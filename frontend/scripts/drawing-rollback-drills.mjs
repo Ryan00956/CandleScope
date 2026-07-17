@@ -1,6 +1,9 @@
 const DEDICATED_SCHEMA_VERSION = "drawing-rollback-drill/v2";
 const PHASE6_SCHEMA_VERSION = "drawing-engine-v2-perf/v1";
 const DRAWING_WORKER_SCHEMA_VERSION = 1;
+const DRAWING_DOCUMENT_RECORD_SCHEMA_VERSION = 1;
+const DRAWING_DOCUMENT_MANIFEST_SCHEMA_VERSION = 1;
+const DRAWING_DOCUMENT_DATABASE_NAME = "candlescope-drawings-v2";
 
 const DRAWING_KINDS = Object.freeze([
   "line",
@@ -655,9 +658,418 @@ function validateOffscreenUnsupported(artifact) {
   return failures;
 }
 
-function validateIndexedDbVariant(failures, value, kind) {
+function validIndexedDbDocumentIdentity(value) {
+  const identity = objectValue(value);
+  return identity !== null
+    && nonEmptyString(identity.scopeKey)
+    && safePositiveInteger(identity.documentRevision) !== null
+    && safePositiveInteger(identity.entityCount) !== null
+    && sha256Digest(identity.documentDigest);
+}
+
+function sameIndexedDbDocumentIdentity(left, right) {
+  return validIndexedDbDocumentIdentity(left)
+    && validIndexedDbDocumentIdentity(right)
+    && left.scopeKey === right.scopeKey
+    && left.documentRevision === right.documentRevision
+    && left.entityCount === right.entityCount
+    && left.documentDigest === right.documentDigest;
+}
+
+function validIndexedDbDurableRecordReceipt(value) {
+  const receipt = objectValue(value);
+  return validIndexedDbDocumentIdentity(receipt)
+    && receipt.kind === "canonical-structured-clone-record"
+    && receipt.documentSchemaVersion === DRAWING_DOCUMENT_RECORD_SCHEMA_VERSION
+    && sha256Digest(receipt.canonicalBytesDigest);
+}
+
+function sameIndexedDbDurableRecordReceipt(left, right) {
+  return validIndexedDbDurableRecordReceipt(left)
+    && validIndexedDbDurableRecordReceipt(right)
+    && sameIndexedDbDocumentIdentity(left, right)
+    && left.kind === right.kind
+    && left.documentSchemaVersion === right.documentSchemaVersion
+    && left.canonicalBytesDigest === right.canonicalBytesDigest;
+}
+
+function validIndexedDbManifestReceipt(value) {
+  const receipt = objectValue(value);
+  return receipt !== null
+    && receipt.kind === "drawing-document-manifest"
+    && receipt.manifestSchemaVersion === DRAWING_DOCUMENT_MANIFEST_SCHEMA_VERSION
+    && nonEmptyString(receipt.scopeKey)
+    && safePositiveInteger(receipt.revision) !== null
+    && safePositiveInteger(receipt.count) !== null
+    && sha256Digest(receipt.rawBytesDigest);
+}
+
+function sameIndexedDbManifestReceipt(left, right) {
+  return validIndexedDbManifestReceipt(left)
+    && validIndexedDbManifestReceipt(right)
+    && left.kind === right.kind
+    && left.manifestSchemaVersion === right.manifestSchemaVersion
+    && left.scopeKey === right.scopeKey
+    && left.revision === right.revision
+    && left.count === right.count
+    && left.rawBytesDigest === right.rawBytesDigest;
+}
+
+function indexedDbRecordAndManifestMatch(record, manifest) {
+  return validIndexedDbDurableRecordReceipt(record)
+    && validIndexedDbManifestReceipt(manifest)
+    && record.scopeKey === manifest.scopeKey
+    && record.documentRevision === manifest.revision
+    && record.entityCount === manifest.count;
+}
+
+function indexedDbRecordMatchesPending(record, pending) {
+  return validIndexedDbDurableRecordReceipt(record)
+    && sameIndexedDbDocumentIdentity(record, pending);
+}
+
+function indexedDbManifestMatchesPending(manifest, pending) {
+  return validIndexedDbManifestReceipt(manifest)
+    && validIndexedDbDocumentIdentity(pending)
+    && manifest.scopeKey === pending.scopeKey
+    && manifest.revision === pending.documentRevision
+    && manifest.count === pending.entityCount;
+}
+
+function validIndexedDbFaultBinding(value, kind, runId) {
+  const binding = objectValue(value);
+  return binding !== null
+    && binding.kind === "controlled-indexeddb-fault-binding"
+    && sameNonEmptyString(binding.runId, runId)
+    && nonEmptyString(binding.faultId)
+    && sha256Digest(binding.authorityTokenSha256)
+    && binding.variant === kind;
+}
+
+function sameIndexedDbFaultReceiptBinding(value, binding, kind, transactionId) {
+  const receipt = objectValue(value);
+  return receipt !== null
+    && validIndexedDbFaultBinding(binding, kind, binding?.runId)
+    && receipt.runId === binding.runId
+    && receipt.faultId === binding.faultId
+    && receipt.authorityTokenSha256 === binding.authorityTokenSha256
+    && receipt.variant === kind
+    && receipt.transactionId === transactionId;
+}
+
+function validQuotaUsageAndQuotaReceipt(value, origin) {
+  const receipt = objectValue(value);
+  return receipt !== null
+    && receipt.method === "Storage.getUsageAndQuota"
+    && sameNonEmptyString(receipt.origin, origin)
+    && finiteNumber(receipt.usageBytes) !== null
+    && receipt.usageBytes >= 0
+    && finiteNumber(receipt.quotaBytes) !== null
+    && receipt.quotaBytes >= 0
+    && typeof receipt.overrideActive === "boolean"
+    && validTimestamp(receipt.observedAt);
+}
+
+function sameQuotaUsageAndQuotaReceipt(left, right) {
+  return objectValue(left) !== null
+    && objectValue(right) !== null
+    && left.method === right.method
+    && left.origin === right.origin
+    && left.usageBytes === right.usageBytes
+    && left.quotaBytes === right.quotaBytes
+    && left.overrideActive === right.overrideActive
+    && left.observedAt === right.observedAt;
+}
+
+function validateQuotaNativeReceipt(failures, value, context) {
+  const receipt = objectValue(value);
+  const overrideCommand = objectValue(receipt?.overrideCommand);
+  const clearCommand = objectValue(receipt?.clearCommand);
+  const quotaPlan = objectValue(receipt?.quotaPlan);
+  const usageAndQuota = objectValue(receipt?.usageAndQuota);
+  const before = objectValue(usageAndQuota?.before);
+  const overridden = objectValue(usageAndQuota?.overridden);
+  const afterCacheExpiry = objectValue(usageAndQuota?.afterCacheExpiry);
+  const restored = objectValue(usageAndQuota?.restored);
+  const preparation = objectValue(receipt?.preparation);
+  const cacheExpiryGuard = objectValue(receipt?.cacheExpiryGuard);
+  const guardVerification = objectValue(cacheExpiryGuard?.verification);
+  const probe = objectValue(receipt?.probe);
+  const transactionError = objectValue(probe?.transactionError);
+  const abortEvent = objectValue(probe?.abortEvent);
+  const cleanup = objectValue(receipt?.cleanup);
+  const deletion = objectValue(cleanup?.deletion);
+  const origin = context.buildAuthority?.managedOrigin;
+  const expectedDbName = `candlescope-rollback-quota-${context.faultBinding?.runId}-${context.faultBinding?.faultId}`;
+  addFailure(
+    failures,
+    receipt?.kind === "cdp-storage-quota-override"
+      && nonEmptyString(receipt?.receiptId),
+    "indexeddb-quota-native-receipt-kind-invalid",
+  );
+  addFailure(
+    failures,
+    sameIndexedDbFaultReceiptBinding(receipt, context.faultBinding, "quota", context.transactionId),
+    "indexeddb-quota-native-fault-binding-mismatch",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(origin) && receipt?.origin === origin,
+    "indexeddb-quota-native-origin-mismatch",
+  );
+  addFailure(
+    failures,
+    receipt?.sacrificialDbName === expectedDbName
+      && receipt?.sacrificialDbName !== DRAWING_DOCUMENT_DATABASE_NAME,
+    "indexeddb-quota-sacrificial-database-invalid",
+  );
+  addFailure(
+    failures,
+    preparation?.prepared === true
+      && preparation?.databaseName === receipt?.sacrificialDbName
+      && preparation?.storeName === "quota-probe"
+      && preparation?.baselineKey === "baseline"
+      && preparation?.baselineCommitted === true
+      && preparation?.connectionKeptOpen === true
+      && validTimestamp(preparation?.preparedAt),
+    "indexeddb-quota-preparation-invalid",
+  );
+  addFailure(
+    failures,
+    quotaPlan?.kind === "nonzero-below-existing-usage"
+      && quotaPlan?.quotaSizeBytes === 1
+      && quotaPlan?.baselineUsageBytes === before?.usageBytes
+      && quotaPlan?.baselineUsageExceedsQuota === true,
+    "indexeddb-quota-plan-invalid",
+  );
+  addFailure(
+    failures,
+    overrideCommand?.method === "Storage.overrideQuotaForOrigin"
+      && overrideCommand?.origin === origin
+      && overrideCommand?.quotaSize === 1
+      && overrideCommand?.accepted === true
+      && validTimestamp(overrideCommand?.observedAt),
+    "indexeddb-quota-native-override-command-invalid",
+  );
+  addFailure(
+    failures,
+    clearCommand?.method === "Storage.overrideQuotaForOrigin"
+      && clearCommand?.origin === origin
+      && clearCommand?.quotaSizeOmitted === true
+      && !own(clearCommand, "quotaSize")
+      && clearCommand?.accepted === true
+      && validTimestamp(clearCommand?.observedAt),
+    "indexeddb-quota-native-clear-command-invalid",
+  );
+  addFailure(
+    failures,
+    validQuotaUsageAndQuotaReceipt(before, origin)
+      && validQuotaUsageAndQuotaReceipt(overridden, origin)
+      && validQuotaUsageAndQuotaReceipt(afterCacheExpiry, origin)
+      && validQuotaUsageAndQuotaReceipt(restored, origin)
+      && before.usageBytes > 1
+      && before.quotaBytes > 1
+      && before.overrideActive === false
+      && overridden.quotaBytes === 1
+      && overridden.overrideActive === true
+      && afterCacheExpiry.quotaBytes === 1
+      && afterCacheExpiry.overrideActive === true
+      && restored.quotaBytes === before.quotaBytes
+      && restored.overrideActive === false
+      && sameQuotaUsageAndQuotaReceipt(afterCacheExpiry, guardVerification),
+    "indexeddb-quota-native-usage-receipts-invalid",
+  );
+  addFailure(
+    failures,
+    receipt?.overrideActive === true
+      && receipt?.overrideCleared === true
+      && receipt?.releaseAccepted === true
+      && receipt?.forcedCleanup === false,
+    "indexeddb-quota-native-override-state-invalid",
+  );
+  addFailure(
+    failures,
+    cacheExpiryGuard?.kind === "indexeddb-bucket-space-cache-expiry"
+      && cacheExpiryGuard?.cacheTimeLimitMs === 30_000
+      && cacheExpiryGuard?.guardMs === 5_000
+      && cacheExpiryGuard?.requestedWaitMs === 35_000
+      && cacheExpiryGuard.cacheTimeLimitMs + cacheExpiryGuard.guardMs
+        === cacheExpiryGuard.requestedWaitMs
+      && finiteNumber(cacheExpiryGuard?.elapsedMs) !== null
+      && cacheExpiryGuard.elapsedMs >= 35_000
+      && validTimestamp(cacheExpiryGuard?.startedAt)
+      && validTimestamp(cacheExpiryGuard?.completedAt)
+      && sameQuotaUsageAndQuotaReceipt(guardVerification, afterCacheExpiry),
+    "indexeddb-quota-cache-expiry-guard-invalid",
+  );
+  addFailure(
+    failures,
+    probe?.attempted === true
+      && probe?.databaseName === receipt?.sacrificialDbName
+      && probe?.storeName === preparation?.storeName
+      && probe?.transactionMode === "readwrite"
+      && probe?.settled === "abort"
+      && transactionError?.name === "QuotaExceededError"
+      && validTimestamp(transactionError?.observedAt)
+      && probe?.nativeQuotaExceeded === true
+      && validTimestamp(probe?.attemptedAt)
+      && validTimestamp(probe?.observedAt),
+    "indexeddb-quota-probe-invalid",
+  );
+  addFailure(
+    failures,
+    abortEvent?.type === "abort"
+      && abortEvent?.isTrusted === true
+      && validTimestamp(abortEvent?.observedAt),
+    "indexeddb-quota-native-trusted-abort-invalid",
+  );
+  addFailure(
+    failures,
+    cleanup?.databaseName === receipt?.sacrificialDbName
+      && (!own(cleanup, "storeName") || cleanup?.storeName === preparation?.storeName)
+      && cleanup?.connectionClosed === true
+      && deletion?.status === "success"
+      && cleanup?.databaseStillPresent === false
+      && cleanup?.forcedCleanup === false
+      && cleanup?.completed === true
+      && validTimestamp(cleanup?.completedAt),
+    "indexeddb-quota-native-cleanup-invalid",
+  );
+  addFailure(
+    failures,
+    receipt?.productErrorReceiptId === context.errorReceipt?.receiptId
+      && context.errorReceipt?.source === "drawing-persistence-flush"
+      && context.errorReceipt?.caughtByProduct === true,
+    "indexeddb-quota-product-error-binding-mismatch",
+  );
+  addFailure(
+    failures,
+    timestampsAreOrdered([
+      preparation?.preparedAt,
+      before?.observedAt,
+      overrideCommand?.observedAt,
+      overridden?.observedAt,
+      cacheExpiryGuard?.startedAt,
+      cacheExpiryGuard?.completedAt,
+      afterCacheExpiry?.observedAt,
+      probe?.attemptedAt,
+      transactionError?.observedAt,
+      abortEvent?.observedAt,
+      probe?.observedAt,
+      context.beforeWrite?.observedAt,
+      context.errorReceipt?.observedAt,
+      context.afterFailure?.observedAt,
+      clearCommand?.observedAt,
+      cleanup?.completedAt,
+      restored?.observedAt,
+      context.retry?.attemptedAt,
+    ]),
+    "indexeddb-quota-native-receipt-order-invalid",
+  );
+}
+
+function validateBlockedNativeReceipt(failures, value, context) {
+  const receipt = objectValue(value);
+  const keeper = objectValue(receipt?.keeperConnection);
+  const openRequest = objectValue(receipt?.upgradeOpenRequest);
+  const blockedEvent = objectValue(openRequest?.blockedEvent);
+  const cleanup = objectValue(receipt?.cleanup);
+  const expectedDbName = `candlescope-rollback-blocked-${context.faultBinding?.runId}-${context.faultBinding?.faultId}`;
+  addFailure(
+    failures,
+    receipt?.kind === "native-indexeddb-blocked-event"
+      && nonEmptyString(receipt?.receiptId),
+    "indexeddb-blocked-native-receipt-kind-invalid",
+  );
+  addFailure(
+    failures,
+    sameIndexedDbFaultReceiptBinding(receipt, context.faultBinding, "blocked", context.transactionId),
+    "indexeddb-blocked-native-fault-binding-mismatch",
+  );
+  addFailure(
+    failures,
+    receipt?.sacrificialDbName === expectedDbName
+      && receipt?.sacrificialDbName !== DRAWING_DOCUMENT_DATABASE_NAME,
+    "indexeddb-blocked-sacrificial-database-invalid",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(keeper?.connectionId)
+      && keeper?.databaseName === receipt?.sacrificialDbName
+      && keeper?.openedVersion === 1
+      && validTimestamp(keeper?.openedAt)
+      && validTimestamp(keeper?.closedAt),
+    "indexeddb-blocked-keeper-lifecycle-invalid",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(openRequest?.requestId)
+      && openRequest?.databaseName === receipt?.sacrificialDbName
+      && openRequest?.requestedVersion === 2
+      && openRequest?.settled === "success-after-keeper-close"
+      && validTimestamp(openRequest?.startedAt)
+      && validTimestamp(openRequest?.settledAt),
+    "indexeddb-blocked-open-lifecycle-invalid",
+  );
+  addFailure(
+    failures,
+    blockedEvent?.type === "blocked"
+      && blockedEvent?.isTrusted === true
+      && blockedEvent?.databaseName === receipt?.sacrificialDbName
+      && blockedEvent?.oldVersion === 1
+      && blockedEvent?.newVersion === 2
+      && validTimestamp(blockedEvent?.observedAt),
+    "indexeddb-blocked-native-trusted-event-invalid",
+  );
+  addFailure(
+    failures,
+    receipt?.productErrorReceiptId === context.errorReceipt?.receiptId
+      && context.errorReceipt?.source === "drawing-persistence-flush"
+      && context.errorReceipt?.caughtByProduct === true,
+    "indexeddb-blocked-product-error-binding-mismatch",
+  );
+  addFailure(
+    failures,
+    cleanup?.keeperClosed === true
+      && cleanup?.upgradeRequestSettled === true
+      && cleanup?.deleteRequested === true
+      && cleanup?.deleteSucceeded === true
+      && cleanup?.databaseAbsent === true
+      && cleanup?.databaseName === receipt?.sacrificialDbName
+      && validTimestamp(cleanup?.completedAt),
+    "indexeddb-blocked-native-cleanup-invalid",
+  );
+  addFailure(
+    failures,
+    timestampsAreOrdered([
+      keeper?.openedAt,
+      context.beforeWrite?.observedAt,
+      openRequest?.startedAt,
+      blockedEvent?.observedAt,
+      keeper?.closedAt,
+      openRequest?.settledAt,
+      cleanup?.completedAt,
+    ])
+      && timestampsAreOrdered([
+        blockedEvent?.observedAt,
+        context.errorReceipt?.observedAt,
+        context.afterFailure?.observedAt,
+        context.retry?.attemptedAt,
+      ])
+      && validTimestamp(cleanup?.completedAt)
+      && validTimestamp(context.retry?.attemptedAt)
+      && Date.parse(context.retry.attemptedAt) >= Date.parse(cleanup.completedAt),
+    "indexeddb-blocked-native-receipt-order-invalid",
+  );
+}
+
+function validateIndexedDbVariant(failures, value, kind, artifact) {
   const variant = objectValue(value);
+  const provenance = objectValue(artifact?.provenance);
+  const buildAuthority = objectValue(artifact?.buildAuthority);
+  const faultBinding = objectValue(variant?.faultBinding);
   const errorReceipt = objectValue(variant?.errorReceipt);
+  const nativeReceipt = objectValue(variant?.nativeReceipt);
   const durableRecord = objectValue(variant?.durableRecord);
   const durableBefore = objectValue(durableRecord?.beforeFailure);
   const durableAfter = objectValue(durableRecord?.afterFailure);
@@ -669,7 +1081,12 @@ function validateIndexedDbVariant(failures, value, kind) {
   const afterFailure = objectValue(states[1]);
   const afterRetry = objectValue(states[2]);
   const retry = objectValue(variant?.retryReceipt);
+  const retryRecord = objectValue(retry?.durableRecord);
+  const retryManifest = objectValue(retry?.manifest);
   const coldReload = objectValue(variant?.coldReloadReceipt);
+  const restoredDocument = objectValue(coldReload?.restoredDocument);
+  const coldRecord = objectValue(coldReload?.durableRecord);
+  const coldManifest = objectValue(coldReload?.manifest);
   const expectedErrorName = kind === "quota" ? "QuotaExceededError" : "Error";
   const expectedOperation = kind === "quota" ? "transaction-write" : "database-open";
   addFailure(failures, variant !== null, `indexeddb-${kind}-variant-missing`);
@@ -677,10 +1094,21 @@ function validateIndexedDbVariant(failures, value, kind) {
   addFailure(failures, nonEmptyString(variant?.transactionId), `indexeddb-${kind}-transaction-id-missing`);
   addFailure(
     failures,
-    errorReceipt?.transactionId === variant?.transactionId
+    validIndexedDbFaultBinding(faultBinding, kind, provenance?.runId),
+    `indexeddb-${kind}-fault-binding-invalid`,
+  );
+  addFailure(
+    failures,
+    sameIndexedDbFaultReceiptBinding(errorReceipt, faultBinding, kind, variant?.transactionId)
+      && nonEmptyString(errorReceipt?.receiptId)
+      && errorReceipt?.nativeReceiptId === nativeReceipt?.receiptId
       && errorReceipt?.operation === expectedOperation
       && errorReceipt?.name === expectedErrorName
-      && nonEmptyString(errorReceipt?.message)
+      && (kind === "quota"
+        ? typeof errorReceipt?.message === "string"
+        : nonEmptyString(errorReceipt?.message))
+      && errorReceipt?.source === "drawing-persistence-flush"
+      && errorReceipt?.caughtByProduct === true
       && validTimestamp(errorReceipt?.observedAt),
     `indexeddb-${kind}-error-receipt-invalid`,
   );
@@ -693,14 +1121,28 @@ function validateIndexedDbVariant(failures, value, kind) {
   }
   addFailure(
     failures,
-    sameSha256Digest(durableBefore?.bytesDigest, durableAfter?.bytesDigest)
-      && sameSha256Digest(durableBefore?.documentDigest, durableAfter?.documentDigest),
+    validIndexedDbDurableRecordReceipt(durableBefore),
+    `indexeddb-${kind}-old-durable-record-invalid`,
+  );
+  addFailure(
+    failures,
+    validIndexedDbManifestReceipt(manifestBefore),
+    `indexeddb-${kind}-old-manifest-invalid`,
+  );
+  addFailure(
+    failures,
+    indexedDbRecordAndManifestMatch(durableBefore, manifestBefore),
+    `indexeddb-${kind}-old-record-manifest-mismatch`,
+  );
+  addFailure(
+    failures,
+    sameIndexedDbDurableRecordReceipt(durableBefore, durableAfter),
     `indexeddb-${kind}-durable-record-changed-on-failure`,
   );
   addFailure(
     failures,
-    sameSha256Digest(manifestBefore?.bytesDigest, manifestAfter?.bytesDigest),
-    `indexeddb-${kind}-manifest-bytes-changed-on-failure`,
+    sameIndexedDbManifestReceipt(manifestBefore, manifestAfter),
+    `indexeddb-${kind}-manifest-changed-on-failure`,
   );
   addFailure(failures, states.length === 3, `indexeddb-${kind}-state-receipt-count-mismatch`);
   addFailure(
@@ -708,8 +1150,18 @@ function validateIndexedDbVariant(failures, value, kind) {
     beforeWrite?.stage === "before-write"
       && afterFailure?.stage === "after-failure"
       && afterRetry?.stage === "after-retry"
-      && states.every((state) => state?.transactionId === variant?.transactionId),
+      && states.every((state) => sameIndexedDbFaultReceiptBinding(
+        state,
+        faultBinding,
+        kind,
+        variant?.transactionId,
+      )),
     `indexeddb-${kind}-state-receipt-sequence-invalid`,
+  );
+  addFailure(
+    failures,
+    states.every((state) => validIndexedDbDocumentIdentity(state)),
+    `indexeddb-${kind}-pending-document-receipt-invalid`,
   );
   addFailure(
     failures,
@@ -720,36 +1172,109 @@ function validateIndexedDbVariant(failures, value, kind) {
   );
   addFailure(
     failures,
-    sameSha256Digest(beforeWrite?.pendingDocumentDigest, afterFailure?.pendingDocumentDigest)
-      && sameSha256Digest(afterFailure?.pendingDocumentDigest, afterRetry?.pendingDocumentDigest),
+    sameIndexedDbDocumentIdentity(beforeWrite, afterFailure)
+      && sameIndexedDbDocumentIdentity(afterFailure, afterRetry),
     `indexeddb-${kind}-pending-document-state-mismatch`,
   );
   addFailure(
     failures,
+    validIndexedDbDocumentIdentity(beforeWrite)
+      && validIndexedDbDurableRecordReceipt(durableBefore)
+      && beforeWrite.scopeKey === durableBefore.scopeKey
+      && beforeWrite.documentRevision > durableBefore.documentRevision
+      && beforeWrite.documentDigest !== durableBefore.documentDigest,
+    `indexeddb-${kind}-pending-document-not-newer-than-durable`,
+  );
+  addFailure(
+    failures,
     retry?.kind === "retry-commit"
-      && retry?.transactionId === variant?.transactionId
+      && sameIndexedDbFaultReceiptBinding(retry, faultBinding, kind, variant?.transactionId)
       && nonEmptyString(retry?.receiptId)
       && validTimestamp(retry?.attemptedAt)
       && validTimestamp(retry?.committedAt)
-      && Date.parse(retry?.committedAt) >= Date.parse(retry?.attemptedAt)
-      && sameSha256Digest(retry?.documentDigest, afterRetry?.pendingDocumentDigest)
-      && sha256Digest(retry?.durableRecordBytesDigest)
-      && sha256Digest(retry?.manifestBytesDigest),
-    `indexeddb-${kind}-retry-receipt-invalid`,
+      && Date.parse(retry?.committedAt) >= Date.parse(retry?.attemptedAt),
+    `indexeddb-${kind}-retry-identity-invalid`,
+  );
+  addFailure(
+    failures,
+    validIndexedDbDurableRecordReceipt(retryRecord),
+    `indexeddb-${kind}-retry-durable-record-invalid`,
+  );
+  addFailure(
+    failures,
+    indexedDbRecordMatchesPending(retryRecord, afterRetry),
+    `indexeddb-${kind}-retry-durable-record-pending-mismatch`,
+  );
+  addFailure(
+    failures,
+    validIndexedDbManifestReceipt(retryManifest),
+    `indexeddb-${kind}-retry-manifest-invalid`,
+  );
+  addFailure(
+    failures,
+    indexedDbManifestMatchesPending(retryManifest, afterRetry),
+    `indexeddb-${kind}-retry-manifest-pending-mismatch`,
+  );
+  addFailure(
+    failures,
+    indexedDbRecordAndManifestMatch(retryRecord, retryManifest),
+    `indexeddb-${kind}-retry-record-manifest-mismatch`,
   );
   addFailure(
     failures,
     coldReload?.kind === "cold-reload"
+      && sameIndexedDbFaultReceiptBinding(coldReload, faultBinding, kind, variant?.transactionId)
       && coldReload?.sourceTransactionId === variant?.transactionId
       && nonEmptyString(coldReload?.receiptId)
-      && nonEmptyString(coldReload?.beforeBrowserInstanceId)
-      && nonEmptyString(coldReload?.afterBrowserInstanceId)
-      && coldReload.beforeBrowserInstanceId !== coldReload.afterBrowserInstanceId
-      && validTimestamp(coldReload?.observedAt)
-      && sameSha256Digest(coldReload?.documentDigest, retry?.documentDigest)
-      && sameSha256Digest(coldReload?.durableRecordBytesDigest, retry?.durableRecordBytesDigest)
-      && sameSha256Digest(coldReload?.manifestBytesDigest, retry?.manifestBytesDigest),
-    `indexeddb-${kind}-cold-reload-receipt-invalid`,
+      && validTimestamp(coldReload?.observedAt),
+    `indexeddb-${kind}-cold-reload-identity-invalid`,
+  );
+  addFailure(
+    failures,
+    nonEmptyString(coldReload?.beforeDocumentInstanceId)
+      && nonEmptyString(coldReload?.afterDocumentInstanceId)
+      && coldReload.beforeDocumentInstanceId !== coldReload.afterDocumentInstanceId,
+    `indexeddb-${kind}-cold-reload-document-instance-invalid`,
+  );
+  addFailure(
+    failures,
+    coldReload?.restoreSource === "v2",
+    `indexeddb-${kind}-cold-reload-source-not-v2`,
+  );
+  addFailure(
+    failures,
+    sameIndexedDbDocumentIdentity(restoredDocument, afterRetry),
+    `indexeddb-${kind}-cold-reload-document-pending-mismatch`,
+  );
+  addFailure(
+    failures,
+    sameIndexedDbDurableRecordReceipt(coldRecord, retryRecord),
+    `indexeddb-${kind}-cold-reload-durable-record-mismatch`,
+  );
+  addFailure(
+    failures,
+    sameIndexedDbManifestReceipt(coldManifest, retryManifest),
+    `indexeddb-${kind}-cold-reload-manifest-mismatch`,
+  );
+  addFailure(
+    failures,
+    coldReload?.queueDepthCurrent === 0 && coldReload?.dirty === false,
+    `indexeddb-${kind}-cold-reload-state-not-converged`,
+  );
+  const currentStamp = coldReload?.lastRequestedStamp;
+  addFailure(
+    failures,
+    validStamp(currentStamp)
+      && currentStamp?.scopeKey === restoredDocument?.scopeKey
+      && currentStamp?.documentRevision === restoredDocument?.documentRevision
+      && sameStamp(currentStamp, coldReload?.lastPublishedStamp)
+      && sameStamp(coldReload?.lastPublishedStamp, coldReload?.lastPaintedStamp),
+    `indexeddb-${kind}-cold-reload-current-stamp-invalid`,
+  );
+  addFailure(
+    failures,
+    validPaintReceipt(coldReload?.paintReceipt, coldReload?.lastPaintedStamp),
+    `indexeddb-${kind}-cold-reload-paint-receipt-invalid`,
   );
   addFailure(
     failures,
@@ -760,6 +1285,7 @@ function validateIndexedDbVariant(failures, value, kind) {
       retry?.attemptedAt,
       retry?.committedAt,
       afterRetry?.observedAt,
+      coldReload?.paintReceipt?.observedAt,
       coldReload?.observedAt,
     ]),
     `indexeddb-${kind}-receipt-order-invalid`,
@@ -769,15 +1295,57 @@ function validateIndexedDbVariant(failures, value, kind) {
     counterDelta(variant?.failureMetrics) > 0,
     `indexeddb-${kind}-failure-metric-missing`,
   );
+  const context = {
+    afterFailure,
+    beforeWrite,
+    buildAuthority,
+    errorReceipt,
+    faultBinding,
+    retry,
+    transactionId: variant?.transactionId,
+  };
+  if (kind === "quota") {
+    validateQuotaNativeReceipt(failures, nativeReceipt, context);
+  } else {
+    validateBlockedNativeReceipt(failures, nativeReceipt, context);
+  }
 }
 
 function validateIndexedDbQuotaBlocked(artifact) {
   const failures = validateDedicatedCommon("indexeddb-quota-blocked", artifact);
   addFailure(failures, artifact?.injection?.kind === "indexeddb-quota-and-blocked", "wrong-indexeddb-injection");
+  addFailure(
+    failures,
+    artifact?.injection?.buildAuthorityCurrent === true,
+    "indexeddb-current-build-authority-not-proven",
+  );
   const variants = Array.isArray(artifact?.variants) ? artifact.variants : [];
   addFailure(failures, variants.length === 2, "indexeddb-variant-count-mismatch");
-  validateIndexedDbVariant(failures, variants.find((value) => value?.kind === "quota"), "quota");
-  validateIndexedDbVariant(failures, variants.find((value) => value?.kind === "blocked"), "blocked");
+  const quota = variants.find((value) => value?.kind === "quota");
+  const blocked = variants.find((value) => value?.kind === "blocked");
+  validateIndexedDbVariant(failures, quota, "quota", artifact);
+  validateIndexedDbVariant(failures, blocked, "blocked", artifact);
+  addFailure(
+    failures,
+    nonEmptyString(quota?.faultBinding?.faultId)
+      && nonEmptyString(blocked?.faultBinding?.faultId)
+      && quota.faultBinding.faultId !== blocked.faultBinding.faultId,
+    "indexeddb-fault-ids-not-distinct",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(quota?.transactionId)
+      && nonEmptyString(blocked?.transactionId)
+      && quota.transactionId !== blocked.transactionId,
+    "indexeddb-transaction-ids-not-distinct",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(quota?.nativeReceipt?.receiptId)
+      && nonEmptyString(blocked?.nativeReceipt?.receiptId)
+      && quota.nativeReceipt.receiptId !== blocked.nativeReceipt.receiptId,
+    "indexeddb-native-receipt-ids-not-distinct",
+  );
   return failures;
 }
 

@@ -22,6 +22,7 @@ import {
   MAX_SAVED_FREEHAND_POINTS,
   MAX_SAVED_FREEHAND_SPANS,
 } from "../drawingPersistence.js";
+import { observeDrawingId } from "../drawingModel.js";
 import type { SavedDrawing } from "../drawingTypes.js";
 import { legacyDrawingImporter } from "./legacyDrawingImporter.js";
 import type {
@@ -459,7 +460,9 @@ export function decodeDrawingDocumentRecord(
       entities,
       zOrder: entities.map((entity) => entity.id),
     });
-    return exportDrawingDocument(document) ? document : null;
+    if (!exportDrawingDocument(document)) return null;
+    for (const entity of entities) observeDrawingId(entity.id);
+    return document;
   } catch {
     return null;
   }
@@ -580,6 +583,7 @@ export async function decodeDrawingDocumentRecordAsync(
     return null;
   }
   finishChunk();
+  for (const entity of entities) observeDrawingId(entity.id);
   return Object.freeze({
     document,
     metrics: Object.freeze({

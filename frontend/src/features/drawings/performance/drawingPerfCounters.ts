@@ -43,6 +43,10 @@ export const DRAWING_PERF_COUNTER_METRICS = [
   "sceneRuntimeFaultCount",
   "legacyFallbackSucceededCount",
   "workerQueueDropCount",
+  "persistenceAttemptCount",
+  "persistenceFailureCount",
+  "persistenceQuotaFailureCount",
+  "persistenceOtherFailureCount",
   "shadowCompareCount",
   "shadowParityMismatchCount",
   "shadowSkippedCount",
@@ -200,6 +204,30 @@ export interface DrawingPerfPhase6PaintReceipt {
   readonly paintSequence: number;
 }
 
+export interface DrawingPerfPhase6PersistenceSnapshot {
+  readonly scopeKey: string;
+  readonly phase: "idle" | "debounced" | "persisting" | "persisted" | "error";
+  readonly queueDepth: number;
+  readonly inFlightRevision: number | null;
+  readonly pendingRevision: number | null;
+  readonly dirtyRevision: number | null;
+  readonly lastPersistedRevision: number | null;
+  readonly lastError: string | null;
+  readonly lastErrorName: string | null;
+  readonly legacySnapshotRevision: number | null;
+  readonly legacySnapshotError: string | null;
+}
+
+export type DrawingPerfPersistenceRestoreSource = "v2" | "legacy" | "none" | null;
+
+export interface DrawingPerfActivePersistenceDocumentRecord {
+  readonly documentSchemaVersion: number;
+  readonly scopeKey: string;
+  readonly documentRevision: number;
+  readonly updatedAt: number;
+  readonly entities: readonly unknown[];
+}
+
 export interface DrawingPerfPhase6RuntimeSnapshot {
   readonly engineMode: "legacy" | "shadow" | "scene-canary";
   readonly scenePublicationReady: boolean;
@@ -233,6 +261,12 @@ export interface DrawingPerfPhase6RuntimeSnapshot {
   readonly sceneRuntimeFaultCount: number;
   readonly legacyFallbackSucceededCount: number;
   readonly sceneFallbackLastReason: string | null;
+  readonly persistence: DrawingPerfPhase6PersistenceSnapshot | null;
+  readonly persistenceRestoreSource: DrawingPerfPersistenceRestoreSource;
+  readonly persistenceAttemptCount: number;
+  readonly persistenceFailureCount: number;
+  readonly persistenceQuotaFailureCount: number;
+  readonly persistenceOtherFailureCount: number;
   readonly rawPoints: number;
   readonly renderedPoints: number;
   readonly lodRatio: number;
@@ -274,6 +308,9 @@ export interface DrawingPerfPhase6HitOracleResult {
 }
 
 export type DrawingPerfPhase6RuntimeProvider = () => DrawingPerfPhase6RuntimeSnapshot | null;
+export type DrawingPerfActivePersistenceDocumentRecordProvider = (
+  () => DrawingPerfActivePersistenceDocumentRecord | null
+);
 export type DrawingPerfPhase6HitOracleProvider = (
   points: readonly Readonly<{ x: number; y: number }>[],
 ) => DrawingPerfPhase6HitOracleResult;
@@ -332,6 +369,7 @@ export interface DrawingPerfCounters {
   recordHitQueryDuration(durationMs: number): boolean;
   recordMouseupSyncDuration(durationMs: number): boolean;
   recordPersistenceDuration(durationMs: number): boolean;
+  recordPersistenceAttempt(error: Error | null): boolean;
   recordSceneProjectPaintDuration(durationMs: number): boolean;
   recordActiveOverlayCpuDuration(durationMs: number): boolean;
   accumulateFrameWork(contribution: DrawingPerfFrameWorkContribution): boolean;
@@ -363,6 +401,9 @@ export interface DrawingPerfDebugHandle {
   ) => () => void;
   readonly readRuntimeSummary: () => DrawingPerfRuntimeSummary | null;
   readonly readPhase6Runtime: () => DrawingPerfPhase6RuntimeSnapshot | null;
+  readonly readActivePersistenceDocumentRecord: (
+    () => DrawingPerfActivePersistenceDocumentRecord | null
+  );
   readonly runPhase6HitOracle: DrawingPerfPhase6HitOracleProvider;
   readonly readInteractionHandoff: () => DrawingPerfInteractionHandoffSnapshot;
   readonly requestShadowParity: () => boolean;
@@ -690,6 +731,10 @@ function createCounters(): Record<DrawingPerfCounterMetric, number> {
     sceneRuntimeFaultCount: 0,
     legacyFallbackSucceededCount: 0,
     workerQueueDropCount: 0,
+    persistenceAttemptCount: 0,
+    persistenceFailureCount: 0,
+    persistenceQuotaFailureCount: 0,
+    persistenceOtherFailureCount: 0,
     shadowCompareCount: 0,
     shadowParityMismatchCount: 0,
     shadowSkippedCount: 0,
@@ -818,6 +863,21 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
 
   recordPersistenceDuration(durationMs: number): boolean {
     return this.recordDuration("persistenceMs", durationMs);
+  }
+
+  recordPersistenceAttempt(error: Error | null): boolean {
+    this.incrementCounterWithoutFlush("persistenceAttemptCount", 1);
+    if (error) {
+      this.incrementCounterWithoutFlush("persistenceFailureCount", 1);
+      this.incrementCounterWithoutFlush(
+        error.name === "QuotaExceededError"
+          ? "persistenceQuotaFailureCount"
+          : "persistenceOtherFailureCount",
+        1,
+      );
+    }
+    this.markDirtyAndMaybeFlush();
+    return true;
   }
 
   recordSceneProjectPaintDuration(durationMs: number): boolean {
@@ -1254,6 +1314,8 @@ export function accumulateDrawingPerfFrameWork(
 
 let runtimeSummaryProvider: DrawingPerfRuntimeSummaryProvider | null = null;
 let phase6RuntimeProvider: DrawingPerfPhase6RuntimeProvider | null = null;
+let activePersistenceDocumentRecordProvider:
+  DrawingPerfActivePersistenceDocumentRecordProvider | null = null;
 let phase6HitOracleProvider: DrawingPerfPhase6HitOracleProvider | null = null;
 let shadowParityRequester: DrawingPerfShadowParityRequester | null = null;
 let interactionHandoffSequence = 0;
@@ -1410,6 +1472,27 @@ export function registerDrawingPerfPhase6RuntimeProvider(
   };
 }
 
+export function registerDrawingPerfActivePersistenceDocumentRecordProvider(
+  provider: DrawingPerfActivePersistenceDocumentRecordProvider | null,
+): () => void {
+  activePersistenceDocumentRecordProvider = provider;
+  return () => {
+    if (activePersistenceDocumentRecordProvider === provider) {
+      activePersistenceDocumentRecordProvider = null;
+    }
+  };
+}
+
+export function readDrawingPerfActivePersistenceDocumentRecord(
+): DrawingPerfActivePersistenceDocumentRecord | null {
+  if (!activePersistenceDocumentRecordProvider) return null;
+  try {
+    return activePersistenceDocumentRecordProvider();
+  } catch {
+    return null;
+  }
+}
+
 export function registerDrawingPerfPhase6HitOracleProvider(
   provider: DrawingPerfPhase6HitOracleProvider | null,
 ): () => void {
@@ -1490,6 +1573,9 @@ export function installDrawingPerfDebugHandle(
     ),
     readRuntimeSummary: () => readDrawingPerfRuntimeSummary(),
     readPhase6Runtime: () => readDrawingPerfPhase6Runtime(),
+    readActivePersistenceDocumentRecord: () => (
+      readDrawingPerfActivePersistenceDocumentRecord()
+    ),
     runPhase6HitOracle: (
       points: readonly Readonly<{ x: number; y: number }>[],
     ) => runDrawingPerfPhase6HitOracle(points),

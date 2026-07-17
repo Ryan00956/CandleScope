@@ -229,6 +229,7 @@ test("coordinator debounces 400ms and keeps one in-flight plus one pending lates
     dirtyRevision: 2,
     lastPersistedRevision: null,
     lastError: null,
+    lastErrorName: null,
     legacySnapshotRevision: null,
     legacySnapshotError: null,
   });
@@ -247,7 +248,7 @@ test("coordinator debounces 400ms and keeps one in-flight plus one pending lates
   assert.ok((coordinator.snapshot("latest")?.queueDepth ?? 1) <= 2);
 });
 
-test("failed transaction retains dirty latest job, status, and old record", async () => {
+test("failed explicit flush retains its pending revision and a later retry commits it", async () => {
   const { backend, coordinator } = fixture();
   const store = createDrawingDocumentStore("failure");
   const oldRecord = Object.freeze({ sentinel: "old-bytes" });
@@ -258,14 +259,42 @@ test("failed transaction retains dirty latest job, status, and old record", asyn
   const flushing = coordinator.flush("failure");
   await settle();
   assert.equal(backend.writes.length, 1);
-  backend.writes[0]?.reject(new Error("quota exceeded"));
+  const quotaError = new Error("quota exceeded");
+  quotaError.name = "QuotaExceededError";
+  backend.writes[0]?.reject(quotaError);
   const result = await flushing;
   assert.equal(result.ok, false);
   assert.equal(store.dirty, true);
   assert.equal(coordinator.snapshot("failure")?.phase, "error");
   assert.equal(coordinator.snapshot("failure")?.pendingRevision, 1);
   assert.equal(coordinator.snapshot("failure")?.lastError, "quota exceeded");
+  assert.equal(coordinator.snapshot("failure")?.lastErrorName, "QuotaExceededError");
   assert.deepEqual(backend.records.get("failure"), oldRecord);
+
+  const retrying = coordinator.flush("failure");
+  await settle();
+  assert.equal(backend.writes.length, 2);
+  assert.equal(backend.writes[1]?.record.documentRevision, 1);
+  assert.deepEqual(
+    backend.writes[1]?.record,
+    backend.writes[0]?.record,
+    "retry must persist the exact retained job, including its original updatedAt",
+  );
+  assert.equal(coordinator.snapshot("failure")?.inFlightRevision, 1);
+  assert.equal(coordinator.snapshot("failure")?.pendingRevision, null);
+  backend.writes[1]?.resolve();
+  const retryResult = await retrying;
+  assert.equal(retryResult.ok, true);
+  assert.equal(retryResult.ok && retryResult.persistedRevision, 1);
+  assert.equal(store.dirty, false);
+  assert.equal(coordinator.snapshot("failure")?.phase, "persisted");
+  assert.equal(coordinator.snapshot("failure")?.lastPersistedRevision, 1);
+  assert.equal(coordinator.snapshot("failure")?.lastError, null);
+  assert.equal(coordinator.snapshot("failure")?.lastErrorName, null);
+  assert.equal(
+    (backend.records.get("failure") as DrawingDocumentRecordV1 | undefined)?.documentRevision,
+    1,
+  );
 });
 
 test("idle legacy snapshots publish only the latest successfully persisted revision", async () => {

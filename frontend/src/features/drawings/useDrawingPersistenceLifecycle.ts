@@ -32,9 +32,11 @@ import {
   drawingPersistenceCoordinator,
 } from "./persistence/drawingPersistenceCoordinator.js";
 import type {
+  DrawingPersistenceCoordinator,
   DrawingPersistenceFlushResult,
 } from "./persistence/drawingPersistenceCoordinator.js";
 import {
+  encodeDrawingDocumentRecord,
   drawingDocumentRepository,
 } from "./persistence/drawingDocumentRepository.js";
 import type {
@@ -75,6 +77,7 @@ import {
 import type { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
 import {
   drawingPerfCounters,
+  registerDrawingPerfActivePersistenceDocumentRecordProvider,
   registerDrawingPerfPhase6HitOracleProvider,
   registerDrawingPerfPhase6RuntimeProvider,
   registerDrawingPerfShadowParityRequester,
@@ -391,6 +394,50 @@ export interface DrawingDetachedCommitReceipt {
 export interface DrawingActiveDocumentTarget {
   readonly scopeKey: string;
   readonly documentRevision: number;
+}
+
+export type DrawingActiveDocumentFlushResult = DrawingPersistenceFlushResult | Readonly<{
+  ok: true;
+  scopeKey: string;
+  targetRevision: number;
+  persistedRevision: number;
+  skipped: true;
+}>;
+
+export async function flushDrawingPersistenceTarget(
+  coordinator: DrawingPersistenceCoordinator,
+  store: DrawingDocumentStore,
+  target: DrawingActiveDocumentTarget,
+): Promise<DrawingActiveDocumentFlushResult> {
+  const document = store.getSnapshot();
+  if (document.scopeKey !== target.scopeKey
+    || document.documentRevision !== target.documentRevision) {
+    return Object.freeze({
+      ok: false as const,
+      scopeKey: target.scopeKey,
+      targetRevision: target.documentRevision,
+      error: new Error("drawing export persistence target is stale"),
+    });
+  }
+  if (!store.dirty) {
+    return Object.freeze({
+      ok: true as const,
+      scopeKey: target.scopeKey,
+      targetRevision: target.documentRevision,
+      persistedRevision: target.documentRevision,
+      skipped: true as const,
+    });
+  }
+  if (coordinator.snapshot(target.scopeKey) === null
+    && !coordinator.schedule(store)) {
+    return Object.freeze({
+      ok: false as const,
+      scopeKey: target.scopeKey,
+      targetRevision: target.documentRevision,
+      error: new Error("drawing export persistence could not be scheduled"),
+    });
+  }
+  return coordinator.flush(target.scopeKey);
 }
 
 export interface DrawingExportHiddenFrameReceipt {
@@ -775,13 +822,7 @@ export function useDrawingPersistenceLifecycle({
   getActiveDocumentTarget(): DrawingActiveDocumentTarget | null;
   flushActiveDocument(
     target: DrawingActiveDocumentTarget,
-  ): Promise<DrawingPersistenceFlushResult | Readonly<{
-    ok: true;
-    scopeKey: string;
-    targetRevision: number;
-    persistedRevision: number;
-    skipped: true;
-  }>>;
+  ): Promise<DrawingActiveDocumentFlushResult>;
   waitForExactExportScene(
     target: DrawingActiveDocumentTarget,
     signal?: AbortSignal,
@@ -912,6 +953,10 @@ export function useDrawingPersistenceLifecycle({
   const activeStoreRef = useRef<DrawingDocumentStore>(initialStore);
   const rendererRef = useRef<LegacyPrimitiveRenderer | null>(null);
   const requestedScopeRef = useRef(symbol);
+  const persistenceRestoreSourceRef = useRef<Readonly<{
+    scopeKey: string;
+    source: "v2" | "legacy" | "none" | null;
+  }>>({ scopeKey: symbol, source: null });
   const scopeReadyRef = useRef(false);
   const sceneSurfaceRetryCountRef = useRef(0);
   const sceneSurfaceRetryHandleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -946,6 +991,9 @@ export function useDrawingPersistenceLifecycle({
   useLayoutEffect(() => {
     requestedScopeRef.current = symbol;
     scopeReadyRef.current = false;
+    if (persistenceRestoreSourceRef.current.scopeKey !== symbol) {
+      persistenceRestoreSourceRef.current = { scopeKey: symbol, source: null };
+    }
   }, [getChartAdapter, seriesReady, symbol]);
 
   useEffect(() => {
@@ -1929,6 +1977,13 @@ export function useDrawingPersistenceLifecycle({
     const bridgeSnapshot = sceneBridge.snapshot();
     const runtimeSnapshot = sceneRuntime.snapshot();
     const perf = drawingPerfCounters.snapshot();
+    const activePersistenceSnapshot = drawingPersistenceCoordinator.snapshot(
+      activeStoreRef.current.getSnapshot().scopeKey,
+    );
+    const activePersistenceRestoreSource = persistenceRestoreSourceRef.current.scopeKey
+      === activeStoreRef.current.getSnapshot().scopeKey
+      ? persistenceRestoreSourceRef.current.source
+      : null;
     const worker = runtimeSnapshot.worker;
     const sceneAdapter = sceneAdapterGetterDelegate.read()();
     const lineageStats = sceneAdapter?.readDrawingFrameSourceLineageStats?.() ?? null;
@@ -2006,6 +2061,12 @@ export function useDrawingPersistenceLifecycle({
       sceneRuntimeFaultCount: sceneFallbackCountRef.current,
       legacyFallbackSucceededCount: legacyFallbackSucceededCountRef.current,
       sceneFallbackLastReason: sceneFallbackLastReasonRef.current,
+      persistence: activePersistenceSnapshot ? Object.freeze({ ...activePersistenceSnapshot }) : null,
+      persistenceRestoreSource: activePersistenceRestoreSource,
+      persistenceAttemptCount: perf.counters.persistenceAttemptCount,
+      persistenceFailureCount: perf.counters.persistenceFailureCount,
+      persistenceQuotaFailureCount: perf.counters.persistenceQuotaFailureCount,
+      persistenceOtherFailureCount: perf.counters.persistenceOtherFailureCount,
       rawPoints,
       renderedPoints,
       lodRatio: rawPoints > 0 ? Math.min(1, renderedPoints / rawPoints) : 0,
@@ -2054,6 +2115,10 @@ export function useDrawingPersistenceLifecycle({
     sceneBridge,
     sceneRuntime,
   ]);
+
+  useEffect(() => registerDrawingPerfActivePersistenceDocumentRecordProvider(() => (
+    encodeDrawingDocumentRecord(activeStoreRef.current.getSnapshot(), 0)
+  )), []);
 
   useEffect(() => registerDrawingPerfPhase6HitOracleProvider((points) => {
     const runtimeSnapshot = sceneRuntime.snapshot();
@@ -2162,43 +2227,11 @@ export function useDrawingPersistenceLifecycle({
 
   const flushActiveDocument = useCallback(async (
     target: DrawingActiveDocumentTarget,
-  ): Promise<DrawingPersistenceFlushResult | Readonly<{
-    ok: true;
-    scopeKey: string;
-    targetRevision: number;
-    persistedRevision: number;
-    skipped: true;
-  }>> => {
-    const store = activeStoreRef.current;
-    const document = store.getSnapshot();
-    if (document.scopeKey !== target.scopeKey
-      || document.documentRevision !== target.documentRevision) {
-      return Object.freeze({
-        ok: false as const,
-        scopeKey: target.scopeKey,
-        targetRevision: target.documentRevision,
-        error: new Error("drawing export persistence target is stale"),
-      });
-    }
-    if (!store.dirty) {
-      return Object.freeze({
-        ok: true as const,
-        scopeKey: target.scopeKey,
-        targetRevision: target.documentRevision,
-        persistedRevision: target.documentRevision,
-        skipped: true as const,
-      });
-    }
-    if (!drawingPersistenceCoordinator.schedule(store)) {
-      return Object.freeze({
-        ok: false as const,
-        scopeKey: target.scopeKey,
-        targetRevision: target.documentRevision,
-        error: new Error("drawing export persistence could not be scheduled"),
-      });
-    }
-    return drawingPersistenceCoordinator.flush(target.scopeKey);
-  }, []);
+  ): Promise<DrawingActiveDocumentFlushResult> => flushDrawingPersistenceTarget(
+    drawingPersistenceCoordinator,
+    activeStoreRef.current,
+    target,
+  ), []);
 
   const waitForExactExportScene = useCallback(async (
     target: DrawingActiveDocumentTarget,
@@ -2474,6 +2507,10 @@ export function useDrawingPersistenceLifecycle({
             return;
           } else {
             drawingDocumentSessionRegistry.markLoaded(requestedSymbol, requestedStore);
+            persistenceRestoreSourceRef.current = {
+              scopeKey: requestedSymbol,
+              source: loaded.source,
+            };
             if (loaded.source === "v2") {
               drawingPerfCounters.recordDuration(
                 "restoreChunkMs",
@@ -2483,6 +2520,10 @@ export function useDrawingPersistenceLifecycle({
           }
         } else if (loaded.status === "missing") {
           drawingDocumentSessionRegistry.markLoaded(requestedSymbol, requestedStore);
+          persistenceRestoreSourceRef.current = {
+            scopeKey: requestedSymbol,
+            source: "none",
+          };
         } else {
           console.warn(
             "Drawing document restore failed closed; mutations remain disabled:",

@@ -27,7 +27,7 @@ function sameStamp(left, right) {
   return left && right && DRAWING_RENDER_STAMP_KEYS.every((key) => left[key] === right[key]);
 }
 
-function runtimeCurrent(runtime) {
+export function runtimeCurrent(runtime) {
   return runtime
     && runtime.queueDepthCurrent === 0
     && runtime.inFlightCurrent === 0
@@ -39,7 +39,7 @@ function runtimeCurrent(runtime) {
     && runtime.paintReceipt.paintSequence > 0;
 }
 
-function runtimeSignature(bundle) {
+export function runtimeSignature(bundle) {
   const runtime = bundle?.runtime;
   return JSON.stringify({
     workerJobDelta: runtime?.workerJobDelta,
@@ -59,7 +59,7 @@ function runtimeSignature(bundle) {
   });
 }
 
-async function waitForSample(
+export async function waitForSample(
   reader,
   predicate,
   { timeoutMs, description, stableMs = 0, signature = null },
@@ -90,7 +90,7 @@ async function waitForSample(
   throw new Error(`${description} timed out: ${JSON.stringify({ attempts, last })}`);
 }
 
-async function readRuntimeBundle(session) {
+export async function readRuntimeBundle(session) {
   return session.cdp.evaluateJson(`(() => {
     const handle = window.__CANDLESCOPE_DRAWING_PERF__;
     return {
@@ -104,14 +104,14 @@ async function readRuntimeBundle(session) {
   })()`);
 }
 
-async function readRollbackState(session) {
+export async function readRollbackState(session) {
   return session.cdp.evaluateJson(`(() => {
     const handle = window.__CANDLESCOPE_CONTROLLED_ROLLBACK_DRILL__;
     return handle && typeof handle.snapshot === 'function' ? handle.snapshot() : null;
   })()`);
 }
 
-async function readCanonicalDocumentEvidence(session, scopeKey) {
+export async function readCanonicalDocumentEvidence(session, scopeKey) {
   const expression = `(async () => {
     const scopeKey = ${JSON.stringify(scopeKey)};
     if (typeof indexedDB.databases !== 'function') return null;
@@ -164,7 +164,7 @@ async function readCanonicalDocumentEvidence(session, scopeKey) {
   return session.cdp.evaluateJson(expression);
 }
 
-async function readPlotRect(session) {
+export async function readPlotRect(session) {
   return session.cdp.evaluateJson(`(() => {
     const chart = document.querySelector(
       '.chart-pane[data-pane-id="main"] .chart-pane-container, .chart-pane[data-pane-id="single-chart"]'
@@ -194,7 +194,7 @@ async function dispatchWheel(session, rect, index = 0) {
   });
 }
 
-async function createPersistedFreehand(session, timeoutMs) {
+export async function performFreehandGesture(session, timeoutMs) {
   const setup = await session.cdp.evaluateJson(`(() => {
     const button = document.querySelector('[data-drawing-tool="pen"]');
     const chart = document.querySelector(
@@ -203,10 +203,13 @@ async function createPersistedFreehand(session, timeoutMs) {
     if (!(button instanceof HTMLButtonElement) || button.disabled || !(chart instanceof HTMLElement)) {
       return { ready: false, buttonFound: Boolean(button), chartFound: Boolean(chart) };
     }
-    button.click();
+    const wasActive = button.classList.contains('active');
+    if (!wasActive) button.click();
     const rect = chart.getBoundingClientRect();
     return {
       ready: rect.width > 200 && rect.height > 160,
+      toolAlreadyActive: wasActive,
+      toolActivationClicked: !wasActive,
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
     };
   })()`);
@@ -231,6 +234,10 @@ async function createPersistedFreehand(session, timeoutMs) {
     y: Math.round(setup.rect.y + setup.rect.height * 0.38),
   };
   await session.cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved", x: start.x, y: start.y, button: "none", buttons: 0,
+  });
+  await waitNextAnimationFrame(session);
+  await session.cdp.send("Input.dispatchMouseEvent", {
     type: "mousePressed", x: start.x, y: start.y, button: "left", buttons: 1, clickCount: 1,
   });
   for (let step = 1; step <= 8; step += 1) {
@@ -245,6 +252,16 @@ async function createPersistedFreehand(session, timeoutMs) {
   await session.cdp.send("Input.dispatchMouseEvent", {
     type: "mouseReleased", x: end.x, y: end.y, button: "left", buttons: 0, clickCount: 1,
   });
+  return Object.freeze({
+    setup,
+    start,
+    end,
+    committedAt: new Date().toISOString(),
+  });
+}
+
+async function createPersistedFreehand(session, timeoutMs) {
+  const gesture = await performFreehandGesture(session, timeoutMs);
   const settled = await waitForSample(
     () => readRuntimeBundle(session),
     (bundle) => bundle?.summary?.entityCount > 0
@@ -262,9 +279,9 @@ async function createPersistedFreehand(session, timeoutMs) {
     { timeoutMs, description: "canonical drawing IndexedDB persistence", stableMs: 80, signature: JSON.stringify },
   );
   return Object.freeze({
-    setup,
-    start,
-    end,
+    setup: gesture.setup,
+    start: gesture.start,
+    end: gesture.end,
     runtime: settled.value.runtime,
     summary: settled.value.summary,
     document: stored.value,
@@ -285,7 +302,7 @@ function prefixedSha256(value) {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? `sha256:${value}` : null;
 }
 
-async function captureDrillBuildAuthority(session, drillId) {
+export async function captureDrillBuildAuthority(session, drillId) {
   const allowDetachedWorker = drillId === "offscreen-canvas-unsupported";
   const evidence = await session.readBrowserBuildEvidence({
     requireActiveWorkers: !allowDetachedWorker,
@@ -335,6 +352,7 @@ async function captureDrillBuildAuthority(session, drillId) {
   const authoritative = evidence?.assetAuthoritative === true
     && workerLifecycleAccepted
     && workerAssetAuthorityAccepted;
+  const networkAssets = evidence?.networkAssets ?? null;
   const receipt = Object.freeze({
     kind: "controlled-browser-build-authority",
     drillId,
@@ -370,6 +388,20 @@ async function captureDrillBuildAuthority(session, drillId) {
     workerDiagnosticsPassed: evidence?.workerDiagnostics?.passed === true,
     handlerSettlementsPassed: evidence?.cdpHandlerSettlements?.beforeCapture?.passed === true
       && evidence?.cdpHandlerSettlements?.afterCapture?.passed === true,
+    networkAssetDiagnostics: Object.freeze({
+      currentGeneration: networkAssets?.currentGeneration ?? null,
+      currentDocumentPath: networkAssets?.currentDocumentPath ?? null,
+      pendingCount: networkAssets?.pendingCount ?? null,
+      inFlightCount: networkAssets?.inFlightCount ?? null,
+      expectedEntryCount: networkAssets?.expectedEntryCount ?? null,
+      acceptedEntryCount: networkAssets?.acceptedEntryCount ?? null,
+      observedAssetCount: networkAssets?.observedAssetCount ?? null,
+      acceptedObservedAssetCount: networkAssets?.acceptedObservedAssetCount ?? null,
+      duplicateResponseKeys: Object.freeze([...(networkAssets?.duplicateResponseKeys ?? [])]),
+      unmanifestedResponses: Object.freeze([...(networkAssets?.unmanifestedResponses ?? [])]),
+      provenanceErrors: Object.freeze([...(networkAssets?.provenanceErrors ?? [])]),
+      quiescence: networkAssets?.quiescence ?? null,
+    }),
     workerLifecycle: Object.freeze({
       kind: workerLifecycleKind,
       accepted: workerLifecycleAccepted,
@@ -387,7 +419,7 @@ async function captureDrillBuildAuthority(session, drillId) {
   return receipt;
 }
 
-function commonArtifact(
+export function commonArtifact(
   session,
   drillId,
   startedAt,

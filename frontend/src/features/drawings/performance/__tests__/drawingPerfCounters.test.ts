@@ -9,6 +9,7 @@ import {
   readDrawingPerfInteractionHandoff,
   recordDrawingPerfInteractionHandoffAcknowledged,
   recordDrawingPerfInteractionHandoffPrepared,
+  registerDrawingPerfActivePersistenceDocumentRecordProvider,
   registerDrawingPerfPhase6HitOracleProvider,
   registerDrawingPerfPhase6RuntimeProvider,
   registerDrawingPerfShadowParityRequester,
@@ -93,6 +94,11 @@ test("counters, gauges, and attributed long tasks reject invalid measurements", 
   assert.equal(counters.recordSceneRebuild(), true);
   assert.equal(counters.recordRequestUpdate(3), true);
   assert.equal(counters.recordAnchorResolve(0), false);
+  assert.equal(counters.recordPersistenceAttempt(null), true);
+  const quotaError = new Error("quota exceeded");
+  quotaError.name = "QuotaExceededError";
+  assert.equal(counters.recordPersistenceAttempt(quotaError), true);
+  assert.equal(counters.recordPersistenceAttempt(new Error("blocked")), true);
 
   assert.equal(counters.setGauge("rawPoints", 4_096), true);
   assert.equal(counters.setGauge("renderedPoints", 512), true);
@@ -114,6 +120,10 @@ test("counters, gauges, and attributed long tasks reject invalid measurements", 
   assert.equal(snapshot.counters.finalProjectionCount, 7);
   assert.equal(snapshot.counters.sceneRebuildCount, 1);
   assert.equal(snapshot.counters.requestUpdateCount, 3);
+  assert.equal(snapshot.counters.persistenceAttemptCount, 3);
+  assert.equal(snapshot.counters.persistenceFailureCount, 2);
+  assert.equal(snapshot.counters.persistenceQuotaFailureCount, 1);
+  assert.equal(snapshot.counters.persistenceOtherFailureCount, 1);
   assert.equal(snapshot.counters.longTaskCount, 3);
   assert.equal(snapshot.durations.longTaskMs.minMs, 55);
   assert.equal(snapshot.durations.longTaskMs.maxMs, 70);
@@ -579,6 +589,24 @@ test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle pro
     sceneRuntimeFaultCount: 0,
     legacyFallbackSucceededCount: 0,
     sceneFallbackLastReason: null,
+    persistence: Object.freeze({
+      scopeKey: "binance:spot:BTCUSDT__main",
+      phase: "error" as const,
+      queueDepth: 1,
+      inFlightRevision: null,
+      pendingRevision: 8,
+      dirtyRevision: 8,
+      lastPersistedRevision: 7,
+      lastError: "quota exceeded",
+      lastErrorName: "QuotaExceededError",
+      legacySnapshotRevision: 7,
+      legacySnapshotError: null,
+    }),
+    persistenceRestoreSource: "v2" as const,
+    persistenceAttemptCount: 2,
+    persistenceFailureCount: 1,
+    persistenceQuotaFailureCount: 1,
+    persistenceOtherFailureCount: 0,
     rawPoints: 32_768,
     renderedPoints: 1_024,
     lodRatio: 0.03125,
@@ -618,6 +646,9 @@ test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle pro
   const unregisterRuntime = registerDrawingPerfPhase6RuntimeProvider(() => phase6Runtime);
   assert.strictEqual(handle?.readPhase6Runtime(), phase6Runtime);
   assert.equal(handle?.readPhase6Runtime()?.sceneRuntimeFaultCount, 0);
+  assert.equal(handle?.readPhase6Runtime()?.persistence?.pendingRevision, 8);
+  assert.equal(handle?.readPhase6Runtime()?.persistenceRestoreSource, "v2");
+  assert.equal(handle?.readPhase6Runtime()?.persistenceQuotaFailureCount, 1);
   assert.equal(handle?.readPhase6Runtime()?.cacheMetadataBudgetBytes, 1024 * 1024);
   assert.strictEqual(handle?.readPhase6Runtime()?.paintReceipt, phase6Runtime.paintReceipt);
   assert.strictEqual(
@@ -626,6 +657,27 @@ test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle pro
   );
   unregisterRuntime();
   assert.equal(handle?.readPhase6Runtime(), null);
+
+  const activeDocumentRecord = Object.freeze({
+    documentSchemaVersion: 1,
+    scopeKey: "binance:spot:BTCUSDT__main",
+    documentRevision: 8,
+    updatedAt: 0,
+    entities: Object.freeze([{ id: "pending-line" }]),
+  });
+  const unregisterActiveDocument = registerDrawingPerfActivePersistenceDocumentRecordProvider(
+    () => activeDocumentRecord,
+  );
+  assert.strictEqual(handle?.readActivePersistenceDocumentRecord(), activeDocumentRecord);
+  unregisterActiveDocument();
+  assert.equal(handle?.readActivePersistenceDocumentRecord(), null);
+
+  const unregisterThrowingActiveDocument =
+    registerDrawingPerfActivePersistenceDocumentRecordProvider(() => {
+      throw new Error("active persistence document unavailable");
+    });
+  assert.equal(handle?.readActivePersistenceDocumentRecord(), null);
+  unregisterThrowingActiveDocument();
 
   const unregisterThrowingRuntime = registerDrawingPerfPhase6RuntimeProvider(() => {
     throw new Error("surface disposed");

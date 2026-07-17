@@ -32,6 +32,7 @@ export interface DrawingPersistenceCoordinatorSnapshot {
   readonly dirtyRevision: number | null;
   readonly lastPersistedRevision: number | null;
   readonly lastError: string | null;
+  readonly lastErrorName: string | null;
   readonly legacySnapshotRevision: number | null;
   readonly legacySnapshotError: string | null;
 }
@@ -446,6 +447,7 @@ export function createDrawingPersistenceCoordinator({
         dirtyRevision: state.store.dirtyRevision,
         lastPersistedRevision: state.lastPersistedRevision,
         lastError: state.lastError?.message ?? null,
+        lastErrorName: state.lastError?.name ?? null,
         legacySnapshotRevision: state.legacySnapshotRevision,
         legacySnapshotError: state.legacySnapshotError?.message ?? null,
       });
@@ -455,8 +457,9 @@ export function createDrawingPersistenceCoordinator({
 }
 
 export const drawingPersistenceCoordinator = createDrawingPersistenceCoordinator({
-  onPersistenceAttempt: ({ durationMs, maxEncodeChunkDurationMs }) => {
+  onPersistenceAttempt: ({ durationMs, error, maxEncodeChunkDurationMs }) => {
     drawingPerfCounters.recordPersistenceDuration(durationMs);
+    drawingPerfCounters.recordPersistenceAttempt(error);
     if (maxEncodeChunkDurationMs !== null) {
       drawingPerfCounters.recordDuration("persistenceChunkMs", maxEncodeChunkDurationMs);
     }

@@ -7,10 +7,12 @@ import {
   createDrawingEntity,
 } from "../../core/drawingDocument.js";
 import type { DrawingDocument } from "../../core/drawingDocument.js";
+import { nextDrawingId } from "../../drawingModel.js";
 import type { SavedDrawing } from "../../drawingTypes.js";
 import {
   createDrawingDocumentRepository,
   decodeDrawingDocumentRecord,
+  decodeDrawingDocumentRecordAsync,
   drawingDocumentManifestKey,
   encodeDrawingDocumentRecord,
 } from "../drawingDocumentRepository.js";
@@ -78,6 +80,24 @@ function document(scopeKey: string, drawings: readonly SavedDrawing[] = [line("l
   return result;
 }
 
+function recordWithDrawingId(scopeKey: string, id: string): DrawingDocumentRecordV1 {
+  const record = encodeDrawingDocumentRecord(
+    document(scopeKey, [line("allocator-template")]),
+    1,
+  );
+  assert.ok(record);
+  return {
+    ...record,
+    entities: record.entities.map((entity) => ({ ...entity, id })),
+  };
+}
+
+function nextDrawingIdSuffix(prefix: string): number {
+  const suffix = Number(nextDrawingId(prefix).split("_").at(-1));
+  assert.ok(Number.isSafeInteger(suffix));
+  return suffix;
+}
+
 function countedDocument(source: DrawingDocument, onGet: () => void): DrawingDocument {
   return {
     ...source,
@@ -108,6 +128,50 @@ test("strict v2 record codec preserves revision and ordered entities", () => {
   const tombstone = encodeDrawingDocumentRecord(document("empty", []), 9);
   assert.ok(tombstone);
   assert.equal(decodeDrawingDocumentRecord(tombstone, "empty")?.entities.size, 0);
+});
+
+test("strict v2 decoders advance restored ids only after full document validation", async () => {
+  const syncBefore = nextDrawingIdSuffix("sync-before");
+  const syncRestoredSuffix = syncBefore + 100;
+  const syncRecord = recordWithDrawingId("sync-allocator", `fh_${syncRestoredSuffix}`);
+  assert.ok(decodeDrawingDocumentRecord(syncRecord, syncRecord.scopeKey));
+  assert.equal(nextDrawingIdSuffix("sync-after"), syncRestoredSuffix + 1);
+
+  const asyncBefore = nextDrawingIdSuffix("async-before");
+  const asyncRestoredSuffix = asyncBefore + 100;
+  const asyncRecord = recordWithDrawingId("async-allocator", `fh_${asyncRestoredSuffix}`);
+  assert.ok(await decodeDrawingDocumentRecordAsync(asyncRecord, {
+    expectedScopeKey: asyncRecord.scopeKey,
+  }));
+  assert.equal(nextDrawingIdSuffix("async-after"), asyncRestoredSuffix + 1);
+
+  const invalidSyncBefore = nextDrawingIdSuffix("invalid-sync-before");
+  const invalidSyncRecord = recordWithDrawingId(
+    "invalid-sync-allocator",
+    `fh_${invalidSyncBefore + 100}`,
+  );
+  const duplicateSyncEntity = invalidSyncRecord.entities[0];
+  assert.ok(duplicateSyncEntity);
+  assert.equal(decodeDrawingDocumentRecord({
+    ...invalidSyncRecord,
+    entities: [duplicateSyncEntity, duplicateSyncEntity],
+  }, invalidSyncRecord.scopeKey), null);
+  assert.equal(nextDrawingIdSuffix("invalid-sync-after"), invalidSyncBefore + 1);
+
+  const invalidAsyncBefore = nextDrawingIdSuffix("invalid-async-before");
+  const invalidAsyncRecord = recordWithDrawingId(
+    "invalid-async-allocator",
+    `fh_${invalidAsyncBefore + 100}`,
+  );
+  const duplicateAsyncEntity = invalidAsyncRecord.entities[0];
+  assert.ok(duplicateAsyncEntity);
+  assert.equal(await decodeDrawingDocumentRecordAsync({
+    ...invalidAsyncRecord,
+    entities: [duplicateAsyncEntity, duplicateAsyncEntity],
+  }, {
+    expectedScopeKey: invalidAsyncRecord.scopeKey,
+  }), null);
+  assert.equal(nextDrawingIdSuffix("invalid-async-after"), invalidAsyncBefore + 1);
 });
 
 test("putDocument encodes 512 entities once in bounded async chunks and returns metrics", async () => {

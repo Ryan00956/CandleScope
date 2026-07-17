@@ -8,6 +8,7 @@ import {
   buildInitialControlledRunReport,
   CONTROLLED_DRILL_PLAN,
   parseArgs,
+  storageDrillBuildAuthorityPassed,
   workerDrillBuildAuthorityPassed,
 } from "./drawing-rollback-drills-browser.mjs";
 
@@ -28,6 +29,7 @@ const IMPLEMENTED_WORKER_DRILLS = Object.freeze([
   "offscreen-canvas-unsupported",
   "worker-stale-generation",
 ]);
+const IMPLEMENTED_STORAGE_DRILLS = Object.freeze(["indexeddb-quota-blocked"]);
 
 function runCli(args, environment = {}) {
   return spawnSync(process.execPath, [CLI, ...args], {
@@ -75,6 +77,7 @@ test("initial controlled report is fail closed for the fixed eight-drill authori
   assert.equal(report.phase9RollbackDrillsPassed, false);
   assert.equal(report.harnessPassed, false);
   assert.equal(report.workerHarnessPassed, false);
+  assert.equal(report.storageHarnessPassed, false);
   assert.equal(report.planValid, true);
   assert.equal(report.drills.length, 8);
   assert.deepEqual(report.drills.map((drill) => drill.id), EXPECTED_DRILL_ORDER);
@@ -154,6 +157,60 @@ test("run authority requires exact current build receipts from every worker dril
   workerResult.drills[2].drillId = "worker-stale-generation";
   workerResult.drills.pop();
   assert.equal(workerDrillBuildAuthorityPassed(workerResult, buildReceipt), false);
+});
+
+test("run authority independently requires the current storage drill build receipt", () => {
+  const rawDigest = (character) => character.repeat(64);
+  const digest = (character) => `sha256:${rawDigest(character)}`;
+  const buildReceipt = {
+    buildId: "controlled-build-1",
+    buildFingerprint: { sha256: rawDigest("a") },
+    assetFingerprint: { sha256: rawDigest("b") },
+    inputFingerprint: { sha256: rawDigest("c") },
+    git: { commit: "0123456789abcdef" },
+  };
+  const storageResult = {
+    drills: IMPLEMENTED_STORAGE_DRILLS.map((drillId) => ({
+      drillId,
+      buildAuthority: {
+        kind: "controlled-browser-build-authority",
+        drillId,
+        authoritative: true,
+        assetBuildAuthoritative: true,
+        buildId: buildReceipt.buildId,
+        buildFingerprint: digest("a"),
+        assetDigest: digest("b"),
+        currentAssetDigest: digest("b"),
+        buildInputDigest: digest("c"),
+        currentBuildInputDigest: digest("c"),
+        gitRevision: buildReceipt.git.commit,
+        matchesManagedOrigin: true,
+        matchesManagedDocument: true,
+        entryAssetsLoaded: true,
+        networkAssetAuthorityPassed: true,
+        networkQuiescencePassed: true,
+        browserLoadedAssetsAccepted: true,
+        domLoadedAssetsAccepted: true,
+        expectedEntriesPresentInDom: true,
+        distMatchesBuild: true,
+        buildInputsMatch: true,
+        gitMatchesBuild: true,
+        managedOriginGuardPassed: true,
+        workerDiagnosticsPassed: true,
+        handlerSettlementsPassed: true,
+        workerLifecycle: {
+          accepted: true,
+          assetAuthorityAccepted: true,
+        },
+      },
+    })),
+  };
+  assert.equal(storageDrillBuildAuthorityPassed(storageResult, buildReceipt), true);
+  storageResult.drills[0].buildAuthority.currentBuildInputDigest = digest("d");
+  assert.equal(storageDrillBuildAuthorityPassed(storageResult, buildReceipt), false);
+  storageResult.drills[0].buildAuthority.currentBuildInputDigest = digest("c");
+  storageResult.drills[0].drillId = "worker-stale-generation";
+  assert.equal(storageDrillBuildAuthorityPassed(storageResult, buildReceipt), false);
 });
 
 test("controlled rollback browser CLI rejects duplicate and malformed safe options", () => {

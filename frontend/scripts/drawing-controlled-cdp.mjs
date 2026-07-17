@@ -38,6 +38,14 @@ export const CONTROLLED_WORKER_ROLLBACK_DRILL_IDS = Object.freeze([
   "offscreen-canvas-unsupported",
   "worker-stale-generation",
 ]);
+export const CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS = Object.freeze([
+  "quota",
+  "blocked",
+]);
+export const CONTROLLED_ROLLBACK_DRILL_IDS = Object.freeze([
+  ...CONTROLLED_WORKER_ROLLBACK_DRILL_IDS,
+  "indexeddb-quota-blocked",
+]);
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
 const DEFAULT_MOCK = Object.freeze({
@@ -53,6 +61,7 @@ export const CONTROLLED_DIAGNOSTIC_WORKER_DOMAIN_CAPABILITIES = Object.freeze({
 export const CONTROLLED_DIAGNOSTIC_WORKER_TYPES = Object.freeze(
   Object.keys(CONTROLLED_DIAGNOSTIC_WORKER_DOMAIN_CAPABILITIES),
 );
+const CONTROLLED_DRAWING_WORKER_FETCH_RESOURCE_TYPE = "Other";
 const CONTROLLED_OPTION_KEYS = new Set([
   "chromePath",
   "dpr",
@@ -127,6 +136,422 @@ const PROCESS_ENVIRONMENT_ALLOWLIST = new Set([
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+const INDEXEDDB_BUCKET_SPACE_CACHE_TIME_LIMIT_MS = 30_000;
+const INDEXEDDB_BUCKET_SPACE_CACHE_GUARD_MS = 5_000;
+const CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES = 1;
+const CONTROLLED_QUOTA_STORE_NAME = "quota-probe";
+const CONTROLLED_QUOTA_BASELINE_KEY = "baseline";
+
+export async function waitForControlledQuotaCacheExpiry({
+  origin,
+  readUsageAndQuota,
+  waitFor = wait,
+  monotonicNow = () => globalThis.performance.now(),
+  observedAt = isoNow,
+  cacheTimeLimitMs = INDEXEDDB_BUCKET_SPACE_CACHE_TIME_LIMIT_MS,
+  guardMs = INDEXEDDB_BUCKET_SPACE_CACHE_GUARD_MS,
+}) {
+  const requestedWaitMs = cacheTimeLimitMs + guardMs;
+  const startedAt = observedAt();
+  const startedMilliseconds = monotonicNow();
+  await waitFor(requestedWaitMs);
+  const elapsedMs = monotonicNow() - startedMilliseconds;
+  const completedAt = observedAt();
+  if (!Number.isFinite(elapsedMs) || elapsedMs < requestedWaitMs) {
+    throw new Error(
+      `Controlled IndexedDB quota cache-expiry guard elapsed only ${elapsedMs}ms; required ${requestedWaitMs}ms`,
+    );
+  }
+  const verification = await readUsageAndQuota(origin);
+  return Object.freeze({
+    kind: "indexeddb-bucket-space-cache-expiry",
+    cacheTimeLimitMs,
+    guardMs,
+    requestedWaitMs,
+    elapsedMs,
+    startedAt,
+    completedAt,
+    verification,
+  });
+}
+
+export async function prepareControlledQuotaOverride({
+  binding,
+  receiptId,
+  origin,
+  overrideQuota,
+  readUsageAndQuota,
+  evaluatePreparation,
+  evaluateProbe,
+  evaluateCleanup,
+  publish,
+  observedAt = isoNow,
+  waitForCacheExpiry = waitForControlledQuotaCacheExpiry,
+}) {
+  let state = {
+    ...binding,
+    receiptId,
+    origin,
+    sacrificialDatabaseName: `candlescope-rollback-quota-${binding.runId}-${binding.faultId}`,
+    sacrificialStoreName: CONTROLLED_QUOTA_STORE_NAME,
+    baselineKey: CONTROLLED_QUOTA_BASELINE_KEY,
+    preparationSnapshot: null,
+    probeSnapshot: null,
+    releaseSnapshot: null,
+    prepared: false,
+    before: null,
+    overrideCommand: null,
+    overridden: null,
+    cacheExpiryGuard: null,
+    quotaPlan: null,
+    overrideActive: false,
+    overrideCleared: true,
+    overrideResetRequired: false,
+    pageCleanupRequired: true,
+    pageCleanupCompleted: false,
+    releaseAccepted: false,
+    clearCommand: null,
+    restored: null,
+    forcedCleanup: false,
+    overrideCleanupError: null,
+    pageCleanupError: null,
+    restorationError: null,
+  };
+  publish(state);
+  try {
+    const preparationSnapshot = await evaluatePreparation(binding.faultId);
+    const quotaPreparation = preparationSnapshot?.storage?.quotaPreparation;
+    if (preparationSnapshot?.runId !== binding.runId
+      || preparationSnapshot?.faultId !== binding.faultId
+      || preparationSnapshot?.variant !== "quota"
+      || quotaPreparation?.prepared !== true
+      || quotaPreparation?.databaseName !== state.sacrificialDatabaseName
+      || quotaPreparation?.storeName !== state.sacrificialStoreName
+      || quotaPreparation?.baselineKey !== state.baselineKey
+      || quotaPreparation?.baselineCommitted !== true
+      || quotaPreparation?.connectionKeptOpen !== true) {
+      throw new Error(
+        `Controlled IndexedDB quota preparation is invalid: ${JSON.stringify(preparationSnapshot)}`,
+      );
+    }
+    state = { ...state, preparationSnapshot };
+    publish(state);
+
+    const before = await readUsageAndQuota(origin);
+    state = { ...state, before };
+    publish(state);
+    if (!Number.isFinite(before?.usageBytes)
+      || before.usageBytes <= CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES
+      || !Number.isFinite(before?.quotaBytes)
+      || before.quotaBytes <= CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES
+      || before?.overrideActive !== false) {
+      throw new Error(`Controlled IndexedDB baseline quota is invalid: ${JSON.stringify(state)}`);
+    }
+    const quotaPlan = Object.freeze({
+      kind: "nonzero-below-existing-usage",
+      quotaSizeBytes: CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES,
+      baselineUsageBytes: before.usageBytes,
+      baselineUsageExceedsQuota: before.usageBytes > CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES,
+    });
+    state = { ...state, quotaPlan };
+    publish(state);
+
+    state = {
+      ...state,
+      overrideCleared: false,
+      overrideResetRequired: true,
+    };
+    publish(state);
+    await overrideQuota({ origin, quotaSize: CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES });
+    const overrideCommand = Object.freeze({
+      method: "Storage.overrideQuotaForOrigin",
+      origin,
+      quotaSize: CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES,
+      accepted: true,
+      observedAt: observedAt(),
+    });
+    state = { ...state, overrideCommand, overrideActive: true };
+    publish(state);
+
+    const overridden = await readUsageAndQuota(origin);
+    state = { ...state, overridden };
+    publish(state);
+    if (overridden?.quotaBytes !== CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES
+      || overridden?.overrideActive !== true) {
+      throw new Error(`Controlled IndexedDB quota override did not become authoritative: ${JSON.stringify(state)}`);
+    }
+
+    const cacheExpiryGuard = await waitForCacheExpiry({ origin, readUsageAndQuota });
+    state = { ...state, cacheExpiryGuard };
+    publish(state);
+    if (cacheExpiryGuard?.kind !== "indexeddb-bucket-space-cache-expiry"
+      || cacheExpiryGuard?.cacheTimeLimitMs !== 30_000
+      || cacheExpiryGuard?.guardMs !== 5_000
+      || cacheExpiryGuard?.elapsedMs < cacheExpiryGuard?.requestedWaitMs
+      || cacheExpiryGuard?.requestedWaitMs !== 35_000
+      || cacheExpiryGuard?.verification?.quotaBytes !== CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES
+      || cacheExpiryGuard?.verification?.overrideActive !== true) {
+      throw new Error(`Controlled IndexedDB quota cache-expiry verification failed: ${JSON.stringify(state)}`);
+    }
+
+    const probeSnapshot = await evaluateProbe(binding.faultId);
+    const quotaProbe = probeSnapshot?.storage?.quotaProbe;
+    if (probeSnapshot?.runId !== binding.runId
+      || probeSnapshot?.faultId !== binding.faultId
+      || probeSnapshot?.variant !== "quota"
+      || quotaProbe?.attempted !== true
+      || quotaProbe?.databaseName !== state.sacrificialDatabaseName
+      || quotaProbe?.storeName !== state.sacrificialStoreName
+      || quotaProbe?.transactionMode !== "readwrite"
+      || quotaProbe?.settled !== "abort"
+      || quotaProbe?.abortEvent?.type !== "abort"
+      || quotaProbe?.abortEvent?.isTrusted !== true
+      || quotaProbe?.transactionError?.name !== "QuotaExceededError"
+      || quotaProbe?.nativeQuotaExceeded !== true) {
+      throw new Error(`Controlled IndexedDB native quota probe is invalid: ${JSON.stringify(probeSnapshot)}`);
+    }
+    state = {
+      ...state,
+      probeSnapshot,
+      prepared: true,
+    };
+    publish(state);
+    return Object.freeze({ ...state });
+  } catch (error) {
+    state = await forceCleanupControlledQuotaOverride(state, {
+      overrideQuota,
+      evaluateCleanup,
+      readUsageAndQuota,
+      publish,
+      reason: "quota-preparation-failed",
+      observedAt,
+    });
+    throw error;
+  }
+}
+
+export async function forceCleanupControlledQuotaOverride(
+  state,
+  {
+    overrideQuota,
+    evaluateCleanup,
+    readUsageAndQuota,
+    publish = () => {},
+    reason,
+    observedAt = isoNow,
+  },
+) {
+  if (!state) return state;
+  let nextState = {
+    ...state,
+    forcedCleanup: true,
+    forcedCleanupReason: reason,
+    forcedCleanupAt: observedAt(),
+  };
+  publish(nextState);
+
+  if (nextState.overrideCleared !== true || nextState.overrideResetRequired === true) {
+    try {
+      await overrideQuota({ origin: nextState.origin });
+      nextState = {
+        ...nextState,
+        overrideActive: false,
+        overrideCleared: true,
+        overrideResetRequired: false,
+        overrideCleanupError: null,
+      };
+    } catch (error) {
+      nextState = {
+        ...nextState,
+        overrideCleanupError: error instanceof Error ? error.message : String(error),
+      };
+    }
+    publish(nextState);
+  }
+
+  if (nextState.pageCleanupCompleted !== true) {
+    try {
+      const releaseSnapshot = await evaluateCleanup(nextState.faultId, true);
+      const quotaRelease = releaseSnapshot?.storage?.quotaRelease;
+      const completed = releaseSnapshot?.runId === nextState.runId
+        && releaseSnapshot?.faultId === nextState.faultId
+        && releaseSnapshot?.variant === "quota"
+        && quotaRelease?.databaseName === nextState.sacrificialDatabaseName
+        && quotaRelease?.storeName === nextState.sacrificialStoreName
+        && quotaRelease?.connectionClosed === true
+        && quotaRelease?.deletion?.status === "success"
+        && quotaRelease?.databaseStillPresent === false
+        && quotaRelease?.forcedCleanup === true
+        && quotaRelease?.completed === true;
+      nextState = {
+        ...nextState,
+        releaseSnapshot,
+        pageCleanupCompleted: completed,
+        pageCleanupRequired: !completed,
+        pageCleanupError: completed ? null : "controlled quota page cleanup is incomplete",
+      };
+    } catch (error) {
+      nextState = {
+        ...nextState,
+        pageCleanupError: error instanceof Error ? error.message : String(error),
+      };
+    }
+    publish(nextState);
+  }
+
+  if (nextState.overrideCleared === true
+    && nextState.pageCleanupCompleted === true
+    && (!nextState.restored || nextState.restorationError !== null)
+    && typeof readUsageAndQuota === "function") {
+    try {
+      const restored = await readUsageAndQuota(nextState.origin);
+      const restorationValid = restored?.overrideActive === false
+        && (nextState.before === null || restored?.quotaBytes === nextState.before?.quotaBytes);
+      nextState = {
+        ...nextState,
+        restored,
+        restorationError: restorationValid ? null : "controlled quota restoration drifted",
+      };
+    } catch (error) {
+      nextState = {
+        ...nextState,
+        restorationError: error instanceof Error ? error.message : String(error),
+      };
+    }
+    publish(nextState);
+  }
+  return Object.freeze({ ...nextState });
+}
+
+export async function releaseControlledQuotaOverride(
+  state,
+  {
+    overrideQuota,
+    evaluateCleanup,
+    readUsageAndQuota,
+    publish = () => {},
+    observedAt = isoNow,
+  },
+) {
+  let nextState = { ...state, overrideResetRequired: true };
+  publish(nextState);
+  await overrideQuota({ origin: nextState.origin });
+  const clearCommand = Object.freeze({
+    method: "Storage.overrideQuotaForOrigin",
+    origin: nextState.origin,
+    quotaSizeOmitted: true,
+    accepted: true,
+    observedAt: observedAt(),
+  });
+  nextState = {
+    ...nextState,
+    overrideActive: false,
+    overrideCleared: true,
+    overrideResetRequired: false,
+    clearCommand,
+  };
+  publish(nextState);
+
+  const releaseSnapshot = await evaluateCleanup(nextState.faultId, false);
+  const quotaRelease = releaseSnapshot?.storage?.quotaRelease;
+  if (releaseSnapshot?.runId !== nextState.runId
+    || releaseSnapshot?.faultId !== nextState.faultId
+    || releaseSnapshot?.variant !== "quota"
+    || quotaRelease?.databaseName !== nextState.sacrificialDatabaseName
+    || quotaRelease?.storeName !== nextState.sacrificialStoreName
+    || quotaRelease?.connectionClosed !== true
+    || quotaRelease?.deletion?.status !== "success"
+    || quotaRelease?.completed !== true
+    || quotaRelease?.databaseStillPresent !== false
+    || quotaRelease?.forcedCleanup === true) {
+    throw new Error(`Controlled IndexedDB quota release is invalid: ${JSON.stringify(releaseSnapshot)}`);
+  }
+  nextState = {
+    ...nextState,
+    releaseSnapshot,
+    pageCleanupCompleted: true,
+    pageCleanupRequired: false,
+  };
+  publish(nextState);
+
+  const restored = await readUsageAndQuota(nextState.origin);
+  const restorationValid = restored?.overrideActive === false
+    && restored?.quotaBytes === nextState.before?.quotaBytes;
+  nextState = {
+    ...nextState,
+    restored,
+    restorationError: restorationValid ? null : "controlled quota restoration drifted",
+  };
+  publish(nextState);
+  if (!restorationValid) {
+    throw new Error(`Controlled IndexedDB quota restoration drifted: ${JSON.stringify(nextState)}`);
+  }
+  nextState = { ...nextState, releaseAccepted: true };
+  publish(nextState);
+  return Object.freeze({ ...nextState });
+}
+
+export async function prepareControlledBlockedFault({
+  binding,
+  receiptId,
+  evaluatePreparation,
+  publish,
+}) {
+  let state = {
+    ...binding,
+    receiptId,
+    prepared: false,
+    released: false,
+    forcedCleanup: false,
+    snapshot: null,
+  };
+  publish(state);
+  const snapshot = await evaluatePreparation(binding.faultId);
+  if (snapshot?.runId !== binding.runId
+    || snapshot?.faultId !== binding.faultId
+    || snapshot?.variant !== "blocked"
+    || snapshot?.storage?.blockedInterceptorInstalled !== true
+    || snapshot?.storage?.blockedPreparation?.prepared !== true) {
+    throw new Error(`Controlled IndexedDB blocked preparation is invalid: ${JSON.stringify(snapshot)}`);
+  }
+  state = {
+    ...state,
+    prepared: true,
+    snapshot,
+  };
+  publish(state);
+  return Object.freeze({ ...state });
+}
+
+export async function forceCleanupControlledBlockedFault(
+  state,
+  { evaluateCleanup, reason },
+) {
+  if (!state || state.released !== false) {
+    return Object.freeze({
+      state,
+      receipt: state ? Object.freeze({
+        complete: state.released === true,
+        forced: state.forcedCleanup === true,
+        faultId: state.faultId,
+      }) : null,
+    });
+  }
+  const snapshot = await evaluateCleanup(state.faultId);
+  const complete = snapshot?.storage?.blockedRelease?.completed === true;
+  const nextState = Object.freeze({
+    ...state,
+    released: complete,
+    forcedCleanup: true,
+    forcedCleanupReason: reason,
+    snapshot,
+  });
+  return Object.freeze({
+    state: nextState,
+    receipt: Object.freeze({ complete, forced: true, faultId: state.faultId }),
+  });
 }
 
 function wait(milliseconds) {
@@ -1543,6 +1968,15 @@ export function assertControlledCdpResponseSession(message, expectedSessionId = 
   return true;
 }
 
+export function isControlledDetachedSessionCommandError(message, expectedSessionId = null) {
+  return message?.kind === "response"
+    && typeof expectedSessionId === "string"
+    && expectedSessionId.trim().length > 0
+    && message.sessionId === null
+    && message.error?.code === -32001
+    && message.error?.message === "Session with given id not found.";
+}
+
 export function createControlledCdpHandlerTracker(diagnostics) {
   if (!diagnostics
     || typeof diagnostics.recordEvent !== "function"
@@ -1675,6 +2109,7 @@ function connectOwnedCdp(webSocketUrl, debugPort, timeoutMs, diagnostics) {
       let resolveClosed;
       const closedPromise = new Promise((closedResolve) => { resolveClosed = closedResolve; });
       const pending = new Map();
+      const detachedSessionIds = new Set();
       const handlerTracker = createControlledCdpHandlerTracker(diagnostics);
       const terminalTransportError = (cause) => {
         const error = new Error(controlledCdpTerminalCauseErrorMessage(cause));
@@ -1709,8 +2144,12 @@ function connectOwnedCdp(webSocketUrl, debugPort, timeoutMs, diagnostics) {
           const deferred = pending.get(message.id);
           pending.delete(message.id);
           clearTimeout(deferred.timer);
+          const detachedSessionCommandError = detachedSessionIds.has(deferred.sessionId)
+            && isControlledDetachedSessionCommandError(message, deferred.sessionId);
           try {
-            assertControlledCdpResponseSession(message, deferred.sessionId);
+            if (!detachedSessionCommandError) {
+              assertControlledCdpResponseSession(message, deferred.sessionId);
+            }
           } catch (cause) {
             const error = new Error(
               `CDP response session mismatch for ${deferred.method}: ${cause instanceof Error ? cause.message : cause}`,
@@ -1721,10 +2160,23 @@ function connectOwnedCdp(webSocketUrl, debugPort, timeoutMs, diagnostics) {
           }
           if (message.error) {
             const error = new Error(message.error.message || JSON.stringify(message.error));
+            if (detachedSessionCommandError) {
+              Object.defineProperty(error, "controlledCdpDetachedSession", {
+                configurable: false,
+                enumerable: false,
+                value: true,
+                writable: false,
+              });
+            }
             if (deferred.recordErrors) diagnostics.recordCommandError(deferred.method, error);
             deferred.reject(error);
           } else deferred.resolve(message);
           return;
+        }
+        if (message.method === "Target.detachedFromTarget"
+          && typeof message.params?.sessionId === "string"
+          && message.params.sessionId.trim()) {
+          detachedSessionIds.add(message.params.sessionId);
         }
         handlerTracker.dispatch(message.method, message.params, message);
       });
@@ -2139,18 +2591,41 @@ export function controlledManagedDocumentUrlAllowed(url, managedUrl) {
   }
 }
 
-export async function createManagedOriginGuard(cdp, managedUrl) {
+export async function createManagedOriginGuard(cdp, managedUrl, drawingWorkerPaths = []) {
   const managedOrigin = new URL(managedUrl).origin;
+  if (!Array.isArray(drawingWorkerPaths)
+    || drawingWorkerPaths.some((relativePath) => (
+      typeof relativePath !== "string"
+      || !/^assets\/drawing\.worker(?:-[^/]+)?\.js$/.test(relativePath)
+    ))) {
+    throw new TypeError("managed-origin guard drawing worker paths are invalid");
+  }
+  const workerPathSet = new Set(drawingWorkerPaths);
   const violations = [];
+  const armedWorkerResponses = new Map();
+  const workerResponseCaptures = new Map();
   const record = (kind, url, details = {}) => {
     violations.push(Object.freeze({ kind, url, at: isoNow(), ...stableObject(details) }));
   };
+  const relativeManagedPath = (url) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.origin !== managedOrigin) return null;
+      return decodeURIComponent(parsed.pathname).replace(/^\/+/, "") || "index.html";
+    } catch {
+      return null;
+    }
+  };
+  const captureKey = (networkId, url) => `${networkId}\0${url}`;
   const removePaused = cdp.on("Fetch.requestPaused", async (params, message) => {
     const url = params?.request?.url || "";
     const sessionId = message?.sessionId ?? null;
+    const responseStage = Object.prototype.hasOwnProperty.call(params || {}, "responseStatusCode")
+      || Object.prototype.hasOwnProperty.call(params || {}, "responseErrorReason");
     if (!controlledManagedUrlAllowed(url, managedOrigin)) {
       record("off-origin-request-blocked", url, {
         resourceType: params?.resourceType ?? null,
+        responseStage,
         sessionId,
       });
       await cdp.send("Fetch.failRequest", {
@@ -2159,7 +2634,115 @@ export async function createManagedOriginGuard(cdp, managedUrl) {
       }, sessionId);
       return;
     }
-    await cdp.send("Fetch.continueRequest", { requestId: params.requestId }, sessionId);
+    if (!responseStage) {
+      const relativePath = relativeManagedPath(url);
+      const isDrawingWorker = workerPathSet.has(relativePath);
+      if (!isDrawingWorker) {
+        await cdp.send("Fetch.continueRequest", { requestId: params.requestId }, sessionId);
+        return;
+      }
+      const networkId = params?.networkId;
+      const armed = typeof params?.requestId === "string"
+        && params.requestId.length > 0
+        && typeof networkId === "string"
+        && networkId.length > 0
+        && params?.resourceType === CONTROLLED_DRAWING_WORKER_FETCH_RESOURCE_TYPE
+        && sessionId === null
+        && !armedWorkerResponses.has(params.requestId);
+      if (!armed) {
+        record("drawing-worker-response-capture-arm-invalid", url, {
+          fetchRequestId: params?.requestId ?? null,
+          networkId: networkId ?? null,
+          resourceType: params?.resourceType ?? null,
+          sessionId,
+        });
+        await cdp.send("Fetch.continueRequest", { requestId: params.requestId }, sessionId);
+        return;
+      }
+      armedWorkerResponses.set(params.requestId, Object.freeze({
+        fetchRequestId: params.requestId,
+        networkId,
+        relativePath,
+        resourceType: params.resourceType,
+        sessionId,
+        url,
+        armedAt: isoNow(),
+      }));
+      await cdp.send("Fetch.continueRequest", {
+        requestId: params.requestId,
+        interceptResponse: true,
+      }, sessionId);
+      return;
+    }
+
+    const armed = armedWorkerResponses.get(params?.requestId) ?? null;
+    let captureError = null;
+    try {
+      const accepted = armed !== null
+        && sessionId === null
+        && params?.networkId === armed.networkId
+        && url === armed.url
+        && params?.resourceType === armed.resourceType
+        && params?.responseErrorReason === undefined
+        && Number.isInteger(params?.responseStatusCode)
+        && params.responseStatusCode >= 200
+        && params.responseStatusCode < 300;
+      if (!accepted) {
+        throw new Error("drawing worker response-stage identity is invalid");
+      }
+      const response = await cdp.send("Fetch.getResponseBody", {
+        requestId: params.requestId,
+      }, sessionId, false);
+      const body = response?.result?.body;
+      const base64Encoded = response?.result?.base64Encoded;
+      if (typeof body !== "string" || typeof base64Encoded !== "boolean") {
+        throw new Error("drawing worker response body receipt is invalid");
+      }
+      const bytes = Buffer.from(body, base64Encoded ? "base64" : "utf8");
+      const key = captureKey(armed.networkId, armed.url);
+      if (workerResponseCaptures.has(key)) {
+        throw new Error("drawing worker response body capture is duplicated");
+      }
+      workerResponseCaptures.set(key, {
+        kind: "controlled-fetch-response-body-capture",
+        fetchRequestId: armed.fetchRequestId,
+        networkId: armed.networkId,
+        relativePath: armed.relativePath,
+        resourceType: armed.resourceType,
+        sessionId: armed.sessionId,
+        url: armed.url,
+        responseStatusCode: params.responseStatusCode,
+        bodyBytes: bytes.byteLength,
+        bodySha256: sha256(bytes),
+        capturedAt: isoNow(),
+        claimedAt: null,
+        claimCount: 0,
+      });
+    } catch (error) {
+      captureError = error;
+      record("drawing-worker-response-body-capture-failed", url, {
+        error: error instanceof Error ? error.message : String(error),
+        fetchRequestId: params?.requestId ?? null,
+        networkId: params?.networkId ?? null,
+        responseErrorReason: params?.responseErrorReason ?? null,
+        responseStatusCode: params?.responseStatusCode ?? null,
+        resourceType: params?.resourceType ?? null,
+        sessionId,
+      });
+    } finally {
+      armedWorkerResponses.delete(params?.requestId);
+      try {
+        await cdp.send("Fetch.continueResponse", { requestId: params.requestId }, sessionId);
+      } catch (error) {
+        record("drawing-worker-response-continue-failed", url, {
+          error: error instanceof Error ? error.message : String(error),
+          fetchRequestId: params?.requestId ?? null,
+          sessionId,
+        });
+        if (captureError === null) captureError = error;
+      }
+    }
+    if (captureError !== null) return;
   });
   const removeFrame = cdp.on("Page.frameNavigated", (params) => {
     if (params?.frame?.parentId) return;
@@ -2180,8 +2763,17 @@ export async function createManagedOriginGuard(cdp, managedUrl) {
     ],
   });
   return Object.freeze({
+    claimWorkerResponseBodyCapture(networkId, url) {
+      if (typeof networkId !== "string" || !networkId
+        || typeof url !== "string" || !url) return null;
+      const capture = workerResponseCaptures.get(captureKey(networkId, url)) ?? null;
+      if (!capture || capture.claimCount !== 0) return null;
+      capture.claimCount = 1;
+      capture.claimedAt = isoNow();
+      return Object.freeze({ ...capture });
+    },
     assertHealthy() {
-      if (violations.length > 0) {
+      if (violations.length > 0 || armedWorkerResponses.size > 0) {
         throw new Error(`Managed-origin guard observed forbidden traffic: ${JSON.stringify(violations)}`);
       }
     },
@@ -2189,7 +2781,11 @@ export async function createManagedOriginGuard(cdp, managedUrl) {
       return Object.freeze({
         managedOrigin,
         managedDocumentPath: new URL(managedUrl).pathname,
-        passed: violations.length === 0,
+        passed: violations.length === 0 && armedWorkerResponses.size === 0,
+        armedWorkerResponseCount: armedWorkerResponses.size,
+        workerResponseCaptures: Object.freeze(
+          [...workerResponseCaptures.values()].map((capture) => Object.freeze({ ...capture })),
+        ),
         violations: Object.freeze(violations.map((violation) => Object.freeze({ ...violation }))),
       });
     },
@@ -2208,9 +2804,14 @@ export function createControlledNetworkAssetTracker(
   timeoutMs,
   mainFrameId,
   rollbackAuthority = null,
+  claimWorkerResponseBodyCapture = null,
 ) {
   if (typeof mainFrameId !== "string" || !mainFrameId) {
     throw new Error("controlled asset tracker requires the owned main frame id");
+  }
+  if (claimWorkerResponseBodyCapture !== null
+    && typeof claimWorkerResponseBodyCapture !== "function") {
+    throw new TypeError("controlled asset tracker worker response capture must be callable");
   }
   const entryPaths = Object.freeze(["index.html", ...buildReceipt.entryAssetPaths]);
   const manifest = new Map(buildReceipt.assetFingerprint.files.map((file) => [file.path, file]));
@@ -2249,6 +2850,7 @@ export function createControlledNetworkAssetTracker(
   const assetPath = (url) => {
     try {
       const parsed = new URL(url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
       if (parsed.origin !== managedOrigin) return null;
       const relative = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
       return relative || "index.html";
@@ -2263,6 +2865,7 @@ export function createControlledNetworkAssetTracker(
       kind,
       at: isoNow(),
       generation: currentGeneration,
+      observedGeneration: currentGeneration,
       ...stableObject(details),
     }));
     observe();
@@ -2410,7 +3013,13 @@ export function createControlledNetworkAssetTracker(
     const key = requestKey(sessionId, requestId);
     if (requests.has(key)) {
       duplicateRequestKeys.add(key);
-      recordProvenanceError("duplicate-request-key", { key, requestId, sessionId, url });
+      recordProvenanceError("duplicate-request-key", {
+        generation,
+        key,
+        requestId,
+        sessionId,
+        url,
+      });
     }
     const record = {
       key,
@@ -2710,10 +3319,17 @@ export function createControlledNetworkAssetTracker(
     const relativePath = assetPath(params?.response?.url || "");
     if (!relativePath) return;
     const responseType = params?.type ?? null;
+    let request = requests.get(key) ?? null;
+    const eventGeneration = request?.generation
+      ?? responses.get(key)?.generation
+      ?? targetSessions.get(sessionId)?.generation
+      ?? currentGeneration;
     responseEventKeys.add(key);
     if (terminalRequestKeys.has(key)) {
       const clearedKeys = clearRequestAndCanonicalInFlight(sessionId, params?.requestId);
+      if (request?.dataApiExempt === true) return;
       recordProvenanceError("response-after-network-terminal", {
+        generation: eventGeneration,
         clearedKeys,
         key,
         requestId: params?.requestId ?? null,
@@ -2721,7 +3337,6 @@ export function createControlledNetworkAssetTracker(
       });
       return;
     }
-    let request = requests.get(key) ?? null;
     if (!request) {
       request = resolveWorkerBootstrapHandoff({
         sessionId,
@@ -2734,6 +3349,7 @@ export function createControlledNetworkAssetTracker(
     const generation = request?.generation ?? null;
     if (!request) {
       recordProvenanceError("response-without-request", {
+        generation: eventGeneration,
         requestId: params?.requestId ?? null,
         sessionId,
         path: relativePath,
@@ -2743,6 +3359,7 @@ export function createControlledNetworkAssetTracker(
     } else if (request.path !== relativePath || request.url !== params?.response?.url) {
       clearRequestAndCanonicalInFlight(sessionId, params?.requestId);
       recordProvenanceError("response-request-mismatch", {
+        generation: request.generation,
         requestId: params?.requestId ?? null,
         sessionId,
         requestPath: request.path,
@@ -2810,6 +3427,8 @@ export function createControlledNetworkAssetTracker(
       expectedSha256: expected.sha256,
       bodyBytes: null,
       bodySha256: null,
+      bodyCaptureKind: null,
+      bodyCaptureReceipt: null,
       bodyError: null,
       failed: null,
     });
@@ -2818,12 +3437,21 @@ export function createControlledNetworkAssetTracker(
   const beginNetworkTerminal = (event, params, message) => {
     const sessionId = message?.sessionId ?? null;
     const key = requestKey(sessionId, params?.requestId);
+    const request = requests.get(key) ?? null;
+    const generation = request?.generation
+      ?? responses.get(key)?.generation
+      ?? targetSessions.get(sessionId)?.generation
+      ?? currentGeneration;
     const tracked = requests.has(key) || responses.has(key) || responseEventKeys.has(key);
     const canonical = canonicalWorkerBootstrapSource(sessionId, params?.requestId);
     if (!tracked && !canonical) return { abort: true, ignored: true, key, sessionId };
     if (terminalRequestKeys.has(key)) {
       const clearedKeys = clearRequestAndCanonicalInFlight(sessionId, params?.requestId);
+      if (request?.dataApiExempt === true) {
+        return { abort: true, ignored: true, key, sessionId };
+      }
       recordProvenanceError("duplicate-network-terminal", {
+        generation,
         clearedKeys,
         event,
         key,
@@ -2835,7 +3463,11 @@ export function createControlledNetworkAssetTracker(
     terminalRequestKeys.add(key);
     if (!responseEventKeys.has(key)) {
       const clearedKeys = clearRequestAndCanonicalInFlight(sessionId, params?.requestId);
+      if (request?.dataApiExempt === true) {
+        return { abort: true, ignored: true, key, sessionId };
+      }
       recordProvenanceError("network-terminal-without-response", {
+        generation,
         clearedKeys,
         event,
         key,
@@ -2859,16 +3491,53 @@ export function createControlledNetworkAssetTracker(
       clearRequestAndCanonicalInFlight(sessionId, params?.requestId);
       return undefined;
     }
+    if (record.generation !== currentGeneration) {
+      finishRequest();
+      return undefined;
+    }
+    const canonicalDrawingWorker = record.workerBootstrapHandoff === true
+      && record.sessionId !== null
+      && drawingWorkerPaths.includes(record.path);
+    if (canonicalDrawingWorker && claimWorkerResponseBodyCapture !== null) {
+      const capture = claimWorkerResponseBodyCapture(params.requestId, record.url);
+      const captureAccepted = capture?.kind === "controlled-fetch-response-body-capture"
+        && typeof capture.fetchRequestId === "string"
+        && capture.fetchRequestId.length > 0
+        && capture.networkId === params.requestId
+        && capture.relativePath === record.path
+        && capture.resourceType === CONTROLLED_DRAWING_WORKER_FETCH_RESOURCE_TYPE
+        && capture.sessionId === null
+        && capture.url === record.url
+        && capture.responseStatusCode === record.status
+        && Number.isSafeInteger(capture.bodyBytes)
+        && capture.bodyBytes >= 0
+        && /^[a-f0-9]{64}$/.test(capture.bodySha256)
+        && capture.claimCount === 1
+        && typeof capture.claimedAt === "string";
+      if (captureAccepted) {
+        record.bodyBytes = capture.bodyBytes;
+        record.bodySha256 = capture.bodySha256;
+        record.bodyCaptureKind = capture.kind;
+        record.bodyCaptureReceipt = capture;
+      } else {
+        record.bodyError = "canonical drawing worker response body capture is missing or invalid";
+      }
+      finishRequest();
+      observe();
+      return undefined;
+    }
     const task = cdp.send(
       "Network.getResponseBody",
       { requestId: params.requestId },
       sessionId,
+      sessionId === null,
     )
       .then((response) => {
         const result = response.result || {};
         const body = Buffer.from(String(result.body || ""), result.base64Encoded ? "base64" : "utf8");
         record.bodyBytes = body.byteLength;
         record.bodySha256 = sha256(body);
+        record.bodyCaptureKind = "network-response-body";
       })
       .catch((error) => {
         record.bodyError = error instanceof Error ? error.message : String(error);
@@ -3161,17 +3830,17 @@ async function readBrowserBuildEvidence(
   { requireActiveWorkers = true } = {},
 ) {
   const managedOrigin = new URL(managedUrl).origin;
-  originGuard.assertHealthy();
-  const handlersBeforeCapture = await cdp.settleHandlers();
-  if (!handlersBeforeCapture.passed) {
-    throw new Error(`CDP handlers did not settle before build capture: ${JSON.stringify(handlersBeforeCapture)}`);
-  }
   await workerDiagnostics.settle();
   workerDiagnostics.assertHealthy();
   const waitForNetworkAuthority = requireActiveWorkers
     ? assetTracker.waitForComplete
     : assetTracker.waitForAssetAuthorityComplete;
   let networkAssets = await waitForNetworkAuthority();
+  const handlersBeforeCapture = await cdp.settleHandlers();
+  if (!handlersBeforeCapture.passed) {
+    throw new Error(`CDP handlers did not settle before build capture: ${JSON.stringify(handlersBeforeCapture)}`);
+  }
+  originGuard.assertHealthy();
   const browser = await evaluateJson(cdp, `(async () => {
     if (document.fonts?.ready) await document.fonts.ready;
     const domUrls = new Set();
@@ -3201,11 +3870,12 @@ async function readBrowserBuildEvidence(
   if (captureBarrier.result?.exceptionDetails) {
     throw new Error(captureBarrier.result.exceptionDetails.text || "Build evidence barrier failed");
   }
+  networkAssets = await waitForNetworkAuthority();
   const handlersAfterCapture = await cdp.settleHandlers();
   if (!handlersAfterCapture.passed) {
     throw new Error(`CDP handlers did not settle after build capture: ${JSON.stringify(handlersAfterCapture)}`);
   }
-  networkAssets = await waitForNetworkAuthority();
+  originGuard.assertHealthy();
   const dataInitiatorTypes = new Set([
     "beacon",
     "eventsource",
@@ -3355,7 +4025,8 @@ export function diagnosticBootstrapSource({
     authorityToken,
     authorityTokenSha256,
     drawingWorkerPaths: Object.freeze([...drawingWorkerPaths]),
-    drillIds: CONTROLLED_WORKER_ROLLBACK_DRILL_IDS,
+    drillIds: CONTROLLED_ROLLBACK_DRILL_IDS,
+    storageVariants: CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS,
     sessionKey: CONTROLLED_ROLLBACK_SESSION_KEY,
     handleName: CONTROLLED_ROLLBACK_HANDLE,
   });
@@ -3392,6 +4063,9 @@ export function diagnosticBootstrapSource({
         token = JSON.parse(raw);
       }
     } catch {}
+    const tokenVariantAccepted = token?.drillId === 'indexeddb-quota-blocked'
+      ? authority.storageVariants.includes(token?.variant)
+      : token?.variant === null;
     const authorityAccepted = Boolean(token
       && token.runId === authority.runId
       && token.authorityToken === authority.authorityToken
@@ -3400,14 +4074,21 @@ export function diagnosticBootstrapSource({
       && /^[a-f0-9-]{36}$/.test(token.faultId)
       && Number.isSafeInteger(token.sequence)
       && token.sequence > 0
-      && authority.drillIds.includes(token.drillId));
+      && authority.drillIds.includes(token.drillId)
+      && tokenVariantAccepted);
     const activeDrill = authorityAccepted ? token.drillId : null;
+    const activeVariant = authorityAccepted ? token.variant : null;
+    const documentInstanceId = typeof globalThis.crypto?.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID()
+      : authority.runId + ':' + Date.now() + ':' + Math.random();
     const state = {
       runId: authority.runId,
       authorityTokenSha256: authority.authorityTokenSha256,
       authorityAccepted,
       tokenRemoved,
       drillId: activeDrill,
+      variant: activeVariant,
+      documentInstanceId,
       faultId: authorityAccepted ? token.faultId : null,
       sequence: authorityAccepted ? token.sequence : null,
       armed: authorityAccepted,
@@ -3424,7 +4105,21 @@ export function diagnosticBootstrapSource({
       bitmapResultCount: 0,
       renderRequests: [],
       renderResults: [],
-      constructionFailure: null
+      constructionFailure: null,
+      storage: {
+        realDatabaseName: 'candlescope-drawings-v2',
+        realOpenCount: 0,
+        realConnectionCount: 0,
+        realCloseCount: 0,
+        quotaPreparation: null,
+        quotaProbe: null,
+        quotaRelease: null,
+        blockedInterceptorInstalled: false,
+        blockedPreparation: null,
+        blockedRoute: null,
+        blockedEvent: null,
+        blockedRelease: null
+      }
     };
     const observe = () => {
       state.observed = true;
@@ -3435,8 +4130,556 @@ export function diagnosticBootstrapSource({
       target.push(value);
     };
     const snapshot = () => JSON.parse(JSON.stringify(state));
+    const nativeIndexedDb = globalThis.indexedDB;
+    const nativeIndexedDbOpen = typeof nativeIndexedDb?.open === 'function'
+      ? nativeIndexedDb.open.bind(nativeIndexedDb)
+      : null;
+    const nativeIndexedDbDelete = typeof nativeIndexedDb?.deleteDatabase === 'function'
+      ? nativeIndexedDb.deleteDatabase.bind(nativeIndexedDb)
+      : null;
+    const realConnections = [];
+    const closedRealConnections = new WeakSet();
+    let blockedKeeper = null;
+    let blockedUpgradeRequest = null;
+    let blockedUpgradeSettled = null;
+    let blockedRouteActive = false;
+    let blockedFaultDatabaseName = null;
+    let blockedKeeperConnectionId = null;
+    let blockedKeeperOpenedAt = null;
+    let blockedKeeperClosedAt = null;
+    let blockedInterceptorInstalled = false;
+    let blockedFaultConsumed = false;
+    const quotaStoreName = 'quota-probe';
+    const quotaBaselineKey = 'baseline';
+    const quotaProbeKey = 'probe';
+    const quotaFaultDatabaseName = activeDrill === 'indexeddb-quota-blocked'
+      && activeVariant === 'quota'
+      && state.faultId
+      ? 'candlescope-rollback-quota-' + authority.runId + '-' + state.faultId
+      : null;
+    let quotaConnection = null;
+    let quotaFaultConsumed = false;
+    let quotaConnectionOpenedAt = null;
+    const waitForIdbRequest = (request, operation) => new Promise((resolve, reject) => {
+      request.addEventListener('success', () => resolve(request.result), { once: true });
+      request.addEventListener('error', () => reject(request.error || new Error(operation + ' failed')), { once: true });
+      request.addEventListener('blocked', () => reject(new Error(operation + ' blocked')), { once: true });
+    });
+    const waitForIdbTransaction = (transaction, operation) => new Promise((resolve, reject) => {
+      transaction.addEventListener('complete', () => resolve(), { once: true });
+      transaction.addEventListener('error', () => {
+        reject(transaction.error || new Error(operation + ' failed'));
+      }, { once: true });
+      transaction.addEventListener('abort', () => {
+        reject(transaction.error || new Error(operation + ' aborted'));
+      }, { once: true });
+    });
+    const waitForIdbDeletion = (request) => Promise.race([
+      new Promise((resolve) => {
+        request.addEventListener('success', () => resolve({
+          status: 'success', observedAt: new Date().toISOString()
+        }), { once: true });
+        request.addEventListener('error', () => resolve({
+          status: 'error',
+          name: request.error?.name || null,
+          message: request.error?.message || null,
+          observedAt: new Date().toISOString()
+        }), { once: true });
+        request.addEventListener('blocked', (event) => resolve({
+          status: 'blocked',
+          isTrusted: event.isTrusted === true,
+          observedAt: new Date().toISOString()
+        }), { once: true });
+      }),
+      new Promise((resolve) => setTimeout(() => resolve({
+        status: 'timeout', observedAt: new Date().toISOString()
+      }), 2_000))
+    ]);
+    const observeRealConnection = (request) => {
+      request.addEventListener('success', () => {
+        let database = null;
+        try { database = request.result; } catch {}
+        if (!database || database.name !== state.storage.realDatabaseName) return;
+        state.storage.realConnectionCount += 1;
+        realConnections.push(database);
+        try {
+          const nativeClose = database.close.bind(database);
+          Object.defineProperty(database, 'close', {
+            value() {
+              if (!closedRealConnections.has(database)) {
+                closedRealConnections.add(database);
+                state.storage.realCloseCount += 1;
+              }
+              return nativeClose();
+            },
+            configurable: false,
+            enumerable: false,
+            writable: false
+          });
+        } catch {}
+      }, { once: true });
+    };
+    const controlledIndexedDbOpen = function(name, version) {
+      const normalizedName = String(name);
+      const normalizedVersion = version === undefined ? null : Number(version);
+      const exactProductOpen = normalizedName === state.storage.realDatabaseName
+        && normalizedVersion === 1;
+      if (exactProductOpen) state.storage.realOpenCount += 1;
+      if (activeDrill === 'indexeddb-quota-blocked'
+        && activeVariant === 'blocked'
+        && exactProductOpen
+        && blockedRouteActive
+        && blockedFaultDatabaseName) {
+        blockedRouteActive = false;
+        const startedAt = new Date().toISOString();
+        const requestId = typeof globalThis.crypto?.randomUUID === 'function'
+          ? globalThis.crypto.randomUUID()
+          : authority.runId + ':blocked-open:' + Date.now() + ':' + Math.random();
+        const request = nativeIndexedDbOpen(blockedFaultDatabaseName, 2);
+        blockedUpgradeRequest = request;
+        state.storage.blockedRoute = {
+          consumed: true,
+          requestId,
+          requestedName: normalizedName,
+          requestedVersion: normalizedVersion,
+          routedDatabaseName: blockedFaultDatabaseName,
+          routedVersion: 2,
+          startedAt,
+          settled: null,
+          settledAt: null,
+          resultClosed: false
+        };
+        request.addEventListener('blocked', (event) => {
+          state.storage.blockedEvent = {
+            type: event.type,
+            isTrusted: event.isTrusted === true,
+            databaseName: blockedFaultDatabaseName,
+            oldVersion: event.oldVersion,
+            newVersion: event.newVersion,
+            observedAt: new Date().toISOString()
+          };
+          observe();
+        }, { once: true });
+        blockedUpgradeSettled = new Promise((resolve) => {
+          request.addEventListener('success', () => {
+            let closed = false;
+            try { request.result.close(); closed = true; } catch {}
+            const settledAt = new Date().toISOString();
+            state.storage.blockedRoute.settled = 'success-after-keeper-close';
+            state.storage.blockedRoute.settledAt = settledAt;
+            state.storage.blockedRoute.resultClosed = closed;
+            resolve({
+              status: 'success-after-keeper-close',
+              resultClosed: closed,
+              observedAt: settledAt
+            });
+          }, { once: true });
+          request.addEventListener('error', () => {
+            const settledAt = new Date().toISOString();
+            state.storage.blockedRoute.settled = 'error';
+            state.storage.blockedRoute.settledAt = settledAt;
+            resolve({
+              status: 'error',
+              name: request.error?.name || null,
+              message: request.error?.message || null,
+              observedAt: settledAt
+            });
+          }, { once: true });
+        });
+        return request;
+      }
+      const request = version === undefined
+        ? nativeIndexedDbOpen(name)
+        : nativeIndexedDbOpen(name, version);
+      if (exactProductOpen) observeRealConnection(request);
+      return request;
+    };
+    if (activeDrill === 'indexeddb-quota-blocked'
+      && activeVariant === 'blocked'
+      && nativeIndexedDbOpen
+      && nativeIndexedDbDelete) {
+      try {
+        Object.defineProperty(nativeIndexedDb, 'open', {
+          value: controlledIndexedDbOpen,
+          configurable: false,
+          enumerable: false,
+          writable: false
+        });
+        blockedInterceptorInstalled = nativeIndexedDb.open === controlledIndexedDbOpen;
+        state.storage.blockedInterceptorInstalled = blockedInterceptorInstalled;
+      } catch {
+        state.storage.blockedPreparation = {
+          prepared: false,
+          reason: 'indexeddb-open-interceptor-install-failed',
+          observedAt: new Date().toISOString()
+        };
+      }
+    }
+    const prepareQuotaFault = async (expectedFaultId) => {
+      if (activeDrill !== 'indexeddb-quota-blocked'
+        || activeVariant !== 'quota'
+        || expectedFaultId !== state.faultId
+        || !quotaFaultDatabaseName
+        || !nativeIndexedDbOpen
+        || !nativeIndexedDbDelete
+        || quotaFaultConsumed
+        || quotaConnection) {
+        throw new Error('controlled quota IndexedDB fault cannot be prepared');
+      }
+      quotaFaultConsumed = true;
+      const request = nativeIndexedDbOpen(quotaFaultDatabaseName, 1);
+      request.addEventListener('upgradeneeded', () => {
+        if (!request.result.objectStoreNames.contains(quotaStoreName)) {
+          request.result.createObjectStore(quotaStoreName);
+        }
+      }, { once: true });
+      quotaConnection = await waitForIdbRequest(request, 'controlled quota database open');
+      quotaConnectionOpenedAt = new Date().toISOString();
+      const transaction = quotaConnection.transaction(quotaStoreName, 'readwrite');
+      const completion = waitForIdbTransaction(transaction, 'controlled quota baseline transaction');
+      transaction.objectStore(quotaStoreName).put({
+        runId: authority.runId,
+        faultId: state.faultId,
+        kind: 'quota-baseline'
+      }, quotaBaselineKey);
+      await completion;
+      state.storage.quotaPreparation = {
+        prepared: true,
+        databaseName: quotaFaultDatabaseName,
+        storeName: quotaStoreName,
+        baselineKey: quotaBaselineKey,
+        baselineCommitted: true,
+        connectionKeptOpen: quotaConnection !== null,
+        connectionOpenedAt: quotaConnectionOpenedAt,
+        preparedAt: new Date().toISOString()
+      };
+      return snapshot();
+    };
+    const probeQuotaFault = async (expectedFaultId) => {
+      if (activeDrill !== 'indexeddb-quota-blocked'
+        || activeVariant !== 'quota'
+        || expectedFaultId !== state.faultId
+        || !quotaConnection
+        || state.storage.quotaPreparation?.prepared !== true
+        || state.storage.quotaProbe !== null) {
+        throw new Error('controlled quota IndexedDB fault cannot be probed');
+      }
+      const attemptedAt = new Date().toISOString();
+      const transaction = quotaConnection.transaction(quotaStoreName, 'readwrite');
+      let request = null;
+      let requestError = null;
+      let transactionErrorEvent = null;
+      let abortEvent = null;
+      const settlement = new Promise((resolve) => {
+        transaction.addEventListener('error', (event) => {
+          transactionErrorEvent = {
+            type: event.type,
+            isTrusted: event.isTrusted === true,
+            observedAt: new Date().toISOString()
+          };
+        });
+        transaction.addEventListener('abort', (event) => {
+          abortEvent = {
+            type: event.type,
+            isTrusted: event.isTrusted === true,
+            observedAt: new Date().toISOString()
+          };
+          resolve('abort');
+        }, { once: true });
+        transaction.addEventListener('complete', () => resolve('complete'), { once: true });
+      });
+      let synchronousError = null;
+      try {
+        request = transaction.objectStore(quotaStoreName).put({
+          runId: authority.runId,
+          faultId: state.faultId,
+          kind: 'quota-probe'
+        }, quotaProbeKey);
+        request.addEventListener('error', (event) => {
+          requestError = {
+            type: event.type,
+            isTrusted: event.isTrusted === true,
+            name: request.error?.name || null,
+            message: request.error?.message || null,
+            observedAt: new Date().toISOString()
+          };
+        }, { once: true });
+      } catch (error) {
+        synchronousError = {
+          name: error?.name || null,
+          message: error?.message || String(error),
+          observedAt: new Date().toISOString()
+        };
+      }
+      const settled = synchronousError ? 'synchronous-error' : await settlement;
+      const transactionError = transaction.error ? {
+        name: transaction.error.name || null,
+        message: transaction.error.message || null,
+        observedAt: abortEvent?.observedAt || new Date().toISOString()
+      } : null;
+      const observedAt = new Date().toISOString();
+      state.storage.quotaProbe = {
+        attempted: true,
+        databaseName: quotaFaultDatabaseName,
+        storeName: quotaStoreName,
+        key: quotaProbeKey,
+        transactionMode: transaction.mode,
+        attemptedAt,
+        settled,
+        requestError,
+        transactionErrorEvent,
+        transactionError,
+        abortEvent,
+        synchronousError,
+        nativeQuotaExceeded: settled === 'abort'
+          && abortEvent?.isTrusted === true
+          && transactionError?.name === 'QuotaExceededError',
+        observedAt
+      };
+      return snapshot();
+    };
+    const cleanupQuotaFault = async (expectedFaultId, forcedCleanup = true) => {
+      if (activeDrill !== 'indexeddb-quota-blocked'
+        || activeVariant !== 'quota'
+        || expectedFaultId !== state.faultId
+        || !quotaFaultDatabaseName
+        || !nativeIndexedDbDelete) {
+        throw new Error('controlled quota IndexedDB fault cannot be cleaned');
+      }
+      if (state.storage.quotaRelease?.completed === true) {
+        let databaseStillPresent = state.storage.quotaRelease.databaseStillPresent;
+        if (typeof nativeIndexedDb.databases === 'function') {
+          const databases = await nativeIndexedDb.databases();
+          databaseStillPresent = databases.some((database) => database?.name === quotaFaultDatabaseName);
+        }
+        state.storage.quotaRelease = {
+          ...state.storage.quotaRelease,
+          databaseStillPresent,
+          forcedCleanup: state.storage.quotaRelease.forcedCleanup === true
+            || forcedCleanup === true,
+          completed: state.storage.quotaRelease.connectionClosed === true
+            && state.storage.quotaRelease.deletion?.status === 'success'
+            && databaseStillPresent === false,
+          lastVerifiedAt: new Date().toISOString()
+        };
+        return snapshot();
+      }
+      let connectionClosed = false;
+      if (quotaConnection) {
+        try {
+          quotaConnection.close();
+          connectionClosed = true;
+        } catch {}
+        quotaConnection = null;
+      } else {
+        connectionClosed = true;
+      }
+      const deletion = await waitForIdbDeletion(nativeIndexedDbDelete(quotaFaultDatabaseName));
+      let databaseStillPresent = null;
+      if (typeof nativeIndexedDb.databases === 'function') {
+        const databases = await nativeIndexedDb.databases();
+        databaseStillPresent = databases.some((database) => database?.name === quotaFaultDatabaseName);
+      }
+      const completedAt = new Date().toISOString();
+      state.storage.quotaRelease = {
+        databaseName: quotaFaultDatabaseName,
+        storeName: quotaStoreName,
+        connectionClosed,
+        deletion,
+        databaseStillPresent,
+        forcedCleanup: forcedCleanup === true,
+        completed: connectionClosed
+          && deletion?.status === 'success'
+          && databaseStillPresent === false,
+        completedAt
+      };
+      return snapshot();
+    };
+    const prepareBlockedFault = async (expectedFaultId) => {
+      if (activeDrill !== 'indexeddb-quota-blocked'
+        || activeVariant !== 'blocked'
+        || expectedFaultId !== state.faultId
+        || !nativeIndexedDbOpen
+        || !nativeIndexedDbDelete
+        || blockedInterceptorInstalled !== true
+        || nativeIndexedDb.open !== controlledIndexedDbOpen
+        || blockedFaultConsumed
+        || blockedKeeper
+        || blockedRouteActive) {
+        throw new Error('controlled blocked IndexedDB fault cannot be prepared');
+      }
+      blockedFaultConsumed = true;
+      blockedFaultDatabaseName = 'candlescope-rollback-blocked-' + authority.runId + '-' + state.faultId;
+      blockedKeeperConnectionId = typeof globalThis.crypto?.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID()
+        : authority.runId + ':blocked-keeper:' + Date.now() + ':' + Math.random();
+      const request = nativeIndexedDbOpen(blockedFaultDatabaseName, 1);
+      request.addEventListener('upgradeneeded', () => {
+        if (!request.result.objectStoreNames.contains('keeper')) {
+          request.result.createObjectStore('keeper');
+        }
+      }, { once: true });
+      blockedKeeper = await waitForIdbRequest(request, 'controlled blocked keeper open');
+      blockedKeeperOpenedAt = new Date().toISOString();
+      const activeConnections = realConnections.filter((database) => !closedRealConnections.has(database));
+      const closeCountBefore = state.storage.realCloseCount;
+      let dispatchedCount = 0;
+      for (const database of activeConnections) {
+        try {
+          const event = new IDBVersionChangeEvent('versionchange', {
+            oldVersion: database.version,
+            newVersion: null
+          });
+          if (database.dispatchEvent(event)) dispatchedCount += 1;
+          else dispatchedCount += 1;
+        } catch {}
+      }
+      const closeCountAfter = state.storage.realCloseCount;
+      blockedRouteActive = true;
+      state.storage.blockedPreparation = {
+        prepared: activeConnections.length === 1
+          && dispatchedCount === 1
+          && closeCountAfter === closeCountBefore + 1,
+        faultDatabaseName: blockedFaultDatabaseName,
+        keeperConnectionId: blockedKeeperConnectionId,
+        keeperVersion: blockedKeeper.version,
+        keeperOpenedAt: blockedKeeperOpenedAt,
+        activeRealConnectionCount: activeConnections.length,
+        syntheticVersionChangeDispatchCount: dispatchedCount,
+        realCloseCountBefore: closeCountBefore,
+        realCloseCountAfter: closeCountAfter,
+        preparedAt: new Date().toISOString()
+      };
+      if (!state.storage.blockedPreparation.prepared) {
+        blockedRouteActive = false;
+        blockedKeeperClosedAt = new Date().toISOString();
+        try { blockedKeeper.close(); } catch {}
+        blockedKeeper = null;
+        const deletion = await waitForIdbDeletion(nativeIndexedDbDelete(blockedFaultDatabaseName));
+        let databaseStillPresent = null;
+        if (typeof nativeIndexedDb.databases === 'function') {
+          const databases = await nativeIndexedDb.databases();
+          databaseStillPresent = databases.some((database) => database?.name === blockedFaultDatabaseName);
+        }
+        state.storage.blockedRelease = {
+          releasedAt: blockedKeeperClosedAt,
+          settlement: null,
+          deletion,
+          databaseStillPresent,
+          databaseName: blockedFaultDatabaseName,
+          keeperConnectionId: blockedKeeperConnectionId,
+          keeperOpenedAt: blockedKeeperOpenedAt,
+          keeperClosedAt: blockedKeeperClosedAt,
+          completedAt: new Date().toISOString(),
+          forcedCleanup: true,
+          completed: deletion?.status === 'success' && databaseStillPresent === false
+        };
+        throw new Error('controlled blocked IndexedDB cache retirement failed');
+      }
+      return snapshot();
+    };
+    const releaseBlockedFault = async (expectedFaultId) => {
+      if (activeDrill !== 'indexeddb-quota-blocked'
+        || activeVariant !== 'blocked'
+        || expectedFaultId !== state.faultId
+        || !blockedKeeper
+        || !blockedUpgradeRequest
+        || !blockedUpgradeSettled
+        || state.storage.blockedRoute?.consumed !== true
+        || state.storage.blockedEvent?.isTrusted !== true) {
+        throw new Error('controlled blocked IndexedDB fault cannot be released');
+      }
+      const releasedAt = new Date().toISOString();
+      blockedKeeperClosedAt = releasedAt;
+      blockedKeeper.close();
+      blockedKeeper = null;
+      const settlement = await Promise.race([
+        blockedUpgradeSettled,
+        new Promise((resolve) => setTimeout(() => resolve({ status: 'timeout' }), 2_000))
+      ]);
+      const deleteRequest = nativeIndexedDbDelete(blockedFaultDatabaseName);
+      const deletion = await waitForIdbDeletion(deleteRequest);
+      let databaseStillPresent = null;
+      if (typeof nativeIndexedDb.databases === 'function') {
+        const databases = await nativeIndexedDb.databases();
+        databaseStillPresent = databases.some((database) => database?.name === blockedFaultDatabaseName);
+      }
+      state.storage.blockedRelease = {
+        releasedAt,
+        settlement,
+        deletion,
+        databaseStillPresent,
+        databaseName: blockedFaultDatabaseName,
+        keeperConnectionId: blockedKeeperConnectionId,
+        keeperOpenedAt: blockedKeeperOpenedAt,
+        keeperClosedAt: blockedKeeperClosedAt,
+        completedAt: new Date().toISOString(),
+        completed: settlement?.status === 'success-after-keeper-close'
+          && settlement?.resultClosed === true
+          && deletion?.status === 'success'
+          && databaseStillPresent === false
+      };
+      if (!state.storage.blockedRelease.completed) {
+        throw new Error('controlled blocked IndexedDB fault cleanup failed');
+      }
+      return snapshot();
+    };
+    const cleanupBlockedFault = async (expectedFaultId) => {
+      if (activeDrill !== 'indexeddb-quota-blocked'
+        || activeVariant !== 'blocked'
+        || expectedFaultId !== state.faultId
+        || !nativeIndexedDbDelete) {
+        throw new Error('controlled blocked IndexedDB fault cannot be cleaned');
+      }
+      if (state.storage.blockedRelease?.completed === true) return snapshot();
+      if (blockedKeeper) {
+        blockedKeeperClosedAt = blockedKeeperClosedAt || new Date().toISOString();
+        try { blockedKeeper.close(); } catch {}
+        blockedKeeper = null;
+      }
+      let settlement = null;
+      if (blockedUpgradeSettled) {
+        settlement = await Promise.race([
+          blockedUpgradeSettled,
+          new Promise((resolve) => setTimeout(() => resolve({ status: 'timeout' }), 2_000))
+        ]);
+      }
+      let deletion = null;
+      if (blockedFaultDatabaseName) {
+        const request = nativeIndexedDbDelete(blockedFaultDatabaseName);
+        deletion = await waitForIdbDeletion(request);
+      }
+      let databaseStillPresent = null;
+      if (blockedFaultDatabaseName && typeof nativeIndexedDb.databases === 'function') {
+        const databases = await nativeIndexedDb.databases();
+        databaseStillPresent = databases.some((database) => database?.name === blockedFaultDatabaseName);
+      }
+      state.storage.blockedRelease = {
+        releasedAt: blockedKeeperClosedAt,
+        settlement,
+        deletion,
+        databaseStillPresent,
+        databaseName: blockedFaultDatabaseName,
+        keeperConnectionId: blockedKeeperConnectionId,
+        keeperOpenedAt: blockedKeeperOpenedAt,
+        keeperClosedAt: blockedKeeperClosedAt,
+        completedAt: new Date().toISOString(),
+        forcedCleanup: true,
+        completed: deletion?.status === 'success' && databaseStillPresent === false
+      };
+      blockedRouteActive = false;
+      return snapshot();
+    };
     Object.defineProperty(window, authority.handleName, {
-      value: Object.freeze({ snapshot }),
+      value: Object.freeze({
+        snapshot,
+        prepareQuotaFault,
+        probeQuotaFault,
+        cleanupQuotaFault,
+        prepareBlockedFault,
+        releaseBlockedFault,
+        cleanupBlockedFault
+      }),
       configurable: false,
       enumerable: false,
       writable: false
@@ -4051,8 +5294,20 @@ async function launchOwnedBrowser(
     runId,
     authorityTokenSha256: rollbackAuthorityTokenSha256,
     drawingWorkerPaths,
+    drillIds: CONTROLLED_ROLLBACK_DRILL_IDS,
+    storageVariants: CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS,
   });
   let rollbackSequence = 0;
+  let activeRollbackNavigation = null;
+  let activeQuotaFault = null;
+  let activeBlockedFault = null;
+  let storageFaultCleanupReceipt = null;
+  let cleanupControlledStorageFaults = async () => Object.freeze({
+    complete: true,
+    forced: false,
+    quota: null,
+    blocked: null,
+  });
   const chromeArguments = [
     "--remote-debugging-port=0",
     `--user-data-dir=${profileDirectory}`,
@@ -4112,11 +5367,20 @@ async function launchOwnedBrowser(
     finalDiagnostics: finalization?.finalDiagnostics ?? null,
     finalWorkerDiagnostics: finalization?.finalWorkerDiagnostics ?? null,
     finalOriginGuard: finalization?.finalOriginGuard ?? null,
+    storageFaultCleanup: finalization?.storageFaultCleanup ?? storageFaultCleanupReceipt,
   });
   const finalize = () => {
     if (finalizePromise) return finalizePromise;
     finalizePromise = (async () => {
       const finalizationErrors = [];
+      try {
+        storageFaultCleanupReceipt = await cleanupControlledStorageFaults("browser-finalize");
+        if (storageFaultCleanupReceipt?.complete !== true) {
+          finalizationErrors.push("storage-fault-cleanup-incomplete");
+        }
+      } catch (error) {
+        finalizationErrors.push(`storage-fault-cleanup:${error instanceof Error ? error.message : error}`);
+      }
       let workerDiagnosticsBarrier = Object.freeze({
         passed: false,
         receipts: Object.freeze([]),
@@ -4317,6 +5581,7 @@ async function launchOwnedBrowser(
         finalDiagnostics: diagnostics.snapshot(),
         finalWorkerDiagnostics: workerDiagnostics?.snapshot() ?? null,
         finalOriginGuard: originGuard?.snapshot() ?? null,
+        storageFaultCleanup: storageFaultCleanupReceipt,
       });
       assetTracker?.dispose();
       originGuard?.dispose();
@@ -4359,7 +5624,7 @@ async function launchOwnedBrowser(
         drawingWorkerPaths,
       }),
     });
-    originGuard = await createManagedOriginGuard(cdp, managedUrl);
+    originGuard = await createManagedOriginGuard(cdp, managedUrl, drawingWorkerPaths);
     const frameTree = (await cdp.send("Page.getFrameTree")).result?.frameTree;
     const mainFrameId = frameTree?.frame?.id;
     if (typeof mainFrameId !== "string" || !mainFrameId) {
@@ -4372,6 +5637,7 @@ async function launchOwnedBrowser(
       configuration.timeoutMs,
       mainFrameId,
       rollbackAuthority,
+      originGuard.claimWorkerResponseBodyCapture,
     );
     const browserVersion = (await cdp.send("Browser.getVersion")).result || {};
     if (!/^(?:Chrome|Chromium|Edg)\/[0-9.]+$/.test(String(browserVersion.product || ""))) {
@@ -4398,9 +5664,24 @@ async function launchOwnedBrowser(
       configuration.viewport,
       configuration.dpr,
     );
-    const navigateRollbackDrill = async (drillId) => {
-      if (!CONTROLLED_WORKER_ROLLBACK_DRILL_IDS.includes(drillId)) {
-        throw new Error(`Unknown controlled worker rollback drill: ${drillId}`);
+    const navigateRollbackDrill = async (drillId, { variant = null } = {}) => {
+      if (activeRollbackNavigation?.drillId === "indexeddb-quota-blocked") {
+        throw new Error("Controlled IndexedDB rollback drill requires an exact managed cold reload before navigation");
+      }
+      if ((activeQuotaFault && (
+        activeQuotaFault.overrideCleared !== true
+        || activeQuotaFault.pageCleanupCompleted !== true
+      )) || activeBlockedFault?.released === false) {
+        throw new Error("Controlled storage rollback fault is still active");
+      }
+      if (!CONTROLLED_ROLLBACK_DRILL_IDS.includes(drillId)) {
+        throw new Error(`Unknown controlled rollback drill: ${drillId}`);
+      }
+      const variantAccepted = drillId === "indexeddb-quota-blocked"
+        ? CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS.includes(variant)
+        : variant === null;
+      if (!variantAccepted) {
+        throw new Error(`Controlled rollback drill variant is invalid: ${drillId}:${variant}`);
       }
       rollbackSequence += 1;
       const sequence = rollbackSequence;
@@ -4410,6 +5691,7 @@ async function launchOwnedBrowser(
         authorityToken: rollbackAuthorityToken,
         authorityTokenSha256: rollbackAuthorityTokenSha256,
         drillId,
+        variant,
         faultId,
         sequence,
       });
@@ -4439,20 +5721,341 @@ async function launchOwnedBrowser(
         || bootstrap?.runId !== runId
         || bootstrap?.authorityTokenSha256 !== rollbackAuthorityTokenSha256
         || bootstrap?.drillId !== drillId
+        || bootstrap?.variant !== variant
         || bootstrap?.faultId !== faultId
         || bootstrap?.sequence !== sequence) {
         throw new Error(`Controlled rollback drill bootstrap rejected authority: ${JSON.stringify(bootstrap)}`);
       }
-      return Object.freeze({
+      const receipt = Object.freeze({
         kind: "controlled-rollback-drill-navigation",
         runId,
         authorityTokenSha256: rollbackAuthorityTokenSha256,
         drillId,
+        variant,
         faultId,
         sequence,
         armedAt,
         loadedAt: isoNow(),
         bootstrap: Object.freeze({ ...bootstrap }),
+      });
+      activeRollbackNavigation = receipt;
+      if (drillId === "indexeddb-quota-blocked" && variant === "quota") {
+        activeQuotaFault = null;
+      }
+      if (drillId === "indexeddb-quota-blocked" && variant === "blocked") {
+        activeBlockedFault = null;
+      }
+      return receipt;
+    };
+    const assertStorageFaultAuthority = (variant, faultId, transactionId) => {
+      if (!CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS.includes(variant)
+        || typeof transactionId !== "string"
+        || !transactionId.trim()
+        || activeRollbackNavigation?.runId !== runId
+        || activeRollbackNavigation?.authorityTokenSha256 !== rollbackAuthorityTokenSha256
+        || activeRollbackNavigation?.drillId !== "indexeddb-quota-blocked"
+        || activeRollbackNavigation?.variant !== variant
+        || activeRollbackNavigation?.faultId !== faultId) {
+        throw new Error(`Controlled IndexedDB ${variant} authority binding is invalid`);
+      }
+      return Object.freeze({
+        runId,
+        faultId,
+        authorityTokenSha256: rollbackAuthorityTokenSha256,
+        variant,
+        transactionId,
+        sequence: activeRollbackNavigation.sequence,
+      });
+    };
+    const readUsageAndQuota = async (origin) => {
+      const response = await cdp.send("Storage.getUsageAndQuota", { origin });
+      return Object.freeze({
+        method: "Storage.getUsageAndQuota",
+        origin,
+        usageBytes: response.result?.usage ?? null,
+        quotaBytes: response.result?.quota ?? null,
+        overrideActive: response.result?.overrideActive === true,
+        observedAt: isoNow(),
+      });
+    };
+    const prepareIndexedDbQuotaFault = async ({ faultId, transactionId } = {}) => {
+      const binding = assertStorageFaultAuthority("quota", faultId, transactionId);
+      if (activeQuotaFault !== null) {
+        throw new Error("Controlled IndexedDB quota fault is one-shot");
+      }
+      const origin = new URL(managedUrl).origin;
+      const receiptId = randomUUID();
+      return prepareControlledQuotaOverride({
+        binding,
+        receiptId,
+        origin,
+        overrideQuota: (parameters) => cdp.send("Storage.overrideQuotaForOrigin", parameters),
+        readUsageAndQuota,
+        evaluatePreparation: (expectedFaultId) => evaluateJson(cdp, `(() => {
+          const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+          if (!handle || typeof handle.prepareQuotaFault !== 'function') {
+            throw new Error('controlled quota IndexedDB preparation handle is unavailable');
+          }
+          return handle.prepareQuotaFault(${JSON.stringify(expectedFaultId)});
+        })()`),
+        evaluateProbe: (expectedFaultId) => evaluateJson(cdp, `(() => {
+          const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+          if (!handle || typeof handle.probeQuotaFault !== 'function') {
+            throw new Error('controlled quota IndexedDB probe handle is unavailable');
+          }
+          return handle.probeQuotaFault(${JSON.stringify(expectedFaultId)});
+        })()`),
+        evaluateCleanup: (expectedFaultId, forcedCleanup) => evaluateJson(cdp, `(() => {
+          const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+          if (!handle || typeof handle.cleanupQuotaFault !== 'function') {
+            throw new Error('controlled quota IndexedDB cleanup handle is unavailable');
+          }
+          return handle.cleanupQuotaFault(
+            ${JSON.stringify(expectedFaultId)},
+            ${JSON.stringify(forcedCleanup)}
+          );
+        })()`),
+        publish: (state) => { activeQuotaFault = state; },
+      });
+    };
+    const releaseIndexedDbQuotaFault = async ({ faultId, transactionId } = {}) => {
+      const binding = assertStorageFaultAuthority("quota", faultId, transactionId);
+      if (!activeQuotaFault
+        || activeQuotaFault.receiptId === null
+        || activeQuotaFault.prepared !== true
+        || activeQuotaFault.overrideActive !== true
+        || activeQuotaFault.overrideCleared !== false
+        || activeQuotaFault.pageCleanupCompleted !== false
+        || activeQuotaFault.transactionId !== binding.transactionId) {
+        throw new Error("Controlled IndexedDB quota fault cannot be released");
+      }
+      return releaseControlledQuotaOverride(activeQuotaFault, {
+        overrideQuota: (parameters) => cdp.send("Storage.overrideQuotaForOrigin", parameters),
+        evaluateCleanup: (expectedFaultId, forcedCleanup) => evaluateJson(cdp, `(() => {
+          const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+          if (!handle || typeof handle.cleanupQuotaFault !== 'function') {
+            throw new Error('controlled quota IndexedDB cleanup handle is unavailable');
+          }
+          return handle.cleanupQuotaFault(
+            ${JSON.stringify(expectedFaultId)},
+            ${JSON.stringify(forcedCleanup)}
+          );
+        })()`),
+        readUsageAndQuota,
+        publish: (state) => { activeQuotaFault = state; },
+      });
+    };
+    const prepareIndexedDbBlockedFault = async ({ faultId, transactionId } = {}) => {
+      const binding = assertStorageFaultAuthority("blocked", faultId, transactionId);
+      if (activeBlockedFault !== null) {
+        throw new Error("Controlled IndexedDB blocked fault is one-shot");
+      }
+      return prepareControlledBlockedFault({
+        binding,
+        receiptId: randomUUID(),
+        evaluatePreparation: (expectedFaultId) => evaluateJson(cdp, `(() => {
+          const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+          if (!handle || typeof handle.prepareBlockedFault !== 'function') {
+            throw new Error('controlled blocked IndexedDB handle is unavailable');
+          }
+          return handle.prepareBlockedFault(${JSON.stringify(expectedFaultId)});
+        })()`),
+        publish: (state) => { activeBlockedFault = state; },
+      });
+    };
+    const releaseIndexedDbBlockedFault = async ({ faultId, transactionId } = {}) => {
+      const binding = assertStorageFaultAuthority("blocked", faultId, transactionId);
+      if (!activeBlockedFault
+        || activeBlockedFault.prepared !== true
+        || activeBlockedFault.released !== false
+        || activeBlockedFault.transactionId !== binding.transactionId) {
+        throw new Error("Controlled IndexedDB blocked fault cannot be released");
+      }
+      const snapshot = await evaluateJson(cdp, `(() => {
+        const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+        if (!handle || typeof handle.releaseBlockedFault !== 'function') {
+          throw new Error('controlled blocked IndexedDB release handle is unavailable');
+        }
+        return handle.releaseBlockedFault(${JSON.stringify(faultId)});
+      })()`);
+      if (snapshot?.runId !== runId
+        || snapshot?.faultId !== faultId
+        || snapshot?.variant !== "blocked"
+        || snapshot?.storage?.blockedEvent?.isTrusted !== true
+        || snapshot?.storage?.blockedRelease?.completed !== true
+        || snapshot?.storage?.blockedRelease?.forcedCleanup === true) {
+        throw new Error(`Controlled IndexedDB blocked release is invalid: ${JSON.stringify(snapshot)}`);
+      }
+      activeBlockedFault = {
+        ...activeBlockedFault,
+        released: true,
+        snapshot,
+      };
+      return Object.freeze({ ...activeBlockedFault });
+    };
+    cleanupControlledStorageFaults = async (reason = "explicit-cleanup") => {
+      let quota = null;
+      let blocked = null;
+      if (activeQuotaFault && (
+        activeQuotaFault.overrideCleared !== true
+        || activeQuotaFault.overrideResetRequired === true
+        || activeQuotaFault.pageCleanupCompleted !== true
+        || activeQuotaFault.restorationError !== null
+        || !activeQuotaFault.restored
+        || activeQuotaFault.restored?.quotaBytes !== activeQuotaFault.before?.quotaBytes
+      )) {
+        try {
+          activeQuotaFault = await forceCleanupControlledQuotaOverride(activeQuotaFault, {
+            overrideQuota: (parameters) => cdp.send("Storage.overrideQuotaForOrigin", parameters),
+            evaluateCleanup: (expectedFaultId, forcedCleanup) => evaluateJson(cdp, `(() => {
+              const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+              if (!handle || typeof handle.cleanupQuotaFault !== 'function') return null;
+              return handle.cleanupQuotaFault(
+                ${JSON.stringify(expectedFaultId)},
+                ${JSON.stringify(forcedCleanup)}
+              );
+            })()`),
+            readUsageAndQuota,
+            publish: (state) => { activeQuotaFault = state; },
+            reason,
+          });
+        } catch (error) {
+          quota = Object.freeze({ complete: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (quota === null && activeQuotaFault) {
+        quota = Object.freeze({
+          complete: activeQuotaFault.overrideCleared === true
+            && activeQuotaFault.overrideResetRequired === false
+            && activeQuotaFault.pageCleanupCompleted === true
+            && activeQuotaFault.restorationError === null
+            && activeQuotaFault.restored?.overrideActive === false
+            && activeQuotaFault.restored?.quotaBytes === activeQuotaFault.before?.quotaBytes,
+          forced: activeQuotaFault.forcedCleanup === true,
+          faultId: activeQuotaFault.faultId,
+        });
+      }
+      if (activeBlockedFault?.released === false) {
+        try {
+          const cleanup = await forceCleanupControlledBlockedFault(activeBlockedFault, {
+            evaluateCleanup: (expectedFaultId) => evaluateJson(cdp, `(() => {
+              const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+              if (!handle || typeof handle.cleanupBlockedFault !== 'function') return null;
+              return handle.cleanupBlockedFault(${JSON.stringify(expectedFaultId)});
+            })()`),
+            reason,
+          });
+          activeBlockedFault = cleanup.state;
+          blocked = cleanup.receipt;
+        } catch (error) {
+          blocked = Object.freeze({ complete: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      } else if (activeBlockedFault) {
+        blocked = Object.freeze({
+          complete: activeBlockedFault.released === true,
+          forced: activeBlockedFault.forcedCleanup === true,
+          faultId: activeBlockedFault.faultId,
+        });
+      }
+      const receipt = Object.freeze({
+        complete: quota?.complete !== false && blocked?.complete !== false,
+        forced: quota?.forced === true || blocked?.forced === true,
+        reason,
+        observedAt: isoNow(),
+        quota,
+        blocked,
+      });
+      storageFaultCleanupReceipt = receipt;
+      return receipt;
+    };
+    const reloadManagedDocument = async ({ variant, faultId, transactionId } = {}) => {
+      const binding = assertStorageFaultAuthority(variant, faultId, transactionId);
+      const faultClean = variant === "quota"
+        ? activeQuotaFault?.transactionId === transactionId
+          && activeQuotaFault?.overrideCleared === true
+          && activeQuotaFault?.overrideResetRequired === false
+          && activeQuotaFault?.pageCleanupCompleted === true
+          && activeQuotaFault?.releaseSnapshot?.storage?.quotaRelease?.completed === true
+          && activeQuotaFault?.restored?.overrideActive === false
+          && activeQuotaFault?.releaseAccepted === true
+          && activeQuotaFault?.forcedCleanup !== true
+        : activeBlockedFault?.transactionId === transactionId
+          && activeBlockedFault?.released === true
+          && activeBlockedFault?.forcedCleanup !== true;
+      if (!faultClean) {
+        throw new Error(`Controlled IndexedDB ${variant} fault must be explicitly cleaned before reload`);
+      }
+      const before = await evaluateJson(cdp, `(() => {
+        const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+        return handle && typeof handle.snapshot === 'function' ? handle.snapshot() : null;
+      })()`);
+      if (before?.runId !== runId
+        || before?.authorityTokenSha256 !== rollbackAuthorityTokenSha256
+        || before?.authorityAccepted !== true
+        || before?.tokenRemoved !== true
+        || before?.armed !== true
+        || before?.drillId !== "indexeddb-quota-blocked"
+        || before?.variant !== variant
+        || before?.faultId !== faultId
+        || before?.sequence !== binding.sequence
+        || typeof before?.documentInstanceId !== "string"
+        || !before.documentInstanceId) {
+        throw new Error(`Controlled reload source document identity is unavailable: ${JSON.stringify(before)}`);
+      }
+      const reloadedAt = isoNow();
+      await cdp.send("Page.reload", { ignoreCache: true });
+      await waitForDocumentReady(cdp, new URL(managedUrl).origin, configuration.timeoutMs);
+      const reloadDeadline = Date.now() + configuration.timeoutMs;
+      let after = null;
+      let locationAfter = null;
+      while (Date.now() <= reloadDeadline) {
+        try {
+          const observed = await evaluateJson(cdp, `(() => {
+            const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+            return {
+              bootstrap: handle && typeof handle.snapshot === 'function' ? handle.snapshot() : null,
+              origin: location.origin,
+              href: location.href,
+              readyState: document.readyState
+            };
+          })()`);
+          after = observed?.bootstrap ?? null;
+          locationAfter = observed;
+          if (after?.documentInstanceId !== before.documentInstanceId) break;
+        } catch {
+          // Reload can replace the execution context between identity polls.
+        }
+        await wait(50);
+      }
+      if (after?.runId !== runId
+        || after?.authorityAccepted !== false
+        || after?.tokenRemoved !== false
+        || after?.armed !== false
+        || after?.drillId !== null
+        || after?.variant !== null
+        || after?.faultId !== null
+        || after?.sequence !== null
+        || typeof after?.documentInstanceId !== "string"
+        || !after.documentInstanceId
+        || after.documentInstanceId === before.documentInstanceId
+        || locationAfter?.origin !== new URL(managedUrl).origin
+        || !controlledManagedDocumentUrlAllowed(locationAfter?.href || "", managedUrl)
+        || locationAfter?.readyState !== "complete") {
+        throw new Error(`Controlled reload document identity is invalid: ${JSON.stringify({ before, after, locationAfter })}`);
+      }
+      activeRollbackNavigation = null;
+      return Object.freeze({
+        kind: "controlled-managed-document-reload",
+        runId,
+        faultId,
+        authorityTokenSha256: rollbackAuthorityTokenSha256,
+        variant,
+        transactionId,
+        reloadedAt,
+        loadedAt: isoNow(),
+        beforeDocumentInstanceId: before.documentInstanceId,
+        afterDocumentInstanceId: after.documentInstanceId,
+        bootstrap: Object.freeze({ ...after }),
       });
     };
     lifecycle.readyAt = isoNow();
@@ -4465,6 +6068,11 @@ async function launchOwnedBrowser(
       workerDiagnostics,
       rollbackAuthority,
       navigateRollbackDrill,
+      prepareIndexedDbQuotaFault,
+      releaseIndexedDbQuotaFault,
+      prepareIndexedDbBlockedFault,
+      releaseIndexedDbBlockedFault,
+      reloadManagedDocument,
       targetId: target.id,
       windowId,
       windowEvidence,
@@ -5171,6 +6779,8 @@ export async function startControlledProductionCdp(options = {}) {
         "Inspector.disable",
         "Network.disable",
         "Page.disable",
+        "Page.navigate",
+        "Page.reload",
         "Page.setDocumentContent",
         "Runtime.disable",
         "Runtime.removeBinding",
@@ -5179,12 +6789,9 @@ export async function startControlledProductionCdp(options = {}) {
         "Target.detachFromTarget",
         "Target.setDiscoverTargets",
         "Target.setAutoAttach",
+        "Storage.overrideQuotaForOrigin",
       ].includes(method)) {
         throw new Error(`Controlled CDP facade forbids authority-changing command ${method}`);
-      }
-      if (method === "Page.navigate"
-        && !controlledManagedDocumentUrlAllowed(String(params?.url || ""), servers.url)) {
-        throw new Error(`Controlled CDP facade forbids off-origin navigation to ${params?.url || ""}`);
       }
       return browser.cdp.send(method, params, sessionId);
     };
@@ -5232,7 +6839,12 @@ export async function startControlledProductionCdp(options = {}) {
         browser.workerDiagnostics.registerPausedTargetInitializer(specification)
       ),
       rollbackAuthority: browser.rollbackAuthority,
-      navigateRollbackDrill: (drillId) => browser.navigateRollbackDrill(drillId),
+      navigateRollbackDrill: (drillId, options) => browser.navigateRollbackDrill(drillId, options),
+      prepareIndexedDbQuotaFault: (binding) => browser.prepareIndexedDbQuotaFault(binding),
+      releaseIndexedDbQuotaFault: (binding) => browser.releaseIndexedDbQuotaFault(binding),
+      prepareIndexedDbBlockedFault: (binding) => browser.prepareIndexedDbBlockedFault(binding),
+      releaseIndexedDbBlockedFault: (binding) => browser.releaseIndexedDbBlockedFault(binding),
+      reloadManagedDocument: (binding) => browser.reloadManagedDocument(binding),
       settleAuthoritativeState: assertManagedCaptureState,
       verifyWindow: async () => {
         await assertManagedCaptureState();

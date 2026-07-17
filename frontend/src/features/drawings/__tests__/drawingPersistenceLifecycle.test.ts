@@ -5,6 +5,7 @@ import { importSavedDrawings } from "../core/drawingCodec.js";
 import { createDrawingDocument, createDrawingEntity } from "../core/drawingDocument.js";
 import type { DrawingEntityInput } from "../core/drawingDocument.js";
 import { createDrawingDocumentStore } from "../core/drawingDocumentStore.js";
+import type { DrawingPersistenceCoordinator } from "../persistence/drawingPersistenceCoordinator.js";
 import { createPrimitiveFromSavedDrawing } from "../drawingPrimitiveFactory.js";
 import type { DrawingKind, DrawingPrimitive, SavedDrawing } from "../drawingTypes.js";
 import type { DrawingSceneRuntimeSnapshot } from "../engine/drawingSceneRuntime.js";
@@ -17,6 +18,7 @@ import {
   createDrawingPersistenceRenderer,
   drawingLegacyPrimitiveRuntimeEvidence,
   ensureHiddenDrawingSceneRuntimeForExactExport,
+  flushDrawingPersistenceTarget,
   isDrawingExportExactSceneEmpty,
   isDrawingHiddenExportFrameCurrent,
   isDrawingHiddenExportSceneRetired,
@@ -51,6 +53,83 @@ function lineFixture(id: string, color = "#fff"): {
   if (!document || !primitive || !entity) throw new Error("Invalid lifecycle line fixture");
   return { entity, primitive };
 }
+
+function persistenceCoordinatorSpy(hasScopeState: boolean) {
+  let flushCount = 0;
+  let scheduleCount = 0;
+  const coordinator: DrawingPersistenceCoordinator = {
+    clear: () => false,
+    flush: async (scopeKey) => {
+      flushCount += 1;
+      return Object.freeze({
+        ok: true as const,
+        scopeKey,
+        targetRevision: 1,
+        persistedRevision: 1,
+      });
+    },
+    flushAll: async () => Object.freeze([]),
+    schedule: () => {
+      scheduleCount += 1;
+      return true;
+    },
+    snapshot: (scopeKey) => hasScopeState
+      ? Object.freeze({
+        scopeKey,
+        phase: "error" as const,
+        queueDepth: 1,
+        inFlightRevision: null,
+        pendingRevision: 1,
+        dirtyRevision: 1,
+        lastPersistedRevision: null,
+        lastError: "quota exceeded",
+        lastErrorName: "QuotaExceededError",
+        legacySnapshotRevision: null,
+        legacySnapshotError: null,
+      })
+      : null,
+  };
+  return {
+    coordinator,
+    flushCount: () => flushCount,
+    scheduleCount: () => scheduleCount,
+  };
+}
+
+test("export flush reuses an existing failed persistence job without rescheduling it", async () => {
+  const store = createDrawingDocumentStore("export-retry");
+  const dispatched = store.dispatch(Object.freeze({
+    type: "create" as const,
+    entity: lineFixture("line-retry").entity,
+  }));
+  assert.equal(dispatched.ok, true);
+  assert.equal(store.dirty, true);
+  const spy = persistenceCoordinatorSpy(true);
+  const result = await flushDrawingPersistenceTarget(spy.coordinator, store, {
+    scopeKey: "export-retry",
+    documentRevision: 1,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(spy.scheduleCount(), 0);
+  assert.equal(spy.flushCount(), 1);
+});
+
+test("export flush schedules a dirty scope only when the coordinator has no state", async () => {
+  const store = createDrawingDocumentStore("export-first-flush");
+  const dispatched = store.dispatch(Object.freeze({
+    type: "create" as const,
+    entity: lineFixture("line-first").entity,
+  }));
+  assert.equal(dispatched.ok, true);
+  const spy = persistenceCoordinatorSpy(false);
+  const result = await flushDrawingPersistenceTarget(spy.coordinator, store, {
+    scopeKey: "export-first-flush",
+    documentRevision: 1,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(spy.scheduleCount(), 1);
+  assert.equal(spy.flushCount(), 1);
+});
 
 test("ordinary hide suspends the scene while export hide keeps an exact-empty path", () => {
   const events: string[] = [];

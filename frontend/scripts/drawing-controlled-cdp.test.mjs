@@ -6,6 +6,8 @@ import { runInNewContext } from "node:vm";
 import {
   CONTROLLED_DIAGNOSTIC_WORKER_DOMAIN_CAPABILITIES,
   CONTROLLED_DIAGNOSTIC_WORKER_TYPES,
+  CONTROLLED_ROLLBACK_DRILL_IDS,
+  CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS,
   assessControlledBrowserCloseEvidence,
   assessControlledBrowserWindow,
   assessControlledRunnerRuntimeEvidence,
@@ -25,8 +27,15 @@ import {
   extractHtmlAssetPaths,
   fingerprintBuildToolImplementation,
   fingerprintFileEntries,
+  forceCleanupControlledBlockedFault,
+  forceCleanupControlledQuotaOverride,
+  isControlledDetachedSessionCommandError,
   normalizeControlledCdpOptions,
   parseControlledCdpMessage,
+  prepareControlledBlockedFault,
+  prepareControlledQuotaOverride,
+  releaseControlledQuotaOverride,
+  waitForControlledQuotaCacheExpiry,
   assertControlledRunnerEntrypoint,
   assertControlledRunnerRuntime,
   summarizeControlledCleanup,
@@ -47,13 +56,20 @@ function controlledRollbackToken(overrides = {}) {
     authorityToken: CONTROLLED_ROLLBACK_AUTHORITY_TOKEN,
     authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
     drillId: "worker-init-failure",
+    variant: null,
     faultId: CONTROLLED_ROLLBACK_FAULT_ID,
     sequence: 1,
     ...overrides,
   };
 }
 
-function createDiagnosticBootstrapFixture({ token = controlledRollbackToken() } = {}) {
+function createDiagnosticBootstrapFixture({
+  token = controlledRollbackToken(),
+  indexedDB = null,
+  IDBVersionChangeEvent = class {
+    constructor(type, init = {}) { Object.assign(this, { type, ...init }); }
+  },
+} = {}) {
   const values = new Map();
   if (token !== null) {
     values.set(CONTROLLED_ROLLBACK_SESSION_KEY, JSON.stringify(token));
@@ -75,6 +91,7 @@ function createDiagnosticBootstrapFixture({ token = controlledRollbackToken() } 
   }
   const window = {
     Worker: FakeWorker,
+    indexedDB,
     [CONTROLLED_DIAGNOSTIC_BINDING](payload) {
       reports.push(JSON.parse(payload));
     },
@@ -98,9 +115,18 @@ function createDiagnosticBootstrapFixture({ token = controlledRollbackToken() } 
     drawingWorkerPaths: [CONTROLLED_HASHED_DRAWING_WORKER_PATH],
   }), {
     DOMException,
+    IDBVersionChangeEvent,
     URL,
     addEventListener() {},
+    crypto: {
+      randomUUID: (() => {
+        let sequence = 0;
+        return () => `22222222-2222-4222-8222-${String(++sequence).padStart(12, "0")}`;
+      })(),
+    },
+    indexedDB,
     location,
+    setTimeout,
     sessionStorage,
     window,
   });
@@ -114,6 +140,255 @@ function createDiagnosticBootstrapFixture({ token = controlledRollbackToken() } 
     },
     window,
   };
+}
+
+function createFakeIndexedDb({ blockedEventTrusted = true, extensible = true } = {}) {
+  class FakeRequest {
+    constructor() {
+      this.error = null;
+      this.result = undefined;
+      this.listeners = new Map();
+    }
+
+    addEventListener(type, listener) {
+      if (!this.listeners.has(type)) this.listeners.set(type, []);
+      this.listeners.get(type).push(listener);
+    }
+
+    emit(type, fields = {}) {
+      const event = { type, isTrusted: false, ...fields };
+      for (const listener of this.listeners.get(type) || []) listener(event);
+      if (typeof this[`on${type}`] === "function") this[`on${type}`](event);
+    }
+  }
+
+  const databases = new Map();
+  let pendingUpgrade = null;
+  let quotaFailure = {
+    active: false,
+    abortTrusted: true,
+    errorName: "QuotaExceededError",
+  };
+  class FakeTransaction extends FakeRequest {
+    constructor(database, storeName, mode) {
+      super();
+      this.database = database;
+      this.storeName = storeName;
+      this.mode = mode;
+    }
+
+    objectStore(name) {
+      if (name !== this.storeName || !this.database.stores.has(name)) {
+        throw new DOMException("Object store does not exist", "NotFoundError");
+      }
+      return {
+        put: (_value, key) => {
+          const request = new FakeRequest();
+          queueMicrotask(() => {
+            if (quotaFailure.active && key === "probe") {
+              const error = new DOMException("Controlled native quota failure", quotaFailure.errorName);
+              request.error = error;
+              this.error = error;
+              request.emit("error", { isTrusted: quotaFailure.abortTrusted });
+              this.emit("error", { isTrusted: quotaFailure.abortTrusted });
+              this.emit("abort", { isTrusted: quotaFailure.abortTrusted });
+              return;
+            }
+            request.result = key;
+            request.emit("success", { isTrusted: true });
+            this.emit("complete", { isTrusted: true });
+          });
+          return request;
+        },
+      };
+    }
+  }
+
+  class FakeDatabase {
+    constructor(factory, name, version, stores = new Set()) {
+      this.factory = factory;
+      this.name = name;
+      this.version = version;
+      this.stores = stores;
+      this.closed = false;
+      this.onversionchange = null;
+      this.objectStoreNames = { contains: (value) => this.stores.has(value) };
+    }
+
+    createObjectStore(name) {
+      this.stores.add(String(name));
+      return {};
+    }
+
+    transaction(storeName, mode) {
+      if (this.closed) throw new DOMException("Database is closed", "InvalidStateError");
+      return new FakeTransaction(this, String(storeName), String(mode));
+    }
+
+    close() {
+      if (this.closed) return;
+      this.closed = true;
+      if (pendingUpgrade?.keeper === this) {
+        const pending = pendingUpgrade;
+        pendingUpgrade = null;
+        queueMicrotask(() => {
+          const database = new FakeDatabase(
+            this.factory,
+            pending.name,
+            pending.version,
+            pending.stores,
+          );
+          databases.set(pending.name, { stores: pending.stores, version: pending.version });
+          pending.request.result = database;
+          pending.request.emit("success");
+        });
+      }
+    }
+
+    dispatchEvent(event) {
+      if (typeof this.onversionchange === "function") this.onversionchange(event);
+      return true;
+    }
+  }
+
+  const factory = {
+    open(name, version) {
+      const request = new FakeRequest();
+      const normalizedName = String(name);
+      const normalizedVersion = version === undefined
+        ? (databases.get(normalizedName)?.version ?? 1)
+        : Number(version);
+      queueMicrotask(() => {
+        const current = databases.get(normalizedName);
+        if (current && normalizedVersion > current.version && current.keeper?.closed !== true) {
+          pendingUpgrade = {
+            keeper: current.keeper,
+            name: normalizedName,
+            request,
+            stores: current.stores,
+            version: normalizedVersion,
+          };
+          request.emit("blocked", {
+            isTrusted: blockedEventTrusted,
+            oldVersion: current.version,
+            newVersion: normalizedVersion,
+          });
+          return;
+        }
+        const stores = current?.stores ?? new Set();
+        const database = new FakeDatabase(factory, normalizedName, normalizedVersion, stores);
+        const created = !current;
+        request.result = database;
+        if (created) request.emit("upgradeneeded", { oldVersion: 0, newVersion: normalizedVersion });
+        databases.set(normalizedName, {
+          stores,
+          version: normalizedVersion,
+          ...(normalizedName.startsWith("candlescope-rollback-blocked-")
+            ? { keeper: database }
+            : {}),
+        });
+        request.emit("success");
+      });
+      return request;
+    },
+    deleteDatabase(name) {
+      const request = new FakeRequest();
+      queueMicrotask(() => {
+        databases.delete(String(name));
+        request.emit("success");
+      });
+      return request;
+    },
+    async databases() {
+      return [...databases].map(([name, value]) => ({ name, version: value.version }));
+    },
+    setQuotaFailure(configuration = {}) {
+      quotaFailure = {
+        ...quotaFailure,
+        ...configuration,
+      };
+    },
+  };
+  if (!extensible) {
+    Object.defineProperty(factory, "open", {
+      value: factory.open,
+      configurable: false,
+      enumerable: true,
+      writable: false,
+    });
+    Object.preventExtensions(factory);
+  }
+  return factory;
+}
+
+function waitForFakeRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.addEventListener("success", () => resolve(request.result));
+    request.addEventListener("error", () => reject(request.error));
+  });
+}
+
+function controlledQuotaSnapshot(storage) {
+  return {
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    variant: "quota",
+    storage,
+  };
+}
+
+function controlledQuotaPreparationSnapshot() {
+  return controlledQuotaSnapshot({
+    quotaPreparation: {
+      prepared: true,
+      databaseName: `candlescope-rollback-quota-${CONTROLLED_ROLLBACK_RUN_ID}-${CONTROLLED_ROLLBACK_FAULT_ID}`,
+      storeName: "quota-probe",
+      baselineKey: "baseline",
+      baselineCommitted: true,
+      connectionKeptOpen: true,
+      preparedAt: "2026-07-16T08:00:00.000Z",
+    },
+  });
+}
+
+function controlledQuotaProbeSnapshot(overrides = {}) {
+  return controlledQuotaSnapshot({
+    quotaProbe: {
+      attempted: true,
+      databaseName: `candlescope-rollback-quota-${CONTROLLED_ROLLBACK_RUN_ID}-${CONTROLLED_ROLLBACK_FAULT_ID}`,
+      storeName: "quota-probe",
+      transactionMode: "readwrite",
+      attemptedAt: "2026-07-16T08:00:36.000Z",
+      settled: "abort",
+      abortEvent: {
+        type: "abort",
+        isTrusted: true,
+        observedAt: "2026-07-16T08:00:36.010Z",
+      },
+      transactionError: {
+        name: "QuotaExceededError",
+        observedAt: "2026-07-16T08:00:36.010Z",
+      },
+      nativeQuotaExceeded: true,
+      observedAt: "2026-07-16T08:00:36.011Z",
+      ...overrides,
+    },
+  });
+}
+
+function controlledQuotaReleaseSnapshot({ forcedCleanup }) {
+  return controlledQuotaSnapshot({
+    quotaRelease: {
+      databaseName: `candlescope-rollback-quota-${CONTROLLED_ROLLBACK_RUN_ID}-${CONTROLLED_ROLLBACK_FAULT_ID}`,
+      storeName: "quota-probe",
+      connectionClosed: true,
+      deletion: { status: "success" },
+      databaseStillPresent: false,
+      forcedCleanup,
+      completed: true,
+      completedAt: "2026-07-16T08:00:37.000Z",
+    },
+  });
 }
 
 async function createWorkerConstructionFaultTrackerFixture() {
@@ -247,7 +522,12 @@ async function createWorkerBootstrapHandoffFixture({
   sourceTiming = "before-target",
   sourceType = "Script",
   timeoutMs = 500,
+  claimWorkerResponseBodyCapture = null,
+  captureWorkerResponseWithManagedOriginGuard = false,
 } = {}) {
+  if (captureWorkerResponseWithManagedOriginGuard && claimWorkerResponseBodyCapture !== null) {
+    throw new Error("worker bootstrap fixture accepts only one response capture provider");
+  }
   const files = [
     { relativePath: "index.html", content: "index" },
     { relativePath: "assets/main.js", content: "main" },
@@ -261,11 +541,25 @@ async function createWorkerBootstrapHandoffFixture({
       [`${sessionId}\0${requestId}`, { body: "worker", base64Encoded: false }],
       [`${sessionId}\0worker-self-fetch`, { body: "worker", base64Encoded: false }],
     ]),
+    onSend: ({ method }) => (
+      captureWorkerResponseWithManagedOriginGuard && method === "Fetch.getResponseBody"
+        ? { result: { body: "worker", base64Encoded: false } }
+        : undefined
+    ),
   });
+  const originGuard = captureWorkerResponseWithManagedOriginGuard
+    ? await createManagedOriginGuard(
+      cdp,
+      "http://127.0.0.1:15173/",
+      ["assets/drawing.worker.js"],
+    )
+    : null;
   const tracker = createControlledNetworkAssetTracker(cdp, "http://127.0.0.1:15173", {
     entryAssetPaths: ["assets/main.js"],
     assetFingerprint: fingerprintFileEntries(files),
-  }, timeoutMs, "main-frame");
+  }, timeoutMs, "main-frame", null, (
+    originGuard?.claimWorkerResponseBodyCapture ?? claimWorkerResponseBodyCapture
+  ));
   const emitTopResponse = async (id, path, type, initiatorType) => {
     const url = `http://127.0.0.1:15173${path}`;
     await cdp.emit("Network.requestWillBeSent", {
@@ -339,6 +633,7 @@ async function createWorkerBootstrapHandoffFixture({
     sourceUrl,
     targetUrl,
     tracker,
+    originGuard,
     async emitChildResponse(responseUrl = targetUrl) {
       await cdp.emit("Network.responseReceived", {
         requestId,
@@ -577,6 +872,643 @@ test("diagnostic rollback bootstrap rejects missing or mismatched session author
   }
 });
 
+test("diagnostic rollback authority binds exact worker and IndexedDB variants", async (t) => {
+  assert.deepEqual([...CONTROLLED_ROLLBACK_DRILL_IDS], [
+    "worker-init-failure",
+    "offscreen-canvas-unsupported",
+    "worker-stale-generation",
+    "indexeddb-quota-blocked",
+  ]);
+  assert.deepEqual([...CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS], ["quota", "blocked"]);
+
+  for (const variant of CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS) {
+    await t.test(`accepts IndexedDB ${variant}`, () => {
+      const fixture = createDiagnosticBootstrapFixture({
+        token: controlledRollbackToken({
+          drillId: "indexeddb-quota-blocked",
+          variant,
+        }),
+      });
+      const snapshot = fixture.snapshot();
+      assert.equal(snapshot.authorityAccepted, true);
+      assert.equal(snapshot.drillId, "indexeddb-quota-blocked");
+      assert.equal(snapshot.variant, variant);
+      assert.match(snapshot.documentInstanceId, /\S/);
+      assert.equal(fixture.sessionStorage.getItem(CONTROLLED_ROLLBACK_SESSION_KEY), null);
+    });
+  }
+
+  const rejected = [
+    controlledRollbackToken({ variant: "quota" }),
+    controlledRollbackToken({ drillId: "indexeddb-quota-blocked", variant: null }),
+    controlledRollbackToken({ drillId: "indexeddb-quota-blocked", variant: "other" }),
+  ];
+  for (const [index, token] of rejected.entries()) {
+    await t.test(`rejects mismatched variant ${index + 1}`, () => {
+      const snapshot = createDiagnosticBootstrapFixture({ token }).snapshot();
+      assert.equal(snapshot.authorityAccepted, false);
+      assert.equal(snapshot.drillId, null);
+      assert.equal(snapshot.variant, null);
+    });
+  }
+});
+
+test("quota cache-expiry guard proves the full monotonic 35 second wait", async () => {
+  let monotonic = 1_000;
+  let reads = 0;
+  const guard = await waitForControlledQuotaCacheExpiry({
+    origin: "http://127.0.0.1:15173",
+    readUsageAndQuota: async () => {
+      reads += 1;
+      return { quotaBytes: 1, overrideActive: true, observedAt: "after-cache-expiry" };
+    },
+    waitFor: async (milliseconds) => { monotonic += milliseconds; },
+    monotonicNow: () => monotonic,
+    observedAt: (() => {
+      const values = ["guard-start", "guard-complete"];
+      return () => values.shift();
+    })(),
+  });
+  assert.deepEqual(guard, {
+    kind: "indexeddb-bucket-space-cache-expiry",
+    cacheTimeLimitMs: 30_000,
+    guardMs: 5_000,
+    requestedWaitMs: 35_000,
+    elapsedMs: 35_000,
+    startedAt: "guard-start",
+    completedAt: "guard-complete",
+    verification: { quotaBytes: 1, overrideActive: true, observedAt: "after-cache-expiry" },
+  });
+  assert.equal(reads, 1);
+
+  monotonic = 0;
+  await assert.rejects(
+    waitForControlledQuotaCacheExpiry({
+      origin: "http://127.0.0.1:15173",
+      readUsageAndQuota: async () => { throw new Error("must not read"); },
+      waitFor: async () => { monotonic += 34_999; },
+      monotonicNow: () => monotonic,
+    }),
+    /elapsed only 34999ms; required 35000ms/,
+  );
+});
+
+test("quota preparation binds the sacrificial database, protocol override, cache guard, and native probe", async () => {
+  const origin = "http://127.0.0.1:15173";
+  const order = [];
+  const published = [];
+  let usageRead = 0;
+  const result = await prepareControlledQuotaOverride({
+    binding: {
+      runId: CONTROLLED_ROLLBACK_RUN_ID,
+      faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+      authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+      variant: "quota",
+      transactionId: "quota-transaction",
+      sequence: 1,
+    },
+    receiptId: "quota-receipt",
+    origin,
+    evaluatePreparation: async () => {
+      order.push("page-preparation");
+      assert.equal(published.length, 1);
+      assert.equal(published[0].pageCleanupRequired, true);
+      assert.equal(published[0].before, null);
+      return controlledQuotaPreparationSnapshot();
+    },
+    readUsageAndQuota: async () => {
+      usageRead += 1;
+      order.push(usageRead === 1 ? "usage-before" : "usage-immediate");
+      return usageRead === 1
+        ? { quotaBytes: 1024, usageBytes: 128, overrideActive: false, observedAt: "before" }
+        : { quotaBytes: 1, usageBytes: 128, overrideActive: true, observedAt: "immediate" };
+    },
+    overrideQuota: async (parameters) => {
+      order.push("override");
+      assert.deepEqual(parameters, { origin, quotaSize: 1 });
+    },
+    waitForCacheExpiry: async () => {
+      order.push("cache-guard");
+      return {
+        kind: "indexeddb-bucket-space-cache-expiry",
+        cacheTimeLimitMs: 30_000,
+        guardMs: 5_000,
+        requestedWaitMs: 35_000,
+        elapsedMs: 35_001,
+        startedAt: "guard-start",
+        completedAt: "guard-complete",
+        verification: {
+          quotaBytes: 1,
+          usageBytes: 128,
+          overrideActive: true,
+          observedAt: "after-cache-expiry",
+        },
+      };
+    },
+    evaluateProbe: async () => {
+      order.push("native-probe");
+      return controlledQuotaProbeSnapshot();
+    },
+    evaluateCleanup: async () => { throw new Error("cleanup must not run"); },
+    publish: (state) => { published.push(structuredClone(state)); },
+    observedAt: () => "override-command",
+  });
+  assert.deepEqual(order, [
+    "page-preparation",
+    "usage-before",
+    "override",
+    "usage-immediate",
+    "cache-guard",
+    "native-probe",
+  ]);
+  assert.equal(result.prepared, true);
+  assert.equal(result.sacrificialStoreName, "quota-probe");
+  assert.deepEqual(result.quotaPlan, {
+    kind: "nonzero-below-existing-usage",
+    quotaSizeBytes: 1,
+    baselineUsageBytes: 128,
+    baselineUsageExceedsQuota: true,
+  });
+  assert.equal(result.cacheExpiryGuard.elapsedMs, 35_001);
+  assert.equal(result.probeSnapshot.storage.quotaProbe.nativeQuotaExceeded, true);
+});
+
+test("quota controller rejects zero as unlimited and requires existing usage above the one-byte plan", async (t) => {
+  const origin = "http://127.0.0.1:15173";
+  const binding = {
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    variant: "quota",
+    transactionId: "quota-transaction",
+    sequence: 1,
+  };
+
+  await t.test("rejects a baseline whose usage does not exceed one byte", async () => {
+    const commands = [];
+    let reads = 0;
+    await assert.rejects(
+      prepareControlledQuotaOverride({
+        binding,
+        receiptId: "baseline-too-small",
+        origin,
+        overrideQuota: async (parameters) => { commands.push(parameters); },
+        readUsageAndQuota: async () => {
+          reads += 1;
+          return reads === 1
+            ? { usageBytes: 1, quotaBytes: 1024, overrideActive: false }
+            : { usageBytes: 0, quotaBytes: 1024, overrideActive: false };
+        },
+        evaluatePreparation: async () => controlledQuotaPreparationSnapshot(),
+        evaluateProbe: async () => controlledQuotaProbeSnapshot(),
+        evaluateCleanup: async () => controlledQuotaReleaseSnapshot({ forcedCleanup: true }),
+        publish: () => {},
+      }),
+      /baseline quota is invalid/,
+    );
+    assert.deepEqual(commands, []);
+  });
+
+  for (const scenario of ["immediate", "after-cache-expiry"]) {
+    await t.test(`rejects a zero-byte ${scenario} receipt`, async () => {
+      const commands = [];
+      let reads = 0;
+      const waitForCacheExpiry = async () => ({
+        kind: "indexeddb-bucket-space-cache-expiry",
+        cacheTimeLimitMs: 30_000,
+        guardMs: 5_000,
+        requestedWaitMs: 35_000,
+        elapsedMs: 35_000,
+        startedAt: "guard-start",
+        completedAt: "guard-complete",
+        verification: {
+          usageBytes: 128,
+          quotaBytes: scenario === "after-cache-expiry" ? 0 : 1,
+          overrideActive: true,
+        },
+      });
+      await assert.rejects(
+        prepareControlledQuotaOverride({
+          binding,
+          receiptId: `zero-${scenario}`,
+          origin,
+          overrideQuota: async (parameters) => { commands.push({ ...parameters }); },
+          readUsageAndQuota: async () => {
+            reads += 1;
+            if (reads === 1) {
+              return { usageBytes: 128, quotaBytes: 1024, overrideActive: false };
+            }
+            if (reads === 2) {
+              return {
+                usageBytes: 128,
+                quotaBytes: scenario === "immediate" ? 0 : 1,
+                overrideActive: true,
+              };
+            }
+            return { usageBytes: 0, quotaBytes: 1024, overrideActive: false };
+          },
+          evaluatePreparation: async () => controlledQuotaPreparationSnapshot(),
+          evaluateProbe: async () => controlledQuotaProbeSnapshot(),
+          evaluateCleanup: async () => controlledQuotaReleaseSnapshot({ forcedCleanup: true }),
+          waitForCacheExpiry,
+          publish: () => {},
+        }),
+        scenario === "immediate"
+          ? /quota override did not become authoritative/
+          : /quota cache-expiry verification failed/,
+      );
+      assert.deepEqual(commands, [
+        { origin, quotaSize: 1 },
+        { origin },
+      ]);
+      assert.ok(commands.every((command) => command.quotaSize !== 0));
+    });
+  }
+});
+
+test("quota finalizer independently retries override, lost page cleanup, and restoration drift", async () => {
+  const origin = "http://127.0.0.1:15173";
+  const commands = [];
+  let clearAttempts = 0;
+  let cleanupAttempts = 0;
+  let usageReads = 0;
+  let active = null;
+  const overrideQuota = async (parameters) => {
+    commands.push({ ...parameters });
+    if (!("quotaSize" in parameters)) {
+      clearAttempts += 1;
+      if (clearAttempts === 1) throw new Error("immediate clear failed");
+    }
+  };
+  const readUsageAndQuota = async () => {
+    usageReads += 1;
+    if (usageReads === 1) {
+      return { quotaBytes: 1024, usageBytes: 128, overrideActive: false };
+    }
+    if (usageReads === 2) throw new Error("immediate verification read failed");
+    if (usageReads === 3) {
+      return { quotaBytes: 2048, usageBytes: 128, overrideActive: false };
+    }
+    return { quotaBytes: 1024, usageBytes: 128, overrideActive: false };
+  };
+  const evaluateCleanup = async () => {
+    cleanupAttempts += 1;
+    if (cleanupAttempts === 1) throw new Error("Runtime.evaluate cleanup response lost");
+    return controlledQuotaReleaseSnapshot({ forcedCleanup: true });
+  };
+  await assert.rejects(
+    prepareControlledQuotaOverride({
+      binding: {
+        runId: CONTROLLED_ROLLBACK_RUN_ID,
+        faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+        authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+        variant: "quota",
+        transactionId: "quota-transaction",
+        sequence: 1,
+      },
+      receiptId: "quota-receipt",
+      origin,
+      overrideQuota,
+      readUsageAndQuota,
+      evaluatePreparation: async () => controlledQuotaPreparationSnapshot(),
+      evaluateProbe: async () => controlledQuotaProbeSnapshot(),
+      evaluateCleanup,
+      publish: (state) => { active = state; },
+      observedAt: () => "2026-07-16T08:00:00.000Z",
+    }),
+    /immediate verification read failed/,
+  );
+  assert.equal(clearAttempts, 1);
+  assert.equal(cleanupAttempts, 1);
+  assert.equal(active.overrideCleared, false);
+  assert.equal(active.pageCleanupCompleted, false);
+  assert.equal(active.overrideCleanupError, "immediate clear failed");
+  assert.equal(active.pageCleanupError, "Runtime.evaluate cleanup response lost");
+
+  active = await forceCleanupControlledQuotaOverride(active, {
+    overrideQuota,
+    evaluateCleanup,
+    readUsageAndQuota,
+    publish: (state) => { active = state; },
+    reason: "browser-finalize",
+    observedAt: () => "2026-07-16T08:00:01.000Z",
+  });
+  assert.equal(active.overrideCleared, true);
+  assert.equal(active.pageCleanupCompleted, true);
+  assert.equal(active.restorationError, "controlled quota restoration drifted");
+  assert.equal(active.restored.quotaBytes, 2048);
+
+  active = await forceCleanupControlledQuotaOverride(active, {
+    overrideQuota,
+    evaluateCleanup,
+    readUsageAndQuota,
+    publish: (state) => { active = state; },
+    reason: "browser-finalize-retry",
+  });
+  assert.equal(active.restorationError, null);
+  assert.equal(active.restored.quotaBytes, 1024);
+  assert.equal(clearAttempts, 2);
+  assert.equal(cleanupAttempts, 2);
+  const effectCounts = { clearAttempts, cleanupAttempts, usageReads };
+  active = await forceCleanupControlledQuotaOverride(active, {
+    overrideQuota,
+    evaluateCleanup,
+    readUsageAndQuota,
+    reason: "idempotence-check",
+  });
+  assert.deepEqual({ clearAttempts, cleanupAttempts, usageReads }, effectCounts);
+  assert.equal(active.forcedCleanup, true);
+  assert.deepEqual(commands, [
+    { origin, quotaSize: 1 },
+    { origin },
+    { origin },
+  ]);
+});
+
+test("explicit quota release clears override, deletes the exact page database, then verifies restoration", async () => {
+  const origin = "http://127.0.0.1:15173";
+  const order = [];
+  let active = {
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    variant: "quota",
+    origin,
+    before: { quotaBytes: 1024, overrideActive: false },
+    sacrificialDatabaseName: `candlescope-rollback-quota-${CONTROLLED_ROLLBACK_RUN_ID}-${CONTROLLED_ROLLBACK_FAULT_ID}`,
+    sacrificialStoreName: "quota-probe",
+    overrideActive: true,
+    overrideCleared: false,
+    overrideResetRequired: true,
+    pageCleanupCompleted: false,
+    pageCleanupRequired: true,
+    releaseAccepted: false,
+    forcedCleanup: false,
+  };
+  active = await releaseControlledQuotaOverride(active, {
+    overrideQuota: async (parameters) => {
+      order.push("clear-override");
+      assert.deepEqual(parameters, { origin });
+    },
+    evaluateCleanup: async (_faultId, forcedCleanup) => {
+      order.push("page-cleanup");
+      assert.equal(forcedCleanup, false);
+      return controlledQuotaReleaseSnapshot({ forcedCleanup: false });
+    },
+    readUsageAndQuota: async () => {
+      order.push("restored-usage");
+      return { quotaBytes: 1024, overrideActive: false, observedAt: "restored" };
+    },
+    publish: (state) => { active = state; },
+    observedAt: () => "clear-command",
+  });
+  assert.deepEqual(order, ["clear-override", "page-cleanup", "restored-usage"]);
+  assert.equal(active.releaseAccepted, true);
+  assert.equal(active.pageCleanupCompleted, true);
+  assert.equal(active.releaseSnapshot.storage.quotaRelease.forcedCleanup, false);
+  assert.equal(active.restored.overrideActive, false);
+
+  await assert.rejects(
+    releaseControlledQuotaOverride({
+      ...active,
+      overrideActive: true,
+      overrideCleared: false,
+      overrideResetRequired: true,
+      pageCleanupCompleted: false,
+      pageCleanupRequired: true,
+      releaseAccepted: false,
+      releaseSnapshot: null,
+      restored: null,
+    }, {
+      overrideQuota: async () => {},
+      evaluateCleanup: async () => controlledQuotaReleaseSnapshot({ forcedCleanup: false }),
+      readUsageAndQuota: async () => ({ quotaBytes: 2048, overrideActive: false }),
+      publish: (state) => { active = state; },
+    }),
+    /restoration drifted/,
+  );
+  assert.equal(active.pageCleanupCompleted, true);
+  assert.equal(active.releaseAccepted, false);
+  assert.equal(active.restored.quotaBytes, 2048);
+  assert.equal(active.restorationError, "controlled quota restoration drifted");
+});
+
+test("quota IndexedDB seam commits a baseline, observes a trusted native abort, and deletes idempotently", async () => {
+  const indexedDB = createFakeIndexedDb();
+  const fixture = createDiagnosticBootstrapFixture({
+    indexedDB,
+    token: controlledRollbackToken({
+      drillId: "indexeddb-quota-blocked",
+      variant: "quota",
+    }),
+  });
+  const handle = fixture.window[CONTROLLED_ROLLBACK_HANDLE];
+  const prepared = await handle.prepareQuotaFault(CONTROLLED_ROLLBACK_FAULT_ID);
+  assert.deepEqual(
+    {
+      baselineCommitted: prepared.storage.quotaPreparation.baselineCommitted,
+      connectionKeptOpen: prepared.storage.quotaPreparation.connectionKeptOpen,
+      databaseName: prepared.storage.quotaPreparation.databaseName,
+      storeName: prepared.storage.quotaPreparation.storeName,
+    },
+    {
+      baselineCommitted: true,
+      connectionKeptOpen: true,
+      databaseName: `candlescope-rollback-quota-${CONTROLLED_ROLLBACK_RUN_ID}-${CONTROLLED_ROLLBACK_FAULT_ID}`,
+      storeName: "quota-probe",
+    },
+  );
+
+  indexedDB.setQuotaFailure({ active: true });
+  const probed = await handle.probeQuotaFault(CONTROLLED_ROLLBACK_FAULT_ID);
+  assert.equal(probed.storage.quotaProbe.transactionMode, "readwrite");
+  assert.equal(probed.storage.quotaProbe.abortEvent.type, "abort");
+  assert.equal(probed.storage.quotaProbe.abortEvent.isTrusted, true);
+  assert.equal(probed.storage.quotaProbe.transactionError.name, "QuotaExceededError");
+  assert.equal(probed.storage.quotaProbe.nativeQuotaExceeded, true);
+  assert.match(probed.storage.quotaProbe.attemptedAt, /T/);
+  assert.match(probed.storage.quotaProbe.abortEvent.observedAt, /T/);
+  assert.match(probed.storage.quotaProbe.observedAt, /T/);
+
+  indexedDB.setQuotaFailure({ active: false });
+  const released = await handle.cleanupQuotaFault(CONTROLLED_ROLLBACK_FAULT_ID, false);
+  assert.equal(released.storage.quotaRelease.connectionClosed, true);
+  assert.equal(released.storage.quotaRelease.deletion.status, "success");
+  assert.equal(released.storage.quotaRelease.databaseStillPresent, false);
+  assert.equal(released.storage.quotaRelease.forcedCleanup, false);
+  assert.equal(released.storage.quotaRelease.completed, true);
+  const reverified = await handle.cleanupQuotaFault(CONTROLLED_ROLLBACK_FAULT_ID, true);
+  assert.equal(reverified.storage.quotaRelease.completed, true);
+  assert.equal(reverified.storage.quotaRelease.databaseStillPresent, false);
+  assert.equal(reverified.storage.quotaRelease.forcedCleanup, true);
+  assert.match(reverified.storage.quotaRelease.lastVerifiedAt, /T/);
+});
+
+test("quota probe evidence fails closed for an untrusted abort", async () => {
+  const indexedDB = createFakeIndexedDb();
+  const fixture = createDiagnosticBootstrapFixture({
+    indexedDB,
+    token: controlledRollbackToken({
+      drillId: "indexeddb-quota-blocked",
+      variant: "quota",
+    }),
+  });
+  const handle = fixture.window[CONTROLLED_ROLLBACK_HANDLE];
+  await handle.prepareQuotaFault(CONTROLLED_ROLLBACK_FAULT_ID);
+  indexedDB.setQuotaFailure({ active: true, abortTrusted: false });
+  const probed = await handle.probeQuotaFault(CONTROLLED_ROLLBACK_FAULT_ID);
+  assert.equal(probed.storage.quotaProbe.transactionError.name, "QuotaExceededError");
+  assert.equal(probed.storage.quotaProbe.abortEvent.isTrusted, false);
+  assert.equal(probed.storage.quotaProbe.nativeQuotaExceeded, false);
+  const cleaned = await handle.cleanupQuotaFault(CONTROLLED_ROLLBACK_FAULT_ID, true);
+  assert.equal(cleaned.storage.quotaRelease.completed, true);
+});
+
+test("blocked finalizer cleans a page fault when the preparation response is lost", async () => {
+  let active = null;
+  let pageFaultActive = false;
+  const binding = {
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    variant: "blocked",
+    transactionId: "blocked-transaction",
+    sequence: 1,
+  };
+  await assert.rejects(
+    prepareControlledBlockedFault({
+      binding,
+      receiptId: "blocked-receipt",
+      evaluatePreparation: async () => {
+        pageFaultActive = true;
+        throw new Error("Runtime.evaluate response lost");
+      },
+      publish: (state) => { active = state; },
+    }),
+    /response lost/,
+  );
+  assert.ok(active);
+  assert.equal(active.prepared, false);
+  assert.equal(active.released, false);
+  assert.equal(pageFaultActive, true);
+
+  const cleanup = await forceCleanupControlledBlockedFault(active, {
+    evaluateCleanup: async (faultId) => {
+      assert.equal(faultId, CONTROLLED_ROLLBACK_FAULT_ID);
+      assert.equal(pageFaultActive, true);
+      pageFaultActive = false;
+      return {
+        storage: {
+          blockedRelease: {
+            completed: true,
+            databaseStillPresent: false,
+          },
+        },
+      };
+    },
+    reason: "browser-finalize",
+  });
+  active = cleanup.state;
+  assert.equal(pageFaultActive, false);
+  assert.equal(active.released, true);
+  assert.equal(active.forcedCleanup, true);
+  assert.equal(active.forcedCleanupReason, "browser-finalize");
+  assert.deepEqual(cleanup.receipt, {
+    complete: true,
+    forced: true,
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+  });
+});
+
+test("blocked IndexedDB seam routes one exact product open through a trusted native event", async () => {
+  const indexedDB = createFakeIndexedDb();
+  const fixture = createDiagnosticBootstrapFixture({
+    indexedDB,
+    token: controlledRollbackToken({
+      drillId: "indexeddb-quota-blocked",
+      variant: "blocked",
+    }),
+  });
+  const handle = fixture.window[CONTROLLED_ROLLBACK_HANDLE];
+  const realRequest = fixture.window.indexedDB.open("candlescope-drawings-v2", 1);
+  const realDatabase = await waitForFakeRequest(realRequest);
+  realDatabase.onversionchange = () => realDatabase.close();
+
+  const prepared = await handle.prepareBlockedFault(CONTROLLED_ROLLBACK_FAULT_ID);
+  assert.equal(prepared.storage.blockedInterceptorInstalled, true);
+  assert.equal(prepared.storage.blockedPreparation.prepared, true);
+  assert.equal(prepared.storage.blockedPreparation.realCloseCountAfter, 1);
+  assert.equal(
+    prepared.storage.blockedPreparation.faultDatabaseName,
+    `candlescope-rollback-blocked-${CONTROLLED_ROLLBACK_RUN_ID}-${CONTROLLED_ROLLBACK_FAULT_ID}`,
+  );
+
+  const unrelated = fixture.window.indexedDB.open("unrelated-database", 1);
+  assert.equal((await waitForFakeRequest(unrelated)).name, "unrelated-database");
+  const routed = fixture.window.indexedDB.open("candlescope-drawings-v2", 1);
+  await new Promise((resolve) => routed.addEventListener("blocked", resolve));
+  const blocked = handle.snapshot();
+  assert.equal(blocked.storage.blockedRoute.consumed, true);
+  assert.equal(blocked.storage.blockedEvent.isTrusted, true);
+  assert.equal(blocked.storage.blockedEvent.oldVersion, 1);
+  assert.equal(blocked.storage.blockedEvent.newVersion, 2);
+
+  const released = await handle.releaseBlockedFault(CONTROLLED_ROLLBACK_FAULT_ID);
+  assert.equal(released.storage.blockedRoute.settled, "success-after-keeper-close");
+  assert.equal(released.storage.blockedRelease.completed, true);
+  assert.equal(released.storage.blockedRelease.databaseStillPresent, false);
+  await assert.rejects(
+    handle.prepareBlockedFault(CONTROLLED_ROLLBACK_FAULT_ID),
+    /cannot be prepared/,
+  );
+});
+
+test("blocked IndexedDB seam cleans an untrusted event and fails closed on install drift", async () => {
+  const indexedDB = createFakeIndexedDb({ blockedEventTrusted: false });
+  const fixture = createDiagnosticBootstrapFixture({
+    indexedDB,
+    token: controlledRollbackToken({
+      drillId: "indexeddb-quota-blocked",
+      variant: "blocked",
+    }),
+  });
+  const handle = fixture.window[CONTROLLED_ROLLBACK_HANDLE];
+  const realDatabase = await waitForFakeRequest(
+    fixture.window.indexedDB.open("candlescope-drawings-v2", 1),
+  );
+  realDatabase.onversionchange = () => realDatabase.close();
+  await handle.prepareBlockedFault(CONTROLLED_ROLLBACK_FAULT_ID);
+  const routed = fixture.window.indexedDB.open("candlescope-drawings-v2", 1);
+  await new Promise((resolve) => routed.addEventListener("blocked", resolve));
+  await assert.rejects(
+    handle.releaseBlockedFault(CONTROLLED_ROLLBACK_FAULT_ID),
+    /cannot be released/,
+  );
+  const cleanup = await handle.cleanupBlockedFault(CONTROLLED_ROLLBACK_FAULT_ID);
+  assert.equal(cleanup.storage.blockedRelease.forcedCleanup, true);
+  assert.equal(cleanup.storage.blockedRelease.completed, true);
+  assert.equal(cleanup.storage.blockedRelease.databaseStillPresent, false);
+
+  const immutableFactory = createFakeIndexedDb({ extensible: false });
+  const rejectedFixture = createDiagnosticBootstrapFixture({
+    indexedDB: immutableFactory,
+    token: controlledRollbackToken({
+      drillId: "indexeddb-quota-blocked",
+      variant: "blocked",
+    }),
+  });
+  const rejectedState = rejectedFixture.snapshot();
+  assert.equal(rejectedState.storage.blockedInterceptorInstalled, false);
+  assert.equal(
+    rejectedState.storage.blockedPreparation.reason,
+    "indexeddb-open-interceptor-install-failed",
+  );
+  await assert.rejects(
+    rejectedFixture.window[CONTROLLED_ROLLBACK_HANDLE]
+      .prepareBlockedFault(CONTROLLED_ROLLBACK_FAULT_ID),
+    /cannot be prepared/,
+  );
+});
+
 test("diagnostic rollback bootstrap counts and synchronously fails repeated exact faults", () => {
   const fixture = createDiagnosticBootstrapFixture();
   const construct = () => new fixture.window.Worker(
@@ -679,8 +1611,19 @@ test("managed URL guard treats HTTP and WebSocket scheme families consistently",
 
 test("managed origin guard keeps Fetch interception on the top-level page session", async () => {
   const managedUrl = "http://127.0.0.1:15173/";
-  const cdp = createFakeCdp();
-  const guard = await createManagedOriginGuard(cdp, managedUrl);
+  const workerBody = "captured drawing worker";
+  let releaseWorkerBody;
+  const workerBodyReceipt = new Promise((resolve) => { releaseWorkerBody = resolve; });
+  const cdp = createFakeCdp({
+    onSend: ({ method }) => method === "Fetch.getResponseBody"
+      ? workerBodyReceipt
+      : undefined,
+  });
+  const guard = await createManagedOriginGuard(
+    cdp,
+    managedUrl,
+    [CONTROLLED_HASHED_DRAWING_WORKER_PATH],
+  );
   const enable = cdp.sends.find((entry) => entry.method === "Fetch.enable");
   assert.ok(enable);
   assert.equal(enable.sessionId, null);
@@ -701,6 +1644,64 @@ test("managed origin guard keeps Fetch interception on the top-level page sessio
     && entry.sessionId === null
   )));
 
+  const workerUrl = `${managedUrl}${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`;
+  const workerRequest = await cdp.emit("Fetch.requestPaused", {
+    requestId: "worker-fetch-request",
+    networkId: "worker-network-request",
+    resourceType: "Other",
+    request: { url: workerUrl },
+  });
+  assert.equal(workerRequest[0].status, "fulfilled");
+  assert.ok(cdp.sends.some((entry) => (
+    entry.method === "Fetch.continueRequest"
+    && entry.params.requestId === "worker-fetch-request"
+    && entry.params.interceptResponse === true
+    && entry.sessionId === null
+  )));
+
+  const workerResponsePending = cdp.emit("Fetch.requestPaused", {
+    requestId: "worker-fetch-request",
+    networkId: "worker-network-request",
+    resourceType: "Other",
+    responseStatusCode: 200,
+    responseStatusText: "OK",
+    responseHeaders: [],
+    request: { url: workerUrl },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cdp.sends.some((entry) => (
+    entry.method === "Fetch.continueResponse"
+    && entry.params.requestId === "worker-fetch-request"
+  )), false);
+  releaseWorkerBody({ result: { body: workerBody, base64Encoded: false } });
+  const workerResponse = await workerResponsePending;
+  assert.equal(workerResponse[0].status, "fulfilled");
+  assert.ok(cdp.sends.some((entry) => (
+    entry.method === "Fetch.getResponseBody"
+    && entry.params.requestId === "worker-fetch-request"
+    && entry.sessionId === null
+    && entry.recordErrors === false
+  )));
+  assert.ok(cdp.sends.some((entry) => (
+    entry.method === "Fetch.continueResponse"
+    && entry.params.requestId === "worker-fetch-request"
+    && entry.sessionId === null
+  )));
+  assert.equal(cdp.sends.filter((entry) => (
+    entry.method === "Fetch.continueResponse"
+    && entry.params.requestId === "worker-fetch-request"
+  )).length, 1);
+  const capture = guard.claimWorkerResponseBodyCapture("worker-network-request", workerUrl);
+  assert.ok(capture);
+  assert.equal(capture.bodyBytes, Buffer.byteLength(workerBody));
+  assert.equal(capture.bodySha256, fingerprintFileEntries([{
+    relativePath: CONTROLLED_HASHED_DRAWING_WORKER_PATH,
+    content: workerBody,
+  }]).files[0].sha256);
+  assert.equal(capture.claimCount, 1);
+  assert.equal(guard.claimWorkerResponseBodyCapture("worker-network-request", workerUrl), null);
+  assert.equal(guard.snapshot().workerResponseCaptures[0].claimCount, 1);
+
   const blocked = await cdp.emit("Fetch.requestPaused", {
     requestId: "off-origin-request",
     resourceType: "Script",
@@ -716,6 +1717,156 @@ test("managed origin guard keeps Fetch interception on the top-level page sessio
   assert.equal(guard.snapshot().passed, false);
   assert.throws(() => guard.assertHealthy(), /off-origin-request-blocked/);
   guard.dispose();
+});
+
+test("managed origin guard unblocks a failed worker body capture and records it fail closed", async () => {
+  const managedUrl = "http://127.0.0.1:15173/";
+  const workerUrl = `${managedUrl}${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`;
+  const cdp = createFakeCdp({
+    onSend: ({ method }) => {
+      if (method === "Fetch.getResponseBody") throw new Error("simulated body read failure");
+      return undefined;
+    },
+  });
+  const guard = await createManagedOriginGuard(
+    cdp,
+    managedUrl,
+    [CONTROLLED_HASHED_DRAWING_WORKER_PATH],
+  );
+  await cdp.emit("Fetch.requestPaused", {
+    requestId: "worker-fetch-request",
+    networkId: "worker-network-request",
+    resourceType: "Other",
+    request: { url: workerUrl },
+  });
+  const response = await cdp.emit("Fetch.requestPaused", {
+    requestId: "worker-fetch-request",
+    networkId: "worker-network-request",
+    resourceType: "Other",
+    responseStatusCode: 200,
+    request: { url: workerUrl },
+  });
+
+  assert.equal(response[0].status, "fulfilled");
+  assert.equal(cdp.sends.filter((entry) => (
+    entry.method === "Fetch.continueResponse"
+    && entry.params.requestId === "worker-fetch-request"
+  )).length, 1);
+  assert.equal(cdp.sends.find((entry) => (
+    entry.method === "Fetch.getResponseBody"
+    && entry.params.requestId === "worker-fetch-request"
+  )).recordErrors, false);
+  assert.equal(guard.claimWorkerResponseBodyCapture("worker-network-request", workerUrl), null);
+  const snapshot = guard.snapshot();
+  assert.equal(snapshot.passed, false);
+  assert.equal(snapshot.armedWorkerResponseCount, 0);
+  assert.equal(snapshot.violations[0].kind, "drawing-worker-response-body-capture-failed");
+  assert.match(snapshot.violations[0].error, /simulated body read failure/);
+  assert.throws(() => guard.assertHealthy(), /drawing-worker-response-body-capture-failed/);
+  guard.dispose();
+});
+
+test("managed origin guard rejects worker response identity drift and duplicate captures", async (t) => {
+  const managedUrl = "http://127.0.0.1:15173/";
+  const workerUrl = `${managedUrl}${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`;
+  const makeGuard = async () => {
+    const cdp = createFakeCdp({
+      onSend: ({ method }) => method === "Fetch.getResponseBody"
+        ? { result: { body: "worker", base64Encoded: false } }
+        : undefined,
+    });
+    const guard = await createManagedOriginGuard(
+      cdp,
+      managedUrl,
+      [CONTROLLED_HASHED_DRAWING_WORKER_PATH],
+    );
+    const request = (overrides = {}) => {
+      const { message = {}, ...params } = overrides;
+      return cdp.emit("Fetch.requestPaused", {
+        requestId: "worker-fetch-request",
+        networkId: "worker-network-request",
+        resourceType: "Other",
+        request: { url: workerUrl },
+        ...params,
+      }, message);
+    };
+    const response = (overrides = {}) => {
+      const { message = {}, ...params } = overrides;
+      return cdp.emit("Fetch.requestPaused", {
+        requestId: "worker-fetch-request",
+        networkId: "worker-network-request",
+        resourceType: "Other",
+        responseStatusCode: 200,
+        request: { url: workerUrl },
+        ...params,
+      }, message);
+    };
+    return { cdp, guard, request, response };
+  };
+
+  await t.test("unarmed response", async () => {
+    const fixture = await makeGuard();
+    await fixture.response();
+    const snapshot = fixture.guard.snapshot();
+    assert.equal(snapshot.passed, false);
+    assert.equal(snapshot.armedWorkerResponseCount, 0);
+    assert.match(snapshot.violations[0].error, /identity is invalid/);
+    assert.equal(fixture.cdp.sends.some((entry) => entry.method === "Fetch.getResponseBody"), false);
+    assert.equal(fixture.cdp.sends.filter((entry) => entry.method === "Fetch.continueResponse").length, 1);
+    fixture.guard.dispose();
+  });
+
+  await t.test("child-session arm", async () => {
+    const fixture = await makeGuard();
+    await fixture.request({ message: { sessionId: "worker-session" } });
+    const snapshot = fixture.guard.snapshot();
+    assert.equal(snapshot.passed, false);
+    assert.equal(snapshot.violations[0].kind, "drawing-worker-response-capture-arm-invalid");
+    const continued = fixture.cdp.sends.find((entry) => entry.method === "Fetch.continueRequest");
+    assert.equal(continued.sessionId, "worker-session");
+    assert.equal(continued.params.interceptResponse, undefined);
+    fixture.guard.dispose();
+  });
+
+  await t.test("unexpected Fetch resource type", async () => {
+    const fixture = await makeGuard();
+    await fixture.request({ resourceType: "Script" });
+    const snapshot = fixture.guard.snapshot();
+    assert.equal(snapshot.passed, false);
+    assert.equal(snapshot.violations[0].kind, "drawing-worker-response-capture-arm-invalid");
+    assert.equal(snapshot.violations[0].resourceType, "Script");
+    const continued = fixture.cdp.sends.find((entry) => entry.method === "Fetch.continueRequest");
+    assert.equal(continued.params.interceptResponse, undefined);
+    fixture.guard.dispose();
+  });
+
+  await t.test("network identity mismatch", async () => {
+    const fixture = await makeGuard();
+    await fixture.request();
+    await fixture.response({ networkId: "other-network-request" });
+    const snapshot = fixture.guard.snapshot();
+    assert.equal(snapshot.passed, false);
+    assert.equal(snapshot.armedWorkerResponseCount, 0);
+    assert.match(snapshot.violations[0].error, /identity is invalid/);
+    assert.equal(fixture.cdp.sends.some((entry) => entry.method === "Fetch.getResponseBody"), false);
+    assert.equal(fixture.cdp.sends.filter((entry) => entry.method === "Fetch.continueResponse").length, 1);
+    fixture.guard.dispose();
+  });
+
+  await t.test("duplicate response capture", async () => {
+    const fixture = await makeGuard();
+    await fixture.request();
+    await fixture.response();
+    await fixture.request();
+    await fixture.response();
+    const snapshot = fixture.guard.snapshot();
+    assert.equal(snapshot.passed, false);
+    assert.match(snapshot.violations[0].error, /capture is duplicated/);
+    assert.equal(snapshot.workerResponseCaptures.length, 1);
+    assert.equal(fixture.cdp.sends.filter((entry) => entry.method === "Fetch.getResponseBody").length, 2);
+    assert.equal(fixture.cdp.sends.filter((entry) => entry.method === "Fetch.continueResponse").length, 2);
+    fixture.guard.dispose();
+  });
 });
 
 test("flattened CDP command envelopes preserve worker session authority", () => {
@@ -785,6 +1936,26 @@ test("controlled CDP parser preserves flattened response and event sessions", ()
     sessionId: null,
     params: {},
   });
+});
+
+test("detached child command classifier accepts only Chromium's exact root error", () => {
+  const detached = parseControlledCdpMessage(JSON.stringify({
+    id: 9,
+    error: { code: -32001, message: "Session with given id not found." },
+  }));
+  assert.equal(detached.sessionId, null);
+  assert.equal(isControlledDetachedSessionCommandError(detached, "worker-session"), true);
+
+  const invalid = [
+    { ...detached, sessionId: "worker-session" },
+    { ...detached, error: { ...detached.error, code: -32000 } },
+    { ...detached, error: { ...detached.error, message: "Session with given id not found" } },
+    { kind: "response", id: 9, sessionId: null, result: {} },
+  ];
+  for (const message of invalid) {
+    assert.equal(isControlledDetachedSessionCommandError(message, "worker-session"), false);
+  }
+  assert.equal(isControlledDetachedSessionCommandError(detached, null), false);
 });
 
 test("controlled CDP parser rejects ambiguous or malformed protocol messages", () => {
@@ -1369,6 +2540,60 @@ test("api data requests are exempt but api script resources fail closed", async 
   tracker.dispose();
 });
 
+test("runtime-generated blob resources stay outside build asset authority", async () => {
+  const files = [{ relativePath: "index.html", content: "index" }];
+  const cdp = createFakeCdp({
+    responseBodies: new Map([["<top>\0document", { body: "index", base64Encoded: false }]]),
+  });
+  const tracker = createControlledNetworkAssetTracker(cdp, "http://127.0.0.1:15173", {
+    entryAssetPaths: [],
+    assetFingerprint: fingerprintFileEntries(files),
+  }, 400, "main-frame");
+  const documentUrl = "http://127.0.0.1:15173/";
+  await cdp.emit("Network.requestWillBeSent", {
+    requestId: "document",
+    frameId: "main-frame",
+    loaderId: "loader-1",
+    type: "Document",
+    initiator: { type: "other" },
+    request: { url: documentUrl },
+  });
+  await cdp.emit("Network.responseReceived", {
+    requestId: "document",
+    frameId: "main-frame",
+    loaderId: "loader-1",
+    type: "Document",
+    response: { url: documentUrl, status: 200 },
+  });
+  await cdp.emit("Network.loadingFinished", { requestId: "document" });
+
+  const blobUrl = "blob:http://127.0.0.1:15173/76a4f481-b7a6-4c45-b028-b74a6d8138c0";
+  await cdp.emit("Network.requestWillBeSent", {
+    requestId: "blob-image",
+    frameId: "main-frame",
+    loaderId: "loader-1",
+    type: "Image",
+    initiator: { type: "script" },
+    request: { url: blobUrl },
+  });
+  await cdp.emit("Network.responseReceived", {
+    requestId: "blob-image",
+    frameId: "main-frame",
+    loaderId: "loader-1",
+    type: "Image",
+    response: { url: blobUrl, status: 200 },
+  });
+  await cdp.emit("Network.loadingFinished", { requestId: "blob-image" });
+
+  const snapshot = tracker.snapshot();
+  assert.deepEqual(snapshot.unmanifestedResponses, []);
+  assert.deepEqual(snapshot.observedAssets.map((asset) => asset.path), ["index.html"]);
+  assert.equal(cdp.sends.some((entry) => (
+    entry.method === "Network.getResponseBody" && entry.params.requestId === "blob-image"
+  )), false);
+  tracker.dispose();
+});
+
 test("same-origin iframe traffic cannot switch or satisfy main-frame build authority", async () => {
   const files = [
     { relativePath: "index.html", content: "index" },
@@ -1476,6 +2701,156 @@ test("same-origin iframe traffic cannot switch or satisfy main-frame build autho
   tracker.dispose();
 });
 
+test("late prior-generation network terminals cannot poison current build authority", async () => {
+  const cdp = createFakeCdp();
+  const tracker = createControlledNetworkAssetTracker(cdp, "http://127.0.0.1:15173", {
+    entryAssetPaths: [],
+    assetFingerprint: fingerprintFileEntries([
+      { relativePath: "index.html", content: "index" },
+      { relativePath: "assets/main.js", content: "main" },
+    ]),
+  }, 400, "main-frame");
+  await cdp.emit("Network.requestWillBeSent", {
+    requestId: "prior-document",
+    frameId: "main-frame",
+    loaderId: "main-loader-1",
+    type: "Document",
+    initiator: { type: "other" },
+    request: { url: "http://127.0.0.1:15173/" },
+  });
+  await cdp.emit("Network.requestWillBeSent", {
+    requestId: "prior-entry",
+    frameId: "main-frame",
+    loaderId: "main-loader-1",
+    type: "Script",
+    initiator: { type: "parser" },
+    request: { url: "http://127.0.0.1:15173/assets/main.js" },
+  });
+  await cdp.emit("Network.requestWillBeSent", {
+    requestId: "current-document",
+    frameId: "main-frame",
+    loaderId: "main-loader-2",
+    type: "Document",
+    initiator: { type: "other" },
+    request: { url: "http://127.0.0.1:15173/" },
+  });
+
+  await cdp.emit("Network.loadingFailed", {
+    requestId: "prior-entry",
+    canceled: true,
+    errorText: "net::ERR_ABORTED",
+  });
+  await cdp.emit("Network.responseReceived", {
+    requestId: "prior-entry",
+    frameId: "main-frame",
+    loaderId: "main-loader-1",
+    type: "Script",
+    response: { url: "http://127.0.0.1:15173/assets/main.js", status: 200 },
+  });
+  await cdp.emit("Network.loadingFailed", {
+    requestId: "prior-entry",
+    canceled: true,
+    errorText: "net::ERR_ABORTED",
+  });
+  let snapshot = tracker.snapshot();
+  assert.equal(snapshot.currentGeneration, 2);
+  assert.equal(snapshot.inFlightCount, 1);
+  assert.deepEqual(snapshot.provenanceErrors, []);
+
+  await cdp.emit("Network.loadingFailed", {
+    requestId: "current-document",
+    canceled: true,
+    errorText: "net::ERR_ABORTED",
+  });
+  snapshot = tracker.snapshot();
+  assert.equal(snapshot.inFlightCount, 0);
+  assert.equal(snapshot.provenanceErrors.length, 1);
+  assert.equal(snapshot.provenanceErrors[0].kind, "network-terminal-without-response");
+  assert.equal(snapshot.provenanceErrors[0].generation, 2);
+  tracker.dispose();
+});
+
+test("late prior-generation loading completion skips invalid response body reads", async () => {
+  const cdp = createFakeCdp();
+  const tracker = createControlledNetworkAssetTracker(cdp, "http://127.0.0.1:15173", {
+    entryAssetPaths: [],
+    assetFingerprint: fingerprintFileEntries([
+      { relativePath: "index.html", content: "index" },
+    ]),
+  }, 400, "main-frame");
+  await cdp.emit("Network.requestWillBeSent", {
+    requestId: "prior-document",
+    frameId: "main-frame",
+    loaderId: "main-loader-1",
+    type: "Document",
+    initiator: { type: "other" },
+    request: { url: "http://127.0.0.1:15173/" },
+  });
+  await cdp.emit("Network.responseReceived", {
+    requestId: "prior-document",
+    frameId: "main-frame",
+    loaderId: "main-loader-1",
+    type: "Document",
+    response: { url: "http://127.0.0.1:15173/", status: 200 },
+  });
+  await cdp.emit("Network.requestWillBeSent", {
+    requestId: "current-document",
+    frameId: "main-frame",
+    loaderId: "main-loader-2",
+    type: "Document",
+    initiator: { type: "other" },
+    request: { url: "http://127.0.0.1:15173/" },
+  });
+
+  await cdp.emit("Network.loadingFinished", { requestId: "prior-document" });
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.currentGeneration, 2);
+  assert.equal(snapshot.pendingCount, 0);
+  assert.deepEqual(snapshot.inFlight.map((record) => record.requestId), ["current-document"]);
+  assert.equal(cdp.sends.some((entry) => (
+    entry.method === "Network.getResponseBody" && entry.params.requestId === "prior-document"
+  )), false);
+  tracker.dispose();
+});
+
+test("aborted data API requests clear in-flight state without poisoning asset authority", async () => {
+  const cdp = createFakeCdp();
+  const tracker = createControlledNetworkAssetTracker(cdp, "http://127.0.0.1:15173", {
+    entryAssetPaths: [],
+    assetFingerprint: fingerprintFileEntries([
+      { relativePath: "index.html", content: "index" },
+    ]),
+  }, 400, "main-frame");
+  await cdp.emit("Network.requestWillBeSent", {
+    requestId: "document",
+    frameId: "main-frame",
+    loaderId: "loader-1",
+    type: "Document",
+    initiator: { type: "other" },
+    request: { url: "http://127.0.0.1:15173/" },
+  });
+  await cdp.emit("Network.requestWillBeSent", {
+    requestId: "api-fetch",
+    frameId: "main-frame",
+    loaderId: "loader-1",
+    type: "Fetch",
+    initiator: { type: "script" },
+    request: { url: "http://127.0.0.1:15173/api/v1/bars" },
+  });
+  await cdp.emit("Network.loadingFailed", {
+    requestId: "api-fetch",
+    canceled: true,
+    errorText: "net::ERR_ABORTED",
+  });
+
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.currentGeneration, 1);
+  assert.equal(snapshot.inFlightCount, 1);
+  assert.deepEqual(snapshot.inFlight.map((record) => record.requestId), ["document"]);
+  assert.deepEqual(snapshot.provenanceErrors, []);
+  tracker.dispose();
+});
+
 test("legacy top-session worker bootstrap response cannot authorize a drawing worker", async () => {
   const files = [
     { relativePath: "index.html", content: "index" },
@@ -1577,6 +2952,140 @@ test("worker bootstrap response hands off exactly once from top to its child ses
     entry.method === "Network.getResponseBody" && entry.params.requestId === fixture.requestId
   ));
   assert.deepEqual(workerBodyReads.map((entry) => entry.sessionId), [fixture.sessionId]);
+  fixture.tracker.dispose();
+});
+
+test("detached canonical worker consumes its top-session Fetch capture without a child body read", async () => {
+  const workerAsset = fingerprintFileEntries([{
+    relativePath: "assets/drawing.worker.js",
+    content: "worker",
+  }]).files[0];
+  const claims = [];
+  const fixture = await createWorkerBootstrapHandoffFixture({
+    claimWorkerResponseBodyCapture(networkId, url) {
+      claims.push({ networkId, url });
+      return {
+        kind: "controlled-fetch-response-body-capture",
+        fetchRequestId: "worker-fetch-request",
+        networkId,
+        relativePath: "assets/drawing.worker.js",
+        resourceType: "Other",
+        sessionId: null,
+        url,
+        responseStatusCode: 200,
+        bodyBytes: workerAsset.bytes,
+        bodySha256: workerAsset.sha256,
+        capturedAt: "2026-07-17T00:00:00.000Z",
+        claimedAt: "2026-07-17T00:00:00.001Z",
+        claimCount: 1,
+      };
+    },
+  });
+  await fixture.emitChildResponse();
+  await fixture.cdp.emit("Target.detachedFromTarget", { sessionId: fixture.sessionId });
+  await fixture.emitChildFinished();
+
+  const snapshot = fixture.tracker.snapshot();
+  const worker = snapshot.workerTargets[0];
+  const candidate = worker.authorizedCandidates[0];
+  assert.deepEqual(claims, [{
+    networkId: fixture.requestId,
+    url: fixture.targetUrl,
+  }]);
+  assert.equal(snapshot.workerBootstrapHandoffs.length, 1);
+  assert.equal(candidate.workerBootstrapHandoff, true);
+  assert.equal(candidate.bodyCaptureKind, "controlled-fetch-response-body-capture");
+  assert.equal(candidate.bodyCaptureReceipt.fetchRequestId, "worker-fetch-request");
+  assert.equal(candidate.bodyCaptureReceipt.networkId, fixture.requestId);
+  assert.equal(candidate.bodyCaptureReceipt.sessionId, null);
+  assert.equal(candidate.bodyCaptureReceipt.claimCount, 1);
+  assert.equal(candidate.bodySha256, worker.expectedAssetSha256);
+  assert.equal(worker.networkProvenanceAccepted, true);
+  assert.equal(worker.assetAccepted, true);
+  assert.equal(worker.active, false);
+  assert.equal(snapshot.passed, false);
+  assert.equal(snapshot.assetAuthorityPassed, true);
+  assert.equal(snapshot.workerAssetAuthorityPassed, true);
+  assert.equal(fixture.cdp.sends.some((entry) => (
+    entry.method === "Network.getResponseBody"
+    && entry.params.requestId === fixture.requestId
+  )), false);
+  fixture.tracker.dispose();
+});
+
+test("managed Fetch capture composes with the canonical worker handoff across detach", async () => {
+  const fixture = await createWorkerBootstrapHandoffFixture({
+    captureWorkerResponseWithManagedOriginGuard: true,
+  });
+  const fetchRequestId = "worker-fetch-request";
+  const requestStage = await fixture.cdp.emit("Fetch.requestPaused", {
+    requestId: fetchRequestId,
+    networkId: fixture.requestId,
+    resourceType: "Other",
+    request: { url: fixture.targetUrl },
+  });
+  const responseStage = await fixture.cdp.emit("Fetch.requestPaused", {
+    requestId: fetchRequestId,
+    networkId: fixture.requestId,
+    resourceType: "Other",
+    responseStatusCode: 200,
+    request: { url: fixture.targetUrl },
+  });
+  assert.equal(requestStage[0].status, "fulfilled");
+  assert.equal(responseStage[0].status, "fulfilled");
+  fixture.originGuard.assertHealthy();
+
+  await fixture.emitChildResponse();
+  await fixture.cdp.emit("Target.detachedFromTarget", { sessionId: fixture.sessionId });
+  await fixture.emitChildFinished();
+
+  const snapshot = fixture.tracker.snapshot();
+  const worker = snapshot.workerTargets[0];
+  const candidate = worker.authorizedCandidates[0];
+  const guardSnapshot = fixture.originGuard.snapshot();
+  assert.equal(snapshot.workerBootstrapHandoffs.length, 1);
+  assert.equal(worker.active, false);
+  assert.equal(worker.assetAccepted, true);
+  assert.equal(snapshot.assetAuthorityPassed, true);
+  assert.equal(candidate.bodyCaptureKind, "controlled-fetch-response-body-capture");
+  assert.equal(candidate.bodyCaptureReceipt.fetchRequestId, fetchRequestId);
+  assert.equal(candidate.bodyCaptureReceipt.networkId, fixture.requestId);
+  assert.equal(candidate.bodyCaptureReceipt.url, fixture.targetUrl);
+  assert.equal(candidate.bodyCaptureReceipt.claimCount, 1);
+  assert.equal(candidate.bodySha256, worker.expectedAssetSha256);
+  assert.equal(guardSnapshot.passed, true);
+  assert.equal(guardSnapshot.workerResponseCaptures.length, 1);
+  assert.equal(guardSnapshot.workerResponseCaptures[0].claimCount, 1);
+  assert.equal(
+    fixture.originGuard.claimWorkerResponseBodyCapture(fixture.requestId, fixture.targetUrl),
+    null,
+  );
+  assert.equal(fixture.cdp.sends.some((entry) => (
+    entry.method === "Network.getResponseBody"
+    && entry.params.requestId === fixture.requestId
+  )), false);
+  fixture.originGuard.dispose();
+  fixture.tracker.dispose();
+});
+
+test("canonical worker capture remains fail closed without falling back to its child session", async () => {
+  const fixture = await createWorkerBootstrapHandoffFixture({
+    claimWorkerResponseBodyCapture: () => null,
+  });
+  await fixture.emitChildResponse();
+  await fixture.emitChildFinished();
+
+  const snapshot = fixture.tracker.snapshot();
+  const candidate = snapshot.workerTargets[0].authorizedCandidates[0];
+  assert.equal(snapshot.passed, false);
+  assert.equal(snapshot.assetAuthorityPassed, false);
+  assert.equal(snapshot.workerAssetAuthorityPassed, false);
+  assert.equal(candidate.bodyError, "canonical drawing worker response body capture is missing or invalid");
+  assert.equal(candidate.bodySha256, null);
+  assert.equal(fixture.cdp.sends.some((entry) => (
+    entry.method === "Network.getResponseBody"
+    && entry.params.requestId === fixture.requestId
+  )), false);
   fixture.tracker.dispose();
 });
 

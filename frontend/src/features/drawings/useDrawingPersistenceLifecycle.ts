@@ -899,7 +899,12 @@ export function useDrawingPersistenceLifecycle({
   const [scenePaintRecoveryDelegate] = useState(() => (
     createMutableDrawingDelegate<() => void>(() => {})
   ));
-  const [scenePrimitive] = useState(() => new DrawingScenePrimitive());
+  const [sceneChartFrameSyncDelegate] = useState(() => (
+    createMutableDrawingDelegate<() => void>(() => {})
+  ));
+  const [scenePrimitive] = useState(() => new DrawingScenePrimitive({
+    synchronizeChartFrame: () => sceneChartFrameSyncDelegate.read()(),
+  }));
   const [sceneBridge] = useState<DrawingScenePrimitiveBridge<
     import("./rendering/drawingDisplayList.js").DrawingScreenDisplayList
   >>(() => createDrawingScenePrimitiveBridge({
@@ -963,6 +968,12 @@ export function useDrawingPersistenceLifecycle({
     scenePaintRecoveryDelegate.write(recoverCurrentPaint);
     return () => scenePaintRecoveryDelegate.write(() => {});
   }, [scenePaintRecoveryDelegate, sceneRuntime]);
+  useEffect(() => {
+    sceneChartFrameSyncDelegate.write(() => {
+      sceneRuntime.synchronizeChartFrame();
+    });
+    return () => sceneChartFrameSyncDelegate.write(() => {});
+  }, [sceneChartFrameSyncDelegate, sceneRuntime]);
   const [initialStore] = useState(() => drawingDocumentSessionRegistry.getStore(symbol));
   const [scopeRetryGeneration, setScopeRetryGeneration] = useState(0);
   const activeStoreRef = useRef<DrawingDocumentStore>(initialStore);

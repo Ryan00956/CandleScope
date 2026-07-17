@@ -419,6 +419,111 @@ test("viewport invalidation publishes continuous LOD immediately and exact LOD a
   runtime.dispose();
 });
 
+test("chart-frame synchronization replaces an unannounced stale viewport plan before paint", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const initialFrame = frame();
+  const pannedFrame: DrawingFrameSnapshot = Object.freeze({
+    ...initialFrame,
+    viewportRevision: initialFrame.viewportRevision + 1,
+  });
+  const adapter = fakeAdapter(initialFrame);
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof project>[] = [];
+  const projectedToleranceClasses: string[] = [];
+  const delayed = new Map<number, Readonly<{ callback: () => void; delayMs: number }>>();
+  let nextDelayHandle = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+    scheduleDelay: (callback, delayMs) => {
+      nextDelayHandle += 1;
+      delayed.set(nextDelayHandle, { callback, delayMs });
+      return nextDelayHandle;
+    },
+    cancelDelay: (handle) => { delayed.delete(handle as number); },
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: (request) => {
+      projectedToleranceClasses.push(request.lodToleranceClass);
+      return project(request);
+    },
+    publishScene: (plan) => {
+      published.push(plan);
+      return true;
+    },
+  });
+
+  assert.equal(runtime.flushNow(), true);
+  assert.equal(published.length, 1);
+  adapter.setFrame(pannedFrame);
+  assert.equal(runtime.synchronizeChartFrame(), true);
+  assert.equal(published.length, 2);
+  assert.equal(published[1]?.stamp.viewportRevision, pannedFrame.viewportRevision);
+  assert.equal(runtime.snapshot().lodToleranceClass, "continuousViewport");
+  assert.deepEqual(projectedToleranceClasses, ["normalStatic", "continuousViewport"]);
+  assert.deepEqual([...delayed.values()].map((task) => task.delayMs), [100]);
+  assert.equal(runtime.synchronizeChartFrame(), false,
+    "a second updateAllViews pass over the same viewport must not rebuild");
+  assert.equal(published.length, 2);
+  runtime.dispose();
+});
+
+test("chart-frame synchronization replaces a stale freehand viewport without waiting for its worker", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const initialFrame = frame();
+  const pannedFrame: DrawingFrameSnapshot = Object.freeze({
+    ...initialFrame,
+    viewportRevision: initialFrame.viewportRevision + 1,
+  });
+  const adapter = fakeAdapter(initialFrame);
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan) => {
+      published.push(plan);
+      return true;
+    },
+  });
+
+  assert.equal(runtime.synchronizeChartFrame(), false,
+    "first publication has no stale pixels to replace");
+  assert.equal(runtime.flushNow(), true);
+  const initialWorkerRequest = transport.renderRequests()[0];
+  assert.ok(initialWorkerRequest);
+  transport.emit(bitmapWorkerResponse(initialWorkerRequest, () => {}));
+  assert.equal(published.length, 1);
+
+  adapter.setFrame(pannedFrame);
+  assert.equal(runtime.synchronizeChartFrame(), true);
+  assert.equal(published.length, 2);
+  assert.strictEqual(runtime.snapshot().plan, published[1]);
+  assert.equal(published[1]?.stamp.viewportRevision, pannedFrame.viewportRevision);
+  assert.equal(transport.renderRequests().length, 1,
+    "the current chart frame cannot wait for a worker round-trip");
+
+  assert.equal(runtime.invalidate("settled-worker-pass"), true);
+  assert.equal(runtime.flushNow(), true);
+  assert.equal(transport.renderRequests().length, 2,
+    "ordinary scheduled work keeps the worker raster path");
+  runtime.dispose();
+});
+
 test("exact paint barrier accepts only a fresh exact plan and newer full paint evidence", async () => {
   const store = createDrawingDocumentStore(documentWithRevision());
   const adapter = fakeAdapter();

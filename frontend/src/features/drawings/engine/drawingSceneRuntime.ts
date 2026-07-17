@@ -267,6 +267,8 @@ export interface DrawingSceneExactPaintReceipt {
 export interface DrawingSceneRuntime {
   activate(binding: DrawingSceneRuntimeBinding): boolean;
   invalidate(reason?: string): boolean;
+  /** Replace a stale scene plan inside the chart's current pre-paint phase. */
+  synchronizeChartFrame(): boolean;
   requestParity(): boolean;
   waitForExactPaint(
     request: DrawingSceneExactPaintRequest,
@@ -754,6 +756,7 @@ export function createDrawingSceneRuntime({
   let disposed = false;
   let faulted = false;
   let recoveryPublicationPending = false;
+  let publishingFromChartUpdate = false;
   let lastParityAttemptAt = Number.NEGATIVE_INFINITY;
   let lastParitySuccessAt = Number.NEGATIVE_INFINITY;
   let parityDelayHandle: unknown = null;
@@ -1468,7 +1471,12 @@ export function createDrawingSceneRuntime({
     publish(plan) {
       const publishStartedAt = now();
       try {
-        if (mode === "scene-canary" && submitWorkerPlan(plan)) return;
+        // A worker round-trip cannot complete before the chart consumes this
+        // frame. During updateAllViews publish the continuous/main-thread plan
+        // immediately; the normal 100 ms settle pass still uses the worker.
+        if (mode === "scene-canary"
+          && !publishingFromChartUpdate
+          && submitWorkerPlan(plan)) return;
         publishPreparedPlan(plan, plan.list, plan.hitIndex, "main-thread");
       } finally {
         const publishDurationMs = Math.max(0, now() - publishStartedAt);
@@ -1497,6 +1505,58 @@ export function createDrawingSceneRuntime({
     cancelFrame: cancelSceneFrame,
     restartPendingFrameOnInvalidate: mode === "shadow",
   });
+
+  const synchronizeChartFrame = (): boolean => {
+    if (disposed
+      || faulted
+      || mode !== "scene-canary"
+      || !binding
+      || !registry
+      || publishingFromChartUpdate) return false;
+
+    let document: DrawingDocument;
+    let frame: DrawingFrameSnapshot | null;
+    try {
+      document = binding.store.getSnapshot();
+      if (binding.renderer.documentSnapshot() !== document) return false;
+      frame = binding.adapter.captureDrawingFrame();
+    } catch (error) {
+      onError?.(error);
+      return false;
+    }
+    if (!frame || !binding.adapter.isDrawingFrameCurrent(frame)) return false;
+
+    const published = latestPublishedPlan;
+    // With no accepted pixels there is nothing for the chart to drag ahead
+    // of. Keep first publication (and same-stamp exact refreshes) on their
+    // normal worker path; this boundary is only for replacing stale pixels.
+    if (!published || published.binding !== binding) return false;
+    const targetStamp = frameStamp(document, frame);
+    const currentPlan = drawingRenderRevisionKey(published.stamp)
+      === drawingRenderRevisionKey(targetStamp);
+    if (currentPlan) return false;
+
+    const viewportChanged = (
+      published.stamp.viewportRevision !== targetStamp.viewportRevision
+      || published.stamp.widthCssPx !== targetStamp.widthCssPx
+      || published.stamp.heightCssPx !== targetStamp.heightCssPx
+      || published.stamp.dpr !== targetStamp.dpr
+    );
+    if (viewportChanged) {
+      lodToleranceClass = "continuousViewport";
+      exactRequestedAt = now();
+      pendingExactPaintStamp = null;
+      scheduleExactViewportRender();
+    }
+
+    if (!invalidateScene("chart-frame-sync")) return false;
+    publishingFromChartUpdate = true;
+    try {
+      return scheduler.flushNow();
+    } finally {
+      publishingFromChartUpdate = false;
+    }
+  };
 
   const acceptScenePainted = (stamp: DrawingRenderRevisionStamp): void => {
     if (exactRequestedAt === null || !pendingExactPaintStamp) return;
@@ -1703,6 +1763,7 @@ export function createDrawingSceneRuntime({
     invalidate(reason = "external") {
       return !faulted && mode !== "legacy" && binding !== null && invalidateScene(reason);
     },
+    synchronizeChartFrame,
     requestParity() {
       if (mode !== "shadow" || !binding?.compareParity || disposed) return false;
       clearParityDelay();

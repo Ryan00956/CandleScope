@@ -16,21 +16,12 @@ export interface DrawingScenePaintAck {
 export type DrawingScenePaintListener = (ack: DrawingScenePaintAck) => void;
 
 export interface DrawingScenePrimitiveOptions {
-  requestFrame?: (callback: () => void) => unknown;
-  cancelFrame?: (handle: unknown) => void;
-}
-
-function defaultRequestFrame(callback: () => void): unknown {
-  if (typeof requestAnimationFrame === "function") return requestAnimationFrame(callback);
-  return setTimeout(callback, 0);
-}
-
-function defaultCancelFrame(handle: unknown): void {
-  if (typeof cancelAnimationFrame === "function" && typeof handle === "number") {
-    cancelAnimationFrame(handle);
-    return;
-  }
-  clearTimeout(handle as ReturnType<typeof setTimeout>);
+  /**
+   * Called from Lightweight Charts' own view-update phase. The lifecycle uses
+   * this boundary to replace a stale viewport plan before the current bitmap
+   * is consumed, without teaching the primitive how to project geometry.
+   */
+  synchronizeChartFrame?: () => void;
 }
 
 class DrawingScenePaneView implements PrimitivePaneView {
@@ -51,30 +42,26 @@ class DrawingScenePaneView implements PrimitivePaneView {
 
 /**
  * The only LWC primitive owned by the visible static drawing scene. Geometry
- * is prepared before publication; chart-driven view updates are intentionally
- * no-ops and can never trigger projection work.
+ * remains owned by the scene runtime; this primitive only gives that runtime
+ * one pre-paint synchronization boundary and consumes its published plan.
  */
 export class DrawingScenePrimitive {
   readonly #renderer: DrawingSceneRenderer;
   readonly #paneView: DrawingScenePaneView;
   readonly #paneViews: readonly PrimitivePaneView[];
-  readonly #requestFrame: (callback: () => void) => unknown;
-  readonly #cancelFrame: (handle: unknown) => void;
+  readonly #synchronizeChartFrame: () => void;
   readonly #paintListeners = new Set<DrawingScenePaintListener>();
   #requestUpdate: (() => void) | null = null;
-  #updateFrameHandle: unknown = null;
-  #updateScheduled = false;
+  #updatingAllViews = false;
   #attachmentRevision = 0;
   #paintSequence = 0;
   #disposed = false;
   _series: DrawingAttachedParameter["series"] | null = null;
 
   constructor({
-    requestFrame = defaultRequestFrame,
-    cancelFrame = defaultCancelFrame,
+    synchronizeChartFrame = () => {},
   }: DrawingScenePrimitiveOptions = {}) {
-    this.#requestFrame = requestFrame;
-    this.#cancelFrame = cancelFrame;
+    this.#synchronizeChartFrame = synchronizeChartFrame;
     this.#renderer = new DrawingSceneRenderer((plan) => {
       this.#acknowledgePainted(plan);
     });
@@ -108,24 +95,11 @@ export class DrawingScenePrimitive {
     }
   }
 
-  #cancelPendingUpdate(): void {
-    if (!this.#updateScheduled) return;
-    this.#cancelFrame(this.#updateFrameHandle);
-    this.#updateFrameHandle = null;
-    this.#updateScheduled = false;
-  }
-
-  #scheduleUpdate(): void {
-    if (!this.#requestUpdate || this.#updateScheduled) return;
-    this.#updateScheduled = true;
-    this.#updateFrameHandle = this.#requestFrame(() => {
-      this.#updateFrameHandle = null;
-      this.#updateScheduled = false;
-      const requestUpdate = this.#requestUpdate;
-      if (!requestUpdate) return;
-      drawingPerfCounters.recordRequestUpdate();
-      requestUpdate();
-    });
+  #requestChartUpdate(): void {
+    const requestUpdate = this.#requestUpdate;
+    if (!requestUpdate || this.#updatingAllViews) return;
+    drawingPerfCounters.recordRequestUpdate();
+    requestUpdate();
   }
 
   attached({ series, requestUpdate }: DrawingAttachedParameter): void {
@@ -136,7 +110,6 @@ export class DrawingScenePrimitive {
   }
 
   detached(): void {
-    this.#cancelPendingUpdate();
     this.#attachmentRevision += 1;
     this.#clearPaintListeners();
     this._series = null;
@@ -156,8 +129,13 @@ export class DrawingScenePrimitive {
   }
 
   updateAllViews(): void {
-    // Prepared scene plans are published explicitly. Cursor-only and ordinary
-    // chart updates must not project, scan, allocate, or replace this plan.
+    if (this.#disposed || this.#updatingAllViews || !this.#requestUpdate || !this._series) return;
+    this.#updatingAllViews = true;
+    try {
+      this.#synchronizeChartFrame();
+    } finally {
+      this.#updatingAllViews = false;
+    }
   }
 
   paneViews(): readonly PrimitivePaneView[] {
@@ -168,14 +146,14 @@ export class DrawingScenePrimitive {
     if (this.#disposed || !this.#requestUpdate || !this._series) return false;
     if (this.#renderer.plan() === plan) return true;
     this.#renderer.setPlan(plan);
-    this.#scheduleUpdate();
+    this.#requestChartUpdate();
     return true;
   }
 
   clearPlan(requestUpdate = true): void {
     if (this.#renderer.plan() === null) return;
     this.#renderer.setPlan(null);
-    if (requestUpdate) this.#scheduleUpdate();
+    if (requestUpdate) this.#requestChartUpdate();
   }
 
   plan(): DrawingScreenDisplayList | null {

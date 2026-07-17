@@ -42,16 +42,15 @@ test("scene primitive permanently reuses one normal pane view and owns no LWC hi
   assert.equal("hitTest" in primitive, false);
 });
 
-test("plan publication coalesces requestUpdate and chart view updates never rebuild", () => {
-  const frames: Array<() => void> = [];
-  const cancelled: unknown[] = [];
+test("chart view update synchronizes the plan before paint without requesting a later frame", () => {
   let updates = 0;
-  const primitive = new DrawingScenePrimitive({
-    requestFrame(callback) {
-      frames.push(callback);
-      return frames.length;
+  let synchronizations = 0;
+  let replacement: ReturnType<typeof createDrawingScreenDisplayList> | null = null;
+  const primitive: DrawingScenePrimitive = new DrawingScenePrimitive({
+    synchronizeChartFrame() {
+      synchronizations += 1;
+      if (replacement) primitive.publishPlan(replacement);
     },
-    cancelFrame(handle) { cancelled.push(handle); },
   });
   primitive.attached({
     series: {},
@@ -63,18 +62,17 @@ test("plan publication coalesces requestUpdate and chart view updates never rebu
   const second = createDrawingScreenDisplayList(stamp, []);
   assert.equal(primitive.publishPlan(first), true);
   assert.equal(primitive.publishPlan(first), true);
-  assert.equal(primitive.publishPlan(second), true);
-  for (let index = 0; index < 1_000; index += 1) primitive.updateAllViews();
-  assert.equal(frames.length, 1);
-  assert.equal(updates, 0);
-  frames[0]?.();
   assert.equal(updates, 1);
+  replacement = second;
+  primitive.updateAllViews();
+  assert.equal(synchronizations, 1);
+  assert.equal(updates, 1,
+    "publication inside updateAllViews must be consumed by the current chart frame");
   assert.strictEqual(primitive.plan(), second);
 
   primitive.clearPlan();
-  assert.equal(frames.length, 2);
+  assert.equal(updates, 2);
   primitive.detached();
-  assert.deepEqual(cancelled, [2]);
   assert.equal(primitive.plan(), null);
   assert.equal(primitive.publishPlan(first), false);
 });

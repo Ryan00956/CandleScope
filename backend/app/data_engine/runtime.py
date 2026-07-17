@@ -1064,17 +1064,27 @@ async def _background_gap_audit_loop(
                     max_gaps=100,
                     repair=True,
                 )
-            if report.queued or report.failed:
+            if (
+                report.queued
+                or report.failed
+                or report.ledger_resolved
+                or report.ledger_failed
+            ):
                 logger.info(
-                    "Background gap audit: %d scanned, %d queued, %d failed",
+                    "Background gap audit: %d scanned, %d queued, %d failed; "
+                    "ledger %d scanned, %d resolved, %d failed",
                     report.scanned,
                     report.queued,
                     report.failed,
+                    report.ledger_scanned,
+                    report.ledger_resolved,
+                    report.ledger_failed,
                 )
                 print(
                     "[gap-audit] "
                     f"{report.scanned} scanned, {report.queued} queued, "
-                    f"{report.failed} failed"
+                    f"{report.failed} failed; ledger {report.ledger_scanned} scanned, "
+                    f"{report.ledger_resolved} resolved, {report.ledger_failed} failed"
                 )
         except asyncio.CancelledError:
             raise

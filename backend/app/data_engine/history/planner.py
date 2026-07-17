@@ -14,7 +14,11 @@ from app.data_engine.history.models import (
     TimeBound,
     TimeRange,
 )
-from app.data_engine.interval_policy import last_closed_bar_open_ms
+from app.data_engine.interval_policy import (
+    compute_bucket_start_ms,
+    last_closed_bar_open_ms,
+    parse_interval_ms,
+)
 
 
 def _now_ms() -> int:
@@ -150,8 +154,33 @@ class HistoryRequestPlanner:
                 current_ms,
                 request.interval,
             )
-            if last_closed_ms is not None and effective_end > last_closed_ms:
-                excluded_start = max(effective_start, last_closed_ms + 1)
+            interval_ms = parse_interval_ms(request.interval)
+            requested_end_open_ms = (
+                compute_bucket_start_ms(
+                    effective_end,
+                    interval_ms,
+                    interval=request.interval,
+                )
+                if interval_ms is not None and interval_ms > 0
+                else None
+            )
+            if requested_end_open_ms is not None:
+                # All later planner/calendar work is expressed in target-bar
+                # opens.  Retaining a wall-clock close here would make the
+                # already-selected bar look followed by a pseudo
+                # market-closed millisecond range.
+                effective_end = requested_end_open_ms
+            if (
+                last_closed_ms is not None
+                and requested_end_open_ms is not None
+                and requested_end_open_ms > last_closed_ms
+            ):
+                # A full-day wall-clock edge (for example 23:59:59.999) has
+                # the same target open as that just-closed daily bar.  Only
+                # exclude from the first genuinely forming target bucket;
+                # comparing raw timestamps would incorrectly defer the
+                # already-closed candle until the following day.
+                excluded_start = max(effective_start, requested_end_open_ms)
                 if excluded_start <= effective_end:
                     tail_has_expected_open = bool(selected_calendar.open_segments(
                         excluded_start,

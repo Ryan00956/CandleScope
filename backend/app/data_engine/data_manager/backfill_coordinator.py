@@ -26,6 +26,7 @@ from app.data_engine.history.models import (
 from app.data_engine.history.planner import HistoryRequestPlanner
 from app.data_engine.history.service import HistoryAvailabilityService
 from app.data_engine.interval_policy import (
+    compute_bucket_start_ms,
     last_closed_bar_open_ms,
     parse_interval_ms,
 )
@@ -220,6 +221,10 @@ class ScanReport:
     queued: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    ledger_scanned: int = 0
+    ledger_resolved: int = 0
+    ledger_skipped: int = 0
+    ledger_failed: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -228,7 +233,22 @@ class ScanReport:
             "queued": self.queued,
             "failed": self.failed,
             "errors": list(self.errors),
+            "ledger_scanned": self.ledger_scanned,
+            "ledger_resolved": self.ledger_resolved,
+            "ledger_skipped": self.ledger_skipped,
+            "ledger_failed": self.ledger_failed,
         }
+
+
+@dataclass(slots=True)
+class LedgerReconciliationReport:
+    """Result of verifying stale ledger decisions against stored K-lines."""
+
+    scanned: int = 0
+    resolved: int = 0
+    skipped: int = 0
+    failed: int = 0
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -1189,6 +1209,143 @@ class BackfillCoordinator:
                     exc,
                 )
 
+        ledger_report = await self.reconcile_gap_ledger(
+            limit=max_gaps,
+            scan_limit=scan_limit,
+        )
+        report.ledger_scanned += ledger_report.scanned
+        report.ledger_resolved += ledger_report.resolved
+        report.ledger_skipped += ledger_report.skipped
+        report.ledger_failed += ledger_report.failed
+        if ledger_report.errors:
+            report.errors.extend(ledger_report.errors)
+        return report
+
+    async def reconcile_gap_ledger(
+        self,
+        *,
+        ranges: Iterable[RepairRequest] | None = None,
+        limit: int = 100,
+        scan_limit: int = 50_000,
+    ) -> LedgerReconciliationReport:
+        """Close stale ledger decisions only after an exact storage recheck.
+
+        A past repair can populate storage before this process knows about it,
+        leaving a legacy ``source_empty`` or ``failed`` row behind.  This
+        method never trusts the caller or the ledger by itself: every target
+        range is normalised to target-bar opens, must be fully closed, and is
+        then scanned for head/interior/tail gaps before any ledger mutation.
+
+        With ``ranges=None`` it reconciles inactive ledger rows.  Internal
+        callers may supply exact known ranges (for example, after importing
+        authoritative history); overlapping inactive rows are still closed
+        only if their entire range is covered by the verified scan.
+        """
+        report = LedgerReconciliationReport()
+        if self._gap_ledger is None:
+            return report
+
+        mark_covered = getattr(self._gap_ledger, "mark_covered_resolved", None)
+        if not callable(mark_covered):
+            report.errors.append("gap ledger does not support coverage reconciliation")
+            report.failed += 1
+            return report
+
+        if ranges is None:
+            list_reconcilable = getattr(self._gap_ledger, "list_reconcilable", None)
+            if not callable(list_reconcilable):
+                return report
+            try:
+                rows = await run_storage(
+                    list_reconcilable,
+                    limit=max(1, int(limit)),
+                )
+            except Exception as exc:
+                report.failed += 1
+                report.errors.append(f"gap ledger reconciliation lookup failed: {exc}")
+                logger.exception("Gap ledger reconciliation lookup failed")
+                return report
+            candidates: list[RepairRequest] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    report.failed += 1
+                    report.errors.append("gap ledger returned a malformed row")
+                    continue
+                try:
+                    candidates.append(self._repair_request_from_ledger_row(row))
+                except (KeyError, TypeError, ValueError) as exc:
+                    report.failed += 1
+                    report.errors.append(f"invalid gap-ledger row: {exc}")
+        else:
+            candidates = list(ranges)
+
+        scanner = getattr(self._storage, "scan_gaps", None)
+        if not callable(scanner):
+            report.failed += 1
+            report.errors.append("storage does not support gap scanning")
+            return report
+
+        now_ms = int(time.time() * 1000)
+        seen_ranges: set[tuple[tuple[str, str, str, str], int, int]] = set()
+        for raw_request in candidates:
+            if self._shutdown:
+                break
+            try:
+                request = self._canonical_reconciliation_request(raw_request)
+            except (AttributeError, TypeError, ValueError) as exc:
+                report.failed += 1
+                report.errors.append(f"invalid gap-ledger range: {exc}")
+                continue
+            if request is None:
+                report.skipped += 1
+                continue
+            range_key = (request.series_key, request.start_ms, request.end_ms)
+            if range_key in seen_ranges:
+                continue
+            seen_ranges.add(range_key)
+            if not self._request_range_is_fully_closed(request, now_ms):
+                report.skipped += 1
+                continue
+
+            try:
+                scan = await run_storage(
+                    scanner,
+                    symbol=request.symbol,
+                    interval=request.interval,
+                    start_ms=request.start_ms,
+                    end_ms=request.end_ms,
+                    exchange=request.exchange,
+                    market_type=request.market_type,
+                    limit=max(1, int(scan_limit)),
+                )
+                report.scanned += 1
+                if (
+                    not isinstance(scan, dict)
+                    or scan.get("error")
+                    or scan.get("truncated")
+                    or int(scan.get("gap_count", 0) or 0) != 0
+                    or int(scan.get("scanned_bars", 0) or 0) <= 0
+                ):
+                    report.skipped += 1
+                    continue
+                resolved = await run_storage(mark_covered, request)
+                report.resolved += max(0, int(resolved or 0))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                report.failed += 1
+                report.errors.append(
+                    f"{request.exchange}:{request.market_type}:"
+                    f"{request.symbol}@{request.interval}: {exc}"
+                )
+                logger.warning(
+                    "Gap ledger storage reconciliation failed for %s:%s:%s@%s: %s",
+                    request.exchange,
+                    request.market_type,
+                    request.symbol,
+                    request.interval,
+                    exc,
+                )
         return report
 
     async def shutdown(self) -> None:
@@ -1211,6 +1368,7 @@ class BackfillCoordinator:
         self._prune_retained_state()
         prepared = self._prepare_history_request(request)
         if prepared.request is None:
+            self._ledger_mark_history_deferred(request, prepared.plan)
             future = self._future_for(request)
             outcome = self._history_no_fetch_outcome(request, prepared.plan)
             self._complete(request, outcome)
@@ -1965,6 +2123,14 @@ class BackfillCoordinator:
                 missing_count=remaining,
                 error=None,
             )
+            if verification.get("verified_contiguous") is True:
+                mark_covered = getattr(
+                    self._gap_ledger,
+                    "mark_covered_resolved",
+                    None,
+                )
+                if callable(mark_covered):
+                    mark_covered(request)
         except Exception:
             logger.exception("Gap ledger verified update failed for %s", request.request_id)
 
@@ -1980,6 +2146,95 @@ class BackfillCoordinator:
         except Exception:
             logger.exception("Gap ledger failure update failed for %s", request.request_id)
 
+    @staticmethod
+    def _repair_request_from_ledger_row(row: dict[str, Any]) -> RepairRequest:
+        """Build a non-scheduled verification request from a ledger row."""
+        symbol = str(row.get("symbol") or "").strip().upper()
+        interval = str(row.get("interval") or "").strip()
+        if not symbol or not interval:
+            raise ValueError("ledger row is missing symbol or interval")
+        ledger_id = row.get("id")
+        return RepairRequest(
+            symbol=symbol,
+            interval=interval,
+            start_ms=int(row["start_ms"]),
+            end_ms=int(row["end_ms"]),
+            exchange=str(row.get("exchange") or "binance").strip().lower(),
+            market_type=str(row.get("market_type") or "spot").strip().lower(),
+            reason="ledger_reconcile",
+            requester="ledger_reconcile",
+            metadata={
+                "origin": "ledger_storage_reconciliation",
+                "ledger_id": ledger_id,
+                "ledger_status": row.get("status"),
+            },
+            request_id=f"ledger-reconcile-{ledger_id}",
+        )
+
+    @staticmethod
+    def _target_open_range(request: RepairRequest) -> tuple[int, int] | None:
+        """Normalize a ledger/request range to inclusive target-bar opens."""
+        interval_ms = parse_interval_ms(request.interval)
+        if interval_ms is None or interval_ms <= 0:
+            return None
+        start_ms = compute_bucket_start_ms(
+            int(request.start_ms),
+            interval_ms,
+            interval=request.interval,
+        )
+        end_ms = compute_bucket_start_ms(
+            int(request.end_ms),
+            interval_ms,
+            interval=request.interval,
+        )
+        if end_ms < start_ms:
+            return None
+        return start_ms, end_ms
+
+    @classmethod
+    def _canonical_reconciliation_request(
+        cls,
+        request: RepairRequest,
+    ) -> RepairRequest | None:
+        """Return the target-open version of a range for strict storage scans."""
+        target_range = cls._target_open_range(request)
+        if target_range is None:
+            return None
+        start_ms, end_ms = target_range
+        metadata = dict(getattr(request, "metadata", {}) or {})
+        metadata["canonical_target_range"] = {
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+        }
+        return RepairRequest(
+            symbol=request.symbol,
+            interval=request.interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            exchange=request.exchange,
+            market_type=request.market_type,
+            reason=request.reason,
+            priority=request.priority,
+            requester=request.requester,
+            wait_policy=request.wait_policy,
+            metadata=metadata,
+            request_id=request.request_id,
+        )
+
+    @classmethod
+    def _request_range_is_fully_closed(
+        cls,
+        request: RepairRequest,
+        now_ms: int,
+    ) -> bool:
+        """Whether every target bucket represented by ``request`` is closed."""
+        target_range = cls._target_open_range(request)
+        if target_range is None:
+            return False
+        _, end_open_ms = target_range
+        last_closed_ms = last_closed_bar_open_ms(now_ms, request.interval)
+        return last_closed_ms is not None and end_open_ms <= last_closed_ms
+
     def _should_skip_audited_gap(self, request: RepairRequest) -> bool:
         if self._gap_ledger is None:
             return False
@@ -1993,12 +2248,82 @@ class BackfillCoordinator:
             return False
         if not status:
             return False
-        if status.get("status") != "source_empty":
+        now_ms = int(time.time() * 1000)
+        status_value = str(status.get("status") or "")
+
+        if status_value == "unavailable":
+            next_retry_at = status.get("next_retry_at")
+            return next_retry_at is not None and int(next_retry_at) > now_ms
+
+        if status_value == "not_expected":
+            # A forming range becomes actionable naturally once the entire
+            # recorded target window has closed.  Never let its old ledger
+            # marker suppress that later audit.
+            return not self._request_range_is_fully_closed(request, now_ms)
+
+        if status_value != "source_empty":
             return False
+
+        # A source-empty record is only a safe suppression while the exact
+        # range remains closed.  Older versions could write this state after
+        # asking the provider for a forming daily bar; once that bar closes it
+        # must re-enter the normal audit path even if the 24-hour cooldown has
+        # not elapsed yet.
+        if not self._request_range_is_fully_closed(request, now_ms):
+            return True
+        resolved_at = status.get("resolved_at") or status.get("last_checked_at")
+        if resolved_at is not None:
+            if not self._request_range_is_fully_closed(request, int(resolved_at)):
+                return False
         next_retry_at = status.get("next_retry_at")
         if next_retry_at is None:
             return True
-        return int(next_retry_at) > int(time.time() * 1000)
+        return int(next_retry_at) > now_ms
+
+    def _ledger_mark_history_deferred(
+        self,
+        request: RepairRequest,
+        plan: HistoryPlan | None,
+    ) -> None:
+        """Persist explicit forming/unavailable decisions without source-empty.
+
+        Fetch planning happens before the scheduler, so no queued ledger row
+        exists for a no-fetch outcome unless we create one here.  Keeping these
+        semantics distinct prevents a transient/forming request from becoming
+        a durable source-empty hole.
+        """
+        if self._gap_ledger is None or plan is None:
+            return
+        if plan.disposition not in {
+            HistoryDisposition.NOT_EXPECTED,
+            HistoryDisposition.RETRYABLE,
+            HistoryDisposition.UNKNOWN,
+        }:
+            return
+        try:
+            self._gap_ledger.upsert_detected(request, status="queued")
+            mark_deferred = getattr(self._gap_ledger, "mark_deferred", None)
+            if not callable(mark_deferred):
+                return
+            if plan.disposition is HistoryDisposition.NOT_EXPECTED:
+                exclusion = plan.exclusions[0] if plan.exclusions else None
+                mark_deferred(
+                    request,
+                    status="not_expected",
+                    reason=(exclusion.reason.value if exclusion is not None else None),
+                )
+                return
+            mark_deferred(
+                request,
+                status="unavailable",
+                reason=("history availability is unknown" if plan.unknown else None),
+                next_retry_at=plan.retry_at_ms,
+            )
+        except Exception:
+            logger.exception(
+                "Gap ledger deferred-history update failed for %s",
+                request.request_id,
+            )
 
     def _ledger_open_snapshot(self) -> list[dict[str, Any]]:
         if self._gap_ledger is None:

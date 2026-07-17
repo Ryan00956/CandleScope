@@ -426,7 +426,8 @@ async def _handle_indicator_subscribe(
                 "closedThrough": max((int(bar.time) for bar in query_bars), default=0),
             }
 
-        seed_bars = confirmed_indicator_seed_bars(query_result.bars)
+        query_bars = list(query_result.bars or [])
+        seed_bars = confirmed_indicator_seed_bars(query_bars)
         key, result = indicator_engine.subscribe(
             symbol=symbol,
             interval=interval,
@@ -475,6 +476,7 @@ async def _handle_indicator_subscribe(
     }
     range_service = getattr(indicator_engine, "indicator_range_service", None)
     resume_patch = None
+    initial_preview = None
     if range_service is not None:
         data_revision = _indicator_subscription_revision(
             range_service,
@@ -527,9 +529,44 @@ async def _handle_indicator_subscribe(
                 end_s=int(resume_plan.end),
             )
             resume_patch["dataRevision"] = data_revision
+
+    # The seed intentionally excludes the forming bar so its values never
+    # become durable history.  Still, a newly opened/reconnected chart should
+    # not have to wait for another market tick before its realtime VOL (or
+    # other hosted indicator) gets the current point.  Compute this one
+    # non-committing preview directly and send it *after* the acknowledgement
+    # (and any resume patch) to keep the client-side subscription state ordered.
+    forming_bar = next(
+        (
+            bar
+            for bar in reversed(query_bars)
+            if not getattr(bar, "is_closed", True)
+            and (not seed_bars or int(bar.time) > int(seed_bars[-1].time))
+        ),
+        None,
+    )
+    preview_for_key = getattr(indicator_engine, "preview_for_key", None)
+    if forming_bar is not None and callable(preview_for_key):
+        preview_values = preview_for_key(key, forming_bar)
+        if preview_values:
+            initial_preview = {
+                "type": "indicator.preview",
+                "clientId": client_id,
+                "indicatorId": key.uid,
+                "exchange": key.exchange,
+                "symbol": symbol,
+                "interval": interval,
+                "market_type": market_type,
+                "barTime": int(forming_bar.time),
+                "timestampMs": int(time.time() * 1000),
+                "values": preview_values,
+                "bar": forming_bar.to_dict(),
+            }
     await send_json(subscribed_payload)
     if resume_patch is not None:
         await send_json(resume_patch)
+    if initial_preview is not None:
+        await send_json(initial_preview)
 
 
 def _indicator_subscription_revision(

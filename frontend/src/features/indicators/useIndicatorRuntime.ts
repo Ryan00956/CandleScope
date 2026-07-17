@@ -7,6 +7,11 @@ import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type { IndicatorRangeEvent } from "../market-data/klineContracts.js";
 import { useActiveIndicatorStore } from "./activeIndicatorStore.js";
 import { resolveRealtimeHistogramColor } from "./indicatorRealtimeColor.js";
+import {
+  applyRealtimeIndicatorValuesToLines,
+  shouldRetainProvisionalIndicatorPreview,
+  type ProvisionalIndicatorPreview,
+} from "./indicatorRealtimePreview.js";
 import { computeIndicatorRangeBatch } from "../../services/indicatorApi.js";
 import { useIndicatorComputeController } from "./indicatorComputeController.js";
 import { parseIntervalParts, parseIntervalSeconds } from "../../utils/intervals.js";
@@ -57,9 +62,7 @@ import {
   normalizeIndicatorPayload,
   normalizeParamSchema,
   replaceIndicatorLinesRange,
-  resolveWsValue,
   stringSignature,
-  upsertLinePoint,
 } from "./indicatorPayloadRuntime.js";
 import type {
   DeferredRightCatchupPlan,
@@ -78,7 +81,6 @@ import type {
   IndicatorSubscribeMessage,
   IndicatorSubscribedMessage,
   IndicatorVisibleRange,
-  IndicatorValuePoint,
   IndicatorValuesMessage,
 } from "./indicatorTypes.js";
 
@@ -119,6 +121,19 @@ interface ResolvedIndicatorRuntimeInputs {
   sessionKey: string;
   savedVisibleRange: IndicatorVisibleRange | null;
   symbol: string;
+}
+
+interface IndicatorPreviewContext {
+  exchange: string;
+  interval: string;
+  marketType: string;
+  sessionKey: string;
+  symbol: string;
+}
+
+interface ContextualProvisionalIndicatorPreview {
+  contextKey: string;
+  preview: ProvisionalIndicatorPreview;
 }
 
 interface HostedReadinessOptions {
@@ -379,6 +394,16 @@ function normalizeRangeBoundary(value: unknown): number | null {
   return Number.isFinite(normalized) && normalized > 0 ? normalized : null;
 }
 
+function buildIndicatorPreviewContextKey({
+  exchange,
+  interval,
+  marketType,
+  sessionKey,
+  symbol,
+}: IndicatorPreviewContext): string {
+  return [sessionKey, exchange, marketType, symbol, interval].join("|");
+}
+
 function inferIntervalSecondsFromChartData(chartData: KlineBar[] = []): number | null {
   if (!Array.isArray(chartData) || chartData.length < 2) return null;
   const deltas: number[] = [];
@@ -531,6 +556,9 @@ export function useIndicatorRuntime(
   const chartDataMetaRef = useLatestRef(chartDataMeta);
   const candleUpColorRef = useLatestRef(candleUpColor);
   const candleDownColorRef = useLatestRef(candleDownColor);
+  const provisionalIndicatorPreviewsRef = useRef<
+    Map<string, ContextualProvisionalIndicatorPreview>
+  >(new Map());
   const consumedIndicatorRangeRequestIdsRef = useRef<Set<number>>(new Set());
   const autoRightCatchupRangeSignaturesRef = useRef<Set<string>>(new Set());
   const autoRightCatchupPendingRef = useRef<DeferredRightCatchupPlan | null>(null);
@@ -563,6 +591,39 @@ export function useIndicatorRuntime(
     symbol,
   });
 
+  const resolveProvisionalIndicatorPreview = useCallback((indicatorId: string) => {
+    const candidate = provisionalIndicatorPreviewsRef.current.get(indicatorId);
+    if (!candidate) return null;
+    const contextKey = buildIndicatorPreviewContextKey(runtimeContextRef.current);
+    return candidate.contextKey === contextKey ? candidate : null;
+  }, [runtimeContextRef]);
+
+  const reapplyProvisionalIndicatorPreview = useCallback((
+    indicator: IndicatorDefinition,
+    lines: IndicatorLine[],
+    payload: Partial<IndicatorPayloadEnvelope> | null | undefined,
+  ): IndicatorLine[] => {
+    const candidate = resolveProvisionalIndicatorPreview(indicator.id);
+    if (!candidate) return lines;
+    if (!shouldRetainProvisionalIndicatorPreview(candidate.preview, lines, payload)) {
+      provisionalIndicatorPreviewsRef.current.delete(indicator.id);
+      return lines;
+    }
+    return applyRealtimeIndicatorValuesToLines({
+      ...(candidate.preview.bar ? { bar: candidate.preview.bar } : {}),
+      barTime: candidate.preview.barTime,
+      candleDownColor: candleDownColorRef.current,
+      candleUpColor: candleUpColorRef.current,
+      indicator,
+      lines,
+      values: candidate.preview.values,
+    });
+  }, [
+    candleDownColorRef,
+    candleUpColorRef,
+    resolveProvisionalIndicatorPreview,
+  ]);
+
   const chartDataStatus = chartDataMeta?.status || "idle";
   const chartDataReady = Boolean(chartData?.length && chartDataStatus === "ready");
   const indicatorCacheHydrationSignature = useMemo(() => (
@@ -588,6 +649,10 @@ export function useIndicatorRuntime(
     initialHostedRangeSignaturesRef.current.clear();
     autoRightCatchupRangeSignaturesRef.current.clear();
   }, [indicatorCacheHydrationSignature]);
+
+  useLayoutEffect(() => {
+    provisionalIndicatorPreviewsRef.current.clear();
+  }, [exchange, interval, marketType, sessionKey, symbol]);
 
   const resetHostedSubscriptionReadiness = useCallback(() => {
     const context = runtimeContextRef.current;
@@ -676,7 +741,11 @@ export function useIndicatorRuntime(
         indicator.id === indicatorId
           ? {
               ...indicator,
-              lines: normalized.lines,
+              lines: reapplyProvisionalIndicatorPreview(
+                indicator,
+                normalized.lines,
+                payload,
+              ),
               error,
               ...(schema.length > 0 ? { paramSchema: schema } : {}),
             }
@@ -690,7 +759,12 @@ export function useIndicatorRuntime(
       normalized,
       schema,
     });
-  }, [activeIndicatorsRef, getIndicatorCacheContext, setActiveIndicators]);
+  }, [
+    activeIndicatorsRef,
+    getIndicatorCacheContext,
+    reapplyProvisionalIndicatorPreview,
+    setActiveIndicators,
+  ]);
 
   const applyWsPatch = useCallback((indicatorId: string, payload: IndicatorPatchMessage) => {
     const normalized = normalizeIndicatorPayload(payload, indicatorId);
@@ -713,7 +787,11 @@ export function useIndicatorRuntime(
         indicator.id === indicatorId
           ? {
               ...indicator,
-              lines: mergeIndicatorLines(indicator.lines || [], normalized.lines),
+              lines: reapplyProvisionalIndicatorPreview(
+                indicator,
+                mergeIndicatorLines(indicator.lines || [], normalized.lines),
+                payload,
+              ),
               error: payload?.ok === false ? formatIndicatorError(payload) : null,
             }
           : indicator
@@ -725,7 +803,13 @@ export function useIndicatorRuntime(
       indicatorId,
       normalized,
     });
-  }, [activeIndicatorsRef, getIndicatorCacheContext, markHostedSubscriptionReady, setActiveIndicators]);
+  }, [
+    activeIndicatorsRef,
+    getIndicatorCacheContext,
+    markHostedSubscriptionReady,
+    reapplyProvisionalIndicatorPreview,
+    setActiveIndicators,
+  ]);
 
   const applyWsReplaceRange = useCallback((
     indicatorId: string,
@@ -749,7 +833,11 @@ export function useIndicatorRuntime(
         indicator.id === indicatorId
           ? {
               ...indicator,
-              lines: replaceIndicatorLinesRange(indicator.lines || [], normalized.lines, range),
+              lines: reapplyProvisionalIndicatorPreview(
+                indicator,
+                replaceIndicatorLinesRange(indicator.lines || [], normalized.lines, range),
+                payload,
+              ),
               error: payload?.ok === false && !resolvedEmpty ? formatIndicatorError(payload) : null,
             }
           : indicator
@@ -762,7 +850,12 @@ export function useIndicatorRuntime(
       normalized,
       range,
     });
-  }, [activeIndicatorsRef, getIndicatorCacheContext, setActiveIndicators]);
+  }, [
+    activeIndicatorsRef,
+    getIndicatorCacheContext,
+    reapplyProvisionalIndicatorPreview,
+    setActiveIndicators,
+  ]);
 
   const applyWsValues = useCallback((
     indicatorId: string,
@@ -779,6 +872,27 @@ export function useIndicatorRuntime(
     const bar = payloadBar && Number(payloadBar.time) === Number(barTime)
       ? payloadBar
       : currentChartData.find((item) => Number(item.time) === Number(barTime));
+
+    const existingPreview = resolveProvisionalIndicatorPreview(indicatorId);
+    if (!isFinal) {
+      // A delayed preview for an older forming bar must not overwrite the
+      // newer provisional point. Values always retain their exact timestamp;
+      // they are never aligned by a nearby main-series candle index.
+      if (existingPreview && barTime < existingPreview.preview.barTime) return;
+      const preview: ProvisionalIndicatorPreview = { barTime, values };
+      if (bar) preview.bar = bar;
+      provisionalIndicatorPreviewsRef.current.set(indicatorId, {
+        contextKey: buildIndicatorPreviewContextKey(runtimeContextRef.current),
+        preview,
+      });
+    } else if (
+      existingPreview
+      && barTime >= existingPreview.preview.barTime
+    ) {
+      // A final update supersedes the matching preview (or an older one when
+      // the exchange has already opened the next bar).
+      provisionalIndicatorPreviewsRef.current.delete(indicatorId);
+    }
 
     setActiveIndicators((prev) =>
       prev.map((indicator) => {
@@ -805,16 +919,14 @@ export function useIndicatorRuntime(
             rebaseCachedIndicatorRevision(indicator, getIndicatorCacheContext(), dataRevision);
           }
         }
-        const isSingleLine = indicator.lines.length === 1 && Object.keys(values).length === 1;
-        const lines = indicator.lines.map((line) => {
-          const value = resolveWsValue(line, values, isSingleLine);
-          if (value === undefined) return line;
-          const point: IndicatorValuePoint = { time: barTime, value: Number(value) };
-          const histogramColor = resolveHistogramColor(line, value);
-          if (line.type === "histogram" && histogramColor) {
-            point.color = histogramColor;
-          }
-          return { ...line, data: upsertLinePoint(line.data, point) };
+        const lines = applyRealtimeIndicatorValuesToLines({
+          ...(bar ? { bar } : {}),
+          barTime,
+          candleDownColor: candleDownColorRef.current,
+          candleUpColor: candleUpColorRef.current,
+          indicator,
+          lines: indicator.lines,
+          values,
         });
         return { ...indicator, lines, error: null };
       })
@@ -824,6 +936,8 @@ export function useIndicatorRuntime(
     candleUpColorRef,
     chartDataRef,
     getIndicatorCacheContext,
+    resolveProvisionalIndicatorPreview,
+    runtimeContextRef,
     setActiveIndicators,
   ]);
 

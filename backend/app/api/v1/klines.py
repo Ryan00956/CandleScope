@@ -202,8 +202,15 @@ async def _poll_backfill_storage(
     *,
     timeout_seconds: float,
     requery: Callable[[bool], Awaitable[Any]],
+    wait_through_partial_rows: bool = False,
 ) -> Any:
-    """Interleave exact backfill waiting with bounded storage re-queries."""
+    """Interleave exact backfill waiting with bounded storage re-queries.
+
+    Empty cold starts can return as soon as any rows appear.  A partial range
+    with a known tail/interior repair must instead keep waiting for the exact
+    repair future (within the same bounded budget), otherwise the API returns
+    the known incomplete history immediately.
+    """
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     wait_task: asyncio.Task[bool] | None = asyncio.create_task(
         _wait_for_backfill_requests(request, result)
@@ -230,7 +237,11 @@ async def _poll_backfill_storage(
             # final timeout. One chunk may have committed while another exact
             # request is still pending.
             result = await requery(False)
-            if result.bars or exact_wait_completed or time.monotonic() >= deadline:
+            if (
+                exact_wait_completed
+                or time.monotonic() >= deadline
+                or (result.bars and not wait_through_partial_rows)
+            ):
                 return result
     finally:
         if wait_task is not None:
@@ -245,6 +256,18 @@ def _last_closed_open_ms(interval: str, now_ms: int | None = None) -> int:
     """Return the latest closed bar open_time for an interval."""
     now = int(now_ms if now_ms is not None else time.time() * 1000)
     return last_closed_bar_open_ms(now, interval) or 0
+
+
+def _should_wait_for_backfill(result: Any) -> bool:
+    """Return whether a response has a scheduled repair worth bounded waiting."""
+    if not bool(getattr(result, "backfill_triggered", False)):
+        return False
+    if not getattr(result, "bars", None):
+        return True
+    return bool(
+        getattr(result, "has_tail_gap", False)
+        or getattr(result, "missing_ranges", None)
+    )
 
 
 def _first_expected_open_ms(start_ms: int, interval: str) -> int:
@@ -853,12 +876,13 @@ async def get_klines_history(
         # very first response already carries data. Poll re-queries pass
         # auto_backfill=False so we wait for the already-scheduled backfill
         # instead of spamming duplicate backfill requests.
-        if max_wait_ms > 0 and not result.bars and backfill_triggered:
+        if max_wait_ms > 0 and _should_wait_for_backfill(result):
             result = await _poll_backfill_storage(
                 request,
                 result,
                 timeout_seconds=max_wait_ms / 1000,
                 requery=_run_history_query,
+                wait_through_partial_rows=bool(result.bars),
             )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager history query failed: {exc}") from exc
@@ -1146,12 +1170,13 @@ async def get_klines_before(
         # multi-second window where server-streamed indicators are drawn but the
         # candle series is still empty. Poll re-queries pass auto_backfill=False
         # to avoid spamming duplicate backfill requests.
-        if max_wait_ms > 0 and not result.bars and backfill_triggered:
+        if max_wait_ms > 0 and _should_wait_for_backfill(result):
             result = await _poll_backfill_storage(
                 request,
                 result,
                 timeout_seconds=max_wait_ms / 1000,
                 requery=_run_before_query,
+                wait_through_partial_rows=bool(result.bars),
             )
             # If the wait timed out before the backfill delivered bars, keep
             # has_more=True (data is still on the way) so the client retries

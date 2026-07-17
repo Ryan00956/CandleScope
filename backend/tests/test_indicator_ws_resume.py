@@ -106,3 +106,63 @@ def test_builtin_subscribe_coalesces_seed_query_and_sends_small_resume_patch():
         }
 
     asyncio.run(_run())
+
+
+def test_builtin_subscribe_replays_forming_preview_after_acknowledgement():
+    async def _run() -> None:
+        closed_bars = _bars(3)
+        forming_bar = BarData(
+            time=closed_bars[-1].time + 60,
+            open=closed_bars[-1].close,
+            high=closed_bars[-1].close + 5,
+            low=closed_bars[-1].close - 2,
+            close=closed_bars[-1].close + 3,
+            volume=987.5,
+            is_closed=False,
+        )
+        dm = _DataManager([*closed_bars, forming_bar])
+        engine = create_engine()
+        sent: list[dict] = []
+
+        async def send_json(payload: dict) -> bool:
+            sent.append(payload)
+            return True
+
+        await _handle_indicator_subscribe(
+            websocket=SimpleNamespace(),
+            dm=dm,
+            indicator_engine=engine,
+            subscribed={},
+            custom_handles={},
+            custom_tasks={},
+            queue=asyncio.Queue(),
+            client_meta={},
+            seed_query_cache={},
+            send_json=send_json,
+            msg={
+                "action": "subscribe",
+                "clientId": "vol",
+                "name": "VOL",
+                "symbol": "BTCUSDT",
+                "interval": "1m",
+                "historyLimit": 100,
+            },
+        )
+
+        assert [item["type"] for item in sent] == [
+            "indicator.subscribed",
+            "indicator.preview",
+        ]
+        preview = sent[1]
+        assert preview["barTime"] == forming_bar.time
+        assert preview["bar"]["is_closed"] is False
+        assert preview["values"] == {"vol": forming_bar.volume}
+
+        key = engine.list_instances(symbol="BTCUSDT", interval="1m")[0]
+        # Preview remains non-committing: reconnecting/receiving a close event
+        # cannot duplicate the forming point in durable indicator history.
+        result = engine.get_result(key)
+        assert result is not None
+        assert result.outputs["vol"].data[-1].timestamp == closed_bars[-1].time
+
+    asyncio.run(_run())

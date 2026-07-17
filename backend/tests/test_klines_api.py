@@ -398,6 +398,74 @@ def test_history_requeries_storage_after_backfill_future_times_out() -> None:
     assert all(auto_backfill is False for auto_backfill in dm.calls[1:])
 
 
+def test_history_waits_for_a_scheduled_partial_tail_repair() -> None:
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.calls: list[bool | None] = []
+            self.tail_repaired = False
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+        ) -> QueryResult:
+            self.calls.append(auto_backfill)
+            bars = [BarData(time=1_700_000_000, open=1, high=2, low=1, close=2, volume=10)]
+            if self.tail_repaired:
+                bars.append(BarData(time=1_700_000_060, open=2, high=3, low=2, close=3, volume=11))
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(bars),
+                has_more=True,
+                backfill_triggered=len(self.calls) == 1,
+                has_tail_gap=not self.tail_repaired,
+                metadata={"backfill_request_ids": ["req-partial-tail"]},
+            )
+
+    class _CompletedCoordinator:
+        def __init__(self, data_manager: _HistoryDataManager) -> None:
+            self._data_manager = data_manager
+            self.waited: list[str] = []
+
+        async def wait_for_request(self, request_id: str):
+            self.waited.append(request_id)
+            self._data_manager.tail_repaired = True
+            return object()
+
+    dm = _HistoryDataManager()
+    coordinator = _CompletedCoordinator(dm)
+    client = _client_with_runtime(dm, coordinator)
+
+    response = client.get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "days": 0.001,
+            "exchange": "binance",
+            "market_type": "spot",
+            "max_wait_ms": 1000,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 2
+    assert coordinator.waited == ["req-partial-tail"]
+    assert dm.calls == [None, False]
+
+
 def test_history_returns_promptly_when_completed_backfill_has_no_rows() -> None:
     class _HistoryDataManager:
         def __init__(self) -> None:

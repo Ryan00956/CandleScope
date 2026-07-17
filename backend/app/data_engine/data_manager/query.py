@@ -35,6 +35,7 @@ from app.data_engine.interval_policy import (
     is_custom_interval,
     is_ephemeral_interval,
     last_closed_bar_open_ms,
+    latest_eligible_bar_open_ms,
     parse_custom_interval,
     parse_interval_ms,
 )
@@ -228,8 +229,22 @@ class QueryEngine:
         planned = self._plan_history_range(key, history_start_ms, history_end_ms)
 
         # Convert ms → seconds for cache queries
-        start_s = start_ms // 1000 if start_ms else None
-        end_s = end_ms // 1000 if end_ms else None
+        start_s = start_ms // 1000 if start_ms is not None else None
+        end_s = end_ms // 1000 if end_ms is not None else None
+        # An explicit range may end inside the target interval's forming
+        # bucket.  That bucket is queryable from the live cache but is not
+        # expected durable history, so do not treat it as a storage/backfill
+        # shortfall.  Keep the original end for reads; use the closed edge only
+        # when judging history completeness.
+        closed_end_s = end_s
+        if end_ms is not None:
+            eligible_end_ms = latest_eligible_bar_open_ms(
+                int(time.time() * 1000),
+                interval,
+                end_ms,
+            )
+            if eligible_end_ms is not None:
+                closed_end_s = min(end_s, eligible_end_ms // 1000)
 
         # ── Step 1: Try cache ────────────────────────────────
         if start_s is not None or end_s is not None:
@@ -240,7 +255,7 @@ class QueryEngine:
         if cached and self._is_complete(
             cached,
             start_s,
-            end_s,
+            closed_end_s,
             effective_limit,
             interval=interval,
             key=key,
@@ -351,13 +366,14 @@ class QueryEngine:
             ), planned, boundary_reached=bool(planned and planned[0].terminal))
 
         # ── Step 4: Check completeness & backfill ────────────
+        tail_range: tuple[int, int] | None = None
         if (
             allow_backfill
             and not missing_ranges
             and not self._is_complete(
                 merged,
                 start_s,
-                end_s,
+                closed_end_s,
                 effective_limit,
                 interval=interval,
                 key=key,
@@ -368,25 +384,34 @@ class QueryEngine:
             earliest_bar_ms = merged[0].time * 1000
             latest_bar_ms = merged[-1].time * 1000
 
-            # Determine which direction has a gap
+            # Determine which direction has a gap.  Tail completeness is
+            # anchored to the last *closed target bucket*, not `end - one
+            # fixed interval`: the old arithmetic missed exactly one absent
+            # daily bar whenever the request edge landed on that bar's open.
             has_gap_before = (start_ms is not None and earliest_bar_ms > start_ms)
-            has_gap_after = latest_bar_ms < (end_ms or now_ms) - (interval_secs * 1000)
+            tail_range = self._closed_tail_gap_range(
+                key,
+                latest_bar_ms=latest_bar_ms,
+                requested_end_ms=end_ms,
+                now_ms=now_ms,
+            )
+            has_gap_after = tail_range is not None
 
             if has_gap_before and has_gap_after:
                 # Both sides have gaps — backfill the larger gap first
                 # (forward catch-up is usually more urgent)
                 missing_range = self._trigger_backfill(
                     key,
-                    latest_bar_ms + interval_secs * 1000,
-                    end_ms,
+                    tail_range[0],
+                    tail_range[1],
                     reason="query_tail_gap",
                 )
             elif has_gap_after:
                 # Scenario 1: Forward catch-up (e.g. app was closed overnight)
                 missing_range = self._trigger_backfill(
                     key,
-                    latest_bar_ms + interval_secs * 1000,
-                    end_ms,
+                    tail_range[0],
+                    tail_range[1],
                     reason="query_tail_gap",
                 )
             elif has_gap_before:
@@ -420,16 +445,9 @@ class QueryEngine:
         )
 
         # ── Step 5: Detect tail gap ──────────────────────────
-        # If the latest bar in the result set trails "now" by more than
-        # 1.5 × interval, the front-end should keep showing a loading
-        # overlay until the backfill completes and fills the gap.
-        tail_gap = False
-        if merged and backfill_triggered:
-            interval_secs = parse_custom_interval(key.interval) or 60
-            now_s = int(time.time())
-            gap_s = now_s - merged[-1].time
-            if gap_s > interval_secs * 1.5:
-                tail_gap = True
+        # Keep this in lockstep with the actual closed-bar repair decision.
+        # Wall-clock staleness is not a reliable signal at a forming boundary.
+        tail_gap = bool(merged and backfill_triggered and tail_range is not None)
 
         elapsed = time.monotonic() - t0
         return self._apply_history_contract(QueryResult(
@@ -1110,14 +1128,33 @@ class QueryEngine:
         # isn't stale.  Without this, prewarm data from days ago can
         # satisfy count >= limit and skip backfill entirely.
         if interval and end_s is None:
-            interval_secs = parse_custom_interval(interval) or 60
-            now_s = int(time.time())
-            staleness = now_s - bars[-1].time
-            if staleness > interval_secs * 2:
+            now_ms = int(time.time() * 1000)
+            interval_ms = parse_interval_ms(interval)
+            eligible_end_ms = latest_eligible_bar_open_ms(now_ms, interval)
+            latest_open_ms = int(bars[-1].time) * 1000
+            next_open_ms = (
+                compute_bucket_end_ms(
+                    compute_bucket_start_ms(
+                        latest_open_ms,
+                        interval_ms,
+                        interval=interval,
+                    ),
+                    interval_ms,
+                    interval=interval,
+                )
+                if interval_ms is not None and interval_ms > 0
+                else None
+            )
+            if (
+                eligible_end_ms is not None
+                and next_open_ms is not None
+                and next_open_ms <= eligible_end_ms
+            ):
                 logger.debug(
-                    "Cache data stale for %s: latest=%d now=%d gap=%ds (%.1f intervals behind)",
-                    interval, bars[-1].time, now_s, staleness,
-                    staleness / interval_secs,
+                    "Cache data stale for %s: latest=%d latest_closed=%d",
+                    interval,
+                    latest_open_ms,
+                    eligible_end_ms,
                 )
                 return False
 
@@ -1134,6 +1171,46 @@ class QueryEngine:
         if end_s is not None and bars[-1].time < end_s:
             return False
         return True
+
+    @staticmethod
+    def _closed_tail_gap_range(
+        key: SeriesKey,
+        *,
+        latest_bar_ms: int,
+        requested_end_ms: int | None,
+        now_ms: int,
+    ) -> tuple[int, int] | None:
+        """Return a missing closed tail range, if the stored tail is behind.
+
+        The range is expressed in target-bar open timestamps.  It is shared by
+        latest, bounded-history, and recovery queries so an exact one-bar tail
+        is detected regardless of whether ``requested_end_ms`` lands on a bar
+        open, a bar close, or wall-clock time inside the following bar.
+        """
+        interval_ms = parse_interval_ms(key.interval)
+        if interval_ms is None or interval_ms <= 0:
+            return None
+        eligible_end_ms = latest_eligible_bar_open_ms(
+            now_ms,
+            key.interval,
+            requested_end_ms,
+        )
+        if eligible_end_ms is None:
+            return None
+
+        latest_bucket_ms = compute_bucket_start_ms(
+            int(latest_bar_ms),
+            interval_ms,
+            interval=key.interval,
+        )
+        next_open_ms = compute_bucket_end_ms(
+            latest_bucket_ms,
+            interval_ms,
+            interval=key.interval,
+        )
+        if next_open_ms > eligible_end_ms:
+            return None
+        return next_open_ms, eligible_end_ms
 
     def _trigger_backfill(
         self,

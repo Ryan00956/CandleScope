@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.exchanges.models import ExchangeCapabilities, ExchangeMarket, SymbolInfo
+from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
+from app.exchanges.models import (
+    ExchangeCapabilities,
+    ExchangeMarket,
+    HistoryAvailabilityPolicy,
+    HistoryCadence,
+    HistoryEmptyPageSemantics,
+    MarketChannelCapability,
+    SymbolInfo,
+)
 from app.exchanges.ws_protocol import WsSubscriptionMode, WsSubscriptionSpec
 
 
@@ -20,11 +29,54 @@ class TemplateExchangeAdapter:
         return ExchangeCapabilities(
             exchange=self.id,
             name=self.name,
+            capability_schema_version=3,
             markets=[
                 ExchangeMarket(
                     market_type="spot",
                     product_type="spot",
                     label="Spot",
+                    calendar_id="replace-with-exchange-calendar",
+                    timezone="UTC",
+                ),
+            ],
+            channels=[
+                MarketChannelCapability(
+                    channel=MarketChannel.KLINE,
+                    market_types=("spot",),
+                    realtime=True,
+                    history=True,
+                    realtime_transports=(
+                        TransportMode.WEBSOCKET,
+                        TransportMode.REST_POLL,
+                    ),
+                    history_transports=(TransportMode.REST_HISTORY,),
+                    delivery=DeliveryClass.APPEND,
+                    snapshot=True,
+                    sequence="timestamp",
+                    resync="replace_snapshot",
+                    params={"interval": ["1m", "5m", "15m", "1h", "1d"]},
+                    update_intervals_ms=(1000,),
+                    available_fields=(
+                        "interval",
+                        "open_time",
+                        "close_time",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                        "is_closed",
+                    ),
+                    connection_model="message_per_stream",
+                    limits={"rest.max_limit": 1000},
+                    history_policy=HistoryAvailabilityPolicy(
+                        cadence=HistoryCadence.REGULAR,
+                        empty_page_semantics=(
+                            HistoryEmptyPageSemantics.AUTHORITATIVE_RANGE_EMPTY
+                        ),
+                        calendar_id="replace-with-exchange-calendar",
+                        timezone="UTC",
+                    ),
                 ),
             ],
             native_intervals=["1m", "5m", "15m", "1h", "1d"],

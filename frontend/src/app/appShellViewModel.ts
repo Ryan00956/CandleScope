@@ -12,6 +12,7 @@ import type {
 function buildAppShellViewModelContext({
   session,
   marketData,
+  advancedMarketData,
   drawings,
   indicators,
   settings,
@@ -34,6 +35,8 @@ function buildAppShellViewModelContext({
     marketView,
     marketActions: marketData.actions,
     marketStatus: marketData.status,
+    advancedMarketView: advancedMarketData.view,
+    advancedMarketActions: advancedMarketData.actions,
     drawingView: drawings.view,
     drawingActions: drawings.actions,
     indicatorView: indicators.view,

@@ -36,8 +36,10 @@ from app.core.market import (
 from app.data_engine.interval_policy import (
     compute_bucket_end_ms,
     compute_bucket_start_ms,
+    last_closed_bar_open_ms,
     parse_interval_ms,
 )
+from app.data_engine.history import TradingCalendar
 from app.data_engine.storage import DEFAULT_EXCHANGE, DEFAULT_MARKET_TYPE
 
 router = APIRouter(prefix="/klines", tags=["klines"])
@@ -128,8 +130,15 @@ def _resolve_interval(interval: str) -> dict:
 
 
 def _bars_to_dicts(bars: list) -> list[dict]:
-    """Convert BarData list to lightweight-charts dicts."""
-    return [b.to_dict() if hasattr(b, "to_dict") else b for b in bars]
+    """Convert bars to the enhanced Kline API contract."""
+    return [
+        b.to_kline_dict()
+        if hasattr(b, "to_kline_dict")
+        else b.to_dict()
+        if hasattr(b, "to_dict")
+        else b
+        for b in bars
+    ]
 
 
 def _call_data_manager_method(method: Any, *args: Any, **kwargs: Any) -> Any:
@@ -193,8 +202,15 @@ async def _poll_backfill_storage(
     *,
     timeout_seconds: float,
     requery: Callable[[bool], Awaitable[Any]],
+    wait_through_partial_rows: bool = False,
 ) -> Any:
-    """Interleave exact backfill waiting with bounded storage re-queries."""
+    """Interleave exact backfill waiting with bounded storage re-queries.
+
+    Empty cold starts can return as soon as any rows appear.  A partial range
+    with a known tail/interior repair must instead keep waiting for the exact
+    repair future (within the same bounded budget), otherwise the API returns
+    the known incomplete history immediately.
+    """
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     wait_task: asyncio.Task[bool] | None = asyncio.create_task(
         _wait_for_backfill_requests(request, result)
@@ -221,7 +237,11 @@ async def _poll_backfill_storage(
             # final timeout. One chunk may have committed while another exact
             # request is still pending.
             result = await requery(False)
-            if result.bars or exact_wait_completed or time.monotonic() >= deadline:
+            if (
+                exact_wait_completed
+                or time.monotonic() >= deadline
+                or (result.bars and not wait_through_partial_rows)
+            ):
                 return result
     finally:
         if wait_task is not None:
@@ -235,11 +255,19 @@ async def _poll_backfill_storage(
 def _last_closed_open_ms(interval: str, now_ms: int | None = None) -> int:
     """Return the latest closed bar open_time for an interval."""
     now = int(now_ms if now_ms is not None else time.time() * 1000)
-    interval_ms = parse_interval_ms(interval) or 60_000
-    current_open = compute_bucket_start_ms(now, interval_ms, interval=interval)
-    if current_open <= 0:
-        return current_open
-    return compute_bucket_start_ms(current_open - 1, interval_ms, interval=interval)
+    return last_closed_bar_open_ms(now, interval) or 0
+
+
+def _should_wait_for_backfill(result: Any) -> bool:
+    """Return whether a response has a scheduled repair worth bounded waiting."""
+    if not bool(getattr(result, "backfill_triggered", False)):
+        return False
+    if not getattr(result, "bars", None):
+        return True
+    return bool(
+        getattr(result, "has_tail_gap", False)
+        or getattr(result, "missing_ranges", None)
+    )
 
 
 def _first_expected_open_ms(start_ms: int, interval: str) -> int:
@@ -263,12 +291,60 @@ def _interval_ms_for_request(interval: str) -> int:
     return int(custom_seconds * 1000)
 
 
+def _resolve_history_calendar(
+    dm: Any,
+    *,
+    exchange: str,
+    market_type: str,
+    symbol: str,
+    interval: str,
+) -> tuple[TradingCalendar | None, bool]:
+    resolver = getattr(dm, "history_policy", None)
+    if resolver is None:
+        return None, True
+    try:
+        key = resolver.series_key(
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            channel="kline",
+            variant=interval,
+        )
+        context = resolver.resolve(key)
+        return context.calendar, context.calendar is not None
+    except Exception as exc:
+        logger.warning(
+            "Unable to resolve history calendar for %s:%s:%s@%s: %s",
+            exchange,
+            market_type,
+            symbol,
+            interval,
+            exc,
+        )
+        return None, False
+
+
+def _history_contract_payload(result: Any) -> dict[str, Any]:
+    """Serialize the additive terminal/pending history contract."""
+    return {
+        "history_state": getattr(result, "history_state", "ready"),
+        "complete": bool(getattr(result, "complete", False)),
+        "retryable": bool(getattr(result, "retryable", False)),
+        "terminal_reason": getattr(result, "terminal_reason", None),
+        "earliest_available_ms": getattr(result, "earliest_available_ms", None),
+        "next_before_ms": getattr(result, "next_before_ms", None),
+        "availability_revision": getattr(result, "availability_revision", None),
+        "excluded_ranges": list(getattr(result, "excluded_ranges", ()) or ()),
+    }
+
+
 def _cap_range_request(
     *,
     start_ms: int,
     end_ms: int,
     interval: str,
     max_bars: int = MAX_RANGE_RESPONSE_BARS,
+    calendar: TradingCalendar | None = None,
 ) -> dict[str, Any]:
     interval_ms = _interval_ms_for_request(interval)
     if interval_ms <= 0 or end_ms < start_ms:
@@ -281,24 +357,62 @@ def _cap_range_request(
             "interval_ms": interval_ms,
         }
 
-    requested_bars = int((end_ms - start_ms) / interval_ms) + 1
+    if calendar is not None:
+        end_bucket = compute_bucket_start_ms(end_ms, interval_ms, interval=interval)
+        after_end_bucket = compute_bucket_end_ms(
+            end_bucket,
+            interval_ms,
+            interval=interval,
+        )
+        last_open = calendar.previous_expected_open(after_end_bucket, interval)
+        if last_open is None or last_open < start_ms:
+            requested_bars = 0
+            query_start_ms = start_ms
+            next_older_open = None
+        else:
+            requested_bars = 1
+            query_start_ms = last_open
+            while requested_bars < max_bars:
+                previous = calendar.previous_expected_open(query_start_ms, interval)
+                if previous is None or previous < start_ms:
+                    break
+                query_start_ms = previous
+                requested_bars += 1
+            next_older_open = calendar.previous_expected_open(query_start_ms, interval)
+        truncated = bool(
+            requested_bars >= max_bars
+            and next_older_open is not None
+            and next_older_open >= start_ms
+        )
+        if truncated:
+            return {
+                "query_start_ms": query_start_ms,
+                "query_end_ms": end_ms,
+                "needed_limit": max_bars,
+                "truncated": True,
+                "next_end_ms": next_older_open,
+                "interval_ms": interval_ms,
+            }
+    else:
+        requested_bars = int((end_ms - start_ms) / interval_ms) + 1
     if requested_bars <= max_bars:
         return {
             "query_start_ms": start_ms,
             "query_end_ms": end_ms,
-            "needed_limit": min(max_bars, int((end_ms - start_ms) / interval_ms) + 100),
+            "needed_limit": min(max_bars, max(0, requested_bars - 1) + 100),
             "truncated": False,
             "next_end_ms": None,
             "interval_ms": interval_ms,
         }
 
     query_start_ms = max(start_ms, end_ms - ((max_bars - 1) * interval_ms))
+    next_end_ms = query_start_ms - interval_ms if query_start_ms > start_ms else None
     return {
         "query_start_ms": query_start_ms,
         "query_end_ms": end_ms,
         "needed_limit": max_bars,
         "truncated": True,
-        "next_end_ms": query_start_ms - interval_ms if query_start_ms > start_ms else None,
+        "next_end_ms": next_end_ms,
         "interval_ms": interval_ms,
     }
 
@@ -312,8 +426,20 @@ def _verify_range_continuity(
     market_type: str,
     start_ms: int,
     end_ms: int,
+    calendar: TradingCalendar | None = None,
+    calendar_known: bool = True,
+    excluded_ranges: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify exact closed-bar continuity for a range returned to the chart."""
+    if not calendar_known:
+        return {
+            "verified_contiguous": False,
+            "missing_ranges": [],
+            "expected_bars": 0,
+            "actual_bars": len(data),
+            "calendar_unknown": True,
+        }
+
     interval_ms = parse_interval_ms(interval)
     if interval_ms is None or interval_ms <= 0 or start_ms > end_ms:
         return {
@@ -324,14 +450,38 @@ def _verify_range_continuity(
         }
 
     actual = {int(item["time"]) * 1000 for item in data if item.get("time") is not None}
-    current = _first_expected_open_ms(start_ms, interval)
+    exclusions: list[tuple[int, int]] = []
+    for item in excluded_ranges or []:
+        try:
+            excluded_start = int(item["start_ms"])
+            excluded_end = int(item["end_ms"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if excluded_start <= excluded_end:
+            exclusions.append((excluded_start, excluded_end))
+
+    def _is_excluded(open_ms: int) -> bool:
+        return any(start <= open_ms <= end for start, end in exclusions)
+
+    current = (
+        calendar.first_expected_open(start_ms, end_ms, interval)
+        if calendar is not None
+        else _first_expected_open_ms(start_ms, interval)
+    )
     missing: list[dict[str, Any]] = []
     range_start: int | None = None
     range_end: int | None = None
     range_count = 0
     expected_count = 0
 
-    while current <= end_ms:
+    while current is not None and current <= end_ms:
+        if _is_excluded(current):
+            current = (
+                calendar.next_expected_open(current, interval)
+                if calendar is not None
+                else _next_expected_open_ms(current, interval)
+            )
+            continue
         expected_count += 1
         if current not in actual:
             if range_start is None:
@@ -354,7 +504,11 @@ def _verify_range_continuity(
             range_start = None
             range_end = None
             range_count = 0
-        current = _next_expected_open_ms(current, interval)
+        current = (
+            calendar.next_expected_open(current, interval)
+            if calendar is not None
+            else _next_expected_open_ms(current, interval)
+        )
 
     if range_start is not None and range_end is not None:
         missing.append({
@@ -374,6 +528,7 @@ def _verify_range_continuity(
         "missing_ranges": missing,
         "expected_bars": expected_count,
         "actual_bars": len(actual),
+        "calendar_unknown": False,
     }
 
 
@@ -428,13 +583,26 @@ def _schedule_related_interval_warmup(
     for interval in _related_warmup_intervals(current_interval):
         try:
             interval_ms = _interval_ms_for_request(interval)
-            warmup_start_ms = max(start_ms, end_ms - (RELATED_WARMUP_TARGET_BARS * interval_ms))
+            # ``end_ms`` is closed for the chart's current interval, but it
+            # can still fall inside a forming candle of a wider related
+            # interval.  Recompute the live edge for each target interval so
+            # a 15m request at 16:45 does not try to repair the still-forming
+            # 16:00 1h candle before 17:00.
+            warmup_end_ms = min(end_ms, _last_closed_open_ms(interval))
+            warmup_start_ms = max(
+                start_ms,
+                warmup_end_ms - (RELATED_WARMUP_TARGET_BARS * interval_ms),
+            )
+            # A narrow visible range can begin after the wider interval's
+            # last closed open.  Fetch that one closed bar instead of emitting
+            # an inverted range or falling forward into the forming candle.
+            warmup_start_ms = min(warmup_start_ms, warmup_end_ms)
             _call_data_manager_method(
                 request_backfill,
                 symbol,
                 interval,
                 warmup_start_ms,
-                end_ms,
+                warmup_end_ms,
                 exchange,
                 market_type,
                 reason="related_interval_warmup",
@@ -449,7 +617,7 @@ def _schedule_related_interval_warmup(
                     },
                     "warmup_range": {
                         "start_ms": warmup_start_ms,
-                        "end_ms": end_ms,
+                        "end_ms": warmup_end_ms,
                         "target_bars": RELATED_WARMUP_TARGET_BARS,
                     },
                 },
@@ -486,7 +654,6 @@ async def get_klines(
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
-
     dm = _require_data_manager(request)
     consumer_id = f"rest:klines:{exchange}:{market_type}:{symbol}:{interval}:{id(request)}"
     stream_ensured = False
@@ -634,15 +801,54 @@ async def get_klines_history(
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
 
     dm = _require_data_manager(request)
+    calendar, calendar_known = _resolve_history_calendar(
+        dm,
+        exchange=exchange,
+        market_type=market_type,
+        symbol=symbol,
+        interval=interval,
+    )
     try:
         end_ms = min(int(time.time() * 1000), _last_closed_open_ms(interval))
+        if calendar is not None:
+            interval_ms = _interval_ms_for_request(interval)
+            end_bucket = compute_bucket_start_ms(
+                end_ms,
+                interval_ms,
+                interval=interval,
+            )
+            expected_end = calendar.previous_expected_open(
+                compute_bucket_end_ms(
+                    end_bucket,
+                    interval_ms,
+                    interval=interval,
+                ),
+                interval,
+            )
+            if expected_end is not None:
+                end_ms = expected_end
         interval_secs = parse_custom_interval(interval) or 60
         if count_back is not None:
-            start_ms = end_ms - int((count_back - 1) * interval_secs * 1000)
+            start_ms = end_ms
+            if calendar is not None:
+                for _ in range(count_back - 1):
+                    previous = calendar.previous_expected_open(start_ms, interval)
+                    if previous is None:
+                        break
+                    start_ms = previous
+            else:
+                start_ms = end_ms - int((count_back - 1) * interval_secs * 1000)
             needed_limit = min(MAX_RANGE_RESPONSE_BARS, count_back)
         else:
             start_ms = end_ms - int(days * 24 * 60 * 60 * 1000)
-            needed_limit = int((end_ms - start_ms) / 1000 / interval_secs) + 100
+            cap = _cap_range_request(
+                start_ms=start_ms,
+                end_ms=end_ms,
+                interval=interval,
+                calendar=calendar,
+            )
+            start_ms = cap["query_start_ms"]
+            needed_limit = cap["needed_limit"]
 
         async def _run_history_query(auto_backfill=None):
             return await run_storage(
@@ -670,12 +876,13 @@ async def get_klines_history(
         # very first response already carries data. Poll re-queries pass
         # auto_backfill=False so we wait for the already-scheduled backfill
         # instead of spamming duplicate backfill requests.
-        if max_wait_ms > 0 and not result.bars and backfill_triggered:
+        if max_wait_ms > 0 and _should_wait_for_backfill(result):
             result = await _poll_backfill_storage(
                 request,
                 result,
                 timeout_seconds=max_wait_ms / 1000,
                 requery=_run_history_query,
+                wait_through_partial_rows=bool(result.bars),
             )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager history query failed: {exc}") from exc
@@ -699,6 +906,9 @@ async def get_klines_history(
         market_type=market_type,
         start_ms=start_ms,
         end_ms=end_ms,
+        calendar=calendar,
+        calendar_known=calendar_known,
+        excluded_ranges=getattr(result, "excluded_ranges", None),
     )
     missing_ranges = _merge_missing_ranges(
         [r.to_dict() for r in result.missing_ranges],
@@ -720,6 +930,7 @@ async def get_klines_history(
         "backfill_triggered": backfill_triggered,
         "verified_contiguous": verification["verified_contiguous"],
         "missing_ranges": missing_ranges,
+        **_history_contract_payload(result),
         "cache": result.metadata,
         "data": data,
         "base_interval": None,
@@ -750,6 +961,14 @@ async def get_klines_range(
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
+    dm = _require_data_manager(request)
+    calendar, calendar_known = _resolve_history_calendar(
+        dm,
+        exchange=exchange,
+        market_type=market_type,
+        symbol=symbol,
+        interval=interval,
+    )
 
     now_ms = int(time.time() * 1000)
     effective_end_ms = min(end_ms, _last_closed_open_ms(interval, now_ms))
@@ -774,6 +993,14 @@ async def get_klines_range(
             "verified_contiguous": True,
             "renderable": True,
             "missing_ranges": [],
+            "history_state": "ready",
+            "complete": True,
+            "retryable": False,
+            "terminal_reason": None,
+            "earliest_available_ms": None,
+            "next_before_ms": None,
+            "availability_revision": None,
+            "excluded_ranges": [],
             "cache": {"strict": strict, "repair": repair_mode},
             "data": [],
             "base_interval": None,
@@ -783,12 +1010,12 @@ async def get_klines_range(
         start_ms=start_ms,
         end_ms=effective_end_ms,
         interval=interval,
+        calendar=calendar,
     )
     query_start_ms = range_cap["query_start_ms"]
     query_end_ms = range_cap["query_end_ms"]
     needed_limit = range_cap["needed_limit"]
 
-    dm = _require_data_manager(request)
     try:
         result = await run_storage(
             _call_data_manager_method,
@@ -813,6 +1040,9 @@ async def get_klines_range(
             market_type=market_type,
             start_ms=query_start_ms,
             end_ms=query_end_ms,
+            calendar=calendar,
+            calendar_known=calendar_known,
+            excluded_ranges=getattr(result, "excluded_ranges", None),
         )
 
         if (
@@ -845,6 +1075,9 @@ async def get_klines_range(
                 market_type=market_type,
                 start_ms=query_start_ms,
                 end_ms=query_end_ms,
+                calendar=calendar,
+                calendar_known=calendar_known,
+                excluded_ranges=getattr(result, "excluded_ranges", None),
             )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager range query failed: {exc}") from exc
@@ -876,6 +1109,7 @@ async def get_klines_range(
         "missing_ranges": missing_ranges,
         "expected_bars": verification["expected_bars"],
         "actual_bars": verification["actual_bars"],
+        **_history_contract_payload(result),
         "cache": result.metadata,
         "data": data if (verified or not strict) else data,
         "base_interval": None,
@@ -936,18 +1170,26 @@ async def get_klines_before(
         # multi-second window where server-streamed indicators are drawn but the
         # candle series is still empty. Poll re-queries pass auto_backfill=False
         # to avoid spamming duplicate backfill requests.
-        if max_wait_ms > 0 and not result.bars and backfill_triggered:
+        if max_wait_ms > 0 and _should_wait_for_backfill(result):
             result = await _poll_backfill_storage(
                 request,
                 result,
                 timeout_seconds=max_wait_ms / 1000,
                 requery=_run_before_query,
+                wait_through_partial_rows=bool(result.bars),
             )
             # If the wait timed out before the backfill delivered bars, keep
             # has_more=True (data is still on the way) so the client retries
             # instead of concluding there is no more history. Re-queries made
             # with auto_backfill=False would otherwise report has_more=False.
-            has_more = bool(result.has_more) if result.bars else True
+            terminal = (
+                getattr(result, "history_state", None) == "exhausted"
+                or (
+                    bool(getattr(result, "complete", False))
+                    and not bool(getattr(result, "retryable", False))
+                )
+            )
+            has_more = bool(result.has_more) if result.bars else not terminal
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager before query failed: {exc}") from exc
 
@@ -965,6 +1207,7 @@ async def get_klines_before(
         "fetched": result.total,
         "backfill_triggered": backfill_triggered,
         "missing_ranges": [r.to_dict() for r in result.missing_ranges],
+        **_history_contract_payload(result),
         "cache": result.metadata,
         "data": data,
         "base_interval": None,

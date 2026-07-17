@@ -2,6 +2,7 @@ import type {
   AppliedKlineResult,
   BackfillCompletedMessage,
   BackfillCompletedOptions,
+  BeforePageAvailability,
   CommitChartData,
   FeedApplyMode,
   FeedCommitMode,
@@ -134,6 +135,7 @@ export class SeriesDataFeed {
   epochBySeries: Map<SeriesKey, number>;
   beforePageCooldownUntil: Map<SeriesKey, number>;
   pendingBeforePages: Map<SeriesKey, PendingBeforePage>;
+  beforePageAvailability: Map<SeriesKey, BeforePageAvailability>;
   backfillReloadInFlight: Set<SeriesKey>;
   api: KlineApi | null;
   getActiveSeries: () => MarketSeries | null;
@@ -148,6 +150,7 @@ export class SeriesDataFeed {
     this.epochBySeries = new Map();
     this.beforePageCooldownUntil = new Map();
     this.pendingBeforePages = new Map();
+    this.beforePageAvailability = new Map();
     this.backfillReloadInFlight = new Set();
     this.api = null;
     this.getActiveSeries = () => null;
@@ -195,6 +198,7 @@ export class SeriesDataFeed {
     const key = this.seriesKey(series);
     const next = (this.epochBySeries.get(key) || 0) + 1;
     this.epochBySeries.set(key, next);
+    this.clearBeforePageAvailability(series);
     return next;
   }
 
@@ -255,6 +259,69 @@ export class SeriesDataFeed {
 
   clearPendingBeforePage(series: MarketSeries): void {
     this.pendingBeforePages.delete(this.beforePageKey(series));
+  }
+
+  getBeforePageAvailability(series: MarketSeries): BeforePageAvailability | null {
+    return this.beforePageAvailability.get(this.beforePageKey(series)) || null;
+  }
+
+  clearBeforePageAvailability(series?: MarketSeries): void {
+    if (series) {
+      this.beforePageAvailability.delete(this.beforePageKey(series));
+      return;
+    }
+    this.beforePageAvailability.clear();
+  }
+
+  invalidateBeforePageAvailability(series?: MarketSeries): void {
+    this.clearBeforePageAvailability(series);
+  }
+
+  isBeforePageExhausted(series: MarketSeries, before?: EpochSeconds): boolean {
+    const availability = this.getBeforePageAvailability(series);
+    return Boolean(
+      availability
+      && before !== undefined
+      && before <= availability.boundaryBefore,
+    );
+  }
+
+  updateBeforePageAvailability(
+    series: MarketSeries,
+    before: EpochSeconds | undefined,
+    result: KlineFetchResult,
+  ): void {
+    const key = this.beforePageKey(series);
+    const current = this.beforePageAvailability.get(key);
+    const revision = result.availability_revision ?? null;
+    if (
+      current?.availabilityRevision
+      && revision
+      && current.availabilityRevision !== revision
+    ) {
+      this.beforePageAvailability.delete(key);
+    }
+
+    const explicitTerminal = result.history_state === "exhausted"
+      && result.retryable === false;
+    if (!explicitTerminal) return;
+
+    const earliestAvailableMs = toEpochMilliseconds(result.earliest_available_ms);
+    const earliestAvailable = earliestAvailableMs == null
+      ? null
+      : millisecondsToSeconds(earliestAvailableMs);
+    const rowTimes = rowsFromResult(result).map((row) => row.time);
+    const earliestRow = rowTimes.length > 0 ? Math.min(...rowTimes) as EpochSeconds : null;
+    const boundaryBefore = rowTimes.length === 0
+      ? (before ?? earliestAvailable)
+      : (earliestAvailable ?? earliestRow);
+    if (boundaryBefore === undefined || boundaryBefore === null) return;
+    this.beforePageAvailability.set(key, {
+      boundaryBefore,
+      historyState: "exhausted",
+      terminalReason: result.terminal_reason ?? null,
+      availabilityRevision: revision,
+    });
   }
 
   markBeforePageSafetyRetry(
@@ -475,6 +542,23 @@ export class SeriesDataFeed {
       errorCooldownMs = 3_000,
     }: RequestBeforePageOptions = {},
   ): Promise<FeedResult> {
+    if (this.isBeforePageExhausted(series, before)) {
+      const availability = this.getBeforePageAvailability(series);
+      this.clearPendingBeforePage(series);
+      return {
+        data: [],
+        rows: [],
+        skipped: true,
+        reason: "history-exhausted",
+        pending: false,
+        has_more: false,
+        history_state: "exhausted",
+        complete: true,
+        retryable: false,
+        terminal_reason: availability?.terminalReason ?? null,
+        availability_revision: availability?.availabilityRevision ?? null,
+      };
+    }
     if (this.isBeforePageCoolingDown(series)) {
       return { skipped: true, reason: "cooldown", data: [], rows: [] };
     }
@@ -495,7 +579,11 @@ export class SeriesDataFeed {
         return { ...result, pending: false };
       }
 
-      if (result?.has_more) {
+      if (
+        result?.history_state === "pending"
+        || result?.retryable === true
+        || result?.has_more === true
+      ) {
         const existing = this.getPendingBeforePage(series);
         if (!existing || existing.before !== before) {
           this.setPendingBeforePage(series, {
@@ -634,12 +722,14 @@ export class SeriesDataFeed {
         series.exchange,
         signal === undefined ? {} : { signal },
       );
-      return this.applyResult(series, result, {
+      const applied = this.applyResult(series, result, {
         epoch,
         source,
         commit,
         mode: "range",
       });
+      if (!applied.stale) this.updateBeforePageAvailability(series, before, applied);
+      return applied;
     });
   }
 

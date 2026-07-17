@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
+
 
 # ═══════════════════════════════════════════════════════════════
 #  Enums
@@ -283,6 +285,26 @@ class FetchedBar:
     taker_buy_base: float = 0.0
     taker_buy_quote: float = 0.0
     source: str = "backfill"
+    enhanced_fields: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        values = {
+            "volume": self.volume,
+            "quote_volume": self.quote_volume
+            if "quote_volume" in self.enhanced_fields else None,
+            "trades": self.trades
+            if "trades" in self.enhanced_fields else None,
+            "taker_buy_base": self.taker_buy_base
+            if "taker_buy_base" in self.enhanced_fields else None,
+            "taker_buy_quote": self.taker_buy_quote
+            if "taker_buy_quote" in self.enhanced_fields else None,
+        }
+        self.enhanced_fields = declared_enhanced_fields(
+            self.exchange,
+            self.market_type,
+            values,
+            explicit_fields=self.enhanced_fields,
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -301,6 +323,7 @@ class FetchedBar:
             "trades": self.trades,
             "taker_buy_base": self.taker_buy_base,
             "taker_buy_quote": self.taker_buy_quote,
+            "enhanced_fields": sorted(self.enhanced_fields),
             "source": self.source,
         }
 
@@ -314,10 +337,14 @@ class FetchedBar:
             "low": self.low,
             "close": self.close,
             "volume": self.volume,
-            "quote_volume": self.quote_volume,
-            "trades": self.trades,
-            "taker_buy_base": self.taker_buy_base,
-            "taker_buy_quote": self.taker_buy_quote,
+            "quote_volume": self.quote_volume
+            if "quote_volume" in self.enhanced_fields else None,
+            "trades": self.trades
+            if "trades" in self.enhanced_fields else None,
+            "taker_buy_base": self.taker_buy_base
+            if "taker_buy_base" in self.enhanced_fields else None,
+            "taker_buy_quote": self.taker_buy_quote
+            if "taker_buy_quote" in self.enhanced_fields else None,
         }
 
     def to_lightweight(self) -> dict:
@@ -329,6 +356,14 @@ class FetchedBar:
             "low": self.low,
             "close": self.close,
             "volume": self.volume,
+            "quote_volume": self.quote_volume
+            if "quote_volume" in self.enhanced_fields else None,
+            "trades": self.trades
+            if "trades" in self.enhanced_fields else None,
+            "taker_buy_base": self.taker_buy_base
+            if "taker_buy_base" in self.enhanced_fields else None,
+            "taker_buy_quote": self.taker_buy_quote
+            if "taker_buy_quote" in self.enhanced_fields else None,
         }
 
 
@@ -350,6 +385,13 @@ class FetchResult:
     elapsed_ms: int = 0
     pages_fetched: int = 0
     errors: list[str] = field(default_factory=list)
+    # A successful empty page is materially different from a transport
+    # failure.  Keep the evidence on the fetch result so the coordinator can
+    # decide whether it is safe to learn a series-level history boundary.
+    source_complete: bool = False
+    exhausted_before_ms: int | None = None
+    empty_reason: str | None = None
+    retryable: bool = False
 
     @property
     def bars_count(self) -> int:
@@ -363,6 +405,10 @@ class FetchResult:
             "elapsed_ms": self.elapsed_ms,
             "pages_fetched": self.pages_fetched,
             "errors": self.errors,
+            "source_complete": self.source_complete,
+            "exhausted_before_ms": self.exhausted_before_ms,
+            "empty_reason": self.empty_reason,
+            "retryable": self.retryable,
         }
 
 
@@ -626,7 +672,7 @@ class CacheBackend(Protocol):
 # ═══════════════════════════════════════════════════════════════
 
 from app.data_engine.interval_policy import (  # noqa: E402
-    STANDARD_INTERVAL_MS,
-    is_standard_interval,
-    parse_interval_ms,
+    STANDARD_INTERVAL_MS as STANDARD_INTERVAL_MS,
+    is_standard_interval as is_standard_interval,
+    parse_interval_ms as parse_interval_ms,
 )

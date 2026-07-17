@@ -30,6 +30,7 @@ import logging
 from dataclasses import replace
 from typing import Callable, Awaitable, Any
 
+from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 
 from .config import BarAggregatorConfig
@@ -404,10 +405,12 @@ class EventRouter:
     ) -> BarInput | None:
         """Convert a kline MarketEvent.data to BarInput."""
         try:
+            exchange = self._extract_exchange(event)
+            market_type = self._extract_market_type(event)
             return BarInput(
                 symbol=getattr(event, "symbol", "").upper(),
                 source_interval=data.get("interval", "1m"),
-                exchange=self._extract_exchange(event),
+                exchange=exchange,
                 open_time_ms=int(data["open_time"]),
                 close_time_ms=int(data["close_time"]),
                 open=float(data["open"]),
@@ -417,11 +420,16 @@ class EventRouter:
                 volume=float(data.get("volume", 0)),
                 source=source,
                 is_closed=bool(data.get("is_closed", False)),
-                market_type=self._extract_market_type(event),
+                market_type=market_type,
                 quote_volume=float(data.get("quote_volume", 0)),
                 trades=int(data.get("trades", 0)),
                 taker_buy_base=float(data.get("taker_buy_base", 0)),
                 taker_buy_quote=float(data.get("taker_buy_quote", 0)),
+                enhanced_fields=declared_enhanced_fields(
+                    exchange,
+                    market_type,
+                    data,
+                ),
                 sequence=int(data.get("open_time", 0)),
             )
         except (KeyError, ValueError, TypeError) as exc:
@@ -477,10 +485,15 @@ class EventRouter:
         """Convert a FetchedBar (or dict) to BarInput."""
         try:
             if isinstance(bar, dict):
+                resolved_exchange = str(bar.get("exchange", exchange))
+                resolved_market_type = str(bar.get("market_type", market_type))
+                explicit_fields = bar.get("enhanced_fields")
+                if isinstance(explicit_fields, (str, bytes, dict)):
+                    explicit_fields = ()
                 return BarInput(
                     symbol=symbol.upper(),
                     source_interval=interval,
-                    exchange=str(bar.get("exchange", exchange)),
+                    exchange=resolved_exchange,
                     open_time_ms=int(bar["open_time"]),
                     close_time_ms=int(bar["close_time"]),
                     open=float(bar["open"]),
@@ -493,19 +506,34 @@ class EventRouter:
                     # closed by default. Custom read aggregation can also pass
                     # the live forming tail through this batch adapter.
                     is_closed=bool(bar.get("is_closed", True)),
-                    market_type=str(bar.get("market_type", market_type)),
-                    quote_volume=float(bar.get("quote_volume", 0)),
-                    trades=int(bar.get("trades", 0)),
-                    taker_buy_base=float(bar.get("taker_buy_base", 0)),
-                    taker_buy_quote=float(bar.get("taker_buy_quote", 0)),
+                    market_type=resolved_market_type,
+                    quote_volume=float(bar.get("quote_volume") or 0),
+                    trades=int(bar.get("trades") or 0),
+                    taker_buy_base=float(bar.get("taker_buy_base") or 0),
+                    taker_buy_quote=float(bar.get("taker_buy_quote") or 0),
+                    enhanced_fields=declared_enhanced_fields(
+                        resolved_exchange,
+                        resolved_market_type,
+                        bar,
+                        explicit_fields=explicit_fields,
+                    ),
                     sequence=int(bar.get("open_time", 0)),
                 )
             else:
                 # Duck-type: assume FetchedBar dataclass
+                resolved_exchange = str(getattr(bar, "exchange", exchange))
+                resolved_market_type = str(getattr(bar, "market_type", market_type))
+                enhanced_values = {
+                    "volume": getattr(bar, "volume", None),
+                    "quote_volume": getattr(bar, "quote_volume", None),
+                    "trades": getattr(bar, "trades", None),
+                    "taker_buy_base": getattr(bar, "taker_buy_base", None),
+                    "taker_buy_quote": getattr(bar, "taker_buy_quote", None),
+                }
                 return BarInput(
                     symbol=symbol.upper(),
                     source_interval=getattr(bar, "interval", interval),
-                    exchange=str(getattr(bar, "exchange", exchange)),
+                    exchange=resolved_exchange,
                     open_time_ms=int(getattr(bar, "open_time", 0)),
                     close_time_ms=int(getattr(bar, "close_time", 0)),
                     open=float(getattr(bar, "open", 0)),
@@ -515,11 +543,17 @@ class EventRouter:
                     volume=float(getattr(bar, "volume", 0)),
                     source=BarInputSource.BACKFILL,
                     is_closed=bool(getattr(bar, "is_closed", True)),
-                    market_type=str(getattr(bar, "market_type", market_type)),
+                    market_type=resolved_market_type,
                     quote_volume=float(getattr(bar, "quote_volume", 0)),
                     trades=int(getattr(bar, "trades", 0)),
                     taker_buy_base=float(getattr(bar, "taker_buy_base", 0)),
                     taker_buy_quote=float(getattr(bar, "taker_buy_quote", 0)),
+                    enhanced_fields=declared_enhanced_fields(
+                        resolved_exchange,
+                        resolved_market_type,
+                        enhanced_values,
+                        explicit_fields=getattr(bar, "enhanced_fields", None),
+                    ),
                     sequence=int(getattr(bar, "open_time", 0)),
                 )
         except (KeyError, ValueError, TypeError, AttributeError) as exc:

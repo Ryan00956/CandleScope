@@ -26,6 +26,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   "震荡": "震荡",
   "波动": "波动率",
   "成交量": "成交量",
+  "contract-data": "合约数据",
   "custom": "自定义",
   // English fallbacks (lowercase)
   "trend": "趋势",
@@ -45,6 +46,7 @@ const CATEGORY_ICONS: Record<string, string> = {
   "震荡": "⚡",
   "波动": "📊",
   "成交量": "📦",
+  "contract-data": "⛓️",
   "custom": "✏️",
   // English fallbacks (lowercase)
   "trend": "📈",
@@ -64,6 +66,26 @@ const ENGINE_SCRIPT_MARKER = "# __ENGINE__:";
 
 type IndicatorPanelTab = "presets" | "active" | "editor";
 type IndicatorBadgeTone = "builtin" | "custom" | "main" | "sub" | "neutral";
+export type IndicatorPanelMarketStudyStatus =
+  | "idle"
+  | "loading"
+  | "ready"
+  | "dormant"
+  | "error";
+
+export interface IndicatorPanelMarketStudy {
+  id: string;
+  name: string;
+  description?: string;
+  added: boolean;
+  visible: boolean;
+  supported: boolean;
+  unsupportedReason?: string | null;
+  status?: IndicatorPanelMarketStudyStatus;
+  statusText?: string | null;
+  error?: string | null;
+}
+
 type UiParamSchema = IndicatorParameterSchema & {
   key: string;
   title?: string;
@@ -96,6 +118,10 @@ export interface IndicatorPanelProps {
   onUpdateScript(indicatorId: string, script: string): void;
   computing: boolean;
   onRecompute?: (force?: boolean) => void;
+  marketStudies?: readonly IndicatorPanelMarketStudy[];
+  onAddMarketStudy?: (studyId: string) => void;
+  onRemoveMarketStudy?: (studyId: string) => void;
+  onToggleMarketStudyVisibility?: (studyId: string) => void;
 }
 
 type IndicatorBuiltinLike = Partial<Pick<
@@ -187,6 +213,35 @@ function renderHintPaneTarget(renderHints: Record<string, unknown> | undefined):
   return typeof renderHints?.paneTarget === "string" ? renderHints.paneTarget : null;
 }
 
+function marketStudyStatusLabel(study: IndicatorPanelMarketStudy): string | null {
+  if (!study.supported || study.status === "dormant") return "休眠";
+  if (study.error || study.status === "error") return "错误";
+  if (study.status === "loading") return "加载中";
+  return null;
+}
+
+function marketStudyStatusMessage(study: IndicatorPanelMarketStudy): string | null {
+  if (!study.supported) return study.unsupportedReason || "当前品种不支持";
+  if (study.error) return study.error;
+  return study.statusText || null;
+}
+
+function marketStudyMatchesSearch(
+  study: IndicatorPanelMarketStudy,
+  searchQuery: string,
+): boolean {
+  if (!searchQuery) return true;
+  const query = searchQuery.toLowerCase();
+  return [
+    study.name,
+    study.id,
+    study.description,
+    study.unsupportedReason,
+    study.statusText,
+    "合约数据",
+  ].some((value) => String(value || "").toLowerCase().includes(query));
+}
+
 export default function IndicatorPanel({
   isOpen,
   onClose,
@@ -199,6 +254,10 @@ export default function IndicatorPanel({
   onUpdateScript,
   computing,
   onRecompute,
+  marketStudies = [],
+  onAddMarketStudy,
+  onRemoveMarketStudy,
+  onToggleMarketStudyVisibility,
 }: IndicatorPanelProps) {
   const [tab, setTab] = useState<IndicatorPanelTab>("presets");
   const {
@@ -211,6 +270,8 @@ export default function IndicatorPanel({
   } = useIndicatorCatalogRuntime({ isOpen });
   const [searchQuery, setSearchQuery] = useState("");
   const [editingIndicator, setEditingIndicator] = useState<IndicatorEditorSource | null>(null);
+  const activeMarketStudies = marketStudies.filter((study) => study.added);
+  const activeItemCount = activeIndicators.length + activeMarketStudies.length;
 
   const [panelWidth, setPanelWidth] = useState(400);
   const [isResizing, setIsResizing] = useState(false);
@@ -462,8 +523,8 @@ plot(ma, "MA", color=line_color)
 
   const handleEditorBack = useCallback(() => {
     setEditingIndicator(null);
-    setTab(activeIndicators.length > 0 ? "active" : "presets");
-  }, [activeIndicators.length]);
+    setTab(activeItemCount > 0 ? "active" : "presets");
+  }, [activeItemCount]);
 
   // Calculate previewState
   const previewedActiveIndicator = editingIndicator?.id ? activeIndicators.find(i => i.id === editingIndicator.id) : null;
@@ -486,6 +547,9 @@ plot(ma, "MA", color=line_color)
       (p.category || "").toLowerCase().includes(q)
     );
   });
+  const filteredMarketStudies = marketStudies.filter((study) => (
+    marketStudyMatchesSearch(study, searchQuery)
+  ));
 
   // Group presets by category
   const groupedPresets: Record<string, CatalogIndicator[]> = {};
@@ -559,7 +623,7 @@ plot(ma, "MA", color=line_color)
                 className={`indicator-tab ${tab === "active" ? "active" : ""}`}
                 onClick={() => setTab("active")}
               >
-                已添加 {activeIndicators.length > 0 && `(${activeIndicators.length})`}
+                已添加 {activeItemCount > 0 && `(${activeItemCount})`}
               </button>
               <button
                 className="indicator-tab indicator-tab-create"
@@ -638,7 +702,63 @@ plot(ma, "MA", color=line_color)
                     ))
                   )}
 
-                  {!presetsLoading && filteredPresets.length === 0 && (
+                  {filteredMarketStudies.length > 0 && (
+                    <div className="indicator-category-group">
+                      <div className="indicator-category-label">
+                        <span>{CATEGORY_ICONS["contract-data"]}</span>
+                        <span>{CATEGORY_LABELS["contract-data"]}</span>
+                      </div>
+                      {filteredMarketStudies.map((study) => {
+                        const callback = study.added ? onRemoveMarketStudy : onAddMarketStudy;
+                        const disabled = !study.supported || !callback;
+                        const disabledReason = study.supported
+                          ? "操作暂不可用"
+                          : study.unsupportedReason || "当前品种不支持";
+                        return (
+                          <div
+                            key={study.id}
+                            className={`indicator-preset-item ${study.added ? "is-active" : ""}`}
+                          >
+                            <div className="indicator-preset-info">
+                              <span className="indicator-preset-name">
+                                {study.name}
+                                <IndicatorBadge tone="neutral">market-data</IndicatorBadge>
+                                <IndicatorBadge tone="sub">副图</IndicatorBadge>
+                                {!study.supported && (
+                                  <IndicatorBadge tone="neutral">不可用</IndicatorBadge>
+                                )}
+                              </span>
+                              <span className="indicator-preset-desc">
+                                {study.description}
+                                {!study.supported && (
+                                  <span style={{ display: "block", color: "#f59e0b", marginTop: 3 }}>
+                                    {disabledReason}
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                            <div className="indicator-preset-actions">
+                              <button
+                                className={`indicator-add-btn ${study.added ? "added" : ""}`}
+                                onClick={() => callback?.(study.id)}
+                                disabled={disabled}
+                                title={disabled
+                                  ? disabledReason
+                                  : study.added ? "从图表移除" : "添加到图表"}
+                                style={disabled ? { cursor: "not-allowed", opacity: 0.45 } : undefined}
+                              >
+                                {study.added ? "✓" : "+"}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {!presetsLoading
+                    && filteredPresets.length === 0
+                    && filteredMarketStudies.length === 0 && (
                     <div className="indicator-empty">未找到匹配的指标</div>
                   )}
                 </div>
@@ -647,17 +767,18 @@ plot(ma, "MA", color=line_color)
               {/* ── Active tab ── */}
               {tab === "active" && (
                 <div className="indicator-active-list">
-                  {activeIndicators.length === 0 ? (
+                  {activeItemCount === 0 ? (
                     <div className="indicator-empty">
                       <div style={{ fontSize: 32, marginBottom: 8 }}>📭</div>
                       <div>暂未添加指标</div>
                       <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
-                        从"内置指标"选择或创建自定义指标
+                        从指标库选择或创建自定义指标
                       </div>
                     </div>
                   ) : (
-                    activeIndicators.map((ind) => (
-                      <div key={ind.id} className="indicator-active-item">
+                    <>
+                      {activeIndicators.map((ind) => (
+                        <div key={ind.id} className="indicator-active-item">
                         <div className="indicator-active-header">
                           <button
                             className={`indicator-visibility-btn ${ind.visible ? "" : "hidden"}`}
@@ -758,8 +879,66 @@ plot(ma, "MA", color=line_color)
                             ))}
                           </div>
                         )}
-                      </div>
-                    ))
+                        </div>
+                      ))}
+
+                      {activeMarketStudies.map((study) => {
+                        const statusLabel = marketStudyStatusLabel(study);
+                        const statusMessage = marketStudyStatusMessage(study);
+                        const hasError = study.supported
+                          && Boolean(study.error || study.status === "error");
+                        return (
+                          <div key={study.id} className="indicator-active-item">
+                            <div className="indicator-active-header">
+                              <button
+                                className={`indicator-visibility-btn ${study.visible ? "" : "hidden"}`}
+                                onClick={() => onToggleMarketStudyVisibility?.(study.id)}
+                                disabled={!onToggleMarketStudyVisibility}
+                                title={study.visible ? "隐藏" : "显示"}
+                              >
+                                {study.visible ? "👁" : "👁‍🗨"}
+                              </button>
+                              <span className="indicator-active-name">
+                                {study.name}
+                                <IndicatorBadge tone="neutral">market-data</IndicatorBadge>
+                                <IndicatorBadge tone="sub">副图</IndicatorBadge>
+                                {statusLabel && (
+                                  <IndicatorBadge tone="neutral">{statusLabel}</IndicatorBadge>
+                                )}
+                              </span>
+                              {hasError && (
+                                <span className="indicator-error-badge" title={statusMessage || "市场指标错误"}>
+                                  ⚠️
+                                </span>
+                              )}
+                              <div className="indicator-active-actions">
+                                <button
+                                  className="indicator-action-btn indicator-remove-btn"
+                                  onClick={() => onRemoveMarketStudy?.(study.id)}
+                                  disabled={!onRemoveMarketStudy}
+                                  title="移除"
+                                >
+                                  🗑
+                                </button>
+                              </div>
+                            </div>
+
+                            {statusMessage && (
+                              <div
+                                className={hasError ? "indicator-error-msg" : undefined}
+                                style={hasError ? undefined : {
+                                  color: "var(--text-muted)",
+                                  fontSize: 11,
+                                  margin: "4px 10px 8px 38px",
+                                }}
+                              >
+                                {statusMessage}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </>
                   )}
 
                   {activeIndicators.length > 0 && (

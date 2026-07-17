@@ -10,6 +10,7 @@ import {
 import {
   IndicatorPayloadError,
   parseIndicatorParameterSchemas,
+  parseIndicatorPayloadEnvelope,
 } from "../indicatorContracts.js";
 import { mustBeDefined } from "../../../test/testHelpers.js";
 
@@ -48,6 +49,34 @@ test("parameter schemas omit absent optional fields", () => {
   for (const field of ["label", "type", "default", "min", "max", "step", "options"]) {
     assert.equal(Object.hasOwn(mustBeDefined(schemas[0]), field), false);
   }
+});
+
+test("indicator payload parser preserves terminal availability metadata", () => {
+  const parsed = parseIndicatorPayloadEnvelope({
+    ok: false,
+    code: "INDICATOR_RANGE_EMPTY",
+    history_state: "exhausted",
+    complete: true,
+    retryable: false,
+    terminal_reason: "source_exhausted",
+    earliest_available_ms: 1_700_000_000_000,
+    next_before_ms: null,
+    availability_revision: "history-v2",
+    excluded_ranges: [{
+      start_ms: 1_699_999_000_000,
+      end_ms: 1_699_999_999_999,
+      reason: "market_closed",
+    }],
+  });
+
+  assert.equal(parsed.history_state, "exhausted");
+  assert.equal(parsed.retryable, false);
+  assert.equal(parsed.terminal_reason, "source_exhausted");
+  assert.deepEqual(parsed.excluded_ranges, [{
+    start_ms: 1_699_999_000_000,
+    end_ms: 1_699_999_999_999,
+    reason: "market_closed",
+  }]);
 });
 
 test("replaceIndicatorLinesRange replaces only the target time window", () => {

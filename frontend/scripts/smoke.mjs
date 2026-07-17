@@ -93,6 +93,19 @@ const SMOKE_OVERLAY_HEAVY_INDICATORS = [
   SMOKE_BOLL_INDICATOR,
   SMOKE_RSI_INDICATOR,
 ];
+const ADVANCED_MARKET_STUDIES = [
+  {
+    id: "market:funding-rate",
+    name: "资金费率 (Funding Rate)",
+    paneId: "funding-rate",
+  },
+  {
+    id: "market:open-interest",
+    name: "未平仓量 (Open Interest)",
+    paneId: "open-interest",
+  },
+];
+const ADVANCED_MARKET_HIDDEN_STATUS = "已隐藏，实时订阅已暂停";
 
 function parseArgs(argv) {
   const args = {
@@ -100,6 +113,7 @@ function parseArgs(argv) {
     timeoutMs: Number(process.env.SMOKE_TIMEOUT_MS || DEFAULT_TIMEOUT_MS),
     chromePath: process.env.CHROME_PATH || "",
     screenshot: process.env.SMOKE_SCREENSHOT || "",
+    marketType: process.env.SMOKE_MARKET_TYPE || "futures",
     seedIndicators: process.env.SMOKE_SEED_INDICATORS !== "0",
     overlayHeavy: process.env.SMOKE_OVERLAY_HEAVY === "1",
     drawingCheck: process.env.SMOKE_DRAWING_CHECK === "1",
@@ -122,6 +136,7 @@ function parseArgs(argv) {
     else if (arg === "--timeout-ms") args.timeoutMs = Number(argv[++i]);
     else if (arg === "--chrome") args.chromePath = argv[++i];
     else if (arg === "--screenshot") args.screenshot = argv[++i];
+    else if (arg === "--market-type") args.marketType = argv[++i];
     else if (arg === "--no-seed-indicators") args.seedIndicators = false;
     else if (arg === "--overlay-heavy") args.overlayHeavy = true;
     else if (arg === "--drawing-check") args.drawingCheck = true;
@@ -430,6 +445,434 @@ async function waitForChartReady(cdp, timeoutMs) {
   }
 
   return { bodyText, loadedAt };
+}
+
+async function readAdvancedMarketState(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const metricIds = ["mark-price", "index-price", "basis"];
+      const paneIds = ["funding-rate", "open-interest"];
+      const parseFiniteValue = (element) => {
+        if (!element) return null;
+        const candidates = [
+          element.getAttribute("data-market-value"),
+          element.getAttribute("data-value"),
+          element.getAttribute("aria-label"),
+          element.textContent,
+        ];
+        for (const candidate of candidates) {
+          const match = String(candidate || "")
+            .replaceAll(",", "")
+            .match(/[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:e[-+]?\\d+)?/i);
+          if (!match) continue;
+          const value = Number(match[0]);
+          if (Number.isFinite(value)) return value;
+        }
+        return null;
+      };
+      const metrics = Object.fromEntries(metricIds.map((id) => {
+        const selector = '[data-market-metric="' + id + '"]';
+        const element = document.querySelector(selector);
+        return [id, {
+          selector,
+          present: Boolean(element),
+          text: String(element?.textContent || "").trim(),
+          value: parseFiniteValue(element),
+        }];
+      }));
+      const panes = Object.fromEntries(paneIds.map((id) => {
+        const selector = '[data-market-pane="' + id + '"]';
+        const element = document.querySelector(selector);
+        const rect = element?.getBoundingClientRect();
+        return [id, {
+          selector,
+          present: Boolean(element),
+          visible: Boolean(rect && rect.width > 0 && rect.height > 0),
+          text: String(element?.textContent || "").trim(),
+        }];
+      }));
+      const summaryReady = Object.values(metrics).every((item) => Number.isFinite(item.value));
+      const panesVisible = Object.values(panes).every((item) => item.present && item.visible);
+      const panesHidden = Object.values(panes).every((item) => !item.present);
+      return {
+        metrics,
+        panes,
+        summaryReady,
+        panesVisible,
+        panesHidden,
+        ready: summaryReady && panesVisible,
+      };
+    })()`,
+    returnByValue: true,
+  });
+  return result.result?.value || {
+    metrics: {},
+    panes: {},
+    summaryReady: false,
+    panesVisible: false,
+    panesHidden: false,
+    ready: false,
+  };
+}
+
+async function waitForAdvancedMarketState(cdp, timeoutMs = 15_000) {
+  const started = Date.now();
+  let state = await readAdvancedMarketState(cdp);
+  while (!state.ready && Date.now() - started < timeoutMs) {
+    await wait(250);
+    state = await readAdvancedMarketState(cdp);
+  }
+  return {
+    ...state,
+    checked: true,
+    readyAtMs: state.ready ? Date.now() - started : null,
+  };
+}
+
+async function waitForAdvancedMarketDefaultState(cdp, timeoutMs = 15_000) {
+  const started = Date.now();
+  let state = await readAdvancedMarketState(cdp);
+  const isReady = () => state.summaryReady && state.panesHidden;
+  while (!isReady() && Date.now() - started < timeoutMs) {
+    await wait(250);
+    state = await readAdvancedMarketState(cdp);
+  }
+  const ready = isReady();
+  return {
+    ...state,
+    checked: true,
+    ready,
+    readyAtMs: ready ? Date.now() - started : null,
+  };
+}
+
+async function clickMarketStudyAddButton(cdp, study) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const expectedName = ${JSON.stringify(study.name)};
+      const groups = Array.from(document.querySelectorAll('.indicator-category-group'));
+      const group = groups.find((element) => (
+        element.querySelector('.indicator-category-label')?.textContent?.includes('合约数据')
+      ));
+      if (!group) return { ok: false, reason: 'contract-data-group-not-found' };
+      const items = Array.from(group.querySelectorAll('.indicator-preset-item'));
+      const item = items.find((element) => (
+        element.querySelector('.indicator-preset-name')?.textContent?.includes(expectedName)
+      ));
+      if (!item) return { ok: false, reason: 'study-not-found', expectedName };
+      const button = item.querySelector('.indicator-add-btn');
+      if (!(button instanceof HTMLButtonElement)) {
+        return { ok: false, reason: 'add-button-not-found', expectedName };
+      }
+      if (button.disabled) {
+        return {
+          ok: false,
+          reason: 'add-button-disabled',
+          expectedName,
+          title: button.title,
+        };
+      }
+      button.click();
+      return { ok: true, expectedName, buttonText: button.textContent?.trim() || '' };
+    })()`,
+    returnByValue: true,
+  });
+  const click = result.result?.value || { ok: false, reason: "evaluation-failed" };
+  if (!click.ok) return { ...study, click, reflected: false };
+
+  const reflected = await waitForExpression(
+    cdp,
+    `(() => {
+      const expectedName = ${JSON.stringify(study.name)};
+      return Array.from(document.querySelectorAll('.indicator-preset-item.is-active')).some(
+        (element) => element.querySelector('.indicator-preset-name')?.textContent?.includes(expectedName)
+      );
+    })()`,
+    5_000,
+    50,
+  );
+  return { ...study, click, reflected };
+}
+
+async function addAdvancedMarketStudiesThroughUi(cdp) {
+  const indicatorButtonClicked = await clickSelector(
+    cdp,
+    '.indicator-toggle-btn:not(.alert-toggle-btn)',
+  );
+  const indicatorPanelOpened = indicatorButtonClicked
+    && await waitForSelector(cdp, '.indicator-panel-overlay .indicator-panel', 5_000);
+  const contractDataSectionFound = indicatorPanelOpened && await waitForExpression(
+    cdp,
+    `Array.from(document.querySelectorAll('.indicator-category-label')).some(
+      (element) => element.textContent?.includes('合约数据')
+    )`,
+    5_000,
+    50,
+  );
+  const studies = [];
+  if (contractDataSectionFound) {
+    for (const study of ADVANCED_MARKET_STUDIES) {
+      studies.push(await clickMarketStudyAddButton(cdp, study));
+    }
+  }
+  const panelClosed = indicatorPanelOpened
+    ? await clickSelector(cdp, '.indicator-panel-close')
+    : false;
+  const ready = indicatorButtonClicked
+    && indicatorPanelOpened
+    && contractDataSectionFound
+    && studies.length === ADVANCED_MARKET_STUDIES.length
+    && studies.every((study) => study.click?.ok && study.reflected);
+  return {
+    indicatorButtonClicked,
+    indicatorPanelOpened,
+    contractDataSectionFound,
+    studies,
+    panelClosed,
+    ready,
+  };
+}
+
+async function openAddedMarketStudies(cdp) {
+  const indicatorButtonClicked = await clickSelector(
+    cdp,
+    '.indicator-toggle-btn:not(.alert-toggle-btn)',
+  );
+  const indicatorPanelOpened = indicatorButtonClicked
+    && await waitForSelector(cdp, '.indicator-panel-overlay .indicator-panel', 5_000);
+  const activeTabClick = indicatorPanelOpened
+    ? await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          const tab = Array.from(document.querySelectorAll('.indicator-tab')).find(
+            (element) => element.textContent?.includes('已添加')
+          );
+          if (!(tab instanceof HTMLButtonElement)) return false;
+          tab.click();
+          return true;
+        })()`,
+        returnByValue: true,
+      })
+    : null;
+  const activeTabClicked = Boolean(activeTabClick?.result?.value);
+  const activeStudiesVisible = activeTabClicked && await waitForExpression(
+    cdp,
+    `(() => {
+      const expectedNames = ${JSON.stringify(ADVANCED_MARKET_STUDIES.map((study) => study.name))};
+      const names = Array.from(document.querySelectorAll('.indicator-active-name')).map(
+        (element) => element.textContent || ''
+      );
+      return expectedNames.every((expectedName) => names.some((name) => name.includes(expectedName)));
+    })()`,
+    5_000,
+    50,
+  );
+  return {
+    indicatorButtonClicked,
+    indicatorPanelOpened,
+    activeTabClicked,
+    activeStudiesVisible,
+    ready: indicatorButtonClicked
+      && indicatorPanelOpened
+      && activeTabClicked
+      && activeStudiesVisible,
+  };
+}
+
+async function clickMarketStudyVisibilityButton(cdp, study, hidden) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const expectedName = ${JSON.stringify(study.name)};
+      const expectedHidden = ${JSON.stringify(hidden)};
+      const item = Array.from(document.querySelectorAll('.indicator-active-item')).find(
+        (element) => element.querySelector('.indicator-active-name')?.textContent?.includes(expectedName)
+      );
+      if (!item) return { ok: false, reason: 'active-study-not-found', expectedName };
+      const button = item.querySelector('.indicator-visibility-btn');
+      if (!(button instanceof HTMLButtonElement)) {
+        return { ok: false, reason: 'visibility-button-not-found', expectedName };
+      }
+      if (button.disabled) {
+        return { ok: false, reason: 'visibility-button-disabled', expectedName };
+      }
+      const beforeHidden = button.classList.contains('hidden');
+      if (beforeHidden === expectedHidden) {
+        return {
+          ok: false,
+          reason: 'unexpected-initial-visibility',
+          expectedName,
+          beforeHidden,
+          expectedHidden,
+        };
+      }
+      button.click();
+      return { ok: true, expectedName, beforeHidden, expectedHidden };
+    })()`,
+    returnByValue: true,
+  });
+  const click = result.result?.value || { ok: false, reason: "evaluation-failed" };
+  if (!click.ok) {
+    return {
+      ...study,
+      hidden,
+      click,
+      reflected: false,
+      hiddenStatusVisible: false,
+    };
+  }
+
+  const reflected = await waitForExpression(
+    cdp,
+    `(() => {
+      const expectedName = ${JSON.stringify(study.name)};
+      const expectedHidden = ${JSON.stringify(hidden)};
+      const item = Array.from(document.querySelectorAll('.indicator-active-item')).find(
+        (element) => element.querySelector('.indicator-active-name')?.textContent?.includes(expectedName)
+      );
+      const button = item?.querySelector('.indicator-visibility-btn');
+      return button instanceof HTMLButtonElement
+        && button.classList.contains('hidden') === expectedHidden;
+    })()`,
+    5_000,
+    50,
+  );
+  const hiddenStatusVisible = hidden && reflected
+    ? await waitForExpression(
+        cdp,
+        `(() => {
+          const expectedName = ${JSON.stringify(study.name)};
+          const item = Array.from(document.querySelectorAll('.indicator-active-item')).find(
+            (element) => element.querySelector('.indicator-active-name')?.textContent?.includes(expectedName)
+          );
+          return Boolean(item?.textContent?.includes(${JSON.stringify(ADVANCED_MARKET_HIDDEN_STATUS)}));
+        })()`,
+        5_000,
+        50,
+      )
+    : false;
+  return {
+    ...study,
+    hidden,
+    click,
+    reflected,
+    hiddenStatusVisible,
+  };
+}
+
+async function waitForMarketPaneVisibility(cdp, study, visible, timeoutMs) {
+  const started = Date.now();
+  let state = await readAdvancedMarketState(cdp);
+  const matches = () => {
+    const pane = state.panes?.[study.paneId];
+    return visible
+      ? Boolean(pane?.present && pane?.visible)
+      : !pane?.present;
+  };
+  while (!matches() && Date.now() - started < timeoutMs) {
+    await wait(250);
+    state = await readAdvancedMarketState(cdp);
+  }
+  return {
+    paneId: study.paneId,
+    expectedVisible: visible,
+    pane: state.panes?.[study.paneId] || null,
+    matched: matches(),
+    readyAtMs: matches() ? Date.now() - started : null,
+  };
+}
+
+async function verifyAdvancedMarketStudyVisibilityWorkflow(cdp, timeoutMs) {
+  const panel = await openAddedMarketStudies(cdp);
+  const hiddenStudies = [];
+  if (panel.ready) {
+    for (const study of ADVANCED_MARKET_STUDIES) {
+      const interaction = await clickMarketStudyVisibilityButton(cdp, study, true);
+      const pane = await waitForMarketPaneVisibility(cdp, study, false, timeoutMs);
+      hiddenStudies.push({ ...interaction, pane });
+    }
+  }
+  const hiddenState = panel.ready
+    ? await waitForAdvancedMarketDefaultState(cdp, timeoutMs)
+    : { ...await readAdvancedMarketState(cdp), checked: true, ready: false, readyAtMs: null };
+
+  const restoredStudies = [];
+  if (panel.ready) {
+    for (const study of ADVANCED_MARKET_STUDIES) {
+      const interaction = await clickMarketStudyVisibilityButton(cdp, study, false);
+      const pane = await waitForMarketPaneVisibility(cdp, study, true, timeoutMs);
+      restoredStudies.push({ ...interaction, pane });
+    }
+  }
+  const panelClosed = panel.indicatorPanelOpened
+    ? await clickSelector(cdp, '.indicator-panel-close')
+    : false;
+  const restoredState = panel.ready
+    ? await waitForAdvancedMarketState(cdp, timeoutMs)
+    : { ...await readAdvancedMarketState(cdp), checked: true, ready: false, readyAtMs: null };
+  const hiddenReady = hiddenStudies.length === ADVANCED_MARKET_STUDIES.length
+    && hiddenStudies.every((study) => (
+      study.click?.ok
+      && study.reflected
+      && study.hiddenStatusVisible
+      && study.pane?.matched
+    ))
+    && hiddenState.ready;
+  const restoredReady = restoredStudies.length === ADVANCED_MARKET_STUDIES.length
+    && restoredStudies.every((study) => (
+      study.click?.ok
+      && study.reflected
+      && study.pane?.matched
+    ))
+    && restoredState.ready;
+  return {
+    panel,
+    hiddenStudies,
+    hiddenState,
+    hiddenReady,
+    restoredStudies,
+    restoredState,
+    restoredReady,
+    panelClosed,
+    ready: panel.ready && hiddenReady && restoredReady,
+  };
+}
+
+async function verifyAdvancedMarketStudyWorkflow(cdp, timeoutMs = 15_000) {
+  const defaultState = await waitForAdvancedMarketDefaultState(cdp, timeoutMs);
+  const ui = defaultState.ready
+    ? await addAdvancedMarketStudiesThroughUi(cdp)
+    : {
+        indicatorButtonClicked: false,
+        indicatorPanelOpened: false,
+        contractDataSectionFound: false,
+        studies: [],
+        panelClosed: false,
+        ready: false,
+        reason: "default-state-not-ready",
+      };
+  const addedState = ui.ready
+    ? await waitForAdvancedMarketState(cdp, timeoutMs)
+    : { ...await readAdvancedMarketState(cdp), checked: true, readyAtMs: null };
+  const visibilityWorkflow = addedState.ready
+    ? await verifyAdvancedMarketStudyVisibilityWorkflow(cdp, timeoutMs)
+    : {
+        ready: false,
+        reason: "added-state-not-ready",
+        restoredState: addedState,
+      };
+  const finalState = visibilityWorkflow.restoredState || addedState;
+  return {
+    ...finalState,
+    checked: true,
+    ready: defaultState.ready
+      && ui.ready
+      && addedState.ready
+      && visibilityWorkflow.ready
+      && finalState.ready,
+    defaultState,
+    ui,
+    addedState,
+    visibilityWorkflow,
+  };
 }
 
 async function readPerfReport(cdp) {
@@ -1416,6 +1859,10 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  args.marketType = String(args.marketType || "").trim().toLowerCase();
+  if (!new Set(["spot", "futures"]).has(args.marketType)) {
+    throw new Error("--market-type must be either spot or futures");
+  }
   if (args.shortSwitch && args.shortSwitchIntervals.length !== 2) {
     throw new Error("--short-switch-intervals requires exactly two comma-separated intervals");
   }
@@ -1502,13 +1949,17 @@ async function main() {
       const isReplacedExportBlob = args.exportMatrix
         && event.errorText === "net::ERR_FILE_NOT_FOUND"
         && url.startsWith("blob:");
+      const isOptionalExternalFont = event.type === "Font"
+        && /^https:\/\/fonts\.(?:googleapis|gstatic)\.com\//i.test(url);
       // Export previews revoke the previous object URL after replacing it.
       // The export matrix separately verifies the new preview and downloaded
-      // file bytes, so a late fetch against that retired blob is cancellation,
-      // not an application/network failure.
+      // file bytes, so a late fetch against that retired blob is cancellation.
+      // Google Fonts are cosmetic and may be unavailable in an offline CI run;
+      // the browser fallback font does not invalidate the product smoke.
       const isCanceled = event.canceled
         || event.errorText === "net::ERR_ABORTED"
-        || isReplacedExportBlob;
+        || isReplacedExportBlob
+        || isOptionalExternalFont;
       if (event.errorText && !isCanceled) {
         failures.push({ errorText: event.errorText, requestId: event.requestId, type: event.type, url });
       }
@@ -1524,6 +1975,19 @@ async function main() {
         eventsEnabled: true,
       });
     }
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: `
+        try {
+          const raw = localStorage.getItem("candlescope-user-prefs");
+          const current = raw ? JSON.parse(raw) : {};
+          const prefs = current && typeof current === "object" ? current : {};
+          prefs.lastExchange = "binance";
+          prefs.lastMarketType = ${JSON.stringify(args.marketType)};
+          prefs.lastSymbol = "BTCUSDT";
+          localStorage.setItem("candlescope-user-prefs", JSON.stringify(prefs));
+        } catch {}
+      `,
+    });
     if (args.seedIndicators) {
       const activeIndicators = args.overlayHeavy ? SMOKE_OVERLAY_HEAVY_INDICATORS : SMOKE_ACTIVE_INDICATORS;
       await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
@@ -1544,6 +2008,16 @@ async function main() {
     await cdp.send("Page.navigate", { url: args.url });
 
     const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
+    const advancedMarket = args.marketType === "futures"
+      ? await verifyAdvancedMarketStudyWorkflow(cdp, Math.min(args.timeoutMs, 15_000))
+      : {
+          checked: false,
+          ready: true,
+          readyAtMs: null,
+          reason: "advanced market data is futures-only",
+          metrics: {},
+          panes: {},
+        };
     const chartTypeMatrix = args.chartTypeMatrix
       ? await runChartTypeMatrix({
           args,
@@ -1616,6 +2090,7 @@ async function main() {
     await indicatorRangeNetworkCapture.flush();
     const indicatorRangeRequests = indicatorRangeNetworkCapture.records();
     const indicatorRangeNetwork = indicatorRangeNetworkCapture.summary();
+    const failedApiResponses = responses.filter((response) => response.status >= 400);
     const screenshotData = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
     fs.writeFileSync(screenshot, Buffer.from(screenshotData.data, "base64"));
 
@@ -1625,6 +2100,8 @@ async function main() {
       bars: parseBarCount(bodyText),
       connected: bodyText.includes("Connected to Binance"),
       live: bodyText.includes("Live (WebSocket)"),
+      marketType: args.marketType,
+      advancedMarket,
       ...lazySurfaces,
       ...settings,
       drawingWorkflow,
@@ -1649,6 +2126,7 @@ async function main() {
       shortSwitch,
       chartTypeMatrix,
       apiResponses: responses.slice(0, 20),
+      failedApiResponses: failedApiResponses.slice(0, 20),
       failures,
       warnings: warnings.slice(0, 20),
       exceptions: exceptions.slice(0, 20),
@@ -1669,6 +2147,7 @@ async function main() {
     const failed = !report.connected
       || !report.live
       || report.bars <= 0
+      || !report.advancedMarket.ready
       || !report.drawingToolbarLoaded
       || !report.symbolSearchOpened
       || !report.settingsOpened
@@ -1699,7 +2178,7 @@ async function main() {
       || (args.chartTypeMatrix && !chartTypeMatrix?.passed)
       || (args.exportMatrix && !exportMatrix?.passed)
       || exceptions.length > 0
-      || responses.some((response) => response.status >= 400)
+      || failedApiResponses.length > 0
       || failures.length > 0;
     process.exitCode = failed ? 1 : 0;
   } finally {

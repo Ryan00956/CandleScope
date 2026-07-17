@@ -56,11 +56,20 @@ It includes:
 - `plugin_api_version`
 - `capability_schema_version`
 - `markets`
+- `channels`
 - `native_intervals`
 - `ws_connection_model`
 - `protocol_features`
 - `limits`
 - `known_limitations`
+
+Each schema-v2+ channel separately declares transport, snapshot/delta,
+sequence/resync, `available_fields`, `unavailable_fields`, and
+`derived_fields`. The P0 K-line path uses those declarations to gate enhanced
+volume and order-flow proxies so plugin placeholders never become market data.
+Schema v3 adds market `calendar_id`/`timezone`, typed channel
+`history_policy` metadata, and normalized symbol lifecycle timestamps. Legacy
+dotted history limits remain available to schema-v1/v2 consumers.
 
 The frontend uses this metadata for interval lists, available market types,
 WS behavior, and user-visible exchange limitations. Keep new exchange UI

@@ -58,7 +58,7 @@ backend/app/exchanges/plugins/<exchange>/
 6. 在 `symbols.py` 中实现 symbol 规范化和 symbol metadata 转换。
 7. 如果默认倒序时间分页不适用，在 `pagination.py` 中实现交易所分页策略。
 8. 在 `plugin.py` 中返回 protocol、normalizer、symbol normalizer 和各类 policy。
-9. 除非 registry 已支持新的 major contract，否则保持 `plugin_api_version="1.0"` 和 `capability_schema_version=1`。
+9. 保持 `plugin_api_version="1.0"`；`capability_schema_version` 应选择插件完整实现的最高版本（内置模板示范 schema v3）。
 10. 通过 `bootstrap_default_adapters()` 注册内置插件，或用 `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory` 显式加载外部插件。
 11. 在 `tests/fixtures/exchanges/` 下增加 `ExchangeContractCase` 和 `NormalizerContractSample` 契约 fixture。
 12. 覆盖 capabilities、symbol normalization、REST spec、WS spec/subscription、normalizer、pagination 和 backfill fetch 行为。
@@ -71,6 +71,8 @@ backend/app/exchanges/plugins/<exchange>/
 - `capabilities()`：支持的 market types、intervals、REST/WS 特性。
 - `plugin_api_version`：`ExchangeRegistry` 消费的插件主契约版本。
 - `capability_schema_version`：能力元数据 schema 版本。
+- schema v3 `markets`：声明 `calendar_id` 和 `timezone`。
+- schema v3 历史 `channels`：在 `history_policy` 中声明强类型 cadence、空页语义、calendar identity 和有限历史边界。
 - `protocol_features`：稳定 feature flags，例如 `rest.kline`、`ws.shared_multiplex`、`pagination.reverse_time`。
 - `limits`：机器可读限制，例如 `rest.kline.max_limit`。
 - `known_limitations`：前端或 diagnostics 可以展示的真实限制。

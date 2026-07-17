@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Callable
 
 from .config import IngestionConfig
 from .models import (
@@ -46,10 +47,9 @@ from .models import (
     DataSource,
     SessionHealth,
 )
-from .metrics import LayerMetrics
 from .transport import TransportLayer, TransportError
 from .session import SessionLayer
-from .session_types import SessionLike
+from .session_types import HealthCallback, SessionLike
 from .feed_control import FeedControlLayer
 from .normalize import NormalizeLayer
 from .continuity import ContinuityLayer
@@ -98,6 +98,7 @@ class StreamPipeline:
         transport: TransportLayer,
         descriptor: StreamDescriptor,
         session_factory: Callable[[], SessionLike] | None = None,
+        calendar_resolver: Callable[[str, str, str], Any] | None = None,
     ) -> None:
         self.descriptor = descriptor
 
@@ -109,7 +110,12 @@ class StreamPipeline:
             session_factory=session_factory,
         )
         self.normalize = NormalizeLayer(config, descriptor)
-        self.continuity = ContinuityLayer(config, transport, descriptor)
+        self.continuity = ContinuityLayer(
+            config,
+            transport,
+            descriptor,
+            calendar_resolver=calendar_resolver,
+        )
         self.delivery = DeliveryLayer(config, descriptor)
 
         # Wire: L3 → L4 → L5 → L6
@@ -124,6 +130,11 @@ class StreamPipeline:
     async def stop(self) -> None:
         await self.feed_control.stop()
         await self.delivery.close_all_subscribers()
+
+    def on_health_change(self, callback: HealthCallback) -> None:
+        """Observe L2 health changes while preserving L3's internal handler."""
+
+        self.feed_control.on_health_change(callback)
 
     def snapshot(self) -> dict:
         return {
@@ -141,12 +152,19 @@ class MarketDataIngress:
     Owns the shared L1 Transport layer and creates per-stream pipelines.
     """
 
-    def __init__(self, config: IngestionConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: IngestionConfig | None = None,
+        *,
+        calendar_resolver: Callable[[str, str, str], Any] | None = None,
+    ) -> None:
         self._cfg = config or IngestionConfig()
         self._transport = TransportLayer(self._cfg)
         self._shared_ws = SharedWsHubRegistry(self._cfg, self._transport)
         self._pipelines: dict[str, StreamPipeline] = {}
+        self._stream_locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._started = False
+        self._calendar_resolver = calendar_resolver
 
     @property
     def config(self) -> IngestionConfig:
@@ -180,41 +198,92 @@ class MarketDataIngress:
 
     # ── Stream management ────────────────────────────────────
 
-    async def add_stream(self, descriptor: StreamDescriptor) -> StreamPipeline:
+    async def add_stream(
+        self,
+        descriptor: StreamDescriptor,
+        *,
+        on_health: HealthCallback | None = None,
+    ) -> StreamPipeline:
         """Create and start a new stream pipeline.
 
         Raises ValueError if the stream is already running.
         """
         descriptor.validate()
         key = descriptor.key
+        async with self._hold_stream_lock(key):
+            if key in self._pipelines:
+                raise ValueError(f"Stream already exists: {key}")
 
-        if key in self._pipelines:
-            raise ValueError(f"Stream already exists: {key}")
+            if not self._started:
+                await self.start()
 
-        if not self._started:
-            await self.start()
-
-        pipeline = StreamPipeline(
-            self._cfg,
-            self._transport,
-            descriptor,
-            session_factory=self._create_session_factory(descriptor),
-        )
-        self._pipelines[key] = pipeline
-        await pipeline.start()
-        logger.info("Stream added: %s", key)
-        return pipeline
+            pipeline = StreamPipeline(
+                self._cfg,
+                self._transport,
+                descriptor,
+                session_factory=self._create_session_factory(descriptor),
+                calendar_resolver=self._calendar_resolver,
+            )
+            if on_health is not None:
+                pipeline.on_health_change(on_health)
+            self._pipelines[key] = pipeline
+            try:
+                await pipeline.start()
+            except BaseException:
+                cleanup_succeeded = False
+                try:
+                    await asyncio.shield(pipeline.stop())
+                    cleanup_succeeded = True
+                except BaseException:
+                    logger.exception(
+                        "Failed to roll back partially started stream: %s",
+                        key,
+                    )
+                if cleanup_succeeded and self._pipelines.get(key) is pipeline:
+                    self._pipelines.pop(key, None)
+                raise
+            logger.info("Stream added: %s", key)
+            return pipeline
 
     async def remove_stream(self, key: str) -> None:
         """Stop and remove a stream pipeline."""
-        pipeline = self._pipelines.pop(key, None)
-        if pipeline:
-            await pipeline.stop()
-            logger.info("Stream removed: %s", key)
+        async with self._hold_stream_lock(key):
+            pipeline = self._pipelines.get(key)
+            if pipeline:
+                await pipeline.stop()
+                if self._pipelines.get(key) is pipeline:
+                    self._pipelines.pop(key, None)
+                logger.info("Stream removed: %s", key)
 
     def get_pipeline(self, key: str) -> StreamPipeline | None:
         """Get a pipeline by its key."""
         return self._pipelines.get(key)
+
+    @asynccontextmanager
+    async def _hold_stream_lock(self, key: str) -> AsyncIterator[None]:
+        state = self._stream_locks.get(key)
+        if state is None:
+            lock = asyncio.Lock()
+            users = 0
+        else:
+            lock, users = state
+        self._stream_locks[key] = (lock, users + 1)
+
+        acquired = False
+        try:
+            await lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                lock.release()
+            current = self._stream_locks.get(key)
+            if current is not None and current[0] is lock:
+                remaining = current[1] - 1
+                if remaining <= 0:
+                    self._stream_locks.pop(key, None)
+                else:
+                    self._stream_locks[key] = (lock, remaining)
 
     def _create_session_factory(
         self,

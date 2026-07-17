@@ -22,13 +22,19 @@ from typing import Any
 
 import aiohttp
 import websockets
-from websockets.asyncio.client import ClientConnection
 
-from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.exchanges import (
+    HistoricalRequest,
+    bootstrap_default_adapters,
+    get_exchange_registry,
+    get_shared_rate_limit_manager,
+    get_shared_rate_limit_semaphore,
+)
 from app.exchanges.ws_protocol import (
     WsConnectionContext,
     WsSubscriptionMode,
 )
+from app.data_engine.market_data import TransportMode, market_channel_for_stream_type
 
 from .config import IngestionConfig
 from .metrics import LayerMetrics
@@ -42,6 +48,9 @@ from .models import (
 
 logger = logging.getLogger("ingestion.L1_Transport")
 
+_NON_RETRYABLE_HTTP_BODY_CODES = frozenset({"-1130"})
+
+
 class TransportLayer:
     """Async HTTP + WS transport with endpoint rotation.
 
@@ -53,6 +62,7 @@ class TransportLayer:
         self._metrics = LayerMetrics("L1_Transport")
         bootstrap_default_adapters()
         self._registry = get_exchange_registry()
+        self._rate_limits = get_shared_rate_limit_manager()
 
         # Endpoint rotation state
         self._http_idx: dict[tuple[str, str], int] = {}
@@ -138,6 +148,7 @@ class TransportLayer:
                 for (exchange, market_type), urls in self._diagnostic_ws_url_map().items()
             },
             "metrics": self._metrics.snapshot(),
+            "exchange_rate_limits": self._rate_limits.snapshot(),
         }
 
     # ── Public: Lifecycle ────────────────────────────────────
@@ -177,12 +188,35 @@ class TransportLayer:
         desc = req.descriptor
         exchange = getattr(desc, "exchange", "binance")
         market_type = getattr(desc, "market_type", "spot")
-        protocol = self._registry.get_plugin(exchange).protocol()
+        quota_acquired = bool(req.quota_acquired)
+        quota_semaphore_held = bool(req.quota_semaphore_held)
+        req.quota_acquired = False
+        req.quota_semaphore_held = False
+
+        plugin = self._registry.get_plugin(exchange)
+        protocol = plugin.protocol()
         spec = protocol.rest_request(req, config=self._cfg)
         if spec is None:
             raise TransportError(f"No REST endpoint for stream type: {desc.stream_type}")
 
         params = spec.params
+        quota_request = HistoricalRequest(
+            exchange=exchange,
+            market_type=market_type,
+            endpoint=spec.path,
+            symbol=desc.symbol,
+            interval=desc.interval,
+            start_ms=req.start_ms,
+            end_ms=req.end_ms,
+            limit=req.limit,
+            params=dict(params),
+        )
+        quota_policy = plugin.rate_limit_policy(self._cfg)
+        quota_rule = quota_policy.rule_for(quota_request)
+        quota_semaphore = get_shared_rate_limit_semaphore(
+            quota_rule,
+            fallback=quota_policy.concurrency_for(market_type),
+        )
         http_urls = spec.base_urls
         last_exc: Exception | None = None
         tried = 0
@@ -194,7 +228,14 @@ class TransportLayer:
         while tried < total:
             base = self._current_http_base(exchange, market_type, http_urls)
             url = f"{base}{spec.path}"
+            acquired_here = False
             try:
+                if not quota_semaphore_held:
+                    await quota_semaphore.acquire()
+                    acquired_here = True
+                if not (quota_acquired and tried == 0):
+                    await self._rate_limits.acquire(quota_rule, quota_request)
+
                 self._metrics.inc("http_requests_sent")
                 self._metrics.set("http_active_endpoint", base)
                 self._metrics.mark("http_last_request_at")
@@ -230,6 +271,12 @@ class TransportLayer:
                 self._metrics.inc("http_requests_ok")
                 self._metrics.mark("http_last_success_at")
                 self._last_http_base = base
+                self._rate_limits.record_response(
+                    quota_rule,
+                    status_code=200,
+                    headers=headers,
+                    body_code=body_code,
+                )
                 now_ms = int(time.time() * 1000)
 
                 rows = protocol.extract_http_rows(data, desc)
@@ -244,20 +291,34 @@ class TransportLayer:
                         http_status=200,
                         http_headers=headers,
                         http_body_code=body_code,
+                        request_limit=req.limit,
                     )
                     for row in rows
                 ]
 
             except Exception as exc:
                 last_exc = exc
+                self._rate_limits.record_response(
+                    quota_rule,
+                    status_code=getattr(exc, "status_code", None),
+                    headers=getattr(exc, "headers", None),
+                    body_code=getattr(exc, "body_code", None),
+                    retry_after=getattr(exc, "retry_after", None),
+                    fallback_cooldown_seconds=quota_rule.cooldown_seconds,
+                )
                 self._metrics.inc("http_requests_failed")
                 self._metrics.mark("http_last_error_at")
+                if _is_non_retryable_http_error(exc):
+                    raise
                 logger.warning(
                     "HTTP fetch failed (%s): [%s] %s",
                     base, type(exc).__name__, exc,
                 )
                 self._rotate_http(exchange, market_type, len(http_urls))
                 tried += 1
+            finally:
+                if acquired_here:
+                    quota_semaphore.release()
 
         if isinstance(last_exc, TransportError):
             raise TransportError(
@@ -412,7 +473,16 @@ class TransportLayer:
         exchange = getattr(descriptor, "exchange", "binance")
         market_type = getattr(descriptor, "market_type", "spot")
         plugin = self._registry.get_plugin(exchange)
+        protocol_support = getattr(plugin.protocol(), "supports_ws", None)
+        if callable(protocol_support) and not protocol_support(descriptor):
+            return False
+
         capabilities = plugin.capabilities()
+        channel = market_channel_for_stream_type(descriptor.stream_type)
+        if channel is not None and getattr(capabilities, "capability_schema_version", 1) >= 2:
+            capability = capabilities.channel_capability(channel, market_type)
+            if capability is not None:
+                return capability.supports_transport(TransportMode.WEBSOCKET)
         return capabilities.ws_connection_model != "polling_only"
 
     # ── Public: probe (used by L3 to test WS connectivity) ───
@@ -604,3 +674,11 @@ def _extract_body_code(body: object) -> str | None:
         return None
     raw = payload.get("code")
     return str(raw) if raw is not None else None
+
+
+def _is_non_retryable_http_error(exc: Exception) -> bool:
+    return (
+        isinstance(exc, TransportError)
+        and exc.status_code == 400
+        and exc.body_code in _NON_RETRYABLE_HTTP_BODY_CODES
+    )

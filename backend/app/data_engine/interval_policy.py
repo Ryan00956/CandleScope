@@ -4,7 +4,9 @@ from __future__ import annotations
 import calendar
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Mapping, Optional, Sequence
+
+from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
 
 
 VALID_INTERVALS = [
@@ -74,6 +76,34 @@ def aggregate_tail_is_closed(
     if source_interval_seconds is None:
         return True
     return int(rows[-1]["time"]) + source_interval_seconds >= bucket_end_seconds
+
+
+def enhanced_components_are_complete(
+    rows: list[dict],
+    *,
+    bucket_start_seconds: int,
+    bucket_end_seconds: int,
+    source_interval_seconds: int | None,
+) -> bool:
+    """Check that enhanced totals cover a contiguous target-bucket prefix.
+
+    A complete closed bucket must reach its end.  A forming bucket may end at
+    the latest open source component, but the first component and every step
+    before it must still be present.
+    """
+    if not rows or not source_interval_seconds or source_interval_seconds <= 0:
+        return False
+    if int(rows[0]["time"]) != bucket_start_seconds:
+        return False
+    if any(
+        int(current["time"]) - int(previous["time"]) != source_interval_seconds
+        for previous, current in zip(rows, rows[1:])
+    ):
+        return False
+    reaches_bucket_end = (
+        int(rows[-1]["time"]) + source_interval_seconds >= bucket_end_seconds
+    )
+    return reaches_bucket_end or not row_is_closed(rows[-1])
 
 
 STANDARD_INTERVAL_MS = {key: value * 1000 for key, value in INTERVAL_SECONDS.items()}
@@ -238,6 +268,229 @@ def compute_bucket_close_ms(
     ) - 1
 
 
+def last_closed_bar_open_ms(now_ms: int, interval: str) -> int | None:
+    """Return the open time of the latest fully closed interval bucket.
+
+    Historical K-line ranges are expressed in bar ``open_time`` values.  The
+    bucket containing ``now_ms`` is still forming, so the right-most eligible
+    historical open is the bucket immediately before it.  Bucket helpers are
+    used instead of fixed-width subtraction so calendar-month intervals (for
+    example ``1M`` and ``2M``) retain their real UTC month boundaries.
+    """
+    width_ms = parse_interval_ms(interval)
+    if width_ms is None or width_ms <= 0:
+        return None
+
+    current_open_ms = compute_bucket_start_ms(
+        int(now_ms),
+        width_ms,
+        interval=interval,
+    )
+    if current_open_ms <= 0:
+        return None
+
+    previous_open_ms = compute_bucket_start_ms(
+        current_open_ms - 1,
+        width_ms,
+        interval=interval,
+    )
+    if compute_bucket_end_ms(
+        previous_open_ms,
+        width_ms,
+        interval=interval,
+    ) > int(now_ms):
+        return None
+    return previous_open_ms
+
+
+def latest_eligible_bar_open_ms(
+    now_ms: int,
+    interval: str,
+    requested_end_ms: int | None = None,
+) -> int | None:
+    """Return the latest *closed* bar open that a request may include.
+
+    Storage queries use an inclusive wall-clock ``end_ms`` but K-line history
+    is keyed by bucket open.  A caller can therefore pass either an exact open
+    time, a bar close time, or a timestamp inside the current forming bucket.
+    This helper intersects that request edge with the target interval's closed
+    boundary.  It is deliberately target-interval-aware: subtracting one
+    fixed interval from a wall clock creates an off-by-one tail blind spot and
+    is incorrect for calendar months.
+    """
+    last_closed_ms = last_closed_bar_open_ms(now_ms, interval)
+    if last_closed_ms is None:
+        return None
+    if requested_end_ms is None:
+        return last_closed_ms
+
+    width_ms = parse_interval_ms(interval)
+    if width_ms is None or width_ms <= 0:
+        return None
+    requested_open_ms = compute_bucket_start_ms(
+        int(requested_end_ms),
+        width_ms,
+        interval=interval,
+    )
+    return min(last_closed_ms, requested_open_ms)
+
+
+def aggregate_kline_rows(
+    component_rows: Sequence[Mapping[str, Any]],
+    *,
+    target_interval: str,
+    source_interval: str,
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    """Safely rebuild closed target K-lines from complete stored components.
+
+    The helper is intentionally strict.  A target bucket is emitted only when
+    every expected source open is present, every component has its canonical
+    close timestamp, every component is closed by ``now_ms``, and the target
+    bucket itself is already closed.  It is therefore safe to use for
+    derived/custom series without ever turning a forming bucket into durable
+    history.  It must not replace an exchange-native standard candle: venues
+    can aggregate volume and order-flow differently from persisted minute
+    components, so a missing native ``1d`` remains an authoritative-history
+    repair task.
+
+    Input and output rows use the storage shape (``open_time`` in
+    milliseconds).  Optional order-flow fields are preserved only when every
+    component supplies a valid value, matching the existing calendar-month
+    aggregation semantics.
+    """
+    target_ms = parse_interval_ms(target_interval)
+    source_ms = parse_interval_ms(source_interval)
+    if (
+        not component_rows
+        or target_ms is None
+        or source_ms is None
+        or target_ms <= source_ms
+        or source_ms <= 0
+    ):
+        return []
+
+    last_closed_ms = last_closed_bar_open_ms(int(now_ms), target_interval)
+    if last_closed_ms is None:
+        return []
+
+    rows_by_open: dict[int, dict[str, Any]] = {}
+    for raw in component_rows:
+        try:
+            row = dict(raw)
+            open_time_ms = int(row["open_time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # A duplicate component makes the source ambiguous.  Refuse that
+        # target bucket instead of silently choosing a row.
+        if open_time_ms in rows_by_open:
+            rows_by_open[open_time_ms] = {}
+        else:
+            rows_by_open[open_time_ms] = row
+
+    bucket_opens = sorted({
+        compute_bucket_start_ms(
+            open_time_ms,
+            target_ms,
+            interval=target_interval,
+        )
+        for open_time_ms in rows_by_open
+    })
+    rebuilt: list[dict[str, Any]] = []
+
+    for bucket_open_ms in bucket_opens:
+        if bucket_open_ms > last_closed_ms:
+            continue
+        bucket_end_ms = compute_bucket_end_ms(
+            bucket_open_ms,
+            target_ms,
+            interval=target_interval,
+        )
+
+        expected_opens: list[int] = []
+        component_open_ms = bucket_open_ms
+        while component_open_ms < bucket_end_ms:
+            expected_opens.append(component_open_ms)
+            component_open_ms += source_ms
+        # A source interval that crosses a target boundary cannot prove an
+        # exact target candle.  This is expected for some exotic interval
+        # pairs; callers can still fall back to authoritative history.
+        if component_open_ms != bucket_end_ms:
+            continue
+
+        components = [rows_by_open.get(open_time_ms) for open_time_ms in expected_opens]
+        if any(not row for row in components):
+            continue
+        rows = [row for row in components if row]
+        if not all(_stored_component_is_closed(
+            row,
+            open_time_ms=open_time_ms,
+            source_ms=source_ms,
+            now_ms=now_ms,
+        ) for row, open_time_ms in zip(rows, expected_opens)):
+            continue
+
+        try:
+            enhanced_rows = [
+                serialize_kline_enhancements(
+                    volume=row.get("volume"),
+                    quote_volume=row.get("quote_volume"),
+                    trades=row.get("trades"),
+                    taker_buy_base=row.get("taker_buy_base"),
+                    taker_buy_quote=row.get("taker_buy_quote"),
+                )
+                for row in rows
+            ]
+            rebuilt.append({
+                "open_time": bucket_open_ms,
+                "close_time": bucket_end_ms - 1,
+                "open": float(rows[0]["open"]),
+                "high": max(float(row["high"]) for row in rows),
+                "low": min(float(row["low"]) for row in rows),
+                "close": float(rows[-1]["close"]),
+                "volume": round(sum(float(row["volume"]) for row in rows), 8),
+                "quote_volume": _sum_optional_additive_field(
+                    enhanced_rows, "quote_volume",
+                ),
+                "trades": _sum_optional_additive_field(
+                    enhanced_rows, "trades", integer=True,
+                ),
+                "taker_buy_base": _sum_optional_additive_field(
+                    enhanced_rows, "taker_buy_base",
+                ),
+                "taker_buy_quote": _sum_optional_additive_field(
+                    enhanced_rows, "taker_buy_quote",
+                ),
+                "is_closed": True,
+            })
+        except (KeyError, TypeError, ValueError):
+            # A malformed component must not produce a plausible-looking
+            # reconstructed candle.
+            continue
+
+    return rebuilt
+
+
+def _stored_component_is_closed(
+    row: Mapping[str, Any],
+    *,
+    open_time_ms: int,
+    source_ms: int,
+    now_ms: int,
+) -> bool:
+    """Validate one storage-shaped source component for strict reconstruction."""
+    if not row_is_closed(dict(row), default=True):
+        return False
+    try:
+        close_time_ms = int(row["close_time"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        close_time_ms == int(open_time_ms) + int(source_ms) - 1
+        and close_time_ms < int(now_ms)
+    )
+
+
 def find_best_base_interval(
     custom_seconds: int,
     *,
@@ -341,6 +594,23 @@ def aggregate_rows_by_month(
     result: list[dict] = []
     for bucket_start in sorted(buckets):
         rows = sorted(buckets[bucket_start], key=lambda row: row["time"])
+        bucket_end = next_month_bucket(bucket_start, months)
+        enhanced_complete = enhanced_components_are_complete(
+            rows,
+            bucket_start_seconds=bucket_start,
+            bucket_end_seconds=bucket_end,
+            source_interval_seconds=source_interval_seconds,
+        )
+        enhanced_rows = [
+            serialize_kline_enhancements(
+                volume=row.get("volume"),
+                quote_volume=row.get("quote_volume"),
+                trades=row.get("trades"),
+                taker_buy_base=row.get("taker_buy_base"),
+                taker_buy_quote=row.get("taker_buy_quote"),
+            )
+            for row in rows
+        ]
         result.append({
             "time": bucket_start,
             "open": rows[0]["open"],
@@ -348,16 +618,39 @@ def aggregate_rows_by_month(
             "low": min(row["low"] for row in rows),
             "close": rows[-1]["close"],
             "volume": round(sum(row["volume"] for row in rows), 8),
+            "quote_volume": _sum_optional_additive_field(enhanced_rows, "quote_volume")
+            if enhanced_complete else None,
+            "trades": _sum_optional_additive_field(enhanced_rows, "trades", integer=True)
+            if enhanced_complete else None,
+            "taker_buy_base": _sum_optional_additive_field(enhanced_rows, "taker_buy_base")
+            if enhanced_complete else None,
+            "taker_buy_quote": _sum_optional_additive_field(enhanced_rows, "taker_buy_quote")
+            if enhanced_complete else None,
             # A newer component implicitly confirms any older component whose
             # explicit close event was missed, but a partial target bucket is
             # still forming until that component reaches its calendar end.
             "is_closed": aggregate_tail_is_closed(
                 rows,
-                bucket_end_seconds=next_month_bucket(bucket_start, months),
+                bucket_end_seconds=bucket_end,
                 source_interval_seconds=source_interval_seconds,
             ),
         })
     return result
+
+
+def _sum_optional_additive_field(
+    rows: list[dict],
+    field: str,
+    *,
+    integer: bool = False,
+) -> float | int | None:
+    """Sum an additive field only for a complete component set."""
+    values = [row.get(field) for row in rows]
+    if any(value is None for value in values):
+        return None
+    if integer:
+        return sum(int(value) for value in values)
+    return round(sum(float(value) for value in values), 8)
 
 
 def add_months(ts_seconds: int, months: int) -> int:

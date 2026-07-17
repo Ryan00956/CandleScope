@@ -14,6 +14,11 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.api.v1.stream_indicators import stream_indicators
 from app.api.v1.stream_klines import stream_multi_kline, stream_single_kline
+from app.api.v1.stream_liquidations import stream_liquidations
+from app.api.v1.stream_market import stream_market
+from app.api.v1.stream_full_order_book import stream_full_order_book
+from app.api.v1.stream_order_book import stream_order_book
+from app.api.v1.stream_trade_flow import stream_trade_flow
 from app.api.v1.stream_utils import (
     normalize_exchange as _normalize_exchange,
     normalize_market_type as _normalize_market_type,
@@ -152,3 +157,88 @@ async def indicator_stream(websocket: WebSocket) -> None:
         return
 
     await stream_indicators(websocket, dm, indicator_engine)
+
+
+@router.websocket("/market")
+async def market_stream(websocket: WebSocket) -> None:
+    """Multiplex Mark/Index/Funding/OI/Basis over one browser socket."""
+
+    await websocket.accept()
+    dm = _get_data_manager(websocket)
+    if dm is None or not getattr(dm, "market_data_ready", False):
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "code": "MARKET_STREAM_NOT_READY",
+            "detail": "Advanced market data is not initialized.",
+        })
+        await websocket.close(code=1013)
+        return
+    await stream_market(websocket, dm)
+
+
+@router.websocket("/trade-flow")
+async def trade_flow_stream(websocket: WebSocket) -> None:
+    """Deliver append-only aggregate trades over ``tradeflow.v1``."""
+
+    await websocket.accept()
+    dm = _get_data_manager(websocket)
+    if dm is None or not getattr(dm, "trade_flow_ready", False):
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "code": "TRADE_FLOW_STREAM_NOT_READY",
+            "detail": "Trade-flow market data is not initialized.",
+        })
+        await websocket.close(code=1013)
+        return
+    await stream_trade_flow(websocket, dm)
+
+
+@router.websocket("/liquidations")
+async def liquidation_stream(websocket: WebSocket) -> None:
+    """Deliver sampled public liquidation observations over ``liquidation.v1``."""
+
+    await websocket.accept()
+    dm = _get_data_manager(websocket)
+    if dm is None or not getattr(dm, "liquidation_ready", False):
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "code": "LIQUIDATION_STREAM_NOT_READY",
+            "detail": "Liquidation market data is not initialized.",
+        })
+        await websocket.close(code=1013)
+        return
+    await stream_liquidations(websocket, dm)
+
+
+@router.websocket("/order-book")
+async def order_book_stream(websocket: WebSocket) -> None:
+    """Deliver replaceable Partial Top-N snapshots over ``orderbook.v1``."""
+
+    await websocket.accept()
+    dm = _get_data_manager(websocket)
+    if dm is None or not getattr(dm, "order_book_ready", False):
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "code": "ORDER_BOOK_STREAM_NOT_READY",
+            "detail": "Order-book market data is not initialized.",
+        })
+        await websocket.close(code=1013)
+        return
+    await stream_order_book(websocket, dm)
+
+
+@router.websocket("/full-order-book")
+async def full_order_book_stream(websocket: WebSocket) -> None:
+    """Deliver atomic projections of a strictly reconstructed local L2 book."""
+
+    await websocket.accept()
+    dm = _get_data_manager(websocket)
+    if dm is None or not getattr(dm, "full_order_book_ready", False):
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "code": "FULL_ORDER_BOOK_STREAM_NOT_READY",
+            "detail": "Full order-book market data is not initialized.",
+        })
+        await websocket.close(code=1013)
+        return
+    await stream_full_order_book(websocket, dm)

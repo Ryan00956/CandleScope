@@ -862,7 +862,14 @@ class MaintenanceService:
             market_type=market_type,
         )
         if rows:
-            bars = [BarData.from_storage_row(row) for row in reversed(rows)]
+            bars = [
+                BarData.from_storage_row(
+                    row,
+                    exchange=exchange,
+                    market_type=market_type,
+                )
+                for row in reversed(rows)
+            ]
             await self._bars_backfilled(
                 symbol,
                 interval,

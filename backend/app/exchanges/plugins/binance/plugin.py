@@ -51,6 +51,14 @@ class BinancePlugin(BuiltinExchangePlugin):
             getattr(config, "fetch_binance_futures_concurrency", 1),
             1,
         )
+        premium_index_history_concurrency = _configured_concurrency(
+            getattr(
+                config,
+                "fetch_binance_futures_premium_index_concurrency",
+                4,
+            ),
+            4,
+        )
         futures_delay = _non_negative_float(
             getattr(config, "fetch_binance_futures_rate_limit_delay", 1.0),
             1.0,
@@ -68,6 +76,8 @@ class BinancePlugin(BuiltinExchangePlugin):
             getattr(config, "fetch_binance_futures_weight_per_minute", 2400),
             safety_factor,
         )
+        funding_history_capacity = effective_rate_limit_capacity(500, safety_factor)
+        open_interest_history_capacity = effective_rate_limit_capacity(1000, safety_factor)
         return RateLimitPolicy(
             default_concurrency=spot_concurrency,
             default_delay_seconds=spot_delay,
@@ -103,6 +113,84 @@ class BinancePlugin(BuiltinExchangePlugin):
                     max_concurrency=futures_concurrency,
                     cooldown_seconds=backoff,
                 ),
+                RateLimitRule(
+                    name="binance_futures_depth_snapshot",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/depth",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=_futures_depth_cost,
+                    max_concurrency=futures_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
+                    name="binance_futures_aggregate_trades",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/aggTrades",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=lambda _request: 20,
+                    max_concurrency=futures_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
+                    name="binance_futures_premium_index",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/premiumIndex",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    max_concurrency=futures_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
+                    name="binance_futures_premium_index_klines",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/premiumIndexKlines",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=_futures_kline_cost,
+                    max_concurrency=premium_index_history_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
+                    name="binance_futures_open_interest",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/openInterest",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    max_concurrency=futures_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
+                    name="binance_futures_funding_history",
+                    bucket_key="binance:futures:funding_history:ip",
+                    endpoint="/fapi/v1/fundingRate",
+                    market_types=("futures",),
+                    capacity=funding_history_capacity,
+                    refill_interval_seconds=300.0,
+                    max_concurrency=futures_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
+                    name="binance_futures_open_interest_history",
+                    bucket_key="binance:futures:open_interest_history:ip",
+                    endpoint="/futures/data/openInterestHist",
+                    market_types=("futures",),
+                    capacity=open_interest_history_capacity,
+                    refill_interval_seconds=300.0,
+                    max_concurrency=futures_concurrency,
+                    cooldown_seconds=backoff,
+                ),
             ),
         )
 
@@ -124,6 +212,17 @@ def _futures_kline_cost(request: HistoricalRequest) -> int:
     if limit <= 1000:
         return 5
     return 10
+
+
+def _futures_depth_cost(request: HistoricalRequest) -> int:
+    limit = int(request.limit or 500)
+    if limit <= 50:
+        return 2
+    if limit <= 100:
+        return 5
+    if limit <= 500:
+        return 10
+    return 20
 
 
 def _configured_concurrency(value: Any, fallback: Any) -> int:

@@ -2,6 +2,7 @@ import type { AppShellViewModelContext } from "../appShellContracts.js";
 import type { TopBarProps } from "../TopBar.js";
 
 export function buildTopBarViewModel({
+  advancedMarketView,
   alertsActions,
   alertsView,
   indicatorActions,
@@ -42,8 +43,10 @@ export function buildTopBarViewModel({
       onToggleIndicatorPanel: indicatorActions.togglePanel,
       alertPanelOpen: alertsView.isOpen,
       onToggleAlertPanel: alertsActions.togglePanel,
-      activeIndicatorCount: indicatorView.activeIndicators.length,
+      activeIndicatorCount: indicatorView.activeIndicators.length
+        + advancedMarketView.marketStudies.filter((study) => study.added).length,
     },
     marketSummary: { displayData, isUp, priceChange, amplitude },
+    advancedMarketData: advancedMarketView,
   };
 }

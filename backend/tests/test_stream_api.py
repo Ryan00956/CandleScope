@@ -64,17 +64,36 @@ class _SingleStreamDataManager:
         yield DataEvent(
             event_type=self.event_type,
             key=SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
-            bar=BarData(time=1_700_000_000, open=1, high=2, low=0.5, close=1.5, volume=10),
+            detail={"bars_count": 2}
+            if self.event_type is DataEventType.BACKFILL_COMPLETED else {},
+            bar=BarData(
+                time=1_700_000_000,
+                open=1,
+                high=2,
+                low=0.5,
+                close=1.5,
+                volume=10,
+                quote_volume=15,
+                trades=7,
+                taker_buy_base=6,
+                taker_buy_quote=9,
+            ) if self.event_type is not DataEventType.BACKFILL_COMPLETED else None,
         )
 
 
 class _MultiStreamDataManager:
-    def __init__(self, *, emit_backfill: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        emit_backfill: bool = True,
+        event_type: DataEventType = DataEventType.BACKFILL_COMPLETED,
+    ) -> None:
         self.ensure_stream_calls: list[dict] = []
         self.release_stream_calls: list[dict] = []
         self.subscribe_calls: list[dict] = []
         self.unsubscribed: list[object] = []
         self.emit_backfill = emit_backfill
+        self.event_type = event_type
 
     async def ensure_stream(
         self,
@@ -134,11 +153,26 @@ class _MultiStreamDataManager:
 
         async def _emit() -> None:
             await asyncio.sleep(0)
-            await callback(DataEvent(
-                event_type=DataEventType.BACKFILL_COMPLETED,
+            event = DataEvent(
+                event_type=self.event_type,
                 key=SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
-                detail={"bars_count": 2},
-            ))
+                detail={"bars_count": 2}
+                if self.event_type is DataEventType.BACKFILL_COMPLETED else {},
+                bar=BarData(
+                    time=1_700_000_000,
+                    open=1,
+                    high=2,
+                    low=0.5,
+                    close=1.5,
+                    volume=10,
+                    quote_volume=15,
+                    trades=7,
+                    taker_buy_base=6,
+                    taker_buy_quote=9,
+                )
+                if self.event_type is not DataEventType.BACKFILL_COMPLETED else None,
+            )
+            await callback(event)
 
         if self.emit_backfill:
             asyncio.create_task(_emit())
@@ -270,6 +304,16 @@ def test_kline_ws_forwards_bar_updated_event_from_data_manager() -> None:
             "close": 1.5,
             "volume": 10,
             "is_closed": False,
+            "quote_volume": 15,
+            "trades": 7,
+            "taker_buy_base": 6,
+            "taker_buy_quote": 9,
+            "order_flow": {
+                "taker_sell_base": 4,
+                "volume_delta_base": 2,
+                "taker_buy_ratio_base": 0.6,
+                "cvd_contribution_base": 2,
+            },
         },
     }
     assert dm.ensure_stream_calls == [{
@@ -291,6 +335,37 @@ def test_kline_ws_forwards_bar_updated_event_from_data_manager() -> None:
         "focus_scope": "websocket",
         "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
     }]
+
+
+def test_kline_ws_forwards_amended_bar_as_closed_replacement() -> None:
+    dm = _SingleStreamDataManager(DataEventType.BAR_AMENDED)
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines?symbol=BTCUSDT&interval=1m") as ws:
+        assert ws.receive_json()["type"] == "subscribed"
+        message = ws.receive_json()
+
+    assert message["type"] == "kline"
+    assert message["data"]["is_closed"] is True
+    assert message["data"]["order_flow"]["cvd_contribution_base"] == 2
+
+
+def test_kline_ws_forwards_backfill_completion_for_cvd_refetch() -> None:
+    dm = _SingleStreamDataManager(DataEventType.BACKFILL_COMPLETED)
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines?symbol=BTCUSDT&interval=1m") as ws:
+        assert ws.receive_json()["type"] == "subscribed"
+        message = ws.receive_json()
+
+    assert message == {
+        "type": "backfill_completed",
+        "exchange": "binance",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "market_type": "spot",
+        "detail": {"bars_count": 2},
+    }
 
 
 def test_kline_multi_ws_forwards_backfill_completed_event() -> None:
@@ -342,6 +417,22 @@ def test_kline_multi_ws_forwards_backfill_completed_event() -> None:
         "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
     }]
     assert len(dm.subscribe_calls) == 1
+
+
+def test_kline_multi_ws_forwards_amended_enhanced_bar() -> None:
+    dm = _MultiStreamDataManager(event_type=DataEventType.BAR_AMENDED)
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines_multi?symbol=BTCUSDT") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({"action": "subscribe", "intervals": ["1m"]})
+        assert ws.receive_json()["type"] == "subscribed"
+        message = ws.receive_json()
+
+    assert message["type"] == "kline"
+    assert message["data"]["is_closed"] is True
+    assert message["data"]["order_flow"]["cvd_contribution_base"] == 2
+    assert DataEventType.BAR_AMENDED in dm.subscribe_calls[0]["event_types"]
 
 
 def test_kline_multi_ws_unsubscribe_releases_stream_consumer() -> None:

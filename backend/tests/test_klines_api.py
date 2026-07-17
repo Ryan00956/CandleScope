@@ -6,6 +6,7 @@ import time
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import app.api.v1.klines as klines_api
 from app.api.v1.klines import _schedule_related_interval_warmup, router as klines_router
 from app.data_engine.data_manager import DataManager
 from app.data_engine.data_manager.models import BarData, QueryResult, QuerySource
@@ -73,15 +74,21 @@ class _FakeDataManager:
             "market_type": market_type,
         })
         bars = [
-            BarData(
-                time=1_700_000_000,
-                open=1,
-                high=2,
-                low=0.5,
-                close=1.5,
-                volume=10,
-                is_closed=self.is_closed,
-            )
+            BarData.from_storage_row({
+                "exchange": exchange,
+                "market_type": market_type,
+                "open_time": 1_700_000_000_000,
+                "open": 1,
+                "high": 2,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10,
+                "is_closed": self.is_closed,
+                "quote_volume": 15,
+                "trades": 7,
+                "taker_buy_base": 6,
+                "taker_buy_quote": 9,
+            })
         ]
         return QueryResult(
             bars=bars,
@@ -160,6 +167,16 @@ def test_get_klines_uses_data_manager_when_available() -> None:
             "close": 1.5,
             "volume": 10,
             "is_closed": True,
+            "quote_volume": 15,
+            "trades": 7,
+            "taker_buy_base": 6,
+            "taker_buy_quote": 9,
+            "order_flow": {
+                "taker_sell_base": 4,
+                "volume_delta_base": 2,
+                "taker_buy_ratio_base": 0.6,
+                "cvd_contribution_base": 2,
+            },
         }
     ]
     assert dm.ensure_stream_calls == [
@@ -194,6 +211,29 @@ def test_get_klines_uses_data_manager_when_available() -> None:
             "market_type": "spot",
         }
     ]
+
+
+def test_get_klines_okx_suppresses_placeholder_order_flow() -> None:
+    client = _client(_FakeDataManager())
+
+    response = client.get(
+        "/api/v1/klines/",
+        params={
+            "symbol": "BTC-USDT",
+            "interval": "1m",
+            "limit": 1,
+            "exchange": "okx",
+            "market_type": "swap",
+        },
+    )
+
+    assert response.status_code == 200
+    bar = response.json()["data"][0]
+    assert bar["quote_volume"] == 15
+    assert bar["trades"] is None
+    assert bar["taker_buy_base"] is None
+    assert bar["taker_buy_quote"] is None
+    assert bar["order_flow"] is None
 
 
 def test_get_klines_preserves_forming_bar_state() -> None:
@@ -356,6 +396,74 @@ def test_history_requeries_storage_after_backfill_future_times_out() -> None:
     assert dm.calls[0] is None
     assert len(dm.calls) >= 2
     assert all(auto_backfill is False for auto_backfill in dm.calls[1:])
+
+
+def test_history_waits_for_a_scheduled_partial_tail_repair() -> None:
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.calls: list[bool | None] = []
+            self.tail_repaired = False
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+        ) -> QueryResult:
+            self.calls.append(auto_backfill)
+            bars = [BarData(time=1_700_000_000, open=1, high=2, low=1, close=2, volume=10)]
+            if self.tail_repaired:
+                bars.append(BarData(time=1_700_000_060, open=2, high=3, low=2, close=3, volume=11))
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(bars),
+                has_more=True,
+                backfill_triggered=len(self.calls) == 1,
+                has_tail_gap=not self.tail_repaired,
+                metadata={"backfill_request_ids": ["req-partial-tail"]},
+            )
+
+    class _CompletedCoordinator:
+        def __init__(self, data_manager: _HistoryDataManager) -> None:
+            self._data_manager = data_manager
+            self.waited: list[str] = []
+
+        async def wait_for_request(self, request_id: str):
+            self.waited.append(request_id)
+            self._data_manager.tail_repaired = True
+            return object()
+
+    dm = _HistoryDataManager()
+    coordinator = _CompletedCoordinator(dm)
+    client = _client_with_runtime(dm, coordinator)
+
+    response = client.get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "days": 0.001,
+            "exchange": "binance",
+            "market_type": "spot",
+            "max_wait_ms": 1000,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 2
+    assert coordinator.waited == ["req-partial-tail"]
+    assert dm.calls == [None, False]
 
 
 def test_history_returns_promptly_when_completed_backfill_has_no_rows() -> None:
@@ -803,6 +911,51 @@ def test_related_interval_warmup_caps_each_interval_to_target_bars() -> None:
         "end_ms": 10_000_000_000,
         "target_bars": 1_000,
     }
+
+
+def test_related_interval_warmup_uses_each_target_last_closed_open(
+    monkeypatch,
+) -> None:
+    class _WarmupDataManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple, dict]] = []
+
+        def request_backfill(self, *args, **kwargs) -> None:
+            self.calls.append((args, kwargs))
+
+    last_closed = {
+        "1m": 9_600_000,
+        "5m": 9_000_000,
+        "1h": 7_200_000,
+    }
+    monkeypatch.setattr(
+        klines_api,
+        "_last_closed_open_ms",
+        lambda interval: last_closed[interval],
+    )
+    dm = _WarmupDataManager()
+
+    _schedule_related_interval_warmup(
+        dm,
+        symbol="BTCUSDT",
+        current_interval="15m",
+        start_ms=9_750_000,
+        end_ms=9_900_000,
+        exchange="binance",
+        market_type="futures",
+    )
+
+    by_interval = {args[1]: (args, kwargs) for args, kwargs in dm.calls}
+    assert list(by_interval) == ["5m", "1h", "1m"]
+    for interval, expected_end_ms in last_closed.items():
+        args, kwargs = by_interval[interval]
+        assert args[2] == expected_end_ms
+        assert args[3] == expected_end_ms
+        assert kwargs["metadata"]["visible_range"] == {
+            "start_ms": 9_750_000,
+            "end_ms": 9_900_000,
+        }
+        assert kwargs["metadata"]["warmup_range"]["end_ms"] == expected_end_ms
 
 
 def test_continuity_endpoint_returns_storage_gap_report() -> None:

@@ -1,18 +1,44 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from .base import ExchangeAdapter
+from .contracts import validate_exchange_capabilities
+from .models import serialize_exchange_capabilities
 from .plugin import BuiltinExchangePlugin, ExchangePlugin
 
 
 SUPPORTED_PLUGIN_API_MAJOR = 1
-SUPPORTED_CAPABILITY_SCHEMA_VERSION = 1
+SUPPORTED_CAPABILITY_SCHEMA_VERSION = 3
 
 
 class ExchangePluginRegistrationError(ValueError):
     """Raised when an exchange plugin cannot be safely registered."""
+
+
+class _LegacyCapabilitySnapshot:
+    """Detached, copyable snapshot for plugin-owned schema-v1 documents."""
+
+    __slots__ = ("_payload",)
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = copy.deepcopy(payload)
+
+    def __getattr__(self, name: str) -> Any:
+        payload = object.__getattribute__(self, "_payload")
+        if name not in payload:
+            raise AttributeError(name)
+        return copy.deepcopy(payload[name])
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _LegacyCapabilitySnapshot:
+        snapshot = type(self)(self._payload)
+        memo[id(self)] = snapshot
+        return snapshot
+
+    def to_dict(self) -> dict[str, Any]:
+        return copy.deepcopy(self._payload)
 
 
 @dataclass(slots=True)
@@ -28,6 +54,7 @@ class ExchangePluginLoadStatus:
     adapter_class: str = ""
     policy_classes: dict[str, str] = field(default_factory=dict)
     rate_limit_rules: list[dict[str, Any]] = field(default_factory=list)
+    capability_summary: dict[str, int] = field(default_factory=dict)
     error: str = ""
 
     def to_dict(self) -> dict:
@@ -41,6 +68,7 @@ class ExchangePluginLoadStatus:
             "adapter_class": self.adapter_class,
             "policy_classes": dict(self.policy_classes),
             "rate_limit_rules": list(self.rate_limit_rules),
+            "capability_summary": dict(self.capability_summary),
             "error": self.error,
         }
 
@@ -54,6 +82,7 @@ class ExchangeRegistry:
 
     def __init__(self) -> None:
         self._plugins: dict[str, ExchangePlugin] = {}
+        self._capabilities: dict[str, Any] = {}
         self._load_statuses: dict[str, ExchangePluginLoadStatus] = {}
         self._external_loader_fingerprints: set[str] = set()
 
@@ -65,7 +94,12 @@ class ExchangeRegistry:
     ) -> None:
         plugin = self._coerce_plugin(plugin_or_adapter)
         try:
-            self._assert_compatible(plugin)
+            capabilities = _snapshot_capabilities(self._assert_compatible(plugin))
+            status = self._status_for_plugin(
+                plugin,
+                capabilities,
+                source=source,
+            )
         except Exception as exc:
             self.record_load_error(
                 getattr(plugin, "id", "unknown"),
@@ -74,7 +108,8 @@ class ExchangeRegistry:
             )
             raise
         self._plugins[plugin.id] = plugin
-        self._load_statuses[plugin.id] = self._status_for_plugin(plugin, source=source)
+        self._capabilities[plugin.id] = capabilities
+        self._load_statuses[plugin.id] = status
 
     def has(self, exchange: str) -> bool:
         return exchange.strip().lower() in self._plugins
@@ -87,6 +122,14 @@ class ExchangeRegistry:
         if key not in self._plugins:
             raise KeyError(f"Unknown exchange: {exchange}")
         return self._plugins[key]
+
+    def get_capabilities(self, exchange: str) -> Any:
+        """Return the capability document validated at registration time."""
+
+        key = exchange.strip().lower()
+        if key not in self._capabilities:
+            raise KeyError(f"Unknown exchange: {exchange}")
+        return copy.deepcopy(self._capabilities[key])
 
     def list(self) -> list[ExchangeAdapter]:
         return [plugin.adapter() for plugin in self.list_plugins()]
@@ -133,36 +176,54 @@ class ExchangeRegistry:
         return BuiltinExchangePlugin(adapter)
 
     @staticmethod
-    def _assert_compatible(plugin: ExchangePlugin) -> None:
+    def _assert_compatible(plugin: ExchangePlugin) -> Any:
         capabilities = plugin.capabilities()
-        if capabilities.exchange != plugin.id:
+        if getattr(capabilities, "exchange", None) != plugin.id:
             raise ExchangePluginRegistrationError(
                 f"Plugin {plugin.id!r} capabilities.exchange must match plugin id"
             )
-        api_major = _parse_major_version(capabilities.plugin_api_version)
+        api_version = getattr(capabilities, "plugin_api_version", None)
+        api_major = _parse_major_version(api_version)
         if api_major != SUPPORTED_PLUGIN_API_MAJOR:
             raise ExchangePluginRegistrationError(
                 f"Plugin {plugin.id!r} uses unsupported exchange plugin API "
-                f"{capabilities.plugin_api_version!r}; supported major is "
+                f"{api_version!r}; supported major is "
                 f"{SUPPORTED_PLUGIN_API_MAJOR}"
             )
-        if capabilities.capability_schema_version > SUPPORTED_CAPABILITY_SCHEMA_VERSION:
+        schema_version = getattr(capabilities, "capability_schema_version", 1)
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise ExchangePluginRegistrationError(
+                f"Plugin {plugin.id!r} capability schema must be a non-boolean integer"
+            )
+        if schema_version > SUPPORTED_CAPABILITY_SCHEMA_VERSION:
             raise ExchangePluginRegistrationError(
                 f"Plugin {plugin.id!r} uses capability schema "
-                f"{capabilities.capability_schema_version}; supported version is "
+                f"{schema_version}; supported version is "
                 f"{SUPPORTED_CAPABILITY_SCHEMA_VERSION}"
             )
+        validation = validate_exchange_capabilities(capabilities, plugin_id=plugin.id)
+        errors = [issue for issue in validation.issues if issue.severity == "error"]
+        if errors:
+            details = "; ".join(f"{issue.code}: {issue.message}" for issue in errors)
+            raise ExchangePluginRegistrationError(
+                f"Plugin {plugin.id!r} has invalid capabilities: {details}"
+            )
+        return capabilities
 
     @staticmethod
-    def _status_for_plugin(plugin: ExchangePlugin, *, source: str) -> ExchangePluginLoadStatus:
-        capabilities = plugin.capabilities()
+    def _status_for_plugin(
+        plugin: ExchangePlugin,
+        capabilities: Any,
+        *,
+        source: str,
+    ) -> ExchangePluginLoadStatus:
         rate_limit_policy = plugin.rate_limit_policy()
         return ExchangePluginLoadStatus(
             plugin_id=plugin.id,
             source=source,
             status="loaded",
             api_version=capabilities.plugin_api_version,
-            capability_schema_version=capabilities.capability_schema_version,
+            capability_schema_version=getattr(capabilities, "capability_schema_version", 1),
             protocol_class=_qualified_class_name(plugin.protocol()),
             adapter_class=_qualified_class_name(plugin.adapter()),
             policy_classes={
@@ -172,6 +233,7 @@ class ExchangeRegistry:
                 "symbol": _qualified_class_name(plugin.symbol_normalizer()),
             },
             rate_limit_rules=_rate_limit_rule_summaries(rate_limit_policy),
+            capability_summary=_capability_summary(capabilities),
         )
 
 
@@ -182,6 +244,14 @@ def _parse_major_version(version: str) -> int:
         raise ExchangePluginRegistrationError(
             f"Invalid exchange plugin API version: {version!r}"
         ) from exc
+
+
+def _snapshot_capabilities(capabilities: Any) -> Any:
+    schema_version = getattr(capabilities, "capability_schema_version", 1)
+    if schema_version == 1:
+        payload = serialize_exchange_capabilities(capabilities)
+        return _LegacyCapabilitySnapshot(payload)
+    return copy.deepcopy(capabilities)
 
 
 def _qualified_class_name(obj: object) -> str:
@@ -215,6 +285,35 @@ def _rate_limit_rule_summaries(policy: object) -> list[dict[str, Any]]:
             }
         )
     return summaries
+
+
+def _capability_summary(capabilities: object) -> dict[str, int]:
+    channels = tuple(getattr(capabilities, "channels", ()) or ())
+    summary = {
+        "channel_declarations": len(channels),
+        "market_channel_pairs": 0,
+        "realtime_pairs": 0,
+        "history_pairs": 0,
+        "websocket_pairs": 0,
+        "ordered_delta_pairs": 0,
+    }
+    for channel in channels:
+        market_count = len(tuple(getattr(channel, "market_types", ()) or ()))
+        summary["market_channel_pairs"] += market_count
+        if getattr(channel, "realtime", False) is True:
+            summary["realtime_pairs"] += market_count
+        if getattr(channel, "history", False) is True:
+            summary["history_pairs"] += market_count
+        transports = {
+            getattr(item, "value", item)
+            for item in (getattr(channel, "realtime_transports", ()) or ())
+        }
+        if "websocket" in transports:
+            summary["websocket_pairs"] += market_count
+        delivery = getattr(channel, "delivery", None)
+        if getattr(delivery, "value", delivery) == "ordered_delta":
+            summary["ordered_delta_pairs"] += market_count
+    return summary
 
 
 _registry = ExchangeRegistry()

@@ -462,6 +462,31 @@ class IndicatorEngine:
             except Exception as exc:
                 logger.error("update_partial failed for %s: %s", key.uid, exc, exc_info=True)
 
+    def preview_for_key(
+        self,
+        key: IndicatorKey,
+        bar: BarData,
+    ) -> dict[str, float | None] | None:
+        """Compute a non-committing preview for one subscribed indicator.
+
+        WebSocket subscribers seed indicators from confirmed bars only.  When
+        the latest market bar is already forming at subscription time, this
+        gives that subscriber a deterministic initial preview instead of
+        waiting for the next exchange tick.  It deliberately does not emit an
+        engine event: callers can preserve protocol ordering by acknowledging
+        the subscription before they send the preview frame.
+        """
+        self._prune_idle_instances()
+        instance = self._instances.get(key)
+        if instance is None or not instance.is_initialized:
+            return None
+        try:
+            instance.update_partial(bar)
+            return instance.get_preview()
+        except Exception as exc:
+            logger.error("initial preview failed for %s: %s", key.uid, exc, exc_info=True)
+            return None
+
     def on_bars_backfilled(
         self,
         symbol: str,

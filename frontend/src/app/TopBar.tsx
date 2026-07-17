@@ -15,6 +15,8 @@ import {
 import type { CrosshairData, MarketSummary } from "../features/market-data/klineContracts.js";
 import type { MarketDisplayData } from "../features/market-data/marketDataView.js";
 import type { SymbolSearchProps } from "../features/symbol-search/SymbolSearch.js";
+import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
+import { useAdvancedMarketSummary } from "../features/advanced-market-data/useAdvancedMarketSnapshots.js";
 
 export interface TopBarSymbolSearchModel extends Omit<SymbolSearchProps, "onSelect"> {
   onSelectSymbol: SymbolSearchProps["onSelect"];
@@ -35,6 +37,7 @@ export interface TopBarProps {
   marketSummary: Omit<MarketSummary, "displayData"> & {
     displayData: MarketDisplayData | null;
   };
+  advancedMarketData: AdvancedMarketRuntimeView;
 }
 
 function isCompleteMarketDisplayData(
@@ -47,7 +50,7 @@ function isCompleteMarketDisplayData(
     && typeof value.close === "number";
 }
 
-function TopBar({ symbolSearch, controls, marketSummary }: TopBarProps) {
+function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData }: TopBarProps) {
   const {
     currentSymbol,
     currentMarketType,
@@ -73,6 +76,10 @@ function TopBar({ symbolSearch, controls, marketSummary }: TopBarProps) {
   const { displayData, isUp, priceChange, amplitude } = buildMarketSummary(
     isCompleteMarketDisplayData(crosshairData) ? crosshairData : marketSummary.displayData,
   );
+  const advancedSummary = useAdvancedMarketSummary(advancedMarketData);
+  const basisText = advancedSummary.basis == null
+    ? "--"
+    : `${advancedSummary.basis >= 0 ? "+" : "-"}${formatPrice(Math.abs(advancedSummary.basis))}`;
 
   return (
     <header className="top-bar" id="top-bar">
@@ -140,6 +147,31 @@ function TopBar({ symbolSearch, controls, marketSummary }: TopBarProps) {
           <span className={`price-change ${isUp ? "change-positive" : "change-negative"}`}>
             {isUp ? "▲" : "▼"} {Math.abs(priceChange).toFixed(2)}%
           </span>
+        </div>
+      )}
+
+      {advancedMarketData.summaryEnabled && (
+        <div
+          className={`advanced-market-summary advanced-market-summary-${advancedSummary.connectionStatus}`}
+          aria-label="Derivatives market summary"
+        >
+          <div className="advanced-market-chip" data-market-metric="mark-price">
+            <span className="advanced-market-chip-label">Mark</span>
+            <span className="advanced-market-chip-value">{formatPrice(advancedSummary.markPrice)}</span>
+          </div>
+          <div className="advanced-market-chip" data-market-metric="index-price">
+            <span className="advanced-market-chip-label">Index</span>
+            <span className="advanced-market-chip-value">{formatPrice(advancedSummary.indexPrice)}</span>
+          </div>
+          <div className="advanced-market-chip" data-market-metric="basis">
+            <span className="advanced-market-chip-label">Basis</span>
+            <span className="advanced-market-chip-value">{basisText}</span>
+            {advancedSummary.basisBps != null && (
+              <span className="advanced-market-chip-suffix">
+                {advancedSummary.basisBps >= 0 ? "+" : ""}{advancedSummary.basisBps.toFixed(2)} bps
+              </span>
+            )}
+          </div>
         </div>
       )}
 

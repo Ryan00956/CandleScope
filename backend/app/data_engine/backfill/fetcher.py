@@ -30,12 +30,14 @@ import logging
 import time
 from typing import Callable, Awaitable
 
+from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
 from app.exchanges import (
     HistoricalRequest,
-    RateLimitManager,
     RateLimitPolicy,
     RateLimitRule,
     bootstrap_default_adapters,
+    get_shared_rate_limit_manager,
+    get_shared_rate_limit_semaphore,
     get_exchange_registry,
 )
 from app.data_engine.interval_policy import parse_interval_ms
@@ -87,8 +89,7 @@ class HistoricalFetcher:
 
         # Concurrency control
         self._semaphore = asyncio.Semaphore(self._global_fetch_concurrency())
-        self._exchange_semaphores: dict[tuple[str, str], asyncio.Semaphore] = {}
-        self._rate_limit_manager = RateLimitManager()
+        self._rate_limit_manager = get_shared_rate_limit_manager()
 
         # Extension points
         self._progress_callbacks: list[ProgressCallback] = []
@@ -228,6 +229,8 @@ class HistoricalFetcher:
         all_bars: list[FetchedBar] = []
         errors: list[str] = []
         pages_fetched = 0
+        source_complete = False
+        empty_reason: str | None = None
 
         interval_ms = parse_interval_ms(task.interval)
         if interval_ms is None:
@@ -290,6 +293,8 @@ class HistoricalFetcher:
                     exchange_semaphore = self._get_exchange_semaphore(task, req)
                     async with exchange_semaphore:
                         await self._rate_limit(task, req)
+                        req.quota_acquired = True
+                        req.quota_semaphore_held = True
                         try:
                             raw_messages = await self._transport.http_fetch(req)
                         except TransportError as exc:
@@ -333,8 +338,21 @@ class HistoricalFetcher:
 
             pages_fetched += 1
 
-            if not page_bars:
+            if not page_bars and not raw_messages:
+                # Preserve a successful empty-page signal separately from
+                # failures.  The coordinator combines this with calendar,
+                # pagination and local-bound evidence before learning a
+                # durable history boundary.
+                source_complete = True
+                empty_reason = "source_empty"
                 break  # No more data available
+            if not page_bars:
+                # A non-empty payload that normalizes to no closed bars may be
+                # a forming candle, schema drift, or parse failure.  It is not
+                # evidence that the provider's history is exhausted.
+                errors.append("History page contained no usable closed bars")
+                empty_reason = "unusable_page"
+                break
 
             all_bars.extend(page_bars)
             await self._fire_progress(task, len(all_bars), estimated_total)
@@ -377,6 +395,14 @@ class HistoricalFetcher:
             elapsed_ms=elapsed,
             pages_fetched=pages_fetched,
             errors=errors,
+            source_complete=source_complete and not errors,
+            exhausted_before_ms=(
+                min((bar.open_time for bar in all_bars), default=None)
+                if source_complete and not errors
+                else None
+            ),
+            empty_reason=empty_reason if source_complete and not errors else None,
+            retryable=bool(errors),
         )
 
         logger.info(
@@ -399,6 +425,11 @@ class HistoricalFetcher:
             return None
 
         try:
+            enhanced_fields = declared_enhanced_fields(
+                task.exchange,
+                task.market_type,
+                data,
+            )
             return FetchedBar(
                 symbol=task.symbol,
                 interval=task.interval,
@@ -416,6 +447,7 @@ class HistoricalFetcher:
                 taker_buy_base=float(data.get("taker_buy_base", 0)),
                 taker_buy_quote=float(data.get("taker_buy_quote", 0)),
                 source="backfill",
+                enhanced_fields=enhanced_fields,
             )
         except (KeyError, ValueError, TypeError) as exc:
             logger.warning("Failed to convert event to bar: %s", exc)
@@ -455,14 +487,8 @@ class HistoricalFetcher:
     ) -> asyncio.Semaphore:
         historical_request = self._historical_request(task, request)
         rule = self._rate_limit_rule(task, historical_request)
-        key = (rule.bucket_key, str(rule.max_concurrency or self._cfg.fetch_concurrency))
-        sem = self._exchange_semaphores.get(key)
-        if sem is not None:
-            return sem
         limit = rule.max_concurrency or self._rate_limit_policy(task).concurrency_for(task.market_type)
-        sem = asyncio.Semaphore(max(1, int(limit)))
-        self._exchange_semaphores[key] = sem
-        return sem
+        return get_shared_rate_limit_semaphore(rule, fallback=max(1, int(limit)))
 
     def _global_fetch_concurrency(self) -> int:
         configured = getattr(self._cfg, "fetch_global_concurrency", None)

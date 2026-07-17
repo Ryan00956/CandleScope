@@ -269,6 +269,13 @@ interface PanePlaceholderState {
   seriesByPane: Map<number, PanePlaceholderEntry>;
 }
 
+interface PaneLabelPosition {
+  id: string;
+  label: string;
+  marketPane: "funding-rate" | "open-interest";
+  top: number;
+}
+
 interface PaneDescriptor {
   id: string;
   paneIndex: number;
@@ -991,8 +998,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const paneHeightStorageKeyRef = useRef<string | null>(null);
   const prevSubPaneScopeRef = useRef<{
     base: string | null;
-    ids: Set<string>;
-  }>({ base: null, ids: new Set() });
+    panes: Map<string, boolean>;
+  }>({ base: null, panes: new Map() });
   const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
   const datasetKeyRef = useRef(datasetKey);
@@ -1003,6 +1010,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const drawingApiRef = useRef<DrawingEngineApi | null>(null);
   const drawingsHiddenRef = useRef(false);
   const [seriesReady, setSeriesReady] = useState(0);
+  const [paneCrosshairTime, setPaneCrosshairTime] = useState<number | null>(null);
   const [drawingSeriesGeneration, setDrawingSeriesGeneration] = useState(0);
   const [drawingCoordinateGeneration, setDrawingCoordinateGeneration] = useState(0);
   const drawingCoordinateGenerationRef = useRef(0);
@@ -1153,6 +1161,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }> | null>(null);
   const [isAutoScale, setIsAutoScale] = useState(true);
   const [contextMenu, setContextMenu] = useState<PriceScaleContextMenuPosition | null>(null);
+  const [paneLabelPositions, setPaneLabelPositions] = useState<PaneLabelPosition[]>([]);
 
   const resolvedChartType = normalizeMainChartType(chartType);
   const resolvedDescriptor = getChartTypeDescriptor(resolvedChartType);
@@ -1402,6 +1411,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   useEffect(() => {
     onCrosshairMove?.(null);
+    setPaneCrosshairTime(null);
   }, [datasetKey, interval, onCrosshairMove, symbol]);
 
   const dataTimeSet = resolveDataTimeSet(seriesStore);
@@ -1452,6 +1462,45 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     [activeSubPanes],
   );
   paneHeightStorageKeyRef.current = paneHeightStorageKey;
+
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    const chart = chartRef.current;
+    if (!wrapper || !chart) {
+      setPaneLabelPositions([]);
+      return undefined;
+    }
+
+    const syncLabels = () => {
+      const heights = readPaneHeights(chart);
+      if (heights.length !== activeSubPanes.length + 1) return;
+      let paneTop = heights[0] || 0;
+      const next: PaneLabelPosition[] = [];
+      for (const [index, pane] of activeSubPanes.entries()) {
+        if (pane.dataMarketPane) {
+          next.push({
+            id: pane.id,
+            label: pane.label,
+            marketPane: pane.dataMarketPane,
+            top: paneTop + 6,
+          });
+        }
+        paneTop += heights[index + 1] || 0;
+      }
+      setPaneLabelPositions((previous) => (
+        JSON.stringify(previous) === JSON.stringify(next) ? previous : next
+      ));
+    };
+
+    const frame = requestAnimationFrame(syncLabels);
+    wrapper.addEventListener("pointerup", syncLabels);
+    window.addEventListener("resize", syncLabels);
+    return () => {
+      cancelAnimationFrame(frame);
+      wrapper.removeEventListener("pointerup", syncLabels);
+      window.removeEventListener("resize", syncLabels);
+    };
+  }, [activeSubPanes, paneHeightStorageKey, seriesReady]);
 
   const saveCurrentPaneHeights = useCallback((
     chart = chartRef.current,
@@ -1675,21 +1724,25 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     setDrawingSeriesGeneration((prev) => prev + 1);
 
     const handleCrosshairMove = (param: ChartCrosshairParam) => {
-      if (isSyncingRef.current || !onCrosshairMove) return;
+      if (isSyncingRef.current) return;
       if (param.time == null) {
-        onCrosshairMove(null);
+        setPaneCrosshairTime(null);
+        onCrosshairMove?.(null);
         return;
       }
       const axisTime = typeof param.time === "number" || isOrdinalAxisTime(param.time)
         ? param.time
         : null;
       if (axisTime == null) {
-        onCrosshairMove(null);
+        setPaneCrosshairTime(null);
+        onCrosshairMove?.(null);
         return;
       }
       const displayRow = displayRowMapRef.current.get(axisTime);
       const displayIndex = displayRowIndexMapRef.current.get(axisTime);
       const sourceTime = resolveSourceTime(axisTime, displayRow);
+      setPaneCrosshairTime(sourceTime);
+      if (!onCrosshairMove) return;
       const sourceRow = sourceTime == null ? null : sourceRowMapRef.current.get(sourceTime);
       const includeVolume = initialDescriptor.axisMode === "time"
         || isLastDisplayTargetForSourceTime(displayRowsRef.current, displayIndex);
@@ -2920,17 +2973,26 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   useEffect(() => {
     const currentBase = drawingKeyBase || symbol;
-    const currentIds = new Set(subPanes.map((p) => p.id));
+    const currentPanes = new Map(
+      subPanes.map((pane) => [pane.id, Boolean(pane.dataMarketPane)]),
+    );
     const previous = prevSubPaneScopeRef.current;
+    const removablePreviousIds = new Set<string>();
+    for (const [paneId, preserveWhenHidden] of previous.panes) {
+      // Market-data studies can disappear temporarily when hidden or when the
+      // current product lacks the channel. Preserve their pane drawings so a
+      // later supported/visible session can restore the user's work.
+      if (!preserveWhenHidden) removablePreviousIds.add(paneId);
+    }
     for (const scopeKey of removedDrawingSubPaneScopeKeys({
       currentBase,
-      currentIds,
+      currentIds: new Set(currentPanes.keys()),
       previousBase: previous.base,
-      previousIds: previous.ids,
+      previousIds: removablePreviousIds,
     })) {
       clearDrawingScopeAuthoritatively(scopeKey);
     }
-    prevSubPaneScopeRef.current = { base: currentBase, ids: currentIds };
+    prevSubPaneScopeRef.current = { base: currentBase, panes: currentPanes };
   }, [drawingKeyBase, subPanes, symbol]);
 
   const shouldMountDrawingEngine = supportsDrawingFeatures && (
@@ -3088,6 +3150,56 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         onContextMenu={handlePriceScaleContextMenu}
         style={{ cursor: cursorStyleForDrawingTool(effectiveDrawingTool) }}
       />
+
+      {paneLabelPositions.map((position) => {
+        const pane = activeSubPanes.find((candidate) => candidate.id === position.id);
+        const exactPoint = paneCrosshairTime === null
+          ? null
+          : pane?.pointMetadata?.find((point) => point.time === paneCrosshairTime) ?? null;
+        const displayPoint = exactPoint ?? pane?.pointMetadata?.at(-1) ?? null;
+        return (
+          <div
+            key={position.id}
+            className={`chart-pane-label advanced-market-pane-label${exactPoint ? " crosshair-active" : ""}`}
+            data-market-pane={position.marketPane}
+            data-pane-id={position.id}
+            role="group"
+            aria-label={displayPoint?.accessibilityLabel ?? position.label}
+            style={{ top: position.top }}
+          >
+            <span className="advanced-market-pane-heading">{position.label}</span>
+            {displayPoint && (
+              <span
+                className="advanced-market-pane-value"
+                data-appearance={displayPoint.appearance}
+              >
+                <span>{displayPoint.valueLabel}</span>
+                <span className="advanced-market-pane-source">
+                  {`${displayPoint.sourceLabel} · ${displayPoint.qualityLabel}`}
+                </span>
+              </span>
+            )}
+            {pane?.legendItems && pane.legendItems.length > 0 && (
+              <span className="advanced-market-pane-legend" aria-hidden="true">
+                {pane.legendItems.map((item) => (
+                  <span key={item.id} className="advanced-market-pane-legend-item" title={item.description}>
+                    <span
+                      className="advanced-market-pane-legend-swatch"
+                      data-appearance={item.appearance}
+                    />
+                    <span>{item.label}</span>
+                  </span>
+                ))}
+              </span>
+            )}
+            {exactPoint && (
+              <span className="advanced-market-pane-tooltip" aria-hidden="true">
+                {exactPoint.details.map((detail) => <span key={detail}>{detail}</span>)}
+              </span>
+            )}
+          </div>
+        );
+      })}
 
       {cursorOverlayClass && (
         <div className="chart-pane-cursor-overlay" aria-hidden="true">

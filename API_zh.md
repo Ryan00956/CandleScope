@@ -69,7 +69,17 @@ WebSocket API: ws://localhost:8000/api/v1
       "low": 41950.0,
       "close": 42050.0,
       "volume": 12.5,
-      "is_closed": false
+      "is_closed": false,
+      "quote_volume": 525000.0,
+      "trades": 320,
+      "taker_buy_base": 7.5,
+      "taker_buy_quote": 315000.0,
+      "order_flow": {
+        "taker_sell_base": 5.0,
+        "volume_delta_base": 2.5,
+        "taker_buy_ratio_base": 0.6,
+        "cvd_contribution_base": 2.5
+      }
     }
   ],
   "base_interval": null
@@ -78,6 +88,8 @@ WebSocket API: ws://localhost:8000/api/v1
 
 只有仍在形成中的实时 K 线，其 `is_closed` 才为 `false`。兼容旧服务或历史存储时，
 客户端可将缺少该字段的 K 线视为已确认。
+
+增强字段按 exchange/market 的 capability fail closed；不可用或非法原始值为 `null`，无法计算 base 订单流时整个 `order_flow` 为 `null`。`cvd_contribution_base` 是连续区间 CVD 前缀和的单根贡献，形成中 K 线更新应替换当前桶，不能重复累加。完整字段、公式和自定义周期规则见 [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](docs/KLINE_ORDER_FLOW_CONTRACT_zh.md)。
 
 ### `GET /klines/latest`
 
@@ -232,6 +244,89 @@ WebSocket API: ws://localhost:8000/api/v1
 | `end` | int | 可选 | Unix 秒 |
 | `exchange` | string | `binance` | 已注册交易所 |
 | `market_type` | string | `spot` | 市场类型 |
+
+## 高级行情 API（P1）
+
+高级行情与 K 线主链独立，当前支持 Binance USD-M Futures 的 `mark_price`、`index_price`、`funding_rate`、`open_interest` 和派生 `basis`。
+
+### `GET /market/snapshot`
+
+读取一个 symbol 的最新状态。不传 `channel` 时返回全部五个 P1 频道；`channel` 可以重复，也可以用逗号分隔。`refresh_missing=true`（默认）会通过 REST 补读 Hub 中缺失的快照，但不会持有长期订阅。
+
+```http
+GET /api/v1/market/snapshot?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=mark_price&channel=open_interest
+```
+
+响应包含 `data` 和明确的 `missing` key 列表。每条数据带 `event_time_ms`、`received_at_ms`、`source`，以及该 key 在进程内 Hub 驻留期间单调递增的 `revision`。
+
+### `GET /market/history`
+
+读取一个有界历史页面。P1 只开放 `funding_rate` 与 `open_interest`；OI 必须传 `period`（`5m`、`15m`、`30m`、`1h`、`2h`、`4h`、`6h`、`12h`、`1d`）。可选 `start_ms`、`end_ms`，`limit` 为 1 到 1000。Funding 不传 `view` 时继续保持旧的稀疏结算契约；Binance 合约可使用 `view=hybrid`，并且必须传图表 `period`。每根已关闭 K 最多返回一个点：有交易所结算就返回权威结算，否则使用本地缓存的 Binance Premium Index 1m 数据做不偷看未来的近似估算。
+
+```http
+GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=open_interest&period=5m&limit=500
+```
+
+```http
+GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=funding_rate&view=hybrid&period=1h&start_ms=...&end_ms=...&limit=1000
+```
+
+Hybrid Funding 记录会返回 `provenance`（`exchange_settlement` 或 `derived_history`）、`quality`、`sample_time_ms`、`target_funding_time_ms` 和 `funding_cycle_ms`；`derived_history` 记录还会返回 `formula_version`、`input_resolution` 与 `input_coverage`。估算值只表示参考轨迹，不是交易所结算。实时 Funding 仍通过 `/market/snapshot` 和 `/stream/market` 返回，使用 `provenance=exchange_realtime`；沿用值只能在同一个目标结算周期内有效。
+
+Hybrid 页面只返回连续前缀。如果请求的 K 都已有交易所结算，会直接跳过估算输入下载。冷缓存 Premium Index 回填有单次页预算：达到容量或预算边界时返回 `complete=false`、`has_more=true`、`retryable=false`，调用方应从最后一根已返回 K 继续翻页；临时上游失败会返回 `retryable=true`，不得把本次范围记为已覆盖。无法估算的输入缺口会写入 `excluded_ranges`。模型只使用每根 K 截止时已经关闭的 1m Premium Index 样本，资金费周期也只从此前结算推断，并把标准 8 小时利率分量按推断出的 1/2/4/8 小时周期缩放。
+
+### `WS /stream/market`
+
+一个浏览器 WebSocket 可以 multiplex 多个 symbol/channel。连接后发送：
+
+```json
+{
+  "action": "subscribe",
+  "request_id": "req-1",
+  "streams": [
+    {"exchange":"binance","market_type":"futures","symbol":"BTCUSDT","channel":"mark_price"},
+    {"exchange":"binance","market_type":"futures","symbol":"ETHUSDT","channel":"open_interest"}
+  ]
+}
+```
+
+服务端依次返回 `subscribed`、`snapshot`，之后发送 `protocol=market.v1` 的批量 `update`。每个连接最多 64 个逻辑 stream。取消订阅复用相同 `streams` 并将 action 改成 `unsubscribe`；断连会自动释放全部租约。
+
+完整架构、物理流复用和背压语义见 [`docs/ADVANCED_MARKET_DATA_P1_BACKEND_zh.md`](docs/ADVANCED_MARKET_DATA_P1_BACKEND_zh.md)。
+
+## 完整订单簿 API（P4）
+
+P4 为 Binance USD-M Futures 提供独立的本地 L2 重建链。它先订阅 diff-depth WebSocket，再以 REST `limit=1000` seed 对齐，并严格检查 `U/u/pu`。gap、重连、队列溢出或 crossed book 会立即令状态 stale，旧盘口不会继续作为 live 返回。原始 depth 不落库，也没有历史查询。
+
+### `GET /full-order-book/snapshot`
+
+```http
+GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit=100&wait_ms=5000
+```
+
+`update_interval_ms` 支持 `100`、`250`、`500`；`limit` 为 `1..1000`，只裁剪输出，不改变后台 1000 档 seed。接口仅在 book 为 live 时返回；有界等待超时返回 `504`。
+
+### `WS /stream/full-order-book`
+
+```json
+{
+  "action": "subscribe",
+  "streams": [{
+    "exchange": "binance",
+    "market_type": "futures",
+    "symbol": "BTCUSDT",
+    "channel": "full_depth",
+    "params": {
+      "mode": "full",
+      "snapshot_limit": 1000,
+      "update_interval_ms": 100,
+      "output_limit": 200
+    }
+  }]
+}
+```
+
+live 数据帧类型为 `full_order_book.snapshot`；断链/重同步帧类型为 `full_order_book.status`，并带 `state=stale`、`backend_sequence_continuity=false` 和空 `bids/asks`。完整状态机、能力边界和配置见 [`docs/FULL_ORDER_BOOK_P4_BACKEND_zh.md`](docs/FULL_ORDER_BOOK_P4_BACKEND_zh.md)。
 
 ## WebSocket API
 

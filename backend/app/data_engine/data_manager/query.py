@@ -30,11 +30,27 @@ import time
 from typing import Any, Callable
 
 from app.data_engine.interval_policy import (
+    compute_bucket_end_ms,
+    compute_bucket_start_ms,
     is_custom_interval,
     is_ephemeral_interval,
+    last_closed_bar_open_ms,
+    latest_eligible_bar_open_ms,
     parse_custom_interval,
     parse_interval_ms,
 )
+from app.data_engine.history import (
+    BoundaryReason,
+    ExchangeHistoryPolicyResolver,
+    HistoryAvailability,
+    HistoryDisposition,
+    HistoryPlan,
+    HistoryRequest,
+    HistoryRequestPlanner,
+    HistorySeriesKey,
+    ResolvedHistoryContext,
+)
+from app.exchanges import HistoryEmptyPageSemantics
 
 from .cache import BarCache
 from .config import QueryConfig
@@ -79,11 +95,13 @@ class QueryEngine:
         storage: StorageBackend | None = None,
         config: QueryConfig | None = None,
         backfill_trigger: BackfillTrigger | None = None,
+        history_policy: ExchangeHistoryPolicyResolver | None = None,
     ) -> None:
         self._cache = cache
         self._storage = storage
         self._cfg = config or QueryConfig()
         self._backfill_trigger = backfill_trigger
+        self._history_policy = history_policy
 
         # Metrics
         self._queries = 0
@@ -115,6 +133,17 @@ class QueryEngine:
     def set_backfill_trigger(self, trigger: BackfillTrigger | None) -> None:
         """Set or clear the backfill trigger callback."""
         self._backfill_trigger = trigger
+
+    def set_history_policy(
+        self,
+        history_policy: ExchangeHistoryPolicyResolver | None,
+    ) -> None:
+        """Set the shared exchange/calendar availability resolver."""
+        self._history_policy = history_policy
+
+    @property
+    def history_policy(self) -> ExchangeHistoryPolicyResolver | None:
+        return self._history_policy
 
     def set_bar_aggregator(self, bar_aggregator: Any | None) -> None:
         """Set the BarAggregator used for custom interval read aggregation."""
@@ -188,10 +217,34 @@ class QueryEngine:
             limit or self._cfg.default_limit,
             self._cfg.max_limit,
         )
+        history_end_ms = end_ms if end_ms is not None else int(time.time() * 1000)
+        if start_ms is not None:
+            history_start_ms = start_ms
+        else:
+            history_start_ms, _ = self._before_window(
+                key,
+                history_end_ms + 1,
+                effective_limit,
+            )
+        planned = self._plan_history_range(key, history_start_ms, history_end_ms)
 
         # Convert ms → seconds for cache queries
-        start_s = start_ms // 1000 if start_ms else None
-        end_s = end_ms // 1000 if end_ms else None
+        start_s = start_ms // 1000 if start_ms is not None else None
+        end_s = end_ms // 1000 if end_ms is not None else None
+        # An explicit range may end inside the target interval's forming
+        # bucket.  That bucket is queryable from the live cache but is not
+        # expected durable history, so do not treat it as a storage/backfill
+        # shortfall.  Keep the original end for reads; use the closed edge only
+        # when judging history completeness.
+        closed_end_s = end_s
+        if end_ms is not None:
+            eligible_end_ms = latest_eligible_bar_open_ms(
+                int(time.time() * 1000),
+                interval,
+                end_ms,
+            )
+            if eligible_end_ms is not None:
+                closed_end_s = min(end_s, eligible_end_ms // 1000)
 
         # ── Step 1: Try cache ────────────────────────────────
         if start_s is not None or end_s is not None:
@@ -199,10 +252,17 @@ class QueryEngine:
         else:
             cached = self._cache.get_latest(key, effective_limit)
 
-        if cached and self._is_complete(cached, start_s, end_s, effective_limit, interval=interval):
+        if cached and self._is_complete(
+            cached,
+            start_s,
+            closed_end_s,
+            effective_limit,
+            interval=interval,
+            key=key,
+        ):
             self._cache_hits += 1
             elapsed = time.monotonic() - t0
-            return QueryResult(
+            return self._apply_history_contract(QueryResult(
                 bars=cached,
                 symbol=key.symbol,
                 interval=key.interval,
@@ -213,7 +273,7 @@ class QueryEngine:
                 has_more=self._cache.series_count(key) > len(cached),
                 cache_hit=True,
                 metadata={"elapsed_ms": round(elapsed * 1000, 2)},
-            )
+            ), planned)
 
         # ── Step 2: Try storage ──────────────────────────────
         storage_bars: list[BarData] = []
@@ -234,7 +294,14 @@ class QueryEngine:
                     market_type=key.market_type,
                 )
                 rows.reverse()
-                storage_bars = [BarData.from_storage_row(r) for r in rows]
+                storage_bars = [
+                    BarData.from_storage_row(
+                        row,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    )
+                    for row in rows
+                ]
             except Exception as exc:
                 logger.error("Storage query failed: %s", exc, exc_info=True)
 
@@ -275,6 +342,7 @@ class QueryEngine:
                         trigger_start_ms,
                         end_ms,
                         key.interval,
+                        key=key,
                     ),
                 )
                 if missing_range is not None:
@@ -282,7 +350,7 @@ class QueryEngine:
                     backfill_triggered = self._backfill_trigger is not None
 
             elapsed = time.monotonic() - t0
-            return QueryResult(
+            return self._apply_history_contract(QueryResult(
                 bars=[],
                 symbol=key.symbol,
                 interval=key.interval,
@@ -295,38 +363,55 @@ class QueryEngine:
                 backfill_triggered=backfill_triggered,
                 missing_ranges=missing_ranges,
                 metadata={"elapsed_ms": round(elapsed * 1000, 2)},
-            )
+            ), planned, boundary_reached=bool(planned and planned[0].terminal))
 
         # ── Step 4: Check completeness & backfill ────────────
+        tail_range: tuple[int, int] | None = None
         if (
             allow_backfill
             and not missing_ranges
-            and not self._is_complete(merged, start_s, end_s, effective_limit, interval=interval)
+            and not self._is_complete(
+                merged,
+                start_s,
+                closed_end_s,
+                effective_limit,
+                interval=interval,
+                key=key,
+            )
         ):
             interval_secs = parse_custom_interval(key.interval) or 60
             now_ms = int(time.time() * 1000)
             earliest_bar_ms = merged[0].time * 1000
             latest_bar_ms = merged[-1].time * 1000
 
-            # Determine which direction has a gap
+            # Determine which direction has a gap.  Tail completeness is
+            # anchored to the last *closed target bucket*, not `end - one
+            # fixed interval`: the old arithmetic missed exactly one absent
+            # daily bar whenever the request edge landed on that bar's open.
             has_gap_before = (start_ms is not None and earliest_bar_ms > start_ms)
-            has_gap_after = latest_bar_ms < (end_ms or now_ms) - (interval_secs * 1000)
+            tail_range = self._closed_tail_gap_range(
+                key,
+                latest_bar_ms=latest_bar_ms,
+                requested_end_ms=end_ms,
+                now_ms=now_ms,
+            )
+            has_gap_after = tail_range is not None
 
             if has_gap_before and has_gap_after:
                 # Both sides have gaps — backfill the larger gap first
                 # (forward catch-up is usually more urgent)
                 missing_range = self._trigger_backfill(
                     key,
-                    latest_bar_ms + interval_secs * 1000,
-                    end_ms,
+                    tail_range[0],
+                    tail_range[1],
                     reason="query_tail_gap",
                 )
             elif has_gap_after:
                 # Scenario 1: Forward catch-up (e.g. app was closed overnight)
                 missing_range = self._trigger_backfill(
                     key,
-                    latest_bar_ms + interval_secs * 1000,
-                    end_ms,
+                    tail_range[0],
+                    tail_range[1],
                     reason="query_tail_gap",
                 )
             elif has_gap_before:
@@ -360,19 +445,12 @@ class QueryEngine:
         )
 
         # ── Step 5: Detect tail gap ──────────────────────────
-        # If the latest bar in the result set trails "now" by more than
-        # 1.5 × interval, the front-end should keep showing a loading
-        # overlay until the backfill completes and fills the gap.
-        tail_gap = False
-        if merged and backfill_triggered:
-            interval_secs = parse_custom_interval(key.interval) or 60
-            now_s = int(time.time())
-            gap_s = now_s - merged[-1].time
-            if gap_s > interval_secs * 1.5:
-                tail_gap = True
+        # Keep this in lockstep with the actual closed-bar repair decision.
+        # Wall-clock staleness is not a reliable signal at a forming boundary.
+        tail_gap = bool(merged and backfill_triggered and tail_range is not None)
 
         elapsed = time.monotonic() - t0
-        return QueryResult(
+        return self._apply_history_contract(QueryResult(
             bars=merged,
             symbol=key.symbol,
             interval=key.interval,
@@ -386,7 +464,7 @@ class QueryEngine:
             has_tail_gap=tail_gap,
             missing_ranges=missing_ranges,
             metadata={"elapsed_ms": round(elapsed * 1000, 2)},
-        )
+        ), planned)
 
     # ── Public: Convenience Methods ──────────────────────────
 
@@ -431,11 +509,18 @@ class QueryEngine:
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
         before_s = before_ms // 1000
         effective_limit = min(limit, self._cfg.max_limit)
+        history_start_ms, history_end_ms = self._before_window(
+            key,
+            before_ms,
+            effective_limit,
+        )
+        planned = self._plan_history_range(key, history_start_ms, history_end_ms)
+        history_fetch_allowed = planned is None or planned[0].has_fetch_work
 
         # Ephemeral intervals are cache-only — skip storage and backfill
         if is_ephemeral_interval(interval):
             cached = self._cache.get_before(key, before_s, effective_limit)
-            return QueryResult(
+            return self._apply_history_contract(QueryResult(
                 bars=cached,
                 symbol=key.symbol,
                 interval=key.interval,
@@ -447,13 +532,13 @@ class QueryEngine:
                 cache_hit=bool(cached),
                 backfill_triggered=False,
                 metadata={"ephemeral": True},
-            )
+            ), planned)
 
         # Try cache first
         cached = self._cache.get_before(key, before_s, effective_limit)
 
         if len(cached) >= effective_limit:
-            return QueryResult(
+            return self._apply_history_contract(QueryResult(
                 bars=cached,
                 symbol=key.symbol,
                 interval=key.interval,
@@ -463,7 +548,7 @@ class QueryEngine:
                 total=len(cached),
                 has_more=True,
                 cache_hit=True,
-            )
+            ), planned)
 
         # Fall back to storage
         storage_bars: list[BarData] = []
@@ -477,7 +562,14 @@ class QueryEngine:
                     exchange=key.exchange,
                     market_type=key.market_type,
                 )
-                storage_bars = [BarData.from_storage_row(r) for r in rows]
+                storage_bars = [
+                    BarData.from_storage_row(
+                        row,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    )
+                    for row in rows
+                ]
                 if storage_bars:
                     self._cache.bulk_load(key, storage_bars)
             except Exception as exc:
@@ -489,19 +581,21 @@ class QueryEngine:
 
         backfill_triggered = False
         missing_ranges: list[MissingRange] = []
-        if len(merged) < effective_limit and allow_backfill:
-            interval_secs = parse_custom_interval(key.interval) or 60
-
+        if len(merged) < effective_limit and allow_backfill and history_fetch_allowed:
             # Only backfill the missing portion before existing data
             if merged:
-                # We have some bars — backfill from (before_ms - needed_span) up to earliest existing bar
+                # Count expected opens, not wall-clock buckets, so weekends and
+                # session breaks do not shrink the requested page.
                 needed = effective_limit - len(merged)
-                trigger_start_ms = merged[0].time * 1000 - (needed * interval_secs * 1000)
-                trigger_end_ms = merged[0].time * 1000 - interval_secs * 1000
+                trigger_start_ms, trigger_end_ms = self._before_window(
+                    key,
+                    merged[0].time_ms,
+                    needed,
+                )
             else:
-                # No data at all — backfill limit bars before before_ms
-                trigger_start_ms = before_ms - (effective_limit * interval_secs * 1000)
-                trigger_end_ms = before_ms - interval_secs * 1000
+                # No data at all — use the calendar-derived page window.
+                trigger_start_ms = history_start_ms
+                trigger_end_ms = history_end_ms
 
             missing_range = self._trigger_backfill(
                 key,
@@ -532,7 +626,18 @@ class QueryEngine:
         else:
             has_more = bool(merged)
 
-        return QueryResult(
+        boundary_reached = False
+        if planned is not None:
+            plan, _ = planned
+            boundary_reached = bool(
+                (plan.terminal and len(merged) < effective_limit)
+                or (
+                    len(merged) < effective_limit
+                    and plan.has_terminal_boundary
+                )
+            )
+
+        result = QueryResult(
             bars=merged,
             symbol=key.symbol,
             interval=key.interval,
@@ -545,6 +650,14 @@ class QueryEngine:
             backfill_triggered=backfill_triggered,
             missing_ranges=missing_ranges,
         )
+        result = self._apply_history_contract(
+            result,
+            planned,
+            boundary_reached=boundary_reached,
+        )
+        if boundary_reached and result.bars:
+            result.earliest_available_ms = result.bars[0].time_ms
+        return result
 
     def get_bounds(
         self,
@@ -600,6 +713,176 @@ class QueryEngine:
 
     # ── Internal ─────────────────────────────────────────────
 
+    @staticmethod
+    def _history_series_key(key: SeriesKey) -> HistorySeriesKey:
+        return HistorySeriesKey(
+            exchange=key.exchange,
+            market_type=key.market_type,
+            symbol=key.symbol,
+            channel="kline",
+            variant=key.interval,
+        )
+
+    def _plan_history_range(
+        self,
+        key: SeriesKey,
+        start_ms: int,
+        end_ms: int,
+    ) -> tuple[HistoryPlan, ResolvedHistoryContext] | None:
+        if self._history_policy is None or start_ms > end_ms:
+            return None
+        request = HistoryRequest(
+            series=self._history_series_key(key),
+            interval=key.interval,
+            start_ms=int(start_ms),
+            end_ms=int(end_ms),
+        )
+        try:
+            return self._history_policy.plan(request)
+        except Exception as exc:
+            logger.error("History availability planning failed for %s: %s", key, exc)
+            availability = HistoryAvailability(
+                disposition=HistoryDisposition.UNKNOWN,
+                status_reason=BoundaryReason.AVAILABILITY_UNKNOWN,
+            )
+            return (
+                HistoryRequestPlanner.fail_closed(
+                    request,
+                    reason=BoundaryReason.AVAILABILITY_UNKNOWN,
+                ),
+                ResolvedHistoryContext(
+                    availability=availability,
+                    calendar=None,
+                    policy=None,
+                    empty_page_semantics=HistoryEmptyPageSemantics.UNKNOWN,
+                ),
+            )
+
+    def _calendar_for(self, key: SeriesKey):
+        if self._history_policy is None:
+            return None
+        try:
+            return self._history_policy.calendar_for(self._history_series_key(key))
+        except Exception as exc:
+            logger.error("History calendar resolution failed for %s: %s", key, exc)
+            return None
+
+    def _before_window(
+        self,
+        key: SeriesKey,
+        before_ms: int,
+        limit: int,
+    ) -> tuple[int, int]:
+        """Return the expected-open window for a count-based left query."""
+        calendar = self._calendar_for(key)
+        if calendar is not None:
+            interval_ms = parse_interval_ms(key.interval)
+            if interval_ms is None or interval_ms <= 0:
+                interval_ms = (parse_custom_interval(key.interval) or 60) * 1000
+            bucket = compute_bucket_start_ms(
+                int(before_ms) - 1,
+                interval_ms,
+                interval=key.interval,
+            )
+            next_bucket = compute_bucket_end_ms(
+                bucket,
+                interval_ms,
+                interval=key.interval,
+            )
+            last = calendar.previous_expected_open(next_bucket, key.interval)
+            if last is not None:
+                first = last
+                for _ in range(max(0, int(limit) - 1)):
+                    previous = calendar.previous_expected_open(first, key.interval)
+                    if previous is None:
+                        break
+                    first = previous
+                return max(0, first), last
+        interval_ms = parse_interval_ms(key.interval)
+        if interval_ms is None or interval_ms <= 0:
+            interval_ms = (parse_custom_interval(key.interval) or 60) * 1000
+        return (
+            max(0, int(before_ms) - (int(limit) * interval_ms)),
+            int(before_ms) - interval_ms,
+        )
+
+    @staticmethod
+    def _lower_history_bound(
+        context: ResolvedHistoryContext,
+        *,
+        now_ms: int | None = None,
+    ) -> tuple[int | None, str | None]:
+        availability = context.availability
+        candidates = [
+            (int(bound.value_ms), bound.reason.value)
+            for bound in (availability.data_start, availability.upstream_start)
+            if bound is not None and bound.confirmed and not bound.retryable
+        ]
+        if availability.rolling_retention_ms is not None:
+            current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+            candidates.append((
+                current_ms - availability.rolling_retention_ms,
+                BoundaryReason.PROVIDER_RETENTION.value,
+            ))
+        if not candidates:
+            return None, None
+        return max(candidates, key=lambda item: item[0])
+
+    def _apply_history_contract(
+        self,
+        result: QueryResult,
+        planned: tuple[HistoryPlan, ResolvedHistoryContext] | None,
+        *,
+        boundary_reached: bool = False,
+    ) -> QueryResult:
+        if planned is None:
+            result.next_before_ms = result.bars[0].time_ms if result.has_more and result.bars else None
+            return result
+
+        plan, context = planned
+        earliest_ms, lower_reason = self._lower_history_bound(context)
+        result.earliest_available_ms = earliest_ms
+        result.availability_revision = context.revision or None
+        result.excluded_ranges = [
+            {
+                "start_ms": exclusion.time_range.start_ms,
+                "end_ms": exclusion.time_range.end_ms,
+                "disposition": exclusion.disposition.value,
+                "reason": exclusion.reason.value,
+            }
+            for exclusion in plan.exclusions
+        ]
+
+        terminal_reason = next(
+            (
+                exclusion.reason.value
+                for exclusion in plan.exclusions
+                if exclusion.disposition is HistoryDisposition.TERMINAL
+            ),
+            lower_reason,
+        )
+        terminal = bool(boundary_reached or (plan.terminal and not result.bars))
+        if terminal:
+            result.history_state = "exhausted"
+            result.complete = True
+            result.retryable = False
+            result.terminal_reason = terminal_reason or BoundaryReason.SOURCE_EXHAUSTED.value
+            result.has_more = False
+        elif plan.retryable or (plan.unknown and not plan.has_fetch_work):
+            result.history_state = "pending"
+            result.complete = False
+            result.retryable = True
+            result.terminal_reason = None
+        elif not plan.has_fetch_work:
+            # A pure closure/holiday is fully explained but is not a permanent
+            # series edge, so clients may cover it without caching exhaustion.
+            result.history_state = "ready"
+            result.complete = True
+            result.retryable = False
+            result.terminal_reason = None
+        result.next_before_ms = result.bars[0].time_ms if result.has_more and result.bars else None
+        return result
+
     def _merge(
         self, a: list[BarData], b: list[BarData],
     ) -> list[BarData]:
@@ -622,7 +905,10 @@ class QueryEngine:
         return sorted(combined.values(), key=lambda x: x.time)
 
     def _has_interior_gaps(
-        self, bars: list[BarData], interval: str,
+        self,
+        bars: list[BarData],
+        interval: str,
+        key: SeriesKey | None = None,
     ) -> bool:
         """Check if bars have interior gaps (missing bars in the middle).
 
@@ -641,7 +927,10 @@ class QueryEngine:
         return False
 
     def _detect_gaps(
-        self, bars: list[BarData], interval: str,
+        self,
+        bars: list[BarData],
+        interval: str,
+        key: SeriesKey | None = None,
     ) -> list[tuple[int, int]]:
         """Return a list of (gap_start_s, gap_end_s) for each interior gap.
 
@@ -650,11 +939,32 @@ class QueryEngine:
         """
         if len(bars) < 2:
             return []
+        calendar = self._calendar_for(key) if key is not None else None
+        calendar = self._calendar_for(key) if key is not None else None
+        if calendar is not None:
+            return any(
+                (
+                    expected := calendar.next_expected_open(
+                        bars[index - 1].time_ms,
+                        interval,
+                    )
+                ) is not None
+                and expected < bars[index].time_ms
+                for index in range(1, len(bars))
+            )
         interval_secs = parse_custom_interval(interval) or 60
         threshold = interval_secs * 1.5
         gaps: list[tuple[int, int]] = []
         for i in range(1, len(bars)):
-            if bars[i].time - bars[i - 1].time > threshold:
+            if calendar is not None:
+                expected = calendar.next_expected_open(
+                    bars[i - 1].time_ms,
+                    interval,
+                )
+                has_gap = expected is not None and expected < bars[i].time_ms
+            else:
+                has_gap = bars[i].time - bars[i - 1].time > threshold
+            if has_gap:
                 gaps.append((bars[i - 1].time, bars[i].time))
         return gaps
 
@@ -677,7 +987,7 @@ class QueryEngine:
 
         Returns the (potentially augmented) bar list, still sorted.
         """
-        gaps = self._detect_gaps(bars, interval)
+        gaps = self._detect_gaps(bars, interval, key)
         if not gaps:
             return bars
 
@@ -693,6 +1003,7 @@ class QueryEngine:
                 gap_start_s,
                 gap_end_s,
                 interval,
+                key=key,
             )
             if missing_start_ms is None or missing_end_ms is None:
                 continue
@@ -708,7 +1019,14 @@ class QueryEngine:
                     exchange=key.exchange,
                     market_type=key.market_type,
                 )
-                fill_bars = [BarData.from_storage_row(r) for r in rows]
+                fill_bars = [
+                    BarData.from_storage_row(
+                        row,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    )
+                    for row in rows
+                ]
                 if fill_bars:
                     all_fill_bars.extend(fill_bars)
                     logger.info(
@@ -786,6 +1104,7 @@ class QueryEngine:
         end_s: int | None,
         limit: int,
         interval: str | None = None,
+        key: SeriesKey | None = None,
     ) -> bool:
         """Heuristic: does the cache result satisfy the query?
 
@@ -797,7 +1116,7 @@ class QueryEngine:
             return False
 
         # Even if count is enough, check for interior gaps first
-        if interval and self._has_interior_gaps(bars, interval):
+        if interval and self._has_interior_gaps(bars, interval, key):
             logger.debug(
                 "Cache has %d bars but interior gaps detected for %s",
                 len(bars), interval,
@@ -809,14 +1128,33 @@ class QueryEngine:
         # isn't stale.  Without this, prewarm data from days ago can
         # satisfy count >= limit and skip backfill entirely.
         if interval and end_s is None:
-            interval_secs = parse_custom_interval(interval) or 60
-            now_s = int(time.time())
-            staleness = now_s - bars[-1].time
-            if staleness > interval_secs * 2:
+            now_ms = int(time.time() * 1000)
+            interval_ms = parse_interval_ms(interval)
+            eligible_end_ms = latest_eligible_bar_open_ms(now_ms, interval)
+            latest_open_ms = int(bars[-1].time) * 1000
+            next_open_ms = (
+                compute_bucket_end_ms(
+                    compute_bucket_start_ms(
+                        latest_open_ms,
+                        interval_ms,
+                        interval=interval,
+                    ),
+                    interval_ms,
+                    interval=interval,
+                )
+                if interval_ms is not None and interval_ms > 0
+                else None
+            )
+            if (
+                eligible_end_ms is not None
+                and next_open_ms is not None
+                and next_open_ms <= eligible_end_ms
+            ):
                 logger.debug(
-                    "Cache data stale for %s: latest=%d now=%d gap=%ds (%.1f intervals behind)",
-                    interval, bars[-1].time, now_s, staleness,
-                    staleness / interval_secs,
+                    "Cache data stale for %s: latest=%d latest_closed=%d",
+                    interval,
+                    latest_open_ms,
+                    eligible_end_ms,
                 )
                 return False
 
@@ -834,6 +1172,46 @@ class QueryEngine:
             return False
         return True
 
+    @staticmethod
+    def _closed_tail_gap_range(
+        key: SeriesKey,
+        *,
+        latest_bar_ms: int,
+        requested_end_ms: int | None,
+        now_ms: int,
+    ) -> tuple[int, int] | None:
+        """Return a missing closed tail range, if the stored tail is behind.
+
+        The range is expressed in target-bar open timestamps.  It is shared by
+        latest, bounded-history, and recovery queries so an exact one-bar tail
+        is detected regardless of whether ``requested_end_ms`` lands on a bar
+        open, a bar close, or wall-clock time inside the following bar.
+        """
+        interval_ms = parse_interval_ms(key.interval)
+        if interval_ms is None or interval_ms <= 0:
+            return None
+        eligible_end_ms = latest_eligible_bar_open_ms(
+            now_ms,
+            key.interval,
+            requested_end_ms,
+        )
+        if eligible_end_ms is None:
+            return None
+
+        latest_bucket_ms = compute_bucket_start_ms(
+            int(latest_bar_ms),
+            interval_ms,
+            interval=key.interval,
+        )
+        next_open_ms = compute_bucket_end_ms(
+            latest_bucket_ms,
+            interval_ms,
+            interval=key.interval,
+        )
+        if next_open_ms > eligible_end_ms:
+            return None
+        return next_open_ms, eligible_end_ms
+
     def _trigger_backfill(
         self,
         key: SeriesKey,
@@ -850,6 +1228,14 @@ class QueryEngine:
         """
         now_ms = int(time.time() * 1000)
         effective_end = end_ms if end_ms is not None else now_ms
+        last_closed_ms = last_closed_bar_open_ms(now_ms, key.interval)
+        if last_closed_ms is None:
+            logger.debug(
+                "Skipping backfill for %s because its closed-bar boundary is unknown",
+                key,
+            )
+            return None
+        effective_end = min(effective_end, last_closed_ms)
 
         if start_ms is not None:
             effective_start = start_ms
@@ -871,11 +1257,27 @@ class QueryEngine:
             )
             return None
 
+        planned = self._plan_history_range(key, effective_start, effective_end)
+        if planned is not None:
+            plan, _ = planned
+            if not plan.has_fetch_work:
+                logger.debug(
+                    "Skipping non-fetchable history range for %s: %d-%d (%s)",
+                    key,
+                    effective_start,
+                    effective_end,
+                    plan.disposition.value,
+                )
+                return None
+            effective_start = min(item.start_ms for item in plan.fetch_ranges)
+            effective_end = max(item.end_ms for item in plan.fetch_ranges)
+
         if missing_bars is None:
             missing_bars = self._estimate_missing_bars(
                 effective_start,
                 effective_end,
                 key.interval,
+                key=key,
             )
 
         missing_range = MissingRange(
@@ -915,8 +1317,22 @@ class QueryEngine:
         previous_s: int,
         next_s: int,
         interval: str,
+        *,
+        key: SeriesKey | None = None,
     ) -> tuple[int | None, int | None, int | None]:
         """Return the actual missing open_time range between two boundary bars."""
+        calendar = self._calendar_for(key) if key is not None else None
+        if calendar is not None:
+            start_ms = calendar.next_expected_open(previous_s * 1000, interval)
+            end_ms = calendar.previous_expected_open(next_s * 1000, interval)
+            if start_ms is None or end_ms is None or start_ms > end_ms:
+                return None, None, None
+            return (
+                start_ms,
+                end_ms,
+                calendar.count_expected(start_ms, end_ms, interval),
+            )
+
         interval_ms = parse_interval_ms(interval)
         if interval_ms is None or interval_ms <= 0:
             return None, None, None
@@ -924,16 +1340,26 @@ class QueryEngine:
         end_ms = next_s * 1000 - interval_ms
         if start_ms > end_ms:
             return None, None, None
-        return start_ms, end_ms, self._estimate_missing_bars(start_ms, end_ms, interval)
+        return start_ms, end_ms, self._estimate_missing_bars(
+            start_ms,
+            end_ms,
+            interval,
+            key=key,
+        )
 
     def _estimate_missing_bars(
         self,
         start_ms: int | None,
         end_ms: int | None,
         interval: str,
+        *,
+        key: SeriesKey | None = None,
     ) -> int | None:
         if start_ms is None or end_ms is None or start_ms > end_ms:
             return None
+        calendar = self._calendar_for(key) if key is not None else None
+        if calendar is not None:
+            return calendar.count_expected(start_ms, end_ms, interval)
         interval_ms = parse_interval_ms(interval)
         if interval_ms is None or interval_ms <= 0:
             return None

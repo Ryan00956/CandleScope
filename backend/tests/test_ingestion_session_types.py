@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 
 from app.data_engine.ingestion.config import IngestionConfig
+from app.data_engine.ingestion.factory import ExchangeIngestionFactory
 from app.data_engine.ingestion.feed_control import FeedControlLayer
 from app.data_engine.ingestion import MarketDataIngress
 from app.data_engine.ingestion.models import (
@@ -268,3 +270,214 @@ def test_market_data_ingress_session_factory_follows_exchange_capabilities() -> 
     assert okx_factory is not None
     assert isinstance(binance_factory(), SessionLayer)
     assert isinstance(okx_factory(), SharedWsSessionAdapter)
+
+
+def test_market_data_ingress_keeps_failed_pipeline_registered_for_stop_retry() -> None:
+    class _FailsOncePipeline:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                raise RuntimeError("transient stop failure")
+
+    async def _scenario() -> None:
+        ingress = MarketDataIngress(IngestionConfig())
+        pipeline = _FailsOncePipeline()
+        ingress._pipelines["demo"] = pipeline
+
+        try:
+            await ingress.remove_stream("demo")
+        except RuntimeError as exc:
+            assert str(exc) == "transient stop failure"
+        else:
+            raise AssertionError("first stop should fail")
+        assert ingress.get_pipeline("demo") is pipeline
+
+        await ingress.remove_stream("demo")
+        assert ingress.get_pipeline("demo") is None
+        assert pipeline.stop_calls == 2
+        assert ingress._stream_locks == {}
+
+    asyncio.run(_scenario())
+
+
+def test_market_data_ingress_rolls_back_partially_started_pipeline() -> None:
+    class _PartiallyStartedPipeline:
+        instances = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.running = False
+            self.stop_calls = 0
+            self.__class__.instances.append(self)
+
+        async def start(self) -> None:
+            self.running = True
+            raise RuntimeError("partial start failure")
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            self.running = False
+
+    async def _scenario() -> None:
+        ingress = MarketDataIngress(IngestionConfig())
+        ingress._started = True
+        descriptor = StreamDescriptor(
+            "BTCUSDT",
+            StreamType.MARK_PRICE,
+            exchange="binance",
+            market_type="futures",
+        )
+
+        with patch("app.data_engine.ingestion.StreamPipeline", _PartiallyStartedPipeline):
+            try:
+                await ingress.add_stream(descriptor)
+            except RuntimeError as exc:
+                assert str(exc) == "partial start failure"
+            else:
+                raise AssertionError("partial start should fail")
+
+        pipeline = _PartiallyStartedPipeline.instances[0]
+        assert pipeline.running is False
+        assert pipeline.stop_calls == 1
+        assert ingress.get_pipeline(descriptor.key) is None
+        assert ingress._stream_locks == {}
+
+    asyncio.run(_scenario())
+
+
+def test_factory_waits_for_kline_stop_before_fast_resubscribe() -> None:
+    class _Delivery:
+        def __init__(self) -> None:
+            self.market_callbacks = []
+            self.gap_callbacks = []
+
+        def on_market_event(self, callback) -> None:
+            self.market_callbacks.append(callback)
+
+        def on_gap(self, callback) -> None:
+            self.gap_callbacks.append(callback)
+
+    class _Pipeline:
+        def __init__(self) -> None:
+            self.delivery = _Delivery()
+
+    class _Ingress:
+        def __init__(self, key: str) -> None:
+            self.pipelines = {key: _Pipeline()}
+            self.stop_entered = asyncio.Event()
+            self.stop_gate = asyncio.Event()
+            self.add_calls = 0
+
+        def get_pipeline(self, key: str):
+            return self.pipelines.get(key)
+
+        async def add_stream(self, descriptor: StreamDescriptor):
+            self.add_calls += 1
+            pipeline = _Pipeline()
+            self.pipelines[descriptor.key] = pipeline
+            return pipeline
+
+        async def remove_stream(self, key: str) -> None:
+            self.stop_entered.set()
+            await self.stop_gate.wait()
+            self.pipelines.pop(key, None)
+
+    async def _noop(*_args) -> None:
+        return None
+
+    async def _scenario() -> None:
+        descriptor = StreamDescriptor(
+            "BTCUSDT",
+            StreamType.KLINE,
+            interval="1m",
+            exchange="binance",
+            market_type="spot",
+        )
+        factory = ExchangeIngestionFactory()
+        ingress = _Ingress(descriptor.key)
+        factory._ingress = ingress
+
+        old_pipeline = ingress.get_pipeline(descriptor.key)
+        old_handle = await factory.start("BTCUSDT", "1m", _noop)
+        stop = asyncio.create_task(old_handle.stop())
+        await ingress.stop_entered.wait()
+
+        restart = asyncio.create_task(factory.start("BTCUSDT", "1m", _noop))
+        await asyncio.sleep(0)
+        assert not restart.done()
+
+        ingress.stop_gate.set()
+        assert await stop is True
+        new_handle = await restart
+        assert ingress.add_calls == 1
+        assert ingress.get_pipeline(descriptor.key) is not old_pipeline
+        assert factory._stream_locks == {}
+
+        assert await new_handle.stop() is True
+
+    asyncio.run(_scenario())
+
+
+def test_factory_cleans_failed_kline_stop_before_reuse() -> None:
+    class _Delivery:
+        def on_market_event(self, callback) -> None:
+            return None
+
+        def on_gap(self, callback) -> None:
+            return None
+
+    class _Pipeline:
+        def __init__(self) -> None:
+            self.delivery = _Delivery()
+
+    class _FailsOnceIngress:
+        def __init__(self, key: str) -> None:
+            self.pipelines = {key: _Pipeline()}
+            self.remove_calls = 0
+            self.add_calls = 0
+
+        def get_pipeline(self, key: str):
+            return self.pipelines.get(key)
+
+        async def remove_stream(self, key: str) -> None:
+            self.remove_calls += 1
+            if self.remove_calls == 1:
+                raise RuntimeError("transient stop failure")
+            self.pipelines.pop(key, None)
+
+        async def add_stream(self, descriptor: StreamDescriptor):
+            self.add_calls += 1
+            pipeline = _Pipeline()
+            self.pipelines[descriptor.key] = pipeline
+            return pipeline
+
+    async def _noop(*_args) -> None:
+        return None
+
+    async def _scenario() -> None:
+        descriptor = StreamDescriptor(
+            "BTCUSDT",
+            StreamType.KLINE,
+            interval="1m",
+            exchange="binance",
+            market_type="spot",
+        )
+        factory = ExchangeIngestionFactory()
+        ingress = _FailsOnceIngress(descriptor.key)
+        factory._ingress = ingress
+        old_pipeline = ingress.get_pipeline(descriptor.key)
+
+        old_handle = await factory.start("BTCUSDT", "1m", _noop)
+        assert await old_handle.stop() is False
+        assert descriptor.key in factory._failed_stream_stops
+
+        new_handle = await factory.start("BTCUSDT", "1m", _noop)
+        assert ingress.remove_calls == 2
+        assert ingress.add_calls == 1
+        assert ingress.get_pipeline(descriptor.key) is not old_pipeline
+        assert descriptor.key not in factory._failed_stream_stops
+        assert await new_handle.stop() is True
+
+    asyncio.run(_scenario())

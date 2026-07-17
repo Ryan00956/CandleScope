@@ -6,7 +6,10 @@ import inspect
 from collections.abc import Callable
 from typing import Any
 
-from app.data_engine.interval_policy import compute_bucket_start_ms
+from app.data_engine.interval_policy import (
+    compute_bucket_start_ms,
+    last_closed_bar_open_ms,
+)
 
 from .backfill_coordinator import priority_for_reason
 from .price_cache import PriceSnapshot
@@ -18,7 +21,7 @@ DAY_MS = 86_400_000
 
 
 class DailyOpenService:
-    """Resolve current daily open through DataManager storage/backfill."""
+    """Resolve the current daily open without backfilling a forming 1d bar."""
 
     def __init__(
         self,
@@ -27,6 +30,9 @@ class DailyOpenService:
         backfill_trigger_provider: Callable[[], BackfillTrigger | None],
     ) -> None:
         self._storage_provider = storage_provider
+        # Kept in the constructor for DataManager/API compatibility.  The
+        # historical fetcher intentionally admits only closed candles, so it
+        # must not be used to fetch the current (forming) daily candle.
         self._backfill_trigger_provider = backfill_trigger_provider
         self._cache: dict[tuple[str, str, str], tuple[int, float]] = {}
         self._requested: set[tuple[str, str, str, int]] = set()
@@ -48,7 +54,10 @@ class DailyOpenService:
             self._cache[key] = (bucket_start_ms, storage_open)
             return storage_open
 
-        self._request_backfill_once(snapshot, bucket_start_ms)
+        # The current 1d candle is forming and therefore cannot enter the
+        # closed-only history pipeline.  Repair only the first 1m candle of
+        # the UTC day once it has closed; its open is the same daily open.
+        self._request_open_minute_backfill_once(snapshot, bucket_start_ms)
         return snapshot.daily_open or snapshot.open
 
     async def _load_from_storage(
@@ -59,38 +68,44 @@ class DailyOpenService:
         storage = self._storage_provider()
         if storage is None:
             return 0.0
-        try:
-            rows = storage.query_bars(
-                symbol=snapshot.symbol,
-                interval="1d",
-                start_ms=bucket_start_ms,
-                end_ms=bucket_start_ms,
-                limit=1,
-                order="ASC",
-                exchange=snapshot.exchange,
-                market_type=snapshot.market_type,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Daily open storage query failed for %s:%s:%s: %s",
-                snapshot.exchange,
-                snapshot.market_type,
-                snapshot.symbol,
-                exc,
-            )
-            return 0.0
-        if not rows:
-            return 0.0
-        try:
-            return float(rows[0].get("open", 0) or 0)
-        except (TypeError, ValueError):
-            return 0.0
+        for interval in ("1d", "1m"):
+            try:
+                rows = storage.query_bars(
+                    symbol=snapshot.symbol,
+                    interval=interval,
+                    start_ms=bucket_start_ms,
+                    end_ms=bucket_start_ms,
+                    limit=1,
+                    order="ASC",
+                    exchange=snapshot.exchange,
+                    market_type=snapshot.market_type,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Daily open storage query failed for %s:%s:%s@%s: %s",
+                    snapshot.exchange,
+                    snapshot.market_type,
+                    snapshot.symbol,
+                    interval,
+                    exc,
+                )
+                continue
+            if not rows:
+                continue
+            try:
+                return float(rows[0].get("open", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
 
-    def _request_backfill_once(
+    def _request_open_minute_backfill_once(
         self,
         snapshot: PriceSnapshot,
         bucket_start_ms: int,
     ) -> None:
+        last_closed_minute = last_closed_bar_open_ms(snapshot.updated_at_ms, "1m")
+        if last_closed_minute is None or last_closed_minute < bucket_start_ms:
+            return
         request_key = (
             snapshot.exchange,
             snapshot.market_type,
@@ -113,23 +128,24 @@ class DailyOpenService:
                     "metadata": {
                         "focus_scope": "price",
                         "subscription_tier": "price",
-                        "requested_interval": "1d",
+                        "requested_interval": "1m",
                         "daily_bucket_start_ms": bucket_start_ms,
                     },
                 },
             )
             trigger(
                 snapshot.symbol,
-                "1d",
+                "1m",
                 bucket_start_ms,
-                bucket_start_ms + DAY_MS - 1,
+                bucket_start_ms,
                 snapshot.exchange,
                 snapshot.market_type,
                 **kwargs,
             )
         except Exception as exc:
+            self._requested.discard(request_key)
             logger.warning(
-                "Daily open backfill trigger failed for %s:%s:%s: %s",
+                "Daily open minute backfill trigger failed for %s:%s:%s: %s",
                 snapshot.exchange,
                 snapshot.market_type,
                 snapshot.symbol,

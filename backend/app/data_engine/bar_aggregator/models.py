@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
+
 
 # ═══════════════════════════════════════════════════════════════
 #  Enums
@@ -115,6 +117,7 @@ class BarInput:
     trades: int = 0
     taker_buy_base: float = 0.0
     taker_buy_quote: float = 0.0
+    enhanced_fields: frozenset[str] = field(default_factory=frozenset)
     sequence: int | None = None    # for ordering / dedup
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -124,6 +127,18 @@ class BarInput:
         self.market_type = self.market_type.strip().lower()
         if self.merge_mode is not None and not isinstance(self.merge_mode, MergeMode):
             self.merge_mode = MergeMode(str(self.merge_mode))
+        self.enhanced_fields = declared_enhanced_fields(
+            self.exchange,
+            self.market_type,
+            {
+                "volume": self.volume,
+                "quote_volume": self.quote_volume,
+                "trades": self.trades,
+                "taker_buy_base": self.taker_buy_base,
+                "taker_buy_quote": self.taker_buy_quote,
+            },
+            explicit_fields=self.enhanced_fields,
+        )
 
     @property
     def input_key(self) -> str:
@@ -151,6 +166,9 @@ class BarInput:
             "merge_mode": self.merge_mode.value if self.merge_mode else None,
             "quote_volume": self.quote_volume,
             "trades": self.trades,
+            "taker_buy_base": self.taker_buy_base,
+            "taker_buy_quote": self.taker_buy_quote,
+            "enhanced_fields": sorted(self.enhanced_fields),
         }
 
 
@@ -180,6 +198,7 @@ class BarState:
     trades: int = 0
     taker_buy_base: float = 0.0
     taker_buy_quote: float = 0.0
+    enhanced_fields: frozenset[str] = field(default_factory=frozenset)
     tick_count: int = 0            # how many BarInputs were merged
     first_input_at_ms: int = 0     # open_time of the first input
     last_input_at_ms: int = 0      # open_time of the last input
@@ -193,6 +212,7 @@ class BarState:
         self.symbol = self.symbol.upper().strip()
         self.exchange = self.exchange.strip().lower()
         self.market_type = self.market_type.strip().lower()
+        self.enhanced_fields = frozenset(self.enhanced_fields)
 
     def to_dict(self) -> dict:
         return {
@@ -211,6 +231,7 @@ class BarState:
             "trades": self.trades,
             "taker_buy_base": self.taker_buy_base,
             "taker_buy_quote": self.taker_buy_quote,
+            "enhanced_fields": sorted(self.enhanced_fields),
             "tick_count": self.tick_count,
             "first_input_at_ms": self.first_input_at_ms,
             "last_input_at_ms": self.last_input_at_ms,
@@ -241,10 +262,14 @@ class BarState:
             "low": self.low,
             "close": self.close,
             "volume": self.volume,
-            "quote_volume": self.quote_volume,
-            "trades": self.trades,
-            "taker_buy_base": self.taker_buy_base,
-            "taker_buy_quote": self.taker_buy_quote,
+            "quote_volume": self.quote_volume
+            if "quote_volume" in self.enhanced_fields else None,
+            "trades": self.trades
+            if "trades" in self.enhanced_fields else None,
+            "taker_buy_base": self.taker_buy_base
+            if "taker_buy_base" in self.enhanced_fields else None,
+            "taker_buy_quote": self.taker_buy_quote
+            if "taker_buy_quote" in self.enhanced_fields else None,
         }
 
 

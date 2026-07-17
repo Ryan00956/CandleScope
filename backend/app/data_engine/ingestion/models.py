@@ -29,6 +29,13 @@ class StreamType(str, enum.Enum):
     TICKER = "ticker"            # @ticker             (24h rolling ticker)
     MINI_TICKER = "miniTicker"   # @miniTicker         (lightweight ticker)
     DEPTH = "depth"              # @depth<levels>      (order-book depth)
+    FULL_DEPTH = "fullDepth"     # @depth              (snapshot + ordered deltas)
+    MARK_PRICE = "markPrice"     # USD-M mark/index/funding summary stream
+    PREMIUM_INDEX = "premiumIndex"  # USD-M REST-only premium-index kline history
+    INDEX_PRICE = "indexPrice"   # logical projection of markPrice stream
+    FUNDING_RATE = "fundingRate" # logical projection + REST history
+    OPEN_INTEREST = "openInterest"  # REST snapshot/poll + REST history
+    LIQUIDATION = "forceOrder"   # USD-M lossy liquidation-order snapshot stream
 
 
 class FeedMode(str, enum.Enum):
@@ -73,6 +80,8 @@ class StreamDescriptor:
     depth_levels: int | None = None  # only for DEPTH streams (5, 10, 20)
     exchange: str = "binance"
     market_type: str = "spot"       # "spot" or "futures"
+    poll_interval_seconds: float | None = None  # REST-only stream cadence override
+    update_interval_ms: int | None = None  # optional WebSocket update-speed override
 
     @property
     def key(self) -> str:
@@ -82,6 +91,12 @@ class StreamDescriptor:
             base = f"{symbol}@kline_{self.interval}"
         elif self.stream_type == StreamType.DEPTH and self.depth_levels:
             base = f"{symbol}@depth{self.depth_levels}"
+            if self.update_interval_ms is not None:
+                base = f"{base}@{self.update_interval_ms}ms"
+        elif self.stream_type == StreamType.FULL_DEPTH:
+            base = f"{symbol}@{self.stream_type.value}"
+            if self.update_interval_ms is not None:
+                base = f"{base}@{self.update_interval_ms}ms"
         else:
             base = f"{symbol}@{self.stream_type.value}"
         prefixes: list[str] = []
@@ -100,13 +115,50 @@ class StreamDescriptor:
         if self.stream_type == StreamType.KLINE:
             return f"{symbol}@kline_{self.interval}"
         if self.stream_type == StreamType.DEPTH and self.depth_levels:
-            return f"{symbol}@depth{self.depth_levels}"
+            base = f"{symbol}@depth{self.depth_levels}"
+            if self.update_interval_ms is not None:
+                is_binance_default = (
+                    self.exchange.strip().lower() == "binance"
+                    and (
+                        (
+                            self.market_type.strip().lower() == "futures"
+                            and self.update_interval_ms == 250
+                        )
+                        or (
+                            self.market_type.strip().lower() == "spot"
+                            and self.update_interval_ms == 1000
+                        )
+                    )
+                )
+                if is_binance_default:
+                    return base
+                return f"{base}@{self.update_interval_ms}ms"
+            return base
+        if self.stream_type == StreamType.FULL_DEPTH:
+            base = f"{symbol}@depth"
+            if self.update_interval_ms is None or self.update_interval_ms == 250:
+                return base
+            return f"{base}@{self.update_interval_ms}ms"
         return f"{symbol}@{self.stream_type.value}"
 
     def validate(self) -> None:
         """Raise ValueError if the descriptor is invalid."""
         if self.stream_type == StreamType.KLINE and not self.interval:
             raise ValueError("KLINE stream requires an interval (e.g. '1m')")
+        if self.stream_type == StreamType.PREMIUM_INDEX and self.interval != "1m":
+            raise ValueError("PREMIUM_INDEX history requires the fixed 1m interval")
+        if self.stream_type == StreamType.DEPTH and (
+            type(self.depth_levels) is not int or self.depth_levels not in {5, 10, 20}
+        ):
+            raise ValueError("DEPTH stream requires depth_levels in {5, 10, 20}")
+        if self.stream_type == StreamType.FULL_DEPTH and self.depth_levels is not None:
+            raise ValueError("FULL_DEPTH stream must not set partial depth_levels")
+        if self.poll_interval_seconds is not None and self.poll_interval_seconds <= 0:
+            raise ValueError("poll_interval_seconds must be positive")
+        if self.update_interval_ms is not None and (
+            type(self.update_interval_ms) is not int or self.update_interval_ms <= 0
+        ):
+            raise ValueError("update_interval_ms must be a positive integer")
 
 
 # ─── Core Output: MarketEvent ────────────────────────────────
@@ -241,6 +293,7 @@ class RawMessage:
     http_status: int | None = None
     http_headers: dict[str, str] | None = None
     http_body_code: str | None = None
+    request_limit: int | None = None  # REST request context when the payload omits it
 
 
 
@@ -252,6 +305,10 @@ class TransportRequest:
     limit: int = 1
     start_ms: int | None = None
     end_ms: int | None = None
+    from_id: int | None = None
+    history: bool = False
+    quota_acquired: bool = False
+    quota_semaphore_held: bool = False
 
     # Convenience properties for backward compat
     @property

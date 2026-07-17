@@ -313,6 +313,33 @@ class BackfillEngine:
             status = BackfillStatus.FETCHING
             fetch_results = await self.fetcher.fetch(plan.tasks)
 
+            fetch_error_summaries: list[str] = []
+            for result in fetch_results:
+                if not result.errors and result.status not in {
+                    BackfillStatus.FAILED,
+                    BackfillStatus.PARTIAL,
+                }:
+                    continue
+                error_text = "; ".join(result.errors) or "no error detail"
+                summary = (
+                    f"Fetch task {result.status.value}: "
+                    f"task={result.task.task_key} "
+                    f"interval={result.task.interval} "
+                    f"range=[{result.task.start_ms},{result.task.end_ms}] "
+                    f"errors={error_text}"
+                )
+                fetch_error_summaries.append(summary)
+                logger.warning(
+                    "Backfill fetch task issue: task=%s interval=%s "
+                    "range=[%d,%d] status=%s errors=%s",
+                    result.task.task_key,
+                    result.task.interval,
+                    result.task.start_ms,
+                    result.task.end_ms,
+                    result.status.value,
+                    error_text,
+                )
+
             # Check if all tasks failed
             all_failed = all(
                 fr.status == BackfillStatus.FAILED for fr in fetch_results
@@ -320,8 +347,10 @@ class BackfillEngine:
             if all_failed:
                 status = BackfillStatus.FAILED
                 errors.append("All fetch tasks failed")
+                errors.extend(fetch_error_summaries)
                 logger.error("All fetch tasks failed for %s", symbol)
             else:
+                errors.extend(fetch_error_summaries)
                 # ── Phase 4: Reconcile ──
                 status = BackfillStatus.RECONCILING
                 reconcile_result = await self.reconciler.reconcile(

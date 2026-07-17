@@ -48,6 +48,43 @@ class _FakeSession:
         )
 
 
+class _SequenceSession:
+    closed = False
+
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self._responses = responses
+        self.calls = 0
+
+    def get(self, *args: object, **kwargs: object) -> _FakeResponse:
+        self.calls += 1
+        return self._responses.pop(0)
+
+
+class _BinanceInvalidParameterResponse(_FakeResponse):
+    def __init__(self) -> None:
+        super().__init__({}, status=400)
+        self.url = "https://fapi.binance.com/futures/data/openInterestHist"
+
+    async def text(self) -> str:
+        return '{"msg":"parameter \'startTime\' is invalid.","code":-1130}'
+
+
+class _CountingRateLimits:
+    def __init__(self) -> None:
+        self.acquire_calls = 0
+        self.response_calls = 0
+
+    async def acquire(self, rule: object, request: object) -> None:
+        self.acquire_calls += 1
+
+    def record_response(self, rule: object, **kwargs: object) -> bool:
+        self.response_calls += 1
+        return False
+
+    def snapshot(self) -> dict[str, object]:
+        return {}
+
+
 def test_http_fetch_preserves_okx_rate_limit_metadata() -> None:
     async def run() -> TransportError:
         transport = TransportLayer(IngestionConfig())
@@ -74,3 +111,76 @@ def test_http_fetch_preserves_okx_rate_limit_metadata() -> None:
     assert exc.retry_after == 0.25
     assert exc.body_code == "50011"
     assert exc.headers["Retry-After"] == "0.25"
+
+
+def test_http_fetch_accounts_for_each_physical_endpoint_attempt() -> None:
+    async def run(*, preacquired: bool) -> tuple[int, int]:
+        config = IngestionConfig(
+            http_base_urls_futures=["https://one.example", "https://two.example"],
+        )
+        transport = TransportLayer(config)
+        transport._http_session = _SequenceSession([  # type: ignore[assignment]
+            _FakeResponse({"msg": "temporary"}, status=500),
+            _FakeResponse({
+                "symbol": "BTCUSDT",
+                "markPrice": "101",
+                "indexPrice": "100",
+                "estimatedSettlePrice": "100.5",
+                "lastFundingRate": "0.0001",
+                "nextFundingTime": 1_700_028_800_000,
+                "time": 1_700_000_000_000,
+            }),
+        ])
+        counter = _CountingRateLimits()
+        transport._rate_limits = counter  # type: ignore[assignment]
+        req = TransportRequest(
+            descriptor=StreamDescriptor(
+                symbol="BTCUSDT",
+                stream_type=StreamType.MARK_PRICE,
+                exchange="binance",
+                market_type="futures",
+            ),
+            quota_acquired=preacquired,
+            quota_semaphore_held=preacquired,
+        )
+
+        rows = await transport.http_fetch(req)
+        assert len(rows) == 1
+        return counter.acquire_calls, counter.response_calls
+
+    assert asyncio.run(run(preacquired=False)) == (2, 2)
+    assert asyncio.run(run(preacquired=True)) == (1, 2)
+
+
+def test_http_fetch_does_not_fail_over_binance_invalid_parameter() -> None:
+    async def run() -> tuple[TransportError, int]:
+        config = IngestionConfig(
+            http_base_urls_futures=["https://one.example", "https://two.example"],
+        )
+        transport = TransportLayer(config)
+        session = _SequenceSession([_BinanceInvalidParameterResponse()])
+        transport._http_session = session  # type: ignore[assignment]
+        request = TransportRequest(
+            descriptor=StreamDescriptor(
+                symbol="BTCUSDT",
+                stream_type=StreamType.OPEN_INTEREST,
+                interval="1h",
+                exchange="binance",
+                market_type="futures",
+            ),
+            start_ms=1,
+            end_ms=2,
+            limit=500,
+            history=True,
+        )
+
+        try:
+            await transport.http_fetch(request)
+        except TransportError as exc:
+            return exc, session.calls
+        raise AssertionError("expected invalid startTime to raise TransportError")
+
+    exc, calls = asyncio.run(run())
+    assert calls == 1
+    assert exc.status_code == 400
+    assert exc.body_code == "-1130"

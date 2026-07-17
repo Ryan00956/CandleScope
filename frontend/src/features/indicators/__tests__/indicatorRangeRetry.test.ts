@@ -18,6 +18,11 @@ let hostedIndicatorRangeRequestsReady = structuralMock<
 let isTypedIndicatorRangeWait = structuralMock<RuntimeModule["isTypedIndicatorRangeWait"]>(() => {
   throw new Error("indicator runtime not loaded");
 });
+let isResolvedIndicatorRangeEmpty = structuralMock<
+  RuntimeModule["isResolvedIndicatorRangeEmpty"]
+>(() => {
+  throw new Error("indicator runtime not loaded");
+});
 
 test.before(async () => {
   server = await createServer({
@@ -28,6 +33,7 @@ test.before(async () => {
     planIndicatorRangeRetry,
     hostedIndicatorRangeRequestsReady,
     isTypedIndicatorRangeWait,
+    isResolvedIndicatorRangeEmpty,
   } = structuralMock<RuntimeModule>(await server.ssrLoadModule(
     "/src/features/indicators/useIndicatorRuntime.js",
   )));
@@ -91,6 +97,67 @@ test("typed bounded-wait responses defer to events without a blind retry", () =>
     ok: false,
     code: "INDICATOR_RANGE_NOT_READY",
     detail: { retryAfterMs: 3000 },
+  }), false);
+});
+
+test("terminal indicator empty ranges resolve coverage while pending empties stay retryable", () => {
+  assert.equal(isResolvedIndicatorRangeEmpty({
+    ok: false,
+    code: "INDICATOR_RANGE_EMPTY",
+    lines: [],
+    series: [],
+    annotations: [],
+    fills: [],
+    legacyFills: [],
+    markers: [],
+    hlines: [],
+    bgcolors: [],
+    barcolors: [],
+    signals: [],
+    param_schema: [],
+    history_state: "exhausted",
+    complete: true,
+    retryable: false,
+  }), true);
+  assert.equal(isResolvedIndicatorRangeEmpty({
+    ok: false,
+    code: "INDICATOR_RANGE_EMPTY",
+    lines: [],
+    series: [],
+    annotations: [],
+    fills: [],
+    legacyFills: [],
+    markers: [],
+    hlines: [],
+    bgcolors: [],
+    barcolors: [],
+    signals: [],
+    param_schema: [],
+    detail: {
+      availability: {
+        history_state: "exhausted",
+        complete: true,
+        retryable: false,
+      },
+    },
+  }), true);
+  assert.equal(isResolvedIndicatorRangeEmpty({
+    ok: false,
+    code: "INDICATOR_RANGE_EMPTY",
+    lines: [],
+    series: [],
+    annotations: [],
+    fills: [],
+    legacyFills: [],
+    markers: [],
+    hlines: [],
+    bgcolors: [],
+    barcolors: [],
+    signals: [],
+    param_schema: [],
+    history_state: "pending",
+    complete: false,
+    retryable: true,
   }), false);
 });
 

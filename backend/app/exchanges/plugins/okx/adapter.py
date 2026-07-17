@@ -6,7 +6,17 @@ from typing import Any
 import aiohttp
 
 from app.core.config import REQUEST_TIMEOUT, get_effective_proxy
-from app.exchanges.models import ExchangeCapabilities, ExchangeMarket, SymbolInfo
+from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
+from app.exchanges.models import (
+    CRYPTO_24X7_CALENDAR_ID,
+    ExchangeCapabilities,
+    ExchangeMarket,
+    HistoryAvailabilityPolicy,
+    HistoryCadence,
+    HistoryEmptyPageSemantics,
+    MarketChannelCapability,
+    SymbolInfo,
+)
 
 from .protocol import OKX_REST_BASE_URLS, OkxExchangeProtocol
 
@@ -29,6 +39,113 @@ _OKX_NATIVE_INTERVALS = [
     "1w",
     "1M",
 ]
+_MARKET_TYPES = ("spot", "futures")
+_REALTIME_TRANSPORTS = (TransportMode.WEBSOCKET, TransportMode.REST_POLL)
+_TICKER_FIELDS = (
+    "last_price",
+    "open_price",
+    "high_price",
+    "low_price",
+    "price_change_pct",
+    "volume",
+    "quote_volume",
+)
+
+
+def _timestamp_ms(value: Any) -> int | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _channel_capabilities() -> list[MarketChannelCapability]:
+    return [
+        MarketChannelCapability(
+            channel=MarketChannel.KLINE,
+            market_types=_MARKET_TYPES,
+            realtime=True,
+            history=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            history_transports=(TransportMode.REST_HISTORY,),
+            delivery=DeliveryClass.APPEND,
+            snapshot=True,
+            sequence="timestamp",
+            resync="replace_snapshot",
+            params={"interval": list(_OKX_NATIVE_INTERVALS)},
+            update_intervals_ms=(1000,),
+            available_fields=(
+                "interval",
+                "open_time",
+                "close_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quote_volume",
+                "is_closed",
+            ),
+            unavailable_fields=(
+                "trades",
+                "taker_buy_base",
+                "taker_buy_quote",
+            ),
+            connection_model="shared_multiplex",
+            limits={
+                "rest.max_limit": 300,
+                "websocket.multiplex_scope": "symbol_intervals",
+            },
+            known_limitations=(
+                "Trade count and taker-buy fields are unavailable; normalized zero placeholders are not data",
+                "Current shared WebSocket hubs multiplex intervals only; each symbol has its own connection",
+            ),
+            history_policy=HistoryAvailabilityPolicy(
+                cadence=HistoryCadence.REGULAR,
+                empty_page_semantics=(
+                    HistoryEmptyPageSemantics.AUTHORITATIVE_RANGE_EMPTY
+                ),
+                calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                timezone="UTC",
+            ),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.TICKER,
+            market_types=("spot",),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            update_intervals_ms=(100,),
+            available_fields=_TICKER_FIELDS,
+            connection_model="message_per_stream",
+            known_limitations=(
+                "Ticker streams use individual message-subscription sessions in the current runtime",
+            ),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.TICKER,
+            market_types=("futures",),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            update_intervals_ms=(100,),
+            available_fields=tuple(
+                field for field in _TICKER_FIELDS if field != "quote_volume"
+            ),
+            unavailable_fields=("quote_volume",),
+            connection_model="message_per_stream",
+            known_limitations=(
+                "Ticker streams use individual message-subscription sessions in the current runtime",
+                "For derivatives, volCcy24h is base-currency volume; normalized quote_volume is not data",
+                "For derivatives, normalized volume is contract count rather than base-asset volume",
+            ),
+        ),
+    ]
 
 
 class OkxExchangeAdapter:
@@ -49,18 +166,24 @@ class OkxExchangeAdapter:
         return ExchangeCapabilities(
             exchange=self.id,
             name=self.name,
+            capability_schema_version=3,
             markets=[
                 ExchangeMarket(
                     market_type="spot",
                     product_type="spot",
                     label="Spot",
+                    calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                    timezone="UTC",
                 ),
                 ExchangeMarket(
                     market_type="futures",
                     product_type="perpetual",
                     label="Swap Perpetual",
+                    calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                    timezone="UTC",
                 ),
             ],
+            channels=_channel_capabilities(),
             native_intervals=list(_OKX_NATIVE_INTERVALS),
             supports_multi_symbol_ticker=False,
             supports_symbol_search=True,
@@ -171,6 +294,11 @@ class OkxExchangeAdapter:
                     product_type=product_type,
                     contract_type=str(item.get("ctType", "")),
                     raw=item,
+                    listed_at_ms=_timestamp_ms(item.get("listTime")),
+                    continuous_trading_at_ms=_timestamp_ms(
+                        item.get("contTdSwTime"),
+                    ),
+                    expiry_at_ms=_timestamp_ms(item.get("expTime")),
                 ),
             )
         return symbols

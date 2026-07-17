@@ -6,6 +6,7 @@ import type { DrawingRuntime } from "../features/drawings/useDrawingRuntime.js";
 import type { ExportRuntime } from "../features/export/useExportRuntime.js";
 import type { IndicatorRuntime } from "../features/indicators/useIndicatorRuntime.js";
 import type { MarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
+import type { AdvancedMarketRuntime } from "../features/advanced-market-data/advancedMarketDataTypes.js";
 import type { ChartSettings } from "../features/settings/chartAppearanceSettings.js";
 import type { WatchlistRuntime } from "../features/watchlist/useWatchlistRuntime.js";
 import type { ChartWorkspaceProps } from "./ChartWorkspace.js";
@@ -62,6 +63,7 @@ export interface AlertsShellRuntime {
 export interface AppShellRuntimeInputs {
   session: ChartSessionRuntime;
   marketData: MarketDataRuntime;
+  advancedMarketData: AdvancedMarketRuntime;
   drawings: DrawingRuntime;
   indicators: IndicatorShellRuntime;
   settings: SettingsShellRuntime;
@@ -78,6 +80,8 @@ export interface AppShellViewModelContext {
   marketView: MarketDataRuntime["view"];
   marketActions: MarketDataRuntime["actions"];
   marketStatus: MarketDataRuntime["status"];
+  advancedMarketView: AdvancedMarketRuntime["view"];
+  advancedMarketActions: AdvancedMarketRuntime["actions"];
   drawingView: DrawingRuntime["view"];
   drawingActions: DrawingRuntime["actions"];
   indicatorView: IndicatorShellRuntime["view"];

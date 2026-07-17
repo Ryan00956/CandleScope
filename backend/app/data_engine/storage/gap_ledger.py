@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import KLINES_DB_PATH
-from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_policy import (
+    compute_bucket_close_ms,
+    compute_bucket_start_ms,
+    parse_interval_ms,
+)
 
 
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -170,18 +174,109 @@ class GapLedger:
             values["missing_count"] = max(0, int(missing_count))
         self._update(request, **values)
 
+    def mark_deferred(
+        self,
+        request: Any,
+        *,
+        status: str,
+        reason: str | None = None,
+        next_retry_at: int | None = None,
+    ) -> None:
+        """Record a non-fetchable history decision without fabricating emptiness.
+
+        ``not_expected`` is used for forming/market-closed windows and is a
+        resolved informational state.  ``unavailable`` keeps an auditable open
+        record with an optional retry deadline.  Neither state is equivalent to
+        an exchange-confirmed ``source_empty`` range.
+        """
+        now = _now_ms()
+        self._update(
+            request,
+            status=status,
+            last_error=reason,
+            last_checked_at=now,
+            resolved_at=now if status == "not_expected" else None,
+            next_retry_at=next_retry_at,
+        )
+
+    def mark_covered_resolved(self, request: Any) -> int:
+        """Close legacy ledger entries fully covered by verified continuity.
+
+        Backfill requests are frequently merged or clipped to closed-bar
+        boundaries, so an older ``source_empty``/``failed`` row may not have
+        exactly the same natural key as the successful repair.  Only rows
+        fully contained in the verified range are closed; partially covered
+        rows remain actionable.
+        """
+        now = _now_ms()
+        interval_ms = parse_interval_ms(request.interval)
+        if interval_ms is None or interval_ms <= 0:
+            return 0
+        coverage_start_ms = compute_bucket_start_ms(
+            int(request.start_ms),
+            interval_ms,
+            interval=request.interval,
+        )
+        last_open_ms = compute_bucket_start_ms(
+            int(request.end_ms),
+            interval_ms,
+            interval=request.interval,
+        )
+        # Repair requests are keyed by bar *open*, whereas older ledger rows
+        # sometimes recorded a full bar close/wall-clock edge.  Verify coverage
+        # in wall-clock time so a native repaired bar resolves both forms.
+        coverage_end_ms = compute_bucket_close_ms(
+            last_open_ms,
+            interval_ms,
+            interval=request.interval,
+        )
+        with _connect(self._db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE kline_gap_ledger
+                SET status = 'filled',
+                    missing_count = 0,
+                    last_error = NULL,
+                    last_checked_at = ?,
+                    resolved_at = ?,
+                    next_retry_at = NULL
+                WHERE exchange = ?
+                  AND market_type = ?
+                  AND symbol = ?
+                  AND interval = ?
+                  AND start_ms >= ?
+                  AND end_ms <= ?
+                  AND status IN ('source_empty', 'failed', 'unavailable', 'not_expected')
+                """,
+                (
+                    now,
+                    now,
+                    request.exchange,
+                    request.market_type,
+                    request.symbol,
+                    request.interval,
+                    coverage_start_ms,
+                    coverage_end_ms,
+                ),
+            )
+            conn.commit()
+        return int(cursor.rowcount or 0)
+
     def get_status(self, request: Any) -> dict[str, Any] | None:
         with _connect(self._db_path) as conn:
             row = conn.execute(
                 """
                 SELECT
                     status,
+                    reason,
                     attempts,
                     missing_count,
                     last_error,
+                    last_seen_at,
                     last_checked_at,
                     resolved_at,
-                    next_retry_at
+                    next_retry_at,
+                    metadata_json
                 FROM kline_gap_ledger
                 WHERE exchange = ?
                   AND market_type = ?
@@ -207,8 +302,29 @@ class GapLedger:
                 """
                 SELECT *
                 FROM kline_gap_ledger
-                WHERE status NOT IN ('filled', 'source_empty')
+                WHERE status NOT IN ('filled', 'source_empty', 'not_expected')
                 ORDER BY priority ASC, first_seen_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_reconcilable(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return inactive ledger outcomes that may be superseded by storage.
+
+        These are deliberately kept separate from ``list_open``: a confirmed
+        source-empty result is not active work, but a later authoritative
+        repair can make it stale.  Callers must still verify exact storage
+        continuity before resolving any returned row.
+        """
+        with _connect(self._db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM kline_gap_ledger
+                WHERE status IN ('source_empty', 'failed', 'unavailable', 'not_expected')
+                ORDER BY COALESCE(last_checked_at, first_seen_at) ASC, id ASC
                 LIMIT ?
                 """,
                 (limit,),

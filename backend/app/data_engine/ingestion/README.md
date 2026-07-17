@@ -103,6 +103,7 @@ Common knobs:
 | `INGESTION_PROXY_MODE` | `system`, `custom`, or `none` |
 | `INGESTION_HTTP_PROXY` | custom proxy URL |
 | `INGESTION_WS_OPEN_TIMEOUT` | WebSocket open timeout |
+| `INGESTION_WS_CONTROL_TIMEOUT` | shared WS subscribe/unsubscribe send timeout |
 | `INGESTION_WS_PING_INTERVAL` / `INGESTION_WS_PING_TIMEOUT` | WS keepalive |
 | `INGESTION_WS_FAIL_THRESHOLD` | consecutive failures before unhealthy |
 | `INGESTION_HTTP_POLL_INTERVAL` | HTTP fallback polling interval |

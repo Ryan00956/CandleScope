@@ -50,6 +50,14 @@ export type FetchPlan =
   | { type: "before"; before: EpochSeconds; bars: number }
   | { type: "history"; days: number | null; countBack: number | null };
 
+export type HistoryAvailabilityState = "ready" | "pending" | "exhausted";
+
+export interface HistoryExcludedRange extends Record<string, unknown> {
+  start_ms: EpochMilliseconds | number;
+  end_ms: EpochMilliseconds | number;
+  reason?: string;
+}
+
 export interface KlineFetchResult extends Record<string, unknown> {
   data?: KlineBar[];
   has_more?: boolean;
@@ -59,6 +67,21 @@ export interface KlineFetchResult extends Record<string, unknown> {
   end_ms?: unknown;
   truncated?: boolean;
   next_end_ms?: EpochMilliseconds | number | null;
+  history_state?: HistoryAvailabilityState;
+  complete?: boolean;
+  retryable?: boolean;
+  terminal_reason?: string | null;
+  earliest_available_ms?: EpochMilliseconds | number | null;
+  next_before_ms?: EpochMilliseconds | number | null;
+  availability_revision?: string | null;
+  excluded_ranges?: HistoryExcludedRange[];
+}
+
+export interface BeforePageAvailability {
+  boundaryBefore: EpochSeconds;
+  historyState: "exhausted";
+  terminalReason: string | null;
+  availabilityRevision: string | null;
 }
 
 export interface KlineRequestOptions {

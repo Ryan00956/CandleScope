@@ -701,7 +701,14 @@ class StreamCoordinator:
         if not rows:
             return 0
 
-        bars = [BarData.from_storage_row(r) for r in rows]
+        bars = [
+            BarData.from_storage_row(
+                row,
+                exchange=key.exchange,
+                market_type=key.market_type,
+            )
+            for row in rows
+        ]
         self._cache.bulk_load(key, bars)
         logger.debug("Prewarmed %s: %d bars (%d days)", key, len(bars), days)
         return len(bars)

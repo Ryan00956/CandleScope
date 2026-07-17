@@ -21,6 +21,132 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("CANDLE_DATA_DIR", BASE_DIR / "data"))
 KLINES_DB_PATH = Path(os.getenv("KLINES_DB_PATH", DATA_DIR / "candlescope.db"))
 
+# TradeFlow is storage-backend neutral at the service boundary.  SQLite is the
+# first rollup implementation; raw aggregate-trade Parquet is opt-in because it
+# is intended for deterministic research/replay rather than normal chart use.
+TRADE_FLOW_ROLLUP_BACKEND = os.getenv(
+    "TRADE_FLOW_ROLLUP_BACKEND", "sqlite"
+).strip().lower()
+TRADE_FLOW_DB_PATH = Path(os.getenv("TRADE_FLOW_DB_PATH", KLINES_DB_PATH))
+TRADE_FLOW_RAW_RING_SIZE = int(os.getenv("TRADE_FLOW_RAW_RING_SIZE", "20000"))
+TRADE_FLOW_MAX_STREAMS = int(os.getenv("TRADE_FLOW_MAX_STREAMS", "64"))
+TRADE_FLOW_EVENT_QUEUE_SIZE = int(
+    os.getenv("TRADE_FLOW_EVENT_QUEUE_SIZE", "20000")
+)
+TRADE_FLOW_BATCH_INTERVAL_SECONDS = float(
+    os.getenv("TRADE_FLOW_BATCH_INTERVAL_SECONDS", "0.05")
+)
+TRADE_FLOW_MAX_BATCH_SIZE = int(os.getenv("TRADE_FLOW_MAX_BATCH_SIZE", "1000"))
+TRADE_FLOW_GAP_REPAIR_MAX_TRADES = int(
+    os.getenv("TRADE_FLOW_GAP_REPAIR_MAX_TRADES", "20000")
+)
+RAW_AGG_TRADE_ARCHIVE_ENABLED = os.getenv(
+    "RAW_AGG_TRADE_ARCHIVE_ENABLED", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+RAW_AGG_TRADE_ARCHIVE_BACKEND = os.getenv(
+    "RAW_AGG_TRADE_ARCHIVE_BACKEND", "parquet"
+).strip().lower()
+RAW_AGG_TRADE_ARCHIVE_DIR = Path(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_DIR", DATA_DIR / "raw_agg_trades")
+)
+# Optional comma-separated ``exchange:market_type:symbol`` identities.  When
+# empty, archival follows ordinary TradeFlow leases; configured identities are
+# held by a runtime lease so replay capture does not depend on an open browser.
+RAW_AGG_TRADE_ARCHIVE_STREAMS = tuple(
+    item.strip()
+    for item in os.getenv("RAW_AGG_TRADE_ARCHIVE_STREAMS", "").split(",")
+    if item.strip()
+)
+RAW_AGG_TRADE_ARCHIVE_FLUSH_SECONDS = float(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_FLUSH_SECONDS", "1.0")
+)
+RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES = int(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES", "16")
+)
+RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH = int(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH", "10000")
+)
+
+# Public liquidation snapshots are lossy at the exchange boundary, but the
+# observations we do receive are append-only and worth retaining as one-minute
+# directional rollups.  Keep this backend selection independent so a future
+# DuckDB implementation does not leak into the service or API contracts.
+LIQUIDATION_ROLLUP_BACKEND = os.getenv(
+    "LIQUIDATION_ROLLUP_BACKEND", "sqlite"
+).strip().lower()
+LIQUIDATION_DB_PATH = Path(os.getenv("LIQUIDATION_DB_PATH", KLINES_DB_PATH))
+LIQUIDATION_RAW_RING_SIZE = int(os.getenv("LIQUIDATION_RAW_RING_SIZE", "5000"))
+LIQUIDATION_MAX_STREAMS = int(os.getenv("LIQUIDATION_MAX_STREAMS", "64"))
+LIQUIDATION_EVENT_QUEUE_SIZE = int(
+    os.getenv("LIQUIDATION_EVENT_QUEUE_SIZE", "8192")
+)
+LIQUIDATION_BATCH_INTERVAL_SECONDS = float(
+    os.getenv("LIQUIDATION_BATCH_INTERVAL_SECONDS", "0.1")
+)
+LIQUIDATION_MAX_BATCH_SIZE = int(os.getenv("LIQUIDATION_MAX_BATCH_SIZE", "500"))
+LIQUIDATION_FINALIZE_INTERVAL_SECONDS = float(
+    os.getenv("LIQUIDATION_FINALIZE_INTERVAL_SECONDS", "1.0")
+)
+# Optional comma-separated ``exchange:market_type:symbol`` identities.  These
+# runtime-held leases make local history capture independent of an open browser.
+LIQUIDATION_CAPTURE_STREAMS = tuple(
+    item.strip()
+    for item in os.getenv("LIQUIDATION_CAPTURE_STREAMS", "").split(",")
+    if item.strip()
+)
+
+# Partial Top-N order books are replaceable process-local snapshots.  They do
+# not share append-only persistence settings because raw depth is deliberately
+# not archived in P3A.
+ORDER_BOOK_MAX_STREAMS = int(os.getenv("ORDER_BOOK_MAX_STREAMS", "64"))
+ORDER_BOOK_EVENT_QUEUE_SIZE = int(
+    os.getenv("ORDER_BOOK_EVENT_QUEUE_SIZE", "256")
+)
+ORDER_BOOK_DEFAULT_MAX_PENDING = int(
+    os.getenv("ORDER_BOOK_DEFAULT_MAX_PENDING", "32")
+)
+ORDER_BOOK_MAX_SNAPSHOT_AGE_MS = int(
+    os.getenv("ORDER_BOOK_MAX_SNAPSHOT_AGE_MS", "5000")
+)
+ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS = float(
+    os.getenv("ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS", "2.0")
+)
+
+# Full Order Books are rebuilt from a REST seed plus every ordered diff-depth
+# event.  They deliberately have separate, tighter stream limits and explicit
+# per-stream queue/book bounds; a bound violation invalidates the book and
+# triggers resynchronization instead of dropping a delta silently.
+FULL_ORDER_BOOK_MAX_STREAMS = int(
+    os.getenv("FULL_ORDER_BOOK_MAX_STREAMS", "16")
+)
+FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE = int(
+    os.getenv("FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE", "4096")
+)
+FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE = int(
+    os.getenv("FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE", "5000")
+)
+FULL_ORDER_BOOK_MAX_UPDATES_PER_DELTA = int(
+    os.getenv("FULL_ORDER_BOOK_MAX_UPDATES_PER_DELTA", "10000")
+)
+FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES = int(
+    os.getenv("FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES", "200000")
+)
+FULL_ORDER_BOOK_DEFAULT_MAX_PENDING = int(
+    os.getenv("FULL_ORDER_BOOK_DEFAULT_MAX_PENDING", "16")
+)
+FULL_ORDER_BOOK_SNAPSHOT_TIMEOUT_SECONDS = float(
+    os.getenv("FULL_ORDER_BOOK_SNAPSHOT_TIMEOUT_SECONDS", "5.0")
+)
+FULL_ORDER_BOOK_RESYNC_BACKOFF_SECONDS = float(
+    os.getenv("FULL_ORDER_BOOK_RESYNC_BACKOFF_SECONDS", "0.1")
+)
+FULL_ORDER_BOOK_MAX_RESYNC_BACKOFF_SECONDS = float(
+    os.getenv("FULL_ORDER_BOOK_MAX_RESYNC_BACKOFF_SECONDS", "5.0")
+)
+FULL_ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS = float(
+    os.getenv("FULL_ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS", "5.0")
+)
+
 # Binance HTTP APIs
 BINANCE_BASE_URLS = [
     "https://api.binance.com",

@@ -69,7 +69,17 @@ Response:
       "low": 41950.0,
       "close": 42050.0,
       "volume": 12.5,
-      "is_closed": false
+      "is_closed": false,
+      "quote_volume": 525000.0,
+      "trades": 320,
+      "taker_buy_base": 7.5,
+      "taker_buy_quote": 315000.0,
+      "order_flow": {
+        "taker_sell_base": 5.0,
+        "volume_delta_base": 2.5,
+        "taker_buy_ratio_base": 0.6,
+        "cvd_contribution_base": 2.5
+      }
     }
   ],
   "base_interval": null
@@ -78,6 +88,8 @@ Response:
 
 `is_closed` is `false` only for a still-forming live bar. Clients may treat the
 missing field from older servers or stored historical rows as confirmed.
+
+Enhanced fields fail closed according to the exchange/market capability; unavailable or invalid raw values are `null`, and `order_flow` is `null` when base order flow cannot be computed. `cvd_contribution_base` is the per-bar input to a prefix-summed CVD over a contiguous range. A forming-bar update replaces the current bucket instead of being added again. See [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](docs/KLINE_ORDER_FLOW_CONTRACT_zh.md) for the complete field, formula, and custom-interval contract.
 
 ### `GET /klines/latest`
 
@@ -232,6 +244,87 @@ Convenience SMA endpoint built from DataManager query results. Full indicator wo
 | `end` | int | optional | Unix seconds |
 | `exchange` | string | `binance` | Registered exchange |
 | `market_type` | string | `spot` | Market type |
+
+## Advanced Market Data API (P1)
+
+This path is independent from the K-line pipeline. P1 supports Binance USD-M Futures `mark_price`, `index_price`, `funding_rate`, `open_interest`, and derived `basis`.
+
+### `GET /market/snapshot`
+
+Returns latest states for one symbol. Omitting `channel` requests all five P1 channels. Repeated and comma-separated `channel` parameters are accepted. With the default `refresh_missing=true`, missing Hub states are fetched through REST without acquiring a long-lived stream lease.
+
+```http
+GET /api/v1/market/snapshot?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=mark_price&channel=open_interest
+```
+
+The response contains `data` and an explicit `missing` key list. Records include `event_time_ms`, `received_at_ms`, `source`, and a `revision` that increases while the key remains resident in the process-local hub.
+
+### `GET /market/history`
+
+Returns one bounded history page. P1 exposes history only for `funding_rate` and `open_interest`; OI requires `period` (`5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, or `1d`). Optional parameters are `start_ms`, `end_ms`, and `limit` from 1 to 1000. Funding keeps the legacy sparse settlement contract when `view` is omitted. For Binance futures, `view=hybrid` additionally requires the chart `period` and returns at most one point per closed chart candle: an authoritative exchange settlement when one exists, otherwise a no-lookahead estimate derived from cached Binance Premium Index 1m data.
+
+```http
+GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=open_interest&period=5m&limit=500
+```
+
+```http
+GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=funding_rate&view=hybrid&period=1h&start_ms=...&end_ms=...&limit=1000
+```
+
+Hybrid funding records expose `provenance` (`exchange_settlement` or `derived_history`), `quality`, `sample_time_ms`, `target_funding_time_ms`, and `funding_cycle_ms`; `derived_history` records additionally expose `formula_version`, `input_resolution`, and `input_coverage`. Estimates are indicative, never exchange settlements. Realtime funding remains on `/market/snapshot` and `/stream/market` with `provenance=exchange_realtime`; a carried value is valid only inside the same target funding cycle.
+
+Hybrid pages are continuous prefixes. Exchange settlements short-circuit the estimator when they already cover every requested candle. Cold Premium Index backfills use a bounded page budget: capacity/budget boundaries return `complete=false`, `has_more=true`, and `retryable=false` so the caller can continue from the latest returned candle; transient upstream failures return `retryable=true` and must not be committed as coverage. `excluded_ranges` identifies input gaps that could not be estimated. The model uses only closed 1m Premium Index samples available at each candle cutoff, infers funding cadence only from prior settlements, and scales the standard eight-hour interest component to the inferred 1/2/4/8-hour cadence.
+
+### `WS /stream/market`
+
+One browser WebSocket multiplexes multiple symbols and channels. After connecting, send:
+
+```json
+{
+  "action": "subscribe",
+  "request_id": "req-1",
+  "streams": [
+    {"exchange":"binance","market_type":"futures","symbol":"BTCUSDT","channel":"mark_price"},
+    {"exchange":"binance","market_type":"futures","symbol":"ETHUSDT","channel":"open_interest"}
+  ]
+}
+```
+
+The server sends `subscribed`, then `snapshot`, followed by batched `update` frames using `protocol=market.v1`. A connection may hold at most 64 logical streams. Use the same `streams` shape with `action=unsubscribe`; disconnect cleanup releases all leases.
+
+## Full Order Book API (P4)
+
+P4 adds an independent local L2 reconstruction chain for Binance USD-M Futures. It subscribes to diff-depth first, aligns a REST `limit=1000` seed, and enforces `U/u/pu` continuity. A gap, reconnect, queue overflow, or crossed book immediately marks the public state stale. Raw depth is not persisted and no history endpoint is exposed.
+
+### `GET /full-order-book/snapshot`
+
+```http
+GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit=100&wait_ms=5000
+```
+
+`update_interval_ms` accepts `100`, `250`, or `500`. `limit` is an output-only projection from 1 to 1000; it does not reduce the 1000-level upstream seed. The endpoint returns only a live book and responds with `504` when bounded synchronization times out.
+
+### `WS /stream/full-order-book`
+
+```json
+{
+  "action": "subscribe",
+  "streams": [{
+    "exchange": "binance",
+    "market_type": "futures",
+    "symbol": "BTCUSDT",
+    "channel": "full_depth",
+    "params": {
+      "mode": "full",
+      "snapshot_limit": 1000,
+      "update_interval_ms": 100,
+      "output_limit": 200
+    }
+  }]
+}
+```
+
+Live frames use `full_order_book.snapshot`. Disconnect/resync frames use `full_order_book.status` with `state=stale`, `backend_sequence_continuity=false`, and empty `bids/asks`. See [`docs/FULL_ORDER_BOOK_P4_BACKEND_zh.md`](docs/FULL_ORDER_BOOK_P4_BACKEND_zh.md) for the complete state machine and configuration.
 
 ## WebSocket API
 

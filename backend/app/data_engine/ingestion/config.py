@@ -148,6 +148,15 @@ class IngestionConfig:
     ))
     # HTTP request timeout (seconds)
     http_timeout: int = field(default_factory=lambda: _env_int("INGESTION_HTTP_TIMEOUT", 8))
+    # Premium Index history is split into independent fixed 1m ranges. Keep a
+    # dedicated, bounded gate so those pages can overlap without widening all
+    # futures REST traffic.
+    fetch_binance_futures_premium_index_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "INGESTION_BINANCE_FUTURES_PREMIUM_INDEX_CONCURRENCY",
+            4,
+        ),
+    )
     # HTTP proxy (None = no proxy)
     http_proxy: str | None = field(default_factory=_load_persisted_http_proxy)
     # Proxy mode: "none" | "system" | "custom"
@@ -159,6 +168,10 @@ class IngestionConfig:
     # ── L2: Session ────────────────────────────────────────────
     # WebSocket open timeout (seconds)
     ws_open_timeout: int = field(default_factory=lambda: _env_int("INGESTION_WS_OPEN_TIMEOUT", 10))
+    # WebSocket subscribe/unsubscribe control-message timeout (seconds)
+    ws_control_timeout: float = field(
+        default_factory=lambda: _env_float("INGESTION_WS_CONTROL_TIMEOUT", 2.0),
+    )
     # WebSocket ping interval (seconds) — keep-alive
     ws_ping_interval: int = field(default_factory=lambda: _env_int("INGESTION_WS_PING_INTERVAL", 20))
     # WebSocket ping timeout (seconds)

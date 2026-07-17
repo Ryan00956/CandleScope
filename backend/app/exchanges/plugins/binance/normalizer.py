@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 from app.data_engine.ingestion.config import IngestionConfig
@@ -13,7 +14,23 @@ from app.data_engine.ingestion.models import (
     StreamType,
 )
 
+from .symbols import BinanceSymbolNormalizer
+
 logger = logging.getLogger("ingestion.normalizers.binance")
+
+_PARTIAL_DEPTH_LEVELS = {5, 10, 20}
+_PARTIAL_DEPTH_UPDATE_INTERVALS_MS = {
+    "spot": {100, 1000},
+    "futures": {100, 250, 500},
+}
+_DEFAULT_PARTIAL_DEPTH_UPDATE_INTERVAL_MS = {
+    "spot": 1000,
+    "futures": 250,
+}
+_FULL_DEPTH_UPDATE_INTERVALS_MS = {100, 250, 500}
+_DEFAULT_FULL_DEPTH_UPDATE_INTERVAL_MS = 250
+_FULL_DEPTH_SNAPSHOT_LIMITS = {5, 10, 20, 50, 100, 500, 1000}
+_DEFAULT_FULL_DEPTH_SNAPSHOT_LIMIT = 500
 
 
 class BinanceNormalizer:
@@ -22,6 +39,7 @@ class BinanceNormalizer:
     def __init__(self, config: IngestionConfig, descriptor: StreamDescriptor) -> None:
         self._cfg = config
         self._descriptor = descriptor
+        self._symbols = BinanceSymbolNormalizer()
 
     def parse(self, msg: RawMessage) -> MarketEvent | None:
         if msg.source == DataSource.WEBSOCKET:
@@ -41,12 +59,22 @@ class BinanceNormalizer:
             return self._parse_ws_kline(payload, msg)
         if st == StreamType.AGG_TRADE:
             return self._parse_ws_agg_trade(payload, msg)
+        if st == StreamType.LIQUIDATION:
+            return self._parse_ws_liquidation(payload, msg)
         if st == StreamType.TRADE:
             return self._parse_ws_trade(payload, msg)
         if st in (StreamType.TICKER, StreamType.MINI_TICKER):
             return self._parse_ws_ticker(payload, msg)
         if st == StreamType.DEPTH:
             return self._parse_ws_depth(payload, msg)
+        if st == StreamType.FULL_DEPTH:
+            return self._parse_ws_full_depth(payload, msg)
+        if st in (
+            StreamType.MARK_PRICE,
+            StreamType.INDEX_PRICE,
+            StreamType.FUNDING_RATE,
+        ):
+            return self._parse_ws_derivatives_summary(payload, msg)
 
         logger.warning("No Binance WS parser for stream type: %s", st)
         return None
@@ -63,6 +91,16 @@ class BinanceNormalizer:
             return self._parse_http_ticker(msg)
         if st == StreamType.DEPTH:
             return self._parse_http_depth(msg)
+        if st == StreamType.FULL_DEPTH:
+            return self._parse_http_full_depth(msg)
+        if st == StreamType.PREMIUM_INDEX:
+            return self._parse_http_premium_index_kline(msg)
+        if st in (StreamType.MARK_PRICE, StreamType.INDEX_PRICE):
+            return self._parse_http_derivatives_price(msg)
+        if st == StreamType.FUNDING_RATE:
+            return self._parse_http_funding_rate(msg)
+        if st == StreamType.OPEN_INTEREST:
+            return self._parse_http_open_interest(msg)
 
         logger.warning("No Binance HTTP parser for stream type: %s", st)
         return None
@@ -209,22 +247,127 @@ class BinanceNormalizer:
         )
 
     def _parse_ws_depth(self, payload: dict, msg: RawMessage) -> MarketEvent | None:
-        bids = payload.get("bids") or payload.get("b")
-        asks = payload.get("asks") or payload.get("a")
-        if bids is None and asks is None:
-            return None
+        market_type = self._descriptor.market_type.strip().lower()
+        if market_type == "futures":
+            if payload.get("e") != "depthUpdate":
+                return None
+            if "st" in payload and (
+                type(payload.get("st")) is not int or payload.get("st") != 1
+            ):
+                return None
+            expected_symbol = self._symbols.normalize(
+                self._descriptor.symbol,
+                market_type=self._descriptor.market_type,
+            ).upper()
+            if str(payload.get("s", "")).upper() != expected_symbol:
+                return None
 
-        data = {
-            "last_update_id": int(payload.get("lastUpdateId", payload.get("u", 0))),
-            "bids": [[float(price), float(qty)] for price, qty in (bids or [])],
-            "asks": [[float(price), float(qty)] for price, qty in (asks or [])],
-        }
+        normalized = self._normalize_depth_payload(payload)
+        if normalized is None:
+            return None
+        data, event_time_ms = normalized
         return self._event(
             event_type=StreamType.DEPTH,
-            event_time_ms=int(payload.get("E", msg.received_at_ms)),
+            event_time_ms=(
+                event_time_ms if event_time_ms is not None else msg.received_at_ms
+            ),
             msg=msg,
             data=data,
             sequence=data["last_update_id"],
+        )
+
+    def _parse_ws_full_depth(
+        self,
+        payload: dict,
+        msg: RawMessage,
+    ) -> MarketEvent | None:
+        update_interval_ms = self._full_depth_update_interval()
+        if update_interval_ms is None or payload.get("e") != "depthUpdate":
+            return None
+        if "st" in payload and (
+            type(payload.get("st")) is not int or payload.get("st") != 1
+        ):
+            return None
+
+        expected_symbol = self._symbols.normalize(
+            self._descriptor.symbol,
+            market_type=self._descriptor.market_type,
+        ).upper()
+        if str(payload.get("s", "")).upper() != expected_symbol:
+            return None
+
+        first_update_id = self._positive_int(payload.get("U"))
+        final_update_id = self._positive_int(payload.get("u"))
+        previous_final_update_id = self._positive_int(payload.get("pu"))
+        event_time_ms = self._positive_int(payload.get("E"))
+        transaction_time_ms = self._positive_int(payload.get("T"))
+        if (
+            first_update_id is None
+            or final_update_id is None
+            or previous_final_update_id is None
+            or event_time_ms is None
+            or transaction_time_ms is None
+            or first_update_id > final_update_id
+            or previous_final_update_id >= final_update_id
+        ):
+            return None
+
+        bids = self._normalize_full_depth_levels(
+            payload.get("b"),
+            allow_empty=True,
+            allow_zero_quantity=True,
+        )
+        asks = self._normalize_full_depth_levels(
+            payload.get("a"),
+            allow_empty=True,
+            allow_zero_quantity=True,
+        )
+        if bids is None or asks is None:
+            return None
+
+        data: dict[str, object] = {
+            "kind": "delta",
+            "last_update_id": None,
+            "first_update_id": first_update_id,
+            "final_update_id": final_update_id,
+            "previous_final_update_id": previous_final_update_id,
+            "event_time_ms": event_time_ms,
+            "transaction_time_ms": transaction_time_ms,
+            "update_interval_ms": update_interval_ms,
+            "snapshot_limit": None,
+            "bids": bids,
+            "asks": asks,
+        }
+        return self._event(
+            event_type=StreamType.FULL_DEPTH,
+            event_time_ms=event_time_ms,
+            msg=msg,
+            data=data,
+            sequence=final_update_id,
+        )
+
+    def _parse_ws_derivatives_summary(
+        self,
+        payload: dict,
+        msg: RawMessage,
+    ) -> MarketEvent | None:
+        if payload.get("e") != "markPriceUpdate":
+            return None
+
+        data = self._summary_data(
+            mark_price=payload.get("p"),
+            index_price=payload.get("i"),
+            estimated_settle_price=payload.get("P"),
+            funding_rate=payload.get("r"),
+            next_funding_time_ms=payload.get("T"),
+        )
+        if not self._has_required_summary_field(data):
+            return None
+        return self._event(
+            event_type=self._descriptor.stream_type,
+            event_time_ms=int(payload.get("E", msg.received_at_ms)),
+            msg=msg,
+            data=data,
         )
 
     def _parse_http_kline(self, msg: RawMessage) -> MarketEvent | None:
@@ -277,6 +420,64 @@ class BinanceNormalizer:
             msg=msg,
             data=data,
             sequence=data["agg_trade_id"],
+        )
+
+    def _parse_ws_liquidation(self, payload: dict, msg: RawMessage) -> MarketEvent | None:
+        if self._descriptor.market_type.strip().lower() != "futures":
+            return None
+        if payload.get("e") != "forceOrder":
+            return None
+        if "st" in payload and (
+            type(payload.get("st")) is not int or payload.get("st") != 1
+        ):
+            return None
+
+        order = payload.get("o")
+        if not isinstance(order, dict):
+            return None
+        expected_symbol = self._symbols.normalize(
+            self._descriptor.symbol,
+            market_type=self._descriptor.market_type,
+        ).upper()
+        if str(order.get("s", "")).upper() != expected_symbol:
+            return None
+
+        order_side = str(order.get("S", "")).upper()
+        position_side = {"SELL": "long", "BUY": "short"}.get(order_side)
+        if position_side is None:
+            return None
+        required_fields = ("o", "f", "q", "p", "ap", "X", "l", "z", "T")
+        if any(order.get(field) in (None, "") for field in required_fields):
+            return None
+
+        try:
+            data: dict[str, object] = {
+                "order_side": order_side,
+                "position_side": position_side,
+                "order_type": str(order["o"]),
+                "time_in_force": str(order["f"]),
+                "original_quantity": float(order["q"]),
+                "order_price": float(order["p"]),
+                "average_price": float(order["ap"]),
+                "order_status": str(order["X"]),
+                "last_filled_quantity": float(order["l"]),
+                "filled_quantity": float(order["z"]),
+                "trade_time_ms": int(order["T"]),
+            }
+            event_time_ms = int(payload.get("E", data["trade_time_ms"]))
+        except (TypeError, ValueError):
+            return None
+
+        if payload.get("ps") not in (None, ""):
+            data["pair_symbol"] = str(payload["ps"]).upper()
+        if "st" in payload:
+            data["symbol_type"] = "UM"
+
+        return self._event(
+            event_type=StreamType.LIQUIDATION,
+            event_time_ms=event_time_ms,
+            msg=msg,
+            data=data,
         )
 
     def _parse_http_trade(self, msg: RawMessage) -> MarketEvent | None:
@@ -351,12 +552,10 @@ class BinanceNormalizer:
         payload = msg.payload
         if not isinstance(payload, dict):
             return None
-
-        data = {
-            "last_update_id": int(payload.get("lastUpdateId", 0)),
-            "bids": [[float(price), float(qty)] for price, qty in payload.get("bids", [])],
-            "asks": [[float(price), float(qty)] for price, qty in payload.get("asks", [])],
-        }
+        normalized = self._normalize_depth_payload(payload)
+        if normalized is None:
+            return None
+        data, _ = normalized
         return self._event(
             event_type=StreamType.DEPTH,
             event_time_ms=msg.received_at_ms,
@@ -364,3 +563,413 @@ class BinanceNormalizer:
             data=data,
             sequence=data["last_update_id"],
         )
+
+    def _parse_http_full_depth(self, msg: RawMessage) -> MarketEvent | None:
+        if msg.source is not DataSource.HTTP:
+            return None
+        payload = msg.payload
+        update_interval_ms = self._full_depth_update_interval()
+        if not isinstance(payload, dict) or update_interval_ms is None:
+            return None
+
+        last_update_id = self._positive_int(payload.get("lastUpdateId"))
+        event_time_ms = self._positive_int(payload.get("E"))
+        transaction_time_ms = self._positive_int(payload.get("T"))
+        if (
+            last_update_id is None
+            or event_time_ms is None
+            or transaction_time_ms is None
+        ):
+            return None
+
+        bids = self._normalize_full_depth_levels(
+            payload.get("bids"),
+            allow_empty=False,
+            allow_zero_quantity=False,
+        )
+        asks = self._normalize_full_depth_levels(
+            payload.get("asks"),
+            allow_empty=False,
+            allow_zero_quantity=False,
+        )
+        if bids is None or asks is None:
+            return None
+
+        snapshot_limit = msg.request_limit
+        if snapshot_limit is None:
+            snapshot_limit = _DEFAULT_FULL_DEPTH_SNAPSHOT_LIMIT
+        elif (
+            type(snapshot_limit) is not int
+            or snapshot_limit not in _FULL_DEPTH_SNAPSHOT_LIMITS
+        ):
+            return None
+
+        data: dict[str, object] = {
+            "kind": "snapshot",
+            "last_update_id": last_update_id,
+            "first_update_id": None,
+            "final_update_id": None,
+            "previous_final_update_id": None,
+            "event_time_ms": event_time_ms,
+            "transaction_time_ms": transaction_time_ms,
+            "update_interval_ms": update_interval_ms,
+            "snapshot_limit": snapshot_limit,
+            "bids": bids,
+            "asks": asks,
+        }
+        return self._event(
+            event_type=StreamType.FULL_DEPTH,
+            event_time_ms=event_time_ms,
+            msg=msg,
+            data=data,
+            sequence=last_update_id,
+        )
+
+    def _normalize_depth_payload(
+        self,
+        payload: dict,
+    ) -> tuple[dict[str, object], int | None] | None:
+        descriptor_params = self._depth_descriptor_params()
+        if descriptor_params is None:
+            return None
+        depth_levels, update_interval_ms = descriptor_params
+
+        bids_raw = payload.get("bids") if "bids" in payload else payload.get("b")
+        asks_raw = payload.get("asks") if "asks" in payload else payload.get("a")
+        bids = self._normalize_book_levels(bids_raw, max_levels=depth_levels)
+        asks = self._normalize_book_levels(asks_raw, max_levels=depth_levels)
+        if bids is None or asks is None:
+            return None
+
+        raw_last_update_id = payload.get("lastUpdateId")
+        raw_final_update_id = payload.get("u")
+        if raw_last_update_id is None and raw_final_update_id is None:
+            return None
+        last_update_id = self._non_negative_int(
+            raw_final_update_id
+            if raw_final_update_id is not None
+            else raw_last_update_id,
+        )
+        if last_update_id is None or last_update_id == 0:
+            return None
+        if raw_last_update_id is not None:
+            snapshot_update_id = self._non_negative_int(raw_last_update_id)
+            if snapshot_update_id is None or snapshot_update_id != last_update_id:
+                return None
+
+        data: dict[str, object] = {
+            "last_update_id": last_update_id,
+            "depth_levels": depth_levels,
+            "update_interval_ms": update_interval_ms,
+            "bids": bids,
+            "asks": asks,
+        }
+        if self._descriptor.market_type.strip().lower() == "futures":
+            data.update({
+                "first_update_id": None,
+                "final_update_id": None,
+                "previous_final_update_id": None,
+                "event_time_ms": None,
+                "transaction_time_ms": None,
+            })
+
+        optional_ids = (
+            ("U", "first_update_id"),
+            ("u", "final_update_id"),
+            ("pu", "previous_final_update_id"),
+        )
+        for raw_field, normalized_field in optional_ids:
+            if raw_field not in payload:
+                continue
+            value = self._non_negative_int(payload[raw_field])
+            if value is None:
+                return None
+            data[normalized_field] = value
+
+        first_update_id = data.get("first_update_id")
+        final_update_id = data.get("final_update_id")
+        previous_final_update_id = data.get("previous_final_update_id")
+        if isinstance(first_update_id, int) and isinstance(final_update_id, int):
+            if first_update_id > final_update_id:
+                return None
+        if isinstance(previous_final_update_id, int) and isinstance(final_update_id, int):
+            if previous_final_update_id > final_update_id:
+                return None
+
+        event_time_ms: int | None = None
+        optional_times = (
+            ("E", "event_time_ms"),
+            ("T", "transaction_time_ms"),
+        )
+        for raw_field, normalized_field in optional_times:
+            if raw_field not in payload:
+                continue
+            value = self._non_negative_int(payload[raw_field])
+            if value is None:
+                return None
+            data[normalized_field] = value
+            if raw_field == "E":
+                event_time_ms = value
+
+        return data, event_time_ms
+
+    def _depth_descriptor_params(self) -> tuple[int, int] | None:
+        depth_levels = self._descriptor.depth_levels
+        if type(depth_levels) is not int or depth_levels not in _PARTIAL_DEPTH_LEVELS:
+            return None
+
+        market_type = self._descriptor.market_type.strip().lower()
+        allowed_intervals = _PARTIAL_DEPTH_UPDATE_INTERVALS_MS.get(market_type)
+        default_interval = _DEFAULT_PARTIAL_DEPTH_UPDATE_INTERVAL_MS.get(market_type)
+        if allowed_intervals is None or default_interval is None:
+            return None
+        update_interval_ms = self._descriptor.update_interval_ms
+        if update_interval_ms is None:
+            update_interval_ms = default_interval
+        if type(update_interval_ms) is not int or update_interval_ms not in allowed_intervals:
+            return None
+        return depth_levels, update_interval_ms
+
+    def _full_depth_update_interval(self) -> int | None:
+        if self._descriptor.market_type.strip().lower() != "futures":
+            return None
+        if self._descriptor.depth_levels is not None:
+            return None
+        update_interval_ms = self._descriptor.update_interval_ms
+        if update_interval_ms is None:
+            return _DEFAULT_FULL_DEPTH_UPDATE_INTERVAL_MS
+        if (
+            type(update_interval_ms) is not int
+            or update_interval_ms not in _FULL_DEPTH_UPDATE_INTERVALS_MS
+        ):
+            return None
+        return update_interval_ms
+
+    @staticmethod
+    def _normalize_full_depth_levels(
+        raw_levels: object,
+        *,
+        allow_empty: bool,
+        allow_zero_quantity: bool,
+    ) -> list[list[float]] | None:
+        if not isinstance(raw_levels, (list, tuple)):
+            return None
+        if not raw_levels and not allow_empty:
+            return None
+
+        levels: list[list[float]] = []
+        for raw_level in raw_levels:
+            if not isinstance(raw_level, (list, tuple)) or len(raw_level) != 2:
+                return None
+            raw_price, raw_quantity = raw_level
+            if isinstance(raw_price, bool) or isinstance(raw_quantity, bool):
+                return None
+            try:
+                price = float(raw_price)
+                quantity = float(raw_quantity)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if (
+                not math.isfinite(price)
+                or not math.isfinite(quantity)
+                or price <= 0
+                or quantity < 0
+                or (quantity == 0 and not allow_zero_quantity)
+            ):
+                return None
+            levels.append([price, quantity])
+        return levels
+
+    @staticmethod
+    def _normalize_book_levels(
+        raw_levels: object,
+        *,
+        max_levels: int,
+    ) -> list[list[float]] | None:
+        if (
+            not isinstance(raw_levels, (list, tuple))
+            or not raw_levels
+            or len(raw_levels) > max_levels
+        ):
+            return None
+
+        levels: list[list[float]] = []
+        for raw_level in raw_levels:
+            if not isinstance(raw_level, (list, tuple)) or len(raw_level) != 2:
+                return None
+            raw_price, raw_quantity = raw_level
+            if isinstance(raw_price, bool) or isinstance(raw_quantity, bool):
+                return None
+            try:
+                price = float(raw_price)
+                quantity = float(raw_quantity)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if (
+                not math.isfinite(price)
+                or not math.isfinite(quantity)
+                or price <= 0
+                or quantity <= 0
+            ):
+                return None
+            levels.append([price, quantity])
+        return levels
+
+    @staticmethod
+    def _non_negative_int(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, float) and (
+            not math.isfinite(value) or not value.is_integer()
+        ):
+            return None
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if normalized < 0:
+            return None
+        return normalized
+
+    @classmethod
+    def _positive_int(cls, value: object) -> int | None:
+        normalized = cls._non_negative_int(value)
+        if normalized is None or normalized == 0:
+            return None
+        return normalized
+
+    def _parse_http_derivatives_price(self, msg: RawMessage) -> MarketEvent | None:
+        payload = msg.payload
+        if not isinstance(payload, dict):
+            return None
+
+        data = self._summary_data(
+            mark_price=payload.get("markPrice"),
+            index_price=payload.get("indexPrice"),
+            estimated_settle_price=payload.get("estimatedSettlePrice"),
+            funding_rate=payload.get("lastFundingRate"),
+            next_funding_time_ms=payload.get("nextFundingTime"),
+        )
+        if not self._has_required_summary_field(data):
+            return None
+        return self._event(
+            event_type=self._descriptor.stream_type,
+            event_time_ms=int(payload.get("time", msg.received_at_ms)),
+            msg=msg,
+            data=data,
+        )
+
+    def _parse_http_premium_index_kline(self, msg: RawMessage) -> MarketEvent | None:
+        row = msg.payload
+        if not isinstance(row, (list, tuple)) or len(row) < 7:
+            logger.warning("REST premium-index kline row too short (%s)", type(row).__name__)
+            return None
+        try:
+            open_time_ms = int(row[0])
+            close_time_ms = int(row[6])
+            data = {
+                "interval": self._descriptor.interval or "1m",
+                "open_time_ms": open_time_ms,
+                "close_time_ms": close_time_ms,
+                "premium_index_open": float(row[1]),
+                "premium_index_high": float(row[2]),
+                "premium_index_low": float(row[3]),
+                "premium_index_close": float(row[4]),
+            }
+        except (TypeError, ValueError, OverflowError):
+            logger.warning("Invalid REST premium-index kline row", exc_info=True)
+            return None
+        if not all(
+            math.isfinite(data[name])
+            for name in (
+                "premium_index_open",
+                "premium_index_high",
+                "premium_index_low",
+                "premium_index_close",
+            )
+        ):
+            return None
+        return self._event(
+            event_type=StreamType.PREMIUM_INDEX,
+            event_time_ms=open_time_ms,
+            msg=msg,
+            data=data,
+            sequence=open_time_ms,
+        )
+
+    def _parse_http_funding_rate(self, msg: RawMessage) -> MarketEvent | None:
+        payload = msg.payload
+        if not isinstance(payload, dict):
+            return None
+        if "fundingTime" not in payload:
+            return self._parse_http_derivatives_price(msg)
+        if payload.get("fundingRate") in (None, ""):
+            return None
+
+        data = {
+            "funding_rate": float(payload["fundingRate"]),
+            "funding_time_ms": int(payload["fundingTime"]),
+        }
+        if payload.get("markPrice") not in (None, ""):
+            data["mark_price"] = float(payload["markPrice"])
+        return self._event(
+            event_type=StreamType.FUNDING_RATE,
+            event_time_ms=data["funding_time_ms"],
+            msg=msg,
+            data=data,
+            sequence=data["funding_time_ms"],
+        )
+
+    def _parse_http_open_interest(self, msg: RawMessage) -> MarketEvent | None:
+        payload = msg.payload
+        if not isinstance(payload, dict):
+            return None
+
+        historical = "sumOpenInterest" in payload
+        value = payload.get("sumOpenInterest" if historical else "openInterest")
+        if value in (None, ""):
+            return None
+        event_time_ms = int(
+            payload.get("timestamp" if historical else "time", msg.received_at_ms),
+        )
+        data = {"open_interest": float(value)}
+        if historical and payload.get("sumOpenInterestValue") not in (None, ""):
+            data["open_interest_value"] = float(payload["sumOpenInterestValue"])
+        return self._event(
+            event_type=StreamType.OPEN_INTEREST,
+            event_time_ms=event_time_ms,
+            msg=msg,
+            data=data,
+            sequence=event_time_ms if historical else None,
+        )
+
+    @staticmethod
+    def _summary_data(
+        *,
+        mark_price: object,
+        index_price: object,
+        estimated_settle_price: object,
+        funding_rate: object,
+        next_funding_time_ms: object,
+    ) -> dict:
+        data: dict[str, float | int] = {}
+        values = (
+            ("mark_price", mark_price, float),
+            ("index_price", index_price, float),
+            ("estimated_settle_price", estimated_settle_price, float),
+            ("funding_rate", funding_rate, float),
+            ("next_funding_time_ms", next_funding_time_ms, int),
+        )
+        for name, value, caster in values:
+            if value in (None, ""):
+                continue
+            data[name] = caster(value)
+        return data
+
+    def _has_required_summary_field(self, data: dict) -> bool:
+        required = {
+            StreamType.MARK_PRICE: "mark_price",
+            StreamType.INDEX_PRICE: "index_price",
+            StreamType.FUNDING_RATE: "funding_rate",
+        }.get(self._descriptor.stream_type)
+        return required is not None and required in data

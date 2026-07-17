@@ -136,6 +136,8 @@ def test_warm_start_standard_interval_seeds_active_bar_without_events() -> None:
         assert state.low == 9
         assert state.close == 11
         assert state.volume == 100
+        assert state.quote_volume == 1_000
+        assert state.enhanced_fields == frozenset({"quote_volume"})
         assert state.exchange == "okx"
         assert state.market_type == "spot"
         assert storage.query_calls == [{
@@ -203,6 +205,8 @@ def test_warm_start_custom_interval_replays_components_and_warms_cache() -> None
         assert state.low == min(row["low"] for row in rows)
         assert state.close == rows[-1]["close"]
         assert state.volume == sum(row["volume"] for row in rows)
+        assert state.quote_volume == sum(row["quote_volume"] for row in rows)
+        assert state.enhanced_fields == frozenset({"quote_volume"})
         assert state.tick_count == len(rows)
         assert len(state.source_snapshots) == len(rows)
 
@@ -211,12 +215,50 @@ def test_warm_start_custom_interval_replays_components_and_warms_cache() -> None
             1,
         )
         assert cached and cached[0].close == state.close
+        assert cached[0].quote_volume == state.quote_volume
         assert storage.query_calls[0]["interval"] == "15m"
         assert storage.query_calls[0]["exchange"] == "okx"
         assert storage.query_calls[0]["market_type"] == "spot"
         assert triggers == []
 
     asyncio.run(_run())
+
+
+def test_custom_sync_ignores_rows_from_previous_target_bucket() -> None:
+    bucket_start = 45 * 60_000
+    base_ms = 15 * 60_000
+    previous = _row(bucket_start - base_ms, base_ms, close=9)
+    current = [
+        _row(bucket_start, base_ms, close=10),
+        _row(bucket_start + base_ms, base_ms, close=11),
+    ]
+    current[-1]["is_closed"] = False
+    state = BarState(
+        symbol="BTC-USDT",
+        interval="45m",
+        bucket_start_ms=bucket_start,
+        bucket_end_ms=bucket_start + (45 * 60_000),
+        open=current[0]["open"],
+        high=max(row["high"] for row in current),
+        low=min(row["low"] for row in current),
+        close=current[-1]["close"],
+        volume=sum(row["volume"] for row in current),
+        exchange="okx",
+        market_type="spot",
+        quote_volume=sum(row["quote_volume"] for row in current),
+        trades=sum(row["trades"] for row in current),
+        taker_buy_base=sum(row["taker_buy_base"] for row in current),
+        taker_buy_quote=sum(row["taker_buy_quote"] for row in current),
+        enhanced_fields=frozenset({"quote_volume"}),
+        tick_count=len(current),
+    )
+
+    assert AggregatorWarmStartService._custom_bucket_is_synced(
+        state,
+        [previous, *current],
+        exchange="okx",
+        market_type="spot",
+    )
 
 
 def test_warm_start_marks_full_subscription_base_backfill_priority() -> None:
@@ -330,6 +372,8 @@ def test_aggregator_bridge_persists_closed_and_amended_events() -> None:
             "data_manager_amended",
         ]
         assert storage.upsert_calls[1]["rows"][0]["close"] == 3
+        assert storage.upsert_calls[1]["rows"][0]["quote_volume"] is None
+        assert storage.upsert_calls[1]["rows"][0]["trades"] is None
         assert storage.upsert_calls[1]["exchange"] == "okx"
         assert storage.upsert_calls[1]["market_type"] == "spot"
         assert cache.get_latest(key, 1)[0].close == 3

@@ -252,6 +252,20 @@ export interface IndicatorPayloadEnvelope {
   range?: IndicatorRange;
   dataRevision?: IndicatorRevision;
   __httpStatus?: number;
+  history_state?: "ready" | "pending" | "exhausted";
+  complete?: boolean;
+  retryable?: boolean;
+  terminal_reason?: string | null;
+  earliest_available_ms?: number | null;
+  next_before_ms?: number | null;
+  availability_revision?: string | null;
+  excluded_ranges?: IndicatorExcludedRange[];
+}
+
+export interface IndicatorExcludedRange {
+  start_ms: number;
+  end_ms: number;
+  reason?: string;
 }
 
 export interface IndicatorRange {

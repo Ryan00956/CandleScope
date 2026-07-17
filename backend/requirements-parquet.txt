@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Optional raw aggTrade archive used by deterministic trade/K-line replay.
+pyarrow==21.0.0

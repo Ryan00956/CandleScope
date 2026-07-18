@@ -76,3 +76,47 @@ test("indicator panel receives capability-aware market studies and routed action
     "toggle:market:funding-rate",
   ]);
 });
+
+test("hidden liquidation study reports that collection continues", () => {
+  const context = structuralMock<LazyContext>({
+    advancedMarketActions: {},
+    advancedMarketView: {
+      marketStudies: [{
+        id: "market:liquidations",
+        channel: "liquidation",
+        name: "观测爆仓额",
+        description: "Liquidations",
+        category: "contract-data",
+        paneTarget: "sub",
+        added: true,
+        visible: false,
+        supported: true,
+        supportReason: null,
+        status: "hidden",
+        error: null,
+      }],
+    },
+    alertsActions: {},
+    alertsView: {},
+    chartSettings: {},
+    displayData: null,
+    indicatorActions: {},
+    indicatorComputing: false,
+    indicatorView: { activeIndicators: [], paramSchemas: {}, isPanelOpen: true },
+    marketStatus: {},
+    marketView: {},
+    sessionView: {
+      symbol: "BTCUSDT",
+      exchange: "binance",
+      marketType: "futures",
+      interval: "1h",
+    },
+    settingsActions: {},
+    settingsView: {},
+    watchlistView: { watchlists: [] },
+  });
+
+  const study = buildLazySurfaceViewModel(context).indicatorPanel.marketStudies?.[0];
+  assert.equal(study?.status, "ready");
+  assert.equal(study?.statusText, "已隐藏，仍在后台采集观测爆仓");
+});

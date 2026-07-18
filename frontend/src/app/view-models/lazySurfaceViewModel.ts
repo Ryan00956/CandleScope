@@ -59,9 +59,13 @@ export function buildLazySurfaceViewModel({
         visible: study.visible,
         supported: study.supported,
         unsupportedReason: study.supportReason,
-        status: marketStudyStatus(study.status),
+        status: study.id === "market:liquidations" && study.status === "hidden"
+          ? "ready"
+          : marketStudyStatus(study.status),
         statusText: study.status === "hidden"
-          ? "已隐藏，实时订阅已暂停"
+          ? study.id === "market:liquidations"
+            ? "已隐藏，仍在后台采集观测爆仓"
+            : "已隐藏，实时订阅已暂停"
           : study.status === "loading"
             ? "正在加载市场数据"
             : study.status === "unavailable"

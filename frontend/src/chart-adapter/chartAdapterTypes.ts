@@ -95,6 +95,8 @@ export interface IndicatorLine {
   color?: string;
   lineWidth?: number;
   lineStyle?: number;
+  scale?: string;
+  valueFormat?: string;
   data?: IndicatorDataEntry[];
   colorData?: IndicatorDataEntry[] | null;
 }

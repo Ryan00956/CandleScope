@@ -33,6 +33,7 @@ test("market metric definitions use stable IDs and default to no added panes", (
   assert.deepEqual(MARKET_METRIC_DEFINITIONS.map((item) => item.id), [
     "market:funding-rate",
     "market:open-interest",
+    "market:liquidations",
   ]);
 
   const store = new MarketMetricSelectionStore({ storage: null });
@@ -41,6 +42,7 @@ test("market metric definitions use stable IDs and default to no added panes", (
     [
       { id: "market:funding-rate", added: false, visible: false },
       { id: "market:open-interest", added: false, visible: false },
+      { id: "market:liquidations", added: false, visible: false },
     ],
   );
 });
@@ -124,6 +126,7 @@ test("persistence parsing fails closed and strips unknown or invalid items", () 
   assert.deepEqual(parsed.map(({ id, added, visible }) => ({ id, added, visible })), [
     { id: "market:funding-rate", added: false, visible: false },
     { id: "market:open-interest", added: true, visible: false },
+    { id: "market:liquidations", added: false, visible: false },
   ]);
 });
 

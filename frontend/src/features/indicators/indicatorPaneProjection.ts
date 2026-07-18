@@ -5,6 +5,7 @@ export interface IndicatorPaneLegendItem {
   label: string;
   appearance: "solid" | "estimated" | "realtime" | "carried";
   description: string;
+  color?: string;
 }
 
 export interface IndicatorPanePointMetadata {
@@ -25,9 +26,12 @@ export interface IndicatorSubPane {
     kind: "indicator" | "market-study";
     id: string;
   };
-  dataMarketPane?: "funding-rate" | "open-interest";
+  dataMarketPane?: "funding-rate" | "open-interest" | "liquidations";
   legendItems?: readonly IndicatorPaneLegendItem[];
   pointMetadata?: readonly IndicatorPanePointMetadata[];
+  pointMetadataFallback?: "latest" | "none";
+  missingPointText?: string;
+  statusText?: string | null;
 }
 
 export interface IndicatorPaneData {

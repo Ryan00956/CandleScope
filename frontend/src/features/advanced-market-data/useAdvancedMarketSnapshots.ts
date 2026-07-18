@@ -32,16 +32,16 @@ export function useAdvancedMarketMetrics(
   view: AdvancedMarketRuntimeView,
 ): AdvancedMarketMetricsSnapshot {
   const subscribe = useCallback(
-    (listener: () => void) => view.metricsEnabled
+    (listener: () => void) => view.stateMetricsEnabled
       ? advancedMarketDataStore.subscribeMetrics(view.identityKey, listener)
       : () => undefined,
-    [view.identityKey, view.metricsEnabled],
+    [view.identityKey, view.stateMetricsEnabled],
   );
   const getSnapshot = useCallback(
-    () => view.metricsEnabled
+    () => view.stateMetricsEnabled
       ? advancedMarketDataStore.getMetricsSnapshot(view.identityKey)
       : EMPTY_ADVANCED_MARKET_METRICS,
-    [view.identityKey, view.metricsEnabled],
+    [view.identityKey, view.stateMetricsEnabled],
   );
   return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_ADVANCED_MARKET_METRICS);
 }

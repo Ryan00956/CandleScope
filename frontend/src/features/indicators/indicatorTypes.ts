@@ -89,6 +89,7 @@ export interface IndicatorLine {
   overlay?: boolean;
   pane?: string;
   scale?: string;
+  valueFormat?: "notional" | string;
   zIndex?: number;
   colorData?: IndicatorColorPoint[] | null;
 }

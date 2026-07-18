@@ -7,10 +7,21 @@ export const MARKET_METRIC_DEFINITIONS = Object.freeze([
     id: "market:open-interest",
     channel: "open_interest",
   }),
+  Object.freeze({
+    id: "market:liquidations",
+    channel: "liquidation",
+  }),
 ] as const);
 
 export type MarketMetricId = (typeof MARKET_METRIC_DEFINITIONS)[number]["id"];
 export type MarketMetricChannel = (typeof MARKET_METRIC_DEFINITIONS)[number]["channel"];
+export type MarketStateMetricChannel = Exclude<MarketMetricChannel, "liquidation">;
+
+export function isMarketStateMetricChannel(
+  value: MarketMetricChannel,
+): value is MarketStateMetricChannel {
+  return value === "funding_rate" || value === "open_interest";
+}
 
 export interface MarketMetricSelectionItem {
   readonly id: MarketMetricId;

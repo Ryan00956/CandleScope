@@ -7218,6 +7218,7 @@ body {
 }
 
 .advanced-market-pane-label[data-pane-collapsed='true'] .advanced-market-pane-value,
+.advanced-market-pane-label[data-pane-collapsed='true'] .advanced-market-pane-status,
 .advanced-market-pane-label[data-pane-collapsed='true'] .advanced-market-pane-legend {
   display: none;
 }
@@ -7323,6 +7324,15 @@ body {
 
 [data-theme='light'] .chart-pane-label {
   background: rgba(248, 250, 252, 0.7);
+}
+
+.advanced-market-pane-status {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  max-width: min(460px, 45vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @media (max-width: 900px) {

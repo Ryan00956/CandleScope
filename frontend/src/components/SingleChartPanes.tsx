@@ -286,7 +286,7 @@ interface PanePlaceholderState {
 interface PaneLabelDescriptor {
   id: string;
   label: string;
-  marketPane: "funding-rate" | "open-interest";
+  marketPane: "funding-rate" | "open-interest" | "liquidations";
 }
 
 interface PaneDescriptor {
@@ -3028,6 +3028,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         line.color || "",
         line.lineWidth || "",
         line.lineStyle || "",
+        line.scale || "",
+        line.valueFormat || "",
       ].join(":")))
       .join("|");
     const structureChanged = structuralKey !== prevIndicatorKeyRef.current;
@@ -3605,7 +3607,16 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         const exactPoint = paneCrosshairTime === null
           ? null
           : pane?.pointMetadata?.find((point) => point.time === paneCrosshairTime) ?? null;
-        const displayPoint = exactPoint ?? pane?.pointMetadata?.at(-1) ?? null;
+        const displayPoint = exactPoint ?? (
+          paneCrosshairTime === null || pane?.pointMetadataFallback !== "none"
+            ? pane?.pointMetadata?.at(-1) ?? null
+            : null
+        );
+        const auxiliaryText = displayPoint
+          ? null
+          : paneCrosshairTime !== null
+            ? pane?.missingPointText ?? pane?.statusText ?? null
+            : pane?.statusText ?? null;
         return (
           <div
             key={descriptor.id}
@@ -3614,7 +3625,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
             data-pane-id={descriptor.id}
             data-pane-collapsed={collapsedPaneIds.includes(descriptor.id) ? "true" : "false"}
             role="group"
-            aria-label={displayPoint?.accessibilityLabel ?? descriptor.label}
+            aria-label={displayPoint?.accessibilityLabel ?? auxiliaryText ?? descriptor.label}
           >
             <span className="advanced-market-pane-heading">{descriptor.label}</span>
             {displayPoint && (
@@ -3628,6 +3639,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
                 </span>
               </span>
             )}
+            {auxiliaryText && (
+              <span className="advanced-market-pane-status">{auxiliaryText}</span>
+            )}
             {pane?.legendItems && pane.legendItems.length > 0 && (
               <span className="advanced-market-pane-legend" aria-hidden="true">
                 {pane.legendItems.map((item) => (
@@ -3635,6 +3649,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
                     <span
                       className="advanced-market-pane-legend-swatch"
                       data-appearance={item.appearance}
+                      style={item.color ? { background: item.color } : undefined}
                     />
                     <span>{item.label}</span>
                   </span>

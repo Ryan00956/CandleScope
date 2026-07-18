@@ -37,9 +37,12 @@ import {
   type AdvancedMarketStudyView,
 } from "./advancedMarketDataTypes.js";
 import type {
-  MarketMetricChannel,
   MarketMetricId,
+  MarketStateMetricChannel,
 } from "./marketMetricSelectionTypes.js";
+import { isMarketStateMetricChannel } from "./marketMetricSelectionTypes.js";
+import { resolveLiquidationCapability } from "../liquidations/liquidationCapability.js";
+import { useLiquidationRuntime } from "../liquidations/useLiquidationRuntime.js";
 
 interface UseAdvancedMarketDataRuntimeOptions {
   session: ChartSessionRuntime;
@@ -53,7 +56,7 @@ interface ActiveRuntimeContext {
   identityKey: string;
   interval: string;
   historyContextKey: string;
-  metricChannels: readonly MarketMetricChannel[];
+  metricChannels: readonly MarketStateMetricChannel[];
   requestedChannels: readonly AdvancedMarketChannel[];
   requestedChannelSignature: string;
   seriesReady: boolean;
@@ -71,7 +74,7 @@ interface OwnedStreamErrorState {
 
 interface OwnedHistoryErrorState {
   historyContextKey: string;
-  errors: Partial<Record<MarketMetricChannel, string>>;
+  errors: Partial<Record<MarketStateMetricChannel, string>>;
 }
 
 const MAX_HISTORY_PAGES_PER_LOAD = 8;
@@ -79,7 +82,7 @@ const HISTORY_RETRY_DELAY_MS = 30_000;
 const HISTORY_CONTINUATION_DELAY_MS = 50;
 const INITIAL_HISTORY_TAIL_BARS = 120;
 const INITIAL_HISTORY_TAIL_DURATION_MS = 10 * 24 * 60 * 60 * 1000;
-const EMPTY_HISTORY_ERRORS: Partial<Record<MarketMetricChannel, string>> = Object.freeze({});
+const EMPTY_HISTORY_ERRORS: Partial<Record<MarketStateMetricChannel, string>> = Object.freeze({});
 const SUMMARY_CHANNELS: readonly AdvancedMarketChannel[] = [
   "mark_price",
   "index_price",
@@ -96,6 +99,10 @@ const MARKET_STUDY_CATALOG: Record<MarketMetricId, {
   "market:open-interest": {
     name: "未平仓量 (Open Interest)",
     description: "当前合约未平仓头寸规模，按交易所支持的采样周期显示。",
+  },
+  "market:liquidations": {
+    name: "观测爆仓额 (Liquidations)",
+    description: "公开强平流的本地观测名义金额；按方向显示，采样非全量且不可回填。",
   },
 };
 
@@ -128,7 +135,7 @@ function isAbortError(error: unknown): boolean {
 export function buildAdvancedMarketHistoryContextKey(
   identityKey: string,
   interval: string,
-  channels: readonly MarketMetricChannel[],
+  channels: readonly MarketStateMetricChannel[],
 ): string {
   return `${identityKey}|${interval}|${channels.join("|")}`;
 }
@@ -168,9 +175,9 @@ export interface AdvancedMarketHistoryRequestGuard {
   currentIdentityKey: string;
   expectedInterval: string;
   currentInterval: string;
-  channel: MarketMetricChannel;
+  channel: MarketStateMetricChannel;
   period: string | null;
-  currentMetricChannels: readonly MarketMetricChannel[];
+  currentMetricChannels: readonly MarketStateMetricChannel[];
   seriesReady: boolean;
 }
 
@@ -223,6 +230,11 @@ export function useAdvancedMarketDataRuntime({
     marketType: session.view.marketType,
     raw: session.view.exchangeConfig.raw,
   }), [session.view.exchangeConfig.raw, session.view.marketType]);
+  const liquidationCapability = useMemo(() => resolveLiquidationCapability({
+    marketType: session.view.marketType,
+    interval,
+    raw: session.view.exchangeConfig.raw,
+  }), [interval, session.view.exchangeConfig.raw, session.view.marketType]);
   const {
     selections: metricSelections,
     add: addMarketStudy,
@@ -238,16 +250,20 @@ export function useAdvancedMarketDataRuntime({
       supported: capabilitySnapshot.channels.open_interest.supported,
       reason: capabilitySnapshot.channels.open_interest.reason,
     },
-  }), [capabilitySnapshot]);
-  const activeMetricChannels = useMemo<MarketMetricChannel[]>(() => (
+    liquidation: liquidationCapability,
+  }), [capabilitySnapshot, liquidationCapability]);
+  const activeMetricChannels = useMemo<MarketStateMetricChannel[]>(() => (
     metricSelections
       .filter((item) => (
         item.added
         && item.visible
+        && isMarketStateMetricChannel(item.channel)
         && metricCapabilities[item.channel].supported
       ))
       .map((item) => item.channel)
+      .filter(isMarketStateMetricChannel)
   ), [metricCapabilities, metricSelections]);
+  const liquidationSelection = metricSelections.find((item) => item.channel === "liquidation");
   const metricChannelSignature = activeMetricChannels.join("|");
   const summaryEnabled = capabilitySnapshot.summarySupported;
   const metricsEnabled = activeMetricChannels.length > 0;
@@ -264,6 +280,17 @@ export function useAdvancedMarketDataRuntime({
   );
   const seriesReady = String(seriesStore?.seriesKey || "") === seriesKey
     && String(dataMeta.seriesKey || "") === seriesKey;
+  const liquidations = useLiquidationRuntime({
+    identity,
+    identityKey,
+    interval,
+    seriesKey,
+    dataMeta,
+    seriesStore,
+    added: liquidationSelection?.added === true,
+    visible: liquidationSelection?.visible === true,
+    supported: liquidationCapability.supported,
+  });
   const [retryToken, setRetryToken] = useState(0);
   const [historyRetryToken, setHistoryRetryToken] = useState(0);
   const [connectionState, setConnectionState] = useState<OwnedConnectionState>(() => ({
@@ -416,7 +443,7 @@ export function useAdvancedMarketDataRuntime({
     const expectedHistoryGeneration = historyGenerationRef.current;
     const expectedHistoryContextKey = context.historyContextKey;
     const requests: Array<{
-      channel: MarketMetricChannel;
+      channel: MarketStateMetricChannel;
       period: string | null;
       view: "hybrid" | null;
       limit: number;
@@ -588,8 +615,10 @@ export function useAdvancedMarketDataRuntime({
 
   const ensureVisibleRange = useCallback((range: unknown): boolean => {
     const requested = parseVisibleTimeRange(range);
-    return requested ? loadHistory(requested) : false;
-  }, [loadHistory]);
+    const marketScheduled = requested ? loadHistory(requested) : false;
+    const liquidationScheduled = liquidations.ensureVisibleRange(range);
+    return marketScheduled || liquidationScheduled;
+  }, [liquidations, loadHistory]);
 
   const retry = useCallback(() => {
     invalidateHistoryRequests(false);
@@ -600,7 +629,8 @@ export function useAdvancedMarketDataRuntime({
     setStreamErrorState({ identityKey, error: null });
     setHistoryErrorState({ historyContextKey, errors: {} });
     setRetryToken((value) => value + 1);
-  }, [enabled, historyContextKey, identityKey, invalidateHistoryRequests]);
+    liquidations.retry();
+  }, [enabled, historyContextKey, identityKey, invalidateHistoryRequests, liquidations]);
 
   useEffect(() => {
     if (!activeMetricChannels.includes("open_interest")) return;
@@ -738,15 +768,20 @@ export function useAdvancedMarketDataRuntime({
     metricSelections.map((item) => {
       const catalog = MARKET_STUDY_CATALOG[item.id];
       const capability = metricCapabilities[item.channel];
-      const error = item.visible
-        ? historyErrors[item.channel] || streamError || null
-        : null;
+      const isLiquidation = item.channel === "liquidation";
+      const studyError = isLiquidation
+        ? liquidations.view.historyError || liquidations.view.error
+        : historyErrors[item.channel] || streamError || null;
+      const error = item.visible ? studyError : null;
+      const studyConnectionStatus = isLiquidation
+        ? liquidations.view.connectionStatus
+        : connectionStatus;
       let status: AdvancedMarketStudyView["status"] = "available";
       if (!capability.supported) status = "unavailable";
       else if (!item.added) status = "available";
       else if (!item.visible) status = "hidden";
       else if (error) status = "error";
-      else if (connectionStatus === "live") status = "active";
+      else if (studyConnectionStatus === "live") status = "active";
       else status = "loading";
       return {
         ...item,
@@ -762,15 +797,21 @@ export function useAdvancedMarketDataRuntime({
   ), [
     connectionStatus,
     historyErrors,
+    liquidations.view.connectionStatus,
+    liquidations.view.error,
+    liquidations.view.historyError,
     metricCapabilities,
     metricSelections,
     streamError,
   ]);
 
   const view = useMemo(() => ({
-    enabled,
+    enabled: enabled || liquidations.view.enabled,
     summaryEnabled,
-    metricsEnabled,
+    metricsEnabled: metricsEnabled || (
+      liquidationSelection?.visible === true && liquidationCapability.supported
+    ),
+    stateMetricsEnabled: metricsEnabled,
     identity,
     identityKey,
     interval,
@@ -778,11 +819,15 @@ export function useAdvancedMarketDataRuntime({
     seriesStore,
     marketStudies,
     metricCapabilities,
+    liquidations: liquidations.view,
   }), [
     enabled,
     identity,
     identityKey,
     interval,
+    liquidationCapability.supported,
+    liquidationSelection?.visible,
+    liquidations.view,
     marketStudies,
     metricCapabilities,
     metricsEnabled,
@@ -800,12 +845,13 @@ export function useAdvancedMarketDataRuntime({
       removeMarketStudy,
       toggleMarketStudyVisibility,
     },
-    status: { enabled, connectionStatus },
+    status: { enabled: enabled || liquidations.view.enabled, connectionStatus },
   }), [
     addMarketStudy,
     connectionStatus,
     enabled,
     ensureVisibleRange,
+    liquidations.view.enabled,
     removeMarketStudy,
     retry,
     toggleMarketStudyVisibility,

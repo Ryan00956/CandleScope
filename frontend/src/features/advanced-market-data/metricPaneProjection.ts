@@ -14,7 +14,7 @@ import type {
   AdvancedMarketMetricsSnapshot,
   MarketStateRecord,
 } from "./advancedMarketDataTypes.js";
-import type { MarketMetricChannel } from "./marketMetricSelectionTypes.js";
+import type { MarketStateMetricChannel } from "./marketMetricSelectionTypes.js";
 import {
   fundingRateProvenance,
   fundingRateQuality,
@@ -427,7 +427,7 @@ export function projectMetricRecordsToCandles(
 export function buildAdvancedMarketPanes(
   metrics: AdvancedMarketMetricsSnapshot,
   bars: readonly KlineBar[],
-  channels: readonly MarketMetricChannel[] = ["funding_rate", "open_interest"],
+  channels: readonly MarketStateMetricChannel[] = ["funding_rate", "open_interest"],
   interval: unknown = null,
   nowMs: number = Date.now(),
 ): IndicatorSubPane[] {
@@ -474,7 +474,7 @@ export function buildAdvancedMarketPanes(
   }
 
   const panes: Array<IndicatorSubPane & {
-    channel: MarketMetricChannel;
+    channel: MarketStateMetricChannel;
     owner: NonNullable<IndicatorSubPane["owner"]>;
   }> = [
     {

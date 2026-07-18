@@ -4,6 +4,7 @@ import type {
   MarketMetricChannel,
   MarketMetricId,
 } from "./marketMetricSelectionTypes.js";
+import type { LiquidationRuntimeView } from "../liquidations/liquidationTypes.js";
 
 export const ADVANCED_MARKET_CHANNELS = [
   "mark_price",
@@ -190,6 +191,8 @@ export interface AdvancedMarketRuntimeView {
   seriesStore: SeriesWindowStore | null;
   marketStudies: readonly AdvancedMarketStudyView[];
   metricCapabilities: Record<MarketMetricChannel, AdvancedMarketMetricCapability>;
+  stateMetricsEnabled: boolean;
+  liquidations: LiquidationRuntimeView;
 }
 
 export interface AdvancedMarketRuntime {

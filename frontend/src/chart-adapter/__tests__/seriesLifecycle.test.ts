@@ -4,6 +4,7 @@ import {
   applyIndicatorPaneSeriesOrder,
   buildIndicatorSeriesOptions,
   createFutureTimeAxisSeries,
+  formatIndicatorNotional,
   INDICATOR_SERIES_INCREMENTAL_GRACE_MS,
   removeSeriesEntries,
   replaceMainSeries,
@@ -132,6 +133,36 @@ test("only volume-pane histograms use volume number formatting", () => {
     buildIndicatorSeriesOptions({ type: "histogram", pane: "separate" }).priceFormat,
     undefined,
   );
+});
+
+test("liquidation histograms use a symmetric zero scale and compact notional labels", () => {
+  const options = buildIndicatorSeriesOptions({
+    type: "histogram",
+    pane: "advanced-liquidations",
+    scale: "symmetric-zero",
+    valueFormat: "notional",
+  });
+  assert.equal(options.base, 0);
+  assert.equal(options.baseLineVisible, true);
+  const priceFormat = options.priceFormat as {
+    type: string;
+    formatter(value: number): string;
+  };
+  assert.equal(priceFormat.type, "custom");
+  assert.equal(priceFormat.formatter(1_250_000), "$1.25M");
+  assert.equal(priceFormat.formatter(-25_000), "−$25K");
+  assert.equal(formatIndicatorNotional(0), "$0");
+
+  const autoscale = options.autoscaleInfoProvider as (
+    base: () => unknown,
+  ) => { priceRange: { minValue: number; maxValue: number } };
+  assert.deepEqual(autoscale(() => ({
+    priceRange: { minValue: -25, maxValue: 100 },
+    margins: { above: 1, below: 2 },
+  })), {
+    priceRange: { minValue: -100, maxValue: 100 },
+    margins: { above: 1, below: 2 },
+  });
 });
 
 test("replaceMainSeries clears duplicate main-series time points before registering the replacement", () => {

@@ -244,7 +244,57 @@ export function buildIndicatorSeriesOptions(
     options.priceFormat = { type: "volume" };
   }
 
+  if (line?.valueFormat === "notional") {
+    options.priceFormat = {
+      type: "custom",
+      minMove: 0.01,
+      formatter: formatIndicatorNotional,
+    };
+  }
+
+  if (isHistogram && line?.scale === "symmetric-zero") {
+    options.base = 0;
+    options.baseLineVisible = true;
+    options.baseLineColor = "rgba(148, 163, 184, 0.42)";
+    options.autoscaleInfoProvider = (baseImplementation: () => unknown): unknown => {
+      const info = baseImplementation();
+      if (info === null || typeof info !== "object" || Array.isArray(info)) return info;
+      const priceRange = Reflect.get(info, "priceRange") as unknown;
+      if (priceRange === null || typeof priceRange !== "object" || Array.isArray(priceRange)) {
+        return info;
+      }
+      const minValue = Number(Reflect.get(priceRange, "minValue"));
+      const maxValue = Number(Reflect.get(priceRange, "maxValue"));
+      if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return info;
+      const maximum = Math.max(Math.abs(minValue), Math.abs(maxValue));
+      if (maximum <= 0) return info;
+      return {
+        ...info,
+        priceRange: { minValue: -maximum, maxValue: maximum },
+      };
+    };
+  }
+
   return options;
+}
+
+export function formatIndicatorNotional(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  const sign = value < 0 ? "−" : "";
+  const absolute = Math.abs(value);
+  const units = [
+    { threshold: 1_000_000_000, suffix: "B" },
+    { threshold: 1_000_000, suffix: "M" },
+    { threshold: 1_000, suffix: "K" },
+  ] as const;
+  const unit = units.find((candidate) => absolute >= candidate.threshold);
+  if (!unit) {
+    const precision = absolute >= 100 ? 0 : absolute >= 10 ? 1 : 2;
+    return `${sign}$${absolute.toFixed(precision).replace(/\.0+$/, "")}`;
+  }
+  const scaled = absolute / unit.threshold;
+  const precision = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+  return `${sign}$${scaled.toFixed(precision).replace(/\.0+$/, "")}${unit.suffix}`;
 }
 
 export function createIndicatorSeries(

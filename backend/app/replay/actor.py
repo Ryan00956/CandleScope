@@ -41,6 +41,7 @@ from .sources.base import ReplayMarketSource
 ACTOR_STATE_HASH_SCHEMA_VERSION = "replay-actor-state-hash.v1"
 ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION = "replay-actor-checkpoint-state.v1"
 SOURCE_CHAIN_SCHEMA_VERSION = "replay-source-chain.v1"
+MIN_TASK_EXIT_GRACE_SECONDS = 0.05
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -371,7 +372,7 @@ class ReplaySessionActor:
             # time-bound flush and checkpoint persistence.
             await asyncio.wait_for(
                 asyncio.shield(request.future),
-                timeout=timeout * 3,
+                timeout=timeout * 3 + MIN_TASK_EXIT_GRACE_SECONDS,
             )
         except TimeoutError:
             self._metrics["shutdown_timeouts"] = int(
@@ -388,15 +389,23 @@ class ReplaySessionActor:
             error = exc
         if not self._task.done():
             try:
-                await asyncio.wait_for(asyncio.shield(self._task), timeout=timeout)
+                # A completed shutdown barrier still needs one scheduler turn
+                # for _run to leave its loop and finalize the task.  Windows
+                # timer granularity can exceed a very small persistence-step
+                # budget, so give task teardown a separate bounded grace.
+                await asyncio.wait_for(
+                    asyncio.shield(self._task),
+                    timeout=max(timeout, MIN_TASK_EXIT_GRACE_SECONDS),
+                )
             except TimeoutError:
                 self._metrics["shutdown_timeouts"] = int(
                     self._metrics["shutdown_timeouts"] or 0
                 ) + 1
-                error = ReplayDomainError(
-                    ReplayErrorCode.PERSISTENCE_DEGRADED,
-                    "replay actor task did not exit in time",
-                )
+                if error is None:
+                    error = ReplayDomainError(
+                        ReplayErrorCode.PERSISTENCE_DEGRADED,
+                        "replay actor task did not exit in time",
+                    )
                 await self._cancel_actor_task(timeout)
         if error is not None:
             raise error

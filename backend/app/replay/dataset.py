@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping
@@ -79,6 +79,54 @@ class ReplayBar:
             "source": self.source,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "ReplayBar":
+        expected = {
+            "open_time_ms",
+            "close_time_ms",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "source",
+        }
+        if set(payload) != expected:
+            raise ValueError("replay BAR fields are incompatible")
+        trades = payload["trades"]
+        if trades is not None and (
+            isinstance(trades, bool) or not isinstance(trades, int) or trades < 0
+        ):
+            raise ValueError("replay BAR trades must be a non-negative integer or null")
+        return cls(
+            open_time_ms=validate_timestamp_ms(
+                payload["open_time_ms"], field_name="open_time_ms"
+            ),
+            close_time_ms=validate_timestamp_ms(
+                payload["close_time_ms"], field_name="close_time_ms"
+            ),
+            open=_decimal_value(payload["open"], field_name="open", positive=True),
+            high=_decimal_value(payload["high"], field_name="high", positive=True),
+            low=_decimal_value(payload["low"], field_name="low", positive=True),
+            close=_decimal_value(payload["close"], field_name="close", positive=True),
+            volume=_decimal_value(payload["volume"], field_name="volume"),
+            quote_volume=_optional_decimal(
+                payload["quote_volume"], field_name="quote_volume"
+            ),
+            trades=trades,
+            taker_buy_base=_optional_decimal(
+                payload["taker_buy_base"], field_name="taker_buy_base"
+            ),
+            taker_buy_quote=_optional_decimal(
+                payload["taker_buy_quote"], field_name="taker_buy_quote"
+            ),
+            source=validate_identifier(payload["source"], field_name="source"),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class BarDatasetProvenance:
@@ -117,6 +165,58 @@ class BarDatasetProvenance:
             "hash_schema": self.hash_schema,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "BarDatasetProvenance":
+        expected = {
+            "repository_backend",
+            "identity",
+            "interval",
+            "source_fingerprint",
+            "catalog_epoch",
+            "source_earliest_open_ms",
+            "source_latest_open_ms",
+            "source_latest_closed_open_ms",
+            "row_count",
+            "first_open_ms",
+            "last_open_ms",
+            "gap_count",
+            "gap_scan_bars",
+            "calendar_id",
+            "hash_schema",
+        }
+        if set(payload) != expected or not isinstance(payload["identity"], Mapping):
+            raise ValueError("BAR dataset provenance fields are incompatible")
+        integer_fields = (
+            "source_earliest_open_ms",
+            "source_latest_open_ms",
+            "source_latest_closed_open_ms",
+            "row_count",
+            "first_open_ms",
+            "last_open_ms",
+            "gap_count",
+            "gap_scan_bars",
+        )
+        values: dict[str, int] = {}
+        for name in integer_fields:
+            value = payload[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"provenance.{name} must be a non-negative integer")
+            values[name] = value
+        return cls(
+            repository_backend=validate_identifier(
+                payload["repository_backend"], field_name="repository_backend"
+            ),
+            identity=ReplaySeriesIdentity.from_dict(payload["identity"]),
+            interval=validate_identifier(payload["interval"], field_name="interval"),
+            source_fingerprint=str(payload["source_fingerprint"]),
+            catalog_epoch=str(payload["catalog_epoch"]),
+            calendar_id=validate_identifier(
+                payload["calendar_id"], field_name="calendar_id"
+            ),
+            hash_schema=_nonempty_string(payload["hash_schema"], "hash_schema"),
+            **values,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class BarDatasetRef:
@@ -129,6 +229,19 @@ class BarDatasetRef:
     replay_end_open_ms: int
     row_count: int
     repository_backend: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "data_epoch": self.data_epoch,
+            "identity": self.identity.to_dict(),
+            "interval": self.interval,
+            "warmup_start_ms": self.warmup_start_ms,
+            "replay_start_ms": self.replay_start_ms,
+            "replay_end_open_ms": self.replay_end_open_ms,
+            "row_count": self.row_count,
+            "repository_backend": self.repository_backend,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +295,140 @@ class BarDatasetSnapshot:
             "rows": [row.to_dict() for row in self.rows],
             "provenance": self.provenance.to_dict(),
         }
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "data_epoch": self.data_epoch,
+            "identity": self.identity.to_dict(),
+            "interval": self.interval,
+            "rows": [row.to_dict() for row in self.rows],
+            "warmup_bars": self.warmup_bars,
+            "replay_start_index": self.replay_start_index,
+            "replay_start_ms": self.replay_start_ms,
+            "replay_end_open_ms": self.replay_end_open_ms,
+            "provenance": self.provenance.to_dict(),
+            "estimated_size_bytes": self.estimated_size_bytes,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "BarDatasetSnapshot":
+        expected = {
+            "schema_version",
+            "data_epoch",
+            "identity",
+            "interval",
+            "rows",
+            "warmup_bars",
+            "replay_start_index",
+            "replay_start_ms",
+            "replay_end_open_ms",
+            "provenance",
+            "estimated_size_bytes",
+        }
+        if set(payload) != expected:
+            raise ValueError("BAR dataset snapshot fields are incompatible")
+        if not isinstance(payload["identity"], Mapping) or not isinstance(
+            payload["provenance"], Mapping
+        ):
+            raise TypeError("BAR dataset identity/provenance must be objects")
+        rows_payload = payload["rows"]
+        if not isinstance(rows_payload, list) or not rows_payload:
+            raise ValueError("BAR dataset rows must be a non-empty array")
+        rows = tuple(
+            ReplayBar.from_dict(row)
+            if isinstance(row, Mapping)
+            else (_raise_invalid_row())
+            for row in rows_payload
+        )
+        integer_fields = (
+            "warmup_bars",
+            "replay_start_index",
+            "replay_start_ms",
+            "replay_end_open_ms",
+            "estimated_size_bytes",
+        )
+        integers: dict[str, int] = {}
+        for name in integer_fields:
+            value = payload[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"BAR dataset {name} must be a non-negative integer")
+            integers[name] = value
+        snapshot = cls(
+            schema_version=str(payload["schema_version"]),
+            data_epoch=str(payload["data_epoch"]),
+            identity=ReplaySeriesIdentity.from_dict(payload["identity"]),
+            interval=str(payload["interval"]),
+            rows=rows,
+            provenance=BarDatasetProvenance.from_dict(payload["provenance"]),
+            **integers,
+        )
+        if snapshot.schema_version != BAR_DATASET_SCHEMA_VERSION:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted BAR dataset schema is incompatible",
+            )
+        if canonical_sha256(snapshot.hash_payload()) != snapshot.data_epoch:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted BAR dataset content hash does not match data_epoch",
+            )
+        return snapshot
+
+
+def _raise_invalid_row():
+    raise TypeError("BAR dataset row must be an object")
+
+
+def _nonempty_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def remap_bar_snapshot_time(
+    snapshot: BarDatasetSnapshot,
+    *,
+    synthetic_replay_start_ms: int,
+) -> BarDatasetSnapshot:
+    """Create an actor-only synthetic timeline while retaining protected epoch."""
+
+    synthetic_start = validate_timestamp_ms(
+        synthetic_replay_start_ms,
+        field_name="synthetic_replay_start_ms",
+    )
+    delta = synthetic_start - snapshot.replay_start_ms
+
+    def shifted(value: int) -> int:
+        candidate = value + delta
+        return validate_timestamp_ms(candidate, field_name="synthetic timestamp")
+
+    rows = tuple(
+        replace(
+            row,
+            open_time_ms=shifted(row.open_time_ms),
+            close_time_ms=shifted(row.close_time_ms),
+        )
+        for row in snapshot.rows
+    )
+    provenance = replace(
+        snapshot.provenance,
+        source_earliest_open_ms=shifted(snapshot.provenance.source_earliest_open_ms),
+        source_latest_open_ms=shifted(snapshot.provenance.source_latest_open_ms),
+        source_latest_closed_open_ms=shifted(
+            snapshot.provenance.source_latest_closed_open_ms
+        ),
+        first_open_ms=shifted(snapshot.provenance.first_open_ms),
+        last_open_ms=shifted(snapshot.provenance.last_open_ms),
+        repository_backend="replay.synthetic.blind",
+    )
+    return replace(
+        snapshot,
+        rows=rows,
+        replay_start_ms=synthetic_start,
+        replay_end_open_ms=shifted(snapshot.replay_end_open_ms),
+        provenance=provenance,
+    )
 
 
 class BarDatasetBuilder:

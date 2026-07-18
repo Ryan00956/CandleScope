@@ -15,6 +15,7 @@ from .models import ReplayCommand, ReplayCursor, validate_counter, validate_time
 
 MAX_STEP_COUNT = 100_000
 MAX_ADVANCE_MS = 30 * 86_400_000
+MAX_JOURNAL_NOTE_CHARS = 4_000
 
 
 def _exact_keys(payload: Mapping[str, object], expected: set[str]) -> None:
@@ -185,6 +186,24 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
                 "quantity must be a Decimal string or null",
             )
         return ParsedCommand(command_type, {"quantity": payload["quantity"]})
+    if command_type is CommandType.ADD_JOURNAL_NOTE:
+        _exact_keys(payload, {"text"})
+        text = payload["text"]
+        if not isinstance(text, str):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "journal text must be a string",
+            )
+        normalized = text.strip()
+        if not normalized or len(normalized) > MAX_JOURNAL_NOTE_CHARS:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                f"journal text must contain 1-{MAX_JOURNAL_NOTE_CHARS} characters",
+            )
+        return ParsedCommand(command_type, {"text": normalized})
+    if command_type is CommandType.REVEAL_HISTORY:
+        _exact_keys(payload, set())
+        return ParsedCommand(command_type, {})
     if command_type is CommandType.END_SESSION:
         if not payload:
             return ParsedCommand(

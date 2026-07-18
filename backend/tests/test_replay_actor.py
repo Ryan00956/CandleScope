@@ -384,6 +384,41 @@ async def test_pause_ack_waits_for_atomic_event_and_queue_overflow_is_diagnostic
 
 
 @_async_test
+async def test_saturated_snapshot_mailbox_does_not_starve_max_playback() -> None:
+    reducer = GateReducer()
+    event_count = 20
+    actor = _actor(
+        reducer=reducer,
+        command_queue_size=event_count + 8,
+        events=event_fixture(count=event_count, step_ms=1),
+    )
+    await actor.start()
+    await actor.submit(_command("acquire", CommandType.ACQUIRE_CONTROLLER, revision=0))
+    await actor.submit(
+        _command("speed", CommandType.SET_SPEED, revision=1, payload={"speed": "MAX"})
+    )
+    await actor.submit(_command("play", CommandType.PLAY, revision=2))
+    await asyncio.wait_for(reducer.started.wait(), timeout=0.2)
+
+    pending = [asyncio.create_task(actor.snapshot()) for _ in range(event_count)]
+
+    async def _wait_for_saturated_mailbox() -> None:
+        while actor.diagnostics()["queue_size"] < event_count:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(_wait_for_saturated_mailbox(), timeout=0.2)
+    reducer.release.set()
+    snapshots = await asyncio.wait_for(asyncio.gather(*pending), timeout=0.5)
+
+    assert [snapshot.cursor.source_sequence for snapshot in snapshots] == list(
+        range(1, event_count + 1)
+    )
+    await _wait_for_state(actor, SessionState.ENDED)
+    assert (await actor.snapshot()).cursor.source_sequence == event_count
+    await actor.shutdown()
+
+
+@_async_test
 async def test_seek_uses_checkpoint_rebuild_and_trading_state_fails_closed() -> None:
     reducer = CountingReducer()
     actor = _actor(reducer=reducer, checkpoint_event_interval=2)

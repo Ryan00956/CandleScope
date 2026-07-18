@@ -1714,21 +1714,21 @@ feat(replay): add conservative paper broker and ledger
 
 ### 逐步任务
 
-- [ ] **5.1** 建立独立 replay schema 和显式 schema version；迁移只作用于 `REPLAY_DB_PATH`。
-- [ ] **5.2** 实现 command/source event 的 SQLite 事务边界。
-- [ ] **5.3** SQLite busy 有界重试；耗尽后暂停并 sticky degraded。
-- [ ] **5.4** 实现 `ReplayService` 的 create/get/command/fork/report/journal/shutdown。
-- [ ] **5.5** `DataEngineRuntime` 只拥有 service 生命周期并暴露 `app.state.replay_service`，不把 service 注入 DataManager。
-- [ ] **5.6** `REPLAY_ENABLED=0` 时 router 返回稳定 disabled capability，不能创建 session；不启动 actor/store writer。
-- [ ] **5.7** 实现第 12 节 HTTP 路由、错误码和 request limits。
-- [ ] **5.8** 实现 session EventHub、bounded replay buffer 和 WS snapshot-to-live 原子交接。
-- [ ] **5.9** 实现 after_sequence resume、buffer miss snapshot reset、慢客户端 1013。
-- [ ] **5.10** WebSocket disconnect/heartbeat 触发 controller TTL 暂停。
-- [ ] **5.11** 后端重启恢复为 PAUSED，校验 dataset/state hash。
-- [ ] **5.12** main shutdown 顺序：拒绝新 session -> pause actors -> flush/checkpoint -> close replay store -> 后续 data runtime storage。
-- [ ] **5.13** `/debug/snapshot` 增加 replay 节点：sessions、queues、events、coalescing、checkpoint、persistence、dataset pins、degraded reason。
-- [ ] **5.14** API snapshot 在 blind mode 不泄露 actual time/file path。
-- [ ] **5.15** OpenAPI schema 和 JSON examples 与 parser fixture 同步。
+- [x] **5.1** 建立独立 replay schema 和显式 schema version；迁移只作用于 `REPLAY_DB_PATH`。
+- [x] **5.2** 实现 command/source event 的 SQLite 事务边界。
+- [x] **5.3** SQLite busy 有界重试；耗尽后暂停并 sticky degraded。
+- [x] **5.4** 实现 `ReplayService` 的 create/get/command/fork/report/journal/shutdown。
+- [x] **5.5** `DataEngineRuntime` 只拥有 service 生命周期并暴露 `app.state.replay_service`，不把 service 注入 DataManager。
+- [x] **5.6** `REPLAY_ENABLED=0` 时 router 返回稳定 disabled capability，不能创建 session；不启动 actor/store writer。
+- [x] **5.7** 实现第 12 节 HTTP 路由、错误码和 request limits。
+- [x] **5.8** 实现 session EventHub、bounded replay buffer 和 WS snapshot-to-live 原子交接。
+- [x] **5.9** 实现 after_sequence resume、buffer miss snapshot reset、慢客户端 1013。
+- [x] **5.10** WebSocket disconnect/heartbeat 触发 controller TTL 暂停。
+- [x] **5.11** 后端重启恢复为 PAUSED，校验 dataset/state hash。
+- [x] **5.12** main shutdown 顺序：拒绝新 session -> pause actors -> flush/checkpoint -> close replay store -> 后续 data runtime storage。
+- [x] **5.13** `/debug/snapshot` 增加 replay 节点：sessions、queues、events、coalescing、checkpoint、persistence、dataset pins、degraded reason。
+- [x] **5.14** API snapshot 在 blind mode 不泄露 actual time/file path。
+- [x] **5.15** OpenAPI schema 和 JSON examples 与 parser fixture 同步。
 
 ### 测试
 
@@ -2392,5 +2392,23 @@ No-lookahead evidence: actor 对 source 使用 peek -> reducer candidate success
 Failure injection evidence: 非 canonical Decimal、quantity step/price tick/quote step、数量/名义/杠杆/权益/reduce-only、重复 client ID/command、非法终态回迁、触发时风险、已揭示 bar、source bar 损坏、ledger capacity、合法重算 hash 但错误 next counter/client index/model record、checkpoint account/ledger/builder 漂移、失败 END_SESSION、失败 source reducer 均覆盖；失败 command/broker restore/end 不改 revision 或领域状态，失败 source 不推进 cursor 并进入 ERROR。10,000 序列曾实际暴露默认 28 位 Decimal 上下文导致长均价盯市/账本取负精度分叉，现统一为 60 位领域上下文并由 property test 锁定。
 Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对初始 Phase 4 checkpoint 4d0f174 执行 git revert --no-commit 后，working tree、index 相对父提交 aaeb99c31ab2b80451ad1eee87d4b60017e26fbd 均为 zero diff，untracked=0，index tree 与 parent tree 同为 6b95b3e03f5ed13843e6dc3b72e944743ba3043a；随后移除临时 worktree，并对 amend 后最终 checkpoint 再次执行同一演练。
 Known limitations: BAR_CONSERVATIVE_V1 明确不模拟盘口队列、真实 partial fill 或 bar 内精确路径；PARTIALLY_FILLED 状态受模型/restore 校验但 BAR v1 不虚构流动性分片。PAPER_LINEAR_V1 不含历史 funding、maintenance margin tier、真实 liquidation/ADL 或多资产抵押。Phase 5 前没有 SQLite command/event/checkpoint 持久化、HTTP/WS 或跨进程恢复；前端仍无成交或 replay 可见入口。Vite 仍打印既有 24678 HMR 端口噪声与 >500 kB chunk warning，但完整 check 退出码为 0。
+Decision: PASS
+```
+
+```text
+Phase: 5 - 持久化、HTTP、WebSocket 与恢复
+Date: 2026-07-18
+Commit: this Phase 5 checkpoint; subject feat(replay): expose persistent replay sessions over replay v1
+Executor: Codex
+Scope: 建立仅由 REPLAY_DB_PATH 拥有的 replay schema v1 与 ReplaySQLiteStore；实现 command/source/internal mutation 的 commit-before-publish 事务、busy 有界重试与 sticky degraded、initial+recent32 checkpoint、checksum fallback、dataset/blob pin 与 command/source tail 恢复；实现 ReplayService create/get/command/fork/report/journal/subscribe/heartbeat/recovery/shutdown、严格 replay.v1 HTTP/OpenAPI/64 KiB request limit、原子 WS snapshot-to-live/resume/reset/slow-client 1013、blind synthetic timeline、debug diagnostics 与 DataEngineRuntime/main 生命周期接线。高频 mailbox 公平性和同一事务内重复 component snapshot 物化在本阶段性能探针中发现并修复；未新增 replay 前端页面或打开默认 feature flag。
+Files changed: backend/app/api/v1/{replay,stream_replay,stream}.py；backend/app/data_engine/runtime.py；backend/app/main.py；backend/app/replay/{actor,runtime,service,catalog,commands,dataset}.py；backend/app/replay/broker/models.py；backend/app/replay/storage/{__init__,schema,sqlite_store}.py；backend/tests/fixtures/replay/service_fakes.py；backend/tests/test_replay_{actor,api,recovery,service,shutdown,store,stream}.py；本文。
+Commands run: python -m ruff check Phase 5 files；python -m compileall app tests -q；六个 Phase 5 test files；actor/determinism/recovery/shutdown 定向回归；全部 test_replay_*.py；在线 HTTP/WS regression selection；python -m pytest -q backend/tests；npm run check；100/1,000 BAR ReplayService+SQLite MAX benchmarks；mailbox saturation、busy/degraded、corrupt dataset/checkpoint、restart/tail replay、slow subscriber、shutdown failure injection；git diff --check。
+Tests passed: Phase 5 定向 29 passed；最终 actor/determinism/recovery/shutdown 26 passed；全部 replay tests 207 passed；在线 API/WS regression 86 passed；backend global 1251 passed、4 条既有 FastAPI on_event deprecation warnings；frontend global 1853 passed，architecture/typecheck/lint/test/build 全通过，Vite build 393 modules。
+Golden/state hashes: 1,000 BAR/MAX/SQLite 全链路终点 cursor source_sequence=1000、event sequence=1005，actor state sha256:fb713cb708c4a9eee104217ada5ad3ffb5f9551364f8af6e0d9026337e2c3c76；event buffer retained=1005/1064、evicted=0。重启恢复用 checkpoint 后按 persisted mutation order 重放 command/source tail，并在每步和最终位置对比持久化 state hash；恢复后强制 PAUSED/ENDED，不恢复 wall-clock autoplay。
+Performance evidence: 优化前 100 BAR 探针 1.526930s、65.49 events/s、105 transactions、23 checkpoints、DB 630,784 bytes、WAL 4,132,392 bytes；1,000 BAR 探针最初暴露饱和 snapshot mailbox 饿死 MAX source 与重复全量 component snapshot 物化，分别通过每 request 最多让出一个 due source event、同一 mutation/checkpoint/durable hash 复用候选快照修复。最终以 WS ENDED 消费而非 HTTP polling 计时：57.976167s、17.25 events/s、1005 transactions、203 checkpoints、DB 11,907,072 bytes、WAL 4,453,752 bytes，完整结束且无 event eviction。该 synchronous=FULL 本机 correctness baseline 不外推生产容量；增长 closed-bar tail 的非线性序列化成本仍须在 Phase 8/9 做正式优化和 soak。
+No-lookahead evidence: session 固定不可变 dataset blob/data_epoch，actor 只消费其下一条 source event；每个 mutation 先完成 SQLite transaction 和 state hash，再向 event buffer/WS 发布或返回 accepted ack；恢复只重放已持久化 command/source tail。blind service、HTTP snapshot、debug diagnostics 与 WS fixture 检查 actual replay time、dataset partition/blob path 在 reveal_history 前均不可见，公开 cursor 使用 synthetic timeline；reveal 只允许 ENDED 后显式命令。
+Failure injection evidence: replay schema newer-version、主 K 线 DB 隔离、component projection transaction rollback、同 command id 异 payload、SQLite busy retry exhaustion/sticky degraded、durable write failure rollback/pause、latest/all checkpoint corruption、dataset checksum/epoch mismatch、旧 checkpoint command+autonomous-source tail、recovery 中 MAX clock freeze、wrong WS epoch、buffer miss reset、subscriber overflow/1013、controller heartbeat/disconnect、enabled startup failure、flush/checkpoint timeout 与 store close order均已覆盖；disabled runtime 不构造 store、不创建 DB、不启动 replay task。饱和 20 个 snapshot request 的确定性回归证明 MAX source 从 sequence 1 连续推进到 20，不再被只读 mailbox 饿死。
+Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对初始 Phase 5 checkpoint dd56a6b5b37efa945f96df119ee534fe1fb87a72 执行 git revert --no-commit 后，working tree、index 相对父提交 6ee6221c6645dae6ccd29dc5a3c2883067114435 均为 zero diff，untracked=0，index tree 与 parent tree 同为 f5d2274e8d9332116f46cbb0e10df3743e8b00b3；随后移除临时 worktree，并对 amend 后最终 checkpoint 再次执行同一演练。
+Known limitations: BAR_CONSERVATIVE_V1 的 service-side instrument filters 仍由冻结 dataset 首价精度和保守通用数量边界构造，不代表历史 exchange filter 快照；AGG_TRADE capability 明确为 ARCHIVE_DISABLED，直到 Phase 8 完成 source-validated archive、分页与 exact reader。ReplayService 暂无 idle TTL eviction scheduler，配置只冻结上限；前端仍无 replay.html/ReplayRuntime/可见入口，留给 Phase 6/7。1,000 BAR 基准虽已完成，但 17.25 events/s 显示 full-state rollback/checkpoint 随 retained closed tail 增长的成本，必须作为 Phase 8/9 性能门槛输入。Vite 仍有既有 >500 kB chunk warning，完整 check 退出码为 0。
 Decision: PASS
 ```

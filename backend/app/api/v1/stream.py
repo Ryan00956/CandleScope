@@ -18,6 +18,7 @@ from app.api.v1.stream_liquidations import stream_liquidations
 from app.api.v1.stream_market import stream_market
 from app.api.v1.stream_full_order_book import stream_full_order_book
 from app.api.v1.stream_order_book import stream_order_book
+from app.api.v1.stream_replay import stream_replay_session
 from app.api.v1.stream_trade_flow import stream_trade_flow
 from app.api.v1.stream_utils import (
     normalize_exchange as _normalize_exchange,
@@ -25,6 +26,7 @@ from app.api.v1.stream_utils import (
     send_json_with_timeout as _send_json_with_timeout,
     validate_ws_interval as _validate_ws_interval,
 )
+from app.replay.models import MAX_COUNTER
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
@@ -37,6 +39,28 @@ def _get_data_manager(websocket: WebSocket):
 def _get_indicator_engine(websocket: WebSocket):
     """Get IndicatorEngine from app state."""
     return getattr(websocket.app.state, "indicator_engine", None)
+
+
+@router.websocket("/replay/{session_id}")
+async def replay_stream(
+    websocket: WebSocket,
+    session_id: str,
+    after_sequence: int | None = Query(default=None, ge=0, le=MAX_COUNTER),
+    data_epoch: str | None = Query(
+        default=None,
+        min_length=71,
+        max_length=71,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    ),
+) -> None:
+    """Deliver an atomic replay snapshot/resume handoff and bounded live tail."""
+
+    await stream_replay_session(
+        websocket,
+        session_id=session_id,
+        after_sequence=after_sequence,
+        data_epoch=data_epoch,
+    )
 
 
 @router.websocket("/klines")

@@ -376,6 +376,36 @@ class BrokerConfig:
             "limits": self.limits.to_dict(),
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "BrokerConfig":
+        exact_keys(
+            payload,
+            {
+                "initial_equity",
+                "quote_asset",
+                "maker_bps",
+                "taker_bps",
+                "market_slippage_bps",
+                "initial_mark_price",
+                "instrument",
+                "limits",
+            },
+        )
+        instrument = payload["instrument"]
+        limits = payload["limits"]
+        if not isinstance(instrument, Mapping) or not isinstance(limits, Mapping):
+            raise TypeError("broker instrument and limits must be objects")
+        return cls(
+            initial_equity=payload["initial_equity"],  # type: ignore[arg-type]
+            quote_asset=payload["quote_asset"],  # type: ignore[arg-type]
+            maker_bps=payload["maker_bps"],  # type: ignore[arg-type]
+            taker_bps=payload["taker_bps"],  # type: ignore[arg-type]
+            market_slippage_bps=payload["market_slippage_bps"],  # type: ignore[arg-type]
+            initial_mark_price=payload["initial_mark_price"],  # type: ignore[arg-type]
+            instrument=InstrumentFilters.from_dict(instrument),
+            limits=BrokerLimits.from_dict(limits),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class OrderRequest:

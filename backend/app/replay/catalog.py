@@ -98,6 +98,16 @@ class ReplaySeriesIdentity:
             "symbol": self.symbol,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "ReplaySeriesIdentity":
+        if set(payload) != {"exchange", "market_type", "symbol"}:
+            raise ValueError("replay series identity fields are incompatible")
+        return cls(
+            exchange=payload["exchange"],  # type: ignore[arg-type]
+            market_type=payload["market_type"],  # type: ignore[arg-type]
+            symbol=payload["symbol"],  # type: ignore[arg-type]
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class SeriesBounds:

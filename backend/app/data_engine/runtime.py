@@ -96,6 +96,7 @@ from app.data_engine.storage import (
     TradeFlowRollupStore,
     TradeFlowRollupWriter,
 )
+from app.replay.runtime import ReplayRuntime, start_replay_runtime
 
 logger = logging.getLogger("data_engine.runtime")
 
@@ -138,11 +139,16 @@ class DataEngineRuntime:
     subscription_service: SubscriptionService | None = None
     gap_scan_task: asyncio.Task | None = None
     gap_audit_task: asyncio.Task | None = None
+    replay_runtime: ReplayRuntime | None = None
 
     def attach_to_app_state(self, state: Any) -> None:
         """Expose stable app.state handles used by API routes."""
         state.data_engine_runtime = self
         state.data_manager = self.data_manager
+        state.replay_runtime = self.replay_runtime
+        state.replay_service = (
+            None if self.replay_runtime is None else self.replay_runtime.service
+        )
 
     def get_ingestion_config(self) -> IngestionConfig | None:
         """Return the primary ingestion config for settings display."""
@@ -200,6 +206,13 @@ class DataEngineRuntime:
 
     async def shutdown(self, step_timeout: float = 5.0) -> None:
         """Stop runtime-owned components in dependency order."""
+        if self.replay_runtime is not None:
+            await self._shutdown_step(
+                "ReplayRuntime",
+                self.replay_runtime.shutdown(step_timeout=step_timeout),
+                None,
+            )
+
         await self._cancel_background_task(self.gap_audit_task, "Gap audit")
         await self._cancel_background_task(self.gap_scan_task, "Gap scan")
 
@@ -786,6 +799,7 @@ async def start_data_engine() -> DataEngineRuntime:
     liquidation_service: LiquidationService | None = None
     order_book_service: OrderBookService | None = None
     full_order_book_service: FullOrderBookService | None = None
+    replay_runtime: ReplayRuntime | None = None
 
     try:
         history_service = HistoryAvailabilityService(
@@ -914,6 +928,7 @@ async def start_data_engine() -> DataEngineRuntime:
             ingestion_factory,
         )
 
+        replay_runtime = await start_replay_runtime()
         gap_scan_task = _start_startup_gap_scan(dm, backfill_coordinator)
         gap_audit_task = _start_background_gap_audit(dm, backfill_coordinator)
 
@@ -932,6 +947,7 @@ async def start_data_engine() -> DataEngineRuntime:
             subscription_service=subscription_service,
             gap_scan_task=gap_scan_task,
             gap_audit_task=gap_audit_task,
+            replay_runtime=replay_runtime,
         )
         return runtime
     except Exception:
@@ -948,6 +964,7 @@ async def start_data_engine() -> DataEngineRuntime:
                 liquidation_service=liquidation_service,
                 order_book_service=order_book_service,
                 full_order_book_service=full_order_book_service,
+                replay_runtime=replay_runtime,
             )
         raise
 
@@ -1115,7 +1132,11 @@ async def _cleanup_partial_start(
     liquidation_service: LiquidationService | None = None,
     order_book_service: OrderBookService | None = None,
     full_order_book_service: FullOrderBookService | None = None,
+    replay_runtime: ReplayRuntime | None = None,
 ) -> None:
+    if replay_runtime is not None:
+        with suppress(Exception):
+            await replay_runtime.shutdown()
     if price_source is not None:
         with suppress(Exception):
             await price_source.stop()

@@ -13,6 +13,7 @@ interface PaneControlBarProps {
   canMaximize: boolean;
   canDelete: boolean;
   collapsed: boolean;
+  hovered: boolean;
   maximized: boolean;
   onMove(direction: PaneMoveDirection): void;
   onToggleCollapse(): void;
@@ -85,6 +86,7 @@ export default function PaneControlBar({
   canMaximize,
   canDelete,
   collapsed,
+  hovered,
   maximized,
   onMove,
   onToggleCollapse,
@@ -97,6 +99,7 @@ export default function PaneControlBar({
       className="pane-control-bar pane-overlay-anchor export-exclude"
       data-pane-id={paneId}
       data-pane-collapsed={collapsed ? "true" : "false"}
+      data-pane-hovered={hovered ? "true" : "false"}
       data-pane-maximized={maximized ? "true" : "false"}
       role="toolbar"
       aria-label={`${title}窗格控制`}

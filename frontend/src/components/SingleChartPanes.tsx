@@ -9,6 +9,7 @@ import type {
   ComponentType,
   MouseEvent as ReactMouseEvent,
   MutableRefObject,
+  PointerEvent as ReactPointerEvent,
 } from "react";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
 import {
@@ -1091,6 +1092,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const activeSubPaneCountRef = useRef(0);
   const activeSubPanesRef = useRef<IndicatorSubPane[]>(subPanes);
   const activePaneIdsRef = useRef<string[]>(["main", ...subPanes.map((pane) => pane.id)]);
+  const hoveredPaneIdRef = useRef<string | null>(null);
   const materializedMainPaneIndexRef = useRef(0);
   const paneHeightStorageKeyRef = useRef<string | null>(null);
   const expandedPaneHeightsRef = useRef<Map<string, number>>(new Map());
@@ -1265,6 +1267,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     return stored.includes("main") ? stored : ["main", ...stored];
   });
   const [collapsedPaneIds, setCollapsedPaneIds] = useState<string[]>([]);
+  const [hoveredPaneId, setHoveredPaneId] = useState<string | null>(null);
   const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null);
 
   const resolvedChartType = normalizeMainChartType(chartType);
@@ -1597,6 +1600,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       return next.length === previous.length ? previous : next;
     });
     setMaximizedPaneId((previous) => previous && !activeIds.has(previous) ? null : previous);
+    if (hoveredPaneIdRef.current && !activeIds.has(hoveredPaneIdRef.current)) {
+      hoveredPaneIdRef.current = null;
+      setHoveredPaneId(null);
+    }
   }, [activePaneIds, activePaneIdsKey]);
   useLayoutEffect(() => {
     const chart = chartRef.current;
@@ -3236,6 +3243,37 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     onRemoveSubPane(pane);
   }, [onRemoveSubPane]);
 
+  const publishHoveredPaneId = useCallback((paneId: string | null) => {
+    if (hoveredPaneIdRef.current === paneId) return;
+    hoveredPaneIdRef.current = paneId;
+    setHoveredPaneId(paneId);
+  }, []);
+
+  const handleChartPanePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "touch") {
+      publishHoveredPaneId(null);
+      return;
+    }
+    const panes = chartRef.current?.panes?.() || [];
+    const paneIds = activePaneIdsRef.current;
+    if (panes.length !== paneIds.length) {
+      publishHoveredPaneId(null);
+      return;
+    }
+    let nextPaneId: string | null = null;
+    for (const [index, pane] of panes.entries()) {
+      const rect = pane.getHTMLElement?.()?.getBoundingClientRect?.() ?? null;
+      if (!rect || event.clientY < rect.top || event.clientY > rect.bottom) continue;
+      nextPaneId = paneIds[index] ?? null;
+      break;
+    }
+    publishHoveredPaneId(nextPaneId);
+  }, [publishHoveredPaneId]);
+
+  const handleChartPanePointerLeave = useCallback(() => {
+    publishHoveredPaneId(null);
+  }, [publishHoveredPaneId]);
+
   useEffect(() => {
     const chart = chartRef.current;
     const panes = chart?.panes?.() || [];
@@ -3535,7 +3573,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   ]);
 
   return (
-    <div className="chart-area multi-pane-chart" ref={wrapperRef}>
+    <div
+      className="chart-area multi-pane-chart"
+      ref={wrapperRef}
+      onPointerMove={handleChartPanePointerMove}
+      onPointerLeave={handleChartPanePointerLeave}
+    >
       <div
         ref={containerRef}
         className="chart-pane"
@@ -3619,6 +3662,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
             canMaximize={activePaneIds.length > 1}
             canDelete={Boolean(pane?.owner && onRemoveSubPane)}
             collapsed={collapsed}
+            hovered={hoveredPaneId === paneId}
             maximized={maximizedPaneId === paneId}
             onMove={(direction) => handleMovePane(paneId, direction)}
             onToggleCollapse={() => handleTogglePaneCollapse(paneId)}

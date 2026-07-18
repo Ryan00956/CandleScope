@@ -8,7 +8,11 @@ let computeIndicatorRange: typeof IndicatorApiModule.computeIndicatorRange;
 let computeIndicatorRangeBatch: typeof IndicatorApiModule.computeIndicatorRangeBatch;
 
 test.before(async () => {
-  server = await createServer({ appType: "custom", server: { middlewareMode: true } });
+  server = await createServer({
+    appType: "custom",
+    optimizeDeps: { noDiscovery: true, include: [] },
+    server: { middlewareMode: true },
+  });
   const module = await server.ssrLoadModule(
     "/src/services/indicatorApi.js",
   ) as typeof IndicatorApiModule;

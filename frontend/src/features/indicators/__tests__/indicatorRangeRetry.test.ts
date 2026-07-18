@@ -27,6 +27,7 @@ let isResolvedIndicatorRangeEmpty = structuralMock<
 test.before(async () => {
   server = await createServer({
     appType: "custom",
+    optimizeDeps: { noDiscovery: true, include: [] },
     server: { middlewareMode: true },
   });
   ({

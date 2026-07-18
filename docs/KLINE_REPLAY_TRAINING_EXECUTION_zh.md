@@ -1414,19 +1414,19 @@ chore(replay): freeze replay v1 contracts and architecture boundaries
 
 ### 逐步任务
 
-- [ ] **1.1** 定义 `ReplayMarketSource`：`snapshot_ref()`、`peek()`、`next()`、`advance_until()`、`cursor()`、`exhausted()`。
-- [ ] **1.2** 定义 `ReplayCatalogEntry`：identity、base intervals、bounds、gap summary、eligible windows、quality、catalog epoch、限制原因。
-- [ ] **1.3** 使用 repo contract 查询 series，不在 replay 模块写裸 SQL。
-- [ ] **1.4** 只接受 closed bars；将最后形成中 K 线排除。
-- [ ] **1.5** 校验 open time 对齐、唯一性、严格递增、OHLC 合法和非负 volume。
-- [ ] **1.6** 将 exchange native interval 与本地连续 coverage 取交集，选择最小可信 base interval。
-- [ ] **1.7** 依据 warmup/horizon/gaps 切出 eligible windows；避免逐请求全库扫描，缓存 catalog 结果并绑定 source fingerprint。
-- [ ] **1.8** 用稳定 PRNG 实现 `random_eligible`；添加固定 seed golden test。
-- [ ] **1.9** 手动 start 不合格时返回具体 gap/boundary 原因，不自动挪到另一个时间。
-- [ ] **1.10** 创建 `BarDatasetSnapshot`，读取有界全范围并计算 `data_epoch`。
-- [ ] **1.11** 确认创建后修改源 DB/fixture 不影响已创建 snapshot。
-- [ ] **1.12** 为 session 数量和 snapshot 总内存加预算；超预算拒绝新 session，不回收活动 session 的数据。
-- [ ] **1.13** 记录 source provenance：repo backend、identity、row count、first/last open、gap result、hash schema。
+- [x] **1.1** 定义 `ReplayMarketSource`：`snapshot_ref()`、`peek()`、`next()`、`advance_until()`、`cursor()`、`exhausted()`。
+- [x] **1.2** 定义 `ReplayCatalogEntry`：identity、base intervals、bounds、gap summary、eligible windows、quality、catalog epoch、限制原因。
+- [x] **1.3** 使用 repo contract 查询 series，不在 replay 模块写裸 SQL。
+- [x] **1.4** 只接受 closed bars；将最后形成中 K 线排除。
+- [x] **1.5** 校验 open time 对齐、唯一性、严格递增、OHLC 合法和非负 volume。
+- [x] **1.6** 将 exchange native interval 与本地连续 coverage 取交集，选择最小可信 base interval。
+- [x] **1.7** 依据 warmup/horizon/gaps 切出 eligible windows；避免逐请求全库扫描，缓存 catalog 结果并绑定 source fingerprint。
+- [x] **1.8** 用稳定 PRNG 实现 `random_eligible`；添加固定 seed golden test。
+- [x] **1.9** 手动 start 不合格时返回具体 gap/boundary 原因，不自动挪到另一个时间。
+- [x] **1.10** 创建 `BarDatasetSnapshot`，读取有界全范围并计算 `data_epoch`。
+- [x] **1.11** 确认创建后修改源 DB/fixture 不影响已创建 snapshot。
+- [x] **1.12** 为 session 数量和 snapshot 总内存加预算；超预算拒绝新 session，不回收活动 session 的数据。
+- [x] **1.13** 记录 source provenance：repo backend、identity、row count、first/last open、gap result、hash schema。
 
 ### 测试
 
@@ -2320,5 +2320,23 @@ No-lookahead evidence: 本阶段没有 market source、HTTP/WS replay route 或 
 Failure injection evidence: 非法 source/execution/protocol/ID/revision/sequence/time/Decimal/float/config 上限均拒绝；ReplayApp 实际目录 advanced-market-data/liquidations 等 value import fixture 被拒绝；快照同源同目标、目标已存在、损坏 SQLite 均拒绝且不发布/不遗留临时文件。
 Rollback exercised: PASS；在系统临时目录创建 detached disposable worktree，执行 git revert --no-commit HEAD 后，working tree 与 index 相对 HEAD^ 均为 zero diff；父提交 c9a1ddbfe316c68c91787b69c783baeeb0670a9f；随后移除临时 worktree。
 Known limitations: 按 Phase 边界尚无 catalog、dataset、actor、broker、persistence、API、ReplayApp 或可见入口；npm ci 报告锁文件当前有 7 个 advisory（3 low、3 moderate、1 high），未用 npm audit fix 自动改锁文件；Vite 保留既有 >500 kB chunk warning。
+Decision: PASS
+```
+
+```text
+Phase: 1 - Catalog、BAR 数据快照与随机窗口
+Date: 2026-07-18
+Commit: this Phase 1 checkpoint; subject feat(replay): add deterministic bar dataset catalog
+Executor: Codex
+Scope: 基于现有 KlinesRepoAdapter 只读契约实现 deterministic catalog、closed-bar 边界、分段 gap 扫描、compact eligible ranges、稳定 seed 均匀采样、手动起点拒绝原因、不可变且有内容哈希的 BAR snapshot、BAR replay source 与活动 snapshot 双预算；未新增 router、schema、runtime actor、生产 K 线写路径或可见 UI。
+Files changed: backend/app/replay/{catalog,dataset}.py；backend/app/replay/sources/{__init__,base,bar_source}.py；backend/tests/test_replay_{catalog,bar_dataset}.py；backend/tests/fixtures/replay/{__init__,catalog_case_v1,fakes}.py/json；本文。全局门禁中发现并独立提交既有 Vite SSR test 的后台 optimizer 竞态修复 e4dc941，仅修改两个 frontend test 配置，不属于 replay 产品实现。
+Commands run: python -m pytest -q tests/test_replay_catalog.py tests/test_replay_bar_dataset.py；python -m pytest -q tests/test_replay_contracts.py tests/test_replay_architecture.py tests/test_snapshot_replay_klines.py tests/test_replay_catalog.py tests/test_replay_bar_dataset.py；python -m compileall -q app/replay tests/test_replay_catalog.py tests/test_replay_bar_dataset.py；python -m pytest -q；npx tsx --test 两个 Vite SSR tests；npm test；npm run check；catalog/dataset diagnostics 审计脚本；git diff --check。
+Tests passed: Phase 1 targeted 21 passed；Phase 0+1 replay gates 84 passed；backend global 1116 passed, 8 skipped, 4 existing FastAPI deprecation warnings；frontend global 1853 passed，architecture/typecheck/lint/production build 均通过，Vite build 393 modules。首次和第二次 frontend check 各出现 1 个既有 Vite dep-scan close race；关闭两个纯 SSR module tests 不需要的 optimizer 后，独立测试、全量测试与完整 check 均通过。
+Golden/state hashes: catalog epoch sha256:231f555321c4524168ea7e984a1721a60c3250fc9df9c9cd7723fb4b4531080e；source fingerprint sha256:f455d89fee4f3c636fea515503f0955fad9b8809639a3d43029e714d286d4523；seed 20260718 -> replay start 1710000480000；BAR data epoch sha256:437fa44c338a66cc00642ac1743fd2210a64dec3d94182a9899bbaca209ed3a0。
+Performance evidence: fixture catalog build diagnostics 0.223 ms、3 个 eligible time points 压缩为 2 个 ranges、3 次 gap scan 共 11 bars、单次 limit=4、cache 最大 16 entries；fixture dataset 5 rows、estimated_size_bytes=3874。该证据用于证明查询和内存所有权有界，不替代 Phase 8/9 的正式基准。
+No-lookahead evidence: catalog 在规划阶段使用统一 last_closed_bar_open_ms 排除 forming 尾 bar；random population 仅由 closed、aligned、warmup+horizon 完整且 gap-free 的 compact ranges 构成；dataset 创建用同一冻结 now 再扫描 gap、读取 exact bounded range 并逐行验证；source 后续只消费 immutable snapshot。fixture diagnostics 的 write_calls=[]，replay 模块无裸 SQL、upsert 或 delete。
+Failure injection evidence: gap、forming horizon、周期不对齐、non-native interval、warmup/horizon/row/memory/session limits、无 eligible window、非法/超范围 seed、手动起点 misaligned/gap/boundary、源行乱序/重复/缺失、非法 open_time/close_time、NaN/OHLC/负 volume、非法 snapshot clock 与源 DB 后写均已覆盖；所有失败均在 session snapshot 发布前拒绝，活动 snapshot 不被回收或改写。
+Rollback exercised: PASS；在系统临时目录创建 detached disposable worktree，对 Phase 1 checkpoint 执行 git revert --no-commit 后，working tree 与 index 相对父提交 e4dc9411a64e69bb14239338748da197d4d1aa02 均为 zero diff，untracked count=0；随后移除临时 worktree。
+Known limitations: Phase 1 只实现 BAR source；base interval 首版只接受可解析且非 monthly 的 exchange-native interval，并只为 24x7 连续日历建立随机池，其他交易日历 fail closed；BEST_EFFORT 尚不放宽 BAR exact coverage；instrument rules、fee/degraded snapshot、session actor、persistence/API/blind mapping 均按后续 Phase 实现。source fingerprint 绑定 series metadata/native intervals/closed boundary，活动 snapshot 的逐行内容由 data_epoch 绑定并在创建时重新验证。前端测试仍保留仓库已记录的并发 Vite middleware HMR 端口 24678 噪声，但不再启动后台 dependency scan，也不影响 test/check 退出码。
 Decision: PASS
 ```

@@ -5,6 +5,8 @@ import type { AdvancedMarketRuntimeView } from "./advancedMarketDataTypes.js";
 import type { IndicatorSubPane } from "../indicators/indicatorPaneProjection.js";
 import type { MarketMetricChannel } from "./marketMetricSelectionTypes.js";
 
+const EMPTY_ADVANCED_MARKET_PANES: readonly IndicatorSubPane[] = Object.freeze([]);
+
 export function hasCurrentAdvancedMarketSeries(
   view: Pick<AdvancedMarketRuntimeView, "seriesKey" | "seriesStore">,
 ): boolean {
@@ -14,21 +16,23 @@ export function hasCurrentAdvancedMarketSeries(
 
 export function useAdvancedMarketPanes(
   view: AdvancedMarketRuntimeView,
-): IndicatorSubPane[] {
+): readonly IndicatorSubPane[] {
   const metrics = useAdvancedMarketMetrics(view);
   const subscribeSeries = useCallback((listener: () => void) => {
     const store = view.seriesStore;
-    if (!store) return () => undefined;
+    if (!view.metricsEnabled || !store) return () => undefined;
     const unsubscribe = store.subscribe(() => listener());
     return () => { unsubscribe(); };
-  }, [view.seriesStore]);
-  const getSeriesVersion = useCallback(
-    () => Number(view.seriesStore?.version ?? 0),
-    [view.seriesStore],
+  }, [view.metricsEnabled, view.seriesStore]);
+  const getSeriesAxisRevision = useCallback(
+    () => view.metricsEnabled
+      ? Number(view.seriesStore?.axisRevision ?? 0)
+      : 0,
+    [view.metricsEnabled, view.seriesStore],
   );
-  const seriesVersion = useSyncExternalStore(
+  const seriesAxisRevision = useSyncExternalStore(
     subscribeSeries,
-    getSeriesVersion,
+    getSeriesAxisRevision,
     () => 0,
   );
   const activeChannels = useMemo<MarketMetricChannel[]>(() => (
@@ -45,7 +49,11 @@ export function useAdvancedMarketPanes(
   }, [fundingActive]);
   const seriesCurrent = hasCurrentAdvancedMarketSeries(view);
   return useMemo(() => {
-    if (!view.metricsEnabled || !seriesCurrent || !Number.isFinite(seriesVersion)) return [];
+    if (!view.metricsEnabled
+      || !seriesCurrent
+      || !Number.isFinite(seriesAxisRevision)) {
+      return EMPTY_ADVANCED_MARKET_PANES;
+    }
     return buildAdvancedMarketPanes(
       metrics,
       view.seriesStore?.snapshot() || [],
@@ -53,5 +61,5 @@ export function useAdvancedMarketPanes(
       view.interval,
       realtimeClockMs,
     ).filter((pane) => pane.lines.some((line) => line.data.length > 0));
-  }, [activeChannels, metrics, realtimeClockMs, seriesCurrent, seriesVersion, view.interval, view.metricsEnabled, view.seriesStore]);
+  }, [activeChannels, metrics, realtimeClockMs, seriesAxisRevision, seriesCurrent, view.interval, view.metricsEnabled, view.seriesStore]);
 }

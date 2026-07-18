@@ -118,6 +118,7 @@ export class SeriesWindowStore {
   private _snapshotDirty: boolean;
   private _timeSet: Set<EpochSeconds>;
   private _version: number;
+  private _axisRevision: number;
   private _listeners: Set<SeriesWindowListener>;
 
   constructor({
@@ -134,11 +135,21 @@ export class SeriesWindowStore {
     this._snapshotDirty = false;
     this._timeSet = new Set();
     this._version = 0;
+    this._axisRevision = 0;
     this._listeners = new Set();
   }
 
   get version(): DataRevision {
     return asDataRevision(this._version);
+  }
+
+  /**
+   * Revision of the ordered time axis only. Replacing the values of the
+   * current candle leaves this stable so consumers that only project onto bar
+   * timestamps do not re-render for every realtime price tick.
+   */
+  get axisRevision(): DataRevision {
+    return asDataRevision(this._axisRevision);
   }
 
   get segments(): SeriesWindowSegment[] {
@@ -265,6 +276,7 @@ export class SeriesWindowStore {
     this._snapshot = [];
     this._snapshotDirty = false;
     this._version += 1;
+    this._axisRevision += 1;
     const delta = createWindowDelta(WINDOW_DELTA_TYPES.CLEAR, {
       originalBars,
       bars: 0,
@@ -283,6 +295,7 @@ export class SeriesWindowStore {
     this._replaceRows(normalized);
     const trim = this.trimToBudget();
     this._version += 1;
+    this._axisRevision += 1;
     const delta = createWindowDelta(WINDOW_DELTA_TYPES.REPLACE, {
       bars: this.barCount,
       originalBars,
@@ -319,6 +332,7 @@ export class SeriesWindowStore {
     let addedLeft = 0;
     let addedRight = 0;
     let changed = false;
+    let axisChanged = false;
 
     for (const row of incoming) {
       const existing = byTime.get(row.time);
@@ -326,6 +340,7 @@ export class SeriesWindowStore {
         if (row.time < previousFirst) addedLeft += 1;
         if (row.time > previousLast) addedRight += 1;
         changed = true;
+        axisChanged = true;
       } else if (!sameRow(existing, row)) {
         changed = true;
       }
@@ -338,6 +353,9 @@ export class SeriesWindowStore {
     this._replaceRows(nextRows);
     const trim = this.trimToBudget();
     this._version += 1;
+    if (axisChanged || trim.trimmedLeft > 0 || trim.trimmedRight > 0) {
+      this._axisRevision += 1;
+    }
 
     let type: WindowDeltaType = WINDOW_DELTA_TYPES.MID_MERGE;
     if (incomingLast < previousFirst) type = WINDOW_DELTA_TYPES.PREPEND;
@@ -444,6 +462,9 @@ export class SeriesWindowStore {
       ? this.trimToBudget()
       : { trimmedLeft: 0, trimmedRight: 0 };
     this._version += 1;
+    if (appended || trim.trimmedLeft > 0 || trim.trimmedRight > 0) {
+      this._axisRevision += 1;
+    }
     const delta = createWindowDelta(WINDOW_DELTA_TYPES.TICK, {
       bar: tick,
       bars: this.barCount,

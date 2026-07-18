@@ -99,6 +99,28 @@ test("applyTick appends a new tail bar", () => {
   assert.deepEqual(store.snapshot().map((row) => row.time), [60, 120, 180]);
 });
 
+test("axis revision ignores value-only updates and advances for time-axis changes", () => {
+  const store = new SeriesWindowStore({ intervalSeconds: 60 });
+  assert.equal(store.axisRevision, 0);
+
+  store.replace(rows([60, 120, 240]));
+  assert.equal(store.axisRevision, 1);
+
+  store.applyTick({ ...rows([240])[0], close: 777 });
+  store.applyTick({ ...rows([120])[0], close: 888 });
+  store.applyRange([{ ...rows([120])[0], close: 999 }]);
+  assert.equal(store.axisRevision, 1);
+
+  store.applyRange(rows([180]));
+  assert.equal(store.axisRevision, 2);
+
+  store.applyTick(rows([300])[0]);
+  assert.equal(store.axisRevision, 3);
+
+  store.clear();
+  assert.equal(store.axisRevision, 4);
+});
+
 test("applyTick ignores older rows outside the window", () => {
   const store = new SeriesWindowStore({ intervalSeconds: 60 });
   store.replace(rows([120, 180]));

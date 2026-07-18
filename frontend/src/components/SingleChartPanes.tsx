@@ -4,7 +4,7 @@
  * Uses one chart instance for the selected main price series and all indicator panes so every
  * series shares the same time scale.
  */
-import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   ComponentType,
   MouseEvent as ReactMouseEvent,
@@ -269,11 +269,10 @@ interface PanePlaceholderState {
   seriesByPane: Map<number, PanePlaceholderEntry>;
 }
 
-interface PaneLabelPosition {
+interface PaneLabelDescriptor {
   id: string;
   label: string;
   marketPane: "funding-rate" | "open-interest";
-  top: number;
 }
 
 interface PaneDescriptor {
@@ -995,6 +994,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const lastViewportRestoreSourceRef = useRef<string | null>(null);
   const visibleRangeSaveTimerRef = useRef<TimerHandle | null>(null);
   const activeSubPaneCountRef = useRef(0);
+  const activeSubPanesRef = useRef<IndicatorSubPane[]>(subPanes);
   const paneHeightStorageKeyRef = useRef<string | null>(null);
   const prevSubPaneScopeRef = useRef<{
     base: string | null;
@@ -1161,7 +1161,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }> | null>(null);
   const [isAutoScale, setIsAutoScale] = useState(true);
   const [contextMenu, setContextMenu] = useState<PriceScaleContextMenuPosition | null>(null);
-  const [paneLabelPositions, setPaneLabelPositions] = useState<PaneLabelPosition[]>([]);
 
   const resolvedChartType = normalizeMainChartType(chartType);
   const resolvedDescriptor = getChartTypeDescriptor(resolvedChartType);
@@ -1452,7 +1451,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     [derivedAuxiliaryIndex, sourcePaneDescriptors, usesDerivedAxis],
   );
   const activeSubPanes = subPanes;
+  const activeSubPaneCount = activeSubPanes.length;
   activeSubPaneCountRef.current = activeSubPanes.length;
+  activeSubPanesRef.current = activeSubPanes;
   const subPaneIdsKey = useMemo(
     () => activeSubPanes.map((pane) => pane.id).join(","),
     [activeSubPanes],
@@ -1462,45 +1463,94 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     [activeSubPanes],
   );
   paneHeightStorageKeyRef.current = paneHeightStorageKey;
+  const paneLabelDescriptors = activeSubPanes.flatMap<PaneLabelDescriptor>((pane) => (
+    pane.dataMarketPane
+      ? [{
+          id: pane.id,
+          label: pane.label,
+          marketPane: pane.dataMarketPane,
+        }]
+      : []
+  ));
+  const paneLabelStructureKey = paneLabelDescriptors
+    .map((pane) => `${pane.id}:${pane.marketPane}:${pane.label}`)
+    .join("|");
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const wrapper = wrapperRef.current;
     const chart = chartRef.current;
-    if (!wrapper || !chart) {
-      setPaneLabelPositions([]);
-      return undefined;
-    }
+    if (!wrapper || !chart || !paneLabelStructureKey) return undefined;
 
     const syncLabels = () => {
+      const panes = activeSubPanesRef.current;
       const heights = readPaneHeights(chart);
-      if (heights.length !== activeSubPanes.length + 1) return;
+      if (heights.length !== panes.length + 1) return;
+      const labelsById = new Map(
+        Array.from(wrapper.querySelectorAll<HTMLElement>(".advanced-market-pane-label[data-pane-id]"))
+          .map((element) => [element.dataset.paneId || "", element]),
+      );
       let paneTop = heights[0] || 0;
-      const next: PaneLabelPosition[] = [];
-      for (const [index, pane] of activeSubPanes.entries()) {
+      for (const [index, pane] of panes.entries()) {
         if (pane.dataMarketPane) {
-          next.push({
-            id: pane.id,
-            label: pane.label,
-            marketPane: pane.dataMarketPane,
-            top: paneTop + 6,
-          });
+          const element = labelsById.get(pane.id);
+          if (element) element.style.top = `${paneTop + 6}px`;
         }
         paneTop += heights[index + 1] || 0;
       }
-      setPaneLabelPositions((previous) => (
-        JSON.stringify(previous) === JSON.stringify(next) ? previous : next
-      ));
     };
 
-    const frame = requestAnimationFrame(syncLabels);
-    wrapper.addEventListener("pointerup", syncLabels);
+    let trackingFrame: number | null = null;
+    let settleFrame: number | null = null;
+    const trackPaneResize = () => {
+      syncLabels();
+      trackingFrame = requestAnimationFrame(trackPaneResize);
+    };
+    const startPaneResizeTracking = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)
+        || window.getComputedStyle(target).cursor !== "row-resize"
+        || trackingFrame !== null) {
+        return;
+      }
+      trackPaneResize();
+    };
+    const stopPaneResizeTracking = () => {
+      if (trackingFrame !== null) {
+        cancelAnimationFrame(trackingFrame);
+        trackingFrame = null;
+      }
+      syncLabels();
+      if (settleFrame !== null) cancelAnimationFrame(settleFrame);
+      settleFrame = requestAnimationFrame(syncLabels);
+    };
+
+    syncLabels();
+    const initialFrame = requestAnimationFrame(syncLabels);
+    const resizeObserver = typeof ResizeObserver === "function"
+      ? new ResizeObserver(syncLabels)
+      : null;
+    resizeObserver?.observe(wrapper);
+    for (const pane of chart.panes?.() || []) {
+      const element = pane.getHTMLElement?.();
+      if (element) resizeObserver?.observe(element);
+    }
+    wrapper.addEventListener("pointerdown", startPaneResizeTracking, true);
+    window.addEventListener("pointerup", stopPaneResizeTracking);
+    window.addEventListener("pointercancel", stopPaneResizeTracking);
+    window.addEventListener("blur", stopPaneResizeTracking);
     window.addEventListener("resize", syncLabels);
     return () => {
-      cancelAnimationFrame(frame);
-      wrapper.removeEventListener("pointerup", syncLabels);
+      cancelAnimationFrame(initialFrame);
+      if (trackingFrame !== null) cancelAnimationFrame(trackingFrame);
+      if (settleFrame !== null) cancelAnimationFrame(settleFrame);
+      resizeObserver?.disconnect();
+      wrapper.removeEventListener("pointerdown", startPaneResizeTracking, true);
+      window.removeEventListener("pointerup", stopPaneResizeTracking);
+      window.removeEventListener("pointercancel", stopPaneResizeTracking);
+      window.removeEventListener("blur", stopPaneResizeTracking);
       window.removeEventListener("resize", syncLabels);
     };
-  }, [activeSubPanes, paneHeightStorageKey, seriesReady]);
+  }, [paneLabelStructureKey, seriesReady, subPaneIdsKey]);
 
   const saveCurrentPaneHeights = useCallback((
     chart = chartRef.current,
@@ -2879,8 +2929,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => {
     const chart = chartRef.current;
     const wrapper = wrapperRef.current;
-    if (!chart || !wrapper || activeSubPanes.length === 0) return;
-    const expectedPaneCount = activeSubPanes.length + 1;
+    if (!chart || !wrapper || activeSubPaneCount === 0) return;
+    const expectedPaneCount = activeSubPaneCount + 1;
     if (paneDescriptors.length !== expectedPaneCount
       || chart.panes?.()?.length !== expectedPaneCount) {
       return;
@@ -2889,11 +2939,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const totalHeight = wrapper.getBoundingClientRect?.().height || wrapper.clientHeight || 0;
     const paneHeights = resolvePaneHeightLayout(
       paneHeightStorageKey,
-      activeSubPanes.length,
+      activeSubPaneCount,
       totalHeight,
     );
     if (paneHeights) setPaneHeights(chart, paneHeights);
-  }, [activeSubPanes, paneDescriptors.length, paneHeightStorageKey, seriesReady, subPaneIdsKey]);
+  }, [activeSubPaneCount, paneDescriptors.length, paneHeightStorageKey, seriesReady, subPaneIdsKey]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -3151,23 +3201,22 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         style={{ cursor: cursorStyleForDrawingTool(effectiveDrawingTool) }}
       />
 
-      {paneLabelPositions.map((position) => {
-        const pane = activeSubPanes.find((candidate) => candidate.id === position.id);
+      {paneLabelDescriptors.map((descriptor) => {
+        const pane = activeSubPanes.find((candidate) => candidate.id === descriptor.id);
         const exactPoint = paneCrosshairTime === null
           ? null
           : pane?.pointMetadata?.find((point) => point.time === paneCrosshairTime) ?? null;
         const displayPoint = exactPoint ?? pane?.pointMetadata?.at(-1) ?? null;
         return (
           <div
-            key={position.id}
+            key={descriptor.id}
             className="chart-pane-label advanced-market-pane-label"
-            data-market-pane={position.marketPane}
-            data-pane-id={position.id}
+            data-market-pane={descriptor.marketPane}
+            data-pane-id={descriptor.id}
             role="group"
-            aria-label={displayPoint?.accessibilityLabel ?? position.label}
-            style={{ top: position.top }}
+            aria-label={displayPoint?.accessibilityLabel ?? descriptor.label}
           >
-            <span className="advanced-market-pane-heading">{position.label}</span>
+            <span className="advanced-market-pane-heading">{descriptor.label}</span>
             {displayPoint && (
               <span
                 className="advanced-market-pane-value"

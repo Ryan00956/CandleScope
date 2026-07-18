@@ -28,6 +28,10 @@ const RULES = {
   drawingPublicRuntimeNoRawChartSeries: "drawing-public-runtime-no-raw-chart-series",
   drawingWorkerNoChartRuntimeImport: "drawing-worker-no-chart-runtime-import",
   sourceTypescriptOnly: "source-typescript-only",
+  replayComponentNoServiceImport: "replay-component-no-service-import",
+  liveAppNoReplayBars: "live-app-no-replay-bars",
+  replayAppNoLiveRuntimeImport: "replay-app-no-live-runtime-import",
+  replayAppNoPrivateTradingImport: "replay-app-no-private-trading-import",
 };
 
 const allowlist = [];
@@ -288,8 +292,40 @@ function isFeatureRuntimePath(filePath) {
   return /Runtime\.(?:js|jsx|ts|tsx)$/.test(parts.at(-1));
 }
 
+function isReplayComponentPath(filePath) {
+  return filePath.startsWith("src/features/replay/components/");
+}
+
+function isReplayAppPath(filePath) {
+  return normalizeModulePath(filePath) === "src/features/replay/ReplayApp";
+}
+
+function isForbiddenReplayLiveRuntimeTarget(target) {
+  if (target === "src/features/market-data/useMarketDataRuntime") return true;
+  if (target.startsWith("src/features/market-data/runtime/")) return true;
+  return [
+    "src/features/advanced-market/",
+    "src/features/advanced-market-data/",
+    "src/features/order-book/",
+    "src/features/full-order-book/",
+    "src/features/liquidation/",
+    "src/features/liquidations/",
+    "src/features/watchlist/",
+    "src/features/watchlist-full-cache/",
+    "src/features/alerts/",
+  ].some((prefix) => target.startsWith(prefix));
+}
+
+function isForbiddenPrivateTradingTarget(target) {
+  const normalized = target.toLowerCase();
+  return normalized.startsWith("src/features/trading/")
+    || normalized.startsWith("src/services/trading")
+    || normalized.startsWith("src/services/private")
+    || /(?:^|\/)(?:api-?keys?|credentials|private-trading|signing)(?:\/|$)/.test(normalized);
+}
+
 function checkImports(absPath, filePath, content, projectDirectory) {
-  for (const { specifier, line } of importSpecifiers(content)) {
+  for (const { specifier, line, typeOnly } of importSpecifiers(content)) {
     const target = resolveImportSpecifier(absPath, specifier, projectDirectory);
     const normalizedTarget = normalizeModulePath(target);
     const lightweightChartsImport = isLightweightChartsImport(specifier);
@@ -313,6 +349,38 @@ function checkImports(absPath, filePath, content, projectDirectory) {
         line,
         target: normalizedTarget,
         message: `component/app layer imports service module ${specifier}`,
+      });
+    }
+
+    if (isReplayComponentPath(filePath) && normalizedTarget.startsWith("src/services/")) {
+      addViolation({
+        rule: RULES.replayComponentNoServiceImport,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: `replay component imports service module ${specifier}; send intent through feature-local actions`,
+      });
+    }
+
+    if (isReplayAppPath(filePath) && !typeOnly
+      && isForbiddenReplayLiveRuntimeTarget(normalizedTarget)) {
+      addViolation({
+        rule: RULES.replayAppNoLiveRuntimeImport,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: `ReplayApp value-imports live runtime ${specifier}`,
+      });
+    }
+
+    if (isReplayAppPath(filePath) && !typeOnly
+      && isForbiddenPrivateTradingTarget(normalizedTarget)) {
+      addViolation({
+        rule: RULES.replayAppNoPrivateTradingImport,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: `ReplayApp value-imports private trading dependency ${specifier}`,
       });
     }
 
@@ -586,6 +654,20 @@ function checkAppRuntimeBridge(filePath, content) {
   }
 }
 
+function checkLiveAppReplayOwnership(filePath, content) {
+  if (normalizeModulePath(filePath) !== "src/app/App") return;
+  const stripped = stripCommentsAndStrings(content);
+  const replayOwnershipPattern = /\b(?:replayBars|setReplayBars|replayBarStore|replaySeriesStore)\b|\buseState\s*<\s*(?:ReadonlyArray\s*<\s*)?ReplayBar\b/g;
+  const match = replayOwnershipPattern.exec(stripped);
+  if (!match) return;
+  addViolation({
+    rule: RULES.liveAppNoReplayBars,
+    filePath,
+    line: lineNumberAt(stripped, match.index),
+    message: "live App must not own replay bars or replay series state",
+  });
+}
+
 function findMatchingBrace(content, openIndex) {
   let depth = 0;
   for (let index = openIndex; index < content.length; index += 1) {
@@ -768,6 +850,7 @@ export function runArchitectureCheck({
     checkComponentRawTimeScaleWrites(filePath, content);
     checkFeatureRuntimeJsx(filePath, content);
     checkAppRuntimeBridge(filePath, content);
+    checkLiveAppReplayOwnership(filePath, content);
     checkFeatureRuntimeLegacyCompatFields(filePath, content);
     checkDrawingPublicRuntimeRawChartSeries(filePath, content);
   }

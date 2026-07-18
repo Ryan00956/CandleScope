@@ -83,8 +83,14 @@ test("future time-axis carrier is an invisible line series in the main pane", ()
 
 test("indicator pane order keeps histograms below line series", () => {
   const operations: Array<[string, number]> = [];
-  const entry = (name: string, type: "line" | "histogram", paneIndex = 1) => ({
+  const entry = (
+    name: string,
+    type: "line" | "histogram",
+    paneIndex = 1,
+    paneId = "indicator",
+  ) => ({
     lineConfig: { type },
+    paneId,
     paneIndex,
     series: structuralMock<IndicatorSeries>({
       setSeriesOrder(order: number) {
@@ -96,13 +102,24 @@ test("indicator pane order keeps histograms below line series", () => {
   const dif = entry("dif", "line");
   const dea = entry("dea", "line");
   const histogram = entry("histogram", "histogram");
-  const mainOverlay = entry("main", "histogram", 0);
+  const zeroPaneHistogram = entry("zero-histogram", "histogram", 0);
+  const zeroPaneLine = entry("zero-line", "line", 0);
+  const mainOverlay = entry("main", "histogram", 2, "main");
 
-  assert.equal(applyIndicatorPaneSeriesOrder([dif, dea, histogram, mainOverlay]), 3);
+  assert.equal(applyIndicatorPaneSeriesOrder([
+    dif,
+    dea,
+    histogram,
+    zeroPaneLine,
+    zeroPaneHistogram,
+    mainOverlay,
+  ]), 5);
   assert.deepEqual(operations, [
     ["histogram", 0],
     ["dif", 1],
     ["dea", 2],
+    ["zero-histogram", 0],
+    ["zero-line", 1],
   ]);
 });
 

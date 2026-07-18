@@ -473,12 +473,16 @@ export function buildAdvancedMarketPanes(
     else openInterestLine.data.push(previewPoint);
   }
 
-  const panes: Array<IndicatorSubPane & { channel: MarketMetricChannel }> = [
+  const panes: Array<IndicatorSubPane & {
+    channel: MarketMetricChannel;
+    owner: NonNullable<IndicatorSubPane["owner"]>;
+  }> = [
     {
       channel: "funding_rate",
       id: "advanced-funding",
       label: "资金费率 (%)",
       lines: [fundingLine],
+      owner: { kind: "market-study", id: "market:funding-rate" },
       dataMarketPane: "funding-rate",
       legendItems: FUNDING_RATE_LEGEND,
       pointMetadata: fundingProjection.metadata,
@@ -488,6 +492,7 @@ export function buildAdvancedMarketPanes(
       id: "advanced-open-interest",
       label: "Open Interest",
       lines: [openInterestLine],
+      owner: { kind: "market-study", id: "market:open-interest" },
       dataMarketPane: "open-interest",
     },
   ];
@@ -497,6 +502,7 @@ export function buildAdvancedMarketPanes(
       id: pane.id,
       label: pane.label,
       lines: pane.lines,
+      owner: pane.owner,
       ...(pane.dataMarketPane === undefined
         ? {}
         : { dataMarketPane: pane.dataMarketPane }),

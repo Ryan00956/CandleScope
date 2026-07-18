@@ -3,12 +3,15 @@ import test from "node:test";
 
 import {
   loadPaneHeights,
+  loadPaneOrder,
   savePaneHeights,
+  savePaneOrder,
 } from "../paneLayoutStorage.js";
 import { withLocalStorage } from "./localStorageHarness.js";
 import { mustBeDefined } from "../../../test/testHelpers.js";
 
 const PANE_HEIGHTS_KEY = "candlescope-pane-heights";
+const PANE_ORDER_KEY = "candlescope-pane-order-v1";
 
 test("pane height storage keeps only finite positive arrays", () => {
   withLocalStorage({
@@ -30,5 +33,15 @@ test("pane height writes sanitize invalid entries without changing the storage k
     assert.deepEqual(JSON.parse(mustBeDefined(storage.getItem(PANE_HEIGHTS_KEY))), {
       valid: [300, 120],
     });
+  });
+});
+
+test("pane order storage keeps bounded unique pane ids", () => {
+  withLocalStorage({
+    [PANE_ORDER_KEY]: JSON.stringify(["rsi", "rsi", "", 42, "vol"]),
+  }, (storage) => {
+    assert.deepEqual(loadPaneOrder(), ["rsi", "vol"]);
+    savePaneOrder(["vol", "macd", "vol", null]);
+    assert.deepEqual(JSON.parse(mustBeDefined(storage.getItem(PANE_ORDER_KEY))), ["vol", "macd"]);
   });
 });

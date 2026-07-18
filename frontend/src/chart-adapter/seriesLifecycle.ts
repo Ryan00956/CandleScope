@@ -270,6 +270,7 @@ export function createIndicatorSeries(
 export function applyIndicatorPaneSeriesOrder(
   entries: Array<{
     lineConfig?: IndicatorSeriesDefinition | null;
+    paneId?: string;
     paneIndex?: number;
     series: IndicatorSeriesHandle;
   }> = [],
@@ -281,7 +282,7 @@ export function applyIndicatorPaneSeriesOrder(
 
   entries.forEach((entry, originalIndex) => {
     const paneIndex = Number(entry.paneIndex);
-    if (!Number.isInteger(paneIndex) || paneIndex <= 0) return;
+    if (entry.paneId === "main" || !Number.isInteger(paneIndex) || paneIndex < 0) return;
     const paneEntries = entriesByPane.get(paneIndex) || [];
     paneEntries.push({ entry, originalIndex });
     entriesByPane.set(paneIndex, paneEntries);

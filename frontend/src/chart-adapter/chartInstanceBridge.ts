@@ -83,6 +83,8 @@ interface LookupMap {
 interface LightweightChartAdapterOptions {
   chartRef: RefOrValue<AdapterChart>;
   seriesRef: RefOrValue<AdapterSeries>;
+  containerRef?: RefOrValue<HTMLElement>;
+  mainPaneIndexRef?: RefOrValue<number>;
   seriesDataRef?: RefOrValue<DisplayRow[]>;
   seriesDataMapRef?: RefOrValue<LookupMap>;
   seriesDataIndexRef?: RefOrValue<LookupMap>;
@@ -222,6 +224,8 @@ function usesOrdinalData(data: unknown): boolean {
 export function createLightweightChartAdapter({
   chartRef,
   seriesRef,
+  containerRef = null,
+  mainPaneIndexRef = null,
   seriesDataRef = null,
   seriesDataMapRef = null,
   seriesDataIndexRef = null,
@@ -234,6 +238,10 @@ export function createLightweightChartAdapter({
 }: LightweightChartAdapterOptions) {
   const getChart = () => getRefValue(chartRef);
   const getSeries = () => getRefValue(seriesRef);
+  const getMainPaneIndex = () => {
+    const value = getRefValue(mainPaneIndexRef);
+    return Number.isInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+  };
   const getSeriesData = (): DisplayRow[] => {
     const data = getRefValue(seriesDataRef);
     if (data) return data;
@@ -831,23 +839,32 @@ export function createLightweightChartAdapter({
       const chart = getChart();
       if (!chart) return null;
 
-      // Lightweight Charts defines paneSize(0) as the main pane's plot
-      // surface, excluding both price scales and the time scale. Its
-      // coordinates are pane-local, so only the visible left price scale
-      // needs to be added to position a DOM overlay in chart coordinates.
-      const pane = chart.paneSize(0);
-      const leftPriceScaleWidth = chart.priceScale("left", 0).width();
+      const paneIndex = getMainPaneIndex();
+      // paneSize describes the plot surface for the requested pane, excluding
+      // both price scales and the time scale. Its coordinates are pane-local,
+      // so resolve the pane element's vertical offset for DOM overlays.
+      const pane = chart.paneSize(paneIndex);
+      const leftPriceScaleWidth = chart.priceScale("left", paneIndex).width();
+      const container = getRefValue(containerRef);
+      const paneElement = getSeries()?.getPane?.()?.getHTMLElement?.() ?? null;
+      const containerRect = container?.getBoundingClientRect?.() ?? null;
+      const paneRect = paneElement?.getBoundingClientRect?.() ?? null;
+      const paneOffsetY = containerRect && paneRect
+        ? paneRect.top - containerRect.top
+        : 0;
       if (!pane
         || !Number.isFinite(pane.width)
         || pane.width <= 0
         || !Number.isFinite(pane.height)
         || pane.height <= 0
         || !Number.isFinite(leftPriceScaleWidth)
-        || leftPriceScaleWidth < 0) return null;
+        || leftPriceScaleWidth < 0
+        || !Number.isFinite(paneOffsetY)
+        || paneOffsetY < 0) return null;
 
       return Object.freeze({
         x: leftPriceScaleWidth,
-        y: 0,
+        y: paneOffsetY,
         width: pane.width,
         height: pane.height,
         dpr: currentDevicePixelRatio(),

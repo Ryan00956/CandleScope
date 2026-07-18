@@ -160,3 +160,40 @@ test("chart range handlers separate indicator coverage from user persistence", (
   assert.deepEqual(indicatorRanges, [range]);
   assert.deepEqual(persistedRanges, [range]);
 });
+
+test("pane delete controls dispatch to the owning indicator or market study", () => {
+  const removed: string[] = [];
+  const model = buildChartWorkspaceViewModel(buildContext({
+    advancedMarketActions: {
+      removeMarketStudy: (id: string) => { removed.push(`market:${id}`); },
+    },
+    indicatorActions: {
+      removeIndicator: (id: string) => { removed.push(`indicator:${id}`); },
+    },
+  }));
+  const removePane = mustBeDefined(model.chart.chartProps.onRemoveSubPane);
+
+  removePane({
+    id: "separate-rsi",
+    label: "RSI",
+    lines: [],
+    owner: { kind: "indicator", id: "rsi" },
+  });
+  removePane({
+    id: "advanced-funding",
+    label: "资金费率 (%)",
+    lines: [],
+    owner: { kind: "market-study", id: "market:funding-rate" },
+  });
+  removePane({
+    id: "unknown",
+    label: "Unknown",
+    lines: [],
+    owner: { kind: "market-study", id: "not-a-market-study" },
+  });
+
+  assert.deepEqual(removed, [
+    "indicator:rsi",
+    "market:market:funding-rate",
+  ]);
+});

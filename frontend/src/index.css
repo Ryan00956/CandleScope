@@ -6655,12 +6655,12 @@ body {
 .synthetic-chart-notice {
   position: absolute;
   top: 8px;
-  right: 104px;
+  right: 232px;
   z-index: 12;
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: min(520px, calc(100% - 150px));
+  max-width: min(520px, calc(100% - 280px));
   padding: 5px 9px;
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: var(--radius-sm);
@@ -6722,13 +6722,116 @@ body {
   letter-spacing: 0.3px;
 }
 
+.indicator-pane-label {
+  max-width: calc(100% - 250px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* TradingView-style native pane controls. The bar is an overlay only; pane
+   geometry remains owned by Lightweight Charts and its stretch factors. */
+.pane-control-bar {
+  position: absolute;
+  top: 6px;
+  right: 86px;
+  z-index: 15;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 2px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 5px;
+  background: rgba(15, 23, 42, 0.74);
+  box-shadow: 0 2px 10px rgba(2, 6, 23, 0.22);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  opacity: 0.62;
+  pointer-events: auto;
+  transition: opacity 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.pane-control-bar:hover,
+.pane-control-bar:focus-within,
+.pane-control-bar[data-pane-collapsed='true'],
+.pane-control-bar[data-pane-maximized='true'] {
+  opacity: 1;
+  border-color: rgba(96, 165, 250, 0.34);
+}
+
+.pane-control-button {
+  appearance: none;
+  width: 24px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease, opacity 0.12s ease;
+}
+
+.pane-control-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.pane-control-button:hover:not(:disabled),
+.pane-control-button:focus-visible,
+.pane-control-button.active {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.pane-control-button:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent-blue);
+}
+
+.pane-control-button.active {
+  color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.14);
+}
+
+.pane-control-button.danger:hover:not(:disabled),
+.pane-control-button.danger:focus-visible {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.14);
+}
+
+.pane-control-button:disabled {
+  opacity: 0.24;
+  cursor: default;
+}
+
+[data-theme='light'] .pane-control-bar {
+  border-color: rgba(15, 23, 42, 0.13);
+  background: rgba(248, 250, 252, 0.82);
+  box-shadow: 0 2px 9px rgba(15, 23, 42, 0.12);
+}
+
+.advanced-market-pane-label[data-pane-collapsed='true'] .advanced-market-pane-value,
+.advanced-market-pane-label[data-pane-collapsed='true'] .advanced-market-pane-legend {
+  display: none;
+}
+
 .advanced-market-pane-label {
   border: 1px solid rgba(148, 163, 184, 0.16);
   color: var(--text-secondary);
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: calc(100% - 110px);
+  max-width: calc(100% - 250px);
   white-space: nowrap;
 }
 
@@ -6823,6 +6926,17 @@ body {
 
 [data-theme='light'] .chart-pane-label {
   background: rgba(248, 250, 252, 0.7);
+}
+
+@media (max-width: 900px) {
+  .pane-control-bar {
+    right: 72px;
+  }
+
+  .synthetic-chart-notice {
+    right: 212px;
+    max-width: calc(100% - 250px);
+  }
 }
 
 /* Cursor overlay for drawing tools on the main pane */

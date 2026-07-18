@@ -21,6 +21,10 @@ export interface IndicatorSubPane {
   id: string;
   label: string;
   lines: IndicatorLine[];
+  owner?: {
+    kind: "indicator" | "market-study";
+    id: string;
+  };
   dataMarketPane?: "funding-rate" | "open-interest";
   legendItems?: readonly IndicatorPaneLegendItem[];
   pointMetadata?: readonly IndicatorPanePointMetadata[];
@@ -55,6 +59,7 @@ export function buildIndicatorPaneData(
           id: paneId,
           label: indicator.name || indicator.id,
           lines: [],
+          owner: { kind: "indicator", id: indicator.id },
         });
       }
       paneMap.get(paneId)?.lines.push(lineWithId);

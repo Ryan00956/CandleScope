@@ -187,6 +187,51 @@ test("main-pane plot rect re-reads pane size, left scale width, and DPR after re
   }
 });
 
+test("main-pane plot rect follows a reordered main pane and reports its DOM offset", () => {
+  const paneIndexes: Array<number | undefined> = [];
+  const priceScaleRequests: Array<readonly [string, number | undefined]> = [];
+  const mainPaneIndexRef = { current: 2 };
+  const adapter = createLightweightChartAdapter({
+    chartRef: {
+      current: {
+        paneSize: (paneIndex?: number) => {
+          paneIndexes.push(paneIndex);
+          return { width: 900, height: 300 };
+        },
+        priceScale: (priceScaleId: string, paneIndex?: number) => {
+          priceScaleRequests.push([priceScaleId, paneIndex]);
+          return { width: () => 52 };
+        },
+      },
+    },
+    containerRef: {
+      current: {
+        getBoundingClientRect: () => ({ top: 100 }),
+      },
+    },
+    mainPaneIndexRef,
+    seriesRef: {
+      current: {
+        getPane: () => ({
+          getHTMLElement: () => ({
+            getBoundingClientRect: () => ({ top: 420 }),
+          }),
+        }),
+      },
+    },
+  });
+
+  assert.deepEqual(adapter.getMainPanePlotRect(), {
+    x: 52,
+    y: 320,
+    width: 900,
+    height: 300,
+    dpr: 1,
+  });
+  assert.deepEqual(paneIndexes, [2]);
+  assert.deepEqual(priceScaleRequests, [["left", 2]]);
+});
+
 test("main-pane plot rect fails closed for invalid public geometry without container fallback", () => {
   let pane: { width: number; height: number } | null = { width: 0, height: 320 };
   let leftPriceScaleWidth = 48;

@@ -1,6 +1,7 @@
 import type { PaneHeights } from "./chartSessionTypes.js";
 
 const PANE_HEIGHTS_KEY = "candlescope-pane-heights";
+const PANE_ORDER_KEY = "candlescope-pane-order-v1";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -39,4 +40,31 @@ export function loadPaneHeights(): PaneHeights {
 
 export function savePaneHeights(heights: unknown): void {
   localStorage.setItem(PANE_HEIGHTS_KEY, JSON.stringify(normalizePaneHeights(heights)));
+}
+
+function normalizePaneOrder(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const paneId of value.slice(0, 100)) {
+    if (typeof paneId !== "string" || paneId.length === 0 || paneId.length > 200 || seen.has(paneId)) {
+      continue;
+    }
+    seen.add(paneId);
+    normalized.push(paneId);
+  }
+  return normalized;
+}
+
+export function loadPaneOrder(): string[] {
+  try {
+    const raw = localStorage.getItem(PANE_ORDER_KEY);
+    return raw ? normalizePaneOrder(JSON.parse(raw)) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function savePaneOrder(order: unknown): void {
+  localStorage.setItem(PANE_ORDER_KEY, JSON.stringify(normalizePaneOrder(order)));
 }

@@ -75,8 +75,20 @@ import {
 } from "../chart-adapter/chartSeriesData";
 import { normalizeMainChartType } from "../shared/mainChartTypes";
 import { parseIntervalSeconds } from "../utils/intervals";
+import PaneControlBar from "./PaneControlBar";
+import {
+  buildPaneHeightPlan,
+  movePaneInOrder,
+  reconcilePaneOrder,
+} from "./paneControlModel";
 import { planVisibleRangeRestore } from "../features/chart-session/visibleRangeStorage";
-import { buildPaneConfigKey, loadPaneHeights, savePaneHeights } from "../features/chart-session/paneLayoutStorage";
+import {
+  buildPaneConfigKey,
+  loadPaneHeights,
+  loadPaneOrder,
+  savePaneHeights,
+  savePaneOrder,
+} from "../features/chart-session/paneLayoutStorage";
 import { createDrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex";
 import {
   buildVisibleRangeSnapshot,
@@ -234,6 +246,7 @@ export interface SingleChartPanesProps {
   indicatorHlines?: IndicatorHLine[];
   indicatorBgcolors?: IndicatorBgColor[];
   indicatorBarcolors?: IndicatorBarColor[];
+  onRemoveSubPane?: ((pane: IndicatorSubPane) => void) | null;
   invertScale?: boolean;
   onInvertScaleChange?: ((value: boolean) => void) | null;
   priceScaleMode?: number;
@@ -377,6 +390,7 @@ function resolvePaneHeightLayout(
   storageKey: string | null | undefined,
   subPaneCount: number,
   totalHeight: number,
+  mainPaneIndex = 0,
 ): number[] | null {
   const expectedPaneCount = Math.max(1, subPaneCount + 1);
   const saved = storageKey ? loadPaneHeights()[storageKey] : undefined;
@@ -389,17 +403,25 @@ function resolvePaneHeightLayout(
 
   const mainHeight = Math.max(180, Math.round(totalHeight * 0.65));
   const subHeight = Math.max(80, Math.round((totalHeight - mainHeight) / subPaneCount));
-  return [mainHeight, ...Array.from({ length: subPaneCount }, () => subHeight)];
+  const safeMainPaneIndex = Number.isInteger(mainPaneIndex)
+    ? Math.min(Math.max(mainPaneIndex, 0), expectedPaneCount - 1)
+    : 0;
+  return Array.from(
+    { length: expectedPaneCount },
+    (_unused, index) => index === safeMainPaneIndex ? mainHeight : subHeight,
+  );
 }
 
 function preparePaneLayout(chart: AdapterChart | null, {
   storageKey,
   subPaneCount,
   totalHeight,
+  mainPaneIndex = 0,
 }: {
   storageKey?: string | null;
   subPaneCount?: number;
   totalHeight?: number;
+  mainPaneIndex?: number;
 } = {}): boolean {
   const resolvedSubPaneCount = subPaneCount ?? -1;
   const resolvedTotalHeight = totalHeight ?? 0;
@@ -407,10 +429,72 @@ function preparePaneLayout(chart: AdapterChart | null, {
   for (let paneIndex = 1; paneIndex <= resolvedSubPaneCount; paneIndex += 1) {
     ensurePane(chart, paneIndex);
   }
-  const paneHeights = resolvePaneHeightLayout(storageKey, resolvedSubPaneCount, resolvedTotalHeight);
+  const paneHeights = resolvePaneHeightLayout(
+    storageKey,
+    resolvedSubPaneCount,
+    resolvedTotalHeight,
+    mainPaneIndex,
+  );
   if (!paneHeights) return resolvedSubPaneCount === 0;
   setPaneHeights(chart, paneHeights);
   return true;
+}
+
+function resolveMainPaneIndex(
+  chart: AdapterChart | null | undefined,
+  series: MainSeriesHandle | null | undefined,
+  fallback = 0,
+): number {
+  try {
+    const paneIndex = series?.getPane?.()?.paneIndex?.();
+    if (typeof paneIndex === "number"
+      && Number.isInteger(paneIndex)
+      && paneIndex >= 0
+      && paneIndex < (chart?.panes?.()?.length ?? 0)) {
+      return paneIndex;
+    }
+  } catch {
+    // Fall through to the last materialized index while panes are rebuilding.
+  }
+  return Number.isInteger(fallback) && fallback >= 0 ? fallback : 0;
+}
+
+function moveMainPane(
+  chart: AdapterChart | null | undefined,
+  series: MainSeriesHandle | null | undefined,
+  targetIndex: number,
+): number | null {
+  const panes = chart?.panes?.() || [];
+  if (!series || !Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= panes.length) {
+    return null;
+  }
+  const currentIndex = resolveMainPaneIndex(chart, series, 0);
+  if (currentIndex === targetIndex) return currentIndex;
+  try {
+    series.getPane().moveTo(targetIndex);
+    return resolveMainPaneIndex(chart, series, targetIndex);
+  } catch {
+    return null;
+  }
+}
+
+function reindexPanePlaceholderSeries(
+  placeholderStateRef: MutableRefObject<PanePlaceholderState>,
+): void {
+  const state = placeholderStateRef.current;
+  if (!state.chart || state.seriesByPane.size === 0) return;
+  const next = new Map<number, PanePlaceholderEntry>();
+  for (const [fallbackIndex, entry] of state.seriesByPane) {
+    let paneIndex = fallbackIndex;
+    try {
+      const resolved = entry.series.getPane?.()?.paneIndex?.();
+      if (Number.isInteger(resolved) && resolved >= 0) paneIndex = resolved;
+    } catch {
+      // Keep the last known key until LWC finishes the structural mutation.
+    }
+    next.set(paneIndex, entry);
+  }
+  state.seriesByPane = next;
 }
 
 function ensurePanePlaceholderSeries(
@@ -418,17 +502,20 @@ function ensurePanePlaceholderSeries(
   placeholderStateRef: MutableRefObject<PanePlaceholderState>,
   subPaneCount: number,
   anchorTime: AxisTime | null = null,
+  { mainPaneIndex = 0 }: { mainPaneIndex?: number } = {},
 ): void {
   if (!chart || !placeholderStateRef || !Number.isInteger(subPaneCount) || subPaneCount < 0) return;
   if (placeholderStateRef.current.chart !== chart) {
     placeholderStateRef.current = { chart, seriesByPane: new Map() };
   }
+  reindexPanePlaceholderSeries(placeholderStateRef);
   const seriesByPane = placeholderStateRef.current.seriesByPane;
   const baseAnchorKey = axisTimeKey(anchorTime);
   const anchorKey = baseAnchorKey && anchorTime && typeof anchorTime === "object"
     ? `${baseAnchorKey}:source:${anchorTime.sourceTime}:ordinal:${anchorTime.sourceOrdinal}`
     : baseAnchorKey;
-  for (let paneIndex = 1; paneIndex <= subPaneCount; paneIndex += 1) {
+  for (let paneIndex = 0; paneIndex <= subPaneCount; paneIndex += 1) {
+    if (paneIndex === mainPaneIndex) continue;
     ensurePane(chart, paneIndex);
     let entry = seriesByPane.get(paneIndex);
     if (!entry) {
@@ -456,6 +543,7 @@ function trimPanePlaceholderSeries(
   retainPaneCount: number,
 ): void {
   if (!chart || placeholderStateRef?.current?.chart !== chart) return;
+  reindexPanePlaceholderSeries(placeholderStateRef);
   for (const [paneIndex, entry] of placeholderStateRef.current.seriesByPane) {
     if (paneIndex < retainPaneCount) continue;
     try {
@@ -813,6 +901,7 @@ function clearAuxiliaryChartState({
 function buildPaneDescriptors({
   dataTimeSet,
   mainOverlayLines,
+  paneOrder,
   subPanes,
   indicatorMarkers,
   indicatorFills,
@@ -821,6 +910,7 @@ function buildPaneDescriptors({
 }: {
   dataTimeSet: ReadonlySet<number>;
   mainOverlayLines: IndicatorLine[];
+  paneOrder: readonly string[];
   subPanes: IndicatorSubPane[];
   indicatorMarkers: IndicatorMarker[];
   indicatorFills: IndicatorFill[];
@@ -828,7 +918,7 @@ function buildPaneDescriptors({
   indicatorBgcolors: IndicatorBgColor[];
 }): PaneDescriptor[] {
   const mainLines = alignIndicatorLinesToTimes(mainOverlayLines, dataTimeSet);
-  const descriptors = [{
+  const descriptors: PaneDescriptor[] = [{
     id: "main",
     paneIndex: 0,
     label: "",
@@ -853,7 +943,11 @@ function buildPaneDescriptors({
     });
   }
 
-  return descriptors;
+  const descriptorById = new Map(descriptors.map((descriptor) => [descriptor.id, descriptor]));
+  return paneOrder.flatMap((paneId, paneIndex) => {
+    const descriptor = descriptorById.get(paneId);
+    return descriptor ? [{ ...descriptor, paneIndex }] : [];
+  });
 }
 
 const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(function SingleChartPanes({
@@ -906,6 +1000,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   indicatorHlines = [],
   indicatorBgcolors = [],
   indicatorBarcolors = [],
+  onRemoveSubPane = null,
   invertScale = false,
   onInvertScaleChange,
   priceScaleMode = 0,
@@ -995,7 +1090,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const visibleRangeSaveTimerRef = useRef<TimerHandle | null>(null);
   const activeSubPaneCountRef = useRef(0);
   const activeSubPanesRef = useRef<IndicatorSubPane[]>(subPanes);
+  const activePaneIdsRef = useRef<string[]>(["main", ...subPanes.map((pane) => pane.id)]);
+  const materializedMainPaneIndexRef = useRef(0);
   const paneHeightStorageKeyRef = useRef<string | null>(null);
+  const expandedPaneHeightsRef = useRef<Map<string, number>>(new Map());
+  const paneLayoutControlledRef = useRef(false);
   const prevSubPaneScopeRef = useRef<{
     base: string | null;
     panes: Map<string, boolean>;
@@ -1161,6 +1260,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }> | null>(null);
   const [isAutoScale, setIsAutoScale] = useState(true);
   const [contextMenu, setContextMenu] = useState<PriceScaleContextMenuPosition | null>(null);
+  const [paneOrder, setPaneOrder] = useState<string[]>(() => {
+    const stored = loadPaneOrder();
+    return stored.includes("main") ? stored : ["main", ...stored];
+  });
+  const [collapsedPaneIds, setCollapsedPaneIds] = useState<string[]>([]);
+  const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null);
 
   const resolvedChartType = normalizeMainChartType(chartType);
   const resolvedDescriptor = getChartTypeDescriptor(resolvedChartType);
@@ -1254,6 +1359,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     () => createLightweightChartAdapter({
       chartRef,
       seriesRef: mainSeriesRef,
+      containerRef,
+      mainPaneIndexRef: materializedMainPaneIndexRef,
       seriesDataRef: displayRowsRef,
       seriesDataMapRef: displayRowMapRef,
       seriesDataIndexRef: displayRowIndexMapRef,
@@ -1283,7 +1390,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         if (!chart || !series || !container) return null;
         const rect = container?.getBoundingClientRect?.();
         const containerHeight = rect?.height ?? container.clientHeight ?? 0;
-        const paneSize = chart.paneSize?.(0);
+        const mainPaneIndex = resolveMainPaneIndex(
+          chart,
+          series,
+          materializedMainPaneIndexRef.current,
+        );
+        materializedMainPaneIndexRef.current = mainPaneIndex;
+        const paneSize = chart.paneSize?.(mainPaneIndex);
         const heightCssPx = typeof paneSize?.height === "number"
           && Number.isFinite(paneSize.height)
           && paneSize.height > 0
@@ -1426,10 +1539,26 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const renderDataTimeSet = usesDerivedAxis
     ? derivedAuxiliaryIndex.displayTimeSet
     : dataTimeSet;
+  useEffect(() => {
+    savePaneOrder(paneOrder);
+  }, [paneOrder]);
+  const activePaneIds = useMemo(
+    () => reconcilePaneOrder(paneOrder, ["main", ...subPanes.map((pane) => pane.id)]),
+    [paneOrder, subPanes],
+  );
+  const activeSubPanes = useMemo(() => {
+    const paneById = new Map(subPanes.map((pane) => [pane.id, pane]));
+    return activePaneIds
+      .flatMap((paneId) => {
+        const pane = paneById.get(paneId);
+        return pane ? [pane] : [];
+      });
+  }, [activePaneIds, subPanes]);
   const sourcePaneDescriptors = useMemo(() => buildPaneDescriptors({
     dataTimeSet,
     mainOverlayLines,
-    subPanes,
+    paneOrder: activePaneIds,
+    subPanes: activeSubPanes,
     indicatorMarkers,
     indicatorFills,
     indicatorHlines,
@@ -1437,7 +1566,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }), [
     dataTimeSet,
     mainOverlayLines,
-    subPanes,
+    activePaneIds,
+    activeSubPanes,
     indicatorMarkers,
     indicatorFills,
     indicatorHlines,
@@ -1450,14 +1580,38 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     },
     [derivedAuxiliaryIndex, sourcePaneDescriptors, usesDerivedAxis],
   );
-  const activeSubPanes = subPanes;
   const activeSubPaneCount = activeSubPanes.length;
   activeSubPaneCountRef.current = activeSubPanes.length;
   activeSubPanesRef.current = activeSubPanes;
+  activePaneIdsRef.current = activePaneIds;
   const subPaneIdsKey = useMemo(
     () => activeSubPanes.map((pane) => pane.id).join(","),
     [activeSubPanes],
   );
+  const activePaneIdsKey = useMemo(() => activePaneIds.join("\u0000"), [activePaneIds]);
+  const desiredMainPaneIndex = Math.max(0, activePaneIds.indexOf("main"));
+  useEffect(() => {
+    const activeIds = new Set(activePaneIds);
+    setCollapsedPaneIds((previous) => {
+      const next = previous.filter((paneId) => activeIds.has(paneId));
+      return next.length === previous.length ? previous : next;
+    });
+    setMaximizedPaneId((previous) => previous && !activeIds.has(previous) ? null : previous);
+  }, [activePaneIds, activePaneIdsKey]);
+  useLayoutEffect(() => {
+    const chart = chartRef.current;
+    const series = mainSeriesRef.current;
+    if (!chart || !series || (chart.panes?.()?.length ?? 0) < activePaneIds.length) return;
+    const previousIndex = resolveMainPaneIndex(chart, series, materializedMainPaneIndexRef.current);
+    const materializedIndex = moveMainPane(chart, series, desiredMainPaneIndex);
+    if (materializedIndex === null) return;
+    materializedMainPaneIndexRef.current = materializedIndex;
+    reindexPanePlaceholderSeries(panePlaceholderSeriesRef);
+    if (previousIndex !== materializedIndex) {
+      materializePaneLayout(chart, containerRef.current, { nudgeAxis: "height" });
+      chartAdapter.notifyDrawingFrameInvalidation();
+    }
+  }, [activePaneIds.length, activePaneIdsKey, chartAdapter, desiredMainPaneIndex, seriesReady]);
   const paneHeightStorageKey = useMemo(
     () => `${SINGLE_PANE_HEIGHT_KEY_PREFIX}${buildPaneConfigKey(activeSubPanes.map((pane) => pane.id))}`,
     [activeSubPanes],
@@ -1472,37 +1626,34 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         }]
       : []
   ));
-  const paneLabelStructureKey = paneLabelDescriptors
-    .map((pane) => `${pane.id}:${pane.marketPane}:${pane.label}`)
-    .join("|");
-
   useLayoutEffect(() => {
     const wrapper = wrapperRef.current;
     const chart = chartRef.current;
-    if (!wrapper || !chart || !paneLabelStructureKey) return undefined;
+    if (!wrapper || !chart || activePaneIds.length === 0) return undefined;
 
-    const syncLabels = () => {
-      const panes = activeSubPanesRef.current;
+    const syncOverlays = () => {
       const heights = readPaneHeights(chart);
-      if (heights.length !== panes.length + 1) return;
-      const labelsById = new Map(
-        Array.from(wrapper.querySelectorAll<HTMLElement>(".advanced-market-pane-label[data-pane-id]"))
-          .map((element) => [element.dataset.paneId || "", element]),
-      );
-      let paneTop = heights[0] || 0;
-      for (const [index, pane] of panes.entries()) {
-        if (pane.dataMarketPane) {
-          const element = labelsById.get(pane.id);
-          if (element) element.style.top = `${paneTop + 6}px`;
+      if (heights.length !== activePaneIds.length) return;
+      const overlaysById = new Map<string, HTMLElement[]>();
+      for (const element of wrapper.querySelectorAll<HTMLElement>(".pane-overlay-anchor[data-pane-id]")) {
+        const paneId = element.dataset.paneId || "";
+        const elements = overlaysById.get(paneId) || [];
+        elements.push(element);
+        overlaysById.set(paneId, elements);
+      }
+      let paneTop = 0;
+      for (const [index, paneId] of activePaneIds.entries()) {
+        for (const element of overlaysById.get(paneId) || []) {
+          element.style.top = `${paneTop + 6}px`;
         }
-        paneTop += heights[index + 1] || 0;
+        paneTop += heights[index] || 0;
       }
     };
 
     let trackingFrame: number | null = null;
     let settleFrame: number | null = null;
     const trackPaneResize = () => {
-      syncLabels();
+      syncOverlays();
       trackingFrame = requestAnimationFrame(trackPaneResize);
     };
     const startPaneResizeTracking = (event: PointerEvent) => {
@@ -1519,15 +1670,15 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         cancelAnimationFrame(trackingFrame);
         trackingFrame = null;
       }
-      syncLabels();
+      syncOverlays();
       if (settleFrame !== null) cancelAnimationFrame(settleFrame);
-      settleFrame = requestAnimationFrame(syncLabels);
+      settleFrame = requestAnimationFrame(syncOverlays);
     };
 
-    syncLabels();
-    const initialFrame = requestAnimationFrame(syncLabels);
+    syncOverlays();
+    const initialFrame = requestAnimationFrame(syncOverlays);
     const resizeObserver = typeof ResizeObserver === "function"
-      ? new ResizeObserver(syncLabels)
+      ? new ResizeObserver(syncOverlays)
       : null;
     resizeObserver?.observe(wrapper);
     for (const pane of chart.panes?.() || []) {
@@ -1538,7 +1689,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     window.addEventListener("pointerup", stopPaneResizeTracking);
     window.addEventListener("pointercancel", stopPaneResizeTracking);
     window.addEventListener("blur", stopPaneResizeTracking);
-    window.addEventListener("resize", syncLabels);
+    window.addEventListener("resize", syncOverlays);
     return () => {
       cancelAnimationFrame(initialFrame);
       if (trackingFrame !== null) cancelAnimationFrame(trackingFrame);
@@ -1548,16 +1699,23 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       window.removeEventListener("pointerup", stopPaneResizeTracking);
       window.removeEventListener("pointercancel", stopPaneResizeTracking);
       window.removeEventListener("blur", stopPaneResizeTracking);
-      window.removeEventListener("resize", syncLabels);
+      window.removeEventListener("resize", syncOverlays);
     };
-  }, [paneLabelStructureKey, seriesReady, subPaneIdsKey]);
+  }, [activePaneIds, activePaneIdsKey, seriesReady, subPaneIdsKey]);
 
   const saveCurrentPaneHeights = useCallback((
     chart = chartRef.current,
     storageKey = paneHeightStorageKeyRef.current,
   ) => {
+    if (paneLayoutControlledRef.current) return false;
     const heights = readPaneHeights(chart);
     if (!storageKey || heights.length <= 1) return false;
+    const paneIds = activePaneIdsRef.current;
+    if (paneIds.length === heights.length) {
+      expandedPaneHeightsRef.current = new Map(
+        paneIds.map((paneId, index) => [paneId, heights[index] || 0]),
+      );
+    }
     try {
       const saved = loadPaneHeights();
       saved[storageKey] = heights;
@@ -1701,11 +1859,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       initialSubPaneCount,
       placeholderAnchorTime,
     );
-    preparePaneLayout(chart, {
-      storageKey: initialPaneHeightStorageKey,
-      subPaneCount: initialSubPaneCount,
-      totalHeight,
-    });
     setAuxiliaryDisplayState(initialDescriptor.axisMode === "derived-ordinal"
       ? {
           datasetKey: datasetKeyRef.current,
@@ -1721,7 +1874,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       paneIndex: 0,
     });
     const futureTimeAxisSeries = createFutureTimeAxisSeries(chart, { paneIndex: 0 });
-    if (initialSubPaneCount > 0) materializePaneLayout(chart, container);
     chartRef.current = chart;
     activeSurfaceOwnerRef.current = {
       chart,
@@ -1747,6 +1899,22 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       series: mainSeries,
       signature: JSON.stringify(buildMainSeriesReferenceOptions(initialChartType, initialRows)),
     };
+    const initialTargetMainPaneIndex = Math.max(0, activePaneIdsRef.current.indexOf("main"));
+    materializedMainPaneIndexRef.current = moveMainPane(
+      chart,
+      mainSeries,
+      initialTargetMainPaneIndex,
+    ) ?? 0;
+    reindexPanePlaceholderSeries(panePlaceholderSeriesRef);
+    preparePaneLayout(chart, {
+      storageKey: initialPaneHeightStorageKey,
+      subPaneCount: initialSubPaneCount,
+      totalHeight,
+      mainPaneIndex: materializedMainPaneIndexRef.current,
+    });
+    if (initialSubPaneCount > 0 || materializedMainPaneIndexRef.current !== 0) {
+      materializePaneLayout(chart, container, { nudgeAxis: "height" });
+    }
     if (pendingSurfaceViewportRef.current && displayRowsRef.current.length > 0) {
       isRestoringViewportRef.current = true;
       try {
@@ -1879,6 +2047,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         surfaceConfigKey: null,
       };
       mainSeriesRef.current = null;
+      materializedMainPaneIndexRef.current = 0;
       futureTimeAxisSeriesRef.current = null;
       futureTimeAxisDataRef.current = [];
       futureTimeAxisPlanKeyRef.current = null;
@@ -1979,9 +2148,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       markUserInteracted();
     };
     const markMousePointerActive = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest(".pane-control-bar")) return;
       beginPointerGesture("mouse", event.clientX, event.clientY, null, event.button === 0);
     };
     const markTouchPointerActive = (event: TouchEvent) => {
+      if (event.target instanceof Element && event.target.closest(".pane-control-bar")) return;
       const touch = event.touches.length === 1 ? event.touches[0] : null;
       beginPointerGesture(
         "touch",
@@ -2188,7 +2359,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       const rect = container.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
-      if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+      const plotRect = chartAdapter.getMainPanePlotRect?.() ?? null;
+      if (!plotRect
+        || x < plotRect.x
+        || y < plotRect.y
+        || x > plotRect.x + plotRect.width
+        || y > plotRect.y + plotRect.height) {
         overlay.style.display = "none";
         return;
       }
@@ -2208,7 +2384,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       container.removeEventListener("pointerenter", updateCursor);
       container.removeEventListener("pointerleave", hideCursor);
     };
-  }, [cursorOverlayClass]);
+  }, [chartAdapter, cursorOverlayClass]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -2269,13 +2445,22 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         data: rows,
         downColor,
         indicatorBarColorMap,
-        paneIndex: 0,
+        paneIndex: resolveMainPaneIndex(
+          chart,
+          previousSeries,
+          materializedMainPaneIndexRef.current,
+        ),
         previousSeriesData: renderedMainSeriesDataRef.current,
         seriesData: nextSeriesData,
         upColor,
       });
 
       mainSeriesRef.current = result.series;
+      materializedMainPaneIndexRef.current = resolveMainPaneIndex(
+        chart,
+        result.series,
+        materializedMainPaneIndexRef.current,
+      );
       mainSeriesTypeRef.current = result.chartType;
       mainSeriesReplaced = true;
       chartAdapter.notifyDrawingFrameInvalidation();
@@ -2306,6 +2491,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         panePlaceholderSeriesRef,
         activeSubPaneCountRef.current,
         displayRowsRef.current.at(-1)?.time ?? null,
+        { mainPaneIndex: materializedMainPaneIndexRef.current },
       );
       setAuxiliaryDisplayState(nextDescriptor.axisMode === "derived-ordinal"
         ? {
@@ -2353,7 +2539,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    chart.priceScale("right", 0).applyOptions({
+    const mainPaneIndex = resolveMainPaneIndex(
+      chart,
+      mainSeriesRef.current,
+      materializedMainPaneIndexRef.current,
+    );
+    materializedMainPaneIndexRef.current = mainPaneIndex;
+    chart.priceScale("right", mainPaneIndex).applyOptions({
       invertScale: !!invertScale,
       mode: priceScaleMode ?? 0,
     });
@@ -2362,7 +2554,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   const resetAutoScale = useCallback(() => {
     try {
-      chartRef.current?.priceScale("right", 0).applyOptions({ autoScale: true });
+      const chart = chartRef.current;
+      const mainPaneIndex = resolveMainPaneIndex(
+        chart,
+        mainSeriesRef.current,
+        materializedMainPaneIndexRef.current,
+      );
+      materializedMainPaneIndexRef.current = mainPaneIndex;
+      chart?.priceScale("right", mainPaneIndex).applyOptions({ autoScale: true });
       chartAdapter.notifyDrawingFrameInvalidation();
       setIsAutoScale(true);
     } catch { /* */ }
@@ -2372,6 +2571,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const rect = containerRef.current?.getBoundingClientRect?.();
     if (!rect) return;
     if (event.clientX < rect.right - PRICE_SCALE_CONTEXT_HIT_WIDTH) return;
+    const plotRect = chartAdapter.getMainPanePlotRect?.() ?? null;
+    const localY = event.clientY - rect.top;
+    if (plotRect && (localY < plotRect.y || localY > plotRect.y + plotRect.height)) return;
     event.preventDefault();
     event.stopPropagation();
     const margin = PRICE_SCALE_CONTEXT_MENU_MARGIN;
@@ -2381,7 +2583,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       x: Math.min(Math.max(event.clientX, rect.left + margin), maxX),
       y: Math.min(Math.max(event.clientY, rect.top + margin), maxY),
     });
-  }, []);
+  }, [chartAdapter]);
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -2429,11 +2631,24 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     });
     const wrapper = wrapperRef.current;
     const totalHeight = wrapper?.getBoundingClientRect?.().height || wrapper?.clientHeight || 0;
-    ensurePanePlaceholderSeries(chart, panePlaceholderSeriesRef, subPaneCount);
+    const mainPaneIndex = resolveMainPaneIndex(
+      chart,
+      mainSeriesRef.current,
+      materializedMainPaneIndexRef.current,
+    );
+    materializedMainPaneIndexRef.current = mainPaneIndex;
+    ensurePanePlaceholderSeries(
+      chart,
+      panePlaceholderSeriesRef,
+      subPaneCount,
+      null,
+      { mainPaneIndex },
+    );
     preparePaneLayout(chart, {
       storageKey: paneHeightStorageKeyRef.current,
       subPaneCount,
       totalHeight,
+      mainPaneIndex,
     });
     if (subPaneCount > 0) {
       materializeRuntimePaneLayout(chart, containerRef.current);
@@ -2577,6 +2792,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         panePlaceholderSeriesRef,
         activeSubPaneCountRef.current,
         displayRows.at(-1)?.time ?? null,
+        { mainPaneIndex: materializedMainPaneIndexRef.current },
       );
       if (getChartTypeDescriptor(activeChartType).axisMode === "derived-ordinal"
         && previousDisplayRows !== displayRows) {
@@ -2709,6 +2925,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           panePlaceholderSeriesRef,
           activeSubPaneCountRef.current,
           displayRows.at(-1)?.time ?? null,
+          { mainPaneIndex: materializedMainPaneIndexRef.current },
         );
         if (getChartTypeDescriptor(currentChartType).axisMode === "derived-ordinal"
           && previousDisplayRows !== displayRows) {
@@ -2774,12 +2991,25 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const paneCountBefore = chart.panes?.()?.length ?? 1;
     const paneStructureChanged = paneCountBefore !== expectedPaneCount;
 
+    const currentMainPaneIndex = resolveMainPaneIndex(
+      chart,
+      mainSeriesRef.current,
+      materializedMainPaneIndexRef.current,
+    );
     ensurePanePlaceholderSeries(
       chart,
       panePlaceholderSeriesRef,
       expectedPaneCount - 1,
       displayRowsRef.current.at(-1)?.time ?? null,
+      { mainPaneIndex: currentMainPaneIndex },
     );
+    const nextMainPaneIndex = moveMainPane(
+      chart,
+      mainSeriesRef.current,
+      desiredMainPaneIndex,
+    );
+    materializedMainPaneIndexRef.current = nextMainPaneIndex ?? currentMainPaneIndex;
+    reindexPanePlaceholderSeries(panePlaceholderSeriesRef);
 
     const structuralKey = paneDescriptors
       .flatMap((pane) => (pane.lines || []).map((line) => [
@@ -2913,6 +3143,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         storageKey: paneHeightStorageKeyRef.current,
         subPaneCount: expectedPaneCount - 1,
         totalHeight,
+        mainPaneIndex: materializedMainPaneIndexRef.current,
       });
       materializeRuntimePaneLayout(chart, containerRef.current);
     }
@@ -2924,7 +3155,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     })) {
       setSeriesReady((prev) => prev + 1);
     }
-  }, [datasetKey, drawingEngineToolActive, indicatorDatasetOwned, interval, materializeRuntimePaneLayout, paneDescriptors, renderDataTimeSet, seriesReady, showCrosshairDetails, usesDerivedAxis]);
+  }, [datasetKey, desiredMainPaneIndex, drawingEngineToolActive, indicatorDatasetOwned, interval, materializeRuntimePaneLayout, paneDescriptors, renderDataTimeSet, seriesReady, showCrosshairDetails, usesDerivedAxis]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -2941,6 +3172,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       paneHeightStorageKey,
       activeSubPaneCount,
       totalHeight,
+      materializedMainPaneIndexRef.current,
     );
     if (paneHeights) setPaneHeights(chart, paneHeights);
   }, [activeSubPaneCount, paneDescriptors.length, paneHeightStorageKey, seriesReady, subPaneIdsKey]);
@@ -2959,6 +3191,101 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       paneHeightStorageKey,
     };
   }, [activeSubPanes.length, paneDescriptors.length, paneHeightStorageKey, seriesReady]);
+
+  const captureExpandedPaneHeights = useCallback(() => {
+    const heights = readPaneHeights(chartRef.current);
+    if (heights.length !== activePaneIds.length) return false;
+    expandedPaneHeightsRef.current = new Map(
+      activePaneIds.map((paneId, index) => [paneId, heights[index] || 0]),
+    );
+    return true;
+  }, [activePaneIds]);
+
+  const handleMovePane = useCallback((paneId: string, direction: "up" | "down") => {
+    const incomingIds = ["main", ...subPanes.map((pane) => pane.id)];
+    setPaneOrder((previous) => movePaneInOrder(
+      reconcilePaneOrder(previous, incomingIds),
+      paneId,
+      direction,
+    ));
+  }, [subPanes]);
+
+  const handleTogglePaneCollapse = useCallback((paneId: string) => {
+    const alreadyCollapsed = collapsedPaneIds.includes(paneId);
+    if (!alreadyCollapsed && activePaneIds.length - collapsedPaneIds.length <= 1) return;
+    if (!paneLayoutControlledRef.current) captureExpandedPaneHeights();
+    setMaximizedPaneId(null);
+    setCollapsedPaneIds((previous) => alreadyCollapsed
+      ? previous.filter((candidate) => candidate !== paneId)
+      : [...previous, paneId]);
+  }, [activePaneIds.length, captureExpandedPaneHeights, collapsedPaneIds]);
+
+  const handleTogglePaneMaximize = useCallback((paneId: string) => {
+    if (activePaneIds.length <= 1) return;
+    if (maximizedPaneId !== paneId && !paneLayoutControlledRef.current) {
+      captureExpandedPaneHeights();
+    }
+    setMaximizedPaneId((previous) => previous === paneId ? null : paneId);
+  }, [activePaneIds.length, captureExpandedPaneHeights, maximizedPaneId]);
+
+  const handleDeletePane = useCallback((pane: IndicatorSubPane) => {
+    if (!pane.owner || !onRemoveSubPane) return;
+    setPaneOrder((previous) => previous.filter((paneId) => paneId !== pane.id));
+    setCollapsedPaneIds((previous) => previous.filter((paneId) => paneId !== pane.id));
+    setMaximizedPaneId((previous) => previous === pane.id ? null : previous);
+    onRemoveSubPane(pane);
+  }, [onRemoveSubPane]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const panes = chart?.panes?.() || [];
+    if (!chart
+      || panes.length !== activePaneIds.length
+      || paneDescriptors.length !== activePaneIds.length) {
+      return;
+    }
+    const currentHeights = readPaneHeights(chart);
+    if (currentHeights.length !== activePaneIds.length) return;
+    const controlled = collapsedPaneIds.length > 0 || maximizedPaneId !== null;
+
+    if (!controlled) {
+      if (!paneLayoutControlledRef.current) return;
+      const restoredHeights = activePaneIds.map((paneId, index) => (
+        expandedPaneHeightsRef.current.get(paneId) ?? currentHeights[index] ?? 0
+      ));
+      setPaneHeights(chart, restoredHeights);
+      paneLayoutControlledRef.current = false;
+      chartAdapter.notifyDrawingFrameInvalidation();
+      return;
+    }
+
+    if (!paneLayoutControlledRef.current) captureExpandedPaneHeights();
+    const heightPlan = buildPaneHeightPlan({
+      paneIds: activePaneIds,
+      currentHeights,
+      expandedHeights: expandedPaneHeightsRef.current,
+      collapsedPaneIds,
+      maximizedPaneId,
+    });
+    if (!heightPlan) return;
+    setPaneHeights(chart, heightPlan);
+    paneLayoutControlledRef.current = true;
+    chartAdapter.notifyDrawingFrameInvalidation();
+    recordPerfEvent("chart.paneControls.layout", {
+      collapsedPaneIds,
+      maximizedPaneId,
+      paneIds: activePaneIds,
+    });
+  }, [
+    activePaneIds,
+    activePaneIdsKey,
+    captureExpandedPaneHeights,
+    chartAdapter,
+    collapsedPaneIds,
+    maximizedPaneId,
+    paneDescriptors.length,
+    seriesReady,
+  ]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -3147,18 +3474,35 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     getExportSnapshot: () => {
       const rootElement = wrapperRef.current;
       const rootRect = rootElement?.getBoundingClientRect?.() || null;
-      const panes = chartRef.current?.panes?.() || [];
-      const mainPaneHeight = panes[0]?.getHeight?.();
+      const chart = chartRef.current;
+      const panes = chart?.panes?.() || [];
+      const mainPaneIndex = resolveMainPaneIndex(
+        chart,
+        mainSeriesRef.current,
+        materializedMainPaneIndexRef.current,
+      );
+      materializedMainPaneIndexRef.current = mainPaneIndex;
+      const mainPaneHeight = panes[mainPaneIndex]?.getHeight?.();
+      const containerRect = containerRef.current?.getBoundingClientRect?.() || null;
+      const mainPlotRect = chartAdapter.getMainPanePlotRect?.() ?? null;
+      const fallbackPaneY = panes
+        .slice(0, mainPaneIndex)
+        .reduce((total, pane) => total + (pane.getHeight?.() || 0), 0);
+      const mainPaneY = rootRect && containerRect && mainPlotRect
+        ? containerRect.top - rootRect.top + mainPlotRect.y
+        : fallbackPaneY;
       const captureRect = panes.length > 1
         && rootRect
         && typeof mainPaneHeight === "number"
         && Number.isFinite(mainPaneHeight)
         && mainPaneHeight > 0
+        && Number.isFinite(mainPaneY)
+        && mainPaneY >= 0
         ? {
             x: 0,
-            y: 0,
+            y: mainPaneY,
             width: rootRect.width,
-            height: Math.min(rootRect.height, mainPaneHeight),
+            height: Math.min(rootRect.height - mainPaneY, mainPaneHeight),
           }
         : null;
       return {
@@ -3179,6 +3523,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     seriesReady,
   }), [
     captureVisibleRange,
+    chartAdapter,
     clearAllDrawings,
     loading,
     paneDescriptors,
@@ -3201,6 +3546,17 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         style={{ cursor: cursorStyleForDrawingTool(effectiveDrawingTool) }}
       />
 
+      {activeSubPanes.filter((pane) => !pane.dataMarketPane).map((pane) => (
+        <div
+          key={`label-${pane.id}`}
+          className="chart-pane-label indicator-pane-label pane-overlay-anchor"
+          data-pane-id={pane.id}
+          data-pane-collapsed={collapsedPaneIds.includes(pane.id) ? "true" : "false"}
+        >
+          {pane.label}
+        </div>
+      ))}
+
       {paneLabelDescriptors.map((descriptor) => {
         const pane = activeSubPanes.find((candidate) => candidate.id === descriptor.id);
         const exactPoint = paneCrosshairTime === null
@@ -3210,9 +3566,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         return (
           <div
             key={descriptor.id}
-            className="chart-pane-label advanced-market-pane-label"
+            className="chart-pane-label advanced-market-pane-label pane-overlay-anchor"
             data-market-pane={descriptor.marketPane}
             data-pane-id={descriptor.id}
+            data-pane-collapsed={collapsedPaneIds.includes(descriptor.id) ? "true" : "false"}
             role="group"
             aria-label={displayPoint?.accessibilityLabel ?? descriptor.label}
           >
@@ -3245,6 +3602,32 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         );
       })}
 
+      {activePaneIds.map((paneId) => {
+        const pane = paneId === "main"
+          ? null
+          : activeSubPanes.find((candidate) => candidate.id === paneId) || null;
+        const panePosition = activePaneIds.indexOf(paneId);
+        const collapsed = collapsedPaneIds.includes(paneId);
+        return (
+          <PaneControlBar
+            key={`controls-${paneId}`}
+            paneId={paneId}
+            paneLabel={pane?.label || `${symbol} 主图`}
+            canMoveUp={panePosition > 0}
+            canMoveDown={panePosition >= 0 && panePosition < activePaneIds.length - 1}
+            canCollapse={collapsed || activePaneIds.length - collapsedPaneIds.length > 1}
+            canMaximize={activePaneIds.length > 1}
+            canDelete={Boolean(pane?.owner && onRemoveSubPane)}
+            collapsed={collapsed}
+            maximized={maximizedPaneId === paneId}
+            onMove={(direction) => handleMovePane(paneId, direction)}
+            onToggleCollapse={() => handleTogglePaneCollapse(paneId)}
+            onToggleMaximize={() => handleTogglePaneMaximize(paneId)}
+            onDelete={() => { if (pane) handleDeletePane(pane); }}
+          />
+        );
+      })}
+
       {cursorOverlayClass && (
         <div className="chart-pane-cursor-overlay" aria-hidden="true">
           <div
@@ -3272,11 +3655,18 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           <button
             type="button"
             className={`price-scale-menu-item${isAutoScale ? " active" : ""}`}
-            onClick={() => {
-              const next = !isAutoScale;
-              try {
-                chartRef.current?.priceScale("right", 0).applyOptions({ autoScale: next });
-                chartAdapter.notifyDrawingFrameInvalidation();
+             onClick={() => {
+               const next = !isAutoScale;
+               try {
+                 const chart = chartRef.current;
+                 const mainPaneIndex = resolveMainPaneIndex(
+                   chart,
+                   mainSeriesRef.current,
+                   materializedMainPaneIndexRef.current,
+                 );
+                 materializedMainPaneIndexRef.current = mainPaneIndex;
+                 chart?.priceScale("right", mainPaneIndex).applyOptions({ autoScale: next });
+                 chartAdapter.notifyDrawingFrameInvalidation();
               } catch { /* */ }
               setIsAutoScale(next);
               setContextMenu(null);

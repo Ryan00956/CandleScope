@@ -6801,36 +6801,6 @@ body {
   opacity: 0.66;
 }
 
-.advanced-market-pane-tooltip {
-  position: absolute;
-  top: calc(100% + 5px);
-  left: 0;
-  display: none;
-  min-width: 230px;
-  max-width: min(480px, calc(100vw - 160px));
-  padding: 7px 9px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: var(--radius-sm);
-  background: rgba(15, 23, 42, 0.94);
-  box-shadow: 0 8px 24px rgba(2, 6, 23, 0.28);
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 1.5;
-  white-space: normal;
-}
-
-.advanced-market-pane-label.crosshair-active .advanced-market-pane-tooltip {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 2px 12px;
-}
-
-[data-theme='light'] .advanced-market-pane-tooltip {
-  background: rgba(248, 250, 252, 0.97);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
-}
-
 @media (max-width: 1500px) {
   .advanced-market-chip-suffix {
     display: none;

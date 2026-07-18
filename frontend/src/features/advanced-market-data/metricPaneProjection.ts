@@ -212,7 +212,6 @@ function fundingPointMetadata(
     sourceLabel,
     qualityLabel,
     appearance: fundingAppearance(record, carried, stale),
-    details,
     accessibilityLabel: `资金费率 ${valueLabel}，${details.join("，")}`,
   };
 }

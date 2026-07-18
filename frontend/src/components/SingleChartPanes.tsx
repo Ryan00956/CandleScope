@@ -3160,7 +3160,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         return (
           <div
             key={position.id}
-            className={`chart-pane-label advanced-market-pane-label${exactPoint ? " crosshair-active" : ""}`}
+            className="chart-pane-label advanced-market-pane-label"
             data-market-pane={position.marketPane}
             data-pane-id={position.id}
             role="group"
@@ -3190,11 +3190,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
                     <span>{item.label}</span>
                   </span>
                 ))}
-              </span>
-            )}
-            {exactPoint && (
-              <span className="advanced-market-pane-tooltip" aria-hidden="true">
-                {exactPoint.details.map((detail) => <span key={detail}>{detail}</span>)}
               </span>
             )}
           </div>

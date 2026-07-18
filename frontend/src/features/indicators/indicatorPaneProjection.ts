@@ -14,7 +14,6 @@ export interface IndicatorPanePointMetadata {
   sourceLabel: string;
   qualityLabel: string;
   appearance: IndicatorPaneLegendItem["appearance"];
-  details: readonly string[];
   accessibilityLabel: string;
 }
 

@@ -8,7 +8,7 @@ base-bar prefix and never fabricates missing BAR-source intervals.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
 from typing import Iterable, Mapping
@@ -34,6 +34,8 @@ BAR_BUILDER_WARMUP_SCHEMA_VERSION = "replay-bar-builder-warmup.v1"
 
 BAR_GAP_POLICY = "reject"
 BAR_SYNTHETIC_POLICY = "reject"
+TRADE_SYNTHETIC_POLICY = "previous_close_zero_volume"
+AGG_TRADE_SYNTHETIC_SOURCE = "agg_trade_synthetic"
 
 _DAY_MS = 86_400_000
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -362,6 +364,7 @@ class ReplayBarBuilder:
         replay_start_ms: int,
         warmup_bars: Iterable[ReplayBar] = (),
         max_closed_bars: int = 2_048,
+        synthetic_policy: str = BAR_SYNTHETIC_POLICY,
     ) -> None:
         self._capability = assess_bar_builder_capability(
             base_interval,
@@ -373,6 +376,18 @@ class ReplayBarBuilder:
                 "base/display interval pair cannot be reconstructed exactly",
                 details={"reason": self._capability.reason},
             )
+        if synthetic_policy not in {
+            BAR_SYNTHETIC_POLICY,
+            TRADE_SYNTHETIC_POLICY,
+        }:
+            raise ValueError("synthetic_policy is unsupported")
+        self._gap_policy = BAR_GAP_POLICY
+        self._synthetic_policy = synthetic_policy
+        self._capability = replace(
+            self._capability,
+            gap_policy=self._gap_policy,
+            synthetic_policy=self._synthetic_policy,
+        )
         self._base_interval = base_interval
         self._display_interval = display_interval
         self._base_interval_ms = int(self._capability.base_interval_ms or 0)
@@ -473,8 +488,8 @@ class ReplayBarBuilder:
             "closed_count": self._closed_count,
             "closed_prefix_count": self._closed_prefix_count,
             "replay_events_applied": self._replay_events_applied,
-            "gap_policy": BAR_GAP_POLICY,
-            "synthetic_policy": BAR_SYNTHETIC_POLICY,
+            "gap_policy": self._gap_policy,
+            "synthetic_policy": self._synthetic_policy,
         }
 
     def rebuild_for_display_interval(
@@ -489,6 +504,7 @@ class ReplayBarBuilder:
             replay_start_ms=self._replay_start_ms,
             warmup_bars=self._warmup_bars,
             max_closed_bars=self._max_closed_bars,
+            synthetic_policy=self._synthetic_policy,
         )
         for bar in revealed:
             rebuilt.apply_bar(bar)
@@ -581,7 +597,7 @@ class ReplayBarBuilder:
                 component_count=1,
                 expected_components=expected_components,
                 is_closed=False,
-                synthetic=False,
+                synthetic=bool(normalized["synthetic"]),
             )
             action = BarProjectionAction.APPEND
         else:
@@ -634,6 +650,8 @@ class ReplayBarBuilder:
             bar=candidate,
             source_sequence=self._replay_events_applied,
             base_open_time_ms=bar.open_time_ms,
+            gap_policy=self._gap_policy,
+            synthetic_policy=self._synthetic_policy,
         )
 
     def _validate_base_bar(
@@ -641,7 +659,7 @@ class ReplayBarBuilder:
         bar: ReplayBar,
         *,
         warmup: bool,
-    ) -> dict[str, str | int | None]:
+    ) -> dict[str, str | int | bool | None]:
         if not isinstance(bar, ReplayBar):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_INCOMPLETE,
@@ -768,6 +786,26 @@ class ReplayBarBuilder:
                 ReplayErrorCode.DATASET_INCOMPLETE,
                 "base bar source must be a non-empty string",
             )
+        synthetic = bar.source == AGG_TRADE_SYNTHETIC_SOURCE
+        if synthetic and self._synthetic_policy == BAR_SYNTHETIC_POLICY:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "BAR-source builder cannot consume synthetic base bars",
+            )
+        if synthetic and (
+            normalized_open != normalized_high
+            or normalized_open != normalized_low
+            or normalized_open != normalized_close
+            or normalized_volume != "0"
+            or normalized_quote not in {None, "0"}
+            or normalized_trades not in {None, 0}
+            or normalized_taker_base not in {None, "0"}
+            or normalized_taker_quote not in {None, "0"}
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "synthetic base bar must be previous-close and zero-volume",
+            )
         return {
             "open": normalized_open,
             "high": normalized_high,
@@ -778,13 +816,14 @@ class ReplayBarBuilder:
             "trades": normalized_trades,
             "taker_buy_base": normalized_taker_base,
             "taker_buy_quote": normalized_taker_quote,
+            "synthetic": synthetic,
         }
 
     def _accumulate(
         self,
         active: ReplayDisplayBar,
         bar: ReplayBar,
-        normalized: Mapping[str, str | int | None],
+        normalized: Mapping[str, str | int | bool | None],
     ) -> ReplayDisplayBar:
         high = _normalized_max(active.high, _required_string(normalized["high"]))
         low = _normalized_min(active.low, _required_string(normalized["low"]))
@@ -824,7 +863,7 @@ class ReplayBarBuilder:
             component_count=active.component_count + 1,
             expected_components=active.expected_components,
             is_closed=False,
-            synthetic=False,
+            synthetic=active.synthetic and bool(normalized["synthetic"]),
         )
 
     def _append_closed(self, bar: ReplayDisplayBar) -> None:
@@ -990,8 +1029,8 @@ class ReplayBarBuilder:
             "max_closed_bars": self._max_closed_bars,
             "warmup_count": len(self._warmup_bars),
             "warmup_fingerprint": self._warmup_fingerprint,
-            "gap_policy": BAR_GAP_POLICY,
-            "synthetic_policy": BAR_SYNTHETIC_POLICY,
+            "gap_policy": self._gap_policy,
+            "synthetic_policy": self._synthetic_policy,
             "replay_events_applied": self._replay_events_applied,
             "last_base_open_ms": self._last_base_open_ms,
             "active_bar": (
@@ -1063,8 +1102,8 @@ class ReplayBarBuilder:
             "max_closed_bars": self._max_closed_bars,
             "warmup_count": len(self._warmup_bars),
             "warmup_fingerprint": self._warmup_fingerprint,
-            "gap_policy": BAR_GAP_POLICY,
-            "synthetic_policy": BAR_SYNTHETIC_POLICY,
+            "gap_policy": self._gap_policy,
+            "synthetic_policy": self._synthetic_policy,
         }
         for field_name, expected_value in expected_config.items():
             if state[field_name] != expected_value:
@@ -1214,7 +1253,7 @@ class ReplayBarBuilder:
         *,
         expected_closed: bool,
     ) -> None:
-        if bar.synthetic:
+        if bar.synthetic and self._synthetic_policy == BAR_SYNTHETIC_POLICY:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
                 "BAR-source builder state cannot contain synthetic bars",

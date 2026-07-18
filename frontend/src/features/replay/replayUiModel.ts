@@ -2,11 +2,14 @@ import type {
   ReplayCapabilities,
   ReplayCatalog,
   ReplayCatalogEntry,
+  ReplayExecutionFidelity,
   ReplaySessionConfig,
+  ReplaySourceKind,
 } from "./replayTypes.js";
 import type { ReplayStoreSnapshot } from "./replayStore.js";
 
 export interface ReplaySessionDraft {
+  readonly sourceKind: ReplaySourceKind;
   readonly catalogIdentity: string;
   readonly displayInterval: string;
   readonly startPolicy: "random_eligible" | "manual";
@@ -27,7 +30,7 @@ export interface ReplaySessionDraftEvaluation {
   readonly baseInterval: string | null;
   readonly availableDisplayIntervals: readonly string[];
   readonly dataFidelity: string;
-  readonly executionFidelity: "BAR_CONSERVATIVE";
+  readonly executionFidelity: ReplayExecutionFidelity;
   readonly canSubmit: boolean;
   readonly disabledReason: string | null;
 }
@@ -66,6 +69,7 @@ export function createReplaySessionDraft(catalog: ReplayCatalog | null): ReplayS
   const entry = catalog?.entries[0] ?? null;
   const baseInterval = entry?.selected_base_interval ?? entry?.base_intervals[0] ?? "1m";
   return {
+    sourceKind: "bar",
     catalogIdentity: entry ? replayCatalogIdentity(entry) : "",
     displayInterval: baseInterval === "1m" ? "5m" : baseInterval,
     startPolicy: "random_eligible",
@@ -98,11 +102,13 @@ export function evaluateReplaySessionDraft(
   const entry = catalog?.entries.find((candidate) => replayCatalogIdentity(candidate) === draft.catalogIdentity) ?? null;
   const baseInterval = entry?.selected_base_interval ?? entry?.base_intervals[0] ?? null;
   const availableDisplayIntervals = replayDisplayIntervals(baseInterval);
-  const barCapability = capabilities?.sources.bar;
+  const sourceCapability = capabilities?.sources[draft.sourceKind];
   let disabledReason: string | null = null;
   if (!capabilities?.enabled || !capabilities.available) disabledReason = capabilities?.reason ?? "Replay capability unavailable";
-  else if (!barCapability?.enabled) disabledReason = barCapability?.reason ?? "BAR replay unavailable";
-  else if (!entry) disabledReason = "No eligible exact BAR dataset is available";
+  else if (!sourceCapability?.enabled) {
+    disabledReason = sourceCapability?.reason
+      ?? (draft.sourceKind === "agg_trade" ? "Aggregate-trade replay unavailable" : "BAR replay unavailable");
+  } else if (!entry) disabledReason = "No eligible exact reference BAR dataset is available";
   else if (!baseInterval) disabledReason = "The selected dataset has no resolved base interval";
   else if (!availableDisplayIntervals.includes(draft.displayInterval)) disabledReason = "Display interval cannot be aggregated from the resolved base interval";
   else if (entry.eligible_window_count < 1) disabledReason = "No eligible replay window matches the current bounds";
@@ -111,8 +117,10 @@ export function evaluateReplaySessionDraft(
     entry,
     baseInterval,
     availableDisplayIntervals,
-    dataFidelity: barCapability?.fidelity ?? entry?.quality ?? "UNAVAILABLE",
-    executionFidelity: "BAR_CONSERVATIVE",
+    dataFidelity: sourceCapability?.fidelity
+      ?? (draft.sourceKind === "bar" ? entry?.quality : null)
+      ?? "UNAVAILABLE",
+    executionFidelity: draft.sourceKind === "agg_trade" ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE",
     canSubmit: disabledReason === null,
     disabledReason,
   };
@@ -128,7 +136,7 @@ export function buildReplaySessionConfig(
   const identity = evaluation.entry.identity;
   return {
     protocol: "replay.v1",
-    source_kind: "bar",
+    source_kind: draft.sourceKind,
     exchange: identity.exchange,
     market_type: identity.market_type,
     symbol: identity.symbol,

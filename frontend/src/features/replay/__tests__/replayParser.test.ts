@@ -16,11 +16,16 @@ import {
 import {
   BASE_TIME_MS,
   disabledCapabilities,
+  enabledAggTradeCapabilities,
   enabledCapabilities,
+  replayBar,
   replayDigest,
   replayReport,
   replaySessionResponse,
   replaySnapshotEvent,
+  replaySourceTrade,
+  replayTradeDeltaEvent,
+  replayTradeSessionResponse,
 } from "./fixtures.js";
 
 test("unknown-first parser accepts enabled and disabled capability variants", () => {
@@ -29,6 +34,58 @@ test("unknown-first parser accepts enabled and disabled capability variants", ()
   assert.equal(enabled.sources.bar.fidelity, "EXACT_BAR_COVERAGE");
   assert.equal(disabled.reason, "REPLAY_DISABLED");
   assert.equal(disabled.persistence.opened, false);
+});
+
+test("aggregate-trade capability, snapshot, source event and batched bars cross the strict boundary", () => {
+  const capabilities = parseReplayCapabilities(enabledAggTradeCapabilities());
+  assert.deepEqual(capabilities.sources.agg_trade, {
+    enabled: true,
+    fidelity: "EXACT_AGG_TRADE_COVERAGE",
+    execution_fidelity: "AGG_TRADE_TAPE",
+    requires_exact_dataset: true,
+    reader: "paged",
+  });
+
+  const response = parseReplaySessionResponse(replayTradeSessionResponse());
+  assert.equal(response.data_fidelity, "EXACT_AGG_TRADE_COVERAGE");
+  assert.equal(response.execution_fidelity, "AGG_TRADE_TAPE");
+  assert.equal(response.snapshot.config.source_kind, "agg_trade");
+  assert.ok("public_projection" in response.snapshot.components.bar_builder);
+
+  const event = structuredClone(replayTradeDeltaEvent());
+  event.data.projection.bar_update = {
+    action: "batch",
+    updates: [
+      event.data.projection.bar_update,
+      {
+        action: "append",
+        bar: {
+          ...replayBar(BASE_TIME_MS + 60_000, "101"),
+          is_closed: false,
+        },
+        source_sequence: 2,
+        base_open_time_ms: BASE_TIME_MS + 60_000,
+        gap_policy: "reject",
+        synthetic_policy: "previous_close_zero_volume",
+      },
+    ],
+  };
+  const parsed = parseReplayEvent(event);
+  assert.equal(parsed.type, "replay.delta");
+  assert.ok("source_event" in parsed.data && "trade_time_ms" in parsed.data.source_event);
+  assert.ok("projection" in parsed.data && parsed.data.projection.bar_update?.action === "batch");
+});
+
+test("aggregate-trade blind payloads reject archive paths and unrevealed actual times", () => {
+  const leakedPath = structuredClone(replayTradeDeltaEvent());
+  Object.assign(leakedPath.data.source_event, {
+    object_id: "date=2026-06-01/part-000.parquet",
+  });
+  assert.throws(() => parseReplayEvent(leakedPath), /unknown field/);
+
+  const future = structuredClone(replayTradeDeltaEvent());
+  future.data.source_event = replaySourceTrade(future.virtual_time_ms + 1, 101);
+  assert.throws(() => parseReplayEvent(future), /unrevealed source event/);
 });
 
 test("session and atomic snapshot parsers bind protocol, session, counters, hashes, and epoch", () => {

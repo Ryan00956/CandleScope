@@ -30,6 +30,8 @@ export default function ReplaySessionDialog({ runtime }: ReplaySessionDialogProp
     setDraft((current) => ({ ...(current ?? createReplaySessionDraft(runtime.catalog)), [key]: value }));
   };
   const busy = runtime.operation === "catalog" || runtime.operation === "create";
+  const sourceCapability = runtime.capabilities?.sources[draft.sourceKind];
+  const sourceLabel = draft.sourceKind === "agg_trade" ? "AGG_TRADE" : "BAR";
 
   return (
     <main className="replay-config-page" data-replay-state="configuring">
@@ -53,11 +55,25 @@ export default function ReplaySessionDialog({ runtime }: ReplaySessionDialogProp
         <div className="replay-form-grid">
           <label>
             数据源
-            <select value="bar" disabled aria-describedby="replay-source-help">
-              <option value="bar">BAR</option>
-              <option value="agg_trade" disabled>AGG_TRADE（archive 未启用）</option>
+            <select
+              data-replay-field="source-kind"
+              value={draft.sourceKind}
+              disabled={busy}
+              aria-describedby="replay-source-help"
+              onChange={(event) => update("sourceKind", event.target.value as ReplaySessionDraft["sourceKind"])}
+            >
+              <option value="bar" disabled={runtime.capabilities?.sources.bar.enabled === false}>BAR</option>
+              <option value="agg_trade" disabled={runtime.capabilities?.sources.agg_trade.enabled !== true}>
+                AGG_TRADE{runtime.capabilities?.sources.agg_trade.enabled === false
+                  ? `（${runtime.capabilities.sources.agg_trade.reason ?? "不可用"}）`
+                  : ""}
+              </option>
             </select>
-            <small id="replay-source-help">Phase 7 仅开放本地连续覆盖的 BAR。</small>
+            <small id="replay-source-help">
+              {sourceCapability?.enabled
+                ? `${sourceLabel} 已通过能力门，创建时仍会冻结并复核所选窗口。`
+                : sourceCapability?.reason ?? "等待服务端能力确认。"}
+            </small>
           </label>
 
           <label>
@@ -159,8 +175,10 @@ export default function ReplaySessionDialog({ runtime }: ReplaySessionDialogProp
 
         <div className="replay-fidelity-summary" id="replay-session-summary" data-replay-fidelity={evaluation.dataFidelity}>
           <strong>训练保真度</strong>
-          <span>BAR · {evaluation.dataFidelity} · {evaluation.executionFidelity}</span>
-          <span>无历史 L2；同一 BAR 内多路径触发按最不利、保守路径处理。</span>
+          <span>{sourceLabel} · {evaluation.dataFidelity} · {evaluation.executionFidelity}</span>
+          <span>{draft.sourceKind === "agg_trade"
+            ? "逐笔 tape 按可用成交量部分成交，限价单要求严格穿价；不模拟历史 L2 队列位置。"
+            : "无历史 L2；同一 BAR 内多路径触发按最不利、保守路径处理。"}</span>
         </div>
 
         <button

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from app.core.config import REPLAY_SETTINGS, ReplaySettings
+from app.data_engine.storage.raw_trade_archive import RawAggTradeArchive
 
 from .service import ReplayService
 from .storage import ReplaySQLiteStore
@@ -50,6 +51,7 @@ async def start_replay_runtime(
     *,
     store_factory: Callable[[str], ReplaySQLiteStore] | None = None,
     service_factory: Callable[..., ReplayService] = ReplayService,
+    raw_trade_archive: RawAggTradeArchive | None = None,
 ) -> ReplayRuntime:
     """Start replay only when enabled; disabled mode has no DB or task side effect."""
 
@@ -61,7 +63,13 @@ async def start_replay_runtime(
     store: ReplaySQLiteStore | None = None
     try:
         store = await asyncio.to_thread(factory, str(settings.db_path))
-        service = service_factory(settings=settings, store=store)
+        service_kwargs: dict[str, object] = {
+            "settings": settings,
+            "store": store,
+        }
+        if raw_trade_archive is not None:
+            service_kwargs["raw_trade_archive"] = raw_trade_archive
+        service = service_factory(**service_kwargs)
         await service.start()
     except asyncio.CancelledError:
         if store is not None:

@@ -46,6 +46,27 @@ export function replaySourceBar(openTimeMs = BASE_TIME_MS, close = "100") {
   };
 }
 
+export function replaySourceTrade(
+  tradeTimeMs = BASE_TIME_MS + 60_500,
+  aggTradeId = 100,
+  price = "101",
+) {
+  return {
+    exchange: "binance",
+    market_type: "usd_m_futures",
+    symbol: "BTCUSDT",
+    agg_trade_id: aggTradeId,
+    first_trade_id: aggTradeId * 2,
+    last_trade_id: aggTradeId * 2,
+    price,
+    quantity: "0.5",
+    quote_quantity: String(Number(price) * 0.5),
+    trade_time_ms: tradeTimeMs,
+    is_buyer_maker: false,
+    source: "binance_public",
+  };
+}
+
 export function replayConfig() {
   return {
     protocol: REPLAY_PROTOCOL,
@@ -264,7 +285,100 @@ export function replaySessionResponse(options: Parameters<typeof replaySnapshot>
   return {
     protocol: REPLAY_PROTOCOL,
     session_id: snapshot.session_id,
+    data_fidelity: "EXACT_BAR_COVERAGE",
+    execution_fidelity: "BAR_CONSERVATIVE",
     snapshot,
+  };
+}
+
+export function replayTradeSessionResponse() {
+  const response = replaySessionResponse({
+    sourceSequence: 1,
+    virtualTimeMs: BASE_TIME_MS + 60_500,
+  });
+  const snapshot = response.snapshot;
+  const nestedBuilder = snapshot.components.bar_builder;
+  const forming = {
+    open_time_ms: BASE_TIME_MS + 60_000,
+    close_time_ms: BASE_TIME_MS + 119_999,
+    open: "101",
+    high: "101",
+    low: "101",
+    close: "101",
+    volume: "0.5",
+    quote_volume: "50.5",
+    trades: 1,
+    taker_buy_base: "0.5",
+    taker_buy_quote: "50.5",
+  };
+  const preview = {
+    ...replayBar(BASE_TIME_MS + 60_000, "101"),
+    open: "101",
+    high: "101",
+    low: "101",
+    volume: "0.5",
+    quote_volume: "50.5",
+    trades: 1,
+    taker_buy_base: "0.5",
+    taker_buy_quote: "50.5",
+    is_closed: false,
+  };
+  return {
+    ...response,
+    data_fidelity: "EXACT_AGG_TRADE_COVERAGE",
+    execution_fidelity: "AGG_TRADE_TAPE",
+    snapshot: {
+      ...snapshot,
+      cursor: {
+        ...snapshot.cursor,
+        last_base_bar_open_ms: null,
+        last_trade_time_ms: BASE_TIME_MS + 60_500,
+        last_agg_trade_id: 100,
+      },
+      config: {
+        ...snapshot.config,
+        source_kind: "agg_trade",
+        market_type: "usd_m_futures",
+      },
+      components: {
+        ...snapshot.components,
+        model_version: "AGG_TRADE_TAPE_V1",
+        bar_builder: {
+          schema_version: "replay-trade-bar-builder-state.v1",
+          base_interval: "1m",
+          display_interval: "1m",
+          replay_start_ms: BASE_TIME_MS + 60_000,
+          replay_end_time_ms: BASE_TIME_MS + 3_659_999,
+          max_closed_bars: 20_000,
+          synthetic_policy: "previous_close_zero_volume",
+          bar_builder: {
+            ...nestedBuilder,
+            synthetic_policy: "previous_close_zero_volume",
+            replay_events_applied: 0,
+          },
+          public_projection: {
+            action: "replace",
+            bars: [replayBar(), preview],
+            closed_count: 1,
+            closed_prefix_count: 0,
+            replay_events_applied: 1,
+            gap_policy: "reject",
+            synthetic_policy: "previous_close_zero_volume",
+            source_kind: "AGG_TRADE",
+          },
+          forming,
+          next_base_open_ms: BASE_TIME_MS + 60_000,
+          replay_events_applied: 1,
+          last_trade_time_ms: BASE_TIME_MS + 60_500,
+          last_agg_trade_id: 100,
+          identity: ["binance", "usd_m_futures", "BTCUSDT"],
+          previous_close: "100",
+          last_projected_open_ms: BASE_TIME_MS + 60_000,
+          finalized: false,
+          state_hash: replayDigest("8"),
+        },
+      },
+    },
   };
 }
 
@@ -325,6 +439,54 @@ export function replayDeltaEvent({
       source_sequence: sourceSequence,
       source_event: replaySourceBar(openTimeMs, close),
       projection,
+    },
+  };
+}
+
+export function replayTradeDeltaEvent({
+  sequence = 1,
+  sourceSequence = sequence + 1,
+  tradeTimeMs = BASE_TIME_MS + 60_500 + sequence,
+}: {
+  sequence?: number;
+  sourceSequence?: number;
+  tradeTimeMs?: number;
+} = {}) {
+  const price = `101.${String(sequence).padStart(3, "0")}`.replace(/0+$/, "").replace(/\.$/, "");
+  const preview = {
+    ...replayBar(BASE_TIME_MS + 60_000, price),
+    open: "101",
+    high: price,
+    low: "101",
+    volume: "0.5",
+    quote_volume: "50.5",
+    trades: 1,
+    taker_buy_base: "0.5",
+    taker_buy_quote: "50.5",
+    is_closed: false,
+  };
+  return {
+    type: "replay.delta",
+    protocol: REPLAY_PROTOCOL,
+    session_id: "session-0001",
+    sequence,
+    revision: 0,
+    virtual_time_ms: tradeTimeMs,
+    state_hash: replayDigest("4"),
+    data_epoch: replayDigest("c"),
+    data: {
+      source_sequence: sourceSequence,
+      source_event: replaySourceTrade(tradeTimeMs, 99 + sourceSequence, price),
+      projection: replayProjection({
+        barUpdate: {
+          action: "tick",
+          bar: preview,
+          source_sequence: sourceSequence,
+          base_open_time_ms: BASE_TIME_MS + 60_000,
+          gap_policy: "reject",
+          synthetic_policy: "previous_close_zero_volume",
+        },
+      }),
     },
   };
 }
@@ -390,6 +552,23 @@ export function enabledCapabilities() {
       schema_version: 1,
       degraded: false,
       degraded_reason: null,
+    },
+  };
+}
+
+export function enabledAggTradeCapabilities() {
+  const capabilities = enabledCapabilities();
+  return {
+    ...capabilities,
+    sources: {
+      ...capabilities.sources,
+      agg_trade: {
+        enabled: true,
+        fidelity: "EXACT_AGG_TRADE_COVERAGE",
+        execution_fidelity: "AGG_TRADE_TAPE",
+        requires_exact_dataset: true,
+        reader: "paged",
+      },
     },
   };
 }

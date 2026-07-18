@@ -11,7 +11,14 @@ import {
   replayCatalogIdentity,
 } from "../replayUiModel.js";
 import { buildReplaySmaLine } from "../useReplayIndicatorRuntime.js";
-import { BASE_TIME_MS, enabledCapabilities, replayDigest, replayReport, replaySessionResponse } from "./fixtures.js";
+import {
+  BASE_TIME_MS,
+  enabledAggTradeCapabilities,
+  enabledCapabilities,
+  replayDigest,
+  replayReport,
+  replaySessionResponse,
+} from "./fixtures.js";
 import type { EpochSeconds, KlineBar } from "../../market-data/marketDataTypes.js";
 
 function catalog() {
@@ -49,6 +56,30 @@ test("session dialog model is capability-driven and emits an immutable exact BAR
   assert.equal(config.execution_model, "paper_linear_v1");
   assert.equal(config.initial_equity, "10000");
   assert.equal(config.requested_start_ms, null);
+});
+
+test("session dialog emits aggregate-trade config only behind the exact archive capability", () => {
+  const parsedCatalog = catalog();
+  const draft = { ...createReplaySessionDraft(parsedCatalog), sourceKind: "agg_trade" as const };
+  const unavailable = evaluateReplaySessionDraft(
+    draft,
+    parseReplayCapabilities(enabledCapabilities()),
+    parsedCatalog,
+  );
+  assert.equal(unavailable.canSubmit, false);
+  assert.equal(unavailable.disabledReason, "ARCHIVE_DISABLED");
+
+  const evaluation = evaluateReplaySessionDraft(
+    draft,
+    parseReplayCapabilities(enabledAggTradeCapabilities()),
+    parsedCatalog,
+  );
+  assert.equal(evaluation.canSubmit, true);
+  assert.equal(evaluation.dataFidelity, "EXACT_AGG_TRADE_COVERAGE");
+  assert.equal(evaluation.executionFidelity, "AGG_TRADE_TAPE");
+  const config = buildReplaySessionConfig(draft, evaluation);
+  assert.equal(config.source_kind, "agg_trade");
+  assert.equal(config.quality_mode, "exact");
 });
 
 test("blind public time is synthetic D+N and never renders a calendar date", () => {

@@ -15,6 +15,7 @@ export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
   const [positionDisposition, setPositionDisposition] = useState<"keep" | "mark_close">("keep");
   const store = runtime.store;
   const config = store.sessionConfig;
+  const tradeTape = config?.source_kind === "agg_trade";
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
   const pending = runtime.pendingCommand?.type ?? null;
   const disabled = pending !== null || store.connectionState !== "connected" || !ownsController;
@@ -89,10 +90,10 @@ export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
           <span>{progress === null ? "进度未知" : `${(progress * 100).toFixed(1)}%`}</span>
         </div>
         <div className="replay-fidelity-chips">
-          <span>BAR_{config?.base_interval.toUpperCase() ?? "--"}</span>
+          <span>{tradeTape ? "AGG_TRADE" : `BAR_${config?.base_interval.toUpperCase() ?? "--"}`}</span>
           <span>PAPER_LINEAR_V1</span>
-          <span>EXACT</span>
-          <span>BAR_CONSERVATIVE</span>
+          <span>{tradeTape ? "EXACT_AGG_TRADE" : "EXACT_BAR"}</span>
+          <span>{tradeTape ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE"}</span>
         </div>
       </div>
 

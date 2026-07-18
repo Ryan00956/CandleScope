@@ -12,6 +12,14 @@ class SourceCursor:
     last_event_time_ms: int | None
     last_base_bar_open_ms: int | None
     at_end: bool
+    last_trade_time_ms: int | None = None
+    last_agg_trade_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.last_trade_time_ms is None) != (self.last_agg_trade_id is None):
+            raise ValueError(
+                "last_trade_time_ms and last_agg_trade_id must be present together"
+            )
 
 
 @runtime_checkable

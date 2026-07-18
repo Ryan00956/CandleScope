@@ -9,7 +9,12 @@ import {
   replayDisplayBarToKline,
   replaceReplaySeriesFromSnapshot,
 } from "../replaySeriesProjection.js";
-import { BASE_TIME_MS, replayBar, replaySessionResponse } from "./fixtures.js";
+import {
+  BASE_TIME_MS,
+  replayBar,
+  replaySessionResponse,
+  replayTradeSessionResponse,
+} from "./fixtures.js";
 
 test("atomic snapshot maps to one SeriesWindowStore replace", () => {
   const snapshot = parseReplaySessionResponse(replaySessionResponse()).snapshot;
@@ -51,6 +56,42 @@ test("append and tick use existing delta hot paths without copying the full seri
   }, BASE_TIME_MS + 119_999);
   assert.equal(tick.type, "tick");
   assert.strictEqual(store.snapshot(), stableSnapshot);
+  assert.equal(store.last()?.close, 102);
+});
+
+test("aggregate-trade public snapshot and batched updates reuse the same series store", () => {
+  const tradeSnapshot = parseReplaySessionResponse(replayTradeSessionResponse()).snapshot;
+  const tradeStore = new SeriesWindowStore();
+  replaceReplaySeriesFromSnapshot(tradeStore, tradeSnapshot);
+  assert.equal(tradeStore.barCount, 2);
+  assert.equal(tradeStore.last()?.replayClosed, false);
+
+  const barSnapshot = parseReplaySessionResponse(replaySessionResponse()).snapshot;
+  const store = new SeriesWindowStore();
+  replaceReplaySeriesFromSnapshot(store, barSnapshot);
+  const result = applyReplayBarUpdate(store, {
+    action: "batch",
+    updates: [
+      {
+        action: "append",
+        bar: parseReplayDisplayBar(replayBar(BASE_TIME_MS + 60_000, "101")),
+        source_sequence: 1,
+        base_open_time_ms: BASE_TIME_MS + 60_000,
+        gap_policy: "reject",
+        synthetic_policy: "previous_close_zero_volume",
+      },
+      {
+        action: "tick",
+        bar: parseReplayDisplayBar(replayBar(BASE_TIME_MS + 60_000, "102")),
+        source_sequence: 1,
+        base_open_time_ms: BASE_TIME_MS + 60_000,
+        gap_policy: "reject",
+        synthetic_policy: "previous_close_zero_volume",
+      },
+    ],
+  }, BASE_TIME_MS + 119_999);
+  assert.equal(result.type, "tick");
+  assert.equal(store.barCount, 2);
   assert.equal(store.last()?.close, 102);
 });
 

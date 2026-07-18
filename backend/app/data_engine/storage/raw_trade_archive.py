@@ -9,14 +9,15 @@ batches, and sends all Parquet I/O to the shared storage executor.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, runtime_checkable
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -40,6 +41,344 @@ RAW_AGG_TRADE_COLUMNS = (
     "is_buyer_maker",
     "source",
 )
+
+REPLAY_TRADE_DATASET_SCHEMA_VERSION = "raw-agg-trade-replay.v1"
+VERIFIED_IMPORT_SCHEMA_VERSION = "binance-public-agg-trade.v1"
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class RawAggTradeCursor:
+    """Stable exclusive replay position inside an aggregate-trade archive."""
+
+    trade_time_ms: int
+    agg_trade_id: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "trade_time_ms",
+            _non_negative_int(self.trade_time_ms, "trade_time_ms"),
+        )
+        object.__setattr__(
+            self,
+            "agg_trade_id",
+            _non_negative_int(self.agg_trade_id, "agg_trade_id"),
+        )
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "trade_time_ms": self.trade_time_ms,
+            "agg_trade_id": self.agg_trade_id,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "RawAggTradeCursor":
+        if set(payload) != {"trade_time_ms", "agg_trade_id"}:
+            raise ValueError("raw aggTrade cursor fields are incompatible")
+        return cls(
+            trade_time_ms=payload["trade_time_ms"],  # type: ignore[arg-type]
+            agg_trade_id=payload["agg_trade_id"],  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RawAggTradeObjectManifest:
+    """Content-addressed immutable Parquet object used by one replay epoch."""
+
+    object_id: str
+    parquet_sha256: str
+    manifest_sha256: str
+    row_count: int
+    min_agg_trade_id: int
+    max_agg_trade_id: int
+    min_trade_time_ms: int
+    max_trade_time_ms: int
+    first_trade_time_ms: int
+    first_agg_trade_id: int
+    source_quality: str
+    source_checksum_sha256: str | None
+
+    def __post_init__(self) -> None:
+        object_id = str(self.object_id)
+        if (
+            not object_id
+            or "\\" in object_id
+            or object_id.startswith("/")
+            or any(part in {"", ".", ".."} for part in object_id.split("/"))
+        ):
+            raise ValueError("raw aggTrade object_id must be a safe relative path")
+        object.__setattr__(self, "object_id", object_id)
+        for field_name in ("parquet_sha256", "manifest_sha256"):
+            object.__setattr__(
+                self,
+                field_name,
+                _sha256_digest(getattr(self, field_name), field_name),
+            )
+        for field_name in (
+            "row_count",
+            "min_agg_trade_id",
+            "max_agg_trade_id",
+            "min_trade_time_ms",
+            "max_trade_time_ms",
+            "first_trade_time_ms",
+            "first_agg_trade_id",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_negative_int(getattr(self, field_name), field_name),
+            )
+        if self.row_count == 0:
+            raise ValueError("raw aggTrade object row_count must be positive")
+        if self.min_agg_trade_id > self.max_agg_trade_id:
+            raise ValueError("raw aggTrade object ID bounds are inverted")
+        if self.min_trade_time_ms > self.max_trade_time_ms:
+            raise ValueError("raw aggTrade object time bounds are inverted")
+        quality = str(self.source_quality).strip()
+        if quality not in {"binance_public_checksum", "live_best_effort"}:
+            raise ValueError("raw aggTrade source_quality is unsupported")
+        object.__setattr__(self, "source_quality", quality)
+        if self.source_checksum_sha256 is not None:
+            object.__setattr__(
+                self,
+                "source_checksum_sha256",
+                _sha256_digest(
+                    self.source_checksum_sha256,
+                    "source_checksum_sha256",
+                ),
+            )
+
+    @property
+    def first_order_key(self) -> tuple[int, int]:
+        return (self.first_trade_time_ms, self.first_agg_trade_id)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "object_id": self.object_id,
+            "parquet_sha256": self.parquet_sha256,
+            "manifest_sha256": self.manifest_sha256,
+            "row_count": self.row_count,
+            "min_agg_trade_id": self.min_agg_trade_id,
+            "max_agg_trade_id": self.max_agg_trade_id,
+            "min_trade_time_ms": self.min_trade_time_ms,
+            "max_trade_time_ms": self.max_trade_time_ms,
+            "first_trade_time_ms": self.first_trade_time_ms,
+            "first_agg_trade_id": self.first_agg_trade_id,
+            "source_quality": self.source_quality,
+            "source_checksum_sha256": self.source_checksum_sha256,
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, object],
+    ) -> "RawAggTradeObjectManifest":
+        expected = {
+            "object_id",
+            "parquet_sha256",
+            "manifest_sha256",
+            "row_count",
+            "min_agg_trade_id",
+            "max_agg_trade_id",
+            "min_trade_time_ms",
+            "max_trade_time_ms",
+            "first_trade_time_ms",
+            "first_agg_trade_id",
+            "source_quality",
+            "source_checksum_sha256",
+        }
+        if set(payload) != expected:
+            raise ValueError("raw aggTrade object manifest fields are incompatible")
+        return cls(**payload)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class RawAggTradeDatasetRef:
+    """Immutable, checksum-bound archive generation pinned by a replay session."""
+
+    schema_version: str
+    data_epoch: str
+    exchange: str
+    market_type: str
+    symbol: str
+    start_time_ms: int
+    end_time_ms: int
+    expected_first_agg_trade_id: int
+    expected_last_agg_trade_id: int
+    row_count: int
+    objects: tuple[RawAggTradeObjectManifest, ...]
+    completeness: str = "exact"
+    source_quality: str = "binance_public_checksum"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != REPLAY_TRADE_DATASET_SCHEMA_VERSION:
+            raise ValueError("raw aggTrade replay dataset schema is incompatible")
+        object.__setattr__(
+            self,
+            "data_epoch",
+            _prefixed_sha256_digest(self.data_epoch, "data_epoch"),
+        )
+        object.__setattr__(self, "exchange", _identity(self.exchange, "exchange", lower=True))
+        object.__setattr__(
+            self,
+            "market_type",
+            _identity(self.market_type, "market_type", lower=True),
+        )
+        object.__setattr__(self, "symbol", _identity(self.symbol, "symbol", upper=True))
+        for field_name in (
+            "start_time_ms",
+            "end_time_ms",
+            "expected_first_agg_trade_id",
+            "expected_last_agg_trade_id",
+            "row_count",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_negative_int(getattr(self, field_name), field_name),
+            )
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("raw aggTrade replay time bounds are inverted")
+        if self.expected_first_agg_trade_id > self.expected_last_agg_trade_id:
+            raise ValueError("raw aggTrade replay ID bounds are inverted")
+        if self.row_count != (
+            self.expected_last_agg_trade_id - self.expected_first_agg_trade_id + 1
+        ):
+            raise ValueError("exact raw aggTrade row count must equal its ID span")
+        objects = tuple(self.objects)
+        if not objects or any(
+            not isinstance(item, RawAggTradeObjectManifest) for item in objects
+        ):
+            raise ValueError("raw aggTrade replay dataset requires object manifests")
+        if any(
+            item.source_quality != "binance_public_checksum"
+            or item.source_checksum_sha256 is None
+            for item in objects
+        ):
+            raise ValueError(
+                "raw aggTrade replay dataset contains an unverified object"
+            )
+        object.__setattr__(self, "objects", objects)
+        if self.completeness != "exact":
+            raise ValueError("raw aggTrade replay dataset must be exact")
+        if self.source_quality != "binance_public_checksum":
+            raise ValueError("raw aggTrade replay dataset source quality is not exact")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "data_epoch": self.data_epoch,
+            "exchange": self.exchange,
+            "market_type": self.market_type,
+            "symbol": self.symbol,
+            "start_time_ms": self.start_time_ms,
+            "end_time_ms": self.end_time_ms,
+            "expected_first_agg_trade_id": self.expected_first_agg_trade_id,
+            "expected_last_agg_trade_id": self.expected_last_agg_trade_id,
+            "row_count": self.row_count,
+            "objects": [item.to_dict() for item in self.objects],
+            "completeness": self.completeness,
+            "source_quality": self.source_quality,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "RawAggTradeDatasetRef":
+        expected = {
+            "schema_version",
+            "data_epoch",
+            "exchange",
+            "market_type",
+            "symbol",
+            "start_time_ms",
+            "end_time_ms",
+            "expected_first_agg_trade_id",
+            "expected_last_agg_trade_id",
+            "row_count",
+            "objects",
+            "completeness",
+            "source_quality",
+        }
+        if set(payload) != expected or not isinstance(payload["objects"], list):
+            raise ValueError("raw aggTrade replay dataset fields are incompatible")
+        values = dict(payload)
+        values["objects"] = tuple(
+            RawAggTradeObjectManifest.from_dict(item)
+            for item in payload["objects"]
+            if isinstance(item, Mapping)
+        )
+        if len(values["objects"]) != len(payload["objects"]):
+            raise ValueError("raw aggTrade replay dataset contains invalid objects")
+        return cls(**values)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class RawAggTradePage:
+    rows: tuple[dict[str, Any], ...]
+    next_cursor: RawAggTradeCursor | None
+    exhausted: bool
+    data_epoch: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedRawAggTradeDay:
+    """Validated official-source provenance supplied to the archive writer."""
+
+    exchange: str
+    market_type: str
+    symbol: str
+    date: str
+    source_url: str
+    source_file: str
+    source_checksum_sha256: str
+    row_count: int
+    first_agg_trade_id: int
+    last_agg_trade_id: int
+    first_trade_time_ms: int
+    last_trade_time_ms: int
+    schema_version: str = VERIFIED_IMPORT_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != VERIFIED_IMPORT_SCHEMA_VERSION:
+            raise ValueError("verified aggTrade import schema is incompatible")
+        object.__setattr__(self, "exchange", _identity(self.exchange, "exchange", lower=True))
+        object.__setattr__(
+            self,
+            "market_type",
+            _identity(self.market_type, "market_type", lower=True),
+        )
+        object.__setattr__(self, "symbol", _identity(self.symbol, "symbol", upper=True))
+        _validate_utc_date(self.date)
+        object.__setattr__(
+            self,
+            "source_checksum_sha256",
+            _sha256_digest(self.source_checksum_sha256, "source_checksum_sha256"),
+        )
+        for field_name in (
+            "row_count",
+            "first_agg_trade_id",
+            "last_agg_trade_id",
+            "first_trade_time_ms",
+            "last_trade_time_ms",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_negative_int(getattr(self, field_name), field_name),
+            )
+        if self.row_count == 0:
+            raise ValueError("verified aggTrade import cannot be empty")
+        if self.first_agg_trade_id > self.last_agg_trade_id:
+            raise ValueError("verified aggTrade import ID bounds are inverted")
+        if self.row_count != self.last_agg_trade_id - self.first_agg_trade_id + 1:
+            raise ValueError("verified aggTrade import IDs must be contiguous")
+        if self.first_trade_time_ms > self.last_trade_time_ms:
+            raise ValueError("verified aggTrade import time bounds are inverted")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            field_name: getattr(self, field_name)
+            for field_name in self.__dataclass_fields__
+        }
 
 
 @runtime_checkable
@@ -72,6 +411,22 @@ class RawAggTradeArchive(Protocol):
     ) -> list[dict[str, Any]]:
         """Read a replay range without exposing the archive layout."""
 
+    def scan_page(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        start_agg_trade_id: int | None = None,
+        end_agg_trade_id: int | None = None,
+        after: RawAggTradeCursor | None = None,
+        limit: int = 50_000,
+        dataset_ref: RawAggTradeDatasetRef | None = None,
+    ) -> RawAggTradePage:
+        """Read one bounded page after an exclusive stable cursor."""
+
     def coverage(
         self,
         *,
@@ -87,6 +442,34 @@ class RawAggTradeArchive(Protocol):
 
     def diagnostics(self) -> dict[str, Any]:
         """Return archive backend state."""
+
+    def freeze_dataset(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        start_time_ms: int,
+        end_time_ms: int,
+        page_rows: int = 50_000,
+    ) -> RawAggTradeDatasetRef:
+        """Build an exact immutable replay generation or fail closed."""
+
+    def validate_dataset(self, dataset_ref: RawAggTradeDatasetRef) -> None:
+        """Revalidate every object checksum in a frozen generation."""
+
+    def pin_dataset(self, dataset_ref: RawAggTradeDatasetRef) -> str:
+        """Protect one validated generation from offline retention."""
+
+    def release_dataset(self, pin_token: str) -> None:
+        """Release a previously acquired generation pin."""
+
+    def import_verified_day(
+        self,
+        rows: Iterable[dict[str, Any]],
+        metadata: VerifiedRawAggTradeDay,
+    ) -> int:
+        """Idempotently publish one checksum-verified official daily file."""
 
 
 class DisabledRawAggTradeArchive:
@@ -123,6 +506,38 @@ class DisabledRawAggTradeArchive:
             limit,
         )
         return []
+
+    def scan_page(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        start_agg_trade_id: int | None = None,
+        end_agg_trade_id: int | None = None,
+        after: RawAggTradeCursor | None = None,
+        limit: int = 50_000,
+        dataset_ref: RawAggTradeDatasetRef | None = None,
+    ) -> RawAggTradePage:
+        del (
+            exchange,
+            market_type,
+            symbol,
+            start_time_ms,
+            end_time_ms,
+            start_agg_trade_id,
+            end_agg_trade_id,
+            after,
+            limit,
+        )
+        return RawAggTradePage(
+            rows=(),
+            next_cursor=None,
+            exhausted=True,
+            data_epoch=None if dataset_ref is None else dataset_ref.data_epoch,
+        )
 
     def coverage(
         self,
@@ -162,6 +577,28 @@ class DisabledRawAggTradeArchive:
 
     def diagnostics(self) -> dict[str, Any]:
         return {"enabled": False, "backend": "disabled"}
+
+    def freeze_dataset(self, **_kwargs: Any) -> RawAggTradeDatasetRef:
+        raise RuntimeError("raw aggTrade archive is disabled")
+
+    def validate_dataset(self, dataset_ref: RawAggTradeDatasetRef) -> None:
+        del dataset_ref
+        raise RuntimeError("raw aggTrade archive is disabled")
+
+    def pin_dataset(self, dataset_ref: RawAggTradeDatasetRef) -> str:
+        del dataset_ref
+        raise RuntimeError("raw aggTrade archive is disabled")
+
+    def release_dataset(self, pin_token: str) -> None:
+        del pin_token
+
+    def import_verified_day(
+        self,
+        rows: Iterable[dict[str, Any]],
+        metadata: VerifiedRawAggTradeDay,
+    ) -> int:
+        del rows, metadata
+        raise RuntimeError("raw aggTrade archive is disabled")
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +648,10 @@ class _FileManifest:
     max_trade_time_ms: int
     first_trade_time_ms: int
     first_agg_trade_id: int
+    parquet_sha256: str | None = None
+    manifest_sha256: str | None = None
+    source_quality: str = "live_best_effort"
+    source_checksum_sha256: str | None = None
 
     @property
     def first_order_key(self) -> tuple[int, int]:
@@ -267,6 +708,8 @@ class ParquetRawAggTradeArchive:
             ) from exc
         self._schema = _parquet_schema(self._pa)
         self._write_lock = Lock()
+        self._pins: dict[str, tuple[str, str]] = {}
+        self._pin_counts: dict[str, int] = {}
         self._health_marker_path = self.root / "_archive_health.json"
         durability_error, health_marker_error = self._load_health_marker()
         self._stats = {
@@ -374,6 +817,7 @@ class ParquetRawAggTradeArchive:
             temporary.unlink(missing_ok=True)
 
     def diagnostics(self) -> dict[str, Any]:
+        verified_partitions_available = self._verified_partitions_available()
         with self._write_lock:
             durability_error = self._stats["durability_error"]
             return {
@@ -387,8 +831,310 @@ class ParquetRawAggTradeArchive:
                 "max_scan_files": self.max_scan_files,
                 "max_scan_rows": self.max_scan_rows,
                 "max_physical_scan_rows": self.max_physical_scan_rows,
+                "pinned_generations": len(self._pin_counts),
+                "active_pins": len(self._pins),
+                "verified_partitions_available": verified_partitions_available,
                 **self._stats,
             }
+
+    def _verified_partitions_available(self) -> bool:
+        try:
+            return any(
+                not (receipt.parent / "_verified_import_conflict.json").exists()
+                for receipt in self.root.rglob("_verified_import.json")
+                if receipt.is_file()
+            )
+        except OSError:
+            return False
+
+    def import_verified_day(
+        self,
+        rows: Iterable[dict[str, Any]],
+        metadata: VerifiedRawAggTradeDay,
+    ) -> int:
+        if not isinstance(metadata, VerifiedRawAggTradeDay):
+            raise TypeError("metadata must be VerifiedRawAggTradeDay")
+        key = (
+            metadata.exchange,
+            metadata.market_type,
+            metadata.symbol,
+            metadata.date,
+        )
+        partition = self._partition_path(key)
+        receipt_path = partition / "_verified_import.json"
+        conflict_path = partition / "_verified_import_conflict.json"
+        checksum_prefix = metadata.source_checksum_sha256[:24]
+        written: list[Path] = []
+        with self._write_lock:
+            if conflict_path.exists():
+                raise RuntimeError(
+                    "verified raw aggTrade partition is quarantined by an "
+                    "unresolved import conflict"
+                )
+            if receipt_path.exists():
+                existing = self._read_verified_receipt(receipt_path)
+                if existing["metadata"] == metadata.to_dict():
+                    self._validate_verified_receipt_objects(partition, existing)
+                    return 0
+                self._record_import_conflict(
+                    conflict_path,
+                    existing=existing["metadata"],
+                    incoming=metadata.to_dict(),
+                )
+                raise RuntimeError(
+                    "verified raw aggTrade import conflicts with the existing "
+                    "official checksum; partition was quarantined"
+                )
+
+            partition.mkdir(parents=True, exist_ok=True)
+            stale = sorted(
+                partition.glob(f"part-verified-{checksum_prefix}-*.parquet")
+            )
+            if stale:
+                self._quarantine_paths(
+                    stale,
+                    reason="incomplete_verified_import_retry",
+                    metadata=metadata.to_dict(),
+                )
+
+            chunk: list[dict[str, Any]] = []
+            count = 0
+            previous_order: tuple[int, int] | None = None
+            first_time: int | None = None
+            last_time: int | None = None
+            try:
+                for raw in rows:
+                    row = _raw_trade_payload(raw)
+                    if (
+                        row["exchange"],
+                        row["market_type"],
+                        row["symbol"],
+                        _utc_date(row["trade_time_ms"]),
+                    ) != key:
+                        raise ValueError(
+                            "verified raw aggTrade row identity/date does not match "
+                            "its import metadata"
+                        )
+                    expected_id = metadata.first_agg_trade_id + count
+                    if row["agg_trade_id"] != expected_id:
+                        raise ValueError(
+                            "verified raw aggTrade IDs are not exactly contiguous "
+                            f"at {expected_id}"
+                        )
+                    order = (row["trade_time_ms"], row["agg_trade_id"])
+                    if previous_order is not None and order <= previous_order:
+                        raise ValueError(
+                            "verified raw aggTrade rows are not strictly ordered"
+                        )
+                    previous_order = order
+                    first_time = row["trade_time_ms"] if first_time is None else first_time
+                    last_time = row["trade_time_ms"]
+                    chunk.append(row)
+                    count += 1
+                    if len(chunk) >= self.max_rows_per_file:
+                        written.append(
+                            self._write_verified_chunk(
+                                key,
+                                chunk,
+                                metadata=metadata,
+                                checksum_prefix=checksum_prefix,
+                                chunk_index=len(written),
+                            )
+                        )
+                        chunk = []
+                if chunk:
+                    written.append(
+                        self._write_verified_chunk(
+                            key,
+                            chunk,
+                            metadata=metadata,
+                            checksum_prefix=checksum_prefix,
+                            chunk_index=len(written),
+                        )
+                    )
+                if (
+                    count != metadata.row_count
+                    or count == 0
+                    or previous_order is None
+                    or previous_order[1] != metadata.last_agg_trade_id
+                    or first_time != metadata.first_trade_time_ms
+                    or last_time != metadata.last_trade_time_ms
+                ):
+                    raise ValueError(
+                        "verified raw aggTrade rows do not match declared exact bounds"
+                    )
+                receipt = {
+                    "schema_version": VERIFIED_IMPORT_SCHEMA_VERSION,
+                    "metadata": metadata.to_dict(),
+                    "objects": [
+                        self._verified_receipt_object(path) for path in written
+                    ],
+                }
+                _atomic_write_json(receipt_path, receipt)
+            except BaseException:
+                if written:
+                    self._quarantine_paths(
+                        written,
+                        reason="verified_import_validation_failed",
+                        metadata=metadata.to_dict(),
+                    )
+                raise
+            self._stats["append_calls"] += 1
+            self._stats["input_rows"] += count
+            self._stats["last_append_error"] = None
+            return count
+
+    def freeze_dataset(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        start_time_ms: int,
+        end_time_ms: int,
+        page_rows: int = 50_000,
+    ) -> RawAggTradeDatasetRef:
+        bounds = self._normalize_scan_bounds(
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+        )
+        assert bounds[0] is not None and bounds[1] is not None
+        with self._write_lock:
+            durability_error = self._stats["durability_error"]
+        if durability_error:
+            raise RuntimeError(
+                "raw aggTrade archive is degraded and cannot release exact data"
+            )
+        identity = (
+            _identity(exchange, "exchange", lower=True),
+            _identity(market_type, "market_type", lower=True),
+            _identity(symbol, "symbol", upper=True),
+        )
+        manifests = self._discover_verified_manifests(
+            exchange=identity[0],
+            market_type=identity[1],
+            symbol=identity[2],
+            start_time_ms=bounds[0],
+            end_time_ms=bounds[1],
+        )
+        if not manifests:
+            raise RuntimeError("no checksum-verified raw aggTrade objects cover the range")
+        objects = tuple(self._object_manifest(item) for item in manifests)
+        provisional = self._build_dataset_ref(
+            identity=identity,
+            start_time_ms=bounds[0],
+            end_time_ms=bounds[1],
+            first_agg_trade_id=min(item.min_agg_trade_id for item in objects),
+            last_agg_trade_id=max(item.max_agg_trade_id for item in objects),
+            objects=objects,
+        )
+        cursor: RawAggTradeCursor | None = None
+        first_id: int | None = None
+        last_id: int | None = None
+        previous_order: tuple[int, int] | None = None
+        row_count = 0
+        while True:
+            page = self.scan_page(
+                exchange=identity[0],
+                market_type=identity[1],
+                symbol=identity[2],
+                start_time_ms=bounds[0],
+                end_time_ms=bounds[1],
+                start_agg_trade_id=provisional.expected_first_agg_trade_id,
+                end_agg_trade_id=provisional.expected_last_agg_trade_id,
+                after=cursor,
+                limit=page_rows,
+                dataset_ref=provisional,
+            )
+            for row in page.rows:
+                order = (row["trade_time_ms"], row["agg_trade_id"])
+                if previous_order is not None and order <= previous_order:
+                    raise RuntimeError(
+                        "exact raw aggTrade generation is not strictly ordered"
+                    )
+                if last_id is not None and row["agg_trade_id"] != last_id + 1:
+                    raise RuntimeError(
+                        "exact raw aggTrade generation contains an aggregate-ID gap"
+                    )
+                first_id = row["agg_trade_id"] if first_id is None else first_id
+                last_id = row["agg_trade_id"]
+                previous_order = order
+                row_count += 1
+            if page.exhausted:
+                break
+            if page.next_cursor is None or page.next_cursor == cursor:
+                raise RuntimeError("raw aggTrade pagination cursor did not advance")
+            cursor = page.next_cursor
+        if first_id is None or last_id is None or row_count != last_id - first_id + 1:
+            raise RuntimeError("exact raw aggTrade range is empty or incomplete")
+        dataset_ref = self._build_dataset_ref(
+            identity=identity,
+            start_time_ms=bounds[0],
+            end_time_ms=bounds[1],
+            first_agg_trade_id=first_id,
+            last_agg_trade_id=last_id,
+            objects=objects,
+        )
+        self.validate_dataset(dataset_ref)
+        return dataset_ref
+
+    def validate_dataset(self, dataset_ref: RawAggTradeDatasetRef) -> None:
+        if not isinstance(dataset_ref, RawAggTradeDatasetRef):
+            raise TypeError("dataset_ref must be RawAggTradeDatasetRef")
+        expected_epoch = self._dataset_epoch(
+            identity=(
+                dataset_ref.exchange,
+                dataset_ref.market_type,
+                dataset_ref.symbol,
+            ),
+            start_time_ms=dataset_ref.start_time_ms,
+            end_time_ms=dataset_ref.end_time_ms,
+            first_agg_trade_id=dataset_ref.expected_first_agg_trade_id,
+            last_agg_trade_id=dataset_ref.expected_last_agg_trade_id,
+            objects=dataset_ref.objects,
+        )
+        if dataset_ref.data_epoch != expected_epoch:
+            raise RuntimeError("raw aggTrade dataset epoch does not match its manifest")
+        with self._write_lock:
+            if self._stats["durability_error"]:
+                raise RuntimeError("raw aggTrade archive is degraded")
+        for item in dataset_ref.objects:
+            path = self._resolve_object_path(item.object_id)
+            sidecar = _manifest_path(path)
+            if not path.is_file() or not sidecar.is_file():
+                raise RuntimeError("raw aggTrade dataset object is missing")
+            if (path.parent / "_verified_import_conflict.json").exists():
+                raise RuntimeError("raw aggTrade dataset partition is quarantined")
+            if _file_sha256(path) != item.parquet_sha256:
+                raise RuntimeError("raw aggTrade Parquet checksum changed")
+            if _file_sha256(sidecar) != item.manifest_sha256:
+                raise RuntimeError("raw aggTrade object manifest checksum changed")
+            current = self._read_file_manifest(path)
+            if self._object_manifest(current) != item:
+                raise RuntimeError("raw aggTrade object manifest changed")
+
+    def pin_dataset(self, dataset_ref: RawAggTradeDatasetRef) -> str:
+        self.validate_dataset(dataset_ref)
+        token = uuid4().hex
+        with self._write_lock:
+            self._pins[token] = (dataset_ref.data_epoch, dataset_ref.symbol)
+            self._pin_counts[dataset_ref.data_epoch] = (
+                self._pin_counts.get(dataset_ref.data_epoch, 0) + 1
+            )
+        return token
+
+    def release_dataset(self, pin_token: str) -> None:
+        token = str(pin_token)
+        with self._write_lock:
+            pinned = self._pins.pop(token, None)
+            if pinned is None:
+                return
+            data_epoch = pinned[0]
+            remaining = self._pin_counts[data_epoch] - 1
+            if remaining <= 0:
+                self._pin_counts.pop(data_epoch, None)
+            else:
+                self._pin_counts[data_epoch] = remaining
 
     def scan_range(
         self,
@@ -402,22 +1148,72 @@ class ParquetRawAggTradeArchive:
         end_agg_trade_id: int | None = None,
         limit: int = 100_000,
     ) -> list[dict[str, Any]]:
-        bounded_limit = max(1, min(int(limit), 1_000_000))
+        return list(
+            self.scan_page(
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+                start_agg_trade_id=start_agg_trade_id,
+                end_agg_trade_id=end_agg_trade_id,
+                limit=max(1, min(int(limit), 1_000_000)),
+            ).rows
+        )
+
+    def scan_page(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        start_agg_trade_id: int | None = None,
+        end_agg_trade_id: int | None = None,
+        after: RawAggTradeCursor | None = None,
+        limit: int = 50_000,
+        dataset_ref: RawAggTradeDatasetRef | None = None,
+    ) -> RawAggTradePage:
+        page_limit = max(1, min(int(limit), 1_000_000))
+        bounded_limit = page_limit + 1
+        if after is not None and not isinstance(after, RawAggTradeCursor):
+            raise TypeError("after must be RawAggTradeCursor or None")
         bounds = self._normalize_scan_bounds(
             start_time_ms=start_time_ms,
             end_time_ms=end_time_ms,
             start_agg_trade_id=start_agg_trade_id,
             end_agg_trade_id=end_agg_trade_id,
         )
-        manifests = self._discover_manifests(
-            exchange=exchange,
-            market_type=market_type,
-            symbol=symbol,
-            start_time_ms=bounds[0],
-            end_time_ms=bounds[1],
-            start_agg_trade_id=bounds[2],
-            end_agg_trade_id=bounds[3],
-        )
+        if dataset_ref is None:
+            manifests = self._discover_manifests(
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                start_time_ms=bounds[0],
+                end_time_ms=bounds[1],
+                start_agg_trade_id=bounds[2],
+                end_agg_trade_id=bounds[3],
+            )
+            data_epoch = None
+        else:
+            self._validate_dataset_request(
+                dataset_ref,
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                bounds=bounds,
+            )
+            bounds = (
+                dataset_ref.start_time_ms,
+                dataset_ref.end_time_ms,
+                dataset_ref.expected_first_agg_trade_id,
+                dataset_ref.expected_last_agg_trade_id,
+            )
+            manifests = [
+                self._file_manifest_from_object(item) for item in dataset_ref.objects
+            ]
+            data_epoch = dataset_ref.data_epoch
         if len(manifests) > self.max_scan_files:
             self._record_scan_limit_rejection()
             raise RawAggTradeScanLimitError(
@@ -425,7 +1221,10 @@ class ParquetRawAggTradeArchive:
                 f"({self.max_scan_files}); add narrower time/ID bounds",
             )
         estimated_physical_rows = sum(item.row_count for item in manifests)
-        if estimated_physical_rows > self.max_physical_scan_rows:
+        if (
+            dataset_ref is None
+            and estimated_physical_rows > self.max_physical_scan_rows
+        ):
             self._record_scan_limit_rejection()
             raise RawAggTradeScanLimitError(
                 "raw aggTrade scan exceeds max_physical_scan_rows "
@@ -436,6 +1235,11 @@ class ParquetRawAggTradeArchive:
         scanned_rows = 0
         files_scanned = 0
         for index, manifest in enumerate(manifests):
+            if after is not None and (
+                manifest.max_trade_time_ms,
+                manifest.max_agg_trade_id,
+            ) <= (after.trade_time_ms, after.agg_trade_id):
+                continue
             if files_scanned >= self.max_scan_files:
                 self._record_scan_limit_rejection()
                 raise RawAggTradeScanLimitError(
@@ -461,16 +1265,24 @@ class ParquetRawAggTradeArchive:
                 for raw in batch.to_pylist():
                     row = _raw_trade_payload(raw)
                     order_key = (row["trade_time_ms"], row["agg_trade_id"])
+                    if after is not None and order_key <= (
+                        after.trade_time_ms,
+                        after.agg_trade_id,
+                    ):
+                        continue
                     if cutoff is not None and order_key > cutoff:
                         stop_file = True
                         break
                     if not _row_matches_bounds(row, bounds):
                         continue
                     current = deduplicated.get(row["agg_trade_id"])
-                    if (
-                        current is None
-                        or row["received_at_ms"] >= current["received_at_ms"]
-                    ):
+                    if current is not None and dataset_ref is not None:
+                        if _immutable_trade_payload(current) != _immutable_trade_payload(row):
+                            raise RuntimeError(
+                                "exact raw aggTrade generation contains conflicting "
+                                f"duplicate aggregate-trade ID {row['agg_trade_id']}"
+                            )
+                    if current is None or row["received_at_ms"] >= current["received_at_ms"]:
                         deduplicated[row["agg_trade_id"]] = row
                 if stop_file:
                     break
@@ -484,10 +1296,26 @@ class ParquetRawAggTradeArchive:
                 and next_manifest.first_order_key > cutoff
             ):
                 break
-        return sorted(
+        ordered = sorted(
             deduplicated.values(),
             key=lambda item: (item["trade_time_ms"], item["agg_trade_id"]),
         )[:bounded_limit]
+        exhausted = len(ordered) <= page_limit
+        page_rows = tuple(ordered[:page_limit])
+        next_cursor = (
+            after
+            if not page_rows
+            else RawAggTradeCursor(
+                trade_time_ms=page_rows[-1]["trade_time_ms"],
+                agg_trade_id=page_rows[-1]["agg_trade_id"],
+            )
+        )
+        return RawAggTradePage(
+            rows=page_rows,
+            next_cursor=next_cursor,
+            exhausted=exhausted,
+            data_epoch=data_epoch,
+        )
 
     def coverage(
         self,
@@ -647,6 +1475,348 @@ class ParquetRawAggTradeArchive:
             scanned_row_count=scanned_rows,
         )
 
+    def _partition_path(self, key: tuple[str, str, str, str]) -> Path:
+        exchange, market_type, symbol, date = key
+        _validate_utc_date(date)
+        return (
+            self.root
+            / f"exchange={_partition_value(exchange)}"
+            / f"market_type={_partition_value(market_type)}"
+            / f"symbol={_partition_value(symbol)}"
+            / f"date={date}"
+        )
+
+    def _write_verified_chunk(
+        self,
+        key: tuple[str, str, str, str],
+        rows: list[dict[str, Any]],
+        *,
+        metadata: VerifiedRawAggTradeDay,
+        checksum_prefix: str,
+        chunk_index: int,
+    ) -> Path:
+        first_id = rows[0]["agg_trade_id"]
+        last_id = rows[-1]["agg_trade_id"]
+        name = (
+            f"part-verified-{checksum_prefix}-{chunk_index:06d}-"
+            f"{first_id:020d}-{last_id:020d}.parquet"
+        )
+        return self._write_file(
+            key,
+            rows,
+            source_quality="binance_public_checksum",
+            source_checksum_sha256=metadata.source_checksum_sha256,
+            deterministic_name=name,
+        )
+
+    def _verified_receipt_object(self, path: Path) -> dict[str, object]:
+        manifest = self._object_manifest(self._read_file_manifest(path))
+        return manifest.to_dict()
+
+    @staticmethod
+    def _read_verified_receipt(path: Path) -> dict[str, object]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("verified raw aggTrade receipt is unreadable") from exc
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"schema_version", "metadata", "objects"}
+            or payload.get("schema_version") != VERIFIED_IMPORT_SCHEMA_VERSION
+            or not isinstance(payload.get("metadata"), dict)
+            or not isinstance(payload.get("objects"), list)
+        ):
+            raise RuntimeError("verified raw aggTrade receipt schema is invalid")
+        try:
+            metadata = VerifiedRawAggTradeDay(**payload["metadata"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("verified raw aggTrade receipt metadata is invalid") from exc
+        if not payload["objects"]:
+            raise RuntimeError("verified raw aggTrade receipt has no objects")
+        return {
+            "schema_version": VERIFIED_IMPORT_SCHEMA_VERSION,
+            "metadata": metadata.to_dict(),
+            "objects": payload["objects"],
+        }
+
+    def _validate_verified_receipt_objects(
+        self,
+        partition: Path,
+        receipt: Mapping[str, object],
+    ) -> None:
+        objects = receipt.get("objects")
+        if not isinstance(objects, list):
+            raise RuntimeError("verified raw aggTrade receipt objects are invalid")
+        for raw in objects:
+            if not isinstance(raw, Mapping):
+                raise RuntimeError("verified raw aggTrade receipt object is invalid")
+            item = RawAggTradeObjectManifest.from_dict(raw)
+            path = self._resolve_object_path(item.object_id)
+            if path.parent.resolve() != partition.resolve():
+                raise RuntimeError("verified raw aggTrade receipt object escaped partition")
+            if not path.is_file() or not _manifest_path(path).is_file():
+                raise RuntimeError("verified raw aggTrade receipt object is missing")
+            if self._object_manifest(self._read_file_manifest(path)) != item:
+                raise RuntimeError("verified raw aggTrade receipt checksum changed")
+
+    def _record_import_conflict(
+        self,
+        conflict_path: Path,
+        *,
+        existing: object,
+        incoming: object,
+    ) -> None:
+        payload = {
+            "schema_version": VERIFIED_IMPORT_SCHEMA_VERSION,
+            "state": "quarantined",
+            "reason": "official_source_checksum_or_schema_conflict",
+            "existing": existing,
+            "incoming": incoming,
+        }
+        _atomic_write_json(conflict_path, payload)
+        quarantine = self.root / "_quarantine" / f"conflict-{uuid4().hex}"
+        quarantine.mkdir(parents=True, exist_ok=False)
+        _atomic_write_json(quarantine / "report.json", payload)
+
+    def _quarantine_paths(
+        self,
+        paths: Iterable[Path],
+        *,
+        reason: str,
+        metadata: Mapping[str, object],
+    ) -> None:
+        quarantine = self.root / "_quarantine" / f"import-{uuid4().hex}"
+        quarantine.mkdir(parents=True, exist_ok=False)
+        moved: list[str] = []
+        for path in paths:
+            for candidate in (path, _manifest_path(path)):
+                if not candidate.exists():
+                    continue
+                destination = quarantine / candidate.name
+                os.replace(candidate, destination)
+                moved.append(destination.name)
+        _atomic_write_json(
+            quarantine / "report.json",
+            {
+                "schema_version": VERIFIED_IMPORT_SCHEMA_VERSION,
+                "state": "quarantined",
+                "reason": reason,
+                "metadata": dict(metadata),
+                "objects": moved,
+            },
+        )
+
+    def _discover_verified_manifests(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        start_time_ms: int,
+        end_time_ms: int,
+    ) -> list[_FileManifest]:
+        identity_root = (
+            self.root
+            / f"exchange={_partition_value(exchange)}"
+            / f"market_type={_partition_value(market_type)}"
+            / f"symbol={_partition_value(symbol)}"
+        )
+        manifests: list[_FileManifest] = []
+        for date in _utc_dates(start_time_ms, end_time_ms):
+            partition = identity_root / f"date={date}"
+            receipt_path = partition / "_verified_import.json"
+            conflict_path = partition / "_verified_import_conflict.json"
+            if conflict_path.exists():
+                raise RuntimeError(
+                    "checksum-verified raw aggTrade partition is quarantined"
+                )
+            if not receipt_path.is_file():
+                raise RuntimeError(
+                    "checksum-verified raw aggTrade daily coverage is missing"
+                )
+            receipt = self._read_verified_receipt(receipt_path)
+            metadata = receipt["metadata"]
+            assert isinstance(metadata, Mapping)
+            if (
+                metadata.get("exchange"),
+                metadata.get("market_type"),
+                metadata.get("symbol"),
+                metadata.get("date"),
+            ) != (exchange, market_type, symbol, date):
+                raise RuntimeError("verified raw aggTrade receipt identity changed")
+            self._validate_verified_receipt_objects(partition, receipt)
+            objects = receipt["objects"]
+            assert isinstance(objects, list)
+            for raw in objects:
+                assert isinstance(raw, Mapping)
+                item = RawAggTradeObjectManifest.from_dict(raw)
+                if item.max_trade_time_ms < start_time_ms:
+                    continue
+                if item.min_trade_time_ms > end_time_ms:
+                    continue
+                manifests.append(
+                    self._file_manifest_from_object(item)
+                )
+        manifests.sort(key=lambda item: (item.first_order_key, item.path.name))
+        if len(manifests) > self.max_scan_files:
+            raise RawAggTradeScanLimitError(
+                "exact raw aggTrade generation exceeds max_scan_files"
+            )
+        return manifests
+
+    def _object_manifest(
+        self,
+        manifest: _FileManifest,
+    ) -> RawAggTradeObjectManifest:
+        path = manifest.path.resolve()
+        root = self.root.resolve()
+        if not path.is_relative_to(root):
+            raise RuntimeError("raw aggTrade object escaped archive root")
+        sidecar = _manifest_path(path)
+        parquet_sha256 = _file_sha256(path)
+        if (
+            manifest.parquet_sha256 is not None
+            and manifest.parquet_sha256 != parquet_sha256
+        ):
+            raise RuntimeError("raw aggTrade Parquet checksum does not match sidecar")
+        manifest_sha256 = _file_sha256(sidecar)
+        if (
+            manifest.manifest_sha256 is not None
+            and manifest.manifest_sha256 != manifest_sha256
+        ):
+            raise RuntimeError("raw aggTrade manifest checksum changed")
+        return RawAggTradeObjectManifest(
+            object_id=path.relative_to(root).as_posix(),
+            parquet_sha256=parquet_sha256,
+            manifest_sha256=manifest_sha256,
+            row_count=manifest.row_count,
+            min_agg_trade_id=manifest.min_agg_trade_id,
+            max_agg_trade_id=manifest.max_agg_trade_id,
+            min_trade_time_ms=manifest.min_trade_time_ms,
+            max_trade_time_ms=manifest.max_trade_time_ms,
+            first_trade_time_ms=manifest.first_trade_time_ms,
+            first_agg_trade_id=manifest.first_agg_trade_id,
+            source_quality=manifest.source_quality,
+            source_checksum_sha256=manifest.source_checksum_sha256,
+        )
+
+    def _resolve_object_path(self, object_id: str) -> Path:
+        root = self.root.resolve()
+        path = (root / Path(object_id)).resolve()
+        if not path.is_relative_to(root):
+            raise RuntimeError("raw aggTrade object escaped archive root")
+        return path
+
+    def _file_manifest_from_object(
+        self,
+        item: RawAggTradeObjectManifest,
+    ) -> _FileManifest:
+        return _FileManifest(
+            path=self._resolve_object_path(item.object_id),
+            row_count=item.row_count,
+            min_agg_trade_id=item.min_agg_trade_id,
+            max_agg_trade_id=item.max_agg_trade_id,
+            min_trade_time_ms=item.min_trade_time_ms,
+            max_trade_time_ms=item.max_trade_time_ms,
+            first_trade_time_ms=item.first_trade_time_ms,
+            first_agg_trade_id=item.first_agg_trade_id,
+            parquet_sha256=item.parquet_sha256,
+            manifest_sha256=item.manifest_sha256,
+            source_quality=item.source_quality,
+            source_checksum_sha256=item.source_checksum_sha256,
+        )
+
+    def _build_dataset_ref(
+        self,
+        *,
+        identity: tuple[str, str, str],
+        start_time_ms: int,
+        end_time_ms: int,
+        first_agg_trade_id: int,
+        last_agg_trade_id: int,
+        objects: tuple[RawAggTradeObjectManifest, ...],
+    ) -> RawAggTradeDatasetRef:
+        epoch = self._dataset_epoch(
+            identity=identity,
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            first_agg_trade_id=first_agg_trade_id,
+            last_agg_trade_id=last_agg_trade_id,
+            objects=objects,
+        )
+        return RawAggTradeDatasetRef(
+            schema_version=REPLAY_TRADE_DATASET_SCHEMA_VERSION,
+            data_epoch=epoch,
+            exchange=identity[0],
+            market_type=identity[1],
+            symbol=identity[2],
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            expected_first_agg_trade_id=first_agg_trade_id,
+            expected_last_agg_trade_id=last_agg_trade_id,
+            row_count=last_agg_trade_id - first_agg_trade_id + 1,
+            objects=objects,
+        )
+
+    @staticmethod
+    def _dataset_epoch(
+        *,
+        identity: tuple[str, str, str],
+        start_time_ms: int,
+        end_time_ms: int,
+        first_agg_trade_id: int,
+        last_agg_trade_id: int,
+        objects: tuple[RawAggTradeObjectManifest, ...],
+    ) -> str:
+        payload = {
+            "schema_version": REPLAY_TRADE_DATASET_SCHEMA_VERSION,
+            "identity": list(identity),
+            "start_time_ms": start_time_ms,
+            "end_time_ms": end_time_ms,
+            "expected_first_agg_trade_id": first_agg_trade_id,
+            "expected_last_agg_trade_id": last_agg_trade_id,
+            "objects": [item.to_dict() for item in objects],
+            "completeness": "exact",
+            "source_quality": "binance_public_checksum",
+        }
+        return "sha256:" + hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _validate_dataset_request(
+        dataset_ref: RawAggTradeDatasetRef,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        bounds: tuple[int | None, int | None, int | None, int | None],
+    ) -> None:
+        identity = (
+            _identity(exchange, "exchange", lower=True),
+            _identity(market_type, "market_type", lower=True),
+            _identity(symbol, "symbol", upper=True),
+        )
+        if identity != (
+            dataset_ref.exchange,
+            dataset_ref.market_type,
+            dataset_ref.symbol,
+        ):
+            raise ValueError("raw aggTrade dataset identity does not match request")
+        expected = (
+            dataset_ref.start_time_ms,
+            dataset_ref.end_time_ms,
+            dataset_ref.expected_first_agg_trade_id,
+            dataset_ref.expected_last_agg_trade_id,
+        )
+        if any(value is not None and value != expected[index] for index, value in enumerate(bounds)):
+            raise ValueError("raw aggTrade dataset bounds do not match request")
+
     @staticmethod
     def _normalize_scan_bounds(
         *,
@@ -743,6 +1913,18 @@ class ParquetRawAggTradeArchive:
             payload = json.loads(sidecar.read_text(encoding="utf-8"))
             if payload.get("file") != path.name:
                 raise ValueError("manifest file identity mismatch")
+            parquet_sha256 = payload.get("parquet_sha256")
+            if parquet_sha256 is not None:
+                parquet_sha256 = _sha256_digest(
+                    parquet_sha256,
+                    "parquet_sha256",
+                )
+            source_checksum = payload.get("source_checksum_sha256")
+            if source_checksum is not None:
+                source_checksum = _sha256_digest(
+                    source_checksum,
+                    "source_checksum_sha256",
+                )
             return _FileManifest(
                 path=path,
                 row_count=_non_negative_int(payload.get("row_count"), "row_count"),
@@ -770,6 +1952,12 @@ class ParquetRawAggTradeArchive:
                     payload.get("first_agg_trade_id"),
                     "first_agg_trade_id",
                 ),
+                parquet_sha256=parquet_sha256,
+                manifest_sha256=_file_sha256(sidecar),
+                source_quality=str(
+                    payload.get("source_quality", "live_best_effort")
+                ),
+                source_checksum_sha256=source_checksum,
             )
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             with self._write_lock:
@@ -788,6 +1976,10 @@ class ParquetRawAggTradeArchive:
                 # Statistics are conservative lower bounds for early-stop.
                 first_trade_time_ms=time_min,
                 first_agg_trade_id=id_min,
+                parquet_sha256=None,
+                manifest_sha256=None,
+                source_quality="live_best_effort",
+                source_checksum_sha256=None,
             )
 
     def _limited_coverage(
@@ -872,7 +2064,11 @@ class ParquetRawAggTradeArchive:
         self,
         key: tuple[str, str, str, str],
         rows: list[dict[str, Any]],
-    ) -> None:
+        *,
+        source_quality: str = "live_best_effort",
+        source_checksum_sha256: str | None = None,
+        deterministic_name: str | None = None,
+    ) -> Path:
         exchange, market_type, symbol, date = key
         partition = (
             self.root
@@ -885,8 +2081,11 @@ class ParquetRawAggTradeArchive:
         first_id = min(row["agg_trade_id"] for row in rows)
         last_id = max(row["agg_trade_id"] for row in rows)
         destination = partition / (
-            f"part-{first_id:020d}-{last_id:020d}-{uuid4().hex}.parquet"
+            deterministic_name
+            or f"part-{first_id:020d}-{last_id:020d}-{uuid4().hex}.parquet"
         )
+        if destination.suffix != ".parquet" or destination.parent != partition:
+            raise ValueError("raw aggTrade destination name is invalid")
         ordered = sorted(
             rows,
             key=lambda item: (item["trade_time_ms"], item["agg_trade_id"]),
@@ -904,6 +2103,7 @@ class ParquetRawAggTradeArchive:
             os.replace(temporary, destination)
         finally:
             temporary.unlink(missing_ok=True)
+        parquet_sha256 = _file_sha256(destination)
         sidecar = _manifest_path(destination)
         sidecar_temporary = sidecar.with_name(
             f".{sidecar.name}.{uuid4().hex}.tmp",
@@ -923,6 +2123,9 @@ class ParquetRawAggTradeArchive:
             "max_trade_time_ms": max(row["trade_time_ms"] for row in ordered),
             "first_trade_time_ms": first["trade_time_ms"],
             "first_agg_trade_id": first["agg_trade_id"],
+            "parquet_sha256": parquet_sha256,
+            "source_quality": source_quality,
+            "source_checksum_sha256": source_checksum_sha256,
         }
         try:
             sidecar_temporary.write_text(
@@ -933,6 +2136,7 @@ class ParquetRawAggTradeArchive:
         finally:
             sidecar_temporary.unlink(missing_ok=True)
         self._stats["files_written"] += 1
+        return destination
 
 
 @dataclass(slots=True)
@@ -1388,14 +2592,94 @@ def _optional_non_negative_int(value: Any, label: str) -> int | None:
     return _non_negative_int(value, label)
 
 
+def _sha256_digest(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a SHA-256 digest")
+    normalized = value.strip().lower()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ValueError(f"{label} must be a SHA-256 digest")
+    return normalized
+
+
+def _prefixed_sha256_digest(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        raise ValueError(f"{label} must be a prefixed SHA-256 digest")
+    return "sha256:" + _sha256_digest(value.removeprefix("sha256:"), label)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _validate_utc_date(value: str) -> None:
+    if not isinstance(value, str):
+        raise ValueError("archive date must use YYYY-MM-DD")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError("archive date must use YYYY-MM-DD") from exc
+    if parsed.isoformat() != value:
+        raise ValueError("archive date must use canonical YYYY-MM-DD")
+
+
+def _utc_dates(start_time_ms: int, end_time_ms: int) -> tuple[str, ...]:
+    start = datetime.fromtimestamp(start_time_ms / 1000, tz=timezone.utc).date()
+    end = datetime.fromtimestamp(end_time_ms / 1000, tz=timezone.utc).date()
+    values: list[str] = []
+    current = start
+    while current <= end:
+        values.append(current.isoformat())
+        current += timedelta(days=1)
+    return tuple(values)
+
+
+def _immutable_trade_payload(row: Mapping[str, object]) -> tuple[object, ...]:
+    return tuple(
+        row[field_name]
+        for field_name in RAW_AGG_TRADE_COLUMNS
+        if field_name not in {"event_time_ms", "received_at_ms", "source"}
+    )
+
+
 __all__ = [
     "ARCHIVE_SCHEMA_VERSION",
     "DisabledRawAggTradeArchive",
     "ParquetRawAggTradeArchive",
     "RAW_AGG_TRADE_COLUMNS",
+    "REPLAY_TRADE_DATASET_SCHEMA_VERSION",
     "RawAggTradeArchive",
+    "RawAggTradeCursor",
     "RawAggTradeCoverage",
+    "RawAggTradeDatasetRef",
     "RawAggTradeGap",
+    "RawAggTradeObjectManifest",
+    "RawAggTradePage",
     "RawAggTradeScanLimitError",
     "RawAggTradeArchiveWriter",
+    "VERIFIED_IMPORT_SCHEMA_VERSION",
+    "VerifiedRawAggTradeDay",
 ]

@@ -10,6 +10,8 @@ import {
   replayEndedEvent,
   replayFill,
   replaySessionResponse,
+  replayTradeDeltaEvent,
+  replayTradeSessionResponse,
 } from "./fixtures.js";
 
 class FakeScheduler implements ReplayStoreScheduler {
@@ -60,6 +62,26 @@ test("100x-style deltas update chart immediately but ordinary UI at most once pe
     assert.equal(store.applyEvent(1, event), true);
   }
   assert.equal(store.seriesStore.barCount, 101);
+  assert.equal(store.getSnapshot().uiFlushCount, flushesBefore);
+  assert.equal(scheduler.tasks.size, 1);
+  scheduler.flushAll();
+  assert.equal(store.getSnapshot().uiFlushCount, flushesBefore + 1);
+});
+
+test("aggregate-trade tape updates every chart tick while ordinary UI remains frame-bounded", () => {
+  const scheduler = new FakeScheduler();
+  const store = new ReplayStore({ scheduler });
+  store.beginGeneration(1, { resetAuthoritativeState: true, connectionState: "connecting" });
+  store.applyAtomicSnapshot(1, parseReplaySessionResponse(replayTradeSessionResponse()).snapshot);
+  const flushesBefore = store.getSnapshot().uiFlushCount;
+  for (let index = 1; index <= 100; index += 1) {
+    const event = parseReplayEvent(replayTradeDeltaEvent({
+      sequence: index,
+      sourceSequence: index + 1,
+    }));
+    assert.equal(store.applyEvent(1, event), true);
+  }
+  assert.equal(store.seriesStore.barCount, 2);
   assert.equal(store.getSnapshot().uiFlushCount, flushesBefore);
   assert.equal(scheduler.tasks.size, 1);
   scheduler.flushAll();

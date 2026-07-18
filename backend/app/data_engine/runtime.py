@@ -928,7 +928,9 @@ async def start_data_engine() -> DataEngineRuntime:
             ingestion_factory,
         )
 
-        replay_runtime = await start_replay_runtime()
+        replay_runtime = await start_replay_runtime(
+            raw_trade_archive=trade_flow_service.raw_archive
+        )
         gap_scan_task = _start_startup_gap_scan(dm, backfill_coordinator)
         gap_audit_task = _start_background_gap_audit(dm, backfill_coordinator)
 

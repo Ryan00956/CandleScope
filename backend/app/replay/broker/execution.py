@@ -1,4 +1,4 @@
-"""BAR_CONSERVATIVE_V1 execution and atomic replay reducer."""
+"""BAR and aggregate-trade tape execution with one atomic replay reducer."""
 
 from __future__ import annotations
 
@@ -7,13 +7,16 @@ from decimal import Decimal, localcontext
 from typing import Mapping
 
 from ..bars.builder import ReplayBarBuilder
+from ..bars.trade_builder import TradeReplayBarBuilder
 from ..canonical import canonical_sha256
 from ..constants import CommandType
 from ..dataset import ReplayBar
 from ..errors import ReplayDomainError, ReplayErrorCode
 from ..models import validate_counter, validate_identifier
+from ..sources.trade_reader import ReplayTrade
 from .ledger import LedgerBook, LedgerEntry
 from .models import (
+    AGG_TRADE_TAPE_MODEL_VERSION,
     BROKER_MODEL_VERSION,
     Account,
     BrokerConfig,
@@ -164,26 +167,35 @@ def apply_position_fill(
 
 
 class ConservativeBarBroker:
-    """Atomic paper broker plus Phase 3 display-bar reducer."""
+    """Atomic paper broker over either closed BARs or revealed aggTrades."""
 
     def __init__(
         self,
         *,
         config: BrokerConfig,
-        bar_builder: ReplayBarBuilder,
+        bar_builder: ReplayBarBuilder | TradeReplayBarBuilder,
     ) -> None:
         if not isinstance(config, BrokerConfig):
             raise TypeError("config must be BrokerConfig")
-        if not isinstance(bar_builder, ReplayBarBuilder):
-            raise TypeError("bar_builder must be ReplayBarBuilder")
+        if not isinstance(bar_builder, (ReplayBarBuilder, TradeReplayBarBuilder)):
+            raise TypeError("bar_builder must be a supported replay bar reducer")
         self.config = config
         self._bar_builder = bar_builder
+        self._model_version = (
+            AGG_TRADE_TAPE_MODEL_VERSION
+            if isinstance(bar_builder, TradeReplayBarBuilder)
+            else BROKER_MODEL_VERSION
+        )
         self._config_hash = canonical_sha256(config.to_dict())
         self.reset()
 
     @property
-    def bar_builder(self) -> ReplayBarBuilder:
+    def bar_builder(self) -> ReplayBarBuilder | TradeReplayBarBuilder:
         return self._bar_builder
+
+    @property
+    def model_version(self) -> str:
+        return self._model_version
 
     @property
     def orders(self) -> tuple[ReplayOrder, ...]:
@@ -306,6 +318,7 @@ class ConservativeBarBroker:
             reserved_margin=reservation,
             status_reason=None,
             status_history=(OrderStatus.NEW, OrderStatus.OPEN),
+            model_version=self._model_version,
         )
         orders = dict(self._orders)
         orders[order.order_id] = order
@@ -507,13 +520,116 @@ class ConservativeBarBroker:
             account=self._account,
         )
 
-    def apply_source_event(self, event: object) -> Mapping[str, object]:
-        if not isinstance(event, ReplayBar):
+    def apply_trade(self, trade: ReplayTrade) -> BrokerEventResult:
+        """Allocate one revealed tape quantity once across deterministic orders."""
+
+        if self._ended:
+            raise ReplayDomainError(
+                ReplayErrorCode.SESSION_ENDED,
+                "broker session has ended",
+            )
+        if not isinstance(self._bar_builder, TradeReplayBarBuilder):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
-                "BAR broker source event must be ReplayBar",
+                "aggregate trade cannot be applied to a BAR broker",
             )
-        return self.apply_bar(event).to_dict()
+        if not isinstance(trade, ReplayTrade):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "tape broker source event must be ReplayTrade",
+            )
+        source_sequence = self._bar_builder.replay_events_applied + 1
+        working = self._working_state()
+        available = Decimal(trade.quantity)
+        eligible = [
+            order
+            for order in self.open_orders
+            if order.accepted_source_sequence < source_sequence
+        ]
+        eligible.sort(key=lambda order: (self._tape_priority(order), order.ordinal))
+
+        for eligible_order in eligible:
+            order = working.orders[eligible_order.order_id]
+            if order.status not in {
+                OrderStatus.OPEN,
+                OrderStatus.PARTIALLY_FILLED,
+            }:
+                continue
+            if order.reduce_only and (
+                Decimal(working.position.quantity) == 0
+                or not self._reduces_position(order, working.position)
+            ):
+                self._terminal_order(
+                    working,
+                    order,
+                    OrderStatus.CANCELED,
+                    reason="REDUCE_ONLY_NO_POSITION",
+                    source_sequence=source_sequence,
+                    event_time_ms=trade.trade_time_ms,
+                )
+                continue
+            triggered = self._trade_trigger(order, trade)
+            if triggered is None:
+                continue
+            trigger, partial_reason = triggered
+            if available <= 0:
+                if (
+                    partial_reason == "TAPE_TRIGGERED"
+                    and order.status_reason != "TAPE_TRIGGERED"
+                ):
+                    triggered_order = replace(
+                        order,
+                        status_reason="TAPE_TRIGGERED",
+                    )
+                    working.orders[order.order_id] = triggered_order
+                    working.changed_orders.append(triggered_order)
+                continue
+            fill_count = len(working.new_fills)
+            filled = self._fill_working(
+                working,
+                order,
+                source_sequence=source_sequence,
+                event_time_ms=trade.trade_time_ms,
+                trigger=trigger,
+                max_fill_quantity=available,
+                allow_partial=True,
+                partial_status_reason=partial_reason,
+            )
+            if filled and len(working.new_fills) == fill_count + 1:
+                available -= Decimal(working.new_fills[-1].quantity)
+            if Decimal(working.position.quantity) == 0:
+                self._cancel_orphan_reduce_orders(
+                    working,
+                    source_sequence=source_sequence,
+                    event_time_ms=trade.trade_time_ms,
+                )
+
+        working.position = mark_position(working.position, trade.price)
+        ledger = working.ledger or self._ledger
+        account = self._account_from(ledger, working.position)
+        self._assert_candidate_invariants(working, ledger, account)
+        bar_update = self._bar_builder.apply_trade(trade)
+
+        self._commit_working(working, account=account)
+        self._record_equity(account)
+        return BrokerEventResult(
+            bar_update=bar_update,
+            orders=tuple(working.changed_orders),
+            fills=tuple(working.new_fills),
+            warnings=tuple(working.new_warnings),
+            position=self._position,
+            account=self._account,
+        )
+
+    def apply_source_event(self, event: object) -> Mapping[str, object]:
+        if isinstance(event, ReplayBar):
+            return self.apply_bar(event).to_dict()
+        if isinstance(event, ReplayTrade):
+            return self.apply_trade(event).to_dict()
+        raise ReplayDomainError(
+            ReplayErrorCode.DATASET_MISMATCH,
+            "broker source event is neither ReplayBar nor ReplayTrade",
+        )
 
     def apply_command(
         self,
@@ -616,6 +732,13 @@ class ConservativeBarBroker:
                 ReplayErrorCode.INVALID_STATE_TRANSITION,
                 "unsupported position disposition",
             )
+        bar_update: Mapping[str, object] | None = None
+        if isinstance(self._bar_builder, TradeReplayBarBuilder):
+            finalized = self._bar_builder.finalize_bars(
+                virtual_time_ms=virtual_time_ms,
+            )
+            if finalized:
+                bar_update = finalized
         sequence = self._bar_builder.replay_events_applied
         working = self._working_state()
         if open_order_disposition != "preserve":
@@ -666,6 +789,7 @@ class ConservativeBarBroker:
                 reserved_margin="0",
                 status_reason=None,
                 status_history=(OrderStatus.NEW, OrderStatus.OPEN),
+                model_version=self._model_version,
             )
             working.orders[order.order_id] = order
             working.changed_orders.append(order)
@@ -696,7 +820,7 @@ class ConservativeBarBroker:
         self._ended = True
         self._record_equity(account)
         return BrokerEventResult(
-            None,
+            bar_update,
             tuple(working.changed_orders),
             tuple(working.new_fills),
             tuple(working.new_warnings),
@@ -733,6 +857,7 @@ class ConservativeBarBroker:
             max_drawdown=self._max_drawdown,
             ended=self._ended,
             state_hash=self.state_hash,
+            model_version=self._model_version,
         )
 
     def reset(self) -> None:
@@ -765,7 +890,7 @@ class ConservativeBarBroker:
     def snapshot(self) -> dict[str, object]:
         payload = {
             "schema_version": BROKER_STATE_SCHEMA_VERSION,
-            "model_version": BROKER_MODEL_VERSION,
+            "model_version": self._model_version,
             "config_hash": self._config_hash,
             "bar_builder": self._bar_builder.snapshot(),
             "orders": [order.to_dict() for order in self.orders],
@@ -835,7 +960,7 @@ class ConservativeBarBroker:
             )
             if (
                 payload["schema_version"] != BROKER_STATE_SCHEMA_VERSION
-                or payload["model_version"] != BROKER_MODEL_VERSION
+                or payload["model_version"] != self._model_version
                 or payload["config_hash"] != self._config_hash
             ):
                 raise ReplayDomainError(
@@ -864,6 +989,8 @@ class ConservativeBarBroker:
             for ordinal, order in enumerate(order_list, start=1):
                 if order.ordinal != ordinal or order.order_id != f"ord-{ordinal:010d}":
                     raise ValueError("broker order identifiers are not contiguous")
+                if order.model_version != self._model_version:
+                    raise ValueError("broker order model version is incompatible")
                 if any(
                     not decimal_multiple(
                         Decimal(value),
@@ -914,6 +1041,8 @@ class ConservativeBarBroker:
             for ordinal, fill in enumerate(fills, start=1):
                 if fill.fill_id != f"fill-{ordinal:010d}":
                     raise ValueError("broker fill identifiers are not contiguous")
+                if fill.model_version != self._model_version:
+                    raise ValueError("broker fill model version is incompatible")
                 order = orders.get(fill.order_id)
                 causal = (
                     fill.source_sequence > order.accepted_source_sequence
@@ -1114,6 +1243,9 @@ class ConservativeBarBroker:
         synthetic: bool = False,
         historical_execution: bool = True,
         skip_trigger_risk: bool = False,
+        max_fill_quantity: Decimal | None = None,
+        allow_partial: bool = False,
+        partial_status_reason: str | None = None,
     ) -> bool:
         price, liquidity, reason = trigger
         requested_quantity = Decimal(order.remaining_quantity)
@@ -1123,6 +1255,10 @@ class ConservativeBarBroker:
             )
         else:
             fill_quantity = requested_quantity
+        if max_fill_quantity is not None:
+            if max_fill_quantity <= 0:
+                return False
+            fill_quantity = min(fill_quantity, max_fill_quantity)
         if fill_quantity <= 0:
             self._terminal_order(
                 working,
@@ -1148,10 +1284,15 @@ class ConservativeBarBroker:
                     position=position_result.position,
                 )
             except ReplayDomainError:
+                rejection_status = (
+                    OrderStatus.CANCELED
+                    if order.status is OrderStatus.PARTIALLY_FILLED
+                    else OrderStatus.REJECTED
+                )
                 self._terminal_order(
                     working,
                     order,
-                    OrderStatus.REJECTED,
+                    rejection_status,
                     reason="TRIGGER_RISK_REJECTED",
                     source_sequence=source_sequence,
                     event_time_ms=event_time_ms,
@@ -1185,16 +1326,30 @@ class ConservativeBarBroker:
             event_time_ms=event_time_ms,
             synthetic=synthetic,
             historical_execution=historical_execution,
+            model_version=self._model_version,
         )
         ledger = self._ledger_for_write(working)
-        if Decimal(order.reserved_margin) > 0:
+        reserved_margin = Decimal(order.reserved_margin)
+        released_margin = Decimal(0)
+        if reserved_margin > 0:
+            with localcontext() as context:
+                context.prec = 60
+                released_margin = (
+                    reserved_margin
+                    if fill_quantity == requested_quantity
+                    else reserved_margin * fill_quantity / requested_quantity
+                )
+            released = decimal_to_string(
+                released_margin,
+                field_name="released margin",
+            )
             ledger.post(
                 kind=LedgerKind.RELEASE_MARGIN,
                 source_sequence=source_sequence,
                 event_time_ms=event_time_ms,
                 postings=(
-                    (LedgerAccount.AVAILABLE_MARGIN, order.reserved_margin),
-                    (LedgerAccount.RESERVED_MARGIN, f"-{order.reserved_margin}"),
+                    (LedgerAccount.AVAILABLE_MARGIN, released),
+                    (LedgerAccount.RESERVED_MARGIN, f"-{released}"),
                 ),
                 order_id=order.order_id,
                 fill_id=fill_id,
@@ -1226,8 +1381,28 @@ class ConservativeBarBroker:
             )
         filled_total = Decimal(order.filled_quantity) + fill_quantity
         remaining = Decimal(order.quantity) - filled_total
-        status = OrderStatus.FILLED if remaining == 0 else OrderStatus.CANCELED
-        status_reason = None if remaining == 0 else "REDUCE_ONLY_CLAMPED"
+        if remaining == 0:
+            status = OrderStatus.FILLED
+            status_reason = None
+        elif allow_partial:
+            status = OrderStatus.PARTIALLY_FILLED
+            status_reason = partial_status_reason
+        else:
+            status = OrderStatus.CANCELED
+            status_reason = "REDUCE_ONLY_CLAMPED"
+        with localcontext() as context:
+            context.prec = 60
+            average_fill = (
+                Decimal(price)
+                if Decimal(order.filled_quantity) == 0
+                else (
+                    Decimal(order.average_fill_price or "0")
+                    * Decimal(order.filled_quantity)
+                    + Decimal(price) * fill_quantity
+                )
+                / filled_total
+            )
+            remaining_reservation = reserved_margin - released_margin
         updated_order = replace(
             order,
             status=status,
@@ -1239,8 +1414,14 @@ class ConservativeBarBroker:
                 remaining,
                 field_name="remaining quantity",
             ),
-            average_fill_price=price,
-            reserved_margin="0",
+            average_fill_price=decimal_to_string(
+                average_fill,
+                field_name="average fill price",
+            ),
+            reserved_margin=decimal_to_string(
+                remaining_reservation,
+                field_name="remaining reserved margin",
+            ),
             status_reason=status_reason,
             status_history=order.status_history + (status,),
         )
@@ -1359,6 +1540,77 @@ class ConservativeBarBroker:
             LiquidityRole.TAKER,
             reason,
         )
+
+    def _trade_trigger(
+        self,
+        order: ReplayOrder,
+        trade: ReplayTrade,
+    ) -> tuple[tuple[str, LiquidityRole, FillReason], str | None] | None:
+        tape_price = Decimal(trade.price)
+        if order.order_type is OrderType.MARKET:
+            return (
+                (
+                    adverse_market_price(trade.price, order.side, self.config),
+                    LiquidityRole.TAKER,
+                    FillReason.MARKET_TAPE,
+                ),
+                None,
+            )
+        if order.order_type is OrderType.LIMIT:
+            assert order.limit_price is not None
+            limit = Decimal(order.limit_price)
+            crossed = (
+                tape_price < limit
+                if order.side is OrderSide.BUY
+                else tape_price > limit
+            )
+            if not crossed:
+                return None
+            return (
+                (
+                    order.limit_price,
+                    LiquidityRole.MAKER,
+                    FillReason.LIMIT_STRICT_CROSS,
+                ),
+                None,
+            )
+
+        assert order.stop_price is not None
+        stop = Decimal(order.stop_price)
+        already_triggered = order.status_reason == "TAPE_TRIGGERED"
+        if order.order_type is OrderType.STOP_MARKET:
+            touched = (
+                tape_price >= stop
+                if order.side is OrderSide.BUY
+                else tape_price <= stop
+            )
+            reason = FillReason.STOP_TAPE_TRIGGER
+        else:
+            touched = (
+                tape_price <= stop
+                if order.side is OrderSide.BUY
+                else tape_price >= stop
+            )
+            reason = FillReason.TAKE_PROFIT_TAPE_TRIGGER
+        if not (already_triggered or touched):
+            return None
+        return (
+            (
+                adverse_market_price(trade.price, order.side, self.config),
+                LiquidityRole.TAKER,
+                reason,
+            ),
+            "TAPE_TRIGGERED",
+        )
+
+    @staticmethod
+    def _tape_priority(order: ReplayOrder) -> int:
+        return {
+            OrderType.MARKET: 0,
+            OrderType.STOP_MARKET: 1,
+            OrderType.TAKE_PROFIT_MARKET: 1,
+            OrderType.LIMIT: 2,
+        }[order.order_type]
 
     @staticmethod
     def _reduce_priority(order: ReplayOrder) -> int:

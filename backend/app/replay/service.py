@@ -11,7 +11,15 @@ from decimal import Decimal, localcontext
 from typing import Callable, Mapping, Sequence
 
 from app.core.config import ReplaySettings
-from app.data_engine.interval_policy import compute_bucket_start_ms, parse_interval_ms
+from app.data_engine.interval_policy import (
+    compute_bucket_start_ms,
+    parse_interval_ms,
+)
+from app.data_engine.storage.raw_trade_archive import (
+    DisabledRawAggTradeArchive,
+    RawAggTradeArchive,
+    RawAggTradeDatasetRef,
+)
 from app.data_engine.storage.klines_repo import KlinesRepoAdapter
 
 from .actor import (
@@ -21,6 +29,8 @@ from .actor import (
     ReplaySessionActor,
 )
 from .bars.builder import ReplayBarBuilder, assess_bar_builder_capability
+from .bars.trade_builder import TradeReplayBarBuilder
+from .bars.trade_parity import assert_trade_bar_parity
 from .broker.execution import ConservativeBarBroker
 from .broker.models import BrokerConfig, BrokerLimits, InstrumentFilters
 from .canonical import canonical_json_bytes, canonical_sha256
@@ -29,6 +39,8 @@ from .commands import CommandResult
 from .constants import (
     REPLAY_PROTOCOL,
     CommandType,
+    DataFidelity,
+    ExecutionFidelity,
     ExecutionModel,
     SessionState,
     SourceKind,
@@ -43,11 +55,15 @@ from .dataset import (
 from .errors import ReplayDomainError, ReplayErrorCode
 from .models import ReplayCommand, ReplayCursor, ReplaySessionConfig
 from .sources.bar_source import BarReplaySource
+from .sources.trade_reader import PagedReplayTradeReader
+from .sources.trade_source import TradeReplaySource
 from .storage.sqlite_store import ReplaySQLiteStore, StoredCommand
 
 
 SYNTHETIC_TIME_ANCHOR_MS = 946_684_800_000
 _DATASET_POOL_MAX_BYTES = 512 * 1024 * 1024
+TRADE_SESSION_DATASET_SCHEMA_VERSION = "replay-trade-session-dataset.v1"
+TRADE_SESSION_REF_SCHEMA_VERSION = "replay-trade-session-ref.v1"
 
 
 @dataclass(slots=True)
@@ -60,6 +76,8 @@ class ReplaySessionHandle:
     actor_dataset: BarDatasetSnapshot
     synthetic_origin_ms: int | None
     created_at_ms: int
+    trade_dataset_ref: RawAggTradeDatasetRef | None = None
+    trade_pin_token: str | None = None
 
 
 class ReplayService:
@@ -71,6 +89,7 @@ class ReplayService:
         settings: ReplaySettings,
         store: ReplaySQLiteStore,
         repository: object | None = None,
+        raw_trade_archive: RawAggTradeArchive | None = None,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1_000),
         session_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
         native_intervals: Callable[[ReplaySeriesIdentity], Sequence[str]] | None = None,
@@ -82,6 +101,7 @@ class ReplayService:
         self.settings = settings
         self.store = store
         self._repository = repository or KlinesRepoAdapter()
+        self._raw_trade_archive = raw_trade_archive or DisabledRawAggTradeArchive()
         self._now_ms = now_ms
         self._session_id_factory = session_id_factory
         self._native_intervals = native_intervals or self._all_local_intervals
@@ -141,16 +161,42 @@ class ReplayService:
                     pass
 
     def capabilities(self) -> dict[str, object]:
+        archive_diagnostics = self._raw_trade_archive.diagnostics()
+        archive_enabled = bool(archive_diagnostics.get("enabled"))
+        archive_ready = archive_diagnostics.get("state") == "ready"
+        exact_dataset_available = bool(
+            archive_diagnostics.get("verified_partitions_available")
+        )
+        if not archive_enabled:
+            trade_capability: dict[str, object] = {
+                "enabled": False,
+                "reason": ReplayErrorCode.ARCHIVE_DISABLED.value,
+            }
+        elif not archive_ready:
+            trade_capability = {
+                "enabled": False,
+                "reason": ReplayErrorCode.ARCHIVE_DEGRADED.value,
+            }
+        elif not exact_dataset_available:
+            trade_capability = {
+                "enabled": False,
+                "reason": ReplayErrorCode.DATASET_INCOMPLETE.value,
+            }
+        else:
+            trade_capability = {
+                "enabled": True,
+                "fidelity": DataFidelity.EXACT_AGG_TRADE_COVERAGE.value,
+                "execution_fidelity": ExecutionFidelity.AGG_TRADE_TAPE.value,
+                "requires_exact_dataset": True,
+                "reader": "paged",
+            }
         return {
             "protocol": REPLAY_PROTOCOL,
             "enabled": True,
             "available": self.store.degraded_reason is None and not self._closed,
             "sources": {
                 "bar": {"enabled": True, "fidelity": "EXACT_BAR_COVERAGE"},
-                "agg_trade": {
-                    "enabled": False,
-                    "reason": "ARCHIVE_DISABLED",
-                },
+                "agg_trade": trade_capability,
             },
             "execution_models": [ExecutionModel.PAPER_LINEAR_V1.value],
             "limits": {
@@ -209,11 +255,8 @@ class ReplayService:
                     "active replay session limit exceeded",
                     details={"limit": self.settings.max_active_sessions},
                 )
-            if config.source_kind is not SourceKind.BAR:
-                raise ReplayDomainError(
-                    ReplayErrorCode.ARCHIVE_DISABLED,
-                    "aggregate-trade replay archive is disabled",
-                )
+            if config.source_kind is SourceKind.AGG_TRADE:
+                self._require_trade_capability()
             if config.execution_model is not ExecutionModel.PAPER_LINEAR_V1:
                 raise ReplayDomainError(
                     ReplayErrorCode.UNSUPPORTED_EXECUTION_MODEL,
@@ -258,9 +301,22 @@ class ReplayService:
             actual_dataset = await asyncio.to_thread(
                 self._dataset_builder.create, entry, window
             )
+            trade_dataset_ref: RawAggTradeDatasetRef | None = None
+            if config.source_kind is SourceKind.AGG_TRADE:
+                trade_dataset_ref = await self._freeze_trade_dataset(
+                    config,
+                    actual_dataset,
+                )
+                await asyncio.to_thread(
+                    self._assert_trade_dataset_parity,
+                    config,
+                    actual_dataset,
+                    trade_dataset_ref,
+                )
             return await self._create_from_dataset(
                 config=config,
                 actual_dataset=actual_dataset,
+                trade_dataset_ref=trade_dataset_ref,
                 restore_checkpoint=None,
                 forked=False,
             )
@@ -304,6 +360,7 @@ class ReplayService:
                 forked=True,
                 synthetic_origin_ms=source.synthetic_origin_ms,
                 broker_config=source.broker_config,
+                trade_dataset_ref=source.trade_dataset_ref,
             )
             self._metrics["forks"] = int(self._metrics["forks"] or 0) + 1
             result["forked_from_session_id"] = session_id
@@ -319,8 +376,8 @@ class ReplayService:
         payload: dict[str, object] = {
             "protocol": REPLAY_PROTOCOL,
             "session_id": session_id,
-            "data_fidelity": "EXACT_BAR_COVERAGE",
-            "execution_fidelity": "BAR_CONSERVATIVE",
+            "data_fidelity": self._data_fidelity(handle.config),
+            "execution_fidelity": self._execution_fidelity(handle.config),
             "revealed": (await handle.actor.public_snapshot())["revealed"],
             "report": report,
         }
@@ -373,6 +430,10 @@ class ReplayService:
                 errors.append(f"{session_id}: {exc}")
             finally:
                 self._datasets.release(session_id)
+                if handle.trade_pin_token is not None:
+                    self._raw_trade_archive.release_dataset(
+                        handle.trade_pin_token
+                    )
         self._sessions.clear()
         try:
             await self.store.close()
@@ -415,6 +476,7 @@ class ReplayService:
         *,
         config: ReplaySessionConfig,
         actual_dataset: BarDatasetSnapshot,
+        trade_dataset_ref: RawAggTradeDatasetRef | None = None,
         restore_checkpoint: bytes | None,
         forked: bool,
         synthetic_origin_ms: int | None = None,
@@ -442,17 +504,38 @@ class ReplayService:
             if config.start_policy is StartPolicy.MANUAL:
                 actor_config = replace(config, requested_start_ms=origin)
         broker = broker_config or self._broker_config(actor_config, actor_dataset)
-        reducer = self._broker(actor_config, actor_dataset, broker)
-        actor = self._actor(
-            session_id=session_id,
-            config=actor_config,
-            dataset=actor_dataset,
-            reducer=reducer,
-            restore_checkpoint=restore_checkpoint,
-            recovery_target=None,
+        if (
+            config.source_kind is SourceKind.AGG_TRADE
+            and trade_dataset_ref is None
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "aggregate-trade session is missing its immutable dataset ref",
+            )
+        reducer = self._broker(
+            actor_config,
+            actor_dataset,
+            broker,
+            trade_dataset_ref=trade_dataset_ref,
         )
         self._datasets.pin(session_id, actor_dataset)
+        trade_pin_token: str | None = None
+        actor: ReplaySessionActor | None = None
         try:
+            if trade_dataset_ref is not None:
+                trade_pin_token = await asyncio.to_thread(
+                    self._raw_trade_archive.pin_dataset,
+                    trade_dataset_ref,
+                )
+            actor = self._actor(
+                session_id=session_id,
+                config=actor_config,
+                dataset=actor_dataset,
+                trade_dataset_ref=trade_dataset_ref,
+                reducer=reducer,
+                restore_checkpoint=restore_checkpoint,
+                recovery_target=None,
+            )
             await actor.start()
             initial_checkpoint = actor.latest_checkpoint_blob()
             if initial_checkpoint is None:
@@ -461,13 +544,17 @@ class ReplayService:
                 )
             snapshot = await actor.public_snapshot()
             durable_state = await actor.durable_state()
+            persisted_ref, persisted_blob = self._persisted_dataset(
+                actual_dataset,
+                trade_dataset_ref,
+            )
             await self.store.create_session(
                 session_id=session_id,
                 config=actor_config.to_dict(),
                 broker_config=broker.to_dict(),
                 session_state=durable_state,
-                dataset_ref=actual_dataset.snapshot_ref().to_dict(),
-                dataset_blob=canonical_json_bytes(actual_dataset.to_dict()),
+                dataset_ref=persisted_ref,
+                dataset_blob=canonical_json_bytes(persisted_blob),
                 actual_replay_start_ms=actual_dataset.replay_start_ms,
                 actual_replay_end_ms=actual_dataset.replay_end_open_ms,
                 synthetic_origin_ms=origin,
@@ -476,11 +563,15 @@ class ReplayService:
             )
         except BaseException:
             self._datasets.release(session_id)
-            try:
-                await actor.shutdown(step_timeout=0.5)
-            except Exception:
-                pass
+            if trade_pin_token is not None:
+                self._raw_trade_archive.release_dataset(trade_pin_token)
+            if actor is not None:
+                try:
+                    await actor.shutdown(step_timeout=0.5)
+                except Exception:
+                    pass
             raise
+        assert actor is not None
         handle = ReplaySessionHandle(
             session_id=session_id,
             actor=actor,
@@ -490,6 +581,8 @@ class ReplayService:
             actor_dataset=actor_dataset,
             synthetic_origin_ms=origin,
             created_at_ms=self._validated_now_ms(),
+            trade_dataset_ref=trade_dataset_ref,
+            trade_pin_token=trade_pin_token,
         )
         self._sessions[session_id] = handle
         self._metrics["sessions_created"] = (
@@ -511,24 +604,6 @@ class ReplayService:
                 ReplayErrorCode.DATASET_MISMATCH,
                 "replay dataset reference is missing",
             )
-        try:
-            decoded = json.loads(bytes(dataset_record["snapshot_blob"]).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_MISMATCH,
-                "persisted BAR dataset JSON is invalid",
-            ) from exc
-        if not isinstance(decoded, Mapping):
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_MISMATCH,
-                "persisted BAR dataset must be an object",
-            )
-        actual_dataset = BarDatasetSnapshot.from_dict(decoded)
-        if actual_dataset.data_epoch != record["data_epoch"]:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_MISMATCH,
-                "persisted BAR dataset epoch does not match session",
-            )
         config_payload = record["config"]
         broker_payload = record["broker_config"]
         if not isinstance(config_payload, Mapping) or not isinstance(
@@ -540,6 +615,58 @@ class ReplayService:
             )
         config = ReplaySessionConfig.from_dict(config_payload)
         broker_config = BrokerConfig.from_dict(broker_payload)
+        try:
+            decoded = json.loads(bytes(dataset_record["snapshot_blob"]).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted replay dataset JSON is invalid",
+            ) from exc
+        if not isinstance(decoded, Mapping):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted replay dataset must be an object",
+            )
+        trade_dataset_ref: RawAggTradeDatasetRef | None = None
+        if config.source_kind is SourceKind.AGG_TRADE:
+            expected = {
+                "schema_version",
+                "bar_dataset",
+                "trade_dataset_ref",
+            }
+            if (
+                set(decoded) != expected
+                or decoded["schema_version"]
+                != TRADE_SESSION_DATASET_SCHEMA_VERSION
+                or not isinstance(decoded["bar_dataset"], Mapping)
+                or not isinstance(decoded["trade_dataset_ref"], Mapping)
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "persisted aggregate-trade dataset bundle is incompatible",
+                )
+            actual_dataset = BarDatasetSnapshot.from_dict(decoded["bar_dataset"])
+            trade_dataset_ref = RawAggTradeDatasetRef.from_dict(
+                decoded["trade_dataset_ref"]
+            )
+            if trade_dataset_ref.data_epoch != record["data_epoch"]:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "persisted trade dataset epoch does not match session",
+                )
+            await asyncio.to_thread(
+                self._assert_trade_dataset_parity,
+                config,
+                actual_dataset,
+                trade_dataset_ref,
+            )
+        else:
+            actual_dataset = BarDatasetSnapshot.from_dict(decoded)
+            if actual_dataset.data_epoch != record["data_epoch"]:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "persisted BAR dataset epoch does not match session",
+                )
         origin_value = dataset_record["synthetic_origin_ms"]
         origin = None if origin_value is None else int(origin_value)
         if config.blind_mode and origin is None:
@@ -559,9 +686,15 @@ class ReplayService:
                 "replay session has no valid checkpoint",
             )
         self._datasets.pin(session_id, actor_dataset)
+        trade_pin_token: str | None = None
         last_error: BaseException | None = None
         actor: ReplaySessionActor | None = None
         try:
+            if trade_dataset_ref is not None:
+                trade_pin_token = await asyncio.to_thread(
+                    self._raw_trade_archive.pin_dataset,
+                    trade_dataset_ref,
+                )
             for checkpoint in checkpoints:
                 tail = await self.store.recovery_mutations_after(
                     session_id,
@@ -575,11 +708,17 @@ class ReplayService:
                     command_log_offset=int(record["command_log_offset"]),
                     state_hash=str(record["state_hash"]),
                 )
-                reducer = self._broker(config, actor_dataset, broker_config)
+                reducer = self._broker(
+                    config,
+                    actor_dataset,
+                    broker_config,
+                    trade_dataset_ref=trade_dataset_ref,
+                )
                 candidate = self._actor(
                     session_id=session_id,
                     config=config,
                     dataset=actor_dataset,
+                    trade_dataset_ref=trade_dataset_ref,
                     reducer=reducer,
                     restore_checkpoint=checkpoint.payload,
                     recovery_target=target,
@@ -602,6 +741,8 @@ class ReplayService:
                 actor_dataset=actor_dataset,
                 synthetic_origin_ms=origin,
                 created_at_ms=int(record["created_at_ms"]),
+                trade_dataset_ref=trade_dataset_ref,
+                trade_pin_token=trade_pin_token,
             )
             self._sessions[session_id] = handle
             self._metrics["sessions_recovered"] = (
@@ -610,6 +751,8 @@ class ReplayService:
             return handle
         except BaseException:
             self._datasets.release(session_id)
+            if trade_pin_token is not None:
+                self._raw_trade_archive.release_dataset(trade_pin_token)
             raise
 
     def _actor(
@@ -618,14 +761,33 @@ class ReplayService:
         session_id: str,
         config: ReplaySessionConfig,
         dataset: BarDatasetSnapshot,
+        trade_dataset_ref: RawAggTradeDatasetRef | None,
         reducer: ConservativeBarBroker,
         restore_checkpoint: bytes | None,
         recovery_target: ActorRecoveryTarget | None,
     ) -> ReplaySessionActor:
+        if trade_dataset_ref is None:
+            def source_factory() -> BarReplaySource:
+                return BarReplaySource(dataset)
+        else:
+            time_offset_ms = (
+                dataset.replay_start_ms - trade_dataset_ref.start_time_ms
+            )
+
+            def source_factory() -> TradeReplaySource:
+                return TradeReplaySource(
+                    PagedReplayTradeReader(
+                        self._raw_trade_archive,
+                        trade_dataset_ref,
+                        page_rows=self.settings.trade_page_rows,
+                    ),
+                    time_offset_ms=time_offset_ms,
+                )
+
         return ReplaySessionActor(
             session_id=session_id,
             config=config,
-            source_factory=lambda: BarReplaySource(dataset),
+            source_factory=source_factory,
             initial_virtual_time_ms=dataset.replay_start_ms,
             command_queue_size=self.settings.command_queue_size,
             event_buffer_size=self.settings.event_buffer_size,
@@ -720,6 +882,8 @@ class ReplayService:
         return {
             "protocol": REPLAY_PROTOCOL,
             "session_id": handle.session_id,
+            "data_fidelity": self._data_fidelity(handle.config),
+            "execution_fidelity": self._execution_fidelity(handle.config),
             "snapshot": snapshot,
         }
 
@@ -792,14 +956,34 @@ class ReplayService:
         config: ReplaySessionConfig,
         dataset: BarDatasetSnapshot,
         broker_config: BrokerConfig,
+        *,
+        trade_dataset_ref: RawAggTradeDatasetRef | None = None,
     ) -> ConservativeBarBroker:
-        builder = ReplayBarBuilder(
-            base_interval=config.base_interval,
-            display_interval=config.display_interval,
-            replay_start_ms=dataset.replay_start_ms,
-            warmup_bars=dataset.warmup_rows,
-            max_closed_bars=min(10_000, max(1, dataset.row_count)),
-        )
+        max_closed_bars = min(10_000, max(1, dataset.row_count))
+        if config.source_kind is SourceKind.AGG_TRADE:
+            if trade_dataset_ref is None:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_INCOMPLETE,
+                    "aggregate-trade broker is missing its dataset ref",
+                )
+            builder: ReplayBarBuilder | TradeReplayBarBuilder = (
+                TradeReplayBarBuilder(
+                    base_interval=config.base_interval,
+                    display_interval=config.display_interval,
+                    replay_start_ms=dataset.replay_start_ms,
+                    replay_end_time_ms=dataset.replay_rows[-1].close_time_ms,
+                    warmup_bars=dataset.warmup_rows,
+                    max_closed_bars=max_closed_bars,
+                )
+            )
+        else:
+            builder = ReplayBarBuilder(
+                base_interval=config.base_interval,
+                display_interval=config.display_interval,
+                replay_start_ms=dataset.replay_start_ms,
+                warmup_bars=dataset.warmup_rows,
+                max_closed_bars=max_closed_bars,
+            )
         return ConservativeBarBroker(config=broker_config, bar_builder=builder)
 
     @staticmethod
@@ -852,6 +1036,147 @@ class ReplayService:
                 max_ledger_entries=65_536,
                 max_warnings=4_096,
             ),
+        )
+
+    def _require_trade_capability(self) -> None:
+        diagnostics = self._raw_trade_archive.diagnostics()
+        if not diagnostics.get("enabled"):
+            raise ReplayDomainError(
+                ReplayErrorCode.ARCHIVE_DISABLED,
+                "aggregate-trade replay archive is disabled",
+            )
+        if diagnostics.get("state") != "ready":
+            raise ReplayDomainError(
+                ReplayErrorCode.ARCHIVE_DEGRADED,
+                "aggregate-trade replay archive is degraded",
+            )
+        if not diagnostics.get("verified_partitions_available"):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "aggregate-trade replay archive has no verified exact dataset",
+            )
+
+    async def _freeze_trade_dataset(
+        self,
+        config: ReplaySessionConfig,
+        dataset: BarDatasetSnapshot,
+    ) -> RawAggTradeDatasetRef:
+        try:
+            reference = await asyncio.to_thread(
+                self._raw_trade_archive.freeze_dataset,
+                exchange=config.exchange,
+                market_type=config.market_type,
+                symbol=config.symbol,
+                start_time_ms=dataset.replay_start_ms,
+                end_time_ms=dataset.replay_rows[-1].close_time_ms,
+                page_rows=self.settings.trade_page_rows,
+            )
+        except ReplayDomainError:
+            raise
+        except Exception as exc:
+            diagnostics = self._raw_trade_archive.diagnostics()
+            code = (
+                ReplayErrorCode.ARCHIVE_DEGRADED
+                if diagnostics.get("state") != "ready"
+                else ReplayErrorCode.DATASET_INCOMPLETE
+            )
+            raise ReplayDomainError(
+                code,
+                "no checksum-verified exact aggregate-trade dataset covers "
+                "the selected replay window",
+            ) from exc
+        expected_identity = (
+            config.exchange.lower(),
+            config.market_type.lower(),
+            config.symbol.upper(),
+        )
+        if (
+            reference.exchange,
+            reference.market_type,
+            reference.symbol,
+        ) != expected_identity or (
+            reference.start_time_ms,
+            reference.end_time_ms,
+        ) != (
+            dataset.replay_start_ms,
+            dataset.replay_rows[-1].close_time_ms,
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "frozen aggregate-trade dataset identity or time range changed",
+            )
+        return reference
+
+    def _assert_trade_dataset_parity(
+        self,
+        config: ReplaySessionConfig,
+        dataset: BarDatasetSnapshot,
+        trade_dataset_ref: RawAggTradeDatasetRef,
+    ) -> None:
+        reader = PagedReplayTradeReader(
+            self._raw_trade_archive,
+            trade_dataset_ref,
+            page_rows=self.settings.trade_page_rows,
+        )
+        builder = TradeReplayBarBuilder(
+            base_interval=config.base_interval,
+            display_interval=config.base_interval,
+            replay_start_ms=dataset.replay_start_ms,
+            replay_end_time_ms=dataset.replay_rows[-1].close_time_ms,
+            warmup_bars=dataset.warmup_rows,
+            max_closed_bars=max(1, dataset.row_count),
+        )
+        count = 0
+        for trade in reader.iter_trades():
+            builder.apply_trade(trade)
+            count += 1
+        if count != trade_dataset_ref.row_count:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATA_GAP,
+                "aggregate-trade parity scan did not consume the frozen row count",
+            )
+        builder.finalize_bars(
+            virtual_time_ms=dataset.replay_rows[-1].close_time_ms
+        )
+        replay_count = len(dataset.replay_rows)
+        derived = builder.closed_bars[-replay_count:]
+        assert_trade_bar_parity(derived, dataset.replay_rows)
+
+    @staticmethod
+    def _persisted_dataset(
+        dataset: BarDatasetSnapshot,
+        trade_dataset_ref: RawAggTradeDatasetRef | None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        if trade_dataset_ref is None:
+            return dataset.snapshot_ref().to_dict(), dataset.to_dict()
+        reference = {
+            "schema_version": TRADE_SESSION_REF_SCHEMA_VERSION,
+            "data_epoch": trade_dataset_ref.data_epoch,
+            "bar_data_epoch": dataset.data_epoch,
+            "source_kind": SourceKind.AGG_TRADE.value,
+            "trade_dataset_ref": trade_dataset_ref.to_dict(),
+        }
+        bundle = {
+            "schema_version": TRADE_SESSION_DATASET_SCHEMA_VERSION,
+            "bar_dataset": dataset.to_dict(),
+            "trade_dataset_ref": trade_dataset_ref.to_dict(),
+        }
+        return reference, bundle
+
+    @staticmethod
+    def _data_fidelity(config: ReplaySessionConfig) -> str:
+        return (
+            DataFidelity.EXACT_AGG_TRADE_COVERAGE.value
+            if config.source_kind is SourceKind.AGG_TRADE
+            else DataFidelity.EXACT_BAR_COVERAGE.value
+        )
+
+    @staticmethod
+    def _execution_fidelity(config: ReplaySessionConfig) -> str:
+        return (
+            ExecutionFidelity.AGG_TRADE_TAPE.value
+            if config.source_kind is SourceKind.AGG_TRADE
+            else ExecutionFidelity.BAR_CONSERVATIVE.value
         )
 
     async def _persist_report(self, handle: ReplaySessionHandle) -> None:

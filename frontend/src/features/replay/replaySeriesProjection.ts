@@ -5,9 +5,12 @@ import type { WindowDelta } from "../market-data/klineContracts.js";
 import { WINDOW_DELTA_TYPES } from "../market-data/window/windowDeltas.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import type {
+  ReplayAnyBarBuilderSnapshot,
+  ReplayBarProjectionUpdate,
   ReplayBarUpdate,
   ReplayDisplayBar,
   ReplaySessionSnapshot,
+  ReplayTradeBarBuilderSnapshot,
 } from "./replayTypes.js";
 
 export class ReplaySeriesProjectionError extends Error {
@@ -67,16 +70,26 @@ function assertRevealed(bar: ReplayDisplayBar, publicTimeMs: number): void {
   }
 }
 
+function isTradeBuilder(
+  builder: ReplayAnyBarBuilderSnapshot,
+): builder is ReplayTradeBarBuilderSnapshot {
+  return "public_projection" in builder;
+}
+
 export function replaceReplaySeriesFromSnapshot(
   store: SeriesWindowStore,
   snapshot: ReplaySessionSnapshot,
 ): WindowDelta {
   const builder = snapshot.components.bar_builder;
-  const bars = [...builder.closed_bars, ...(builder.active_bar ? [builder.active_bar] : [])];
+  const bars = isTradeBuilder(builder)
+    ? builder.public_projection.bars
+    : [...builder.closed_bars, ...(builder.active_bar ? [builder.active_bar] : [])];
   for (const bar of bars) assertRevealed(bar, snapshot.cursor.virtual_time_ms);
   const rows = bars.map(replayDisplayBarToKline);
   store.seriesKey = asSeriesKey(buildReplayDatasetKey(snapshot));
-  store.intervalSeconds = builder.display_interval_ms / 1_000;
+  store.intervalSeconds = (
+    isTradeBuilder(builder) ? builder.bar_builder.display_interval_ms : builder.display_interval_ms
+  ) / 1_000;
   return store.replace(rows, {
     source: "replay-snapshot",
     sessionId: snapshot.session_id,
@@ -87,6 +100,20 @@ export function replaceReplaySeriesFromSnapshot(
 }
 
 export function applyReplayBarUpdate(
+  store: SeriesWindowStore,
+  update: ReplayBarProjectionUpdate,
+  publicTimeMs: number,
+): WindowDelta {
+  if (update.action === "batch") {
+    let last: WindowDelta | null = null;
+    for (const item of update.updates) last = applySingleReplayBarUpdate(store, item, publicTimeMs);
+    if (last === null) throw new ReplaySeriesProjectionError("replay update batch is empty");
+    return last;
+  }
+  return applySingleReplayBarUpdate(store, update, publicTimeMs);
+}
+
+function applySingleReplayBarUpdate(
   store: SeriesWindowStore,
   update: ReplayBarUpdate,
   publicTimeMs: number,

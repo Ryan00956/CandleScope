@@ -184,6 +184,9 @@ export interface ReplayErrorEnvelope {
 export interface ReplaySourceCapability {
   readonly enabled: boolean;
   readonly fidelity?: ReplayDataFidelity;
+  readonly execution_fidelity?: ReplayExecutionFidelity;
+  readonly requires_exact_dataset?: boolean;
+  readonly reader?: "paged";
   readonly reason?: string;
 }
 
@@ -275,6 +278,23 @@ export interface ReplaySourceBar {
   readonly source: string;
 }
 
+export interface ReplaySourceTrade {
+  readonly exchange: string;
+  readonly market_type: string;
+  readonly symbol: string;
+  readonly agg_trade_id: number;
+  readonly first_trade_id: number;
+  readonly last_trade_id: number;
+  readonly price: ReplayDecimalString;
+  readonly quantity: ReplayDecimalString;
+  readonly quote_quantity: ReplayDecimalString;
+  readonly trade_time_ms: ReplayTimestampMs;
+  readonly is_buyer_maker: boolean;
+  readonly source: string;
+}
+
+export type ReplaySourceEvent = ReplaySourceBar | ReplaySourceTrade;
+
 export interface ReplayBarUpdate {
   readonly action: "append" | "tick";
   readonly bar: ReplayDisplayBar;
@@ -283,6 +303,13 @@ export interface ReplayBarUpdate {
   readonly gap_policy: string;
   readonly synthetic_policy: string;
 }
+
+export interface ReplayBarUpdateBatch {
+  readonly action: "batch";
+  readonly updates: readonly ReplayBarUpdate[];
+}
+
+export type ReplayBarProjectionUpdate = ReplayBarUpdate | ReplayBarUpdateBatch;
 
 export interface ReplayOrder {
   readonly order_id: string;
@@ -366,7 +393,7 @@ export interface ReplayAccount {
 }
 
 export interface ReplayProjection {
-  readonly bar_update: ReplayBarUpdate | null;
+  readonly bar_update: ReplayBarProjectionUpdate | null;
   readonly orders: readonly ReplayOrder[];
   readonly fills: readonly ReplayFill[];
   readonly warnings: readonly ReplayWarning[];
@@ -403,11 +430,60 @@ export interface ReplayBarBuilderSnapshot {
   readonly state_hash: ReplayDigest;
 }
 
+export interface ReplayBarReplaceProjection {
+  readonly action: "replace";
+  readonly bars: readonly ReplayDisplayBar[];
+  readonly closed_count: number;
+  readonly closed_prefix_count: number;
+  readonly replay_events_applied: number;
+  readonly gap_policy: string;
+  readonly synthetic_policy: string;
+  readonly source_kind: "AGG_TRADE";
+}
+
+export interface ReplayTradeFormingBar {
+  readonly open_time_ms: ReplayTimestampMs;
+  readonly close_time_ms: ReplayTimestampMs;
+  readonly open: ReplayDecimalString;
+  readonly high: ReplayDecimalString;
+  readonly low: ReplayDecimalString;
+  readonly close: ReplayDecimalString;
+  readonly volume: ReplayDecimalString;
+  readonly quote_volume: ReplayDecimalString;
+  readonly trades: number;
+  readonly taker_buy_base: ReplayDecimalString;
+  readonly taker_buy_quote: ReplayDecimalString;
+}
+
+export interface ReplayTradeBarBuilderSnapshot {
+  readonly schema_version: "replay-trade-bar-builder-state.v1";
+  readonly base_interval: string;
+  readonly display_interval: string;
+  readonly replay_start_ms: ReplayTimestampMs;
+  readonly replay_end_time_ms: ReplayTimestampMs;
+  readonly max_closed_bars: number;
+  readonly synthetic_policy: string;
+  readonly bar_builder: ReplayBarBuilderSnapshot;
+  readonly public_projection: ReplayBarReplaceProjection;
+  readonly forming: ReplayTradeFormingBar | null;
+  readonly next_base_open_ms: ReplayTimestampMs;
+  readonly replay_events_applied: number;
+  readonly last_trade_time_ms: ReplayTimestampMs | null;
+  readonly last_agg_trade_id: number | null;
+  readonly identity: readonly [string, string, string] | null;
+  readonly previous_close: ReplayDecimalString | null;
+  readonly last_projected_open_ms: ReplayTimestampMs | null;
+  readonly finalized: boolean;
+  readonly state_hash: ReplayDigest;
+}
+
+export type ReplayAnyBarBuilderSnapshot = ReplayBarBuilderSnapshot | ReplayTradeBarBuilderSnapshot;
+
 export interface ReplayBrokerSnapshot {
   readonly schema_version: string;
   readonly model_version: string;
   readonly config_hash: ReplayDigest;
-  readonly bar_builder: ReplayBarBuilderSnapshot;
+  readonly bar_builder: ReplayAnyBarBuilderSnapshot;
   readonly orders: readonly ReplayOrder[];
   readonly client_order_ids: readonly string[];
   readonly fills: readonly ReplayFill[];
@@ -495,6 +571,8 @@ export interface ReplaySessionSnapshot {
 export interface ReplaySessionResponse {
   readonly protocol: typeof REPLAY_PROTOCOL;
   readonly session_id: string;
+  readonly data_fidelity: ReplayDataFidelity;
+  readonly execution_fidelity: ReplayExecutionFidelity;
   readonly snapshot: ReplaySessionSnapshot;
   readonly forked?: boolean;
   readonly forked_from_session_id?: string;
@@ -516,7 +594,7 @@ export type ReplayParsedEvent = Omit<ReplayEventEnvelope, "data"> & {
   readonly data:
     | { readonly reset: true; readonly snapshot: ReplaySessionSnapshot }
     | { readonly state: ReplaySessionState; readonly reason: string; readonly speed: ReplaySpeed; readonly controller_client_id: string | null }
-    | { readonly source_sequence: ReplaySequence; readonly source_event: ReplaySourceBar; readonly projection: ReplayProjection }
+    | { readonly source_sequence: ReplaySequence; readonly source_event: ReplaySourceEvent; readonly projection: ReplayProjection }
     | { readonly command_type: ReplayCommandType; readonly projection: ReplayProjection }
     | ReplayJournalEntry
     | { readonly reset: true; readonly reason: string }

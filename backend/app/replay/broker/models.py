@@ -10,7 +10,13 @@ from typing import Mapping, TypeVar
 from ..models import normalize_decimal_string, validate_counter, validate_identifier
 
 
-BROKER_MODEL_VERSION = "BAR_CONSERVATIVE_V1"
+BAR_BROKER_MODEL_VERSION = "BAR_CONSERVATIVE_V1"
+AGG_TRADE_TAPE_MODEL_VERSION = "AGG_TRADE_TAPE_V1"
+SUPPORTED_BROKER_MODEL_VERSIONS = frozenset(
+    {BAR_BROKER_MODEL_VERSION, AGG_TRADE_TAPE_MODEL_VERSION}
+)
+# Backward-compatible public name for the original BAR model.
+BROKER_MODEL_VERSION = BAR_BROKER_MODEL_VERSION
 
 _EnumT = TypeVar("_EnumT", bound=Enum)
 
@@ -72,6 +78,10 @@ class FillReason(_StringEnum):
     STOP_TRIGGER = "STOP_TRIGGER"
     TAKE_PROFIT_TRIGGER = "TAKE_PROFIT_TRIGGER"
     SESSION_END_MARK_CLOSE = "SESSION_END_MARK_CLOSE"
+    MARKET_TAPE = "MARKET_TAPE"
+    LIMIT_STRICT_CROSS = "LIMIT_STRICT_CROSS"
+    STOP_TAPE_TRIGGER = "STOP_TAPE_TRIGGER"
+    TAKE_PROFIT_TAPE_TRIGGER = "TAKE_PROFIT_TAPE_TRIGGER"
 
 
 class WarningCode(_StringEnum):
@@ -661,7 +671,7 @@ class ReplayOrder:
             raise TypeError("reduce_only must be a boolean")
         if self.status_reason is not None and not isinstance(self.status_reason, str):
             raise TypeError("status_reason must be a string or null")
-        if self.model_version != BROKER_MODEL_VERSION:
+        if self.model_version not in SUPPORTED_BROKER_MODEL_VERSIONS:
             raise ValueError("order model_version is incompatible")
 
     def to_dict(self) -> dict[str, object]:
@@ -793,7 +803,7 @@ class ReplayFill:
             self.historical_execution, bool
         ):
             raise TypeError("fill execution flags must be booleans")
-        if self.model_version != BROKER_MODEL_VERSION:
+        if self.model_version not in SUPPORTED_BROKER_MODEL_VERSIONS:
             raise ValueError("fill model_version is incompatible")
 
     def to_dict(self) -> dict[str, object]:

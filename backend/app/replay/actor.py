@@ -1607,6 +1607,17 @@ class ReplaySessionActor:
             self._pending_source_events.append(self._event_payload(event))
         end_projection: Mapping[str, object] = {}
         if self._source.exhausted():
+            terminal_time = getattr(self._source, "terminal_time_ms", event_time)
+            terminal_time = validate_timestamp_ms(
+                terminal_time,
+                field_name="source_terminal_time_ms",
+            )
+            if terminal_time < event_time:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source terminal time precedes its last event",
+                )
+            self._clock.advance_to(terminal_time)
             end_projection = await self._finalize_reducer(
                 open_order_disposition="expire",
                 position_disposition="keep",
@@ -2366,6 +2377,8 @@ class ReplaySessionActor:
             virtual_time_ms=self._clock.virtual_time_ms,
             source_sequence=source_cursor.source_sequence,
             last_base_bar_open_ms=source_cursor.last_base_bar_open_ms,
+            last_trade_time_ms=source_cursor.last_trade_time_ms,
+            last_agg_trade_id=source_cursor.last_agg_trade_id,
             at_end=source_cursor.at_end,
         )
 

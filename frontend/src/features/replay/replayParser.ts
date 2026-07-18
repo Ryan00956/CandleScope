@@ -3,6 +3,7 @@ import {
   REPLAY_DATA_FIDELITIES,
   REPLAY_ERROR_CODES,
   REPLAY_EVENT_TYPES,
+  REPLAY_EXECUTION_FIDELITIES,
   REPLAY_EXECUTION_MODELS,
   REPLAY_PROTOCOL,
   REPLAY_QUALITY_MODES,
@@ -11,7 +12,10 @@ import {
 } from "./replayTypes.js";
 import type {
   ReplayAccount,
+  ReplayAnyBarBuilderSnapshot,
   ReplayBarBuilderSnapshot,
+  ReplayBarProjectionUpdate,
+  ReplayBarReplaceProjection,
   ReplayBarUpdate,
   ReplayBrokerSnapshot,
   ReplayBrokerReport,
@@ -39,7 +43,11 @@ import type {
   ReplaySessionResponse,
   ReplaySessionSnapshot,
   ReplaySourceBar,
+  ReplaySourceEvent,
+  ReplaySourceTrade,
   ReplaySpeed,
+  ReplayTradeBarBuilderSnapshot,
+  ReplayTradeFormingBar,
   ReplayWarning,
 } from "./replayTypes.js";
 
@@ -312,6 +320,40 @@ function parseSourceBar(value: unknown, path: string): ReplaySourceBar {
   };
 }
 
+function parseSourceTrade(value: unknown, path: string): ReplaySourceTrade {
+  const source = record(value, path);
+  exact(source, [
+    "exchange", "market_type", "symbol", "agg_trade_id", "first_trade_id",
+    "last_trade_id", "price", "quantity", "quote_quantity", "trade_time_ms",
+    "is_buyer_maker", "source",
+  ], path);
+  const parsed: ReplaySourceTrade = {
+    exchange: identifier(source.exchange, `${path}.exchange`),
+    market_type: identifier(source.market_type, `${path}.market_type`),
+    symbol: identifier(source.symbol, `${path}.symbol`),
+    agg_trade_id: integer(source.agg_trade_id, `${path}.agg_trade_id`),
+    first_trade_id: integer(source.first_trade_id, `${path}.first_trade_id`),
+    last_trade_id: integer(source.last_trade_id, `${path}.last_trade_id`),
+    price: parseReplayDecimal(source.price, `${path}.price`),
+    quantity: parseReplayDecimal(source.quantity, `${path}.quantity`),
+    quote_quantity: parseReplayDecimal(source.quote_quantity, `${path}.quote_quantity`),
+    trade_time_ms: timestamp(source.trade_time_ms, `${path}.trade_time_ms`),
+    is_buyer_maker: bool(source.is_buyer_maker, `${path}.is_buyer_maker`),
+    source: string(source.source, `${path}.source`),
+  };
+  if (parsed.first_trade_id > parsed.last_trade_id) {
+    fail(path, "aggregate trade raw ID range is reversed");
+  }
+  return parsed;
+}
+
+function parseSourceEvent(value: unknown, path: string): ReplaySourceEvent {
+  const source = record(value, path);
+  return Object.hasOwn(source, "trade_time_ms")
+    ? parseSourceTrade(source, path)
+    : parseSourceBar(source, path);
+}
+
 function parseOrder(value: unknown, path: string): ReplayOrder {
   const source = record(value, path);
   exact(source, [
@@ -432,8 +474,7 @@ function parseAccount(value: unknown, path: string): ReplayAccount {
   };
 }
 
-function parseBarUpdate(value: unknown, path: string): ReplayBarUpdate | null {
-  if (value === null) return null;
+function parseSingleBarUpdate(value: unknown, path: string): ReplayBarUpdate {
   const source = record(value, path);
   exact(source, ["action", "bar", "source_sequence", "base_open_time_ms", "gap_policy", "synthetic_policy"], path);
   return {
@@ -444,6 +485,16 @@ function parseBarUpdate(value: unknown, path: string): ReplayBarUpdate | null {
     gap_policy: string(source.gap_policy, `${path}.gap_policy`),
     synthetic_policy: string(source.synthetic_policy, `${path}.synthetic_policy`),
   };
+}
+
+function parseBarUpdate(value: unknown, path: string): ReplayBarProjectionUpdate | null {
+  if (value === null) return null;
+  const source = record(value, path);
+  if (source.action !== "batch") return parseSingleBarUpdate(source, path);
+  exact(source, ["action", "updates"], path);
+  const updates = array(source.updates, `${path}.updates`, parseSingleBarUpdate);
+  if (updates.length === 0) fail(`${path}.updates`, "batch must contain at least one update");
+  return { action: "batch", updates };
 }
 
 export function parseReplayProjection(value: unknown, path = "$"): ReplayProjection {
@@ -491,6 +542,123 @@ function parseBarBuilder(value: unknown, path: string): ReplayBarBuilderSnapshot
   };
 }
 
+function parseTradeFormingBar(value: unknown, path: string): ReplayTradeFormingBar {
+  const source = record(value, path);
+  exact(source, [
+    "open_time_ms", "close_time_ms", "open", "high", "low", "close", "volume",
+    "quote_volume", "trades", "taker_buy_base", "taker_buy_quote",
+  ], path);
+  const parsed: ReplayTradeFormingBar = {
+    open_time_ms: timestamp(source.open_time_ms, `${path}.open_time_ms`),
+    close_time_ms: timestamp(source.close_time_ms, `${path}.close_time_ms`),
+    open: parseReplayDecimal(source.open, `${path}.open`),
+    high: parseReplayDecimal(source.high, `${path}.high`),
+    low: parseReplayDecimal(source.low, `${path}.low`),
+    close: parseReplayDecimal(source.close, `${path}.close`),
+    volume: parseReplayDecimal(source.volume, `${path}.volume`),
+    quote_volume: parseReplayDecimal(source.quote_volume, `${path}.quote_volume`),
+    trades: integer(source.trades, `${path}.trades`, 1),
+    taker_buy_base: parseReplayDecimal(source.taker_buy_base, `${path}.taker_buy_base`),
+    taker_buy_quote: parseReplayDecimal(source.taker_buy_quote, `${path}.taker_buy_quote`),
+  };
+  if (parsed.close_time_ms < parsed.open_time_ms) fail(path, "forming bar close precedes open");
+  return parsed;
+}
+
+function parseTradePublicProjection(value: unknown, path: string): ReplayBarReplaceProjection {
+  const source = record(value, path);
+  exact(source, [
+    "action", "bars", "closed_count", "closed_prefix_count", "replay_events_applied",
+    "gap_policy", "synthetic_policy", "source_kind",
+  ], path);
+  if (source.action !== "replace") fail(`${path}.action`, "expected replace");
+  if (source.source_kind !== "AGG_TRADE") fail(`${path}.source_kind`, "expected AGG_TRADE");
+  const closedCount = integer(source.closed_count, `${path}.closed_count`);
+  const closedPrefixCount = integer(source.closed_prefix_count, `${path}.closed_prefix_count`);
+  if (closedPrefixCount > closedCount) fail(path, "closed prefix exceeds closed count");
+  return {
+    action: "replace",
+    bars: array(source.bars, `${path}.bars`, parseReplayDisplayBar),
+    closed_count: closedCount,
+    closed_prefix_count: closedPrefixCount,
+    replay_events_applied: integer(source.replay_events_applied, `${path}.replay_events_applied`),
+    gap_policy: string(source.gap_policy, `${path}.gap_policy`),
+    synthetic_policy: string(source.synthetic_policy, `${path}.synthetic_policy`),
+    source_kind: "AGG_TRADE",
+  };
+}
+
+function parseTradeIdentity(value: unknown, path: string): readonly [string, string, string] | null {
+  if (value === null) return null;
+  if (!Array.isArray(value) || value.length !== 3) fail(path, "expected three-part source identity");
+  return [
+    identifier(value[0], `${path}[0]`),
+    identifier(value[1], `${path}[1]`),
+    identifier(value[2], `${path}[2]`),
+  ];
+}
+
+function parseTradeBarBuilder(value: unknown, path: string): ReplayTradeBarBuilderSnapshot {
+  const source = record(value, path);
+  exact(source, [
+    "schema_version", "base_interval", "display_interval", "replay_start_ms",
+    "replay_end_time_ms", "max_closed_bars", "synthetic_policy", "bar_builder",
+    "public_projection", "forming", "next_base_open_ms", "replay_events_applied",
+    "last_trade_time_ms", "last_agg_trade_id", "identity", "previous_close",
+    "last_projected_open_ms", "finalized", "state_hash",
+  ], path);
+  if (source.schema_version !== "replay-trade-bar-builder-state.v1") {
+    fail(`${path}.schema_version`, "unsupported aggregate-trade builder schema");
+  }
+  const nested = parseBarBuilder(source.bar_builder, `${path}.bar_builder`);
+  const publicProjection = parseTradePublicProjection(source.public_projection, `${path}.public_projection`);
+  const parsed: ReplayTradeBarBuilderSnapshot = {
+    schema_version: "replay-trade-bar-builder-state.v1",
+    base_interval: identifier(source.base_interval, `${path}.base_interval`),
+    display_interval: identifier(source.display_interval, `${path}.display_interval`),
+    replay_start_ms: timestamp(source.replay_start_ms, `${path}.replay_start_ms`),
+    replay_end_time_ms: timestamp(source.replay_end_time_ms, `${path}.replay_end_time_ms`),
+    max_closed_bars: integer(source.max_closed_bars, `${path}.max_closed_bars`, 1),
+    synthetic_policy: string(source.synthetic_policy, `${path}.synthetic_policy`),
+    bar_builder: nested,
+    public_projection: publicProjection,
+    forming: source.forming === null ? null : parseTradeFormingBar(source.forming, `${path}.forming`),
+    next_base_open_ms: timestamp(source.next_base_open_ms, `${path}.next_base_open_ms`),
+    replay_events_applied: integer(source.replay_events_applied, `${path}.replay_events_applied`),
+    last_trade_time_ms: nullableTimestamp(source.last_trade_time_ms, `${path}.last_trade_time_ms`),
+    last_agg_trade_id: source.last_agg_trade_id === null
+      ? null
+      : integer(source.last_agg_trade_id, `${path}.last_agg_trade_id`),
+    identity: parseTradeIdentity(source.identity, `${path}.identity`),
+    previous_close: nullableDecimal(source.previous_close, `${path}.previous_close`),
+    last_projected_open_ms: nullableTimestamp(source.last_projected_open_ms, `${path}.last_projected_open_ms`),
+    finalized: bool(source.finalized, `${path}.finalized`),
+    state_hash: digest(source.state_hash, `${path}.state_hash`),
+  };
+  if (parsed.replay_end_time_ms < parsed.replay_start_ms) fail(path, "trade replay range is reversed");
+  if ((parsed.last_trade_time_ms === null) !== (parsed.last_agg_trade_id === null)) {
+    fail(path, "aggregate-trade cursor is partial");
+  }
+  if (parsed.base_interval !== nested.base_interval
+    || parsed.display_interval !== nested.display_interval
+    || parsed.replay_start_ms !== nested.replay_start_ms) {
+    fail(path, "nested bar builder configuration disagrees");
+  }
+  if (parsed.synthetic_policy !== nested.synthetic_policy
+    || parsed.synthetic_policy !== publicProjection.synthetic_policy
+    || parsed.replay_events_applied !== publicProjection.replay_events_applied) {
+    fail(path, "public aggregate-trade projection disagrees with builder state");
+  }
+  return parsed;
+}
+
+function parseAnyBarBuilder(value: unknown, path: string): ReplayAnyBarBuilderSnapshot {
+  const source = record(value, path);
+  return source.schema_version === "replay-trade-bar-builder-state.v1"
+    ? parseTradeBarBuilder(source, path)
+    : parseBarBuilder(source, path);
+}
+
 function parseBrokerSnapshot(value: unknown, path: string): ReplayBrokerSnapshot {
   const source = record(value, path);
   exact(source, [
@@ -502,7 +670,7 @@ function parseBrokerSnapshot(value: unknown, path: string): ReplayBrokerSnapshot
     schema_version: string(source.schema_version, `${path}.schema_version`),
     model_version: string(source.model_version, `${path}.model_version`),
     config_hash: digest(source.config_hash, `${path}.config_hash`),
-    bar_builder: parseBarBuilder(source.bar_builder, `${path}.bar_builder`),
+    bar_builder: parseAnyBarBuilder(source.bar_builder, `${path}.bar_builder`),
     orders: array(source.orders, `${path}.orders`, parseOrder),
     client_order_ids: array(source.client_order_ids, `${path}.client_order_ids`, identifier),
     fills: array(source.fills, `${path}.fills`, parseFill),
@@ -533,17 +701,25 @@ function parseJournalEntry(value: unknown, path: string): ReplayJournalEntry {
   };
 }
 
+function isTradeBarBuilder(
+  builder: ReplayAnyBarBuilderSnapshot,
+): builder is ReplayTradeBarBuilderSnapshot {
+  return "public_projection" in builder;
+}
+
+function publicBuilderBars(builder: ReplayAnyBarBuilderSnapshot): readonly ReplayDisplayBar[] {
+  return isTradeBarBuilder(builder)
+    ? builder.public_projection.bars
+    : [...builder.closed_bars, ...(builder.active_bar ? [builder.active_bar] : [])];
+}
+
 function assertNoFutureSnapshot(snapshot: ReplaySessionSnapshot, path: string): void {
   const publicTime = snapshot.cursor.virtual_time_ms;
   const builder = snapshot.components.bar_builder;
-  for (const [index, bar] of builder.closed_bars.entries()) {
+  for (const [index, bar] of publicBuilderBars(builder).entries()) {
     if (bar.open_time_ms > publicTime || bar.last_base_open_ms > publicTime) {
-      fail(`${path}.components.bar_builder.closed_bars[${index}]`, "contains unrevealed bar time");
+      fail(`${path}.components.bar_builder.public_bars[${index}]`, "contains unrevealed bar time");
     }
-  }
-  if (builder.active_bar
-    && (builder.active_bar.open_time_ms > publicTime || builder.active_bar.last_base_open_ms > publicTime)) {
-    fail(`${path}.components.bar_builder.active_bar`, "contains unrevealed bar time");
   }
   for (const [index, fill] of snapshot.components.fills.entries()) {
     if (fill.event_time_ms > publicTime) fail(`${path}.components.fills[${index}]`, "contains future fill");
@@ -585,6 +761,9 @@ export function parseReplaySessionSnapshot(value: unknown, path = "$"): ReplaySe
   if (parsed.cursor.source_sequence !== parsed.components.bar_builder.replay_events_applied) {
     fail(path, "cursor and bar-builder source sequence disagree");
   }
+  if ((parsed.config.source_kind === "agg_trade") !== isTradeBarBuilder(parsed.components.bar_builder)) {
+    fail(path, "source kind and bar-builder snapshot disagree");
+  }
   assertNoFutureSnapshot(parsed, path);
   return parsed;
 }
@@ -592,14 +771,30 @@ export function parseReplaySessionSnapshot(value: unknown, path = "$"): ReplaySe
 export function parseReplaySessionResponse(value: unknown, path = "$"): ReplaySessionResponse {
   const source = record(value, path);
   const optional = ["forked", "forked_from_session_id"].filter((key) => Object.hasOwn(source, key));
-  exact(source, ["protocol", "session_id", "snapshot", ...optional], path);
+  exact(source, [
+    "protocol", "session_id", "data_fidelity", "execution_fidelity", "snapshot",
+    ...optional,
+  ], path);
   if (source.protocol !== REPLAY_PROTOCOL) fail(`${path}.protocol`, `expected ${REPLAY_PROTOCOL}`);
   const sessionId = identifier(source.session_id, `${path}.session_id`);
   const snapshot = parseReplaySessionSnapshot(source.snapshot, `${path}.snapshot`);
   if (snapshot.session_id !== sessionId) fail(path, "outer and snapshot session id disagree");
+  const dataFidelity = enumeration(source.data_fidelity, REPLAY_DATA_FIDELITIES, `${path}.data_fidelity`);
+  const executionFidelity = enumeration(source.execution_fidelity, REPLAY_EXECUTION_FIDELITIES, `${path}.execution_fidelity`);
+  const expectedDataFidelity = snapshot.config.source_kind === "agg_trade"
+    ? "EXACT_AGG_TRADE_COVERAGE"
+    : "EXACT_BAR_COVERAGE";
+  const expectedExecutionFidelity = snapshot.config.source_kind === "agg_trade"
+    ? "AGG_TRADE_TAPE"
+    : "BAR_CONSERVATIVE";
+  if (dataFidelity !== expectedDataFidelity || executionFidelity !== expectedExecutionFidelity) {
+    fail(path, "session fidelity disagrees with source kind");
+  }
   return {
     protocol: REPLAY_PROTOCOL,
     session_id: sessionId,
+    data_fidelity: dataFidelity,
+    execution_fidelity: executionFidelity,
     snapshot,
     ...(Object.hasOwn(source, "forked") ? { forked: bool(source.forked, `${path}.forked`) } : {}),
     ...(Object.hasOwn(source, "forked_from_session_id")
@@ -608,13 +803,43 @@ export function parseReplaySessionResponse(value: unknown, path = "$"): ReplaySe
   };
 }
 
-function parseSourceCapability(value: unknown, path: string) {
+function parseSourceCapability(value: unknown, path: string, sourceKind: "bar" | "agg_trade") {
   const source = record(value, path);
   const enabled = bool(source.enabled, `${path}.enabled`);
-  exact(source, enabled ? ["enabled", "fidelity"] : ["enabled", "reason"], path);
-  return enabled
-    ? { enabled, fidelity: enumeration(source.fidelity, REPLAY_DATA_FIDELITIES, `${path}.fidelity`) }
-    : { enabled, reason: string(source.reason, `${path}.reason`) };
+  if (!enabled) {
+    exact(source, ["enabled", "reason"], path);
+    return { enabled, reason: string(source.reason, `${path}.reason`) };
+  }
+  if (sourceKind === "bar") {
+    exact(source, ["enabled", "fidelity"], path);
+    return {
+      enabled,
+      fidelity: enumeration(source.fidelity, REPLAY_DATA_FIDELITIES, `${path}.fidelity`),
+    };
+  }
+  exact(source, [
+    "enabled", "fidelity", "execution_fidelity", "requires_exact_dataset", "reader",
+  ], path);
+  const fidelity = enumeration(source.fidelity, REPLAY_DATA_FIDELITIES, `${path}.fidelity`);
+  const executionFidelity = enumeration(
+    source.execution_fidelity,
+    REPLAY_EXECUTION_FIDELITIES,
+    `${path}.execution_fidelity`,
+  );
+  const requiresExactDataset = bool(source.requires_exact_dataset, `${path}.requires_exact_dataset`);
+  if (fidelity !== "EXACT_AGG_TRADE_COVERAGE"
+    || executionFidelity !== "AGG_TRADE_TAPE"
+    || !requiresExactDataset
+    || source.reader !== "paged") {
+    fail(path, "aggregate-trade capability is not the exact paged tape contract");
+  }
+  return {
+    enabled,
+    fidelity,
+    execution_fidelity: executionFidelity,
+    requires_exact_dataset: true,
+    reader: "paged" as const,
+  };
 }
 
 export function parseReplayCapabilities(value: unknown, path = "$"): ReplayCapabilities {
@@ -635,8 +860,8 @@ export function parseReplayCapabilities(value: unknown, path = "$"): ReplayCapab
     available: bool(source.available, `${path}.available`),
     ...(hasReason ? { reason: enumeration(source.reason, REPLAY_ERROR_CODES, `${path}.reason`) } : {}),
     sources: {
-      bar: parseSourceCapability(sources.bar, `${path}.sources.bar`),
-      agg_trade: parseSourceCapability(sources.agg_trade, `${path}.sources.agg_trade`),
+      bar: parseSourceCapability(sources.bar, `${path}.sources.bar`, "bar"),
+      agg_trade: parseSourceCapability(sources.agg_trade, `${path}.sources.agg_trade`, "agg_trade"),
     },
     execution_models: array(source.execution_models, `${path}.execution_models`, (item, itemPath) => enumeration(item, REPLAY_EXECUTION_MODELS, itemPath)),
     limits: {
@@ -742,11 +967,17 @@ export function parseReplayCommandResult(value: unknown, path = "$"): ReplayComm
 }
 
 function assertProjectionTime(projection: ReplayProjection, virtualTime: number, path: string): void {
-  if (projection.bar_update
-    && (projection.bar_update.base_open_time_ms > virtualTime
-      || projection.bar_update.bar.open_time_ms > virtualTime
-      || projection.bar_update.bar.last_base_open_ms > virtualTime)) {
-    fail(`${path}.bar_update`, "contains unrevealed bar time");
+  const updates = projection.bar_update === null
+    ? []
+    : projection.bar_update.action === "batch"
+      ? projection.bar_update.updates
+      : [projection.bar_update];
+  for (const [index, update] of updates.entries()) {
+    if (update.base_open_time_ms > virtualTime
+      || update.bar.open_time_ms > virtualTime
+      || update.bar.last_base_open_ms > virtualTime) {
+      fail(`${path}.bar_update.updates[${index}]`, "contains unrevealed bar time");
+    }
   }
   for (const [index, fill] of projection.fills.entries()) {
     if (fill.event_time_ms > virtualTime) fail(`${path}.fills[${index}]`, "contains future fill");
@@ -772,8 +1003,11 @@ function parseEventData(type: string, value: unknown, path: string, virtualTime:
     }
     case "replay.delta": {
       exact(source, ["source_sequence", "source_event", "projection"], path);
-      const sourceEvent = parseSourceBar(source.source_event, `${path}.source_event`);
-      if (sourceEvent.close_time_ms > virtualTime) fail(`${path}.source_event`, "contains unrevealed source event");
+      const sourceEvent = parseSourceEvent(source.source_event, `${path}.source_event`);
+      const eventTime = "trade_time_ms" in sourceEvent
+        ? sourceEvent.trade_time_ms
+        : sourceEvent.close_time_ms;
+      if (eventTime > virtualTime) fail(`${path}.source_event`, "contains unrevealed source event");
       const projection = parseReplayProjection(source.projection, `${path}.projection`);
       assertProjectionTime(projection, virtualTime, `${path}.projection`);
       return {

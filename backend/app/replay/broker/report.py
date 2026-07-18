@@ -8,6 +8,7 @@ from decimal import Decimal, localcontext
 from ..canonical import canonical_sha256
 from .ledger import LedgerBook, LedgerEntry
 from .models import (
+    BROKER_MODEL_VERSION,
     Account,
     BrokerWarning,
     ClosedTrade,
@@ -102,6 +103,7 @@ def build_broker_report(
     max_drawdown: str,
     ended: bool,
     state_hash: str,
+    model_version: str = BROKER_MODEL_VERSION,
 ) -> BrokerReport:
     LedgerBook.assert_entries_balanced(ledger_entries)
     realized_values = [Decimal(trade.realized_pnl) for trade in closed_trades]
@@ -130,7 +132,7 @@ def build_broker_report(
     values: dict[str, object] = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "config_hash": config_hash,
-        "model_version": "BAR_CONSERVATIVE_V1",
+        "model_version": model_version,
         "initial_equity": initial_equity,
         "final_equity": account.equity,
         "realized_pnl": account.realized_pnl,

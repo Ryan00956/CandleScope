@@ -50,9 +50,9 @@ def test_command_payloads_are_exact_and_normalized_before_actor_mutation() -> No
     assert parse_command(
         _command("speed-1", CommandType.SET_SPEED, {"speed": "MAX"})
     ).values == {"speed": "MAX"}
-    assert parse_command(
-        _command("step-1", CommandType.STEP, {"count": 3})
-    ).values == {"count": 3}
+    assert parse_command(_command("step-1", CommandType.STEP, {"count": 3})).values == {
+        "count": 3
+    }
     assert parse_command(
         _command("advance-1", CommandType.ADVANCE_BY, {"ms": 60_000})
     ).values == {"ms": 60_000}
@@ -66,6 +66,48 @@ def test_command_payloads_are_exact_and_normalized_before_actor_mutation() -> No
     assert parse_command(
         _command("acquire-1", CommandType.ACQUIRE_CONTROLLER, {})
     ).values == {"takeover": False}
+    assert parse_command(
+        _command(
+            "order-1",
+            CommandType.PLACE_ORDER,
+            {
+                "client_order_id": "client-order-1",
+                "side": "BUY",
+                "order_type": "LIMIT",
+                "quantity": "1.25",
+                "reduce_only": False,
+                "limit_price": "100.1",
+                "stop_price": None,
+            },
+        )
+    ).values == {
+        "client_order_id": "client-order-1",
+        "side": "BUY",
+        "order_type": "LIMIT",
+        "quantity": "1.25",
+        "reduce_only": False,
+        "limit_price": "100.1",
+        "stop_price": None,
+    }
+    assert parse_command(
+        _command("cancel-1", CommandType.CANCEL_ORDER, {"order_id": "ord-1"})
+    ).values == {"order_id": "ord-1"}
+    assert parse_command(
+        _command("close-1", CommandType.CLOSE_POSITION, {})
+    ).values == {"quantity": None}
+    assert parse_command(
+        _command(
+            "end-1",
+            CommandType.END_SESSION,
+            {
+                "open_order_disposition": "cancel",
+                "position_disposition": "mark_close",
+            },
+        )
+    ).values == {
+        "open_order_disposition": "cancel",
+        "position_disposition": "mark_close",
+    }
 
     invalid = [
         _command("play-extra", CommandType.PLAY, {"extra": True}),
@@ -75,13 +117,31 @@ def test_command_payloads_are_exact_and_normalized_before_actor_mutation() -> No
         _command("advance-neg", CommandType.ADVANCE_BY, {"ms": -1}),
         _command("takeover-bad", CommandType.ACQUIRE_CONTROLLER, {"takeover": 1}),
         _command("order-early", CommandType.PLACE_ORDER, {}),
+        _command(
+            "order-extra",
+            CommandType.PLACE_ORDER,
+            {
+                "client_order_id": "client-order-1",
+                "side": "BUY",
+                "order_type": "MARKET",
+                "quantity": "1",
+                "reduce_only": False,
+                "limit_price": None,
+                "stop_price": None,
+                "extra": True,
+            },
+        ),
+        _command("cancel-bad", CommandType.CANCEL_ORDER, {"order_id": 1}),
+        _command("close-bad", CommandType.CLOSE_POSITION, {"quantity": 1}),
     ]
     for command in invalid:
         with pytest.raises(ReplayDomainError):
             parse_command(command)
 
 
-def test_command_history_replays_success_and_rejected_result_by_canonical_identity() -> None:
+def test_command_history_replays_success_and_rejected_result_by_canonical_identity() -> (
+    None
+):
     history = CommandHistory(max_records=3)
     command = _command("step-id", CommandType.STEP, {"count": 1})
     result = _result(command.command_id)

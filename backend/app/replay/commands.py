@@ -83,7 +83,6 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
         CommandType.RELEASE_CONTROLLER,
         CommandType.PLAY,
         CommandType.PAUSE,
-        CommandType.END_SESSION,
     }:
         _exact_keys(payload, set())
         return ParsedCommand(command_type, {})
@@ -134,6 +133,90 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
                 "virtual_time_ms is invalid",
             ) from exc
         return ParsedCommand(command_type, {"virtual_time_ms": target})
+    if command_type is CommandType.PLACE_ORDER:
+        fields = (
+            "client_order_id",
+            "side",
+            "order_type",
+            "quantity",
+            "reduce_only",
+            "limit_price",
+            "stop_price",
+        )
+        _exact_keys(payload, set(fields))
+        for field_name in ("client_order_id", "side", "order_type", "quantity"):
+            if not isinstance(payload[field_name], str):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    f"{field_name} must be a string",
+                )
+        if not isinstance(payload["reduce_only"], bool):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "reduce_only must be a boolean",
+            )
+        for field_name in ("limit_price", "stop_price"):
+            if payload[field_name] is not None and not isinstance(
+                payload[field_name], str
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    f"{field_name} must be a Decimal string or null",
+                )
+        return ParsedCommand(
+            command_type,
+            {field_name: payload[field_name] for field_name in fields},
+        )
+    if command_type is CommandType.CANCEL_ORDER:
+        _exact_keys(payload, {"order_id"})
+        if not isinstance(payload["order_id"], str):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "order_id must be a string",
+            )
+        return ParsedCommand(command_type, {"order_id": payload["order_id"]})
+    if command_type is CommandType.CLOSE_POSITION:
+        if not payload:
+            return ParsedCommand(command_type, {"quantity": None})
+        _exact_keys(payload, {"quantity"})
+        if payload["quantity"] is not None and not isinstance(payload["quantity"], str):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "quantity must be a Decimal string or null",
+            )
+        return ParsedCommand(command_type, {"quantity": payload["quantity"]})
+    if command_type is CommandType.END_SESSION:
+        if not payload:
+            return ParsedCommand(
+                command_type,
+                {
+                    "open_order_disposition": "expire",
+                    "position_disposition": "keep",
+                },
+            )
+        _exact_keys(
+            payload,
+            {"open_order_disposition", "position_disposition"},
+        )
+        open_disposition = payload["open_order_disposition"]
+        position_disposition = payload["position_disposition"]
+        if open_disposition not in {"expire", "cancel", "preserve"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "open_order_disposition is unsupported",
+            )
+        if position_disposition not in {"keep", "mark_close"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "position_disposition is unsupported",
+            )
+        return ParsedCommand(
+            command_type,
+            {
+                "open_order_disposition": open_disposition,
+                "position_disposition": position_disposition,
+            },
+        )
     raise ReplayDomainError(
         ReplayErrorCode.INVALID_STATE_TRANSITION,
         f"command {command_type.value} is not available in replay actor phase",
@@ -151,7 +234,11 @@ class CommandResult:
     data: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        state = self.state if isinstance(self.state, SessionState) else SessionState(self.state)
+        state = (
+            self.state
+            if isinstance(self.state, SessionState)
+            else SessionState(self.state)
+        )
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
 
@@ -181,7 +268,11 @@ class CommandHistory:
     """Bounded fail-closed command ID history; entries are never evicted."""
 
     def __init__(self, *, max_records: int) -> None:
-        if isinstance(max_records, bool) or not isinstance(max_records, int) or max_records < 1:
+        if (
+            isinstance(max_records, bool)
+            or not isinstance(max_records, int)
+            or max_records < 1
+        ):
             raise ValueError("max_records must be a positive integer")
         self._max_records = max_records
         self._records: dict[str, _HistoryRecord] = {}

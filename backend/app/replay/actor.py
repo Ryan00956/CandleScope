@@ -117,7 +117,9 @@ class _ShutdownRequest:
     step_timeout: float
 
 
-_ActorRequest = _CommandRequest | _HeartbeatRequest | _SnapshotRequest | _ShutdownRequest
+_ActorRequest = (
+    _CommandRequest | _HeartbeatRequest | _SnapshotRequest | _ShutdownRequest
+)
 
 
 class _LatencyWindow:
@@ -205,10 +207,14 @@ class ReplaySessionActor:
         self._monotonic = monotonic
         self._flush_hook = flush_hook
         self._checkpoint_hook = checkpoint_hook
-        self._restore_checkpoint = bytes(restore_checkpoint) if restore_checkpoint else None
+        self._restore_checkpoint = (
+            bytes(restore_checkpoint) if restore_checkpoint else None
+        )
         self._reducer: ReplayReducer = reducer or NullReplayReducer()
 
-        self._queue: asyncio.Queue[_ActorRequest] = asyncio.Queue(maxsize=self._queue_size)
+        self._queue: asyncio.Queue[_ActorRequest] = asyncio.Queue(
+            maxsize=self._queue_size
+        )
         self._events = ReplayEventBuffer(max_events=self._event_buffer_size)
         self._coalescer = ProjectionCoalescer(max_fps=self._max_emit_fps)
         self._projection_buffer: deque[ProjectionBatch] = deque(
@@ -299,7 +305,9 @@ class ReplaySessionActor:
             future=loop.create_future(),
             enqueued_wall=self._read_wall(),
         )
-        self._metrics["commands_submitted"] = int(self._metrics["commands_submitted"] or 0) + 1
+        self._metrics["commands_submitted"] = (
+            int(self._metrics["commands_submitted"] or 0) + 1
+        )
         self._offer_request(request)
         return await request.future
 
@@ -348,18 +356,18 @@ class ReplaySessionActor:
         if request is None:
             self._accepting = False
             self._closing = True
-            self._metrics["shutdown_attempts"] = int(
-                self._metrics["shutdown_attempts"] or 0
-            ) + 1
+            self._metrics["shutdown_attempts"] = (
+                int(self._metrics["shutdown_attempts"] or 0) + 1
+            )
             loop = asyncio.get_running_loop()
             request = _ShutdownRequest(loop.create_future(), timeout)
             self._shutdown_request = request
             try:
                 await asyncio.wait_for(self._queue.put(request), timeout=timeout)
             except TimeoutError as exc:
-                self._metrics["shutdown_timeouts"] = int(
-                    self._metrics["shutdown_timeouts"] or 0
-                ) + 1
+                self._metrics["shutdown_timeouts"] = (
+                    int(self._metrics["shutdown_timeouts"] or 0) + 1
+                )
                 await self._cancel_actor_task(timeout)
                 raise ReplayDomainError(
                     ReplayErrorCode.PERSISTENCE_DEGRADED,
@@ -375,9 +383,9 @@ class ReplaySessionActor:
                 timeout=timeout * 3 + MIN_TASK_EXIT_GRACE_SECONDS,
             )
         except TimeoutError:
-            self._metrics["shutdown_timeouts"] = int(
-                self._metrics["shutdown_timeouts"] or 0
-            ) + 1
+            self._metrics["shutdown_timeouts"] = (
+                int(self._metrics["shutdown_timeouts"] or 0) + 1
+            )
             error = ReplayDomainError(
                 ReplayErrorCode.PERSISTENCE_DEGRADED,
                 "replay actor did not reach a shutdown barrier in time",
@@ -398,9 +406,9 @@ class ReplaySessionActor:
                     timeout=max(timeout, MIN_TASK_EXIT_GRACE_SECONDS),
                 )
             except TimeoutError:
-                self._metrics["shutdown_timeouts"] = int(
-                    self._metrics["shutdown_timeouts"] or 0
-                ) + 1
+                self._metrics["shutdown_timeouts"] = (
+                    int(self._metrics["shutdown_timeouts"] or 0) + 1
+                )
                 if error is None:
                     error = ReplayDomainError(
                         ReplayErrorCode.PERSISTENCE_DEGRADED,
@@ -507,7 +515,13 @@ class ReplaySessionActor:
             try:
                 payload = self._checkpoint_codec.decode(self._restore_checkpoint)
                 self._restore_payload(payload, restore_public_position=True)
-            except (CheckpointError, ReplayDomainError, TypeError, ValueError, KeyError) as exc:
+            except (
+                CheckpointError,
+                ReplayDomainError,
+                TypeError,
+                ValueError,
+                KeyError,
+            ) as exc:
                 raise ReplayDomainError(
                     ReplayErrorCode.DATASET_MISMATCH,
                     "replay checkpoint restore failed",
@@ -520,7 +534,9 @@ class ReplaySessionActor:
                 state_hash=self._compute_state_hash(),
                 initial=True,
             )
-            self._last_checkpoint_source_sequence = self._source.cursor().source_sequence
+            self._last_checkpoint_source_sequence = (
+                self._source.cursor().source_sequence
+            )
             self._last_checkpoint_virtual_ms = self._clock.virtual_time_ms
         else:
             first = self._source.peek()
@@ -566,9 +582,9 @@ class ReplaySessionActor:
             try:
                 replayed = self._command_history.replay(command)
             except ReplayDomainError as exc:
-                self._metrics["commands_rejected"] = int(
-                    self._metrics["commands_rejected"] or 0
-                ) + 1
+                self._metrics["commands_rejected"] = (
+                    int(self._metrics["commands_rejected"] or 0) + 1
+                )
                 if not request.future.done():
                     request.future.set_exception(exc)
                 return
@@ -596,17 +612,17 @@ class ReplaySessionActor:
                 if capacity_reserved:
                     self._command_history.record_failure(command, exc)
                     self._command_log_offset += 1
-                self._metrics["commands_rejected"] = int(
-                    self._metrics["commands_rejected"] or 0
-                ) + 1
+                self._metrics["commands_rejected"] = (
+                    int(self._metrics["commands_rejected"] or 0) + 1
+                )
                 if not request.future.done():
                     request.future.set_exception(exc)
                 return
             self._command_history.record_success(command, result)
             self._command_log_offset += 1
-            self._metrics["commands_accepted"] = int(
-                self._metrics["commands_accepted"] or 0
-            ) + 1
+            self._metrics["commands_accepted"] = (
+                int(self._metrics["commands_accepted"] or 0) + 1
+            )
             self._maybe_checkpoint()
             if not request.future.done():
                 request.future.set_result(result)
@@ -643,11 +659,16 @@ class ReplaySessionActor:
             )
             self._revision += 1
             self._emit_status("controller_acquired", mandatory=True)
-            return self._command_result(command.command_id, {"controller": command.client_instance_id})
+            return self._command_result(
+                command.command_id, {"controller": command.client_instance_id}
+            )
         self._require_controller(command.client_instance_id)
         if command_type is CommandType.RELEASE_CONTROLLER:
             self._revision += 1
-            if self._state is SessionState.PLAYING and self.config.pause_on_controller_loss:
+            if (
+                self._state is SessionState.PLAYING
+                and self.config.pause_on_controller_loss
+            ):
                 self._pause_clock()
                 self._state = SessionState.PAUSED
             self._controller_client_id = None
@@ -657,7 +678,9 @@ class ReplaySessionActor:
         if command_type is CommandType.PLAY:
             self._require_state(SessionState.PAUSED, command_type)
             if self._source.exhausted():
-                raise ReplayDomainError(ReplayErrorCode.SESSION_ENDED, "replay source is exhausted")
+                raise ReplayDomainError(
+                    ReplayErrorCode.SESSION_ENDED, "replay source is exhausted"
+                )
             self._revision += 1
             self._state = SessionState.PLAYING
             self._clock.start()
@@ -679,7 +702,9 @@ class ReplaySessionActor:
                 cap_ms=self._next_source_boundary(),
             )
             self._emit_status("speed_changed", mandatory=True)
-            return self._command_result(command.command_id, {"speed": self._clock.speed})
+            return self._command_result(
+                command.command_id, {"speed": self._clock.speed}
+            )
         if command_type is CommandType.STEP:
             self._require_state(SessionState.PAUSED, command_type)
             count = int(parsed.values["count"])
@@ -728,12 +753,54 @@ class ReplaySessionActor:
                 command.command_id,
                 {"target_virtual_time_ms": target},
             )
+        if command_type in {
+            CommandType.PLACE_ORDER,
+            CommandType.CANCEL_ORDER,
+            CommandType.CLOSE_POSITION,
+        }:
+            if self._state not in {SessionState.PAUSED, SessionState.PLAYING}:
+                self._invalid_transition(command_type)
+            apply_command = getattr(self._reducer, "apply_command", None)
+            if not callable(apply_command):
+                raise ReplayDomainError(
+                    ReplayErrorCode.UNSUPPORTED_EXECUTION_MODEL,
+                    "replay reducer does not provide paper trading",
+                )
+            projection = apply_command(
+                command_type,
+                parsed.values,
+                command_id=command.command_id,
+                source_sequence=self._source.cursor().source_sequence,
+                virtual_time_ms=self._clock.virtual_time_ms,
+            )
+            if inspect.isawaitable(projection):
+                projection = await projection
+            if not isinstance(projection, Mapping):
+                raise TypeError("replay command reducer projection must be an object")
+            self._revision += 1
+            self._domain_command_position += 1
+            self._emit(
+                ReplayEventType.ORDER,
+                {
+                    "command_type": command_type.value,
+                    "projection": dict(projection),
+                },
+                mandatory=True,
+            )
+            return self._command_result(command.command_id, dict(projection))
         if command_type is CommandType.END_SESSION:
             if self._state not in {SessionState.PAUSED, SessionState.PLAYING}:
                 self._invalid_transition(command_type)
-            self._revision += 1
-            await self._mark_ended(reason="command")
-            return self._command_result(command.command_id, {})
+            end_projection = await self._mark_ended(
+                reason="command",
+                open_order_disposition=str(parsed.values["open_order_disposition"]),
+                position_disposition=str(parsed.values["position_disposition"]),
+                commit_command=True,
+            )
+            return self._command_result(
+                command.command_id,
+                {"session_end": end_projection},
+            )
         raise ReplayDomainError(
             ReplayErrorCode.INVALID_STATE_TRANSITION,
             f"unsupported actor command {command_type.value}",
@@ -742,7 +809,9 @@ class ReplaySessionActor:
     def _handle_heartbeat_request(self, request: _HeartbeatRequest) -> None:
         try:
             self._require_controller(request.client_instance_id)
-            self._controller_deadline_wall = self._read_wall() + self._controller_ttl_seconds
+            self._controller_deadline_wall = (
+                self._read_wall() + self._controller_ttl_seconds
+            )
             if not request.future.done():
                 request.future.set_result(None)
         except ReplayDomainError as exc:
@@ -760,7 +829,9 @@ class ReplaySessionActor:
             try:
                 await asyncio.wait_for(self._flush_hook(), timeout=request.step_timeout)
             except TimeoutError:
-                self._metrics["shutdown_timeouts"] = int(self._metrics["shutdown_timeouts"] or 0) + 1
+                self._metrics["shutdown_timeouts"] = (
+                    int(self._metrics["shutdown_timeouts"] or 0) + 1
+                )
                 errors.append("flush timeout")
             except Exception as exc:
                 errors.append(f"flush failed: {exc}")
@@ -776,13 +847,17 @@ class ReplaySessionActor:
                     timeout=request.step_timeout,
                 )
             except TimeoutError:
-                self._metrics["shutdown_timeouts"] = int(self._metrics["shutdown_timeouts"] or 0) + 1
+                self._metrics["shutdown_timeouts"] = (
+                    int(self._metrics["shutdown_timeouts"] or 0) + 1
+                )
                 errors.append("checkpoint timeout")
             except Exception as exc:
                 errors.append(f"checkpoint failed: {exc}")
         if errors:
             self._state = SessionState.ERROR
-            self._metrics["shutdown_failures"] = int(self._metrics["shutdown_failures"] or 0) + 1
+            self._metrics["shutdown_failures"] = (
+                int(self._metrics["shutdown_failures"] or 0) + 1
+            )
             self._metrics["last_shutdown_error"] = "; ".join(errors)[:500]
             self._emit_status("shutdown_error", mandatory=True)
             error = ReplayDomainError(
@@ -804,7 +879,7 @@ class ReplaySessionActor:
         publish: bool,
         checkpoint: bool = True,
     ) -> None:
-        event = self._source.next()
+        event = self._source.peek()
         if event is None:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -820,11 +895,22 @@ class ReplaySessionActor:
                     "virtual_time_ms": self._clock.virtual_time_ms,
                 },
             )
-        projection = self._reducer.apply_source_event(event)
-        if inspect.isawaitable(projection):
-            projection = await projection
-        if not isinstance(projection, Mapping):
-            raise TypeError("replay reducer projection must be an object")
+        try:
+            projection = self._reducer.apply_source_event(event)
+            if inspect.isawaitable(projection):
+                projection = await projection
+            if not isinstance(projection, Mapping):
+                raise TypeError("replay reducer projection must be an object")
+        except BaseException:
+            self._pause_clock()
+            self._state = SessionState.ERROR
+            raise
+        consumed = self._source.next()
+        if consumed != event:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "replay source changed between peek and atomic commit",
+            )
         self._clock.advance_to(event_time)
         source_cursor = self._source.cursor()
         self._event_chain_hash = self._next_chain_hash(
@@ -832,8 +918,15 @@ class ReplaySessionActor:
             event,
             source_cursor.source_sequence,
         )
-        self._metrics["events_processed"] = int(self._metrics["events_processed"] or 0) + 1
+        self._metrics["events_processed"] = (
+            int(self._metrics["events_processed"] or 0) + 1
+        )
+        end_projection: Mapping[str, object] = {}
         if self._source.exhausted():
+            end_projection = await self._finalize_reducer(
+                open_order_disposition="expire",
+                position_disposition="keep",
+            )
             self._state = SessionState.ENDED
             self._pause_clock()
             self._controller_client_id = None
@@ -851,7 +944,10 @@ class ReplaySessionActor:
             if self._state is SessionState.ENDED:
                 self._emit(
                     ReplayEventType.ENDED,
-                    {"reason": "source_exhausted"},
+                    {
+                        "reason": "source_exhausted",
+                        "projection": dict(end_projection),
+                    },
                     mandatory=True,
                 )
         if checkpoint:
@@ -910,9 +1006,9 @@ class ReplaySessionActor:
                 if self._event_time_ms(event) > target:
                     break
                 await self._process_source_event(publish=False, checkpoint=False)
-                self._metrics["events_replayed_for_seek"] = int(
-                    self._metrics["events_replayed_for_seek"] or 0
-                ) + 1
+                self._metrics["events_replayed_for_seek"] = (
+                    int(self._metrics["events_replayed_for_seek"] or 0) + 1
+                )
             if self._source.exhausted():
                 self._state = SessionState.ENDED
             else:
@@ -944,14 +1040,54 @@ class ReplaySessionActor:
                 "seek target exceeds replay horizon",
             )
 
-    async def _mark_ended(self, *, reason: str) -> None:
+    async def _mark_ended(
+        self,
+        *,
+        reason: str,
+        open_order_disposition: str = "expire",
+        position_disposition: str = "keep",
+        commit_command: bool = False,
+    ) -> Mapping[str, object]:
         if self._state is SessionState.ENDED:
-            return
+            return {}
+        projection = await self._finalize_reducer(
+            open_order_disposition=open_order_disposition,
+            position_disposition=position_disposition,
+        )
+        if commit_command:
+            self._revision += 1
+            if callable(getattr(self._reducer, "finalize_session", None)):
+                self._domain_command_position += 1
         self._pause_clock()
         self._state = SessionState.ENDED
         self._controller_client_id = None
         self._controller_deadline_wall = None
-        self._emit(ReplayEventType.ENDED, {"reason": reason}, mandatory=True)
+        self._emit(
+            ReplayEventType.ENDED,
+            {"reason": reason, "projection": dict(projection)},
+            mandatory=True,
+        )
+        return projection
+
+    async def _finalize_reducer(
+        self,
+        *,
+        open_order_disposition: str,
+        position_disposition: str,
+    ) -> Mapping[str, object]:
+        finalize = getattr(self._reducer, "finalize_session", None)
+        if not callable(finalize):
+            return {}
+        projection = finalize(
+            open_order_disposition=open_order_disposition,
+            position_disposition=position_disposition,
+            virtual_time_ms=self._clock.virtual_time_ms,
+        )
+        if inspect.isawaitable(projection):
+            projection = await projection
+        if not isinstance(projection, Mapping):
+            raise TypeError("replay session-end projection must be an object")
+        return projection
 
     async def _expire_controller_if_needed(self) -> None:
         deadline = self._controller_deadline_wall
@@ -960,7 +1096,9 @@ class ReplaySessionActor:
         self._controller_client_id = None
         self._controller_deadline_wall = None
         self._revision += 1
-        self._metrics["controller_expirations"] = int(self._metrics["controller_expirations"] or 0) + 1
+        self._metrics["controller_expirations"] = (
+            int(self._metrics["controller_expirations"] or 0) + 1
+        )
         if self._state is SessionState.PLAYING and self.config.pause_on_controller_loss:
             self._pause_clock()
             self._state = SessionState.PAUSED
@@ -975,9 +1113,13 @@ class ReplaySessionActor:
                 details={"controller_client_id": existing},
             )
         if existing is not None and existing != client_id:
-            self._metrics["controller_takeovers"] = int(self._metrics["controller_takeovers"] or 0) + 1
+            self._metrics["controller_takeovers"] = (
+                int(self._metrics["controller_takeovers"] or 0) + 1
+            )
         self._controller_client_id = client_id
-        self._controller_deadline_wall = self._read_wall() + self._controller_ttl_seconds
+        self._controller_deadline_wall = (
+            self._read_wall() + self._controller_ttl_seconds
+        )
 
     def _require_controller(self, client_id: str) -> None:
         if self._controller_client_id != client_id:
@@ -1026,8 +1168,12 @@ class ReplaySessionActor:
         self._last_checkpoint_virtual_ms = self._clock.virtual_time_ms
         elapsed_ms = (time.perf_counter() - started) * 1_000
         self._checkpoint_latency.add(elapsed_ms)
-        self._metrics["checkpoints_created"] = int(self._metrics["checkpoints_created"] or 0) + 1
-        self._metrics["checkpoint_bytes"] = int(self._metrics["checkpoint_bytes"] or 0) + len(encoded)
+        self._metrics["checkpoints_created"] = (
+            int(self._metrics["checkpoints_created"] or 0) + 1
+        )
+        self._metrics["checkpoint_bytes"] = int(
+            self._metrics["checkpoint_bytes"] or 0
+        ) + len(encoded)
         return encoded
 
     def _maybe_checkpoint(self) -> None:
@@ -1375,9 +1521,9 @@ class ReplaySessionActor:
     def _store_projection_batches(self, batches: tuple[ProjectionBatch, ...]) -> None:
         for batch in batches:
             if len(self._projection_buffer) == self._projection_buffer.maxlen:
-                self._metrics["projection_buffer_evictions"] = int(
-                    self._metrics["projection_buffer_evictions"] or 0
-                ) + 1
+                self._metrics["projection_buffer_evictions"] = (
+                    int(self._metrics["projection_buffer_evictions"] or 0) + 1
+                )
             self._projection_buffer.append(batch)
 
     def _materialize_clock(self) -> None:
@@ -1480,7 +1626,9 @@ class ReplaySessionActor:
         if callable(to_dict):
             payload = to_dict()
         elif is_dataclass(event) and not isinstance(event, type):
-            payload = {field.name: getattr(event, field.name) for field in fields(event)}
+            payload = {
+                field.name: getattr(event, field.name) for field in fields(event)
+            }
         elif isinstance(event, Mapping):
             payload = dict(event)
         else:
@@ -1548,9 +1696,9 @@ class ReplaySessionActor:
         try:
             self._queue.put_nowait(request)
         except asyncio.QueueFull as exc:
-            self._metrics["command_queue_overflows"] = int(
-                self._metrics["command_queue_overflows"] or 0
-            ) + 1
+            self._metrics["command_queue_overflows"] = (
+                int(self._metrics["command_queue_overflows"] or 0) + 1
+            )
             raise ReplayDomainError(
                 ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
                 "replay actor command queue capacity exceeded",
@@ -1583,9 +1731,9 @@ class ReplaySessionActor:
         task.cancel()
         done, _ = await asyncio.wait({task}, timeout=timeout)
         if task not in done:
-            self._metrics["shutdown_timeouts"] = int(
-                self._metrics["shutdown_timeouts"] or 0
-            ) + 1
+            self._metrics["shutdown_timeouts"] = (
+                int(self._metrics["shutdown_timeouts"] or 0) + 1
+            )
             self._metrics["last_shutdown_error"] = (
                 "actor task ignored cancellation after shutdown timeout"
             )

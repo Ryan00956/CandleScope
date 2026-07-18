@@ -1634,20 +1634,20 @@ feat(replay): build replay bars from revealed base events
 
 ### 逐步任务
 
-- [ ] **4.1** 所有价格/数量/费用输入转为 Decimal，并按 instrument filters 校验 scale。
-- [ ] **4.2** 建立 order 状态机：NEW/OPEN/PARTIALLY_FILLED/FILLED/CANCELED/REJECTED/EXPIRED。
-- [ ] **4.3** 实现 market/limit/stop-market/take-profit-market/reduce-only。
-- [ ] **4.4** 记录 `accepted_source_sequence`，禁止当前或过去 event 成交。
-- [ ] **4.5** 实现 BAR conservative fill 和 gap price 规则。
-- [ ] **4.6** 实现同 bar entry/SL/TP ambiguity 的最不利排序和 warning。
-- [ ] **4.7** 实现 one-way net position 的增仓、减仓、反手和平均 entry。
-- [ ] **4.8** 每个 fill 生成不可变 ledger entries；费用单独记账。
-- [ ] **4.9** 实现 order quantity/notional/leverage/equity/reduce-only 风险校验。
-- [ ] **4.10** 失败 command 和失败 source transaction 不留下任何部分状态。
-- [ ] **4.11** 每个 source event 后执行 ledger invariants；违反即 session ERROR。
-- [ ] **4.12** 把 broker state 纳入 checkpoint 和 state hash。
-- [ ] **4.13** 实现报告 domain，但先不做 HTTP/UI。
-- [ ] **4.14** 随机生成 command/bar 序列做 property-style 守恒测试。
+- [x] **4.1** 所有价格/数量/费用输入转为 Decimal，并按 instrument filters 校验 scale。
+- [x] **4.2** 建立 order 状态机：NEW/OPEN/PARTIALLY_FILLED/FILLED/CANCELED/REJECTED/EXPIRED。
+- [x] **4.3** 实现 market/limit/stop-market/take-profit-market/reduce-only。
+- [x] **4.4** 记录 `accepted_source_sequence`，禁止当前或过去 event 成交。
+- [x] **4.5** 实现 BAR conservative fill 和 gap price 规则。
+- [x] **4.6** 实现同 bar entry/SL/TP ambiguity 的最不利排序和 warning。
+- [x] **4.7** 实现 one-way net position 的增仓、减仓、反手和平均 entry。
+- [x] **4.8** 每个 fill 生成不可变 ledger entries；费用单独记账。
+- [x] **4.9** 实现 order quantity/notional/leverage/equity/reduce-only 风险校验。
+- [x] **4.10** 失败 command 和失败 source transaction 不留下任何部分状态。
+- [x] **4.11** 每个 source event 后执行 ledger invariants；违反即 session ERROR。
+- [x] **4.12** 把 broker state 纳入 checkpoint 和 state hash。
+- [x] **4.13** 实现报告 domain，但先不做 HTTP/UI。
+- [x] **4.14** 随机生成 command/bar 序列做 property-style 守恒测试。
 
 ### 必测场景
 
@@ -2374,5 +2374,23 @@ No-lookahead evidence: warmup 构建后 source_sequence 严格为 0；每次 nex
 Failure injection evidence: duplicate、out-of-order、gap、非 canonical close/forming source、错位 replay start、warmup 缺 active prefix、OHLC/Decimal/zero-volume 边界、display shorter/non-divisible/calendar-inexact、自定义 7m、UTC 日/月切与闰年 31/29 天、每个 5m 子周期 restore、warmup fingerprint 漂移、state hash/closed tail 损坏均覆盖；失败前后 state hash 不变。在线聚合器与 interval policy 未改且回归全绿。
 Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对 Phase 3 checkpoint 执行 git revert --no-commit 后，working tree 与 index 相对父提交 52c83f3481d55e6142f218203d94fd0676d117f9 均为 zero diff，untracked=0，index tree 与 parent tree 同为 328b2499b07ba8e26314c415cb1beaf02dfac26f；随后移除临时 worktree，并对 amend 后最终 checkpoint 再次执行同一演练。
 Known limitations: BAR source 仍要求 exact contiguous closed bars，不生成 empty/synthetic bar；display capability 只在 base 可精确铺满目标 bucket 时启用；closed projection 仅保留配置的有界尾部，完整历史承诺由 dataset/source 与 hash chain 表示；Phase 4 前无订单、持仓、账本或撮合；Phase 5 前无 persistence/API/WS；前端保持无 replay 可见入口。Vite 仍打印既有 24678 HMR 端口噪声与 >500 kB chunk warning，但完整 check 退出码为 0。
+Decision: PASS
+```
+
+```text
+Phase: 4 - SimBroker、Risk 与 Ledger
+Date: 2026-07-18
+Commit: this Phase 4 checkpoint; subject feat(replay): add conservative paper broker and ledger
+Executor: Codex
+Scope: 实现 replay-only PAPER_LINEAR_V1 + BAR_CONSERVATIVE_V1：严格 Decimal/instrument filters、完整 order 状态机、market/limit/stop-market/take-profit-market/reduce-only、accepted_source_sequence 因果边界、保守 gap 与同 bar 最不利排序、one-way position、双边不可变 ledger/hash chain、risk/account、报告 domain，以及 actor domain command/session-end/checkpoint/state-hash 集成；未新增 SQLite、HTTP、WS、main route 或前端成交/UI。
+Files changed: backend/app/replay/broker/{__init__,models,execution,risk,ledger,report}.py；backend/app/replay/{actor,commands}.py；backend/tests/test_replay_{orders,execution_bar,risk,ledger,report,broker_determinism,commands,actor}.py；backend/tests/fixtures/replay/broker_fakes.py；本文。
+Commands run: python -m ruff format/check Phase 4 files；python -m compileall -q broker/actor/commands/tests；python -m pytest -q 六个 Phase 4 broker test files；六个 broker files 加 commands/actor；全部 test_replay_*.py；python -m pytest -q backend/tests；npm run check；10,000 随机 command/bar/ledger property test；step/play/advance/restore 等价矩阵；state/report/ledger hash 诊断脚本；git diff --check。
+Tests passed: Phase 4 broker 定向 29 passed（含 10,000 组 property test）；加 commands/actor 原子集成共 47 passed；全部 replay tests 177 passed；backend global 1221 passed、4 条既有 FastAPI on_event deprecation warnings；frontend global 1853 passed，architecture/typecheck/lint/test/build 全通过，Vite build 393 modules。
+Golden/state hashes: 同一 `equivalent-entry` 命令流的 step/MAX play/advance/restore 路径共用 actor state sha256:19fac57fdabb849715bda2555dd3b8bcfd1317e496a025e2fd458bfbf2f74c6f、broker state sha256:2060f349fdf2b0679877c375567f2fdca100768d9c16244557917b7a7955fd19、report sha256:9c6233258e8858317624b464b2ea4d6bcff9838ee34f4d28f2ec8a0fda326af8、ledger tail sha256:3768d70d4d9dccadce1096394608ce104173c18c3bd34c5c2a18138c9ad62a6f，终点 cursor=(1710000299999,5)。连续/中途 broker restore 流 byte-for-byte 相等，state sha256:d0451e3e635e2e4f57e8fd2e368f276db8a7f82718c89df3cc11ff8fd30921d9、report sha256:b4399c6f8b6612c25ecf832f115f82a6c0d760a239a45f930f25d665c8c523bd、ledger tail sha256:32a3a39323d5f4adb44ddf22ab10d4894b6d95fba606183fa38f1445a2af05bd、snapshot 7,327 bytes。
+Performance evidence: 固定 seed 2026071801 的 10,000 组完整命令/基础 bar 序列（随机多空、增仓/减仓/反手、最终平仓）在 Windows 本机 19.61s 完成，逐序列检查 flat/open-order、每笔 transaction 双边守恒、全 ledger 总和为 0、cash=initial+realized-fees、每个 fill 的 source causality；包含全部 29 项 broker 用例的定向套件 20.44s。orders/fills/ledger/warnings 均受 BrokerLimits 硬上限约束；本结果是确定性本机 correctness baseline，不外推生产吞吐。
+No-lookahead evidence: actor 对 source 使用 peek -> reducer candidate success -> next，reducer 失败时 cursor 保持原位且 session 进入 ERROR；普通 fill 强制 source_sequence > order.accepted_source_sequence，已揭示 bar 后下 market 单直到下一根基础 bar 才成交；restore 再验证 fill/order 因果和 broker cursor；session-end mark close 只能生成 synthetic=true、historical_execution=false 的特殊 fill，不伪装历史成交。
+Failure injection evidence: 非 canonical Decimal、quantity step/price tick/quote step、数量/名义/杠杆/权益/reduce-only、重复 client ID/command、非法终态回迁、触发时风险、已揭示 bar、source bar 损坏、ledger capacity、合法重算 hash 但错误 next counter/client index/model record、checkpoint account/ledger/builder 漂移、失败 END_SESSION、失败 source reducer 均覆盖；失败 command/broker restore/end 不改 revision 或领域状态，失败 source 不推进 cursor 并进入 ERROR。10,000 序列曾实际暴露默认 28 位 Decimal 上下文导致长均价盯市/账本取负精度分叉，现统一为 60 位领域上下文并由 property test 锁定。
+Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对初始 Phase 4 checkpoint 4d0f174 执行 git revert --no-commit 后，working tree、index 相对父提交 aaeb99c31ab2b80451ad1eee87d4b60017e26fbd 均为 zero diff，untracked=0，index tree 与 parent tree 同为 6b95b3e03f5ed13843e6dc3b72e944743ba3043a；随后移除临时 worktree，并对 amend 后最终 checkpoint 再次执行同一演练。
+Known limitations: BAR_CONSERVATIVE_V1 明确不模拟盘口队列、真实 partial fill 或 bar 内精确路径；PARTIALLY_FILLED 状态受模型/restore 校验但 BAR v1 不虚构流动性分片。PAPER_LINEAR_V1 不含历史 funding、maintenance margin tier、真实 liquidation/ADL 或多资产抵押。Phase 5 前没有 SQLite command/event/checkpoint 持久化、HTTP/WS 或跨进程恢复；前端仍无成交或 replay 可见入口。Vite 仍打印既有 24678 HMR 端口噪声与 >500 kB chunk warning，但完整 check 退出码为 0。
 Decision: PASS
 ```

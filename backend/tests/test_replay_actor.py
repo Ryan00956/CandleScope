@@ -81,7 +81,9 @@ def _actor(**kwargs) -> ReplaySessionActor:
 
 
 @_async_test
-async def test_actor_state_machine_controller_requirement_and_illegal_transitions() -> None:
+async def test_actor_state_machine_controller_requirement_and_illegal_transitions() -> (
+    None
+):
     actor = _actor()
     await actor.start()
     initial = await actor.snapshot()
@@ -121,7 +123,9 @@ async def test_actor_state_machine_controller_requirement_and_illegal_transition
 
 
 @_async_test
-async def test_same_timestamp_events_and_long_gap_are_consumed_in_source_order() -> None:
+async def test_same_timestamp_events_and_long_gap_are_consumed_in_source_order() -> (
+    None
+):
     events = (
         FixtureEvent(event_time_ms=1_100, value=1),
         FixtureEvent(event_time_ms=1_100, value=2),
@@ -132,7 +136,9 @@ async def test_same_timestamp_events_and_long_gap_are_consumed_in_source_order()
     await actor.start()
     await actor.submit(_command("acquire", CommandType.ACQUIRE_CONTROLLER, revision=0))
     first = await actor.submit(
-        _command("advance-same-time", CommandType.ADVANCE_BY, revision=1, payload={"ms": 100})
+        _command(
+            "advance-same-time", CommandType.ADVANCE_BY, revision=1, payload={"ms": 100}
+        )
     )
     assert first.data["consumed"] == 2
     assert first.cursor.source_sequence == 2
@@ -149,6 +155,41 @@ async def test_same_timestamp_events_and_long_gap_are_consumed_in_source_order()
     assert final.data["consumed"] == 1
     assert final.cursor.source_sequence == 3
     assert reducer.snapshot() == {"count": 3, "total": 6}
+    await actor.shutdown()
+
+
+@_async_test
+async def test_reducer_failure_does_not_advance_source_cursor_or_partial_state() -> (
+    None
+):
+    class RejectingReducer(CountingReducer):
+        def apply_source_event(self, event: FixtureEvent):
+            del event
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "injected atomic reducer failure",
+            )
+
+    reducer = RejectingReducer()
+    actor = _actor(reducer=reducer, events=event_fixture(count=2))
+    await actor.start()
+    await actor.submit(
+        _command("acquire-atomic", CommandType.ACQUIRE_CONTROLLER, revision=0)
+    )
+    with pytest.raises(ReplayDomainError) as failure:
+        await actor.submit(
+            _command(
+                "step-atomic",
+                CommandType.STEP,
+                revision=1,
+                payload={"count": 1},
+            )
+        )
+    assert failure.value.code is ReplayErrorCode.ORDER_REJECTED
+    snapshot = await actor.snapshot()
+    assert snapshot.state is SessionState.ERROR
+    assert snapshot.cursor.source_sequence == 0
+    assert reducer.snapshot() == {"count": 0, "total": 0}
     await actor.shutdown()
 
 
@@ -203,7 +244,9 @@ async def test_command_history_capacity_is_checked_before_domain_mutation() -> N
 
     with pytest.raises(ReplayDomainError) as full:
         await actor.submit(
-            _command("step-over-capacity", CommandType.STEP, revision=1, payload={"count": 1})
+            _command(
+                "step-over-capacity", CommandType.STEP, revision=1, payload={"count": 1}
+            )
         )
     assert full.value.code is ReplayErrorCode.SCAN_LIMIT_EXCEEDED
     snapshot = await actor.snapshot()
@@ -260,7 +303,9 @@ async def test_source_factory_identity_change_fails_before_event_mutation() -> N
 async def test_controller_takeover_heartbeat_release_and_ttl_auto_pause() -> None:
     actor = _actor(controller_ttl_seconds=0.03)
     await actor.start()
-    await actor.submit(_command("acquire-a", CommandType.ACQUIRE_CONTROLLER, revision=0))
+    await actor.submit(
+        _command("acquire-a", CommandType.ACQUIRE_CONTROLLER, revision=0)
+    )
     with pytest.raises(ReplayDomainError) as held:
         await actor.submit(
             _command(
@@ -285,9 +330,7 @@ async def test_controller_takeover_heartbeat_release_and_ttl_auto_pause() -> Non
         await actor.heartbeat("tab-a")
     await actor.heartbeat("tab-b")
 
-    await actor.submit(
-        _command("play-b", CommandType.PLAY, revision=2, client="tab-b")
-    )
+    await actor.submit(_command("play-b", CommandType.PLAY, revision=2, client="tab-b"))
     await _wait_for_state(actor, SessionState.PAUSED, timeout=0.3)
     expired = await actor.snapshot()
     assert expired.controller_client_id is None
@@ -297,7 +340,9 @@ async def test_controller_takeover_heartbeat_release_and_ttl_auto_pause() -> Non
 
 
 @_async_test
-async def test_pause_ack_waits_for_atomic_event_and_queue_overflow_is_diagnostic() -> None:
+async def test_pause_ack_waits_for_atomic_event_and_queue_overflow_is_diagnostic() -> (
+    None
+):
     reducer = GateReducer()
     actor = _actor(
         reducer=reducer,
@@ -361,15 +406,21 @@ async def test_seek_uses_checkpoint_rebuild_and_trading_state_fails_closed() -> 
 
     fresh = _actor(reducer=CountingReducer())
     await fresh.start()
-    await fresh.submit(_command("fresh-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0))
+    await fresh.submit(
+        _command("fresh-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0)
+    )
     advanced = await fresh.submit(
-        _command("fresh-advance", CommandType.ADVANCE_BY, revision=1, payload={"ms": 250})
+        _command(
+            "fresh-advance", CommandType.ADVANCE_BY, revision=1, payload={"ms": 250}
+        )
     )
     assert advanced.state_hash == sought.state_hash
 
     trading = _actor(reducer=CountingReducer(trading_state=True))
     await trading.start()
-    await trading.submit(_command("trade-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0))
+    await trading.submit(
+        _command("trade-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0)
+    )
     with pytest.raises(ReplayDomainError) as blocked:
         await trading.submit(
             _command(
@@ -417,7 +468,9 @@ async def test_checkpoint_restore_validates_the_exact_source_cursor() -> None:
 
 
 @_async_test
-async def test_checkpoint_restore_rejects_valid_checksum_with_wrong_state_hash() -> None:
+async def test_checkpoint_restore_rejects_valid_checksum_with_wrong_state_hash() -> (
+    None
+):
     actor = _actor(reducer=CountingReducer(), checkpoint_event_interval=1)
     await actor.start()
     await actor.submit(_command("acquire", CommandType.ACQUIRE_CONTROLLER, revision=0))
@@ -443,7 +496,9 @@ async def test_checkpoint_restore_rejects_valid_checksum_with_wrong_state_hash()
 
 
 @_async_test
-async def test_checkpoint_restore_and_shutdown_are_bounded_and_leave_no_actor_task() -> None:
+async def test_checkpoint_restore_and_shutdown_are_bounded_and_leave_no_actor_task() -> (
+    None
+):
     order: list[str] = []
 
     async def flush() -> None:
@@ -501,7 +556,9 @@ async def test_shutdown_hook_timeout_sets_error_but_still_terminates_task() -> N
 
 
 @_async_test
-async def test_shutdown_timeout_cancels_a_stuck_atomic_event_without_task_leak() -> None:
+async def test_shutdown_timeout_cancels_a_stuck_atomic_event_without_task_leak() -> (
+    None
+):
     reducer = GateReducer()
     actor = _actor(reducer=reducer, events=event_fixture(step_ms=1))
     await actor.start()

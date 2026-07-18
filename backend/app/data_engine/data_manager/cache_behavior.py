@@ -49,6 +49,7 @@ class CacheBehaviorStore:
         self._init_lock = Lock()
         self._initialized = False
         self._last_cleanup_ms = 0
+        self._last_refresh_ms = 0
         self._init_db()
 
     def record(self, event: CacheAccessEvent) -> dict[str, Any]:
@@ -84,12 +85,19 @@ class CacheBehaviorStore:
     def heat_for(self, key: SeriesKey) -> dict[str, Any] | None:
         self._init_db()
         with self._connect() as conn:
+            now_ms = int(time.time() * 1000)
+            self._cleanup_old_events(conn, now_ms)
+            self._refresh_heat(conn, key, now_ms)
             row = self._heat_for_conn(conn, key)
+            conn.commit()
         return _heat_row(row) if row else None
 
     def snapshot(self, *, limit: int = 50) -> dict[str, Any]:
         self._init_db()
         with self._connect() as conn:
+            now_ms = int(time.time() * 1000)
+            self._cleanup_old_events(conn, now_ms)
+            self._refresh_all_heat(conn, now_ms)
             rows = conn.execute(
                 """
                 SELECT exchange, market_type, symbol, interval, heat_score, last_seen_ms,
@@ -100,6 +108,7 @@ class CacheBehaviorStore:
                 """,
                 (max(1, int(limit or 50)),),
             ).fetchall()
+            conn.commit()
         return {
             "owner": "cache-behavior",
             "db_path": str(self.db_path),
@@ -170,6 +179,55 @@ class CacheBehaviorStore:
         cutoff = now_ms - EVENT_RETENTION_MS
         conn.execute("DELETE FROM cache_access_events WHERE occurred_at_ms < ?", (cutoff,))
         self._last_cleanup_ms = now_ms
+
+    def _refresh_all_heat(self, conn: sqlite3.Connection, now_ms: int) -> None:
+        """Refresh every materialized heat row with time-decayed values."""
+        if now_ms - self._last_refresh_ms < CLEANUP_INTERVAL_MS:
+            return
+        one_hour = now_ms - 60 * 60 * 1000
+        one_day = now_ms - 24 * 60 * 60 * 1000
+        seven_days = now_ms - EVENT_RETENTION_MS
+        conn.execute(
+            """
+            INSERT INTO cache_series_heat
+                (exchange, market_type, symbol, interval, heat_score, last_seen_ms,
+                 access_count_1h, access_count_24h, access_count_7d, switch_count_24h)
+            SELECT exchange, market_type, symbol, interval,
+                   SUM(weight / (1.0 + ((? - occurred_at_ms) / 3600000.0) / 24.0)),
+                   MAX(occurred_at_ms),
+                   SUM(CASE WHEN occurred_at_ms >= ? THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN occurred_at_ms >= ? THEN 1 ELSE 0 END),
+                   COUNT(*),
+                   SUM(CASE WHEN action LIKE 'chart%' AND occurred_at_ms >= ? THEN 1 ELSE 0 END)
+            FROM cache_access_events
+            WHERE occurred_at_ms >= ?
+            GROUP BY exchange, market_type, symbol, interval
+            ON CONFLICT(exchange, market_type, symbol, interval)
+            DO UPDATE SET
+                heat_score = excluded.heat_score,
+                last_seen_ms = excluded.last_seen_ms,
+                access_count_1h = excluded.access_count_1h,
+                access_count_24h = excluded.access_count_24h,
+                access_count_7d = excluded.access_count_7d,
+                switch_count_24h = excluded.switch_count_24h
+            """,
+            (now_ms, one_hour, one_day, one_day, seven_days),
+        )
+        conn.execute(
+            """
+            DELETE FROM cache_series_heat
+            WHERE NOT EXISTS (
+                SELECT 1 FROM cache_access_events AS events
+                WHERE events.exchange = cache_series_heat.exchange
+                  AND events.market_type = cache_series_heat.market_type
+                  AND events.symbol = cache_series_heat.symbol
+                  AND events.interval = cache_series_heat.interval
+                  AND events.occurred_at_ms >= ?
+            )
+            """,
+            (seven_days,),
+        )
+        self._last_refresh_ms = now_ms
 
     @staticmethod
     def _heat_for_conn(conn: sqlite3.Connection, key: SeriesKey) -> tuple[Any, ...] | None:

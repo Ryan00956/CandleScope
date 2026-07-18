@@ -1,8 +1,11 @@
 """Storage retention intent registry for DataManager-owned series."""
 from __future__ import annotations
 
+import copy
 import time
-from dataclasses import dataclass, field
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .models import SeriesKey
@@ -62,7 +65,7 @@ class StorageIntent:
             "stream_required": self.stream_required,
             "keep_rows": self.keep_rows,
             "effective_keep_rows": self.effective_keep_rows,
-            "detail": dict(self.detail),
+            "detail": copy.deepcopy(self.detail),
             "registered_at_ms": self.registered_at_ms,
             "last_seen_ms": self.last_seen_ms,
         }
@@ -82,8 +85,15 @@ def normalize_priority(priority: str | None) -> str:
 class StorageIntentRegistry:
     """Tracks why a stored K-line series should be retained."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        lock: Any | None = None,
+        on_change: Callable[[], None] | None = None,
+    ) -> None:
         self._intents: dict[str, StorageIntent] = {}
+        self._lock = lock or threading.RLock()
+        self._on_change = on_change
 
     def register(
         self,
@@ -97,53 +107,63 @@ class StorageIntentRegistry:
         keep_rows: int | None = None,
         detail: dict[str, Any] | None = None,
     ) -> StorageIntent:
-        source = str(source or "").strip()
-        if not source:
-            raise ValueError("storage intent source is required")
-        intent_id = f"{source}|{key}"
-        current = self._intents.get(intent_id)
-        now = int(time.time() * 1000)
-        intent = StorageIntent(
-            key=key,
-            source=source,
-            priority=priority,
-            storage_allowed=storage_allowed,
-            frontend_cache_allowed=frontend_cache_allowed,
-            stream_required=stream_required,
-            keep_rows=keep_rows,
-            detail=detail or {},
-            registered_at_ms=current.registered_at_ms if current else now,
-            last_seen_ms=now,
-        )
-        self._intents[intent_id] = intent
-        return intent
+        with self._lock:
+            source = str(source or "").strip()
+            if not source:
+                raise ValueError("storage intent source is required")
+            intent_id = f"{source}|{key}"
+            current = self._intents.get(intent_id)
+            now = int(time.time() * 1000)
+            intent = StorageIntent(
+                key=key,
+                source=source,
+                priority=priority,
+                storage_allowed=storage_allowed,
+                frontend_cache_allowed=frontend_cache_allowed,
+                stream_required=stream_required,
+                keep_rows=keep_rows,
+                detail=copy.deepcopy(detail or {}),
+                registered_at_ms=current.registered_at_ms if current else now,
+                last_seen_ms=now,
+            )
+            self._intents[intent_id] = intent
+            if self._on_change is not None:
+                self._on_change()
+            return _copy_intent(intent)
 
     def unregister(self, key: SeriesKey, *, source: str) -> None:
-        self._intents.pop(f"{str(source or '').strip()}|{key}", None)
+        with self._lock:
+            removed = self._intents.pop(f"{str(source or '').strip()}|{key}", None)
+            if removed is not None and self._on_change is not None:
+                self._on_change()
 
     def unregister_source_prefix(self, source_prefix: str) -> int:
-        prefix = str(source_prefix or "").strip()
-        if not prefix:
-            return 0
-        removed = 0
-        for intent_id, intent in list(self._intents.items()):
-            if intent.source.startswith(prefix):
-                self._intents.pop(intent_id, None)
-                removed += 1
-        return removed
+        with self._lock:
+            prefix = str(source_prefix or "").strip()
+            if not prefix:
+                return 0
+            removed = 0
+            for intent_id, intent in list(self._intents.items()):
+                if intent.source.startswith(prefix):
+                    self._intents.pop(intent_id, None)
+                    removed += 1
+            if removed and self._on_change is not None:
+                self._on_change()
+            return removed
 
     def match(self, key: SeriesKey) -> list[StorageIntent]:
-        return [
-            intent for intent in self._intents.values()
-            if intent.storage_allowed
-            and intent.key.exchange == key.exchange
-            and intent.key.market_type == key.market_type
-            and intent.key.symbol == key.symbol
-            and (
-                intent.key.interval == key.interval
-                or intent.key.interval == WILDCARD_INTERVAL
-            )
-        ]
+        with self._lock:
+            return [
+                _copy_intent(intent) for intent in self._intents.values()
+                if intent.storage_allowed
+                and intent.key.exchange == key.exchange
+                and intent.key.market_type == key.market_type
+                and intent.key.symbol == key.symbol
+                and (
+                    intent.key.interval == key.interval
+                    or intent.key.interval == WILDCARD_INTERVAL
+                )
+            ]
 
     def effective_keep_rows(self, key: SeriesKey, base_keep_rows: int) -> int:
         keep_rows = int(base_keep_rows or 0)
@@ -154,10 +174,26 @@ class StorageIntentRegistry:
         return keep_rows
 
     def snapshot(self) -> dict[str, Any]:
-        intents = [intent.to_dict() for intent in self._intents.values()]
-        intents.sort(key=lambda item: (item["exchange"], item["market_type"], item["symbol"], item["interval"], item["source"]))
-        return {
-            "owner": "storage-retention-intents",
-            "intent_count": len(intents),
-            "intents": intents,
-        }
+        with self._lock:
+            intents = [intent.to_dict() for intent in self._intents.values()]
+            intents.sort(key=lambda item: (item["exchange"], item["market_type"], item["symbol"], item["interval"], item["source"]))
+            return {
+                "owner": "storage-retention-intents",
+                "intent_count": len(intents),
+                "intents": intents,
+            }
+
+    def clone(self) -> "StorageIntentRegistry":
+        """Return an immutable-for-planning copy of the current registry."""
+        with self._lock:
+            cloned = StorageIntentRegistry()
+            cloned._intents = {
+                intent_id: _copy_intent(intent)
+                for intent_id, intent in self._intents.items()
+            }
+            return cloned
+
+
+def _copy_intent(intent: StorageIntent) -> StorageIntent:
+    """Detach a public/planning intent from the registry's guarded record."""
+    return replace(intent, detail=copy.deepcopy(intent.detail))

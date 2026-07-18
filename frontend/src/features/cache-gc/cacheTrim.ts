@@ -1,5 +1,6 @@
 import { trimIndicatorResultCacheEntries } from "../indicators/indicatorResultCacheStore.js";
 import { trimWatchlistFullCacheEntries } from "../watchlist-full-cache/watchlistFullCacheStore.js";
+import { gcVictimRelief } from "./cachePolicy.js";
 import type {
   CacheTrimOwnerResult,
   FrontendGcExecutionResult,
@@ -23,6 +24,37 @@ export function executeFrontendGcPlan(plan: GcPlan | null | undefined, {
   trimChartDataCacheEntries = null,
 }: { trimChartDataCacheEntries?: ChartTrimFunction | null } = {}): FrontendGcExecutionResult {
   const victims = plan?.victims || [];
+  const planned = victims.reduce((total, victim) => {
+    const relief = gcVictimRelief(victim);
+    return {
+      bars: total.bars + relief.bars,
+      indicatorPoints: total.indicatorPoints + relief.indicatorPoints,
+      indicatorItems: total.indicatorItems + relief.indicatorItems,
+      estimatedBytes: total.estimatedBytes + relief.estimatedBytes,
+    };
+  }, { bars: 0, indicatorPoints: 0, indicatorItems: 0, estimatedBytes: 0 });
+  const expiresAtMs = Number(plan?.expiresAtMs);
+  if (Number.isFinite(expiresAtMs) && expiresAtMs > 0 && Date.now() > expiresAtMs) {
+    return {
+      generatedAtMs: Date.now(),
+      mode: "execute",
+      status: "skipped",
+      skipReason: "plan-expired",
+      sourcePlanGeneratedAtMs: plan?.generatedAtMs ?? null,
+      sourcePlanRevision: plan?.planRevision ?? null,
+      removedCount: 0,
+      removedBars: 0,
+      removedIndicatorPoints: 0,
+      removedIndicatorItems: 0,
+      removedEstimatedBytes: 0,
+      plannedBars: planned.bars,
+      plannedIndicatorPoints: planned.indicatorPoints,
+      plannedIndicatorItems: planned.indicatorItems,
+      plannedEstimatedBytes: planned.estimatedBytes,
+      accountingMatchesPlan: false,
+      ownerResults: [],
+    };
+  }
   const groups = byOwner(victims);
   const chartResult: CacheTrimOwnerResult = typeof trimChartDataCacheEntries === "function"
     ? trimChartDataCacheEntries(groups["chart-data-cache"] || [])
@@ -44,16 +76,41 @@ export function executeFrontendGcPlan(plan: GcPlan | null | undefined, {
     groups["indicator-result-cache"] || [],
   );
   const ownerResults: CacheTrimOwnerResult[] = [chartResult, watchlistResult, indicatorResult];
+  const removedBars = ownerResults.reduce((total, result) => total + (result.removedBars || 0), 0);
+  const removedIndicatorPoints = ownerResults.reduce(
+    (total, result) => total + (result.removedIndicatorPoints || 0),
+    0,
+  );
+  const removedIndicatorItems = ownerResults.reduce(
+    (total, result) => total + (result.removedIndicatorItems || 0),
+    0,
+  );
+  const removedEstimatedBytes = ownerResults.reduce(
+    (total, result) => total + (result.removedEstimatedBytes || 0),
+    0,
+  );
 
   return {
     generatedAtMs: Date.now(),
     mode: "execute",
-    sourcePlanGeneratedAtMs: plan?.generatedAtMs || null,
+    status: victims.length ? "executed" : "skipped",
+    ...(victims.length ? {} : { skipReason: "no-victims" }),
+    sourcePlanGeneratedAtMs: plan?.generatedAtMs ?? null,
+    sourcePlanRevision: plan?.planRevision ?? null,
     removedCount: ownerResults.reduce((total, result) => total + (result.removedCount || 0), 0),
-    removedBars: ownerResults.reduce((total, result) => total + (result.removedBars || 0), 0),
-    removedIndicatorPoints: ownerResults.reduce((total, result) => total + (result.removedIndicatorPoints || 0), 0),
-    removedIndicatorItems: ownerResults.reduce((total, result) => total + (result.removedIndicatorItems || 0), 0),
-    removedEstimatedBytes: ownerResults.reduce((total, result) => total + (result.removedEstimatedBytes || 0), 0),
+    removedBars,
+    removedIndicatorPoints,
+    removedIndicatorItems,
+    removedEstimatedBytes,
+    plannedBars: planned.bars,
+    plannedIndicatorPoints: planned.indicatorPoints,
+    plannedIndicatorItems: planned.indicatorItems,
+    plannedEstimatedBytes: planned.estimatedBytes,
+    accountingMatchesPlan:
+      removedBars === planned.bars
+      && removedIndicatorPoints === planned.indicatorPoints
+      && removedIndicatorItems === planned.indicatorItems
+      && removedEstimatedBytes === planned.estimatedBytes,
     ownerResults,
   };
 }

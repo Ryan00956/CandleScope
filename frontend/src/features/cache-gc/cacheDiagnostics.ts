@@ -2,6 +2,7 @@ import { snapshotIndicatorResultCacheDiagnostics } from "../indicators/indicator
 import { snapshotWatchlistFullCacheDiagnostics } from "../watchlist-full-cache/watchlistFullCacheStore.js";
 import { snapshotCacheRegistry } from "./cacheRegistry.js";
 import { collectBrowserRuntimePressure } from "./browserPressure.js";
+import { snapshotFrontendAutoGcScheduler } from "./frontendAutoGcScheduler.js";
 import { snapshotFrontendCacheAccessEvents } from "./cacheAccessRuntime.js";
 import type { CacheDiagnostics, CacheDiagnosticsEntry } from "./cacheGcTypes.js";
 
@@ -131,6 +132,7 @@ export function collectFrontendCacheDiagnostics({
     },
     klineBars: chart.totalBars + watchlist.totalBars,
     indicatorPoints: indicators.totalPoints,
+    autoGcRuntime: snapshotFrontendAutoGcScheduler(),
     registry: snapshotCacheRegistry(),
     pendingAccessEvents: snapshotFrontendCacheAccessEvents(),
     owners: {

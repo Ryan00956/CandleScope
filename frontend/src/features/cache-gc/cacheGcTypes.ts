@@ -47,6 +47,8 @@ export interface BrowserHeapPressure extends Record<string, unknown> {
   usedJSHeapSize?: number;
   totalJSHeapSize?: number;
   jsHeapSizeLimit?: number;
+  usageRatio?: number;
+  headroomBytes?: number;
   error?: string;
 }
 
@@ -76,9 +78,20 @@ export interface CacheDiagnosticsEntry extends Record<string, unknown> {
   lastAccessMs?: unknown;
   lastUpdatedMs?: unknown;
   lastRealtimeMs?: unknown;
+  generation?: unknown;
+  revision?: unknown;
+  metaRevision?: unknown;
   dependencyState?: { orphan?: unknown; missingDependencies?: unknown };
   trimSafety?: { safeRangeTrim?: unknown };
-  coverage?: { firstTime?: unknown; lastTime?: unknown };
+  trimPlan?: {
+    keepStart?: unknown;
+    keepBars?: unknown;
+    removedBars?: unknown;
+    removedPoints?: unknown;
+    removedItems?: unknown;
+    removedEstimatedBytes?: unknown;
+  };
+  coverage?: { firstTime?: unknown; lastTime?: unknown } | null;
   scores?: Partial<GcScores>;
 }
 
@@ -89,6 +102,7 @@ export interface CacheDiagnostics extends Record<string, unknown> {
   klineBars?: unknown;
   indicatorPoints?: unknown;
   runtimePressure?: Partial<BrowserRuntimePressure>;
+  autoGcRuntime?: Record<string, unknown>;
   owners?: {
     chart?: {
       entries?: CacheDiagnosticsEntry[];
@@ -115,6 +129,9 @@ export interface GcPolicy extends Record<string, unknown> {
   maxVictims: number;
   preserveActive: boolean;
   preserveSubscribed: boolean;
+  planTtlMs?: number;
+  heapHighWatermarkRatio?: number;
+  heapHardWatermarkRatio?: number;
   nowMs?: unknown;
   frontendCacheBudgetBytes?: unknown;
   frontend_cache_budget_bytes?: unknown;
@@ -123,6 +140,17 @@ export interface GcPolicy extends Record<string, unknown> {
 export interface GcPressure {
   klineBars: number;
   indicatorPoints: number;
+  estimatedBytes: number;
+  heapEstimatedBytes?: number;
+  heapUsageRatio?: number;
+  level?: "normal" | "high" | "hard";
+  reasons?: string[];
+}
+
+export interface GcRelief {
+  bars: number;
+  indicatorPoints: number;
+  indicatorItems: number;
   estimatedBytes: number;
 }
 
@@ -167,7 +195,13 @@ export interface GcVictim extends Record<string, unknown> {
   lastAccessMs?: unknown;
   lastUpdatedMs?: unknown;
   lastRealtimeMs?: unknown;
+  generation?: unknown;
+  expectedRevision?: unknown;
+  expectedMetaRevision?: unknown;
+  resourceTotals?: GcRelief;
   trimSafety?: { safeRangeTrim?: unknown };
+  trimPlan?: NonNullable<CacheDiagnosticsEntry["trimPlan"]>;
+  relief?: GcRelief;
   rangeSegments?: unknown;
 }
 
@@ -177,6 +211,11 @@ export interface GcPlan extends Record<string, unknown> {
   policy: GcPolicy;
   pressure: GcPressure;
   victims: GcVictim[];
+  candidateVictims?: GcVictim[];
+  remainingPressure?: GcPressure;
+  diagnosticsGeneratedAtMs?: number | null;
+  expiresAtMs?: number;
+  planRevision?: string;
   wouldFreeBars: number;
   wouldFreeIndicatorPoints: number;
   wouldFreeIndicatorItems: number;
@@ -190,18 +229,26 @@ export interface CacheTrimOwnerResult extends Record<string, unknown> {
   removedIndicatorPoints?: number;
   removedIndicatorItems?: number;
   removedEstimatedBytes?: number;
+  skipped?: Array<{ key?: string; reason: string }>;
 }
 
 export interface FrontendGcExecutionResult extends Record<string, unknown> {
   generatedAtMs: number;
   mode: "execute";
-  status?: "skipped";
+  status?: "skipped" | "executed";
+  skipReason?: string;
   sourcePlanGeneratedAtMs: number | null;
+  sourcePlanRevision?: string | null;
   removedCount: number;
   removedBars: number;
   removedIndicatorPoints: number;
   removedIndicatorItems: number;
   removedEstimatedBytes: number;
+  plannedBars?: number;
+  plannedIndicatorPoints?: number;
+  plannedIndicatorItems?: number;
+  plannedEstimatedBytes?: number;
+  accountingMatchesPlan?: boolean;
   ownerResults: CacheTrimOwnerResult[];
 }
 
@@ -212,7 +259,6 @@ export interface AutoGcPolicy extends Record<string, unknown> {
   maxBytesPerRun: number;
   maxEntriesPerRun: number;
   minFinalEvictScore: number;
-  neverEvictActiveWithinMs: number;
   neverEvictAccessedWithinMs: number;
   nowMs?: unknown;
 }

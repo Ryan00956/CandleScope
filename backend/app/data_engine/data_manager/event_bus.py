@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Awaitable
@@ -109,8 +110,16 @@ class DataEventBus:
     event loop.  ``emit()`` is async and should be awaited.
     """
 
-    def __init__(self, config: EventBusConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: EventBusConfig | None = None,
+        *,
+        protection_lock: Any | None = None,
+        on_subscription_change: Callable[[], None] | None = None,
+    ) -> None:
         self._cfg = config or EventBusConfig()
+        self._protection_lock = protection_lock or threading.RLock()
+        self._on_subscription_change = on_subscription_change
 
         # Callback subscriptions: handle.id → SubscriptionHandle
         self._subscriptions: dict[str, SubscriptionHandle] = {}
@@ -163,12 +172,15 @@ class DataEventBus:
             event_types=event_types,
             callback=callback,
         )
-        self._subscriptions[handle.id] = handle
         queue: asyncio.Queue[_QueuedEvent | None] = asyncio.Queue(
             maxsize=self._cfg.subscriber_queue_size,
         )
         sub = _CallbackSubscription(queue=queue, handle=handle)
-        self._callback_subs[handle.id] = sub
+        with self._protection_lock:
+            self._subscriptions[handle.id] = handle
+            self._callback_subs[handle.id] = sub
+            if self._on_subscription_change is not None:
+                self._on_subscription_change()
         self._ensure_callback_worker(sub)
         logger.debug(
             "Subscription added: id=%s key=%s types=%s",
@@ -178,11 +190,18 @@ class DataEventBus:
 
     def unsubscribe(self, handle: SubscriptionHandle) -> None:
         """Remove a callback subscription."""
-        removed = self._subscriptions.pop(handle.id, None)
+        with self._protection_lock:
+            removed = self._subscriptions.pop(handle.id, None)
+            callback_entry = self._callback_subs.pop(handle.id, None)
+            entry = self._queue_subs.pop(handle.id, None)
+            if (
+                (removed is not None or callback_entry is not None or entry is not None)
+                and self._on_subscription_change is not None
+            ):
+                self._on_subscription_change()
         if removed:
             logger.debug("Subscription removed: id=%s", handle.id)
 
-        callback_entry = self._callback_subs.pop(handle.id, None)
         if callback_entry:
             self._put_sentinel(callback_entry.queue)
             if callback_entry.task is not None:
@@ -190,7 +209,6 @@ class DataEventBus:
             logger.debug("Callback subscription removed: id=%s", handle.id)
 
         # Also check queue subscriptions
-        entry = self._queue_subs.pop(handle.id, None)
         if entry:
             self._put_sentinel(entry.queue)
             logger.debug("Queue subscription removed: id=%s", handle.id)
@@ -223,7 +241,10 @@ class DataEventBus:
             event_types=event_types,
         )
         sub = _QueueSubscription(queue=queue, handle=handle)
-        self._queue_subs[handle.id] = sub
+        with self._protection_lock:
+            self._queue_subs[handle.id] = sub
+            if self._on_subscription_change is not None:
+                self._on_subscription_change()
         logger.debug(
             "Iterator subscription added: id=%s key=%s", handle.id, key,
         )
@@ -236,7 +257,10 @@ class DataEventBus:
                 self._record_queue_lag(sub, item.enqueued_at)
                 yield item.event
         finally:
-            self._queue_subs.pop(handle.id, None)
+            with self._protection_lock:
+                removed = self._queue_subs.pop(handle.id, None)
+                if removed is not None and self._on_subscription_change is not None:
+                    self._on_subscription_change()
             logger.debug(
                 "Iterator subscription removed: id=%s", handle.id,
             )
@@ -346,39 +370,46 @@ class DataEventBus:
             logger.debug("Callback subscription closed: id=%s", sub_id)
         if callback_tasks:
             await asyncio.gather(*callback_tasks, return_exceptions=True)
-        self._callback_subs.clear()
-
         for sub_id, sub in list(self._queue_subs.items()):
             self._put_sentinel(sub.queue)
-        self._queue_subs.clear()
-        self._subscriptions.clear()
+        with self._protection_lock:
+            changed = bool(
+                self._callback_subs or self._queue_subs or self._subscriptions
+            )
+            self._callback_subs.clear()
+            self._queue_subs.clear()
+            self._subscriptions.clear()
+            if changed and self._on_subscription_change is not None:
+                self._on_subscription_change()
         logger.info("Event bus closed")
 
     # ── Public: Introspection ────────────────────────────────
 
     def get_subscriber_count(self, key: SeriesKey | None = None) -> int:
         """Count active subscribers, optionally filtered by key."""
-        count = 0
-        for handle in self._subscriptions.values():
-            if key is None or handle.key is None or handle.key == key:
-                count += 1
-        for _, sub in self._queue_subs.items():
-            handle = sub.handle
-            if key is None or handle.key is None or handle.key == key:
-                count += 1
-        return count
+        with self._protection_lock:
+            count = 0
+            for handle in self._subscriptions.values():
+                if key is None or handle.key is None or handle.key == key:
+                    count += 1
+            for _, sub in self._queue_subs.items():
+                handle = sub.handle
+                if key is None or handle.key is None or handle.key == key:
+                    count += 1
+            return count
 
     def get_all_subscribed_keys(self) -> set[SeriesKey]:
         """Return all SeriesKeys that have at least one subscriber."""
-        keys: set[SeriesKey] = set()
-        for handle in self._subscriptions.values():
-            if handle.key is not None:
-                keys.add(handle.key)
-        for _, sub in self._queue_subs.items():
-            handle = sub.handle
-            if handle.key is not None:
-                keys.add(handle.key)
-        return keys
+        with self._protection_lock:
+            keys: set[SeriesKey] = set()
+            for handle in self._subscriptions.values():
+                if handle.key is not None:
+                    keys.add(handle.key)
+            for _, sub in self._queue_subs.items():
+                handle = sub.handle
+                if handle.key is not None:
+                    keys.add(handle.key)
+            return keys
 
     # ── Public: Snapshot ─────────────────────────────────────
 

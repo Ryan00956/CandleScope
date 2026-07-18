@@ -414,7 +414,7 @@ export default function CacheDiagnosticsPanel({
             {storageGcPlan.unable_to_reach_budget ? (
               <div className="st-info-box st-info-warn">
                 <span className="st-info-label">预算提醒</span>
-                <span>受保护数据过多，自动 GC 预计仍差 {formatBytes(storageGcPlan.budget_gap_bytes)} 才能回到目标水位</span>
+                <span>受保护数据过多，当前清理计划预计仍差 {formatBytes(storageGcPlan.budget_gap_bytes)} 才能回到目标水位；自动行删除默认关闭，需后端显式启用</span>
               </div>
             ) : null}
             {storageGcPlan.series?.length ? (

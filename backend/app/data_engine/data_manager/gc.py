@@ -12,6 +12,8 @@ from .models import SeriesKey, StreamStatus
 BAR_ESTIMATED_BYTES = 96
 DEFAULT_COLD_IDLE_SECONDS = 30 * 60
 DEFAULT_MAX_VICTIMS = 50
+DEFAULT_PLAN_TTL_MS = 30_000
+HARD_PROCESS_RSS_BYTES = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +85,7 @@ def plan_memory_gc(
             int(cache_snapshot.get("max_series", 0) or 0),
         )
     max_series = effective_policy.max_series or int(cache_snapshot.get("max_series", 0) or 0) or None
+    runtime_hard_pressure = _runtime_hard_memory_pressure(runtime_pressure)
     pressure = {
         "total_bars": total_bars,
         "max_total_bars": max_total_bars,
@@ -90,6 +93,7 @@ def plan_memory_gc(
         "total_series": total_series,
         "max_series": max_series,
         "over_series": max(0, total_series - max_series) if max_series else 0,
+        "runtime_hard_pressure": runtime_hard_pressure,
     }
     entries = _cache_entries(
         data_manager,
@@ -123,6 +127,8 @@ def plan_memory_gc(
     candidates.sort(key=_smart_victim_sort_key if scoring == "smart" else _victim_sort_key)
     victims = candidates[: effective_policy.max_victims]
     return {
+        "generated_at_ms": now_ms,
+        "expires_at_ms": now_ms + DEFAULT_PLAN_TTL_MS,
         "mode": "dry-run",
         "owner": "data-manager-memory",
         "scoringVersion": 1 if scoring == "smart" else 0,
@@ -144,28 +150,106 @@ def execute_memory_gc_plan(data_manager: Any, plan: dict[str, Any]) -> dict[str,
     removed_series = 0
     trimmed_series = 0
     removed_bars = 0
+    skipped_count = 0
+    unsupported_count = 0
     results: list[dict[str, Any]] = []
+    expires_at_ms = int(plan.get("expires_at_ms", 0) or 0)
+    if expires_at_ms and int(time.time() * 1000) > expires_at_ms:
+        return {
+            **plan,
+            "mode": "execute",
+            "status": "stale",
+            "stale_reason": "plan-expired",
+            "removed_series": 0,
+            "trimmed_series": 0,
+            "removed_bars": 0,
+            "removed_estimated_bytes": 0,
+            "skipped_count": len(plan.get("victims", []) or []),
+            "results": [],
+        }
+
     for victim in plan["victims"]:
         key = _series_key_from_victim(victim)
+        active = key in _active_keys(data_manager)
+        subscribed = key in _subscribed_keys(data_manager)
+        if active or subscribed:
+            skipped_count += 1
+            results.append({
+                **victim,
+                "removed_bars": 0,
+                "status": "protected-at-execute",
+                "active_at_execute": active,
+                "subscribed_at_execute": subscribed,
+            })
+            continue
+
+        expected_generation = int(victim.get("generation", -1) or 0)
+        expected_revision = int(victim.get("revision", -1) or 0)
+        expected_access_revision = int(victim.get("access_revision", -1) or 0)
+        expected_last_access_ms = int(victim.get("last_access_ms", 0) or 0)
         if victim.get("action") == "delete-series":
-            count = data_manager.cache.remove_series(key)
+            conditional_remove = getattr(data_manager.cache, "remove_series_if_unchanged", None)
+            if callable(conditional_remove) and expected_generation >= 0:
+                count, outcome = conditional_remove(
+                    key,
+                    expected_generation=expected_generation,
+                    expected_revision=expected_revision,
+                    expected_access_revision=expected_access_revision,
+                    expected_last_access_ms=expected_last_access_ms,
+                )
+            elif callable(conditional_remove):
+                count, outcome = 0, "stale"
+            else:
+                count, outcome = 0, "unsupported"
             removed_series += 1 if count else 0
             removed_bars += count
-            results.append({**victim, "removed_bars": count})
+            if outcome in {"stale", "unsupported"}:
+                skipped_count += 1
+            if outcome == "unsupported":
+                unsupported_count += 1
+            results.append({**victim, "removed_bars": count, "status": outcome})
         elif victim.get("action") == "trim-series":
             keep_bars = int(victim.get("keep_bars", 0) or 0)
-            count = data_manager.cache.trim_series(key, keep_bars)
+            conditional_trim = getattr(data_manager.cache, "trim_series_if_unchanged", None)
+            if callable(conditional_trim) and expected_generation >= 0:
+                count, outcome = conditional_trim(
+                    key,
+                    keep_bars,
+                    expected_generation=expected_generation,
+                    expected_revision=expected_revision,
+                    expected_access_revision=expected_access_revision,
+                    expected_last_access_ms=expected_last_access_ms,
+                )
+            elif callable(conditional_trim):
+                count, outcome = 0, "stale"
+            else:
+                count, outcome = 0, "unsupported"
             trimmed_series += 1 if count else 0
             removed_bars += count
-            results.append({**victim, "removed_bars": count})
+            if outcome in {"stale", "unsupported"}:
+                skipped_count += 1
+            if outcome == "unsupported":
+                unsupported_count += 1
+            results.append({**victim, "removed_bars": count, "status": outcome})
 
     return {
         **plan,
         "mode": "execute",
+        # Protection/revision drift means the safety checks did their job.  It
+        # is an execution constraint, not a GC engine failure.
+        "status": (
+            "partial"
+            if unsupported_count
+            else "ok"
+            if skipped_count == 0
+            else "constrained"
+        ),
         "removed_series": removed_series,
         "trimmed_series": trimmed_series,
         "removed_bars": removed_bars,
         "removed_estimated_bytes": removed_bars * BAR_ESTIMATED_BYTES,
+        "skipped_count": skipped_count,
+        "unsupported_count": unsupported_count,
         "results": results,
     }
 
@@ -225,6 +309,9 @@ def _cache_entries(
             "earliest_time": snapshot.get("earliest_time"),
             "latest_time": snapshot.get("latest_time"),
             "last_access_ms": last_access_ms,
+            "generation": int(snapshot.get("generation", 0) or 0),
+            "revision": int(snapshot.get("revision", 0) or 0),
+            "access_revision": int(snapshot.get("access_revision", 0) or 0),
             "idle_ms": idle_ms,
             "ephemeral": is_ephemeral_interval(key.interval),
             "active": active,
@@ -248,7 +335,11 @@ def _candidate_action(
         return None
     idle_ms = entry.get("idle_ms")
     idle_enough = idle_ms is not None and idle_ms >= policy.cold_idle_seconds * 1000
-    under_pressure = bool(pressure.get("over_total_bars") or pressure.get("over_series"))
+    under_pressure = bool(
+        pressure.get("over_total_bars")
+        or pressure.get("over_series")
+        or pressure.get("runtime_hard_pressure")
+    )
     if entry["ephemeral"]:
         keep_bars = int(policy.ephemeral_keep_bars or 0)
         if keep_bars <= 0 or entry["bars"] <= keep_bars:
@@ -359,11 +450,21 @@ def _pressure_score(
     if pressure.get("over_series"):
         score += 15.0
     rss = ((runtime_pressure or {}).get("processMemory") or {}).get("rss_bytes")
-    if rss and int(rss) > 512 * 1024 * 1024:
+    if rss and int(rss) >= HARD_PROCESS_RSS_BYTES:
         score += 20.0
     if entry.get("action") == "delete-series":
         score += 10.0
     return score
+
+
+def _runtime_hard_memory_pressure(runtime_pressure: dict[str, Any] | None) -> bool:
+    process_memory = ((runtime_pressure or {}).get("processMemory") or {})
+    if process_memory.get("available") is False:
+        return False
+    try:
+        return int(process_memory.get("rss_bytes", 0) or 0) >= HARD_PROCESS_RSS_BYTES
+    except (TypeError, ValueError):
+        return False
 
 
 def _active_keys(data_manager: Any) -> set[SeriesKey]:

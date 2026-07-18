@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   ApiError,
+  buildCacheLimitsRequestBody,
   fetchExchangeCapabilities,
   fetchExchanges,
   fetchKlinesHistory,
@@ -164,4 +165,17 @@ test("subscription endpoints validate list and sync payloads", async (context) =
 
   globalThis.fetch = async () => jsonResponse({ subscriptions: [{ symbol: "BTCUSDT", tier: "vip" }] });
   await assert.rejects(() => fetchSubscriptions(), ApiPayloadError);
+});
+
+test("cache limit patches preserve omitted, null, and false semantics", () => {
+  assert.deepEqual(buildCacheLimitsRequestBody({ ephemeralBars: 5_000 }), {
+    ephemeral_bars: 5_000,
+  });
+  assert.deepEqual(buildCacheLimitsRequestBody({
+    sqliteBudgetBytes: null,
+    storageRowLimitsEnabled: false,
+  }), {
+    sqlite_budget_bytes: null,
+    storage_row_limits_enabled: false,
+  });
 });

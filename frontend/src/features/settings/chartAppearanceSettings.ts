@@ -73,6 +73,16 @@ function normalizeBoxSizeMode(value: unknown, fallback: PriceBoxSizeMode): Price
   return typeof value === "string" && PRICE_BOX_SIZE_MODES.has(value) ? value as PriceBoxSizeMode : fallback;
 }
 
+function boundedInteger(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  if (
+    value == null
+    || typeof value === "boolean"
+    || (typeof value === "string" && value.trim() === "")
+  ) return fallback;
+  const parsed = Math.trunc(Number(value));
+  return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+}
+
 export function normalizeSettings(settings: unknown = {}): ChartSettings {
   const source = isRecord(settings) ? settings : {};
   const normalized = { ...DEFAULT_SETTINGS, ...source };
@@ -130,6 +140,35 @@ export function normalizeSettings(settings: unknown = {}): ChartSettings {
     && lineBreakNumberOfLines <= 50
     ? lineBreakNumberOfLines
     : DEFAULT_SETTINGS.lineBreakNumberOfLines;
+  const cacheLimits = isRecord(source.cacheLimits) ? source.cacheLimits : {};
+  normalized.cacheLimits = {
+    minutes: boundedInteger(cacheLimits.minutes, DEFAULT_SETTINGS.cacheLimits.minutes, 0, 100_000_000),
+    hours: boundedInteger(cacheLimits.hours, DEFAULT_SETTINGS.cacheLimits.hours, 0, 100_000_000),
+    daily: boundedInteger(cacheLimits.daily, DEFAULT_SETTINGS.cacheLimits.daily, 0, 100_000_000),
+  };
+  normalized.ephemeralCacheBars = boundedInteger(
+    source.ephemeralCacheBars,
+    DEFAULT_SETTINGS.ephemeralCacheBars,
+    1,
+    1_000_000,
+  );
+  normalized.frontendCacheBudgetBytes = boundedInteger(
+    source.frontendCacheBudgetBytes,
+    DEFAULT_SETTINGS.frontendCacheBudgetBytes,
+    16 * 1024 * 1024,
+    4 * 1024 * 1024 * 1024,
+  );
+  normalized.sqliteStorageBudgetBytes = source.sqliteStorageBudgetBytes === null
+    ? null
+    : boundedInteger(
+      source.sqliteStorageBudgetBytes,
+      DEFAULT_SETTINGS.sqliteStorageBudgetBytes ?? 0,
+      1,
+      16 * 1024 * 1024 * 1024 * 1024,
+    ) || null;
+  normalized.storageRowLimitsEnabled = typeof source.storageRowLimitsEnabled === "boolean"
+    ? source.storageRowLimitsEnabled
+    : DEFAULT_SETTINGS.storageRowLimitsEnabled;
   return normalized;
 }
 
@@ -138,12 +177,22 @@ function getSystemTheme(): "dark" | "light" {
   return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
-function loadSettings(): ChartSettings {
-  const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
-  if (saved) {
+export function parseStoredSettings(saved: string | null | undefined): ChartSettings {
+  if (!saved) return normalizeSettings();
+  try {
     return normalizeSettings(JSON.parse(saved));
+  } catch {
+    return normalizeSettings();
   }
-  return normalizeSettings();
+}
+
+function loadSettings(): ChartSettings {
+  if (typeof localStorage === "undefined") return normalizeSettings();
+  try {
+    return parseStoredSettings(localStorage.getItem(SETTINGS_STORAGE_KEY));
+  } catch {
+    return normalizeSettings();
+  }
 }
 
 export interface ChartSettingsRuntime {
@@ -185,7 +234,11 @@ export function useChartSettingsRuntime(): ChartSettingsRuntime {
     }
     root.style.setProperty("--candle-up", settings.upColor);
     root.style.setProperty("--candle-down", settings.downColor);
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    try {
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    } catch {
+      // Settings persistence failures must not interrupt chart rendering.
+    }
   }, [resolvedTheme, settings]);
 
   return { settings, setSettings, resolvedTheme };

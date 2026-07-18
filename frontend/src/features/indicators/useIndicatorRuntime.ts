@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { MarketDataRuntime } from "../market-data/useMarketDataRuntime.js";
@@ -41,6 +41,7 @@ import {
   resolveInitialHostedRange,
 } from "./indicatorRangePlanning.js";
 import {
+  acquireActiveIndicatorCacheLeases,
   buildIndicatorCacheContext,
   buildIndicatorCacheHydrationSignature,
   buildIndicatorResultCacheKey,
@@ -674,6 +675,30 @@ export function useIndicatorRuntime(
     candleDownColor,
     candleUpColor,
     exchange,
+    interval,
+    marketType,
+    symbol,
+  ]);
+  const indicatorCacheRuntimeLeaseId = useId();
+
+  useLayoutEffect(() => acquireActiveIndicatorCacheLeases(
+    activeIndicatorsRef.current,
+    {
+      candleDownColor,
+      candleUpColor,
+      exchange,
+      interval,
+      marketType,
+      symbol,
+    },
+    `active-indicator-${indicatorCacheRuntimeLeaseId}`,
+  ), [
+    activeIndicatorsRef,
+    candleDownColor,
+    candleUpColor,
+    exchange,
+    indicatorCacheHydrationSignature,
+    indicatorCacheRuntimeLeaseId,
     interval,
     marketType,
     symbol,

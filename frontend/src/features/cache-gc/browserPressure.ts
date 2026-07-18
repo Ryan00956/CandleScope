@@ -17,6 +17,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function finiteNonNegative(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
 export async function collectBrowserRuntimePressure({
   estimatedBytes = 0,
 }: { estimatedBytes?: number } = {}): Promise<BrowserRuntimePressure> {
@@ -29,6 +34,7 @@ export async function collectBrowserRuntimePressure({
 }
 
 async function browserHeapPressure(estimatedBytes: number): Promise<BrowserHeapPressure> {
+  let memoryProbeError: unknown = null;
   try {
     const perf = globalThis.performance as ExtendedPerformance;
     if (perf?.measureUserAgentSpecificMemory) {
@@ -36,23 +42,45 @@ async function browserHeapPressure(estimatedBytes: number): Promise<BrowserHeapP
       return {
         available: true,
         source: "measureUserAgentSpecificMemory",
-        usedJSHeapSize: Number(result?.bytes || 0),
-        estimatedBytes,
+        usedJSHeapSize: finiteNonNegative(result?.bytes),
+        estimatedBytes: finiteNonNegative(estimatedBytes),
       };
     }
   } catch (err) {
-    return fallbackHeap(estimatedBytes, "measureUserAgentSpecificMemory-error", err);
+    memoryProbeError = err;
   }
   const memory = (globalThis.performance as ExtendedPerformance | undefined)?.memory;
   if (memory) {
+    const used = finiteNonNegative(memory.usedJSHeapSize);
+    const total = finiteNonNegative(memory.totalJSHeapSize);
+    const limit = finiteNonNegative(memory.jsHeapSizeLimit);
     return {
       available: true,
       source: "performance.memory",
-      usedJSHeapSize: Number(memory.usedJSHeapSize || 0),
-      totalJSHeapSize: Number(memory.totalJSHeapSize || 0),
-      jsHeapSizeLimit: Number(memory.jsHeapSizeLimit || 0),
-      estimatedBytes,
+      usedJSHeapSize: used,
+      totalJSHeapSize: total,
+      jsHeapSizeLimit: limit,
+      ...(limit > 0
+        ? {
+            usageRatio: Math.max(0, used / limit),
+            headroomBytes: Math.max(0, limit - used),
+          }
+        : {}),
+      estimatedBytes: finiteNonNegative(estimatedBytes),
+      ...(memoryProbeError == null
+        ? {}
+        : {
+            fallbackFrom: "measureUserAgentSpecificMemory-error",
+            measureUserAgentSpecificMemoryError: errorMessage(memoryProbeError),
+          }),
     };
+  }
+  if (memoryProbeError != null) {
+    return fallbackHeap(
+      estimatedBytes,
+      "measureUserAgentSpecificMemory-error",
+      memoryProbeError,
+    );
   }
   return fallbackHeap(estimatedBytes, "estimated-cache-bytes");
 }
@@ -62,8 +90,8 @@ async function browserStoragePressure(): Promise<BrowserStoragePressure> {
     const nav = globalThis.navigator;
     if (nav?.storage?.estimate) {
       const estimate = await nav.storage.estimate();
-      const quota = Number(estimate?.quota || 0);
-      const usage = Number(estimate?.usage || 0);
+      const quota = finiteNonNegative(estimate?.quota);
+      const usage = finiteNonNegative(estimate?.usage);
       return {
         available: true,
         source: "navigator.storage.estimate",
@@ -93,7 +121,7 @@ function fallbackHeap(
   return {
     available: false,
     source,
-    estimatedBytes: Number(estimatedBytes || 0),
+    estimatedBytes: finiteNonNegative(estimatedBytes),
     ...(error == null ? {} : { error: errorMessage(error) }),
   };
 }

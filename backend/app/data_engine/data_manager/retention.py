@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Callable
 from typing import Any
@@ -24,12 +25,8 @@ logger = logging.getLogger("data_manager.retention")
 
 StorageProvider = Callable[[], StorageBackend | None]
 BUDGET_PRESSURE_LEVELS = {"high", "critical", "over_budget"}
-BUDGET_KEEP_RATIO = {
-    "high": 0.50,
-    "critical": 0.35,
-    "over_budget": 0.20,
-}
 AUTO_PROTECTED_RISK_FLAGS = {"active-or-subscribed", "storage-intent", "custom-interval"}
+STORAGE_PLAN_TTL_MS = 30_000
 
 
 class RetentionService:
@@ -100,6 +97,12 @@ class RetentionService:
         file_snapshot: dict[str, Any] | None = None,
     ) -> dict:
         """Plan SQLite retention cleanup without deleting rows."""
+        generated_at_ms = int(time.time() * 1000)
+        plan_identity = {
+            "generated_at_ms": generated_at_ms,
+            "expires_at_ms": generated_at_ms + STORAGE_PLAN_TTL_MS,
+            "planner_version": 2,
+        }
         storage = self._storage_provider()
         limits = {**self.db_limits, **(db_limits or {})}
         effective_budget = (
@@ -119,8 +122,14 @@ class RetentionService:
             disk=runtime_pressure.get("disk") or {},
             sqlite_budget_bytes=effective_budget,
         )
+        unavailable_budget_gap = (
+            int(watermarks.get("required_physical_relief_bytes", 0) or 0)
+            if watermarks.get("level") in BUDGET_PRESSURE_LEVELS
+            else 0
+        )
         if storage is None:
             return {
+                **plan_identity,
                 "mode": "dry-run",
                 "owner": "sqlite-storage",
                 "available": False,
@@ -135,8 +144,8 @@ class RetentionService:
                 "series": [],
                 "would_delete_rows": 0,
                 "would_free_estimated_bytes": 0,
-                "unable_to_reach_budget": False,
-                "budget_gap_bytes": 0,
+                "unable_to_reach_budget": unavailable_budget_gap > 0,
+                "budget_gap_bytes": unavailable_budget_gap,
             }
 
         try:
@@ -148,6 +157,7 @@ class RetentionService:
         except Exception as exc:
             logger.warning("Storage GC dry-run: failed to list series: %s", exc)
             return {
+                **plan_identity,
                 "mode": "dry-run",
                 "owner": "sqlite-storage",
                 "available": False,
@@ -163,16 +173,40 @@ class RetentionService:
                 "series": [],
                 "would_delete_rows": 0,
                 "would_free_estimated_bytes": 0,
-                "unable_to_reach_budget": False,
-                "budget_gap_bytes": 0,
+                "unable_to_reach_budget": unavailable_budget_gap > 0,
+                "budget_gap_bytes": unavailable_budget_gap,
             }
 
         protected = protected_keys or set()
         total_rows = sum(int(item.get("total_count", 0) or 0) for item in series_list)
-        storage_bytes = int(files.get("total_size_bytes", 0) or 0)
-        bytes_per_row = storage_bytes / total_rows if total_rows > 0 and storage_bytes > 0 else 0
-        budget_pressure = watermarks.get("level") in BUDGET_PRESSURE_LEVELS
-        victims: list[dict[str, Any]] = []
+        storage_bytes = int(
+            files.get("physical_size_bytes", files.get("total_size_bytes", 0)) or 0
+        )
+        owner_attribution_available = bool(
+            files.get("owner_attribution_available", False)
+        )
+        klines_managed_bytes = int(files.get("klines_managed_bytes", 0) or 0)
+        allocation_bytes = (
+            klines_managed_bytes
+            if owner_attribution_available
+            else 0
+        )
+        bytes_per_row = (
+            allocation_bytes / total_rows
+            if total_rows > 0 and allocation_bytes > 0
+            else 0
+        )
+        required_logical_relief = int(
+            watermarks.get("required_logical_relief_bytes", 0) or 0
+        )
+        required_klines_relief = int(
+            watermarks.get("required_klines_relief_bytes", 0) or 0
+        )
+        budget_pressure = (
+            watermarks.get("level") in BUDGET_PRESSURE_LEVELS
+            and required_klines_relief > 0
+        )
+        candidates: list[dict[str, Any]] = []
 
         for item in series_list:
             interval = str(item.get("interval") or "").strip()
@@ -190,31 +224,35 @@ class RetentionService:
                 if storage_intents is not None
                 else []
             )
-            intent_keep_rows = max((int(item.get("effective_keep_rows", 0) or 0) for item in matched_intents), default=0)
+            intent_keep_rows = max(
+                (
+                    int(item.get("effective_keep_rows", 0) or 0)
+                    for item in matched_intents
+                ),
+                default=0,
+            )
             row_limit_keep_rows = (
                 storage_intents.effective_keep_rows(key, base_keep_rows)
                 if storage_intents is not None and row_limits_enabled
                 else base_keep_rows if row_limits_enabled else 0
             )
             current_rows = int(item.get("total_count", 0) or 0)
-            keep_rows = current_rows
-            reason = ""
+            row_limit_delete_rows = 0
             if row_limits_enabled and row_limit_keep_rows > 0 and current_rows > row_limit_keep_rows:
-                keep_rows = row_limit_keep_rows
-                reason = f"{tier}-tier-retention"
-            if budget_pressure and current_rows > max(1, intent_keep_rows):
-                budget_keep_rows = max(
-                    1,
-                    intent_keep_rows,
-                    int(current_rows * BUDGET_KEEP_RATIO.get(str(watermarks.get("level")), 0.50)),
-                )
-                if budget_keep_rows < keep_rows:
-                    keep_rows = budget_keep_rows
-                    reason = "sqlite-budget-pressure"
-            if current_rows <= keep_rows:
+                row_limit_delete_rows = current_rows - row_limit_keep_rows
+
+            budget_floor_rows = max(1, intent_keep_rows)
+            if row_limits_enabled and row_limit_keep_rows > 0:
+                budget_floor_rows = max(budget_floor_rows, row_limit_keep_rows)
+            budget_capacity_rows = (
+                max(0, current_rows - budget_floor_rows)
+                if budget_pressure
+                else 0
+            )
+            max_delete_rows = max(row_limit_delete_rows, budget_capacity_rows)
+            if max_delete_rows <= 0:
                 continue
 
-            would_delete = current_rows - keep_rows
             risk_flags = self._storage_gc_risk_flags(
                 key=key,
                 item=item,
@@ -232,15 +270,24 @@ class RetentionService:
                 "current_rows": current_rows,
                 "base_keep_rows": base_keep_rows,
                 "row_limit_keep_rows": row_limit_keep_rows,
-                "budget_keep_ratio": BUDGET_KEEP_RATIO.get(str(watermarks.get("level"))),
-                "keep_rows": keep_rows,
-                "would_delete_rows": would_delete,
-                "would_free_estimated_bytes": int(would_delete * bytes_per_row),
+                "budget_keep_ratio": None,
+                "allocation_mode": "required-relief-v2",
+                "budget_floor_rows": budget_floor_rows,
+                "max_deletable_rows": max_delete_rows,
+                "keep_rows": current_rows - max_delete_rows,
+                "would_delete_rows": max_delete_rows,
+                "would_free_estimated_bytes": int(max_delete_rows * bytes_per_row),
                 "earliest_open_time": item.get("earliest_open_time"),
                 "latest_open_time": item.get("latest_open_time"),
-                "reason": reason,
+                "reason": (
+                    f"{tier}-tier-retention"
+                    if row_limit_delete_rows > 0
+                    else "sqlite-budget-required-relief"
+                ),
                 "risk_flags": risk_flags,
                 "storage_intents": matched_intents,
+                "_row_limit_delete_rows": row_limit_delete_rows,
+                "_budget_capacity_rows": budget_capacity_rows,
             }
             if scoring == "smart":
                 victim.update(self._storage_gc_scores(
@@ -248,7 +295,66 @@ class RetentionService:
                     behavior_heat=behavior_heat or {},
                     watermarks=watermarks,
                 ))
-            victims.append(victim)
+            candidates.append(victim)
+
+        if scoring == "smart":
+            candidates.sort(key=lambda row: -float(row.get("scores", {}).get("finalEvictScore", 0) or 0))
+        else:
+            candidates.sort(key=lambda row: int(row["would_delete_rows"]), reverse=True)
+
+        # Hard row-retention deletes are planned first.  Budget pressure then
+        # allocates only the additional rows needed to reach the target.  The
+        # last victim is partial, bounding estimate overshoot to one row rather
+        # than applying a fixed percentage to every series.
+        row_limit_relief = sum(
+            int(row.get("_row_limit_delete_rows", 0) or 0) * bytes_per_row
+            for row in candidates
+            if not (
+                AUTO_PROTECTED_RISK_FLAGS
+                & set(row.get("risk_flags") or [])
+            )
+        )
+        remaining_relief = max(0, required_klines_relief - int(row_limit_relief))
+        for row in candidates:
+            planned_rows = int(row.get("_row_limit_delete_rows", 0) or 0)
+            capacity_rows = int(row.get("_budget_capacity_rows", 0) or 0)
+            extra_capacity = max(0, capacity_rows - planned_rows)
+            flags = set(row.get("risk_flags") or [])
+            budget_rows = 0
+            if (
+                remaining_relief > 0
+                and bytes_per_row > 0
+                and extra_capacity > 0
+                and not (AUTO_PROTECTED_RISK_FLAGS & flags)
+            ):
+                budget_rows = min(
+                    extra_capacity,
+                    max(1, math.ceil(remaining_relief / bytes_per_row)),
+                )
+                remaining_relief = max(
+                    0,
+                    remaining_relief - int(budget_rows * bytes_per_row),
+                )
+
+            planned_rows += budget_rows
+            row["would_delete_rows"] = planned_rows
+            row["keep_rows"] = int(row["current_rows"]) - planned_rows
+            row["would_free_estimated_bytes"] = int(planned_rows * bytes_per_row)
+            if budget_rows > 0 and int(row.get("_row_limit_delete_rows", 0) or 0) > 0:
+                row["reason"] = f"{row['tier']}-tier-retention+sqlite-budget-required-relief"
+            elif budget_rows > 0:
+                row["reason"] = "sqlite-budget-required-relief"
+
+        victims = [row for row in candidates if int(row.get("would_delete_rows", 0) or 0) > 0]
+        for row in victims:
+            row.pop("_row_limit_delete_rows", None)
+            row.pop("_budget_capacity_rows", None)
+            if scoring == "smart":
+                row.update(self._storage_gc_scores(
+                    row,
+                    behavior_heat=behavior_heat or {},
+                    watermarks=watermarks,
+                ))
 
         if scoring == "smart":
             victims.sort(key=lambda row: -float(row.get("scores", {}).get("finalEvictScore", 0) or 0))
@@ -261,15 +367,27 @@ class RetentionService:
             for row in victims
             if not (AUTO_PROTECTED_RISK_FLAGS & set(row.get("risk_flags") or []))
         )
-        required_free_bytes = max(0, storage_bytes - int(watermarks.get("target_bytes", 0) or 0))
-        budget_gap_bytes = (
-            max(0, required_free_bytes - auto_eligible_free_bytes)
-            if budget_pressure and required_free_bytes > 0
-            else 0
+        required_free_bytes = required_klines_relief
+        owner_relief_gap_bytes = int(
+            watermarks.get("owner_relief_gap_bytes", 0) or 0
         )
+        if (
+            watermarks.get("level") in BUDGET_PRESSURE_LEVELS
+            and not watermarks.get("relief_planning_available", True)
+        ):
+            budget_gap_bytes = int(
+                watermarks.get("required_physical_relief_bytes", 0) or 0
+            )
+        else:
+            budget_gap_bytes = owner_relief_gap_bytes + (
+                max(0, required_free_bytes - auto_eligible_free_bytes)
+                if budget_pressure and required_free_bytes > 0
+                else 0
+            )
         db_size = int(files.get("db_size_bytes", 0) or 0)
         wal_size = int(files.get("wal_size_bytes", 0) or 0)
         return {
+            **plan_identity,
             "mode": "dry-run",
             "owner": "sqlite-storage",
             "scoringVersion": 1 if scoring == "smart" else 0,
@@ -290,10 +408,39 @@ class RetentionService:
             "victim_count": len(victims),
             "would_delete_rows": would_delete_rows,
             "would_free_estimated_bytes": would_free_estimated_bytes,
+            "required_physical_relief_bytes": int(
+                watermarks.get("required_physical_relief_bytes", 0) or 0
+            ),
+            "required_logical_relief_bytes": required_logical_relief,
+            "required_klines_relief_bytes": required_klines_relief,
+            "owner_attribution_available": owner_attribution_available,
+            "klines_managed_bytes": klines_managed_bytes,
+            "unmanaged_bytes": int(files.get("unmanaged_bytes", 0) or 0),
+            "checkpoint_relief_bytes": int(
+                watermarks.get("checkpoint_relief_bytes", 0) or 0
+            ),
+            "compaction_relief_bytes": int(
+                watermarks.get("compaction_relief_bytes", 0) or 0
+            ),
+            "estimated_bytes_per_row": round(bytes_per_row, 6),
             "unable_to_reach_budget": budget_gap_bytes > 0,
             "budget_gap_bytes": budget_gap_bytes,
-            "vacuum_recommended": would_delete_rows > 0 and db_size > 128 * 1024 * 1024,
-            "checkpoint_recommended": wal_size > 64 * 1024 * 1024,
+            "vacuum_recommended": bool(
+                watermarks.get("compaction_relief_bytes", 0)
+            ) or (
+                would_delete_rows > 0
+                and (
+                    required_klines_relief > 0
+                    or db_size > 128 * 1024 * 1024
+                )
+            ),
+            "checkpoint_recommended": (
+                bool(watermarks.get("checkpoint_first"))
+                or wal_size > 64 * 1024 * 1024
+            ),
+            "physical_compaction_pending": bool(
+                watermarks.get("physical_compaction_pending")
+            ),
             "series": victims,
         }
 

@@ -16,7 +16,7 @@ from typing import Any
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import KLINES_DB_PATH
 from app.core.executors import run_storage
@@ -25,7 +25,11 @@ from app.core.config import load_proxy_settings, normalize_proxy_settings, save_
 from app.indicator.pyne.cache import pyne_cache
 from app.exchanges.symbols import normalize_symbol
 from app.data_engine.storage.klines_repo import list_series_summaries
-from app.data_engine.data_manager.runtime_pressure import build_storage_watermarks, disk_pressure_snapshot
+from app.data_engine.data_manager.runtime_pressure import (
+    build_storage_watermarks,
+    disk_pressure_snapshot,
+    storage_file_snapshot,
+)
 from app.data_engine.data_manager import (
     MaintenanceBusyError,
     MaintenanceUnavailableError,
@@ -203,26 +207,8 @@ def _model_field_was_set(model: BaseModel, field: str) -> bool:
     return field in fields
 
 
-def _file_size(path: Path) -> int:
-    try:
-        return path.stat().st_size if path.exists() else 0
-    except OSError:
-        logger.exception("Failed to stat %s", path)
-        return 0
-
-
 def _storage_file_snapshot() -> dict:
-    db_path = Path(KLINES_DB_PATH)
-    wal_path = Path(f"{db_path}-wal")
-    shm_path = Path(f"{db_path}-shm")
-    return {
-        "path": str(db_path),
-        "exists": db_path.exists(),
-        "db_size_bytes": _file_size(db_path),
-        "wal_size_bytes": _file_size(wal_path),
-        "shm_size_bytes": _file_size(shm_path),
-        "total_size_bytes": _file_size(db_path) + _file_size(wal_path) + _file_size(shm_path),
-    }
+    return storage_file_snapshot(KLINES_DB_PATH)
 
 
 def _storage_series_snapshot() -> dict:
@@ -592,23 +578,42 @@ async def cache_diagnostics(request: Request) -> dict:
         raise HTTPException(status_code=500, detail=f"Cache diagnostics failed: {exc}") from exc
 
 
-class CacheLimitsRequest(BaseModel):
-    """Request body for updating data retention limits."""
-    db_limits: dict[str, int] | None = None     # {"minutes": N, "hours": N, "daily": N}
-    ephemeral_bars: int | None = None            # max bars for ephemeral series (1s)
-    sqlite_budget_bytes: int | None = None
+class StoragePolicyRequest(BaseModel):
+    """Validated shared storage-retention policy fields."""
+
+    db_limits: dict[str, int] | None = None
+    sqlite_budget_bytes: int | None = Field(default=None, ge=1, le=16 * 1024**4)
     storage_row_limits_enabled: bool | None = None
+
+    @field_validator("db_limits")
+    @classmethod
+    def validate_db_limits(cls, value: dict[str, int] | None) -> dict[str, int] | None:
+        if value is None:
+            return None
+        unknown = set(value) - {"minutes", "hours", "daily"}
+        if unknown:
+            raise ValueError(f"unsupported DB retention tiers: {sorted(unknown)}")
+        for tier, limit in value.items():
+            if isinstance(limit, bool) or not 0 <= int(limit) <= 100_000_000:
+                raise ValueError(f"invalid DB retention limit for {tier}")
+        return {tier: int(limit) for tier, limit in value.items()}
+
+
+class CacheLimitsRequest(StoragePolicyRequest):
+    """Request body for updating data retention limits."""
+
+    ephemeral_bars: int | None = Field(default=None, ge=1, le=1_000_000)
 
 
 class BackendMemoryGcRequest(BaseModel):
     """Optional policy overrides for backend memory GC."""
-    cold_idle_seconds: int | None = None
-    max_total_bars: int | None = None
-    max_series: int | None = None
-    max_victims: int | None = None
+    cold_idle_seconds: int | None = Field(default=None, ge=0, le=30 * 24 * 60 * 60)
+    max_total_bars: int | None = Field(default=None, ge=1, le=100_000_000)
+    max_series: int | None = Field(default=None, ge=1, le=100_000)
+    max_victims: int | None = Field(default=None, ge=1, le=10_000)
     preserve_active: bool = True
     preserve_subscribed: bool = True
-    ephemeral_keep_bars: int | None = None
+    ephemeral_keep_bars: int | None = Field(default=None, ge=1, le=1_000_000)
 
     def policy(self) -> dict:
         values = {
@@ -623,20 +628,14 @@ class BackendMemoryGcRequest(BaseModel):
         return {key: value for key, value in values.items() if value is not None}
 
 
-class StorageGcRequest(BaseModel):
+class StorageGcRequest(StoragePolicyRequest):
     """Optional policy overrides for SQLite storage GC dry-run."""
-    db_limits: dict[str, int] | None = None
-    sqlite_budget_bytes: int | None = None
-    storage_row_limits_enabled: bool | None = None
 
 
-class StorageGcRunRequest(BaseModel):
+class StorageGcRunRequest(StoragePolicyRequest):
     """Confirmed request for SQLite storage GC execution."""
     confirm: bool = False
-    db_limits: dict[str, int] | None = None
-    sqlite_budget_bytes: int | None = None
-    storage_row_limits_enabled: bool | None = None
-    batch_size: int = 10_000
+    batch_size: int = Field(default=1_000, ge=1, le=1_000)
 
 
 class StorageVacuumRequest(BaseModel):
@@ -646,16 +645,26 @@ class StorageVacuumRequest(BaseModel):
 
 class AutoGcRunRequest(BaseModel):
     """Optional conservative auto GC policy overrides."""
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool | None = None
     mode: str | None = None
-    cooldown_ms: int | None = None
-    max_bytes_per_run: int | None = None
-    max_entries_per_run: int | None = None
-    min_final_evict_score: float | None = None
-    never_evict_active_within_ms: int | None = None
-    never_evict_accessed_within_ms: int | None = None
-    storage_batch_size: int | None = None
+    cooldown_ms: int | None = Field(default=None, ge=10_000, le=24 * 60 * 60 * 1000)
+    max_bytes_per_run: int | None = Field(default=None, ge=1, le=16 * 1024**3)
+    max_entries_per_run: int | None = Field(default=None, ge=1, le=10_000)
+    min_final_evict_score: float | None = Field(default=None, ge=0, le=1_000)
+    never_evict_accessed_within_ms: int | None = Field(default=None, ge=0, le=7 * 24 * 60 * 60 * 1000)
+    storage_batch_size: int | None = Field(default=None, ge=1, le=1_000)
     sqlite_auto_vacuum: bool | None = None
+
+    @field_validator("sqlite_auto_vacuum")
+    @classmethod
+    def validate_sqlite_auto_vacuum(cls, value: bool | None) -> bool | None:
+        if value:
+            raise ValueError(
+                "automatic SQLite VACUUM is unsupported; use the confirmed manual vacuum endpoint"
+            )
+        return value
 
     def policy(self) -> dict[str, Any]:
         values = self.model_dump() if hasattr(self, "model_dump") else self.dict()
@@ -712,10 +721,14 @@ async def backend_memory_gc_dry_run(
     dm = _get_data_manager(request)
     if dm is None:
         raise HTTPException(status_code=503, detail="DataManager 尚未初始化")
+    policy = (body or BackendMemoryGcRequest()).policy()
+    async_plan = getattr(dm, "plan_memory_gc_async", None)
+    if callable(async_plan):
+        return await async_plan(policy)
     plan = getattr(dm, "plan_memory_gc", None)
     if not callable(plan):
         raise HTTPException(status_code=503, detail="DataManager 不支持 memory GC")
-    return await run_storage(plan, (body or BackendMemoryGcRequest()).policy())
+    return plan(policy)
 
 
 @router.post("/cache-gc/backend-memory/run")
@@ -727,10 +740,14 @@ async def backend_memory_gc_run(
     dm = _get_data_manager(request)
     if dm is None:
         raise HTTPException(status_code=503, detail="DataManager 尚未初始化")
+    policy = (body or BackendMemoryGcRequest()).policy()
+    async_run = getattr(dm, "run_memory_gc_async", None)
+    if callable(async_run):
+        return await async_run(policy)
     run = getattr(dm, "run_memory_gc", None)
     if not callable(run):
         raise HTTPException(status_code=503, detail="DataManager 不支持 memory GC")
-    return await run_storage(run, (body or BackendMemoryGcRequest()).policy())
+    return run(policy)
 
 
 @router.post("/cache-gc/auto/run")
@@ -761,6 +778,14 @@ async def storage_gc_dry_run(
     if not callable(plan):
         raise HTTPException(status_code=503, detail="DataManager 不支持 storage GC")
     file_snapshot = await run_storage(_storage_file_snapshot)
+    async_plan = getattr(dm, "plan_storage_gc_async", None)
+    if callable(async_plan):
+        return await async_plan(
+            db_limits=(body.db_limits if body else None),
+            sqlite_budget_bytes=(body.sqlite_budget_bytes if body else None),
+            storage_row_limits_enabled=(body.storage_row_limits_enabled if body else None),
+            file_snapshot=file_snapshot,
+        )
     return await run_storage(
         plan,
         db_limits=(body.db_limits if body else None),

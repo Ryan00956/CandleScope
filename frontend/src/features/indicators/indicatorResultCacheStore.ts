@@ -10,8 +10,11 @@ import {
   upsertLinePoint,
 } from "./indicatorPayloadRuntime.js";
 import {
+  acquireCacheLease,
+  cacheLeaseCount,
   dependencyAvailable,
   dependencyState,
+  hasCacheLease,
   klineDependencyKey,
   registerCacheDependency,
   registerCacheResource,
@@ -69,6 +72,15 @@ interface IndicatorCacheTrimVictim {
   key?: string;
   action?: string;
   keepStart?: number | null;
+  generation?: unknown;
+  expectedRevision?: unknown;
+  lastAccessMs?: unknown;
+  reason?: unknown;
+  relief?: {
+    indicatorPoints?: unknown;
+    indicatorItems?: unknown;
+    estimatedBytes?: unknown;
+  };
 }
 
 interface PointRecord {
@@ -76,6 +88,18 @@ interface PointRecord {
 }
 
 const entries = new Map<string, IndicatorCacheEntry>();
+const entryGenerations = new Map<string, number>();
+let nextEntryGeneration = 0;
+
+function markEntryMutation(key: string): number {
+  nextEntryGeneration += 1;
+  entryGenerations.set(key, nextEntryGeneration);
+  return nextEntryGeneration;
+}
+
+function forgetEntryGeneration(key: string): void {
+  entryGenerations.delete(key);
+}
 
 function clone<T>(value: T): T {
   if (value == null) return value;
@@ -260,11 +284,33 @@ function countLinePoints(
 function countOutputItems(
   normalized: Partial<NormalizedIndicatorPayload> = {},
 ): number {
-  return OUTPUT_KEYS.reduce(
-    (total, key) =>
-      total + (Array.isArray(normalized[key]) ? normalized[key].length : 0),
+  const lineColorPoints = (normalized.lines || []).reduce(
+    (total, line) => total + (Array.isArray(line.colorData) ? line.colorData.length : 0),
     0,
   );
+  return lineColorPoints + OUTPUT_KEYS.reduce((total, key) => {
+    const items = Array.isArray(normalized[key]) ? normalized[key] : [];
+    return total + items.reduce((itemTotal, item) => {
+      const record = isIndicatorRecord(item) ? item : {};
+      const dataPoints = Array.isArray(record.data) ? record.data.length : 0;
+      const regionPoints = Array.isArray(record.regions) ? record.regions.length : 0;
+      return itemTotal + 1 + dataPoints + regionPoints;
+    }, 0);
+  }, 0);
+}
+
+function indicatorAccounting(
+  normalized: Partial<NormalizedIndicatorPayload> = {},
+) {
+  const points = countLinePoints(normalized);
+  const items = countOutputItems(normalized);
+  return {
+    points,
+    items,
+    estimatedBytes:
+      points * INDICATOR_POINT_ESTIMATED_BYTES
+      + items * OUTPUT_ITEM_ESTIMATED_BYTES,
+  };
 }
 
 function hasTimedData(items: IndicatorAuxiliaryItem[] = []): boolean {
@@ -295,6 +341,32 @@ function analyzeTrimSafety(
         ? "line-only-time-series"
         : "complex-output",
     unsafeOutputs,
+  };
+}
+
+function buildExactTrimPlan(
+  normalized: NormalizedIndicatorPayload,
+  coverage: IndicatorCoverage | null | undefined,
+) {
+  const trimSafety = analyzeTrimSafety(normalized);
+  if (
+    !trimSafety.safeRangeTrim
+    || coverage?.firstTime == null
+    || coverage?.lastTime == null
+    || coverage.firstTime >= coverage.lastTime
+  ) return null;
+  const keepStart = Math.floor((coverage.firstTime + coverage.lastTime) / 2);
+  const before = indicatorAccounting(normalized);
+  const after = indicatorAccounting(trimNormalizedBefore(normalized, keepStart));
+  const removedPoints = Math.max(0, before.points - after.points);
+  const removedItems = Math.max(0, before.items - after.items);
+  const removedEstimatedBytes = Math.max(0, before.estimatedBytes - after.estimatedBytes);
+  if (removedEstimatedBytes <= 0 || removedPoints + removedItems <= 0) return null;
+  return {
+    keepStart,
+    removedPoints,
+    removedItems,
+    removedEstimatedBytes,
   };
 }
 
@@ -452,9 +524,12 @@ function normalizeLinesWithSharing(
 
 function enforceLimit(): void {
   while (entries.size > MAX_INDICATOR_CACHE_ENTRIES) {
-    const oldestKey = entries.keys().next().value;
+    const oldestKey = Array.from(entries.keys()).find(
+      (key) => !hasCacheLease("indicator-result-cache", key),
+    );
     if (oldestKey == null) return;
     entries.delete(oldestKey);
+    forgetEntryGeneration(oldestKey);
     unregisterCacheResource("indicator-result-cache", oldestKey);
   }
 }
@@ -476,6 +551,7 @@ function putEntry(
   };
   entries.delete(key);
   entries.set(key, next);
+  markEntryMutation(key);
   registerCacheResource("indicator-result-cache", key, {
     type: "indicator",
     dependencyKey,
@@ -514,6 +590,39 @@ export function buildIndicatorCacheHydrationSignature(
   return (indicators || [])
     .map((indicator) => buildIndicatorResultCacheKey(indicator, context))
     .join("\n");
+}
+
+export function acquireActiveIndicatorCacheLeases(
+  indicators: IndicatorDefinition[] = [],
+  context: IndicatorContextInput = {},
+  runtimeLeaseId = "indicator-runtime",
+): () => void {
+  const normalizedContext = normalizeContext(context);
+  const releases: Array<() => void> = [];
+  const acquiredKeys = new Set<string>();
+  for (const indicator of indicators) {
+    if (!indicator?.id) continue;
+    const key = buildIndicatorResultCacheKey(indicator, normalizedContext);
+    if (acquiredKeys.has(key)) continue;
+    acquiredKeys.add(key);
+    const release = acquireCacheLease(
+      "indicator-result-cache",
+      key,
+      runtimeLeaseId,
+      {
+        lifecycle: "active-indicator-runtime",
+        indicatorId: indicator.id,
+        context: clone(normalizedContext),
+      },
+    );
+    if (release) releases.push(release);
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    for (const release of releases) release();
+  };
 }
 
 export function cacheIndicatorSnapshot(
@@ -771,12 +880,14 @@ export function getCachedIndicatorResult(
     )
   ) {
     entries.delete(entry.key);
+    forgetEntryGeneration(entry.key);
     unregisterCacheResource("indicator-result-cache", entry.key);
     return null;
   }
   entry.lastAccessMs = Date.now();
   entries.delete(entry.key);
   entries.set(entry.key, entry);
+  markEntryMutation(entry.key);
   return {
     indicatorId: indicator.id,
     normalized: retargetNormalized(entry.normalized, indicator.id),
@@ -926,6 +1037,7 @@ export function resetIndicatorResultCache(): void {
     unregisterCacheResource("indicator-result-cache", key);
   }
   entries.clear();
+  entryGenerations.clear();
 }
 
 export function snapshotIndicatorResultCacheEntries(): IndicatorCacheEntry[] {
@@ -935,9 +1047,14 @@ export function snapshotIndicatorResultCacheEntries(): IndicatorCacheEntry[] {
 export function snapshotIndicatorResultCacheDiagnostics() {
   const snapshot = Array.from(entries.values()).map((entry) => {
     const normalized = entry.normalized || emptyNormalized();
-    const points = countLinePoints(normalized);
-    const items = countOutputItems(normalized);
+    const accounting = indicatorAccounting(normalized);
+    const points = accounting.points;
+    const items = accounting.items;
     const deps = dependencyState("indicator-result-cache", entry.key);
+    const coverage = entry.outputCoverage || entry.coverage;
+    const trimSafety = analyzeTrimSafety(normalized);
+    const trimPlan = buildExactTrimPlan(normalized, coverage);
+    const activeLeaseCount = cacheLeaseCount("indicator-result-cache", entry.key);
     return {
       owner: "indicator-result-cache",
       key: entry.key,
@@ -945,7 +1062,9 @@ export function snapshotIndicatorResultCacheDiagnostics() {
       dependencyKey:
         entry.dependencyKey || indicatorDependencyKey(entry.context),
       dependencyState: deps,
-      tier: deps.orphan ? "cold" : "warm",
+      tier: activeLeaseCount > 0 ? "active" : deps.orphan ? "cold" : "warm",
+      activeLeaseCount,
+      generation: entryGenerations.get(entry.key) || 0,
       context: clone(entry.context),
       points,
       items,
@@ -958,10 +1077,10 @@ export function snapshotIndicatorResultCacheDiagnostics() {
         {},
       ),
       estimatedBytes:
-        points * INDICATOR_POINT_ESTIMATED_BYTES +
-        items * OUTPUT_ITEM_ESTIMATED_BYTES,
-      coverage: clone(entry.outputCoverage || entry.coverage),
-      outputCoverage: clone(entry.outputCoverage || entry.coverage),
+        accounting.estimatedBytes,
+      accounting: clone(accounting),
+      coverage: clone(coverage),
+      outputCoverage: clone(coverage),
       computedSegments: clone(entry.computedSegments || []),
       staleSegments: clone(entry.staleSegments || []),
       revision: clone(entry.revision),
@@ -970,7 +1089,8 @@ export function snapshotIndicatorResultCacheDiagnostics() {
           ? entry.computedSegments
           : buildRangeSegments(entry.outputCoverage || entry.coverage),
       ),
-      trimSafety: analyzeTrimSafety(normalized),
+      trimSafety,
+      ...(trimPlan ? { trimPlan: clone(trimPlan) } : {}),
       lastAccessMs: entry.lastAccessMs || null,
       lastUpdatedMs: entry.lastUpdatedMs || null,
     };
@@ -1001,21 +1121,83 @@ export function trimIndicatorResultCacheEntries(
     if (typeof victim.key === "string" && victim.key) byKey.set(victim.key, victim);
   }
   const removed = [];
+  const skipped: Array<{ key: string; reason: string }> = [];
   for (const [key, victim] of byKey.entries()) {
     const entry = entries.get(key);
     if (!entry) continue;
+    if (hasCacheLease("indicator-result-cache", key)) {
+      skipped.push({ key, reason: "active-lease" });
+      continue;
+    }
     const normalized = entry.normalized || emptyNormalized();
-    const points = countLinePoints(normalized);
-    const items = countOutputItems(normalized);
-    if (entry && victim?.action === "trim-range" && victim.keepStart != null) {
+    const accounting = indicatorAccounting(normalized);
+    const expectedGeneration = Number(victim.generation);
+    if (
+      Number.isFinite(expectedGeneration)
+      && expectedGeneration > 0
+      && entryGenerations.get(key) !== expectedGeneration
+    ) {
+      skipped.push({ key, reason: "generation-changed" });
+      continue;
+    }
+    const plannedLastAccessMs = Number(victim.lastAccessMs);
+    if (
+      Number.isFinite(plannedLastAccessMs)
+      && plannedLastAccessMs > 0
+      && entry.lastAccessMs > plannedLastAccessMs
+    ) {
+      skipped.push({ key, reason: "accessed-after-plan" });
+      continue;
+    }
+    if (
+      victim.expectedRevision !== undefined
+      && stableJson(normalizeIndicatorRevision(entry.revision))
+        !== stableJson(normalizeIndicatorRevision(victim.expectedRevision))
+    ) {
+      skipped.push({ key, reason: "revision-changed" });
+      continue;
+    }
+    if (
+      victim.reason === "missing-kline-dependency"
+      && dependencyAvailable(entry.dependencyKey || indicatorDependencyKey(entry.context))
+    ) {
+      skipped.push({ key, reason: "dependency-restored" });
+      continue;
+    }
+    if (victim?.action === "trim-range") {
+      if (victim.keepStart == null || !Number.isFinite(Number(victim.keepStart))) {
+        skipped.push({ key, reason: "invalid-trim-boundary" });
+        continue;
+      }
       const trimSafety = analyzeTrimSafety(normalized);
       if (trimSafety.safeRangeTrim) {
         const nextNormalized = trimNormalizedBefore(
           normalized,
           victim.keepStart,
         );
-        const nextPoints = countLinePoints(nextNormalized);
-        const removedPoints = Math.max(0, points - nextPoints);
+        const nextAccounting = indicatorAccounting(nextNormalized);
+        const removedPoints = Math.max(0, accounting.points - nextAccounting.points);
+        const removedItems = Math.max(0, accounting.items - nextAccounting.items);
+        const removedEstimatedBytes = Math.max(
+          0,
+          accounting.estimatedBytes - nextAccounting.estimatedBytes,
+        );
+        const plannedRelief = victim.relief;
+        if (
+          plannedRelief
+          && (
+            removedPoints !== Number(plannedRelief.indicatorPoints || 0)
+            || removedItems !== Number(plannedRelief.indicatorItems || 0)
+            || removedEstimatedBytes !== Number(plannedRelief.estimatedBytes || 0)
+          )
+        ) {
+          skipped.push({ key, reason: "trim-accounting-changed" });
+          continue;
+        }
+        if (removedEstimatedBytes <= 0) {
+          skipped.push({ key, reason: "trim-no-relief" });
+          continue;
+        }
         const nextEntry = {
           ...entry,
           normalized: nextNormalized,
@@ -1033,27 +1215,42 @@ export function trimIndicatorResultCacheEntries(
           lastUpdatedMs: Date.now(),
         };
         entries.set(key, nextEntry);
+        markEntryMutation(key);
         removed.push({
           owner: "indicator-result-cache",
           key,
           action: "trim-range",
           points: removedPoints,
-          items: 0,
-          estimatedBytes: removedPoints * INDICATOR_POINT_ESTIMATED_BYTES,
+          items: removedItems,
+          estimatedBytes: removedEstimatedBytes,
         });
         continue;
       }
+      skipped.push({ key, reason: "trim-no-longer-safe" });
+      continue;
+    }
+    const plannedRelief = victim.relief;
+    if (
+      plannedRelief
+      && (
+        accounting.points !== Number(plannedRelief.indicatorPoints || 0)
+        || accounting.items !== Number(plannedRelief.indicatorItems || 0)
+        || accounting.estimatedBytes !== Number(plannedRelief.estimatedBytes || 0)
+      )
+    ) {
+      skipped.push({ key, reason: "delete-accounting-changed" });
+      continue;
     }
     entries.delete(key);
+    forgetEntryGeneration(key);
     unregisterCacheResource("indicator-result-cache", key);
     removed.push({
       owner: "indicator-result-cache",
       key,
-      points,
-      items,
-      estimatedBytes:
-        points * INDICATOR_POINT_ESTIMATED_BYTES +
-        items * OUTPUT_ITEM_ESTIMATED_BYTES,
+      action: "delete-entry",
+      points: accounting.points,
+      items: accounting.items,
+      estimatedBytes: accounting.estimatedBytes,
     });
   }
   return {
@@ -1072,5 +1269,6 @@ export function trimIndicatorResultCacheEntries(
       0,
     ),
     removed,
+    skipped,
   };
 }

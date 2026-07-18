@@ -38,14 +38,27 @@ def interval_to_milliseconds(interval: str) -> int:
     return INTERVAL_SECONDS[interval] * 1000
 
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(KLINES_DB_PATH), timeout=30, check_same_thread=False)
+def _connect(
+    *,
+    timeout_seconds: float = 30.0,
+    configure_journal_mode: bool = True,
+) -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        str(KLINES_DB_PATH),
+        timeout=max(0.0, float(timeout_seconds)),
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-    except sqlite3.OperationalError as exc:
-        logger.warning("SQLite WAL mode unavailable for %s, falling back to DELETE journal: %s", KLINES_DB_PATH, exc)
-        conn.execute("PRAGMA journal_mode=DELETE;")
+    if configure_journal_mode:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+        except sqlite3.OperationalError as exc:
+            logger.warning(
+                "SQLite WAL mode unavailable for %s, falling back to DELETE journal: %s",
+                KLINES_DB_PATH,
+                exc,
+            )
+            conn.execute("PRAGMA journal_mode=DELETE;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
@@ -673,6 +686,12 @@ class KlinesRepoAdapter:
         dm.set_storage(KlinesRepoAdapter())
     """
 
+    # DataManager holds its protection ordering guard while invoking one GC
+    # batch.  Only backends that explicitly publish a bounded latency/row
+    # contract are eligible for that destructive path.
+    storage_gc_delete_max_batch_rows = 1_000
+    storage_gc_delete_deadline_ms = 50
+
     def __init__(
         self,
         exchange: str = DEFAULT_EXCHANGE,
@@ -1131,9 +1150,20 @@ def delete_oldest_klines_batch(
     """Delete at most *batch_size* oldest bars while keeping newest *keep* rows."""
     if keep < 0:
         keep = 0
-    batch_size = max(1, int(batch_size or 1))
+    batch_size = min(1_000, max(1, int(batch_size or 1)))
 
-    with _connect() as conn:
+    # Storage GC is ordered with stream/subscription activation.  Fail fast on
+    # lock contention instead of holding that ordering guard through SQLite's
+    # normal 30-second busy timeout.
+    with _connect(
+        timeout_seconds=0.05,
+        configure_journal_mode=False,
+    ) as conn:
+        execution_deadline = time.perf_counter() + 0.05
+        conn.set_progress_handler(
+            lambda: 1 if time.perf_counter() >= execution_deadline else 0,
+            1_000,
+        )
         count_row = conn.execute(
             "SELECT COUNT(*) AS cnt FROM klines "
             "WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ?",
@@ -1162,7 +1192,14 @@ def delete_oldest_klines_batch(
 
 def wal_checkpoint_truncate() -> dict:
     """Run a WAL truncate checkpoint and return SQLite's result tuple."""
-    with _connect() as conn:
+    # Automatic checkpointing must never occupy the storage executor through
+    # the normal 30-second busy timeout.  Do not negotiate journal mode here;
+    # an initialized database is already in WAL mode and contention fails
+    # closed through the returned busy flag.
+    with _connect(
+        timeout_seconds=0.05,
+        configure_journal_mode=False,
+    ) as conn:
         row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
     values = tuple(row) if row is not None else ()
     return {

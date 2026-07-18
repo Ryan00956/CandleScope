@@ -1,5 +1,11 @@
 import { executeFrontendGcPlan } from "./cacheTrim.js";
-import { planFrontendGc } from "./cachePolicy.js";
+import {
+  applyGcRelief,
+  gcPressureSatisfied,
+  gcVictimRelief,
+  gcVictimRelievesPressure,
+  planFrontendGc,
+} from "./cachePolicy.js";
 import type {
   AutoGcPlan,
   AutoGcPolicy,
@@ -29,15 +35,109 @@ const DEFAULT_AUTO_GC_POLICY: AutoGcPolicy = {
   maxBytesPerRun: 32 * 1024 * 1024,
   maxEntriesPerRun: 200,
   minFinalEvictScore: 70,
-  neverEvictActiveWithinMs: 10 * 60_000,
   neverEvictAccessedWithinMs: 2 * 60_000,
 };
 
 const FRONTEND_AUDIT_KEY = "candlescope:auto-gc-audit";
 const FRONTEND_AUDIT_LIMIT = 50;
+const AUTO_POLICY_KEYS = [
+  "enabled",
+  "mode",
+  "cooldownMs",
+  "maxBytesPerRun",
+  "maxEntriesPerRun",
+  "minFinalEvictScore",
+  "neverEvictAccessedWithinMs",
+  "nowMs",
+] as const;
+const GC_PLAN_POLICY_KEYS = [
+  "maxEstimatedBytes",
+  "maxIndicatorPoints",
+  "maxKlineBars",
+  "maxVictims",
+  "preserveActive",
+  "preserveSubscribed",
+  "planTtlMs",
+  "heapHighWatermarkRatio",
+  "heapHardWatermarkRatio",
+  "nowMs",
+  "frontendCacheBudgetBytes",
+  "frontend_cache_budget_bytes",
+] as const;
+const SUPPORTED_POLICY_KEYS = new Set<string>([
+  ...AUTO_POLICY_KEYS,
+  ...GC_PLAN_POLICY_KEYS,
+]);
 
 function number(value: unknown): number {
   return Number.isFinite(Number(value)) ? Number(value) : 0;
+}
+
+function assertSupportedPolicyPatch(policyPatch: AutoGcPolicyPatch): void {
+  for (const key of Object.keys(policyPatch)) {
+    if (!SUPPORTED_POLICY_KEYS.has(key)) {
+      throw new TypeError(`Unsupported frontend auto GC policy field: ${key}`);
+    }
+  }
+}
+
+function normalizeAutoPolicy(policyPatch: AutoGcPolicyPatch): AutoGcPolicy {
+  const cooldownMs = number(policyPatch.cooldownMs);
+  const policy: AutoGcPolicy = {
+    enabled: typeof policyPatch.enabled === "boolean"
+      ? policyPatch.enabled
+      : DEFAULT_AUTO_GC_POLICY.enabled,
+    mode: typeof policyPatch.mode === "string" && policyPatch.mode.trim()
+      ? policyPatch.mode.trim()
+      : DEFAULT_AUTO_GC_POLICY.mode,
+    cooldownMs: cooldownMs > 0 ? cooldownMs : DEFAULT_AUTO_GC_POLICY.cooldownMs,
+    maxBytesPerRun: Math.max(
+      0,
+      policyPatch.maxBytesPerRun === undefined
+        ? DEFAULT_AUTO_GC_POLICY.maxBytesPerRun
+        : number(policyPatch.maxBytesPerRun),
+    ),
+    maxEntriesPerRun: Math.max(
+      0,
+      Math.floor(
+        policyPatch.maxEntriesPerRun === undefined
+          ? DEFAULT_AUTO_GC_POLICY.maxEntriesPerRun
+          : number(policyPatch.maxEntriesPerRun),
+      ),
+    ),
+    minFinalEvictScore: Math.max(
+      0,
+      policyPatch.minFinalEvictScore === undefined
+        ? DEFAULT_AUTO_GC_POLICY.minFinalEvictScore
+        : number(policyPatch.minFinalEvictScore),
+    ),
+    neverEvictAccessedWithinMs: Math.max(
+      0,
+      policyPatch.neverEvictAccessedWithinMs === undefined
+        ? DEFAULT_AUTO_GC_POLICY.neverEvictAccessedWithinMs
+        : number(policyPatch.neverEvictAccessedWithinMs),
+    ),
+    ...(policyPatch.nowMs === undefined ? {} : { nowMs: policyPatch.nowMs }),
+  };
+  return policy;
+}
+
+function buildGcPlanPolicyPatch(
+  policyPatch: AutoGcPolicyPatch,
+  autoPolicy: AutoGcPolicy,
+): Partial<GcPolicy> {
+  const gcPolicy: Partial<GcPolicy> = {};
+  for (const key of GC_PLAN_POLICY_KEYS) {
+    if (Object.hasOwn(policyPatch, key)) {
+      Reflect.set(gcPolicy, key, Reflect.get(policyPatch, key));
+    }
+  }
+  const requestedMaxVictims = Math.max(0, Math.floor(number(policyPatch.maxVictims)));
+  gcPolicy.maxVictims = requestedMaxVictims > 0
+    ? Math.min(autoPolicy.maxEntriesPerRun, requestedMaxVictims)
+    : autoPolicy.maxEntriesPerRun;
+  if (autoPolicy.nowMs !== undefined) gcPolicy.nowMs = autoPolicy.nowMs;
+  return gcPolicy;
 }
 
 function score(victim: GcVictim): number {
@@ -45,7 +145,12 @@ function score(victim: GcVictim): number {
 }
 
 function lastAccessMs(victim: GcVictim): number {
-  return number(victim?.lastAccessMs || victim?.lastUpdatedMs || victim?.lastRealtimeMs);
+  return Math.max(
+    0,
+    number(victim?.lastAccessMs),
+    number(victim?.lastUpdatedMs),
+    number(victim?.lastRealtimeMs),
+  );
 }
 
 function isRecentlyAccessed(victim: GcVictim, nowMs: number, policy: AutoGcPolicy): boolean {
@@ -65,27 +170,28 @@ function withinLimits(
 ): boolean {
   if (selected.length >= policy.maxEntriesPerRun) return false;
   const used = selected.reduce((total, item) => total + number(item.estimatedBytes), 0);
-  return used + number(victim.estimatedBytes) <= policy.maxBytesPerRun || selected.length === 0;
+  return used + number(victim.estimatedBytes) <= policy.maxBytesPerRun;
 }
 
 export function buildAutoFrontendGcPlan(
   diagnostics: Parameters<typeof planFrontendGc>[0] = {},
   policyPatch: AutoGcPolicyPatch = {},
 ): AutoGcPlan {
-  const policy: AutoGcPolicy = { ...DEFAULT_AUTO_GC_POLICY, ...policyPatch };
-  const basePlan = planFrontendGc(diagnostics, {
-    ...policyPatch,
-    maxVictims: policy.maxEntriesPerRun,
-    nowMs: policy.nowMs,
-  });
+  assertSupportedPolicyPatch(policyPatch);
+  const policy = normalizeAutoPolicy(policyPatch);
+  const basePlan = planFrontendGc(
+    diagnostics,
+    buildGcPlanPolicyPatch(policyPatch, policy),
+  );
   const nowMs = number(policy.nowMs) || Date.now();
+  const candidateVictims = basePlan.candidateVictims || basePlan.victims;
   if (!policy.enabled) {
     return {
       ...basePlan,
       mode: "auto-plan",
       autoPolicy: policy,
       victims: [],
-      autoSkipped: basePlan.victims.map((victim) => ({
+      autoSkipped: candidateVictims.map((victim) => ({
         key: victim.key,
         reason: "disabled",
         score: score(victim),
@@ -95,13 +201,27 @@ export function buildAutoFrontendGcPlan(
 
   const selected: GcVictim[] = [];
   const skipped: AutoGcPlan["autoSkipped"] = [];
-  for (const victim of basePlan.victims) {
+  let remaining = { ...basePlan.pressure };
+  const pressureActive = !gcPressureSatisfied(basePlan.pressure);
+  for (const victim of candidateVictims) {
+    if (pressureActive && gcPressureSatisfied(remaining)) break;
+    if (pressureActive && !gcVictimRelievesPressure(victim, remaining)) continue;
     let reason = "";
-    if (victim.tier === "active" || victim.tier === "subscribed") {
+    if (
+      victim.tier === "active"
+      || (
+        victim.tier === "subscribed"
+        && !(victim.action === "trim-range" && victim.trimSafety?.safeRangeTrim)
+      )
+    ) {
       reason = "active-or-subscribed";
-    } else if (isRecentlyAccessed(victim, nowMs, policy)) {
+    } else if (!isAlwaysSafe(victim) && isRecentlyAccessed(victim, nowMs, policy)) {
       reason = "recently-accessed";
-    } else if (!isAlwaysSafe(victim) && score(victim) < policy.minFinalEvictScore) {
+    } else if (
+      basePlan.pressure.level !== "hard"
+      && !isAlwaysSafe(victim)
+      && score(victim) < policy.minFinalEvictScore
+    ) {
       reason = "score-below-threshold";
     } else if (!withinLimits(selected, victim, policy)) {
       reason = "per-run-limit";
@@ -112,18 +232,30 @@ export function buildAutoFrontendGcPlan(
       continue;
     }
     selected.push(victim);
+    remaining = applyGcRelief(remaining, victim);
   }
+
+  const relief = selected.reduce((total, item) => {
+    const next = gcVictimRelief(item);
+    return {
+      bars: total.bars + next.bars,
+      indicatorPoints: total.indicatorPoints + next.indicatorPoints,
+      indicatorItems: total.indicatorItems + next.indicatorItems,
+      estimatedBytes: total.estimatedBytes + next.estimatedBytes,
+    };
+  }, { bars: 0, indicatorPoints: 0, indicatorItems: 0, estimatedBytes: 0 });
 
   return {
     ...basePlan,
     mode: "auto-plan",
     autoPolicy: policy,
     victims: selected,
+    remainingPressure: remaining,
     autoSkipped: skipped,
-    wouldFreeBars: selected.reduce((total, item) => total + number(item.bars), 0),
-    wouldFreeIndicatorPoints: selected.reduce((total, item) => total + number(item.points), 0),
-    wouldFreeIndicatorItems: selected.reduce((total, item) => total + number(item.items), 0),
-    wouldFreeEstimatedBytes: selected.reduce((total, item) => total + number(item.estimatedBytes), 0),
+    wouldFreeBars: relief.bars,
+    wouldFreeIndicatorPoints: relief.indicatorPoints,
+    wouldFreeIndicatorItems: relief.indicatorItems,
+    wouldFreeEstimatedBytes: relief.estimatedBytes,
   };
 }
 

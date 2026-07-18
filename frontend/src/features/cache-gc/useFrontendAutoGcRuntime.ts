@@ -1,53 +1,67 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { collectFrontendCacheDiagnosticsAsync } from "./cacheDiagnostics.js";
-import {
-  FRONTEND_AUTO_GC_DEFAULT_POLICY,
-  runAutoFrontendGc,
-} from "./autoGcPolicy.js";
+import { runAutoFrontendGc } from "./autoGcPolicy.js";
 import type { AutoGcPolicyPatch, ChartTrimFunction } from "./autoGcPolicy.js";
+import {
+  createFrontendAutoGcScheduler,
+  resolveFrontendAutoGcSchedule,
+} from "./frontendAutoGcScheduler.js";
+import type { FrontendAutoGcSchedulerSnapshot } from "./frontendAutoGcScheduler.js";
+import type { CacheDiagnostics } from "./cacheGcTypes.js";
 
 export interface UseFrontendAutoGcRuntimeOptions {
   chartDataCacheDiagnostics?: (() => unknown) | unknown | null;
   policy?: AutoGcPolicyPatch;
   trimChartDataCacheEntries?: ChartTrimFunction | null;
+  onError?: (
+    error: unknown,
+    snapshot: FrontendAutoGcSchedulerSnapshot,
+  ) => void;
+  onStateChange?: (snapshot: FrontendAutoGcSchedulerSnapshot) => void;
 }
 
 export function useFrontendAutoGcRuntime({
   chartDataCacheDiagnostics = null,
   policy = {},
   trimChartDataCacheEntries = null,
+  onError,
+  onStateChange,
 }: UseFrontendAutoGcRuntimeOptions = {}): void {
+  const optionsRef = useRef({
+    chartDataCacheDiagnostics,
+    policy,
+    trimChartDataCacheEntries,
+    onError,
+    onStateChange,
+  });
   useEffect(() => {
-    if (!FRONTEND_AUTO_GC_DEFAULT_POLICY.enabled) return undefined;
-
-    let cancelled = false;
-    let running = false;
-
-    const tick = async (): Promise<void> => {
-      if (cancelled || running) return;
-      running = true;
-      try {
-        const diagnostics = await collectFrontendCacheDiagnosticsAsync({
-          chartDataCache: chartDataCacheDiagnostics,
-        });
-        if (!cancelled) {
-          runAutoFrontendGc(diagnostics, { policy, trimChartDataCacheEntries });
-        }
-      } catch {
-        // Automatic cache cleanup must never interrupt chart interaction.
-      } finally {
-        running = false;
-      }
+    optionsRef.current = {
+      chartDataCacheDiagnostics,
+      policy,
+      trimChartDataCacheEntries,
+      onError,
+      onStateChange,
     };
+  }, [chartDataCacheDiagnostics, policy, trimChartDataCacheEntries, onError, onStateChange]);
+  const schedule = resolveFrontendAutoGcSchedule(policy);
 
-    const timer: ReturnType<typeof setInterval> = setInterval(
-      tick,
-      FRONTEND_AUTO_GC_DEFAULT_POLICY.cooldownMs,
-    );
-    void tick();
+  useEffect(() => {
+    const scheduler = createFrontendAutoGcScheduler({
+      enabled: schedule.enabled,
+      cooldownMs: schedule.cooldownMs,
+      collectDiagnostics: async () => collectFrontendCacheDiagnosticsAsync({
+        chartDataCache: optionsRef.current.chartDataCacheDiagnostics,
+      }),
+      runGc: (diagnostics) => runAutoFrontendGc(diagnostics as CacheDiagnostics, {
+        policy: optionsRef.current.policy,
+        trimChartDataCacheEntries: optionsRef.current.trimChartDataCacheEntries,
+      }),
+      onError: (error, snapshot) => optionsRef.current.onError?.(error, snapshot),
+      onStateChange: (snapshot) => optionsRef.current.onStateChange?.(snapshot),
+    });
+    scheduler.start();
     return () => {
-      cancelled = true;
-      clearInterval(timer);
+      scheduler.stop();
     };
-  }, [chartDataCacheDiagnostics, policy, trimChartDataCacheEntries]);
+  }, [schedule.enabled, schedule.cooldownMs]);
 }

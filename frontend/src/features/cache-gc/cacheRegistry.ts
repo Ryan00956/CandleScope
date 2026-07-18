@@ -61,9 +61,8 @@ export function unregisterCacheResource(owner: string, key: string): void {
   const id = scopedKey(owner, key);
   resources.delete(id);
   dependencies.delete(id);
-  for (const leaseKey of Array.from(leases.keys())) {
-    if (leaseKey.startsWith(`${id}:`)) leases.delete(leaseKey);
-  }
+  // Runtime holders own their leases. A lease may intentionally outlive a
+  // resource instance so a recreated cache entry remains protected.
 }
 
 export function registerCacheDependency(owner: string, key: string, dependencyKey: string): void {
@@ -97,6 +96,20 @@ export function acquireCacheLease(
 
 export function releaseCacheLease(owner: string, key: string, leaseId: string): void {
   leases.delete(`${scopedKey(owner, key)}:${leaseId}`);
+}
+
+export function cacheLeaseCount(owner: string, key: string): number {
+  if (!owner || !key) return 0;
+  const prefix = `${scopedKey(owner, key)}:`;
+  let count = 0;
+  for (const leaseKey of leases.keys()) {
+    if (leaseKey.startsWith(prefix)) count += 1;
+  }
+  return count;
+}
+
+export function hasCacheLease(owner: string, key: string): boolean {
+  return cacheLeaseCount(owner, key) > 0;
 }
 
 export function dependencyAvailable(dependencyKey: string): boolean {

@@ -519,7 +519,7 @@ class DataEvent:
 EventCallback = Callable[[DataEvent], Awaitable[None]]
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class SubscriptionHandle:
     """Opaque handle returned when subscribing to events.
 
@@ -536,9 +536,16 @@ class SubscriptionHandle:
     """
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     key: SeriesKey | None = None
-    event_types: set[DataEventType] | None = None
+    event_types: set[DataEventType] | frozenset[DataEventType] | None = None
     callback: EventCallback | None = None
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+
+    def __post_init__(self) -> None:
+        # The handle is also the EventBus routing record.  Copy and freeze the
+        # caller-owned set so it cannot be mutated without the subscription
+        # guard/change notification path.
+        if self.event_types is not None:
+            object.__setattr__(self, "event_types", frozenset(self.event_types))
 
     def matches(self, event: DataEvent) -> bool:
         """Return True if this subscription should receive the event."""

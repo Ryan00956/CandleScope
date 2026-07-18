@@ -1568,18 +1568,18 @@ feat(replay): add deterministic session actor and virtual clock
 
 ### 逐步任务
 
-- [ ] **3.1** 定义 builder 输入/输出，不暴露在线 aggregator mutable state。
-- [ ] **3.2** session 创建时装入 start 之前 warmup closed bars，cursor 不越过 start。
-- [ ] **3.3** 一次 BAR step 恰好消费一根 base bar。
-- [ ] **3.4** 实现 base=display 的 append/close。
-- [ ] **3.5** 实现 base<display 的 active-bar tick 与最终 close。
-- [ ] **3.6** 验证 custom interval 的对齐；无法精确聚合则 capabilities 禁用。
-- [ ] **3.7** 冻结 gap/empty-bar/synthetic 规则并在 payload 标注。
-- [ ] **3.8** 切换 display interval 时从同一已揭示 base events 重建，不读取 cursor 之后的数据。
-- [ ] **3.9** builder snapshot/restore 后 active bar 完全一致。
-- [ ] **3.10** 用固定 base rows 对比现有 interval aggregation 的 closed bar parity。
-- [ ] **3.11** 证明隔离 builder 没有向 DataManager/EventBus 注册或发布。
-- [ ] **3.12** 形成中 bar 的 `time`、volume 和 close 更新只走 `SeriesWindowStore.tick` 所需语义。
+- [x] **3.1** 定义 builder 输入/输出，不暴露在线 aggregator mutable state。
+- [x] **3.2** session 创建时装入 start 之前 warmup closed bars，cursor 不越过 start。
+- [x] **3.3** 一次 BAR step 恰好消费一根 base bar。
+- [x] **3.4** 实现 base=display 的 append/close。
+- [x] **3.5** 实现 base<display 的 active-bar tick 与最终 close。
+- [x] **3.6** 验证 custom interval 的对齐；无法精确聚合则 capabilities 禁用。
+- [x] **3.7** 冻结 gap/empty-bar/synthetic 规则并在 payload 标注。
+- [x] **3.8** 切换 display interval 时从同一已揭示 base events 重建，不读取 cursor 之后的数据。
+- [x] **3.9** builder snapshot/restore 后 active bar 完全一致。
+- [x] **3.10** 用固定 base rows 对比现有 interval aggregation 的 closed bar parity。
+- [x] **3.11** 证明隔离 builder 没有向 DataManager/EventBus 注册或发布。
+- [x] **3.12** 形成中 bar 的 `time`、volume 和 close 更新只走 `SeriesWindowStore.tick` 所需语义。
 
 ### 测试矩阵
 
@@ -2356,5 +2356,23 @@ No-lookahead evidence: actor 只通过冻结 ReplayMarketSource 的 peek/next �
 Failure injection evidence: 非法状态转换、无 controller、controller conflict/takeover/TTL、revision conflict、同 ID 异 payload、幂等 history 满、queue overflow、step 超出剩余事件、同时间多事件与长空档、pause 原子事件 barrier、交易状态 seek、snapshot_ref 漂移、source cursor 篡改、checksum/schema/noncanonical checkpoint、合法 checksum 但错误 component state/state hash、损坏 checkpoint fallback、flush timeout、卡死原子 reducer shutdown timeout 均覆盖；失败不静默继续，卡死 task 被取消且最终 ERROR，无残留 actor task。
 Rollback exercised: PASS；在系统临时目录创建 detached disposable worktree，对 Phase 2 checkpoint c33da72549ca769691c28cb81949ac327568e5ed 执行 git revert --no-commit 后，working tree 与 index 相对父提交 d12c4716d333fa15e78b20ce1e4956b6b8d399d1 均为 zero diff，untracked count=0；随后移除临时 worktree。
 Known limitations: Phase 2 reducer 仍是 headless seam，尚无 bar builder、paper broker、SQLite command/source tail、HTTP/WS transport、订阅者队列或 UI；command history 在内存中有界且满时 fail closed，跨进程 exactly-once 将由后续持久化 command log/tail replay 完成；默认 5 分钟虚拟时间预算在 30 日 BAR fixture 产生 8640 个候选 checkpoint，CPU/RSS 基线可接受但真实 SQLite 写放大须在 persistence Phase 重新验证；benchmark fixture 为确定性生成数据，不代表生产行情分布；既有 Vite middleware 仍打印 24678 HMR 端口噪声，但最终 test/check 退出码为 0。
+Decision: PASS
+```
+
+```text
+Phase: 3 - BAR source 与隔离 K 线构建器
+Date: 2026-07-18
+Commit: this Phase 3 checkpoint; subject feat(replay): build replay bars from revealed base events
+Executor: Codex
+Scope: 完善不可变 BAR source 的 warmup/revealed/cursor 与 closed/contiguous/alignment 校验；实现 replay-only 纯 Decimal K 线构建器、append/tick/close 投影、固定与日历周期精确能力判定、reject gap/synthetic policy、display interval 已揭示前缀重建、有界 closed tail/hash chain、active state snapshot/restore；未修改或注册在线聚合器，未接入 router、SQLite、broker、main 或可见 UI。全局回归中发现并独立提交既有 actor 10ms shutdown 调度竞态修复 52c83f3，不属于 BAR builder 产品范围。
+Files changed: backend/app/replay/bars/{__init__,builder}.py；backend/app/replay/sources/bar_source.py；backend/tests/test_replay_{bar_source,bar_builder,bar_parity}.py；backend/tests/fixtures/replay/bar_builder_fakes.py；本文。
+Commands run: python -m ruff check/format --check Phase 3 files；python -m pytest -q backend/tests/test_replay_bar_{source,builder,parity}.py；python -m pytest -q backend/tests/test_bar_aggregator_contracts.py backend/tests/test_interval_policy_consistency.py 加 Phase 3 tests；全部 test_replay*.py；python -m pytest -q backend/tests；npm run check；43,200 BAR benchmark/状态诊断脚本；既有 actor shutdown 用例 20 次重复与完整 actor test。
+Tests passed: Phase 3 source/builder/parity 33 passed；加在线 bar aggregator/interval policy 回归共 44 passed；全部 replay tests 147 passed；backend global 1191 passed、4 条既有 FastAPI on_event deprecation warnings；frontend global 1853 passed，architecture/typecheck/lint/test/build 全通过，Vite build 393 modules。actor shutdown 修复后完整 actor 14 passed，原竞态连续 20 次 0 failure。
+Golden/state hashes: warmup=7、revealed=3、1m->5m active component=3 的 builder state sha256:32e5740911bdededc735a7bcd0f2d3d2bc823ce4402e10572b3454cb50a26283，restore snapshot byte-for-byte 相等；43,200 BAR/5m/max_closed=32 final state sha256:f742739ee4c1bba39fa71c12020e4db12b924f46eec7f09f1aba258e2d19c1a9，retained closed signature sha256:9ed40151b1c9b8907f8313d27afd4aac84bf9361c642532dc2e29537211f9da5。
+Performance evidence: 预生成 43,200 根 1m BAR 生成 8,640 根 5m closed bar，应用耗时 2.227980s、19,389.76 events/s；closed_count=8640 但仅保留 32，projection 32 bars，snapshot 12,169 bytes，RSS delta 53,248 bytes；tracemalloc 诊断下 current/peak=21,236/24,715 bytes、RSS delta 118,784 bytes。该本机结果用于证明 builder state 不随总事件数线性增长，不替代 Phase 8/9 soak。
+No-lookahead evidence: warmup 构建后 source_sequence 严格为 0；每次 next/apply 只推进一根 base bar；builder 不持有 source/repository，仅接受调用者传入 ReplayBar；display switch 只接收 source.revealed_replay_rows() 且保持 cursor=7，下一条未揭示行不在输入；BAR gap 默认 reject、synthetic_policy=reject 且每条 payload synthetic=false；源码隔离测试确认无在线 registry/event publisher 依赖。
+Failure injection evidence: duplicate、out-of-order、gap、非 canonical close/forming source、错位 replay start、warmup 缺 active prefix、OHLC/Decimal/zero-volume 边界、display shorter/non-divisible/calendar-inexact、自定义 7m、UTC 日/月切与闰年 31/29 天、每个 5m 子周期 restore、warmup fingerprint 漂移、state hash/closed tail 损坏均覆盖；失败前后 state hash 不变。在线聚合器与 interval policy 未改且回归全绿。
+Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对 Phase 3 checkpoint 执行 git revert --no-commit 后，working tree 与 index 相对父提交 52c83f3481d55e6142f218203d94fd0676d117f9 均为 zero diff，untracked=0，index tree 与 parent tree 同为 328b2499b07ba8e26314c415cb1beaf02dfac26f；随后移除临时 worktree，并对 amend 后最终 checkpoint 再次执行同一演练。
+Known limitations: BAR source 仍要求 exact contiguous closed bars，不生成 empty/synthetic bar；display capability 只在 base 可精确铺满目标 bucket 时启用；closed projection 仅保留配置的有界尾部，完整历史承诺由 dataset/source 与 hash chain 表示；Phase 4 前无订单、持仓、账本或撮合；Phase 5 前无 persistence/API/WS；前端保持无 replay 可见入口。Vite 仍打印既有 24678 HMR 端口噪声与 >500 kB chunk warning，但完整 check 退出码为 0。
 Decision: PASS
 ```

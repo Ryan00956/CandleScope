@@ -1,0 +1,6 @@
+{
+  "schema": "replay-actor-determinism-fixture.v1",
+  "state_hash": "sha256:d8e97457634f2d5e0ae7bc00b311c31631ac06f429bfb09ee34b5dec4394db97",
+  "virtual_time_ms": 1006,
+  "source_sequence": 6
+}

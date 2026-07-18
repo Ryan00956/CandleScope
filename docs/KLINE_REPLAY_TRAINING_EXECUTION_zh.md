@@ -1488,20 +1488,20 @@ feat(replay): add deterministic bar dataset catalog
 
 ### 逐步任务
 
-- [ ] **2.1** 实现每 session 一个 `asyncio` actor task 和有界 command queue。
-- [ ] **2.2** 所有 source event、command 和 lifecycle transition 只在 actor 内修改状态。
-- [ ] **2.3** 实现 PAUSED/PLAYING/ENDED/ERROR 状态机和非法转换测试。
-- [ ] **2.4** 实现 controller lease、heartbeat、显式 takeover 和 TTL 自动暂停。
-- [ ] **2.5** 实现 `play/pause/set_speed/step/advance_by`。
-- [ ] **2.6** `pause` 在当前原子事件后 ack；用 barrier 测试 ack 后无更晚事件。
-- [ ] **2.7** `advance_by` 顺序处理全部 event，只合并 projection。
-- [ ] **2.8** `seek_to` 在没有交易状态时可从 checkpoint 重建；存在订单/持仓/账本变化时默认返回 `SEEK_REQUIRES_FORK_OR_RESET`。
-- [ ] **2.9** 实现 `command_id + expected_revision` 幂等和并发冲突。
-- [ ] **2.10** 实现领域 sequence 与 transport coalescing 的分离。
-- [ ] **2.11** 实现 checkpoint codec、版本、checksum 和 state hash 校验。
-- [ ] **2.12** 实现 actor shutdown：停止接收命令、暂停、flush、checkpoint、退出 task；每一步有 timeout。
-- [ ] **2.13** 给 queue high-water、events processed、projection coalesced、pause latency、checkpoint latency 加诊断。
-- [ ] **2.14** 用 1x、60x、MAX、step、advance 和 checkpoint restore 跑同一 fixture，对比 state hash。
+- [x] **2.1** 实现每 session 一个 `asyncio` actor task 和有界 command queue。
+- [x] **2.2** 所有 source event、command 和 lifecycle transition 只在 actor 内修改状态。
+- [x] **2.3** 实现 PAUSED/PLAYING/ENDED/ERROR 状态机和非法转换测试。
+- [x] **2.4** 实现 controller lease、heartbeat、显式 takeover 和 TTL 自动暂停。
+- [x] **2.5** 实现 `play/pause/set_speed/step/advance_by`。
+- [x] **2.6** `pause` 在当前原子事件后 ack；用 barrier 测试 ack 后无更晚事件。
+- [x] **2.7** `advance_by` 顺序处理全部 event，只合并 projection。
+- [x] **2.8** `seek_to` 在没有交易状态时可从 checkpoint 重建；存在订单/持仓/账本变化时默认返回 `SEEK_REQUIRES_FORK_OR_RESET`。
+- [x] **2.9** 实现 `command_id + expected_revision` 幂等和并发冲突。
+- [x] **2.10** 实现领域 sequence 与 transport coalescing 的分离。
+- [x] **2.11** 实现 checkpoint codec、版本、checksum 和 state hash 校验。
+- [x] **2.12** 实现 actor shutdown：停止接收命令、暂停、flush、checkpoint、退出 task；每一步有 timeout。
+- [x] **2.13** 给 queue high-water、events processed、projection coalesced、pause latency、checkpoint latency 加诊断。
+- [x] **2.14** 用 1x、60x、MAX、step、advance 和 checkpoint restore 跑同一 fixture，对比 state hash。
 
 ### 测试
 
@@ -2338,5 +2338,23 @@ No-lookahead evidence: catalog 在规划阶段使用统一 last_closed_bar_open_
 Failure injection evidence: gap、forming horizon、周期不对齐、non-native interval、warmup/horizon/row/memory/session limits、无 eligible window、非法/超范围 seed、手动起点 misaligned/gap/boundary、源行乱序/重复/缺失、非法 open_time/close_time、NaN/OHLC/负 volume、非法 snapshot clock 与源 DB 后写均已覆盖；所有失败均在 session snapshot 发布前拒绝，活动 snapshot 不被回收或改写。
 Rollback exercised: PASS；在系统临时目录创建 detached disposable worktree，对 Phase 1 checkpoint 执行 git revert --no-commit 后，working tree 与 index 相对父提交 e4dc9411a64e69bb14239338748da197d4d1aa02 均为 zero diff，untracked count=0；随后移除临时 worktree。
 Known limitations: Phase 1 只实现 BAR source；base interval 首版只接受可解析且非 monthly 的 exchange-native interval，并只为 24x7 连续日历建立随机池，其他交易日历 fail closed；BEST_EFFORT 尚不放宽 BAR exact coverage；instrument rules、fee/degraded snapshot、session actor、persistence/API/blind mapping 均按后续 Phase 实现。source fingerprint 绑定 series metadata/native intervals/closed boundary，活动 snapshot 的逐行内容由 data_epoch 绑定并在创建时重新验证。前端测试仍保留仓库已记录的并发 Vite middleware HMR 端口 24678 噪声，但不再启动后台 dependency scan，也不影响 test/check 退出码。
+Decision: PASS
+```
+
+```text
+Phase: 2 - Session Actor、虚拟时钟、命令与 checkpoint
+Date: 2026-07-18
+Commit: this Phase 2 checkpoint; subject feat(replay): add deterministic session actor and virtual clock
+Executor: Codex
+Scope: 实现纯后端、无 UI/broker/router/SQLite 依赖的单写者 replay actor；包含有界 mailbox/event/projection/checkpoint/command-history、虚拟时钟、controller lease、严格状态机与命令幂等、pause barrier、顺序推进、无交易状态 seek 重建、canonical checkpoint 和确定性 state hash。未接入 main、在线 DataManager/EventBus、生产 persistence 或可见入口。
+Files changed: backend/app/replay/{actor,clock,commands,events,checkpoints,projection}.py；backend/scripts/benchmark_replay_actor.py；backend/tests/test_replay_{actor,clock,commands,events,checkpoints,determinism}.py；backend/tests/fixtures/replay/{actor_fakes.py,actor_determinism_v1.json}；本文。
+Commands run: python -m pytest -q 六个 Phase 2 test files；python -m pytest -q 全部 replay/snapshot gates；python -m compileall -q Phase 2 modules/tests；python -m scripts.benchmark_replay_actor --bars 1000；python -m scripts.benchmark_replay_actor；python -m pytest -q；npm test；npm run check；git diff --check；checkpoint/source/state-hash/queue/shutdown failure-injection tests。
+Tests passed: Phase 2 targeted 34 passed；Phase 0+1+2 replay/snapshot gates 118 passed；backend global 1150 passed, 8 skipped, 4 existing FastAPI deprecation warnings；frontend 定向复跑 1853 passed，最终完整 check 的 architecture/typecheck/lint/test/build 全通过，Vite build 393 modules。首次完整 frontend check 曾出现 1852/1853 的未复现波动；无前端文件改动，后续 npm test 与完整 check 均为 1853/1853。
+Golden/state hashes: actor fixture 1x/60x/MAX/step/advance/restore+play 共用 sha256:d8e97457634f2d5e0ae7bc00b311c31631ac06f429bfb09ee34b5dec4394db97，cursor=(virtual_time_ms=1006, source_sequence=6)；43,200 BAR benchmark data epoch sha256:f3c9bf3208420ebb98fa885b6583a19fac4ee465ab8fd2a13bc495e44c2870ac，final state hash sha256:a8e075765751881efeb34630aa40a0ce37784d9881d9af5f7517cfc5018244ae。
+Performance evidence: Windows 本机生成 43,200 根 1m BAR、MAX、默认 checkpoint 预算运行 5.203230s，8302.53 events/s；command ack 34 samples，p50/p95/max=0.522/0.692/0.701ms；checkpoint 8640 created、latest/average=1105/1103.97 bytes、p50/p95/max=0.082/0.125/0.303ms、只保留 initial+32；ordinary projection emitted=2、coalesced=43198、0.384/s；queue capacity/high-water=32/32 且压力探针 64 次中 32 次显式 overflow；event buffer 512/512、projection buffer 7/512；RSS baseline/peak/delta=39927808/41107456/1179648 bytes，25/50/75/100%=41082880/41107456/41107456/41107456，后半程增长 0，未见随事件数线性增长。该结果仅为本机 baseline，不外推生产容量。
+No-lookahead evidence: actor 只通过冻结 ReplayMarketSource 的 peek/next 顺序消费；source factory 每次重建都校验完整 snapshot_ref 与 data_epoch，step/restore/seek 重放校验 source event chain 和精确 cursor；虚拟时钟不得越过下一未消费事件；wall time、倍速、controller 和 transport coalescing 不进入领域 state hash；没有导入 live DataManager/EventBus、router、broker 或 UI。
+Failure injection evidence: 非法状态转换、无 controller、controller conflict/takeover/TTL、revision conflict、同 ID 异 payload、幂等 history 满、queue overflow、step 超出剩余事件、同时间多事件与长空档、pause 原子事件 barrier、交易状态 seek、snapshot_ref 漂移、source cursor 篡改、checksum/schema/noncanonical checkpoint、合法 checksum 但错误 component state/state hash、损坏 checkpoint fallback、flush timeout、卡死原子 reducer shutdown timeout 均覆盖；失败不静默继续，卡死 task 被取消且最终 ERROR，无残留 actor task。
+Rollback exercised: PASS；在系统临时目录创建 detached disposable worktree，对 Phase 2 checkpoint c33da72549ca769691c28cb81949ac327568e5ed 执行 git revert --no-commit 后，working tree 与 index 相对父提交 d12c4716d333fa15e78b20ce1e4956b6b8d399d1 均为 zero diff，untracked count=0；随后移除临时 worktree。
+Known limitations: Phase 2 reducer 仍是 headless seam，尚无 bar builder、paper broker、SQLite command/source tail、HTTP/WS transport、订阅者队列或 UI；command history 在内存中有界且满时 fail closed，跨进程 exactly-once 将由后续持久化 command log/tail replay 完成；默认 5 分钟虚拟时间预算在 30 日 BAR fixture 产生 8640 个候选 checkpoint，CPU/RSS 基线可接受但真实 SQLite 写放大须在 persistence Phase 重新验证；benchmark fixture 为确定性生成数据，不代表生产行情分布；既有 Vite middleware 仍打印 24678 HMR 端口噪声，但最终 test/check 退出码为 0。
 Decision: PASS
 ```

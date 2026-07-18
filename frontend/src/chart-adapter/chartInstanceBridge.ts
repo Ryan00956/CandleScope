@@ -84,6 +84,8 @@ interface LightweightChartAdapterOptions {
   chartRef: RefOrValue<AdapterChart>;
   seriesRef: RefOrValue<AdapterSeries>;
   containerRef?: RefOrValue<HTMLElement>;
+  drawingPaneIndexRef?: RefOrValue<number>;
+  /** @deprecated Use drawingPaneIndexRef for pane-scoped drawing adapters. */
   mainPaneIndexRef?: RefOrValue<number>;
   seriesDataRef?: RefOrValue<DisplayRow[]>;
   seriesDataMapRef?: RefOrValue<LookupMap>;
@@ -225,6 +227,7 @@ export function createLightweightChartAdapter({
   chartRef,
   seriesRef,
   containerRef = null,
+  drawingPaneIndexRef = null,
   mainPaneIndexRef = null,
   seriesDataRef = null,
   seriesDataMapRef = null,
@@ -238,9 +241,20 @@ export function createLightweightChartAdapter({
 }: LightweightChartAdapterOptions) {
   const getChart = () => getRefValue(chartRef);
   const getSeries = () => getRefValue(seriesRef);
-  const getMainPaneIndex = () => {
-    const value = getRefValue(mainPaneIndexRef);
+  const getDrawingPaneIndex = () => {
+    const drawingPaneIndex = getRefValue(drawingPaneIndexRef);
+    const value = drawingPaneIndex ?? getRefValue(mainPaneIndexRef);
     return Number.isInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+  };
+  const getDrawingPaneOffsetY = () => {
+    const container = getRefValue(containerRef);
+    if (!container) return 0;
+    const paneElement = getSeries()?.getPane?.()?.getHTMLElement?.() ?? null;
+    const containerRect = container?.getBoundingClientRect?.() ?? null;
+    const paneRect = paneElement?.getBoundingClientRect?.() ?? null;
+    if (!containerRect || !paneRect) return 0;
+    const offset = paneRect.top - containerRect.top;
+    return Number.isFinite(offset) && offset >= 0 ? offset : 0;
   };
   const getSeriesData = (): DisplayRow[] => {
     const data = getRefValue(seriesDataRef);
@@ -739,10 +753,17 @@ export function createLightweightChartAdapter({
           : ordinalSeriesIndex?.revision ?? null;
         if (isDrawingFrameSnapshot(snapshot)) context.drawingFrameSnapshot = snapshot;
       }
+      const paneOffsetY = getDrawingPaneOffsetY();
+      const paneLocalPoints = paneOffsetY === 0
+        ? screenPoints
+        : screenPoints.map((point) => ({
+            x: point.x,
+            y: typeof point.y === "number" ? point.y - paneOffsetY : point.y,
+          }));
       const batch = captureSourceLineageFreehandStrokeBatch(
         chart,
         series,
-        screenPoints,
+        paneLocalPoints,
         context,
       );
       if (!batch) return null;
@@ -752,7 +773,18 @@ export function createLightweightChartAdapter({
           batch.sourceProjection,
           batch.sourceProjectionConfig,
         ),
-        ...batch,
+        sourceProjection: batch.sourceProjection,
+        sourceProjectionConfig: batch.sourceProjectionConfig,
+        // The coordinate bridge consumes pane-local Y, but live-ink feedback
+        // and interaction drafts remain container-local. Restore the original
+        // samples before the batch crosses back into the drawing controller.
+        captures: Object.freeze(batch.captures.map((capture) => Object.freeze({
+          ...capture,
+          screen: Object.freeze({
+            x: capture.screen.x,
+            y: capture.screen.y + paneOffsetY,
+          }),
+        }))),
       });
     }, null),
     axisTimeToDrawingAnchor: (time: unknown) => safeCall(() => {
@@ -815,7 +847,24 @@ export function createLightweightChartAdapter({
       }
       return detached;
     },
-    priceToCoordinate: (price: number) => safeCall(() => getSeries()?.priceToCoordinate(price), null),
+    // Drawing interaction points are container-local while Lightweight Charts
+    // price coordinates are pane-local. Keep this adapter boundary explicit so
+    // the same controller can own the main pane, reordered panes, and native
+    // indicator panes without leaking DOM offsets into persisted geometry.
+    drawingPaneToContainerY: (y: number) => safeCall(
+      () => y + getDrawingPaneOffsetY(),
+      y,
+    ),
+    containerToDrawingPaneY: (y: number) => safeCall(
+      () => y - getDrawingPaneOffsetY(),
+      y,
+    ),
+    priceToCoordinate: (price: number) => safeCall(() => {
+      const coordinate = getSeries()?.priceToCoordinate(price);
+      return typeof coordinate === "number" && Number.isFinite(coordinate)
+        ? coordinate + getDrawingPaneOffsetY()
+        : null;
+    }, null),
     timeToCoordinate: (time: unknown) => safeCall(() => getChart()?.timeScale().timeToCoordinate(time), null),
     timeToCoordinateInterpolated: (time: unknown) => safeCall(() => {
       const series = registerCurrentDrawingSeries();
@@ -826,7 +875,9 @@ export function createLightweightChartAdapter({
         createDrawingCoordinateContext(),
       );
     }, null),
-    coordinateToPrice: (y: number) => safeCall(() => getSeries()?.coordinateToPrice(y), null),
+    coordinateToPrice: (y: number) => safeCall(() => (
+      getSeries()?.coordinateToPrice(y - getDrawingPaneOffsetY()) ?? null
+    ), null),
     coordinateToTime: (x: number) => safeCall(() => getChart()?.timeScale().coordinateToTime(x), null),
     coordinateToLogical: (x: number) => safeCall(() => getChart()?.timeScale().coordinateToLogical(x), null),
     logicalToCoordinate: (logical: number) => safeCall(() => getChart()?.timeScale().logicalToCoordinate(logical), null),
@@ -835,23 +886,17 @@ export function createLightweightChartAdapter({
       null,
     ),
     getBarSpacing: () => safeCall(() => getChart()?.timeScale().options?.().barSpacing, null),
-    getMainPanePlotRect: (): Readonly<MainPanePlotRect> | null => safeCall(() => {
+    getDrawingPanePlotRect: (): Readonly<MainPanePlotRect> | null => safeCall(() => {
       const chart = getChart();
       if (!chart) return null;
 
-      const paneIndex = getMainPaneIndex();
+      const paneIndex = getDrawingPaneIndex();
       // paneSize describes the plot surface for the requested pane, excluding
       // both price scales and the time scale. Its coordinates are pane-local,
       // so resolve the pane element's vertical offset for DOM overlays.
       const pane = chart.paneSize(paneIndex);
       const leftPriceScaleWidth = chart.priceScale("left", paneIndex).width();
-      const container = getRefValue(containerRef);
-      const paneElement = getSeries()?.getPane?.()?.getHTMLElement?.() ?? null;
-      const containerRect = container?.getBoundingClientRect?.() ?? null;
-      const paneRect = paneElement?.getBoundingClientRect?.() ?? null;
-      const paneOffsetY = containerRect && paneRect
-        ? paneRect.top - containerRect.top
-        : 0;
+      const paneOffsetY = getDrawingPaneOffsetY();
       if (!pane
         || !Number.isFinite(pane.width)
         || pane.width <= 0
@@ -862,6 +907,31 @@ export function createLightweightChartAdapter({
         || !Number.isFinite(paneOffsetY)
         || paneOffsetY < 0) return null;
 
+      return Object.freeze({
+        x: leftPriceScaleWidth,
+        y: paneOffsetY,
+        width: pane.width,
+        height: pane.height,
+        dpr: currentDevicePixelRatio(),
+      });
+    }, null),
+    // Transitional alias retained for existing consumers and diagnostics.
+    getMainPanePlotRect: (): Readonly<MainPanePlotRect> | null => safeCall(() => {
+      const chart = getChart();
+      if (!chart) return null;
+      const paneIndex = getDrawingPaneIndex();
+      const pane = chart.paneSize(paneIndex);
+      const leftPriceScaleWidth = chart.priceScale("left", paneIndex).width();
+      const paneOffsetY = getDrawingPaneOffsetY();
+      if (!pane
+        || !Number.isFinite(pane.width)
+        || pane.width <= 0
+        || !Number.isFinite(pane.height)
+        || pane.height <= 0
+        || !Number.isFinite(leftPriceScaleWidth)
+        || leftPriceScaleWidth < 0
+        || !Number.isFinite(paneOffsetY)
+        || paneOffsetY < 0) return null;
       return Object.freeze({
         x: leftPriceScaleWidth,
         y: paneOffsetY,

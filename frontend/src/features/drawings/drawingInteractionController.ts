@@ -1020,6 +1020,7 @@ export interface UseDrawingOptions {
   chartAdapter: DrawingChartAdapter | null;
   chartContainerRef: MutableRefObject<HTMLElement | null>;
   activeTool: DrawingToolId | null;
+  manageChartCursor?: boolean;
   penColor: string;
   penSize: number;
   textFontSize: number;
@@ -1196,6 +1197,7 @@ export function useDrawing({
   chartAdapter,
   chartContainerRef,
   activeTool,
+  manageChartCursor = true,
   penColor,
   penSize,
   textFontSize,
@@ -1350,6 +1352,7 @@ export function useDrawing({
   const isEraserTool = activeTool === "eraser";
 
   const resetCursorForActiveTool = useCallback(() => {
+    if (!manageChartCursor) return;
     const container = chartContainerRef?.current;
     if (!container) return;
     const tool = activeToolRef.current;
@@ -1357,7 +1360,7 @@ export function useDrawing({
       container,
       isPassiveCursorTool(tool) ? cursorStyleForPassiveTool(tool) : "crosshair",
     );
-  }, [chartContainerRef]);
+  }, [chartContainerRef, manageChartCursor]);
 
   useEffect(() => {
     resetCursorForActiveTool();
@@ -1439,9 +1442,10 @@ export function useDrawing({
     });
   }, [getChartAdapter, screenToFreehandData]);
 
-  const isInsideMainPanePlot = useCallback((point: ScreenPoint): boolean => {
+  const isInsideDrawingPanePlot = useCallback((point: ScreenPoint): boolean => {
     if (interactionSurfaceMode !== "overlay") return true;
-    const rect = getChartAdapter()?.getMainPanePlotRect?.();
+    const adapter = getChartAdapter();
+    const rect = adapter?.getDrawingPanePlotRect?.() ?? adapter?.getMainPanePlotRect?.();
     return !!rect
       && point.x >= rect.x
       && point.x <= rect.x + rect.width
@@ -1558,9 +1562,9 @@ export function useDrawing({
     persistDrawings,
     prepareSurfaceDispose: preparePersistenceSurfaceDispose,
     prepareUserMutationScope: preparePersistenceUserMutationScope,
-    hitTestScene,
-    getSceneScreenBox,
-    getSceneScreenHandles,
+    hitTestScene: hitTestPaneScene,
+    getSceneScreenBox: getPaneSceneScreenBox,
+    getSceneScreenHandles: getPaneSceneScreenHandles,
     getSavedDrawing,
     getLegacyPrimitiveRuntimeEvidence,
     getActiveDocumentTarget,
@@ -1591,6 +1595,37 @@ export function useDrawing({
       ? {}
       : { onInteractionSurfaceFallback }),
   });
+  const containerToDrawingPaneY = useCallback((y: number): number => {
+    const converted = getChartAdapter()?.containerToDrawingPaneY?.(y);
+    return typeof converted === "number" && Number.isFinite(converted) ? converted : y;
+  }, [getChartAdapter]);
+  const drawingPaneToContainerY = useCallback((y: number): number => {
+    const converted = getChartAdapter()?.drawingPaneToContainerY?.(y);
+    return typeof converted === "number" && Number.isFinite(converted) ? converted : y;
+  }, [getChartAdapter]);
+  const hitTestScene = useCallback((x: number, y: number) => (
+    hitTestPaneScene(x, containerToDrawingPaneY(y))
+  ), [containerToDrawingPaneY, hitTestPaneScene]);
+  const getSceneScreenBox = useCallback((id: string): ScreenBox | null => {
+    const box = getPaneSceneScreenBox(id);
+    if (!box) return null;
+    const y = drawingPaneToContainerY(box.y);
+    return Object.freeze({
+      ...box,
+      y,
+      ...(typeof box.bottom === "number" && Number.isFinite(box.bottom)
+        ? { bottom: drawingPaneToContainerY(box.bottom) }
+        : {}),
+    });
+  }, [drawingPaneToContainerY, getPaneSceneScreenBox]);
+  const getSceneScreenHandles = useCallback((id: string): readonly ScreenPoint[] | null => {
+    const handles = getPaneSceneScreenHandles(id);
+    if (!handles) return null;
+    return Object.freeze(handles.map((point) => Object.freeze({
+      x: point.x,
+      y: drawingPaneToContainerY(point.y),
+    })));
+  }, [drawingPaneToContainerY, getPaneSceneScreenHandles]);
   savedDrawingGetterRef.current = getSavedDrawing;
   sceneScreenBoxGetterRef.current = getSceneScreenBox;
   const prepareUserMutationScope = useCallback((): boolean => (
@@ -1648,14 +1683,14 @@ export function useDrawing({
       const legacyHit = hitTestDrawingPrimitives(
         primitivesRef.current,
         x,
-        y,
+        containerToDrawingPaneY(y),
         hitRadius,
         (primitive) => primitive._series !== null,
       );
       const sceneHit = hitTestScene(x, y);
       return resolveTopmostDrawingInteractionHit(primitivesRef.current, legacyHit, sceneHit);
     },
-    [getSavedDrawing, hitTestScene, hitTestSelectedOverlayHandle, interactionSurfaceMode],
+    [containerToDrawingPaneY, getSavedDrawing, hitTestScene, hitTestSelectedOverlayHandle, interactionSurfaceMode],
   );
 
   const hitTestInteractive = useCallback(
@@ -1861,7 +1896,10 @@ export function useDrawing({
     if (interactionSurfaceMode !== "overlay") return undefined;
     const dynamicCanvas = dynamicCanvasRef?.current ?? null;
     const liveInkCanvas = liveInkCanvasRef?.current ?? null;
-    const getPlotRect = () => getChartAdapter()?.getMainPanePlotRect?.() ?? null;
+    const getPlotRect = () => {
+      const adapter = getChartAdapter();
+      return adapter?.getDrawingPanePlotRect?.() ?? adapter?.getMainPanePlotRect?.() ?? null;
+    };
     const dynamicController = dynamicCanvas
       ? createDynamicOverlayController({ canvas: dynamicCanvas, getPlotRect })
       : null;
@@ -2172,7 +2210,7 @@ export function useDrawing({
       }
 
       const container = chartContainerRef?.current;
-      if (!container) return;
+      if (!container || !manageChartCursor) return;
       const cursorHit = hit
         && isDrawingEntityHit(hit)
         && hit.saved.type === "axis-line"
@@ -2190,7 +2228,7 @@ export function useDrawing({
         setCursor(container, cursorForTextToolHit(cursorHit));
       }
     },
-    [chartContainerRef, hitTestAll, hitTestInteractive, interactionSurfaceMode, renderDynamicFeedback],
+    [chartContainerRef, hitTestAll, hitTestInteractive, interactionSurfaceMode, manageChartCursor, renderDynamicFeedback],
   );
 
   const scheduleHoverFeedback = useCallback(
@@ -2680,7 +2718,7 @@ export function useDrawing({
       removePreview();
       clearHoverFeedback();
       draggingRef.current = null;
-      setCursor(chartContainerRef?.current, "default");
+      if (manageChartCursor) setCursor(chartContainerRef?.current, "default");
     };
   }, [
     cancelActiveDrawingMove,
@@ -2690,6 +2728,7 @@ export function useDrawing({
     removePreview,
     flushActiveDrawingMove,
     interactionSurfaceMode,
+    manageChartCursor,
     persistDrawings,
     releaseOverlayDrag,
   ]);
@@ -2852,7 +2891,7 @@ export function useDrawing({
       const tool = activeToolRef.current;
       const pos = getChartPos(e);
       if (!pos) return;
-      if (!isInsideMainPanePlot(pos)) return;
+      if (!isInsideDrawingPanePlot(pos)) return;
       if (interactionSurfaceMode === "overlay") cancelDynamicPaintHandoff(true);
       if (liveInkControllerRef.current?.snapshot().retainingFinalFrame) {
         liveInkControllerRef.current.cancel();
@@ -3516,7 +3555,7 @@ export function useDrawing({
         }
       }
     },
-    [flushActiveDrawingMove, getChartPos, isInsideMainPanePlot, captureOverlayFreehandBatch, interactionSurfaceMode, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, hitTestSelectedOverlayHandle, selectPrimitive, deselectAll, getPrimitiveById, getSavedDrawing, getSceneScreenBox, beginOverlayEntityDrag, beginSavedTextDrag, beginTextDrag, startEntityTextEditing, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, persistSceneCommands, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, ensureOverlayDragRegistry, getChartAdapter, getDynamicThemePalette, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, renderDynamicFeedback, renderOverlayDragDraft, retainDynamicOverlayUntilPaint],
+    [flushActiveDrawingMove, getChartPos, isInsideDrawingPanePlot, captureOverlayFreehandBatch, interactionSurfaceMode, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, hitTestSelectedOverlayHandle, selectPrimitive, deselectAll, getPrimitiveById, getSavedDrawing, getSceneScreenBox, beginOverlayEntityDrag, beginSavedTextDrag, beginTextDrag, startEntityTextEditing, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, persistSceneCommands, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, ensureOverlayDragRegistry, getChartAdapter, getDynamicThemePalette, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, renderDynamicFeedback, renderOverlayDragDraft, retainDynamicOverlayUntilPaint],
   );
 
   // ════════════════════════════════════════════════════

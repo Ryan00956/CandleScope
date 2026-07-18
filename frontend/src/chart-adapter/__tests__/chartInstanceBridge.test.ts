@@ -209,27 +209,35 @@ test("main-pane plot rect follows a reordered main pane and reports its DOM offs
         getBoundingClientRect: () => ({ top: 100 }),
       },
     },
-    mainPaneIndexRef,
+    drawingPaneIndexRef: mainPaneIndexRef,
     seriesRef: {
       current: {
+        coordinateToPrice: (coordinate: number) => coordinate / 2,
         getPane: () => ({
           getHTMLElement: () => ({
             getBoundingClientRect: () => ({ top: 420 }),
           }),
         }),
+        priceToCoordinate: (price: number) => price * 2,
       },
     },
   });
 
-  assert.deepEqual(adapter.getMainPanePlotRect(), {
+  const expectedPlotRect = {
     x: 52,
     y: 320,
     width: 900,
     height: 300,
     dpr: 1,
-  });
-  assert.deepEqual(paneIndexes, [2]);
-  assert.deepEqual(priceScaleRequests, [["left", 2]]);
+  };
+  assert.deepEqual(adapter.getDrawingPanePlotRect(), expectedPlotRect);
+  assert.deepEqual(adapter.getMainPanePlotRect(), expectedPlotRect);
+  assert.equal(adapter.drawingPaneToContainerY(24), 344);
+  assert.equal(adapter.containerToDrawingPaneY(344), 24);
+  assert.equal(adapter.priceToCoordinate(12), 344);
+  assert.equal(adapter.coordinateToPrice(344), 12);
+  assert.deepEqual(paneIndexes, [2, 2]);
+  assert.deepEqual(priceScaleRequests, [["left", 2], ["left", 2]]);
 });
 
 test("main-pane plot rect fails closed for invalid public geometry without container fallback", () => {

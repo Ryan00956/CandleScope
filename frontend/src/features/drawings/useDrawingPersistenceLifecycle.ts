@@ -848,6 +848,11 @@ export function useDrawingPersistenceLifecycle({
   ): boolean;
 } {
   const authorityMode = resolveDrawingDocumentAuthorityMode();
+  // The process-wide diagnostics API remains backward compatible while every
+  // native pane owns an independent drawing runtime. Main-pane providers win
+  // when mounted; a subpane provider remains available when it is the only
+  // restored surface.
+  const drawingPerfProviderPriority = symbol.endsWith("__main") ? 100 : 0;
   const [engineMode] = useState(() => (
     authorityMode === "document"
       ? resolvePhase4DrawingEngineMode()
@@ -2004,7 +2009,7 @@ export function useDrawingPersistenceLifecycle({
         }),
       ...(plotRect ? { mainPanePlotRect: plotRect } : {}),
     };
-  }), [engineMode.effective, primitivesRef, sceneAdapterGetterDelegate, sceneBridge, sceneDocumentOnlyEnabled, sceneRuntime]);
+  }, { priority: drawingPerfProviderPriority }), [drawingPerfProviderPriority, engineMode.effective, primitivesRef, sceneAdapterGetterDelegate, sceneBridge, sceneDocumentOnlyEnabled, sceneRuntime]);
 
   useEffect(() => registerDrawingPerfPhase6RuntimeProvider(() => {
     const bridgeSnapshot = sceneBridge.snapshot();
@@ -2141,7 +2146,8 @@ export function useDrawingPersistenceLifecycle({
         runtimeSnapshot.latestSubmittedWorkerIdentity,
       ),
     });
-  }), [
+  }, { priority: drawingPerfProviderPriority }), [
+    drawingPerfProviderPriority,
     engineMode.effective,
     rasterBackend,
     sceneAdapterGetterDelegate,
@@ -2151,7 +2157,7 @@ export function useDrawingPersistenceLifecycle({
 
   useEffect(() => registerDrawingPerfActivePersistenceDocumentRecordProvider(() => (
     encodeDrawingDocumentRecord(activeStoreRef.current.getSnapshot(), 0)
-  )), []);
+  ), { priority: drawingPerfProviderPriority }), [drawingPerfProviderPriority]);
 
   useEffect(() => registerDrawingPerfLegacyCompatibilitySnapshotProvider(() => {
     const scopeKey = activeStoreRef.current.getSnapshot().scopeKey;
@@ -2165,7 +2171,7 @@ export function useDrawingPersistenceLifecycle({
       normalizedRaw: JSON.stringify(loaded.savedDrawings),
       record,
     });
-  }), []);
+  }, { priority: drawingPerfProviderPriority }), [drawingPerfProviderPriority]);
 
   useEffect(() => registerDrawingPerfPhase6HitOracleProvider((points) => {
     const runtimeSnapshot = sceneRuntime.snapshot();
@@ -2212,11 +2218,12 @@ export function useDrawingPersistenceLifecycle({
       indexedResults: Object.freeze(indexedResults),
       oracleResults: Object.freeze(oracleResults),
     });
-  }), [sceneRuntime, selectedIdRef]);
+  }, { priority: drawingPerfProviderPriority }), [drawingPerfProviderPriority, sceneRuntime, selectedIdRef]);
 
   useEffect(() => registerDrawingPerfShadowParityRequester(
     () => sceneRuntime.requestParity(),
-  ), [sceneRuntime]);
+    { priority: drawingPerfProviderPriority },
+  ), [drawingPerfProviderPriority, sceneRuntime]);
 
   const hitTestScene = useCallback((x: number, y: number): DrawingDisplayHitResult | null => {
     if (!sceneCanaryEnabledRef.current || hiddenRef.current) return null;

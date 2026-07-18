@@ -940,18 +940,6 @@ class QueryEngine:
         if len(bars) < 2:
             return []
         calendar = self._calendar_for(key) if key is not None else None
-        calendar = self._calendar_for(key) if key is not None else None
-        if calendar is not None:
-            return any(
-                (
-                    expected := calendar.next_expected_open(
-                        bars[index - 1].time_ms,
-                        interval,
-                    )
-                ) is not None
-                and expected < bars[index].time_ms
-                for index in range(1, len(bars))
-            )
         interval_secs = parse_custom_interval(interval) or 60
         threshold = interval_secs * 1.5
         gaps: list[tuple[int, int]] = []

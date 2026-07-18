@@ -179,6 +179,66 @@ def test_query_engine_does_not_report_weekend_as_interior_gap() -> None:
     assert triggered == []
 
 
+def test_query_engine_fills_calendar_aware_interior_gap() -> None:
+    first = 60_000
+    missing = 120_000
+    last = 180_000
+
+    def _row(open_time: int) -> dict[str, int]:
+        return {
+            "open_time": open_time,
+            "open": 1,
+            "high": 1,
+            "low": 1,
+            "close": 1,
+            "volume": 1,
+        }
+
+    class _Storage:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def query_bars(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs["start_ms"] == missing and kwargs["end_ms"] == missing:
+                return [_row(missing)]
+            return [_row(last), _row(first)]
+
+    service = HistoryAvailabilityService()
+    calendar = service.calendars.require("crypto.24x7.utc")
+    resolver = _StaticHistoryResolver(
+        service,
+        ResolvedHistoryContext(
+            availability=HistoryAvailability(calendar_id=calendar.calendar_id),
+            calendar=calendar,
+            policy=None,
+            empty_page_semantics=HistoryEmptyPageSemantics.UNKNOWN,
+        ),
+    )
+    storage = _Storage()
+    engine = QueryEngine(
+        cache=BarCache(),
+        storage=storage,  # type: ignore[arg-type]
+        history_policy=resolver,  # type: ignore[arg-type]
+    )
+
+    result = engine.query(
+        "BTCUSDT",
+        "1m",
+        start_ms=first,
+        end_ms=last,
+        limit=3,
+        exchange="binance",
+        market_type="spot",
+        auto_backfill=False,
+    )
+
+    assert [bar.time_ms for bar in result.bars] == [first, missing, last]
+    assert len(storage.calls) == 2
+    assert storage.calls[1]["start_ms"] == missing
+    assert storage.calls[1]["end_ms"] == missing
+
+
 def test_exchange_policy_combines_lifecycle_and_channel_retention() -> None:
     service = HistoryAvailabilityService()
     resolver = ExchangeHistoryPolicyResolver(

@@ -297,7 +297,9 @@ function isReplayComponentPath(filePath) {
 }
 
 function isReplayAppPath(filePath) {
-  return normalizeModulePath(filePath) === "src/features/replay/ReplayApp";
+  const normalized = normalizeModulePath(filePath);
+  return normalized === "src/replay-main"
+    || normalized.startsWith("src/features/replay/");
 }
 
 function isForbiddenReplayLiveRuntimeTarget(target) {
@@ -369,7 +371,7 @@ function checkImports(absPath, filePath, content, projectDirectory) {
         filePath,
         line,
         target: normalizedTarget,
-        message: `ReplayApp value-imports live runtime ${specifier}`,
+        message: `replay entry graph value-imports live runtime ${specifier}`,
       });
     }
 
@@ -380,7 +382,7 @@ function checkImports(absPath, filePath, content, projectDirectory) {
         filePath,
         line,
         target: normalizedTarget,
-        message: `ReplayApp value-imports private trading dependency ${specifier}`,
+        message: `replay entry graph value-imports private trading dependency ${specifier}`,
       });
     }
 
@@ -521,6 +523,80 @@ function checkDrawingWorkerReachableImports(sourceModules, projectDirectory) {
     };
     visit(root, []);
   }
+}
+
+function checkReplayEntryReachableImports(sourceModules, projectDirectory) {
+  const root = sourceModules.get("src/replay-main");
+  if (!root) return;
+  const visited = new Set();
+  const reportedTargets = new Set();
+  const resolveSourceModule = (importer, specifier) => {
+    if (!specifier.startsWith(".") && !specifier.startsWith("src/")) return null;
+    const normalized = normalizeModulePath(
+      resolveImportSpecifier(importer.absPath, specifier, projectDirectory),
+    );
+    return sourceModules.get(normalized) ?? sourceModules.get(`${normalized}/index`) ?? null;
+  };
+
+  const report = (rule, imported, normalizedTarget, chain, label) => {
+    const reportKey = `${rule}:${normalizedTarget}`;
+    if (reportedTargets.has(reportKey)) return;
+    reportedTargets.add(reportKey);
+    addViolation({
+      rule,
+      filePath: root.filePath,
+      line: chain[0]?.line ?? imported.line,
+      target: normalizedTarget,
+      message: `replay entry reaches ${label} through ${[
+        root.filePath,
+        ...chain.map((item) => item.target),
+        normalizedTarget,
+      ].join(" -> ")}`,
+    });
+  };
+
+  const visit = (module, chain) => {
+    if (visited.has(module.filePath) || isTestSourcePath(module.filePath)) return;
+    visited.add(module.filePath);
+    for (const imported of importSpecifiers(module.content)) {
+      if (imported.typeOnly) continue;
+      const normalizedTarget = normalizeModulePath(resolveImportSpecifier(
+        module.absPath,
+        imported.specifier,
+        projectDirectory,
+      ));
+      // Replay-local modules are already covered by the direct rule. This
+      // graph check closes the shared-helper escape hatch without duplicating
+      // the same violation.
+      if (!isReplayAppPath(module.filePath)
+        && isForbiddenReplayLiveRuntimeTarget(normalizedTarget)) {
+        report(
+          RULES.replayAppNoLiveRuntimeImport,
+          imported,
+          normalizedTarget,
+          chain,
+          "live runtime dependency",
+        );
+        continue;
+      }
+      if (!isReplayAppPath(module.filePath)
+        && isForbiddenPrivateTradingTarget(normalizedTarget)) {
+        report(
+          RULES.replayAppNoPrivateTradingImport,
+          imported,
+          normalizedTarget,
+          chain,
+          "private trading dependency",
+        );
+        continue;
+      }
+      const targetModule = resolveSourceModule(module, imported.specifier);
+      if (!targetModule) continue;
+      visit(targetModule, [...chain, { line: imported.line, target: targetModule.filePath }]);
+    }
+  };
+
+  visit(root, []);
 }
 
 function checkDrawingHotPathReachableLocalStorageWrites(sourceModules, projectDirectory) {
@@ -856,6 +932,7 @@ export function runArchitectureCheck({
   }
   checkDrawingWorkerReachableImports(sourceModules, projectDirectory);
   checkDrawingHotPathReachableLocalStorageWrites(sourceModules, projectDirectory);
+  checkReplayEntryReachableImports(sourceModules, projectDirectory);
 
   for (const entry of allowlist) {
     const key = allowlistKey(entry);

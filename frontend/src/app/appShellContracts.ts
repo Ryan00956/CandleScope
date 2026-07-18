@@ -5,7 +5,7 @@ import type { ChartSessionRuntime } from "../features/chart-session/chartSession
 import type { DrawingRuntime } from "../features/drawings/useDrawingRuntime.js";
 import type { ExportRuntime } from "../features/export/useExportRuntime.js";
 import type { IndicatorRuntime } from "../features/indicators/useIndicatorRuntime.js";
-import type { MarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
+import type { MarketDataRuntimeContract } from "../features/market-data/marketDataRuntimeContract.js";
 import type { AdvancedMarketRuntime } from "../features/advanced-market-data/advancedMarketDataTypes.js";
 import type { ChartSettings } from "../features/settings/chartAppearanceSettings.js";
 import type { WatchlistRuntime } from "../features/watchlist/useWatchlistRuntime.js";
@@ -63,7 +63,7 @@ export interface AlertsShellRuntime {
 
 export interface AppShellRuntimeInputs {
   session: ChartSessionRuntime;
-  marketData: MarketDataRuntime;
+  marketData: MarketDataRuntimeContract;
   advancedMarketData: AdvancedMarketRuntime;
   drawings: DrawingRuntime;
   indicators: IndicatorShellRuntime;
@@ -79,9 +79,9 @@ export interface AppShellViewModelContext {
   sessionView: ChartSessionRuntime["view"];
   sessionActions: ChartSessionRuntime["actions"];
   sessionStatus: ChartSessionRuntime["status"];
-  marketView: MarketDataRuntime["view"];
-  marketActions: MarketDataRuntime["actions"];
-  marketStatus: MarketDataRuntime["status"];
+  marketView: MarketDataRuntimeContract["view"];
+  marketActions: MarketDataRuntimeContract["actions"];
+  marketStatus: MarketDataRuntimeContract["status"];
   advancedMarketView: AdvancedMarketRuntime["view"];
   advancedMarketActions: AdvancedMarketRuntime["actions"];
   drawingView: DrawingRuntime["view"];
@@ -105,8 +105,8 @@ export interface AppShellViewModelContext {
   priceScaleActions: PriceScaleShellRuntime["actions"];
   alertsView: AlertsShellRuntime["view"];
   alertsActions: AlertsShellRuntime["actions"];
-  marketDisplay: MarketDataRuntime["view"]["display"];
-  displayData: MarketDataRuntime["view"]["display"]["displayData"];
+  marketDisplay: MarketDataRuntimeContract["view"]["display"];
+  displayData: MarketDataRuntimeContract["view"]["display"]["displayData"];
 }
 
 export interface AppShellViewModel {

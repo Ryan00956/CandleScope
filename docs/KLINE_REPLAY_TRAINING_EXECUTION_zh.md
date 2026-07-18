@@ -1800,22 +1800,22 @@ feat(replay): expose persistent replay sessions over replay v1
 
 ### 逐步任务
 
-- [ ] **6.1** 对所有 replay HTTP/WS payload 做 unknown-first 严格 parser；组件不接触 raw JSON。
-- [ ] **6.2** parser 校验 protocol/session/sequence/revision/data epoch/Decimal/time。
-- [ ] **6.3** stream controller 实现 connect、atomic snapshot、resume、backoff、resync 和 generation guard。
-- [ ] **6.4** `ReplayStore` 维护 session/order/account read models，但 K 线真值仍写入 `SeriesWindowStore`。
-- [ ] **6.5** 将 bar replace/append/tick 映射到现有 store delta，不在 React 中每事件复制全 bars。
-- [ ] **6.6** 高速 projection 最多按 30 FPS 刷新普通 UI；fill/error/pause/ended 立即 flush。
-- [ ] **6.7** 扩展 dataset key，加入 source/session/data epoch/public timeline epoch。
-- [ ] **6.8** 从 live hook 文件提取无副作用 `MarketDataRuntimeContract`；live runtime 和 ReplayRuntime 分别实现，不让 replay import live hook。
-- [ ] **6.9** 提取 `MarketPageFrame` / `MarketWorkspaceFrame` 布局槽位，现有 live `AppShell` 适配后视觉结构、runtime 所有权和普通 smoke 不变。
-- [ ] **6.10** 新增 `replay.html`、`replay-main.tsx` 和 Vite multi-page build；`index.html` 仍只指向 live App。
-- [ ] **6.11** `ReplayApp` 使用固定 hook 列表，只创建 ReplayRuntime、replay store 和无副作用共享图表能力；不创建 live/advanced/orderbook/watchlist/alerts runtime。
-- [ ] **6.12** `ReplayApp` 启动状态 fail closed：capability/session/首个 snapshot 失败时显示 replay 错误或配置态，绝不回退 live cache、mock bars 或 live App。
-- [ ] **6.13** 首个原子 snapshot 成功后才向 `SeriesWindowStore` 发布；连接 generation 改变时清理 crosshair、lastPrice、indicator request 和 visible-range pending state。
-- [ ] **6.14** architecture test 证明 replay entry 无 live runtime value import；网络测试证明从首次 document request 起不产生 live Kline/market/orderbook/liquidation/watchlist 请求。
-- [ ] **6.15** 实现 `?session=<opaque-id>` 恢复入口；刷新、重连和旧 replay generation callback 都必须 generation-safe，恢复状态以服务端 snapshot 为准。
-- [ ] **6.16** 测试直接访问、无 opener、session 不存在、capability disabled 和错误 production rewrite，不允许落回 live index。
+- [x] **6.1** 对所有 replay HTTP/WS payload 做 unknown-first 严格 parser；组件不接触 raw JSON。
+- [x] **6.2** parser 校验 protocol/session/sequence/revision/data epoch/Decimal/time。
+- [x] **6.3** stream controller 实现 connect、atomic snapshot、resume、backoff、resync 和 generation guard。
+- [x] **6.4** `ReplayStore` 维护 session/order/account read models，但 K 线真值仍写入 `SeriesWindowStore`。
+- [x] **6.5** 将 bar replace/append/tick 映射到现有 store delta，不在 React 中每事件复制全 bars。
+- [x] **6.6** 高速 projection 最多按 30 FPS 刷新普通 UI；fill/error/pause/ended 立即 flush。
+- [x] **6.7** 扩展 dataset key，加入 source/session/data epoch/public timeline epoch。
+- [x] **6.8** 从 live hook 文件提取无副作用 `MarketDataRuntimeContract`；live runtime 和 ReplayRuntime 分别实现，不让 replay import live hook。
+- [x] **6.9** 提取 `MarketPageFrame` / `MarketWorkspaceFrame` 布局槽位，现有 live `AppShell` 适配后视觉结构、runtime 所有权和普通 smoke 不变。
+- [x] **6.10** 新增 `replay.html`、`replay-main.tsx` 和 Vite multi-page build；`index.html` 仍只指向 live App。
+- [x] **6.11** `ReplayApp` 使用固定 hook 列表，只创建 ReplayRuntime、replay store 和无副作用共享图表能力；不创建 live/advanced/orderbook/watchlist/alerts runtime。
+- [x] **6.12** `ReplayApp` 启动状态 fail closed：capability/session/首个 snapshot 失败时显示 replay 错误或配置态，绝不回退 live cache、mock bars 或 live App。
+- [x] **6.13** 首个原子 snapshot 成功后才向 `SeriesWindowStore` 发布；连接 generation 改变时清理 crosshair、lastPrice、indicator request 和 visible-range pending state。
+- [x] **6.14** architecture test 证明 replay entry 无 live runtime value import；网络测试证明从首次 document request 起不产生 live Kline/market/orderbook/liquidation/watchlist 请求。
+- [x] **6.15** 实现 `?session=<opaque-id>` 恢复入口；刷新、重连和旧 replay generation callback 都必须 generation-safe，恢复状态以服务端 snapshot 为准。
+- [x] **6.16** 测试直接访问、无 opener、session 不存在、capability disabled 和错误 production rewrite，不允许落回 live index。
 
 ### 测试
 
@@ -2410,5 +2410,23 @@ No-lookahead evidence: session 固定不可变 dataset blob/data_epoch，actor �
 Failure injection evidence: replay schema newer-version、主 K 线 DB 隔离、component projection transaction rollback、同 command id 异 payload、SQLite busy retry exhaustion/sticky degraded、durable write failure rollback/pause、latest/all checkpoint corruption、dataset checksum/epoch mismatch、旧 checkpoint command+autonomous-source tail、recovery 中 MAX clock freeze、wrong WS epoch、buffer miss reset、subscriber overflow/1013、controller heartbeat/disconnect、enabled startup failure、flush/checkpoint timeout 与 store close order均已覆盖；disabled runtime 不构造 store、不创建 DB、不启动 replay task。饱和 20 个 snapshot request 的确定性回归证明 MAX source 从 sequence 1 连续推进到 20，不再被只读 mailbox 饿死。
 Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对初始 Phase 5 checkpoint dd56a6b5b37efa945f96df119ee534fe1fb87a72 执行 git revert --no-commit 后，working tree、index 相对父提交 6ee6221c6645dae6ccd29dc5a3c2883067114435 均为 zero diff，untracked=0，index tree 与 parent tree 同为 f5d2274e8d9332116f46cbb0e10df3743e8b00b3；随后移除临时 worktree，并对 amend 后最终 checkpoint 再次执行同一演练。
 Known limitations: BAR_CONSERVATIVE_V1 的 service-side instrument filters 仍由冻结 dataset 首价精度和保守通用数量边界构造，不代表历史 exchange filter 快照；AGG_TRADE capability 明确为 ARCHIVE_DISABLED，直到 Phase 8 完成 source-validated archive、分页与 exact reader。ReplayService 暂无 idle TTL eviction scheduler，配置只冻结上限；前端仍无 replay.html/ReplayRuntime/可见入口，留给 Phase 6/7。1,000 BAR 基准虽已完成，但 17.25 events/s 显示 full-state rollback/checkpoint 随 retained closed tail 增长的成本，必须作为 Phase 8/9 性能门槛输入。Vite 仍有既有 >500 kB chunk warning，完整 check 退出码为 0。
+Decision: PASS
+```
+
+```text
+Phase: 6 - 独立回放页面、ReplayRuntime 与页面隔离
+Date: 2026-07-18
+Commit: this Phase 6 checkpoint; subject feat(frontend): add isolated replay page runtime
+Executor: Codex
+Scope: 建立 replay.html -> replay-main.tsx -> ReplayApp 固定组合根与独立 Vite document；抽取无副作用 MarketDataRuntimeContract、MarketPageFrame 和 MarketWorkspaceFrame，同时保持 index.html -> live App、DOM 槽位和 live runtime 所有权不变。实现 replay.v1 unknown-first HTTP/WS parser、ReplayApiClient、原子 snapshot/resume/backoff/resync/generation-safe stream controller、ReplayStore read models、SeriesWindowStore replace/append/tick projection、普通 UI <=30 FPS 与 fill/error/pause/ended 立即 flush、session/data/public-timeline dataset key 隔离、严格入口错误态和 ?session 恢复；默认 flag 仍关闭，未新增可见 live TopBar 入口、回放控制面或交易 UI。
+Files changed: frontend/{replay.html,package.json,vite.config.js}；frontend/scripts/{check-architecture.mjs,check-architecture.test.mjs,drawing-controlled-cdp.test.mjs}；frontend/src/replay-main.tsx；frontend/src/app/{AppShell,ChartWorkspace,appShellContracts,MarketPageFrame,MarketWorkspaceFrame}.tsx/ts 及 frame test；frontend/src/features/market-data/{marketDataRuntimeContract,useMarketDataRuntime}.ts；frontend/src/features/chart-session/chartDatasetKey.ts；frontend/src/features/replay/{ReplayApp,ReplayPageShell,replayApi,replayEntry,replayParser,replaySeriesProjection,replayStore,replayStreamController,replayTypes,useReplayRuntime}.ts/tsx 及 10 组 replay tests；本文。
+Commands run: npm run test:replay；node --test scripts/check-architecture.test.mjs；npm run check:architecture；npm run typecheck；npm run lint；npm run check；既有 asset-quiescence 定向测试连续 5 次；npm run smoke -- --url http://127.0.0.1:15176/；Playwright CLI 对 production mock entry 矩阵、当前 worktree live page 与真实 backend session 做 document/network/console/canvas 检查；REPLAY_ENABLED=1 的 backend 18082 + Vite 15175 严格 client 创建/acquire/step/reload 恢复；git diff --check。
+Tests passed: replay 定向 38/38；architecture fixtures 20/20，真实入口完整 value-import 图 0 违规；frontend global 1892/1892，typecheck/lint 通过；Vite production build 407 modules，同时生成 index.html 1,179 bytes、replay.html 979 bytes、live entry 352,066 bytes、replay entry 56,864 bytes。当前 worktree live smoke 最终读取 1,501 bars、connected/live、advanced ready、indicator panel/contract data 均正常，0 failure/warning/exception。mock production 浏览器矩阵覆盖 direct/no-session、disabled、missing session、非法 query 和错误 rewrite；真实 backend catalog 为 9 entries，首项 Binance futures BTCUSDT、4,233 eligible windows，严格前端 parser 全部接受。
+Golden/state hashes: 真实 session 406089f330f640bc8abbb6678fb255a7 绑定 BAR data epoch sha256:cbb281cc00b3914d53d51a3bfe8ac7e5bd4be749baa2f084a532b247ca4403d7；初始 PAUSED sequence=1/revision=0/warmup=200，acquire+step 后 revision=2/sequence=4/source_sequence=1，刷新后以服务端 snapshot 恢复 sequence=5/201 bars。production index.html sha256:d961bc44eace716e506bafcb59ae68fd7253060986d7ac19ee01a23676e7d839；replay.html sha256:e52856d4b8adeafa60fa5ed4e4cce941cbaebe344cb38346fa6bbbc4e48424a6；live entry sha256:1cb6c11c2fe3f6225bf9a198f945058d3655a5d18de2841bee25665b2d6a4467；replay entry sha256:e54928e931cb773b7c65117aa34222ebca6e5db903f120ff3cd7301940c1893f。
+Performance evidence: 100x-style delta 回归在每个事件上直接走 SeriesWindowStore delta，而普通 React read model 只在 34ms frame budget 后发布一次；fill、PAUSED、ENDED 和 error 不等待 frame。snapshot replace 仅在原子首帧发生，append/tick 不复制完整 bars；full test 中该用例与 1,892 项并行门禁共同通过。构建拆分后的 replay document entry 为 56,864 bytes，未把 352,066-byte live composition entry 引入 replay root。
+No-lookahead evidence: parser 拒绝 public cursor 之后的 bar/source/fill，HTTP session snapshot 只验证身份且不发布图表，首次图表真值只来自 WS atomic snapshot；页面网络边界测试从 document 起只允许 /api/v1/replay 与 /api/v1/stream/replay。真实浏览器 direct/configuring 为零 session/socket，disabled 只请求 capability，missing 只请求 capability/session；真实创建、step、reload 全程未出现 live Kline/market/orderbook/liquidation/watchlist/private-trading 请求。dataset key 必须同时绑定 replay source、session、data epoch 与 public timeline epoch；legacy live key 有 byte-for-byte 回归。
+Failure injection evidence: unknown/extra field、protocol/session/counter/hash/epoch 不一致、非 canonical Decimal/超 Number 容量、sequence gap、错 epoch、resync、旧 generation callback、首 snapshot 失败、missing/disabled/invalid/rewrite 均 fail closed；generation reset 清除 transient state。真实浏览器检查实际发现并修复两处边界：原生 fetch 被当作实例方法调用导致 Illegal invocation，以及 React StrictMode setup/cleanup/setup 提前终止复用 lifecycle；均新增回归。全量门禁还暴露既有 drawing CDP asset-quiescence 用 50ms 墙钟注入与 350ms 总期限的并行竞态，改为 wait 已同步开始后的微任务注入，保留 late-event 语义，定向连续 5 次和全量均通过。
+Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对初始 Phase 6 checkpoint 6bd9ef799dd03583a4ee2077bdd3099d68ed720f 执行 git revert --no-commit 后，working tree、index 相对父提交 9984cdb7b11098d58a2fcced742e9cf10787af41 均为 zero diff，untracked=0，index tree 与 parent tree 同为 b486cfa65e20d893d7e0734d31a056c1badd7c51；随后移除临时 worktree，并对 amend 后最终 checkpoint 再次执行同一演练。
+Known limitations: Phase 6 只交付隔离运行时与只读图表骨架；play/pause/speed/step/advance、订单/持仓/账本/报告、blind mode 可见 UI 和 live 页新窗口入口属于 Phase 7。后端仍只有 BAR，AGG_TRADE 保持 ARCHIVE_DISABLED；默认 VITE_REPLAY_ENTRY_ENABLED=0/REPLAY_ENABLED=0。真实联调使用的 backend/data/replay-dev 本地 SQLite 在线快照不进入提交，留作后续 Phase 本机证据。Vite 仍有既有 >500 kB 共享 chunk warning；开发模式 console 有 favicon 404/CSS warning，但产品 JS error、unhandled rejection 和失败网络请求均为零。
 Decision: PASS
 ```

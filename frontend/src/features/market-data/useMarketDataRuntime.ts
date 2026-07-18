@@ -6,14 +6,12 @@ import { useKlineStreamRuntime } from "./useKlineStreamRuntime.js";
 import type { KlineWebSocketStatus } from "./useKlineStreamRuntime.js";
 import { useChartBackgroundPrefetch } from "./useChartBackgroundPrefetch.js";
 import { useChartDataRuntime } from "./useChartDataRuntime.js";
-import type { ChartDataCommitMeta } from "./useChartDataRuntime.js";
 import { buildChartDisplayState } from "./marketDataView.js";
 import type { MarketDisplayData } from "./marketDataView.js";
 import { publishCrosshairData } from "./crosshairDisplayStore.js";
 import { requestIndicatorRangeForWindowMeta } from "./indicatorRangeRuntime.js";
 import { useChartInitialLoad } from "./useChartInitialLoad.js";
 import { useChartLoadMoreLeft } from "./useChartLoadMoreLeft.js";
-import type { LoadMoreLeft } from "./useChartLoadMoreLeft.js";
 import { useSessionTransitionReset } from "./useSessionTransitionReset.js";
 import { INDICATOR_RANGE_REQUEST_REASONS, useMarketDataEvents } from "./marketDataEvents.js";
 import { defaultKlineApi } from "./feed/klineApi.js";
@@ -25,44 +23,14 @@ import type {
 import type { KlineBar } from "./marketDataTypes.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
+import type { MarketDataRuntimeContract } from "./marketDataRuntimeContract.js";
 
 export interface UseMarketDataRuntimeOptions {
   session: ChartSessionRuntime;
   realtimePriceRef: MutableRefObject<number | null>;
 }
 
-export interface MarketDataRuntime {
-  view: {
-    bars: KlineBar[];
-    seriesStore: ReturnType<typeof useChartDataRuntime>["activeSeriesStore"];
-    meta: ChartDataCommitMeta;
-    loading: boolean;
-    error: unknown | null;
-    crosshairData: null;
-    lastPrice: KlineBar | null;
-    connectionStatus: string;
-    dataSource: string | null;
-    wsStatus: KlineWebSocketStatus;
-    display: ReturnType<typeof buildChartDisplayState>;
-  };
-  actions: {
-    retry(): void;
-    loadMoreLeft: LoadMoreLeft;
-    onCrosshairMove: typeof publishCrosshairData;
-    onVisibleRangeChange(range: unknown): void;
-    consumeIndicatorRangeRequest(requestId: number): void;
-  };
-  status: {
-    hasMoreLeft: boolean;
-    loadingMoreLeft: boolean;
-    activeChartReady: boolean;
-    canLoadMoreLeft: boolean;
-    barCount: number;
-    cacheDiagnostics: ReturnType<typeof useChartDataRuntime>["getCacheDiagnostics"];
-    trimCacheEntries: ReturnType<typeof useChartDataRuntime>["trimCacheEntries"];
-    indicatorRangeRequests: IndicatorRangeEvent[];
-  };
-}
+export type MarketDataRuntime = MarketDataRuntimeContract;
 
 export function useMarketDataRuntime({
   session,

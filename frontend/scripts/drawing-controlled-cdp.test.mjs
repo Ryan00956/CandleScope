@@ -4326,7 +4326,10 @@ test("asset quiescence fails closed for late unmanifested or unfinished requests
 
   const late = await makeFixture(350);
   const waitingForQuiet = late.tracker.waitForComplete();
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // waitForComplete enters its first quiet-window wait synchronously. Yield once
+  // so the resource is still observed after waiting starts without racing the
+  // fixture's short wall-clock deadline under a loaded parallel test run.
+  await Promise.resolve();
   await late.cdp.emit("Network.requestWillBeSent", {
     requestId: "late-evil",
     frameId: "main-frame",

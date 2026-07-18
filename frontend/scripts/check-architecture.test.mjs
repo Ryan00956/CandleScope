@@ -465,3 +465,38 @@ test("ReplayApp permits erased type imports from shared contracts", (t) => {
 
   assert.deepEqual(result, { ok: true, violations: [] });
 });
+
+test("replay entry graph rejects live and private imports hidden behind a helper", (t) => {
+  const result = runArchitectureFixture(t, {
+    "src/replay-main.tsx": `
+      import { replayBridge } from "./chart-adapter/replayBridge.js";
+      void replayBridge;
+    `,
+    "src/chart-adapter/replayBridge.ts": `
+      import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
+      import { submitSignedOrder } from "../services/private-trading.js";
+      export const replayBridge = [useMarketDataRuntime, submitSignedOrder];
+    `,
+    "src/features/market-data/useMarketDataRuntime.ts": `
+      export const useMarketDataRuntime = () => null;
+    `,
+    "src/services/private-trading.ts": `
+      export const submitSignedOrder = () => null;
+    `,
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(
+    result.violations.map(({ rule, filePath }) => ({ rule, filePath })),
+    [
+      {
+        rule: "replay-app-no-live-runtime-import",
+        filePath: "src/replay-main.tsx",
+      },
+      {
+        rule: "replay-app-no-private-trading-import",
+        filePath: "src/replay-main.tsx",
+      },
+    ],
+  );
+});

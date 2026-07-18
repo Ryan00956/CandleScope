@@ -96,6 +96,8 @@ export type ReplayDecimalString = string;
 export type ReplayTimestampMs = number;
 export type ReplayRevision = number;
 export type ReplaySequence = number;
+export type ReplayDigest = `sha256:${string}`;
+export type ReplaySpeed = 1 | 5 | 15 | 30 | 60 | 120 | 300 | 600 | "MAX";
 export type ReplayJson =
   | null
   | boolean
@@ -167,3 +169,299 @@ export interface ReplayEventEnvelope {
   readonly data_epoch: `sha256:${string}`;
   readonly data: Readonly<Record<string, ReplayJson>>;
 }
+
+export interface ReplayErrorPayload {
+  readonly code: ReplayErrorCode;
+  readonly message: string;
+  readonly details: Readonly<Record<string, ReplayJson>>;
+}
+
+export interface ReplayErrorEnvelope {
+  readonly protocol: typeof REPLAY_PROTOCOL;
+  readonly error: ReplayErrorPayload;
+}
+
+export interface ReplaySourceCapability {
+  readonly enabled: boolean;
+  readonly fidelity?: ReplayDataFidelity;
+  readonly reason?: string;
+}
+
+export interface ReplayCapabilities {
+  readonly protocol: typeof REPLAY_PROTOCOL;
+  readonly enabled: boolean;
+  readonly available: boolean;
+  readonly reason?: ReplayErrorCode;
+  readonly sources: Readonly<Record<ReplaySourceKind, ReplaySourceCapability>>;
+  readonly execution_models: readonly ReplayExecutionModel[];
+  readonly limits: {
+    readonly max_active_sessions: number;
+    readonly max_warmup_bars: number;
+    readonly max_bar_dataset_rows: number;
+    readonly max_horizon_days: number;
+    readonly event_buffer_size: number;
+    readonly subscriber_queue: number;
+  };
+  readonly persistence: {
+    readonly opened?: boolean;
+    readonly schema_version: number | null;
+    readonly degraded: boolean;
+    readonly degraded_reason: string | null;
+  };
+}
+
+export interface ReplaySeriesIdentity {
+  readonly exchange: string;
+  readonly market_type: string;
+  readonly symbol: string;
+}
+
+export interface ReplayCatalogEntry {
+  readonly identity: ReplaySeriesIdentity;
+  readonly base_intervals: readonly string[];
+  readonly selected_base_interval: string | null;
+  readonly bounds: Readonly<Record<string, ReplayJson>> | null;
+  readonly gap_summary?: Readonly<Record<string, ReplayJson>>;
+  readonly eligible_ranges: readonly Readonly<Record<string, ReplayJson>>[];
+  readonly eligible_window_count: number;
+  readonly quality: ReplayDataFidelity | null;
+  readonly source_fingerprint?: ReplayDigest;
+  readonly catalog_epoch: ReplayDigest;
+  readonly limitations: readonly string[];
+}
+
+export interface ReplayCatalog {
+  readonly protocol: typeof REPLAY_PROTOCOL;
+  readonly catalog_epoch: ReplayDigest;
+  readonly warmup_bars: number;
+  readonly horizon_ms: ReplayTimestampMs;
+  readonly quality_mode: ReplayQualityMode;
+  readonly blind_mode: boolean;
+  readonly entries: readonly ReplayCatalogEntry[];
+}
+
+export interface ReplayDisplayBar {
+  readonly open_time_ms: ReplayTimestampMs;
+  readonly close_time_ms: ReplayTimestampMs;
+  readonly open: ReplayDecimalString;
+  readonly high: ReplayDecimalString;
+  readonly low: ReplayDecimalString;
+  readonly close: ReplayDecimalString;
+  readonly volume: ReplayDecimalString;
+  readonly quote_volume: ReplayDecimalString | null;
+  readonly trades: number | null;
+  readonly taker_buy_base: ReplayDecimalString | null;
+  readonly taker_buy_quote: ReplayDecimalString | null;
+  readonly first_base_open_ms: ReplayTimestampMs;
+  readonly last_base_open_ms: ReplayTimestampMs;
+  readonly component_count: number;
+  readonly expected_components: number;
+  readonly is_closed: boolean;
+  readonly synthetic: boolean;
+}
+
+export interface ReplaySourceBar {
+  readonly open_time_ms: ReplayTimestampMs;
+  readonly close_time_ms: ReplayTimestampMs;
+  readonly open: ReplayDecimalString;
+  readonly high: ReplayDecimalString;
+  readonly low: ReplayDecimalString;
+  readonly close: ReplayDecimalString;
+  readonly volume: ReplayDecimalString;
+  readonly quote_volume: ReplayDecimalString | null;
+  readonly trades: number | null;
+  readonly taker_buy_base: ReplayDecimalString | null;
+  readonly taker_buy_quote: ReplayDecimalString | null;
+  readonly source: string;
+}
+
+export interface ReplayBarUpdate {
+  readonly action: "append" | "tick";
+  readonly bar: ReplayDisplayBar;
+  readonly source_sequence: ReplaySequence;
+  readonly base_open_time_ms: ReplayTimestampMs;
+  readonly gap_policy: string;
+  readonly synthetic_policy: string;
+}
+
+export interface ReplayOrder {
+  readonly order_id: string;
+  readonly client_order_id: string;
+  readonly side: string;
+  readonly order_type: string;
+  readonly quantity: ReplayDecimalString;
+  readonly reduce_only: boolean;
+  readonly limit_price: ReplayDecimalString | null;
+  readonly stop_price: ReplayDecimalString | null;
+  readonly status: string;
+  readonly filled_quantity: ReplayDecimalString;
+  readonly remaining_quantity: ReplayDecimalString;
+  readonly average_fill_price: ReplayDecimalString | null;
+  readonly accepted_source_sequence: ReplaySequence;
+  readonly created_time_ms: ReplayTimestampMs;
+  readonly ordinal: number;
+  readonly reserved_margin: ReplayDecimalString;
+  readonly status_reason: string | null;
+  readonly status_history: readonly string[];
+  readonly model_version: string;
+}
+
+export interface ReplayFill {
+  readonly fill_id: string;
+  readonly order_id: string;
+  readonly side: string;
+  readonly quantity: ReplayDecimalString;
+  readonly price: ReplayDecimalString;
+  readonly notional: ReplayDecimalString;
+  readonly fee: ReplayDecimalString;
+  readonly fee_asset: string;
+  readonly liquidity: string;
+  readonly reason: string;
+  readonly source_sequence: ReplaySequence;
+  readonly event_time_ms: ReplayTimestampMs;
+  readonly synthetic: boolean;
+  readonly historical_execution: boolean;
+  readonly model_version: string;
+}
+
+export interface ReplayWarning {
+  readonly warning_id: string;
+  readonly code: string;
+  readonly source_sequence: ReplaySequence;
+  readonly order_ids: readonly string[];
+  readonly message: string;
+}
+
+export interface ReplayPosition {
+  readonly quantity: ReplayDecimalString;
+  readonly entry_price: ReplayDecimalString | null;
+  readonly mark_price: ReplayDecimalString;
+  readonly notional: ReplayDecimalString;
+  readonly realized_pnl: ReplayDecimalString;
+  readonly unrealized_pnl: ReplayDecimalString;
+}
+
+export interface ReplayAccount {
+  readonly cash_balance: ReplayDecimalString;
+  readonly equity: ReplayDecimalString;
+  readonly available_equity: ReplayDecimalString;
+  readonly margin_used: ReplayDecimalString;
+  readonly reserved_margin: ReplayDecimalString;
+  readonly realized_pnl: ReplayDecimalString;
+  readonly unrealized_pnl: ReplayDecimalString;
+  readonly fees_paid: ReplayDecimalString;
+  readonly quote_asset: string;
+}
+
+export interface ReplayProjection {
+  readonly bar_update: ReplayBarUpdate | null;
+  readonly orders: readonly ReplayOrder[];
+  readonly fills: readonly ReplayFill[];
+  readonly warnings: readonly ReplayWarning[];
+  readonly position: ReplayPosition;
+  readonly account: ReplayAccount;
+}
+
+export interface ReplayJournalEntry {
+  readonly entry_id: string;
+  readonly virtual_time_ms: ReplayTimestampMs;
+  readonly text: string;
+}
+
+export interface ReplayBarBuilderSnapshot {
+  readonly schema_version: string;
+  readonly base_interval: string;
+  readonly display_interval: string;
+  readonly base_interval_ms: number;
+  readonly display_interval_ms: number;
+  readonly replay_start_ms: ReplayTimestampMs;
+  readonly max_closed_bars: number;
+  readonly warmup_count: number;
+  readonly warmup_fingerprint: ReplayDigest;
+  readonly gap_policy: string;
+  readonly synthetic_policy: string;
+  readonly replay_events_applied: number;
+  readonly last_base_open_ms: ReplayTimestampMs | null;
+  readonly active_bar: ReplayDisplayBar | null;
+  readonly closed_bars: readonly ReplayDisplayBar[];
+  readonly closed_count: number;
+  readonly closed_prefix_count: number;
+  readonly closed_prefix_hash: ReplayDigest;
+  readonly closed_chain_hash: ReplayDigest;
+  readonly state_hash: ReplayDigest;
+}
+
+export interface ReplayBrokerSnapshot {
+  readonly schema_version: string;
+  readonly model_version: string;
+  readonly config_hash: ReplayDigest;
+  readonly bar_builder: ReplayBarBuilderSnapshot;
+  readonly orders: readonly ReplayOrder[];
+  readonly client_order_ids: readonly string[];
+  readonly fills: readonly ReplayFill[];
+  readonly closed_trades: readonly Readonly<Record<string, ReplayJson>>[];
+  readonly warnings: readonly ReplayWarning[];
+  readonly ledger: Readonly<Record<string, ReplayJson>>;
+  readonly position: ReplayPosition;
+  readonly account: ReplayAccount;
+  readonly next_order: number;
+  readonly next_fill: number;
+  readonly next_trade: number;
+  readonly next_warning: number;
+  readonly has_trading_activity: boolean;
+  readonly ended: boolean;
+  readonly equity_peak: ReplayDecimalString;
+  readonly max_drawdown: ReplayDecimalString;
+  readonly state_hash: ReplayDigest;
+}
+
+export interface ReplaySessionSnapshot {
+  readonly protocol: typeof REPLAY_PROTOCOL;
+  readonly session_id: string;
+  readonly state: ReplaySessionState;
+  readonly revision: ReplayRevision;
+  readonly sequence: ReplaySequence;
+  readonly cursor: ReplayCursor;
+  readonly state_hash: ReplayDigest;
+  readonly data_epoch: ReplayDigest;
+  readonly controller_client_id: string | null;
+  readonly speed: ReplaySpeed;
+  readonly checkpoint_count: number;
+  readonly status_reason: string;
+  readonly config: ReplaySessionConfig;
+  readonly components: ReplayBrokerSnapshot;
+  readonly journal: readonly ReplayJournalEntry[];
+  readonly revealed: boolean;
+  readonly degraded_reason: string | null;
+}
+
+export interface ReplaySessionResponse {
+  readonly protocol: typeof REPLAY_PROTOCOL;
+  readonly session_id: string;
+  readonly snapshot: ReplaySessionSnapshot;
+  readonly forked?: boolean;
+  readonly forked_from_session_id?: string;
+}
+
+export interface ReplayCommandResult {
+  readonly protocol: typeof REPLAY_PROTOCOL;
+  readonly session_id: string;
+  readonly command_id: string;
+  readonly revision: ReplayRevision;
+  readonly sequence: ReplaySequence;
+  readonly state: ReplaySessionState;
+  readonly state_hash: ReplayDigest;
+  readonly cursor: ReplayCursor;
+  readonly data: Readonly<Record<string, ReplayJson>>;
+}
+
+export type ReplayParsedEvent = Omit<ReplayEventEnvelope, "data"> & {
+  readonly data:
+    | { readonly reset: true; readonly snapshot: ReplaySessionSnapshot }
+    | { readonly state: ReplaySessionState; readonly reason: string; readonly speed: ReplaySpeed; readonly controller_client_id: string | null }
+    | { readonly source_sequence: ReplaySequence; readonly source_event: ReplaySourceBar; readonly projection: ReplayProjection }
+    | { readonly command_type: ReplayCommandType; readonly projection: ReplayProjection }
+    | ReplayJournalEntry
+    | { readonly reset: true; readonly reason: string }
+    | { readonly reason: string; readonly projection: ReplayProjection };
+};

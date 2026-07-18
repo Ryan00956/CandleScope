@@ -7,6 +7,7 @@ import type { ReplayStoreScheduler } from "../replayStore.js";
 import {
   BASE_TIME_MS,
   replayDeltaEvent,
+  replayEndedEvent,
   replayFill,
   replaySessionResponse,
 } from "./fixtures.js";
@@ -78,6 +79,18 @@ test("fills and paused state flush immediately", () => {
   assert.equal(store.getSnapshot().fills.length, 1);
   assert.equal(store.getSnapshot().uiFlushCount, before + 1);
   assert.equal(scheduler.tasks.size, 0);
+});
+
+test("ended event releases stale local controller ownership immediately", () => {
+  const store = new ReplayStore();
+  store.beginGeneration(1, { resetAuthoritativeState: true, connectionState: "connecting" });
+  store.applyAtomicSnapshot(1, parseReplaySessionResponse(replaySessionResponse({
+    controllerClientId: "browser-0001",
+  })).snapshot);
+  assert.equal(store.getSnapshot().controllerClientId, "browser-0001");
+  store.applyEvent(1, parseReplayEvent(replayEndedEvent()));
+  assert.equal(store.getSnapshot().state, "ENDED");
+  assert.equal(store.getSnapshot().controllerClientId, null);
 });
 
 test("generation reset clears transient state and rejects late callbacks", () => {

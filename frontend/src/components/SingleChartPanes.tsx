@@ -224,6 +224,8 @@ export interface SingleChartPanesProps {
   theme: string;
   customBg: string;
   timezone?: string;
+  timeFormatter?: ((timeSeconds: number) => string) | undefined;
+  tickMarkFormatter?: ((timeSeconds: number, tickMarkType: number) => string) | undefined;
   savedVisibleRange?: SavedVisibleRangeSnapshot | null;
   dataMeta?: ChartDataCommitMeta | null;
   onViewportRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
@@ -978,6 +980,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   theme,
   customBg,
   timezone = "Local",
+  timeFormatter,
+  tickMarkFormatter,
   savedVisibleRange = null,
   dataMeta = null,
   onViewportRangeChange = null,
@@ -1812,6 +1816,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       timezone,
       interval: intervalRef.current,
       showTimeScale: true,
+      ...(timeFormatter ? { timeFormatter } : {}),
+      ...(tickMarkFormatter ? { tickMarkFormatter } : {}),
     });
     options.layout = {
       ...options.layout,
@@ -2107,7 +2113,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
       }
     };
-  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, tickMarkFormatter, timeFormatter, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -2260,7 +2266,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const chart = chartRef.current;
     if (!chart) return;
     const applyAppearance = () => {
-      applyChartPaneAppearance(chart, { theme, customBg, timezone, interval });
+      applyChartPaneAppearance(chart, {
+        theme,
+        customBg,
+        timezone,
+        interval,
+        ...(timeFormatter ? { timeFormatter } : {}),
+        ...(tickMarkFormatter ? { tickMarkFormatter } : {}),
+      });
       chart.applyOptions({ layout: buildPaneLayoutOptions() });
       appliedAppearanceIntervalRef.current = interval;
       chartAdapter.notifyDrawingFrameInvalidation();
@@ -2331,7 +2344,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }
     });
     return () => cancelAnimationFrame(frameId);
-  }, [chartAdapter, customBg, interval, theme, timezone]);
+  }, [chartAdapter, customBg, interval, theme, tickMarkFormatter, timeFormatter, timezone]);
 
   useEffect(() => {
     const activeType = mainSeriesTypeRef.current || resolvedChartType;

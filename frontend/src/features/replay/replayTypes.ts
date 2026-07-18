@@ -324,6 +324,18 @@ export interface ReplayFill {
   readonly model_version: string;
 }
 
+export interface ReplayClosedTrade {
+  readonly trade_id: string;
+  readonly order_id: string;
+  readonly fill_id: string;
+  readonly side: string;
+  readonly quantity: ReplayDecimalString;
+  readonly entry_price: ReplayDecimalString;
+  readonly exit_price: ReplayDecimalString;
+  readonly realized_pnl: ReplayDecimalString;
+  readonly source_sequence: ReplaySequence;
+}
+
 export interface ReplayWarning {
   readonly warning_id: string;
   readonly code: string;
@@ -399,7 +411,7 @@ export interface ReplayBrokerSnapshot {
   readonly orders: readonly ReplayOrder[];
   readonly client_order_ids: readonly string[];
   readonly fills: readonly ReplayFill[];
-  readonly closed_trades: readonly Readonly<Record<string, ReplayJson>>[];
+  readonly closed_trades: readonly ReplayClosedTrade[];
   readonly warnings: readonly ReplayWarning[];
   readonly ledger: Readonly<Record<string, ReplayJson>>;
   readonly position: ReplayPosition;
@@ -413,6 +425,51 @@ export interface ReplayBrokerSnapshot {
   readonly equity_peak: ReplayDecimalString;
   readonly max_drawdown: ReplayDecimalString;
   readonly state_hash: ReplayDigest;
+}
+
+export interface ReplayBrokerReport {
+  readonly schema_version: string;
+  readonly config_hash: ReplayDigest;
+  readonly model_version: string;
+  readonly initial_equity: ReplayDecimalString;
+  readonly final_equity: ReplayDecimalString;
+  readonly realized_pnl: ReplayDecimalString;
+  readonly fees_paid: ReplayDecimalString;
+  readonly max_drawdown: ReplayDecimalString;
+  readonly trade_count: number;
+  readonly winning_trades: number;
+  readonly losing_trades: number;
+  readonly win_rate: ReplayDecimalString;
+  readonly average_win: ReplayDecimalString;
+  readonly average_loss: ReplayDecimalString;
+  readonly profit_factor: ReplayDecimalString | null;
+  readonly ambiguous_bar_count: number;
+  readonly order_count: number;
+  readonly fill_count: number;
+  readonly ledger_entry_count: number;
+  readonly ledger_tail_hash: ReplayDigest;
+  readonly state_hash: ReplayDigest;
+  readonly ended: boolean;
+  readonly orders: readonly ReplayOrder[];
+  readonly fills: readonly ReplayFill[];
+  readonly closed_trades: readonly ReplayClosedTrade[];
+  readonly warnings: readonly ReplayWarning[];
+  readonly report_hash: ReplayDigest;
+}
+
+export interface ReplayActualHistory {
+  readonly replay_start_ms: ReplayTimestampMs;
+  readonly replay_end_open_ms: ReplayTimestampMs;
+}
+
+export interface ReplayCommandTimelineEntry {
+  readonly command_id: string;
+  readonly type: ReplayCommandType;
+  readonly submitted_revision: ReplayRevision;
+  readonly acknowledged_revision: ReplayRevision | null;
+  readonly submitted_at_ms: number;
+  readonly status: "pending" | "acknowledged" | "rejected";
+  readonly error_code: string | null;
 }
 
 export interface ReplaySessionSnapshot {

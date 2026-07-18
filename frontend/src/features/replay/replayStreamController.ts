@@ -46,6 +46,9 @@ export interface ReplayStreamCallbacks {
 
 export interface ReplayStreamControllerOptions extends ReplayStreamCallbacks {
   sessionId: string;
+  clientInstanceId?: string;
+  shouldHeartbeat?: () => boolean;
+  heartbeatMs?: number;
   initialDataEpoch?: ReplayDigest;
   baseUrl?: string;
   socketFactory?: (url: string) => ReplayStreamSocket;
@@ -112,6 +115,7 @@ export class ReplayStreamController {
   private readonly maxConsecutiveProtocolFaults: number;
   private socket: ReplayStreamSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private generation = 0;
   private stopped = true;
   private reconnectAttempt = 0;
@@ -131,6 +135,13 @@ export class ReplayStreamController {
     this.timers = options.timers ?? defaultTimers;
     this.backoffMs = options.backoffMs ?? [250, 500, 1_000, 2_000, 4_000, 8_000];
     this.maxConsecutiveProtocolFaults = options.maxConsecutiveProtocolFaults ?? 3;
+    if (options.clientInstanceId !== undefined && !SESSION_ID.test(options.clientInstanceId)) {
+      throw new Error("invalid replay client instance id");
+    }
+    if (options.heartbeatMs !== undefined
+      && (!Number.isSafeInteger(options.heartbeatMs) || options.heartbeatMs < 250)) {
+      throw new Error("replay heartbeat interval must be an integer of at least 250ms");
+    }
     this.dataEpoch = options.initialDataEpoch;
   }
 
@@ -145,6 +156,7 @@ export class ReplayStreamController {
     this.stopped = true;
     this.pendingReason = null;
     this.cancelReconnect();
+    this.cancelHeartbeat();
     this.generation += 1;
     const socket = this.socket;
     this.socket = null;
@@ -177,6 +189,7 @@ export class ReplayStreamController {
       lastRevision: this.lastRevision,
       lastVirtualTimeMs: this.lastVirtualTimeMs,
       dataEpoch: this.dataEpoch ?? null,
+      heartbeatScheduled: this.heartbeatTimer !== null,
     };
   }
 
@@ -212,7 +225,9 @@ export class ReplayStreamController {
     const socket = this.socket;
     socket.onopen = () => {
       if (!this.isCurrent(generation, socket)) return;
-      this.setState("connected", generation);
+      // A TCP/WebSocket handshake is not an authoritative replay handshake.
+      // Keep commands gated until the first valid snapshot or contiguous
+      // catch-up event proves this generation has converged with the actor.
     };
     socket.onmessage = (event) => {
       if (!this.isCurrent(generation, socket)) return;
@@ -224,6 +239,7 @@ export class ReplayStreamController {
     };
     socket.onclose = () => {
       if (!this.isCurrent(generation, socket)) return;
+      this.cancelHeartbeat();
       this.socket = null;
       if (this.stopped) return;
       const nextReason = this.pendingReason ?? "reconnect";
@@ -285,6 +301,7 @@ export class ReplayStreamController {
       this.reconnectAttempt = 0;
       this.consecutiveProtocolFaults = 0;
       this.options.onSnapshot?.(snapshot, generation);
+      this.markTransportReady(generation, socket);
       return;
     }
     if (!this.hasAuthoritativeState || this.lastSequence === null) {
@@ -309,6 +326,7 @@ export class ReplayStreamController {
     this.reconnectAttempt = 0;
     this.consecutiveProtocolFaults = 0;
     this.options.onEvent?.(event, generation);
+    this.markTransportReady(generation, socket);
   }
 
   private protocolFault(message: string, generation: number, socket: ReplayStreamSocket, cause?: unknown): void {
@@ -326,6 +344,7 @@ export class ReplayStreamController {
 
   private beginResync(): void {
     if (this.stopped) return;
+    this.cancelHeartbeat();
     this.pendingReason = "resync";
     const socket = this.socket;
     if (socket) {
@@ -348,6 +367,7 @@ export class ReplayStreamController {
     this.stopped = true;
     this.pendingReason = null;
     this.cancelReconnect();
+    this.cancelHeartbeat();
     const socket = this.socket;
     this.socket = null;
     if (socket) {
@@ -377,6 +397,44 @@ export class ReplayStreamController {
     if (this.reconnectTimer === null) return;
     this.timers.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+  }
+
+  private scheduleHeartbeat(generation: number, socket: ReplayStreamSocket): void {
+    const clientInstanceId = this.options.clientInstanceId;
+    if (clientInstanceId === undefined || this.heartbeatTimer !== null) return;
+    const delayMs = this.options.heartbeatMs ?? 1_000;
+    this.heartbeatTimer = this.timers.setTimeout(() => {
+      this.heartbeatTimer = null;
+      if (!this.isCurrent(generation, socket)) return;
+      if (this.options.shouldHeartbeat?.() === true) {
+        try {
+          socket.send(JSON.stringify({
+            type: "replay.heartbeat",
+            protocol: "replay.v1",
+            client_instance_id: clientInstanceId,
+          }));
+        } catch (error) {
+          this.options.onError?.(new ReplayStreamError(
+            "REPLAY_TRANSPORT_ERROR",
+            "failed to send replay controller heartbeat",
+            { fatal: false, cause: error },
+          ), generation);
+        }
+      }
+      this.scheduleHeartbeat(generation, socket);
+    }, delayMs);
+  }
+
+  private markTransportReady(generation: number, socket: ReplayStreamSocket): void {
+    if (!this.isCurrent(generation, socket)) return;
+    if (this.state !== "connected") this.setState("connected", generation);
+    this.scheduleHeartbeat(generation, socket);
+  }
+
+  private cancelHeartbeat(): void {
+    if (this.heartbeatTimer === null) return;
+    this.timers.clearTimeout(this.heartbeatTimer);
+    this.heartbeatTimer = null;
   }
 
   private isCurrent(generation: number, socket: ReplayStreamSocket): boolean {

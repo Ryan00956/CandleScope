@@ -22,6 +22,7 @@ function AppShell({
   orderBook,
   exportFlow,
   alerts,
+  replayEntry,
 }: AppShellProps) {
   const model = useMemo(
     () => buildAppShellViewModel({
@@ -36,6 +37,7 @@ function AppShell({
       orderBook,
       exportFlow,
       alerts,
+      replayEntry,
     }),
     [
       session,
@@ -49,6 +51,7 @@ function AppShell({
       orderBook,
       exportFlow,
       alerts,
+      replayEntry,
     ],
   );
 

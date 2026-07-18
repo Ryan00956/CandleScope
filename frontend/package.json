@@ -21,6 +21,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "smoke": "tsx scripts/smoke.mjs",
+    "smoke:replay": "node scripts/replay-smoke.mjs",
     "smoke:chart-types": "tsx scripts/smoke.mjs --url http://127.0.0.1:15173/ --chart-type-matrix --no-seed-indicators",
     "smoke:export": "tsx scripts/smoke.mjs --url http://127.0.0.1:15173/ --export-matrix --drawing-check --overlay-heavy",
     "smoke:release": "tsx scripts/smoke.mjs --url http://127.0.0.1:15173/ --chart-type-matrix --export-matrix --drawing-check --overlay-heavy",

@@ -117,6 +117,38 @@ export function replayFill(eventTimeMs: number, fillId = "fill-0001") {
   };
 }
 
+export function replayReport() {
+  return {
+    schema_version: "replay-broker-report.v1",
+    config_hash: replayDigest("d"),
+    model_version: "BAR_CONSERVATIVE_V1",
+    initial_equity: "10000",
+    final_equity: "10000",
+    realized_pnl: "0",
+    fees_paid: "0",
+    max_drawdown: "0",
+    trade_count: 0,
+    winning_trades: 0,
+    losing_trades: 0,
+    win_rate: "0",
+    average_win: "0",
+    average_loss: "0",
+    profit_factor: null,
+    ambiguous_bar_count: 0,
+    order_count: 0,
+    fill_count: 0,
+    ledger_entry_count: 1,
+    ledger_tail_hash: replayDigest("6"),
+    state_hash: replayDigest("3"),
+    ended: true,
+    orders: [],
+    fills: [],
+    closed_trades: [],
+    warnings: [],
+    report_hash: replayDigest("7"),
+  };
+}
+
 export function replayProjection({
   barUpdate = null,
   fills = [],
@@ -140,19 +172,27 @@ export function replaySnapshot({
   sourceSequence = 0,
   dataEpoch = replayDigest("c"),
   virtualTimeMs = BASE_TIME_MS + 59_999,
+  controllerClientId = null,
+  state = "PAUSED",
+  revision = 0,
+  revealed = false,
 }: {
   sessionId?: string;
   sequence?: number;
   sourceSequence?: number;
   dataEpoch?: string;
   virtualTimeMs?: number;
+  controllerClientId?: string | null;
+  state?: string;
+  revision?: number;
+  revealed?: boolean;
 } = {}) {
   const bar = replayBar();
   return {
     protocol: REPLAY_PROTOCOL,
     session_id: sessionId,
-    state: "PAUSED",
-    revision: 0,
+    state,
+    revision,
     sequence,
     cursor: {
       virtual_time_ms: virtualTimeMs,
@@ -164,7 +204,7 @@ export function replaySnapshot({
     },
     state_hash: replayDigest("b"),
     data_epoch: dataEpoch,
-    controller_client_id: null,
+    controller_client_id: controllerClientId,
     speed: 1,
     checkpoint_count: 1,
     status_reason: "created",
@@ -214,7 +254,7 @@ export function replaySnapshot({
       state_hash: replayDigest("3"),
     },
     journal: [],
-    revealed: false,
+    revealed,
     degraded_reason: null,
   };
 }
@@ -307,6 +347,23 @@ export function replayStatusEvent({
       reason: "paused",
       speed: 1,
       controller_client_id: null,
+    },
+  };
+}
+
+export function replayEndedEvent({ sequence = 1 }: { sequence?: number } = {}) {
+  return {
+    type: "replay.ended",
+    protocol: REPLAY_PROTOCOL,
+    session_id: "session-0001",
+    sequence,
+    revision: 1,
+    virtual_time_ms: BASE_TIME_MS + 59_999,
+    state_hash: replayDigest("5"),
+    data_epoch: replayDigest("c"),
+    data: {
+      reason: "command",
+      projection: replayProjection(),
     },
   };
 }

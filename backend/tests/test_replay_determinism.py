@@ -16,7 +16,9 @@ from tests.fixtures.replay.actor_fakes import (
 )
 
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "replay" / "actor_determinism_v1.json"
+FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "replay" / "actor_determinism_v1.json"
+)
 
 
 def _async_test(function):
@@ -43,8 +45,13 @@ def _command(
     )
 
 
-def _actor(*, restore_checkpoint: bytes | None = None) -> ReplaySessionActor:
-    events = event_fixture(count=6, step_ms=1)
+def _actor(
+    *,
+    restore_checkpoint: bytes | None = None,
+    event_count: int = 6,
+    event_step_ms: int = 1,
+) -> ReplaySessionActor:
+    events = event_fixture(count=event_count, step_ms=event_step_ms)
     return ReplaySessionActor(
         session_id="session-determinism",
         config=session_config(),
@@ -104,10 +111,11 @@ async def _run_path(path: str) -> tuple[str, int, int]:
 
 
 @_async_test
-async def test_play_step_advance_and_checkpoint_restore_have_one_golden_state_hash() -> None:
+async def test_play_step_advance_and_checkpoint_restore_have_one_golden_state_hash() -> (
+    None
+):
     results = {
-        path: await _run_path(path)
-        for path in ("1x", "60x", "MAX", "step", "advance")
+        path: await _run_path(path) for path in ("1x", "60x", "MAX", "step", "advance")
     }
 
     prefix = _actor()
@@ -149,3 +157,40 @@ async def test_play_step_advance_and_checkpoint_restore_have_one_golden_state_ha
     assert results["MAX"][0] == fixture["state_hash"]
     assert results["MAX"][1] == fixture["virtual_time_ms"]
     assert results["MAX"][2] == fixture["source_sequence"]
+
+
+@_async_test
+async def test_advance_by_one_hour_matches_sixty_one_minute_steps() -> None:
+    async def run(path: str) -> tuple[str, int, int]:
+        actor = _actor(event_count=60, event_step_ms=60_000)
+        await actor.start()
+        await actor.submit(
+            _command(f"{path}-hour-acquire", CommandType.ACQUIRE_CONTROLLER, 0)
+        )
+        if path == "step":
+            await actor.submit(
+                _command("step-one-hour", CommandType.STEP, 1, {"count": 60})
+            )
+        else:
+            await actor.submit(
+                _command(
+                    "advance-one-hour",
+                    CommandType.ADVANCE_BY,
+                    1,
+                    {"ms": 60 * 60_000},
+                )
+            )
+        snapshot = await actor.snapshot()
+        result = (
+            snapshot.state_hash,
+            snapshot.cursor.virtual_time_ms,
+            snapshot.cursor.source_sequence,
+        )
+        await actor.shutdown()
+        return result
+
+    stepped = await run("step")
+    advanced = await run("advance")
+
+    assert stepped == advanced
+    assert stepped[1:] == (1_000 + 60 * 60_000, 60)

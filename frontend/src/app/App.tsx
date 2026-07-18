@@ -14,6 +14,7 @@ import { useWatchlistRuntime } from "../features/watchlist/useWatchlistRuntime";
 import { useOrderBookRuntime } from "../features/order-book/useOrderBookRuntime";
 import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime";
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime";
+import { useReplayEntryCapability } from "../features/replay/useReplayEntryCapability";
 import AppProviders from "./AppProviders";
 import AppShell from "./AppShell";
 import type {
@@ -25,6 +26,7 @@ import type {
 import "../index.css";
 
 export default function App() {
+  const replayEntry = useReplayEntryCapability();
   const chartSurface = useChartSurfaceRuntime();
   const pageExportRef = useRef<HTMLDivElement | null>(null);
   const realtimePriceRef = useRef<number | null>(null);
@@ -226,6 +228,7 @@ export default function App() {
         orderBook={orderBook}
         exportFlow={exportFlow}
         alerts={alertsRuntime}
+        replayEntry={replayEntry}
       />
     </AppProviders>
   );

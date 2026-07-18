@@ -1374,7 +1374,12 @@ class ReplaySessionActor:
                 if request.after_sequence is None
                 else self._events.after(request.after_sequence)
             )
-            reset = replay is None
+            # An empty catch-up has no frame that can prove the client has
+            # converged with this actor instance. This matters after process
+            # recovery because controller ownership is intentionally cleared
+            # without advancing the durable event sequence. Publish an atomic
+            # snapshot whenever there is nothing to replay.
+            reset = replay is None or not replay
             if reset:
                 snapshot = self._public_snapshot_value()
                 initial_events = (

@@ -3,6 +3,7 @@ import { applyReplayBarUpdate, latestReplayBar, replaceReplaySeriesFromSnapshot 
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type {
   ReplayAccount,
+  ReplayClosedTrade,
   ReplayDigest,
   ReplayFill,
   ReplayJournalEntry,
@@ -42,8 +43,12 @@ export interface ReplayStoreSnapshot {
   readonly dataEpoch: ReplayDigest | null;
   readonly speed: ReplaySpeed | null;
   readonly controllerClientId: string | null;
+  readonly cursorAtEnd: boolean;
+  readonly replayStartMs: number | null;
+  readonly revealed: boolean;
   readonly orders: readonly ReplayOrder[];
   readonly fills: readonly ReplayFill[];
+  readonly closedTrades: readonly ReplayClosedTrade[];
   readonly warnings: readonly ReplayWarning[];
   readonly position: ReplayPosition | null;
   readonly account: ReplayAccount | null;
@@ -97,8 +102,12 @@ export class ReplayStore {
   private dataEpoch: ReplayDigest | null = null;
   private speed: ReplaySpeed | null = null;
   private controllerClientId: string | null = null;
+  private cursorAtEnd = false;
+  private replayStartMs: number | null = null;
+  private revealed = false;
   private ordersById = new Map<string, ReplayOrder>();
   private fillsById = new Map<string, ReplayFill>();
+  private closedTradesById = new Map<string, ReplayClosedTrade>();
   private warningsById = new Map<string, ReplayWarning>();
   private position: ReplayPosition | null = null;
   private account: ReplayAccount | null = null;
@@ -159,8 +168,12 @@ export class ReplayStore {
     this.dataEpoch = snapshot.data_epoch;
     this.speed = snapshot.speed;
     this.controllerClientId = snapshot.controller_client_id;
+    this.cursorAtEnd = snapshot.cursor.at_end;
+    this.replayStartMs = snapshot.components.bar_builder.replay_start_ms;
+    this.revealed = snapshot.revealed;
     this.ordersById = new Map(snapshot.components.orders.map((order) => [order.order_id, order]));
     this.fillsById = new Map(snapshot.components.fills.map((fill) => [fill.fill_id, fill]));
+    this.closedTradesById = new Map(snapshot.components.closed_trades.map((trade) => [trade.trade_id, trade]));
     this.warningsById = new Map(snapshot.components.warnings.map((warning) => [warning.warning_id, warning]));
     this.position = snapshot.components.position;
     this.account = snapshot.components.account;
@@ -200,6 +213,7 @@ export class ReplayStore {
       this.statusReason = data.reason;
       this.speed = data.speed;
       this.controllerClientId = data.controller_client_id;
+      if (data.reason === "history_revealed") this.revealed = true;
       mandatory = data.state === "PAUSED" || data.state === "ENDED" || data.state === "ERROR";
     } else if (event.type === "replay.journal") {
       const entry = event.data as ReplayJournalEntry;
@@ -209,6 +223,8 @@ export class ReplayStore {
       const projection = projectionFromEvent(event);
       if (projection) this.applyProjection(projection, event.virtual_time_ms);
       this.state = "ENDED";
+      this.controllerClientId = null;
+      this.cursorAtEnd = true;
       this.statusReason = (event.data as { reason: string }).reason;
       mandatory = true;
     }
@@ -229,6 +245,13 @@ export class ReplayStore {
     if (generation !== this.generation || this.error === null) return;
     this.error = null;
     this.flushNow();
+  }
+
+  replaceJournal(generation: number, entries: readonly ReplayJournalEntry[]): boolean {
+    if (generation !== this.generation || !this.hasAuthoritativeSnapshot) return false;
+    this.journal = [...entries];
+    this.flushNow();
+    return true;
   }
 
   setCrosshairData(value: unknown): void {
@@ -295,8 +318,12 @@ export class ReplayStore {
     this.dataEpoch = null;
     this.speed = null;
     this.controllerClientId = null;
+    this.cursorAtEnd = false;
+    this.replayStartMs = null;
+    this.revealed = false;
     this.ordersById.clear();
     this.fillsById.clear();
+    this.closedTradesById.clear();
     this.warningsById.clear();
     this.position = null;
     this.account = null;
@@ -350,8 +377,12 @@ export class ReplayStore {
       dataEpoch: this.dataEpoch,
       speed: this.speed,
       controllerClientId: this.controllerClientId,
+      cursorAtEnd: this.cursorAtEnd,
+      replayStartMs: this.replayStartMs,
+      revealed: this.revealed,
       orders: [...this.ordersById.values()].sort((left, right) => left.ordinal - right.ordinal),
       fills: [...this.fillsById.values()],
+      closedTrades: [...this.closedTradesById.values()],
       warnings: [...this.warningsById.values()],
       position: this.position,
       account: this.account,

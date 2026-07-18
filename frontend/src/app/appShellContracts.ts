@@ -10,6 +10,7 @@ import type { AdvancedMarketRuntime } from "../features/advanced-market-data/adv
 import type { ChartSettings } from "../features/settings/chartAppearanceSettings.js";
 import type { WatchlistRuntime } from "../features/watchlist/useWatchlistRuntime.js";
 import type { OrderBookRuntime } from "../features/order-book/orderBookTypes.js";
+import type { ReplayEntryCapabilityView } from "../features/replay/useReplayEntryCapability.js";
 import type { ChartWorkspaceProps } from "./ChartWorkspace.js";
 import type { LazyFeatureSurfaceModels } from "./LazyFeatureSurfaces.js";
 import type { StatusBarModel } from "./StatusBar.js";
@@ -73,6 +74,7 @@ export interface AppShellRuntimeInputs {
   orderBook: OrderBookRuntime;
   exportFlow: ExportRuntime;
   alerts: AlertsShellRuntime;
+  replayEntry: ReplayEntryCapabilityView;
 }
 
 export interface AppShellViewModelContext {
@@ -107,6 +109,7 @@ export interface AppShellViewModelContext {
   alertsActions: AlertsShellRuntime["actions"];
   marketDisplay: MarketDataRuntimeContract["view"]["display"];
   displayData: MarketDataRuntimeContract["view"]["display"]["displayData"];
+  replayEntry: ReplayEntryCapabilityView;
 }
 
 export interface AppShellViewModel {

@@ -39,6 +39,14 @@ class FakeTimers implements ReplayStreamTimers {
       next[1].callback();
     }
   }
+
+
+  runNext(): void {
+    const next = [...this.tasks.entries()].sort(([left], [right]) => left - right)[0];
+    if (!next) return;
+    this.tasks.delete(next[0]);
+    next[1].callback();
+  }
 }
 
 class FakeSocket implements ReplayStreamSocket {
@@ -89,6 +97,7 @@ test("controller publishes atomic snapshot then reconnects with after_sequence a
   const snapshots: number[] = [];
   const events: number[] = [];
   const generations: number[] = [];
+  const states: string[] = [];
   const controller = new ReplayStreamController({
     sessionId: "session-0001",
     initialDataEpoch: replayDigest("c"),
@@ -101,13 +110,16 @@ test("controller publishes atomic snapshot then reconnects with after_sequence a
       return socket;
     },
     onGeneration: ({ generation }) => generations.push(generation),
+    onState: (state) => states.push(state),
     onSnapshot: (snapshot) => snapshots.push(snapshot.sequence),
     onEvent: (event) => events.push(event.sequence),
   });
 
   controller.start();
   sockets[0]?.open();
+  assert.deepEqual(states, ["connecting"]);
   sockets[0]?.message(replaySnapshotEvent());
+  assert.equal(states.at(-1), "connected");
   assert.deepEqual(snapshots, [0]);
   const staleHandler = sockets[0]?.onmessage;
   sockets[0]?.close();
@@ -116,7 +128,9 @@ test("controller publishes atomic snapshot then reconnects with after_sequence a
   assert.match(urls[1] ?? "", /after_sequence=0/);
   assert.match(urls[1] ?? "", /data_epoch=sha256%3A/);
   sockets[1]?.open();
+  assert.equal(states.at(-1), "reconnecting");
   sockets[1]?.message(replayStatusEvent({ sequence: 1 }));
+  assert.equal(states.at(-1), "connected");
   assert.deepEqual(events, [1]);
   staleHandler?.({ data: JSON.stringify(replayStatusEvent({ sequence: 2 })) } as MessageEvent<string>);
   assert.deepEqual(events, [1]);
@@ -179,4 +193,35 @@ test("wrong data epoch is fatal and never falls through to best-effort events", 
   assert.deepEqual(events, []);
   assert.ok(errors.some((error) => error.code === "DATASET_MISMATCH" && error.fatal));
   assert.equal(sockets.length, 1);
+});
+
+test("controller heartbeat is exact, ownership-gated, and canceled on stop", () => {
+  const timers = new FakeTimers();
+  const socket = new FakeSocket();
+  let ownsController = false;
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    clientInstanceId: "browser-0001",
+    shouldHeartbeat: () => ownsController,
+    heartbeatMs: 500,
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => socket,
+  });
+  controller.start();
+  socket.open();
+  assert.equal(timers.tasks.size, 0);
+  socket.message(replaySnapshotEvent());
+  assert.equal([...timers.tasks.values()][0]?.delay, 500);
+  timers.runNext();
+  assert.deepEqual(socket.sent, []);
+  ownsController = true;
+  timers.runNext();
+  assert.deepEqual(socket.sent.map((payload): unknown => JSON.parse(payload) as unknown), [{
+    type: "replay.heartbeat",
+    protocol: "replay.v1",
+    client_instance_id: "browser-0001",
+  }]);
+  controller.stop();
+  assert.equal(timers.tasks.size, 0);
 });

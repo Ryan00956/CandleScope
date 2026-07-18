@@ -14,11 +14,13 @@ import type {
   ReplayBarBuilderSnapshot,
   ReplayBarUpdate,
   ReplayBrokerSnapshot,
+  ReplayBrokerReport,
   ReplayCapabilities,
   ReplayCatalog,
   ReplayCatalogEntry,
   ReplayCommandResult,
   ReplayCommandType,
+  ReplayClosedTrade,
   ReplayCursor,
   ReplayDecimalString,
   ReplayDigest,
@@ -367,6 +369,25 @@ function parseFill(value: unknown, path: string): ReplayFill {
   };
 }
 
+function parseClosedTrade(value: unknown, path: string): ReplayClosedTrade {
+  const source = record(value, path);
+  exact(source, [
+    "trade_id", "order_id", "fill_id", "side", "quantity", "entry_price",
+    "exit_price", "realized_pnl", "source_sequence",
+  ], path);
+  return {
+    trade_id: identifier(source.trade_id, `${path}.trade_id`),
+    order_id: identifier(source.order_id, `${path}.order_id`),
+    fill_id: identifier(source.fill_id, `${path}.fill_id`),
+    side: string(source.side, `${path}.side`),
+    quantity: parseReplayDecimal(source.quantity, `${path}.quantity`),
+    entry_price: parseReplayDecimal(source.entry_price, `${path}.entry_price`),
+    exit_price: parseReplayDecimal(source.exit_price, `${path}.exit_price`),
+    realized_pnl: parseReplayDecimal(source.realized_pnl, `${path}.realized_pnl`),
+    source_sequence: integer(source.source_sequence, `${path}.source_sequence`),
+  };
+}
+
 function parseWarning(value: unknown, path: string): ReplayWarning {
   const source = record(value, path);
   exact(source, ["warning_id", "code", "source_sequence", "order_ids", "message"], path);
@@ -485,7 +506,7 @@ function parseBrokerSnapshot(value: unknown, path: string): ReplayBrokerSnapshot
     orders: array(source.orders, `${path}.orders`, parseOrder),
     client_order_ids: array(source.client_order_ids, `${path}.client_order_ids`, identifier),
     fills: array(source.fills, `${path}.fills`, parseFill),
-    closed_trades: array(source.closed_trades, `${path}.closed_trades`, jsonRecord),
+    closed_trades: array(source.closed_trades, `${path}.closed_trades`, parseClosedTrade),
     warnings: array(source.warnings, `${path}.warnings`, parseWarning),
     ledger: jsonRecord(source.ledger, `${path}.ledger`),
     position: parsePosition(source.position, `${path}.position`),
@@ -842,11 +863,61 @@ export function parseReplayJournalResponse(value: unknown, path = "$"): ReplayJo
 export interface ReplayReportResponse {
   readonly protocol: typeof REPLAY_PROTOCOL;
   readonly session_id: string;
-  readonly data_fidelity: string;
-  readonly execution_fidelity: string;
+  readonly data_fidelity: "EXACT_BAR_COVERAGE" | "EXACT_AGG_TRADE_COVERAGE" | "BEST_EFFORT";
+  readonly execution_fidelity: "BAR_CONSERVATIVE" | "AGG_TRADE_TAPE";
   readonly revealed: boolean;
-  readonly report: Readonly<Record<string, ReplayJson>>;
+  readonly report: ReplayBrokerReport;
   readonly actual_history?: { readonly replay_start_ms: number; readonly replay_end_open_ms: number };
+}
+
+function parseBrokerReport(value: unknown, path: string): ReplayBrokerReport {
+  const source = record(value, path);
+  exact(source, [
+    "schema_version", "config_hash", "model_version", "initial_equity", "final_equity",
+    "realized_pnl", "fees_paid", "max_drawdown", "trade_count", "winning_trades",
+    "losing_trades", "win_rate", "average_win", "average_loss", "profit_factor",
+    "ambiguous_bar_count", "order_count", "fill_count", "ledger_entry_count",
+    "ledger_tail_hash", "state_hash", "ended", "orders", "fills", "closed_trades",
+    "warnings", "report_hash",
+  ], path);
+  const report: ReplayBrokerReport = {
+    schema_version: string(source.schema_version, `${path}.schema_version`),
+    config_hash: digest(source.config_hash, `${path}.config_hash`),
+    model_version: string(source.model_version, `${path}.model_version`),
+    initial_equity: parseReplayDecimal(source.initial_equity, `${path}.initial_equity`),
+    final_equity: parseReplayDecimal(source.final_equity, `${path}.final_equity`),
+    realized_pnl: parseReplayDecimal(source.realized_pnl, `${path}.realized_pnl`),
+    fees_paid: parseReplayDecimal(source.fees_paid, `${path}.fees_paid`),
+    max_drawdown: parseReplayDecimal(source.max_drawdown, `${path}.max_drawdown`),
+    trade_count: integer(source.trade_count, `${path}.trade_count`),
+    winning_trades: integer(source.winning_trades, `${path}.winning_trades`),
+    losing_trades: integer(source.losing_trades, `${path}.losing_trades`),
+    win_rate: parseReplayDecimal(source.win_rate, `${path}.win_rate`),
+    average_win: parseReplayDecimal(source.average_win, `${path}.average_win`),
+    average_loss: parseReplayDecimal(source.average_loss, `${path}.average_loss`),
+    profit_factor: nullableDecimal(source.profit_factor, `${path}.profit_factor`),
+    ambiguous_bar_count: integer(source.ambiguous_bar_count, `${path}.ambiguous_bar_count`),
+    order_count: integer(source.order_count, `${path}.order_count`),
+    fill_count: integer(source.fill_count, `${path}.fill_count`),
+    ledger_entry_count: integer(source.ledger_entry_count, `${path}.ledger_entry_count`),
+    ledger_tail_hash: digest(source.ledger_tail_hash, `${path}.ledger_tail_hash`),
+    state_hash: digest(source.state_hash, `${path}.state_hash`),
+    ended: bool(source.ended, `${path}.ended`),
+    orders: array(source.orders, `${path}.orders`, parseOrder),
+    fills: array(source.fills, `${path}.fills`, parseFill),
+    closed_trades: array(source.closed_trades, `${path}.closed_trades`, parseClosedTrade),
+    warnings: array(source.warnings, `${path}.warnings`, parseWarning),
+    report_hash: digest(source.report_hash, `${path}.report_hash`),
+  };
+  if (report.winning_trades + report.losing_trades > report.trade_count) {
+    fail(path, "winning and losing trades exceed trade_count");
+  }
+  if (report.orders.length !== report.order_count
+    || report.fills.length !== report.fill_count
+    || report.closed_trades.length !== report.trade_count) {
+    fail(path, "report record counts do not reconcile");
+  }
+  return report;
 }
 
 export function parseReplayReportResponse(value: unknown, path = "$"): ReplayReportResponse {
@@ -854,6 +925,12 @@ export function parseReplayReportResponse(value: unknown, path = "$"): ReplayRep
   const hasActual = Object.hasOwn(source, "actual_history");
   exact(source, ["protocol", "session_id", "data_fidelity", "execution_fidelity", "revealed", "report", ...(hasActual ? ["actual_history"] : [])], path);
   if (source.protocol !== REPLAY_PROTOCOL) fail(`${path}.protocol`, `expected ${REPLAY_PROTOCOL}`);
+  const revealed = bool(source.revealed, `${path}.revealed`);
+  if (hasActual !== revealed) {
+    fail(path, revealed
+      ? "revealed report must include actual_history"
+      : "unrevealed report cannot include actual_history");
+  }
   let actualHistory: ReplayReportResponse["actual_history"];
   if (hasActual) {
     const actual = record(source.actual_history, `${path}.actual_history`);
@@ -862,14 +939,17 @@ export function parseReplayReportResponse(value: unknown, path = "$"): ReplayRep
       replay_start_ms: timestamp(actual.replay_start_ms, `${path}.actual_history.replay_start_ms`),
       replay_end_open_ms: timestamp(actual.replay_end_open_ms, `${path}.actual_history.replay_end_open_ms`),
     };
+    if (actualHistory.replay_end_open_ms < actualHistory.replay_start_ms) {
+      fail(`${path}.actual_history`, "replay end cannot precede replay start");
+    }
   }
   return {
     protocol: REPLAY_PROTOCOL,
     session_id: identifier(source.session_id, `${path}.session_id`),
-    data_fidelity: string(source.data_fidelity, `${path}.data_fidelity`),
-    execution_fidelity: string(source.execution_fidelity, `${path}.execution_fidelity`),
-    revealed: bool(source.revealed, `${path}.revealed`),
-    report: jsonRecord(source.report, `${path}.report`),
+    data_fidelity: enumeration(source.data_fidelity, REPLAY_DATA_FIDELITIES, `${path}.data_fidelity`),
+    execution_fidelity: enumeration(source.execution_fidelity, ["BAR_CONSERVATIVE", "AGG_TRADE_TAPE"] as const, `${path}.execution_fidelity`),
+    revealed,
+    report: parseBrokerReport(source.report, `${path}.report`),
     ...(actualHistory ? { actual_history: actualHistory } : {}),
   };
 }

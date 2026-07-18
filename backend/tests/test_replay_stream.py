@@ -89,6 +89,9 @@ async def test_actor_subscription_is_atomic_resumable_and_bounded() -> None:
         after_sequence=reacquired.sequence,
         max_pending=1,
     )
+    assert overflow.reset is True
+    assert overflow.initial_events[0].type.value == "replay.snapshot"
+    assert overflow.initial_events[0].sequence == reacquired.sequence
     released_again = await actor.submit(
         _command("release-2", CommandType.RELEASE_CONTROLLER, reacquired.revision)
     )

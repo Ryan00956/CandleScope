@@ -18,6 +18,7 @@ import {
   disabledCapabilities,
   enabledCapabilities,
   replayDigest,
+  replayReport,
   replaySessionResponse,
   replaySnapshotEvent,
 } from "./fixtures.js";
@@ -122,7 +123,7 @@ test("all replay HTTP response families cross a strict parser boundary", () => {
     data_fidelity: "EXACT_BAR_COVERAGE",
     execution_fidelity: "BAR_CONSERVATIVE",
     revealed: false,
-    report: {},
+    report: replayReport(),
   });
   assert.equal(report.revealed, false);
 });
@@ -152,4 +153,41 @@ test("blind catalog entries cannot smuggle source fingerprint or bounds", () => 
   assert.ok(entry);
   Object.assign(entry, { source_fingerprint: replayDigest("a") });
   assert.throws(() => parseReplayCatalog(blind), /unknown field/);
+});
+
+test("report actual history is accepted only at the explicit revealed boundary", () => {
+  const base = {
+    protocol: "replay.v1",
+    session_id: "session-0001",
+    data_fidelity: "EXACT_BAR_COVERAGE",
+    execution_fidelity: "BAR_CONSERVATIVE",
+    report: replayReport(),
+  };
+  const actualHistory = {
+    replay_start_ms: BASE_TIME_MS,
+    replay_end_open_ms: BASE_TIME_MS + 60_000,
+  };
+
+  assert.throws(() => parseReplayReportResponse({
+    ...base,
+    revealed: false,
+    actual_history: actualHistory,
+  }), /unrevealed report cannot include actual_history/);
+  assert.throws(() => parseReplayReportResponse({
+    ...base,
+    revealed: true,
+  }), /revealed report must include actual_history/);
+  assert.throws(() => parseReplayReportResponse({
+    ...base,
+    revealed: true,
+    actual_history: {
+      replay_start_ms: actualHistory.replay_end_open_ms,
+      replay_end_open_ms: actualHistory.replay_start_ms,
+    },
+  }), /replay end cannot precede replay start/);
+  assert.deepEqual(parseReplayReportResponse({
+    ...base,
+    revealed: true,
+    actual_history: actualHistory,
+  }).actual_history, actualHistory);
 });

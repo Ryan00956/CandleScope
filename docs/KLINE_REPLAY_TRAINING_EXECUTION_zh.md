@@ -1886,24 +1886,24 @@ feat(frontend): add isolated replay page runtime
 
 ### 逐步任务
 
-- [ ] **7.1** 用独立、只读、可取消的 `useReplayEntryCapability` 给 live TopBar 增加有文字的 `K 线回放 ↗` 新页面入口；enabled 时使用 `target="_blank" rel="noopener noreferrer"`，flag/capability 不可用时隐藏或显示具体禁用原因，且该 hook 不创建 replay session/runtime/store。
-- [ ] **7.2** 在 replay 页面完成分层 session dialog、loading/error/empty states 和 capabilities 驱动的禁用原因；提交前持续显示 fidelity 摘要。
-- [ ] **7.3** 完成 control bar：play/pause/step/advance/speed/progress/fidelity。
-- [ ] **7.4** 完成 command pending、revision conflict、controller takeover 和断线恢复反馈。
-- [ ] **7.5** 完成 ReplayRightRail：training account、order ticket、open orders、position、fills、closed trades；不渲染 live watchlist/order book。
-- [ ] **7.6** 完成 conservative ambiguity warning，不把它藏在 tooltip 深处。
-- [ ] **7.7** 完成 keyboard shortcuts 和输入焦点冲突保护。
-- [ ] **7.8** 完成 blind synthetic timeline，检查 tooltip/export/DOM/local storage/network payload。
-- [ ] **7.9** replay 中只挂载 `useReplayIndicatorRuntime`，仅用 revealed bars 做本地指标；hosted/range/security 指标入口明确 disabled。
-- [ ] **7.10** session ACTIVE 后 symbol/exchange/market/base interval/source/seed 为只读；修改动作引导新建 session 或 fork，不提供 live watchlist/symbol search 原地改 dataset。
-- [ ] **7.11** 完成 end/reveal/report/journal 流程；ENDED 后仍需显式 `reveal_history` 才返回真实日期。
-- [ ] **7.12** 完成 JSON/CSV report export，含 fidelity、warnings、hash。
-- [ ] **7.13** replay document title、TopBar 和 StatusBar 增加文字模式标识；移除 live Mark/Index/Basis、`Connected to Binance` 和 `Live (WebSocket)` 文案。
-- [ ] **7.14** 新增 replay browser smoke，从 live TopBar 打开新页面，验证 URL、`window.opener === null`，并使用固定后端 fixture/session，不依赖真实 Binance 网络。
-- [ ] **7.15** smoke 覆盖创建随机 session、step、5m active bar、下单、成交、pause、advance、重连、结束、报告。
-- [ ] **7.16** 对 replay page 单独做浏览器网络拦截，证明没有未来 Kline 和任何 live WS/REST；检查 store 最大时间不超过 cursor。
-- [ ] **7.17** 打开、刷新、结束和关闭 replay page 均不改变原 live page 的 symbol/interval/bars/socket；普通 `npm run smoke` 仍通过。
-- [ ] **7.18** 直接访问/书签恢复 `replay.html?session=...`，无 opener 时恢复为 PAUSED 或服务端权威状态；错误 session 留在 replay 错误态。
+- [x] **7.1** 用独立、只读、可取消的 `useReplayEntryCapability` 给 live TopBar 增加有文字的 `K 线回放 ↗` 新页面入口；enabled 时使用 `target="_blank" rel="noopener noreferrer"`，flag/capability 不可用时隐藏或显示具体禁用原因，且该 hook 不创建 replay session/runtime/store。
+- [x] **7.2** 在 replay 页面完成分层 session dialog、loading/error/empty states 和 capabilities 驱动的禁用原因；提交前持续显示 fidelity 摘要。
+- [x] **7.3** 完成 control bar：play/pause/step/advance/speed/progress/fidelity。
+- [x] **7.4** 完成 command pending、revision conflict、controller takeover 和断线恢复反馈。
+- [x] **7.5** 完成 ReplayRightRail：training account、order ticket、open orders、position、fills、closed trades；不渲染 live watchlist/order book。
+- [x] **7.6** 完成 conservative ambiguity warning，不把它藏在 tooltip 深处。
+- [x] **7.7** 完成 keyboard shortcuts 和输入焦点冲突保护。
+- [x] **7.8** 完成 blind synthetic timeline，检查 tooltip/export/DOM/local storage/network payload。
+- [x] **7.9** replay 中只挂载 `useReplayIndicatorRuntime`，仅用 revealed bars 做本地指标；hosted/range/security 指标入口明确 disabled。
+- [x] **7.10** session ACTIVE 后 symbol/exchange/market/base interval/source/seed 为只读；修改动作引导新建 session 或 fork，不提供 live watchlist/symbol search 原地改 dataset。
+- [x] **7.11** 完成 end/reveal/report/journal 流程；ENDED 后仍需显式 `reveal_history` 才返回真实日期。
+- [x] **7.12** 完成 JSON/CSV report export，含 fidelity、warnings、hash。
+- [x] **7.13** replay document title、TopBar 和 StatusBar 增加文字模式标识；移除 live Mark/Index/Basis、`Connected to Binance` 和 `Live (WebSocket)` 文案。
+- [x] **7.14** 新增 replay browser smoke，从 live TopBar 打开新页面，验证 URL、`window.opener === null`，并使用固定后端 fixture/session，不依赖真实 Binance 网络。
+- [x] **7.15** smoke 覆盖创建随机 session、step、5m active bar、下单、成交、pause、advance、重连、结束、报告。
+- [x] **7.16** 对 replay page 单独做浏览器网络拦截，证明没有未来 Kline 和任何 live WS/REST；检查 store 最大时间不超过 cursor。
+- [x] **7.17** 打开、刷新、结束和关闭 replay page 均不改变原 live page 的 symbol/interval/bars/socket；普通 `npm run smoke` 仍通过。
+- [x] **7.18** 直接访问/书签恢复 `replay.html?session=...`，无 opener 时恢复为 PAUSED 或服务端权威状态；错误 session 留在 replay 错误态。
 
 ### 端到端强制场景
 
@@ -2428,5 +2428,24 @@ No-lookahead evidence: parser 拒绝 public cursor 之后的 bar/source/fill，H
 Failure injection evidence: unknown/extra field、protocol/session/counter/hash/epoch 不一致、非 canonical Decimal/超 Number 容量、sequence gap、错 epoch、resync、旧 generation callback、首 snapshot 失败、missing/disabled/invalid/rewrite 均 fail closed；generation reset 清除 transient state。真实浏览器检查实际发现并修复两处边界：原生 fetch 被当作实例方法调用导致 Illegal invocation，以及 React StrictMode setup/cleanup/setup 提前终止复用 lifecycle；均新增回归。全量门禁还暴露既有 drawing CDP asset-quiescence 用 50ms 墙钟注入与 350ms 总期限的并行竞态，改为 wait 已同步开始后的微任务注入，保留 late-event 语义，定向连续 5 次和全量均通过。
 Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对初始 Phase 6 checkpoint 6bd9ef799dd03583a4ee2077bdd3099d68ed720f 执行 git revert --no-commit 后，working tree、index 相对父提交 9984cdb7b11098d58a2fcced742e9cf10787af41 均为 zero diff，untracked=0，index tree 与 parent tree 同为 b486cfa65e20d893d7e0734d31a056c1badd7c51；随后移除临时 worktree，并对 amend 后最终 checkpoint 再次执行同一演练。
 Known limitations: Phase 6 只交付隔离运行时与只读图表骨架；play/pause/speed/step/advance、订单/持仓/账本/报告、blind mode 可见 UI 和 live 页新窗口入口属于 Phase 7。后端仍只有 BAR，AGG_TRADE 保持 ARCHIVE_DISABLED；默认 VITE_REPLAY_ENTRY_ENABLED=0/REPLAY_ENABLED=0。真实联调使用的 backend/data/replay-dev 本地 SQLite 在线快照不进入提交，留作后续 Phase 本机证据。Vite 仍有既有 >500 kB 共享 chunk warning；开发模式 console 有 favicon 404/CSS warning，但产品 JS error、unhandled rejection 和失败网络请求均为零。
+Decision: PASS
+```
+
+```text
+Phase: 7 - BAR 回放 UI、blind mode 与端到端闭环
+Date: 2026-07-18
+Commit: this Phase 7 checkpoint; subject feat(replay): deliver bar replay training workflow
+Executor: Codex
+Scope: 在 Phase 6 独立 replay document/runtime 上交付可训练 BAR 闭环：live TopBar 双重开关新页面入口、capability/session dialog、控制条与 controller 接管、训练账户/订单/持仓/成交/closed trades、显式保守执行警告、快捷键、blind synthetic timeline、revealed-only 本地 SMA、end/reveal/report/journal 与 JSON/CSV 导出；新增固定 4,000 根离线 K 线的自包含 browser smoke，并保持 live composition/runtime 不被 replay 页面拥有。真实浏览器重连注入中发现并修复 replay WS 在 atomic snapshot 前误报 connected、空 catch-up 无首帧、ENDED 后残留 controller owner 三个边界；未启用默认 feature flags，未接入 AGG_TRADE。
+Files changed: frontend/src/app/{App,AppShell,TopBar,appShellContracts,appShellViewModel}.tsx/ts 及 TopBar view model；frontend/src/features/replay/{ReplayApp,ReplayPageShell,replayParser,replayStore,replayStreamController,replayTypes,useReplayRuntime,useReplayEntryCapability,useReplayIndicatorRuntime,replayUiModel,replayShortcuts,replayReportExport}.ts/tsx、components/* 与 replay tests；frontend/src/{components/SingleChartPanes.tsx,chart-adapter/chartPaneLifecycle.ts,index.css}；frontend/scripts/replay-smoke.mjs；frontend/package.json；backend/app/replay/actor.py；backend/scripts/replay_smoke_fixture.py；backend/tests/test_replay_{stream,no_lookahead,determinism}.py；本文。
+Commands run: npm run test:replay；npm run smoke:replay -- --timeout-ms 90000；离线 fixture + VITE_REPLAY_ENTRY_ENABLED=0 下 npm run smoke -- --url http://127.0.0.1:15176/ --market-type spot --no-seed-indicators --timeout-ms 90000；Playwright CLI 1600x1000 headed-equivalent visual/DOM/network/console 检查；python -m pytest -q no-lookahead/1h determinism/same-bar ambiguity/report tests；python -m pytest -q；npm run check；git diff --check。
+Tests passed: replay frontend 52/52；Phase 7 强制后端定向 4/4；backend global 1245 passed、8 skipped、4 条既有 FastAPI on_event deprecation warnings；frontend global 1906/1906，architecture/typecheck/lint/build 全通过，Vite build 416 modules，replay entry 69.86 kB。smoke:replay 以 4,000 根离线 fixture 完成随机 blind session、5 次 step/5m close、next-open market fill、60x pause barrier、advance、刷新恢复、定向 replay WS 断开重连、end/report/reveal 与 missing-session fail closed，最终捕获 281 requests/45 replay frames，0 replay API failure/runtime exception；普通 live smoke 500 bars、connected/live、0 failure/warning/exception。
+Scenario evidence: 强制场景 1-7、9、12-14 由 smoke:replay 自动化；场景 8 由 test_stop_and_take_profit_same_bar_choose_adverse_exit_and_warn 锁定最不利成交并由 ReplayRightRail 的 role=alert 明示 warning；场景 10 由 test_advance_by_one_hour_matches_sixty_one_minute_steps 精确比较 step(60) 与 advance_by(3,600,000) 的 cursor/state hash；场景 11 的 bookmark/WS 收敛由 smoke 覆盖，controller TTL 自动暂停与断开清理由 test_controller_takeover_heartbeat_release_and_ttl_auto_pause/test_websocket_handoff_heartbeat_and_disconnect_cleanup 覆盖；report 独立重算由 test_report_is_recomputable_from_ledger_fills_and_closed_trades 覆盖。
+Golden/state hashes: browser session/command id 与 60x pause 的精确虚拟时刻每次独立生成，因此 Phase 7 不把跨 run 的 UI hash 误标为固定 golden；最终可复验 run 的初始/第 5 根/ENDED 分别为 sha256:c2c02ac8d50451b60e5c342e866a668bd2579438794496de085f5adb241b78e4、sha256:d2d31a48e06fb95bb76d2127069b988d6b5ab8aabcb218fcf7c5e67d186d2f28、sha256:f29e30e66ea8290f3a304c7f4760a369446a52d19f1a1754a8186c5368a1b907。该 run 内 advance、刷新恢复与 replay-only 重连严格收敛为 sha256:76f022da6b6c809a11378ed6ab6e581f87b922acb60a8c984883afb0e7d6f3c8，cursor synthetic=946685525404/source_sequence=12；领域固定 golden 继续由 Phase 2/4 determinism fixtures 拥有。
+Performance evidence: 最终自包含 browser smoke 76.6s，普通 live smoke 9.2s；100x-style frontend store 回归仍以图表 delta 即时更新、普通 UI 34ms frame budget 合并，fill/PAUSED/ENDED/error 立即 flush。进行中 closed-trades 通过 report 单飞请求加一次尾随合并刷新，不产生并发请求扇出。Phase 7 不建立正式吞吐门槛，Phase 5 已记录的 SQLite 全状态成本继续进入 Phase 8/9 优化与 soak。
+No-lookahead evidence: smoke 在 reveal 前断言 DOM 不含日历年份、localStorage 不含 fixture epoch、URL/opener 不携带历史时间、所有 replay bar 的 maxBarMs <= cursorMs；replay target 网络只允许 /api/v1/replay 与 /api/v1/stream/replay，禁止 live Kline/price/indicator/orderbook/liquidation REST/WS。backend no-lookahead test 从 catalog/create/get/WS/journal/report/end 到显式 reveal 逐边界扫描 actual time、future row 与 DB path；前端 parser 拒绝 cursor 之后的 bar/source/fill，本地指标只读 revealed prefix。
+Failure injection evidence: browser 定向溢出 replay subscriber 并在 live backend 保持在线时验证恢复，空 catch-up 必须返回 atomic snapshot；sequence gap/wrong epoch/revision conflict/controller conflict/takeover/TTL、command pending、missing session、无 opener direct restore、flag off/capability unavailable、unknown payload、未 reveal 却夹带 actual_history、ENDED stale owner、输入焦点快捷键保护均自动化。实际烟测暴露并修复 fixture 起点非 1m 对齐、public metadata 外联、WS open 早于首帧、共享 backend kill 破坏 live continuity、reload 误读旧 document、controller lease 到期与自然 live bar 增长断言等测试/产品边界；人工审计另补进行中 closed-trades 权威刷新与 report 单飞回归。
+Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对初始 Phase 7 checkpoint c4f9891989d8eaea08ebae7dd1066f8943ff33ab 执行 git revert --no-commit 后，working tree、index 相对父提交 a0eab42a5c247cd590a9ca6ce4a006eeb44c1e84 均为 zero diff，untracked=0，index tree 与 parent tree 同为 ba34322f087734e827b462770808829b7e5b5256；随后移除临时 worktree，注册残留为 0。
+Known limitations: BAR_CONSERVATIVE_V1 仍不模拟盘口队列、真实 partial fill 或 bar 内精确路径；同 bar 只给出确定、可见的最不利路径警告。hosted/range/security 指标在 replay 明确 disabled，仅有 revealed-only 本地 SMA；AGG_TRADE 仍为 ARCHIVE_DISABLED，留给 Phase 8。默认 VITE_REPLAY_ENTRY_ENABLED=0/REPLAY_ENABLED=0，只有两端同时启用才显示入口。开发测试仍可能打印既有 Vite HMR 24678 端口噪声与浏览器 slider appearance deprecation，不影响 check/smoke 退出码。
 Decision: PASS
 ```

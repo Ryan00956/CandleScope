@@ -145,6 +145,17 @@ def _timestamp_ms(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _price_tick_size(item: dict[str, Any]) -> str:
+    filters = item.get("filters")
+    if not isinstance(filters, list):
+        return ""
+    for raw_filter in filters:
+        if not isinstance(raw_filter, dict) or raw_filter.get("filterType") != "PRICE_FILTER":
+            continue
+        return str(raw_filter.get("tickSize", "")).strip()
+    return ""
+
+
 def _channel_capabilities() -> list[MarketChannelCapability]:
     return [
         MarketChannelCapability(
@@ -582,6 +593,7 @@ class BinanceExchangeAdapter:
                     product_type="spot",
                     raw=item,
                     listed_at_ms=_timestamp_ms(item.get("onboardDate")),
+                    price_tick_size=_price_tick_size(item),
                 ),
             )
         return symbols
@@ -618,6 +630,7 @@ class BinanceExchangeAdapter:
                         if contract_type == "PERPETUAL"
                         else _timestamp_ms(item.get("deliveryDate"))
                     ),
+                    price_tick_size=_price_tick_size(item),
                 ),
             )
         return symbols

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -401,6 +402,7 @@ class SymbolInfo:
     continuous_trading_at_ms: int | None = None
     delisted_at_ms: int | None = None
     expiry_at_ms: int | None = None
+    price_tick_size: str = ""
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -416,6 +418,15 @@ class SymbolInfo:
                 raise TypeError(f"{field_name} must be a non-boolean integer or None")
             if value < 0:
                 raise ValueError(f"{field_name} must be non-negative or None")
+        tick_size = str(self.price_tick_size or "").strip()
+        if tick_size:
+            try:
+                parsed_tick_size = Decimal(tick_size)
+            except InvalidOperation as exc:
+                raise ValueError("price_tick_size must be a positive decimal string") from exc
+            if not parsed_tick_size.is_finite() or parsed_tick_size <= 0:
+                raise ValueError("price_tick_size must be a positive decimal string")
+        self.price_tick_size = tick_size
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -433,6 +444,8 @@ class SymbolInfo:
         }
         if self.contract_type:
             data["contractType"] = self.contract_type
+        if self.price_tick_size:
+            data["priceTickSize"] = self.price_tick_size
         return data
 
 

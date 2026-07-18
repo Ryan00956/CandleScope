@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { markPerfOnce } from "../../runtime/performance/perfMarks";
 import { parseSymbolKey } from "../../utils/symbolKey";
 import type {
@@ -13,9 +13,6 @@ import type { WatchlistRuntime } from "./useWatchlistRuntime.js";
 import type { SubscriptionTier, WatchlistGroup } from "./watchlistTypes.js";
 import {
   createWatchlistId,
-  DEFAULT_WATCHLIST_WIDTH,
-  MAX_WATCHLIST_WIDTH,
-  MIN_WATCHLIST_WIDTH,
   WATCHLIST_COLORS,
 } from "./watchlistStore";
 
@@ -113,7 +110,6 @@ export default function WatchlistSidebar({
   layout,
   actions,
   prices, subscriptionTiers, subscriptionResourceSummaries, onTierChange,
-  upColor, downColor,
 }: WatchlistSidebarProps) {
   const setWatchlists = useCallback((updater: SetStateAction<WatchlistGroup[]>) => {
     if (actions?.setWatchlists) {
@@ -125,14 +121,11 @@ export default function WatchlistSidebar({
     }
   }, [actions, onWatchlistsChange, watchlists]);
 
-  const width = layout?.width ?? DEFAULT_WATCHLIST_WIDTH;
   const sidebarCollapsed = layout?.sidebarCollapsed ?? false;
   const collapsedLists = layout?.collapsedLists ?? EMPTY_COLLAPSED_LISTS;
-  const setWidth = actions?.setWidth ?? noopAction;
   const setSidebarCollapsed = actions?.setSidebarCollapsed ?? noopAction;
   const setCollapsedLists = actions?.setCollapsedLists ?? noopAction;
 
-  const [isResizing, setIsResizing] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [creatingNew, setCreatingNew] = useState(false);
@@ -210,44 +203,8 @@ export default function WatchlistSidebar({
     };
   }, []);
 
-  const sidebarRef = useRef<HTMLDivElement | null>(null);
-  const resizeStartRef = useRef<{ x: number; w: number } | null>(null);
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const newInputRef = useRef<HTMLInputElement | null>(null);
-
-  // ── Color CSS vars ──
-  const colorVars = useMemo<WatchlistCssVars>(() => ({
-    "--wl-up-color": upColor || "#22c55e",
-    "--wl-down-color": downColor || "#ef4444",
-  }), [upColor, downColor]);
-
-  // ── Resize ──
-  const handleResizeMouseDown = useCallback((e: ReactMouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsResizing(true);
-    resizeStartRef.current = { x: e.clientX, w: width };
-  }, [width]);
-
-  useEffect(() => {
-    if (!isResizing) return;
-    const onMove = (e: MouseEvent) => {
-      const start = resizeStartRef.current;
-      if (!start) return;
-      const dx = e.clientX - start.x;
-      setWidth(Math.max(MIN_WATCHLIST_WIDTH, Math.min(MAX_WATCHLIST_WIDTH, start.w - dx)));
-    };
-    const onUp = () => setIsResizing(false);
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    return () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-  }, [isResizing, setWidth]);
 
   // ── Collapse / Expand lists ──
   const toggleListCollapse = useCallback((id: string) => {
@@ -643,16 +600,8 @@ export default function WatchlistSidebar({
 
   return (
     <>
-      {/* ── Resize handle (left edge of right sidebar) ── */}
-      {!sidebarCollapsed && (
-        <div className={`wl-resize-handle ${isResizing ? "active" : ""}`}
-          onMouseDown={handleResizeMouseDown}/>
-      )}
-
       <div
-        className={`watchlist-sidebar ${sidebarCollapsed ? "collapsed" : ""} ${isResizing ? "resizing" : ""}`}
-        style={{ width: sidebarCollapsed ? 40 : width, ...colorVars }}
-        ref={sidebarRef}
+        className={`watchlist-pane ${sidebarCollapsed ? "collapsed" : ""}`}
       >
         {/* ── Header ── */}
         <div className="wl-header">

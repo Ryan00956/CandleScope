@@ -13,7 +13,9 @@ from app.api.v1.order_book import (
     ALLOWED_DEPTH_LEVELS,
     ALLOWED_UPDATE_INTERVALS_MS,
     PROTOCOL,
+    serialize_record,
 )
+from app.api.v1.order_book_projection import cached_price_tick_size
 from app.api.v1.stream_utils import send_json_with_timeout, send_text_with_timeout
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
 
@@ -124,6 +126,7 @@ async def stream_order_book(websocket: WebSocket, dm: Any) -> None:
                 continue
 
             active.extend(keys)
+            tick_sizes = {key: cached_price_tick_size(key) for key in keys}
             await _send_json({
                 "type": "subscribed",
                 "protocol": PROTOCOL,
@@ -136,7 +139,10 @@ async def stream_order_book(websocket: WebSocket, dm: Any) -> None:
                 "protocol": PROTOCOL,
                 "request_id": request_id,
                 "data": [
-                    record.to_dict()
+                    serialize_record(
+                        record,
+                        price_tick_size=tick_sizes[record.event.key],
+                    )
                     for record in attachment.current.values()
                 ],
                 **_contract_metadata(),
@@ -145,6 +151,7 @@ async def stream_order_book(websocket: WebSocket, dm: Any) -> None:
 
     async def _forward() -> None:
         assert attachment is not None
+        tick_sizes = {key: cached_price_tick_size(key) for key in active}
         while True:
             record = await attachment.subscription.receive()
             if record is None:
@@ -152,7 +159,10 @@ async def stream_order_book(websocket: WebSocket, dm: Any) -> None:
             await _send_json({
                 "type": "order_book.snapshot",
                 "protocol": PROTOCOL,
-                "data": record.to_dict(),
+                "data": serialize_record(
+                    record,
+                    price_tick_size=tick_sizes[record.event.key],
+                ),
                 **_contract_metadata(),
             })
 

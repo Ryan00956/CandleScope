@@ -299,10 +299,10 @@ P4 adds an independent local L2 reconstruction chain for Binance USD-M Futures. 
 ### `GET /full-order-book/snapshot`
 
 ```http
-GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit=100&wait_ms=5000
+GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit=100&price_grouping=auto&wait_ms=5000
 ```
 
-`update_interval_ms` accepts `100`, `250`, or `500`. `limit` is an output-only projection from 1 to 1000; it does not reduce the 1000-level upstream seed. The endpoint returns only a live book and responds with `504` when bounded synchronization times out.
+`update_interval_ms` accepts `100`, `250`, or `500`. `limit` is the maximum number of rows after grouping, from 1 to 1000, and does not reduce backend reconstruction coverage. `price_grouping` accepts `raw`, `auto`, `10`, `100`, or `1000`; numeric values are multipliers of the symbol's `price_tick_size`. Grouping happens before clipping, with bids rounded down and asks rounded up. The visible projection is also bounded to `price_step × (limit - 1)` from the nearest bucket, so sparse distant orders cannot leak into the near-book ladder. A truncated outer aggregation bucket is omitted when the bounded exchange source ends inside it. Raw best bid/ask, mid, and spread metrics remain unchanged. The endpoint returns only a live book and responds with `504` when bounded synchronization times out.
 
 ### `WS /stream/full-order-book`
 
@@ -318,7 +318,8 @@ GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit
       "mode": "full",
       "snapshot_limit": 1000,
       "update_interval_ms": 100,
-      "output_limit": 200
+      "output_limit": 200,
+      "price_grouping": "auto"
     }
   }]
 }

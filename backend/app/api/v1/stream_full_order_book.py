@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
@@ -18,6 +19,12 @@ from app.api.v1.full_order_book import (
     contract_metadata,
     full_order_book_key,
     serialize_record,
+)
+from app.api.v1.order_book_projection import (
+    FULL_PRICE_GROUPINGS,
+    PriceGrouping,
+    cached_price_tick_size,
+    normalize_price_grouping,
 )
 from app.api.v1.stream_utils import send_json_with_timeout, send_text_with_timeout
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
@@ -33,6 +40,8 @@ logger = logging.getLogger("api.stream_full_order_book")
 class _RequestedStream:
     key: MarketStreamKey
     output_limit: int
+    price_grouping: PriceGrouping
+    price_tick_size: Decimal | None
 
 
 async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
@@ -145,7 +154,7 @@ async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
                 continue
 
             active.extend(streams)
-            limits = {requested.key: requested.output_limit for requested in streams}
+            requested_by_key = {requested.key: requested for requested in streams}
             await _send_json({
                 "type": "subscribed",
                 "protocol": PROTOCOL,
@@ -154,31 +163,47 @@ async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
                     {
                         **requested.key.to_dict(),
                         "output_limit": requested.output_limit,
+                        "price_grouping": requested.price_grouping,
+                        "price_tick_size": (
+                            float(requested.price_tick_size)
+                            if requested.price_tick_size is not None
+                            else None
+                        ),
                     }
                     for requested in streams
                 ],
-                **contract_metadata(output_limit=max(limits.values())),
+                **contract_metadata(
+                    output_limit=max(item.output_limit for item in streams),
+                ),
             })
             await _send_json({
                 "type": "snapshot",
                 "protocol": PROTOCOL,
                 "request_id": request_id,
                 "data": [
-                    serialize_record(record, limit=limits[record.event.key])
+                    serialize_record(
+                        record,
+                        limit=requested_by_key[record.event.key].output_limit,
+                        price_grouping=requested_by_key[record.event.key].price_grouping,
+                        price_tick_size=requested_by_key[record.event.key].price_tick_size,
+                    )
                     for record in attachment.current.values()
                 ],
-                **contract_metadata(output_limit=max(limits.values())),
+                **contract_metadata(
+                    output_limit=max(item.output_limit for item in streams),
+                ),
             })
             return True
 
     async def _forward() -> None:
         assert attachment is not None
-        limits = {requested.key: requested.output_limit for requested in active}
+        requested_by_key = {requested.key: requested for requested in active}
         while True:
             record = await attachment.subscription.receive()
             if record is None:
                 return
-            output_limit = limits[record.event.key]
+            requested = requested_by_key[record.event.key]
+            output_limit = requested.output_limit
             live = bool(record.event.data.get("live"))
             metadata = contract_metadata(output_limit=output_limit)
             metadata["backend_sequence_continuity"] = live
@@ -190,7 +215,12 @@ async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
                 ),
                 "protocol": PROTOCOL,
                 "state": record.event.data.get("state", "live" if live else "stale"),
-                "data": serialize_record(record, limit=output_limit),
+                "data": serialize_record(
+                    record,
+                    limit=output_limit,
+                    price_grouping=requested.price_grouping,
+                    price_tick_size=requested.price_tick_size,
+                ),
                 **metadata,
             })
 
@@ -223,6 +253,7 @@ async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
             "max_subscriptions": MAX_SUBSCRIPTIONS,
             "max_output_levels": MAX_OUTPUT_LEVELS,
             "allowed_update_intervals_ms": sorted(ALLOWED_UPDATE_INTERVALS_MS),
+            "allowed_price_groupings": list(FULL_PRICE_GROUPINGS),
             **contract_metadata(output_limit=MAX_OUTPUT_LEVELS),
         })
         if not await _subscribe():
@@ -276,6 +307,7 @@ def _parse_streams(raw_streams: object) -> list[_RequestedStream]:
         unknown = set(params) - {
             "mode",
             "output_limit",
+            "price_grouping",
             "snapshot_limit",
             "update_interval_ms",
         }
@@ -301,6 +333,7 @@ def _parse_streams(raw_streams: object) -> list[_RequestedStream]:
         )
         if not 1 <= output_limit <= MAX_OUTPUT_LEVELS:
             raise ValueError(f"output_limit must be between 1 and {MAX_OUTPUT_LEVELS}")
+        price_grouping = normalize_price_grouping(params.get("price_grouping", "raw"))
         try:
             key = full_order_book_key(
                 exchange=str(raw.get("exchange", "binance")),
@@ -313,7 +346,12 @@ def _parse_streams(raw_streams: object) -> list[_RequestedStream]:
         if key in seen:
             raise ValueError("duplicate full order-book physical stream")
         seen.add(key)
-        streams.append(_RequestedStream(key=key, output_limit=output_limit))
+        streams.append(_RequestedStream(
+            key=key,
+            output_limit=output_limit,
+            price_grouping=price_grouping,
+            price_tick_size=cached_price_tick_size(key),
+        ))
     return streams
 
 

@@ -7,12 +7,13 @@ import type { SingleChartPanesProps } from "../components/SingleChartPanes.js";
 import type { DrawingToolbarProps } from "../components/DrawingToolbar.js";
 import type { ExportPanelProps } from "../features/export/ExportPanel.js";
 import type { WatchlistSidebarProps } from "../features/watchlist/WatchlistSidebar.js";
+import type { OrderBookRuntime } from "../features/order-book/orderBookTypes.js";
 import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
 import { useAdvancedMarketPanes } from "../features/advanced-market-data/useAdvancedMarketPanes.js";
 
 const ExportPanel = React.lazy(() => import("../features/export/ExportPanel"));
 const DrawingToolbar = React.lazy(() => import("../features/drawings/DrawingToolbar"));
-const WatchlistSidebar = React.lazy(() => import("../features/watchlist/WatchlistSidebar"));
+const RightMarketRail = React.lazy(() => import("./RightMarketRail"));
 
 export interface ChartWorkspaceChartModel {
   error?: string | null;
@@ -26,6 +27,7 @@ export interface ChartWorkspaceProps {
   exportPanel: ExportPanelProps;
   chart: ChartWorkspaceChartModel;
   watchlist: WatchlistSidebarProps;
+  orderBook: OrderBookRuntime;
   errorBoundary?: ComponentType<PropsWithChildren>;
 }
 
@@ -34,6 +36,7 @@ function ChartWorkspace({
   exportPanel,
   chart,
   watchlist,
+  orderBook,
   errorBoundary = ChartErrorBoundary,
 }: ChartWorkspaceProps) {
   const Boundary = errorBoundary;
@@ -93,7 +96,7 @@ function ChartWorkspace({
           />
         )}
       >
-        <WatchlistSidebar {...watchlist} />
+        <RightMarketRail watchlist={watchlist} orderBook={orderBook} />
       </React.Suspense>
     </div>
   );

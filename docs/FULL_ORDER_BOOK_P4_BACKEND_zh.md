@@ -45,7 +45,7 @@ Binance USDⓈ-M REST `/fapi/v1/depth` 单侧最多返回 1000 个价位，而�
 }
 ```
 
-本地引擎默认允许每侧最多 5000 个动态价位；HTTP/WS 单次输出最多投影前 1000 档。`output_limit` 只影响输出，不改变后端重建覆盖范围，也不会新建额外的交易所连接。
+本地引擎默认允许每侧最多 5000 个动态价位；HTTP/WS 单次输出最多投影前 1000 行。`output_limit` 只影响聚合后的输出，不改变后端重建覆盖范围，也不会新建额外的交易所连接。价格聚合发生在完整本地投影上，因此粗粒度不会退化为“把已经裁剪的 100 行再合并”。
 
 ## 3. Binance 同步协议
 
@@ -130,6 +130,7 @@ GET /api/v1/full-order-book/snapshot
     &symbol=BTCUSDT
     &update_interval_ms=250
     &limit=100
+    &price_grouping=auto
     &wait_ms=5000
 ```
 
@@ -137,7 +138,8 @@ GET /api/v1/full-order-book/snapshot
 
 - 当前仅支持 `binance + futures`；
 - `update_interval_ms`：`100 | 250 | 500`；
-- `limit`：`1..1000`，仅为输出投影；
+- `limit`：`1..1000`，表示聚合后的最大输出行数；
+- `price_grouping`：`raw | auto | 10 | 100 | 1000`，数字是 `price_tick_size` 的倍数；
 - endpoint 使用短租约，成功、超时或错误后都会释放；
 - 同步未在 `wait_ms` 内完成返回 `504`；stale 不返回旧 book。
 
@@ -153,9 +155,17 @@ GET /api/v1/full-order-book/snapshot
   "fail_closed_on_gap": true,
   "upstream_snapshot_limit": 1000,
   "output_limit": 100,
+  "price_grouping": "auto",
   "backfillable": false,
   "persisted": false,
-  "data": {}
+  "data": {
+    "data": {
+      "price_tick_size": 0.1,
+      "price_step": 1.0,
+      "price_grouping": "auto",
+      "aggregation_applied": true
+    }
+  }
 }
 ```
 
@@ -183,12 +193,23 @@ WS /api/v1/stream/full-order-book
         "mode": "full",
         "snapshot_limit": 1000,
         "update_interval_ms": 100,
-        "output_limit": 200
+        "output_limit": 200,
+        "price_grouping": "auto"
       }
     }
   ]
 }
 ```
+
+聚合规则是展示契约，不改变底层物理 stream identity：
+
+- 买盘使用 `floor(price / step) * step`，不会把可买价格抬高；
+- 卖盘使用 `ceil(price / step) * step`，不会把可卖价格压低；
+- 同桶数量相加后才应用 `output_limit`；
+- 每侧可见价格窗口不超过 `price_step × (output_limit - 1)`，不会因为 1000 档种子里的稀疏远端挂单而把近端盘口拉到异常价格；
+- 如果非穷尽交易所源在最外侧聚合桶中间截止，该不完整边界桶会被省略；`price_window_*_truncated` 与 `incomplete_outer_*_bucket_omitted` 明确报告两类裁剪；
+- `best_bid_price`、`best_ask_price`、`mid_price`、`spread` 和 `spread_bps` 仍来自未聚合盘口；
+- `auto` 以约 `0.1 bps`（价格的十万分之一）的尺度选择 `tick × 10^n`，并限制在支持范围内；tick 元数据不可用时安全退回原始价位。
 
 live book 使用：
 

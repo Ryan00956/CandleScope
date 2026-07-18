@@ -18,6 +18,7 @@ function buildAppShellViewModelContext({
   settings,
   priceScale,
   watchlist,
+  orderBook,
   exportFlow,
   alerts,
 }: AppShellRuntimeInputs): AppShellViewModelContext {
@@ -44,6 +45,9 @@ function buildAppShellViewModelContext({
     indicatorComputing: indicatorStatus.computing,
     watchlistView: watchlist.view,
     watchlistActions: watchlist.actions,
+    orderBookView: orderBook.view,
+    orderBookActions: orderBook.actions,
+    orderBookStatus: orderBook.status,
     settingsView,
     settingsActions: settings.actions,
     chartSettings: settingsView.settings,

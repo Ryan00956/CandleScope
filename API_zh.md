@@ -301,10 +301,10 @@ P4 为 Binance USD-M Futures 提供独立的本地 L2 重建链。它先订阅 d
 ### `GET /full-order-book/snapshot`
 
 ```http
-GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit=100&wait_ms=5000
+GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit=100&price_grouping=auto&wait_ms=5000
 ```
 
-`update_interval_ms` 支持 `100`、`250`、`500`；`limit` 为 `1..1000`，只裁剪输出，不改变后台 1000 档 seed。接口仅在 book 为 live 时返回；有界等待超时返回 `504`。
+`update_interval_ms` 支持 `100`、`250`、`500`；`limit` 为 `1..1000`，表示聚合后的最大输出行数，不改变后台重建覆盖。`price_grouping` 支持 `raw`、`auto`、`10`、`100`、`1000`；数字表示交易对 `price_tick_size` 的倍数。后端先聚合完整本地投影，再按 `limit` 截取；买盘向下、卖盘向上归桶。可见投影同时限制在距最近价桶 `price_step × (limit - 1)` 的范围内，避免稀疏远端挂单混入近端盘口；若有界交易所源恰好截断最外侧聚合桶，该不完整桶不会对外展示。原始 best bid/ask、mid 与 spread 保持不变。接口仅在 book 为 live 时返回；有界等待超时返回 `504`。
 
 ### `WS /stream/full-order-book`
 
@@ -320,7 +320,8 @@ GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit
       "mode": "full",
       "snapshot_limit": 1000,
       "update_interval_ms": 100,
-      "output_limit": 200
+      "output_limit": 200,
+      "price_grouping": "auto"
     }
   }]
 }

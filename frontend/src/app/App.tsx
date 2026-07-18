@@ -11,6 +11,7 @@ import { useChartSettingsRuntime } from "../features/settings/chartAppearanceSet
 import { useDrawingRuntime } from "../features/drawings/useDrawingRuntime";
 import { usePriceScalePrefs } from "../features/settings/priceScalePrefsRuntime";
 import { useWatchlistRuntime } from "../features/watchlist/useWatchlistRuntime";
+import { useOrderBookRuntime } from "../features/order-book/useOrderBookRuntime";
 import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime";
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime";
 import AppProviders from "./AppProviders";
@@ -87,6 +88,14 @@ export default function App() {
       nativeIntervals: chartSession.view.nativeIntervals,
       customIntervalRecords: chartSession.view.customIntervalRecords,
     },
+  });
+  const orderBook = useOrderBookRuntime({
+    identity: {
+      exchange: chartSession.view.exchange,
+      marketType: chartSession.view.marketType,
+      symbol: chartSession.view.symbol,
+    },
+    railCollapsed: watchlist.view.layout.sidebarCollapsed,
   });
   useWatchlistFullCacheRuntime({
     watchlists: watchlist.view.watchlists,
@@ -214,6 +223,7 @@ export default function App() {
         settings={settingsRuntime}
         priceScale={priceScaleRuntime}
         watchlist={watchlist}
+        orderBook={orderBook}
         exportFlow={exportFlow}
         alerts={alertsRuntime}
       />

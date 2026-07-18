@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.v1 import symbols as symbols_api
 from app.api.v1.stream import router as stream_router
 from app.data_engine.ingestion.models import DataSource
 from app.data_engine.market_data.events import MarketStateEvent
@@ -81,6 +82,7 @@ def _stream(
     update_interval_ms: object = 250,
     snapshot_limit: object = 1000,
     output_limit: object = 2,
+    price_grouping: object = "raw",
     mode: str = "full",
 ) -> dict:
     return {
@@ -93,6 +95,7 @@ def _stream(
             "snapshot_limit": snapshot_limit,
             "update_interval_ms": update_interval_ms,
             "output_limit": output_limit,
+            "price_grouping": price_grouping,
         },
     }
 
@@ -150,6 +153,7 @@ def test_full_order_book_ws_separates_live_snapshots_from_stale_status() -> None
         assert connected["protocol"] == "orderbook.full.v1"
         assert connected["source_delivery"] == "ordered_delta"
         assert connected["fail_closed_on_gap"] is True
+        assert connected["allowed_price_groupings"] == ["auto", "raw", "10", "100", "1000"]
 
         ws.send_json({
             "action": "subscribe",
@@ -161,11 +165,14 @@ def test_full_order_book_ws_separates_live_snapshots_from_stale_status() -> None
         stale = ws.receive_json()
 
         assert subscribed["type"] == "subscribed"
+        assert subscribed["streams"][0]["price_grouping"] == "raw"
         assert snapshot["type"] == "snapshot"
         assert snapshot["data"][0]["data"]["bids"] == [
             [100.0, 1.0],
             [99.0, 2.0],
         ]
+        assert snapshot["data"][0]["data"]["projection_depth"] == 2
+        assert snapshot["data"][0]["data"]["full_projection"] is False
         assert stale["type"] == "full_order_book.status"
         assert stale["state"] == "stale"
         assert stale["backend_sequence_continuity"] is False
@@ -180,6 +187,38 @@ def test_full_order_book_ws_separates_live_snapshots_from_stale_status() -> None
     assert dm._leases == set()
 
 
+def test_full_order_book_ws_applies_requested_grouping_from_cached_tick(monkeypatch) -> None:
+    monkeypatch.setitem(
+        symbols_api._symbol_cache,
+        ("binance", "futures"),
+        [{"symbol": "BTCUSDT", "priceTickSize": "0.1"}],
+    )
+    dm = _FullOrderBookDataManager()
+
+    with _client(dm).websocket_connect("/api/v1/stream/full-order-book") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({
+            "action": "subscribe",
+            "request_id": "grouped",
+            "streams": [_stream(price_grouping="10")],
+        })
+        subscribed = ws.receive_json()
+        snapshot = ws.receive_json()
+
+        assert subscribed["streams"][0]["price_grouping"] == "10"
+        assert subscribed["streams"][0]["price_tick_size"] == 0.1
+        data = snapshot["data"][0]["data"]
+        assert data["price_step"] == 1.0
+        assert data["aggregation_applied"] is True
+
+        ws.send_json({"action": "unsubscribe"})
+        terminal_types = {
+            ws.receive_json()["type"],
+            ws.receive_json()["type"],
+        }
+        assert terminal_types == {"full_order_book.status", "unsubscribed"}
+
+
 def test_full_order_book_ws_rejects_ambiguous_or_unsupported_streams() -> None:
     dm = _FullOrderBookDataManager()
     invalid = [
@@ -189,6 +228,7 @@ def test_full_order_book_ws_rejects_ambiguous_or_unsupported_streams() -> None:
         _stream(snapshot_limit=500),
         _stream(output_limit=0),
         _stream(output_limit=1001),
+        _stream(price_grouping="7"),
         _stream(mode="partial"),
         _stream(symbol=None),
     ]

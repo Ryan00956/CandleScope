@@ -18,6 +18,7 @@ function AppShell({
   settings,
   priceScale,
   watchlist,
+  orderBook,
   exportFlow,
   alerts,
 }: AppShellProps) {
@@ -31,6 +32,7 @@ function AppShell({
       settings,
       priceScale,
       watchlist,
+      orderBook,
       exportFlow,
       alerts,
     }),
@@ -43,6 +45,7 @@ function AppShell({
       settings,
       priceScale,
       watchlist,
+      orderBook,
       exportFlow,
       alerts,
     ],

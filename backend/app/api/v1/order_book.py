@@ -5,10 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.api.v1.order_book_projection import (
+    cached_price_tick_size,
+    project_order_book_levels,
+)
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
 
 
@@ -90,7 +95,7 @@ async def order_book_snapshot(
         "full_depth": False,
         "backfillable": False,
         "persisted": False,
-        "data": _serialize_record(record),
+        "data": serialize_record(record, price_tick_size=cached_price_tick_size(key)),
     }
 
 
@@ -144,11 +149,31 @@ def _key(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def _serialize_record(record: Any) -> dict[str, Any]:
+def serialize_record(
+    record: Any,
+    *,
+    price_tick_size: Decimal | None = None,
+) -> dict[str, Any]:
     to_dict = getattr(record, "to_dict", None)
     if not callable(to_dict):
         raise TypeError("order-book service returned an unsupported snapshot value")
-    return dict(to_dict())
+    payload = dict(to_dict())
+    data = payload.get("data")
+    if isinstance(data, dict):
+        projected = dict(data)
+        projection = project_order_book_levels(
+            projected,
+            price_grouping="raw",
+            price_tick_size=price_tick_size,
+        )
+        projected["bids"] = projection.bids
+        projected["asks"] = projection.asks
+        projected["price_tick_size"] = projection.price_tick_size
+        projected["price_step"] = projection.price_step
+        projected["price_grouping"] = "raw"
+        projected["aggregation_applied"] = False
+        payload["data"] = projected
+    return payload
 
 
-__all__ = ["router"]
+__all__ = ["router", "serialize_record"]

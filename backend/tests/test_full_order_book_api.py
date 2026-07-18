@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.v1.full_order_book import router as full_order_book_router
+from app.api.v1.full_order_book import (
+    router as full_order_book_router,
+    serialize_record,
+)
 from app.data_engine.ingestion.models import DataSource
 from app.data_engine.market_data.events import HubRecord, MarketStateEvent
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
@@ -73,7 +77,16 @@ def _key(
     )
 
 
-def _record(key: MarketStreamKey, *, update_id: int) -> HubRecord:
+def _record(
+    key: MarketStreamKey,
+    *,
+    update_id: int,
+    bids: list[list[float]] | None = None,
+    asks: list[list[float]] | None = None,
+    exchange_full_depth_exhaustive: bool | None = None,
+) -> HubRecord:
+    bid_levels = bids or [[100.0, 1.0], [99.0, 2.0], [98.0, 3.0]]
+    ask_levels = asks or [[101.0, 1.0], [102.0, 2.0], [103.0, 3.0]]
     return HubRecord(
         event=MarketStateEvent(
             key=key,
@@ -87,10 +100,18 @@ def _record(key: MarketStreamKey, *, update_id: int) -> HubRecord:
                 "last_update_id": update_id,
                 "snapshot_limit": 1000,
                 "update_interval_ms": int(dict(key.params)["update_interval_ms"]),
-                "book_bid_levels": 3,
-                "book_ask_levels": 3,
-                "bids": [[100.0, 1.0], [99.0, 2.0], [98.0, 3.0]],
-                "asks": [[101.0, 1.0], [102.0, 2.0], [103.0, 3.0]],
+                "book_bid_levels": len(bid_levels),
+                "book_ask_levels": len(ask_levels),
+                "best_bid_price": bid_levels[0][0],
+                "best_ask_price": ask_levels[0][0],
+                "mid_price": (bid_levels[0][0] + ask_levels[0][0]) / 2,
+                "bids": bid_levels,
+                "asks": ask_levels,
+                **(
+                    {"exchange_full_depth_exhaustive": exchange_full_depth_exhaustive}
+                    if exchange_full_depth_exhaustive is not None
+                    else {}
+                ),
             },
         ),
         revision=1,
@@ -128,8 +149,136 @@ def test_full_order_book_http_returns_live_trimmed_projection_contract() -> None
     assert payload["data"]["data"]["bids"] == [[100.0, 1.0], [99.0, 2.0]]
     assert payload["data"]["data"]["asks"] == [[101.0, 1.0], [102.0, 2.0]]
     assert payload["data"]["data"]["book_bid_levels"] == 3
+    assert payload["data"]["data"]["projection_depth"] == 2
+    assert payload["data"]["data"]["full_projection"] is False
     assert dm.wait_calls == [(dm.ensure_calls[0][0], 2.5)]
     assert dm.release_calls == dm.ensure_calls
+
+
+def test_full_order_book_http_marks_projection_full_when_limit_covers_local_book() -> None:
+    dm = _FullOrderBookDataManager()
+    response = _client(dm).get(
+        "/api/v1/full-order-book/snapshot",
+        params={"symbol": "BTCUSDT", "limit": 100},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]["data"]
+    assert len(data["bids"]) == 3
+    assert len(data["asks"]) == 3
+    assert data["projection_depth"] is None
+    assert data["full_projection"] is True
+
+
+def test_full_order_book_projection_groups_before_clipping_with_safe_side_rounding() -> None:
+    record = _record(
+        _key(),
+        update_id=43,
+        bids=[[100.9, 1.0], [100.2, 2.0], [99.8, 3.0]],
+        asks=[[101.1, 4.0], [101.9, 5.0], [102.2, 6.0]],
+    )
+
+    data = serialize_record(
+        record,
+        limit=2,
+        price_grouping="10",
+        price_tick_size=Decimal("0.1"),
+    )["data"]
+
+    assert data["bids"] == [[100.0, 3.0], [99.0, 3.0]]
+    assert data["asks"] == [[102.0, 9.0], [103.0, 6.0]]
+    assert data["best_bid_price"] == 100.9
+    assert data["best_ask_price"] == 101.1
+    assert data["price_tick_size"] == 0.1
+    assert data["price_step"] == 1.0
+    assert data["price_grouping"] == "10"
+    assert data["aggregation_applied"] is True
+    assert data["aggregation_source_bid_levels"] == 3
+    assert data["bucket_bid_levels"] == 2
+    assert data["full_projection"] is True
+
+
+def test_full_order_book_auto_grouping_uses_symbol_scale_and_degrades_without_tick() -> None:
+    record = _record(
+        _key(),
+        update_id=44,
+        bids=[[60_000.9, 1.0], [60_000.2, 2.0]],
+        asks=[[60_001.1, 3.0], [60_001.9, 4.0]],
+    )
+
+    automatic = serialize_record(
+        record,
+        limit=20,
+        price_grouping="auto",
+        price_tick_size=Decimal("0.1"),
+    )["data"]
+    unavailable = serialize_record(
+        record,
+        limit=20,
+        price_grouping="1000",
+        price_tick_size=None,
+    )["data"]
+
+    assert automatic["price_step"] == 1.0
+    assert automatic["aggregation_applied"] is True
+    assert unavailable["price_step"] is None
+    assert unavailable["aggregation_applied"] is False
+    assert unavailable["bids"] == [[60_000.9, 1.0], [60_000.2, 2.0]]
+
+
+def test_full_order_book_omits_incomplete_outer_bucket_from_bounded_source() -> None:
+    record = _record(
+        _key(),
+        update_id=45,
+        bids=[[100.9, 1.0], [100.2, 2.0], [99.8, 3.0]],
+        asks=[[101.1, 4.0], [101.9, 5.0], [102.2, 6.0]],
+        exchange_full_depth_exhaustive=False,
+    )
+
+    data = serialize_record(
+        record,
+        limit=20,
+        price_grouping="10",
+        price_tick_size=Decimal("0.1"),
+    )["data"]
+
+    assert data["bids"] == [[100.0, 3.0]]
+    assert data["asks"] == [[102.0, 9.0]]
+    assert data["incomplete_outer_bid_bucket_omitted"] is True
+    assert data["incomplete_outer_ask_bucket_omitted"] is True
+    assert data["bucket_bid_levels"] == 2
+    assert data["bucket_ask_levels"] == 2
+    assert data["price_window_bid_truncated"] is False
+    assert data["price_window_ask_truncated"] is False
+    assert data["projection_depth"] == 20
+    assert data["full_projection"] is False
+
+
+def test_full_order_book_limits_sparse_levels_to_near_price_window() -> None:
+    record = _record(
+        _key(),
+        update_id=46,
+        bids=[[100.9, 1.0], [99.8, 2.0], [50.0, 3.0]],
+        asks=[[101.1, 4.0], [102.2, 5.0], [150.0, 6.0]],
+        exchange_full_depth_exhaustive=False,
+    )
+
+    data = serialize_record(
+        record,
+        limit=3,
+        price_grouping="10",
+        price_tick_size=Decimal("0.1"),
+    )["data"]
+
+    assert data["bids"] == [[100.0, 1.0], [99.0, 2.0]]
+    assert data["asks"] == [[102.0, 4.0], [103.0, 5.0]]
+    assert data["bucket_bid_levels"] == 3
+    assert data["bucket_ask_levels"] == 3
+    assert data["price_window_bid_truncated"] is True
+    assert data["price_window_ask_truncated"] is True
+    assert data["incomplete_outer_bid_bucket_omitted"] is False
+    assert data["incomplete_outer_ask_bucket_omitted"] is False
+    assert data["full_projection"] is False
 
 
 def test_full_order_book_http_rejects_unsupported_contract_before_leasing() -> None:
@@ -144,6 +293,9 @@ def test_full_order_book_http_rejects_unsupported_contract_before_leasing() -> N
     ).status_code == 422
     assert client.get(
         "/api/v1/full-order-book/snapshot?limit=1001",
+    ).status_code == 422
+    assert client.get(
+        "/api/v1/full-order-book/snapshot?price_grouping=7",
     ).status_code == 422
     assert dm.ensure_calls == []
 

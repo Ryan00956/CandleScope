@@ -145,6 +145,9 @@ def test_binance_futures_maps_onboard_date_but_ignores_perpetual_delivery_placeh
                     "contractType": "PERPETUAL",
                     "onboardDate": 1_569_393_000_000,
                     "deliveryDate": 4_133_404_800_000,
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                    ],
                 },
             ],
         },
@@ -157,6 +160,7 @@ def test_binance_futures_maps_onboard_date_but_ignores_perpetual_delivery_placeh
     assert symbol.expiry_at_ms is None
     assert payload["listedAtMs"] == 1_569_393_000_000
     assert payload["expiryAtMs"] is None
+    assert payload["priceTickSize"] == "0.10"
 
 
 def test_okx_maps_listing_continuous_trading_and_expiry_times() -> None:

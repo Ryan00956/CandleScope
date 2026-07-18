@@ -5,10 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.api.v1.order_book_projection import (
+    PriceGrouping,
+    cached_price_tick_size,
+    normalize_price_grouping,
+    project_order_book_levels,
+)
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
 
 
@@ -29,6 +36,7 @@ async def full_order_book_snapshot(
     market_type: str = Query("futures"),
     update_interval_ms: int = Query(default=250),
     limit: int = Query(default=100, ge=1, le=MAX_OUTPUT_LEVELS),
+    price_grouping: str = Query(default="raw"),
     wait_ms: int = Query(default=5_000, ge=100, le=15_000),
 ) -> dict[str, Any]:
     """Return one live atomic projection of the locally reconstructed book."""
@@ -40,6 +48,11 @@ async def full_order_book_snapshot(
         symbol=symbol,
         update_interval_ms=update_interval_ms,
     )
+    try:
+        grouping = normalize_price_grouping(price_grouping)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    price_tick_size = cached_price_tick_size(key)
     consumer_id = f"http:full-order-book:{id(request)}"
     leased = False
     try:
@@ -82,7 +95,13 @@ async def full_order_book_snapshot(
         "type": "full_order_book.snapshot",
         "protocol": PROTOCOL,
         **contract_metadata(output_limit=limit),
-        "data": serialize_record(record, limit=limit),
+        "price_grouping": grouping,
+        "data": serialize_record(
+            record,
+            limit=limit,
+            price_grouping=grouping,
+            price_tick_size=price_tick_size,
+        ),
     }
 
 
@@ -133,8 +152,14 @@ def full_order_book_key(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def serialize_record(record: Any, *, limit: int) -> dict[str, Any]:
-    """Serialize a hub record and trim only its presentation projection."""
+def serialize_record(
+    record: Any,
+    *,
+    limit: int,
+    price_grouping: PriceGrouping = "raw",
+    price_tick_size: Decimal | None = None,
+) -> dict[str, Any]:
+    """Serialize a hub record, group its full projection, then clip visible rows."""
 
     to_dict = getattr(record, "to_dict", None)
     if not callable(to_dict):
@@ -143,10 +168,56 @@ def serialize_record(record: Any, *, limit: int) -> dict[str, Any]:
     data = payload.get("data")
     if isinstance(data, dict):
         projected = dict(data)
-        for side in ("bids", "asks"):
-            levels = projected.get(side)
-            if isinstance(levels, (list, tuple)):
-                projected[side] = list(levels[:limit])
+        projection = project_order_book_levels(
+            projected,
+            price_grouping=price_grouping,
+            price_tick_size=price_tick_size,
+            limit=limit,
+            omit_incomplete_outer_bucket=(
+                projected.get("exchange_full_depth_exhaustive") is False
+            ),
+        )
+        projected["bids"] = projection.bids
+        projected["asks"] = projection.asks
+        projected["price_tick_size"] = projection.price_tick_size
+        projected["price_step"] = projection.price_step
+        projected["price_grouping"] = projection.price_grouping
+        projected["aggregation_applied"] = projection.aggregation_applied
+        projected["aggregation_source_bid_levels"] = projection.source_bid_levels
+        projected["aggregation_source_ask_levels"] = projection.source_ask_levels
+        projected["bucket_bid_levels"] = projection.bucket_bid_levels
+        projected["bucket_ask_levels"] = projection.bucket_ask_levels
+        projected["price_window_bid_truncated"] = projection.price_window_bid_truncated
+        projected["price_window_ask_truncated"] = projection.price_window_ask_truncated
+        projected["incomplete_outer_bid_bucket_omitted"] = (
+            projection.incomplete_outer_bid_bucket_omitted
+        )
+        projected["incomplete_outer_ask_bucket_omitted"] = (
+            projection.incomplete_outer_ask_bucket_omitted
+        )
+        if projected.get("live") is True:
+            bid_count = projected.get("book_bid_levels")
+            ask_count = projected.get("book_ask_levels")
+            source_complete = (
+                isinstance(bid_count, int)
+                and not isinstance(bid_count, bool)
+                and isinstance(ask_count, int)
+                and not isinstance(ask_count, bool)
+                and projection.source_bid_levels >= bid_count
+                and projection.source_ask_levels >= ask_count
+            )
+            full_projection = (
+                source_complete
+                and not projection.price_window_bid_truncated
+                and not projection.price_window_ask_truncated
+                and not projection.incomplete_outer_bid_bucket_omitted
+                and not projection.incomplete_outer_ask_bucket_omitted
+                and len(projection.bids) >= projection.bucket_bid_levels
+                and len(projection.asks) >= projection.bucket_ask_levels
+            )
+            projected["aggregation_source_complete"] = source_complete
+            projected["projection_depth"] = None if full_projection else limit
+            projected["full_projection"] = full_projection
         projected["output_limit"] = limit
         payload["data"] = projected
     return payload

@@ -5,6 +5,7 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.v1 import symbols as symbols_api
 from app.api.v1.order_book import router as order_book_router
 from app.data_engine.ingestion.models import DataSource
 from app.data_engine.market_data.events import HubRecord, MarketStateEvent
@@ -134,6 +135,27 @@ def test_order_book_http_transient_lease_returns_explicit_snapshot_contract() ->
     assert payload["data"]["data"]["last_update_id"] == 42
     assert dm.wait_calls == [(dm.ensure_calls[0][0], 1.5)]
     assert dm.release_calls == dm.ensure_calls
+
+
+def test_order_book_http_exposes_cached_price_tick_for_client_side_small_grouping(
+    monkeypatch,
+) -> None:
+    monkeypatch.setitem(
+        symbols_api._symbol_cache,
+        ("binance", "futures"),
+        [{"symbol": "BTCUSDT", "priceTickSize": "0.1"}],
+    )
+
+    response = _client(_OrderBookDataManager()).get(
+        "/api/v1/order-book/snapshot?symbol=BTCUSDT",
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]["data"]
+    assert data["price_tick_size"] == 0.1
+    assert data["price_step"] == 0.1
+    assert data["price_grouping"] == "raw"
+    assert data["aggregation_applied"] is False
 
 
 def test_order_book_http_rejects_unsupported_contract_before_leasing() -> None:

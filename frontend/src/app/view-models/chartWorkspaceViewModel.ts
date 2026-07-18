@@ -31,6 +31,9 @@ export function buildChartWorkspaceViewModel({
   settingsActions,
   watchlistActions,
   watchlistView,
+  orderBookActions,
+  orderBookStatus,
+  orderBookView,
 }: AppShellViewModelContext): ChartWorkspaceProps {
   const {
     symbol,
@@ -177,6 +180,11 @@ export function buildChartWorkspaceViewModel({
       onTierChange: watchlistActions.handleTierChange,
       upColor: chartSettings.upColor,
       downColor: chartSettings.downColor,
+    },
+    orderBook: {
+      view: orderBookView,
+      actions: orderBookActions,
+      status: orderBookStatus,
     },
   };
 }

@@ -19,12 +19,14 @@ export const TRADE_FLOW_INDICATOR_DEFINITIONS = Object.freeze([
   Object.freeze({
     id: "trade-flow:cvd" as const,
     key: "cvd" as const,
+    category: "volume" as const,
     name: "CVD（累计成交量差）",
     description: "基于 K 线主动买卖量构建的连续前缀和；与右侧实时订单流独立。",
   }),
   Object.freeze({
     id: "trade-flow:delta" as const,
     key: "delta" as const,
+    category: "volume" as const,
     name: "Volume Delta（成交量差）",
     description: "逐根 K 线展示主动买量、主动卖量及其差值；与右侧实时订单流独立。",
   }),

@@ -83,7 +83,7 @@ export function useTradeFlowRuntime({
 
   const intervalSeconds = parseIntervalSeconds(interval);
   const markerSource = useMemo(() => (
-    enabled && seriesStore && intervalSeconds
+    enabled && seriesStore && intervalSeconds && preferences.largeTradeNotional > 0
       ? createTradeFlowMarkerSource({
         store,
         seriesStore,

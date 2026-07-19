@@ -24,10 +24,7 @@ test("legacy TradeFlow workspace migrates both chart indicators", () => {
   });
   assert.equal(preferences.sideFilter, "buy");
   assert.equal(preferences.minNotional, DEFAULT_TRADE_FLOW_PREFERENCES.minNotional);
-  assert.equal(
-    preferences.largeTradeNotional,
-    DEFAULT_TRADE_FLOW_PREFERENCES.largeTradeNotional,
-  );
+  assert.equal(preferences.largeTradeNotional, 0);
 });
 
 test("TradeFlow v2 keeps right rail and chart indicator selections independent", () => {

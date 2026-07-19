@@ -86,7 +86,7 @@ const TapeRow = React.memo(function TapeRow({
   trade: AggregateTrade;
   largeThreshold: number;
 }) {
-  const large = trade.quoteQuantity >= largeThreshold;
+  const large = largeThreshold > 0 && trade.quoteQuantity >= largeThreshold;
   return (
     <div className={`tf-tape-row tf-${trade.aggressorSide} ${large ? "tf-large" : ""}`}>
       <span className="tf-tape-side" aria-label={trade.aggressorSide === "buy" ? "主动买" : "主动卖"}>
@@ -326,7 +326,11 @@ function TradeFlowDock({
             <label title="主图大额成交气泡阈值">
               <span>气泡</span>
               <select value={preferences.largeTradeNotional} onChange={(event) => runtime.actions.setLargeTradeNotional(Number(event.target.value))}>
-                {TRADE_FLOW_BUBBLE_OPTIONS.map((value) => <option key={value} value={value}>≥ {formatNotional(value)}</option>)}
+                {TRADE_FLOW_BUBBLE_OPTIONS.map((value) => (
+                  <option key={value} value={value}>
+                    {value ? `≥ ${formatNotional(value)}` : "关闭"}
+                  </option>
+                ))}
               </select>
             </label>
           </div>

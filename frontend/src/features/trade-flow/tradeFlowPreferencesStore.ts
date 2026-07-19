@@ -15,7 +15,7 @@ export const TRADE_FLOW_NOTIONAL_OPTIONS = [
   0, 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000,
 ] as const;
 export const TRADE_FLOW_BUBBLE_OPTIONS = [
-  50_000, 100_000, 250_000, 500_000, 1_000_000,
+  0, 50_000, 100_000, 250_000, 500_000, 1_000_000,
 ] as const;
 
 export const DEFAULT_TRADE_FLOW_PREFERENCES: TradeFlowPreferences = Object.freeze({

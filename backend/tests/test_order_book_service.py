@@ -158,6 +158,14 @@ async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
 
 
 @_async_test
+async def test_default_stop_budget_exceeds_transport_close_bound() -> None:
+    service = OrderBookService(_Factory())
+
+    assert service.diagnostics()["shutdown"]["physical_stop_timeout_seconds"] == 5.0
+    await service.shutdown()
+
+
+@_async_test
 async def test_consumers_share_one_physical_feed_until_last_release() -> None:
     factory = _Factory()
     service = _service(factory)
@@ -192,16 +200,22 @@ async def test_levels_and_update_interval_are_part_of_immutable_identity() -> No
     service = _service(factory)
     fast = _key(depth_levels=5, update_interval_ms=100)
     deep = _key(depth_levels=20, update_interval_ms=500)
+    spot = _key(market_type="spot", depth_levels=20, update_interval_ms=1000)
 
     await service.ensure_stream(fast, consumer_id="same-consumer")
     await service.ensure_stream(deep, consumer_id="same-consumer")
+    await service.ensure_stream(spot, consumer_id="same-consumer")
 
-    assert len(factory.start_calls) == 2
+    assert len(factory.start_calls) == 3
     assert {
-        (item.depth_levels, item.update_interval_ms)
+        (item.market_type, item.depth_levels, item.update_interval_ms)
         for item in factory.start_calls
-    } == {(5, 100), (20, 500)}
-    assert service.diagnostics()["physical_streams"] == 2
+    } == {
+        ("futures", 5, 100),
+        ("futures", 20, 500),
+        ("spot", 20, 1000),
+    }
+    assert service.diagnostics()["physical_streams"] == 3
     await service.shutdown()
 
 
@@ -223,12 +237,17 @@ async def test_invalid_or_unsupported_keys_fail_before_start() -> None:
         await service.ensure_stream(_key(mode="full"), consumer_id="full")
     with pytest.raises(ValueError, match="mode='partial'"):
         await service.ensure_stream(_key(mode="Partial"), consumer_id="mixed-case")
-    with pytest.raises(ValueError, match="market_type='futures'"):
+    with pytest.raises(ValueError, match="'spot' or 'futures'"):
         await service.ensure_stream(
-            _key(market_type="spot"),
-            consumer_id="spot",
+            _key(market_type="margin"),
+            consumer_id="margin",
         )
-    with pytest.raises(ValueError, match="100, 250, or 500"):
+    with pytest.raises(ValueError, match="100, 1000"):
+        await service.ensure_stream(
+            _key(market_type="spot", update_interval_ms=250),
+            consumer_id="spot-wrong-speed",
+        )
+    with pytest.raises(ValueError, match="100, 250, 500"):
         await service.ensure_stream(
             _key(update_interval_ms=1_000),
             consumer_id="slow",

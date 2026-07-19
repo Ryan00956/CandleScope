@@ -181,6 +181,17 @@ _BINANCE_FUTURES_DEPTH_FIELDS = frozenset({
     "bids",
     "asks",
 })
+_BINANCE_SPOT_FULL_DEPTH_FIELDS = frozenset({
+    "kind",
+    "last_update_id",
+    "first_update_id",
+    "final_update_id",
+    "event_time_ms",
+    "update_interval_ms",
+    "snapshot_limit",
+    "bids",
+    "asks",
+})
 
 _BINANCE_SPOT_EXPECTATIONS = {
     MarketChannel.KLINE: ChannelCapabilityExpectation(
@@ -254,10 +265,36 @@ _BINANCE_SPOT_EXPECTATIONS = {
         connection_model="path_per_stream",
         available_fields=_BINANCE_FIELDS[MarketChannel.DEPTH],
         params=(("depth_levels", (5, 10, 20)),),
-        update_intervals_ms=(1000,),
+        update_intervals_ms=(100, 1000),
         limits=(("rest.max_limit", 5000),),
         known_limitations=(
             "Current depth events are replaceable snapshots, not ordered full-book deltas",
+        ),
+    ),
+    MarketChannel.FULL_DEPTH: ChannelCapabilityExpectation(
+        delivery=DeliveryClass.ORDERED_DELTA,
+        snapshot=True,
+        delta=True,
+        history=False,
+        sequence="range",
+        resync="replace_snapshot",
+        connection_model="path_per_stream",
+        available_fields=_BINANCE_SPOT_FULL_DEPTH_FIELDS,
+        params=(("snapshot_limit", (5, 10, 20, 50, 100, 500, 1000, 5000)),),
+        update_intervals_ms=(100, 1000),
+        limits=(
+            ("rest.default_limit", 100),
+            ("rest.max_limit", 5000),
+        ),
+        known_limitations=(
+            "A local full book is valid only after REST snapshot alignment with buffered WebSocket deltas",
+            "A first-update range beyond the previous local update ID requires a fresh snapshot and buffered-delta replay",
+            "The REST snapshot is bounded, so untouched levels outside the initial snapshot are unknown",
+            "Binance Spot exposes no historical full-order-book replay endpoint",
+        ),
+        realtime_transports=(
+            TransportMode.WEBSOCKET,
+            TransportMode.REST_SNAPSHOT,
         ),
     ),
 }
@@ -517,6 +554,8 @@ def builtin_exchange_contract_cases() -> dict[str, list[ExchangeContractCase]]:
                 StreamType.DEPTH,
             )
         ] + [
+            _binance_case("spot", StreamType.FULL_DEPTH),
+        ] + [
             _binance_case("futures", stream_type)
             for stream_type in (
                 StreamType.MARK_PRICE,
@@ -737,26 +776,31 @@ def _binance_payloads(
             ),
         ]
     if stream_type == StreamType.FULL_DEPTH:
-        row = {
+        row: dict[str, Any] = {
             "lastUpdateId": 123,
-            "E": 1_700_000_000_008,
-            "T": 1_700_000_000_007,
             "bids": [["100", "2"]],
             "asks": [["101", "3"]],
         }
-        ws_row = {
+        ws_row: dict[str, Any] = {
             "e": "depthUpdate",
             "E": 1_700_000_000_010,
-            "T": 1_700_000_000_009,
             "s": "BTCUSDT",
             "U": 120,
             "u": 124,
-            "pu": 119,
             "b": [["100", "0"]],
             "a": [["101", "3"]],
-            "ps": "BTCUSDT",
-            "st": 1,
         }
+        if market_type == "futures":
+            row.update({
+                "E": 1_700_000_000_008,
+                "T": 1_700_000_000_007,
+            })
+            ws_row.update({
+                "T": 1_700_000_000_009,
+                "pu": 119,
+                "ps": "BTCUSDT",
+                "st": 1,
+            })
         return row, [
             NormalizerContractSample(payload=row, source=DataSource.HTTP),
             NormalizerContractSample(payload=ws_row, source=DataSource.WEBSOCKET),

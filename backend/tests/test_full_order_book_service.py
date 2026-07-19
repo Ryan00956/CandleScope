@@ -31,11 +31,12 @@ def _async_test(function):
 def _key(
     *,
     symbol: str = "BTCUSDT",
+    market_type: str = "futures",
     update_interval_ms: int = 250,
 ) -> MarketStreamKey:
     return MarketStreamKey.build(
         "binance",
-        "futures",
+        market_type,
         symbol,
         MarketChannel.FULL_DEPTH,
         params={
@@ -855,5 +856,17 @@ async def test_invalid_key_is_rejected_before_physical_start() -> None:
 
     with pytest.raises(ValueError, match="requires exactly"):
         await service.ensure_stream(invalid, consumer_id="one")
+    with pytest.raises(ValueError, match="'spot' or 'futures'"):
+        await service.ensure_stream(
+            _key(market_type="margin"),
+            consumer_id="margin",
+        )
+    with pytest.raises(ValueError, match="100, 1000"):
+        await service.ensure_stream(
+            _key(market_type="spot", update_interval_ms=250),
+            consumer_id="spot-wrong-speed",
+        )
+    spot = _key(market_type="spot", update_interval_ms=1000)
+    assert service._validate_key(spot) == spot
     assert factory.start_calls == 0
     await service.shutdown()

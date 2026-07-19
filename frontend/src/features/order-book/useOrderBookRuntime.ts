@@ -6,6 +6,11 @@ import { OrderBookStreamController } from "./orderBookStreamController.js";
 import type {
   OrderBookIdentity,
   OrderBookRuntime,
+  OrderBookUpdateIntervalMs,
+} from "./orderBookTypes.js";
+import {
+  FUTURES_UPDATE_INTERVALS_MS,
+  SPOT_UPDATE_INTERVALS_MS,
 } from "./orderBookTypes.js";
 
 export interface UseOrderBookRuntimeOptions {
@@ -23,9 +28,17 @@ function normalizeIdentity(identity: OrderBookIdentity): OrderBookIdentity {
 
 function supportMessage(identity: OrderBookIdentity): string | null {
   if (identity.exchange !== "binance") return "订单簿目前仅支持 Binance";
-  if (identity.marketType !== "futures") return "订单簿目前仅支持 Binance U 本位合约";
+  if (identity.marketType !== "spot" && identity.marketType !== "futures") {
+    return "订单簿目前仅支持 Binance 现货与 U 本位合约";
+  }
   if (!identity.symbol) return "请选择交易品种";
   return null;
+}
+
+function updateIntervals(identity: OrderBookIdentity): readonly OrderBookUpdateIntervalMs[] {
+  return identity.marketType === "spot"
+    ? SPOT_UPDATE_INTERVALS_MS
+    : FUTURES_UPDATE_INTERVALS_MS;
 }
 
 export function useOrderBookRuntime({
@@ -44,6 +57,15 @@ export function useOrderBookRuntime({
   const message = supportMessage(identity);
   const supported = message === null;
   const enabled = supported && !railCollapsed && !preferences.collapsed;
+  const availableUpdateIntervals = updateIntervals(identity);
+  const defaultUpdateIntervalMs: OrderBookUpdateIntervalMs = (
+    identity.marketType === "spot" ? 1000 : 250
+  );
+  const effectiveUpdateIntervalMs = availableUpdateIntervals.includes(
+    preferences.updateIntervalMs,
+  )
+    ? preferences.updateIntervalMs
+    : defaultUpdateIntervalMs;
   const streamPriceGrouping = preferences.mode === "full"
     ? preferences.fullPriceGrouping
     : "raw";
@@ -63,7 +85,7 @@ export function useOrderBookRuntime({
       identity,
       mode: preferences.mode,
       partialDepth: preferences.partialDepth,
-      updateIntervalMs: preferences.updateIntervalMs,
+      updateIntervalMs: effectiveUpdateIntervalMs,
       fullOutputLimit: preferences.fullOutputLimit,
       fullPriceGrouping: streamPriceGrouping,
       store,
@@ -77,7 +99,7 @@ export function useOrderBookRuntime({
     preferences.fullOutputLimit,
     preferences.mode,
     preferences.partialDepth,
-    preferences.updateIntervalMs,
+    effectiveUpdateIntervalMs,
     railCollapsed,
     retryRevision,
     store,
@@ -94,9 +116,21 @@ export function useOrderBookRuntime({
       supported,
       supportMessage: message,
       preferences,
+      updateIntervalMs: effectiveUpdateIntervalMs,
+      updateIntervalsMs: availableUpdateIntervals,
       store,
     },
     actions,
     status: { enabled },
-  }), [actions, enabled, identity, message, preferences, store, supported]);
+  }), [
+    actions,
+    availableUpdateIntervals,
+    effectiveUpdateIntervalMs,
+    enabled,
+    identity,
+    message,
+    preferences,
+    store,
+    supported,
+  ]);
 }

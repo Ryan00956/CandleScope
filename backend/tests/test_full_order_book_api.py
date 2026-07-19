@@ -62,11 +62,12 @@ def _client(data_manager: object | None = None) -> TestClient:
 def _key(
     symbol: str = "BTCUSDT",
     *,
+    market_type: str = "futures",
     update_interval_ms: int = 250,
 ) -> MarketStreamKey:
     return MarketStreamKey.build(
         "binance",
-        "futures",
+        market_type,
         symbol,
         MarketChannel.FULL_DEPTH,
         params={
@@ -281,6 +282,21 @@ def test_full_order_book_limits_sparse_levels_to_near_price_window() -> None:
     assert data["full_projection"] is False
 
 
+def test_full_order_book_http_supports_spot_with_market_default_cadence() -> None:
+    dm = _FullOrderBookDataManager()
+    response = _client(dm).get(
+        "/api/v1/full-order-book/snapshot?market_type=spot&symbol=ethusdt",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["key"] == _key(
+        "ETHUSDT",
+        market_type="spot",
+        update_interval_ms=1000,
+    ).to_dict()
+    assert dm.release_calls == dm.ensure_calls
+
+
 def test_full_order_book_http_rejects_unsupported_contract_before_leasing() -> None:
     dm = _FullOrderBookDataManager()
     client = _client(dm)
@@ -289,7 +305,10 @@ def test_full_order_book_http_rejects_unsupported_contract_before_leasing() -> N
         "/api/v1/full-order-book/snapshot?update_interval_ms=1000",
     ).status_code == 422
     assert client.get(
-        "/api/v1/full-order-book/snapshot?market_type=spot",
+        "/api/v1/full-order-book/snapshot?market_type=margin",
+    ).status_code == 422
+    assert client.get(
+        "/api/v1/full-order-book/snapshot?market_type=spot&update_interval_ms=250",
     ).status_code == 422
     assert client.get(
         "/api/v1/full-order-book/snapshot?limit=1001",

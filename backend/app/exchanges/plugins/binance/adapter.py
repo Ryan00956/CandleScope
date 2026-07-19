@@ -95,7 +95,18 @@ _FUTURES_DEPTH_FIELDS = (
     "bids",
     "asks",
 )
-_FULL_DEPTH_FIELDS = (
+_SPOT_FULL_DEPTH_FIELDS = (
+    "kind",
+    "last_update_id",
+    "first_update_id",
+    "final_update_id",
+    "event_time_ms",
+    "update_interval_ms",
+    "snapshot_limit",
+    "bids",
+    "asks",
+)
+_FUTURES_FULL_DEPTH_FIELDS = (
     "kind",
     "last_update_id",
     "first_update_id",
@@ -317,7 +328,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             sequence="monotonic_id",
             resync="replace_snapshot",
             params={"depth_levels": [5, 10, 20]},
-            update_intervals_ms=(1000,),
+            update_intervals_ms=(100, 1000),
             available_fields=("last_update_id", "bids", "asks"),
             connection_model="path_per_stream",
             limits={"rest.max_limit": 5000},
@@ -345,6 +356,34 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
         ),
         MarketChannelCapability(
             channel=MarketChannel.FULL_DEPTH,
+            market_types=("spot",),
+            realtime=True,
+            realtime_transports=(
+                TransportMode.WEBSOCKET,
+                TransportMode.REST_SNAPSHOT,
+            ),
+            delivery=DeliveryClass.ORDERED_DELTA,
+            snapshot=True,
+            delta=True,
+            sequence="range",
+            resync="replace_snapshot",
+            params={"snapshot_limit": [5, 10, 20, 50, 100, 500, 1000, 5000]},
+            update_intervals_ms=(100, 1000),
+            available_fields=_SPOT_FULL_DEPTH_FIELDS,
+            connection_model="path_per_stream",
+            limits={
+                "rest.default_limit": 100,
+                "rest.max_limit": 5000,
+            },
+            known_limitations=(
+                "A local full book is valid only after REST snapshot alignment with buffered WebSocket deltas",
+                "A first-update range beyond the previous local update ID requires a fresh snapshot and buffered-delta replay",
+                "The REST snapshot is bounded, so untouched levels outside the initial snapshot are unknown",
+                "Binance Spot exposes no historical full-order-book replay endpoint",
+            ),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.FULL_DEPTH,
             market_types=("futures",),
             realtime=True,
             realtime_transports=(
@@ -358,7 +397,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             resync="replace_snapshot",
             params={"snapshot_limit": [5, 10, 20, 50, 100, 500, 1000]},
             update_intervals_ms=(100, 250, 500),
-            available_fields=_FULL_DEPTH_FIELDS,
+            available_fields=_FUTURES_FULL_DEPTH_FIELDS,
             connection_model="path_per_stream",
             limits={
                 "rest.default_limit": 500,

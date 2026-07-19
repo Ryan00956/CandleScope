@@ -142,16 +142,18 @@ def test_full_depth_rest_snapshot_rejects_undocumented_limits(limit: object) -> 
         BinanceExchangeProtocol().build_http_params(request)
 
 
-def test_full_depth_is_futures_only_and_rejects_partial_depth_levels() -> None:
+def test_full_depth_supports_spot_and_rejects_partial_depth_levels() -> None:
     protocol = BinanceExchangeProtocol()
-    spot = _descriptor(market_type="spot")
+    spot = _descriptor(market_type="spot", update_interval_ms=100)
     with_levels = _descriptor()
     with_levels.depth_levels = 20
 
-    assert not protocol.supports_ws(spot)
-    assert protocol.rest_request(TransportRequest(spot, limit=1000)) is None
-    with pytest.raises(ValueError, match="only for USD-M futures"):
-        protocol.build_ws_stream_name(spot)
+    assert protocol.supports_ws(spot)
+    assert protocol.build_ws_stream_name(spot) == "btcusdt@depth@100ms"
+    request = protocol.rest_request(TransportRequest(spot, limit=1000))
+    assert request is not None
+    assert request.path == "/api/v3/depth"
+    assert request.params == {"symbol": "BTCUSDT", "limit": 1000}
     with pytest.raises(ValueError, match="partial depth_levels"):
         with_levels.validate()
     assert not protocol.supports_ws(with_levels)
@@ -202,10 +204,37 @@ def test_full_depth_capability_declares_snapshot_plus_ordered_delta() -> None:
         "bids",
         "asks",
     }
-    assert BinancePlugin().capabilities().channel_capability(
+    spot = BinancePlugin().capabilities().channel_capability(
         MarketChannel.FULL_DEPTH,
         "spot",
-    ) is None
+    )
+    assert spot is not None
+    assert spot.delivery is DeliveryClass.ORDERED_DELTA
+    assert spot.snapshot is True
+    assert spot.delta is True
+    assert spot.sequence == "range"
+    assert spot.update_intervals_ms == (100, 1000)
+    assert spot.params == {
+        "snapshot_limit": [5, 10, 20, 50, 100, 500, 1000, 5000],
+    }
+    assert "previous_final_update_id" not in spot.available_fields
+    assert "transaction_time_ms" not in spot.available_fields
+
+
+def test_spot_full_depth_uses_spot_ws_cadence_and_rejects_futures_only_speed() -> None:
+    protocol = BinanceExchangeProtocol()
+    default = _descriptor(market_type="spot", update_interval_ms=None)
+    slow = _descriptor(market_type="spot", update_interval_ms=1000)
+    unsupported = _descriptor(market_type="spot", update_interval_ms=250)
+
+    assert protocol.build_ws_stream_name(default) == "btcusdt@depth"
+    assert protocol.build_ws_stream_name(slow) == "btcusdt@depth"
+    assert protocol.ws_connection(default).base_urls[0] == (
+        "wss://stream.binance.com:9443/ws"
+    )
+    assert not protocol.supports_ws(unsupported)
+    with pytest.raises(ValueError, match="spot full depth update_interval_ms"):
+        protocol.build_ws_stream_name(unsupported)
 
 
 def test_full_depth_payload_filter_requires_matching_um_depth_event() -> None:
@@ -249,6 +278,26 @@ def test_full_depth_delta_normalizer_preserves_zero_quantity_deletions() -> None
         "bids": [[100.5, 0.0], [100.0, 3.0]],
         "asks": [[101.0, 4.0], [101.5, 0.0]],
     }
+
+
+def test_spot_full_depth_delta_normalizer_uses_update_ranges_without_pu() -> None:
+    payload = _delta_payload()
+    payload.pop("T")
+    payload.pop("pu")
+    payload.pop("st")
+    event = _parse(
+        payload,
+        descriptor=_descriptor(market_type="spot", update_interval_ms=100),
+    )
+
+    assert event is not None
+    assert event.market_type == "spot"
+    assert event.sequence == 124
+    assert event.data["first_update_id"] == 120
+    assert event.data["final_update_id"] == 124
+    assert event.data["previous_final_update_id"] is None
+    assert event.data["transaction_time_ms"] is None
+    assert event.data["update_interval_ms"] == 100
 
 
 def test_full_depth_delta_allows_one_or_both_empty_update_sides() -> None:
@@ -324,6 +373,25 @@ def test_full_depth_rest_snapshot_normalizer_preserves_seed_metadata() -> None:
         "bids": [[100.5, 2.0], [100.0, 3.0]],
         "asks": [[101.0, 4.0], [101.5, 5.0]],
     }
+
+
+def test_spot_full_depth_rest_snapshot_accepts_native_timestamp_less_payload() -> None:
+    payload = _snapshot_payload()
+    payload.pop("E")
+    payload.pop("T")
+    event = _parse(
+        payload,
+        descriptor=_descriptor(market_type="spot", update_interval_ms=100),
+        source=DataSource.HTTP,
+        request_limit=1000,
+    )
+
+    assert event is not None
+    assert event.market_type == "spot"
+    assert event.event_time_ms == 1_700_000_000_020
+    assert event.data["event_time_ms"] == 1_700_000_000_020
+    assert event.data["transaction_time_ms"] is None
+    assert event.data["snapshot_limit"] == 1000
 
 
 def test_full_depth_snapshot_uses_documented_default_without_request_context() -> None:

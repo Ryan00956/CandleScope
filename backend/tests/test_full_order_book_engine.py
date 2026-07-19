@@ -21,6 +21,7 @@ from app.data_engine.market_data.full_order_book import (
 
 
 IDENTITY = ("binance", "futures", "BTCUSDT", 100)
+SPOT_IDENTITY = ("binance", "spot", "BTCUSDT", 100)
 
 
 def _seed(
@@ -52,7 +53,7 @@ def _seed(
 def _delta(
     first_update_id: int,
     final_update_id: int,
-    previous_final_update_id: int,
+    previous_final_update_id: int | None,
     *,
     exchange: str = "binance",
     market_type: str = "futures",
@@ -73,7 +74,9 @@ def _delta(
         bids=bids,  # type: ignore[arg-type]
         asks=asks,  # type: ignore[arg-type]
         event_time_ms=event_time_ms or 1_100 + final_update_id,
-        transaction_time_ms=1_090 + final_update_id,
+        transaction_time_ms=(
+            None if market_type == "spot" else 1_090 + final_update_id
+        ),
         received_at_ms=1_105 + final_update_id,
         source=DataSource.WEBSOCKET,
     )
@@ -91,7 +94,7 @@ def _event(
     last_update_id: int = 100,
     first_update_id: int = 100,
     final_update_id: int = 101,
-    previous_final_update_id: int = 99,
+    previous_final_update_id: int | None = 99,
     sequence: int | None = None,
     bids: object | None = None,
     asks: object | None = None,
@@ -421,6 +424,47 @@ def test_snapshot_discards_only_strictly_older_buffered_events() -> None:
     assert engine.diagnostics()["buffered_old_discarded"] == 1
 
 
+def test_spot_snapshot_discards_u_at_snapshot_and_bridges_next_update_range() -> None:
+    engine = FullOrderBookEngine()
+    engine.activate_stream(SPOT_IDENTITY)
+    epoch = engine.begin_sync(SPOT_IDENTITY)
+    stale_at_snapshot = _delta(
+        98,
+        100,
+        None,
+        market_type="spot",
+    )
+    bridge = _delta(
+        100,
+        102,
+        None,
+        market_type="spot",
+        bids=((100, 7),),
+    )
+
+    assert engine.apply_delta(
+        SPOT_IDENTITY,
+        stale_at_snapshot,
+        epoch=epoch,
+    ).action is FullOrderBookAction.BUFFERED
+    assert engine.apply_delta(
+        SPOT_IDENTITY,
+        bridge,
+        epoch=epoch,
+    ).action is FullOrderBookAction.BUFFERED
+    result = engine.install_snapshot(
+        SPOT_IDENTITY,
+        _seed(market_type="spot"),
+        epoch=epoch,
+    )
+
+    assert result.state is FullOrderBookState.LIVE
+    assert result.last_update_id == 102
+    assert result.snapshot is not None
+    assert result.snapshot.bids[0].quantity == 7
+    assert engine.diagnostics()["buffered_old_discarded"] == 1
+
+
 def test_invalid_first_bridge_requires_resync_and_clears_seed() -> None:
     engine = FullOrderBookEngine()
     epoch = _awaiting(engine)
@@ -470,6 +514,40 @@ def test_live_sequence_allows_non_consecutive_u_ranges_when_pu_links() -> None:
     assert applied.state is FullOrderBookState.LIVE
     assert applied.last_update_id == 175
     assert applied.snapshot is not None
+
+
+def test_spot_live_sequence_accepts_overlap_but_fails_closed_on_missing_range() -> None:
+    engine = FullOrderBookEngine()
+    engine.activate_stream(SPOT_IDENTITY)
+    epoch = engine.begin_sync(SPOT_IDENTITY)
+    engine.apply_delta(
+        SPOT_IDENTITY,
+        _delta(100, 102, None, market_type="spot"),
+        epoch=epoch,
+    )
+    installed = engine.install_snapshot(
+        SPOT_IDENTITY,
+        _seed(market_type="spot"),
+        epoch=epoch,
+    )
+    assert installed.state is FullOrderBookState.LIVE
+
+    overlap = engine.apply_delta(
+        SPOT_IDENTITY,
+        _delta(101, 103, None, market_type="spot", bids=((100, 2),)),
+        epoch=epoch,
+    )
+    assert overlap.state is FullOrderBookState.LIVE
+    assert overlap.last_update_id == 103
+
+    gap = engine.apply_delta(
+        SPOT_IDENTITY,
+        _delta(105, 105, None, market_type="spot"),
+        epoch=epoch,
+    )
+    assert gap.failure is FullOrderBookFailure.GAP
+    assert gap.state is FullOrderBookState.RESYNC_REQUIRED
+    assert engine.snapshot(SPOT_IDENTITY) is None
 
 
 def test_buffered_sequence_gap_fails_before_rest_snapshot() -> None:

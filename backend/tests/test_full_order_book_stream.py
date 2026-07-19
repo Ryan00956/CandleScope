@@ -153,6 +153,11 @@ def test_full_order_book_ws_separates_live_snapshots_from_stale_status() -> None
         assert connected["protocol"] == "orderbook.full.v1"
         assert connected["source_delivery"] == "ordered_delta"
         assert connected["fail_closed_on_gap"] is True
+        assert connected["allowed_update_intervals_ms"] == [100, 250, 500, 1000]
+        assert connected["allowed_update_intervals_ms_by_market"] == {
+            "spot": [100, 1000],
+            "futures": [100, 250, 500],
+        }
         assert connected["allowed_price_groupings"] == ["auto", "raw", "10", "100", "1000"]
 
         ws.send_json({
@@ -223,7 +228,8 @@ def test_full_order_book_ws_rejects_ambiguous_or_unsupported_streams() -> None:
     dm = _FullOrderBookDataManager()
     invalid = [
         _stream(channel="depth"),
-        _stream(market_type="spot"),
+        _stream(market_type="margin"),
+        _stream(market_type="spot", update_interval_ms=250),
         _stream(update_interval_ms=1000),
         _stream(snapshot_limit=500),
         _stream(output_limit=0),
@@ -257,6 +263,31 @@ def test_full_order_book_ws_rejects_ambiguous_or_unsupported_streams() -> None:
         assert ws.receive_json()["type"] == "subscribed"
         assert ws.receive_json()["type"] == "snapshot"
         assert ws.receive_json()["type"] == "full_order_book.status"
+        ws.send_json({"action": "unsubscribe"})
+        assert ws.receive_json()["type"] == "unsubscribed"
+
+    assert dm.release_calls == dm.ensure_calls
+
+
+def test_full_order_book_ws_accepts_spot_continuous_stream() -> None:
+    dm = _FullOrderBookDataManager()
+
+    with _client(dm).websocket_connect("/api/v1/stream/full-order-book") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({
+            "action": "subscribe",
+            "request_id": "spot",
+            "streams": [_stream(market_type="spot", update_interval_ms=1000)],
+        })
+        subscribed = ws.receive_json()
+        snapshot = ws.receive_json()
+        stale = ws.receive_json()
+        assert subscribed["type"] == "subscribed"
+        assert subscribed["streams"][0]["market_type"] == "spot"
+        assert subscribed["streams"][0]["params"]["update_interval_ms"] == "1000"
+        assert snapshot["data"][0]["key"]["market_type"] == "spot"
+        assert stale["type"] == "full_order_book.status"
+        assert stale["data"]["key"]["market_type"] == "spot"
         ws.send_json({"action": "unsubscribe"})
         assert ws.receive_json()["type"] == "unsubscribed"
 

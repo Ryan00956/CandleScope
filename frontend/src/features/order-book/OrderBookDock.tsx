@@ -26,7 +26,6 @@ import {
   FULL_PRICE_GROUPINGS,
   PARTIAL_DEPTH_LEVELS,
   PARTIAL_PRICE_GROUPINGS,
-  UPDATE_INTERVALS_MS,
 } from "./orderBookTypes.js";
 
 export interface OrderBookDockProps {
@@ -358,10 +357,10 @@ function OrderBookDock({ runtime, height, onOpenTradeFlow }: OrderBookDockProps)
               <span className="sr-only">更新频率</span>
               <select
                 aria-label="订单簿更新频率"
-                value={view.preferences.updateIntervalMs}
+                value={view.updateIntervalMs}
                 onChange={(event) => actions.setUpdateIntervalMs(Number(event.target.value) as OrderBookUpdateIntervalMs)}
               >
-                {UPDATE_INTERVALS_MS.map((interval) => <option key={interval} value={interval}>{interval} ms</option>)}
+                {view.updateIntervalsMs.map((interval) => <option key={interval} value={interval}>{interval} ms</option>)}
               </select>
             </label>
           </div>

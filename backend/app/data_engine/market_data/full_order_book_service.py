@@ -33,7 +33,10 @@ logger = logging.getLogger("data_engine.market_data.full_order_book")
 FullOrderBookIdentity = tuple[str, str, str, int]
 
 _REQUIRED_PARAMS = frozenset({"mode", "snapshot_limit", "update_interval_ms"})
-_BINANCE_FUTURES_UPDATE_INTERVALS_MS = frozenset({100, 250, 500})
+_BINANCE_UPDATE_INTERVALS_MS = {
+    "spot": frozenset({100, 1000}),
+    "futures": frozenset({100, 250, 500}),
+}
 
 
 class _IngestionFactory(Protocol):
@@ -1402,13 +1405,17 @@ class FullOrderBookService:
             "update_interval_ms",
         )
         if key.exchange == "binance":
-            if key.market_type != "futures":
+            allowed_intervals = _BINANCE_UPDATE_INTERVALS_MS.get(key.market_type)
+            if allowed_intervals is None:
                 raise ValueError(
-                    "Binance Full Order Book requires market_type='futures'",
+                    "Binance Full Order Book requires market_type to be "
+                    "'spot' or 'futures'",
                 )
-            if update_interval_ms not in _BINANCE_FUTURES_UPDATE_INTERVALS_MS:
+            if update_interval_ms not in allowed_intervals:
+                supported = ", ".join(str(value) for value in sorted(allowed_intervals))
                 raise ValueError(
-                    "Binance Futures update_interval_ms must be one of 100, 250, or 500",
+                    f"Binance {key.market_type} update_interval_ms must be one of "
+                    f"{supported}",
                 )
         return key
 

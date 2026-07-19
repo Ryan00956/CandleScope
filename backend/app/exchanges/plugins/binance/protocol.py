@@ -22,6 +22,7 @@ _REST_PATH: dict[str, dict[str, str]] = {
         "ticker": "/api/v3/ticker/24hr",
         "miniTicker": "/api/v3/ticker/24hr",
         "depth": "/api/v3/depth",
+        "fullDepth": "/api/v3/depth",
     },
     "futures": {
         "kline": "/fapi/v1/klines",
@@ -56,9 +57,18 @@ _PARTIAL_DEPTH_DEFAULT_INTERVAL_MS = {
     "spot": 1000,
     "futures": 250,
 }
-_FULL_DEPTH_UPDATE_INTERVALS_MS = {100, 250, 500}
-_FULL_DEPTH_DEFAULT_INTERVAL_MS = 250
-_FULL_DEPTH_SNAPSHOT_LIMITS = {5, 10, 20, 50, 100, 500, 1000}
+_FULL_DEPTH_UPDATE_INTERVALS_MS = {
+    "spot": {100, 1000},
+    "futures": {100, 250, 500},
+}
+_FULL_DEPTH_DEFAULT_INTERVAL_MS = {
+    "spot": 1000,
+    "futures": 250,
+}
+_FULL_DEPTH_SNAPSHOT_LIMITS = {
+    "spot": {5, 10, 20, 50, 100, 500, 1000, 5000},
+    "futures": {5, 10, 20, 50, 100, 500, 1000},
+}
 
 _FUTURES_MARKET_STREAMS = {
     "aggTrade",
@@ -185,13 +195,15 @@ class BinanceExchangeProtocol:
             max_limit = 1000 if desc.market_type == "futures" else 5000
             params["limit"] = min(max(int(req.limit or 1), 1), max_limit)
         elif desc.stream_type.value == "fullDepth":
-            if str(desc.market_type).strip().lower() != "futures":
-                raise ValueError("Binance full depth is available only for USD-M futures")
+            market_type = str(desc.market_type).strip().lower()
+            allowed_limits = _FULL_DEPTH_SNAPSHOT_LIMITS.get(market_type)
+            if allowed_limits is None:
+                raise ValueError(f"unsupported Binance full-depth market_type: {market_type}")
             raw_limit = getattr(req, "limit", None)
-            if type(raw_limit) is not int or raw_limit not in _FULL_DEPTH_SNAPSHOT_LIMITS:
-                supported = ", ".join(str(value) for value in sorted(_FULL_DEPTH_SNAPSHOT_LIMITS))
+            if type(raw_limit) is not int or raw_limit not in allowed_limits:
+                supported = ", ".join(str(value) for value in sorted(allowed_limits))
                 raise ValueError(
-                    "Binance USD-M full-depth snapshot limit must be one of "
+                    f"Binance {market_type} full-depth snapshot limit must be one of "
                     f"{{{supported}}}",
                 )
             params["limit"] = raw_limit
@@ -245,10 +257,11 @@ class BinanceExchangeProtocol:
             return stream_name
         if descriptor.stream_type.value == "fullDepth":
             update_interval_ms = self._full_depth_update_interval(descriptor)
+            market_type = str(descriptor.market_type).strip().lower()
             stream_name = f"{symbol}@depth"
             if (
                 update_interval_ms is not None
-                and update_interval_ms != _FULL_DEPTH_DEFAULT_INTERVAL_MS
+                and update_interval_ms != _FULL_DEPTH_DEFAULT_INTERVAL_MS[market_type]
             ):
                 stream_name = f"{stream_name}@{update_interval_ms}ms"
             return stream_name
@@ -309,9 +322,10 @@ class BinanceExchangeProtocol:
                 market_type=descriptor.market_type,
             ).upper()
             return payload_symbol == expected_symbol
-        if stream_type in {"depth", "fullDepth"} and str(
-            getattr(descriptor, "market_type", "spot"),
-        ).strip().lower() == "futures":
+        market_type = str(getattr(descriptor, "market_type", "spot")).strip().lower()
+        if stream_type == "fullDepth" or (
+            stream_type == "depth" and market_type == "futures"
+        ):
             if payload.get("e") != "depthUpdate":
                 return False
             if "st" in payload and (
@@ -343,7 +357,6 @@ class BinanceExchangeProtocol:
         if str(getattr(descriptor, "market_type", "spot")).strip().lower() != "futures":
             return stream_type not in {
                 "forceOrder",
-                "fullDepth",
                 "markPrice",
                 "indexPrice",
                 "fundingRate",
@@ -399,8 +412,10 @@ class BinanceExchangeProtocol:
     @staticmethod
     def _full_depth_update_interval(descriptor: Any) -> int | None:
         market_type = str(getattr(descriptor, "market_type", "spot")).strip().lower()
-        if market_type != "futures":
-            raise ValueError("Binance full depth is available only for USD-M futures")
+        allowed_intervals = _FULL_DEPTH_UPDATE_INTERVALS_MS.get(market_type)
+        default_interval = _FULL_DEPTH_DEFAULT_INTERVAL_MS.get(market_type)
+        if allowed_intervals is None or default_interval is None:
+            raise ValueError(f"unsupported Binance full-depth market_type: {market_type}")
         if getattr(descriptor, "depth_levels", None) is not None:
             raise ValueError("Binance full depth must not set partial depth_levels")
 
@@ -409,13 +424,13 @@ class BinanceExchangeProtocol:
             return None
         if (
             type(update_interval_ms) is not int
-            or update_interval_ms not in _FULL_DEPTH_UPDATE_INTERVALS_MS
+            or update_interval_ms not in allowed_intervals
         ):
             supported = ", ".join(
-                str(value) for value in sorted(_FULL_DEPTH_UPDATE_INTERVALS_MS)
+                str(value) for value in sorted(allowed_intervals)
             )
             raise ValueError(
-                "Binance USD-M full depth update_interval_ms must be one of "
+                f"Binance {market_type} full depth update_interval_ms must be one of "
                 f"{{{supported}}}",
             )
         return update_interval_ms

@@ -148,7 +148,11 @@ def test_order_book_ws_orders_snapshot_before_live_latest_state() -> None:
         assert connected["type"] == "connected"
         assert connected["protocol"] == "orderbook.v1"
         assert connected["allowed_depth_levels"] == [5, 10, 20]
-        assert connected["allowed_update_intervals_ms"] == [100, 250, 500]
+        assert connected["allowed_update_intervals_ms"] == [100, 250, 500, 1000]
+        assert connected["allowed_update_intervals_ms_by_market"] == {
+            "spot": [100, 1000],
+            "futures": [100, 250, 500],
+        }
         _assert_contract(connected)
 
         ws.send_json(command)
@@ -185,7 +189,8 @@ def test_order_book_ws_rejects_non_partial_or_unsupported_streams() -> None:
         assert ws.receive_json()["type"] == "connected"
         invalid_streams = [
             _stream(channel="trade"),
-            _stream(market_type="spot"),
+            _stream(market_type="margin"),
+            _stream(market_type="spot", update_interval_ms=250),
             _stream(depth_levels=50),
             _stream(update_interval_ms=1000),
             _stream(mode="delta"),
@@ -210,6 +215,31 @@ def test_order_book_ws_rejects_non_partial_or_unsupported_streams() -> None:
 
     assert len(dm.ensure_calls) == 1
     assert dm.release_calls == dm.ensure_calls
+
+
+def test_order_book_ws_accepts_spot_partial_snapshot_stream() -> None:
+    dm = _OrderBookDataManager()
+    command = {
+        "action": "subscribe",
+        "request_id": "spot",
+        "streams": [_stream(market_type="spot", update_interval_ms=1000)],
+    }
+
+    with _client(dm).websocket_connect("/api/v1/stream/order-book") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json(command)
+        subscribed = ws.receive_json()
+        snapshot = ws.receive_json()
+        live = ws.receive_json()
+        assert subscribed["type"] == "subscribed"
+        assert subscribed["streams"][0]["market_type"] == "spot"
+        assert subscribed["streams"][0]["params"]["update_interval_ms"] == "1000"
+        assert snapshot["data"][0]["key"]["market_type"] == "spot"
+        assert live["data"]["key"]["market_type"] == "spot"
+        ws.send_json({"action": "unsubscribe"})
+        assert ws.receive_json()["type"] == "unsubscribed"
+
+    assert dm.ensure_calls == dm.release_calls
 
 
 def test_order_book_ws_rejects_falsey_non_object_params_and_non_string_symbol() -> None:

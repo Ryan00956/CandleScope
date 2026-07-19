@@ -318,7 +318,11 @@ class FullOrderBookSeed:
 
 @dataclass(frozen=True, slots=True)
 class DepthDelta:
-    """One ordered absolute-quantity diff event (zero quantity deletes)."""
+    """One ordered absolute-quantity diff event (zero quantity deletes).
+
+    Binance USD-M links events through ``pu``. Binance Spot does not publish
+    that field and instead exposes overlapping ``U``/``u`` update ranges.
+    """
 
     exchange: str
     market_type: str
@@ -326,7 +330,7 @@ class DepthDelta:
     update_interval_ms: int
     first_update_id: int
     final_update_id: int
-    previous_final_update_id: int
+    previous_final_update_id: int | None
     bids: tuple[DepthLevelUpdate, ...]
     asks: tuple[DepthLevelUpdate, ...]
     event_time_ms: int
@@ -341,10 +345,22 @@ class DepthDelta:
         object.__setattr__(self, "update_interval_ms", _required_int(self.update_interval_ms, label="update interval", minimum=1))
         first_id = _required_int(self.first_update_id, label="first update id", minimum=1)
         final_id = _required_int(self.final_update_id, label="final update id", minimum=1)
-        previous_id = _required_int(self.previous_final_update_id, label="previous final update id", minimum=0)
+        previous_id: int | None
+        if self.exchange == "binance" and self.market_type == "spot":
+            if self.previous_final_update_id is not None:
+                raise ValueError(
+                    "Binance Spot full order-book deltas must not claim a previous update link",
+                )
+            previous_id = None
+        else:
+            previous_id = _required_int(
+                self.previous_final_update_id,
+                label="previous final update id",
+                minimum=0,
+            )
         if first_id > final_id:
             raise ValueError("full order-book first update id cannot exceed final update id")
-        if previous_id >= final_id:
+        if previous_id is not None and previous_id >= final_id:
             raise ValueError("full order-book previous update id must precede final update id")
         object.__setattr__(self, "first_update_id", first_id)
         object.__setattr__(self, "final_update_id", final_id)
@@ -806,7 +822,11 @@ class FullOrderBookEngine:
         bids = {item.price: item.quantity for item in seed.bids}
         asks = {item.price: item.quantity for item in seed.asks}
         buffered = tuple(state.buffered)
-        kept = tuple(item for item in buffered if item.final_update_id >= seed.last_update_id)
+        kept = tuple(
+            item
+            for item in buffered
+            if self._delta_follows_snapshot(item, seed.last_update_id)
+        )
         self._metrics["buffered_old_discarded"] += len(buffered) - len(kept)
         last_id = seed.last_update_id
         last_signature: tuple[Any, ...] | None = None
@@ -937,7 +957,7 @@ class FullOrderBookEngine:
         delta: DepthDelta,
     ) -> FullOrderBookApplyResult:
         assert state.last_update_id is not None
-        if delta.final_update_id < state.last_update_id:
+        if not self._delta_follows_snapshot(delta, state.last_update_id):
             return self._stale_result(state)
         if not self._bridges_snapshot(delta, state.last_update_id):
             return self._fail(state, FullOrderBookFailure.GAP, "delta does not bridge REST snapshot")
@@ -1017,11 +1037,27 @@ class FullOrderBookEngine:
         return None
 
     @staticmethod
+    def _delta_follows_snapshot(delta: DepthDelta, snapshot_id: int) -> bool:
+        if delta.exchange == "binance" and delta.market_type == "spot":
+            # Spot's documented bootstrap discards every u <= lastUpdateId.
+            return delta.final_update_id > snapshot_id
+        return delta.final_update_id >= snapshot_id
+
+    @staticmethod
     def _bridges_snapshot(delta: DepthDelta, snapshot_id: int) -> bool:
-        return delta.first_update_id <= snapshot_id <= delta.final_update_id
+        target_id = (
+            snapshot_id + 1
+            if delta.exchange == "binance" and delta.market_type == "spot"
+            else snapshot_id
+        )
+        return delta.first_update_id <= target_id <= delta.final_update_id
 
     @staticmethod
     def _link_error(previous_id: int, delta: DepthDelta) -> str | None:
+        if delta.exchange == "binance" and delta.market_type == "spot":
+            if delta.first_update_id > previous_id + 1:
+                return "delta U is greater than previous applied u + 1"
+            return None
         if delta.previous_final_update_id != previous_id:
             return "delta pu does not equal previous applied u"
         return None

@@ -136,7 +136,12 @@ class StreamDescriptor:
             return base
         if self.stream_type == StreamType.FULL_DEPTH:
             base = f"{symbol}@depth"
-            if self.update_interval_ms is None or self.update_interval_ms == 250:
+            market_type = self.market_type.strip().lower()
+            default_interval_ms = 1000 if market_type == "spot" else 250
+            if (
+                self.update_interval_ms is None
+                or self.update_interval_ms == default_interval_ms
+            ):
                 return base
             return f"{base}@{self.update_interval_ms}ms"
         return f"{symbol}@{self.stream_type.value}"

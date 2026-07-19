@@ -21,7 +21,14 @@ from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
 
 PROTOCOL = "orderbook.full.v1"
 UPSTREAM_SNAPSHOT_LIMIT = 1_000
-ALLOWED_UPDATE_INTERVALS_MS = frozenset({100, 250, 500})
+ALLOWED_UPDATE_INTERVALS_BY_MARKET = {
+    "spot": frozenset({100, 1000}),
+    "futures": frozenset({100, 250, 500}),
+}
+DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET = {"spot": 1000, "futures": 250}
+ALLOWED_UPDATE_INTERVALS_MS = frozenset().union(
+    *ALLOWED_UPDATE_INTERVALS_BY_MARKET.values(),
+)
 MAX_OUTPUT_LEVELS = 1_000
 
 router = APIRouter(prefix="/full-order-book", tags=["full-order-book"])
@@ -34,7 +41,7 @@ async def full_order_book_snapshot(
     symbol: str = Query("BTCUSDT"),
     exchange: str = Query("binance"),
     market_type: str = Query("futures"),
-    update_interval_ms: int = Query(default=250),
+    update_interval_ms: int | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=MAX_OUTPUT_LEVELS),
     price_grouping: str = Query(default="raw"),
     wait_ms: int = Query(default=5_000, ge=100, le=15_000),
@@ -122,19 +129,26 @@ def full_order_book_key(
     exchange: str,
     market_type: str,
     symbol: str,
-    update_interval_ms: int,
+    update_interval_ms: int | None,
 ) -> MarketStreamKey:
     exchange_name = str(exchange).strip().lower()
     market = str(market_type).strip().lower()
-    if exchange_name != "binance" or market != "futures":
+    if exchange_name != "binance" or market not in ALLOWED_UPDATE_INTERVALS_BY_MARKET:
         raise HTTPException(
             status_code=422,
-            detail="full order books currently support binance futures only",
+            detail="full order books currently support binance spot and futures only",
         )
-    if update_interval_ms not in ALLOWED_UPDATE_INTERVALS_MS:
+    resolved_interval_ms = (
+        DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET[market]
+        if update_interval_ms is None
+        else update_interval_ms
+    )
+    allowed_intervals = ALLOWED_UPDATE_INTERVALS_BY_MARKET[market]
+    if resolved_interval_ms not in allowed_intervals:
+        supported = ", ".join(str(value) for value in sorted(allowed_intervals))
         raise HTTPException(
             status_code=422,
-            detail="update_interval_ms must be one of 100, 250, or 500",
+            detail=f"binance {market} update_interval_ms must be one of {supported}",
         )
     try:
         return MarketStreamKey.build(
@@ -145,7 +159,7 @@ def full_order_book_key(
             params={
                 "mode": "full",
                 "snapshot_limit": UPSTREAM_SNAPSHOT_LIMIT,
-                "update_interval_ms": update_interval_ms,
+                "update_interval_ms": resolved_interval_ms,
             },
         )
     except (TypeError, ValueError) as exc:

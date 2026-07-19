@@ -11,7 +11,9 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.api.v1.order_book import (
     ALLOWED_DEPTH_LEVELS,
+    ALLOWED_UPDATE_INTERVALS_BY_MARKET,
     ALLOWED_UPDATE_INTERVALS_MS,
+    DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET,
     PROTOCOL,
     serialize_record,
 )
@@ -195,6 +197,10 @@ async def stream_order_book(websocket: WebSocket, dm: Any) -> None:
             "max_subscriptions": MAX_SUBSCRIPTIONS,
             "allowed_depth_levels": sorted(ALLOWED_DEPTH_LEVELS),
             "allowed_update_intervals_ms": sorted(ALLOWED_UPDATE_INTERVALS_MS),
+            "allowed_update_intervals_ms_by_market": {
+                market: sorted(intervals)
+                for market, intervals in ALLOWED_UPDATE_INTERVALS_BY_MARKET.items()
+            },
             **_contract_metadata(),
         })
         if not await _subscribe():
@@ -257,9 +263,9 @@ def _parse_streams(raw_streams: object) -> list[MarketStreamKey]:
         market_type = str(
             raw.get("market_type", raw.get("marketType", "futures")),
         ).strip().lower()
-        if exchange != "binance" or market_type != "futures":
+        if exchange != "binance" or market_type not in ALLOWED_UPDATE_INTERVALS_BY_MARKET:
             raise ValueError(
-                "P3A partial order books currently support binance futures only",
+                "partial order books currently support binance spot and futures only",
             )
         params = raw["params"] if "params" in raw else {}
         if not isinstance(params, dict):
@@ -272,13 +278,20 @@ def _parse_streams(raw_streams: object) -> list[MarketStreamKey]:
             raise ValueError("P3A order-book mode must be 'partial'")
         depth_levels = _integer_param(params.get("depth_levels", 20), "depth_levels")
         update_interval_ms = _integer_param(
-            params.get("update_interval_ms", 250),
+            params.get(
+                "update_interval_ms",
+                DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET[market_type],
+            ),
             "update_interval_ms",
         )
         if depth_levels not in ALLOWED_DEPTH_LEVELS:
             raise ValueError("depth_levels must be one of 5, 10, or 20")
-        if update_interval_ms not in ALLOWED_UPDATE_INTERVALS_MS:
-            raise ValueError("update_interval_ms must be one of 100, 250, or 500")
+        allowed_intervals = ALLOWED_UPDATE_INTERVALS_BY_MARKET[market_type]
+        if update_interval_ms not in allowed_intervals:
+            supported = ", ".join(str(value) for value in sorted(allowed_intervals))
+            raise ValueError(
+                f"binance {market_type} update_interval_ms must be one of {supported}",
+            )
         symbol = raw.get("symbol")
         if not isinstance(symbol, str):
             raise TypeError("order-book stream symbol must be a string")

@@ -27,7 +27,10 @@ logger = logging.getLogger("data_engine.market_data.order_book")
 
 _REQUIRED_PARAMS = frozenset({"mode", "depth_levels", "update_interval_ms"})
 _BINANCE_PARTIAL_LEVELS = frozenset({5, 10, 20})
-_BINANCE_FUTURES_UPDATE_INTERVALS_MS = frozenset({100, 250, 500})
+_BINANCE_UPDATE_INTERVALS_MS = {
+    "spot": frozenset({100, 1000}),
+    "futures": frozenset({100, 250, 500}),
+}
 
 
 class _IngestionFactory(Protocol):
@@ -83,7 +86,7 @@ class OrderBookService:
         event_queue_size: int = 256,
         default_max_pending: int = 32,
         max_snapshot_age_ms: int = 5_000,
-        physical_stop_timeout_seconds: float = 2.0,
+        physical_stop_timeout_seconds: float = 5.0,
     ) -> None:
         self._factory = ingestion_factory
         self._max_streams = max(1, int(max_streams))
@@ -789,11 +792,17 @@ class OrderBookService:
         if depth_levels not in _BINANCE_PARTIAL_LEVELS:
             raise ValueError("partial order-book depth_levels must be one of 5, 10, or 20")
         if key.exchange == "binance":
-            if key.market_type != "futures":
-                raise ValueError("Binance partial order-book service requires market_type='futures'")
-            if update_interval_ms not in _BINANCE_FUTURES_UPDATE_INTERVALS_MS:
+            allowed_intervals = _BINANCE_UPDATE_INTERVALS_MS.get(key.market_type)
+            if allowed_intervals is None:
                 raise ValueError(
-                    "Binance Futures update_interval_ms must be one of 100, 250, or 500",
+                    "Binance partial order-book service requires market_type "
+                    "to be 'spot' or 'futures'",
+                )
+            if update_interval_ms not in allowed_intervals:
+                supported = ", ".join(str(value) for value in sorted(allowed_intervals))
+                raise ValueError(
+                    f"Binance {key.market_type} update_interval_ms must be one of "
+                    f"{supported}",
                 )
         return key
 

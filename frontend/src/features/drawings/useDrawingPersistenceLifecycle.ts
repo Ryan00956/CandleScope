@@ -95,6 +95,7 @@ import type {
   DrawingScenePrimitiveBridgeSnapshot,
 } from "../../chart-adapter/drawingScenePrimitiveBridge.js";
 import { DrawingScenePrimitive } from "./rendering/DrawingScenePrimitive.js";
+import type { DrawingScenePaintAck } from "./rendering/DrawingScenePrimitive.js";
 import {
   drawingDisplayEntityScreenHandles,
   drawingDisplayEntityScreenBox,
@@ -829,6 +830,7 @@ export function useDrawingPersistenceLifecycle({
   completeSurfaceDispose(): void;
   invalidateSurfaceCredentialsForSeriesReplacement(): void;
   invalidateVisibleScene(): boolean;
+  flushVisibleScene(): boolean;
   synchronizeVisibleSceneVisibility(
     hidden: boolean,
     options?: DrawingSceneHiddenTransitionOptions,
@@ -848,6 +850,7 @@ export function useDrawingPersistenceLifecycle({
     listener: (stamp: DrawingCommittedPaintTicket) => void,
     options?: Readonly<{ replayLastPublication?: boolean }>,
   ): () => void;
+  subscribeVisibleSceneExactPaint(listener: (ack: DrawingScenePaintAck) => void): () => void;
   prepareUserMutationScope(): boolean;
   prepareSurfaceDispose(): boolean;
   hitTestScene(x: number, y: number): DrawingDisplayHitResult | null;
@@ -1487,6 +1490,13 @@ export function useDrawingPersistenceLifecycle({
     return sceneRuntime.invalidate("interaction-overlay") || adapterInvalidated;
   }, [authorityMode, engineMode.effective, sceneAdapterGetterDelegate, sceneRuntime]);
 
+  const flushVisibleScene = useCallback((): boolean => {
+    if (authorityMode !== "document"
+      || engineMode.effective !== "scene-canary"
+      || !sceneCanaryEnabledRef.current) return false;
+    return sceneRuntime.flushNow();
+  }, [authorityMode, engineMode.effective, sceneRuntime]);
+
   const synchronizeVisibleSceneVisibility = useCallback((
     hidden: boolean,
     options: DrawingSceneHiddenTransitionOptions = {},
@@ -1542,6 +1552,13 @@ export function useDrawingPersistenceLifecycle({
       visibleScenePublicationListeners.delete(listener);
     };
   }, [sceneBridge, visibleScenePublicationListeners]);
+
+  const subscribeVisibleSceneExactPaint = useCallback((
+    listener: (ack: DrawingScenePaintAck) => void,
+  ): (() => void) => {
+    if (typeof listener !== "function") return () => {};
+    return sceneBridge.subscribePainted(listener);
+  }, [sceneBridge]);
 
   const prepareUserMutationScope = useCallback((): boolean => {
     const adapter = adapterGetterRef.current();
@@ -2834,6 +2851,7 @@ export function useDrawingPersistenceLifecycle({
     completeSurfaceDispose,
     invalidateSurfaceCredentialsForSeriesReplacement,
     invalidateVisibleScene,
+    flushVisibleScene,
     synchronizeVisibleSceneVisibility,
     persistActiveScopeDrawings,
     persistDetachedDrawings,
@@ -2852,5 +2870,6 @@ export function useDrawingPersistenceLifecycle({
     revalidateExportScene,
     subscribeVisibleScenePaint,
     subscribeVisibleScenePublication,
+    subscribeVisibleSceneExactPaint,
   };
 }

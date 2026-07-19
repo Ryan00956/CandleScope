@@ -14,6 +14,8 @@ import {
   createDrawingExportVisibilityIntentGate,
   detachAndRemoveDrawingPrimitive,
   dynamicDecorationsForSavedDrawingDraft,
+  dynamicOverlayExactPaintAction,
+  dynamicOverlayStaticTakeoverTiming,
   dynamicPassiveFeedbackDecorations,
   dynamicSelectedHandleDecoration,
   dynamicSelectionHandlesForSavedDrawing,
@@ -46,7 +48,11 @@ import {
 } from "../useDrawingPersistenceLifecycle.js";
 import type { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
 import type { DrawingPrimitiveHit } from "../drawingSelectionController.js";
-import type { DrawingDisplayHitResult } from "../rendering/drawingDisplayList.js";
+import type {
+  DrawingDisplayHitResult,
+  DrawingScreenDisplayList,
+} from "../rendering/drawingDisplayList.js";
+import type { DrawingScenePaintAck } from "../rendering/DrawingScenePrimitive.js";
 import type {
   ActiveDrawingMovePayload,
   DrawingDataToScreen,
@@ -1292,6 +1298,86 @@ test("selected feedback keeps drag handles without a bounding box", () => {
   assert.notEqual(decoration?.type, "box");
 });
 
+test("dynamic drag takeover waits for static exclusion and bridges a quick release", () => {
+  const stamp = malformedFixture<DrawingScreenDisplayList["stamp"]>({
+    scopeKey: "BTCUSDT:15m",
+    documentRevision: 7,
+    surfaceGeneration: 3,
+    viewportRevision: 11,
+  });
+  const included = malformedFixture<DrawingScreenDisplayList>({
+    stamp,
+    entities: [{ id: "fib" }],
+  });
+  const excluded = malformedFixture<DrawingScreenDisplayList>({
+    stamp,
+    entities: [],
+  });
+  const ack = (plan: DrawingScreenDisplayList): DrawingScenePaintAck => ({
+    plan,
+    stamp: plan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(included), desiredOwner: "dynamic", entityId: "fib",
+  }), "ignore", "dynamic full geometry cannot appear while static still owns it");
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(excluded), desiredOwner: "dynamic", entityId: "fib",
+  }), "paint-dynamic");
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(excluded), desiredOwner: "static", entityId: "fib",
+  }), "paint-dynamic", "late exclusion paint is bridged after quick pointerup");
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(included), desiredOwner: "static", entityId: "fib",
+  }), "paint-static");
+});
+
+test("quick no-move ownership stays singular across same-stamp exclusion and restoration paints", () => {
+  const stamp = malformedFixture<DrawingScreenDisplayList["stamp"]>({
+    scopeKey: "BTCUSDT:15m",
+    documentRevision: 7,
+    surfaceGeneration: 3,
+    viewportRevision: 11,
+  });
+  const plan = (ids: readonly string[]) => malformedFixture<DrawingScreenDisplayList>({
+    stamp,
+    entities: ids.map((id) => ({ id })),
+  });
+  const exclusion = plan([]);
+  const restoration = plan(["fib"]);
+  const ack = (candidate: DrawingScreenDisplayList): DrawingScenePaintAck => ({
+    plan: candidate,
+    stamp: candidate.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+
+  let staticOwner = true;
+  let dynamicOwner = false;
+  assert.equal(Number(staticOwner) + Number(dynamicOwner), 1);
+
+  staticOwner = false;
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(exclusion), desiredOwner: "static", entityId: "fib",
+  }), "paint-dynamic");
+  dynamicOwner = true;
+  assert.equal(Number(staticOwner) + Number(dynamicOwner), 1);
+
+  staticOwner = true;
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(restoration), desiredOwner: "static", entityId: "fib",
+  }), "paint-static");
+  dynamicOwner = false;
+  assert.equal(Number(staticOwner) + Number(dynamicOwner), 1);
+});
+
+test("creation retires dynamic pixels immediately while drag restoration crosses one bitmap swap", () => {
+  assert.equal(dynamicOverlayStaticTakeoverTiming(false), "immediate");
+  assert.equal(dynamicOverlayStaticTakeoverTiming(true), "next-frame");
+});
+
 test("fibonacci draft without explicit levels previews the default retracement grid", () => {
   const fibonacci: SavedDrawing = {
     id: "fibonacci-default-preview",
@@ -1310,14 +1396,15 @@ test("fibonacci draft without explicit levels previews the default retracement g
       : null,
   );
 
-  assert.equal(decorations[0]?.type, "line", "trend line remains the first decoration");
-  assert.equal(decorations.length, 8, "trend line plus seven enabled default levels");
-  assert.deepEqual(decorations.slice(1).map((decoration) => (
-    decoration.type === "line" ? decoration.color : null
-  )), ["#787b86", "#f44336", "#81c784", "#4caf50", "#009688", "#64b5f6", "#787b86"]);
-  assert.deepEqual(decorations.slice(1).map((decoration) => (
-    decoration.type === "line" ? decoration.label?.text : null
-  )), [
+  assert.equal(decorations.length, 1, "one complete Fibonacci draft owns its trend, bands, and levels");
+  const decoration = decorations[0];
+  assert.equal(decoration?.type, "fibonacci");
+  if (decoration?.type !== "fibonacci") return;
+  assert.deepEqual(decoration.trend, [{ x: 10, y: 20 }, { x: 50, y: 80 }]);
+  assert.deepEqual(decoration.levels.map((level) => level.color), [
+    "#787b86", "#f44336", "#81c784", "#4caf50", "#009688", "#64b5f6", "#787b86",
+  ]);
+  assert.deepEqual(decoration.levels.map((level) => level.label?.text), [
     "0 (20.00)",
     "0.236 (34.16)",
     "0.382 (42.92)",
@@ -1327,9 +1414,10 @@ test("fibonacci draft without explicit levels previews the default retracement g
     "1 (80.00)",
   ]);
   assert.deepEqual(
-    decorations[1]?.type === "line" ? decorations[1].label?.anchor : null,
+    decoration.levels[0]?.label?.anchor,
     { x: 14, y: 18 },
   );
+  assert.deepEqual(decoration.handles, [{ x: 10, y: 20 }, { x: 50, y: 80 }]);
 });
 
 test("position creation paints its complete dynamic handoff frame before document commit", () => {

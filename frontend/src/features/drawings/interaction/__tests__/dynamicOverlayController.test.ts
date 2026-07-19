@@ -245,7 +245,7 @@ test("dynamic overlay paints full axis lines, ellipse drafts, and extended rays"
   assert.equal((lines.at(-1)?.[0] ?? 0) > 100, true);
 });
 
-test("dynamic line decorations paint fibonacci level and price labels", () => {
+test("dynamic line decorations paint labels", () => {
   const { canvas, texts } = fixture();
   const frames: Array<() => void> = [];
   const controller = createDynamicOverlayController({
@@ -268,6 +268,51 @@ test("dynamic line decorations paint fibonacci level and price labels", () => {
   frames.shift()?.();
 
   assert.deepEqual(texts, [["0.618 (57.08)", 14, 38]]);
+});
+
+test("dynamic fibonacci decorations keep level bands and labels while interacting", () => {
+  const { canvas, fills, texts } = fixture();
+  const frames: Array<() => void> = [];
+  const controller = createDynamicOverlayController({
+    canvas,
+    getPlotRect: () => ({ x: 20, y: 10, width: 200, height: 100, dpr: 1.5 }),
+    requestFrame(callback) { frames.push(callback); return callback; },
+    cancelFrame() {},
+  });
+  controller.render({ decorations: [{
+    type: "fibonacci",
+    trend: [{ x: 30, y: 30 }, { x: 130, y: 90 }],
+    color: "#3b82f6",
+    lineWidth: 2,
+    levels: [
+      {
+        color: "#f44336",
+        line: [{ x: 30, y: 90 }, { x: 130, y: 90 }],
+        label: { anchor: { x: 34, y: 88 }, text: "1 (80.00)" },
+      },
+      {
+        color: "#787b86",
+        line: [{ x: 30, y: 30 }, { x: 130, y: 30 }],
+        label: { anchor: { x: 34, y: 28 }, text: "0 (20.00)" },
+      },
+      {
+        color: "#4caf50",
+        line: [{ x: 30, y: 60 }, { x: 130, y: 60 }],
+        label: { anchor: { x: 34, y: 58 }, text: "0.5 (50.00)" },
+      },
+    ],
+  }] });
+  frames.shift()?.();
+
+  assert.deepEqual(fills, [
+    [10, 20, 100, 30],
+    [10, 50, 100, 30],
+  ]);
+  assert.deepEqual(texts, [
+    ["0 (20.00)", 14, 18],
+    ["0.5 (50.00)", 14, 48],
+    ["1 (80.00)", 14, 78],
+  ]);
 });
 
 test("dynamic overlay keeps position fills, badges, and information visible while dragging", () => {

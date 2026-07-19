@@ -78,6 +78,7 @@ import {
 } from "./useDrawingPersistenceLifecycle.js";
 import type {
   DrawingActiveDocumentTarget,
+  DrawingCommittedPaintTicket,
   DrawingExportSceneReceipt,
   DrawingLegacyPrimitiveRuntimeEvidence,
 } from "./useDrawingPersistenceLifecycle.js";
@@ -89,6 +90,7 @@ import type {
   DrawingExportBarrierLease,
 } from "./export/drawingExportBarrier.js";
 import type { DrawingDisplayHitResult } from "./rendering/drawingDisplayList.js";
+import type { DrawingScenePaintAck } from "./rendering/DrawingScenePrimitive.js";
 import { DEFAULT_FIBONACCI_RENDER_LEVELS } from "./rendering/drawingRenderDefaults.js";
 import {
   drawingCommandsForLegacyPrimitive,
@@ -328,6 +330,45 @@ export interface DynamicHoverDecoration {
   readonly id: string | null;
   readonly point: ScreenPoint;
   readonly eraser: boolean;
+}
+
+export type DynamicOverlayExactPaintAction = "ignore" | "paint-dynamic" | "paint-static";
+export type DynamicOverlayStaticTakeoverTiming = "immediate" | "next-frame";
+
+/** Creation has no old static bitmap; drag restoration must cross LWC's swap boundary. */
+export function dynamicOverlayStaticTakeoverTiming(
+  canRenderDynamicDraft: boolean,
+): DynamicOverlayStaticTakeoverTiming {
+  return canRenderDynamicDraft ? "next-frame" : "immediate";
+}
+
+/** Decide which full-entity owner must exist when one exact scene paint lands. */
+export function dynamicOverlayExactPaintAction({
+  ack,
+  desiredOwner,
+  entityId,
+  ticket = null,
+}: Readonly<{
+  ack: DrawingScenePaintAck;
+  desiredOwner: "dynamic" | "static";
+  entityId: string;
+  ticket?: DrawingCommittedPaintTicket | null;
+}>): DynamicOverlayExactPaintAction {
+  const staticOwnsEntity = ack.plan.entities.some((entity) => entity.id === entityId);
+  if (desiredOwner === "dynamic") return staticOwnsEntity ? "ignore" : "paint-dynamic";
+  if (!staticOwnsEntity) return "paint-dynamic";
+  return ticket && !scenePaintCoversDrawingHandoff(ticket, ack.stamp)
+    ? "ignore"
+    : "paint-static";
+}
+
+interface DynamicOverlayOwnershipSessionState {
+  readonly entityId: string;
+  readonly generation: number;
+  desiredOwner: "dynamic" | "static";
+  ticket: DrawingCommittedPaintTicket | null;
+  clearDragRefsOnStaticPaint: boolean;
+  canRenderDynamicDraft: boolean;
 }
 
 /** Build passive hover/eraser feedback without repainting selected entities as boxes. */
@@ -642,28 +683,18 @@ export function dynamicDecorationsForSavedDrawingDraft(
       const startPrice = saved.inverted ? lastPrice : firstPrice;
       const endPrice = saved.inverted ? firstPrice : lastPrice;
       const levels = (saved.levels ?? DEFAULT_FIBONACCI_RENDER_LEVELS)
-        .filter((level) => level.enabled);
-      return Object.freeze([
-        Object.freeze({
-          type: "line" as const,
-          from: first,
-          to: last,
-          color,
-          lineWidth,
-          dashed: true,
-          handles: Object.freeze([first, last]),
-        }),
-        ...levels.map((level) => {
+        .flatMap((level) => {
+          if (!level.enabled || !Number.isFinite(level.level)) return [];
           const y = startY + (endY - startY) * level.level;
           const logicalPrice = hasPrices
             ? (startPrice as number) + ((endPrice as number) - (startPrice as number)) * level.level
             : null;
-          return Object.freeze({
-            type: "line" as const,
-            from: Object.freeze({ x: minX, y }),
-            to: Object.freeze({ x: maxX, y }),
+          return [Object.freeze({
             color: level.color,
-            lineWidth,
+            line: Object.freeze([
+              Object.freeze({ x: minX, y }),
+              Object.freeze({ x: maxX, y }),
+            ] as const),
             ...(logicalPrice === null
               ? {}
               : {
@@ -672,7 +703,17 @@ export function dynamicDecorationsForSavedDrawingDraft(
                     text: `${level.level} (${logicalPrice.toFixed(2)})`,
                   }),
                 }),
-          });
+          })];
+        })
+        .sort((left, right) => left.line[0].y - right.line[0].y);
+      return Object.freeze([
+        Object.freeze({
+          type: "fibonacci" as const,
+          trend: Object.freeze([first, last] as const),
+          color,
+          lineWidth,
+          levels: Object.freeze(levels),
+          handles: Object.freeze([first, last]),
         }),
       ]);
     }
@@ -1511,6 +1552,7 @@ export function useDrawing({
   const dynamicHandoffFrameRef = useRef<unknown>(null);
   const dynamicHandoffGenerationRef = useRef(0);
   const dynamicHandoffLockRef = useRef(false);
+  const dynamicOwnershipSessionRef = useRef<DynamicOverlayOwnershipSessionState | null>(null);
   const coordinateCleanupBoundaryRef = useRef<DrawingCoordinateCleanupBoundary | null>(null);
 
   // ── Tool refs (avoid stale closures) ──
@@ -1760,6 +1802,7 @@ export function useDrawing({
     completeSurfaceDispose: completePersistenceSurfaceDispose,
     invalidateSurfaceCredentialsForSeriesReplacement,
     invalidateVisibleScene,
+    flushVisibleScene,
     synchronizeVisibleSceneVisibility,
     persistActiveScopeDrawings,
     persistDetachedDrawings,
@@ -1778,6 +1821,7 @@ export function useDrawing({
     revalidateExportScene,
     subscribeVisibleScenePaint,
     subscribeVisibleScenePublication,
+    subscribeVisibleSceneExactPaint,
   } = useDrawingPersistenceLifecycle({
     beforeScopeTransitionRef,
     currentFreehandRef,
@@ -1934,6 +1978,7 @@ export function useDrawing({
     dynamicHandoffGenerationRef.current += 1;
     dynamicPaintUnsubscribeRef.current?.();
     dynamicPaintUnsubscribeRef.current = null;
+    dynamicOwnershipSessionRef.current = null;
     const handle = dynamicHandoffFrameRef.current;
     if (handle !== null) {
       if (typeof cancelAnimationFrame === "function" && typeof handle === "number") {
@@ -2285,60 +2330,151 @@ export function useDrawing({
   }, [dataToScreen, getDynamicFramePresentation, getDynamicScreenBox, getPrimitiveById, getSavedDrawing, getSceneScreenHandles, interactionSurfaceMode, selectedIdRef]);
   renderDynamicFeedbackRef.current = renderDynamicFeedback;
 
-  const retainDynamicOverlayUntilPaint = useCallback((
-    ticket: Readonly<{
-      scopeKey: string;
-      documentRevision: number;
-      surfaceGeneration: number;
-      viewportRevision: number;
-    }> | null,
-    { replayLastPaint = true }: Readonly<{ replayLastPaint?: boolean }> = {},
-  ) => {
-    if (interactionSurfaceMode !== "overlay") return;
-    cancelDynamicPaintHandoff();
-    if (!ticket) {
-      // Without stable scope + surface credentials there is no paint event
-      // that can safely retire this frame. Drop back to current selection/
-      // hover feedback instead of retaining stale committed pixels forever.
-      renderDynamicFeedback();
-      return;
+  const startDynamicOverlayOwnershipSession = useCallback(({
+    canRenderDynamicDraft,
+    clearDragRefsOnStaticPaint,
+    desiredOwner,
+    entityId,
+    ticket,
+  }: Readonly<{
+    canRenderDynamicDraft: boolean;
+    clearDragRefsOnStaticPaint: boolean;
+    desiredOwner: "dynamic" | "static";
+    entityId: string;
+    ticket: DrawingCommittedPaintTicket | null;
+  }>): boolean => {
+    if (interactionSurfaceMode !== "overlay" || !entityId) return false;
+    const existing = dynamicOwnershipSessionRef.current;
+    if (existing?.entityId === entityId
+      && existing.generation === dynamicHandoffGenerationRef.current) {
+      existing.desiredOwner = desiredOwner;
+      existing.ticket = ticket;
+      existing.clearDragRefsOnStaticPaint ||= clearDragRefsOnStaticPaint;
+      existing.canRenderDynamicDraft ||= canRenderDynamicDraft;
+      dynamicHandoffLockRef.current = true;
+      if (ticket) recordDrawingPerfInteractionHandoffPrepared("dynamic", ticket);
+      const invalidated = invalidateVisibleScene();
+      return flushVisibleScene() || invalidated;
     }
+
+    cancelDynamicPaintHandoff();
     dynamicHandoffLockRef.current = true;
-    recordDrawingPerfInteractionHandoffPrepared("dynamic", ticket);
-    const generation = dynamicHandoffGenerationRef.current;
-    let matchedSynchronously = false;
-    let matched = false;
-    const onPainted = (stamp: Readonly<{
-      scopeKey: string;
-      documentRevision: number;
-      surfaceGeneration: number;
-      viewportRevision: number;
-    }>) => {
-      if (matched
-        || generation !== dynamicHandoffGenerationRef.current
-        || !scenePaintCoversDrawingHandoff(ticket, stamp)) return;
-      matched = true;
-      recordDrawingPerfInteractionHandoffAcknowledged("dynamic", stamp);
-      matchedSynchronously = true;
-      dynamicPaintUnsubscribeRef.current?.();
-      dynamicPaintUnsubscribeRef.current = null;
-      const clearAfterPaint = () => {
+    if (ticket) recordDrawingPerfInteractionHandoffPrepared("dynamic", ticket);
+    const state: DynamicOverlayOwnershipSessionState = {
+      entityId,
+      generation: dynamicHandoffGenerationRef.current,
+      desiredOwner,
+      ticket,
+      clearDragRefsOnStaticPaint,
+      canRenderDynamicDraft,
+    };
+    dynamicOwnershipSessionRef.current = state;
+    let unsubscribePaint: () => void = () => {};
+    unsubscribePaint = subscribeVisibleSceneExactPaint((ack) => {
+      const current = dynamicOwnershipSessionRef.current;
+      if (current !== state
+        || current.generation !== dynamicHandoffGenerationRef.current) return;
+      const action = dynamicOverlayExactPaintAction({
+        ack,
+        desiredOwner: current.desiredOwner,
+        entityId: current.entityId,
+        ticket: current.ticket,
+      });
+      if (action === "ignore") return;
+      if (action === "paint-dynamic") {
+        // The static exclusion plan has already painted. If a quick release
+        // raced it, keep the final draft as the bridge until restoration.
+        if (current.canRenderDynamicDraft) {
+          dynamicHandoffLockRef.current = false;
+          renderDynamicFeedback();
+          dynamicOverlayControllerRef.current?.flush();
+        }
+        dynamicHandoffLockRef.current = current.desiredOwner === "static";
+        return;
+      }
+
+      unsubscribePaint();
+      if (dynamicPaintUnsubscribeRef.current === unsubscribePaint) {
+        dynamicPaintUnsubscribeRef.current = null;
+      }
+      if (current.ticket) {
+        recordDrawingPerfInteractionHandoffAcknowledged("dynamic", ack.stamp);
+      }
+      const finishStaticTakeover = () => {
         dynamicHandoffFrameRef.current = null;
-        if (generation !== dynamicHandoffGenerationRef.current) return;
+        if (dynamicOwnershipSessionRef.current !== current
+          || current.generation !== dynamicHandoffGenerationRef.current) return;
+        dynamicOwnershipSessionRef.current = null;
+        if (current.clearDragRefsOnStaticPaint) {
+          overlayDragEntityDraftRef.current = null;
+          overlayDragPrimitiveRef.current = null;
+          overlayDragOriginalRef.current = null;
+          overlayDragRegistryRef.current = [];
+        }
+        // The caller chooses the creation/drag bitmap boundary below. Always
+        // replace and flush synchronously here; another queued overlay rAF would
+        // overlap the two 10% Fibonacci fills.
         dynamicHandoffLockRef.current = false;
         renderDynamicFeedback();
+        dynamicOverlayControllerRef.current?.flush();
       };
-      dynamicHandoffFrameRef.current = typeof requestAnimationFrame === "function"
-        ? requestAnimationFrame(clearAfterPaint)
-        : setTimeout(clearAfterPaint, 0);
-    };
-    const unsubscribe = subscribeVisibleScenePaint(onPainted, { replayLastPaint });
-    dynamicPaintUnsubscribeRef.current = unsubscribe;
-    if (matchedSynchronously) {
-      unsubscribe();
-      dynamicPaintUnsubscribeRef.current = null;
+      if (dynamicOverlayStaticTakeoverTiming(current.canRenderDynamicDraft) === "immediate") {
+        // Creation publishes the entity to a previously non-owning scene; its
+        // first exact paint is already the visible static owner. Delaying this
+        // path would leave one composite with both 10% Fibonacci fills.
+        finishStaticTakeover();
+      } else {
+        dynamicHandoffFrameRef.current = typeof requestAnimationFrame === "function"
+          ? requestAnimationFrame(finishStaticTakeover)
+          : setTimeout(finishStaticTakeover, 0);
+      }
+    });
+    dynamicPaintUnsubscribeRef.current = unsubscribePaint;
+    const invalidated = invalidateVisibleScene();
+    const flushed = flushVisibleScene();
+    if (!invalidated && !flushed) {
+      cancelDynamicPaintHandoff();
+      renderDynamicFeedback();
+      dynamicOverlayControllerRef.current?.flush();
+      return false;
     }
-  }, [cancelDynamicPaintHandoff, interactionSurfaceMode, renderDynamicFeedback, subscribeVisibleScenePaint]);
+    return true;
+  }, [cancelDynamicPaintHandoff, flushVisibleScene, interactionSurfaceMode, invalidateVisibleScene, renderDynamicFeedback, subscribeVisibleSceneExactPaint]);
+
+  const beginDynamicOverlayOwnershipSession = useCallback((entityId: string): boolean => (
+    startDynamicOverlayOwnershipSession({
+      canRenderDynamicDraft: true,
+      clearDragRefsOnStaticPaint: true,
+      desiredOwner: "dynamic",
+      entityId,
+      ticket: null,
+    })
+  ), [startDynamicOverlayOwnershipSession]);
+
+  const retainDynamicOverlayUntilPaint = useCallback((
+    ticket: DrawingCommittedPaintTicket | null,
+  ): boolean => {
+    const existing = dynamicOwnershipSessionRef.current;
+    const entityId = existing?.entityId
+      ?? overlayDragEntityDraftRef.current?.id
+      ?? overlayDragPrimitiveRef.current?.id
+      ?? selectedIdRef.current;
+    if (!entityId) {
+      cancelDynamicPaintHandoff();
+      renderDynamicFeedback();
+      dynamicOverlayControllerRef.current?.flush();
+      return false;
+    }
+    const hasDragDraft = overlayDragEntityDraftRef.current !== null
+      || overlayDragPrimitiveRef.current !== null;
+    return startDynamicOverlayOwnershipSession({
+      canRenderDynamicDraft: hasDragDraft,
+      clearDragRefsOnStaticPaint: hasDragDraft,
+      desiredOwner: "static",
+      entityId,
+      ticket,
+    });
+  }, [cancelDynamicPaintHandoff, renderDynamicFeedback, selectedIdRef, startDynamicOverlayOwnershipSession]);
 
   useEffect(() => () => {
     cancelDynamicPaintHandoff();
@@ -2505,13 +2641,14 @@ export function useDrawing({
     if (interactionSurfaceMode !== "overlay" || !saved.id || !draggingRef.current) return false;
     overlayDragEntityDraftRef.current = saved;
     activeOverlayEntityIdRef.current = saved.id;
-    cancelDynamicPaintHandoff();
-    invalidateVisibleScene();
-    renderDynamicFeedback();
-    return true;
-  }, [cancelDynamicPaintHandoff, interactionSurfaceMode, invalidateVisibleScene, renderDynamicFeedback]);
+    return beginDynamicOverlayOwnershipSession(saved.id);
+  }, [beginDynamicOverlayOwnershipSession, interactionSurfaceMode]);
 
   const renderOverlayDragDraft = useCallback(() => {
+    // Until the exact exclusion plan is painted, the retained scene remains
+    // the sole full-entity owner. Pointermove may update the draft refs, but it
+    // must not publish those pixels early and recreate an alpha-overlap frame.
+    if (dynamicHandoffLockRef.current) return;
     const entityDraft = overlayDragEntityDraftRef.current;
     const presentation = getDynamicFramePresentation();
     if (entityDraft && interactionSurfaceMode === "overlay") {
@@ -2540,14 +2677,20 @@ export function useDrawing({
     const original = overlayDragOriginalRef.current;
     if (restoreStatic) original?.setHidden?.(false, false);
     activeOverlayEntityIdRef.current = null;
-    overlayDragEntityDraftRef.current = null;
-    overlayDragPrimitiveRef.current = null;
-    overlayDragOriginalRef.current = null;
-    overlayDragRegistryRef.current = [];
+    if (clearDynamic) {
+      cancelDynamicPaintHandoff();
+      overlayDragEntityDraftRef.current = null;
+      overlayDragPrimitiveRef.current = null;
+      overlayDragOriginalRef.current = null;
+      overlayDragRegistryRef.current = [];
+    }
     invalidateVisibleScene();
     try { getChartAdapter()?.requestSeriesUpdate?.(); } catch { /* scene invalidation remains */ }
-    if (clearDynamic) renderDynamicFeedback();
-  }, [getChartAdapter, invalidateVisibleScene, renderDynamicFeedback]);
+    if (clearDynamic) {
+      renderDynamicFeedback();
+      dynamicOverlayControllerRef.current?.flush();
+    }
+  }, [cancelDynamicPaintHandoff, getChartAdapter, invalidateVisibleScene, renderDynamicFeedback]);
 
   const applyActiveDrawingMove = useCallback(
     ({ tool, pos, positions, e }: ActiveDrawingMoveInput): boolean => {
@@ -4070,15 +4213,15 @@ export function useDrawing({
               refreshSelectedTextUi(completedDragDescriptor.id);
             }
             if (persisted) {
-              retainDynamicOverlayUntilPaint(receipt?.ticket ?? null, {
-                // A no-op geometry command keeps the same document revision.
-                // The replayable last paint may still be the active-entity-
-                // excluded frame, so only a changed document can safely use it.
-                replayLastPaint: changed,
-              });
+              // A no-op geometry command keeps the same stamp. Exact plan
+              // identity still distinguishes restoration from exclusion.
+              retainDynamicOverlayUntilPaint(receipt?.ticket ?? null);
             }
           } finally {
-            if (overlayDragEntityDraftRef.current) releaseOverlayDrag(true);
+            if (overlayDragEntityDraftRef.current
+              && dynamicOwnershipSessionRef.current?.desiredOwner !== "static") {
+              releaseOverlayDrag(true);
+            }
           }
         } else if (interactionSurfaceMode === "overlay"
           && completedDrag
@@ -4099,14 +4242,15 @@ export function useDrawing({
               refreshSelectedTextUi(completedDragDescriptor.id);
             }
             if (persisted) {
-              retainDynamicOverlayUntilPaint(receipt?.ticket ?? null, {
-                replayLastPaint: changed,
-              });
+              retainDynamicOverlayUntilPaint(receipt?.ticket ?? null);
             }
           } finally {
             // A throwing persistence boundary still owns a hidden original and
             // detached clone. Restore/clear them before the outer catch exits.
-            if (overlayDragPrimitiveRef.current) releaseOverlayDrag(true);
+            if (overlayDragPrimitiveRef.current
+              && dynamicOwnershipSessionRef.current?.desiredOwner !== "static") {
+              releaseOverlayDrag(true);
+            }
           }
         } else {
           persisted = persistDrawings(commands) !== false;
@@ -4232,14 +4376,23 @@ export function useDrawing({
       handleMouseUp();
       return;
     }
+    const hadOverlayDrag = interactionSurfaceMode === "overlay"
+      && (overlayDragEntityDraftRef.current !== null
+        || overlayDragPrimitiveRef.current !== null
+        || dynamicOwnershipSessionRef.current !== null);
     cancelActiveDrawingMove();
     cancelActiveFreehandStroke();
-    cancelDynamicPaintHandoff();
     removePreview();
     clearHoverFeedback();
     draggingRef.current = null;
-    releaseOverlayDrag(true);
-  }, [cancelActiveDrawingMove, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, clearHoverFeedback, handleMouseUp, interactionSurfaceMode, releaseOverlayDrag, removePreview]);
+    if (hadOverlayDrag) {
+      releaseOverlayDrag(true, false);
+      retainDynamicOverlayUntilPaint(null);
+    } else {
+      cancelDynamicPaintHandoff();
+      releaseOverlayDrag(true);
+    }
+  }, [cancelActiveDrawingMove, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, clearHoverFeedback, handleMouseUp, interactionSurfaceMode, releaseOverlayDrag, removePreview, retainDynamicOverlayUntilPaint]);
 
   const handleMouseLeave = useCallback((e: DrawingDomPointerEvent) => {
     // Text overlays are siblings of the chart canvas container. Moving the

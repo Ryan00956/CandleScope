@@ -1,6 +1,6 @@
 # CandleScope K 线回放与模拟交易训练执行文档
 
-状态：设计与阶段边界已冻结；前端固定采用独立回放页面，尚未开始功能实现。
+状态：Phase 0–9 本地实现与发布级验收完成；Replay v1 仍默认关闭，生产观察窗与默认启用决策未完成。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -1969,26 +1969,26 @@ feat(replay): deliver bar replay training workflow
 
 ### 逐步任务
 
-- [ ] **8.1** 安装 `requirements-parquet.txt`，确认关闭 archive 时仍无强制 PyArrow import。
-- [ ] **8.2** 定义 `PagedReplayTradeReader`，cursor 为 `(trade_time_ms, agg_trade_id)`，结果包含 next cursor/exhausted/data epoch。
-- [ ] **8.3** 保留现有 `scan_range()` 兼容；新增分页/RecordBatch 入口，不能让长 session 全量 list materialize。
-- [ ] **8.4** 分页边界处理同毫秒多 ID、retry overlap、重复 ID、最后一页和 page size=1。
-- [ ] **8.5** 构建 immutable dataset ref、manifest checksum 和 pin/release 生命周期。
-- [ ] **8.6** importer 只从 Binance 官方 public data 获取；下载 `.CHECKSUM`，先校验 SHA-256，再解压和解析。
-- [ ] **8.7** importer 校验文件日期/identity/schema/ID 范围/时间单调/first-last trade IDs/价格数量。
-- [ ] **8.8** importer 通过 archive writer abstraction 写入，不能让 replay source 依赖 ZIP/CSV/Parquet 路径。
-- [ ] **8.9** import 可重入：重复文件不会重复数据；checksum/schema 冲突进入 quarantine 并 fail closed。
-- [ ] **8.10** audit script 输出按日 coverage、ID gaps、重复、checksum、degraded marker 和 eligible windows。
-- [ ] **8.11** exact session 创建前使用 expected ID bounds 做 coverage；未知边界不宣称 complete。
-- [ ] **8.12** 实现 `TradeReplaySource`，严格拒绝 cursor 倒退、重复和缺口。
-- [ ] **8.13** 每条 aggregate trade 驱动隔离 builder，生成 temporary Kline stream。
-- [ ] **8.14** 与同区间可信 exchange Kline 对比 OHLCV；定义允许的 quantity/rounding 差异，差异超界拒绝 release。
-- [ ] **8.15** 实现 `AGG_TRADE_TAPE_V1` partial fill 和 strict-cross limit。
-- [ ] **8.16** 验证 play/step/advance/MAX/restore 的 trade cursor、bars、fills、ledger hash 一致。
-- [ ] **8.17** 高速时每条 trade 仍进入 actor/broker/builder，但前端普通 projection 最多 30 FPS。
-- [ ] **8.18** capabilities 只有在 archive enabled、dataset exact、reader 可用时才开放 AGG_TRADE；否则显示具体原因。
-- [ ] **8.19** blind mode 不泄露 archive date partition、actual trade time 或 dataset 文件名。
-- [ ] **8.20** 增加一段小型、可提交、脱敏/合成的 aggTrade fixture；真实大数据不提交 Git。
+- [x] **8.1** 安装 `requirements-parquet.txt`，确认关闭 archive 时仍无强制 PyArrow import。
+- [x] **8.2** 定义 `PagedReplayTradeReader`，cursor 为 `(trade_time_ms, agg_trade_id)`，结果包含 next cursor/exhausted/data epoch。
+- [x] **8.3** 保留现有 `scan_range()` 兼容；新增分页/RecordBatch 入口，不能让长 session 全量 list materialize。
+- [x] **8.4** 分页边界处理同毫秒多 ID、retry overlap、重复 ID、最后一页和 page size=1。
+- [x] **8.5** 构建 immutable dataset ref、manifest checksum 和 pin/release 生命周期。
+- [x] **8.6** importer 只从 Binance 官方 public data 获取；下载 `.CHECKSUM`，先校验 SHA-256，再解压和解析。
+- [x] **8.7** importer 校验文件日期/identity/schema/ID 范围/时间单调/first-last trade IDs/价格数量。
+- [x] **8.8** importer 通过 archive writer abstraction 写入，不能让 replay source 依赖 ZIP/CSV/Parquet 路径。
+- [x] **8.9** import 可重入：重复文件不会重复数据；checksum/schema 冲突进入 quarantine 并 fail closed。
+- [x] **8.10** audit script 输出按日 coverage、ID gaps、重复、checksum、degraded marker 和 eligible windows。
+- [x] **8.11** exact session 创建前使用 expected ID bounds 做 coverage；未知边界不宣称 complete。
+- [x] **8.12** 实现 `TradeReplaySource`，严格拒绝 cursor 倒退、重复和缺口。
+- [x] **8.13** 每条 aggregate trade 驱动隔离 builder，生成 temporary Kline stream。
+- [x] **8.14** 与同区间可信 exchange Kline 对比 OHLCV；定义允许的 quantity/rounding 差异，差异超界拒绝 release。
+- [x] **8.15** 实现 `AGG_TRADE_TAPE_V1` partial fill 和 strict-cross limit。
+- [x] **8.16** 验证 play/step/advance/MAX/restore 的 trade cursor、bars、fills、ledger hash 一致。
+- [x] **8.17** 高速时每条 trade 仍进入 actor/broker/builder，但前端普通 projection 最多 30 FPS。
+- [x] **8.18** capabilities 只有在 archive enabled、dataset exact、reader 可用时才开放 AGG_TRADE；否则显示具体原因。
+- [x] **8.19** blind mode 不泄露 archive date partition、actual trade time 或 dataset 文件名。
+- [x] **8.20** 增加一段小型、可提交、脱敏/合成的 aggTrade fixture；真实大数据不提交 Git。
 
 ### 数据导入验收流程
 
@@ -2069,22 +2069,22 @@ feat(replay): add paged aggregate-trade replay source
 
 ### 逐步任务
 
-- [ ] **9.1** 冻结 BAR 与 AGG_TRADE golden sessions，包括 config、command log、最终 state/report hash。
-- [ ] **9.2** 建立跨进程重复运行审计，不能只在同一 Python 进程比较。
-- [ ] **9.3** 运行 pause/step/play/advance/MAX/checkpoint/restart 等价矩阵。
-- [ ] **9.4** 注入 WS 丢包、乱序、断线、慢客户端和重复消息。
-- [ ] **9.5** 注入 SQLite busy、磁盘写失败、损坏 checkpoint、dataset 变化和 archive degraded。
-- [ ] **9.6** 验证所有故障 fail closed、暂停、保留诊断并可安全重试。
-- [ ] **9.7** 运行 BAR 4 小时 browser soak：播放/暂停/切速/下单/重连循环。
-- [ ] **9.8** 运行 AGG_TRADE 至少 100 万事件 soak，采集吞吐、RSS、队列高水位、checkpoint、投影率和浏览器 heap。
-- [ ] **9.9** 保持一个 live 页面连续运行，执行 replay 页面打开 -> 创建/恢复 -> 刷新 -> 结束/关闭 100 次，检查 replay socket/task/worker/controller/store 泄漏和 live 页面状态漂移。
-- [ ] **9.10** 运行 blind redaction 自动审计：HTTP、WS、DOM、localStorage、IndexedDB、export。
-- [ ] **9.11** 运行账本独立重算和 report hash 审计。
-- [ ] **9.12** 执行 feature flag 回滚：活动 replay 自动暂停并保存，live TopBar 入口消失，已打开 replay 页面进入 disabled/paused fail-closed 状态，原 live 页面不受影响。
-- [ ] **9.13** 执行旧 build 回滚：新 `replay.db` 被忽略但不损坏，生产 K 线/设置正常。
-- [ ] **9.14** 更新 README：能力、局限、数据准备、端口、配置、故障恢复和禁用方法。
-- [ ] **9.15** 明确 v1 不支持的 fidelity：RAW_TRADE、L2_BOOK、EXCHANGE_FUTURES_EXACT。
-- [ ] **9.16** 仅在全部门槛通过后讨论默认开启；本地完成不等于生产观察窗完成。
+- [x] **9.1** 冻结 BAR 与 AGG_TRADE golden sessions，包括 config、command log、最终 state/report hash。
+- [x] **9.2** 建立跨进程重复运行审计，不能只在同一 Python 进程比较。
+- [x] **9.3** 运行 pause/step/play/advance/MAX/checkpoint/restart 等价矩阵。
+- [x] **9.4** 注入 WS 丢包、乱序、断线、慢客户端和重复消息。
+- [x] **9.5** 注入 SQLite busy、磁盘写失败、损坏 checkpoint、dataset 变化和 archive degraded。
+- [x] **9.6** 验证所有故障 fail closed、暂停、保留诊断并可安全重试。
+- [x] **9.7** 运行 BAR 4 小时 browser soak：播放/暂停/切速/下单/重连循环。
+- [x] **9.8** 运行 AGG_TRADE 至少 100 万事件 soak，采集吞吐、RSS、队列高水位、checkpoint、投影率和浏览器 heap。
+- [x] **9.9** 保持一个 live 页面连续运行，执行 replay 页面打开 -> 创建/恢复 -> 刷新 -> 结束/关闭 100 次，检查 replay socket/task/worker/controller/store 泄漏和 live 页面状态漂移。
+- [x] **9.10** 运行 blind redaction 自动审计：HTTP、WS、DOM、localStorage、IndexedDB、export。
+- [x] **9.11** 运行账本独立重算和 report hash 审计。
+- [x] **9.12** 执行 feature flag 回滚：活动 replay 自动暂停并保存，live TopBar 入口消失，已打开 replay 页面进入 disabled/paused fail-closed 状态，原 live 页面不受影响。
+- [x] **9.13** 执行旧 build 回滚：新 `replay.db` 被忽略但不损坏，生产 K 线/设置正常。
+- [x] **9.14** 更新 README：能力、局限、数据准备、端口、配置、故障恢复和禁用方法。
+- [x] **9.15** 明确 v1 不支持的 fidelity：RAW_TRADE、L2_BOOK、EXCHANGE_FUTURES_EXACT。
+- [x] **9.16** 仅在全部门槛通过后讨论默认开启；本地完成不等于生产观察窗完成。
 
 ### 发布硬门槛
 
@@ -2209,24 +2209,24 @@ replay page close -> controller/timer/worker released, live page unchanged
 
 只有全部满足才可把 v1 标为完成：
 
-- [ ] BAR 和 AGG_TRADE 共享一个 actor/clock/broker/protocol/UI；
-- [ ] BAR 最小步进、形成中展示 K 线和周期收盘语义正确；
-- [ ] AGG_TRADE 严格按 `(trade_time_ms, agg_trade_id)` 分页推进；
-- [ ] play/pause/speed/step/advance/restore 确定性等价；
-- [ ] 模拟订单、持仓、费用、PnL 和账本守恒；
-- [ ] fill fidelity 持续可见且没有过度承诺；
-- [ ] random start 只从合格窗口选择且 seed 可复现；
-- [ ] no-lookahead 网络、store 和指标测试通过；
-- [ ] blind mode 真正从后端映射时间；
-- [ ] WS 断线、慢客户端和后端重启可恢复；
-- [ ] persistence/dataset 错误 fail closed；
-- [ ] report 可由 ledger 独立重算并带 hash；
-- [ ] 独立 replay entry 不挂载 live runtime，打开/刷新/关闭 replay 页面无跨页面 socket、cache、storage 和状态污染；
-- [ ] 全局 backend/frontend checks 通过；
-- [ ] BAR 4 小时 soak 和 AGG_TRADE 100 万事件基准通过；
-- [ ] feature flag 和旧 build 回滚演练通过；
-- [ ] 文档、UI capability 和实际实现一致；
-- [ ] 未宣称 RAW_TRADE、L2_BOOK 或 EXCHANGE_FUTURES_EXACT。
+- [x] BAR 和 AGG_TRADE 共享一个 actor/clock/broker/protocol/UI；
+- [x] BAR 最小步进、形成中展示 K 线和周期收盘语义正确；
+- [x] AGG_TRADE 严格按 `(trade_time_ms, agg_trade_id)` 分页推进；
+- [x] play/pause/speed/step/advance/restore 确定性等价；
+- [x] 模拟订单、持仓、费用、PnL 和账本守恒；
+- [x] fill fidelity 持续可见且没有过度承诺；
+- [x] random start 只从合格窗口选择且 seed 可复现；
+- [x] no-lookahead 网络、store 和指标测试通过；
+- [x] blind mode 真正从后端映射时间；
+- [x] WS 断线、慢客户端和后端重启可恢复；
+- [x] persistence/dataset 错误 fail closed；
+- [x] report 可由 ledger 独立重算并带 hash；
+- [x] 独立 replay entry 不挂载 live runtime，打开/刷新/关闭 replay 页面无跨页面 socket、cache、storage 和状态污染；
+- [x] 全局 backend/frontend checks 通过；
+- [x] BAR 4 小时 soak 和 AGG_TRADE 100 万事件基准通过；
+- [x] feature flag 和旧 build 回滚演练通过；
+- [x] 文档、UI capability 和实际实现一致；
+- [x] 未宣称 RAW_TRADE、L2_BOOK 或 EXCHANGE_FUTURES_EXACT。
 
 ---
 
@@ -2448,4 +2448,41 @@ Failure injection evidence: browser 定向溢出 replay subscriber 并在 live b
 Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对初始 Phase 7 checkpoint c4f9891989d8eaea08ebae7dd1066f8943ff33ab 执行 git revert --no-commit 后，working tree、index 相对父提交 a0eab42a5c247cd590a9ca6ce4a006eeb44c1e84 均为 zero diff，untracked=0，index tree 与 parent tree 同为 ba34322f087734e827b462770808829b7e5b5256；随后移除临时 worktree，注册残留为 0。
 Known limitations: BAR_CONSERVATIVE_V1 仍不模拟盘口队列、真实 partial fill 或 bar 内精确路径；同 bar 只给出确定、可见的最不利路径警告。hosted/range/security 指标在 replay 明确 disabled，仅有 revealed-only 本地 SMA；AGG_TRADE 仍为 ARCHIVE_DISABLED，留给 Phase 8。默认 VITE_REPLAY_ENTRY_ENABLED=0/REPLAY_ENABLED=0，只有两端同时启用才显示入口。开发测试仍可能打印既有 Vite HMR 24678 端口噪声与浏览器 slider appearance deprecation，不影响 check/smoke 退出码。
 Decision: PASS
+```
+
+```text
+Phase: 8 - AGG_TRADE 数据、分页、成交聚合与 tape 执行
+Date: 2026-07-18
+Commit: 2bcf3a7eb464cca5f36488e5d920275e9b3c6f44; subject feat(replay): add paged aggregate-trade replay source
+Executor: Codex
+Scope: 在不分叉 actor/service/API/WS/UI 的前提下交付 AGG_TRADE：扩展 RawAggTradeArchive 的显式 identity、健康标记、原子 manifest、immutable partition pin/release 与 (trade_time_ms, agg_trade_id) 分页；实现仅接受 Binance 官方 USD-M daily archive、先验 SHA-256、schema/日期/ID/单调性校验、幂等写入和 quarantine 的 importer/auditor；实现 exact coverage gate、TradeReplaySource、逐成交 temporary Kline builder、可信 exchange Kline parity、AGG_TRADE_TAPE_V1 partial fill/strict-cross execution，以及 capability/dialog/parser/projection 接线。关闭 archive 时保持零强制 PyArrow import；真实 archive 和 replay DB 均未进入 Git。
+Files changed: backend/app/data_engine/storage/{__init__,raw_trade_archive}.py；backend/app/replay/{actor,runtime,service,trade_audit,trade_import}.py；backend/app/replay/bars/{builder,trade_builder,trade_parity}.py；backend/app/replay/broker/{execution,models,report}.py；backend/app/replay/sources/{base,trade_reader,trade_source}.py；backend/scripts/{import_binance_public_agg_trades,audit_replay_trade_archive,benchmark_replay_trade}.py；backend/tests/test_replay_{execution_tape,trade_audit,trade_bar_parity,trade_benchmark,trade_determinism,trade_import,trade_reader,trade_service,trade_source}.py 与 fixture/fakes；frontend replay parser/store/projection/UI/types/tests；共 46 files、7,471 insertions、160 deletions。
+Commands run: python -m ruff check Phase 8 Python files；trade reader/source/import/audit/parity/execution/service/determinism/benchmark 定向 pytest；python -m pytest -q；npm run check；合成 archive 的 importer/auditor/quarantine/capability 探针；分页 1/2/50,000 rows、同毫秒多 ID、overlap/retry、restore 与 100 万生成成交 benchmark；git diff --check。
+Tests passed: backend global 1,289 passed；frontend npm run check 的 architecture、typecheck、lint、test、build 全通过。reader/source/import/audit/parity/tape/determinism/service 专项覆盖首尾/内部 gap、unknown expected bounds、checksum/schema/identity 冲突、幂等导入、quarantine、cursor 退回/重复、builder restore、partial fill、strict-cross 与 BAR 回归。
+Golden/state hashes: 可提交合成 aggTrade fixture SHA-256 076adf43d38f19f16dab6097304e07c30580fab589bb32a6a199bcd655bfbec4；Phase 8 的 step/play/advance/MAX/restore 同进程矩阵逐字段相等，但没有把同进程比较冒充跨进程 golden；完整 config/command/final state/report/ledger golden 和独立账本重算明确留给 Phase 9 冻结。
+Performance evidence: 100 万成交按最多 50,000 rows/page 读取，20 次 archive page call；每条 aggregate trade 都进入 actor、tape broker 与 builder，普通前端 projection 仍被 parser/store 的 30 FPS 上限合并。Phase 8 证明不存在 source-side 全历史 list materialization，但正式吞吐、tracemalloc late-half、队列/事件环/checkpoint 高水位和冻结阈值留到 Phase 9 独立 full-scale verification。
+No-lookahead evidence: exact session 只 pin 已审计 partition/manifest，公开 cursor 使用 blind synthetic timeline；capability、session、HTTP、WS 和 frontend parser 不暴露 archive 目录、分区日期、actual trade time 或未来成交。builder 仅消费 actor 已揭示的下一笔 aggregate trade，未知 expected ID bounds 或任何静默 gap 均不能宣称 EXACT_AGG_TRADE_COVERAGE。
+Failure injection evidence: checksum 下载/内容错误、ZIP/CSV schema 错、日期/identity 错、重复与冲突导入、首尾/内部 ID gap、unknown bounds、degraded marker、writer exhaustion、manifest/data epoch 漂移、分页 overlap/重复/倒退、builder/tape mutation rollback 均有 fail-closed 回归；AGG_TRADE capability 只有 archive enabled、exact verified partition 和 reader 同时可用时开放，否则返回具体 reason，BAR 独立可用。
+Rollback exercised: PASS；在系统临时目录创建 disposable detached worktree，对 2bcf3a7eb464cca5f36488e5d920275e9b3c6f44 执行 git revert --no-commit 后，working tree、index 相对父提交 63bcef634b58b395168133f3fef8bc4cdf7145d7 均为 zero diff，untracked=0，index tree 与 parent tree 同为 6b9ee2aa0fc28cab6df5cdb2097183ad5aae256d；临时 worktree 随后移除。运行时回滚可单独关闭 RAW_AGG_TRADE_ARCHIVE_ENABLED，保留 BAR 和本地 archive，不自动删除数据。
+Known limitations: aggregate trade 不是 RAW_TRADE，也没有 L2 queue position；AGG_TRADE_TAPE_V1 只宣称聚合 tape 的成交量约束与 strict-cross，不宣称 EXCHANGE_FUTURES_EXACT。真实 Binance 大 archive 由操作者在独立目录准备且不进 Git；默认 RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_ENABLED=0。发布级 4 小时 browser soak、跨进程 golden、100 万事件冻结阈值、独立 ledger audit 和 feature/old-build rollback 属于 Phase 9。
+Decision: PASS
+```
+
+```text
+Phase: 9 - 确定性、故障、性能与发布收口
+Date: 2026-07-18（正式 4 小时 soak 于本机跨日完成）
+Commit: this Phase 9 checkpoint; subject test(replay): close replay v1 quality and rollback gates
+Executor: Codex
+Scope: 冻结 BAR/AGG_TRADE 跨进程 golden 与独立账本审计；补齐故障注入、资源上限、BAR 真实浏览器 4 小时/100 轮训练与页面生命周期 soak、AGG_TRADE 100 万事件基准、HTTP/WS/DOM/storage/export blind 审计、feature flag/旧 build 双回滚和运维文档。正式 soak 暴露的活动列表 DOM 无界增长被改为只渲染最新 20 条，权威历史和导出仍完整；未改变默认关闭策略。
+Files changed: backend/app/replay/actor.py；backend/scripts/{audit_replay_determinism,benchmark_replay,benchmark_replay_actor,benchmark_replay_trade,replay_smoke_fixture}.py；backend/tests/test_replay_quality_gates.py 与两份 golden fixture；frontend/scripts/{replay-smoke,replay-soak,replay-soak.test,replay-rollback-drill}.mjs、replay-rollback-drill.ps1；frontend replay stream/UI model/RightRail tests 与实现；frontend/package.json；README.md；backend/{README.md,.env.replay.example}；docs/perf-baselines/replay-*.json；本文。
+Commands run: backend/.venv/Scripts/python.exe scripts/audit_replay_determinism.py；18 项后端故障门禁与 13 项前端 stream/parser/store 门禁；backend/.venv/Scripts/python.exe scripts/benchmark_replay.py --verification；npm run soak:replay:4h；npm run smoke:replay；frontend/scripts/replay-rollback-drill.ps1；backend 全量 pytest；frontend npm run check；ruff、Node --check、PowerShell parser、JSON parse 与 git diff --check。
+Tests passed: 跨进程 BAR/AGG_TRADE 等价矩阵全部相等；故障门禁 backend 18/18、frontend 13/13；最终 backend global 1,292 passed、4 条既有 FastAPI on_event deprecation warnings；frontend global 1,917/1,917，architecture/typecheck/lint/build 全通过，Vite build 416 modules；最终离线真实浏览器 replay smoke PASS。
+Golden/state hashes: BAR golden 文件 sha256:41a2961fcd3b2a0b24fea68549e836f6a33913786ce80e53e6c11dc11d362cff，actor/report/ledger/projection 分别为 sha256:fdbdbc7efa2b63bf76cd519e54d52da1c12519ea9391ffef87834b581380e3e8、sha256:8ef1c0fd396268b27083dadaa8037b316949f8cd24707616a136e18316690a15、sha256:c7a1ecd2da5f3da607c9dfba2b488f416d7019b2f7eaa1bcfc075e6e209acfe8、sha256:07517a8e41cb72ec82d8a29ac843d4b9ac9a4fe449b571355a38d9025f5dd054；AGG_TRADE golden 文件 sha256:bc14ec98145c5903ef00f6bd04585114723ba162a86afdde532c7c437aa28fe9，actor/report/ledger/projection 分别为 sha256:33ff0d73d232e44a5cb13e9bb5fe1f8538bd4da12bf5a02bb1b85916e742af58、sha256:561fc50724212fe5dd1cd4afc7af2fc31e548d49dd3e0409862993bf9c179ca7、sha256:6bc6bd77b86f2dbd800e5e7e4acdfb7e6d6bd3340f226c75911422590c5f848f、sha256:9c75da5920280cb0d8b72295a4b7979ebd1ed7995b53493b9eb793e9fb108d81。step/advance/MAX/speed/pause/checkpoint/restart 跨进程各重复 2 次，BAR/AGG 最终证据 hash 为 sha256:d5cc18051c417baaf5cc0e60f71bed4c84d4df992aae5794890c588cbba022e0 / sha256:c9fe7e50046e043adad620b3b49666199cf83b29b76103d568a2eb947760d69d，独立账本零差异。
+Performance evidence: docs/perf-baselines/replay-v1-backend-verification-20260718.json（文件 sha256:d24a7102b924d06195832c0a801785859e103be824350c0a75c9b7f0c29587dd）冻结阈值并 PASS：BAR 43,200 events / 6.854405s / 6,302.52 events/s，peak delta 1,224,704 B，late-half 0；AGG_TRADE 1,000,000 events / 1,336.528608s / 748.21 events/s，20 pages、max 50,000 rows/page，peak delta 54,763,520 B，late-half 11,403,264 B，queue 1/32、event ring 512/512、checkpoint 101 created/33 retained、projection 30 FPS、999,998 ordinary events coalesced、无全历史 materialization。阈值基准文件 sha256:fa9366f85899b8ab320b12081b97e954fefa31b9a08650d62b0cde99c17c110a。
+Browser soak evidence: docs/perf-baselines/replay-v1-browser-soak-20260718.json（文件 sha256:c23045084835848b0364eb49c4b0a74067a3adc07333f76c932e448e81a65b54，语义 report hash sha256:f0d942fe0418db10a421dce1ae1992d6aae70f548aafd16ef1f8eb2888abe742）实际运行 14,400,015ms；live 页面连续保留，replay 创建/恢复/刷新/结束/关闭 100/100；暂停、60/120/300/600x、BUY/SELL 下单成交和 replay WS 强制重连 100/100，最终 100 orders/100 fills、source sequence 334。浏览器 projection 1,000,000 events / 136,664.30 events/s；主 heap 增长 4,361,160 B、后段 500,660 B，DOM 增长 140/250，max targets 4、max subscribers 2；18 项 acceptance 全为 true，隔离临时目录和子进程全部释放，失败产物不存在。
+No-lookahead evidence: 正式 soak 对 HTTP 6,703,234 B、WebSocket 42,353,719 B、DOM、localStorage、IndexedDB 与 export 六条边界扫描，全部零 forbidden match；replay 页面无 live feed，live 页面身份、偏好和 socket 不漂移。初版宽泛 epoch regex 将 Decimal/hash 子串误判，修为独立 token 语义并新增上下文；回归随后发现 JSON 转义 Windows 路径盲点并修复，frontend/scripts/replay-soak.test.mjs 的真实时间、允许子串和路径边界 3/3 通过。
+Failure injection evidence: docs/perf-baselines/replay-failure-gates-20260718.json sha256:236176e56394944b501518586811fcc7ca4d2b01a02618ce249da0b83a6c33d1；覆盖 WS 丢序/重复/慢客户端 1013/错误 epoch/断开清理、SQLite 写回滚与 busy sticky degraded、checkpoint 损坏回退、dataset mismatch、archive writer/health/import quarantine、blind boundary；全部精确恢复或显式 fail closed，不跨未知边界 best-effort。正式门禁开发过程还实际发现并修复：最初 soak 未覆盖训练动作、Windows 临时 SQLite 清理 EBUSY、100 fills/closed trades 全量渲染导致 DOM 无界、epoch 子串误报和转义 Windows path 漏报；均有自动回归或正式 4 小时证据。
+Rollback exercised: 运行时双回滚 PASS，证据 docs/perf-baselines/replay-v1-rollback-drill-20260718.json sha256:24a82f8310238ce07d84bf86b25f42ecea76d10a21e2c90fd99645a0565c5c11。feature flag 关闭后活动 session 在 graceful shutdown 持久化为 PAUSED、capability 关闭、live 入口消失、已打开 replay 页面 REPLAY_DISABLED fail closed；旧 baseline build c9a1ddbfe316c68c91787b69c783baeeb0670a9f 返回 replay route 404 且 live K 线/设置正常。两种回滚前中后 replay DB aggregate hash 均为 ea0ff27175baa9f75ad13c46349da2efd4794f20e3c5d9cfeaefb9868720867f，13 项 acceptance 全通过；用户既有 15173/18080 服务未触碰。提交级回滚同样 PASS：在系统临时目录的 disposable detached worktree 对初始 Phase 9 checkpoint 80763779823d0532ba13d7190620fb6b08b92405 执行 git revert --no-commit 后，working tree 与 index 相对父提交 2bcf3a7eb464cca5f36488e5d920275e9b3c6f44 均为 zero diff，untracked=0，index tree 与 parent tree 同为 33666b03421bcbb594baec2adb6caf7a6645b6c3；临时 worktree 随后移除。
+Known limitations: Replay v1 仍由 REPLAY_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0 和 RAW_AGG_TRADE_ARCHIVE_ENABLED=0 默认关闭；真实 Binance archive 需操作者在独立目录准备。AGG_TRADE 是聚合 tape，不是 RAW_TRADE；没有历史 L2 queue position，也不宣称 EXCHANGE_FUTURES_EXACT。生产观察窗、真实业务数据容量评估和默认启用决策尚未完成；本地发布级 PASS 不代表已默认上线。测试仍打印既有 FastAPI on_event deprecation 与偶发 Vite HMR 24678 端口噪声，但所有门禁退出码为 0。
+Decision: PASS（本地 Replay v1 完整实现与发布级门禁完成；保持默认关闭）
 ```

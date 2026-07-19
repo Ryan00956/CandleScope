@@ -404,6 +404,12 @@ async def run_benchmark(
             "queue_capacity": command_queue_size,
             "queue_high_water": diagnostics["command_queue_high_water"],
         },
+        "actor": {
+            "events_processed": diagnostics["events_processed"],
+            "component_snapshot_materializations": diagnostics[
+                "component_snapshot_materializations"
+            ],
+        },
         "checkpoints": {
             "created": checkpoint_count,
             "latest_size_bytes": len(latest_checkpoint) if latest_checkpoint else 0,

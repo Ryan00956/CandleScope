@@ -167,6 +167,69 @@ test("sequence gaps fail closed and reconnect through a reset generation", () =>
   controller.stop();
 });
 
+test("duplicate incremental messages are never applied twice and force resync", () => {
+  const timers = new FakeTimers();
+  const sockets: FakeSocket[] = [];
+  const events: number[] = [];
+  const errors: string[] = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    onEvent: (event) => events.push(event.sequence),
+    onError: (error) => errors.push(error.code),
+  });
+
+  controller.start();
+  sockets[0]?.open();
+  sockets[0]?.message(replaySnapshotEvent());
+  const sequenceOne = replayStatusEvent({ sequence: 1 });
+  sockets[0]?.message(sequenceOne);
+  sockets[0]?.message(sequenceOne);
+  timers.runAll();
+
+  assert.deepEqual(events, [1]);
+  assert.ok(errors.includes("REPLAY_PROTOCOL_ERROR"));
+  assert.equal(sockets.length, 2);
+  controller.stop();
+});
+
+test("out-of-order messages cannot backfill a detected loss inside one generation", () => {
+  const timers = new FakeTimers();
+  const sockets: FakeSocket[] = [];
+  const events: number[] = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    onEvent: (event) => events.push(event.sequence),
+  });
+
+  controller.start();
+  sockets[0]?.open();
+  sockets[0]?.message(replaySnapshotEvent());
+  const staleHandler = sockets[0]?.onmessage;
+  sockets[0]?.message(replayStatusEvent({ sequence: 2 }));
+  staleHandler?.({ data: JSON.stringify(replayStatusEvent({ sequence: 1 })) } as MessageEvent<string>);
+  timers.runAll();
+
+  assert.deepEqual(events, []);
+  assert.equal(sockets.length, 2);
+  controller.stop();
+});
+
 test("wrong data epoch is fatal and never falls through to best-effort events", () => {
   const timers = new FakeTimers();
   const sockets: FakeSocket[] = [];

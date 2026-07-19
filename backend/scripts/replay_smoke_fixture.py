@@ -91,12 +91,26 @@ def main() -> None:
 
     from app.main import app
 
+    server_holder: dict[str, uvicorn.Server] = {}
+
     @app.get("/__replay_smoke__/fixture")
     async def replay_smoke_fixture_status() -> dict[str, object]:
         return {
             "offline": True,
             "fixture_start_ms": FIXTURE_START_MS,
             "fixture_rows": FIXTURE_ROWS,
+        }
+
+    @app.get("/__replay_smoke__/diagnostics")
+    async def replay_smoke_diagnostics() -> dict[str, object]:
+        """Expose bounded, path-redacted replay diagnostics to local QA only."""
+
+        service = getattr(app.state, "replay_service", None)
+        if service is None:
+            return {"available": False, "reason": "REPLAY_DISABLED"}
+        return {
+            "available": True,
+            "replay": service.diagnostics(redact_paths=True),
         }
 
     @app.post("/__replay_smoke__/disconnect-replay/{session_id}")
@@ -138,7 +152,31 @@ def main() -> None:
             service.subscribe = original_subscribe
         return {"disconnected_subscribers": len(overflow_signals)}
 
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    @app.post("/__replay_smoke__/shutdown")
+    async def replay_smoke_graceful_shutdown() -> dict[str, object]:
+        """Request Uvicorn shutdown after the response reaches the caller."""
+
+        server = server_holder.get("server")
+        if server is None:
+            raise RuntimeError("fixture server is not ready for shutdown")
+        asyncio.get_running_loop().call_later(
+            0.05,
+            setattr,
+            server,
+            "should_exit",
+            True,
+        )
+        return {"shutdown": "requested", "graceful": True}
+
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=args.port,
+        log_level="warning",
+    )
+    server = uvicorn.Server(config)
+    server_holder["server"] = server
+    server.run()
 
 
 if __name__ == "__main__":

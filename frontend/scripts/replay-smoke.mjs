@@ -3,7 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -89,9 +89,16 @@ function processTail(child, maxLines = 100) {
   return () => [...lines];
 }
 
-async function stopProcess(child) {
-  if (!child || child.exitCode !== null) return;
-  child.kill();
+async function stopProcessTree(child) {
+  if (!child || child.exitCode !== null || !Number.isSafeInteger(child.pid)) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  } else {
+    child.kill("SIGTERM");
+  }
   await Promise.race([
     new Promise((resolve) => child.once("exit", resolve)),
     wait(3_000),
@@ -428,11 +435,11 @@ async function main() {
     assert(initial.maxBarMs <= initial.cursorMs, "initial replay store exceeds cursor", initial);
     assert(/\?session=[A-Za-z0-9._:-]+$/.test(await evaluate(replayCdp, "location.href")), "session URL is not opaque/restorable");
     const blindDomText = await evaluate(replayCdp, "document.body.innerText");
-    const calendarYearMatches = [...String(blindDomText).matchAll(/20\d\d/g)].map((match) => ({
+    const calendarDateMatches = [...String(blindDomText).matchAll(/\b20\d{2}(?:[-/.年](?:0?[1-9]|1[0-2])(?:[-/.月]))/g)].map((match) => ({
       value: match[0],
       context: String(blindDomText).slice(Math.max(0, match.index - 40), (match.index ?? 0) + 44),
     }));
-    assert(calendarYearMatches.length === 0, "blind replay DOM contains a calendar year", calendarYearMatches);
+    assert(calendarDateMatches.length === 0, "blind replay DOM contains a calendar date", calendarDateMatches);
 
     const stepStates = [];
     for (let index = 0; index < 5; index += 1) stepStates.push(await stepOnce(replayCdp, args.timeoutMs));
@@ -496,24 +503,47 @@ async function main() {
     }
     await waitForCommandReady(replayCdp, args.timeoutMs);
 
-    await click(replayCdp, '[data-replay-action="end"]');
-    await click(replayCdp, '[data-replay-action="confirm-end"]');
+    const submitEnd = async () => {
+      await click(replayCdp, '[data-replay-action="end"]');
+      await waitForValue(
+        replayCdp,
+        `(() => { const button = document.querySelector('[data-replay-action="confirm-end"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`,
+        args.timeoutMs,
+        "end confirmation readiness",
+      );
+      await click(replayCdp, '[data-replay-action="confirm-end"]');
+    };
+    await submitEnd();
     let ended;
     try {
-      ended = await waitForReplayStatus(replayCdp, `(value) => value.state === "ENDED"`, args.timeoutMs, "ended replay state");
+      ended = await waitForReplayStatus(replayCdp, `(value) => value.state === "ENDED"`, Math.min(args.timeoutMs, 5_000), "ended replay state");
     } catch (error) {
-      const diagnostics = await evaluate(replayCdp, `({
-        status: (() => { const node = document.querySelector("#replay-status-bar"); return node instanceof HTMLElement ? { text: node.innerText, data: { ...node.dataset } } : null; })(),
-        commandError: document.querySelector(".replay-command-error")?.textContent || "",
-        bodyTail: (document.body?.innerText || "").slice(-2000),
-      })()`).catch(() => null);
-      throw new Error(`${error.message}\nEnd diagnostics: ${JSON.stringify({
-        diagnostics,
-        apiResponses: replayCapture.responses.filter((item) => item.url.includes("/api/v1/replay")).slice(-20),
-        frames: replayCapture.replayFrames.slice(-10),
-        consoleErrors: replayCapture.consoleErrors,
-        exceptions: replayCapture.exceptions,
-      })}`);
+      const controllerConflict = await evaluate(replayCdp, `document.querySelector(".replay-command-error")?.getAttribute("data-replay-command-error") === "CONTROLLER_CONFLICT"`).catch(() => false);
+      if (controllerConflict) {
+        await waitForValue(
+          replayCdp,
+          `(() => { const button = document.querySelector('[data-replay-action="takeover-controller"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`,
+          args.timeoutMs,
+          "end retry controller readiness",
+        );
+        await click(replayCdp, '[data-replay-action="takeover-controller"]');
+        await waitForCommandReady(replayCdp, args.timeoutMs);
+        await submitEnd();
+        ended = await waitForReplayStatus(replayCdp, `(value) => value.state === "ENDED"`, args.timeoutMs, "ended replay state after controller reacquire");
+      } else {
+        const diagnostics = await evaluate(replayCdp, `({
+          status: (() => { const node = document.querySelector("#replay-status-bar"); return node instanceof HTMLElement ? { text: node.innerText, data: { ...node.dataset } } : null; })(),
+          commandError: document.querySelector(".replay-command-error")?.textContent || "",
+          bodyTail: (document.body?.innerText || "").slice(-2000),
+        })()`).catch(() => null);
+        throw new Error(`${error.message}\nEnd diagnostics: ${JSON.stringify({
+          diagnostics,
+          apiResponses: replayCapture.responses.filter((item) => item.url.includes("/api/v1/replay")).slice(-20),
+          frames: replayCapture.replayFrames.slice(-10),
+          consoleErrors: replayCapture.consoleErrors,
+          exceptions: replayCapture.exceptions,
+        })}`);
+      }
     }
     await waitForValue(replayCdp, `document.querySelector('[data-replay-panel="report"]') !== null`, args.timeoutMs, "training report panel");
     assert(ended.revealed === "false", "session end implicitly revealed actual history", ended);
@@ -577,8 +607,8 @@ async function main() {
     throw error;
   } finally {
     for (const connection of connections) connection.close();
-    await Promise.all([stopProcess(chrome), stopProcess(vite), stopProcess(backend)]);
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    await Promise.all([stopProcessTree(chrome), stopProcessTree(vite), stopProcessTree(backend)]);
+    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 }
 

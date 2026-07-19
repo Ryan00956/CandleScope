@@ -1,0 +1,63 @@
+{
+  "schema_version": "replay-v1-failure-gates.v1",
+  "recorded_at": "2026-07-18",
+  "git_head_before_phase9": "2bcf3a7eb464cca5f36488e5d920275e9b3c6f44",
+  "environment": {
+    "os": "Windows 11",
+    "python": "3.13.9",
+    "node": "22.14.0"
+  },
+  "backend": {
+    "command": "backend/.venv/Scripts/python.exe -m pytest <18 selected replay failure-gate cases> -q",
+    "result": "18 passed in 1.64s",
+    "selected_tests": [
+      "test_replay_stream.py::test_actor_subscription_is_atomic_resumable_and_bounded",
+      "test_replay_stream.py::test_websocket_handoff_heartbeat_and_disconnect_cleanup",
+      "test_replay_stream.py::test_websocket_slow_client_requires_resync_and_closes_1013",
+      "test_replay_stream.py::test_websocket_wrong_epoch_fails_before_subscription_handoff",
+      "test_replay_shutdown.py::test_persistence_failure_rolls_back_event_and_stops_further_playback",
+      "test_replay_store.py::test_busy_retry_exhaustion_is_sticky_degraded",
+      "test_replay_store.py::test_corrupt_latest_checkpoint_falls_back_and_dataset_checksum_fails_closed",
+      "test_replay_recovery.py::test_corrupt_recent_checkpoints_fall_back_and_replay_command_tail",
+      "test_replay_recovery.py::test_dataset_or_all_checkpoint_corruption_fails_closed_per_session",
+      "test_replay_trade_service.py::test_trade_capability_stays_closed_without_a_verified_exact_partition",
+      "test_trade_flow_storage.py::test_raw_archive_writer_exhaustion_is_sticky_and_fail_closed",
+      "test_trade_flow_storage.py::test_health_marker_write_failure_stays_degraded_without_task_crash",
+      "test_replay_trade_import.py::test_verified_import_conflicting_checksum_quarantines_partition",
+      "test_replay_trade_import.py::test_failed_official_download_import_is_quarantined",
+      "test_replay_no_lookahead.py::test_blind_public_boundary_never_leaks_future_or_actual_history_before_reveal"
+    ],
+    "coverage": {
+      "websocket_loss_resume_and_bounded_buffer": "passed",
+      "websocket_disconnect_cleanup": "passed",
+      "websocket_slow_client_resync_1013": "passed",
+      "websocket_wrong_epoch_fail_closed": "passed",
+      "sqlite_write_failure_rollback": "passed",
+      "sqlite_busy_sticky_degraded": "passed",
+      "checkpoint_corruption_fallback": "passed",
+      "dataset_or_all_checkpoint_corruption_fail_closed": "passed",
+      "missing_verified_trade_partition_capability_closed": "passed",
+      "archive_write_exhaustion_sticky_degraded": "passed",
+      "archive_health_marker_failure_degraded": "passed",
+      "conflicting_or_failed_import_quarantined": "passed",
+      "blind_boundary_no_lookahead": "passed"
+    }
+  },
+  "frontend": {
+    "command": "npx tsx --test src/features/replay/__tests__/replayStreamController.test.ts src/features/replay/__tests__/replayStreamParser.test.ts src/features/replay/__tests__/replayStore.test.ts",
+    "result": "13 passed in 349.5226ms",
+    "coverage": {
+      "dropped_sequence_forces_generation_reset": "passed",
+      "duplicate_incremental_not_applied_twice": "passed",
+      "out_of_order_after_loss_cannot_backfill": "passed",
+      "wrong_epoch_fatal": "passed",
+      "heartbeat_ownership_and_cancel": "passed",
+      "100x_projection_frame_bound": "passed",
+      "aggregate_trade_chart_tick_and_ui_bound": "passed"
+    }
+  },
+  "acceptance": {
+    "passed": true,
+    "note": "Every injected failure either recovers through an exact bounded protocol or enters an explicit fail-closed/degraded state; no case continues best-effort playback across an unverified boundary."
+  }
+}

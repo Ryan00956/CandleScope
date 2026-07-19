@@ -1,5 +1,10 @@
 import { useMemo, useState } from "react";
-import { formatReplayPublicTime, replayOwnsController } from "../replayUiModel.js";
+import {
+  formatReplayPublicTime,
+  recentReplayActivity,
+  REPLAY_ACTIVITY_VIEW_LIMIT,
+  replayOwnsController,
+} from "../replayUiModel.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 
 const TERMINAL_ORDER_STATES = new Set(["FILLED", "CANCELED", "REJECTED", "EXPIRED"]);
@@ -30,6 +35,9 @@ export default function ReplayRightRail({ runtime, indicatorStatus }: ReplayRigh
   const commandReady = ownsController && store.connectionState === "connected" && runtime.pendingCommand === null && store.state !== "ENDED";
   const openOrders = useMemo(() => store.orders.filter((order) => !TERMINAL_ORDER_STATES.has(order.status)), [store.orders]);
   const closedTrades = runtime.report?.report.closed_trades ?? store.closedTrades;
+  const recentFills = useMemo(() => recentReplayActivity(store.fills), [store.fills]);
+  const recentClosedTrades = useMemo(() => recentReplayActivity(closedTrades), [closedTrades]);
+  const recentJournal = useMemo(() => recentReplayActivity(store.journal), [store.journal]);
   const warningCount = store.warnings.length;
   const time = (value: number) => formatReplayPublicTime(value, {
     blindMode: config?.blind_mode ?? true,
@@ -118,7 +126,8 @@ export default function ReplayRightRail({ runtime, indicatorStatus }: ReplayRigh
 
       <section className="replay-rail-section" data-replay-panel="fills">
         <h2>Fills · {store.fills.length}</h2>
-        {store.fills.length === 0 ? <p className="replay-empty">等待下一已揭示执行机会</p> : store.fills.slice().reverse().map((fill) => (
+        {store.fills.length > REPLAY_ACTIVITY_VIEW_LIMIT && <small data-replay-recent-window="fills">仅显示最近 {REPLAY_ACTIVITY_VIEW_LIMIT} 条；完整记录见报告导出。</small>}
+        {store.fills.length === 0 ? <p className="replay-empty">等待下一已揭示执行机会</p> : recentFills.map((fill) => (
           <article className="replay-list-card" key={fill.fill_id} data-replay-fill={fill.fill_id}>
             <strong>{fill.side} {fill.quantity} @ {fill.price}</strong>
             <span>{fill.reason} · fee {fill.fee}</span><span>{time(fill.event_time_ms)}</span>
@@ -128,7 +137,8 @@ export default function ReplayRightRail({ runtime, indicatorStatus }: ReplayRigh
 
       <section className="replay-rail-section" data-replay-panel="closed-trades">
         <h2>Closed trades · {closedTrades.length}</h2>
-        {closedTrades.length === 0 ? <p className="replay-empty">暂无已平仓交易</p> : closedTrades.map((trade) => (
+        {closedTrades.length > REPLAY_ACTIVITY_VIEW_LIMIT && <small data-replay-recent-window="closed-trades">仅显示最近 {REPLAY_ACTIVITY_VIEW_LIMIT} 条；完整记录见报告导出。</small>}
+        {closedTrades.length === 0 ? <p className="replay-empty">暂无已平仓交易</p> : recentClosedTrades.map((trade) => (
           <article className="replay-list-card" key={trade.trade_id}><strong>{trade.side} · PnL {trade.realized_pnl}</strong><span>{trade.entry_price} → {trade.exit_price}</span></article>
         ))}
       </section>
@@ -145,7 +155,8 @@ export default function ReplayRightRail({ runtime, indicatorStatus }: ReplayRigh
             void runtime.actions.submitCommand("add_journal_note", { text }).catch(() => setJournalText(text));
           }}
         >添加日志</button>
-        {store.journal.slice().reverse().map((entry) => <article className="replay-list-card" key={entry.entry_id}><span>{time(entry.virtual_time_ms)}</span><p>{entry.text}</p></article>)}
+        {store.journal.length > REPLAY_ACTIVITY_VIEW_LIMIT && <small data-replay-recent-window="journal">仅显示最近 {REPLAY_ACTIVITY_VIEW_LIMIT} 条；完整记录见报告导出。</small>}
+        {recentJournal.map((entry) => <article className="replay-list-card" key={entry.entry_id}><span>{time(entry.virtual_time_ms)}</span><p>{entry.text}</p></article>)}
       </section>
 
       <section className="replay-rail-section replay-indicator-boundary" data-replay-panel="indicators">

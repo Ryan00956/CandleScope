@@ -74,6 +74,7 @@ All application APIs are mounted under `/api/v1`.
 | Symbols | `GET /symbols/exchange-info`, `POST /symbols/exchange-info/refresh` |
 | Settings | proxy get/update/test, storage repair, gap scan, storage health, cache limits |
 | Subscriptions | list, sync, prices snapshot, get/set/delete symbol tier |
+| Replay (opt-in) | capabilities, catalog, session create/get/fork/command, journal, report, and `WS /stream/replay/{session_id}` |
 
 The enhanced K-line volume, delta, and CVD-contribution contract is documented in [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](../docs/KLINE_ORDER_FLOW_CONTRACT_zh.md).
 
@@ -82,6 +83,108 @@ System endpoints outside `/api/v1`:
 - `GET /`
 - `GET /health`
 - `GET /debug/snapshot`
+
+## Deterministic Replay Runtime (Opt-In)
+
+Replay is disabled by default. `REPLAY_ENABLED=0` does not construct the
+`ReplayService`, open `REPLAY_DB_PATH`, start an actor task, or allow session
+creation. The disabled capability response remains stable so the independent
+frontend page can show `REPLAY_DISABLED` instead of falling back to live data.
+
+When enabled, replay owns a separate SQLite database and a bounded runtime:
+
+```text
+frozen BAR snapshot or exact paged AGG_TRADE archive
+  -> single-writer ReplaySessionActor + virtual clock
+  -> replay-only bar builder + PAPER_LINEAR_V1 broker/ledger
+  -> commit-before-publish ReplaySQLiteStore
+  -> replay.v1 HTTP + resumable bounded WebSocket
+```
+
+The production K-line database remains read-only to replay. Temporary replay
+bars, commands, checkpoints, orders, fills, ledger entries, journals, and
+reports are stored only in `REPLAY_DB_PATH`. Active dataset snapshots/partitions,
+mailboxes, event rings, subscriber queues, checkpoint history, and frontend
+projection windows all have explicit capacity limits.
+
+### Replay Configuration
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `REPLAY_ENABLED` | `0` | Authoritative backend feature/capability switch |
+| `REPLAY_DB_PATH` | `<CANDLE_DATA_DIR>/replay.db` | Replay-only SQLite state; must differ from `KLINES_DB_PATH` |
+| `REPLAY_MAX_ACTIVE_SESSIONS` | `8` | Active pinned session limit |
+| `REPLAY_COMMAND_QUEUE_SIZE` | `256` | Per-actor bounded command mailbox |
+| `REPLAY_EVENT_BUFFER_SIZE` | `10000` | Resumable domain event ring |
+| `REPLAY_MAX_EMIT_FPS` | `30` | Ordinary projection ceiling; mandatory events flush immediately |
+| `REPLAY_MAX_WARMUP_BARS` | `5000` | Session warmup ceiling |
+| `REPLAY_MAX_BAR_DATASET_ROWS` | `100000` | Frozen BAR snapshot row ceiling |
+| `REPLAY_MAX_HORIZON_DAYS` | `30` | BAR horizon ceiling |
+| `REPLAY_TRADE_PAGE_ROWS` | `50000` | Maximum aggregate-trade page size |
+| `REPLAY_CHECKPOINT_EVENT_INTERVAL` | `10000` | Source-event checkpoint cadence |
+| `REPLAY_CHECKPOINT_VIRTUAL_MS` | `300000` | Virtual-time checkpoint cadence |
+| `REPLAY_EVENT_SUBSCRIBER_QUEUE` | `256` | Per-WebSocket bounded subscriber queue |
+| `REPLAY_CONTROLLER_TTL_SECONDS` | `10` | Controller heartbeat lease |
+| `REPLAY_IDLE_TTL_SECONDS` | `3600` | Configured idle-session lifetime |
+| `RAW_AGG_TRADE_ARCHIVE_ENABLED` | `0` | Enables archive runtime only; capability still requires exact verified coverage |
+| `RAW_AGG_TRADE_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/raw_agg_trades` | Local aggregate-trade archive root |
+
+Use [`.env.replay.example`](.env.replay.example) as a starting point. The
+frontend entry flag is separate and is not an authorization boundary.
+
+### Data Preparation and Capability Rules
+
+BAR sessions require a frozen, aligned, closed, contiguous SQLite snapshot.
+Create it without sharing an actively written source database:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\snapshot_replay_klines.py `
+  --source .\data\candlescope.db `
+  --destination .\data\replay-dev\source-candlescope.db `
+  --require-quick-check
+```
+
+AGG_TRADE accepts only checksum-verified official Binance USD-M daily files.
+Import is idempotent; identity, date, schema, checksum, monotonicity, or ID
+conflicts are quarantined and keep the capability closed:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\import_binance_public_agg_trades.py `
+  --exchange binance --market-type futures --symbol BTCUSDT `
+  --start 2026-06-01 --end 2026-06-02 `
+  --archive-dir .\data\replay-dev\raw_agg_trades --require-checksum
+
+.\.venv\Scripts\python.exe scripts\audit_replay_trade_archive.py `
+  --exchange binance --market-type futures --symbol BTCUSDT `
+  --start 2026-06-01 --end 2026-06-02 `
+  --archive-dir .\data\replay-dev\raw_agg_trades --require-exact
+```
+
+`EXACT_BAR_COVERAGE` uses the conservative BAR execution model.
+`EXACT_AGG_TRADE_COVERAGE` uses an aggregate-tape, volume-constrained execution
+model. Replay v1 does **not** provide or claim `RAW_TRADE`, `L2_BOOK`, or
+`EXCHANGE_FUTURES_EXACT` fidelity.
+
+### Failure Recovery and Rollback
+
+- Graceful shutdown first pauses a `PLAYING` actor, persists
+  `status_reason=shutdown_pause`, flushes/checkpoints, then closes the store.
+- Restart recovery is `PAUSED` or `ENDED`; wall-clock autoplay and controller
+  ownership are never restored.
+- Controller expiry, sequence/epoch mismatch, slow subscribers, SQLite busy or
+  write failure, corrupt checkpoints, dataset drift, and degraded archives all
+  fail closed with bounded diagnostics or explicit resynchronization.
+- Set `REPLAY_ENABLED=0` and restart to disable the backend in one deployment.
+  The capability reports persistence unopened; retain `replay.db`.
+- To roll back only aggregate-trade replay, disable
+  `RAW_AGG_TRADE_ARCHIVE_ENABLED`; BAR capability is independent. An older
+  application build with no replay routes ignores the retained replay DB.
+
+Formal local gates are `scripts/audit_replay_determinism.py`,
+`scripts/benchmark_replay.py`, the frontend `smoke:replay` and 4-hour replay
+soak, and `frontend/scripts/replay-rollback-drill.ps1`. Passing local gates does
+not make replay default-on; production observation and an explicit enablement
+decision remain separate.
 
 ## Data Engine
 

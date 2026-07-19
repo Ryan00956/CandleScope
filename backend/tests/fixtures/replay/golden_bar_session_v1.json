@@ -1,0 +1,320 @@
+{
+  "schema_version": "replay-golden-session.v1",
+  "source_kind": "bar",
+  "fixture_hash": "sha256:02fadc376c0421c950c6d31506f3d160ab57a87d3f4192efd67c141e341da784",
+  "config": {
+    "protocol": "replay.v1",
+    "source_kind": "bar",
+    "exchange": "binance",
+    "market_type": "spot",
+    "symbol": "BTCUSDT",
+    "base_interval": "1m",
+    "display_interval": "1m",
+    "start_policy": "manual",
+    "requested_start_ms": 1800057600000,
+    "warmup_bars": 0,
+    "horizon_ms": 360000,
+    "random_seed": 20260718,
+    "quality_mode": "exact",
+    "blind_mode": false,
+    "initial_equity": "10000",
+    "quote_asset": "USDT",
+    "execution_model": "paper_linear_v1",
+    "fee_model": {
+      "maker_bps": "2",
+      "taker_bps": "4"
+    },
+    "slippage_model": {
+      "kind": "fixed_bps",
+      "market_bps": "1"
+    },
+    "max_leverage": "5",
+    "pause_on_controller_loss": true
+  },
+  "command_log": {
+    "common_prefix": [
+      {
+        "protocol": "replay.v1",
+        "command_id": "golden-bar-acquire",
+        "client_instance_id": "replay-v1-golden-client",
+        "expected_revision": 0,
+        "type": "acquire_controller",
+        "payload": {}
+      },
+      {
+        "protocol": "replay.v1",
+        "command_id": "golden-bar-entry",
+        "client_instance_id": "replay-v1-golden-client",
+        "expected_revision": 1,
+        "type": "place_order",
+        "payload": {
+          "client_order_id": "golden-bar-entry",
+          "side": "BUY",
+          "order_type": "MARKET",
+          "quantity": "1",
+          "reduce_only": false,
+          "limit_price": null,
+          "stop_price": null
+        }
+      },
+      {
+        "protocol": "replay.v1",
+        "command_id": "golden-bar-entry-step",
+        "client_instance_id": "replay-v1-golden-client",
+        "expected_revision": 2,
+        "type": "step",
+        "payload": {
+          "count": 1
+        }
+      },
+      {
+        "protocol": "replay.v1",
+        "command_id": "golden-bar-close",
+        "client_instance_id": "replay-v1-golden-client",
+        "expected_revision": 3,
+        "type": "close_position",
+        "payload": {}
+      }
+    ],
+    "paths": {
+      "step": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-all-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "step",
+            "payload": {
+              "count": 5
+            }
+          }
+        ],
+        "checks": {}
+      },
+      "advance": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-all-advance",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "advance_by",
+            "payload": {
+              "ms": 300000
+            }
+          }
+        ],
+        "checks": {}
+      },
+      "max": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-max-speed",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "set_speed",
+            "payload": {
+              "speed": "MAX"
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-max-play",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "play",
+            "payload": {}
+          }
+        ],
+        "checks": {}
+      },
+      "speed_step": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-speed-60",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "set_speed",
+            "payload": {
+              "speed": 60
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-speed-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "step",
+            "payload": {
+              "count": 5
+            }
+          }
+        ],
+        "checks": {}
+      },
+      "pause_step": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-pause-speed",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "set_speed",
+            "payload": {
+              "speed": 60
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-pause-play",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "play",
+            "payload": {}
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-pause-barrier",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 6,
+            "type": "pause",
+            "payload": {}
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-pause-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 7,
+            "type": "step",
+            "payload": {
+              "count": 5
+            }
+          }
+        ],
+        "checks": {
+          "pause_barrier_source_sequence": 1
+        }
+      },
+      "checkpoint": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-checkpoint-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "step",
+            "payload": {
+              "count": 2
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-resume-acquire",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "acquire_controller",
+            "payload": {}
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-resume-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 6,
+            "type": "step",
+            "payload": {
+              "count": 3
+            }
+          }
+        ],
+        "checks": {
+          "checkpoint_restored": true,
+          "checkpoint_sha256": "8ed493a5338f25c6f12489bfbc3fd1c369c4bdcfa1be34babe21592b19d8d9a6"
+        }
+      },
+      "restart": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-prefix-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "step",
+            "payload": {
+              "count": 2
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-resume-acquire",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "acquire_controller",
+            "payload": {}
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-bar-resume-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 6,
+            "type": "step",
+            "payload": {
+              "count": 3
+            }
+          }
+        ],
+        "checks": {
+          "checkpoint_restored": true,
+          "checkpoint_sha256": "8ed493a5338f25c6f12489bfbc3fd1c369c4bdcfa1be34babe21592b19d8d9a6",
+          "process_count": 2
+        }
+      }
+    }
+  },
+  "final": {
+    "actor_state_hash": "sha256:fdbdbc7efa2b63bf76cd519e54d52da1c12519ea9391ffef87834b581380e3e8",
+    "broker_state_hash": "sha256:6113be4b19ff7f3753ab18acb5effd33a7a1b05c288cdd1e208c6708c080e12d",
+    "report_hash": "sha256:8ef1c0fd396268b27083dadaa8037b316949f8cd24707616a136e18316690a15",
+    "ledger_tail_hash": "sha256:c7a1ecd2da5f3da607c9dfba2b488f416d7019b2f7eaa1bcfc075e6e209acfe8",
+    "projection_hash": "sha256:07517a8e41cb72ec82d8a29ac843d4b9ac9a4fe449b571355a38d9025f5dd054",
+    "cursor": {
+      "virtual_time_ms": 1800057959999,
+      "source_sequence": 6,
+      "last_base_bar_open_ms": 1800057900000,
+      "last_trade_time_ms": null,
+      "last_agg_trade_id": null,
+      "at_end": true
+    },
+    "state": "ENDED",
+    "order_count": 2,
+    "fill_count": 2,
+    "closed_trade_count": 1,
+    "account_hash": "sha256:70745be95dfa3a8542e0b8bdb571d7e005398c9e7dbf7c736c0965608b4b7255"
+  },
+  "ledger_audit": {
+    "balanced_transactions": 6,
+    "entry_count": 12,
+    "ledger_tail_hash": "sha256:c7a1ecd2da5f3da607c9dfba2b488f416d7019b2f7eaa1bcfc075e6e209acfe8",
+    "cash_total": "10000.71960",
+    "closed_realized_pnl": "0.8",
+    "report_hash": "sha256:8ef1c0fd396268b27083dadaa8037b316949f8cd24707616a136e18316690a15",
+    "zero_difference": true
+  },
+  "equivalence": {
+    "paths": [
+      "step",
+      "advance",
+      "max",
+      "speed_step",
+      "pause_step",
+      "checkpoint",
+      "restart"
+    ],
+    "final_evidence_hash": "sha256:d5cc18051c417baaf5cc0e60f71bed4c84d4df992aae5794890c588cbba022e0",
+    "ledger_audit_hash": "sha256:7eeaecb3b501d61b7ef1cf94b24e6e62b348033bb2dde5846783c4ab700855de",
+    "cross_process_repetitions": 2,
+    "all_equal": true
+  }
+}

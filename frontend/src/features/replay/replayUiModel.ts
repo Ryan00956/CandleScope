@@ -8,6 +8,12 @@ import type {
 } from "./replayTypes.js";
 import type { ReplayStoreSnapshot } from "./replayStore.js";
 
+export const REPLAY_ACTIVITY_VIEW_LIMIT = 20;
+
+export function recentReplayActivity<T>(items: readonly T[]): readonly T[] {
+  return items.slice(-REPLAY_ACTIVITY_VIEW_LIMIT).reverse();
+}
+
 export interface ReplaySessionDraft {
   readonly sourceKind: ReplaySourceKind;
   readonly catalogIdentity: string;

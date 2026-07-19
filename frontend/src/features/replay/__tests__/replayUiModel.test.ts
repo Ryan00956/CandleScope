@@ -8,6 +8,8 @@ import {
   createReplaySessionDraft,
   evaluateReplaySessionDraft,
   formatReplaySyntheticTime,
+  recentReplayActivity,
+  REPLAY_ACTIVITY_VIEW_LIMIT,
   replayCatalogIdentity,
 } from "../replayUiModel.js";
 import { buildReplaySmaLine } from "../useReplayIndicatorRuntime.js";
@@ -86,6 +88,15 @@ test("blind public time is synthetic D+N and never renders a calendar date", () 
   const value = formatReplaySyntheticTime(BASE_TIME_MS + 86_400_000 + 3_661_000, BASE_TIME_MS);
   assert.equal(value, "D+1 01:01:01");
   assert.doesNotMatch(value, /20\d\d|\/|-\d{2}-/);
+});
+
+test("activity views keep a newest-first bounded window without mutating authority history", () => {
+  const authority = Array.from({ length: 100 }, (_, index) => index + 1);
+  const visible = recentReplayActivity(authority);
+  assert.equal(visible.length, REPLAY_ACTIVITY_VIEW_LIMIT);
+  assert.deepEqual(visible, Array.from({ length: REPLAY_ACTIVITY_VIEW_LIMIT }, (_, index) => 100 - index));
+  assert.deepEqual(authority.slice(0, 3), [1, 2, 3]);
+  assert.equal(authority.length, 100);
 });
 
 test("replay local indicator drops every source row after the public cursor", () => {

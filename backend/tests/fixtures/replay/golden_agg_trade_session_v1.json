@@ -1,0 +1,320 @@
+{
+  "schema_version": "replay-golden-session.v1",
+  "source_kind": "agg_trade",
+  "fixture_hash": "sha256:e4e72a60e70055a57761c28abbc7dbcad5ffe978fe4467bfaa6842619a59c846",
+  "config": {
+    "protocol": "replay.v1",
+    "source_kind": "agg_trade",
+    "exchange": "binance",
+    "market_type": "futures",
+    "symbol": "BTCUSDT",
+    "base_interval": "1m",
+    "display_interval": "1m",
+    "start_policy": "manual",
+    "requested_start_ms": 1800057600000,
+    "warmup_bars": 0,
+    "horizon_ms": 60000,
+    "random_seed": 20260718,
+    "quality_mode": "exact",
+    "blind_mode": false,
+    "initial_equity": "10000",
+    "quote_asset": "USDT",
+    "execution_model": "paper_linear_v1",
+    "fee_model": {
+      "maker_bps": "2",
+      "taker_bps": "4"
+    },
+    "slippage_model": {
+      "kind": "fixed_bps",
+      "market_bps": "1"
+    },
+    "max_leverage": "5",
+    "pause_on_controller_loss": true
+  },
+  "command_log": {
+    "common_prefix": [
+      {
+        "protocol": "replay.v1",
+        "command_id": "golden-agg_trade-acquire",
+        "client_instance_id": "replay-v1-golden-client",
+        "expected_revision": 0,
+        "type": "acquire_controller",
+        "payload": {}
+      },
+      {
+        "protocol": "replay.v1",
+        "command_id": "golden-agg_trade-entry",
+        "client_instance_id": "replay-v1-golden-client",
+        "expected_revision": 1,
+        "type": "place_order",
+        "payload": {
+          "client_order_id": "golden-agg_trade-entry",
+          "side": "BUY",
+          "order_type": "MARKET",
+          "quantity": "0.5",
+          "reduce_only": false,
+          "limit_price": null,
+          "stop_price": null
+        }
+      },
+      {
+        "protocol": "replay.v1",
+        "command_id": "golden-agg_trade-entry-step",
+        "client_instance_id": "replay-v1-golden-client",
+        "expected_revision": 2,
+        "type": "step",
+        "payload": {
+          "count": 1
+        }
+      },
+      {
+        "protocol": "replay.v1",
+        "command_id": "golden-agg_trade-close",
+        "client_instance_id": "replay-v1-golden-client",
+        "expected_revision": 3,
+        "type": "close_position",
+        "payload": {}
+      }
+    ],
+    "paths": {
+      "step": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-all-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "step",
+            "payload": {
+              "count": 5
+            }
+          }
+        ],
+        "checks": {}
+      },
+      "advance": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-all-advance",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "advance_by",
+            "payload": {
+              "ms": 58999
+            }
+          }
+        ],
+        "checks": {}
+      },
+      "max": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-max-speed",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "set_speed",
+            "payload": {
+              "speed": "MAX"
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-max-play",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "play",
+            "payload": {}
+          }
+        ],
+        "checks": {}
+      },
+      "speed_step": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-speed-60",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "set_speed",
+            "payload": {
+              "speed": 60
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-speed-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "step",
+            "payload": {
+              "count": 5
+            }
+          }
+        ],
+        "checks": {}
+      },
+      "pause_step": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-pause-speed",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "set_speed",
+            "payload": {
+              "speed": 60
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-pause-play",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "play",
+            "payload": {}
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-pause-barrier",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 6,
+            "type": "pause",
+            "payload": {}
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-pause-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 7,
+            "type": "step",
+            "payload": {
+              "count": 5
+            }
+          }
+        ],
+        "checks": {
+          "pause_barrier_source_sequence": 1
+        }
+      },
+      "checkpoint": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-checkpoint-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "step",
+            "payload": {
+              "count": 2
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-resume-acquire",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "acquire_controller",
+            "payload": {}
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-resume-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 6,
+            "type": "step",
+            "payload": {
+              "count": 3
+            }
+          }
+        ],
+        "checks": {
+          "checkpoint_restored": true,
+          "checkpoint_sha256": "d0fd20d1fe09e752a312bea573397c31ae8595489d3a94706000111d81f05e30"
+        }
+      },
+      "restart": {
+        "suffix": [
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-prefix-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 4,
+            "type": "step",
+            "payload": {
+              "count": 2
+            }
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-resume-acquire",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 5,
+            "type": "acquire_controller",
+            "payload": {}
+          },
+          {
+            "protocol": "replay.v1",
+            "command_id": "golden-agg_trade-resume-step",
+            "client_instance_id": "replay-v1-golden-client",
+            "expected_revision": 6,
+            "type": "step",
+            "payload": {
+              "count": 3
+            }
+          }
+        ],
+        "checks": {
+          "checkpoint_restored": true,
+          "checkpoint_sha256": "d0fd20d1fe09e752a312bea573397c31ae8595489d3a94706000111d81f05e30",
+          "process_count": 2
+        }
+      }
+    }
+  },
+  "final": {
+    "actor_state_hash": "sha256:33ff0d73d232e44a5cb13e9bb5fe1f8538bd4da12bf5a02bb1b85916e742af58",
+    "broker_state_hash": "sha256:65b77a9a08a00bb68f4cc3ce2285ec9d55e9b511f44bd44f65ea3d580f52e1dd",
+    "report_hash": "sha256:561fc50724212fe5dd1cd4afc7af2fc31e548d49dd3e0409862993bf9c179ca7",
+    "ledger_tail_hash": "sha256:6bc6bd77b86f2dbd800e5e7e4acdfb7e6d6bd3340f226c75911422590c5f848f",
+    "projection_hash": "sha256:9c75da5920280cb0d8b72295a4b7979ebd1ed7995b53493b9eb793e9fb108d81",
+    "cursor": {
+      "virtual_time_ms": 1800057659999,
+      "source_sequence": 6,
+      "last_base_bar_open_ms": null,
+      "last_trade_time_ms": 1800057606000,
+      "last_agg_trade_id": 50000005,
+      "at_end": true
+    },
+    "state": "ENDED",
+    "order_count": 2,
+    "fill_count": 2,
+    "closed_trade_count": 1,
+    "account_hash": "sha256:7e3ebdca737af964489e823ad8aedb9828ad7c61e930530cb838851c678dc8fc"
+  },
+  "ledger_audit": {
+    "balanced_transactions": 6,
+    "entry_count": 12,
+    "ledger_tail_hash": "sha256:6bc6bd77b86f2dbd800e5e7e4acdfb7e6d6bd3340f226c75911422590c5f848f",
+    "cash_total": "10000.35980",
+    "closed_realized_pnl": "0.4",
+    "report_hash": "sha256:561fc50724212fe5dd1cd4afc7af2fc31e548d49dd3e0409862993bf9c179ca7",
+    "zero_difference": true
+  },
+  "equivalence": {
+    "paths": [
+      "step",
+      "advance",
+      "max",
+      "speed_step",
+      "pause_step",
+      "checkpoint",
+      "restart"
+    ],
+    "final_evidence_hash": "sha256:c9fe7e50046e043adad620b3b49666199cf83b29b76103d568a2eb947760d69d",
+    "ledger_audit_hash": "sha256:18ec09e596a20a5ab79b358dc3bf841d3de432ef4abd44512acd8b340bd71b4d",
+    "cross_process_repetitions": 2,
+    "all_equal": true
+  }
+}

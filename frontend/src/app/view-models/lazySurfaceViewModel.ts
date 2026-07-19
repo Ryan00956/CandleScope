@@ -2,6 +2,10 @@ import type { AppShellViewModelContext } from "../appShellContracts.js";
 import type { LazyFeatureSurfaceModels } from "../LazyFeatureSurfaces.js";
 import type { IndicatorPanelMarketStudyStatus } from "../../features/indicators/IndicatorPanel.js";
 import { isMarketMetricId } from "../../features/advanced-market-data/marketMetricSelectionTypes.js";
+import {
+  isTradeFlowIndicatorId,
+  TRADE_FLOW_INDICATOR_DEFINITIONS,
+} from "../../features/trade-flow/tradeFlowTypes.js";
 
 function marketStudyStatus(
   status: AppShellViewModelContext["advancedMarketView"]["marketStudies"][number]["status"],
@@ -28,6 +32,8 @@ export function buildLazySurfaceViewModel({
   sessionView,
   settingsActions,
   settingsView,
+  tradeFlowActions,
+  tradeFlowView,
   watchlistView,
 }: AppShellViewModelContext): LazyFeatureSurfaceModels {
   const {
@@ -51,36 +57,68 @@ export function buildLazySurfaceViewModel({
       onUpdateParams: indicatorActions.updateIndicatorParams,
       onUpdateScript: indicatorActions.updateIndicatorScript,
       onRecompute: indicatorActions.recompute,
-      marketStudies: advancedMarketView.marketStudies.map((study) => ({
-        id: study.id,
-        name: study.name,
-        description: study.description,
-        added: study.added,
-        visible: study.visible,
-        supported: study.supported,
-        unsupportedReason: study.supportReason,
-        status: study.id === "market:liquidations" && study.status === "hidden"
-          ? "ready"
-          : marketStudyStatus(study.status),
-        statusText: study.status === "hidden"
-          ? study.id === "market:liquidations"
-            ? "已隐藏，仍在后台采集观测爆仓"
-            : "已隐藏，实时订阅已暂停"
-          : study.status === "loading"
-            ? "正在加载市场数据"
-            : study.status === "unavailable"
-              ? study.supportReason
-              : null,
-        error: study.error,
-      })),
+      marketStudies: [
+        ...advancedMarketView.marketStudies.map((study) => ({
+          id: study.id,
+          name: study.name,
+          description: study.description,
+          added: study.added,
+          visible: study.visible,
+          supported: study.supported,
+          unsupportedReason: study.supportReason,
+          status: study.id === "market:liquidations" && study.status === "hidden"
+            ? "ready" as const
+            : marketStudyStatus(study.status),
+          statusText: study.status === "hidden"
+            ? study.id === "market:liquidations"
+              ? "已隐藏，仍在后台采集观测爆仓"
+              : "已隐藏，实时订阅已暂停"
+            : study.status === "loading"
+              ? "正在加载市场数据"
+              : study.status === "unavailable"
+                ? study.supportReason
+                : null,
+          error: study.error,
+        })),
+        ...TRADE_FLOW_INDICATOR_DEFINITIONS.map((definition) => {
+          const selection = tradeFlowView.preferences.indicators[definition.key];
+          return {
+            id: definition.id,
+            name: definition.name,
+            description: definition.description,
+            added: selection.added,
+            visible: selection.visible,
+            supported: tradeFlowView.supported,
+            unsupportedReason: tradeFlowView.supportMessage,
+            status: !tradeFlowView.supported
+              ? "dormant" as const
+              : selection.added && selection.visible
+                ? "ready" as const
+                : selection.added
+                  ? "dormant" as const
+                  : "idle" as const,
+            statusText: !tradeFlowView.supported
+              ? tradeFlowView.supportMessage
+              : selection.added && !selection.visible
+                ? "已隐藏；右侧成交/分布视图不受影响"
+                : selection.added
+                  ? "使用 K 线订单流字段；右侧成交/分布视图独立控制"
+                  : null,
+            error: null,
+          };
+        }),
+      ],
       onAddMarketStudy: (id) => {
         if (isMarketMetricId(id)) advancedMarketActions.addMarketStudy(id);
+        else if (isTradeFlowIndicatorId(id)) tradeFlowActions.addIndicator(id);
       },
       onRemoveMarketStudy: (id) => {
         if (isMarketMetricId(id)) advancedMarketActions.removeMarketStudy(id);
+        else if (isTradeFlowIndicatorId(id)) tradeFlowActions.removeIndicator(id);
       },
       onToggleMarketStudyVisibility: (id) => {
         if (isMarketMetricId(id)) advancedMarketActions.toggleMarketStudyVisibility(id);
+        else if (isTradeFlowIndicatorId(id)) tradeFlowActions.toggleIndicatorVisibility(id);
       },
     },
     alertsPanel: {

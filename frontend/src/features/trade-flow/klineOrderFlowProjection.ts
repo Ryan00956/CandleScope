@@ -179,7 +179,7 @@ function panes(state: ProjectionState): readonly IndicatorSubPane[] {
     {
       id: "trade-flow-cvd",
       label: "CVD",
-      owner: { kind: "trade-flow", id: "workspace" },
+      owner: { kind: "trade-flow", id: "trade-flow:cvd" },
       dataMarketPane: "order-flow-cvd",
       lines: [{
         id: "trade-flow-cvd-base",
@@ -212,7 +212,7 @@ function panes(state: ProjectionState): readonly IndicatorSubPane[] {
     {
       id: "trade-flow-delta",
       label: "Volume Delta",
-      owner: { kind: "trade-flow", id: "workspace" },
+      owner: { kind: "trade-flow", id: "trade-flow:delta" },
       dataMarketPane: "order-flow-delta",
       lines: [
         {

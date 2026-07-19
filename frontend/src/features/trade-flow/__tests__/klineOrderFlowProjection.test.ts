@@ -45,6 +45,8 @@ test("CVD restarts only at the latest contiguous valid suffix after a gap", () =
     intervalSeconds: 60,
   });
   assert.deepEqual(cvdValues(panes), [4]);
+  assert.equal(panes[0]?.owner?.id, "trade-flow:cvd");
+  assert.equal(panes[1]?.owner?.id, "trade-flow:delta");
   assert.match(panes[0]?.statusText || "", /最近连续段/);
 });
 

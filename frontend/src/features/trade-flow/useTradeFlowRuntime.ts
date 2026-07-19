@@ -55,15 +55,15 @@ export function useTradeFlowRuntime({
   const [retryRevision, setRetryRevision] = useState(0);
   const message = supportMessage(identity);
   const supported = message === null;
-  const enabled = supported && preferences.enabled;
+  const enabled = supported && preferences.dockView !== "order-book";
 
   useEffect(() => {
     if (!supported) {
       store.reset("unsupported", message);
       return undefined;
     }
-    if (!preferences.enabled) {
-      store.reset("idle", "订单流工作区未启用");
+    if (preferences.dockView === "order-book") {
+      store.reset("idle", "右侧实时订单流未打开");
       return undefined;
     }
     const controller = new TradeFlowStreamController({
@@ -79,7 +79,7 @@ export function useTradeFlowRuntime({
       clearTimeout(startTimer);
       controller.close();
     };
-  }, [identity, message, preferences.enabled, retryRevision, store, supported]);
+  }, [identity, message, preferences.dockView, retryRevision, store, supported]);
 
   const intervalSeconds = parseIntervalSeconds(interval);
   const markerSource = useMemo(() => (

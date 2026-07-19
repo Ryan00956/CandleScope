@@ -12,6 +12,31 @@ export type TradeFlowConnectionStatus =
 export type TradeFlowSide = "buy" | "sell";
 export type TradeFlowSideFilter = "all" | TradeFlowSide;
 export type TradeFlowDockView = "order-book" | "tape" | "profile";
+export type TradeFlowIndicatorId = "trade-flow:cvd" | "trade-flow:delta";
+export type TradeFlowIndicatorKey = "cvd" | "delta";
+
+export const TRADE_FLOW_INDICATOR_DEFINITIONS = Object.freeze([
+  Object.freeze({
+    id: "trade-flow:cvd" as const,
+    key: "cvd" as const,
+    name: "CVD（累计成交量差）",
+    description: "基于 K 线主动买卖量构建的连续前缀和；与右侧实时订单流独立。",
+  }),
+  Object.freeze({
+    id: "trade-flow:delta" as const,
+    key: "delta" as const,
+    name: "Volume Delta（成交量差）",
+    description: "逐根 K 线展示主动买量、主动卖量及其差值；与右侧实时订单流独立。",
+  }),
+]);
+
+export function isTradeFlowIndicatorId(value: unknown): value is TradeFlowIndicatorId {
+  return TRADE_FLOW_INDICATOR_DEFINITIONS.some((definition) => definition.id === value);
+}
+
+export function tradeFlowIndicatorKey(id: TradeFlowIndicatorId): TradeFlowIndicatorKey {
+  return id === "trade-flow:cvd" ? "cvd" : "delta";
+}
 
 export interface TradeFlowIdentity {
   exchange: string;
@@ -73,17 +98,21 @@ export interface TradeFlowExternalStore {
 }
 
 export interface TradeFlowPreferences {
-  enabled: boolean;
   dockView: TradeFlowDockView;
+  indicators: Record<TradeFlowIndicatorKey, {
+    added: boolean;
+    visible: boolean;
+  }>;
   sideFilter: TradeFlowSideFilter;
   minNotional: number;
   largeTradeNotional: number;
 }
 
 export interface TradeFlowPreferenceActions {
-  setEnabled(enabled: boolean): void;
-  toggleEnabled(): void;
   setDockView(view: TradeFlowDockView): void;
+  addIndicator(id: TradeFlowIndicatorId): void;
+  removeIndicator(id: TradeFlowIndicatorId): void;
+  toggleIndicatorVisibility(id: TradeFlowIndicatorId): void;
   setSideFilter(side: TradeFlowSideFilter): void;
   setMinNotional(value: number): void;
   setLargeTradeNotional(value: number): void;

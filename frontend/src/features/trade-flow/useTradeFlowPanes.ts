@@ -51,7 +51,10 @@ export function useTradeFlowPanes(
   runtime: TradeFlowRuntime,
   seriesStore: SeriesWindowStore | null | undefined,
 ): readonly IndicatorSubPane[] {
-  const enabled = runtime.view.preferences.enabled;
+  const { cvd, delta } = runtime.view.preferences.indicators;
+  const cvdVisible = cvd.added && cvd.visible;
+  const deltaVisible = delta.added && delta.visible;
+  const enabled = cvdVisible || deltaVisible;
   const revisionSource = useMemo(
     () => createSeriesProjectionRevisionSource(seriesStore, enabled),
     [enabled, seriesStore],
@@ -65,12 +68,16 @@ export function useTradeFlowPanes(
 
   return useMemo(() => {
     if (!enabled || !seriesStore) return EMPTY_PANES;
-    return projection.project({
+    const panes = projection.project({
       bars: seriesStore.snapshot(),
       enabled: true,
       forceFull: false,
       intervalSeconds: seriesStore.intervalSeconds,
       structureRevision: revision.structureRevision,
     });
-  }, [enabled, projection, revision, seriesStore]);
+    return panes.filter((pane) => (
+      (pane.id === "trade-flow-cvd" && cvdVisible)
+      || (pane.id === "trade-flow-delta" && deltaVisible)
+    ));
+  }, [cvdVisible, deltaVisible, enabled, projection, revision, seriesStore]);
 }

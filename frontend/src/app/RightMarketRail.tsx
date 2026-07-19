@@ -207,7 +207,6 @@ function RightMarketRail({ watchlist, orderBook, tradeFlow }: RightMarketRailPro
               <OrderBookDock
                 runtime={orderBook}
                 height={dockHeight}
-                tradeFlowEnabled={tradeFlow.status.enabled}
                 onOpenTradeFlow={() => tradeFlow.actions.setDockView("tape")}
               />
             ) : (

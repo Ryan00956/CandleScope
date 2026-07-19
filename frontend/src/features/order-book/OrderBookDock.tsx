@@ -32,7 +32,6 @@ import {
 export interface OrderBookDockProps {
   runtime: OrderBookRuntime;
   height: number;
-  tradeFlowEnabled?: boolean;
   onOpenTradeFlow?(): void;
 }
 
@@ -232,7 +231,7 @@ function EmptyState({
   );
 }
 
-function OrderBookDock({ runtime, height, tradeFlowEnabled = false, onOpenTradeFlow }: OrderBookDockProps) {
+function OrderBookDock({ runtime, height, onOpenTradeFlow }: OrderBookDockProps) {
   const { view, actions } = runtime;
   const snapshot = useSyncExternalStore(
     view.store.subscribe,
@@ -279,7 +278,6 @@ function OrderBookDock({ runtime, height, tradeFlowEnabled = false, onOpenTradeF
               type="button"
               role="tab"
               aria-selected={false}
-              className={tradeFlowEnabled ? "has-live-workspace" : ""}
               onClick={onOpenTradeFlow}
             >成交</button>
           </div>

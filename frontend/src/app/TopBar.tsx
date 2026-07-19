@@ -29,8 +29,6 @@ export interface TopBarControlsModel {
   alertPanelOpen: boolean;
   onToggleAlertPanel(): void;
   activeIndicatorCount: number;
-  orderFlowEnabled: boolean;
-  onToggleOrderFlow(): void;
 }
 
 export interface TopBarProps {
@@ -69,8 +67,6 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData }: T
     alertPanelOpen,
     onToggleAlertPanel,
     activeIndicatorCount,
-    orderFlowEnabled,
-    onToggleOrderFlow,
   } = controls;
   const crosshairData = useSyncExternalStore(
     subscribeCrosshairData,
@@ -141,16 +137,6 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData }: T
         title="警报 (Alerts)"
       >
         🔔
-      </button>
-
-      <button
-        className={`indicator-toggle-btn order-flow-toggle-btn ${orderFlowEnabled ? "active" : ""}`}
-        onClick={onToggleOrderFlow}
-        title="成交订单流工作区（CVD / Delta / Tape / Profile）"
-        aria-pressed={orderFlowEnabled}
-      >
-        <span aria-hidden="true">⇅</span>
-        <span className="order-flow-toggle-label">OF</span>
       </button>
 
       {displayData && (

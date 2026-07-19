@@ -1,10 +1,13 @@
 import { useCallback, useMemo, useState } from "react";
 import type {
   TradeFlowDockView,
+  TradeFlowIndicatorId,
+  TradeFlowIndicatorKey,
   TradeFlowPreferenceActions,
   TradeFlowPreferences,
   TradeFlowSideFilter,
 } from "./tradeFlowTypes.js";
+import { tradeFlowIndicatorKey } from "./tradeFlowTypes.js";
 
 const STORAGE_KEY = "candlescope-trade-flow-preferences-v1";
 
@@ -16,8 +19,11 @@ export const TRADE_FLOW_BUBBLE_OPTIONS = [
 ] as const;
 
 export const DEFAULT_TRADE_FLOW_PREFERENCES: TradeFlowPreferences = Object.freeze({
-  enabled: false,
   dockView: "order-book",
+  indicators: Object.freeze({
+    cvd: Object.freeze({ added: false, visible: false }),
+    delta: Object.freeze({ added: false, visible: false }),
+  }),
   sideFilter: "all",
   minNotional: 0,
   largeTradeNotional: 100_000,
@@ -45,6 +51,18 @@ function notional(
   return Number.isFinite(parsed) && choices.includes(parsed) ? parsed : fallback;
 }
 
+function indicatorPreference(
+  value: unknown,
+  legacyEnabled: boolean,
+): TradeFlowPreferences["indicators"][TradeFlowIndicatorKey] {
+  if (!value || typeof value !== "object") {
+    return { added: legacyEnabled, visible: legacyEnabled };
+  }
+  const raw = value as Record<string, unknown>;
+  const added = raw.added === true;
+  return { added, visible: added && raw.visible !== false };
+}
+
 export function loadTradeFlowPreferences(
   target: StorageLike | null = storage(),
 ): TradeFlowPreferences {
@@ -52,13 +70,23 @@ export function loadTradeFlowPreferences(
   try {
     const raw = JSON.parse(target.getItem(STORAGE_KEY) || "null") as Record<string, unknown> | null;
     if (!raw || typeof raw !== "object") return { ...DEFAULT_TRADE_FLOW_PREFERENCES };
+    const rawIndicators = raw.indicators && typeof raw.indicators === "object"
+      ? raw.indicators as Record<string, unknown>
+      : null;
+    const legacyEnabled = rawIndicators === null && raw.enabled === true;
+    const dockView = allowed<TradeFlowDockView>(
+      raw.dockView,
+      ["order-book", "tape", "profile"],
+      DEFAULT_TRADE_FLOW_PREFERENCES.dockView,
+    );
     return {
-      enabled: raw.enabled === true,
-      dockView: allowed<TradeFlowDockView>(
-        raw.dockView,
-        ["order-book", "tape", "profile"],
-        DEFAULT_TRADE_FLOW_PREFERENCES.dockView,
-      ),
+      // Legacy v1 stored one global `enabled` bit. Preserve its two chart
+      // panes during migration, while the right rail now follows dockView.
+      dockView: rawIndicators === null && !legacyEnabled ? "order-book" : dockView,
+      indicators: {
+        cvd: indicatorPreference(rawIndicators?.cvd, legacyEnabled),
+        delta: indicatorPreference(rawIndicators?.delta, legacyEnabled),
+      },
       sideFilter: allowed<TradeFlowSideFilter>(
         raw.sideFilter,
         ["all", "buy", "sell"],
@@ -95,21 +123,39 @@ export function useTradeFlowPreferences(): {
     });
   }, [target]);
 
-  const setEnabled = useCallback((enabled: boolean) => update((current) => ({
-    ...current,
-    enabled,
-    dockView: enabled ? (current.dockView === "order-book" ? "tape" : current.dockView) : "order-book",
-  })), [update]);
-  const toggleEnabled = useCallback(() => update((current) => ({
-    ...current,
-    enabled: !current.enabled,
-    dockView: current.enabled ? "order-book" : "tape",
-  })), [update]);
   const setDockView = useCallback((dockView: TradeFlowDockView) => update((current) => ({
     ...current,
     dockView,
-    enabled: dockView === "order-book" ? current.enabled : true,
   })), [update]);
+  const updateIndicator = useCallback((
+    id: TradeFlowIndicatorId,
+    updater: (
+      current: TradeFlowPreferences["indicators"][TradeFlowIndicatorKey],
+    ) => TradeFlowPreferences["indicators"][TradeFlowIndicatorKey],
+  ) => update((current) => {
+    const key = tradeFlowIndicatorKey(id);
+    return {
+      ...current,
+      indicators: {
+        ...current.indicators,
+        [key]: updater(current.indicators[key]),
+      },
+    };
+  }), [update]);
+  const addIndicator = useCallback((id: TradeFlowIndicatorId) => updateIndicator(
+    id,
+    () => ({ added: true, visible: true }),
+  ), [updateIndicator]);
+  const removeIndicator = useCallback((id: TradeFlowIndicatorId) => updateIndicator(
+    id,
+    () => ({ added: false, visible: false }),
+  ), [updateIndicator]);
+  const toggleIndicatorVisibility = useCallback((id: TradeFlowIndicatorId) => updateIndicator(
+    id,
+    (current) => current.added
+      ? { ...current, visible: !current.visible }
+      : current,
+  ), [updateIndicator]);
   const setSideFilter = useCallback((sideFilter: TradeFlowSideFilter) => update((current) => ({
     ...current,
     sideFilter,
@@ -124,19 +170,21 @@ export function useTradeFlowPreferences(): {
   })), [update]);
 
   const actions = useMemo<TradeFlowPreferenceActions>(() => ({
-    setEnabled,
-    toggleEnabled,
     setDockView,
+    addIndicator,
+    removeIndicator,
+    toggleIndicatorVisibility,
     setSideFilter,
     setMinNotional,
     setLargeTradeNotional,
   }), [
+    addIndicator,
+    removeIndicator,
     setDockView,
-    setEnabled,
     setLargeTradeNotional,
     setMinNotional,
     setSideFilter,
-    toggleEnabled,
+    toggleIndicatorVisibility,
   ]);
 
   return { preferences, actions };

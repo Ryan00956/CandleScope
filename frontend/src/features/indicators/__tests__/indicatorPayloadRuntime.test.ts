@@ -6,6 +6,7 @@ import {
   normalizeIndicatorPayload,
   replaceIndicatorItemsRange,
   replaceIndicatorLinesRange,
+  upsertLinePoint,
 } from "../indicatorPayloadRuntime.js";
 import {
   IndicatorPayloadError,
@@ -34,6 +35,23 @@ test("clearIndicatorLineData keeps line identity and style while clearing timed 
     data: [],
     colorData: [],
   }]);
+});
+
+test("realtime line upserts use sorted insertion and preserve identity for no-ops", () => {
+  const original = [
+    { time: 10, value: 1 },
+    { time: 30, value: 3 },
+  ];
+  assert.equal(upsertLinePoint(original, { time: 30, value: 3 }), original);
+  assert.deepEqual(upsertLinePoint(original, { time: 20, value: 2 }), [
+    { time: 10, value: 1 },
+    { time: 20, value: 2 },
+    { time: 30, value: 3 },
+  ]);
+  assert.deepEqual(upsertLinePoint(original, { time: 40, value: 4 }), [
+    ...original,
+    { time: 40, value: 4 },
+  ]);
 });
 
 test("parameter schemas omit absent optional fields", () => {

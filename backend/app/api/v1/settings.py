@@ -552,7 +552,12 @@ async def storage_health(request: Request) -> dict:
     if dm is None or backfill_coordinator is None:
         raise HTTPException(status_code=503, detail="DataEngine 尚未初始化")
 
-    snapshot = backfill_coordinator.snapshot()
+    snapshot_async = getattr(backfill_coordinator, "snapshot_async", None)
+    snapshot = (
+        await snapshot_async()
+        if callable(snapshot_async)
+        else backfill_coordinator.snapshot()
+    )
     engine_snapshot = (
         backfill_engine.snapshot()
         if backfill_engine is not None and callable(getattr(backfill_engine, "snapshot", None))

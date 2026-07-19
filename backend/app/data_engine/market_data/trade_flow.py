@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import math
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
@@ -339,6 +341,7 @@ class _BucketAccumulator:
 @dataclass(slots=True)
 class _StreamState:
     raw_trades: deque[NormalizedAggTrade]
+    raw_trade_inversions: int = 0
     buckets: OrderedDict[int, _BucketAccumulator] = field(default_factory=OrderedDict)
     # Recent IDs mirror the bounded raw ring.  Older live duplicates are
     # rejected by the monotonic high-water mark, while an already-filled gap
@@ -491,9 +494,39 @@ class TradeFlowEngine:
         if state is None:
             return ()
         records = tuple(state.raw_trades)
-        if ordered:
+        if ordered and state.raw_trade_inversions:
             records = tuple(sorted(records, key=lambda item: item.agg_trade_id))
         return records
+
+    def raw_tail(
+        self,
+        identity: StreamIdentity,
+        limit: int,
+    ) -> tuple[NormalizedAggTrade, ...]:
+        """Return the newest ordered trades without sorting the whole ring."""
+        state = self._streams.get(self._normalize_identity(identity))
+        if state is None:
+            return ()
+        bounded = max(0, int(limit))
+        if bounded == 0:
+            return ()
+        if bounded >= len(state.raw_trades):
+            return self.raw_snapshot(identity)
+        if state.raw_trade_inversions == 0:
+            return tuple(
+                itertools.islice(
+                    state.raw_trades,
+                    len(state.raw_trades) - bounded,
+                    None,
+                ),
+            )
+        newest = heapq.nlargest(
+            bounded,
+            state.raw_trades,
+            key=lambda item: item.agg_trade_id,
+        )
+        newest.sort(key=lambda item: item.agg_trade_id)
+        return tuple(newest)
 
     def bucket_snapshot(self, identity: StreamIdentity) -> tuple[TradeFlowBucket, ...]:
         normalized = self._normalize_identity(identity)
@@ -730,6 +763,17 @@ class TradeFlowEngine:
     def _add_trade(self, state: _StreamState, trade: NormalizedAggTrade) -> None:
         if len(state.raw_trades) >= self._raw_ring_size:
             self._metrics["raw_ring_evicted"] += 1
+            if (
+                len(state.raw_trades) >= 2
+                and state.raw_trades[0].agg_trade_id > state.raw_trades[1].agg_trade_id
+            ):
+                state.raw_trade_inversions -= 1
+            state.raw_trades.popleft()
+        if (
+            state.raw_trades
+            and state.raw_trades[-1].agg_trade_id > trade.agg_trade_id
+        ):
+            state.raw_trade_inversions += 1
         state.raw_trades.append(trade)
         bucket_start = trade.trade_time_ms // BUCKET_INTERVAL_MS * BUCKET_INTERVAL_MS
         accumulator = state.buckets.get(bucket_start)

@@ -184,6 +184,26 @@ def test_raw_ring_and_bucket_retention_are_bounded() -> None:
     assert diagnostics["tracked_recent_ids"] == 2
 
 
+def test_raw_tail_selects_newest_ids_without_relying_on_ingest_order() -> None:
+    engine = TradeFlowEngine(raw_ring_size=10)
+    base = 1_700_000_000_000
+    assert engine.ingest(_trade(1, trade_time_ms=base)).accepted
+    assert engine.ingest(_trade(5, trade_time_ms=base + 4_000)).accepted
+    for trade_id in (4, 2, 3):
+        assert engine.ingest_gap_fill(
+            _trade(trade_id, trade_time_ms=base + trade_id * 1_000),
+        ).accepted
+
+    assert [trade.agg_trade_id for trade in engine.raw_tail(IDENTITY, 2)] == [4, 5]
+    assert engine.raw_tail(IDENTITY, 0) == ()
+
+    single = TradeFlowEngine(raw_ring_size=1)
+    assert single.ingest(_trade(1, trade_time_ms=base)).accepted
+    assert single.ingest(_trade(3, trade_time_ms=base + 3_000)).accepted
+    assert single.ingest_gap_fill(_trade(2, trade_time_ms=base + 2_000)).accepted
+    assert [trade.agg_trade_id for trade in single.raw_snapshot(IDENTITY)] == [2]
+
+
 def test_id_dedupe_memory_is_bounded_independently_of_bucket_retention() -> None:
     engine = TradeFlowEngine(
         raw_ring_size=2,

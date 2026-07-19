@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import enum
 import math
+from bisect import bisect_left, insort
 from collections import OrderedDict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -20,6 +21,10 @@ from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
 
 
 FullOrderBookIdentity: TypeAlias = tuple[str, str, str, int]
+
+_MATERIALIZED_TOP_LEVELS = 1_000
+_MAX_LAZY_REVISION_DEPTH = 64
+_TRUSTED_LAZY_SNAPSHOT = object()
 
 
 class FullOrderBookState(str, enum.Enum):
@@ -249,6 +254,222 @@ def _canonical_seed_levels(
     )
 
 
+class _BookRevision:
+    """Immutable revision chain with an eagerly bounded top-of-book view.
+
+    The engine keeps its mutable reconstruction state private.  Published
+    snapshots retain only the delta from their predecessor plus the first
+    ``_MATERIALIZED_TOP_LEVELS`` immutable level objects.  A complete sorted
+    book is materialized only when a caller explicitly asks for more than the
+    bounded view (for example, grouped projection across the whole source).
+    """
+
+    __slots__ = (
+        "_ask_updates",
+        "_asks_cache",
+        "_bid_updates",
+        "_bids_cache",
+        "_depth",
+        "_parent",
+        "ask_count",
+        "bid_count",
+        "top_asks",
+        "top_bids",
+    )
+
+    def __init__(
+        self,
+        *,
+        parent: _BookRevision | None,
+        bid_updates: tuple[tuple[float, FullOrderBookLevel | None], ...],
+        ask_updates: tuple[tuple[float, FullOrderBookLevel | None], ...],
+        top_bids: tuple[FullOrderBookLevel, ...],
+        top_asks: tuple[FullOrderBookLevel, ...],
+        bid_count: int,
+        ask_count: int,
+        base_bids: tuple[FullOrderBookLevel, ...] | None = None,
+        base_asks: tuple[FullOrderBookLevel, ...] | None = None,
+    ) -> None:
+        self._parent = parent
+        self._bid_updates = bid_updates
+        self._ask_updates = ask_updates
+        self.top_bids = top_bids
+        self.top_asks = top_asks
+        self.bid_count = bid_count
+        self.ask_count = ask_count
+        self._bids_cache = base_bids
+        self._asks_cache = base_asks
+        self._depth = 0 if parent is None else parent._depth + 1
+
+    @classmethod
+    def from_book(
+        cls,
+        bids: Mapping[float, FullOrderBookLevel],
+        asks: Mapping[float, FullOrderBookLevel],
+        bid_prices: Sequence[float],
+        ask_prices: Sequence[float],
+    ) -> _BookRevision:
+        full_bids = tuple(bids[price] for price in reversed(bid_prices))
+        full_asks = tuple(asks[price] for price in ask_prices)
+        return cls(
+            parent=None,
+            bid_updates=(),
+            ask_updates=(),
+            top_bids=full_bids[:_MATERIALIZED_TOP_LEVELS],
+            top_asks=full_asks[:_MATERIALIZED_TOP_LEVELS],
+            bid_count=len(full_bids),
+            ask_count=len(full_asks),
+            base_bids=full_bids,
+            base_asks=full_asks,
+        )
+
+    def child(
+        self,
+        delta: DepthDelta,
+        bids: Mapping[float, FullOrderBookLevel],
+        asks: Mapping[float, FullOrderBookLevel],
+        bid_prices: Sequence[float],
+        ask_prices: Sequence[float],
+    ) -> _BookRevision:
+        parent: _BookRevision | None = self
+        if self._bids_cache is not None and self._asks_cache is not None:
+            # A consumer already paid for this revision's full projection.  Use
+            # it as the next immutable base and release the older chain.
+            parent = _BookRevision(
+                parent=None,
+                bid_updates=(),
+                ask_updates=(),
+                top_bids=self.top_bids,
+                top_asks=self.top_asks,
+                bid_count=self.bid_count,
+                ask_count=self.ask_count,
+                base_bids=self._bids_cache,
+                base_asks=self._asks_cache,
+            )
+        elif self._depth >= _MAX_LAZY_REVISION_DEPTH:
+            # Bound retained delta history even when no full-depth consumer is
+            # attached.  This is one compaction per 64 revisions, never one
+            # full sort/materialization per exchange diff.
+            parent = _BookRevision(
+                parent=None,
+                bid_updates=(),
+                ask_updates=(),
+                top_bids=self.top_bids,
+                top_asks=self.top_asks,
+                bid_count=self.bid_count,
+                ask_count=self.ask_count,
+                base_bids=self.materialize("bids"),
+                base_asks=self.materialize("asks"),
+            )
+
+        return _BookRevision(
+            parent=parent,
+            bid_updates=tuple(
+                (update.price, bids.get(update.price)) for update in delta.bids
+            ),
+            ask_updates=tuple(
+                (update.price, asks.get(update.price)) for update in delta.asks
+            ),
+            top_bids=tuple(
+                bids[price]
+                for price in reversed(bid_prices[-_MATERIALIZED_TOP_LEVELS:])
+            ),
+            top_asks=tuple(
+                asks[price] for price in ask_prices[:_MATERIALIZED_TOP_LEVELS]
+            ),
+            bid_count=len(bids),
+            ask_count=len(asks),
+        )
+
+    def materialize(
+        self,
+        side: str,
+    ) -> tuple[FullOrderBookLevel, ...]:
+        cache_name = "_bids_cache" if side == "bids" else "_asks_cache"
+        cached = getattr(self, cache_name)
+        if cached is not None:
+            return cached
+
+        trail: list[_BookRevision] = []
+        cursor: _BookRevision = self
+        while getattr(cursor, cache_name) is None:
+            trail.append(cursor)
+            parent = cursor._parent
+            if parent is None:
+                raise RuntimeError("full order-book revision has no materialized base")
+            cursor = parent
+
+        levels = {
+            level.price: level
+            for level in getattr(cursor, cache_name)
+        }
+        updates_name = "_bid_updates" if side == "bids" else "_ask_updates"
+        for revision in reversed(trail):
+            for price, level in getattr(revision, updates_name):
+                if level is None:
+                    levels.pop(price, None)
+                else:
+                    levels[price] = level
+        materialized = tuple(
+            sorted(
+                levels.values(),
+                key=lambda level: level.price,
+                reverse=side == "bids",
+            ),
+        )
+        setattr(self, cache_name, materialized)
+        return materialized
+
+
+class _LazyBookSide(Sequence[FullOrderBookLevel]):
+    """Immutable sequence facade over one atomic book revision."""
+
+    __slots__ = ("_depth", "_revision", "_side")
+
+    def __init__(
+        self,
+        revision: _BookRevision,
+        side: str,
+        depth: int | None,
+    ) -> None:
+        self._revision = revision
+        self._side = side
+        self._depth = depth
+
+    def __len__(self) -> int:
+        count = (
+            self._revision.bid_count
+            if self._side == "bids"
+            else self._revision.ask_count
+        )
+        return count if self._depth is None else min(count, self._depth)
+
+    def __getitem__(self, index: int | slice) -> FullOrderBookLevel | tuple[FullOrderBookLevel, ...]:
+        return self._view()[index]
+
+    def __iter__(self):
+        return iter(self._view())
+
+    @property
+    def best(self) -> FullOrderBookLevel:
+        top = self._revision.top_bids if self._side == "bids" else self._revision.top_asks
+        return top[0]
+
+    def top(self, limit: int) -> tuple[FullOrderBookLevel, ...]:
+        bounded = min(max(0, int(limit)), len(self))
+        top = self._revision.top_bids if self._side == "bids" else self._revision.top_asks
+        if bounded <= len(top):
+            return top[:bounded]
+        return self._view()[:bounded]
+
+    def _view(self) -> tuple[FullOrderBookLevel, ...]:
+        length = len(self)
+        top = self._revision.top_bids if self._side == "bids" else self._revision.top_asks
+        if length <= len(top):
+            return top[:length]
+        return self._revision.materialize(self._side)[:length]
+
+
 @dataclass(frozen=True, slots=True)
 class FullOrderBookSeed:
     """Validated REST depth snapshot used to initialize one sync epoch."""
@@ -448,8 +669,8 @@ class FullOrderBookSnapshot:
     epoch: int
     last_update_id: int
     snapshot_limit: int
-    bids: tuple[FullOrderBookLevel, ...]
-    asks: tuple[FullOrderBookLevel, ...]
+    bids: Sequence[FullOrderBookLevel]
+    asks: Sequence[FullOrderBookLevel]
     book_bid_levels: int
     book_ask_levels: int
     projection_depth: int | None
@@ -457,6 +678,11 @@ class FullOrderBookSnapshot:
     received_at_ms: int
     source: DataSource
     revision: int
+    _materialization_token: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -506,9 +732,20 @@ class FullOrderBookSnapshot:
                 minimum=1,
             ),
         )
-        bids = _canonical_seed_levels(self.bids, side="bid")
-        asks = _canonical_seed_levels(self.asks, side="ask")
-        if bids[0].price >= asks[0].price:
+        trusted_lazy = (
+            self._materialization_token is _TRUSTED_LAZY_SNAPSHOT
+            and isinstance(self.bids, _LazyBookSide)
+            and isinstance(self.asks, _LazyBookSide)
+        )
+        if trusted_lazy:
+            bids = self.bids
+            asks = self.asks
+        else:
+            bids = _canonical_seed_levels(self.bids, side="bid")
+            asks = _canonical_seed_levels(self.asks, side="ask")
+        best_bid = bids.best if trusted_lazy else bids[0]
+        best_ask = asks.best if trusted_lazy else asks[0]
+        if best_bid.price >= best_ask.price:
             raise ValueError("full order-book snapshot must not be crossed or locked")
         object.__setattr__(self, "bids", bids)
         object.__setattr__(self, "asks", asks)
@@ -567,10 +804,14 @@ class FullOrderBookSnapshot:
 
     @property
     def top_bid(self) -> float:
+        if isinstance(self.bids, _LazyBookSide):
+            return self.bids.best.price
         return self.bids[0].price
 
     @property
     def top_ask(self) -> float:
+        if isinstance(self.asks, _LazyBookSide):
+            return self.asks.best.price
         return self.asks[0].price
 
     @property
@@ -586,6 +827,15 @@ class FullOrderBookSnapshot:
         return self.spread / self.mid_price * 10_000
 
     def to_dict(self) -> dict[str, Any]:
+        payload = self.to_event_data()
+        payload["bids"] = [[item.price, item.quantity] for item in self.bids]
+        payload["asks"] = [[item.price, item.quantity] for item in self.asks]
+        payload.pop("_canonical_level_order", None)
+        return payload
+
+    def to_event_data(self) -> dict[str, Any]:
+        """Return hub-safe metadata while retaining lazy immutable level views."""
+
         return {
             "exchange": self.exchange,
             "market_type": self.market_type,
@@ -600,8 +850,8 @@ class FullOrderBookSnapshot:
             "full_projection": self.full_projection,
             "book_bid_levels": self.book_bid_levels,
             "book_ask_levels": self.book_ask_levels,
-            "bids": [[item.price, item.quantity] for item in self.bids],
-            "asks": [[item.price, item.quantity] for item in self.asks],
+            "bids": self.bids,
+            "asks": self.asks,
             "top_bid": self.top_bid,
             "top_ask": self.top_ask,
             "mid_price": self.mid_price,
@@ -612,6 +862,7 @@ class FullOrderBookSnapshot:
             "source": self.source.value,
             "local_sequence_continuity": True,
             "exchange_full_depth_exhaustive": False,
+            "_canonical_level_order": True,
         }
 
 
@@ -648,8 +899,11 @@ class FullOrderBookApplyResult:
 class _StreamState:
     epoch: int
     status: FullOrderBookState
-    bids: dict[float, float] = field(default_factory=dict)
-    asks: dict[float, float] = field(default_factory=dict)
+    bids: dict[float, FullOrderBookLevel] = field(default_factory=dict)
+    asks: dict[float, FullOrderBookLevel] = field(default_factory=dict)
+    bid_prices: list[float] = field(default_factory=list)
+    ask_prices: list[float] = field(default_factory=list)
+    book_revision: _BookRevision | None = None
     buffered: deque[DepthDelta] = field(default_factory=deque)
     buffered_updates: int = 0
     last_update_id: int | None = None
@@ -819,8 +1073,10 @@ class FullOrderBookEngine:
         if seed.snapshot_limit > self._max_levels_per_side or len(seed.bids) > self._max_levels_per_side or len(seed.asks) > self._max_levels_per_side:
             return self._fail(state, FullOrderBookFailure.CAPACITY, "REST snapshot exceeds local level capacity")
 
-        bids = {item.price: item.quantity for item in seed.bids}
-        asks = {item.price: item.quantity for item in seed.asks}
+        bids = {item.price: item for item in seed.bids}
+        asks = {item.price: item for item in seed.asks}
+        bid_prices = sorted(bids)
+        ask_prices = sorted(asks)
         buffered = tuple(state.buffered)
         kept = tuple(
             item
@@ -838,7 +1094,13 @@ class FullOrderBookEngine:
             first = kept[0]
             if not self._bridges_snapshot(first, seed.last_update_id):
                 return self._fail(state, FullOrderBookFailure.GAP, "first buffered delta does not bridge REST snapshot")
-            failure = self._mutate_book(bids, asks, first)
+            failure = self._mutate_book(
+                bids,
+                asks,
+                first,
+                bid_prices=bid_prices,
+                ask_prices=ask_prices,
+            )
             if failure is not None:
                 return self._fail(state, failure[0], failure[1])
             last_id = first.final_update_id
@@ -850,7 +1112,13 @@ class FullOrderBookEngine:
                 link_error = self._link_error(last_id, delta)
                 if link_error is not None:
                     return self._fail(state, FullOrderBookFailure.GAP, link_error)
-                failure = self._mutate_book(bids, asks, delta)
+                failure = self._mutate_book(
+                    bids,
+                    asks,
+                    delta,
+                    bid_prices=bid_prices,
+                    ask_prices=ask_prices,
+                )
                 if failure is not None:
                     return self._fail(state, failure[0], failure[1])
                 last_id = delta.final_update_id
@@ -861,6 +1129,14 @@ class FullOrderBookEngine:
 
         state.bids = bids
         state.asks = asks
+        state.bid_prices = bid_prices
+        state.ask_prices = ask_prices
+        state.book_revision = _BookRevision.from_book(
+            bids,
+            asks,
+            bid_prices,
+            ask_prices,
+        )
         state.buffered.clear()
         state.buffered_updates = 0
         state.last_update_id = last_id
@@ -961,7 +1237,13 @@ class FullOrderBookEngine:
             return self._stale_result(state)
         if not self._bridges_snapshot(delta, state.last_update_id):
             return self._fail(state, FullOrderBookFailure.GAP, "delta does not bridge REST snapshot")
-        failure = self._mutate_book(state.bids, state.asks, delta)
+        failure = self._mutate_book(
+            state.bids,
+            state.asks,
+            delta,
+            bid_prices=state.bid_prices,
+            ask_prices=state.ask_prices,
+        )
         if failure is not None:
             return self._fail(state, failure[0], failure[1])
         state.status = FullOrderBookState.LIVE
@@ -971,6 +1253,14 @@ class FullOrderBookEngine:
         state.received_at_ms = delta.received_at_ms
         state.source = delta.source
         state.revision = 1
+        assert state.book_revision is not None
+        state.book_revision = state.book_revision.child(
+            delta,
+            state.bids,
+            state.asks,
+            state.bid_prices,
+            state.ask_prices,
+        )
         self._metrics["deltas_applied"] += 1
         return self._result(
             state,
@@ -995,7 +1285,13 @@ class FullOrderBookEngine:
         link_error = self._link_error(state.last_update_id, delta)
         if link_error is not None:
             return self._fail(state, FullOrderBookFailure.GAP, link_error)
-        failure = self._mutate_book(state.bids, state.asks, delta)
+        failure = self._mutate_book(
+            state.bids,
+            state.asks,
+            delta,
+            bid_prices=state.bid_prices,
+            ask_prices=state.ask_prices,
+        )
         if failure is not None:
             return self._fail(state, failure[0], failure[1])
         state.last_update_id = delta.final_update_id
@@ -1004,6 +1300,14 @@ class FullOrderBookEngine:
         state.received_at_ms = delta.received_at_ms
         state.source = delta.source
         state.revision += 1
+        assert state.book_revision is not None
+        state.book_revision = state.book_revision.child(
+            delta,
+            state.bids,
+            state.asks,
+            state.bid_prices,
+            state.ask_prices,
+        )
         self._metrics["deltas_applied"] += 1
         return self._result(
             state,
@@ -1014,25 +1318,20 @@ class FullOrderBookEngine:
 
     def _mutate_book(
         self,
-        bids: dict[float, float],
-        asks: dict[float, float],
+        bids: dict[float, FullOrderBookLevel],
+        asks: dict[float, FullOrderBookLevel],
         delta: DepthDelta,
+        *,
+        bid_prices: list[float],
+        ask_prices: list[float],
     ) -> tuple[FullOrderBookFailure, str] | None:
-        for update in delta.bids:
-            if update.deletes_level:
-                bids.pop(update.price, None)
-            else:
-                bids[update.price] = update.quantity
-        for update in delta.asks:
-            if update.deletes_level:
-                asks.pop(update.price, None)
-            else:
-                asks[update.price] = update.quantity
+        self._mutate_side(bids, bid_prices, delta.bids)
+        self._mutate_side(asks, ask_prices, delta.asks)
         if len(bids) > self._max_levels_per_side or len(asks) > self._max_levels_per_side:
             return FullOrderBookFailure.CAPACITY, "local book level capacity exceeded"
         if not bids or not asks:
             return FullOrderBookFailure.EMPTY_BOOK, "local book lost one complete side"
-        if max(bids) >= min(asks):
+        if bid_prices[-1] >= ask_prices[0]:
             return FullOrderBookFailure.CROSSED_BOOK, "local book became crossed or locked"
         return None
 
@@ -1042,6 +1341,30 @@ class FullOrderBookEngine:
             # Spot's documented bootstrap discards every u <= lastUpdateId.
             return delta.final_update_id > snapshot_id
         return delta.final_update_id >= snapshot_id
+
+    @staticmethod
+    def _mutate_side(
+        levels: dict[float, FullOrderBookLevel],
+        prices: list[float],
+        updates: Sequence[DepthLevelUpdate],
+    ) -> None:
+        for update in updates:
+            existing = update.price in levels
+            if update.deletes_level:
+                if not existing:
+                    continue
+                levels.pop(update.price)
+                index = bisect_left(prices, update.price)
+                if index >= len(prices) or prices[index] != update.price:
+                    raise RuntimeError("full order-book price index diverged from levels")
+                prices.pop(index)
+                continue
+            if not existing:
+                insort(prices, update.price)
+            levels[update.price] = FullOrderBookLevel(
+                update.price,
+                update.quantity,
+            )
 
     @staticmethod
     def _bridges_snapshot(delta: DepthDelta, snapshot_id: int) -> bool:
@@ -1071,13 +1394,9 @@ class FullOrderBookEngine:
     ) -> FullOrderBookSnapshot:
         assert state.last_update_id is not None
         assert state.snapshot_limit is not None
-        bid_prices = sorted(state.bids, reverse=True)
-        ask_prices = sorted(state.asks)
-        if depth is not None:
-            bid_prices = bid_prices[:depth]
-            ask_prices = ask_prices[:depth]
-        bids = tuple(FullOrderBookLevel(price, state.bids[price]) for price in bid_prices)
-        asks = tuple(FullOrderBookLevel(price, state.asks[price]) for price in ask_prices)
+        assert state.book_revision is not None
+        bids = _LazyBookSide(state.book_revision, "bids", depth)
+        asks = _LazyBookSide(state.book_revision, "asks", depth)
         return FullOrderBookSnapshot(
             exchange=identity[0],
             market_type=identity[1],
@@ -1095,6 +1414,7 @@ class FullOrderBookEngine:
             received_at_ms=state.received_at_ms,
             source=state.source,
             revision=state.revision,
+            _materialization_token=_TRUSTED_LAZY_SNAPSHOT,
         )
 
     def _result(
@@ -1147,6 +1467,9 @@ class FullOrderBookEngine:
         state.status = FullOrderBookState.RESYNC_REQUIRED
         state.bids.clear()
         state.asks.clear()
+        state.bid_prices.clear()
+        state.ask_prices.clear()
+        state.book_revision = None
         state.buffered.clear()
         state.buffered_updates = 0
         state.last_update_id = None
@@ -1186,6 +1509,9 @@ class FullOrderBookEngine:
         state.status = status
         state.bids.clear()
         state.asks.clear()
+        state.bid_prices.clear()
+        state.ask_prices.clear()
+        state.book_revision = None
         state.buffered.clear()
         state.buffered_updates = 0
         state.last_update_id = None

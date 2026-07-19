@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
+from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -12,6 +14,63 @@ from app.api.v1.stream_utils import (
     validate_ws_interval,
 )
 from app.data_engine.data_manager.models import DataEventType
+
+
+@dataclass(slots=True)
+class _LatestKlineMessage:
+    key: tuple[str, str, str, str]
+    message: dict[str, Any]
+
+
+class _KlineWsOutbox:
+    """Bounded WS outbox with one replaceable forming update per series."""
+
+    def __init__(self, maxsize: int = 1000) -> None:
+        self._queue: asyncio.Queue[_LatestKlineMessage | dict[str, Any]] = (
+            asyncio.Queue(maxsize=max(1, int(maxsize)))
+        )
+        self._latest: dict[tuple[str, str, str, str], _LatestKlineMessage] = {}
+
+    async def put(
+        self,
+        message: dict[str, Any],
+        *,
+        key: tuple[str, str, str, str] | None = None,
+        replaceable: bool = False,
+        timeout: float = 1.0,
+    ) -> bool:
+        if replaceable and key is not None:
+            pending = self._latest.get(key)
+            if pending is not None:
+                pending.message = message
+                return True
+            pending = _LatestKlineMessage(key=key, message=message)
+            try:
+                self._queue.put_nowait(pending)
+            except asyncio.QueueFull:
+                return False
+            self._latest[key] = pending
+            return True
+
+        pending = self._latest.get(key) if key is not None else None
+        try:
+            await asyncio.wait_for(self._queue.put(message), timeout=timeout)
+            # Keep the old forming slot indexed until the final/correction is
+            # actually queued.  A timeout must not allow duplicate forming
+            # slots to accumulate behind an unindexed pending item.
+            if key is not None and self._latest.get(key) is pending:
+                self._latest.pop(key, None)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def get(self) -> dict[str, Any]:
+        item = await self._queue.get()
+        if isinstance(item, _LatestKlineMessage):
+            if self._latest.get(item.key) is item:
+                self._latest.pop(item.key, None)
+            return item.message
+        return item
 
 
 def should_forward_browser_event(event) -> bool:
@@ -109,7 +168,7 @@ async def stream_multi_kline(
 ) -> None:
     """Multi-interval stream using DataManager's EventBus."""
     active_intervals: set[str] = set()
-    event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    event_queue = _KlineWsOutbox(maxsize=1000)
     subscriptions = {}
     ws_closed = False
     consumer_id = f"ws:klines_multi:{exchange}:{market_type}:{symbol}:{id(websocket)}"
@@ -141,17 +200,24 @@ async def stream_multi_kline(
             return
         if not should_forward_browser_event(event):
             return
+        event_key = (
+            event.key.exchange,
+            event.key.market_type,
+            event.key.symbol,
+            event.key.interval,
+        )
         try:
             if event.event_type == DataEventType.BACKFILL_COMPLETED:
-                await asyncio.wait_for(
-                    event_queue.put({
+                await event_queue.put(
+                    {
                         "type": "backfill_completed",
                         "exchange": event.key.exchange,
                         "symbol": event.key.symbol,
                         "interval": event.key.interval,
                         "market_type": event.key.market_type,
                         "detail": event.detail or {},
-                    }),
+                    },
+                    key=event_key,
                     timeout=1.0,
                 )
                 return
@@ -168,7 +234,12 @@ async def stream_multi_kline(
                 DataEventType.BAR_CLOSED,
                 DataEventType.BAR_AMENDED,
             }
-            await asyncio.wait_for(event_queue.put(bar_dict), timeout=1.0)
+            await event_queue.put(
+                bar_dict,
+                key=event_key,
+                replaceable=event.event_type == DataEventType.BAR_UPDATED,
+                timeout=1.0,
+            )
         except (asyncio.TimeoutError, Exception):
             pass
 

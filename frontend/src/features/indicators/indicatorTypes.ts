@@ -92,6 +92,8 @@ export interface IndicatorLine {
   valueFormat?: "notional" | string;
   zIndex?: number;
   colorData?: IndicatorColorPoint[] | null;
+  /** Internal renderer hint. Historical snapshot/patch/range paths reset it. */
+  renderUpdate?: "tail" | "full" | null;
 }
 
 export interface IndicatorMarker {

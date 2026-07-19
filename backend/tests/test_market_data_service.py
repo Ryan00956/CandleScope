@@ -92,6 +92,22 @@ class _BlockingStartFactory(_Factory):
         return await super().start_market(descriptor, callback)
 
 
+class _SelectiveBlockingStartFactory(_Factory):
+    def __init__(self, blocked_symbol: str) -> None:
+        super().__init__()
+        self.blocked_symbol = blocked_symbol
+        self.start_attempts: list[str] = []
+        self.start_entered = asyncio.Event()
+        self.start_gate = asyncio.Event()
+
+    async def start_market(self, descriptor, callback):
+        self.start_attempts.append(descriptor.symbol)
+        if descriptor.symbol == self.blocked_symbol:
+            self.start_entered.set()
+            await self.start_gate.wait()
+        return await super().start_market(descriptor, callback)
+
+
 class _BlockingStopHandle(_Handle):
     async def stop(self) -> None:
         self.owner.stop_entered.set()
@@ -150,8 +166,12 @@ class _FlakyStopFactory(_Factory):
         return _FlakyStopHandle(self, descriptor.key)
 
 
-def _key(channel: MarketChannel) -> MarketStreamKey:
-    return MarketStreamKey.build("binance", "futures", "BTCUSDT", channel)
+def _key(
+    channel: MarketChannel,
+    *,
+    symbol: str = "BTCUSDT",
+) -> MarketStreamKey:
+    return MarketStreamKey.build("binance", "futures", symbol, channel)
 
 
 @_async_test
@@ -272,6 +292,50 @@ async def test_cancelled_start_rolls_back_logical_and_physical_state() -> None:
     diagnostics = service.diagnostics()
     assert diagnostics["logical_streams"] == 0
     assert diagnostics["physical_streams"] == 0
+
+
+@_async_test
+async def test_keyed_lifecycle_allows_parallel_symbols_and_shutdown_during_start() -> None:
+    factory = _SelectiveBlockingStartFactory("BTCUSDT")
+    service = MarketDataService(factory)
+    btc_mark = _key(MarketChannel.MARK_PRICE)
+    btc_index = _key(MarketChannel.INDEX_PRICE)
+    eth_mark = _key(MarketChannel.MARK_PRICE, symbol="ETHUSDT")
+
+    first = asyncio.create_task(
+        service.ensure_stream(btc_mark, consumer_id="btc-mark"),
+    )
+    await factory.start_entered.wait()
+    same_physical = asyncio.create_task(
+        service.ensure_stream(btc_index, consumer_id="btc-index"),
+    )
+
+    assert await asyncio.wait_for(
+        service.ensure_stream(eth_mark, consumer_id="eth-mark"),
+        timeout=0.25,
+    ) is True
+    assert factory.start_attempts.count("BTCUSDT") == 1
+    assert factory.start_attempts.count("ETHUSDT") == 1
+    assert not same_physical.done()
+
+    shutdown = asyncio.create_task(service.shutdown())
+    for _ in range(100):
+        if service.diagnostics()["closed"]:
+            break
+        await asyncio.sleep(0.005)
+    assert service.diagnostics()["closed"] is True
+    factory.start_gate.set()
+
+    results = await asyncio.gather(first, same_physical, return_exceptions=True)
+    assert all(isinstance(item, RuntimeError) for item in results)
+    await asyncio.wait_for(shutdown, timeout=0.5)
+
+    diagnostics = service.diagnostics()
+    assert diagnostics["logical_streams"] == 0
+    assert diagnostics["physical_streams"] == 0
+    assert len(factory.start_calls) == 2
+    assert len(factory.stop_calls) == 2
+    assert service._identity_locks.active_keys == 0  # noqa: SLF001
 
 
 @_async_test

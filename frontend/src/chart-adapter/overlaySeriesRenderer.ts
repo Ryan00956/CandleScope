@@ -49,6 +49,7 @@ export function renderFillSeries({
     chart: IChartApiBase<ChartTime> | null;
     paneIndex: number | null;
     signature: string;
+    structureSignature?: string;
   }>;
   paneId: string;
   paneIndex: number;
@@ -62,6 +63,34 @@ export function renderFillSeries({
     && fillSeriesStateRef.current.paneIndex === paneIndex
   ) {
     return;
+  }
+
+  const canReuseSeries = fillSeriesStateRef.current.chart === chart
+    && fillSeriesStateRef.current.paneIndex === paneIndex
+    && fillSeriesStateRef.current.structureSignature === fillPayload.structureSignature
+    && fillSeriesRef.current.length === fillPayload.entries.length * 2;
+  if (canReuseSeries) {
+    try {
+      for (const [index, entry] of fillPayload.entries.entries()) {
+        fillSeriesRef.current[index * 2]?.setData(entry.upperData);
+        fillSeriesRef.current[index * 2 + 1]?.setData(entry.lowerData);
+      }
+      fillSeriesStateRef.current = {
+        chart,
+        paneIndex,
+        signature: fillPayload.signature,
+        structureSignature: fillPayload.structureSignature,
+      };
+      recordPerfEvent("chart.fillSeries.setData", {
+        paneId,
+        fills: fillPayload.matchedFillCount,
+        points: fillPayload.pointCount,
+        series: fillSeriesRef.current.length,
+      });
+      return;
+    } catch (error) {
+      onError?.(error);
+    }
   }
 
   const removedFillSeries = fillSeriesRef.current.length;
@@ -79,7 +108,12 @@ export function renderFillSeries({
     });
   }
   fillSeriesRef.current = [];
-  fillSeriesStateRef.current = { chart, paneIndex, signature: fillPayload.signature };
+  fillSeriesStateRef.current = {
+    chart,
+    paneIndex,
+    signature: fillPayload.signature,
+    structureSignature: fillPayload.structureSignature,
+  };
 
   if (fillPayload.entries.length === 0) return;
 

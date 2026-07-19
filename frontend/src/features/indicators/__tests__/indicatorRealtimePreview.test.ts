@@ -140,6 +140,21 @@ test("realtime VOL preview keeps its exact timestamp when the main K-line has a 
   assert.deepEqual(lines[0]?.data.map((point) => point.time), [100, 200, 300]);
   assert.equal(lines[0]?.data[2]?.value, 30);
   assert.equal(lines[0]?.data[2]?.color, "#up");
+  assert.equal(lines[0]?.renderUpdate, "tail");
+});
+
+test("an older realtime correction forces a full indicator render", () => {
+  const lines = applyRealtimeIndicatorValuesToLines({
+    barTime: 100,
+    candleDownColor: "#down",
+    candleUpColor: "#up",
+    indicator,
+    lines: [volumeLine],
+    values: { volume: 15 },
+  });
+
+  assert.equal(lines[0]?.data[0]?.value, 15);
+  assert.equal(lines[0]?.renderUpdate, "full");
 });
 
 test("acknowledged first VOL preview can render before closed history supplies line metadata", () => {

@@ -19,8 +19,8 @@ Design constraints:
   * The bus is **in-process only** — no network transport.
   * Callbacks should still be reasonably fast, but a slow callback no longer
     blocks producers or other subscribers.
-  * Queue-based subscribers that fall behind will have events dropped
-    (bounded queue with backpressure).
+  * Queue-based subscribers that fall behind keep only the latest pending
+    ``BAR_UPDATED`` event per topic; final/correction events remain ordered.
 
 Usage::
 
@@ -76,9 +76,47 @@ class _QueuedEvent:
     enqueued_at: float
 
 
+class _SubscriberQueue(asyncio.Queue[_QueuedEvent | None]):
+    """Bounded subscriber queue with latest-only forming-bar coalescing."""
+
+    def __init__(self, maxsize: int = 0) -> None:
+        super().__init__(maxsize=maxsize)
+        self._latest_forming: dict[SeriesKey, _QueuedEvent] = {}
+
+    def offer(self, event: DataEvent) -> str:
+        if event.event_type == DataEventType.BAR_UPDATED:
+            pending = self._latest_forming.get(event.key)
+            if pending is not None:
+                pending.event = event
+                pending.enqueued_at = time.perf_counter()
+                return "coalesced"
+        item = _QueuedEvent(event=event, enqueued_at=time.perf_counter())
+        try:
+            self.put_nowait(item)
+            if event.event_type == DataEventType.BAR_UPDATED:
+                self._latest_forming[event.key] = item
+            else:
+                # Seal an older forming slot only after the final/correction or
+                # lifecycle event is safely queued.  On QueueFull the old slot
+                # remains replaceable instead of losing its routing index.
+                self._latest_forming.pop(event.key, None)
+            return "queued"
+        except asyncio.QueueFull:
+            return "full"
+
+    def get_nowait(self) -> _QueuedEvent | None:
+        item = super().get_nowait()
+        if (
+            item is not None
+            and self._latest_forming.get(item.event.key) is item
+        ):
+            self._latest_forming.pop(item.event.key, None)
+        return item
+
+
 @dataclass(slots=True)
 class _CallbackSubscription:
-    queue: asyncio.Queue[_QueuedEvent | None]
+    queue: _SubscriberQueue
     handle: SubscriptionHandle
     task: asyncio.Task | None = None
     dropped: int = 0
@@ -87,17 +125,19 @@ class _CallbackSubscription:
     total_lag_ms: float = 0.0
     max_lag_ms: float = 0.0
     last_lag_ms: float = 0.0
+    coalesced: int = 0
 
 
 @dataclass(slots=True)
 class _QueueSubscription:
-    queue: asyncio.Queue[_QueuedEvent | None]
+    queue: _SubscriberQueue
     handle: SubscriptionHandle
     dropped: int = 0
     delivered: int = 0
     total_lag_ms: float = 0.0
     max_lag_ms: float = 0.0
     last_lag_ms: float = 0.0
+    coalesced: int = 0
 
 
 class DataEventBus:
@@ -126,9 +166,13 @@ class DataEventBus:
 
         # Callback subscriptions delivered through per-subscriber worker queues.
         self._callback_subs: dict[str, _CallbackSubscription] = {}
+        self._callback_ids_by_key: dict[SeriesKey, set[str]] = {}
+        self._callback_wildcard_ids: set[str] = set()
 
         # Queue-based subscriptions: handle.id → (queue, handle)
         self._queue_subs: dict[str, _QueueSubscription] = {}
+        self._queue_ids_by_key: dict[SeriesKey, set[str]] = {}
+        self._queue_wildcard_ids: set[str] = set()
 
         # Middleware chain (pre-emit hooks)
         self._middleware: list[MiddlewareHook] = []
@@ -172,13 +216,18 @@ class DataEventBus:
             event_types=event_types,
             callback=callback,
         )
-        queue: asyncio.Queue[_QueuedEvent | None] = asyncio.Queue(
+        queue = _SubscriberQueue(
             maxsize=self._cfg.subscriber_queue_size,
         )
         sub = _CallbackSubscription(queue=queue, handle=handle)
         with self._protection_lock:
             self._subscriptions[handle.id] = handle
             self._callback_subs[handle.id] = sub
+            self._index_subscription(
+                handle,
+                keyed=self._callback_ids_by_key,
+                wildcard=self._callback_wildcard_ids,
+            )
             if self._on_subscription_change is not None:
                 self._on_subscription_change()
         self._ensure_callback_worker(sub)
@@ -194,6 +243,18 @@ class DataEventBus:
             removed = self._subscriptions.pop(handle.id, None)
             callback_entry = self._callback_subs.pop(handle.id, None)
             entry = self._queue_subs.pop(handle.id, None)
+            if callback_entry is not None:
+                self._deindex_subscription(
+                    callback_entry.handle,
+                    keyed=self._callback_ids_by_key,
+                    wildcard=self._callback_wildcard_ids,
+                )
+            if entry is not None:
+                self._deindex_subscription(
+                    entry.handle,
+                    keyed=self._queue_ids_by_key,
+                    wildcard=self._queue_wildcard_ids,
+                )
             if (
                 (removed is not None or callback_entry is not None or entry is not None)
                 and self._on_subscription_change is not None
@@ -233,7 +294,7 @@ class DataEventBus:
             ):
                 push_to_websocket(event)
         """
-        queue: asyncio.Queue[_QueuedEvent | None] = asyncio.Queue(
+        queue = _SubscriberQueue(
             maxsize=self._cfg.subscriber_queue_size,
         )
         handle = SubscriptionHandle(
@@ -243,6 +304,11 @@ class DataEventBus:
         sub = _QueueSubscription(queue=queue, handle=handle)
         with self._protection_lock:
             self._queue_subs[handle.id] = sub
+            self._index_subscription(
+                handle,
+                keyed=self._queue_ids_by_key,
+                wildcard=self._queue_wildcard_ids,
+            )
             if self._on_subscription_change is not None:
                 self._on_subscription_change()
         logger.debug(
@@ -259,6 +325,12 @@ class DataEventBus:
         finally:
             with self._protection_lock:
                 removed = self._queue_subs.pop(handle.id, None)
+                if removed is not None:
+                    self._deindex_subscription(
+                        removed.handle,
+                        keyed=self._queue_ids_by_key,
+                        wildcard=self._queue_wildcard_ids,
+                    )
                 if removed is not None and self._on_subscription_change is not None:
                     self._on_subscription_change()
             logger.debug(
@@ -295,15 +367,20 @@ class DataEventBus:
         event = processed
         self._events_emitted += 1
 
+        callback_subs, queue_subs = self._matching_subscriptions(event.key)
+
         # Callback subscribers
-        for sub_id, sub in list(self._callback_subs.items()):
+        for sub_id, sub in callback_subs:
             handle = sub.handle
             if not handle.matches(event):
                 continue
             if handle.callback is None:
                 continue
             self._ensure_callback_worker(sub)
-            if not self._put_event_nowait(sub.queue, event):
+            offer = sub.queue.offer(event)
+            if offer == "coalesced":
+                sub.coalesced += 1
+            elif offer == "full":
                 sub.dropped += 1
                 self._events_dropped += 1
                 logger.warning(
@@ -311,11 +388,14 @@ class DataEventBus:
                 )
 
         # Queue subscribers
-        for sub_id, sub in list(self._queue_subs.items()):
+        for sub_id, sub in queue_subs:
             handle = sub.handle
             if not handle.matches(event):
                 continue
-            if not self._put_event_nowait(sub.queue, event):
+            offer = sub.queue.offer(event)
+            if offer == "coalesced":
+                sub.coalesced += 1
+            elif offer == "full":
                 sub.dropped += 1
                 self._events_dropped += 1
                 logger.warning(
@@ -379,6 +459,10 @@ class DataEventBus:
             self._callback_subs.clear()
             self._queue_subs.clear()
             self._subscriptions.clear()
+            self._callback_ids_by_key.clear()
+            self._callback_wildcard_ids.clear()
+            self._queue_ids_by_key.clear()
+            self._queue_wildcard_ids.clear()
             if changed and self._on_subscription_change is not None:
                 self._on_subscription_change()
         logger.info("Event bus closed")
@@ -388,15 +472,14 @@ class DataEventBus:
     def get_subscriber_count(self, key: SeriesKey | None = None) -> int:
         """Count active subscribers, optionally filtered by key."""
         with self._protection_lock:
-            count = 0
-            for handle in self._subscriptions.values():
-                if key is None or handle.key is None or handle.key == key:
-                    count += 1
-            for _, sub in self._queue_subs.items():
-                handle = sub.handle
-                if key is None or handle.key is None or handle.key == key:
-                    count += 1
-            return count
+            if key is None:
+                return len(self._callback_subs) + len(self._queue_subs)
+            return (
+                len(self._callback_wildcard_ids)
+                + len(self._callback_ids_by_key.get(key, ()))
+                + len(self._queue_wildcard_ids)
+                + len(self._queue_ids_by_key.get(key, ()))
+            )
 
     def get_direct_subscriber_count(self, key: SeriesKey) -> int:
         """Count subscribers that explicitly retain one series.
@@ -406,30 +489,14 @@ class DataEventBus:
         of every cache entry or upstream stream.
         """
         with self._protection_lock:
-            count = sum(
-                1
-                for handle in self._subscriptions.values()
-                if handle.key == key
+            return len(self._callback_ids_by_key.get(key, ())) + len(
+                self._queue_ids_by_key.get(key, ())
             )
-            count += sum(
-                1
-                for sub in self._queue_subs.values()
-                if sub.handle.key == key
-            )
-            return count
 
     def get_all_subscribed_keys(self) -> set[SeriesKey]:
         """Return all SeriesKeys that have at least one subscriber."""
         with self._protection_lock:
-            keys: set[SeriesKey] = set()
-            for handle in self._subscriptions.values():
-                if handle.key is not None:
-                    keys.add(handle.key)
-            for _, sub in self._queue_subs.items():
-                handle = sub.handle
-                if handle.key is not None:
-                    keys.add(handle.key)
-            return keys
+            return set(self._callback_ids_by_key) | set(self._queue_ids_by_key)
 
     # ── Public: Snapshot ─────────────────────────────────────
 
@@ -468,6 +535,64 @@ class DataEventBus:
         }
 
     # ── Internal ─────────────────────────────────────────────
+
+    @staticmethod
+    def _index_subscription(
+        handle: SubscriptionHandle,
+        *,
+        keyed: dict[SeriesKey, set[str]],
+        wildcard: set[str],
+    ) -> None:
+        if handle.key is None:
+            wildcard.add(handle.id)
+            return
+        keyed.setdefault(handle.key, set()).add(handle.id)
+
+    @staticmethod
+    def _deindex_subscription(
+        handle: SubscriptionHandle,
+        *,
+        keyed: dict[SeriesKey, set[str]],
+        wildcard: set[str],
+    ) -> None:
+        if handle.key is None:
+            wildcard.discard(handle.id)
+            return
+        ids = keyed.get(handle.key)
+        if ids is None:
+            return
+        ids.discard(handle.id)
+        if not ids:
+            keyed.pop(handle.key, None)
+
+    def _matching_subscriptions(
+        self,
+        key: SeriesKey,
+    ) -> tuple[
+        list[tuple[str, _CallbackSubscription]],
+        list[tuple[str, _QueueSubscription]],
+    ]:
+        """Snapshot only wildcard and exact-topic subscribers for one emit."""
+        with self._protection_lock:
+            callback_ids = (
+                self._callback_wildcard_ids
+                | self._callback_ids_by_key.get(key, set())
+            )
+            queue_ids = (
+                self._queue_wildcard_ids
+                | self._queue_ids_by_key.get(key, set())
+            )
+            callbacks = [
+                (sub_id, sub)
+                for sub_id in callback_ids
+                if (sub := self._callback_subs.get(sub_id)) is not None
+            ]
+            queues = [
+                (sub_id, sub)
+                for sub_id in queue_ids
+                if (sub := self._queue_subs.get(sub_id)) is not None
+            ]
+        return callbacks, queues
 
     def _should_emit(self, event: DataEvent) -> bool:
         """Apply config-level event filters."""
@@ -514,7 +639,7 @@ class DataEventBus:
                 )
 
     @staticmethod
-    def _put_sentinel(queue: asyncio.Queue[_QueuedEvent | None]) -> None:
+    def _put_sentinel(queue: _SubscriberQueue) -> None:
         try:
             queue.put_nowait(None)
             return
@@ -528,20 +653,6 @@ class DataEventBus:
             queue.put_nowait(None)
         except asyncio.QueueFull:
             pass
-
-    @staticmethod
-    def _put_event_nowait(
-        queue: asyncio.Queue[_QueuedEvent | None],
-        event: DataEvent,
-    ) -> bool:
-        try:
-            queue.put_nowait(_QueuedEvent(
-                event=event,
-                enqueued_at=time.perf_counter(),
-            ))
-            return True
-        except asyncio.QueueFull:
-            return False
 
     @staticmethod
     def _record_queue_lag(
@@ -562,6 +673,7 @@ class DataEventBus:
             "queue_max_size": sub.queue.maxsize,
             "delivered": sub.delivered,
             "dropped": sub.dropped,
+            "coalesced": sub.coalesced,
             "avg_lag_ms": round(avg, 2),
             "max_lag_ms": round(sub.max_lag_ms, 2),
             "last_lag_ms": round(sub.last_lag_ms, 2),

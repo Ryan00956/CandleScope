@@ -99,6 +99,22 @@ test("histogram normalization preserves stable point identity across tail update
   assert.equal(canUseTrailingSeriesUpdate(previous, next), true);
 });
 
+test("line normalization reuses unchanged data and invalidates when the mutable axis grows", () => {
+  const allowed = new Set([10]);
+  const line = {
+    id: "plot",
+    data: [{ time: 10, value: 1 }, { time: 20, value: 2 }],
+  };
+  const first = alignIndicatorLinesToTimes([line], allowed)[0]?.data;
+  const second = alignIndicatorLinesToTimes([line], allowed)[0]?.data;
+  assert.equal(second, first);
+
+  allowed.add(20);
+  const expanded = alignIndicatorLinesToTimes([line], allowed)[0]?.data;
+  assert.notEqual(expanded, first);
+  assert.deepEqual(expanded, line.data);
+});
+
 test("alignIndicatorMarkersToTimes and bgcolors clip payloads to the main bar time set", () => {
   const allowed = new Set([10]);
 
@@ -296,4 +312,32 @@ test("applyLineSeriesData can force a full reset for custom ordinal axes", () =>
 
   assert.equal(result, "setData");
   assert.deepEqual(calls, [["setData", next]]);
+});
+
+test("applyLineSeriesData trusts an explicit realtime tail hint without weakening range updates", () => {
+  const calls: Array<[string, unknown]> = [];
+  const series = structuralMock<NonNullable<Parameters<typeof applyLineSeriesData>[0]>>({
+    setData: (data: unknown) => { calls.push(["setData", data]); },
+    update: (point: unknown) => { calls.push(["update", point]); },
+  });
+  const previous = [
+    { time: 10, value: 1 },
+    { time: 20, value: 2 },
+  ];
+  const next = [
+    { time: 10, value: 999 },
+    { time: 20, value: 3 },
+  ];
+
+  assert.equal(applyLineSeriesData(series, next, previous, {}, null), "setData");
+  calls.length = 0;
+  assert.equal(applyLineSeriesData(
+    series,
+    next,
+    previous,
+    {},
+    null,
+    { trustedTrailingUpdate: true },
+  ), "update");
+  assert.deepEqual(calls, [["update", next[1]]]);
 });

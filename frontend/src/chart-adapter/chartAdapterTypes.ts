@@ -99,6 +99,7 @@ export interface IndicatorLine {
   valueFormat?: string;
   data?: IndicatorDataEntry[];
   colorData?: IndicatorDataEntry[] | null;
+  renderUpdate?: "tail" | "full" | null;
 }
 
 export interface IndicatorSeriesDefinition extends IndicatorLine {
@@ -159,6 +160,7 @@ export interface IndicatorHline {
 export interface FillRenderResult {
   entries: FillRenderEntry[];
   signature: string;
+  structureSignature: string;
   matchedFillCount: number;
   pointCount: number;
 }

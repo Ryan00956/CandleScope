@@ -80,6 +80,7 @@ import inspect
 import logging
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
@@ -134,6 +135,10 @@ from ..bar_aggregator import (
 )
 
 logger = logging.getLogger("data_manager")
+
+_CACHE_ACCESS_FLUSH_SECONDS = 0.25
+_CACHE_ACCESS_BATCH_SIZE = 256
+_CACHE_ACCESS_MAX_PENDING_IDENTITIES = 2_048
 
 
 class BackfillReconcilerLike(Protocol):
@@ -206,7 +211,21 @@ class DataManager:
         self._cleanup_task: asyncio.Task | None = None
         self._auto_gc_task: asyncio.Task | None = None
         self._cache_access_loop: asyncio.AbstractEventLoop | None = None
-        self._cache_access_tasks: set[asyncio.Task] = set()
+        self._cache_access_writer_task: asyncio.Task | None = None
+        self._cache_access_wakeup = asyncio.Event()
+        self._cache_access_stopping = False
+        self._cache_access_pending: OrderedDict[
+            tuple[SeriesKey, str, str, float | None, int],
+            CacheAccessEvent,
+        ] = OrderedDict()
+        self._cache_access_writer_stats: dict[str, int] = {
+            "signals": 0,
+            "coalesced": 0,
+            "dropped": 0,
+            "batches": 0,
+            "failed_batches": 0,
+            "persisted_signals": 0,
+        }
         self._backfill_trigger: BackfillTrigger | None = None
 
         # ── BarAggregator (L1–L5) ───────────────────────────
@@ -544,6 +563,11 @@ class DataManager:
             return
         self._started = True
         self._cache_access_loop = asyncio.get_running_loop()
+        self._cache_access_stopping = False
+        self._cache_access_writer_task = asyncio.create_task(
+            self._cache_access_writer_loop(),
+            name="data-manager-cache-access-writer",
+        )
         logger.info("DataManager starting...")
 
         # Start BarAggregator
@@ -606,11 +630,6 @@ class DataManager:
                 logger.exception("Auto GC task failed during shutdown")
             self._auto_gc_task = None
 
-        if self._cache_access_tasks:
-            await asyncio.gather(*self._cache_access_tasks, return_exceptions=True)
-            self._cache_access_tasks.clear()
-        self._cache_access_loop = None
-
         # Stop coordinator (stops ingestion streams)
         await self.coordinator.shutdown()
 
@@ -619,6 +638,20 @@ class DataManager:
 
         # Close event bus
         await self.event_bus.close()
+
+        # Stream teardown can emit final cache-access signals.  Drain them only
+        # after every producer has stopped, then detach the owning loop.
+        self._cache_access_stopping = True
+        self._cache_access_wakeup.set()
+        if self._cache_access_writer_task is not None:
+            try:
+                await self._cache_access_writer_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Cache access writer failed during shutdown")
+            self._cache_access_writer_task = None
+        self._cache_access_loop = None
 
         logger.info("DataManager shutdown complete")
 
@@ -2071,29 +2104,178 @@ class DataManager:
         interval: str,
         **kwargs: Any,
     ) -> None:
-        """Record cache behavior off the caller's hot path when the loop is running."""
+        """Coalesce cache behavior off the caller's hot path.
+
+        One writer owns at most one storage-executor submission.  This keeps
+        high-rate query telemetry from building an unbounded set of asyncio
+        tasks or an unbounded ThreadPoolExecutor queue.
+        """
         loop = self._cache_access_loop
         if loop is None or loop.is_closed():
             self.record_cache_access(symbol, interval, **kwargs)
             return
 
-        def _submit() -> None:
-            task = asyncio.create_task(run_storage(self.record_cache_access, symbol, interval, **kwargs))
-            self._cache_access_tasks.add(task)
-
-            def _done(done_task: asyncio.Task) -> None:
-                self._cache_access_tasks.discard(done_task)
-                try:
-                    done_task.result()
-                except Exception as exc:
-                    logger.debug("deferred cache access recording failed: %s", exc)
-
-            task.add_done_callback(_done)
+        event = self._cache_access_event(symbol, interval, **kwargs)
 
         try:
-            loop.call_soon_threadsafe(_submit)
+            loop.call_soon_threadsafe(self._enqueue_cache_access, event)
         except RuntimeError:
             self.record_cache_access(symbol, interval, **kwargs)
+
+    def _cache_access_event(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        action: str = "access",
+        source: str = "backend",
+        weight: float | None = None,
+        detail: dict[str, Any] | None = None,
+        occurred_at_ms: int | None = None,
+    ) -> CacheAccessEvent:
+        return CacheAccessEvent(
+            key=SeriesKey(
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=self._normalize_market_type(market_type),
+            ),
+            action=action,
+            source=source,
+            weight=weight,
+            detail=detail,
+            occurred_at_ms=occurred_at_ms,
+        )
+
+    def _enqueue_cache_access(self, event: CacheAccessEvent) -> None:
+        server_now_ms = int(time.time() * 1000)
+        occurred_at_ms = (
+            server_now_ms
+            if event.occurred_at_ms is None
+            else min(server_now_ms, max(0, int(event.occurred_at_ms)))
+        )
+        bucket_ms = occurred_at_ms - (occurred_at_ms % 60_000)
+        identity = (
+            event.key,
+            str(event.action or "access"),
+            str(event.source or "backend"),
+            event.weight,
+            bucket_ms,
+        )
+        self._cache_access_writer_stats["signals"] += max(1, int(event.count or 1))
+        current = self._cache_access_pending.get(identity)
+        if current is not None:
+            self._cache_access_pending[identity] = CacheAccessEvent(
+                key=current.key,
+                action=current.action,
+                source=current.source,
+                weight=current.weight,
+                detail=event.detail or current.detail,
+                occurred_at_ms=max(
+                    int(current.occurred_at_ms or 0),
+                    occurred_at_ms,
+                ),
+                count=max(1, int(current.count or 1)) + max(1, int(event.count or 1)),
+            )
+            self._cache_access_pending.move_to_end(identity)
+            self._cache_access_writer_stats["coalesced"] += max(1, int(event.count or 1))
+        elif len(self._cache_access_pending) >= _CACHE_ACCESS_MAX_PENDING_IDENTITIES:
+            self._cache_access_writer_stats["dropped"] += max(1, int(event.count or 1))
+            return
+        else:
+            self._cache_access_pending[identity] = CacheAccessEvent(
+                key=event.key,
+                action=event.action,
+                source=event.source,
+                weight=event.weight,
+                detail=event.detail,
+                occurred_at_ms=occurred_at_ms,
+                count=max(1, int(event.count or 1)),
+            )
+
+        task = self._cache_access_writer_task
+        if task is None or task.done():
+            self._cache_access_writer_task = asyncio.create_task(
+                self._cache_access_writer_loop(),
+                name="data-manager-cache-access-writer",
+            )
+        self._cache_access_wakeup.set()
+
+    async def _cache_access_writer_loop(self) -> None:
+        flush_deadline: float | None = None
+        while True:
+            if not self._cache_access_pending:
+                flush_deadline = None
+                if self._cache_access_stopping or not self._started:
+                    return
+                self._cache_access_wakeup.clear()
+                await self._cache_access_wakeup.wait()
+                continue
+
+            if not self._cache_access_stopping:
+                loop = asyncio.get_running_loop()
+                if flush_deadline is None:
+                    # Anchor cadence to the first pending signal.  Later
+                    # wakeups may coalesce data but must not postpone this
+                    # deadline indefinitely under continuous traffic.
+                    flush_deadline = loop.time() + _CACHE_ACCESS_FLUSH_SECONDS
+                remaining = flush_deadline - loop.time()
+                if remaining > 0:
+                    self._cache_access_wakeup.clear()
+                    try:
+                        await asyncio.wait_for(
+                            self._cache_access_wakeup.wait(),
+                            timeout=remaining,
+                        )
+                        continue
+                    except TimeoutError:
+                        pass
+
+            batch: list[CacheAccessEvent] = []
+            while self._cache_access_pending and len(batch) < _CACHE_ACCESS_BATCH_SIZE:
+                _identity, event = self._cache_access_pending.popitem(last=False)
+                batch.append(event)
+            try:
+                await run_storage(
+                    self.cache_behavior.record_batch,
+                    batch,
+                    refresh_heat=False,
+                )
+                self._cache_access_writer_stats["batches"] += 1
+                self._cache_access_writer_stats["persisted_signals"] += sum(
+                    max(1, int(event.count or 1))
+                    for event in batch
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._cache_access_writer_stats["failed_batches"] += 1
+                self._cache_access_writer_stats["dropped"] += sum(
+                    max(1, int(event.count or 1))
+                    for event in batch
+                )
+                logger.debug("deferred cache access batch failed: %s", exc)
+
+            flush_deadline = None
+
+            if self._cache_access_stopping and not self._cache_access_pending:
+                return
+
+    def _cache_access_writer_snapshot(self) -> dict[str, Any]:
+        pending_signals = sum(
+            max(1, int(event.count or 1))
+            for event in self._cache_access_pending.values()
+        )
+        task = self._cache_access_writer_task
+        return {
+            **self._cache_access_writer_stats,
+            "pending_identities": len(self._cache_access_pending),
+            "pending_signals": pending_signals,
+            "max_pending_identities": _CACHE_ACCESS_MAX_PENDING_IDENTITIES,
+            "task_alive": task is not None and not task.done(),
+        }
 
     def record_cache_access_deferred(
         self,
@@ -2118,29 +2300,29 @@ class DataManager:
         occurred_at_ms: int | None = None,
     ) -> dict[str, Any]:
         """Persist one cache access signal for future GC scoring."""
-        key = SeriesKey(
+        event = self._cache_access_event(
             symbol,
             interval,
             exchange=exchange,
-            market_type=self._normalize_market_type(market_type),
+            market_type=market_type,
+            action=action,
+            source=source,
+            weight=weight,
+            detail=detail,
+            occurred_at_ms=occurred_at_ms,
         )
         try:
-            return self.cache_behavior.record(CacheAccessEvent(
-                key=key,
-                action=action,
-                source=source,
-                weight=weight,
-                detail=detail,
-                occurred_at_ms=occurred_at_ms,
-            ))
+            return self.cache_behavior.record(event)
         except Exception as exc:
-            logger.debug("cache access recording failed for %s: %s", key, exc)
+            logger.debug("cache access recording failed for %s: %s", event.key, exc)
             return {}
 
     def cache_behavior_snapshot(self, *, limit: int = 50) -> dict[str, Any]:
         """Return learned cache behavior heat for diagnostics."""
         try:
-            return self.cache_behavior.snapshot(limit=limit)
+            snapshot = self.cache_behavior.snapshot(limit=limit)
+            snapshot["writer"] = self._cache_access_writer_snapshot()
+            return snapshot
         except Exception as exc:
             return {
                 "owner": "cache-behavior",
@@ -2389,6 +2571,17 @@ class DataManager:
                 "mode": "not-run",
                 "owner": "sqlite-storage",
             },
+        }
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """Return the small, in-memory subset used by the liveness endpoint."""
+        cache = self.cache.health_snapshot()
+        coordinator = self.coordinator.health_snapshot()
+        return {
+            "started": self._started,
+            "active_streams": coordinator["active_streams"],
+            "cache_series": cache["series_count"],
+            "cache_bars": cache["total_bars"],
         }
 
     @property

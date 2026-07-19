@@ -903,3 +903,46 @@ def test_result_and_snapshot_payloads_are_immutable() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.snapshot.last_update_id = 1  # type: ignore[misc]
     assert result.to_dict()["snapshot"]["last_update_id"] == 102  # type: ignore[index]
+
+
+def test_live_revision_defers_full_materialization_and_keeps_old_snapshot_atomic() -> None:
+    level_count = 1_500
+    engine = FullOrderBookEngine(max_levels_per_side=level_count)
+    epoch = _started(engine)
+    engine.apply_delta(
+        IDENTITY,
+        _delta(100, 101, 99, bids=((10_000, 2),)),
+        epoch=epoch,
+    )
+    installed = engine.install_snapshot(
+        IDENTITY,
+        _seed(
+            snapshot_limit=level_count,
+            bids=tuple((10_000 - index, 1) for index in range(level_count)),
+            asks=tuple((10_001 + index, 1) for index in range(level_count)),
+        ),
+        epoch=epoch,
+    )
+    assert installed.snapshot is not None
+    old_snapshot = installed.snapshot
+
+    applied = engine.apply_delta(
+        IDENTITY,
+        _delta(102, 102, 101, bids=((8_501, 7),)),
+        epoch=epoch,
+    )
+    assert applied.snapshot is not None
+
+    # A normal API-sized projection stays inside the eagerly bounded top view;
+    # it must not sort/materialize all 1,500 local levels.
+    revision = engine._streams[IDENTITY].book_revision  # type: ignore[attr-defined]
+    assert revision is not None
+    assert revision._bids_cache is None  # type: ignore[attr-defined]
+    assert len(engine.snapshot(IDENTITY, depth=20).to_dict()["bids"]) == 20  # type: ignore[union-attr]
+    assert revision._bids_cache is None  # type: ignore[attr-defined]
+
+    old_deep = {level.price: level.quantity for level in old_snapshot.bids}
+    new_deep = {level.price: level.quantity for level in applied.snapshot.bids}
+    assert old_deep[8_501] == 1
+    assert new_deep[8_501] == 7
+    assert revision._bids_cache is not None  # type: ignore[attr-defined]

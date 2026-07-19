@@ -106,6 +106,8 @@ class _Handle:
 class _Factory:
     def __init__(self) -> None:
         self.start_calls = []
+        self.start_gates: dict[str, asyncio.Event] = {}
+        self.start_entered: dict[str, asyncio.Event] = {}
         self.callbacks = {}
         self.stop_calls: list[tuple[str, str, str, int, int]] = []
         self.stop_gate: asyncio.Event | None = None
@@ -124,6 +126,10 @@ class _Factory:
             descriptor.update_interval_ms,
         )
         self.start_calls.append(descriptor)
+        gate = self.start_gates.get(descriptor.symbol)
+        if gate is not None:
+            self.start_entered.setdefault(descriptor.symbol, asyncio.Event()).set()
+            await gate.wait()
         self.callbacks[identity] = callback
         return _Handle(self, identity)
 
@@ -192,6 +198,39 @@ async def test_consumers_share_one_physical_feed_until_last_release() -> None:
     assert service._last_event_time_ms == {}
     assert service._last_published_at_ms == {}
     await service.shutdown()
+
+
+@_async_test
+async def test_keyed_lifecycle_parallelizes_symbols_and_singleflights_identity() -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    factory.start_entered["BTCUSDT"] = asyncio.Event()
+    service = _service(factory)
+    btc = _key()
+    eth = _key(symbol="ETHUSDT")
+
+    first = asyncio.create_task(service.ensure_stream(btc, consumer_id="btc-one"))
+    await factory.start_entered["BTCUSDT"].wait()
+    same_identity = asyncio.create_task(
+        service.ensure_stream(btc, consumer_id="btc-two"),
+    )
+
+    assert await asyncio.wait_for(
+        service.ensure_stream(eth, consumer_id="eth"),
+        timeout=0.25,
+    ) is True
+    assert len(factory.start_calls) == 2
+    assert not same_identity.done()
+
+    factory.start_gates["BTCUSDT"].set()
+    assert await first is True
+    assert await same_identity is True
+    assert len(factory.start_calls) == 2
+
+    await service.shutdown()
+    assert len(factory.stop_calls) == 2
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service._identity_locks.active_keys == 0  # noqa: SLF001
 
 
 @_async_test

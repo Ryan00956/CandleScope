@@ -634,6 +634,14 @@ class BarCache:
                 },
             }
 
+    def health_snapshot(self) -> dict[str, int]:
+        """Return the constant-size counters needed by ``/health``."""
+        with self._lock:
+            return {
+                "series_count": len(self._series),
+                "total_bars": sum(series.count for series in self._series.values()),
+            }
+
     # ── Internal ─────────────────────────────────────────────
 
     def _get_or_create(self, key: SeriesKey) -> BarSeries:

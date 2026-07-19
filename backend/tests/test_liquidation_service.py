@@ -86,6 +86,36 @@ class _Factory:
         await self.callbacks[identity](event)
 
 
+class _BlockingRollupStore(SQLiteLiquidationRollupStore):
+    def __init__(self, path: Path, *, blocked_symbol: str) -> None:
+        super().__init__(path)
+        self.blocked_symbol = blocked_symbol
+        self.query_calls: list[str] = []
+        self.query_entered = asyncio.Event()
+        self.query_gate = asyncio.Event()
+
+    async def query_recent_rollups(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        position_side: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        self.query_calls.append(symbol)
+        if symbol == self.blocked_symbol:
+            self.query_entered.set()
+            await self.query_gate.wait()
+        return await super().query_recent_rollups(
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            position_side=position_side,
+            limit=limit,
+        )
+
+
 def _event(
     nonce: int,
     *,
@@ -221,6 +251,49 @@ async def test_consumer_leases_share_one_physical_feed_until_last_release(
     assert service.diagnostics()["physical_streams"] == 0
     assert service.engine.diagnostics()["active_streams"] == 0
     await service.shutdown()
+
+
+@_async_test
+async def test_keyed_lifecycle_keeps_slow_sqlite_load_identity_local(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    store = _BlockingRollupStore(
+        tmp_path / "blocking-liquidation.sqlite",
+        blocked_symbol="BTCUSDT",
+    )
+    service = _service(
+        factory,
+        tmp_path / "unused.sqlite",
+        rollup_store=store,
+    )
+
+    first = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="btc-one"),
+    )
+    await store.query_entered.wait()
+    same_identity = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="btc-two"),
+    )
+
+    assert await asyncio.wait_for(
+        service.ensure_stream(_key("ETHUSDT"), consumer_id="eth"),
+        timeout=0.5,
+    ) is True
+    assert store.query_calls.count("BTCUSDT") == 1
+    assert store.query_calls.count("ETHUSDT") == 1
+    assert len(factory.start_calls) == 1
+    assert not same_identity.done()
+
+    store.query_gate.set()
+    assert await first is True
+    assert await same_identity is True
+    assert len(factory.start_calls) == 2
+
+    await service.shutdown()
+    assert len(factory.stop_calls) == 2
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service._identity_locks.active_keys == 0  # noqa: SLF001
 
 
 @_async_test

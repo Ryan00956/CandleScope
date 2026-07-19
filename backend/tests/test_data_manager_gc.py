@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from app.data_engine.data_manager import BarData, DataManager, SeriesKey
 from app.data_engine.data_manager.models import DataEventType, StreamInfo, StreamStatus
 from app.data_engine.data_manager import auto_gc as auto_gc_module
+from app.data_engine.data_manager import manager as manager_module
 from app.data_engine.data_manager import runtime_pressure as runtime_pressure_module
 from app.data_engine.data_manager.auto_gc import (
     AutoGcPolicy,
@@ -109,13 +111,13 @@ def test_memory_gc_smart_scoring_prefers_low_heat_series(tmp_path) -> None:
 
 def test_cache_access_deferred_uses_background_storage_executor(monkeypatch) -> None:
     dm = DataManager()
-    calls: list[tuple[str, str, dict]] = []
+    calls: list[list[CacheAccessEvent]] = []
 
-    def fake_record(symbol: str, interval: str, **kwargs) -> dict:
-        calls.append((symbol, interval, kwargs))
+    def fake_record_batch(events, *, refresh_heat=False) -> dict:
+        calls.append(list(events))
         return {}
 
-    monkeypatch.setattr(dm, "record_cache_access", fake_record)
+    monkeypatch.setattr(dm.cache_behavior, "record_batch", fake_record_batch)
 
     async def run() -> None:
         dm._cache_access_loop = asyncio.get_running_loop()
@@ -126,12 +128,127 @@ def test_cache_access_deferred_uses_background_storage_executor(monkeypatch) -> 
             source="test",
         )
         await asyncio.sleep(0)
-        if dm._cache_access_tasks:
-            await asyncio.gather(*dm._cache_access_tasks)
+        if dm._cache_access_writer_task is not None:
+            await dm._cache_access_writer_task
 
     asyncio.run(run())
 
-    assert calls == [("BTCUSDT", "1m", {"action": "history-query", "source": "test"})]
+    assert len(calls) == 1
+    assert len(calls[0]) == 1
+    assert calls[0][0].key == SeriesKey("BTCUSDT", "1m")
+    assert calls[0][0].action == "history-query"
+    assert calls[0][0].source == "test"
+
+
+def test_cache_access_deferred_coalesces_repeated_signals(monkeypatch) -> None:
+    dm = DataManager()
+    calls: list[list[CacheAccessEvent]] = []
+
+    def fake_record_batch(events, *, refresh_heat=False) -> dict:
+        calls.append(list(events))
+        return {}
+
+    monkeypatch.setattr(dm.cache_behavior, "record_batch", fake_record_batch)
+
+    async def run() -> None:
+        dm._cache_access_loop = asyncio.get_running_loop()
+        for _ in range(1_000):
+            dm.record_cache_access_deferred(
+                "BTCUSDT",
+                "1m",
+                action="history-query",
+                source="test",
+            )
+        await asyncio.sleep(0)
+        if dm._cache_access_writer_task is not None:
+            await dm._cache_access_writer_task
+
+    asyncio.run(run())
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 1
+    assert calls[0][0].count == 1_000
+    stats = dm._cache_access_writer_snapshot()
+    assert stats["signals"] == 1_000
+    assert stats["coalesced"] == 999
+    assert stats["persisted_signals"] == 1_000
+    assert stats["pending_signals"] == 0
+
+
+def test_cache_access_deferred_clamps_future_time_before_bucket_identity(
+    monkeypatch,
+) -> None:
+    server_now_ms = 1_700_000_012_345
+    monkeypatch.setattr(
+        manager_module.time,
+        "time",
+        lambda: server_now_ms / 1000,
+    )
+    dm = DataManager()
+
+    async def run() -> None:
+        blocker = asyncio.create_task(asyncio.Event().wait())
+        dm._cache_access_writer_task = blocker
+        try:
+            dm._enqueue_cache_access(CacheAccessEvent(
+                key=SeriesKey("BTCUSDT", "1m"),
+                action="history-query",
+                source="test",
+                occurred_at_ms=server_now_ms + 8 * 24 * 60 * 60 * 1000,
+            ))
+            dm._enqueue_cache_access(CacheAccessEvent(
+                key=SeriesKey("BTCUSDT", "1m"),
+                action="history-query",
+                source="test",
+                occurred_at_ms=server_now_ms,
+            ))
+
+            pending = list(dm._cache_access_pending.values())
+            assert len(pending) == 1
+            assert pending[0].count == 2
+            assert pending[0].occurred_at_ms == server_now_ms
+        finally:
+            blocker.cancel()
+            await asyncio.gather(blocker, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_cache_access_writer_flushes_on_fixed_cadence_under_continuous_signals(
+    monkeypatch,
+) -> None:
+    dm = DataManager()
+    flush_times: list[float] = []
+
+    def fake_record_batch(events, *, refresh_heat=False) -> dict:
+        flush_times.append(time.monotonic())
+        return {}
+
+    monkeypatch.setattr(dm.cache_behavior, "record_batch", fake_record_batch)
+
+    async def run() -> float:
+        dm._started = True
+        dm._cache_access_loop = asyncio.get_running_loop()
+        started_at = time.monotonic()
+        for _ in range(14):
+            dm.record_cache_access_deferred(
+                "BTCUSDT",
+                "1m",
+                action="history-query",
+                source="continuous-test",
+            )
+            await asyncio.sleep(0.05)
+        dm._started = False
+        dm._cache_access_stopping = True
+        dm._cache_access_wakeup.set()
+        if dm._cache_access_writer_task is not None:
+            await dm._cache_access_writer_task
+        return started_at
+
+    started_at = asyncio.run(run())
+
+    assert len(flush_times) >= 2
+    assert flush_times[0] - started_at < 0.45
 
 
 def test_auto_memory_gc_filter_only_keeps_high_confidence_victims() -> None:

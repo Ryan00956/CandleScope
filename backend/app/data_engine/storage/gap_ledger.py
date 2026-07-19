@@ -80,12 +80,42 @@ class GapLedger:
             )
 
     def upsert_detected(self, request: Any, *, status: str = "queued") -> None:
-        now = _now_ms()
-        expected = _estimate_count(request.start_ms, request.end_ms, request.interval)
-        metadata = dict(getattr(request, "metadata", {}) or {})
-        priority = int(metadata.get("priority", 100))
+        self.upsert_detected_many([request], status=status)
+
+    def upsert_detected_many(
+        self,
+        requests: list[Any] | tuple[Any, ...],
+        *,
+        status: str = "queued",
+    ) -> None:
+        """Persist a scheduler batch in one SQLite transaction."""
+        if not requests:
+            return
+        rows: list[tuple[Any, ...]] = []
+        for request in requests:
+            now = _now_ms()
+            expected = _estimate_count(request.start_ms, request.end_ms, request.interval)
+            metadata = dict(getattr(request, "metadata", {}) or {})
+            priority = int(metadata.get("priority", 100))
+            rows.append((
+                request.exchange,
+                request.market_type,
+                request.symbol,
+                request.interval,
+                int(request.start_ms),
+                int(request.end_ms),
+                expected,
+                expected,
+                status,
+                priority,
+                request.reason,
+                request.request_id,
+                now,
+                now,
+                json.dumps(metadata, sort_keys=True),
+            ))
         with _connect(self._db_path) as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO kline_gap_ledger (
                     exchange, market_type, symbol, interval, start_ms, end_ms,
@@ -104,23 +134,7 @@ class GapLedger:
                     last_seen_at = excluded.last_seen_at,
                     metadata_json = excluded.metadata_json
                 """,
-                (
-                    request.exchange,
-                    request.market_type,
-                    request.symbol,
-                    request.interval,
-                    int(request.start_ms),
-                    int(request.end_ms),
-                    expected,
-                    expected,
-                    status,
-                    priority,
-                    request.reason,
-                    request.request_id,
-                    now,
-                    now,
-                    json.dumps(metadata, sort_keys=True),
-                ),
+                rows,
             )
             conn.commit()
 

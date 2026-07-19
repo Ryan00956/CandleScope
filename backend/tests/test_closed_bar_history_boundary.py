@@ -438,7 +438,7 @@ def test_legacy_source_empty_for_a_forming_daily_bar_is_reaudited_when_closed(
     # The cooldown still has almost eight hours left, but its source-empty
     # observation included the then-forming target bar, so it must not suppress
     # this first closed-bar audit.
-    assert coordinator._should_skip_audited_gap(request) is False
+    assert asyncio.run(coordinator._should_skip_audited_gap(request)) is False
 
 
 def test_ledger_storage_reconciliation_closes_a_legacy_full_day_row(tmp_path, monkeypatch) -> None:

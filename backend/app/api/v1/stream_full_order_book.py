@@ -20,7 +20,7 @@ from app.api.v1.full_order_book import (
     UPSTREAM_SNAPSHOT_LIMIT,
     contract_metadata,
     full_order_book_key,
-    serialize_record,
+    serialize_record_async,
 )
 from app.api.v1.order_book_projection import (
     FULL_PRICE_GROUPINGS,
@@ -178,19 +178,20 @@ async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
                     output_limit=max(item.output_limit for item in streams),
                 ),
             })
+            serialized_current = await asyncio.gather(*(
+                serialize_record_async(
+                    record,
+                    limit=requested_by_key[record.event.key].output_limit,
+                    price_grouping=requested_by_key[record.event.key].price_grouping,
+                    price_tick_size=requested_by_key[record.event.key].price_tick_size,
+                )
+                for record in attachment.current.values()
+            ))
             await _send_json({
                 "type": "snapshot",
                 "protocol": PROTOCOL,
                 "request_id": request_id,
-                "data": [
-                    serialize_record(
-                        record,
-                        limit=requested_by_key[record.event.key].output_limit,
-                        price_grouping=requested_by_key[record.event.key].price_grouping,
-                        price_tick_size=requested_by_key[record.event.key].price_tick_size,
-                    )
-                    for record in attachment.current.values()
-                ],
+                "data": serialized_current,
                 **contract_metadata(
                     output_limit=max(item.output_limit for item in streams),
                 ),
@@ -217,7 +218,7 @@ async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
                 ),
                 "protocol": PROTOCOL,
                 "state": record.event.data.get("state", "live" if live else "stale"),
-                "data": serialize_record(
+                "data": await serialize_record_async(
                     record,
                     limit=output_limit,
                     price_grouping=requested.price_grouping,

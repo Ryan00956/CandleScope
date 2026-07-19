@@ -523,9 +523,11 @@ export function projectMetricRecordsToCandles(
     }
   }
 
-  return Array.from(candidates.values())
-    .sort((a, b) => Number(a.point.time) - Number(b.point.time))
-    .map(({ point }) => point);
+  // Records and the bar cursor both move monotonically, so Map insertion order
+  // is already chart-time order.  Returning the unique candidates avoids both
+  // the old O(k log k) sort and duplicate output when an upstream bar array
+  // contains a repeated timestamp.
+  return Array.from(candidates.values(), ({ point }) => point);
 }
 
 export function buildFundingRatePane(

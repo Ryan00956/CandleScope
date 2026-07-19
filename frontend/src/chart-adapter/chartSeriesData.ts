@@ -33,11 +33,19 @@ interface NormalizedLineCacheEntry {
   result: NormalizedIndicatorDataEntry[];
 }
 
+interface AlignedGroupCacheEntry<TResult> {
+  allowedTimeSet: ReadonlySet<ChartTime> | null | undefined;
+  allowedTimeSize: number;
+  result: TResult;
+}
+
 const allowedTimeKeyCache = new WeakMap<object, AllowedTimeKeyCacheEntry>();
 const filteredEntriesCache = new WeakMap<object, FilteredEntriesCacheEntry>();
 const normalizedLineCache = new WeakMap<object, NormalizedLineCacheEntry>();
 const histogramColorMapCache = new WeakMap<object, ReadonlyMap<string, string>>();
 const histogramPointCache = new WeakMap<object, Map<string, NormalizedIndicatorDataEntry>>();
+const alignedMarkerCache = new WeakMap<object, AlignedGroupCacheEntry<IndicatorMarkerGroup[]>>();
+const alignedBgcolorCache = new WeakMap<object, AlignedGroupCacheEntry<IndicatorBgcolorGroup[]>>();
 
 function allowedTimeKeys(allowedTimeSet: ReadonlySet<ChartTime>): ReadonlySet<string> {
   const cacheKey = allowedTimeSet as object;
@@ -104,6 +112,7 @@ export function toCandlePoint(d: ChartSeriesInputRow): ChartSeriesInputRow {
 export function filterEntriesByTime<TEntry extends { time?: ChartTime }>(
   entries: TEntry[] = [],
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+  allowedKeysInput?: ReadonlySet<string> | null,
 ): TEntry[] {
   if (!allowedTimeSet) return entries || [];
   const source = entries || [];
@@ -113,12 +122,12 @@ export function filterEntriesByTime<TEntry extends { time?: ChartTime }>(
     && cached.allowedTimeSetSize === allowedTimeSet.size) {
     return cached.result as TEntry[];
   }
-  const allowedKeys = allowedTimeKeys(allowedTimeSet);
+  const allowedKeys = allowedKeysInput ?? allowedTimeKeys(allowedTimeSet);
   const result = source.filter((entry) => {
     if (entry?.time == null) return false;
     if (allowedTimeSet.has(entry.time)) return true;
     const key = chartTimeKey(entry.time);
-    return key !== null && allowedKeys.has(key);
+    return key !== null && allowedKeys?.has(key) === true;
   });
   filteredEntriesCache.set(source, {
     allowedTimeSet: allowedTimeSetKey,
@@ -128,10 +137,19 @@ export function filterEntriesByTime<TEntry extends { time?: ChartTime }>(
   return result;
 }
 
+export function buildAllowedTimeKeys(
+  allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+): ReadonlySet<string> | null {
+  if (!allowedTimeSet) return null;
+  return allowedTimeKeys(allowedTimeSet);
+}
+
 export function normalizeLineSeriesData(
   line: IndicatorLine | null | undefined,
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+  allowedKeysInput?: ReadonlySet<string> | null,
 ): NormalizedIndicatorDataEntry[] {
+  const allowedKeys = allowedKeysInput ?? buildAllowedTimeKeys(allowedTimeSet);
   const isHistogram = line?.type === "histogram";
   const source = line?.data || [];
   const allowedTimeSetKey = allowedTimeSet ? allowedTimeSet as object : null;
@@ -143,10 +161,12 @@ export function normalizeLineSeriesData(
     && cached.histogram === isHistogram) {
     return cached.result;
   }
-  const sourceData = filterEntriesByTime(source, allowedTimeSet);
+  const sourceData = filterEntriesByTime(source, allowedTimeSet, allowedKeys);
   let result: NormalizedIndicatorDataEntry[];
   if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
-    const colorMap = histogramColorMap(filterEntriesByTime(line.colorData, allowedTimeSet));
+    const colorMap = histogramColorMap(
+      filterEntriesByTime(line.colorData, allowedTimeSet, allowedKeys),
+    );
     result = sourceData
       .filter((d): d is NormalizedIndicatorDataEntry => (
         d?.time != null && d?.value != null && isFinite(d.value)
@@ -180,12 +200,14 @@ export function normalizeLineSeriesData(
 export function alignIndicatorLinesToTimes(
   indicatorLines: IndicatorLine[] = [],
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+  allowedKeysInput?: ReadonlySet<string> | null,
 ): IndicatorLine[] {
+  const allowedKeys = allowedKeysInput ?? buildAllowedTimeKeys(allowedTimeSet);
   return (indicatorLines || []).map((line) => ({
     ...line,
-    data: normalizeLineSeriesData(line, allowedTimeSet),
+    data: normalizeLineSeriesData(line, allowedTimeSet, allowedKeys),
     ...(Array.isArray(line?.colorData)
-      ? { colorData: filterEntriesByTime(line.colorData, allowedTimeSet) }
+      ? { colorData: filterEntriesByTime(line.colorData, allowedTimeSet, allowedKeys) }
       : {}),
   }));
 }
@@ -193,22 +215,56 @@ export function alignIndicatorLinesToTimes(
 export function alignIndicatorMarkersToTimes(
   indicatorMarkers: IndicatorMarkerGroup[] = [],
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+  allowedKeysInput?: ReadonlySet<string> | null,
 ): IndicatorMarkerGroup[] {
-  return (indicatorMarkers || []).map((group) => ({
+  const cacheKey = indicatorMarkers as object;
+  const cached = alignedMarkerCache.get(cacheKey);
+  if (
+    cached
+    && cached.allowedTimeSet === allowedTimeSet
+    && cached.allowedTimeSize === (allowedTimeSet?.size ?? -1)
+  ) {
+    return cached.result;
+  }
+  const allowedKeys = allowedKeysInput ?? buildAllowedTimeKeys(allowedTimeSet);
+  const result = (indicatorMarkers || []).map((group) => ({
     ...group,
-    data: filterEntriesByTime(group?.data, allowedTimeSet),
+    data: filterEntriesByTime(group?.data, allowedTimeSet, allowedKeys),
   }));
+  alignedMarkerCache.set(cacheKey, {
+    allowedTimeSet,
+    allowedTimeSize: allowedTimeSet?.size ?? -1,
+    result,
+  });
+  return result;
 }
 
 export function alignIndicatorBgcolorsToTimes(
   indicatorBgcolors: IndicatorBgcolorGroup[] = [],
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+  allowedKeysInput?: ReadonlySet<string> | null,
 ): IndicatorBgcolorGroup[] {
-  return (indicatorBgcolors || []).map((group) => ({
+  const cacheKey = indicatorBgcolors as object;
+  const cached = alignedBgcolorCache.get(cacheKey);
+  if (
+    cached
+    && cached.allowedTimeSet === allowedTimeSet
+    && cached.allowedTimeSize === (allowedTimeSet?.size ?? -1)
+  ) {
+    return cached.result;
+  }
+  const allowedKeys = allowedKeysInput ?? buildAllowedTimeKeys(allowedTimeSet);
+  const result = (indicatorBgcolors || []).map((group) => ({
     ...group,
-    data: filterEntriesByTime(group?.data, allowedTimeSet),
-    regions: filterEntriesByTime(group?.regions, allowedTimeSet),
+    data: filterEntriesByTime(group?.data, allowedTimeSet, allowedKeys),
+    regions: filterEntriesByTime(group?.regions, allowedTimeSet, allowedKeys),
   }));
+  alignedBgcolorCache.set(cacheKey, {
+    allowedTimeSet,
+    allowedTimeSize: allowedTimeSet?.size ?? -1,
+    result,
+  });
+  return result;
 }
 
 export function linePointEquals(
@@ -278,7 +334,10 @@ export function applyLineSeriesData(
   previousData: IndicatorDataEntry[],
   detail: Readonly<Record<string, unknown>>,
   recordPerfEvent: PerfEventRecorder | null | undefined,
-  { preferSetData = false }: { preferSetData?: boolean } = {},
+  {
+    preferSetData = false,
+    trustedTrailingUpdate = false,
+  }: { preferSetData?: boolean; trustedTrailingUpdate?: boolean } = {},
 ): "clear" | "empty" | "unchanged" | "update" | "setData" {
   if (nextData === previousData) return "unchanged";
   if (!nextData?.length) {
@@ -293,7 +352,21 @@ export function applyLineSeriesData(
     }
     return "empty";
   }
-  if (!preferSetData && canUseTrailingSeriesUpdate(previousData, nextData)) {
+  const trailingShapeMatches = Boolean(
+    previousData?.length
+    && nextData?.length
+    && nextData.length >= previousData.length
+    && nextData.length <= previousData.length + 1
+    && chartTimesEqual(nextData[0]?.time, previousData[0]?.time)
+    && chartTimesEqual(
+      nextData[previousData.length - 1]?.time,
+      previousData[previousData.length - 1]?.time,
+    )
+  );
+  if (!preferSetData && (
+    (trustedTrailingUpdate && trailingShapeMatches)
+    || canUseTrailingSeriesUpdate(previousData, nextData)
+  )) {
     const start = Math.max(0, previousData.length - 1);
     for (let i = start; i < nextData.length; i += 1) {
       const point = nextData[i];
@@ -320,7 +393,13 @@ export function buildFillRenderEntries(
   backgroundColor: string,
 ): FillRenderResult {
   if (!indicatorFills?.length || !indicatorLines?.length) {
-    return { entries: [], signature: "empty", matchedFillCount: 0, pointCount: 0 };
+    return {
+      entries: [],
+      signature: "empty",
+      structureSignature: "empty",
+      matchedFillCount: 0,
+      pointCount: 0,
+    };
   }
 
   const plotDataMap = new Map<string, IndicatorDataEntry[] | undefined>();
@@ -335,6 +414,7 @@ export function buildFillRenderEntries(
 
   const entries: FillRenderEntry[] = [];
   const signatureParts: string[] = [];
+  const structureSignatureParts: string[] = [];
   let pointCount = 0;
 
   for (const fillDef of indicatorFills) {
@@ -382,6 +462,13 @@ export function buildFillRenderEntries(
     }));
     const fillColor = fillDef.color || "rgba(59,130,246,0.15)";
     entries.push({ upperData, lowerData, fillColor, backgroundColor });
+    structureSignatureParts.push(JSON.stringify([
+      scope,
+      plot1_id,
+      plot2_id,
+      fillColor,
+      backgroundColor,
+    ]));
     signatureParts.push(JSON.stringify([
       scope,
       plot1_id,
@@ -396,6 +483,9 @@ export function buildFillRenderEntries(
   return {
     entries,
     signature: signatureParts.length ? signatureParts.join("|") : "empty",
+    structureSignature: structureSignatureParts.length
+      ? structureSignatureParts.join("|")
+      : "empty",
     matchedFillCount: entries.length,
     pointCount,
   };

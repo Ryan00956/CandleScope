@@ -61,7 +61,9 @@ import {
   buildMainSeriesReferenceOptions,
   buildMainSeriesStyleOptions,
   buildIndicatorBarColorMap,
+  MainSeriesReferenceTracker,
 } from "../chart-adapter/mainSeriesModel";
+import type { MainSeriesReferenceDelta } from "../chart-adapter/mainSeriesModel";
 import {
   canReuseFutureTimeAxisData,
   countFutureTimeAxisPointsAfter,
@@ -74,6 +76,7 @@ import {
   alignIndicatorLinesToTimes,
   alignIndicatorMarkersToTimes,
   applyLineSeriesData,
+  buildAllowedTimeKeys,
   buildFillRenderEntries,
 } from "../chart-adapter/chartSeriesData";
 import { normalizeMainChartType } from "../shared/mainChartTypes";
@@ -712,11 +715,24 @@ function paneKeyForItem(item: { pane?: string; indicatorId?: string } | null | u
   return `${pane}-${item.indicatorId}`;
 }
 
+const paneItemFilterCache = new WeakMap<object, Map<string, readonly unknown[]>>();
+
 function filterItemsForPane<T extends { pane?: string; indicatorId?: string }>(
   items: readonly T[] | null | undefined,
   paneId: string,
 ): T[] {
-  return (items || []).filter((item) => paneKeyForItem(item) === paneId);
+  if (!items) return [];
+  const cacheKey = items as object;
+  let byPane = paneItemFilterCache.get(cacheKey);
+  if (!byPane) {
+    byPane = new Map();
+    paneItemFilterCache.set(cacheKey, byPane);
+  }
+  const cached = byPane.get(paneId);
+  if (cached) return cached as T[];
+  const filtered = items.filter((item) => paneKeyForItem(item) === paneId);
+  byPane.set(paneId, filtered);
+  return filtered;
 }
 
 function filterFillsForLines(
@@ -953,7 +969,12 @@ function getPaneRenderState(
     hlinesStateRef: { current: { target: null, signature: "unknown" } },
     fillSeriesRef: { current: [] },
     fillSeriesStateRef: {
-      current: { chart: null, paneIndex: null, signature: "unknown" },
+      current: {
+        chart: null,
+        paneIndex: null,
+        signature: "unknown",
+        structureSignature: "unknown",
+      },
     },
     bgcolorPrimitiveRef: { current: null },
     bgcolorStateRef: { current: { pane: null, signature: "unknown" } },
@@ -967,6 +988,7 @@ const EMPTY_FILL_RENDER_PAYLOAD = {
   matchedFillCount: 0,
   pointCount: 0,
   signature: "empty",
+  structureSignature: "empty",
 };
 
 function clearPaneAuxiliaryRenderState(
@@ -1067,29 +1089,30 @@ function buildPaneDescriptors({
   indicatorHlines: IndicatorHLine[];
   indicatorBgcolors: IndicatorBgColor[];
 }): PaneDescriptor[] {
-  const mainLines = alignIndicatorLinesToTimes(mainOverlayLines, dataTimeSet);
+  const allowedTimeKeys = buildAllowedTimeKeys(dataTimeSet);
+  const mainLines = alignIndicatorLinesToTimes(mainOverlayLines, dataTimeSet, allowedTimeKeys);
   const descriptors: PaneDescriptor[] = [{
     id: "main",
     paneIndex: 0,
     label: "",
     lines: mainLines,
-    markers: alignIndicatorMarkersToTimes(filterItemsForPane(indicatorMarkers, "main"), dataTimeSet),
+    markers: alignIndicatorMarkersToTimes(filterItemsForPane(indicatorMarkers, "main"), dataTimeSet, allowedTimeKeys),
     fills: filterFillsForLines(indicatorFills, mainLines),
     hlines: filterItemsForPane(indicatorHlines, "main"),
-    bgcolors: alignIndicatorBgcolorsToTimes(filterItemsForPane(indicatorBgcolors, "main"), dataTimeSet),
+    bgcolors: alignIndicatorBgcolorsToTimes(filterItemsForPane(indicatorBgcolors, "main"), dataTimeSet, allowedTimeKeys),
   }];
 
   for (const [index, subPane] of subPanes.entries()) {
-    const lines = alignIndicatorLinesToTimes(subPane.lines, dataTimeSet);
+    const lines = alignIndicatorLinesToTimes(subPane.lines, dataTimeSet, allowedTimeKeys);
     descriptors.push({
       id: subPane.id,
       paneIndex: index + 1,
       label: subPane.label,
       lines,
-      markers: alignIndicatorMarkersToTimes(filterItemsForPane(indicatorMarkers, subPane.id), dataTimeSet),
+      markers: alignIndicatorMarkersToTimes(filterItemsForPane(indicatorMarkers, subPane.id), dataTimeSet, allowedTimeKeys),
       fills: filterFillsForLines(indicatorFills, lines),
       hlines: filterItemsForPane(indicatorHlines, subPane.id),
-      bgcolors: alignIndicatorBgcolorsToTimes(filterItemsForPane(indicatorBgcolors, subPane.id), dataTimeSet),
+      bgcolors: alignIndicatorBgcolorsToTimes(filterItemsForPane(indicatorBgcolors, subPane.id), dataTimeSet, allowedTimeKeys),
     });
   }
 
@@ -1217,6 +1240,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const projectionRenderContextRef = useRef<ProjectionRenderContext | null>(null);
   const mainSeriesTypeRef = useRef<MainChartType | null>(null);
   const mainSeriesReferenceRef = useRef<{ series: MainSeriesHandle | null; signature: string }>({ series: null, signature: "" });
+  const mainSeriesReferenceTrackerRef = useRef<MainSeriesReferenceTracker | null>(null);
+  if (!mainSeriesReferenceTrackerRef.current) {
+    mainSeriesReferenceTrackerRef.current = new MainSeriesReferenceTracker();
+  }
   const requestedChartTypeRef = useRef(normalizeMainChartType(chartType));
   const requestedProjectionSettingsRef = useRef<ProjectionSettings | null>(null);
   const pendingSurfaceViewportRef = useRef<SurfaceViewportSnapshot | null>(null);
@@ -1976,9 +2003,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     series: MainSeriesHandle | null,
     rows: ChartSeriesInputRow[],
     nextChartType: MainChartType | null = mainSeriesTypeRef.current,
+    delta: MainSeriesReferenceDelta | null = null,
   ) => {
     if (!series || !nextChartType) return;
-    const options = buildMainSeriesReferenceOptions(nextChartType, rows);
+    const options = mainSeriesReferenceTrackerRef.current?.resolve(nextChartType, rows, delta)
+      ?? buildMainSeriesReferenceOptions(nextChartType, rows);
     const signature = JSON.stringify(options);
     const previous = mainSeriesReferenceRef.current;
     if (previous.series === series && previous.signature === signature) return;
@@ -2093,7 +2122,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     surfaceAxisModeRef.current = initialDescriptor.axisMode;
     mainSeriesReferenceRef.current = {
       series: mainSeries,
-      signature: JSON.stringify(buildMainSeriesReferenceOptions(initialChartType, initialRows)),
+      signature: JSON.stringify(mainSeriesReferenceTrackerRef.current?.resolve(
+        initialChartType,
+        initialRows,
+      ) ?? buildMainSeriesReferenceOptions(initialChartType, initialRows)),
     };
     const initialTargetMainPaneIndex = Math.max(0, activePaneIdsRef.current.indexOf("main"));
     materializedMainPaneIndexRef.current = moveMainPane(
@@ -2256,6 +2288,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       chartPointerLogicalRangeChangedRef.current = false;
       mainSeriesTypeRef.current = null;
       mainSeriesReferenceRef.current = { series: null, signature: "" };
+      mainSeriesReferenceTrackerRef.current?.reset();
       sourceRowsRef.current = [];
       sourceRowMapRef.current = new Map();
       sourceRowIndexMapRef.current = new Map();
@@ -2731,7 +2764,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         : { datasetKey: null, rows: [], surfaceConfigKey: null });
       mainSeriesReferenceRef.current = {
         series: result.series,
-        signature: JSON.stringify(buildMainSeriesReferenceOptions(resolvedChartType, rows)),
+        signature: JSON.stringify(mainSeriesReferenceTrackerRef.current?.resolve(
+          resolvedChartType,
+          rows,
+        ) ?? buildMainSeriesReferenceOptions(resolvedChartType, rows)),
       };
 
       if (visibleRange) chartAdapter.restoreVisibleRange(visibleRange);
@@ -3165,7 +3201,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
             surfaceConfigKey: surfaceConfigKeyRef.current,
           });
         }
-        updateMainSeriesReference(currentSeries, rows);
+        updateMainSeriesReference(currentSeries, rows, currentChartType, delta);
         if (projectionRendered) {
           publishDrawingProjectionStore(projectionStore);
           chartAdapter.requestSeriesUpdate();
@@ -3312,6 +3348,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
               createdAtMs: existing.createdAtMs,
               usesDerivedAxis,
             }),
+            trustedTrailingUpdate: line.renderUpdate === "tail" && !usesDerivedAxis,
           });
           existing.key = key;
           existing.paneId = pane.id;

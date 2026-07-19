@@ -23,6 +23,7 @@ from app.data_engine.storage.liquidation_store import (
 from app.data_engine.storage.liquidation_writer import LiquidationRollupWriter
 
 from .append_hub import AppendBatchHub, AppendBatchSubscription
+from .lifecycle import KeyedAsyncLockPool
 from .liquidation import (
     LiquidationEngine,
     LiquidationRollup,
@@ -124,6 +125,7 @@ class LiquidationService:
 
         self._physical: dict[StreamIdentity, _PhysicalLease] = {}
         self._lifecycle_lock = asyncio.Lock()
+        self._identity_locks = KeyedAsyncLockPool[StreamIdentity]()
         self._ingest_task: asyncio.Task[None] | None = None
         self._flush_task: asyncio.Task[None] | None = None
         self._finalize_task: asyncio.Task[None] | None = None
@@ -167,37 +169,40 @@ class LiquidationService:
 
         identity = self._validate_identity(key)
         consumer = _consumer_id(consumer_id)
-        async with self._lifecycle_lock:
-            self._ensure_open()
-            existing = self._physical.get(identity)
-            if existing is not None:
-                if (
-                    existing.stop_task is not None
-                    and existing.stop_task.done()
-                    and self._reconcile_completed_stop_locked(identity, existing)
-                ):
-                    existing = None
-            if existing is not None:
-                if existing.stop_task is not None and not existing.stop_task.done():
+        async with self._identity_locks.hold(identity):
+            async with self._lifecycle_lock:
+                self._ensure_open()
+                existing = self._physical.get(identity)
+                if existing is not None and existing.stop_task is not None:
+                    if existing.stop_task.done() and self._reconcile_completed_stop_locked(
+                        identity,
+                        existing,
+                    ):
+                        existing = None
+                    elif not existing.stop_task.done():
+                        raise RuntimeError(
+                            "liquidation physical stream stop is still in progress",
+                        )
+                if existing is not None:
+                    if consumer in existing.consumers:
+                        return False
+                    existing.consumers.add(consumer)
+                    return True
+                if len(self._physical) >= self._max_streams:
                     raise RuntimeError(
-                        "liquidation physical stream stop is still in progress",
+                        f"liquidation physical stream limit reached ({self._max_streams})",
                     )
-                if consumer in existing.consumers:
-                    return False
-                existing.consumers.add(consumer)
-                return True
-            if len(self._physical) >= self._max_streams:
-                raise RuntimeError(
-                    f"liquidation physical stream limit reached ({self._max_streams})",
-                )
-
-            self._start_workers()
-            descriptor = _descriptor(identity)
+                if not self.engine.activate_stream(identity):
+                    raise RuntimeError(
+                        "liquidation engine identity is active without a physical lease",
+                    )
+                reservation = _PhysicalLease(handle=None, stop_state="starting")
+                self._physical[identity] = reservation
+                self._start_workers()
 
             async def _on_event(event: MarketEvent) -> None:
                 await self._enqueue_live(identity, event)
 
-            activated = self.engine.activate_stream(identity)
             try:
                 persisted = await self.rollup_store.query_recent_rollups(
                     exchange=identity[0],
@@ -209,16 +214,28 @@ class LiquidationService:
                     identity,
                     (_stored_rollup(row) for row in persisted),
                 )
-                handle = await self._factory.start_market(descriptor, _on_event)
+                async with self._lifecycle_lock:
+                    self._ensure_open()
+                handle = await self._factory.start_market(
+                    _descriptor(identity),
+                    _on_event,
+                )
             except BaseException:
-                if activated:
-                    self.engine.deactivate_stream(identity)
+                async with self._lifecycle_lock:
+                    self._retire_entry_locked(identity, reservation)
                 raise
-            self._physical[identity] = _PhysicalLease(
-                handle=handle,
-                consumers={consumer},
-            )
-            return True
+
+            async with self._lifecycle_lock:
+                if not self._closing and not self._closed and self._physical.get(identity) is reservation:
+                    reservation.handle = handle
+                    reservation.stop_state = "active"
+                    reservation.consumers.add(consumer)
+                    return True
+                reservation.handle = handle
+            await self._stop_physical(identity, reservation)
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(identity, reservation)
+            raise RuntimeError("liquidation service closed while stream was starting")
 
     async def release_stream(
         self,
@@ -228,17 +245,18 @@ class LiquidationService:
     ) -> bool:
         identity = _normalize_identity(key)
         consumer = _consumer_id(consumer_id)
-        async with self._lifecycle_lock:
-            entry = self._physical.get(identity)
-            if entry is None or consumer not in entry.consumers:
-                return False
-            if len(entry.consumers) > 1:
-                entry.consumers.remove(consumer)
-                return True
+        async with self._identity_locks.hold(identity):
+            async with self._lifecycle_lock:
+                entry = self._physical.get(identity)
+                if entry is None or consumer not in entry.consumers:
+                    return False
+                if len(entry.consumers) > 1:
+                    entry.consumers.remove(consumer)
+                    return True
             if not await self._stop_physical(identity, entry):
                 return False
-            self._physical.pop(identity, None)
-            self.engine.deactivate_stream(identity)
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(identity, entry)
             return True
 
     def recent(
@@ -250,7 +268,7 @@ class LiquidationService:
         self._ensure_readable()
         identity = self._validate_identity(key)
         bounded = _bounded_limit(limit, self._max_attach_recent)
-        return list(self.engine.raw_snapshot(identity)[-bounded:])
+        return list(self.engine.raw_tail(identity, bounded))
 
     async def history(
         self,
@@ -347,7 +365,7 @@ class LiquidationService:
         )
         recent = {
             identity: (
-                self.engine.raw_snapshot(identity)[-bounded_recent:]
+                self.engine.raw_tail(identity, bounded_recent)
                 if bounded_recent
                 else ()
             )
@@ -425,18 +443,17 @@ class LiquidationService:
     async def _shutdown_impl(self) -> None:
         self._accepting_events = False
         await self._drain_stop_finalizers()
-        identities = tuple(self._physical)
-        stop_items = tuple(self._physical.items())
-        if stop_items:
+        async with self._lifecycle_lock:
+            identities = tuple(self._physical)
+        if identities:
             await asyncio.gather(*(
-                self._stop_physical(identity, entry)
-                for identity, entry in stop_items
+                self._shutdown_identity(identity) for identity in identities
             ))
         await asyncio.sleep(0)
         await self._drain_stop_finalizers()
-        self._physical.clear()
-        for identity in identities:
-            self.engine.deactivate_stream(identity)
+        async with self._lifecycle_lock:
+            for identity, entry in tuple(self._physical.items()):
+                self._retire_entry_locked(identity, entry)
 
         if self._ingest_task is not None:
             await self._command_queue.join()
@@ -457,6 +474,17 @@ class LiquidationService:
         finally:
             await self.rollup_store.close()
         self._closed = True
+
+    async def _shutdown_identity(self, identity: StreamIdentity) -> None:
+        async with self._identity_locks.hold(identity):
+            async with self._lifecycle_lock:
+                entry = self._physical.get(identity)
+                if entry is None:
+                    return
+                entry.consumers.clear()
+            await self._stop_physical(identity, entry)
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(identity, entry)
 
     async def _stop_physical(
         self,
@@ -611,40 +639,50 @@ class LiquidationService:
         entry: _PhysicalLease,
         stop_task: asyncio.Task[Any],
     ) -> None:
-        async with self._lifecycle_lock:
-            if (
-                not entry.reconcile_stop_on_completion
-                or entry.stop_task is not stop_task
-            ):
-                self._consume_task_exception(stop_task)
-                return
-            entry.reconcile_stop_on_completion = False
-            if stop_task.cancelled():
-                self._clear_stop_task(entry, stop_task, state="stop_cancelled")
-                return
-            try:
-                result = stop_task.result()
-            except asyncio.CancelledError:
-                self._clear_stop_task(entry, stop_task, state="stop_cancelled")
-                return
-            except Exception as exc:
-                self._clear_stop_task(entry, stop_task, state="stop_failed")
-                self._metrics["physical_stop_failures"] += 1
-                self._record_physical_stop_failure(identity, f"late failure: {exc}")
-                return
-            if result is False:
-                self._clear_stop_task(entry, stop_task, state="stop_failed")
-                self._metrics["physical_stop_failures"] += 1
-                self._record_physical_stop_failure(
-                    identity,
-                    "late physical stream reported stop failure",
-                )
-                return
-            self._clear_stop_task(entry, stop_task, state="stopped")
-            if self._physical.get(identity) is entry:
-                self._physical.pop(identity, None)
-                self.engine.deactivate_stream(identity)
-            self._metrics["physical_stops_late_succeeded"] += 1
+        async with self._identity_locks.hold(identity):
+            async with self._lifecycle_lock:
+                if (
+                    not entry.reconcile_stop_on_completion
+                    or entry.stop_task is not stop_task
+                ):
+                    self._consume_task_exception(stop_task)
+                    return
+                entry.reconcile_stop_on_completion = False
+                if stop_task.cancelled():
+                    self._clear_stop_task(entry, stop_task, state="stop_cancelled")
+                    return
+                try:
+                    result = stop_task.result()
+                except asyncio.CancelledError:
+                    self._clear_stop_task(entry, stop_task, state="stop_cancelled")
+                    return
+                except Exception as exc:
+                    self._clear_stop_task(entry, stop_task, state="stop_failed")
+                    self._metrics["physical_stop_failures"] += 1
+                    self._record_physical_stop_failure(identity, f"late failure: {exc}")
+                    return
+                if result is False:
+                    self._clear_stop_task(entry, stop_task, state="stop_failed")
+                    self._metrics["physical_stop_failures"] += 1
+                    self._record_physical_stop_failure(
+                        identity,
+                        "late physical stream reported stop failure",
+                    )
+                    return
+                self._clear_stop_task(entry, stop_task, state="stopped")
+                self._retire_entry_locked(identity, entry)
+                self._metrics["physical_stops_late_succeeded"] += 1
+
+    def _retire_entry_locked(
+        self,
+        identity: StreamIdentity,
+        entry: _PhysicalLease,
+    ) -> bool:
+        if self._physical.get(identity) is not entry:
+            return False
+        self._physical.pop(identity, None)
+        self.engine.deactivate_stream(identity)
+        return True
 
     @staticmethod
     def _clear_stop_task(

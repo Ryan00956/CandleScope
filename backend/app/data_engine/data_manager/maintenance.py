@@ -35,6 +35,7 @@ _STORAGE_ROW_FLOAT_FIELDS = (
 _STORAGE_ROW_INT_FIELDS = ("open_time", "close_time", "trades")
 _STANDARD_INTERVALS = set(STANDARD_INTERVAL_MS) - {"1s", "1M"}
 _MAX_STORAGE_GC_BATCH_ROWS = 1_000
+_MAX_GAP_REPAIR_CONCURRENCY = 4
 
 
 class MaintenanceBusyError(RuntimeError):
@@ -620,12 +621,13 @@ class MaintenanceService:
                         if interior_gaps:
                             gaps_found += len(interior_gaps)
                             gap_errors: list[str] = []
+                            repair_requests: list[RepairRequest] = []
                             for gap_start, gap_end, _gap_diff in interior_gaps:
                                 missing_start = int(gap_start) + interval_ms
                                 missing_end = int(gap_end) - interval_ms
                                 if missing_start > missing_end:
                                     continue
-                                outcome = await backfill_coordinator.request_and_wait(RepairRequest(
+                                repair_requests.append(RepairRequest(
                                     symbol=symbol,
                                     interval=interval,
                                     start_ms=missing_start,
@@ -638,6 +640,17 @@ class MaintenanceService:
                                         "gap_type": "interior",
                                     },
                                 ))
+
+                            repair_results = await _request_repairs_bounded(
+                                backfill_coordinator,
+                                repair_requests,
+                                max_concurrency=_MAX_GAP_REPAIR_CONCURRENCY,
+                            )
+                            for succeeded, result in repair_results:
+                                if not succeeded:
+                                    gap_errors.append(str(result))
+                                    continue
+                                outcome = result
                                 if _outcome_failed(outcome):
                                     gap_errors.extend(_outcome_errors(outcome))
                                     continue
@@ -1560,6 +1573,46 @@ def _outcome_errors(outcome: Any) -> list[str]:
     if error:
         errors.append(str(error))
     return errors
+
+
+async def _request_repairs_bounded(
+    coordinator: RepairRequester,
+    requests: list[RepairRequest],
+    *,
+    max_concurrency: int,
+) -> list[tuple[bool, Any]]:
+    """Run repairs with a fixed worker count and stable result ordering."""
+    if not requests:
+        return []
+    results: list[tuple[bool, Any] | None] = [None] * len(requests)
+    next_index = 0
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while next_index < len(requests):
+            index = next_index
+            next_index += 1
+            try:
+                results[index] = (
+                    True,
+                    await coordinator.request_and_wait(requests[index]),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Fail closed: the caller records the error and never counts
+                # this gap as repaired.
+                results[index] = (False, exc)
+
+    workers = [
+        asyncio.create_task(_worker(), name=f"storage-gap-repair:{index}")
+        for index in range(min(max(1, int(max_concurrency)), len(requests)))
+    ]
+    await asyncio.gather(*workers)
+    return [
+        result if result is not None else (False, RuntimeError("repair did not run"))
+        for result in results
+    ]
 
 
 async def _find_storage_gap_ranges(

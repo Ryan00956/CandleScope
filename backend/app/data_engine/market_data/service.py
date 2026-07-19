@@ -40,6 +40,7 @@ from app.exchanges import (
 
 from .events import HubRecord, MarketStateEvent
 from .hub import MarketEventHub, MarketHubSubscription
+from .lifecycle import KeyedAsyncLockPool
 from .models import MarketChannel, MarketStreamKey
 from .storage_writer import MarketMetricStorageWriter
 
@@ -162,6 +163,7 @@ class MarketDataService:
         self._logical_leases: dict[MarketStreamKey, _LogicalLease] = {}
         self._physical_entries: dict[tuple[str, str, str, str], _PhysicalEntry] = {}
         self._lock = asyncio.Lock()
+        self._identity_locks = KeyedAsyncLockPool[tuple[str, str, str, str]]()
         self._snapshot_lock = asyncio.Lock()
         self._snapshot_tasks: dict[tuple[str, str, str, str], asyncio.Task] = {}
         self._funding_refresh_lock = asyncio.Lock()
@@ -178,6 +180,7 @@ class MarketDataService:
         self._metrics_writer = metrics_writer
         self._history_policy = history_policy
         self._metrics = {"snapshot_fetch_errors": 0, "physical_stop_errors": 0}
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._closed = False
 
     async def ensure_stream(self, key: MarketStreamKey, *, consumer_id: str) -> bool:
@@ -187,60 +190,75 @@ class MarketDataService:
         self._validate_key(key, history=False)
         physical_id = self._physical_id(key)
 
-        while True:
-            wait_for_stop: asyncio.Task | None = None
-            async with self._lock:
-                if self._closed:
-                    raise RuntimeError("market data service is closed")
-                entry = self._physical_entries.get(physical_id)
-                if entry is not None and entry.stop_task is not None:
-                    wait_for_stop = entry.stop_task
-                elif entry is not None and entry.stop_error is not None:
-                    delay = max(0.0, entry.retry_stop_at - time.monotonic())
-                    wait_for_stop = self._schedule_physical_stop(
-                        physical_id,
-                        entry,
-                        delay=delay,
-                    )
-                else:
-                    lease = self._logical_leases.get(key)
-                    if lease is not None and consumer in lease.consumers:
-                        return False
+        async with self._identity_locks.hold(physical_id):
+            while True:
+                wait_for_stop: asyncio.Task | None = None
+                created_physical = False
+                async with self._lock:
+                    if self._closed:
+                        raise RuntimeError("market data service is closed")
+                    entry = self._physical_entries.get(physical_id)
+                    if entry is not None and entry.stop_task is not None:
+                        wait_for_stop = entry.stop_task
+                    elif entry is not None and entry.stop_error is not None:
+                        delay = max(0.0, entry.retry_stop_at - time.monotonic())
+                        wait_for_stop = self._schedule_physical_stop(
+                            physical_id,
+                            entry,
+                            delay=delay,
+                        )
+                    else:
+                        lease = self._logical_leases.get(key)
+                        if lease is not None and consumer in lease.consumers:
+                            return False
 
-                    created_physical = entry is None
-                    if entry is None:
-                        wait_for_stop = self._physical_capacity_waiter(key)
-                        if wait_for_stop is None:
-                            entry = _PhysicalEntry(
-                                descriptor=self._physical_descriptor(key),
-                            )
-                            self._physical_entries[physical_id] = entry
-
-                    if wait_for_stop is None:
-                        lease = self._logical_leases.setdefault(key, _LogicalLease())
-                        lease.consumers.add(consumer)
-                        entry.logical_keys.add(key)
-
-                        if created_physical:
-                            try:
-                                async def _on_event(event: MarketEvent) -> None:
-                                    await self._on_ingestion_event(physical_id, event)
-
-                                entry.handle = await self._factory.start_market(
-                                    entry.descriptor,
-                                    _on_event,
+                        created_physical = entry is None
+                        if entry is None:
+                            wait_for_stop = self._physical_capacity_waiter(key)
+                            if wait_for_stop is None:
+                                entry = _PhysicalEntry(
+                                    descriptor=self._physical_descriptor(key),
                                 )
-                            except BaseException:
-                                entry.logical_keys.discard(key)
-                                self._physical_entries.pop(physical_id, None)
-                                lease.consumers.discard(consumer)
-                                if not lease.consumers:
-                                    self._logical_leases.pop(key, None)
-                                raise
-                        return True
+                                self._physical_entries[physical_id] = entry
 
-            if wait_for_stop is not None:
-                await asyncio.shield(wait_for_stop)
+                        if wait_for_stop is None:
+                            assert entry is not None
+                            lease = self._logical_leases.setdefault(key, _LogicalLease())
+                            lease.consumers.add(consumer)
+                            entry.logical_keys.add(key)
+                            if not created_physical:
+                                return True
+
+                if wait_for_stop is not None:
+                    await asyncio.shield(wait_for_stop)
+                    continue
+
+                async def _on_event(event: MarketEvent) -> None:
+                    await self._on_ingestion_event(physical_id, event)
+
+                try:
+                    handle = await self._factory.start_market(
+                        entry.descriptor,
+                        _on_event,
+                    )
+                except BaseException:
+                    async with self._lock:
+                        self._rollback_start_locked(
+                            physical_id,
+                            entry,
+                            key,
+                            consumer,
+                        )
+                    raise
+
+                async with self._lock:
+                    if not self._closed and self._physical_entries.get(physical_id) is entry:
+                        entry.handle = handle
+                        return True
+                    entry.handle = handle
+
+                await self._stop_physical(physical_id, entry)
+                raise RuntimeError("market data service closed while stream was starting")
 
     async def ensure_streams(
         self,
@@ -267,30 +285,31 @@ class MarketDataService:
 
         consumer = self._consumer_id(consumer_id)
         physical_id = self._physical_id(key)
-        stop_task: asyncio.Task | None = None
-        async with self._lock:
-            lease = self._logical_leases.get(key)
-            if lease is None or consumer not in lease.consumers:
-                return False
-            lease.consumers.remove(consumer)
-            if lease.consumers:
-                return True
+        async with self._identity_locks.hold(physical_id):
+            stop_task: asyncio.Task | None = None
+            async with self._lock:
+                lease = self._logical_leases.get(key)
+                if lease is None or consumer not in lease.consumers:
+                    return False
+                lease.consumers.remove(consumer)
+                if lease.consumers:
+                    return True
 
-            self._logical_leases.pop(key, None)
-            entry = self._physical_entries.get(physical_id)
-            if entry is None:
-                return True
-            entry.logical_keys.discard(key)
-            if entry.logical_keys:
-                return True
+                self._logical_leases.pop(key, None)
+                entry = self._physical_entries.get(physical_id)
+                if entry is None:
+                    return True
+                entry.logical_keys.discard(key)
+                if entry.logical_keys:
+                    return True
 
-            if entry.stop_task is None:
-                self._schedule_physical_stop(physical_id, entry)
-            stop_task = entry.stop_task
+                if entry.stop_task is None:
+                    self._schedule_physical_stop(physical_id, entry)
+                stop_task = entry.stop_task
 
-        if stop_task is not None:
-            await asyncio.shield(stop_task)
-        return True
+            if stop_task is not None:
+                await asyncio.shield(stop_task)
+            return True
 
     async def snapshot(
         self,
@@ -1864,17 +1883,19 @@ class MarketDataService:
 
     async def shutdown(self) -> None:
         async with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._logical_leases.clear()
-            stop_tasks: list[asyncio.Task] = []
-            for physical_id, entry in self._physical_entries.items():
-                entry.logical_keys.clear()
-                if entry.stop_task is None:
-                    entry.stop_error = None
-                    self._schedule_physical_stop(physical_id, entry)
-                stop_tasks.append(entry.stop_task)
+            if self._shutdown_task is None:
+                self._closed = True
+                self._logical_leases.clear()
+                self._shutdown_task = asyncio.create_task(
+                    self._shutdown_impl(),
+                    name="market-data-shutdown",
+                )
+            task = self._shutdown_task
+        await asyncio.shield(task)
+
+    async def _shutdown_impl(self) -> None:
+        async with self._lock:
+            physical_ids = tuple(self._physical_entries)
 
         async with self._snapshot_lock:
             snapshot_tasks = list(self._snapshot_tasks.values())
@@ -1895,9 +1916,9 @@ class MarketDataService:
         if funding_refresh_tasks:
             await asyncio.gather(*funding_refresh_tasks, return_exceptions=True)
 
-        if stop_tasks:
+        if physical_ids:
             await asyncio.gather(
-                *(asyncio.shield(task) for task in stop_tasks),
+                *(self._shutdown_physical(item) for item in physical_ids),
                 return_exceptions=True,
             )
         async with self._lock:
@@ -1905,6 +1926,23 @@ class MarketDataService:
         if self._metrics_writer is not None:
             await self._metrics_writer.close()
         await self.hub.close()
+
+    async def _shutdown_physical(
+        self,
+        physical_id: tuple[str, str, str, str],
+    ) -> None:
+        async with self._identity_locks.hold(physical_id):
+            async with self._lock:
+                entry = self._physical_entries.get(physical_id)
+                if entry is None:
+                    return
+                entry.logical_keys.clear()
+                if entry.stop_task is None:
+                    entry.stop_error = None
+                    self._schedule_physical_stop(physical_id, entry)
+                stop_task = entry.stop_task
+            if stop_task is not None:
+                await asyncio.shield(stop_task)
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -2019,6 +2057,23 @@ class MarketDataService:
             end_ms=end_ms,
             history=history,
         )
+
+    def _rollback_start_locked(
+        self,
+        physical_id: tuple[str, str, str, str],
+        entry: _PhysicalEntry,
+        key: MarketStreamKey,
+        consumer: str,
+    ) -> None:
+        entry.logical_keys.discard(key)
+        if self._physical_entries.get(physical_id) is entry:
+            self._physical_entries.pop(physical_id, None)
+        lease = self._logical_leases.get(key)
+        if lease is None:
+            return
+        lease.consumers.discard(consumer)
+        if not lease.consumers:
+            self._logical_leases.pop(key, None)
 
     def _schedule_physical_stop(
         self,

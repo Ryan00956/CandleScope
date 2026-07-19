@@ -597,6 +597,13 @@ class StreamCoordinator:
             "streams": [e.info.to_dict() for e in self._streams.values()],
         }
 
+    def health_snapshot(self) -> dict[str, Any]:
+        """Return constant-size liveness state without serializing streams."""
+        return {
+            "active_streams": len(self._streams),
+            "reaper_running": self._reaper_task is not None and not self._reaper_task.done(),
+        }
+
     # ── Internal: Stream Start ───────────────────────────────
 
     async def _start_stream(self, key: SeriesKey) -> StreamInfo:

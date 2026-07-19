@@ -990,7 +990,12 @@ class FullOrderBookService:
 
     def _publish_live(self, actor: _FullBookActor, snapshot: Any) -> None:
         completed_resync = actor.state != "live"
-        payload = snapshot.to_dict()
+        to_event_data = getattr(snapshot, "to_event_data", None)
+        payload = (
+            to_event_data()
+            if callable(to_event_data)
+            else snapshot.to_dict()
+        )
         payload.update({
             "state": "live",
             "live": True,

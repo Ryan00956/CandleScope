@@ -4,9 +4,7 @@ import sqlite3
 import time
 import logging
 from pathlib import Path
-from typing import Callable
-
-import pandas as pd
+from typing import Any, Callable
 
 from app.core.config import KLINES_DB_PATH
 from app.core.executors import run_storage
@@ -173,7 +171,12 @@ def init_klines_storage() -> None:
         )
 
 
-def dataframe_to_rows(df: pd.DataFrame) -> list[dict]:
+def dataframe_to_rows(df: Any) -> list[dict]:
+    # Pandas is only needed by this legacy conversion helper.  Keeping it out
+    # of the module import path avoids paying its sizeable startup/RSS cost for
+    # every API worker and storage subprocess.
+    import pandas as pd
+
     if df is None or df.empty:
         return []
 
@@ -501,6 +504,9 @@ def scan_klines_gaps(
             "missing_bars": 0,
             "scanned_bars": 0,
             "truncated": False,
+            "first_open_time": None,
+            "last_open_time": None,
+            "resume_from_ms": None,
             "error": f"Unsupported interval: {interval}",
         }
 
@@ -523,6 +529,9 @@ def scan_klines_gaps(
             "missing_bars": 0,
             "scanned_bars": 0,
             "truncated": False,
+            "first_open_time": None,
+            "last_open_time": None,
+            "resume_from_ms": None,
             "error": "Trading calendar could not be resolved",
         }
 
@@ -586,6 +595,9 @@ def scan_klines_gaps(
             "missing_bars": sum(gap["missing_bars"] for gap in gaps),
             "scanned_bars": 0,
             "truncated": truncated,
+            "first_open_time": None,
+            "last_open_time": None,
+            "resume_from_ms": None,
             "calendar_id": selected_calendar.calendar_id,
         }
 
@@ -666,6 +678,11 @@ def scan_klines_gaps(
         "missing_bars": sum(gap["missing_bars"] for gap in gaps),
         "scanned_bars": len(opens),
         "truncated": truncated,
+        "first_open_time": opens[0],
+        "last_open_time": opens[-1],
+        # Resume inclusively so the next page retains the boundary pair used
+        # to detect a gap between this page and the next one.
+        "resume_from_ms": opens[-1] if truncated else None,
         "calendar_id": selected_calendar.calendar_id,
     }
 

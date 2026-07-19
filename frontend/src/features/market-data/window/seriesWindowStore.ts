@@ -51,20 +51,28 @@ function sameRow(
 ): boolean {
   if (left === right) return true;
   if (!left || !right) return false;
-  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
-  for (const key of keys) {
-    if (left[key] !== right[key]) return false;
+  const leftKeys = Object.keys(left);
+  if (leftKeys.length !== Object.keys(right).length) return false;
+  for (const key of leftKeys) {
+    if (!Object.prototype.hasOwnProperty.call(right, key) || left[key] !== right[key]) return false;
   }
   return true;
 }
 
 function normalizeRows(rows: readonly KlineBarInput[] | null | undefined): KlineBar[] {
-  const byTime = new Map<EpochSeconds, KlineBar>();
+  const normalized: KlineBar[] = [];
+  let strictlyAscending = true;
+  let previousTime: EpochSeconds | null = null;
   for (const row of rows || []) {
     const time = finiteTime(row);
     if (time == null) continue;
-    byTime.set(time, { ...row, time });
+    if (previousTime !== null && time <= previousTime) strictlyAscending = false;
+    normalized.push({ ...row, time });
+    previousTime = time;
   }
+  if (strictlyAscending) return normalized;
+  const byTime = new Map<EpochSeconds, KlineBar>();
+  for (const row of normalized) byTime.set(row.time, row);
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
 }
 
@@ -327,29 +335,51 @@ export class SeriesWindowStore {
     const previousFirst = previousRows.at(0)?.time;
     const previousLast = previousRows.at(-1)?.time;
     if (previousFirst == null || previousLast == null) return this.replace(incoming, meta);
-    const previousByTime = new Map(previousRows.map((row) => [row.time, row]));
-    const byTime = new Map(previousByTime);
+    let alreadyPresent = true;
+    for (const row of incoming) {
+      const ref = this._timeIndex.get(row.time);
+      const existing = ref
+        ? this._segments[ref.segmentIndex]?.bars[ref.rowIndex]
+        : undefined;
+      if (!existing || !sameRow(existing, row)) {
+        alreadyPresent = false;
+        break;
+      }
+    }
+    if (alreadyPresent) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
+
+    const nextRows: KlineBar[] = [];
     let addedLeft = 0;
     let addedRight = 0;
     let changed = false;
     let axisChanged = false;
-
-    for (const row of incoming) {
-      const existing = byTime.get(row.time);
-      if (!existing) {
+    let previousIndex = 0;
+    let incomingIndex = 0;
+    while (previousIndex < previousRows.length || incomingIndex < incoming.length) {
+      const previous = previousRows[previousIndex];
+      const row = incoming[incomingIndex];
+      if (!row || (previous && previous.time < row.time)) {
+        if (previous) nextRows.push(previous);
+        previousIndex += 1;
+        continue;
+      }
+      if (!previous || row.time < previous.time) {
+        nextRows.push(row);
         if (row.time < previousFirst) addedLeft += 1;
         if (row.time > previousLast) addedRight += 1;
         changed = true;
         axisChanged = true;
-      } else if (!sameRow(existing, row)) {
-        changed = true;
+        incomingIndex += 1;
+        continue;
       }
-      byTime.set(row.time, row);
+      nextRows.push(row);
+      if (!sameRow(previous, row)) changed = true;
+      previousIndex += 1;
+      incomingIndex += 1;
     }
 
     if (!changed) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
 
-    const nextRows = Array.from(byTime.values()).sort((a, b) => a.time - b.time);
     this._replaceRows(nextRows);
     const trim = this.trimToBudget();
     this._version += 1;

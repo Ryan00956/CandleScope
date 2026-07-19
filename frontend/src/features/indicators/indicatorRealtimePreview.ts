@@ -103,10 +103,19 @@ export function applyRealtimeIndicatorValuesToLines({
       value,
     });
     if (line.type === "histogram" && histogramColor) point.color = histogramColor;
+    const previousLastTime = line.data.at(-1)?.time;
     const data = upsertLinePoint(line.data, point);
     if (data === line.data) return line;
     changed = true;
-    return { ...line, data };
+    const renderUpdate: "tail" | "full" = Number.isFinite(point.value)
+      && (previousLastTime === undefined || barTime >= previousLastTime)
+      ? "tail"
+      : "full";
+    return {
+      ...line,
+      data,
+      renderUpdate,
+    };
   });
   return changed ? nextLines : lines;
 }

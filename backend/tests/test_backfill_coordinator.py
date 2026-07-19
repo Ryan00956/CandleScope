@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from app.data_engine.data_manager.backfill_coordinator import (
@@ -724,15 +726,6 @@ def test_backfill_coordinator_loads_cache_from_written_ranges() -> None:
                 "exchange": "binance",
                 "market_type": "spot",
             },
-            {
-                "symbol": "BTCUSDT",
-                "interval": "1m",
-                "start_ms": 60_000,
-                "end_ms": 60_000,
-                "order": "ASC",
-                "exchange": "binance",
-                "market_type": "spot",
-            },
         ]
         assert dm.loaded[0][3]["event_detail"]["status"] == "completed"
         assert dm.loaded[0][3]["event_detail"]["range_start_ms"] == 60_000
@@ -774,6 +767,103 @@ def test_backfill_coordinator_updates_gap_ledger_lifecycle() -> None:
             "resolved",
         ]
         assert ledger.events[-1][1]["status"] == "source_empty"
+
+    asyncio.run(_run())
+
+
+def test_gap_ledger_lifecycle_never_runs_sqlite_callbacks_on_event_loop() -> None:
+    async def _run() -> None:
+        loop_thread = threading.get_ident()
+        callback_threads: list[int] = []
+
+        class _ThreadLedger(_Ledger):
+            def _mark_thread(self) -> None:
+                callback_threads.append(threading.get_ident())
+
+            def upsert_detected(self, request, *, status="queued") -> None:
+                self._mark_thread()
+                super().upsert_detected(request, status=status)
+
+            def mark_started(self, request, *, attempt) -> None:
+                self._mark_thread()
+                super().mark_started(request, attempt=attempt)
+
+            def mark_verifying(self, request) -> None:
+                self._mark_thread()
+                super().mark_verifying(request)
+
+            def mark_resolved(self, request, **kwargs) -> None:
+                self._mark_thread()
+                super().mark_resolved(request, **kwargs)
+
+        class _Engine:
+            async def run(self, **kwargs):
+                return _RepairReport(status="completed")
+
+        ledger = _ThreadLedger()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=_Engine(),
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            gap_ledger=ledger,
+        )
+
+        await coordinator.request_and_wait(_request(0, 60_000, request_id="threaded-ledger"))
+
+        assert callback_threads
+        assert all(thread_id != loop_thread for thread_id in callback_threads)
+
+    asyncio.run(_run())
+
+
+def test_completed_outcome_retains_summary_without_fetched_bars() -> None:
+    async def _run() -> None:
+        class _Engine:
+            async def run(self, **kwargs):
+                return SimpleNamespace(
+                    status="completed",
+                    errors=[],
+                    elapsed_ms=12,
+                    written_ranges=[],
+                    fetch_results=[SimpleNamespace(bars=[object() for _ in range(10_000)])],
+                    reconcile_result=SimpleNamespace(
+                        bars_received=10_000,
+                        bars_written=0,
+                        bars_skipped=10_000,
+                        bars_deduplicated=10_000,
+                        custom_bars_generated=0,
+                        custom_bars_written=0,
+                        bars_cached=0,
+                        write_errors=0,
+                        failed_batches=[],
+                        written_ranges=[],
+                        elapsed_ms=8,
+                    ),
+                )
+
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=_Engine(),
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+        request = _request(0, 60_000, request_id="compact-outcome")
+
+        outcome = await coordinator.request_and_wait(request)
+
+        assert outcome.report.fetch_result_count == 1
+        assert outcome.report.fetched_bar_count == 10_000
+        assert outcome.report.reconcile_result.bars_received == 10_000
+        assert not hasattr(outcome.report, "fetch_results")
+        assert coordinator._outcomes[request.request_id].report is outcome.report
+        assert coordinator._scheduler._outcomes[request.request_id].report is outcome.report
 
     asyncio.run(_run())
 
@@ -892,6 +982,83 @@ def test_backfill_coordinator_audits_exact_okx_series() -> None:
         assert engine.calls[0]["symbol"] == "BTC-USDT"
         assert engine.calls[0]["exchange"] == "okx"
         assert engine.calls[0]["market_type"] == "spot"
+
+    asyncio.run(_run())
+
+
+def test_backfill_coordinator_resumes_at_first_gap_left_by_quota() -> None:
+    async def _run() -> None:
+        class _PagedAuditStorage:
+            def __init__(self) -> None:
+                self.scan_calls: list[dict] = []
+
+            def scan_gaps(self, **kwargs):
+                self.scan_calls.append(kwargs)
+                if kwargs.get("start_ms") == 180_000:
+                    return {
+                        "gaps": [{
+                            "start_ms": 180_000,
+                            "end_ms": 180_000,
+                            "reason": "interior_gap",
+                        }],
+                        "truncated": False,
+                        "resume_from_ms": None,
+                    }
+                return {
+                    "gaps": [
+                        {
+                            "start_ms": 60_000,
+                            "end_ms": 60_000,
+                            "reason": "interior_gap",
+                        },
+                        {
+                            "start_ms": 180_000,
+                            "end_ms": 180_000,
+                            "reason": "interior_gap",
+                        },
+                    ],
+                    "truncated": True,
+                    "resume_from_ms": 240_000,
+                }
+
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                return _RepairReport(status="completed")
+
+        storage = _PagedAuditStorage()
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=storage,
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+
+        first = await coord.audit_storage_series([
+            ("binance", "spot", "BTCUSDT", "1m"),
+        ], max_gaps=1)
+        second = await coord.audit_storage_series([
+            ("binance", "spot", "BTCUSDT", "1m"),
+        ], max_gaps=1)
+
+        assert first.queued == 1
+        assert second.queued == 1
+        await _wait_until(lambda: len(engine.calls) == 2)
+        assert [call.get("start_ms") for call in storage.scan_calls] == [
+            None,
+            180_000,
+        ]
+        assert [call["range_start_ms"] for call in engine.calls] == [
+            60_000,
+            180_000,
+        ]
 
     asyncio.run(_run())
 

@@ -6,6 +6,7 @@ import heapq
 import logging
 import time
 import uuid
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -205,6 +206,37 @@ class RepairOutcome:
     terminal_reason: str | None = None
     exhausted_before_ms: int | None = None
     retryable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RepairReconcileSummary:
+    """Small reconciliation payload retained after a repair completes."""
+
+    bars_received: int = 0
+    bars_written: int = 0
+    bars_skipped: int = 0
+    bars_deduplicated: int = 0
+    custom_bars_generated: int = 0
+    custom_bars_written: int = 0
+    bars_cached: int = 0
+    write_errors: int = 0
+    failed_batch_count: int = 0
+    written_range_count: int = 0
+    elapsed_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RepairReportSummary:
+    """Report statistics retained without FetchResult bar payloads."""
+
+    status: Any
+    errors: tuple[str, ...]
+    error_count: int
+    reconcile_result: RepairReconcileSummary | None
+    fetch_result_count: int
+    fetched_bar_count: int
+    written_range_count: int
+    elapsed_ms: int
 
 
 @dataclass(slots=True)
@@ -947,6 +979,14 @@ class BackfillCoordinator:
         self._gap_ledger = gap_ledger
         self._history_service = history_service
         self._history_policy_resolver = history_policy_resolver
+        self._gap_audit_cursors: dict[tuple[str, str, str, str], int] = {}
+        self._gap_audit_series_rotation = 0
+        self._ledger_pending_upserts: OrderedDict[str, RepairRequest] = OrderedDict()
+        self._ledger_pending_operations: deque[tuple[Callable[..., Any], tuple[Any, ...]]] = deque()
+        self._ledger_write_task: asyncio.Task | None = None
+        self._ledger_open_cache: list[dict[str, Any]] = []
+        self._ledger_open_cache_updated_at = 0.0
+        self._ledger_open_refresh_task: asyncio.Task | None = None
 
         self._futures: dict[str, asyncio.Future[RepairOutcome]] = {}
         self._outcomes: dict[str, RepairOutcome] = {}
@@ -1053,7 +1093,8 @@ class BackfillCoordinator:
                 if self._shutdown:
                     return report
                 try:
-                    bounds = self._storage.get_bounds(
+                    bounds = await run_storage(
+                        self._storage.get_bounds,
                         symbol,
                         interval,
                         exchange=exchange,
@@ -1141,6 +1182,7 @@ class BackfillCoordinator:
 
         queued = 0
         seen_series: set[tuple[str, str, str, str]] = set()
+        normalized_series: list[tuple[str, str, str, str]] = []
         for raw_exchange, raw_market_type, raw_symbol, raw_interval in series:
             exchange = str(raw_exchange or "binance").strip().lower()
             market_type = str(raw_market_type or "spot").strip().lower()
@@ -1152,24 +1194,50 @@ class BackfillCoordinator:
             if series_key in seen_series:
                 continue
             seen_series.add(series_key)
+            normalized_series.append(series_key)
 
+        if normalized_series:
+            start_index = self._gap_audit_series_rotation % len(normalized_series)
+            normalized_series = (
+                normalized_series[start_index:] + normalized_series[:start_index]
+            )
+        else:
+            start_index = 0
+
+        processed_series = 0
+        for exchange, market_type, symbol, interval in normalized_series:
+            series_key = (exchange, market_type, symbol, interval)
             if self._shutdown:
                 return report
             if queued >= max_gaps:
-                return report
+                break
             try:
-                scan = await run_storage(
-                    scanner,
-                    symbol=symbol,
-                    interval=interval,
-                    exchange=exchange,
-                    market_type=market_type,
-                    limit=scan_limit,
+                cursor_ms = self._gap_audit_cursors.get(
+                    (exchange, market_type, symbol, interval)
                 )
+                scan_kwargs: dict[str, Any] = {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "exchange": exchange,
+                    "market_type": market_type,
+                    "limit": scan_limit,
+                }
+                if cursor_ms is not None:
+                    scan_kwargs["start_ms"] = cursor_ms
+                scan = await run_storage(scanner, **scan_kwargs)
                 report.scanned += 1
+                processed_series += 1
+                page_cut_short = False
                 for gap in scan.get("gaps", []):
                     if queued >= max_gaps:
-                        return report
+                        # Resume inclusively at the first unconsumed gap rather
+                        # than at the end of the storage page.  Advancing to
+                        # resume_from_ms here would permanently skip later gaps
+                        # whenever an earlier unresolved repair keeps consuming
+                        # the per-audit quota on each pagination wrap.
+                        self._gap_audit_cursors[series_key] = int(gap["start_ms"])
+                        page_cut_short = True
+                        break
                     request = RepairRequest(
                         symbol=symbol,
                         interval=interval,
@@ -1185,7 +1253,7 @@ class BackfillCoordinator:
                             "gap_type": gap.get("reason", "unknown"),
                         },
                     )
-                    if self._should_skip_audited_gap(request):
+                    if await self._should_skip_audited_gap(request):
                         continue
                     if repair:
                         self.request(request)
@@ -1193,6 +1261,16 @@ class BackfillCoordinator:
                         report.queued += 1
                     else:
                         report.repaired += 1
+                if not page_cut_short:
+                    resume_from_ms = scan.get("resume_from_ms")
+                    if scan.get("truncated") and resume_from_ms is not None:
+                        resume_value = int(resume_from_ms)
+                        if cursor_ms is not None and resume_value <= cursor_ms:
+                            interval_ms = parse_interval_ms(interval) or 60_000
+                            resume_value = cursor_ms + interval_ms
+                        self._gap_audit_cursors[series_key] = resume_value
+                    else:
+                        self._gap_audit_cursors.pop(series_key, None)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1208,6 +1286,11 @@ class BackfillCoordinator:
                     interval,
                     exc,
                 )
+
+        if normalized_series:
+            self._gap_audit_series_rotation = (
+                start_index + max(1, processed_series)
+            ) % len(normalized_series)
 
         ledger_report = await self.reconcile_gap_ledger(
             limit=max_gaps,
@@ -1352,10 +1435,39 @@ class BackfillCoordinator:
         """Cancel active and pending repairs."""
         self._shutdown = True
         await self._scheduler.shutdown()
+        ledger_task = self._ledger_write_task
+        if ledger_task is not None:
+            await asyncio.gather(ledger_task, return_exceptions=True)
+        refresh_task = self._ledger_open_refresh_task
+        if refresh_task is not None:
+            await asyncio.gather(refresh_task, return_exceptions=True)
 
     def snapshot(self) -> dict:
         snapshot = self._scheduler.snapshot()
         snapshot["gap_ledger_open"] = self._ledger_open_snapshot()
+        return snapshot
+
+    async def snapshot_async(self) -> dict:
+        """Return an exact snapshot without performing SQLite on the loop."""
+        snapshot = self._scheduler.snapshot()
+        if self._gap_ledger is None:
+            snapshot["gap_ledger_open"] = []
+            return snapshot
+        list_open = getattr(self._gap_ledger, "list_open", None)
+        if not callable(list_open):
+            snapshot["gap_ledger_open"] = []
+            return snapshot
+        try:
+            rows = await run_storage(list_open, limit=50)
+            self._ledger_open_cache = [
+                dict(row)
+                for row in rows
+                if isinstance(row, dict)
+            ]
+            self._ledger_open_cache_updated_at = time.monotonic()
+        except Exception:
+            logger.exception("Gap ledger open snapshot failed")
+        snapshot["gap_ledger_open"] = [dict(row) for row in self._ledger_open_cache]
         return snapshot
 
     def _request_in_loop(
@@ -1724,7 +1836,7 @@ class BackfillCoordinator:
 
         for attempt in range(1, self._max_retries + 1):
             try:
-                self._ledger_mark_started(request, attempt=attempt)
+                await self._ledger_mark_started(request, attempt=attempt)
                 report = await self._engine.run(
                     symbol=request.symbol,
                     intervals=[request.interval],
@@ -1742,7 +1854,7 @@ class BackfillCoordinator:
                 )
                 if self._is_failed(report.status) and attempt < self._max_retries:
                     delay = self._backoff(attempt)
-                    self._ledger_mark_retry_wait(
+                    await self._ledger_mark_retry_wait(
                         request,
                         attempt=attempt,
                         error="; ".join(report.errors) if report.errors else None,
@@ -1757,12 +1869,13 @@ class BackfillCoordinator:
                     "remaining_missing_bars": None,
                 }
                 if not self._is_failed(report.status):
-                    self._ledger_mark_verifying(request)
+                    await self._ledger_mark_verifying(request)
                     verification = await self._verify_request_range(
                         request,
                         context=history_context,
+                        include_rows=True,
                     )
-                    self._ledger_mark_verified(request, report, verification)
+                    await self._ledger_mark_verified(request, report, verification)
                     bars_loaded = await self._load_backfilled_to_cache(
                         request,
                         report,
@@ -1777,7 +1890,7 @@ class BackfillCoordinator:
 
                 if self._is_failed(report.status):
                     await self._emit_failed(request, report)
-                    self._ledger_mark_failed(
+                    await self._ledger_mark_failed(
                         request,
                         "; ".join(report.errors) if report.errors else None,
                     )
@@ -1796,7 +1909,7 @@ class BackfillCoordinator:
                 return RepairOutcome(
                     request=request,
                     status=report.status,
-                    report=report,
+                    report=self._summarize_report(report),
                     attempts=attempt,
                     bars_loaded=bars_loaded,
                     verified_contiguous=verification.get("verified_contiguous"),
@@ -1821,7 +1934,7 @@ class BackfillCoordinator:
                 )
                 if attempt < self._max_retries:
                     delay = self._backoff(attempt)
-                    self._ledger_mark_retry_wait(
+                    await self._ledger_mark_retry_wait(
                         request,
                         attempt=attempt,
                         error=last_error,
@@ -1830,11 +1943,11 @@ class BackfillCoordinator:
                     await asyncio.sleep(delay)
 
         await self._emit_failed(request, report, last_error)
-        self._ledger_mark_failed(request, last_error)
+        await self._ledger_mark_failed(request, last_error)
         return RepairOutcome(
             request=request,
             status="failed",
-            report=report,
+            report=self._summarize_report(report),
             attempts=self._max_retries,
             error=last_error,
         )
@@ -1849,17 +1962,31 @@ class BackfillCoordinator:
             return 0
 
         total_loaded = 0
+        verified_rows = (
+            (verification or {}).get("_rows")
+            if isinstance(verification, dict)
+            else None
+        )
         for written_range in self._written_ranges_for_request(request, report):
-            rows = await run_storage(
-                self._storage.query_bars,
-                symbol=written_range["symbol"],
-                interval=written_range["interval"],
-                start_ms=written_range["start_ms"],
-                end_ms=written_range["end_ms"],
-                order="ASC",
-                exchange=written_range["exchange"],
-                market_type=written_range["market_type"],
-            )
+            if isinstance(verified_rows, list):
+                range_start = int(written_range["start_ms"])
+                range_end = int(written_range["end_ms"])
+                rows = [
+                    row
+                    for row in verified_rows
+                    if range_start <= int(row["open_time"]) <= range_end
+                ]
+            else:
+                rows = await run_storage(
+                    self._storage.query_bars,
+                    symbol=written_range["symbol"],
+                    interval=written_range["interval"],
+                    start_ms=written_range["start_ms"],
+                    end_ms=written_range["end_ms"],
+                    order="ASC",
+                    exchange=written_range["exchange"],
+                    market_type=written_range["market_type"],
+                )
             bars = [
                 BarData.from_storage_row(
                     row,
@@ -1967,6 +2094,7 @@ class BackfillCoordinator:
         request: RepairRequest,
         *,
         context: Any | None = None,
+        include_rows: bool = False,
     ) -> dict[str, Any]:
         query_bars = getattr(self._storage, "query_bars", None)
         if not callable(query_bars):
@@ -2047,30 +2175,92 @@ class BackfillCoordinator:
 
         missing = len(expected_opens - actual)
 
-        return {
+        result = {
             "verified_contiguous": missing == 0,
             "remaining_missing_bars": missing,
             "expected_bars": len(expected_opens),
             "actual_bars": len(actual),
         }
+        if include_rows:
+            # Private handoff to cache reload: verification already paid for
+            # this exact storage range, so do not immediately query it again.
+            result["_rows"] = rows
+        return result
 
     def _ledger_upsert_detected(self, request: RepairRequest) -> None:
         if self._gap_ledger is None:
             return
-        try:
-            self._gap_ledger.upsert_detected(request, status="queued")
-        except Exception:
-            logger.exception("Gap ledger upsert failed for %s", request.request_id)
+        # Scheduler submission is synchronous, but SQLite is not.  Coalesce
+        # merged requests by id and let one short-lived writer drain them.
+        self._ledger_pending_upserts[request.request_id] = request
+        self._ledger_pending_upserts.move_to_end(request.request_id)
+        self._ensure_ledger_writer()
 
-    def _ledger_mark_started(self, request: RepairRequest, *, attempt: int) -> None:
+    def _ensure_ledger_writer(self) -> None:
+        task = self._ledger_write_task
+        if task is not None and not task.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._drain_ledger_writes_sync()
+            return
+        self._ledger_write_task = asyncio.create_task(
+            self._drain_ledger_writes(),
+            name="backfill-gap-ledger-writer",
+        )
+
+    def _drain_ledger_writes_sync(self) -> None:
+        while self._ledger_pending_upserts or self._ledger_pending_operations:
+            if self._ledger_pending_upserts:
+                requests = list(self._ledger_pending_upserts.values())
+                self._ledger_pending_upserts.clear()
+                self._persist_ledger_upserts(requests)
+            while self._ledger_pending_operations:
+                func, args = self._ledger_pending_operations.popleft()
+                func(*args)
+
+    async def _drain_ledger_writes(self) -> None:
+        while self._ledger_pending_upserts or self._ledger_pending_operations:
+            if self._ledger_pending_upserts:
+                requests = list(self._ledger_pending_upserts.values())
+                self._ledger_pending_upserts.clear()
+                try:
+                    await run_storage(self._persist_ledger_upserts, requests)
+                except Exception:
+                    logger.exception("Gap ledger queued upsert batch failed")
+            while self._ledger_pending_operations:
+                func, args = self._ledger_pending_operations.popleft()
+                try:
+                    await run_storage(func, *args)
+                except Exception:
+                    logger.exception("Gap ledger deferred write failed")
+
+    def _persist_ledger_upserts(self, requests: list[RepairRequest]) -> None:
+        if self._gap_ledger is None or not requests:
+            return
+        upsert_many = getattr(self._gap_ledger, "upsert_detected_many", None)
+        if callable(upsert_many):
+            upsert_many(requests, status="queued")
+            return
+        for request in requests:
+            self._gap_ledger.upsert_detected(request, status="queued")
+
+    async def _ledger_mark_started(self, request: RepairRequest, *, attempt: int) -> None:
         if self._gap_ledger is None:
             return
         try:
-            self._gap_ledger.mark_started(request, attempt=attempt)
+            # The synchronous scheduler callback only enqueues the durable
+            # "queued" row.  Preserve lifecycle ordering before marking it
+            # repairing, while keeping all SQLite work off the event loop.
+            queued_write = self._ledger_write_task
+            if queued_write is not None and not queued_write.done():
+                await asyncio.shield(queued_write)
+            await run_storage(self._gap_ledger.mark_started, request, attempt=attempt)
         except Exception:
             logger.exception("Gap ledger start update failed for %s", request.request_id)
 
-    def _ledger_mark_retry_wait(
+    async def _ledger_mark_retry_wait(
         self,
         request: RepairRequest,
         *,
@@ -2081,7 +2271,8 @@ class BackfillCoordinator:
         if self._gap_ledger is None:
             return
         try:
-            self._gap_ledger.mark_retry_wait(
+            await run_storage(
+                self._gap_ledger.mark_retry_wait,
                 request,
                 attempt=attempt,
                 error=error,
@@ -2090,15 +2281,15 @@ class BackfillCoordinator:
         except Exception:
             logger.exception("Gap ledger retry update failed for %s", request.request_id)
 
-    def _ledger_mark_verifying(self, request: RepairRequest) -> None:
+    async def _ledger_mark_verifying(self, request: RepairRequest) -> None:
         if self._gap_ledger is None:
             return
         try:
-            self._gap_ledger.mark_verifying(request)
+            await run_storage(self._gap_ledger.mark_verifying, request)
         except Exception:
             logger.exception("Gap ledger verifying update failed for %s", request.request_id)
 
-    def _ledger_mark_verified(
+    async def _ledger_mark_verified(
         self,
         request: RepairRequest,
         report: Any,
@@ -2116,7 +2307,7 @@ class BackfillCoordinator:
         else:
             status = "partial"
 
-        try:
+        def _persist() -> None:
             self._gap_ledger.mark_resolved(
                 request,
                 status=status,
@@ -2124,21 +2315,21 @@ class BackfillCoordinator:
                 error=None,
             )
             if verification.get("verified_contiguous") is True:
-                mark_covered = getattr(
-                    self._gap_ledger,
-                    "mark_covered_resolved",
-                    None,
-                )
+                mark_covered = getattr(self._gap_ledger, "mark_covered_resolved", None)
                 if callable(mark_covered):
                     mark_covered(request)
+
+        try:
+            await run_storage(_persist)
         except Exception:
             logger.exception("Gap ledger verified update failed for %s", request.request_id)
 
-    def _ledger_mark_failed(self, request: RepairRequest, error: str | None) -> None:
+    async def _ledger_mark_failed(self, request: RepairRequest, error: str | None) -> None:
         if self._gap_ledger is None:
             return
         try:
-            self._gap_ledger.mark_resolved(
+            await run_storage(
+                self._gap_ledger.mark_resolved,
                 request,
                 status="failed",
                 error=error,
@@ -2235,14 +2426,14 @@ class BackfillCoordinator:
         last_closed_ms = last_closed_bar_open_ms(now_ms, request.interval)
         return last_closed_ms is not None and end_open_ms <= last_closed_ms
 
-    def _should_skip_audited_gap(self, request: RepairRequest) -> bool:
+    async def _should_skip_audited_gap(self, request: RepairRequest) -> bool:
         if self._gap_ledger is None:
             return False
         get_status = getattr(self._gap_ledger, "get_status", None)
         if not callable(get_status):
             return False
         try:
-            status = get_status(request)
+            status = await run_storage(get_status, request)
         except Exception:
             logger.exception("Gap ledger status lookup failed for %s", request.request_id)
             return False
@@ -2300,7 +2491,7 @@ class BackfillCoordinator:
             HistoryDisposition.UNKNOWN,
         }:
             return
-        try:
+        def _persist() -> None:
             self._gap_ledger.upsert_detected(request, status="queued")
             mark_deferred = getattr(self._gap_ledger, "mark_deferred", None)
             if not callable(mark_deferred):
@@ -2319,11 +2510,9 @@ class BackfillCoordinator:
                 reason=("history availability is unknown" if plan.unknown else None),
                 next_retry_at=plan.retry_at_ms,
             )
-        except Exception:
-            logger.exception(
-                "Gap ledger deferred-history update failed for %s",
-                request.request_id,
-            )
+
+        self._ledger_pending_operations.append((_persist, ()))
+        self._ensure_ledger_writer()
 
     def _ledger_open_snapshot(self) -> list[dict[str, Any]]:
         if self._gap_ledger is None:
@@ -2332,10 +2521,37 @@ class BackfillCoordinator:
         if not callable(list_open):
             return []
         try:
-            return list_open(limit=50)
+            asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                return list_open(limit=50)
+            except Exception:
+                logger.exception("Gap ledger open snapshot failed")
+                return []
+
+        now = time.monotonic()
+        refresh_task = self._ledger_open_refresh_task
+        if (
+            now - self._ledger_open_cache_updated_at >= 1.0
+            and (refresh_task is None or refresh_task.done())
+        ):
+            self._ledger_open_refresh_task = asyncio.create_task(
+                self._refresh_ledger_open_cache(list_open),
+                name="backfill-gap-ledger-snapshot-refresh",
+            )
+        return [dict(row) for row in self._ledger_open_cache]
+
+    async def _refresh_ledger_open_cache(self, list_open: Callable[..., Any]) -> None:
+        try:
+            rows = await run_storage(list_open, limit=50)
+            self._ledger_open_cache = [
+                dict(row)
+                for row in rows
+                if isinstance(row, dict)
+            ]
+            self._ledger_open_cache_updated_at = time.monotonic()
         except Exception:
             logger.exception("Gap ledger open snapshot failed")
-            return []
 
     def _complete(self, request: RepairRequest, outcome: RepairOutcome) -> None:
         self._retain_completed_outcome(request, outcome)
@@ -2350,6 +2566,51 @@ class BackfillCoordinator:
             return 0
         return int(getattr(reconcile_result, "bars_written", 0) or 0) + int(
             getattr(reconcile_result, "custom_bars_written", 0) or 0
+        )
+
+    @classmethod
+    def _summarize_report(cls, report: Any | None) -> RepairReportSummary | None:
+        """Drop fetched bar payloads before outcomes enter retained history."""
+        if report is None:
+            return None
+        reconcile = getattr(report, "reconcile_result", None)
+        reconcile_summary = None
+        if reconcile is not None:
+            failed_batches = list(getattr(reconcile, "failed_batches", None) or [])
+            written_ranges = list(getattr(reconcile, "written_ranges", None) or [])
+            reconcile_summary = RepairReconcileSummary(
+                bars_received=int(getattr(reconcile, "bars_received", 0) or 0),
+                bars_written=int(getattr(reconcile, "bars_written", 0) or 0),
+                bars_skipped=int(getattr(reconcile, "bars_skipped", 0) or 0),
+                bars_deduplicated=int(getattr(reconcile, "bars_deduplicated", 0) or 0),
+                custom_bars_generated=int(
+                    getattr(reconcile, "custom_bars_generated", 0) or 0
+                ),
+                custom_bars_written=int(
+                    getattr(reconcile, "custom_bars_written", 0) or 0
+                ),
+                bars_cached=int(getattr(reconcile, "bars_cached", 0) or 0),
+                write_errors=int(getattr(reconcile, "write_errors", 0) or 0),
+                failed_batch_count=len(failed_batches),
+                written_range_count=len(written_ranges),
+                elapsed_ms=int(getattr(reconcile, "elapsed_ms", 0) or 0),
+            )
+
+        fetch_results = cls._report_fetch_results(report)
+        errors = [str(error) for error in getattr(report, "errors", None) or []]
+        report_ranges = list(getattr(report, "written_ranges", None) or [])
+        return RepairReportSummary(
+            status=getattr(report, "status", "unknown"),
+            errors=tuple(error[:500] for error in errors[:20]),
+            error_count=len(errors),
+            reconcile_result=reconcile_summary,
+            fetch_result_count=len(fetch_results),
+            fetched_bar_count=sum(
+                int(getattr(result, "bars_count", 0) or len(getattr(result, "bars", ()) or ()))
+                for result in fetch_results
+            ),
+            written_range_count=len(report_ranges),
+            elapsed_ms=int(getattr(report, "elapsed_ms", 0) or 0),
         )
 
     @staticmethod

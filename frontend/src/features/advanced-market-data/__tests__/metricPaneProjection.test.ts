@@ -51,6 +51,39 @@ test("5m samples first appear on the next available 3m bar without lookahead", (
   assert.equal(points.some((point) => point.time === epochSeconds(180)), false);
 });
 
+test("metric projection keeps output sorted and unique for repeated bar times", () => {
+  const duplicateBars: KlineBar[] = [540, 180, 360, 360]
+    .map((time) => ({ time: epochSeconds(time) }));
+  const originalTimes = duplicateBars.map((bar) => bar.time);
+
+  const points = projectMetricRecordsToCandles([
+    record("open_interest", 300_000, { open_interest: 10 }),
+    record("open_interest", 500_000, { open_interest: 20 }),
+  ], duplicateBars, {
+    valueField: "open_interest",
+  });
+
+  assert.deepEqual(points, [
+    { time: epochSeconds(360), value: 10 },
+    { time: epochSeconds(540), value: 20 },
+  ]);
+  assert.equal(new Set(points.map((point) => point.time)).size, points.length);
+  assert.deepEqual(duplicateBars.map((bar) => bar.time), originalTimes);
+});
+
+test("advanced pane builder skips every unrequested channel", () => {
+  const throwingMetrics = {
+    get fundingHistory(): never { throw new Error("funding should not be read"); },
+    get fundingRealtimeHistory(): never { throw new Error("funding should not be read"); },
+    get fundingPreview(): never { throw new Error("funding should not be read"); },
+    get openInterestHistory(): never { throw new Error("open interest should not be read"); },
+    openInterestPeriod: "5m",
+    connectionStatus: "live" as const,
+    revision: 1,
+  };
+  assert.deepEqual(buildAdvancedMarketPanes(throwingMetrics, BARS, []), []);
+});
+
 test("final OI wins its as-of bucket and latest provisional OI covers the forming tail", () => {
   const provisional = record("open_interest", 290_000, {
     open_interest: 10,

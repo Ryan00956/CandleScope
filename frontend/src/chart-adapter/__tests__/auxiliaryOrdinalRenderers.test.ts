@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildBgcolorSignature,
   flattenBgcolorRegions,
+  sliceBgcolorRegionsForVisibleRange,
 } from "../bgcolorPrimitiveRenderer.js";
 import { flattenIndicatorMarkers } from "../markerRenderer.js";
 import type { OrdinalAxisTime } from "../../features/chart-representation/chartRepresentationTypes.js";
@@ -67,4 +68,31 @@ test("bgcolor signature changes for a different ordinal or color", () => {
     buildBgcolorSignature([{ time: ordinal(1, 200, 0), color: "red" }]),
     baseline,
   );
+});
+
+test("bgcolor paint slices sorted history to the visible window plus edge neighbors", () => {
+  const regions = Array.from({ length: 1_000 }, (_, time) => ({
+    time,
+    color: time % 2 ? "red" : "blue",
+  }));
+  const visible = sliceBgcolorRegionsForVisibleRange(regions, { from: 500, to: 509 });
+
+  assert.deepEqual(visible.map((region) => region.time), [
+    499, 500, 501, 502, 503, 504, 505, 506, 507, 508, 509, 510,
+  ]);
+  assert.ok(visible.length < regions.length / 50);
+});
+
+test("bgcolor visible slicing preserves ordinal ordering", () => {
+  const regions = [1, 2, 3, 4, 5].map((order) => ({
+    time: ordinal(order),
+    color: "red",
+  }));
+  const visible = sliceBgcolorRegionsForVisibleRange(regions, {
+    from: ordinal(3),
+    to: ordinal(4),
+  });
+  assert.deepEqual(visible.map((region) => (
+    typeof region.time === "object" && "order" in region.time ? region.time.order : null
+  )), [2, 3, 4, 5]);
 });

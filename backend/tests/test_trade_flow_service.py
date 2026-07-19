@@ -513,6 +513,37 @@ async def test_pending_stop_does_not_block_a_different_identity(tmp_path) -> Non
 
 
 @_async_test
+async def test_cancel_after_start_returns_cleans_unpublished_reservation(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    service = _service(factory, tmp_path)
+    starting = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    assert factory.stop_invocations == 1
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service.engine.diagnostics()["active_streams"] == 0
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    await service.shutdown()
+
+
+@_async_test
 async def test_failed_stop_is_cleaned_before_replacement_can_start(tmp_path) -> None:
     factory = _Factory()
     factory.stop_error = RuntimeError("transport stop failed")

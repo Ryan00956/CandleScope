@@ -40,7 +40,7 @@ from app.exchanges import (
 
 from .events import HubRecord, MarketStateEvent
 from .hub import MarketEventHub, MarketHubSubscription
-from .lifecycle import KeyedAsyncLockPool
+from .lifecycle import KeyedAsyncLockPool, drain_cancellation_safe_cleanup
 from .models import MarketChannel, MarketStreamKey
 from .storage_writer import MarketMetricStorageWriter
 
@@ -242,22 +242,57 @@ class MarketDataService:
                         _on_event,
                     )
                 except BaseException:
-                    async with self._lock:
-                        self._rollback_start_locked(
+                    await drain_cancellation_safe_cleanup(
+                        self._cleanup_start_entry(
                             physical_id,
                             entry,
                             key,
                             consumer,
-                        )
+                        ),
+                        name=(
+                            f"market-start-cleanup-{physical_id[0]}-"
+                            f"{physical_id[1]}-{physical_id[2]}-{physical_id[3]}"
+                        ),
+                    )
                     raise
 
-                async with self._lock:
-                    if not self._closed and self._physical_entries.get(physical_id) is entry:
-                        entry.handle = handle
-                        return True
+                try:
                     entry.handle = handle
+                    async with self._lock:
+                        if (
+                            not self._closed
+                            and self._physical_entries.get(physical_id) is entry
+                        ):
+                            return True
+                except BaseException:
+                    await drain_cancellation_safe_cleanup(
+                        self._cleanup_start_entry(
+                            physical_id,
+                            entry,
+                            key,
+                            consumer,
+                        ),
+                        name=(
+                            f"market-start-cleanup-{physical_id[0]}-"
+                            f"{physical_id[1]}-{physical_id[2]}-{physical_id[3]}"
+                        ),
+                    )
+                    raise
 
-                await self._stop_physical(physical_id, entry)
+                caller_cancelled = await drain_cancellation_safe_cleanup(
+                    self._cleanup_start_entry(
+                        physical_id,
+                        entry,
+                        key,
+                        consumer,
+                    ),
+                    name=(
+                        f"market-start-cleanup-{physical_id[0]}-"
+                        f"{physical_id[1]}-{physical_id[2]}-{physical_id[3]}"
+                    ),
+                )
+                if caller_cancelled:
+                    raise asyncio.CancelledError
                 raise RuntimeError("market data service closed while stream was starting")
 
     async def ensure_streams(
@@ -2058,22 +2093,32 @@ class MarketDataService:
             history=history,
         )
 
-    def _rollback_start_locked(
+    async def _cleanup_start_entry(
         self,
         physical_id: tuple[str, str, str, str],
         entry: _PhysicalEntry,
         key: MarketStreamKey,
         consumer: str,
     ) -> None:
-        entry.logical_keys.discard(key)
-        if self._physical_entries.get(physical_id) is entry:
-            self._physical_entries.pop(physical_id, None)
-        lease = self._logical_leases.get(key)
-        if lease is None:
-            return
-        lease.consumers.discard(consumer)
-        if not lease.consumers:
-            self._logical_leases.pop(key, None)
+        stop_task: asyncio.Task | None = None
+        async with self._lock:
+            entry.logical_keys.discard(key)
+            lease = self._logical_leases.get(key)
+            if lease is not None:
+                lease.consumers.discard(consumer)
+                if not lease.consumers:
+                    self._logical_leases.pop(key, None)
+
+            if entry.handle is None:
+                if self._physical_entries.get(physical_id) is entry:
+                    self._physical_entries.pop(physical_id, None)
+                return
+            if entry.stop_task is None:
+                self._schedule_physical_stop(physical_id, entry)
+            stop_task = entry.stop_task
+
+        if stop_task is not None:
+            await asyncio.shield(stop_task)
 
     def _schedule_physical_stop(
         self,

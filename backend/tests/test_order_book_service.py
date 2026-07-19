@@ -201,6 +201,36 @@ async def test_consumers_share_one_physical_feed_until_last_release() -> None:
 
 
 @_async_test
+async def test_cancel_after_start_returns_cleans_unpublished_reservation() -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    service = _service(factory)
+    key = _key()
+    starting = asyncio.create_task(
+        service.ensure_stream(key, consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    assert factory.stop_invocations == 1
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service.engine.diagnostics()["active_streams"] == 0
+    assert await service.ensure_stream(key, consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    await service.shutdown()
+
+
+@_async_test
 async def test_keyed_lifecycle_parallelizes_symbols_and_singleflights_identity() -> None:
     factory = _Factory()
     factory.start_gates["BTCUSDT"] = asyncio.Event()

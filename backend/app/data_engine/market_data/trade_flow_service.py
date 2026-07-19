@@ -32,7 +32,7 @@ from app.data_engine.storage.trade_flow_store import (
 )
 from app.data_engine.storage.trade_flow_writer import TradeFlowRollupWriter
 from .append_hub import AppendBatchHub, AppendBatchSubscription
-from .lifecycle import KeyedAsyncLockPool
+from .lifecycle import KeyedAsyncLockPool, drain_cancellation_safe_cleanup
 from .models import DeliveryClass, MarketChannel, MarketStreamKey, TransportMode
 from .trade_flow import (
     NormalizedAggTrade,
@@ -362,22 +362,49 @@ class TradeFlowService:
                             on_gap=_on_l5_gap,
                         )
                     except BaseException:
-                        async with self._lifecycle_lock:
-                            self._retire_entry_locked(identity, reservation)
+                        await drain_cancellation_safe_cleanup(
+                            self._cleanup_start_reservation(identity, reservation),
+                            name=(
+                                f"trade-flow-start-cleanup-{identity[0]}-"
+                                f"{identity[1]}-{identity[2]}"
+                            ),
+                        )
                         raise
 
-                    async with self._lifecycle_lock:
-                        if (
-                            not self._closing
-                            and not self._closed
-                            and self._physical.get(identity) is reservation
-                        ):
-                            reservation.handle = handle
-                            reservation.stop_state = "active"
-                            reservation.consumers.add(consumer)
-                            return True
+                    try:
+                        # Publish the transport into the reservation before the
+                        # next await.  Cancellation while acquiring the
+                        # lifecycle lock can then stop the real handle instead
+                        # of leaving a handle=None ghost lease.
                         reservation.handle = handle
-                    await self._stop_physical(identity, reservation)
+                        async with self._lifecycle_lock:
+                            if (
+                                not self._closing
+                                and not self._closed
+                                and self._physical.get(identity) is reservation
+                            ):
+                                reservation.stop_state = "active"
+                                reservation.consumers.add(consumer)
+                                return True
+                    except BaseException:
+                        await drain_cancellation_safe_cleanup(
+                            self._cleanup_start_reservation(identity, reservation),
+                            name=(
+                                f"trade-flow-start-cleanup-{identity[0]}-"
+                                f"{identity[1]}-{identity[2]}"
+                            ),
+                        )
+                        raise
+
+                    caller_cancelled = await drain_cancellation_safe_cleanup(
+                        self._cleanup_start_reservation(identity, reservation),
+                        name=(
+                            f"trade-flow-start-cleanup-{identity[0]}-"
+                            f"{identity[1]}-{identity[2]}"
+                        ),
+                    )
+                    if caller_cancelled:
+                        raise asyncio.CancelledError
                     raise RuntimeError(
                         "trade-flow service closed while stream was starting",
                     )
@@ -891,6 +918,20 @@ class TradeFlowService:
                 return True
             stop_task = self._start_physical_stop_locked(identity, entry)
         return await self._wait_for_physical_stop(identity, entry, stop_task)
+
+    async def _cleanup_start_reservation(
+        self,
+        identity: StreamIdentity,
+        entry: _PhysicalLease,
+    ) -> None:
+        if entry.handle is None:
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(identity, entry)
+            return
+        stopped = await self._stop_physical(identity, entry)
+        if stopped:
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(identity, entry)
 
     def _start_physical_stop_locked(
         self,

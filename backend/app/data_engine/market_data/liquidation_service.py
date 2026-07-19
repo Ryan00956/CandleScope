@@ -23,7 +23,7 @@ from app.data_engine.storage.liquidation_store import (
 from app.data_engine.storage.liquidation_writer import LiquidationRollupWriter
 
 from .append_hub import AppendBatchHub, AppendBatchSubscription
-from .lifecycle import KeyedAsyncLockPool
+from .lifecycle import KeyedAsyncLockPool, drain_cancellation_safe_cleanup
 from .liquidation import (
     LiquidationEngine,
     LiquidationRollup,
@@ -170,6 +170,7 @@ class LiquidationService:
         identity = self._validate_identity(key)
         consumer = _consumer_id(consumer_id)
         async with self._identity_locks.hold(identity):
+            stale_entry: _PhysicalLease | None = None
             async with self._lifecycle_lock:
                 self._ensure_open()
                 existing = self._physical.get(identity)
@@ -183,11 +184,23 @@ class LiquidationService:
                         raise RuntimeError(
                             "liquidation physical stream stop is still in progress",
                         )
-                if existing is not None:
+                if existing is not None and existing.stop_state == "active":
                     if consumer in existing.consumers:
                         return False
                     existing.consumers.add(consumer)
                     return True
+                stale_entry = existing
+
+            if stale_entry is not None:
+                if not await self._stop_physical(identity, stale_entry):
+                    raise RuntimeError(
+                        "liquidation physical stream is unavailable after a failed stop",
+                    )
+                async with self._lifecycle_lock:
+                    self._retire_entry_locked(identity, stale_entry)
+
+            async with self._lifecycle_lock:
+                self._ensure_open()
                 if len(self._physical) >= self._max_streams:
                     raise RuntimeError(
                         f"liquidation physical stream limit reached ({self._max_streams})",
@@ -221,20 +234,45 @@ class LiquidationService:
                     _on_event,
                 )
             except BaseException:
-                async with self._lifecycle_lock:
-                    self._retire_entry_locked(identity, reservation)
+                await drain_cancellation_safe_cleanup(
+                    self._cleanup_start_reservation(identity, reservation),
+                    name=(
+                        f"liquidation-start-cleanup-{identity[0]}-"
+                        f"{identity[1]}-{identity[2]}"
+                    ),
+                )
                 raise
 
-            async with self._lifecycle_lock:
-                if not self._closing and not self._closed and self._physical.get(identity) is reservation:
-                    reservation.handle = handle
-                    reservation.stop_state = "active"
-                    reservation.consumers.add(consumer)
-                    return True
+            try:
                 reservation.handle = handle
-            await self._stop_physical(identity, reservation)
-            async with self._lifecycle_lock:
-                self._retire_entry_locked(identity, reservation)
+                async with self._lifecycle_lock:
+                    if (
+                        not self._closing
+                        and not self._closed
+                        and self._physical.get(identity) is reservation
+                    ):
+                        reservation.stop_state = "active"
+                        reservation.consumers.add(consumer)
+                        return True
+            except BaseException:
+                await drain_cancellation_safe_cleanup(
+                    self._cleanup_start_reservation(identity, reservation),
+                    name=(
+                        f"liquidation-start-cleanup-{identity[0]}-"
+                        f"{identity[1]}-{identity[2]}"
+                    ),
+                )
+                raise
+
+            caller_cancelled = await drain_cancellation_safe_cleanup(
+                self._cleanup_start_reservation(identity, reservation),
+                name=(
+                    f"liquidation-start-cleanup-{identity[0]}-"
+                    f"{identity[1]}-{identity[2]}"
+                ),
+            )
+            if caller_cancelled:
+                raise asyncio.CancelledError
             raise RuntimeError("liquidation service closed while stream was starting")
 
     async def release_stream(
@@ -561,6 +599,19 @@ class LiquidationService:
         self._clear_stop_task(entry, stop_task, state="stopped")
         self._metrics["physical_stops_succeeded"] += 1
         return True
+
+    async def _cleanup_start_reservation(
+        self,
+        identity: StreamIdentity,
+        entry: _PhysicalLease,
+    ) -> None:
+        if entry.handle is None:
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(identity, entry)
+            return
+        if await self._stop_physical(identity, entry):
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(identity, entry)
 
     def _reconcile_completed_stop_locked(
         self,

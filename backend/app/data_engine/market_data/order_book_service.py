@@ -19,7 +19,7 @@ from app.data_engine.ingestion.models import MarketEvent, StreamDescriptor, Stre
 
 from .events import HubRecord, MarketStateEvent
 from .hub import MarketEventHub, MarketHubSubscription
-from .lifecycle import KeyedAsyncLockPool
+from .lifecycle import KeyedAsyncLockPool, drain_cancellation_safe_cleanup
 from .models import MarketChannel, MarketStreamKey
 from .order_book import OrderBookEngine, OrderBookIdentity
 
@@ -216,23 +216,42 @@ class OrderBookService:
                     _on_event,
                 )
             except BaseException:
-                async with self._lifecycle_lock:
-                    self._retire_entry_locked(validated, reservation)
+                await drain_cancellation_safe_cleanup(
+                    self._cleanup_start_reservation(validated, reservation),
+                    name=(
+                        f"order-book-start-cleanup-{validated.exchange}-"
+                        f"{validated.market_type}-{validated.symbol}"
+                    ),
+                )
                 raise
 
-            async with self._lifecycle_lock:
-                if self._closing or self._closed:
-                    reservation.handle = handle
-                elif self._physical.get(validated) is reservation:
-                    reservation.handle = handle
-                    reservation.stop_state = "active"
-                    reservation.consumers.add(consumer)
-                    return True
+            try:
+                reservation.handle = handle
+                async with self._lifecycle_lock:
+                    if not self._closing and not self._closed:
+                        if self._physical.get(validated) is reservation:
+                            reservation.stop_state = "active"
+                            reservation.consumers.add(consumer)
+                            return True
+            except BaseException:
+                await drain_cancellation_safe_cleanup(
+                    self._cleanup_start_reservation(validated, reservation),
+                    name=(
+                        f"order-book-start-cleanup-{validated.exchange}-"
+                        f"{validated.market_type}-{validated.symbol}"
+                    ),
+                )
+                raise
 
-            reservation.handle = handle
-            await self._stop_physical(validated, reservation)
-            async with self._lifecycle_lock:
-                self._retire_entry_locked(validated, reservation)
+            caller_cancelled = await drain_cancellation_safe_cleanup(
+                self._cleanup_start_reservation(validated, reservation),
+                name=(
+                    f"order-book-start-cleanup-{validated.exchange}-"
+                    f"{validated.market_type}-{validated.symbol}"
+                ),
+            )
+            if caller_cancelled:
+                raise asyncio.CancelledError
             raise RuntimeError("order-book service closed while stream was starting")
 
     async def release_stream(
@@ -638,6 +657,19 @@ class OrderBookService:
         self._clear_stop_task(entry, stop_task, state="stopped")
         self._metrics["physical_stops_succeeded"] += 1
         return True
+
+    async def _cleanup_start_reservation(
+        self,
+        key: MarketStreamKey,
+        entry: _PhysicalLease,
+    ) -> None:
+        if entry.handle is None:
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(key, entry)
+            return
+        if await self._stop_physical(key, entry):
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(key, entry)
 
     def _reconcile_completed_stop_locked(
         self,

@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Hashable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from typing import Any, Coroutine, Generic, TypeVar
 
 
 _KeyT = TypeVar("_KeyT", bound=Hashable)
@@ -52,4 +52,39 @@ class KeyedAsyncLockPool(Generic[_KeyT]):
                     self._entries.pop(key, None)
 
 
-__all__ = ["KeyedAsyncLockPool"]
+async def drain_cancellation_safe_cleanup(
+    cleanup: Coroutine[Any, Any, Any],
+    *,
+    name: str,
+) -> bool:
+    """Finish one bounded cleanup even if its caller is being cancelled.
+
+    Start paths use this only after reserving lifecycle state.  The cleanup
+    runs in its own task so caller cancellation cannot strand a live transport
+    between creation and publication.  The return value tells non-exception
+    paths to restore the caller's cancellation after cleanup completes.
+    """
+
+    task = asyncio.create_task(cleanup, name=name)
+    caller_cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            caller_cancelled = caller_cancelled or bool(
+                current is not None and current.cancelling()
+            )
+        except BaseException:
+            break
+    if task.done() and not task.cancelled():
+        try:
+            task.result()
+        except BaseException:
+            # Service-specific cleanup records its own degradation state.  Do
+            # not replace the start failure/cancellation that triggered it.
+            pass
+    return caller_cancelled
+
+
+__all__ = ["KeyedAsyncLockPool", "drain_cancellation_safe_cleanup"]

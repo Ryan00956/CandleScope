@@ -166,6 +166,18 @@ class _FlakyStopFactory(_Factory):
         return _FlakyStopHandle(self, descriptor.key)
 
 
+class _BlockingFlakyStopFactory(_FlakyStopFactory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_entered = asyncio.Event()
+        self.start_gate = asyncio.Event()
+
+    async def start_market(self, descriptor, callback):
+        self.start_entered.set()
+        await self.start_gate.wait()
+        return await super().start_market(descriptor, callback)
+
+
 def _key(
     channel: MarketChannel,
     *,
@@ -292,6 +304,71 @@ async def test_cancelled_start_rolls_back_logical_and_physical_state() -> None:
     diagnostics = service.diagnostics()
     assert diagnostics["logical_streams"] == 0
     assert diagnostics["physical_streams"] == 0
+
+
+@_async_test
+async def test_cancel_after_start_returns_stops_unpublished_handle() -> None:
+    factory = _BlockingStartFactory()
+    service = MarketDataService(factory)
+    key = _key(MarketChannel.MARK_PRICE)
+    task = asyncio.create_task(
+        service.ensure_stream(key, consumer_id="cancelled-after-start"),
+    )
+    await factory.start_entered.wait()
+
+    async with service._lock:
+        factory.start_gate.set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert task.done() is False
+        task.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    diagnostics = service.diagnostics()
+    assert diagnostics["logical_streams"] == 0
+    assert diagnostics["physical_streams"] == 0
+    assert len(factory.stop_calls) == 1
+    assert await service.ensure_stream(key, consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    await service.shutdown()
+
+
+@_async_test
+async def test_cancelled_start_cleanup_reuses_physical_stop_retry() -> None:
+    factory = _BlockingFlakyStopFactory()
+    service = MarketDataService(factory)
+    key = _key(MarketChannel.MARK_PRICE)
+    task = asyncio.create_task(
+        service.ensure_stream(key, consumer_id="cancelled-after-start"),
+    )
+    await factory.start_entered.wait()
+
+    async with service._lock:
+        factory.start_gate.set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert task.done() is False
+        task.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    diagnostics = service.diagnostics()
+    assert diagnostics["logical_streams"] == 0
+    assert diagnostics["physical_streams"] == 1
+    assert factory.stop_attempts == 1
+
+    assert await asyncio.wait_for(
+        service.ensure_stream(key, consumer_id="replacement"),
+        timeout=1.0,
+    ) is True
+    assert factory.stop_attempts == 2
+    assert len(factory.start_calls) == 2
+    await service.shutdown()
 
 
 @_async_test

@@ -61,6 +61,8 @@ class _Handle:
 class _Factory:
     def __init__(self) -> None:
         self.start_calls = []
+        self.start_gates: dict[str, asyncio.Event] = {}
+        self.start_entered: dict[str, asyncio.Event] = {}
         self.stop_calls: list[tuple[str, str, str]] = []
         self.callbacks = {}
         self.stop_gate: asyncio.Event | None = None
@@ -78,6 +80,10 @@ class _Factory:
             descriptor.symbol,
         )
         self.start_calls.append(descriptor)
+        gate = self.start_gates.get(descriptor.symbol)
+        if gate is not None:
+            self.start_entered.setdefault(descriptor.symbol, asyncio.Event()).set()
+            await gate.wait()
         self.callbacks[identity] = callback
         return _Handle(self, identity)
 
@@ -250,6 +256,118 @@ async def test_consumer_leases_share_one_physical_feed_until_last_release(
     assert factory.stop_calls == [IDENTITY]
     assert service.diagnostics()["physical_streams"] == 0
     assert service.engine.diagnostics()["active_streams"] == 0
+    await service.shutdown()
+
+
+@_async_test
+async def test_cancel_after_start_returns_cleans_unpublished_reservation(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    service = _service(factory, tmp_path / "liquidation.sqlite")
+    starting = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    assert factory.stop_invocations == 1
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service.engine.diagnostics()["active_streams"] == 0
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    await service.shutdown()
+
+
+@_async_test
+async def test_failed_cancelled_start_cleanup_fails_closed_until_recovered(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    factory.stop_error = RuntimeError("transport stop failed")
+    service = _service(factory, tmp_path / "liquidation.sqlite")
+    starting = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    diagnostics = service.diagnostics()
+    assert diagnostics["physical_streams"] == 1
+    assert diagnostics["physical"][0]["stop_state"] == "stop_failed"
+    assert diagnostics["physical"][0]["consumers"] == 0
+    with pytest.raises(RuntimeError, match="unavailable after a failed stop"):
+        await service.ensure_stream(_key(), consumer_id="blocked-replacement")
+    assert len(factory.start_calls) == 1
+    assert factory.stop_invocations == 2
+
+    factory.stop_error = None
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    assert factory.stop_invocations == 3
+    await service.shutdown()
+
+
+@_async_test
+async def test_timed_out_cancelled_start_cleanup_blocks_replacement_until_late_stop(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    factory.stop_gate = asyncio.Event()
+    factory.stop_ignores_cancellation = True
+    service = _service(
+        factory,
+        tmp_path / "liquidation.sqlite",
+        physical_stop_timeout_seconds=0.02,
+    )
+    starting = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    assert service.diagnostics()["physical"][0]["stop_state"] == "stopping"
+    with pytest.raises(RuntimeError, match="stop is still in progress"):
+        await service.ensure_stream(_key(), consumer_id="blocked-replacement")
+    assert len(factory.start_calls) == 1
+
+    factory.stop_gate.set()
+    await _wait_until(lambda: service.diagnostics()["physical_streams"] == 0)
+    assert service.engine.diagnostics()["active_streams"] == 0
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
     await service.shutdown()
 
 

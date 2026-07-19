@@ -7,9 +7,150 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import app.api.v1.klines as klines_api
-from app.api.v1.klines import _schedule_related_interval_warmup, router as klines_router
+from app.api.v1.klines import (
+    _schedule_related_interval_warmup,
+    _verify_range_continuity,
+    router as klines_router,
+)
 from app.data_engine.data_manager import DataManager
-from app.data_engine.data_manager.models import BarData, QueryResult, QuerySource
+from app.data_engine.data_manager.models import BarData, MissingRange, QueryResult, QuerySource
+from app.data_engine.history import SessionCalendar
+
+
+def test_range_verifier_rejects_explicitly_unclosed_bar_inside_closed_range() -> None:
+    verification = _verify_range_continuity(
+        data=[{
+            "time": 60,
+            "open": 1,
+            "high": 1,
+            "low": 1,
+            "close": 1,
+            "volume": 1,
+            "is_closed": False,
+        }],
+        symbol="BTCUSDT",
+        interval="1m",
+        exchange="binance",
+        market_type="spot",
+        start_ms=60_000,
+        end_ms=60_000,
+    )
+
+    assert verification["verified_contiguous"] is False
+    assert verification["unclosed_bars"] == 1
+    assert verification["missing_ranges"][0]["start_ms"] == 60_000
+
+
+def test_custom_verification_does_not_duplicate_reported_base_component_repair() -> None:
+    verification_missing = [{
+        "symbol": "BTCUSDT",
+        "interval": "45m",
+        "exchange": "binance",
+        "market_type": "spot",
+        "start_ms": 0,
+        "end_ms": 0,
+        "missing_bars": 1,
+        "reason": "range_verification",
+    }]
+    reported_base_missing = [{
+        "symbol": "BTCUSDT",
+        "interval": "15m",
+        "exchange": "binance",
+        "market_type": "spot",
+        "start_ms": 1_800_000,
+        "end_ms": 1_800_000,
+        "missing_bars": 1,
+        "reason": "query_interior_gap",
+    }]
+
+    assert klines_api._verification_only_missing_ranges(
+        verification_missing,
+        reported_base_missing,
+        interval="45m",
+        calendar=None,
+    ) == []
+
+
+def test_custom_verifier_projects_suppressed_base_component_to_target_bucket() -> None:
+    verification = _verify_range_continuity(
+        data=[],
+        symbol="BTCUSDT",
+        interval="45m",
+        exchange="binance",
+        market_type="spot",
+        start_ms=0,
+        end_ms=0,
+        excluded_ranges=[{
+            "start_ms": 1_800_000,
+            "end_ms": 1_800_000,
+            "reason": "gap_ledger_source_empty",
+            "retry_at_ms": 86_400_000,
+        }],
+    )
+
+    assert verification["verified_contiguous"] is True
+    assert verification["missing_ranges"] == []
+
+
+def test_range_verifier_splits_missing_runs_around_excluded_bucket() -> None:
+    verification = _verify_range_continuity(
+        data=[],
+        symbol="BTCUSDT",
+        interval="1m",
+        exchange="binance",
+        market_type="spot",
+        start_ms=0,
+        end_ms=120_000,
+        excluded_ranges=[{
+            "start_ms": 60_000,
+            "end_ms": 60_000,
+            "reason": "gap_ledger_source_empty",
+        }],
+    )
+
+    assert verification["verified_contiguous"] is False
+    assert verification["expected_bars"] == 2
+    assert [
+        (item["start_ms"], item["end_ms"], item["missing_bars"])
+        for item in verification["missing_ranges"]
+    ] == [(0, 0, 1), (120_000, 120_000, 1)]
+
+
+def test_session_tail_bucket_does_not_absorb_closed_market_exclusions_or_reports() -> None:
+    calendar = SessionCalendar(
+        calendar_id="test.short-session",
+        timezone_name="UTC",
+        weekly_sessions={weekday: [("09:30", "10:00")] for weekday in range(5)},
+    )
+    session_open_ms = 1_719_826_200_000
+    closed_market_ms = 1_719_856_800_000
+    exclusion = {
+        "start_ms": closed_market_ms,
+        "end_ms": closed_market_ms,
+        "reason": "unrelated_closed_market_gap",
+    }
+
+    verification = _verify_range_continuity(
+        data=[],
+        symbol="BTCUSDT",
+        interval="30m",
+        exchange="binance",
+        market_type="spot",
+        start_ms=session_open_ms,
+        end_ms=session_open_ms,
+        calendar=calendar,
+        excluded_ranges=[exclusion],
+    )
+
+    assert verification["verified_contiguous"] is False
+    assert verification["expected_bars"] == 1
+    assert verification["missing_ranges"][0]["start_ms"] == session_open_ms
+    assert klines_api._verification_only_missing_ranges(
+        verification["missing_ranges"],
+        [exclusion],
+        interval="30m",
+        calendar=calendar,
+    ) == verification["missing_ranges"]
 
 
 class _FakeDataManager:
@@ -122,6 +263,47 @@ def _client_with_runtime(data_manager=None, backfill_coordinator=None) -> TestCl
     if backfill_coordinator is not None:
         app.state.data_engine_runtime = _Runtime()
     return TestClient(app)
+
+
+def test_strict_range_withholds_unverified_partial_rows() -> None:
+    class _RangeDataManager:
+        def query(self, symbol, interval, *, exchange, market_type, **kwargs) -> QueryResult:
+            bars = [
+                BarData(time=0, open=1, high=2, low=1, close=2, volume=1),
+                BarData(time=120, open=2, high=3, low=2, close=3, volume=1),
+            ]
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(bars),
+            )
+
+    client = _client(_RangeDataManager())
+    params = {
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "start_ms": 0,
+        "end_ms": 120_000,
+        "repair": "none",
+    }
+
+    strict_payload = client.get("/api/v1/klines/range", params=params).json()
+    permissive_payload = client.get(
+        "/api/v1/klines/range",
+        params={**params, "strict": False},
+    ).json()
+
+    assert strict_payload["verified_contiguous"] is False
+    assert strict_payload["renderable"] is False
+    assert strict_payload["data"] == []
+    assert strict_payload["count"] == 0
+    assert strict_payload["actual_bars"] == 2
+    assert len(permissive_payload["data"]) == 2
+    assert permissive_payload["renderable"] is True
 
 
 def test_get_klines_returns_503_without_data_manager() -> None:
@@ -466,6 +648,100 @@ def test_history_waits_for_a_scheduled_partial_tail_repair() -> None:
     assert dm.calls == [None, False]
 
 
+def test_history_verification_only_gap_submits_and_waits_for_exact_request(
+    monkeypatch,
+) -> None:
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.repaired = False
+            self.query_calls: list[bool | None] = []
+            self.repair_calls: list[tuple[tuple, dict]] = []
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+            **kwargs,
+        ) -> QueryResult:
+            self.query_calls.append(auto_backfill)
+            times = [start_ms, end_ms]
+            if self.repaired:
+                times.insert(1, start_ms + 60_000)
+            bars = [
+                BarData(
+                    time=value // 1000,
+                    open=1,
+                    high=2,
+                    low=1,
+                    close=2,
+                    volume=10,
+                )
+                for value in times
+            ]
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(bars),
+            )
+
+        def request_backfill(self, *args, **kwargs):
+            self.repair_calls.append((args, kwargs))
+            return "verification-history-wait"
+
+    class _Coordinator:
+        def __init__(self, dm: _HistoryDataManager) -> None:
+            self.dm = dm
+            self.waited: list[str] = []
+
+        async def wait_for_request(self, request_id: str):
+            self.waited.append(request_id)
+            self.dm.repaired = True
+            return object()
+
+    monkeypatch.setattr(
+        klines_api,
+        "_schedule_related_interval_warmup",
+        lambda *args, **kwargs: None,
+    )
+    dm = _HistoryDataManager()
+    coordinator = _Coordinator(dm)
+    response = _client_with_runtime(dm, coordinator).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "count_back": 3,
+            "max_wait_ms": 1000,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert dm.query_calls == [None, False]
+    assert len(dm.repair_calls) == 1
+    repair_args, repair_kwargs = dm.repair_calls[0]
+    assert repair_args[3] == repair_args[2]
+    assert repair_kwargs["reason"] == "initial_history"
+    assert repair_kwargs["requester"] == "klines_history"
+    assert repair_kwargs["metadata"]["missing_bars"] == 1
+    assert coordinator.waited == ["verification-history-wait"]
+    assert payload["backfill_triggered"] is True
+    assert payload["verified_contiguous"] is True
+    assert payload["complete"] is True
+    assert payload["missing_ranges"] == []
+
+
 def test_history_returns_promptly_when_completed_backfill_has_no_rows() -> None:
     class _HistoryDataManager:
         def __init__(self) -> None:
@@ -678,6 +954,104 @@ def test_history_count_back_overrides_days_window() -> None:
     assert end_ms - start_ms == 9 * 60 * 60 * 1000
 
 
+def test_history_count_back_monthly_steps_calendar_buckets_without_calendar(
+    monkeypatch,
+) -> None:
+    may_open_ms = 1_714_521_600_000
+    july_open_ms = 1_719_792_000_000
+
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def query(self, symbol: str, interval: str, **kwargs) -> QueryResult:
+            self.calls.append({"symbol": symbol, "interval": interval, **kwargs})
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                source=QuerySource.EMPTY,
+                total=0,
+            )
+
+    monkeypatch.setattr(
+        klines_api,
+        "_last_closed_open_ms",
+        lambda interval, *args, **kwargs: july_open_ms,
+    )
+    dm = _HistoryDataManager()
+
+    response = _client(dm).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1M",
+            "count_back": 3,
+            "max_wait_ms": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert dm.calls == [{
+        "symbol": "BTCUSDT",
+        "interval": "1M",
+        "start_ms": may_open_ms,
+        "end_ms": july_open_ms,
+        "limit": 3,
+        "exchange": "binance",
+        "market_type": "spot",
+        "auto_backfill": None,
+        "backfill_reason": "initial_history",
+        "backfill_requester": "klines_history",
+    }]
+
+
+def test_cap_range_request_monthly_uses_exact_calendar_boundaries() -> None:
+    january_open_ms = 1_704_067_200_000
+    march_open_ms = 1_709_251_200_000
+    april_open_ms = 1_711_929_600_000
+    june_open_ms = 1_717_200_000_000
+
+    capped = klines_api._cap_range_request(
+        start_ms=january_open_ms,
+        end_ms=june_open_ms,
+        interval="1M",
+        max_bars=3,
+        calendar=None,
+    )
+
+    assert capped["query_start_ms"] == april_open_ms
+    assert capped["query_end_ms"] == june_open_ms
+    assert capped["needed_limit"] == 3
+    assert capped["truncated"] is True
+    assert capped["next_end_ms"] == march_open_ms
+
+
+def test_cap_range_request_session_end_is_inclusive_without_looking_ahead() -> None:
+    calendar = SessionCalendar(
+        calendar_id="test.cap.0930.utc",
+        timezone_name="UTC",
+        weekly_sessions={weekday: (("09:30", "17:00"),) for weekday in range(5)},
+    )
+    day_start_ms = 1_773_964_800_000  # 2026-03-20T00:00:00Z, Friday
+
+    capped = klines_api._cap_range_request(
+        start_ms=day_start_ms + 9 * 3_600_000 + 30 * 60_000,
+        end_ms=day_start_ms + 15 * 3_600_000,
+        interval="1h",
+        max_bars=2,
+        calendar=calendar,
+    )
+
+    # 15:00 lies between the 14:30 and 15:30 session opens.  The latter must
+    # not leak into this inclusive request or its pagination cursor.
+    assert capped["query_start_ms"] == day_start_ms + 13 * 3_600_000 + 30 * 60_000
+    assert capped["query_end_ms"] == day_start_ms + 15 * 3_600_000
+    assert capped["needed_limit"] == 2
+    assert capped["truncated"] is True
+    assert capped["next_end_ms"] == day_start_ms + 12 * 3_600_000 + 30 * 60_000
+
+
 def test_latest_endpoint_does_not_trigger_backfill_when_storage_is_empty() -> None:
     calls: list[tuple] = []
     dm = DataManager()
@@ -799,6 +1173,462 @@ def test_range_query_reports_exact_visible_gap() -> None:
             "status": "detected",
         }
     ]
+
+
+def test_range_verification_only_gap_submits_for_async_but_not_none() -> None:
+    class _RangeDataManager:
+        def __init__(self) -> None:
+            self.query_calls: list[bool | None] = []
+            self.repair_calls: list[tuple[tuple, dict]] = []
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+            **kwargs,
+        ) -> QueryResult:
+            self.query_calls.append(auto_backfill)
+            return QueryResult(
+                bars=[
+                    BarData(time=60, open=1, high=2, low=1, close=2, volume=10),
+                    BarData(time=180, open=3, high=4, low=3, close=4, volume=30),
+                ],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=2,
+            )
+
+        def request_backfill(self, *args, **kwargs):
+            self.repair_calls.append((args, kwargs))
+            return "verification-range-1"
+
+    async_dm = _RangeDataManager()
+    async_response = _client(async_dm).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 180_000,
+            "repair": "async",
+        },
+    )
+    assert async_response.status_code == 200
+    async_payload = async_response.json()
+    assert async_dm.query_calls == [True]
+    assert len(async_dm.repair_calls) == 1
+    repair_args, repair_kwargs = async_dm.repair_calls[0]
+    assert repair_args == (
+        "BTCUSDT",
+        "1m",
+        120_000,
+        120_000,
+        "binance",
+        "spot",
+    )
+    assert repair_kwargs["reason"] == "visible_range_gap"
+    assert repair_kwargs["requester"] == "klines_range"
+    assert repair_kwargs["metadata"]["verification_only"] is True
+    assert async_payload["backfill_triggered"] is True
+    assert async_payload["history_state"] == "pending"
+
+    none_dm = _RangeDataManager()
+    none_response = _client(none_dm).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 180_000,
+            "repair": "none",
+        },
+    )
+    assert none_response.status_code == 200
+    assert none_dm.query_calls == [False]
+    assert none_dm.repair_calls == []
+    assert none_response.json()["backfill_triggered"] is False
+
+
+def test_range_verification_only_gap_honours_covering_ledger_suppression() -> None:
+    class _RangeDataManager:
+        def __init__(self) -> None:
+            self.repair_calls: list[tuple] = []
+
+        def query(self, symbol, interval, **kwargs) -> QueryResult:
+            return QueryResult(
+                bars=[
+                    BarData(time=60, open=1, high=2, low=1, close=2, volume=10),
+                    BarData(time=180, open=3, high=4, low=3, close=4, volume=30),
+                ],
+                symbol=symbol,
+                interval=interval,
+                source=QuerySource.STORAGE,
+                total=2,
+                history_state="ready",
+                complete=True,
+            )
+
+        def get_backfill_suppression(
+            self,
+            symbol,
+            interval,
+            start_ms,
+            end_ms,
+            exchange,
+            market_type,
+        ):
+            assert (start_ms, end_ms) == (120_000, 120_000)
+            return {
+                "suppressed": True,
+                "ledger_status": "source_empty",
+                "start_ms": 60_000,
+                "end_ms": 180_000,
+                "retry_at_ms": 86_400_000,
+            }
+
+        def request_backfill(self, *args, **kwargs):
+            self.repair_calls.append((args, kwargs))
+            return True
+
+    dm = _RangeDataManager()
+    response = _client(dm).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 180_000,
+            "repair": "async",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert dm.repair_calls == []
+    assert payload["verified_contiguous"] is True
+    assert payload["missing_ranges"] == []
+    assert payload["history_state"] == "ready"
+    assert payload["complete"] is True
+    assert payload["retryable"] is False
+    assert payload["retry_at_ms"] == 86_400_000
+    assert payload["excluded_ranges"][0]["reason"] == "gap_ledger_source_empty"
+
+
+def test_range_repairs_only_unsuppressed_sides_of_excluded_bucket() -> None:
+    class _RangeDataManager:
+        def __init__(self) -> None:
+            self.lookup_calls: list[tuple[int, int]] = []
+            self.repair_calls: list[tuple[tuple, dict]] = []
+
+        def query(self, symbol, interval, **kwargs) -> QueryResult:
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                source=QuerySource.EMPTY,
+                total=0,
+                history_state="ready",
+                complete=True,
+                excluded_ranges=[{
+                    "start_ms": 60_000,
+                    "end_ms": 60_000,
+                    "disposition": "terminal",
+                    "reason": "gap_ledger_source_empty",
+                }],
+            )
+
+        def get_backfill_suppression(
+            self,
+            symbol,
+            interval,
+            start_ms,
+            end_ms,
+            exchange,
+            market_type,
+        ):
+            self.lookup_calls.append((start_ms, end_ms))
+            return None
+
+        def request_backfill(self, *args, **kwargs):
+            self.repair_calls.append((args, kwargs))
+            return True
+
+    dm = _RangeDataManager()
+    response = _client(dm).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 0,
+            "end_ms": 120_000,
+            "repair": "async",
+        },
+    )
+
+    assert response.status_code == 200
+    assert dm.lookup_calls == [(0, 0), (120_000, 120_000)]
+    submitted_ranges = [(args[2], args[3]) for args, _kwargs in dm.repair_calls]
+    assert submitted_ranges == [(0, 0), (120_000, 120_000)]
+    assert all(not (start <= 60_000 <= end) for start, end in submitted_ranges)
+
+
+def test_custom_range_does_not_bypass_suppressed_base_component() -> None:
+    class _RangeDataManager:
+        def __init__(self) -> None:
+            self.repair_calls: list[tuple] = []
+
+        def query(self, symbol, interval, **kwargs) -> QueryResult:
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                source=QuerySource.EMPTY,
+                total=0,
+                history_state="ready",
+                complete=True,
+                retryable=False,
+                excluded_ranges=[{
+                    "start_ms": 1_800_000,
+                    "end_ms": 1_800_000,
+                    "disposition": "terminal",
+                    "reason": "gap_ledger_source_empty",
+                    "retry_at_ms": 86_400_000,
+                }],
+                metadata={"backfill_retry_at_ms": 86_400_000},
+            )
+
+        def request_backfill(self, *args, **kwargs):
+            self.repair_calls.append((args, kwargs))
+            return True
+
+    dm = _RangeDataManager()
+    response = _client(dm).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "45m",
+            "start_ms": 0,
+            "end_ms": 0,
+            "repair": "async",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert dm.repair_calls == []
+    assert payload["verified_contiguous"] is True
+    assert payload["missing_ranges"] == []
+    assert payload["retry_at_ms"] == 86_400_000
+
+
+def test_range_wait_binds_verification_only_request_and_requeries_without_resubmit() -> None:
+    class _RangeDataManager:
+        def __init__(self) -> None:
+            self.repaired = False
+            self.query_calls: list[bool | None] = []
+            self.repair_calls: list[tuple[tuple, dict]] = []
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+            **kwargs,
+        ) -> QueryResult:
+            self.query_calls.append(auto_backfill)
+            times = (60, 120, 180) if self.repaired else (60, 180)
+            bars = [
+                BarData(time=value, open=1, high=2, low=1, close=2, volume=10)
+                for value in times
+            ]
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(bars),
+            )
+
+        def request_backfill(self, *args, **kwargs):
+            self.repair_calls.append((args, kwargs))
+            return "verification-range-wait"
+
+    class _Coordinator:
+        def __init__(self, dm: _RangeDataManager) -> None:
+            self.dm = dm
+            self.waited: list[str] = []
+
+        async def wait_for_request(self, request_id: str):
+            self.waited.append(request_id)
+            self.dm.repaired = True
+            return object()
+
+    dm = _RangeDataManager()
+    coordinator = _Coordinator(dm)
+    response = _client_with_runtime(dm, coordinator).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 180_000,
+            "repair": "wait",
+            "wait_ms": 1000,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert dm.query_calls == [True, False]
+    assert len(dm.repair_calls) == 1
+    assert coordinator.waited == ["verification-range-wait"]
+    assert payload["backfill_triggered"] is True
+    assert payload["verified_contiguous"] is True
+    assert payload["complete"] is True
+    assert payload["missing_ranges"] == []
+
+
+def test_range_verification_submits_only_part_not_covered_by_query_result() -> None:
+    class _RangeDataManager:
+        def __init__(self) -> None:
+            self.repair_calls: list[tuple[tuple, dict]] = []
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            exchange: str,
+            market_type: str,
+            **kwargs,
+        ) -> QueryResult:
+            return QueryResult(
+                bars=[
+                    BarData(time=60, open=1, high=2, low=1, close=2, volume=10),
+                    BarData(time=240, open=3, high=4, low=3, close=4, volume=30),
+                ],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=2,
+                backfill_triggered=True,
+                missing_ranges=[
+                    MissingRange(
+                        symbol=symbol,
+                        interval=interval,
+                        exchange=exchange,
+                        market_type=market_type,
+                        start_ms=120_000,
+                        end_ms=120_000,
+                        reason="query_interior_gap",
+                        missing_bars=1,
+                    )
+                ],
+            )
+
+        def request_backfill(self, *args, **kwargs):
+            self.repair_calls.append((args, kwargs))
+            return "verification-uncovered-1"
+
+    dm = _RangeDataManager()
+    response = _client(dm).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 240_000,
+            "repair": "async",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(dm.repair_calls) == 1
+    args, kwargs = dm.repair_calls[0]
+    assert args[2:4] == (180_000, 180_000)
+    assert kwargs["metadata"]["missing_bars"] == 1
+
+
+def test_range_wait_requeries_without_resubmitting_visible_gap() -> None:
+    class _RangeDataManager:
+        def __init__(self) -> None:
+            self.calls: list[bool | None] = []
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+            **kwargs,
+        ) -> QueryResult:
+            self.calls.append(auto_backfill)
+            return QueryResult(
+                bars=[
+                    BarData(time=60, open=1, high=2, low=1, close=2, volume=10),
+                    BarData(time=180, open=3, high=4, low=3, close=4, volume=30),
+                ],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=2,
+                backfill_triggered=len(self.calls) == 1,
+            )
+
+    dm = _RangeDataManager()
+    client = _client(dm)
+    response = client.get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 180_000,
+            "exchange": "binance",
+            "market_type": "spot",
+            "repair": "wait",
+            "wait_ms": 1,
+            "strict": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert dm.calls[0] is True
+    assert len(dm.calls) >= 2
+    assert all(auto_backfill is False for auto_backfill in dm.calls[1:])
+    assert payload["backfill_triggered"] is True
+    assert payload["history_state"] == "pending"
+    assert payload["complete"] is False
+    assert payload["retryable"] is True
+    assert payload["verified_contiguous"] is False
 
 
 def test_range_query_caps_huge_range_from_newest_end() -> None:
@@ -931,7 +1761,7 @@ def test_related_interval_warmup_uses_each_target_last_closed_open(
     monkeypatch.setattr(
         klines_api,
         "_last_closed_open_ms",
-        lambda interval: last_closed[interval],
+        lambda interval, *args, **kwargs: last_closed[interval],
     )
     dm = _WarmupDataManager()
 

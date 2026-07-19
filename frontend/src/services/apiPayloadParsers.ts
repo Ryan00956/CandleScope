@@ -39,6 +39,7 @@ export interface TransportKlineResponse extends JsonRecord {
   has_more?: boolean;
   truncated?: boolean;
   next_end_ms?: number | null;
+  retry_at_ms?: number | null;
 }
 
 export interface ExchangeMarketPayload extends JsonRecord {
@@ -258,6 +259,7 @@ export function parseKlineResponse(
     "query_end_ms",
     "before",
     "bars",
+    "retry_at_ms",
   ]) {
     optionalFiniteNumber(record, key, path);
   }

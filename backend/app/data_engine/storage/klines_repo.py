@@ -790,6 +790,151 @@ class KlinesRepoAdapter:
             market_type=market_type or self._market_type,
         )
 
+    def count_bars(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        end_ms: int,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> int:
+        """Count one exact series range without materialising its rows."""
+        resolved_exchange = exchange or self._exchange
+        resolved_market_type = market_type or self._market_type
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM klines
+                WHERE exchange = ?
+                  AND market_type = ?
+                  AND symbol = ?
+                  AND interval = ?
+                  AND open_time >= ?
+                  AND open_time <= ?
+                """,
+                (
+                    resolved_exchange,
+                    resolved_market_type,
+                    symbol,
+                    interval,
+                    int(start_ms),
+                    int(end_ms),
+                ),
+            ).fetchone()
+        return int(row["cnt"] if row is not None else 0)
+
+    def verify_contiguous_range(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        end_ms: int,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> dict:
+        """Exactly compare stored opens with the calendar sequence.
+
+        The SQLite cursor streams rows from one read snapshot, so this remains
+        bounded-memory even for a range that needed several audit passes.
+        Unlike a count-only check it also rejects off-grid replacements.
+        """
+        resolved_exchange = exchange or self._exchange
+        resolved_market_type = market_type or self._market_type
+        interval_ms = parse_interval_ms(interval)
+        if interval_ms is None or interval_ms <= 0:
+            return {
+                "verified_contiguous": None,
+                "error": f"Unsupported interval: {interval}",
+            }
+        selected_calendar = _resolve_trading_calendar(
+            exchange=resolved_exchange,
+            market_type=resolved_market_type,
+            symbol=symbol,
+            calendar=None,
+            calendar_resolver=self._calendar_resolver,
+            calendar_registry=self._calendar_registry,
+        )
+        if selected_calendar is None:
+            return {
+                "verified_contiguous": None,
+                "error": "Trading calendar could not be resolved",
+            }
+
+        range_start = int(start_ms)
+        range_end = int(end_ms)
+        if range_end < range_start:
+            return {
+                "verified_contiguous": False,
+                "error": "Invalid verification range",
+            }
+        expected_open = selected_calendar.first_expected_open(
+            range_start,
+            range_end,
+            interval,
+        )
+        actual_count = 0
+        expected_count = 0
+        with _connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT open_time
+                FROM klines
+                WHERE exchange = ?
+                  AND market_type = ?
+                  AND symbol = ?
+                  AND interval = ?
+                  AND open_time >= ?
+                  AND open_time <= ?
+                ORDER BY open_time ASC
+                """,
+                (
+                    resolved_exchange,
+                    resolved_market_type,
+                    symbol,
+                    interval,
+                    range_start,
+                    range_end,
+                ),
+            )
+            for row in cursor:
+                actual_open = int(row["open_time"])
+                actual_count += 1
+                if expected_open is None or actual_open != expected_open:
+                    return {
+                        "verified_contiguous": False,
+                        "actual_count": actual_count,
+                        "expected_count": expected_count,
+                        "expected_open_time": expected_open,
+                        "actual_open_time": actual_open,
+                    }
+                expected_count += 1
+                next_expected = selected_calendar.next_expected_open(
+                    expected_open,
+                    interval,
+                )
+                if next_expected is not None and next_expected <= expected_open:
+                    return {
+                        "verified_contiguous": None,
+                        "actual_count": actual_count,
+                        "expected_count": expected_count,
+                        "error": "Trading calendar did not advance",
+                    }
+                expected_open = (
+                    next_expected
+                    if next_expected is not None and next_expected <= range_end
+                    else None
+                )
+
+        verified = expected_open is None
+        return {
+            "verified_contiguous": verified,
+            "actual_count": actual_count,
+            "expected_count": expected_count + (0 if verified else 1),
+            "expected_open_time": expected_open,
+        }
+
     def list_series(
         self,
         custom_only: bool = False,

@@ -259,15 +259,27 @@ def test_custom_interval_aggregation_preserves_forming_state() -> None:
         source_interval="1m",
     )[0].is_closed is True
 
+    january_first = _ms(2024, 1, 1) // 1000
     end_of_month_rows = [
-        {**rows[0], "time": _ms(2024, 1, 30) // 1000, "is_closed": False},
-        {**rows[1], "time": _ms(2024, 1, 31) // 1000, "is_closed": True},
+        {
+            **rows[index % len(rows)],
+            "time": january_first + index * 86_400,
+            # A later component confirms a missed explicit close event on the
+            # first component, while the full contiguous month is still present.
+            "is_closed": index > 0,
+        }
+        for index in range(31)
     ]
     assert aggregate_rows_by_month(
         end_of_month_rows,
         months=1,
         source_interval_seconds=86_400,
     )[0]["is_closed"] is True
+    assert aggregate_rows_by_month(
+        end_of_month_rows[-2:],
+        months=1,
+        source_interval_seconds=86_400,
+    )[0]["is_closed"] is False
 
 
 def test_custom_query_bar_aggregator_preserves_forming_state() -> None:

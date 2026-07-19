@@ -5,9 +5,16 @@ import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type { InitialRowsResolution } from "../watchlist-full-cache/watchlistFullCacheTypes.js";
 import type { CommitChartData, FeedResult, PendingInitialSeries } from "./klineContracts.js";
-import type { KlineBar } from "./marketDataTypes.js";
+import type { KlineBar, TimeRangeSec } from "./marketDataTypes.js";
 import { numericRange } from "./rangeRuntime.js";
-import type { SeriesDataFeed } from "./feed/seriesDataFeed.js";
+import {
+  isKlineResultRepairPending,
+  type SeriesDataFeed,
+} from "./feed/seriesDataFeed.js";
+import {
+  initialRepairRetryMode,
+  reconcileInitialRepairRetry,
+} from "./feed/initialRepairRetryPolicy.js";
 
 const INITIAL_BACKFILL_RETRY_MS = 3_000;
 const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
@@ -102,6 +109,9 @@ export function useChartInitialLoad({
     const hasCacheHit = cached && cached.length > 0;
     let shownInitialData = false;
     let fallbackClearTimer: ReturnType<typeof setTimeout> | null = null;
+    let initialRetryStarted = false;
+    let stopInitialHistoryRetry: (() => void) | null = null;
+    let trackedInitialRepairRange: TimeRangeSec | null = null;
     const markInitialDataShown = () => {
       shownInitialData = true;
       if (fallbackClearTimer) {
@@ -139,7 +149,11 @@ export function useChartInitialLoad({
     pendingInitialHistoryRef.current = null;
 
     const series = { exchange: ex, marketType: mt, symbol: sym, interval: intv };
-    seriesDataFeed.beginEpoch(series);
+    const initialEpoch = seriesDataFeed.beginEpoch(series);
+    controller.signal.addEventListener("abort", () => {
+      seriesDataFeed.cancelSeriesRepairs(series);
+      trackedInitialRepairRange = null;
+    }, { once: true });
 
     function commitQuickResult(quickResult: FeedResult | null | undefined): void {
       if (controller.signal.aborted || !quickResult?.data?.length) return;
@@ -165,6 +179,8 @@ export function useChartInitialLoad({
 
     function commitHistoryResult(historyResult: FeedResult | null | undefined): void {
       if (controller.signal.aborted) return;
+      const repairPending = isKlineResultRepairPending(historyResult);
+      let terminalFailed = false;
 
       recordPerfEvent("chart.initialLoad.history.result", {
         source: historyResult?.source || "unknown",
@@ -172,15 +188,94 @@ export function useChartInitialLoad({
         hasTailGap: Boolean(historyResult?.has_tail_gap),
       });
 
-      if (historyResult?.start_ms != null && historyResult?.end_ms != null) {
-        pendingInitialHistoryRef.current = {
+      if (repairPending && historyResult) {
+        const pendingInitial = {
           exchange: ex,
           marketType: mt,
           symbol: sym,
           interval: intv,
-          range: numericRange(historyResult.start_ms, historyResult.end_ms),
+          range: historyResult.start_ms != null && historyResult.end_ms != null
+            ? numericRange(historyResult.start_ms, historyResult.end_ms)
+            : null,
         };
+        pendingInitialHistoryRef.current = pendingInitial;
+        const previousTrackedRange = trackedInitialRepairRange;
+        const finalizePending = () => {
+          if (
+            controller.signal.aborted
+            || !seriesDataFeed.isCurrent(series, initialEpoch)
+            || !seriesDataFeed.shouldCommitActive(series)
+            || pendingInitialHistoryRef.current !== pendingInitial
+          ) return;
+          pendingInitialHistoryRef.current = null;
+          trackedInitialRepairRange = null;
+          stopInitialHistoryRetry?.();
+          const repairedRows = getFromCache(sym, intv);
+          const latest = repairedRows.at(-1);
+          if (latest) updateLastPrice(latest, intv);
+          setError(null);
+          setConnectionStatus("connected");
+          setLoading(false);
+        };
+        const failPending = (reason: string) => {
+          if (
+            controller.signal.aborted
+            || !seriesDataFeed.isCurrent(series, initialEpoch)
+            || !seriesDataFeed.shouldCommitActive(series)
+            || pendingInitialHistoryRef.current !== pendingInitial
+          ) return;
+          terminalFailed = true;
+          if (trackedInitialRepairRange) {
+            seriesDataFeed.clearPendingResultRepair(series, trackedInitialRepairRange);
+          }
+          pendingInitialHistoryRef.current = null;
+          trackedInitialRepairRange = null;
+          stopInitialHistoryRetry?.();
+          setError(new Error(`K-line history repair stopped: ${reason}`));
+          setConnectionStatus("disconnected");
+          setLoading(false);
+        };
+        let trackedRange = seriesDataFeed.trackPendingResultRepair(
+          series,
+          historyResult,
+          finalizePending,
+          failPending,
+        );
+        if (terminalFailed) {
+          seriesDataFeed.clearPendingResultRepair(series, trackedRange);
+          trackedRange = null;
+        } else if (
+          previousTrackedRange
+          && (
+            !trackedRange
+            || previousTrackedRange.start !== trackedRange.start
+            || previousTrackedRange.end !== trackedRange.end
+          )
+        ) {
+          seriesDataFeed.clearPendingResultRepair(series, previousTrackedRange);
+          trackedRange = seriesDataFeed.trackPendingResultRepair(
+            series,
+            historyResult,
+            finalizePending,
+            failPending,
+          );
+        }
+        trackedInitialRepairRange = trackedRange;
+      } else if (!repairPending) {
+        pendingInitialHistoryRef.current = null;
+        seriesDataFeed.clearPendingResultRepair(series, trackedInitialRepairRange);
+        trackedInitialRepairRange = null;
       }
+
+      const retryMode = initialRepairRetryMode({
+        repairPending,
+        exactRangeTracked: trackedInitialRepairRange != null,
+        terminal: terminalFailed,
+      });
+      reconcileInitialRepairRetry(retryMode, {
+        startBroadRetry: startInitialHistoryRetry,
+        stopBroadRetry: () => stopInitialHistoryRetry?.(),
+      });
 
       if (!historyResult?.data?.length) {
         recordPerfEvent("chart.initialLoad.history.empty", {
@@ -189,7 +284,11 @@ export function useChartInitialLoad({
           symbol: sym,
           interval: intv,
         });
-        startInitialHistoryRetry();
+        if (!repairPending) {
+          if (historyResult?.history_state === "exhausted") setHasMoreLeft(false);
+          setConnectionStatus("connected");
+          setLoading(false);
+        }
         return;
       }
 
@@ -203,27 +302,45 @@ export function useChartInitialLoad({
       const latest = historyResult.data[historyResult.data.length - 1];
       if (latest) updateLastPrice(latest, intv);
       setDataSource(historyResult.source || "unknown");
-      setConnectionStatus(historyResult.source === "mock" ? "loading" : "connected");
+      setConnectionStatus(
+        historyResult.source === "mock" || repairPending ? "loading" : "connected",
+      );
 
       if (!shownInitialData) {
         markInitialDataShown();
       }
-      pendingInitialHistoryRef.current = null;
-
-      if (historyResult.has_tail_gap) {
-        setConnectionStatus("loading");
-      }
       setLoading(false);
+      void seriesDataFeed.repairVisibleGaps(series, historyResult.data, null, {
+        source: "initial-held-gap-planner",
+      });
     }
 
     function startInitialHistoryRetry(): void {
+      if (initialRetryStarted) return;
+      initialRetryStarted = true;
       markPerf("chart.initialLoad.retry.start", { exchange: ex, marketType: mt, symbol: sym, interval: intv });
       setConnectionStatus("loading");
 
       let retryTimer: ReturnType<typeof setTimeout> | null = null;
       let safetyTimer: ReturnType<typeof setTimeout> | null = null;
       let stoppedRetrying = false;
+      let abortListener: (() => void) | null = null;
       const retryStartedAt = Date.now();
+      const stopRetrying = () => {
+        if (stoppedRetrying) return;
+        stoppedRetrying = true;
+        if (retryTimer) clearTimeout(retryTimer);
+        if (safetyTimer) clearTimeout(safetyTimer);
+        if (abortListener) {
+          controller.signal.removeEventListener("abort", abortListener);
+          abortListener = null;
+        }
+        if (stopInitialHistoryRetry === stopRetrying) {
+          stopInitialHistoryRetry = null;
+          initialRetryStarted = false;
+        }
+      };
+      stopInitialHistoryRetry = stopRetrying;
 
       const retryInitialHistory = async () => {
         if (controller.signal.aborted || stoppedRetrying) return false;
@@ -234,13 +351,13 @@ export function useChartInitialLoad({
             signal: controller.signal,
           });
           if (controller.signal.aborted || stoppedRetrying) return false;
-          if (retryResult?.data?.length) {
+          if (retryResult) {
             markPerf("chart.initialLoad.retry.success", {
               source: retryResult.source || "unknown",
-              bars: retryResult.data.length,
+              bars: retryResult.data?.length || 0,
             });
             commitHistoryResult(retryResult);
-            return true;
+            return !isKlineResultRepairPending(retryResult);
           }
         } catch (retryErr) {
           console.warn("Initial history retry failed:", retryErr);
@@ -254,12 +371,13 @@ export function useChartInitialLoad({
           retryTimer = null;
           const loaded = await retryInitialHistory();
           if (loaded) {
-            stoppedRetrying = true;
-            if (safetyTimer) clearTimeout(safetyTimer);
+            stopRetrying();
             return;
           }
           if (Date.now() - retryStartedAt < INITIAL_BACKFILL_MAX_WAIT_MS) {
             scheduleRetry();
+          } else {
+            stopRetrying();
           }
         }, INITIAL_BACKFILL_RETRY_MS);
       };
@@ -275,12 +393,11 @@ export function useChartInitialLoad({
         }
       }, INITIAL_BACKFILL_TIMEOUT_MS);
 
-      controller.signal.addEventListener("abort", () => {
-        stoppedRetrying = true;
-        if (retryTimer) clearTimeout(retryTimer);
-        if (safetyTimer) clearTimeout(safetyTimer);
+      abortListener = () => {
+        stopRetrying();
         if (fallbackClearTimer) clearTimeout(fallbackClearTimer);
-      });
+      };
+      controller.signal.addEventListener("abort", abortListener, { once: true });
     }
 
     markPerf("chart.initialLoad.latest.request", { exchange: ex, marketType: mt, symbol: sym, interval: intv, limit: 5 });

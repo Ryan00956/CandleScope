@@ -85,7 +85,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
 from app.core.executors import run_storage
-from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_policy import is_custom_interval, parse_interval_ms
 from app.data_engine.market_data.models import MarketStreamKey
 
 from .aggregator_bridge import AggregatorBridge
@@ -107,6 +107,7 @@ from .models import (
     DataEvent,
     DataEventType,
     EventCallback,
+    MissingRange,
     QueryResult,
     SeriesKey,
     StorageBackend,
@@ -227,6 +228,7 @@ class DataManager:
             "persisted_signals": 0,
         }
         self._backfill_trigger: BackfillTrigger | None = None
+        self._backfill_suppression_lookup: Any | None = None
 
         # ── BarAggregator (L1–L5) ───────────────────────────
         self.bar_aggregator = BarAggregator(BarAggregatorConfig())
@@ -491,6 +493,26 @@ class DataManager:
 
         return sorted(item for item in series if item[2] and item[3])
 
+    def gap_audit_tail_series(self) -> list[tuple[str, str, str, str]]:
+        """Return live/prewarm series whose closed tail should stay current."""
+        series: set[tuple[str, str, str, str]] = set()
+        for exchange, market_type, symbol in self.prewarm_targets():
+            for interval in self.prewarm_intervals():
+                series.add((
+                    exchange.strip().lower(),
+                    self._normalize_market_type(market_type),
+                    symbol.upper().strip(),
+                    interval,
+                ))
+        for exchange, market_type, symbol, interval in self.bar_aggregator.get_targets():
+            series.add((
+                exchange.strip().lower(),
+                self._normalize_market_type(market_type),
+                symbol.upper().strip(),
+                interval,
+            ))
+        return sorted(item for item in series if item[2] and item[3])
+
     def set_subscription_service(self, service: Any | None) -> None:
         """Attach the runtime-owned subscription service."""
         self._subscriptions = service
@@ -545,6 +567,39 @@ class DataManager:
             )
 
         self.coordinator.set_gap_handler(_handle_ingestion_gap)
+
+    def set_backfill_suppression_lookup(self, lookup: Any | None) -> None:
+        """Inject a read-only, non-blocking ledger suppression lookup."""
+        if lookup is not None and not callable(lookup):
+            raise TypeError("backfill suppression lookup must be callable")
+        self._backfill_suppression_lookup = lookup
+
+    def get_backfill_suppression(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        end_ms: int,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> dict[str, Any] | None:
+        """Return a cached exact/covering repair cooldown, if one exists."""
+        lookup = self._backfill_suppression_lookup
+        if not callable(lookup):
+            return None
+        try:
+            result = lookup(
+                str(symbol or "").strip().upper(),
+                str(interval or "").strip(),
+                int(start_ms),
+                int(end_ms),
+                str(exchange or "binance").strip().lower(),
+                self._normalize_market_type(market_type),
+            )
+        except Exception:
+            logger.exception("Backfill suppression lookup failed")
+            return None
+        return dict(result) if isinstance(result, dict) else None
 
     # ═══════════════════════════════════════════════════════════
     #  Lifecycle
@@ -711,6 +766,11 @@ class DataManager:
             result,
             reason=backfill_reason,
             requester=backfill_requester,
+            submit=(
+                self.query_engine.auto_backfill_default
+                if auto_backfill is None
+                else bool(auto_backfill)
+            ),
         )
 
     def query_latest(
@@ -746,6 +806,11 @@ class DataManager:
             result,
             reason=backfill_reason,
             requester=backfill_requester,
+            submit=(
+                self.query_engine.auto_backfill_default
+                if auto_backfill is None
+                else bool(auto_backfill)
+            ),
         )
 
     def query_before(
@@ -779,6 +844,11 @@ class DataManager:
             result,
             reason=backfill_reason,
             requester=backfill_requester,
+            submit=(
+                self.query_engine.auto_backfill_default
+                if auto_backfill is None
+                else bool(auto_backfill)
+            ),
         )
 
     def _submit_missing_ranges(
@@ -787,14 +857,40 @@ class DataManager:
         *,
         reason: str | None = None,
         requester: str = "query",
+        submit: bool = True,
     ) -> QueryResult:
         """Submit QueryEngine-detected missing ranges via DataManager."""
-        if self._backfill_trigger is None or not result.missing_ranges:
+        if not result.missing_ranges:
             return result
 
+        original_history_state = result.history_state
         submitted = 0
         request_ids: list[str] = []
-        for missing in result.missing_ranges:
+        suppressions: list[dict[str, Any]] = []
+        actionable_missing: list[MissingRange] = []
+        for missing in list(result.missing_ranges):
+            suppression = self.get_backfill_suppression(
+                missing.symbol,
+                missing.interval,
+                missing.start_ms,
+                missing.end_ms,
+                missing.exchange,
+                missing.market_type,
+            )
+            if suppression is not None:
+                suppressions.append({
+                    **suppression,
+                    "symbol": missing.symbol,
+                    "interval": missing.interval,
+                    "exchange": missing.exchange,
+                    "market_type": missing.market_type,
+                    "requested_start_ms": missing.start_ms,
+                    "requested_end_ms": missing.end_ms,
+                })
+                continue
+            actionable_missing.append(missing)
+            if not submit or self._backfill_trigger is None:
+                continue
             demand_reason = reason or self._semantic_reason_for_missing(missing.reason)
             metadata = {
                 "query_reason": missing.reason,
@@ -803,6 +899,22 @@ class DataManager:
                     "end_ms": missing.end_ms,
                 },
             }
+            if (
+                is_custom_interval(result.interval)
+                and result.interval != missing.interval
+                and result.metadata.get("derived_from") == missing.interval
+            ):
+                target = self.query_engine.custom_intervals.project_base_repair_to_target(
+                    symbol=missing.symbol,
+                    target_interval=result.interval,
+                    base_interval=missing.interval,
+                    start_ms=missing.start_ms,
+                    end_ms=missing.end_ms,
+                    exchange=missing.exchange,
+                    market_type=missing.market_type,
+                )
+                if target is not None:
+                    metadata["derived_repair_targets"] = [target]
             try:
                 request_id = self._call_backfill_trigger(
                     missing.symbol,
@@ -830,6 +942,51 @@ class DataManager:
                     missing.end_ms,
                     exc,
                     exc_info=True,
+                )
+
+        if suppressions:
+            # A durable cooldown is an explicit terminal exclusion for the
+            # current request, not an actionable repair gap.  Leaving it in
+            # ``missing_ranges`` makes the API contract (and therefore the
+            # chart) pending forever even though every retry is suppressed.
+            result.missing_ranges = actionable_missing
+            result.has_tail_gap = any(
+                missing.reason == "query_tail_gap"
+                for missing in actionable_missing
+            )
+            result.metadata["backfill_suppressions"] = suppressions
+            retry_deadlines = [
+                int(item["retry_at_ms"])
+                for item in suppressions
+                if item.get("retry_at_ms") is not None
+            ]
+            if retry_deadlines:
+                result.metadata["backfill_retry_at_ms"] = min(retry_deadlines)
+            existing_exclusions = list(result.excluded_ranges)
+            for item in suppressions:
+                existing_exclusions.append({
+                    "start_ms": int(item["requested_start_ms"]),
+                    "end_ms": int(item["requested_end_ms"]),
+                    "disposition": "terminal",
+                    "reason": f"gap_ledger_{item.get('ledger_status') or 'suppressed'}",
+                    "ledger_status": item.get("ledger_status"),
+                    "retry_at_ms": item.get("retry_at_ms"),
+                })
+            result.excluded_ranges = existing_exclusions
+            if not actionable_missing and submitted == 0:
+                # A terminal interior exclusion completes this requested
+                # window, but it is not proof of the series' left boundary.
+                # Preserve a genuinely exhausted result; otherwise keep
+                # pagination state (has_more/next_before_ms) intact.
+                result.history_state = (
+                    "exhausted"
+                    if original_history_state == "exhausted"
+                    else "ready"
+                )
+                result.complete = True
+                result.retryable = False
+                result.terminal_reason = (
+                    f"gap_ledger_{suppressions[0].get('ledger_status') or 'suppressed'}"
                 )
 
         if submitted:
@@ -899,6 +1056,15 @@ class DataManager:
         if self._backfill_trigger is None:
             return False
         market_type = self._normalize_market_type(market_type)
+        if self.get_backfill_suppression(
+            symbol,
+            interval,
+            start_ms,
+            end_ms,
+            exchange,
+            market_type,
+        ) is not None:
+            return False
         self._call_backfill_trigger(
             symbol,
             interval,

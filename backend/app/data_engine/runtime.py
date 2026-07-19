@@ -902,6 +902,14 @@ async def start_data_engine() -> DataEngineRuntime:
                 )
             ),
         )
+        await backfill_coordinator.refresh_suppressions()
+        set_suppression_lookup = getattr(
+            dm,
+            "set_backfill_suppression_lookup",
+            None,
+        )
+        if callable(set_suppression_lookup):
+            set_suppression_lookup(backfill_coordinator.get_repair_suppression)
         dm.set_backfill_trigger(backfill_coordinator.trigger)
         print("[startup] BackfillCoordinator injected ✓")
 
@@ -1050,11 +1058,17 @@ async def _background_gap_audit_loop(
         try:
             get_series = getattr(dm, "gap_audit_series", None)
             if callable(get_series):
+                get_tail_series = getattr(dm, "gap_audit_tail_series", None)
                 report = await backfill_coordinator.audit_storage_series(
                     get_series(),
                     scan_limit=50_000,
                     max_gaps=100,
                     repair=True,
+                    tail_series=(
+                        get_tail_series()
+                        if callable(get_tail_series)
+                        else ()
+                    ),
                 )
             else:
                 report = await backfill_coordinator.audit_storage_gaps(
@@ -1068,23 +1082,29 @@ async def _background_gap_audit_loop(
                 report.queued
                 or report.failed
                 or report.ledger_resolved
+                or report.ledger_requeued
+                or report.ledger_compacted
                 or report.ledger_failed
             ):
                 logger.info(
                     "Background gap audit: %d scanned, %d queued, %d failed; "
-                    "ledger %d scanned, %d resolved, %d failed",
+                    "ledger %d scanned, %d resolved, %d requeued, %d compacted, %d failed",
                     report.scanned,
                     report.queued,
                     report.failed,
                     report.ledger_scanned,
                     report.ledger_resolved,
+                    report.ledger_requeued,
+                    report.ledger_compacted,
                     report.ledger_failed,
                 )
                 print(
                     "[gap-audit] "
                     f"{report.scanned} scanned, {report.queued} queued, "
                     f"{report.failed} failed; ledger {report.ledger_scanned} scanned, "
-                    f"{report.ledger_resolved} resolved, {report.ledger_failed} failed"
+                    f"{report.ledger_resolved} resolved, {report.ledger_requeued} requeued, "
+                    f"{report.ledger_compacted} compacted, "
+                    f"{report.ledger_failed} failed"
                 )
         except asyncio.CancelledError:
             raise

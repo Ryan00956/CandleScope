@@ -441,6 +441,97 @@ def test_legacy_source_empty_for_a_forming_daily_bar_is_reaudited_when_closed(
     assert asyncio.run(coordinator._should_skip_audited_gap(request)) is False
 
 
+def test_source_empty_cache_reopens_after_close_and_fails_closed_while_uncertain(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    daily_open = _ms("2026-07-15T00:00:00")
+    daily_close = _ms("2026-07-15T23:59:59.999")
+    recorded_while_forming_ms = _ms("2026-07-15T08:00:00")
+    still_forming_ms = _ms("2026-07-15T12:00:00")
+    now_after_close_ms = _ms("2026-07-16T00:01:00")
+    request = RepairRequest(
+        symbol="BTCUSDT",
+        interval="1d",
+        start_ms=daily_open,
+        end_ms=daily_close,
+        exchange="binance",
+        market_type="futures",
+        request_id="cached-forming-source-empty",
+    )
+    monkeypatch.setattr(
+        "app.data_engine.storage.gap_ledger._now_ms",
+        lambda: recorded_while_forming_ms,
+    )
+    ledger = GapLedger(tmp_path / "klines.sqlite")
+    ledger.upsert_detected(request)
+    ledger.mark_resolved(request, status="source_empty")
+
+    async def _run() -> None:
+        coordinator = BackfillCoordinator(
+            storage=_EmptyStorage(),
+            bars_backfilled=_ignore,
+            emit_event=_ignore,
+            gap_ledger=ledger,
+        )
+
+        monkeypatch.setattr(
+            "app.data_engine.data_manager.backfill_coordinator.time.time",
+            lambda: still_forming_ms / 1000,
+        )
+        assert await coordinator.refresh_suppressions() == 1
+        forming_suppression = coordinator.get_repair_suppression(
+            "BTCUSDT",
+            "1d",
+            daily_open,
+            daily_close,
+            "binance",
+            "futures",
+        )
+        assert forming_suppression is not None
+        assert forming_suppression["ledger_status"] == "source_empty"
+
+        monkeypatch.setattr(
+            "app.data_engine.data_manager.backfill_coordinator.time.time",
+            lambda: now_after_close_ms / 1000,
+        )
+        assert await coordinator.refresh_suppressions() == 1
+        assert coordinator.get_repair_suppression(
+            "BTCUSDT",
+            "1d",
+            daily_open,
+            daily_close,
+            "binance",
+            "futures",
+        ) is None
+
+        unknown_calendar = BackfillCoordinator(
+            storage=_EmptyStorage(),
+            bars_backfilled=_ignore,
+            emit_event=_ignore,
+            gap_ledger=ledger,
+            history_policy_resolver=lambda _request: HistoryAvailability(
+                calendar_id="missing.session.calendar"
+            ),
+        )
+        assert await unknown_calendar.refresh_suppressions() == 1
+        unknown_suppression = unknown_calendar.get_repair_suppression(
+            "BTCUSDT",
+            "1d",
+            daily_open,
+            daily_close,
+            "binance",
+            "futures",
+        )
+        assert unknown_suppression is not None
+        assert unknown_suppression["ledger_status"] == "source_empty"
+
+        await coordinator.shutdown()
+        await unknown_calendar.shutdown()
+
+    asyncio.run(_run())
+
+
 def test_ledger_storage_reconciliation_closes_a_legacy_full_day_row(tmp_path, monkeypatch) -> None:
     daily_open = _ms("2026-07-15T00:00:00")
     daily_close = _ms("2026-07-15T23:59:59.999")
@@ -570,6 +661,10 @@ def test_gap_audit_automatically_reconciles_contiguous_legacy_ledger_rows(
         exchange="binance",
         market_type="futures",
         request_id="gap-audit-legacy-row",
+    )
+    monkeypatch.setattr(
+        "app.data_engine.storage.gap_ledger._now_ms",
+        lambda: now_after_close_ms - 2 * 86_400_000,
     )
     ledger = GapLedger(tmp_path / "klines.sqlite")
     ledger.upsert_detected(legacy)

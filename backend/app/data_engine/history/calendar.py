@@ -10,8 +10,10 @@ from zoneinfo import ZoneInfo
 from app.data_engine.history.models import TimeRange
 from app.data_engine.interval_policy import (
     add_months,
+    compute_bucket_end_ms,
     compute_bucket_start_ms,
     is_monthly_interval,
+    is_weekly_interval,
     parse_interval_ms,
     parse_monthly_count,
 )
@@ -70,6 +72,69 @@ class TradingCalendar(Protocol):
     def open_segments(
         self, start_ms: int, end_ms: int, interval: str
     ) -> tuple[TimeRange, ...]: ...
+
+
+def expected_bucket_end_ms(
+    calendar: TradingCalendar,
+    open_ms: int,
+    interval: str,
+) -> int:
+    """Return the exclusive close edge for one expected calendar bucket.
+
+    Unknown/third-party calendars retain the natural interval edge.  Built-in
+    session calendars may clamp sub-day tail buckets to the containing session
+    close so a short final candle does not remain forming forever.
+    """
+    width_ms = _interval_width_ms(interval)
+    natural_end_ms = compute_bucket_end_ms(
+        int(open_ms),
+        width_ms,
+        interval=interval,
+    )
+    resolver = getattr(calendar, "bucket_end_ms", None)
+    if not callable(resolver):
+        return natural_end_ms
+    try:
+        resolved = int(resolver(int(open_ms), interval))
+    except (TypeError, ValueError):
+        return natural_end_ms
+    return resolved if resolved > int(open_ms) else natural_end_ms
+
+
+def latest_closed_expected_open_ms(
+    calendar: TradingCalendar,
+    now_ms: int,
+    interval: str,
+    requested_end_ms: int | None = None,
+) -> int | None:
+    """Return the latest expected open whose target bucket is fully closed.
+
+    Session calendars may anchor bars at offsets such as 09:30.  Applying a
+    UTC-aligned closed edge first can therefore include a forming session bar
+    or delay a newly closed one by almost a full interval.
+    """
+    width_ms = parse_interval_ms(interval)
+    if width_ms is None or width_ms <= 0:
+        return None
+    edge_ms = min(
+        int(now_ms),
+        int(requested_end_ms) if requested_end_ms is not None else int(now_ms),
+    )
+    # ``previous_expected_open`` is guaranteed to step from an expected open,
+    # but third-party/always-open implementations need not align an arbitrary
+    # wall-clock value first.  Resolve the initial candidate through the range
+    # contract, then use strict stepping only between canonical opens.
+    candidate = calendar.last_expected_open(
+        max(0, edge_ms - _SEARCH_HORIZON_MS),
+        edge_ms,
+        interval,
+    )
+    while candidate is not None:
+        bucket_end_ms = expected_bucket_end_ms(calendar, candidate, interval)
+        if bucket_end_ms <= int(now_ms):
+            return candidate
+        candidate = calendar.previous_expected_open(candidate, interval)
+    return None
 
 
 class AlwaysOpenCalendar:
@@ -279,6 +344,42 @@ class SessionCalendar:
             else:
                 merged.append((segment_start, segment_end))
         return tuple(merged)
+
+    def bucket_end_ms(self, open_ms: int, interval: str) -> int:
+        """Return a session-aware exclusive bucket end for an expected open."""
+        width_ms = _interval_width_ms(interval)
+        # Coarse session bars expose the first *actual* session open inside a
+        # canonical weekly/monthly bucket.  A holiday or DST transition can
+        # move that timestamp away from the canonical grid, so stepping from
+        # the exposed open would also move the close edge.  Close coarse bars
+        # on the shared UTC grid while retaining the real open timestamp.
+        bucket_origin_ms = (
+            compute_bucket_start_ms(
+                int(open_ms),
+                width_ms,
+                interval=interval,
+            )
+            if is_weekly_interval(interval) or is_monthly_interval(interval)
+            else int(open_ms)
+        )
+        natural_end_ms = compute_bucket_end_ms(
+            bucket_origin_ms,
+            width_ms,
+            interval=interval,
+        )
+        # Daily/multi-day/monthly buckets intentionally retain their natural
+        # calendar edge; only intraday session tails can be shorter than the
+        # nominal interval width.
+        if width_ms >= _DAY_MS or is_monthly_interval(interval):
+            return natural_end_ms
+        for session_start_ms, session_end_ms in self._session_segments(
+            int(open_ms),
+            natural_end_ms,
+            lookback_ms=width_ms,
+        ):
+            if session_start_ms <= int(open_ms) < session_end_ms:
+                return min(natural_end_ms, session_end_ms)
+        return natural_end_ms
 
     def _coarse_expected_opens(
         self, start_ms: int, end_ms: int, interval: str, width_ms: int

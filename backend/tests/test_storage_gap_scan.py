@@ -89,3 +89,75 @@ def test_scan_klines_gaps_resume_cursor_reaches_gap_after_first_page(tmp_path) -
         (gap["reason"], gap["start_ms"], gap["end_ms"])
         for gap in second["gaps"]
     ] == [("interior_gap", 4 * minute, 4 * minute)]
+
+
+def test_scan_klines_gaps_reports_closed_tail_only_with_explicit_end(tmp_path) -> None:
+    klines_repo.KLINES_DB_PATH = tmp_path / "klines.sqlite"
+    klines_repo.init_klines_storage()
+    minute = 60_000
+    klines_repo.upsert_klines(
+        "BTCUSDT",
+        "1m",
+        [_row(value, value + minute - 1) for value in (0, minute)],
+        source="test",
+    )
+
+    interior_only = klines_repo.scan_klines_gaps("BTCUSDT", "1m")
+    through_closed_tail = klines_repo.scan_klines_gaps(
+        "BTCUSDT",
+        "1m",
+        end_ms=3 * minute,
+    )
+
+    assert interior_only["gaps"] == []
+    assert [
+        (gap["reason"], gap["start_ms"], gap["end_ms"])
+        for gap in through_closed_tail["gaps"]
+    ] == [("tail_gap", 2 * minute, 3 * minute)]
+
+
+def test_exact_range_verifier_rejects_equal_count_off_grid_replacement(tmp_path) -> None:
+    klines_repo.KLINES_DB_PATH = tmp_path / "klines.sqlite"
+    klines_repo.init_klines_storage()
+    minute = 60_000
+    klines_repo.upsert_klines(
+        "BTCUSDT",
+        "1m",
+        [
+            _row(open_time, open_time + minute - 1)
+            for open_time in (0, minute, 2 * minute)
+        ],
+        source="test",
+    )
+    adapter = klines_repo.KlinesRepoAdapter()
+
+    assert adapter.verify_contiguous_range(
+        "BTCUSDT",
+        "1m",
+        0,
+        2 * minute,
+    )["verified_contiguous"] is True
+
+    klines_repo.delete_klines(
+        "BTCUSDT",
+        "1m",
+        start_ms=minute,
+        end_ms=minute,
+    )
+    klines_repo.upsert_klines(
+        "BTCUSDT",
+        "1m",
+        [_row(90_000, 149_999)],
+        source="test",
+    )
+
+    assert adapter.count_bars("BTCUSDT", "1m", 0, 2 * minute) == 3
+    result = adapter.verify_contiguous_range(
+        "BTCUSDT",
+        "1m",
+        0,
+        2 * minute,
+    )
+    assert result["verified_contiguous"] is False
+    assert result["expected_open_time"] == minute
+    assert result["actual_open_time"] == 90_000

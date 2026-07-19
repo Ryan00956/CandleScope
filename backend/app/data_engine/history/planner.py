@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import time
 
-from app.data_engine.history.calendar import AlwaysOpenCalendar, TradingCalendar
+from app.data_engine.history.calendar import (
+    AlwaysOpenCalendar,
+    TradingCalendar,
+    latest_closed_expected_open_ms,
+)
 from app.data_engine.history.models import (
     BoundaryReason,
     HistoryAvailability,
@@ -13,11 +17,6 @@ from app.data_engine.history.models import (
     HistoryRequest,
     TimeBound,
     TimeRange,
-)
-from app.data_engine.interval_policy import (
-    compute_bucket_start_ms,
-    last_closed_bar_open_ms,
-    parse_interval_ms,
 )
 
 
@@ -150,19 +149,16 @@ class HistoryRequestPlanner:
         # out of expected/fetch work without turning it into a durable terminal
         # series boundary.
         if request.series.channel == "kline":
-            last_closed_ms = last_closed_bar_open_ms(
-                current_ms,
+            requested_end_open_ms = selected_calendar.last_expected_open(
+                effective_start,
+                effective_end,
                 request.interval,
             )
-            interval_ms = parse_interval_ms(request.interval)
-            requested_end_open_ms = (
-                compute_bucket_start_ms(
-                    effective_end,
-                    interval_ms,
-                    interval=request.interval,
-                )
-                if interval_ms is not None and interval_ms > 0
-                else None
+            last_closed_ms = latest_closed_expected_open_ms(
+                selected_calendar,
+                current_ms,
+                request.interval,
+                requested_end_ms=requested_end_open_ms,
             )
             if requested_end_open_ms is not None:
                 # All later planner/calendar work is expressed in target-bar
@@ -171,9 +167,8 @@ class HistoryRequestPlanner:
                 # market-closed millisecond range.
                 effective_end = requested_end_open_ms
             if (
-                last_closed_ms is not None
-                and requested_end_open_ms is not None
-                and requested_end_open_ms > last_closed_ms
+                requested_end_open_ms is not None
+                and (last_closed_ms is None or requested_end_open_ms > last_closed_ms)
             ):
                 # A full-day wall-clock edge (for example 23:59:59.999) has
                 # the same target open as that just-closed daily bar.  Only
@@ -193,7 +188,11 @@ class HistoryRequestPlanner:
                         else BoundaryReason.MARKET_CLOSED
                     )
                     forming_bound = TimeBound(
-                        last_closed_ms,
+                        (
+                            last_closed_ms
+                            if last_closed_ms is not None
+                            else requested_end_open_ms
+                        ),
                         tail_reason,
                         revision=availability.revision,
                         dynamic=True,
@@ -204,7 +203,11 @@ class HistoryRequestPlanner:
                         tail_reason,
                         forming_bound,
                     ))
-                effective_end = min(effective_end, last_closed_ms)
+                effective_end = (
+                    min(effective_end, last_closed_ms)
+                    if last_closed_ms is not None
+                    else effective_start - 1
+                )
 
         if effective_start > effective_end:
             if not exclusions:

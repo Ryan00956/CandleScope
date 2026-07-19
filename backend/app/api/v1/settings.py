@@ -12,7 +12,6 @@ import asyncio
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -564,12 +563,16 @@ async def storage_health(request: Request) -> dict:
         else None
     )
     open_gaps = snapshot.get("gap_ledger_open") or []
+    ledger_health = snapshot.get("gap_ledger_health") or {}
     return {
         "status": "ok",
         "targets": _call_runtime_list(dm, "prewarm_targets"),
         "intervals": _call_runtime_list(dm, "prewarm_intervals"),
         "audit_series": _call_runtime_list(dm, "gap_audit_series"),
-        "open_gap_count": len(open_gaps),
+        "open_gap_count": int(ledger_health.get("open_total", len(open_gaps))),
+        "open_gap_by_status": ledger_health.get("by_status", {}),
+        "open_gap_age_buckets": ledger_health.get("age_buckets", {}),
+        "oldest_open_gap_at": ledger_health.get("oldest_open_at"),
         "backfill": snapshot,
         "backfill_engine": engine_snapshot,
     }

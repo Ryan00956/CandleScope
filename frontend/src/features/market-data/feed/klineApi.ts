@@ -9,6 +9,7 @@ import type { TransportKlineResponse } from "../../../services/apiPayloadParsers
 import type {
   HistoryAvailabilityState,
   HistoryExcludedRange,
+  HistoryMissingRange,
   KlineApi,
   KlineFetchResult,
   KlineHistoryRequestOptions,
@@ -73,6 +74,40 @@ function optionalExcludedRanges(value: unknown): HistoryExcludedRange[] | undefi
       throw new TypeError(`excluded_ranges[${index}] must contain a valid start_ms/end_ms range`);
     }
     const reason = optionalNullableString(record.reason, `excluded_ranges[${index}].reason`);
+    const retryAtMs = optionalNullableNonNegativeNumber(
+      record.retry_at_ms,
+      `excluded_ranges[${index}].retry_at_ms`,
+    );
+    return {
+      ...record,
+      start_ms: startMs,
+      end_ms: endMs,
+      ...(reason == null ? {} : { reason }),
+      ...(retryAtMs === undefined ? {} : { retry_at_ms: retryAtMs }),
+    };
+  });
+}
+
+function optionalMissingRanges(value: unknown): HistoryMissingRange[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new TypeError("missing_ranges must be an array");
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new TypeError(`missing_ranges[${index}] must be an object`);
+    }
+    const record = item as Record<string, unknown>;
+    const startMs = optionalNullableNonNegativeNumber(
+      record.start_ms,
+      `missing_ranges[${index}].start_ms`,
+    );
+    const endMs = optionalNullableNonNegativeNumber(
+      record.end_ms,
+      `missing_ranges[${index}].end_ms`,
+    );
+    if (startMs == null || endMs == null || endMs < startMs) {
+      throw new TypeError(`missing_ranges[${index}] must contain a valid start_ms/end_ms range`);
+    }
+    const reason = optionalNullableString(record.reason, `missing_ranges[${index}].reason`);
     return {
       ...record,
       start_ms: startMs,
@@ -101,7 +136,10 @@ function toMarketDataResult(result: TransportKlineResponse): KlineFetchResult {
     result.availability_revision,
     "availability_revision",
   );
+  const retryAtMs = optionalNullableNonNegativeNumber(result.retry_at_ms, "retry_at_ms");
   const excludedRanges = optionalExcludedRanges(result.excluded_ranges);
+  const missingRanges = optionalMissingRanges(result.missing_ranges);
+  const verifiedContiguous = optionalBoolean(result.verified_contiguous, "verified_contiguous");
   return {
     ...result,
     data,
@@ -112,7 +150,10 @@ function toMarketDataResult(result: TransportKlineResponse): KlineFetchResult {
     ...(earliestAvailableMs === undefined ? {} : { earliest_available_ms: earliestAvailableMs }),
     ...(nextBeforeMs === undefined ? {} : { next_before_ms: nextBeforeMs }),
     ...(availabilityRevision === undefined ? {} : { availability_revision: availabilityRevision }),
+    ...(retryAtMs === undefined ? {} : { retry_at_ms: retryAtMs }),
     ...(excludedRanges === undefined ? {} : { excluded_ranges: excludedRanges }),
+    ...(missingRanges === undefined ? {} : { missing_ranges: missingRanges }),
+    ...(verifiedContiguous === undefined ? {} : { verified_contiguous: verifiedContiguous }),
   };
 }
 

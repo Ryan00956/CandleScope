@@ -39,11 +39,9 @@ from app.data_engine.history.calendar import (
     AlwaysOpenCalendar,
     CalendarRegistry,
     TradingCalendar,
+    latest_closed_expected_open_ms,
 )
-from app.data_engine.interval_policy import (
-    last_closed_bar_open_ms,
-    parse_interval_ms,
-)
+from app.data_engine.interval_policy import parse_interval_ms
 
 from ..ingestion.metrics import LayerMetrics
 from .config import BackfillConfig
@@ -304,9 +302,11 @@ class GapDetector:
         # forming bucket eligible for historical repair.  Preserve an older
         # ingestion reference while capping newer references at the latest
         # fully closed target bucket.
-        last_closed_ms = last_closed_bar_open_ms(
+        last_closed_ms = latest_closed_expected_open_ms(
+            calendar,
             int(time.time() * 1000),
             interval,
+            requested_end_ms=reference_ms,
         )
         if last_closed_ms is None:
             return []

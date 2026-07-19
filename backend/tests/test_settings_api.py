@@ -146,6 +146,12 @@ class _BackfillCoordinator:
             "active": [],
             "pending": [],
             "gap_ledger_open": [{"symbol": "BTCUSDT", "interval": "1m"}],
+            "gap_ledger_health": {
+                "open_total": 173,
+                "by_status": {"queued": 170, "partial": 3},
+                "age_buckets": {"lt_5m": 3, "gte_1d": 170},
+                "oldest_open_at": 123,
+            },
             "recent_outcomes": {},
         }
 
@@ -206,7 +212,10 @@ def test_storage_health_returns_backfill_snapshot() -> None:
         ["binance", "spot", "BTCUSDT", "1m"],
         ["okx", "spot", "BTC-USDT", "1m"],
     ]
-    assert payload["open_gap_count"] == 1
+    assert payload["open_gap_count"] == 173
+    assert payload["open_gap_by_status"] == {"queued": 170, "partial": 3}
+    assert payload["open_gap_age_buckets"] == {"lt_5m": 3, "gte_1d": 170}
+    assert payload["oldest_open_gap_at"] == 123
     assert payload["backfill"]["submitted"] == 3
     assert (
         payload["backfill_engine"]["fetcher"]["exchange_rate_limits"]

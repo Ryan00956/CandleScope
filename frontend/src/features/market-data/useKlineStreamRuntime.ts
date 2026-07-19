@@ -19,6 +19,8 @@ const WS_MAX_RECONNECT_ATTEMPTS = 20;
 const WS_PING_INTERVAL = 30_000;
 const WS_INITIAL_FALLBACK_DELAY = 4_000;
 const POLLING_INTERVAL_MS = 1_000;
+const PENDING_REPAIR_POLL_INTERVAL_MS = 3_000;
+const HELD_WINDOW_GAP_SCAN_INTERVAL_MS = 15_000;
 const WS_RECOVERY_COUNT_BACK = 1_500;
 const TAB_RECOVERY_MIN_HIDDEN_MS = 15_000;
 
@@ -38,6 +40,12 @@ export interface UseKlineStreamRuntimeOptions {
   seriesDataFeed: SeriesDataFeed;
   commitPatchedChartData: CommitChartData;
   patchCacheTick: PatchCacheTick;
+  getCacheRows(series: {
+    exchange: ExchangeId;
+    marketType: MarketType;
+    symbol: SymbolCode;
+    interval: IntervalString;
+  }): KlineBar[];
   updateLastPrice(candidate: KlineBar, interval: IntervalString): void;
   updateRealtimePrice(closePrice: number): void;
   handleBackfillCompleted(message: BackfillCompletedMessage): boolean;
@@ -53,6 +61,7 @@ export function useKlineStreamRuntime({
   seriesDataFeed,
   commitPatchedChartData,
   patchCacheTick,
+  getCacheRows,
   updateLastPrice,
   updateRealtimePrice,
   handleBackfillCompleted,
@@ -71,7 +80,10 @@ export function useKlineStreamRuntime({
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let pendingRepairInterval: ReturnType<typeof setInterval> | null = null;
+    let heldWindowGapScanInterval: ReturnType<typeof setInterval> | null = null;
     let pollingInFlight = false;
+    let pendingRepairPollingInFlight = false;
     let reconnectDelay = WS_RECONNECT_BASE_DELAY;
     let reconnectAttempts = 0;
 
@@ -102,7 +114,7 @@ export function useKlineStreamRuntime({
             { exchange, marketType, symbol, interval: currentIntv },
             { limit: 2, source: "polling-latest", commit: "patch-active" },
           );
-          if (!result?.data?.length) return;
+          if (!active || result.stale || result.active === false || !result?.data?.length) return;
 
           const latestTick = result.data[result.data.length - 1];
           if (latestTick) updateLastPrice(latestTick, currentIntv);
@@ -184,9 +196,24 @@ export function useKlineStreamRuntime({
                   { countBack: WS_RECOVERY_COUNT_BACK, source: "ws-reconnect-history" },
                 )
                   .then((result) => {
-                    if (!active || !result?.data?.length) return;
+                    if (
+                      !active
+                      || result.stale
+                      || result.active === false
+                      || !result?.data?.length
+                    ) return;
                     const latest = result.data[result.data.length - 1];
                     if (latest) updateLastPrice(latest, currentIntv);
+                    void seriesDataFeed.repairVisibleGaps(
+                      { exchange, marketType, symbol, interval: currentIntv },
+                      result.data,
+                      null,
+                      { source: "ws-reconnect-gap-planner" },
+                    );
+                    void seriesDataFeed.pollPendingRepairs(
+                      { exchange, marketType, symbol, interval: currentIntv },
+                      { force: true },
+                    );
                     console.log(`[WS-Recovery] Reloaded ${result.data.length} bars after reconnect`);
                   })
                   .catch((err) => {
@@ -259,6 +286,32 @@ export function useKlineStreamRuntime({
 
     connect();
 
+    // Query-triggered repairs are intentionally internal backend work and may
+    // not emit a browser completion event. Poll only exact ranges already
+    // known to be pending; this never rescans or reloads the whole window.
+    pendingRepairInterval = setInterval(() => {
+      if (!active || pendingRepairPollingInFlight) return;
+      const currentIntv = intervalRef.current;
+      const series = { exchange, marketType, symbol, interval: currentIntv };
+      if (seriesDataFeed.pendingRepairCount(series) === 0) return;
+      pendingRepairPollingInFlight = true;
+      void seriesDataFeed.pollPendingRepairs(series, { maxRequests: 2 })
+        .finally(() => {
+          pendingRepairPollingInFlight = false;
+        });
+    }, PENDING_REPAIR_POLL_INTERVAL_MS);
+
+    heldWindowGapScanInterval = setInterval(() => {
+      if (!active) return;
+      const currentIntv = intervalRef.current;
+      const series = { exchange, marketType, symbol, interval: currentIntv };
+      const heldRows = getCacheRows(series);
+      if (heldRows.length < 2) return;
+      void seriesDataFeed.repairVisibleGaps(series, heldRows, null, {
+        source: "ws-held-window-gap-scan",
+      });
+    }, HELD_WINDOW_GAP_SCAN_INTERVAL_MS);
+
     const initialFallbackTimer = setTimeout(() => {
       if (active && !pollInterval && !subscription?.isOpen()) {
         startPolling();
@@ -274,6 +327,8 @@ export function useKlineStreamRuntime({
       }
       stopPing();
       if (pollInterval) clearInterval(pollInterval);
+      if (pendingRepairInterval) clearInterval(pendingRepairInterval);
+      if (heldWindowGapScanInterval) clearInterval(heldWindowGapScanInterval);
       if (subscription) {
         subscription.close();
       }
@@ -284,6 +339,7 @@ export function useKlineStreamRuntime({
   }, [
     commitPatchedChartData,
     exchange,
+    getCacheRows,
     handleBackfillCompleted,
     intervalRef,
     marketType,
@@ -301,6 +357,7 @@ export function useKlineStreamRuntime({
 
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
+    let active = true;
     let hiddenAt: number | null = null;
 
     const handleVisibilityChange = () => {
@@ -325,9 +382,24 @@ export function useKlineStreamRuntime({
         { countBack, source: "tab-visibility-recovery" },
       )
         .then((result) => {
-          if (!result?.data?.length) return;
+          if (
+            !active
+            || result.stale
+            || result.active === false
+            || !result?.data?.length
+          ) return;
           const latest = result.data.at(-1);
           if (latest) updateLastPrice(latest, currentIntv);
+          void seriesDataFeed.repairVisibleGaps(
+            { exchange, marketType, symbol, interval: currentIntv },
+            result.data,
+            null,
+            { source: "tab-recovery-gap-planner" },
+          );
+          void seriesDataFeed.pollPendingRepairs(
+            { exchange, marketType, symbol, interval: currentIntv },
+            { force: true },
+          );
         })
         .catch((err) => {
           console.warn("[TabRecovery] Tail catch-up failed:", err);
@@ -335,6 +407,9 @@ export function useKlineStreamRuntime({
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      active = false;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [exchange, intervalRef, marketType, seriesDataFeed, symbol, updateLastPrice]);
 }

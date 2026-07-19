@@ -629,10 +629,13 @@ def aggregate_rows_by_month(
             # A newer component implicitly confirms any older component whose
             # explicit close event was missed, but a partial target bucket is
             # still forming until that component reaches its calendar end.
-            "is_closed": aggregate_tail_is_closed(
-                rows,
-                bucket_end_seconds=bucket_end,
-                source_interval_seconds=source_interval_seconds,
+            "is_closed": bool(
+                enhanced_complete
+                and aggregate_tail_is_closed(
+                    rows,
+                    bucket_end_seconds=bucket_end,
+                    source_interval_seconds=source_interval_seconds,
+                )
             ),
         })
     return result

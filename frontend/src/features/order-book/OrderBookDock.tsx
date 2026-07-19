@@ -32,6 +32,8 @@ import {
 export interface OrderBookDockProps {
   runtime: OrderBookRuntime;
   height: number;
+  tradeFlowEnabled?: boolean;
+  onOpenTradeFlow?(): void;
 }
 
 const STATUS_LABELS: Record<OrderBookConnectionStatus, string> = {
@@ -230,7 +232,7 @@ function EmptyState({
   );
 }
 
-function OrderBookDock({ runtime, height }: OrderBookDockProps) {
+function OrderBookDock({ runtime, height, tradeFlowEnabled = false, onOpenTradeFlow }: OrderBookDockProps) {
   const { view, actions } = runtime;
   const snapshot = useSyncExternalStore(
     view.store.subscribe,
@@ -270,7 +272,18 @@ function OrderBookDock({ runtime, height }: OrderBookDockProps) {
             {collapsed ? <polyline points="6 15 12 9 18 15" /> : <polyline points="6 9 12 15 18 9" />}
           </svg>
         </button>
-        <span className="ob-title">订单簿</span>
+        {onOpenTradeFlow ? (
+          <div className="market-dock-tabs" role="tablist" aria-label="市场微观结构视图">
+            <button type="button" role="tab" aria-selected className="active">盘口</button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={false}
+              className={tradeFlowEnabled ? "has-live-workspace" : ""}
+              onClick={onOpenTradeFlow}
+            >成交</button>
+          </div>
+        ) : <span className="ob-title">订单簿</span>}
         {!collapsed && <span className="ob-symbol">{symbol || view.identity.symbol}</span>}
         <span className={`ob-status ob-status-${snapshot.status}`} title={snapshot.message || snapshot.error || STATUS_LABELS[snapshot.status]}>
           <span className="ob-status-dot" aria-hidden="true" />

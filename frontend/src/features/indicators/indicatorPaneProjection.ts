@@ -23,10 +23,15 @@ export interface IndicatorSubPane {
   label: string;
   lines: IndicatorLine[];
   owner?: {
-    kind: "indicator" | "market-study";
+    kind: "indicator" | "market-study" | "trade-flow";
     id: string;
   };
-  dataMarketPane?: "funding-rate" | "open-interest" | "liquidations";
+  dataMarketPane?:
+    | "funding-rate"
+    | "open-interest"
+    | "liquidations"
+    | "order-flow-cvd"
+    | "order-flow-delta";
   legendItems?: readonly IndicatorPaneLegendItem[];
   pointMetadata?: readonly IndicatorPanePointMetadata[];
   pointMetadataFallback?: "latest" | "none";

@@ -9,6 +9,8 @@ import {
   MIN_WATCHLIST_PANE_HEIGHT,
 } from "../features/order-book/orderBookPreferencesStore.js";
 import type { OrderBookRuntime } from "../features/order-book/orderBookTypes.js";
+import TradeFlowDock from "../features/trade-flow/TradeFlowDock.js";
+import type { TradeFlowRuntime } from "../features/trade-flow/tradeFlowTypes.js";
 import WatchlistSidebar from "../features/watchlist/WatchlistSidebar.js";
 import type { WatchlistSidebarProps } from "../features/watchlist/WatchlistSidebar.js";
 import {
@@ -22,13 +24,14 @@ type RailCssVars = CSSProperties & Record<`--${string}`, string | number>;
 export interface RightMarketRailProps {
   watchlist: WatchlistSidebarProps;
   orderBook: OrderBookRuntime;
+  tradeFlow: TradeFlowRuntime;
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function RightMarketRail({ watchlist, orderBook }: RightMarketRailProps) {
+function RightMarketRail({ watchlist, orderBook, tradeFlow }: RightMarketRailProps) {
   const railRef = useRef<HTMLElement | null>(null);
   const widthStartRef = useRef<{ x: number; width: number } | null>(null);
   const heightStartRef = useRef<{ y: number; height: number } | null>(null);
@@ -191,7 +194,7 @@ function RightMarketRail({ watchlist, orderBook }: RightMarketRailProps) {
                 onKeyDown={handleSeparatorKeyDown}
                 role="separator"
                 tabIndex={0}
-                aria-label="调整自选与订单簿高度"
+                aria-label="调整自选与市场微观结构面板高度"
                 aria-orientation="horizontal"
                 aria-valuemin={MIN_ORDER_BOOK_HEIGHT}
                 aria-valuemax={maximumDockHeight}
@@ -200,7 +203,22 @@ function RightMarketRail({ watchlist, orderBook }: RightMarketRailProps) {
                 <span aria-hidden="true" />
               </div>
             )}
-            <OrderBookDock runtime={orderBook} height={dockHeight} />
+            {tradeFlow.view.preferences.dockView === "order-book" ? (
+              <OrderBookDock
+                runtime={orderBook}
+                height={dockHeight}
+                tradeFlowEnabled={tradeFlow.status.enabled}
+                onOpenTradeFlow={() => tradeFlow.actions.setDockView("tape")}
+              />
+            ) : (
+              <TradeFlowDock
+                runtime={tradeFlow}
+                height={dockHeight}
+                collapsed={orderBook.view.preferences.collapsed}
+                onCollapsedChange={orderBook.actions.setCollapsed}
+                onOpenOrderBook={() => tradeFlow.actions.setDockView("order-book")}
+              />
+            )}
           </>
         )}
       </aside>

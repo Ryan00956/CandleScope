@@ -12,6 +12,7 @@ import { useDrawingRuntime } from "../features/drawings/useDrawingRuntime";
 import { usePriceScalePrefs } from "../features/settings/priceScalePrefsRuntime";
 import { useWatchlistRuntime } from "../features/watchlist/useWatchlistRuntime";
 import { useOrderBookRuntime } from "../features/order-book/useOrderBookRuntime";
+import { useTradeFlowRuntime } from "../features/trade-flow/useTradeFlowRuntime";
 import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime";
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime";
 import AppProviders from "./AppProviders";
@@ -96,6 +97,17 @@ export default function App() {
       symbol: chartSession.view.symbol,
     },
     railCollapsed: watchlist.view.layout.sidebarCollapsed,
+  });
+  const tradeFlow = useTradeFlowRuntime({
+    identity: {
+      exchange: chartSession.view.exchange,
+      marketType: chartSession.view.marketType,
+      symbol: chartSession.view.symbol,
+    },
+    interval: chartSession.view.interval,
+    seriesStore: marketData.view.seriesStore,
+    buyColor: settings.upColor,
+    sellColor: settings.downColor,
   });
   useWatchlistFullCacheRuntime({
     watchlists: watchlist.view.watchlists,
@@ -224,6 +236,7 @@ export default function App() {
         priceScale={priceScaleRuntime}
         watchlist={watchlist}
         orderBook={orderBook}
+        tradeFlow={tradeFlow}
         exportFlow={exportFlow}
         alerts={alertsRuntime}
       />

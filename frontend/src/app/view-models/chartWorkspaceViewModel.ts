@@ -34,6 +34,9 @@ export function buildChartWorkspaceViewModel({
   orderBookActions,
   orderBookStatus,
   orderBookView,
+  tradeFlowActions,
+  tradeFlowStatus,
+  tradeFlowView,
 }: AppShellViewModelContext): ChartWorkspaceProps {
   const {
     symbol,
@@ -158,6 +161,10 @@ export function buildChartWorkspaceViewModel({
           }
           if (owner.kind === "market-study" && isMarketMetricId(owner.id)) {
             advancedMarketActions.removeMarketStudy(owner.id);
+            return;
+          }
+          if (owner.kind === "trade-flow") {
+            tradeFlowActions.setEnabled(false);
           }
         },
         invertScale: priceScaleView.invertScale,
@@ -185,6 +192,11 @@ export function buildChartWorkspaceViewModel({
       view: orderBookView,
       actions: orderBookActions,
       status: orderBookStatus,
+    },
+    tradeFlow: {
+      view: tradeFlowView,
+      actions: tradeFlowActions,
+      status: tradeFlowStatus,
     },
   };
 }

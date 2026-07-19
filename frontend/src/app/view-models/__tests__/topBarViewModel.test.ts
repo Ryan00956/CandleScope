@@ -7,6 +7,7 @@ import { buildTopBarViewModel } from "../topBarViewModel.js";
 type TopBarContext = Parameters<typeof buildTopBarViewModel>[0];
 
 test("top bar indicator count includes added market-data studies", () => {
+  const toggleOrderFlow = () => undefined;
   const context = structuralMock<TopBarContext>({
     advancedMarketView: {
       marketStudies: [
@@ -30,10 +31,20 @@ test("top bar indicator count includes added market-data studies", () => {
       exchangeCatalog: {},
     },
     settingsActions: {},
+    tradeFlowActions: {
+      toggleEnabled: toggleOrderFlow,
+    },
+    tradeFlowView: {
+      preferences: {
+        enabled: true,
+      },
+    },
     watchlistActions: {},
     watchlistView: { watchlists: [] },
   });
 
   const model = buildTopBarViewModel(context);
   assert.equal(model.controls.activeIndicatorCount, 3);
+  assert.equal(model.controls.orderFlowEnabled, true);
+  assert.equal(model.controls.onToggleOrderFlow, toggleOrderFlow);
 });

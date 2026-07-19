@@ -47,6 +47,8 @@ import {
 } from "../chart-adapter/paneManager";
 import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRenderer";
 import { renderMarkers } from "../chart-adapter/markerRenderer";
+import { attachExternalMarkerSource } from "../chart-adapter/externalMarkerSource";
+import type { ExternalMarkerSource } from "../chart-adapter/externalMarkerSource.js";
 import { renderBgcolors } from "../chart-adapter/bgcolorPrimitiveRenderer";
 import {
   buildMainSeriesProjectionPatch,
@@ -264,6 +266,7 @@ export interface SingleChartPanesProps {
   mainOverlayLines?: IndicatorLine[];
   subPanes?: IndicatorSubPane[];
   indicatorMarkers?: IndicatorMarker[];
+  externalMarkerSource?: ExternalMarkerSource | null;
   indicatorFills?: IndicatorFill[];
   indicatorHlines?: IndicatorHLine[];
   indicatorBgcolors?: IndicatorBgColor[];
@@ -1143,6 +1146,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   mainOverlayLines = [],
   subPanes = [],
   indicatorMarkers = [],
+  externalMarkerSource = null,
   indicatorFills = [],
   indicatorHlines = [],
   indicatorBgcolors = [],
@@ -1436,6 +1440,20 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const resolvedDescriptor = getChartTypeDescriptor(resolvedChartType);
   const resolvedAxisMode = resolvedDescriptor.axisMode;
   const usesDerivedAxis = resolvedAxisMode === "derived-ordinal";
+  useEffect(() => {
+    const series = mainSeriesRef.current;
+    if (!externalMarkerSource || !series || usesDerivedAxis) return undefined;
+    try {
+      return attachExternalMarkerSource({
+        source: externalMarkerSource,
+        targetSeries: series,
+        recordPerfEvent,
+      });
+    } catch (error) {
+      console.warn("SingleChartPanes: failed to attach external marker source:", error);
+      return undefined;
+    }
+  }, [datasetKey, drawingSeriesGeneration, externalMarkerSource, usesDerivedAxis]);
   const drawingAnchorMode = resolvedDescriptor.drawingAnchorMode;
   const supportsDrawingFeatures = supportsDrawingAnchorMode(drawingAnchorMode);
   const effectiveDrawingTool = drawingToolForAnchorMode(drawingAnchorMode, drawingTool);

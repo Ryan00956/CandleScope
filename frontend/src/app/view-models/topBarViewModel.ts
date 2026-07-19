@@ -11,6 +11,8 @@ export function buildTopBarViewModel({
   sessionActions,
   sessionView,
   settingsActions,
+  tradeFlowActions,
+  tradeFlowView,
   watchlistActions,
   watchlistView,
 }: AppShellViewModelContext): TopBarProps {
@@ -45,6 +47,8 @@ export function buildTopBarViewModel({
       onToggleAlertPanel: alertsActions.togglePanel,
       activeIndicatorCount: indicatorView.activeIndicators.length
         + advancedMarketView.marketStudies.filter((study) => study.added).length,
+      orderFlowEnabled: tradeFlowView.preferences.enabled,
+      onToggleOrderFlow: tradeFlowActions.toggleEnabled,
     },
     marketSummary: { displayData, isUp, priceChange, amplitude },
     advancedMarketData: advancedMarketView,

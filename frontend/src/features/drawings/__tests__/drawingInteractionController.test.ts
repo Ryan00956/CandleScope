@@ -13,6 +13,9 @@ import {
   createDrawingPointerRectCache,
   createDrawingExportVisibilityIntentGate,
   detachAndRemoveDrawingPrimitive,
+  dynamicDecorationsForSavedDrawingDraft,
+  dynamicPassiveFeedbackDecorations,
+  dynamicSelectedHandleDecoration,
   dynamicSelectionHandlesForSavedDrawing,
   hitTestSelectedOverlayDrawingHandle,
   hitTestOverlayDrawingEntity,
@@ -1155,6 +1158,90 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
   assert.deepEqual(dynamicSelectionHandlesForSavedDrawing(freehand, project), []);
 });
 
+test("passive feedback does not paint a blue selection box after drawing completion", () => {
+  let screenBoxReads = 0;
+  const selectedOnly = dynamicPassiveFeedbackDecorations({
+    selectedId: "completed-line",
+    hover: null,
+    getScreenBox() {
+      screenBoxReads += 1;
+      return { x: 10, y: 20, width: 40, height: 30 };
+    },
+  });
+
+  assert.deepEqual(selectedOnly, []);
+  assert.equal(screenBoxReads, 0, "selection bounds are not read for passive painting");
+
+  const hover = dynamicPassiveFeedbackDecorations({
+    selectedId: "completed-line",
+    hover: { id: "other-line", point: { x: 30, y: 40 }, eraser: false },
+    getScreenBox() {
+      screenBoxReads += 1;
+      return { x: 20, y: 30, width: 50, height: 10 };
+    },
+  });
+  assert.deepEqual(hover, [{
+    type: "box",
+    box: { x: 20, y: 30, width: 50, height: 10 },
+    color: "#ff6b6b",
+  }], "red hover feedback remains available");
+});
+
+test("selected feedback keeps drag handles without a bounding box", () => {
+  const decoration = dynamicSelectedHandleDecoration([
+    { x: 10, y: 20 },
+    { x: 50, y: 60 },
+    { x: Number.NaN, y: 80 },
+  ]);
+
+  assert.deepEqual(decoration, {
+    type: "handles",
+    handles: [{ x: 10, y: 20 }, { x: 50, y: 60 }],
+    color: "#3b82f6",
+  });
+  assert.notEqual(decoration?.type, "box");
+});
+
+test("fibonacci draft without explicit levels previews the default retracement grid", () => {
+  const fibonacci: SavedDrawing = {
+    id: "fibonacci-default-preview",
+    type: "fibonacci",
+    dataPoints: [
+      { time: 10, price: 20 },
+      { time: 50, price: 80 },
+    ],
+    color: "#123456",
+    lineWidth: 2,
+  };
+  const decorations = dynamicDecorationsForSavedDrawingDraft(
+    fibonacci,
+    (point) => typeof point.time === "number"
+      ? { x: point.time, y: point.price }
+      : null,
+  );
+
+  assert.equal(decorations[0]?.type, "line", "trend line remains the first decoration");
+  assert.equal(decorations.length, 8, "trend line plus seven enabled default levels");
+  assert.deepEqual(decorations.slice(1).map((decoration) => (
+    decoration.type === "line" ? decoration.color : null
+  )), ["#787b86", "#f44336", "#81c784", "#4caf50", "#009688", "#64b5f6", "#787b86"]);
+  assert.deepEqual(decorations.slice(1).map((decoration) => (
+    decoration.type === "line" ? decoration.label?.text : null
+  )), [
+    "0 (20.00)",
+    "0.236 (34.16)",
+    "0.382 (42.92)",
+    "0.5 (50.00)",
+    "0.618 (57.08)",
+    "0.786 (67.16)",
+    "1 (80.00)",
+  ]);
+  assert.deepEqual(
+    decorations[1]?.type === "line" ? decorations[1].label?.anchor : null,
+    { x: 14, y: 18 },
+  );
+});
+
 test("position creation paints its complete dynamic handoff frame before document commit", () => {
   const position: SavedDrawing = {
     id: "position-handoff",
@@ -1179,13 +1266,17 @@ test("position creation paints its complete dynamic handoff frame before documen
     project,
     (decorations) => {
       order.push("dynamic");
-      assert.equal(decorations.length, 3);
-      assert.deepEqual(decorations.map((decoration) => decoration.type), [
-        "line", "line", "line",
+      assert.equal(decorations.length, 1);
+      const decoration = decorations[0];
+      assert.equal(decoration?.type, "position");
+      if (decoration?.type !== "position") return;
+      assert.equal(decoration.entryColor, "#2196f3");
+      assert.equal(decoration.tpLevel?.color, themePalette.upColor);
+      assert.equal(decoration.slLevel?.color, themePalette.downColor);
+      assert.deepEqual(decoration.panelLines.map((line) => line.label), [
+        "入场", "止盈", "止损", "现价", "盈亏比", "仓位",
       ]);
-      assert.deepEqual(decorations.map((decoration) => (
-        decoration.type === "line" ? decoration.color : null
-      )), ["#3b82f6", themePalette.upColor, themePalette.downColor]);
+      assert.equal(decoration.badgeText, "LONG");
     },
     () => {
       assert.deepEqual(order, ["dynamic"]);
@@ -1193,6 +1284,7 @@ test("position creation paints its complete dynamic handoff frame before documen
       return receipt;
     },
     themePalette,
+    110,
   );
 
   assert.strictEqual(result, receipt);
@@ -1220,9 +1312,12 @@ test("short-position dynamic levels follow the static scene price-direction pale
     position,
     project,
     (decorations) => {
-      assert.deepEqual(decorations.map((decoration) => (
-        decoration.type === "line" ? decoration.color : null
-      )), ["#3b82f6", themePalette.downColor, themePalette.upColor]);
+      const decoration = decorations[0];
+      assert.equal(decoration?.type, "position");
+      if (decoration?.type !== "position") return;
+      assert.equal(decoration.tpLevel?.color, themePalette.downColor);
+      assert.equal(decoration.slLevel?.color, themePalette.upColor);
+      assert.equal(decoration.badgeColor, themePalette.downColor);
     },
     () => undefined,
     themePalette,

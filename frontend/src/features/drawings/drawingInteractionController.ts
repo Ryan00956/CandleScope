@@ -89,6 +89,7 @@ import type {
   DrawingExportBarrierLease,
 } from "./export/drawingExportBarrier.js";
 import type { DrawingDisplayHitResult } from "./rendering/drawingDisplayList.js";
+import { DEFAULT_FIBONACCI_RENDER_LEVELS } from "./rendering/drawingRenderDefaults.js";
 import {
   drawingCommandsForLegacyPrimitive,
   drawingCommandsForSavedDrawing,
@@ -196,6 +197,7 @@ import {
 } from "./interaction/drawingEntityDrag.js";
 import { createLiveInkController } from "./interaction/liveInkController.js";
 import type { LiveInkController } from "./interaction/liveInkController.js";
+import { buildDynamicPositionOverlayDecoration } from "./interaction/dynamicPositionOverlay.js";
 import type { DrawingInteractionSurfaceMode } from "./interactionSurfaceMode.js";
 import {
   abandonDrawingInteractionLifecycleActiveGesture,
@@ -206,8 +208,8 @@ import {
 } from "./interaction/drawingInteractionLifecycle.js";
 import {
   DEFAULT_DRAWING_POSITION_THEME_PALETTE,
-  drawingPositionLevelColor,
 } from "./drawingPositionColors.js";
+import { drawingPositionCurrentPrice } from "./drawingPositionPresentation.js";
 
 function drawingPerfNow(): number {
   return typeof performance !== "undefined" && typeof performance.now === "function"
@@ -322,10 +324,56 @@ function attachDrawingPrimitive(
   }
 }
 
-interface DynamicHoverDecoration {
+export interface DynamicHoverDecoration {
   readonly id: string | null;
   readonly point: ScreenPoint;
   readonly eraser: boolean;
+}
+
+/** Build passive hover/eraser feedback without repainting selected entities as boxes. */
+export function dynamicPassiveFeedbackDecorations({
+  getScreenBox,
+  hover,
+  selectedId,
+}: Readonly<{
+  getScreenBox: (id: string | null) => ScreenBox | null;
+  hover: DynamicHoverDecoration | null;
+  selectedId: string | null;
+}>): readonly DynamicOverlayDecoration[] {
+  if (!hover) return Object.freeze([]);
+  const decorations: DynamicOverlayDecoration[] = [];
+  const hoverBox = getScreenBox(hover.id);
+  if (hoverBox && hover.id !== selectedId) {
+    decorations.push(Object.freeze({
+      type: "box" as const,
+      box: hoverBox,
+      color: "#ff6b6b",
+    }));
+  }
+  if (hover.eraser) {
+    decorations.push(Object.freeze({
+      type: "cursor-ring" as const,
+      center: hover.point,
+      color: hover.id ? "#ff6b6b" : "rgba(148,163,184,0.8)",
+      radius: 8,
+    }));
+  }
+  return Object.freeze(decorations);
+}
+
+/** Preserve selected drag affordances without drawing a bounding rectangle. */
+export function dynamicSelectedHandleDecoration(
+  handles: readonly ScreenPoint[],
+): DynamicOverlayDecoration | null {
+  const validHandles = handles
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+    .map((point) => Object.freeze({ x: point.x, y: point.y }));
+  if (validHandles.length === 0) return null;
+  return Object.freeze({
+    type: "handles" as const,
+    handles: Object.freeze(validHandles),
+    color: "#3b82f6",
+  });
 }
 
 function detachDrawingPrimitive(
@@ -546,6 +594,7 @@ export function dynamicDecorationsForSavedDrawingDraft(
   saved: SavedDrawing,
   dataToScreen: DrawingDataToScreen,
   themePalette: DrawingFrameThemePalette = DEFAULT_DRAWING_POSITION_THEME_PALETTE,
+  currentPrice: number | null = null,
 ): readonly DynamicOverlayDecoration[] {
   const color = "color" in saved && typeof saved.color === "string"
     ? saved.color
@@ -584,7 +633,16 @@ export function dynamicDecorationsForSavedDrawingDraft(
       const maxX = Math.max(first.x, last.x);
       const startY = saved.inverted ? last.y : first.y;
       const endY = saved.inverted ? first.y : last.y;
-      const levels = (saved.levels ?? []).filter((level) => level.enabled);
+      const firstPrice = saved.dataPoints[0]?.price;
+      const lastPrice = saved.dataPoints.at(-1)?.price;
+      const hasPrices = typeof firstPrice === "number"
+        && Number.isFinite(firstPrice)
+        && typeof lastPrice === "number"
+        && Number.isFinite(lastPrice);
+      const startPrice = saved.inverted ? lastPrice : firstPrice;
+      const endPrice = saved.inverted ? firstPrice : lastPrice;
+      const levels = (saved.levels ?? DEFAULT_FIBONACCI_RENDER_LEVELS)
+        .filter((level) => level.enabled);
       return Object.freeze([
         Object.freeze({
           type: "line" as const,
@@ -597,12 +655,23 @@ export function dynamicDecorationsForSavedDrawingDraft(
         }),
         ...levels.map((level) => {
           const y = startY + (endY - startY) * level.level;
+          const logicalPrice = hasPrices
+            ? (startPrice as number) + ((endPrice as number) - (startPrice as number)) * level.level
+            : null;
           return Object.freeze({
             type: "line" as const,
             from: Object.freeze({ x: minX, y }),
             to: Object.freeze({ x: maxX, y }),
             color: level.color,
             lineWidth,
+            ...(logicalPrice === null
+              ? {}
+              : {
+                  label: Object.freeze({
+                    anchor: Object.freeze({ x: minX + 4, y: y - 2 }),
+                    text: `${level.level} (${logicalPrice.toFixed(2)})`,
+                  }),
+                }),
           });
         }),
       ]);
@@ -654,38 +723,13 @@ export function dynamicDecorationsForSavedDrawingDraft(
     })];
   }
   if (saved.type === "position" && saved.timeRange) {
-    const entryPrice = saved.entryPrice;
-    if (typeof entryPrice !== "number" || !Number.isFinite(entryPrice)) return [];
-    const start = dataPointFromSavedHorizontalAnchor(saved.timeRange.start, entryPrice);
-    const end = dataPointFromSavedHorizontalAnchor(saved.timeRange.end, entryPrice);
-    const startScreen = start ? dataToScreen(start) : null;
-    const endScreen = end ? dataToScreen(end) : null;
-    if (!startScreen || !endScreen) return [];
-    const decorations: DynamicOverlayDecoration[] = [Object.freeze({
-      type: "line",
-      from: startScreen,
-      to: endScreen,
-      color,
-      lineWidth,
-      handles: Object.freeze([startScreen, endScreen]),
-    })];
-    for (const price of [saved.tpPrice, saved.slPrice] as const) {
-      if (typeof price !== "number" || !Number.isFinite(price)) continue;
-      const levelStart = dataPointFromSavedHorizontalAnchor(saved.timeRange.start, price);
-      const levelEnd = dataPointFromSavedHorizontalAnchor(saved.timeRange.end, price);
-      const from = levelStart ? dataToScreen(levelStart) : null;
-      const to = levelEnd ? dataToScreen(levelEnd) : null;
-      if (!from || !to) continue;
-      decorations.push(Object.freeze({
-        type: "line",
-        from,
-        to,
-        color: drawingPositionLevelColor(entryPrice, price, themePalette),
-        lineWidth,
-        handles: Object.freeze([from, to]),
-      }));
-    }
-    return Object.freeze(decorations);
+    const decoration = buildDynamicPositionOverlayDecoration(
+      saved,
+      dataToScreen,
+      themePalette,
+      currentPrice,
+    );
+    return decoration ? Object.freeze([decoration]) : [];
   }
   return [];
 }
@@ -701,8 +745,14 @@ export function commitSavedDrawingAfterDynamicFrame<T>(
   renderDynamicFrame: (decorations: readonly DynamicOverlayDecoration[]) => void,
   commit: () => T,
   themePalette: DrawingFrameThemePalette = DEFAULT_DRAWING_POSITION_THEME_PALETTE,
+  currentPrice: number | null = null,
 ): T {
-  const decorations = dynamicDecorationsForSavedDrawingDraft(saved, dataToScreen, themePalette);
+  const decorations = dynamicDecorationsForSavedDrawingDraft(
+    saved,
+    dataToScreen,
+    themePalette,
+    currentPrice,
+  );
   if (decorations.length > 0) renderDynamicFrame(decorations);
   return commit();
 }
@@ -712,12 +762,13 @@ export function dynamicDecorationsForDrawingDraft(
   primitive: DrawingPrimitive,
   dataToScreen: DrawingDataToScreen,
   themePalette: DrawingFrameThemePalette = DEFAULT_DRAWING_POSITION_THEME_PALETTE,
+  currentPrice: number | null = null,
 ): readonly DynamicOverlayDecoration[] {
   const saved = serializeDrawingPrimitive(
     primitive as unknown as PersistableDrawingPrimitive,
   );
   return saved
-    ? dynamicDecorationsForSavedDrawingDraft(saved, dataToScreen, themePalette)
+    ? dynamicDecorationsForSavedDrawingDraft(saved, dataToScreen, themePalette, currentPrice)
     : [];
 }
 
@@ -1337,14 +1388,27 @@ export function useDrawing({
 }: UseDrawingOptions): DrawingInteractionRuntime {
   const onToolChangeRef = useRef(onToolChange);
   const getChartAdapter = useCallback(() => chartAdapter || null, [chartAdapter]);
-  const getDynamicThemePalette = useCallback((): DrawingFrameThemePalette => {
+  const getDynamicFramePresentation = useCallback((): Readonly<{
+    currentPrice: number | null;
+    themePalette: DrawingFrameThemePalette;
+  }> => {
     try {
-      return getChartAdapter()?.captureDrawingFrame?.()?.themePalette
-        ?? DEFAULT_DRAWING_POSITION_THEME_PALETTE;
+      const frame = getChartAdapter()?.captureDrawingFrame?.() ?? null;
+      return Object.freeze({
+        currentPrice: frame ? drawingPositionCurrentPrice(frame) : null,
+        themePalette: frame?.themePalette ?? DEFAULT_DRAWING_POSITION_THEME_PALETTE,
+      });
     } catch {
-      return DEFAULT_DRAWING_POSITION_THEME_PALETTE;
+      return Object.freeze({
+        currentPrice: null,
+        themePalette: DEFAULT_DRAWING_POSITION_THEME_PALETTE,
+      });
     }
   }, [getChartAdapter]);
+  const getDynamicThemePalette = useCallback(
+    (): DrawingFrameThemePalette => getDynamicFramePresentation().themePalette,
+    [getDynamicFramePresentation],
+  );
   const notifyDrawingSceneInvalidation = useCallback(() => {
     getChartAdapter()?.notifyDrawingFrameInvalidation?.();
   }, [getChartAdapter]);
@@ -2129,24 +2193,30 @@ export function useDrawing({
       return;
     }
     // A committed handoff owns the exact last interaction pixels until the
-    // matching scene paint (plus one rAF). Selection/hover React effects must
-    // not replace that frame with a sparse box and create a visible gap.
+    // matching scene paint (plus one rAF). Passive-feedback React effects must
+    // not replace that frame and create a visible gap.
     if (dynamicHandoffLockRef.current) return;
     // Transient geometry has strict visual ownership priority. Scene-paint and
     // selection effects can run between pointer frames; they must repaint the
-    // complete detached draft/preview instead of replacing it with a sparse
-    // selection box or an empty frame while the pointer is paused.
+    // complete detached draft/preview instead of replacing it with an empty
+    // frame while the pointer is paused.
     const entityTransient = overlayDragEntityDraftRef.current ?? previewEntityRef.current;
     const transient = overlayDragPrimitiveRef.current ?? previewRef.current;
     if (entityTransient || transient) {
-      const themePalette = getDynamicThemePalette();
+      const presentation = getDynamicFramePresentation();
       const transientDecorations = entityTransient
-        ? dynamicDecorationsForSavedDrawingDraft(entityTransient, dataToScreen, themePalette)
+        ? dynamicDecorationsForSavedDrawingDraft(
+            entityTransient,
+            dataToScreen,
+            presentation.themePalette,
+            presentation.currentPrice,
+          )
         : dynamicDecorationsForDrawingDraft(
-          transient as DrawingPrimitive,
-          dataToScreen,
-          themePalette,
-        );
+            transient as DrawingPrimitive,
+            dataToScreen,
+            presentation.themePalette,
+            presentation.currentPrice,
+          );
       if (transientDecorations.length === 0) {
         dynamicOverlayControllerRef.current?.clear();
       } else {
@@ -2154,7 +2224,7 @@ export function useDrawing({
       }
       return;
     }
-    const decorations = [];
+    const decorations: DynamicOverlayDecoration[] = [];
     const selectedId = selectedIdRef.current;
     const selectionBox = getDynamicScreenBox(selectedId);
     if (selectionBox) {
@@ -2173,30 +2243,17 @@ export function useDrawing({
           .map((handle) => handle.point)
         : [];
       const handles = sceneHandles?.length ? sceneHandles : fallbackHandles;
-      decorations.push({
-        type: "box" as const,
-        box: selectionBox,
-        color: "#3b82f6",
-        ...(handles.length ? { handles } : {}),
-      });
+      const handleDecoration = dynamicSelectedHandleDecoration(handles);
+      if (handleDecoration) decorations.push(handleDecoration);
     }
-    if (hover) {
-      const hoverBox = getDynamicScreenBox(hover.id);
-      if (hoverBox && hover.id !== selectedIdRef.current) {
-        decorations.push({ type: "box" as const, box: hoverBox, color: "#ff6b6b" });
-      }
-      if (hover.eraser) {
-        decorations.push({
-          type: "cursor-ring" as const,
-          center: hover.point,
-          color: hover.id ? "#ff6b6b" : "rgba(148,163,184,0.8)",
-          radius: 8,
-        });
-      }
-    }
+    decorations.push(...dynamicPassiveFeedbackDecorations({
+      getScreenBox: getDynamicScreenBox,
+      hover,
+      selectedId,
+    }));
     if (decorations.length === 0) dynamicOverlayControllerRef.current?.clear();
     else dynamicOverlayControllerRef.current?.render({ decorations });
-  }, [dataToScreen, getDynamicScreenBox, getDynamicThemePalette, getPrimitiveById, getSavedDrawing, getSceneScreenHandles, interactionSurfaceMode, selectedIdRef]);
+  }, [dataToScreen, getDynamicFramePresentation, getDynamicScreenBox, getPrimitiveById, getSavedDrawing, getSceneScreenHandles, interactionSurfaceMode, selectedIdRef]);
   renderDynamicFeedbackRef.current = renderDynamicFeedback;
 
   const retainDynamicOverlayUntilPaint = useCallback((
@@ -2424,12 +2481,14 @@ export function useDrawing({
 
   const renderOverlayDragDraft = useCallback(() => {
     const entityDraft = overlayDragEntityDraftRef.current;
+    const presentation = getDynamicFramePresentation();
     if (entityDraft && interactionSurfaceMode === "overlay") {
       dynamicOverlayControllerRef.current?.render({
         decorations: dynamicDecorationsForSavedDrawingDraft(
           entityDraft,
           dataToScreen,
-          getDynamicThemePalette(),
+          presentation.themePalette,
+          presentation.currentPrice,
         ),
       });
       return;
@@ -2439,10 +2498,11 @@ export function useDrawing({
     const decorations = dynamicDecorationsForDrawingDraft(
       draft,
       dataToScreen,
-      getDynamicThemePalette(),
+      presentation.themePalette,
+      presentation.currentPrice,
     );
     dynamicOverlayControllerRef.current?.render({ decorations });
-  }, [dataToScreen, getDynamicThemePalette, interactionSurfaceMode]);
+  }, [dataToScreen, getDynamicFramePresentation, interactionSurfaceMode]);
 
   const releaseOverlayDrag = useCallback((restoreStatic: boolean, clearDynamic = true) => {
     const original = overlayDragOriginalRef.current;
@@ -3365,6 +3425,7 @@ export function useDrawing({
           });
           const commands = drawingCreateCommandsForSavedDrawing(saved);
           if (!saved?.id || !commands) return;
+          const dynamicPresentation = getDynamicFramePresentation();
           let receipt: ReturnType<typeof persistSceneCommands>;
           try {
             receipt = commitSavedDrawingAfterDynamicFrame(
@@ -3377,7 +3438,8 @@ export function useDrawing({
                 dynamicHandoffLockRef.current = true;
               },
               () => persistSceneCommands(commands),
-              getDynamicThemePalette(),
+              dynamicPresentation.themePalette,
+              dynamicPresentation.currentPrice,
             );
           } catch (error) {
             dynamicHandoffLockRef.current = false;
@@ -3679,7 +3741,7 @@ export function useDrawing({
         }
       }
     },
-    [flushActiveDrawingMove, capturePointerRect, getChartPos, isInsideDrawingPanePlot, captureOverlayFreehandBatch, interactionSurfaceMode, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, hitTestSelectedOverlayHandle, selectPrimitive, deselectAll, getPrimitiveById, getSavedDrawing, getSceneScreenBox, beginOverlayEntityDrag, beginSavedTextDrag, beginTextDrag, startEntityTextEditing, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, persistSceneCommands, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, ensureOverlayDragRegistry, getChartAdapter, getDynamicThemePalette, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, renderDynamicFeedback, renderOverlayDragDraft, retainDynamicOverlayUntilPaint],
+    [flushActiveDrawingMove, capturePointerRect, getChartPos, isInsideDrawingPanePlot, captureOverlayFreehandBatch, interactionSurfaceMode, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, hitTestSelectedOverlayHandle, selectPrimitive, deselectAll, getPrimitiveById, getSavedDrawing, getSceneScreenBox, beginOverlayEntityDrag, beginSavedTextDrag, beginTextDrag, startEntityTextEditing, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, persistSceneCommands, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, ensureOverlayDragRegistry, getChartAdapter, getDynamicFramePresentation, getDynamicThemePalette, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, renderDynamicFeedback, renderOverlayDragDraft, retainDynamicOverlayUntilPaint],
   );
 
   // ════════════════════════════════════════════════════

@@ -6,6 +6,7 @@ import {
   createDynamicOverlayController,
   type DynamicAngleOverlayDecoration,
 } from "../dynamicOverlayController.js";
+import { buildDynamicPositionOverlayDecoration } from "../dynamicPositionOverlay.js";
 
 function fixture() {
   const arcs: number[][] = [];
@@ -13,6 +14,7 @@ function fixture() {
   const clears: number[][] = [];
   const dashes: number[][] = [];
   const ellipses: number[][] = [];
+  const fills: number[][] = [];
   const lineWidths: number[] = [];
   const moves: number[][] = [];
   const lines: number[][] = [];
@@ -27,9 +29,9 @@ function fixture() {
     save() {}, restore() {},
     setTransform(...args: number[]) { transforms.push(args); },
     clearRect(...args: number[]) { clears.push(args); },
-    beginPath() {},
+    beginPath() {}, closePath() {},
     arc(...args: number[]) { arcs.push(args); },
-    fill() {}, fillRect() {}, stroke() {},
+    fill() {}, fillRect(...args: number[]) { fills.push(args); }, stroke() {},
     ellipse(...args: number[]) { ellipses.push(args); },
     fillText(text: string, x: number, y: number) { texts.push([text, x, y]); },
     measureText(text: string) { return { width: [...text].length * 7 } as TextMetrics; },
@@ -56,6 +58,7 @@ function fixture() {
     clears,
     dashes,
     ellipses,
+    fills,
     lines,
     lineWidths,
     moves,
@@ -149,6 +152,30 @@ test("dynamic overlay is latest-wins within one animation frame", () => {
   assert.equal(controller.snapshot().disposed, true);
 });
 
+test("selected handle feedback paints endpoints without a dashed bounding box", () => {
+  const { arcs, boxes, canvas, dashes } = fixture();
+  const frames: Array<() => void> = [];
+  const controller = createDynamicOverlayController({
+    canvas,
+    getPlotRect: () => ({ x: 20, y: 10, width: 200, height: 100, dpr: 1 }),
+    requestFrame(callback) { frames.push(callback); return callback; },
+    cancelFrame() {},
+  });
+  controller.render({ decorations: [{
+    type: "handles",
+    handles: [{ x: 30, y: 20 }, { x: 80, y: 60 }],
+    color: "#3b82f6",
+  }] });
+  frames.shift()?.();
+
+  assert.deepEqual(arcs, [
+    [10, 10, 4.5, 0, Math.PI * 2],
+    [60, 50, 4.5, 0, Math.PI * 2],
+  ]);
+  assert.deepEqual(boxes, []);
+  assert.deepEqual(dashes, []);
+});
+
 test("dynamic overlay paints full axis lines, ellipse drafts, and extended rays", () => {
   const { canvas, ellipses, lines, moves } = fixture();
   const frames: Array<() => void> = [];
@@ -189,6 +216,71 @@ test("dynamic overlay paints full axis lines, ellipse drafts, and extended rays"
   assert.deepEqual(ellipses[0]?.slice(0, 4), [30, 15, 20, 10]);
   assert.deepEqual(moves.at(-1), [10, 30]);
   assert.equal((lines.at(-1)?.[0] ?? 0) > 100, true);
+});
+
+test("dynamic line decorations paint fibonacci level and price labels", () => {
+  const { canvas, texts } = fixture();
+  const frames: Array<() => void> = [];
+  const controller = createDynamicOverlayController({
+    canvas,
+    getPlotRect: () => ({ x: 20, y: 10, width: 200, height: 100, dpr: 1.5 }),
+    requestFrame(callback) { frames.push(callback); return callback; },
+    cancelFrame() {},
+  });
+  controller.render({ decorations: [{
+    type: "line",
+    from: { x: 30, y: 50 },
+    to: { x: 130, y: 50 },
+    color: "#009688",
+    lineWidth: 2,
+    label: {
+      anchor: { x: 34, y: 48 },
+      text: "0.618 (57.08)",
+    },
+  }] });
+  frames.shift()?.();
+
+  assert.deepEqual(texts, [["0.618 (57.08)", 14, 38]]);
+});
+
+test("dynamic overlay keeps position fills, badges, and information visible while dragging", () => {
+  const { canvas, fills, roundRects, texts } = fixture();
+  const frames: Array<() => void> = [];
+  const controller = createDynamicOverlayController({
+    canvas,
+    getPlotRect: () => ({ x: 20, y: 10, width: 240, height: 180, dpr: 2 }),
+    requestFrame(callback) { frames.push(callback); return callback; },
+    cancelFrame() {},
+  });
+  const decoration = buildDynamicPositionOverlayDecoration(
+    {
+      id: "position-drag",
+      type: "position",
+      direction: "long",
+      entryPrice: 100,
+      tpPrice: 120,
+      slPrice: 90,
+      positionSize: 1_000,
+      infoPanelOffset: { x: 4, y: -2 },
+      timeRange: { start: 40, end: 160 },
+    },
+    (point) => typeof point.time === "number"
+      ? { x: point.time, y: 150 - point.price }
+      : null,
+    { upColor: "#00aa11", downColor: "#dd0022" },
+    108,
+  );
+  assert.ok(decoration);
+
+  controller.render({ decorations: [decoration] });
+  frames.shift()?.();
+
+  assert.equal(fills.length, 2, "TP and SL risk/reward areas remain filled");
+  assert.ok(roundRects.length >= 8, "price badges, panel, direction badge, and controls paint");
+  assert.ok(texts.some(([text]) => text === "LONG"));
+  assert.ok(texts.some(([text]) => text === "入场: "));
+  assert.ok(texts.some(([text]) => text === "现价: "));
+  assert.ok(texts.some(([text]) => text === "仓位: "));
 });
 
 test("dynamic overlay paints structured angle geometry in plot-local CSS pixels", () => {

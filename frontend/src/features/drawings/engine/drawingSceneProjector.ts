@@ -66,7 +66,11 @@ import type {
 } from "../rendering/drawingRenderDefaults.js";
 import type { DrawingRenderRevisionStamp } from "./drawingRenderScheduler.js";
 import type { DrawingSceneNode } from "./drawingSceneRegistry.js";
-import { drawingPositionLevelColor } from "../drawingPositionColors.js";
+import {
+  drawingPositionCurrentPrice,
+  drawingPositionLevelPresentation,
+  drawingPositionPanelLines,
+} from "../drawingPositionPresentation.js";
 
 export interface DrawingSceneTextMeasureRequest {
   readonly text: string;
@@ -1514,112 +1518,6 @@ function horizontalAnchorDataPoint(
   return anchor && typeof anchor === "object" ? { ...anchor, price } : null;
 }
 
-function formatPositionPrice(price: number): string {
-  if (price >= 1_000) {
-    return price.toLocaleString("en-US", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
-  }
-  if (price >= 1) return price.toFixed(4);
-  if (price >= 0.01) return price.toFixed(6);
-  return price.toFixed(8);
-}
-
-function positionPnlPercent(entryPrice: number, price: number, isLong: boolean): number {
-  if (!entryPrice) return 0;
-  return isLong
-    ? ((price - entryPrice) / entryPrice) * 100
-    : ((entryPrice - price) / entryPrice) * 100;
-}
-
-function positionCurrentPrice(frame: DrawingFrameSnapshot): number | null {
-  const last = frame.seriesData.at(-1);
-  if (!last) return null;
-  if (finiteNumber(last.close)) return last.close;
-  return finiteNumber(last.value) ? last.value : null;
-}
-
-interface PositionPanelPaintLine {
-  readonly label: string;
-  readonly value: string;
-  readonly extra: string | null;
-  readonly color: string;
-}
-
-function signedPositionValue(value: number): string {
-  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
-}
-
-function positionPanelLines(
-  entity: PositionDrawingRenderEntity,
-  currentPrice: number | null,
-  upColor: string,
-  downColor: string,
-): readonly PositionPanelPaintLine[] {
-  const { direction, entryPrice, slPrice, tpPrice } = entity.geometry;
-  const size = entity.style.positionSize;
-  const isLong = direction === "long";
-  const priceColor = (price: number): string => drawingPositionLevelColor(
-    entryPrice,
-    price,
-    { upColor, downColor },
-  );
-  const lines: PositionPanelPaintLine[] = [Object.freeze({
-    label: "入场",
-    value: formatPositionPrice(entryPrice),
-    extra: null,
-    color: "#2196f3",
-  })];
-  if (tpPrice !== null) {
-    const percent = positionPnlPercent(entryPrice, tpPrice, isLong);
-    const pnl = size ? size * percent / 100 : null;
-    lines.push(Object.freeze({
-      label: "止盈",
-      value: `${formatPositionPrice(tpPrice)} (${signedPositionValue(percent)}%)`,
-      extra: pnl === null ? null : signedPositionValue(pnl),
-      color: priceColor(tpPrice),
-    }));
-  }
-  if (slPrice !== null) {
-    const percent = positionPnlPercent(entryPrice, slPrice, isLong);
-    const pnl = size ? size * percent / 100 : null;
-    lines.push(Object.freeze({
-      label: "止损",
-      value: `${formatPositionPrice(slPrice)} (${signedPositionValue(percent)}%)`,
-      extra: pnl === null ? null : signedPositionValue(pnl),
-      color: priceColor(slPrice),
-    }));
-  }
-  if (currentPrice !== null && finiteNumber(currentPrice)) {
-    const percent = positionPnlPercent(entryPrice, currentPrice, isLong);
-    const pnl = size ? size * percent / 100 : null;
-    lines.push(Object.freeze({
-      label: "现价",
-      value: `${formatPositionPrice(currentPrice)} (${signedPositionValue(percent)}%)`,
-      extra: pnl === null ? null : signedPositionValue(pnl),
-      color: priceColor(currentPrice),
-    }));
-  }
-  if (tpPrice !== null && slPrice !== null && entryPrice) {
-    const reward = Math.abs(tpPrice - entryPrice);
-    const risk = Math.abs(slPrice - entryPrice);
-    if (risk > 0) lines.push(Object.freeze({
-      label: "盈亏比",
-      value: `1 : ${(reward / risk).toFixed(2)}`,
-      extra: null,
-      color: "#ffab40",
-    }));
-  }
-  if (size) lines.push(Object.freeze({
-    label: "仓位",
-    value: `$${size.toFixed(0)}`,
-    extra: null,
-    color: "#b0bec5",
-  }));
-  return Object.freeze(lines);
-}
-
 function projectPosition(
   entity: PositionDrawingRenderEntity,
   frame: DrawingFrameSnapshot,
@@ -1682,12 +1580,15 @@ function projectPosition(
   const slOffsets = slY === null ? null : appendPriceZone("sl", slY);
 
   const { upColor, downColor } = frame.themePalette;
-  const panelLines = positionPanelLines(
-    entity,
-    positionCurrentPrice(frame),
-    upColor,
-    downColor,
-  );
+  const panelLines = drawingPositionPanelLines({
+    currentPrice: drawingPositionCurrentPrice(frame),
+    direction: entity.geometry.direction,
+    entryPrice,
+    positionSize: entity.style.positionSize,
+    slPrice,
+    themePalette: frame.themePalette,
+    tpPrice,
+  });
   const panelFont = 11;
   const panelTextWidth = panelLines.reduce((width, line) => {
     const text = `${line.label}: ${line.value}${line.extra ? ` ${line.extra}` : ""}`;
@@ -1765,15 +1666,16 @@ function projectPosition(
     offsets: Readonly<{ bodyOffset: number; lineOffset: number }> | null,
   ) => {
     if (price === null || !offsets) return null;
-    const percent = positionPnlPercent(entryPrice, price, isLong);
-    const pnl = entity.style.positionSize ? entity.style.positionSize * percent / 100 : 0;
+    const presentation = drawingPositionLevelPresentation({
+      direction: entity.geometry.direction,
+      entryPrice,
+      positionSize: entity.style.positionSize,
+      themePalette: frame.themePalette,
+    }, price);
     return Object.freeze({
       linePointOffset: offsets.lineOffset,
       bodyPointOffset: offsets.bodyOffset,
-      priceText: formatPositionPrice(price),
-      percentText: `${signedPositionValue(percent)}%`,
-      pnlText: pnl === 0 ? null : signedPositionValue(pnl),
-      color: drawingPositionLevelColor(entryPrice, price, frame.themePalette),
+      ...presentation,
     });
   };
   const tpLevel = positionLevelSpec(tpPrice, tpOffsets);

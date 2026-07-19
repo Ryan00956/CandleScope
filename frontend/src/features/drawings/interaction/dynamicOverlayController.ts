@@ -11,6 +11,12 @@ import {
   syncDrawingOverlayCanvas,
 } from "./overlayCanvasSurface.js";
 import type { DrawingOverlayPlotRect } from "./overlayCanvasSurface.js";
+import {
+  drawDynamicPositionOverlayDecoration,
+} from "./dynamicPositionOverlay.js";
+import type {
+  DynamicPositionOverlayDecoration,
+} from "./dynamicPositionOverlay.js";
 
 export type DynamicAngleOverlayDecoration = Readonly<{
   type: "angle";
@@ -43,6 +49,10 @@ export type DynamicOverlayDecoration =
       dashed?: boolean;
       extension?: BasicLineToolId;
       handles?: readonly ScreenPoint[];
+      label?: Readonly<{
+        anchor: ScreenPoint;
+        text: string;
+      }>;
     }>
   | DynamicAngleOverlayDecoration
   | Readonly<{
@@ -64,6 +74,12 @@ export type DynamicOverlayDecoration =
       dashed?: boolean;
       handles?: readonly ScreenPoint[];
     }>
+  | Readonly<{
+      type: "handles";
+      handles: readonly ScreenPoint[];
+      color: string;
+    }>
+  | DynamicPositionOverlayDecoration
   | Readonly<{
       type: "cursor-ring";
       center: ScreenPoint;
@@ -474,6 +490,10 @@ export function createDynamicOverlayController({
         for (const handle of item.handles ?? []) {
           drawHandle(context, handle, layout.rect, item.color ?? "#3b82f6");
         }
+      } else if (item.type === "handles") {
+        for (const handle of item.handles) {
+          drawHandle(context, handle, layout.rect, item.color);
+        }
       } else if (item.type === "line") {
         if (!finitePoint(item.from) || !finitePoint(item.to)) continue;
         const [from, to] = extendDynamicLine(
@@ -490,6 +510,20 @@ export function createDynamicOverlayController({
         context.lineTo(to.x - layout.rect.x, to.y - layout.rect.y);
         context.stroke();
         context.setLineDash([]);
+        if (item.label
+          && finitePoint(item.label.anchor)
+          && typeof item.label.text === "string"
+          && item.label.text.length > 0) {
+          context.fillStyle = item.color;
+          context.font = "11px sans-serif";
+          context.textAlign = "left";
+          context.textBaseline = "bottom";
+          context.fillText(
+            item.label.text,
+            item.label.anchor.x - layout.rect.x,
+            item.label.anchor.y - layout.rect.y,
+          );
+        }
         for (const handle of item.handles ?? []) {
           drawHandle(context, handle, layout.rect, item.color);
         }
@@ -562,6 +596,8 @@ export function createDynamicOverlayController({
         for (const handle of item.handles ?? []) {
           drawHandle(context, handle, layout.rect, item.color);
         }
+      } else if (item.type === "position") {
+        drawDynamicPositionOverlayDecoration(context, item, layout.rect);
       } else if (finitePoint(item.center)) {
         context.beginPath();
         context.arc(

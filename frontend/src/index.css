@@ -878,6 +878,8 @@ body {
 }
 
 .ob-levels {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
@@ -887,8 +889,13 @@ body {
 }
 
 .ob-levels-window {
+  flex: 0 0 auto;
   position: relative;
   width: 100%;
+}
+
+.ob-asks .ob-levels-window {
+  margin-top: auto;
 }
 
 .ob-level-row {

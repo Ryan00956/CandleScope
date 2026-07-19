@@ -174,7 +174,7 @@ export function buildChartWorkspaceViewModel({
       watchlists: watchlistView.watchlists,
       layout: watchlistView.layout,
       actions: watchlistActions,
-      prices: watchlistView.prices,
+      priceStore: watchlistView.priceStore,
       subscriptionTiers: watchlistView.subscriptionTiers,
       subscriptionResourceSummaries: watchlistView.subscriptionResourceSummaries,
       onTierChange: watchlistActions.handleTierChange,

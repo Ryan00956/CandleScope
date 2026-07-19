@@ -32,6 +32,7 @@ export interface IndicatorStreamSubscription {
 }
 
 export interface IndicatorStreamMessageContext {
+  subscriptionSignature?: string;
   wsGeneration: number;
 }
 
@@ -299,7 +300,15 @@ export class IndicatorStreamConnection {
 
     if (!this.shouldDispatch(message)) return;
     try {
-      this.onMessage(message, context);
+      const clientId = message.clientId;
+      const subscriptionSignature = clientId
+        ? this.pendingSubscriptions.get(clientId)?.signature
+          ?? this.activeSubscriptions.get(clientId)
+          ?? this.desiredSubscriptions.get(clientId)?.signature
+        : undefined;
+      this.onMessage(message, subscriptionSignature
+        ? { ...context, subscriptionSignature }
+        : context);
     } catch (error) {
       this.onError(error);
     }
@@ -332,7 +341,10 @@ export class IndicatorStreamConnection {
     this.reconnectDelayMs = this.reconnectBaseMs;
     this.scheduleSubscriptionAckCheck();
     try {
-      this.onMessage(message, context);
+      this.onMessage(message, {
+        ...context,
+        subscriptionSignature: desired.signature,
+      });
     } catch (error) {
       this.onError(error);
     }

@@ -900,7 +900,8 @@ viewport 连续变化时：
 3. data/projection/lineage/DPR/size 改变时禁止 warp；
 4. affine 不可靠时立即使用更低 LOD 的精确可见点；
 5. 每帧 drawing budget 到 4ms 后停止低优先工作；
-6. viewport 80–120ms 稳定后发布 ≤0.5px exact render。
+6. viewport 连续 40ms 无新 invalidation 后启动 ≤0.5px exact build；从最后一次 viewport invalidation 到 exact pixels painted 的 stop-to-painted 目标仍为 ≤120ms。40ms 是按端到端预算分配的 quiet-window 起跑线：预留 80ms 给 projection、worker round-trip、调度抖动和下一次 paint，而不是把 40ms 当 publication latency。
+7. 若已有可见 plan 且不是高成本 source-lineage freehand，quiet-window exact 先发布同一份 main-thread exact plan 作为 latency hedge；worker 仍保持 1 in-flight + 1 pending-latest，并在后台用 raster 接管。首个可见 publication 与 source-lineage exact 不得使用此兜底。
 
 normal、log、percentage、indexed、invert price mode 至少使用三个价格样本验证 transform。不能假设所有模式都可直接仿射复用。
 
@@ -912,7 +913,7 @@ normal、log、percentage、indexed、invert price mode 至少使用三个价格
 - worker queue depth ≤ 2；
 - stale result publish = 0；
 - viewport-only 更新的 source anchor resolve = 0；
-- exact settle ≤ 120ms。
+- viewport stop-to-painted exact settle ≤ 120ms。
 
 ### 回滚
 
@@ -1418,6 +1419,21 @@ Correctness parity: canonical raw geometry 不被 LOD 覆盖；RDP hierarchy 保
 Known limitations: 本记录证明 Phase 6 checkpoint，不声称第 7 节全局发布矩阵全部完成；DPR 1/2 目前为 smoke，正式 5+1 仍留给最终全局发布矩阵。IndexedDB/export barrier 属于 Phase 7；angle/fibonacci/text/position 完整迁移属于 Phase 8。
 Rollback verified: VITE_DRAWING_RASTER_BACKEND=main-thread 使用相同 scene/document、screen display list 与低 LOD renderer；正式 fallback 场景 exact max=53.8ms，queue/in-flight/stale publish 均为 0。worker backend 的旧 generation、旧 plan 与旧 frame 结果禁止发布并释放资源。
 Decision: Phase 6 PASS；LOD、indexed hit、worker latest-wins/backpressure、source-lineage、主线程 fallback、浏览器功能验收与 DPR 1.5 正式性能门全部通过；Phase 7 尚未开始。
+~~~
+
+### 2026-07-18 前端交互性能长期收口
+
+~~~text
+Scope: 对当前生产页面的缩放、平移、crosshair、drawing、指标流、orderbook、watchlist 与 liquidation 数据链做端到端性能/并发收口；不改变 chart/document 真值边界，也不以降低刷新正确性换取帧率。
+Chrome evidence: 修复前 10s 录制中主线程 Task=8518ms、Script=8061ms、Layout=231ms；热点包含按时间重复过滤/归一化、funding 全量投影、React 根树 jsxDEV、getBoundingClientRect、BookRow 与 GC。Orderbook 展开/折叠时 Layout 约 120ms/6ms，watchlist tick 会进入 App 根树；drawing 空 document 仍重建并重复捕获 frame/listener。
+Architecture: crosshair/pointer 改为 pane 外部 store + cached geometry，pointermove 不再读 DOM；series/indicator/advanced projection 使用 immutable-reference 与 axis-revision cache；advanced/watchlist/indicator preview 使用 rAF latest-only 批处理；orderbook 使用固定行高虚拟化、ask bottom anchor、memo row 与 CSS contain；watchlist socket/tier mutation、indicator stream identity、liquidation history claim 全部按 generation/signature fail-closed，旧异步结果不得覆盖当前配置。
+Drawing hot path: continuous viewport 保留同帧 main-thread LOD pre-paint publication，40ms quiet-window 后 worker exact；首个可见 publication 与 source-lineage exact 继续 worker-owned。原子 frame、range/size/DPR/document hub、empty-document gate、prefetched scheduler、lineage resolution span cache 与严格 affine publication certificate 共同消除重复 DOM/projection/scene 工作；近似 affine 不能代替 public exact Y projection。
+Performance contract: contracts/drawing-performance.json 是 runtime 与 benchmark 的单一 40ms/56ms/192ms/96-wheel-events 契约。Backpressure runner 在 current LOD paint 后继续等待 queue=0、in-flight=0、worker result>0，并要求 latestSubmitted=published=paintedWorkerIdentity 与 exact paint receipt 同 stamp；stamp/identity 必须通过完整 schema 校验，worker provenance 原子绑定到实际 publication plan，main-thread plan 不得继承同 stamp worker 身份。2s 派生页面收敛上限、10s hard cap 之外另有 host wall-clock deadline，probe stop/delete 也在 finally 中有界清理。Chrome device metrics 的 float 往返统一使用 0.001 DPR 容差，只吸收 1 -> 1.0000000298023224 的表示噪声，不接受真实 display-scale 漂移。
+Tests: npm run check PASS（architecture 0 allowlist；双 TypeScript；全仓 ESLint；1953/1953 tests；production build 409 modules）；backend liquidation service/API 18/18；git diff --check PASS。Phase 6 runner/probe/acceptance、rollback drills 与 Phase 9 device-metrics/soak 使用同一 DPR/worker convergence contract；controlled-CDP asset quiescence 在成功或超时封口前均跨一次 host event-loop turn，避免长任务饥饿时漏过已到期的网络事件。
+Perf report: output/phase6-formal-final.json；production managed preview、headed Chrome、1440x900、DPR 1、59.88Hz、10000 bars，6 scenarios x（1 warm-up + 5 measured）正式命令 exit 0，phase6Acceptance=true，30/30 runtime、30/30 action、30/30 browser evidence 与 72/72 DOM observations 通过，六组 targetAssessment 全 true，全部 attributable Long Task=0。
+Perf result: freehand 64x512 zoom/pan scene p95/p99=6.0/7.7ms、frame=17.0/17.1ms、exact max=66.1ms；Renko lineage=6.2/10.3ms、17.0/17.1ms、102.4ms；indexed hit 5000 queries 的 p95/p99/max=0/0.1/0.1ms；active 4096 finalize 的 drawing main=0.3/0.4ms、input-to-paint=17.1/21.5ms、mouseup=4.4ms、worker finalize=5.8ms、exact max=29.1ms；main-thread fallback scene=5.7/7.6ms、frame=17.0/17.1ms、exact max=102.9ms。
+Backpressure: 五次 measured 均 queue max/current=2/0、in-flight max/current=1/0、jobs/results=96/1、pending drops=53-54、stale result drops=22-30、stale publish=0；最终 latest/published/painted worker identity 均为 schema v1 job/generation 98 且 stamp 完全一致，paintSequence=246-254，workerDrainWaitPassed=true。故障注入下 worker finalize p95=405.9ms 是 192ms delayed-delivery 的预期诊断值，不套生产 exact SLO，也不隐藏最终收敛。
+Decision: PASS。当前缩放/平移主链已从重复 React/DOM/全量投影转为 frame-coalesced、reference-stable、latest-wins、可观测且 fail-closed 的长期结构；保留同帧 LOD 响应与静止后 exact correctness。
 ~~~
 
 ### Phase 7 执行记录

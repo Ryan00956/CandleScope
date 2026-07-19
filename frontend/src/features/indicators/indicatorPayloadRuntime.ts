@@ -218,16 +218,30 @@ export function upsertLinePoint(
   data: IndicatorValuePoint[],
   point: { time: number; value: unknown; color?: string },
 ): IndicatorValuePoint[] {
-  const next = Array.isArray(data) ? [...data] : [];
-  const idx = next.findIndex((item) => item.time === point.time);
+  const current = Array.isArray(data) ? data : [];
+  const tail = current.at(-1);
+  const idx = tail?.time === point.time
+    ? current.length - 1
+    : current.findIndex((item) => item.time === point.time);
   if (point.value == null || Number.isNaN(Number(point.value))) {
-    if (idx !== -1) next.splice(idx, 1);
+    if (idx === -1) return current;
+    const next = [...current];
+    next.splice(idx, 1);
     return next;
   }
   const normalized = { ...point, value: Number(point.value) };
+  if (idx !== -1) {
+    const previous = current[idx];
+    if (previous
+      && previous.value === normalized.value
+      && previous.color === normalized.color) {
+      return current;
+    }
+  }
+  const next = [...current];
   if (idx === -1) {
     next.push(normalized);
-    next.sort((a, b) => a.time - b.time);
+    if (tail && tail.time > normalized.time) next.sort((a, b) => a.time - b.time);
   } else {
     next[idx] = { ...next[idx], ...normalized };
   }

@@ -77,6 +77,44 @@ function freehandDocument(): DrawingDocument {
   });
 }
 
+function sourceLineageFreehandDocument(): DrawingDocument {
+  const entity = createDrawingEntity({
+    id: "lineage-ink",
+    kind: "freehand",
+    geometry: {
+      kind: "freehand",
+      stroke: {
+        version: 2,
+        sourceProjection: "renko",
+        sourceProjectionConfig: "dataset-a:renko:10",
+        spans: [{
+          exact: {
+            left: { time: 10, sourceOrdinal: 0 },
+            right: { time: 10, sourceOrdinal: 1 },
+          },
+          fallback: {
+            fromTime: 10,
+            toTime: 20,
+            leftRatio: 0,
+            rightRatio: 1,
+          },
+        }],
+        points: [
+          { span: 0, ratio: 0, price: 10 },
+          { span: 0, ratio: 1, price: 20 },
+        ],
+      },
+    },
+    style: { kind: "freehand", color: "#60a5fa", lineWidth: 2 },
+  });
+  return createDrawingDocument({
+    scopeKey: "scope-a",
+    documentRevision: 1,
+    entities: [entity],
+    zOrder: [entity.id],
+  });
+}
+
 function frame({
   coordinateKey = "frame-a",
   includeAffinePriceCertificate = true,
@@ -294,6 +332,7 @@ test("legacy mode is inert and owns no subscriptions", () => {
     mode: "legacy",
     offscreenSupported: typeof OffscreenCanvas === "function",
     paintReceipt: null,
+    paintedWorkerIdentity: null,
     plan: null,
     publishedWorkerIdentity: null,
     publicationReady: false,
@@ -347,7 +386,7 @@ test("scene-canary filters owned nodes and publishes only through the visible su
   assert.equal(runtime.snapshot().hitIndex, null);
 });
 
-test("viewport invalidation publishes continuous LOD immediately and exact LOD after 100 ms", () => {
+test("viewport invalidation publishes continuous LOD immediately and exact LOD after the quiet window", () => {
   const store = createDrawingDocumentStore(documentWithRevision());
   const adapter = fakeAdapter();
   const renderer = fakeRenderer(store.getSnapshot());
@@ -395,13 +434,13 @@ test("viewport invalidation publishes continuous LOD immediately and exact LOD a
   const exactTaskEntry = [...delayed.entries()][0];
   assert.ok(exactTaskEntry);
   const [exactTaskHandle, exactTask] = exactTaskEntry;
-  assert.equal(exactTask.delayMs, 100);
+  assert.equal(exactTask.delayMs, 40);
 
   delayed.delete(exactTaskHandle);
-  timestamp = 110;
+  timestamp = 50;
   exactTask.callback();
   assert.equal(runtime.snapshot().lodToleranceClass, "settledExact");
-  timestamp = 115;
+  timestamp = 55;
   assert.equal(runtime.flushNow(), true);
   assert.deepEqual(projectedToleranceClasses, [
     "normalStatic",
@@ -410,12 +449,93 @@ test("viewport invalidation publishes continuous LOD immediately and exact LOD a
   ]);
   assert.equal(runtime.snapshot().lastExactSettleMs, null,
     "publication alone must not claim that exact pixels reached the canvas");
-  timestamp = 125;
+  timestamp = 105;
   const exactPlan = runtime.snapshot().plan;
   const listener = paintedListener as ((stamp: DrawingRenderRevisionStamp) => void) | null;
   assert.ok(exactPlan && listener);
   listener(exactPlan.stamp);
-  assert.equal(runtime.snapshot().lastExactSettleMs, 115);
+  assert.equal(runtime.snapshot().lastExactSettleMs, 95);
+  runtime.dispose();
+});
+
+test("viewport exact quiet window is trailing-edge and restarts at 40 ms", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const projectedToleranceClasses: string[] = [];
+  const delayed = new Map<number, Readonly<{
+    callback: () => void;
+    delayMs: number;
+    dueAt: number;
+  }>>();
+  const cancelled: number[] = [];
+  let nextDelayHandle = 0;
+  let timestamp = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    now: () => timestamp,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+    scheduleDelay: (callback, delayMs) => {
+      nextDelayHandle += 1;
+      delayed.set(nextDelayHandle, { callback, delayMs, dueAt: timestamp + delayMs });
+      return nextDelayHandle;
+    },
+    cancelDelay: (handle) => {
+      cancelled.push(handle as number);
+      delayed.delete(handle as number);
+    },
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: (request) => {
+      projectedToleranceClasses.push(request.lodToleranceClass);
+      return project(request);
+    },
+    publishScene: () => true,
+  });
+  const runDueDelays = (): void => {
+    for (const [handle, task] of [...delayed.entries()]) {
+      if (task.dueAt > timestamp) continue;
+      delayed.delete(handle);
+      task.callback();
+    }
+  };
+  assert.equal(runtime.flushNow(), true);
+
+  timestamp = 10;
+  adapter.emit("viewport");
+  assert.equal(runtime.flushNow(), true);
+  const firstEntry = [...delayed.entries()][0];
+  assert.ok(firstEntry);
+  assert.equal(firstEntry[1].delayMs, 40);
+  assert.equal(firstEntry[1].dueAt, 50);
+
+  timestamp = 42;
+  adapter.emit("viewport");
+  assert.equal(runtime.flushNow(), true);
+  assert.deepEqual(cancelled, [firstEntry[0]]);
+  assert.equal(delayed.has(firstEntry[0]), false);
+  assert.equal(delayed.size, 1, "only the quiet window after the latest viewport may survive");
+
+  const latestEntry = [...delayed.entries()][0];
+  assert.ok(latestEntry);
+  assert.notEqual(latestEntry[0], firstEntry[0]);
+  assert.equal(latestEntry[1].delayMs, 40);
+  assert.equal(latestEntry[1].dueAt, 82);
+  const projectionCountBeforeOldDeadline = projectedToleranceClasses.length;
+  timestamp = 50;
+  runDueDelays();
+  assert.equal(projectedToleranceClasses.length, projectionCountBeforeOldDeadline,
+    "the cancelled first deadline must not start exact work");
+  assert.equal(projectedToleranceClasses.at(-1), "continuousViewport");
+
+  timestamp = 82;
+  runDueDelays();
+  assert.equal(runtime.flushNow(), true);
+  assert.equal(projectedToleranceClasses.at(-1), "settledExact");
   runtime.dispose();
 });
 
@@ -460,15 +580,47 @@ test("chart-frame synchronization replaces an unannounced stale viewport plan be
   assert.equal(runtime.flushNow(), true);
   assert.equal(published.length, 1);
   adapter.setFrame(pannedFrame);
+  const capturesBeforeSync = adapter.captureCount();
   assert.equal(runtime.synchronizeChartFrame(), true);
+  assert.equal(adapter.captureCount(), capturesBeforeSync + 1,
+    "same-frame publication must carry one immutable capture through build and freshness checks");
   assert.equal(published.length, 2);
   assert.equal(published[1]?.stamp.viewportRevision, pannedFrame.viewportRevision);
   assert.equal(runtime.snapshot().lodToleranceClass, "continuousViewport");
   assert.deepEqual(projectedToleranceClasses, ["normalStatic", "continuousViewport"]);
-  assert.deepEqual([...delayed.values()].map((task) => task.delayMs), [100]);
+  assert.deepEqual([...delayed.values()].map((task) => task.delayMs), [40]);
   assert.equal(runtime.synchronizeChartFrame(), false,
     "a second updateAllViews pass over the same viewport must not rebuild");
   assert.equal(published.length, 2);
+  runtime.dispose();
+});
+
+test("chart-frame synchronization does not capture empty drawing documents", () => {
+  const emptyDocument = createDrawingDocument({
+    scopeKey: "scope-a",
+    documentRevision: 0,
+    entities: [],
+    zOrder: [],
+  });
+  const store = createDrawingDocumentStore(emptyDocument);
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(emptyDocument);
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    publishScene: () => true,
+  });
+  const capturesBeforeSync = adapter.captureCount();
+
+  assert.equal(runtime.synchronizeChartFrame(), false);
+  assert.equal(adapter.captureCount(), capturesBeforeSync);
   runtime.dispose();
 });
 
@@ -521,6 +673,305 @@ test("chart-frame synchronization replaces a stale freehand viewport without wai
   assert.equal(runtime.flushNow(), true);
   assert.equal(transport.renderRequests().length, 2,
     "ordinary scheduled work keeps the worker raster path");
+  runtime.dispose();
+});
+
+test("quiet exact pass keeps first visible publication worker-owned and accepts only latest viewport", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const initialFrame = frame();
+  const pannedFrame: DrawingFrameSnapshot = Object.freeze({
+    ...initialFrame,
+    viewportRevision: initialFrame.viewportRevision + 1,
+  });
+  const adapter = fakeAdapter(initialFrame);
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  const delayed = new Map<number, Readonly<{ callback: () => void; delayMs: number }>>();
+  let nextDelayHandle = 0;
+  let firstBitmapClosed = 0;
+  let finalBitmapClosed = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+    scheduleDelay: (callback, delayMs) => {
+      nextDelayHandle += 1;
+      delayed.set(nextDelayHandle, { callback, delayMs });
+      return nextDelayHandle;
+    },
+    cancelDelay: (handle) => { delayed.delete(handle as number); },
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan) => {
+      published.push(plan);
+      return true;
+    },
+  });
+
+  assert.equal(runtime.flushNow(), true);
+  const initialWorkerRequest = transport.renderRequests().at(-1);
+  assert.ok(initialWorkerRequest);
+  assert.equal(published.length, 0);
+
+  adapter.setFrame(pannedFrame);
+  adapter.emit("viewport");
+  assert.equal(runtime.synchronizeChartFrame(), false,
+    "without accepted pixels the chart-frame path must not create a main-thread first publication");
+  assert.equal(published.length, 0);
+
+  const quietEntry = [...delayed.entries()][0];
+  assert.ok(quietEntry);
+  assert.equal(quietEntry[1].delayMs, 40);
+  delayed.delete(quietEntry[0]);
+  quietEntry[1].callback();
+  assert.equal(runtime.flushNow(), true,
+    "the exact viewport coalesces the scheduled continuous build into pending-latest");
+  const pendingExact = runtime.snapshot();
+  assert.equal(pendingExact.worker?.queueDepth, 2);
+  assert.equal(pendingExact.worker?.inFlight, 1);
+  assert.equal(pendingExact.worker?.pending, 1);
+  assert.deepEqual(pendingExact.worker?.inFlightHeader, initialWorkerRequest.header);
+  const pendingExactHeader = pendingExact.worker?.pendingHeader;
+  assert.ok(pendingExactHeader);
+  assert.deepEqual(pendingExactHeader, pendingExact.latestSubmittedWorkerIdentity);
+  assert.equal(transport.renderRequests().length, 1,
+    "pending-latest cannot dispatch before the initial in-flight job terminates");
+
+  transport.emit(bitmapWorkerResponse(initialWorkerRequest, () => { firstBitmapClosed += 1; }));
+  assert.equal(firstBitmapClosed, 1);
+  assert.equal(published.length, 0, "the superseded initial bitmap must never become visible");
+  const latestWorkerRequest = transport.renderRequests().at(-1);
+  assert.ok(latestWorkerRequest);
+  assert.deepEqual(latestWorkerRequest.header, pendingExactHeader);
+
+  transport.emit(bitmapWorkerResponse(latestWorkerRequest, () => { finalBitmapClosed += 1; }));
+  const finalSnapshot = runtime.snapshot();
+  assert.equal(published.length, 1);
+  assert.strictEqual(finalSnapshot.plan, published[0]);
+  assert.ok(finalSnapshot.plan?.freehandRaster,
+    "the first accepted visible publication must remain worker-owned");
+  assert.equal(finalSnapshot.plan?.stamp.viewportRevision, pannedFrame.viewportRevision);
+  assert.deepEqual(finalSnapshot.publishedWorkerIdentity, latestWorkerRequest.header);
+  assert.equal(finalSnapshot.worker?.queueDepth, 0);
+  assert.equal(finalSnapshot.staleWorkerPublishCount, 0);
+  finalSnapshot.plan?.freehandRaster?.bitmap.close();
+  assert.equal(finalBitmapClosed, 1);
+  runtime.dispose();
+});
+
+test("source-lineage exact remains worker-only after continuous viewport publication", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(sourceLineageFreehandDocument());
+  const initialFrame = frame();
+  const pannedFrame: DrawingFrameSnapshot = Object.freeze({
+    ...initialFrame,
+    viewportRevision: initialFrame.viewportRevision + 1,
+  });
+  const adapter = fakeAdapter(initialFrame);
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  const delayed = new Map<number, Readonly<{ callback: () => void; delayMs: number }>>();
+  let nextDelayHandle = 0;
+  let visiblePlan: ReturnType<typeof projectFreehand> | null = null;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+    scheduleDelay: (callback, delayMs) => {
+      nextDelayHandle += 1;
+      delayed.set(nextDelayHandle, { callback, delayMs });
+      return nextDelayHandle;
+    },
+    cancelDelay: (handle) => { delayed.delete(handle as number); },
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan) => {
+      visiblePlan?.freehandRaster?.bitmap.close();
+      visiblePlan = plan;
+      published.push(plan);
+      return true;
+    },
+  });
+
+  assert.equal(runtime.flushNow(), true);
+  const initialRequest = transport.renderRequests().at(-1);
+  assert.ok(initialRequest);
+  transport.emit(bitmapWorkerResponse(initialRequest, () => {}));
+  assert.equal(published.length, 1);
+
+  adapter.setFrame(pannedFrame);
+  adapter.emit("viewport");
+  assert.equal(runtime.synchronizeChartFrame(), true);
+  assert.equal(published.length, 2, "continuous lineage LOD must still publish before paint");
+  const quietEntry = [...delayed.entries()][0];
+  assert.ok(quietEntry);
+  delayed.delete(quietEntry[0]);
+  quietEntry[1].callback();
+  assert.equal(runtime.flushNow(), true);
+  const exactRequest = transport.renderRequests().at(-1);
+  assert.ok(exactRequest);
+  assert.equal(published.length, 2,
+    "high-cost lineage exact must not take the main-thread latency hedge");
+
+  transport.emit(bitmapWorkerResponse(exactRequest, () => {}));
+  assert.equal(published.length, 3);
+  assert.ok(runtime.snapshot().plan?.freehandRaster);
+  runtime.snapshot().plan?.freehandRaster?.bitmap.close();
+  runtime.dispose();
+});
+
+test("new viewport supersedes an in-flight exact worker and converges on the latest painted stamp", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const initialFrame = frame();
+  const firstViewportFrame: DrawingFrameSnapshot = Object.freeze({
+    ...initialFrame,
+    viewportRevision: initialFrame.viewportRevision + 1,
+  });
+  const latestViewportFrame: DrawingFrameSnapshot = Object.freeze({
+    ...initialFrame,
+    viewportRevision: initialFrame.viewportRevision + 2,
+  });
+  const adapter = fakeAdapter(initialFrame);
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  const delayed = new Map<number, Readonly<{ callback: () => void; delayMs: number }>>();
+  let nextDelayHandle = 0;
+  let visiblePlan: ReturnType<typeof projectFreehand> | null = null;
+  let exactPaintListener: ((ack: DrawingScenePaintAck) => void) | null = null;
+  let initialBitmapClosed = 0;
+  let staleBitmapClosed = 0;
+  let finalBitmapClosed = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+    scheduleDelay: (callback, delayMs) => {
+      nextDelayHandle += 1;
+      delayed.set(nextDelayHandle, { callback, delayMs });
+      return nextDelayHandle;
+    },
+    cancelDelay: (handle) => { delayed.delete(handle as number); },
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan) => {
+      visiblePlan?.freehandRaster?.bitmap.close();
+      visiblePlan = plan;
+      published.push(plan);
+      return true;
+    },
+    subscribeSceneExactPainted: (listener) => {
+      exactPaintListener = listener;
+      return () => { exactPaintListener = null; };
+    },
+  });
+
+  assert.equal(runtime.flushNow(), true);
+  const initialWorkerRequest = transport.renderRequests().at(-1);
+  assert.ok(initialWorkerRequest);
+  transport.emit(bitmapWorkerResponse(initialWorkerRequest, () => { initialBitmapClosed += 1; }));
+  assert.equal(published.length, 1);
+
+  adapter.setFrame(firstViewportFrame);
+  adapter.emit("viewport");
+  assert.equal(runtime.synchronizeChartFrame(), true);
+  assert.equal(initialBitmapClosed, 1, "the continuous viewport replaces the initial raster");
+  const firstQuietEntry = [...delayed.entries()][0];
+  assert.ok(firstQuietEntry);
+  assert.equal(firstQuietEntry[1].delayMs, 40);
+  delayed.delete(firstQuietEntry[0]);
+  firstQuietEntry[1].callback();
+  assert.equal(runtime.flushNow(), true);
+  const staleExactRequest = transport.renderRequests().at(-1);
+  assert.ok(staleExactRequest);
+  assert.deepEqual(runtime.snapshot().worker?.inFlightHeader, staleExactRequest.header);
+
+  adapter.setFrame(latestViewportFrame);
+  adapter.emit("viewport");
+  assert.equal(runtime.synchronizeChartFrame(), true,
+    "the latest viewport must publish synchronously without waiting for stale exact work");
+  const latestContinuousPlan = runtime.snapshot().plan;
+  assert.ok(latestContinuousPlan);
+  assert.equal(latestContinuousPlan.stamp.viewportRevision, latestViewportFrame.viewportRevision);
+  const latestQuietEntry = [...delayed.entries()][0];
+  assert.ok(latestQuietEntry);
+  assert.equal(latestQuietEntry[1].delayMs, 40);
+  delayed.delete(latestQuietEntry[0]);
+  latestQuietEntry[1].callback();
+  assert.equal(runtime.flushNow(), true);
+  const queuedLatest = runtime.snapshot();
+  assert.equal(queuedLatest.worker?.queueDepth, 2);
+  assert.deepEqual(queuedLatest.worker?.inFlightHeader, staleExactRequest.header);
+  const pendingLatestHeader = queuedLatest.worker?.pendingHeader;
+  assert.ok(pendingLatestHeader);
+  assert.deepEqual(pendingLatestHeader, queuedLatest.latestSubmittedWorkerIdentity);
+  const exactLatencyHedge = queuedLatest.plan;
+  assert.ok(exactLatencyHedge);
+  assert.notStrictEqual(exactLatencyHedge, latestContinuousPlan,
+    "a queued exact worker must not spend the stop-to-painted latency budget");
+  assert.equal(exactLatencyHedge.stamp.viewportRevision, latestViewportFrame.viewportRevision);
+  assert.equal(exactLatencyHedge.freehandRaster, undefined,
+    "the latency hedge publishes the exact main-thread list while raster work stays queued");
+  const listener = exactPaintListener as ((ack: DrawingScenePaintAck) => void) | null;
+  assert.ok(listener);
+  listener({
+    plan: exactLatencyHedge,
+    stamp: exactLatencyHedge.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+  assert.ok((runtime.snapshot().lastExactSettleMs ?? -1) >= 0);
+
+  transport.emit(bitmapWorkerResponse(staleExactRequest, () => { staleBitmapClosed += 1; }));
+  assert.equal(staleBitmapClosed, 1);
+  assert.strictEqual(runtime.snapshot().plan, exactLatencyHedge,
+    "a stale exact bitmap must not roll the visible scene back from the exact latency hedge");
+  assert.equal(runtime.snapshot().staleWorkerPublishCount, 0);
+  assert.equal(runtime.snapshot().worker?.staleResultCount, 1);
+
+  const latestExactRequest = transport.renderRequests().at(-1);
+  assert.ok(latestExactRequest);
+  assert.deepEqual(latestExactRequest.header, pendingLatestHeader);
+  transport.emit(bitmapWorkerResponse(latestExactRequest, () => { finalBitmapClosed += 1; }));
+  const finalPlan = runtime.snapshot().plan;
+  assert.ok(finalPlan?.freehandRaster);
+  assert.equal(finalPlan.stamp.viewportRevision, latestViewportFrame.viewportRevision);
+  listener({
+    plan: finalPlan,
+    stamp: finalPlan.stamp,
+    attachmentRevision: 2,
+    paintSequence: 2,
+  });
+
+  const converged = runtime.snapshot();
+  assert.deepEqual(converged.lastWorkerRequestedStamp, finalPlan.stamp);
+  assert.deepEqual(converged.lastWorkerPublishedStamp, finalPlan.stamp);
+  assert.deepEqual(converged.lastPaintedStamp, finalPlan.stamp);
+  assert.equal(converged.worker?.queueDepth, 0);
+  assert.equal(converged.worker?.inFlight, 0);
+  assert.equal(converged.worker?.pending, 0);
+  assert.equal(converged.staleWorkerPublishCount, 0);
+  finalPlan.freehandRaster.bitmap.close();
+  assert.equal(finalBitmapClosed, 1);
   runtime.dispose();
 });
 
@@ -935,6 +1386,7 @@ test("same-stamp invalidation rejects an old worker bitmap before a new scene ep
   const adapter = fakeAdapter();
   const renderer = fakeRenderer(store.getSnapshot());
   const published: ReturnType<typeof projectFreehand>[] = [];
+  let exactPaintListener: ((ack: DrawingScenePaintAck) => void) | null = null;
   let closed = 0;
   const runtime = createDrawingSceneRuntime({
     mode: "scene-canary",
@@ -951,6 +1403,10 @@ test("same-stamp invalidation rejects an old worker bitmap before a new scene ep
     publishScene: (plan) => {
       published.push(plan);
       return true;
+    },
+    subscribeSceneExactPainted: (listener) => {
+      exactPaintListener = listener;
+      return () => { exactPaintListener = null; };
     },
   });
   assert.equal(runtime.flushNow(), true);
@@ -975,11 +1431,172 @@ test("same-stamp invalidation rejects an old worker bitmap before a new scene ep
   assert.equal(published.length, 1);
   assert.deepEqual(runtime.snapshot().acceptedWorkerIdentity, second.header);
   assert.deepEqual(runtime.snapshot().publishedWorkerIdentity, second.header);
+  assert.equal(runtime.snapshot().paintedWorkerIdentity, null,
+    "publication alone must not claim that the worker plan reached the canvas");
+  const exactPlan = published[0];
+  assert.ok(exactPlan);
+  const emitExactPaint = exactPaintListener as ((ack: DrawingScenePaintAck) => void) | null;
+  assert.ok(emitExactPaint);
+  emitExactPaint({
+    plan: exactPlan,
+    stamp: exactPlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+  assert.deepEqual(runtime.snapshot().paintedWorkerIdentity, second.header);
   assert.ok(published[0]?.freehandRaster);
   assert.equal(runtime.snapshot().rasterBackend, "worker");
   assert.equal(runtime.snapshot().staleWorkerPublishCount, 0,
     "a superseded result rejected inside the client never attempts publication");
   published[0]?.freehandRaster?.bitmap.close();
+  runtime.dispose();
+  assert.equal(closed, 2);
+});
+
+test("a same-stamp main-thread paint cannot inherit the prior worker publication identity", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  let exactPaintListener: ((ack: DrawingScenePaintAck) => void) | null = null;
+  let closed = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan) => {
+      published.push(plan);
+      return true;
+    },
+    subscribeSceneExactPainted: (listener) => {
+      exactPaintListener = listener;
+      return () => { exactPaintListener = null; };
+    },
+  });
+
+  assert.equal(runtime.flushNow(), true);
+  const workerRequest = transport.renderRequests()[0];
+  assert.ok(workerRequest);
+  transport.emit(bitmapWorkerResponse(workerRequest, () => { closed += 1; }));
+  const workerPlan = published[0];
+  assert.ok(workerPlan);
+  const emitExactPaint = exactPaintListener as ((ack: DrawingScenePaintAck) => void) | null;
+  assert.ok(emitExactPaint);
+  emitExactPaint({
+    plan: workerPlan,
+    stamp: workerPlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+  assert.deepEqual(runtime.snapshot().paintedWorkerIdentity, workerRequest.header);
+
+  // A settled invalidation at the same frame stamp submits the next worker
+  // job but uses the exact main-thread hedge for the immediately visible plan.
+  adapter.emit("manual");
+  assert.equal(runtime.flushNow(), true);
+  const mainThreadPlan = published[1];
+  assert.ok(mainThreadPlan);
+  assert.deepEqual(mainThreadPlan.stamp, workerPlan.stamp);
+  assert.equal(mainThreadPlan.freehandRaster, undefined);
+  assert.equal(runtime.snapshot().publishedWorkerIdentity, null);
+  emitExactPaint({
+    plan: mainThreadPlan,
+    stamp: mainThreadPlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 2,
+  });
+  assert.equal(runtime.snapshot().paintedWorkerIdentity, null,
+    "paint provenance must come from the acknowledged plan, not a same-stamp global identity");
+
+  workerPlan.freehandRaster?.bitmap.close();
+  runtime.dispose();
+  assert.equal(closed, 1);
+});
+
+test("rebuilding the worker client clears the prior painted identity namespace", () => {
+  const transports = [new RuntimeWorkerTransport(), new RuntimeWorkerTransport()];
+  let transportIndex = 0;
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let visiblePlan: ReturnType<typeof projectFreehand> | null = null;
+  let exactPaintListener: ((ack: DrawingScenePaintAck) => void) | null = null;
+  let acceptPublication = true;
+  let closed = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transports[transportIndex++]!,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+    onError: () => {},
+  });
+  const binding = {
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan: ReturnType<typeof projectFreehand>) => {
+      if (acceptPublication) visiblePlan = plan;
+      return acceptPublication;
+    },
+    subscribeSceneExactPainted: (listener: (ack: DrawingScenePaintAck) => void) => {
+      exactPaintListener = listener;
+      return () => { exactPaintListener = null; };
+    },
+  };
+  runtime.activate(binding);
+
+  assert.equal(runtime.flushNow(), true);
+  const paintedRequest = transports[0]!.renderRequests()[0];
+  assert.ok(paintedRequest);
+  transports[0]!.emit(bitmapWorkerResponse(paintedRequest, () => { closed += 1; }));
+  const paintedPlan = visiblePlan as ReturnType<typeof projectFreehand> | null;
+  assert.ok(paintedPlan);
+  const emitExactPaint = exactPaintListener as ((ack: DrawingScenePaintAck) => void) | null;
+  assert.ok(emitExactPaint);
+  emitExactPaint({
+    plan: paintedPlan,
+    stamp: paintedPlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+  assert.deepEqual(runtime.snapshot().paintedWorkerIdentity, paintedRequest.header);
+
+  assert.equal(runtime.invalidate("force-worker-publication-rejection"), true);
+  assert.equal(runtime.flushNow(), true);
+  const rejectedRequest = transports[0]!.renderRequests()[1];
+  assert.ok(rejectedRequest);
+  acceptPublication = false;
+  transports[0]!.emit(bitmapWorkerResponse(rejectedRequest, () => { closed += 1; }));
+  assert.equal(runtime.snapshot().active, false);
+  assert.deepEqual(runtime.snapshot().paintedWorkerIdentity, paintedRequest.header);
+
+  acceptPublication = true;
+  assert.equal(runtime.activate(binding), true);
+  const rebuilt = runtime.snapshot();
+  assert.equal(transports[0]!.terminated, true);
+  assert.equal(rebuilt.paintedWorkerIdentity, null);
+  assert.equal(rebuilt.publishedWorkerIdentity, null);
+  assert.equal(rebuilt.latestSubmittedWorkerIdentity, null);
+  assert.deepEqual(rebuilt.submittedWorkerHeaders, []);
+
+  assert.equal(runtime.flushNow(), true);
+  const rebuiltRequest = transports[1]!.renderRequests()[0];
+  assert.ok(rebuiltRequest);
+  assert.equal(rebuiltRequest.header.jobId, 1,
+    "the rebuilt transport owns a fresh identity namespace");
+
+  paintedPlan.freehandRaster?.bitmap.close();
   runtime.dispose();
   assert.equal(closed, 2);
 });

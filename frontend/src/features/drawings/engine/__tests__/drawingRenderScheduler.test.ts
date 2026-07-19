@@ -110,6 +110,33 @@ test("a plan is discarded and the latest input is rescheduled when build becomes
   assert.deepEqual(published, [2]);
 });
 
+test("prefetched input and a lightweight freshness check avoid duplicate input capture", () => {
+  const input = { stamp: stamp(1) };
+  let readCount = 0;
+  let currentChecks = 0;
+  let published = 0;
+  const scheduler = createDrawingRenderScheduler({
+    readInput: () => {
+      readCount += 1;
+      return input;
+    },
+    buildPlan: (value) => ({ stamp: value.stamp }),
+    isInputCurrent: (value, plan) => {
+      currentChecks += 1;
+      return value === input && plan.stamp === value.stamp;
+    },
+    publish: () => { published += 1; },
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+
+  scheduler.invalidate("chart-frame-sync");
+  assert.equal(scheduler.flushNow(input), true);
+  assert.equal(readCount, 0);
+  assert.equal(currentChecks, 1);
+  assert.equal(published, 1);
+});
+
 test("an invalidation raised during build discards the plan even when revisions are unchanged", () => {
   const frames: Array<() => void> = [];
   const discarded: string[] = [];

@@ -981,8 +981,18 @@ def _merge_rollups(
 
 
 def _public_rollup_row(row: dict[str, Any]) -> dict[str, Any]:
-    public = dict(row)
-    public.update({
+    """Translate the storage row into the stable liquidation.v1 wire shape.
+
+    Storage deliberately calls the last-observed timestamp ``received_at_ms``.
+    The public rollup model calls the same revision timestamp ``updated_at_ms``.
+    Construct the response explicitly so storage-only columns cannot leak into
+    the HTTP contract when the persistence schema evolves.
+    """
+
+    return {
+        "exchange": str(row["exchange"]),
+        "market_type": str(row["market_type"]),
+        "symbol": str(row["symbol"]),
         "period": "1m",
         "bucket_start_ms": int(row["bucket_open_ms"]),
         "bucket_end_ms": int(row["bucket_close_ms"]),
@@ -991,11 +1001,14 @@ def _public_rollup_row(row: dict[str, Any]) -> dict[str, Any]:
         "filled_notional": float(row["filled_notional"]),
         "event_count": int(row["event_count"]),
         "max_event_notional": float(row["max_event_notional"]),
+        "first_event_time_ms": int(row["first_event_time_ms"]),
+        "last_event_time_ms": int(row["last_event_time_ms"]),
         "is_final": bool(row.get("is_final", False)),
+        "revision": int(row["revision"]),
+        "updated_at_ms": int(row["received_at_ms"]),
         "source_quality": "sampled_best_effort",
         "source_exhaustive": False,
-    })
-    return public
+    }
 
 
 def _bounded_limit(value: int, maximum: int) -> int:

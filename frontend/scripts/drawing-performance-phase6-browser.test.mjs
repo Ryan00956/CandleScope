@@ -3,9 +3,12 @@ import test from "node:test";
 
 import {
   phase6ActionRequiresCurrentPaint,
+  phase6ActionRequiresWorkerDrain,
   phase6BrowserProbeBootstrap,
+  phase6LatestWorkerPaintConverged,
   phase6SceneReadiness,
   waitForPhase6ActionCurrentPaint,
+  waitForPhase6ActionWorkerDrain,
 } from "./drawing-performance-phase6-browser.mjs";
 
 test("Phase 6 scene readiness accepts a stable non-freehand scene without fake point gauges", () => {
@@ -69,6 +72,108 @@ function runtimeStamp(overrides = {}) {
     ...overrides,
   };
 }
+
+function convergedWorkerRuntime(overrides = {}) {
+  const currentStamp = runtimeStamp();
+  const identity = workerIdentity(8, currentStamp);
+  return {
+    backend: "worker",
+    queueDepthCurrent: 0,
+    inFlightCurrent: 0,
+    workerResultDelta: 1,
+    lastRequestedStamp: currentStamp,
+    lastPublishedStamp: currentStamp,
+    lastPaintedStamp: currentStamp,
+    latestSubmittedWorkerIdentity: identity,
+    publishedWorkerIdentity: identity,
+    paintedWorkerIdentity: identity,
+    paintReceipt: paintReceipt(currentStamp, 9),
+    ...overrides,
+  };
+}
+
+test("Phase 6 latest-worker convergence binds drain, publication, and exact paint identity", () => {
+  const currentStamp = runtimeStamp();
+  const converged = convergedWorkerRuntime();
+  assert.equal(phase6LatestWorkerPaintConverged(converged), true);
+  for (const mutation of [
+    { queueDepthCurrent: 1 },
+    { inFlightCurrent: 1 },
+    { workerResultDelta: 0 },
+    { workerResultDelta: 0.5 },
+    { backend: "main-thread" },
+    { publishedWorkerIdentity: workerIdentity(7, currentStamp) },
+    { paintedWorkerIdentity: workerIdentity(7, currentStamp) },
+    { lastPaintedStamp: runtimeStamp({ viewportRevision: 99 }) },
+    { paintReceipt: paintReceipt(runtimeStamp({ viewportRevision: 99 }), 10) },
+  ]) {
+    assert.equal(phase6LatestWorkerPaintConverged({ ...converged, ...mutation }), false);
+  }
+});
+
+test("Phase 6 latest-worker convergence rejects equal but malformed schema evidence", () => {
+  const malformedStamps = [
+    {},
+    runtimeStamp({ scopeKey: "" }),
+    runtimeStamp({ documentRevision: -1 }),
+    runtimeStamp({ viewportRevision: Number.MAX_SAFE_INTEGER + 1 }),
+    runtimeStamp({ widthCssPx: 0 }),
+    runtimeStamp({ dpr: Number.NaN }),
+  ];
+  for (const malformedStamp of malformedStamps) {
+    const identity = workerIdentity(8, malformedStamp);
+    assert.equal(phase6LatestWorkerPaintConverged(convergedWorkerRuntime({
+      lastRequestedStamp: malformedStamp,
+      lastPublishedStamp: malformedStamp,
+      lastPaintedStamp: malformedStamp,
+      latestSubmittedWorkerIdentity: identity,
+      publishedWorkerIdentity: identity,
+      paintedWorkerIdentity: identity,
+      paintReceipt: paintReceipt(malformedStamp, 9),
+    })), false);
+  }
+
+  const currentStamp = runtimeStamp();
+  for (const malformedIdentity of [
+    {},
+    { schemaVersion: 0, jobId: 8, generation: 8, stamp: currentStamp },
+    { schemaVersion: 2, jobId: 8, generation: 8, stamp: currentStamp },
+    { schemaVersion: 1, jobId: 0, generation: 8, stamp: currentStamp },
+    { schemaVersion: 1, jobId: -1, generation: 8, stamp: currentStamp },
+    { schemaVersion: 1, jobId: 8, generation: -1, stamp: currentStamp },
+    {
+      schemaVersion: 1,
+      jobId: Number.MAX_SAFE_INTEGER + 1,
+      generation: 8,
+      stamp: currentStamp,
+    },
+  ]) {
+    assert.equal(phase6LatestWorkerPaintConverged(convergedWorkerRuntime({
+      latestSubmittedWorkerIdentity: malformedIdentity,
+      publishedWorkerIdentity: malformedIdentity,
+      paintedWorkerIdentity: malformedIdentity,
+    })), false);
+  }
+});
+
+test("Phase 6 latest-worker convergence remains closure-free after serialization", () => {
+  const serializedPredicate = Function(
+    `"use strict"; return (${phase6LatestWorkerPaintConverged.toString()});`,
+  )();
+  assert.equal(serializedPredicate(convergedWorkerRuntime()), true);
+
+  const emptyStamp = {};
+  const forgedIdentity = workerIdentity(8, emptyStamp);
+  assert.equal(serializedPredicate(convergedWorkerRuntime({
+    lastRequestedStamp: emptyStamp,
+    lastPublishedStamp: emptyStamp,
+    lastPaintedStamp: emptyStamp,
+    latestSubmittedWorkerIdentity: forgedIdentity,
+    publishedWorkerIdentity: forgedIdentity,
+    paintedWorkerIdentity: forgedIdentity,
+    paintReceipt: paintReceipt(emptyStamp, 9),
+  })), false);
+});
 
 test("Phase 6 browser probe fails closed without the drawing perf handle", async () => {
   await withWindow({}, () => {
@@ -147,6 +252,74 @@ test("Phase 6 runner fails closed for a missing baseline or current-paint timeou
   );
 });
 
+test("Phase 6 runner waits only for the backpressure worker drain and bounds the wait", async () => {
+  assert.equal(phase6ActionRequiresWorkerDrain("phase6-worker-backpressure"), true);
+  assert.equal(phase6ActionRequiresWorkerDrain("phase6-viewport"), false);
+
+  let calls = 0;
+  const skipped = await waitForPhase6ActionWorkerDrain({
+    action: "phase6-viewport",
+    timeoutMs: 50_000,
+    waitForWorkerDrain: async () => {
+      calls += 1;
+      return { passed: true };
+    },
+  });
+  assert.deepEqual(skipped, { required: false, result: null });
+  assert.equal(calls, 0);
+
+  const argumentsSeen = [];
+  const waited = await waitForPhase6ActionWorkerDrain({
+    action: "phase6-worker-backpressure",
+    timeoutMs: 50_000,
+    workerDelayMs: 192,
+    waitForWorkerDrain: async (...args) => {
+      argumentsSeen.push(args);
+      return { passed: true, queueDepthCurrent: 0, inFlightCurrent: 0 };
+    },
+  });
+  assert.deepEqual(argumentsSeen, [[2_000]]);
+  assert.equal(waited.required, true);
+  assert.equal(waited.result.passed, true);
+});
+
+test("Phase 6 runner fails closed when the latest exact worker does not drain", async () => {
+  await assert.rejects(
+    waitForPhase6ActionWorkerDrain({
+      action: "phase6-worker-backpressure",
+      timeoutMs: 100,
+      waitForWorkerDrain: async () => ({
+        passed: false,
+        reason: "phase6-latest-worker-drain-timeout",
+      }),
+    }),
+    /did not drain to the latest exact worker paint.*phase6-latest-worker-drain-timeout/,
+  );
+  await assert.rejects(
+    waitForPhase6ActionWorkerDrain({
+      action: "phase6-worker-backpressure",
+      timeoutMs: 100,
+      waitForWorkerDrain: null,
+    }),
+    /worker-drain probe is unavailable/,
+  );
+});
+
+test("Phase 6 runner host-bounds a page worker-drain promise that never resolves", async () => {
+  const startedAt = performance.now();
+  await assert.rejects(
+    waitForPhase6ActionWorkerDrain({
+      action: "phase6-worker-backpressure",
+      timeoutMs: 0,
+      waitForWorkerDrain: () => new Promise(() => {}),
+    }),
+    /did not drain.*phase6-latest-worker-drain-host-timeout/,
+  );
+  const elapsedMs = performance.now() - startedAt;
+  assert.ok(elapsedMs >= 200, `host timeout fired too early: ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 1_000, `host timeout leaked to the outer CDP boundary: ${elapsedMs}ms`);
+});
+
 test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidence", async () => {
   let counters = {
     workerJobCount: 2,
@@ -203,6 +376,7 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     returnedWorkerIdentity: null,
     acceptedWorkerIdentity: initialWorkerIdentity,
     publishedWorkerIdentity: initialWorkerIdentity,
+    paintedWorkerIdentity: initialWorkerIdentity,
     latestSubmittedWorkerIdentity: initialWorkerIdentity,
   };
   const handle = {
@@ -245,6 +419,7 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     phase6.returnedWorkerIdentity = staleIdentity;
     phase6.acceptedWorkerIdentity = currentIdentity;
     phase6.publishedWorkerIdentity = currentIdentity;
+    phase6.paintedWorkerIdentity = currentIdentity;
     phase6.latestSubmittedWorkerIdentity = currentIdentity;
     counters = {
       ...counters,
@@ -311,6 +486,7 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     assert.deepEqual(stopped.runtime.returnedWorkerIdentity, staleIdentity);
     assert.deepEqual(stopped.runtime.acceptedWorkerIdentity, currentIdentity);
     assert.deepEqual(stopped.runtime.publishedWorkerIdentity, currentIdentity);
+    assert.deepEqual(stopped.runtime.paintedWorkerIdentity, currentIdentity);
     assert.deepEqual(stopped.runtime.latestSubmittedWorkerIdentity, currentIdentity);
 
     phase6.rawPoints = 32_768;
@@ -398,6 +574,89 @@ test("Phase 6 browser probe waits through superseded paints for the latest reque
     assert.deepEqual(painted.previousStamp, revision(1));
     assert.deepEqual(painted.requestedStamp, revision(3));
     assert.deepEqual(painted.paintedStamp, revision(3));
+  });
+});
+
+test("Phase 6 browser probe waits for the drained latest exact worker publication", async () => {
+  const initialStamp = runtimeStamp({ viewportRevision: 1 });
+  const currentStamp = runtimeStamp({ viewportRevision: 2 });
+  const initialIdentity = workerIdentity(1, initialStamp);
+  const latestIdentity = workerIdentity(2, currentStamp);
+  let counters = {
+    workerJobCount: 1,
+    workerResultCount: 1,
+    workerQueueDropCount: 0,
+    staleWorkerResultCount: 0,
+    staleWorkerPublishCount: 0,
+  };
+  const phase6 = {
+    backend: "worker",
+    queueDepthCurrent: 0,
+    inFlightCurrent: 0,
+    lastRequestedStamp: initialStamp,
+    lastPublishedStamp: initialStamp,
+    lastPaintedStamp: initialStamp,
+    latestSubmittedWorkerIdentity: initialIdentity,
+    publishedWorkerIdentity: initialIdentity,
+    paintedWorkerIdentity: initialIdentity,
+    paintReceipt: paintReceipt(initialStamp),
+  };
+  const handle = {
+    report: () => ({
+      counters,
+      counterMaxima: counters,
+      gauges: {
+        workerQueue: phase6.queueDepthCurrent,
+        workerInFlight: phase6.inFlightCurrent,
+      },
+      gaugeMaxima: { workerQueue: 2, workerInFlight: 1 },
+    }),
+    readRuntimeSummary: () => ({}),
+    readPhase6Runtime: () => phase6,
+  };
+  await withWindow({
+    __CANDLESCOPE_DRAWING_PERF__: handle,
+    __CANDLESCOPE_DRAWING_PERF_CONFIG__: {},
+  }, async () => {
+    phase6BrowserProbeBootstrap();
+    phase6.backend = "main-thread";
+    phase6.queueDepthCurrent = 1;
+    phase6.inFlightCurrent = 1;
+    phase6.lastRequestedStamp = currentStamp;
+    phase6.lastPublishedStamp = currentStamp;
+    phase6.lastPaintedStamp = currentStamp;
+    phase6.latestSubmittedWorkerIdentity = latestIdentity;
+    counters = { ...counters, workerJobCount: 2 };
+
+    const waiting = globalThis.window.__CANDLESCOPE_PHASE6_PROBE__
+      .waitForWorkerDrain(250);
+    setTimeout(() => {
+      phase6.backend = "worker";
+      phase6.queueDepthCurrent = 0;
+      phase6.inFlightCurrent = 0;
+      phase6.publishedWorkerIdentity = latestIdentity;
+      phase6.paintedWorkerIdentity = latestIdentity;
+      phase6.paintReceipt = paintReceipt(currentStamp, 2);
+      counters = { ...counters, workerResultCount: 2 };
+    }, 25);
+    const drained = await waiting;
+    assert.equal(drained.passed, true);
+    assert.equal(drained.backend, "worker");
+    assert.equal(drained.queueDepthCurrent, 0);
+    assert.equal(drained.inFlightCurrent, 0);
+    assert.equal(drained.workerResultDelta, 1);
+    assert.deepEqual(drained.latestSubmittedWorkerIdentity, latestIdentity);
+    assert.deepEqual(drained.publishedWorkerIdentity, latestIdentity);
+    assert.deepEqual(drained.paintedWorkerIdentity, latestIdentity);
+    assert.deepEqual(drained.paintReceipt, paintReceipt(currentStamp, 2));
+
+    phase6.backend = "main-thread";
+    phase6.queueDepthCurrent = 1;
+    phase6.inFlightCurrent = 1;
+    const timedOut = await globalThis.window.__CANDLESCOPE_PHASE6_PROBE__
+      .waitForWorkerDrain(10);
+    assert.equal(timedOut.passed, false);
+    assert.equal(timedOut.reason, "phase6-latest-worker-drain-timeout");
   });
 });
 

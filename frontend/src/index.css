@@ -651,6 +651,7 @@ body {
   background: var(--bg-secondary);
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+  contain: layout paint style;
 }
 
 .order-book-dock.collapsed {
@@ -847,21 +848,24 @@ body {
   overflow-y: auto;
   overflow-anchor: none;
   overscroll-behavior: contain;
+  contain: strict;
 }
 
-.ob-asks {
-  display: flex;
-  flex-direction: column-reverse;
+.ob-levels-window {
+  position: relative;
+  width: 100%;
 }
 
 .ob-level-row {
-  position: relative;
-  flex: 0 0 22px;
+  position: absolute;
+  inset: 0 0 auto;
+  height: 22px;
   min-height: 22px;
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 22px;
   cursor: default;
+  contain: layout paint style;
 }
 
 .ob-level-row:hover { background: var(--bg-hover); }

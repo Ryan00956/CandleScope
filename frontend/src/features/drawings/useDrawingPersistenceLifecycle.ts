@@ -2142,6 +2142,7 @@ export function useDrawingPersistenceLifecycle({
       returnedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.returnedWorkerIdentity),
       acceptedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.acceptedWorkerIdentity),
       publishedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.publishedWorkerIdentity),
+      paintedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.paintedWorkerIdentity),
       latestSubmittedWorkerIdentity: snapshotWorkerIdentity(
         runtimeSnapshot.latestSubmittedWorkerIdentity,
       ),

@@ -18,6 +18,7 @@ import type {
   CoordinateSeriesBridge,
   DrawingCoordinateContext,
   DrawingCoordinateResolution,
+  DrawingSourceLineageSpanProjection,
   DrawingSourceLineageSpanResolution,
   DrawingSeriesProviders,
   ScreenPoint,
@@ -28,6 +29,9 @@ import {
   isDrawingFrameSnapshot,
 } from "./drawingFrameSnapshot.js";
 import type { DrawingFrameSnapshot } from "./drawingFrameSnapshot.js";
+import {
+  subscribeSharedDrawingFrameInvalidation,
+} from "./drawingFrameInvalidationHub.js";
 
 export type DrawingFrameInvalidationReason = "manual" | "viewport";
 import type { DrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex.js";
@@ -108,6 +112,20 @@ interface FreehandCaptureIdentityRecord {
 interface DrawingFrameProjectionSessionState {
   readonly context: DrawingCoordinateContext;
   readonly invalidationEpoch: number;
+  /**
+   * Viewport projection is pure for one atomic frame. Multiple canonical
+   * strokes may share the same immutable world-lineage resolution, so retain
+   * its public time-scale projection only for this synchronous scene build.
+   * The WeakMap is released with the session and cannot retain documents or
+   * grow across viewport revisions.
+   */
+  readonly lineageProjectionCache: WeakMap<
+    DrawingSourceLineageSpanResolution,
+    Readonly<{
+      coordinates: Readonly<{ left: number; right: number }> | null;
+      mode: DrawingSourceLineageSpanProjection["mode"] | null;
+    }>
+  >;
   readonly lineageStats: {
     exactProjectionCount: number;
     fallbackProjectionCount: number;
@@ -246,15 +264,56 @@ export function createLightweightChartAdapter({
     const value = drawingPaneIndex ?? getRefValue(mainPaneIndexRef);
     return Number.isInteger(value) && Number(value) >= 0 ? Number(value) : 0;
   };
-  const getDrawingPaneOffsetY = () => {
-    const container = getRefValue(containerRef);
-    if (!container) return 0;
-    const paneElement = getSeries()?.getPane?.()?.getHTMLElement?.() ?? null;
+  let drawingPaneGeometryCache: Readonly<{
+    container: HTMLElement | null;
+    offsetY: number;
+    paneElement: HTMLElement | null;
+    valid: boolean;
+  }> = Object.freeze({
+    container: null,
+    offsetY: 0,
+    paneElement: null,
+    valid: false,
+  });
+  const getDrawingPaneElement = (): HTMLElement | null => (
+    getSeries()?.getPane?.()?.getHTMLElement?.() ?? null
+  ) as HTMLElement | null;
+  const refreshDrawingPaneGeometry = (
+    container: HTMLElement | null = getRefValue(containerRef) ?? null,
+    paneElement?: HTMLElement | null,
+  ): number => {
+    const resolvedPaneElement = container
+      ? paneElement === undefined ? getDrawingPaneElement() : paneElement
+      : null;
     const containerRect = container?.getBoundingClientRect?.() ?? null;
-    const paneRect = paneElement?.getBoundingClientRect?.() ?? null;
-    if (!containerRect || !paneRect) return 0;
-    const offset = paneRect.top - containerRect.top;
-    return Number.isFinite(offset) && offset >= 0 ? offset : 0;
+    const paneRect = resolvedPaneElement?.getBoundingClientRect?.() ?? null;
+    const rawOffset = containerRect && paneRect ? paneRect.top - containerRect.top : 0;
+    const offsetY = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+    drawingPaneGeometryCache = Object.freeze({
+      container,
+      offsetY,
+      paneElement: resolvedPaneElement,
+      valid: true,
+    });
+    return offsetY;
+  };
+  const getDrawingPaneOffsetY = (): number => {
+    const container = getRefValue(containerRef) ?? null;
+    if (!container) {
+      if (!drawingPaneGeometryCache.valid
+        || drawingPaneGeometryCache.container !== null
+        || drawingPaneGeometryCache.paneElement !== null) {
+        return refreshDrawingPaneGeometry(null, null);
+      }
+      return 0;
+    }
+    const paneElement = getDrawingPaneElement();
+    if (!drawingPaneGeometryCache.valid
+      || drawingPaneGeometryCache.container !== container
+      || drawingPaneGeometryCache.paneElement !== paneElement) {
+      return refreshDrawingPaneGeometry(container, paneElement);
+    }
+    return drawingPaneGeometryCache.offsetY;
   };
   const getSeriesData = (): DisplayRow[] => {
     const data = getRefValue(seriesDataRef);
@@ -397,6 +456,7 @@ export function createLightweightChartAdapter({
   const drawingFrameInvalidationListeners = new Set<(
     reason?: DrawingFrameInvalidationReason,
   ) => void>();
+  let unsubscribeSharedFrameInvalidation: (() => void) | null = null;
   let drawingFrameInvalidationEpoch = 0;
   const advanceDrawingFrameInvalidationEpoch = (): void => {
     drawingFrameInvalidationEpoch = drawingFrameInvalidationEpoch >= Number.MAX_SAFE_INTEGER
@@ -405,7 +465,9 @@ export function createLightweightChartAdapter({
   };
   const emitDrawingFrameInvalidation = (
     reason: DrawingFrameInvalidationReason = "manual",
+    refreshPaneGeometry = reason === "manual",
   ) => {
+    if (refreshPaneGeometry) refreshDrawingPaneGeometry();
     advanceDrawingFrameInvalidationEpoch();
     for (const listener of drawingFrameInvalidationListeners) {
       safeCall(() => listener(reason), undefined);
@@ -447,6 +509,7 @@ export function createLightweightChartAdapter({
     const session = Object.freeze({
       context: createDrawingFrameCoordinateContext(snapshot),
       invalidationEpoch: drawingFrameInvalidationEpoch,
+      lineageProjectionCache: new WeakMap(),
       lineageStats: {
         exactProjectionCount: 0,
         fallbackProjectionCount: 0,
@@ -602,26 +665,43 @@ export function createLightweightChartAdapter({
         span,
         context,
       );
-      const projected = projectSourceLineageSpanWithMode(
-        timeScale,
-        resolution,
-        context,
-      );
-      if (!projected
-        || !Number.isFinite(projected.left)
-        || !Number.isFinite(projected.right)
-        || projected.left >= projected.right) {
+      const cachedProjection = session && resolution
+        ? session.lineageProjectionCache.get(resolution)
+        : undefined;
+      let coordinates = cachedProjection?.coordinates;
+      let mode = cachedProjection?.mode;
+      if (cachedProjection === undefined) {
+        const projected = projectSourceLineageSpanWithMode(
+          timeScale,
+          resolution,
+          context,
+        );
+        if (!projected
+          || !Number.isFinite(projected.left)
+          || !Number.isFinite(projected.right)
+          || projected.left >= projected.right) {
+          coordinates = null;
+          mode = null;
+        } else {
+          coordinates = Object.freeze({ left: projected.left, right: projected.right });
+          mode = projected.mode;
+        }
+        if (session && resolution) {
+          session.lineageProjectionCache.set(resolution, Object.freeze({ coordinates, mode }));
+        }
+      }
+      if (!coordinates || mode === null || mode === undefined) {
         if (session) session.lineageStats.unresolvedProjectionCount += 1;
         else drawingLineageUnresolvedProjectionCount += 1;
         return null;
       }
       if (!session && !isDrawingFrameCurrent(snapshot)) return null;
-      if (projected.mode === "exact") {
+      if (mode === "exact") {
         if (session) session.lineageStats.exactProjectionCount += 1;
         else drawingLineageExactProjectionCount += 1;
       } else if (session) session.lineageStats.fallbackProjectionCount += 1;
       else drawingLineageFallbackProjectionCount += 1;
-      return Object.freeze({ left: projected.left, right: projected.right });
+      return coordinates;
     }, null),
     readDrawingFrameSourceLineageStats: () => Object.freeze({
       exactProjectionCount: drawingLineageExactProjectionCount,
@@ -633,68 +713,27 @@ export function createLightweightChartAdapter({
     ) => {
       if (typeof listener !== "function") return () => {};
       drawingFrameInvalidationListeners.add(listener);
-      const timeScale = safeCall(() => getChart()?.timeScale(), null);
-      const notify = () => {
-        advanceDrawingFrameInvalidationEpoch();
-        safeCall(() => listener("viewport"), undefined);
-      };
-      safeCall(() => timeScale?.subscribeVisibleLogicalRangeChange?.(notify), undefined);
-      safeCall(() => timeScale?.subscribeSizeChange?.(notify), undefined);
-      let dprMediaQuery: MediaQueryList | null = null;
-      let dprChangeListener: (() => void) | null = null;
-      let dprPollTimer: number | null = null;
-      let observedDpr = currentDevicePixelRatio();
-      let dprDisposed = false;
-      const removeDprMediaQueryListener = () => {
-        if (!dprMediaQuery || !dprChangeListener) return;
-        if (typeof dprMediaQuery.removeEventListener === "function") {
-          dprMediaQuery.removeEventListener("change", dprChangeListener);
-        } else {
-          dprMediaQuery.removeListener?.(dprChangeListener);
-        }
-        dprMediaQuery = null;
-        dprChangeListener = null;
-      };
-      const detectDprChange = () => {
-        if (dprDisposed) return;
-        const nextDpr = currentDevicePixelRatio();
-        if (nextDpr === observedDpr) return;
-        observedDpr = nextDpr;
-        notify();
-        armDprMediaQuery();
-      };
-      const armDprMediaQuery = () => {
-        removeDprMediaQueryListener();
-        if (dprDisposed
-          || typeof window === "undefined"
-          || typeof window.matchMedia !== "function") return;
-        observedDpr = currentDevicePixelRatio();
-        dprMediaQuery = window.matchMedia(`(resolution: ${observedDpr}dppx)`);
-        dprChangeListener = detectDprChange;
-        if (typeof dprMediaQuery.addEventListener === "function") {
-          dprMediaQuery.addEventListener("change", dprChangeListener);
-        } else {
-          dprMediaQuery.addListener?.(dprChangeListener);
-        }
-      };
-      armDprMediaQuery();
-      if (typeof window !== "undefined" && typeof window.setInterval === "function") {
-        // Chromium's device-metrics override, and some monitor/zoom changes,
-        // update devicePixelRatio without dispatching resize or MediaQueryList
-        // change. Keep a low-frequency fallback only while a drawing consumer
-        // is subscribed so the scene and overlay cannot retain stale bitmaps.
-        dprPollTimer = window.setInterval(detectDprChange, 250);
+      if (drawingFrameInvalidationListeners.size === 1) {
+        const timeScale = safeCall(() => getChart()?.timeScale(), null);
+        unsubscribeSharedFrameInvalidation = subscribeSharedDrawingFrameInvalidation(
+          timeScale,
+          (source) => {
+            // Horizontal viewport churn cannot move a pane relative to its
+            // container. Refresh DOM geometry only for a real size change;
+            // coordinate conversion then stays layout-read-free for the full
+            // wheel/pan frame.
+            emitDrawingFrameInvalidation("viewport", source === "size");
+          },
+        );
       }
+      let disposed = false;
       return () => {
-        dprDisposed = true;
-        if (dprPollTimer !== null && typeof window !== "undefined") {
-          window.clearInterval(dprPollTimer);
-          dprPollTimer = null;
-        }
-        removeDprMediaQueryListener();
+        if (disposed) return;
+        disposed = true;
         drawingFrameInvalidationListeners.delete(listener);
-        safeCall(() => timeScale?.unsubscribeVisibleLogicalRangeChange?.(notify), undefined);
-        safeCall(() => timeScale?.unsubscribeSizeChange?.(notify), undefined);
+        if (drawingFrameInvalidationListeners.size > 0) return;
+        unsubscribeSharedFrameInvalidation?.();
+        unsubscribeSharedFrameInvalidation = null;
       };
     },
     notifyDrawingFrameInvalidation: emitDrawingFrameInvalidation,

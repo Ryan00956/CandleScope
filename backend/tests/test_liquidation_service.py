@@ -309,6 +309,11 @@ async def test_history_merges_live_and_persisted_rows_and_filters_side(
     ]
     assert all_rows[0]["filled_notional"] == 500
     assert all_rows[0]["is_final"] is True
+    assert all_rows[0]["updated_at_ms"] == START_MS + 10
+    assert "received_at_ms" not in all_rows[0]
+    assert "bucket_open_ms" not in all_rows[0]
+    assert "bucket_close_ms" not in all_rows[0]
+    assert "source" not in all_rows[0]
     assert [row["position_side"] for row in short_rows] == ["short"]
     assert short_rows[-1]["filled_notional"] == 30
     await service.shutdown()

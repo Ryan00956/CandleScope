@@ -4326,23 +4326,28 @@ test("asset quiescence fails closed for late unmanifested or unfinished requests
 
   const late = await makeFixture(350);
   const waitingForQuiet = late.tracker.waitForComplete();
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  await late.cdp.emit("Network.requestWillBeSent", {
-    requestId: "late-evil",
-    frameId: "main-frame",
-    loaderId: "loader-1",
-    type: "Script",
-    initiator: { type: "script" },
-    request: { url: "http://127.0.0.1:15173/assets/late-evil.js" },
-  });
-  await late.cdp.emit("Network.responseReceived", {
-    requestId: "late-evil",
-    frameId: "main-frame",
-    loaderId: "loader-1",
-    type: "Script",
-    response: { url: "http://127.0.0.1:15173/assets/late-evil.js", status: 200 },
-  });
-  await late.cdp.emit("Network.loadingFinished", { requestId: "late-evil" });
+  const lateEmission = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await late.cdp.emit("Network.requestWillBeSent", {
+      requestId: "late-evil",
+      frameId: "main-frame",
+      loaderId: "loader-1",
+      type: "Script",
+      initiator: { type: "script" },
+      request: { url: "http://127.0.0.1:15173/assets/late-evil.js" },
+    });
+    await late.cdp.emit("Network.responseReceived", {
+      requestId: "late-evil",
+      frameId: "main-frame",
+      loaderId: "loader-1",
+      type: "Script",
+      response: { url: "http://127.0.0.1:15173/assets/late-evil.js", status: 200 },
+    });
+    await late.cdp.emit("Network.loadingFinished", { requestId: "late-evil" });
+  })();
+  const eventLoopBlock = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  Atomics.wait(eventLoopBlock, 0, 0, 250);
+  await lateEmission;
   const lateReceipt = await waitingForQuiet;
   assert.equal(lateReceipt.passed, false);
   assert.equal(lateReceipt.quiescence.timedOut, true);

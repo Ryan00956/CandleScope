@@ -174,6 +174,8 @@ def test_liquidation_history_metadata_and_side_filter_are_explicit() -> None:
     assert payload["count"] == 2
     assert payload["has_more"] is False
     assert {item["position_side"] for item in payload["data"]} == {"short"}
+    assert all("updated_at_ms" in item for item in payload["data"])
+    assert all("received_at_ms" not in item for item in payload["data"])
     assert payload["coverage"] == {
         "earliest_ms": 1_700_000_000_000,
         "latest_ms": 1_700_000_060_000,

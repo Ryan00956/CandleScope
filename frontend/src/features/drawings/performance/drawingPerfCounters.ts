@@ -316,6 +316,7 @@ export interface DrawingPerfPhase6RuntimeSnapshot {
   readonly returnedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
   readonly acceptedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
   readonly publishedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
+  readonly paintedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
   readonly latestSubmittedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
 }
 

@@ -73,11 +73,23 @@ import {
   alignIndicatorMarkersToTimes,
   applyLineSeriesData,
   buildFillRenderEntries,
-  normalizeLineSeriesData,
 } from "../chart-adapter/chartSeriesData";
 import { normalizeMainChartType } from "../shared/mainChartTypes";
 import { parseIntervalSeconds } from "../utils/intervals";
+import {
+  createCursorOverlayGeometryCache,
+  resolveCursorOverlayPoint,
+  resolvePaneCaptureSize,
+  subscribeCursorOverlayGeometryRefresh,
+} from "./singleChartPaneGeometry";
+import MarketPaneLabels from "./MarketPaneLabels";
 import PaneControlBar from "./PaneControlBar";
+import { createPaneCrosshairStoreLifecycle } from "./paneCrosshairStore";
+import {
+  buildPanePointerLayout,
+  paneIdAtClientY,
+  type PanePointerLayout,
+} from "./panePointerModel";
 import {
   composeDrawingPaneExportLeases,
   drawingPaneIdAfterPointerLeave,
@@ -290,12 +302,6 @@ interface PanePlaceholderEntry {
 interface PanePlaceholderState {
   chart: AdapterChart | null;
   seriesByPane: Map<number, PanePlaceholderEntry>;
-}
-
-interface PaneLabelDescriptor {
-  id: string;
-  label: string;
-  marketPane: "funding-rate" | "open-interest" | "liquidations";
 }
 
 interface PaneDescriptor {
@@ -1151,6 +1157,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cursorOverlayRef = useRef<HTMLDivElement | null>(null);
+  const cursorOverlayGeometryCache = useMemo(
+    () => createCursorOverlayGeometryCache(),
+    [],
+  );
   const chartRef = useRef<AdapterChart | null>(null);
   const viewportControllerRef = useRef<ViewportController | null>(null);
   const mainSeriesRef = useRef<MainSeriesHandle | null>(null);
@@ -1231,6 +1241,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const activeSubPanesRef = useRef<IndicatorSubPane[]>(subPanes);
   const activePaneIdsRef = useRef<string[]>(["main", ...subPanes.map((pane) => pane.id)]);
   const hoveredPaneIdRef = useRef<string | null>(null);
+  const panePointerLayoutRef = useRef<PanePointerLayout | null>(null);
   const materializedMainPaneIndexRef = useRef(0);
   const paneHeightStorageKeyRef = useRef<string | null>(null);
   const expandedPaneHeightsRef = useRef<Map<string, number>>(new Map());
@@ -1256,7 +1267,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const selectedDrawingsByPaneRef = useRef<Map<string, SelectedDrawingMeta>>(new Map());
   const drawingsHiddenRef = useRef(false);
   const [seriesReady, setSeriesReady] = useState(0);
-  const [paneCrosshairTime, setPaneCrosshairTime] = useState<number | null>(null);
+  const paneCrosshairStoreLifecycle = useMemo(
+    () => createPaneCrosshairStoreLifecycle(),
+    [],
+  );
+  const paneCrosshairStore = paneCrosshairStoreLifecycle.store;
   const [drawingSeriesGeneration, setDrawingSeriesGeneration] = useState(0);
   const [drawingCoordinateGeneration, setDrawingCoordinateGeneration] = useState(0);
   const drawingCoordinateGenerationRef = useRef(0);
@@ -1529,25 +1544,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const chart = chartRef.current;
     const container = containerRef.current;
     if (!chart || !container) return null;
-    const rect = container.getBoundingClientRect?.();
-    const containerHeight = rect?.height ?? container.clientHeight ?? 0;
     const resolvedPaneIndex = resolveMainPaneIndex(chart, series, paneIndex);
     if (paneId === "main") materializedMainPaneIndexRef.current = resolvedPaneIndex;
     const paneSize = chart.paneSize?.(resolvedPaneIndex);
-    const heightCssPx = typeof paneSize?.height === "number"
-      && Number.isFinite(paneSize.height)
-      && paneSize.height > 0
-      ? paneSize.height
-      : containerHeight;
+    const captureSize = resolvePaneCaptureSize(paneSize, container);
+    if (!captureSize) return null;
+    const { heightCssPx, widthCssPx } = captureSize;
     // Drawing primitives and worker bitmaps are pane-local even though input
     // overlays use chart-container coordinates.
-    const widthCssPx = typeof paneSize?.width === "number"
-      && Number.isFinite(paneSize.width)
-      && paneSize.width > 0
-      ? paneSize.width
-      : rect?.width ?? container.clientWidth ?? 0;
-    if (!Number.isFinite(heightCssPx) || heightCssPx <= 0
-      || !Number.isFinite(widthCssPx) || widthCssPx <= 0) return null;
     let viewportKey: string | null = null;
     let drawingViewport: {
       horizontalDomain: "logical" | "time";
@@ -1688,10 +1692,15 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     notifyDrawingFrameInvalidation();
   }, [drawingFontMetricRevision, notifyDrawingFrameInvalidation]);
 
+  useEffect(
+    () => paneCrosshairStoreLifecycle.activate(),
+    [paneCrosshairStoreLifecycle],
+  );
+
   useEffect(() => {
     onCrosshairMove?.(null);
-    setPaneCrosshairTime(null);
-  }, [datasetKey, interval, onCrosshairMove, symbol]);
+    paneCrosshairStore.clear();
+  }, [datasetKey, interval, onCrosshairMove, paneCrosshairStore, symbol]);
 
   const dataTimeSet = resolveDataTimeSet(seriesStore);
   const derivedAuxiliaryIndex = useMemo(() => {
@@ -1703,9 +1712,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
     return buildDisplaySourceTimeIndex(auxiliaryDisplayState.rows);
   }, [auxiliaryDisplayState, datasetKey, surfaceConfigKey, usesDerivedAxis]);
-  const renderDataTimeSet = usesDerivedAxis
-    ? derivedAuxiliaryIndex.displayTimeSet
-    : dataTimeSet;
   useEffect(() => {
     savePaneOrder(paneOrder);
   }, [paneOrder]);
@@ -1788,15 +1794,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     [activeSubPanes],
   );
   paneHeightStorageKeyRef.current = paneHeightStorageKey;
-  const paneLabelDescriptors = activeSubPanes.flatMap<PaneLabelDescriptor>((pane) => (
-    pane.dataMarketPane
-      ? [{
-          id: pane.id,
-          label: pane.label,
-          marketPane: pane.dataMarketPane,
-        }]
-      : []
-  ));
   useLayoutEffect(() => {
     const wrapper = wrapperRef.current;
     const chart = chartRef.current;
@@ -1804,7 +1801,15 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
     const syncOverlays = () => {
       const heights = readPaneHeights(chart);
-      if (heights.length !== activePaneIds.length) return;
+      if (heights.length !== activePaneIds.length) {
+        panePointerLayoutRef.current = null;
+        return;
+      }
+      panePointerLayoutRef.current = buildPanePointerLayout(
+        activePaneIds,
+        heights,
+        wrapper.getBoundingClientRect().top,
+      );
       const overlaysById = new Map<string, HTMLElement[]>();
       for (const element of wrapper.querySelectorAll<HTMLElement>(".pane-overlay-anchor[data-pane-id]")) {
         const paneId = element.dataset.paneId || "";
@@ -1862,6 +1867,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     window.addEventListener("blur", stopPaneResizeTracking);
     window.addEventListener("resize", syncOverlays);
     return () => {
+      panePointerLayoutRef.current = null;
       cancelAnimationFrame(initialFrame);
       if (trackingFrame !== null) cancelAnimationFrame(trackingFrame);
       if (settleFrame !== null) cancelAnimationFrame(settleFrame);
@@ -2116,7 +2122,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const handleCrosshairMove = (param: ChartCrosshairParam) => {
       if (isSyncingRef.current) return;
       if (param.time == null) {
-        setPaneCrosshairTime(null);
+        paneCrosshairStore.publish(null);
         onCrosshairMove?.(null);
         return;
       }
@@ -2124,14 +2130,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         ? param.time
         : null;
       if (axisTime == null) {
-        setPaneCrosshairTime(null);
+        paneCrosshairStore.publish(null);
         onCrosshairMove?.(null);
         return;
       }
       const displayRow = displayRowMapRef.current.get(axisTime);
       const displayIndex = displayRowIndexMapRef.current.get(axisTime);
       const sourceTime = resolveSourceTime(axisTime, displayRow);
-      setPaneCrosshairTime(sourceTime);
+      paneCrosshairStore.publish(sourceTime);
       if (!onCrosshairMove) return;
       const sourceRow = sourceTime == null ? null : sourceRowMapRef.current.get(sourceTime);
       const includeVolume = initialDescriptor.axisMode === "time"
@@ -2252,6 +2258,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         chart.unsubscribeCrosshairMove(handleCrosshairMove);
         chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
       } catch { /* chart may already be disposing */ }
+      paneCrosshairStore.clear();
       onCrosshairMove?.(null);
       const drawingBoundary = resolveDrawingSurfaceChartTypeBoundary(
         initialChartType,
@@ -2283,7 +2290,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
       }
     };
-  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -2535,40 +2542,60 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       return undefined;
     }
 
+    const point = { x: 0, y: 0 };
     const updateCursor = (event: PointerEvent) => {
       if (event.pointerType === "touch") {
         overlay.style.display = "none";
         return;
       }
-      const rect = container.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
       const plotRect = chartAdapter.getMainPanePlotRect?.() ?? null;
-      if (!plotRect
-        || x < plotRect.x
-        || y < plotRect.y
-        || x > plotRect.x + plotRect.width
-        || y > plotRect.y + plotRect.height) {
+      const isVisible = resolveCursorOverlayPoint(
+        cursorOverlayGeometryCache,
+        event.clientX,
+        event.clientY,
+        plotRect,
+        point,
+      );
+      if (!isVisible) {
         overlay.style.display = "none";
         return;
       }
       overlay.style.display = "block";
-      overlay.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+      overlay.style.transform = `translate3d(${point.x}px, ${point.y}px, 0) translate(-50%, -50%)`;
+    };
+    const enterCursor = (event: PointerEvent) => {
+      cursorOverlayGeometryCache.invalidate();
+      cursorOverlayGeometryCache.capture(container);
+      updateCursor(event);
     };
     const hideCursor = () => {
       overlay.style.display = "none";
     };
+    const unsubscribeGeometryRefresh = subscribeCursorOverlayGeometryRefresh({
+      cache: cursorOverlayGeometryCache,
+      container,
+    });
 
     container.addEventListener("pointermove", updateCursor);
-    container.addEventListener("pointerenter", updateCursor);
+    container.addEventListener("pointerenter", enterCursor);
     container.addEventListener("pointerleave", hideCursor);
     return () => {
       hideCursor();
+      unsubscribeGeometryRefresh();
       container.removeEventListener("pointermove", updateCursor);
-      container.removeEventListener("pointerenter", updateCursor);
+      container.removeEventListener("pointerenter", enterCursor);
       container.removeEventListener("pointerleave", hideCursor);
     };
-  }, [chartAdapter, cursorOverlayClass]);
+  }, [
+    activePaneIdsKey,
+    chartAdapter,
+    collapsedPaneIds,
+    cursorOverlayClass,
+    cursorOverlayGeometryCache,
+    maximizedPaneId,
+    paneHeightStorageKey,
+    seriesReady,
+  ]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -3242,7 +3269,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         const key = entryKey(pane, line);
         const matches = existingByKey.get(key) || [];
         const existing = matches.shift() || null;
-        const validData = normalizeLineSeriesData(line, renderDataTimeSet);
+        // Pane descriptors already own clipped, normalized data. Re-filtering
+        // every line here doubled the O(lines * bars) work on each realtime
+        // indicator/market-data publication.
+        const validData = line.data as NormalizedIndicatorDataEntry[];
         const detail = {
           datasetKey,
           indicatorId: line.indicatorId,
@@ -3359,7 +3389,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     })) {
       setSeriesReady((prev) => prev + 1);
     }
-  }, [datasetKey, desiredMainPaneIndex, drawingEngineToolActive, indicatorDatasetOwned, interval, materializeRuntimePaneLayout, paneDescriptors, renderDataTimeSet, seriesReady, showCrosshairDetails, usesDerivedAxis]);
+  }, [datasetKey, desiredMainPaneIndex, drawingEngineToolActive, indicatorDatasetOwned, interval, materializeRuntimePaneLayout, paneDescriptors, seriesReady, showCrosshairDetails, usesDerivedAxis]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -3451,20 +3481,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       publishHoveredPaneId(null);
       return;
     }
-    const panes = chartRef.current?.panes?.() || [];
-    const paneIds = activePaneIdsRef.current;
-    if (panes.length !== paneIds.length) {
-      publishHoveredPaneId(null);
-      return;
-    }
-    let nextPaneId: string | null = null;
-    for (const [index, pane] of panes.entries()) {
-      const rect = pane.getHTMLElement?.()?.getBoundingClientRect?.() ?? null;
-      if (!rect || event.clientY < rect.top || event.clientY > rect.bottom) continue;
-      nextPaneId = paneIds[index] ?? null;
-      break;
-    }
-    publishHoveredPaneId(nextPaneId);
+    publishHoveredPaneId(paneIdAtClientY(panePointerLayoutRef.current, event.clientY));
   }, [publishHoveredPaneId]);
 
   const handleChartPanePointerLeave = useCallback(() => {
@@ -3955,63 +3972,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         </div>
       ))}
 
-      {paneLabelDescriptors.map((descriptor) => {
-        const pane = activeSubPanes.find((candidate) => candidate.id === descriptor.id);
-        const exactPoint = paneCrosshairTime === null
-          ? null
-          : pane?.pointMetadata?.find((point) => point.time === paneCrosshairTime) ?? null;
-        const displayPoint = exactPoint ?? (
-          paneCrosshairTime === null || pane?.pointMetadataFallback !== "none"
-            ? pane?.pointMetadata?.at(-1) ?? null
-            : null
-        );
-        const auxiliaryText = displayPoint
-          ? null
-          : paneCrosshairTime !== null
-            ? pane?.missingPointText ?? pane?.statusText ?? null
-            : pane?.statusText ?? null;
-        return (
-          <div
-            key={descriptor.id}
-            className="chart-pane-label advanced-market-pane-label pane-overlay-anchor"
-            data-market-pane={descriptor.marketPane}
-            data-pane-id={descriptor.id}
-            data-pane-collapsed={collapsedPaneIds.includes(descriptor.id) ? "true" : "false"}
-            role="group"
-            aria-label={displayPoint?.accessibilityLabel ?? auxiliaryText ?? descriptor.label}
-          >
-            <span className="advanced-market-pane-heading">{descriptor.label}</span>
-            {displayPoint && (
-              <span
-                className="advanced-market-pane-value"
-                data-appearance={displayPoint.appearance}
-              >
-                <span>{displayPoint.valueLabel}</span>
-                <span className="advanced-market-pane-source">
-                  {`${displayPoint.sourceLabel} · ${displayPoint.qualityLabel}`}
-                </span>
-              </span>
-            )}
-            {auxiliaryText && (
-              <span className="advanced-market-pane-status">{auxiliaryText}</span>
-            )}
-            {pane?.legendItems && pane.legendItems.length > 0 && (
-              <span className="advanced-market-pane-legend" aria-hidden="true">
-                {pane.legendItems.map((item) => (
-                  <span key={item.id} className="advanced-market-pane-legend-item" title={item.description}>
-                    <span
-                      className="advanced-market-pane-legend-swatch"
-                      data-appearance={item.appearance}
-                      style={item.color ? { background: item.color } : undefined}
-                    />
-                    <span>{item.label}</span>
-                  </span>
-                ))}
-              </span>
-            )}
-          </div>
-        );
-      })}
+      {activeSubPanes.some((pane) => Boolean(pane.dataMarketPane)) && (
+        <MarketPaneLabels
+          panes={activeSubPanes}
+          collapsedPaneIds={collapsedPaneIds}
+          crosshairStore={paneCrosshairStore}
+        />
+      )}
 
       {activePaneIds.map((paneId) => {
         const pane = paneId === "main"

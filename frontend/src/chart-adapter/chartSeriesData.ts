@@ -14,6 +14,78 @@ import type {
   SeriesDataWriter,
 } from "./chartAdapterTypes.js";
 
+interface AllowedTimeKeyCacheEntry {
+  size: number;
+  keys: ReadonlySet<string>;
+}
+
+interface FilteredEntriesCacheEntry {
+  allowedTimeSet: object;
+  allowedTimeSetSize: number;
+  result: unknown[];
+}
+
+interface NormalizedLineCacheEntry {
+  allowedTimeSet: object | null;
+  allowedTimeSetSize: number;
+  colorData: object | null;
+  histogram: boolean;
+  result: NormalizedIndicatorDataEntry[];
+}
+
+const allowedTimeKeyCache = new WeakMap<object, AllowedTimeKeyCacheEntry>();
+const filteredEntriesCache = new WeakMap<object, FilteredEntriesCacheEntry>();
+const normalizedLineCache = new WeakMap<object, NormalizedLineCacheEntry>();
+const histogramColorMapCache = new WeakMap<object, ReadonlyMap<string, string>>();
+const histogramPointCache = new WeakMap<object, Map<string, NormalizedIndicatorDataEntry>>();
+
+function allowedTimeKeys(allowedTimeSet: ReadonlySet<ChartTime>): ReadonlySet<string> {
+  const cacheKey = allowedTimeSet as object;
+  const cached = allowedTimeKeyCache.get(cacheKey);
+  if (cached?.size === allowedTimeSet.size) return cached.keys;
+  const keys = new Set<string>();
+  for (const time of allowedTimeSet) {
+    const key = chartTimeKey(time);
+    if (key !== null) keys.add(key);
+  }
+  allowedTimeKeyCache.set(cacheKey, { size: allowedTimeSet.size, keys });
+  return keys;
+}
+
+function histogramColorMap(
+  colorEntries: Array<{ time?: ChartTime; color?: string }>,
+): ReadonlyMap<string, string> {
+  const cached = histogramColorMapCache.get(colorEntries);
+  if (cached) return cached;
+  const colors = new Map<string, string>();
+  for (const entry of colorEntries) {
+    const key = chartTimeKey(entry.time);
+    if (key !== null && entry.color) colors.set(key, entry.color);
+  }
+  histogramColorMapCache.set(colorEntries, colors);
+  return colors;
+}
+
+function normalizedHistogramPoint(
+  point: NormalizedIndicatorDataEntry,
+  color: string | undefined,
+): NormalizedIndicatorDataEntry {
+  if ((point.color || undefined) === color) return point;
+  const cacheKey = point as object;
+  let byColor = histogramPointCache.get(cacheKey);
+  if (!byColor) {
+    byColor = new Map();
+    histogramPointCache.set(cacheKey, byColor);
+  }
+  const colorKey = color || "";
+  const cached = byColor.get(colorKey);
+  if (cached) return cached;
+  const normalized: NormalizedIndicatorDataEntry = { time: point.time, value: point.value };
+  if (color) normalized.color = color;
+  byColor.set(colorKey, normalized);
+  return normalized;
+}
+
 export function toCandlePoint(d: ChartSeriesInputRow): ChartSeriesInputRow {
   const time = d.time;
   if (time == null) return {};
@@ -34,17 +106,26 @@ export function filterEntriesByTime<TEntry extends { time?: ChartTime }>(
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
 ): TEntry[] {
   if (!allowedTimeSet) return entries || [];
-  const allowedKeys = new Set();
-  for (const time of allowedTimeSet) {
-    const key = chartTimeKey(time);
-    if (key !== null) allowedKeys.add(key);
+  const source = entries || [];
+  const allowedTimeSetKey = allowedTimeSet as object;
+  const cached = filteredEntriesCache.get(source);
+  if (cached?.allowedTimeSet === allowedTimeSetKey
+    && cached.allowedTimeSetSize === allowedTimeSet.size) {
+    return cached.result as TEntry[];
   }
-  return (entries || []).filter((entry) => {
+  const allowedKeys = allowedTimeKeys(allowedTimeSet);
+  const result = source.filter((entry) => {
     if (entry?.time == null) return false;
     if (allowedTimeSet.has(entry.time)) return true;
     const key = chartTimeKey(entry.time);
     return key !== null && allowedKeys.has(key);
   });
+  filteredEntriesCache.set(source, {
+    allowedTimeSet: allowedTimeSetKey,
+    allowedTimeSetSize: allowedTimeSet.size,
+    result,
+  });
+  return result;
 }
 
 export function normalizeLineSeriesData(
@@ -52,19 +133,25 @@ export function normalizeLineSeriesData(
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
 ): NormalizedIndicatorDataEntry[] {
   const isHistogram = line?.type === "histogram";
-  const sourceData = filterEntriesByTime(line?.data, allowedTimeSet);
+  const source = line?.data || [];
+  const allowedTimeSetKey = allowedTimeSet ? allowedTimeSet as object : null;
+  const colorDataKey = Array.isArray(line?.colorData) ? line.colorData : null;
+  const cached = normalizedLineCache.get(source);
+  if (cached?.allowedTimeSet === allowedTimeSetKey
+    && cached.allowedTimeSetSize === (allowedTimeSet?.size ?? -1)
+    && cached.colorData === colorDataKey
+    && cached.histogram === isHistogram) {
+    return cached.result;
+  }
+  const sourceData = filterEntriesByTime(source, allowedTimeSet);
+  let result: NormalizedIndicatorDataEntry[];
   if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
-    const colorMap = new Map<string, string>();
-    for (const cd of filterEntriesByTime(line.colorData, allowedTimeSet)) {
-      const key = chartTimeKey(cd.time);
-      if (key !== null && cd.color) colorMap.set(key, cd.color);
-    }
-    return sourceData
+    const colorMap = histogramColorMap(filterEntriesByTime(line.colorData, allowedTimeSet));
+    result = sourceData
       .filter((d): d is NormalizedIndicatorDataEntry => (
         d?.time != null && d?.value != null && isFinite(d.value)
       ))
       .map((d) => {
-        const entry: NormalizedIndicatorDataEntry = { time: d.time, value: d.value };
         const key = chartTimeKey(d.time);
         // Realtime histogram updates carry their color on the value point,
         // while historical snapshots carry a parallel colorData series.  A
@@ -72,14 +159,22 @@ export function normalizeLineSeriesData(
         // newest realtime timestamp.  Keep the point color authoritative and
         // use colorData only as the historical fallback; otherwise the newest
         // volume/MACD bars silently fall back to the series default color.
-        const c = d.color || (key === null ? undefined : colorMap.get(key));
-        if (c) entry.color = c;
-        return entry;
+        const color = d.color || (key === null ? undefined : colorMap.get(key));
+        return normalizedHistogramPoint(d, color);
       });
+  } else {
+    result = sourceData.filter((d): d is NormalizedIndicatorDataEntry => (
+      d?.time != null && d?.value != null && isFinite(d.value)
+    ));
   }
-  return sourceData.filter((d): d is NormalizedIndicatorDataEntry => (
-    d?.time != null && d?.value != null && isFinite(d.value)
-  ));
+  normalizedLineCache.set(source, {
+    allowedTimeSet: allowedTimeSetKey,
+    allowedTimeSetSize: allowedTimeSet?.size ?? -1,
+    colorData: colorDataKey,
+    histogram: isHistogram,
+    result,
+  });
+  return result;
 }
 
 export function alignIndicatorLinesToTimes(
@@ -184,7 +279,8 @@ export function applyLineSeriesData(
   detail: Readonly<Record<string, unknown>>,
   recordPerfEvent: PerfEventRecorder | null | undefined,
   { preferSetData = false }: { preferSetData?: boolean } = {},
-): "clear" | "empty" | "update" | "setData" {
+): "clear" | "empty" | "unchanged" | "update" | "setData" {
+  if (nextData === previousData) return "unchanged";
   if (!nextData?.length) {
     if (previousData?.length) {
       series.setData([]);

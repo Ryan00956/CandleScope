@@ -1,4 +1,11 @@
-import React, { useMemo, useSyncExternalStore } from "react";
+import React, {
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type {
   FullOutputLimit,
   OrderBookConnectionStatus,
@@ -13,6 +20,7 @@ import {
 } from "./orderBookAggregation.js";
 import { buildOrderBookRows } from "./orderBookRows.js";
 import type { DisplayOrderBookLevel } from "./orderBookRows.js";
+import { fixedRowWindow } from "./orderBookVirtualization.js";
 import {
   FULL_OUTPUT_LIMITS,
   FULL_PRICE_GROUPINGS,
@@ -69,22 +77,131 @@ function groupingLabel(
   return step === null ? `${grouping}×` : formatPrice(step);
 }
 
-function BookRow({
+const ORDER_BOOK_ROW_HEIGHT = 22;
+const ORDER_BOOK_ROW_OVERSCAN = 4;
+
+const BookRow = React.memo(function BookRow({
   row,
   side,
   maxCumulative,
+  offsetPx,
 }: {
   row: DisplayOrderBookLevel;
   side: "ask" | "bid";
   maxCumulative: number;
+  offsetPx: number;
 }) {
   const width = maxCumulative > 0 ? Math.min(100, row.cumulative / maxCumulative * 100) : 0;
   return (
-    <div className={`ob-level-row ob-${side}`}>
+    <div className={`ob-level-row ob-${side}`} style={{ transform: `translateY(${offsetPx}px)` }}>
       <span className="ob-depth-bar" style={{ width: `${width}%` }} aria-hidden="true" />
       <span className="ob-price">{formatPrice(row.price)}</span>
       <span>{formatQuantity(row.quantity)}</span>
       <span>{formatQuantity(row.cumulative)}</span>
+    </div>
+  );
+}, (previous, next) => (
+  previous.side === next.side
+  && previous.offsetPx === next.offsetPx
+  && previous.maxCumulative === next.maxCumulative
+  && previous.row.price === next.row.price
+  && previous.row.quantity === next.row.quantity
+  && previous.row.cumulative === next.row.cumulative
+));
+
+function BookLevels({
+  rows,
+  side,
+  maxCumulative,
+}: {
+  rows: readonly DisplayOrderBookLevel[];
+  side: "ask" | "bid";
+  maxCumulative: number;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const frameRef = useRef<number | null>(null);
+  const stickToEdgeRef = useRef(side === "ask");
+  const [viewport, setViewport] = useState({ height: 0, scrollTop: 0 });
+  const displayRows = useMemo(
+    () => side === "ask" ? [...rows].reverse() : rows,
+    [rows, side],
+  );
+  const requestedScrollTop = side === "ask" && viewport.height === 0
+    ? Number.POSITIVE_INFINITY
+    : viewport.scrollTop;
+  const window = fixedRowWindow({
+    rowCount: displayRows.length,
+    rowHeight: ORDER_BOOK_ROW_HEIGHT,
+    viewportHeight: viewport.height,
+    scrollTop: requestedScrollTop,
+    overscan: ORDER_BOOK_ROW_OVERSCAN,
+  });
+
+  const publishViewport = useCallback((element: HTMLDivElement) => {
+    const height = element.clientHeight;
+    const scrollTop = element.scrollTop;
+    setViewport((previous) => previous.height === height && previous.scrollTop === scrollTop
+      ? previous
+      : { height, scrollTop });
+  }, []);
+
+  useLayoutEffect(() => {
+    const element = containerRef.current;
+    if (!element) return undefined;
+    publishViewport(element);
+    const observer = typeof ResizeObserver === "function"
+      ? new ResizeObserver(() => publishViewport(element))
+      : null;
+    observer?.observe(element);
+    return () => observer?.disconnect();
+  }, [publishViewport]);
+
+  useLayoutEffect(() => {
+    const element = containerRef.current;
+    if (!element || side !== "ask" || !stickToEdgeRef.current) return;
+    element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    publishViewport(element);
+  }, [displayRows.length, publishViewport, side, viewport.height]);
+
+  useLayoutEffect(() => () => {
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    if (side === "ask") {
+      stickToEdgeRef.current = element.scrollHeight - element.clientHeight - element.scrollTop
+        <= ORDER_BOOK_ROW_HEIGHT * 2;
+    }
+    if (frameRef.current !== null) return;
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = null;
+      const current = containerRef.current;
+      if (current) publishViewport(current);
+    });
+  }, [publishViewport, side]);
+
+  return (
+    <div
+      ref={containerRef}
+      className={`ob-levels ob-${side === "ask" ? "asks" : "bids"}`}
+      onScroll={handleScroll}
+    >
+      <div className="ob-levels-window" style={{ height: window.totalHeight }}>
+        {displayRows.slice(window.start, window.end).map((row, localIndex) => {
+          const index = window.start + localIndex;
+          return (
+            <BookRow
+              key={`${side}-slot-${row.slot}`}
+              row={row}
+              side={side}
+              maxCumulative={maxCumulative}
+              offsetPx={index * ORDER_BOOK_ROW_HEIGHT}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -248,11 +365,7 @@ function OrderBookDock({ runtime, height }: OrderBookDockProps) {
 
           {snapshot.book && presentation && rows ? (
             <div className="ob-book-scroll">
-              <div className="ob-levels ob-asks">
-                {rows.asks.map((row) => (
-                  <BookRow key={`ask-slot-${row.slot}`} row={row} side="ask" maxCumulative={rows.maxCumulative} />
-                ))}
-              </div>
+              <BookLevels rows={rows.asks} side="ask" maxCumulative={rows.maxCumulative} />
               <div className="ob-spread-row">
                 <span className="ob-mid-price">{formatPrice(snapshot.book.midPrice)}</span>
                 <span>{formatSpread(snapshot.book.spread, snapshot.book.spreadBps)}</span>
@@ -266,11 +379,7 @@ function OrderBookDock({ runtime, height }: OrderBookDockProps) {
                   <span>聚合 {formatPrice(presentation.priceStep)}</span>
                 )}
               </div>
-              <div className="ob-levels ob-bids">
-                {rows.bids.map((row) => (
-                  <BookRow key={`bid-slot-${row.slot}`} row={row} side="bid" maxCumulative={rows.maxCumulative} />
-                ))}
-              </div>
+              <BookLevels rows={rows.bids} side="bid" maxCumulative={rows.maxCumulative} />
             </div>
           ) : (
             <EmptyState

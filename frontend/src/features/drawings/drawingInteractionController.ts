@@ -1193,6 +1193,120 @@ export interface DrawingInteractionRuntime {
   getLegacyPrimitiveRuntimeEvidence(): DrawingLegacyPrimitiveRuntimeEvidence;
 }
 
+export interface DrawingPointerRectCache {
+  capture(container: Pick<HTMLElement, "getBoundingClientRect">): DOMRect;
+  clear(): void;
+  peek(): DOMRect | null;
+}
+
+interface DrawingPointerRectInvalidationTarget {
+  addEventListener(
+    type: "resize" | "scroll",
+    listener: EventListener,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  removeEventListener(
+    type: "resize" | "scroll",
+    listener: EventListener,
+    options?: boolean | EventListenerOptions,
+  ): void;
+}
+
+interface DrawingPointerRectResizeObserver {
+  disconnect(): void;
+  observe(target: Element): void;
+}
+
+export function createDrawingPointerRectCache(): DrawingPointerRectCache {
+  let current: DOMRect | null = null;
+  return {
+    capture(container) {
+      current = container.getBoundingClientRect();
+      return current;
+    },
+    clear() {
+      current = null;
+    },
+    peek() {
+      return current;
+    },
+  };
+}
+
+function scrollCanMoveDrawingContainer({
+  container,
+  event,
+  eventTarget,
+}: {
+  container: HTMLElement;
+  event: Event;
+  eventTarget: DrawingPointerRectInvalidationTarget | null;
+}): boolean {
+  const target = event.target;
+  if (!target) return false;
+  const ownerDocument = container.ownerDocument;
+  if (target === eventTarget
+    || target === ownerDocument
+    || target === ownerDocument?.defaultView) {
+    return true;
+  }
+  // Scrolling the chart itself (or one of its descendants) does not move the
+  // container's viewport rect. Only a strict scroll ancestor can do that.
+  if (target === container) return false;
+  const potentialAncestor = target as EventTarget & {
+    contains?: (candidate: Node | null) => boolean;
+  };
+  return typeof potentialAncestor.contains === "function"
+    && potentialAncestor.contains(container);
+}
+
+/**
+ * Refresh pointer geometry at layout boundaries so native pointermove handlers
+ * only consume an already-captured rect. Pointerdown still performs its own
+ * authoritative capture before starting an interaction.
+ */
+export function subscribeDrawingPointerRectInvalidation({
+  cache,
+  container,
+  eventTarget = typeof window === "undefined"
+    ? null
+    : window as unknown as DrawingPointerRectInvalidationTarget,
+  createResizeObserver = typeof ResizeObserver === "undefined"
+    ? null
+    : (listener: ResizeObserverCallback) => new ResizeObserver(listener),
+}: {
+  cache: DrawingPointerRectCache;
+  container: HTMLElement;
+  eventTarget?: DrawingPointerRectInvalidationTarget | null;
+  createResizeObserver?: ((listener: ResizeObserverCallback) => DrawingPointerRectResizeObserver) | null;
+}): () => void {
+  let disposed = false;
+  const refresh = () => {
+    if (!disposed) cache.capture(container);
+  };
+  const handleResize: EventListener = () => refresh();
+  const handleScroll: EventListener = (event) => {
+    if (scrollCanMoveDrawingContainer({ container, event, eventTarget })) refresh();
+  };
+  const resizeObserver = createResizeObserver?.(() => refresh()) ?? null;
+
+  refresh();
+  resizeObserver?.observe(container);
+  eventTarget?.addEventListener("resize", handleResize);
+  // Scroll does not bubble, but a capture listener on window observes scrolls
+  // from any ancestor that can move the chart container in viewport space.
+  eventTarget?.addEventListener("scroll", handleScroll, true);
+
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    resizeObserver?.disconnect();
+    eventTarget?.removeEventListener("resize", handleResize);
+    eventTarget?.removeEventListener("scroll", handleScroll, true);
+    cache.clear();
+  };
+}
+
 export function useDrawing({
   chartAdapter,
   chartContainerRef,
@@ -1290,7 +1404,11 @@ export function useDrawing({
   const activeMoveFrameRef = useRef<number>(0);
   const pendingActiveMoveRef = useRef<ActiveDrawingMovePayload | null>(null);
   const beforeScopeTransitionRef = useRef<() => boolean>(() => true);
-  const pointerRectRef = useRef<DOMRect | null>(null);
+  const pointerRectCacheRef = useRef<DrawingPointerRectCache | null>(null);
+  if (!pointerRectCacheRef.current) {
+    pointerRectCacheRef.current = createDrawingPointerRectCache();
+  }
+  const pointerRectCache = pointerRectCacheRef.current;
   const dynamicOverlayControllerRef = useRef<DynamicOverlayController | null>(null);
   const liveInkControllerRef = useRef<LiveInkController | null>(null);
   const renderDynamicFeedbackRef = useRef<() => void>(() => {});
@@ -1879,18 +1997,23 @@ export function useDrawing({
 
   const getChartPos = useChartPointerPosition(chartContainerRef);
 
-  const getCachedPointerRect = useCallback(() => {
+  const getCachedPointerRect = useCallback(
+    () => pointerRectCache.peek(),
+    [pointerRectCache],
+  );
+  const capturePointerRect = useCallback(() => {
     const container = chartContainerRef?.current;
-    if (!container) return null;
-    if (!pointerRectRef.current) {
-      pointerRectRef.current = container.getBoundingClientRect();
-    }
-    return pointerRectRef.current;
-  }, [chartContainerRef]);
+    return container ? pointerRectCache.capture(container) : null;
+  }, [chartContainerRef, pointerRectCache]);
 
-  const clearCachedPointerRect = useCallback(() => {
-    pointerRectRef.current = null;
-  }, []);
+  useLayoutEffect(() => {
+    const container = chartContainerRef?.current;
+    if (!container) {
+      pointerRectCache.clear();
+      return undefined;
+    }
+    return subscribeDrawingPointerRectInvalidation({ cache: pointerRectCache, container });
+  }, [chartContainerRef, drawingCoordinateKey, pointerRectCache, seriesReady]);
 
   useEffect(() => {
     if (interactionSurfaceMode !== "overlay") return undefined;
@@ -2558,7 +2681,6 @@ export function useDrawing({
       if (interactionSurfaceMode === "overlay") {
         cancelActiveMoveFrame();
         pendingActiveMoveRef.current = null;
-        clearCachedPointerRect();
         releaseOverlayDrag(true);
         draggingRef.current = null;
       } else {
@@ -2575,7 +2697,7 @@ export function useDrawing({
     // empty until confirmation. Cancel it before persistence snapshots the old
     // scope so it is detached as well as excluded by the canonical filter.
     return cancelTextEditing();
-  }, [cancelActiveFreehandStroke, cancelActiveMoveFrame, cancelTextEditing, clearCachedPointerRect, flushActiveDrawingMove, interactionSurfaceMode, persistActiveScopeDrawings, releaseOverlayDrag, removePreview]);
+  }, [cancelActiveFreehandStroke, cancelActiveMoveFrame, cancelTextEditing, flushActiveDrawingMove, interactionSurfaceMode, persistActiveScopeDrawings, releaseOverlayDrag, removePreview]);
 
   useEffect(() => {
     beforeScopeTransitionRef.current = prepareDrawingScopeTransition;
@@ -2587,8 +2709,7 @@ export function useDrawing({
   const cancelActiveDrawingMove = useCallback(() => {
     cancelActiveMoveFrame();
     pendingActiveMoveRef.current = null;
-    clearCachedPointerRect();
-  }, [cancelActiveMoveFrame, clearCachedPointerRect]);
+  }, [cancelActiveMoveFrame]);
 
   const scheduleActiveDrawingMove = useCallback(
     (payload: ActiveDrawingMoveInput) => {
@@ -2889,7 +3010,10 @@ export function useDrawing({
     (e: DrawingDomPointerEvent) => {
       flushActiveDrawingMove();
       const tool = activeToolRef.current;
-      const pos = getChartPos(e);
+      // Establish one geometry snapshot for the interaction. Every pane host
+      // shares this chart container, so the following document-level samples
+      // can reuse the stable rect instead of entering layout again.
+      const pos = getChartPos(e, capturePointerRect());
       if (!pos) return;
       if (!isInsideDrawingPanePlot(pos)) return;
       if (interactionSurfaceMode === "overlay") cancelDynamicPaintHandoff(true);
@@ -3555,7 +3679,7 @@ export function useDrawing({
         }
       }
     },
-    [flushActiveDrawingMove, getChartPos, isInsideDrawingPanePlot, captureOverlayFreehandBatch, interactionSurfaceMode, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, hitTestSelectedOverlayHandle, selectPrimitive, deselectAll, getPrimitiveById, getSavedDrawing, getSceneScreenBox, beginOverlayEntityDrag, beginSavedTextDrag, beginTextDrag, startEntityTextEditing, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, persistSceneCommands, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, ensureOverlayDragRegistry, getChartAdapter, getDynamicThemePalette, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, renderDynamicFeedback, renderOverlayDragDraft, retainDynamicOverlayUntilPaint],
+    [flushActiveDrawingMove, capturePointerRect, getChartPos, isInsideDrawingPanePlot, captureOverlayFreehandBatch, interactionSurfaceMode, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, hitTestSelectedOverlayHandle, selectPrimitive, deselectAll, getPrimitiveById, getSavedDrawing, getSceneScreenBox, beginOverlayEntityDrag, beginSavedTextDrag, beginTextDrag, startEntityTextEditing, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, persistSceneCommands, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, ensureOverlayDragRegistry, getChartAdapter, getDynamicThemePalette, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, renderDynamicFeedback, renderOverlayDragDraft, retainDynamicOverlayUntilPaint],
   );
 
   // ════════════════════════════════════════════════════
@@ -3637,7 +3761,10 @@ export function useDrawing({
         return;
       }
 
-      const pos = getChartPos(e);
+      // Passive cursor movement is delivered to every pane host. Reusing the
+      // interaction rect removes O(panes) forced DOM layout reads from every
+      // native pointer sample while preserving pane-local coordinate gates.
+      const pos = getChartPos(e, getCachedPointerRect());
       if (!pos) return;
 
       // ── ERASER: hover highlight ──
@@ -3917,11 +4044,10 @@ export function useDrawing({
     if (completedDrag && (persisted || interactionSurfaceMode === "overlay")) {
       draggingRef.current = null;
     }
-    clearCachedPointerRect();
     const durationMs = Math.max(0, drawingPerfNow() - mouseupStartedAt);
     drawingPerfCounters.recordMouseupSyncDuration(durationMs);
     drawingPerfCounters.gestureEnded();
-  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, interactionSurfaceMode, invalidateVisibleScene, persistDetachedDrawings, persistDrawings, persistSceneCommands, prepareUserMutationScope, dataToScreen, clearCachedPointerRect, refreshSelectedTextUi, releaseOverlayDrag, retainDynamicOverlayUntilPaint, selectPrimitive, subscribeVisibleScenePaint]);
+  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, interactionSurfaceMode, invalidateVisibleScene, persistDetachedDrawings, persistDrawings, persistSceneCommands, prepareUserMutationScope, dataToScreen, refreshSelectedTextUi, releaseOverlayDrag, retainDynamicOverlayUntilPaint, selectPrimitive, subscribeVisibleScenePaint]);
 
   const terminalizeExportInteraction = useCallback((): boolean => {
     if (editingTextIdRef.current) {
@@ -4019,8 +4145,7 @@ export function useDrawing({
     clearHoverFeedback();
     draggingRef.current = null;
     releaseOverlayDrag(true);
-    clearCachedPointerRect();
-  }, [cancelActiveDrawingMove, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, clearCachedPointerRect, clearHoverFeedback, handleMouseUp, interactionSurfaceMode, releaseOverlayDrag, removePreview]);
+  }, [cancelActiveDrawingMove, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, clearHoverFeedback, handleMouseUp, interactionSurfaceMode, releaseOverlayDrag, removePreview]);
 
   const handleMouseLeave = useCallback((e: DrawingDomPointerEvent) => {
     // Text overlays are siblings of the chart canvas container. Moving the

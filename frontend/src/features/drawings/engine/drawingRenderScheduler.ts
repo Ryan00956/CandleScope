@@ -27,6 +27,11 @@ export interface DrawingRenderSchedulerOptions<
   readInput(): TInput | null;
   buildPlan(input: TInput): TPlan | null;
   publish(plan: TPlan, reasons: readonly string[]): void;
+  /**
+   * Optional lightweight freshness check for callers whose input capture is
+   * materially more expensive than comparing provider revisions.
+   */
+  isInputCurrent?(input: TInput, plan: TPlan): boolean;
   onDiscard?(plan: TPlan, reason: "disposed" | "stale"): void;
   onError?(error: unknown, input: TInput, reasons: readonly string[]): void;
   requestFrame?(callback: () => void): unknown;
@@ -35,11 +40,11 @@ export interface DrawingRenderSchedulerOptions<
   restartPendingFrameOnInvalidate?: boolean;
 }
 
-export interface DrawingRenderScheduler {
+export interface DrawingRenderScheduler<TInput extends DrawingRenderInput = DrawingRenderInput> {
   readonly disposed: boolean;
   readonly scheduled: boolean;
   invalidate(reason?: string): boolean;
-  flushNow(): boolean;
+  flushNow(input?: TInput): boolean;
   dispose(): void;
 }
 
@@ -84,12 +89,13 @@ export function createDrawingRenderScheduler<
   readInput,
   buildPlan,
   publish,
+  isInputCurrent,
   onDiscard,
   onError,
   requestFrame: scheduleFrame = defaultRequestFrame,
   cancelFrame: cancelScheduledFrame = defaultCancelFrame,
   restartPendingFrameOnInvalidate = false,
-}: DrawingRenderSchedulerOptions<TInput, TPlan>): DrawingRenderScheduler {
+}: DrawingRenderSchedulerOptions<TInput, TPlan>): DrawingRenderScheduler<TInput> {
   let disposed = false;
   let frameHandle: unknown = null;
   let running = false;
@@ -105,10 +111,10 @@ export function createDrawingRenderScheduler<
     });
   };
 
-  const run = (): boolean => {
+  const run = (prefetchedInput?: TInput): boolean => {
     frameHandle = null;
     if (disposed || running) return false;
-    const input = readInput();
+    const input = prefetchedInput ?? readInput();
     if (!input) {
       reasons.clear();
       return false;
@@ -138,11 +144,15 @@ export function createDrawingRenderScheduler<
       onDiscard?.(plan, "disposed");
       return false;
     }
-    const latest = readInput();
     const expectedKey = drawingRenderRevisionKey(input.stamp);
+    const inputCurrent = isInputCurrent
+      ? isInputCurrent(input, plan)
+      : (() => {
+          const latest = readInput();
+          return Boolean(latest && drawingRenderRevisionKey(latest.stamp) === expectedKey);
+        })();
     if (invalidationGeneration !== buildGeneration
-      || !latest
-      || drawingRenderRevisionKey(latest.stamp) !== expectedKey
+      || !inputCurrent
       || drawingRenderRevisionKey(plan.stamp) !== expectedKey) {
       onDiscard?.(plan, "stale");
       if (!disposed) scheduler.invalidate("stale-retry");
@@ -153,7 +163,7 @@ export function createDrawingRenderScheduler<
     return true;
   };
 
-  const scheduler: DrawingRenderScheduler = {
+  const scheduler: DrawingRenderScheduler<TInput> = {
     get disposed() { return disposed; },
     get scheduled() { return frameHandle !== null; },
     invalidate(reason = "unspecified") {
@@ -169,14 +179,14 @@ export function createDrawingRenderScheduler<
       schedulePendingFrame();
       return true;
     },
-    flushNow() {
+    flushNow(input) {
       if (disposed) return false;
       if (frameHandle !== null) {
         cancelScheduledFrame(frameHandle);
         frameScheduleGeneration += 1;
         frameHandle = null;
       }
-      return run();
+      return run(input);
     },
     dispose() {
       if (disposed) return;

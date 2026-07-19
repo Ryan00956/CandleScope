@@ -53,6 +53,45 @@ function replaceIndicatorOutputs(
   };
 }
 
+function reuseArrayReference<T>(previous: T[], next: T[]): T[] {
+  if (previous === next) return previous;
+  if (previous.length !== next.length) return next;
+  for (let index = 0; index < previous.length; index += 1) {
+    if (previous[index] !== next[index]) return next;
+  }
+  return previous;
+}
+
+function reuseUnchangedOutputLanes(
+  previous: IndicatorOutputState,
+  next: IndicatorOutputState,
+): IndicatorOutputState {
+  const markers = reuseArrayReference(previous.markers, next.markers);
+  const fills = reuseArrayReference(previous.fills, next.fills);
+  const hlines = reuseArrayReference(previous.hlines, next.hlines);
+  const bgcolors = reuseArrayReference(previous.bgcolors, next.bgcolors);
+  const barcolors = reuseArrayReference(previous.barcolors, next.barcolors);
+  const signals = reuseArrayReference(previous.signals, next.signals);
+  if (markers === previous.markers
+    && fills === previous.fills
+    && hlines === previous.hlines
+    && bgcolors === previous.bgcolors
+    && barcolors === previous.barcolors
+    && signals === previous.signals
+    && next.paramSchemas === previous.paramSchemas) {
+    return previous;
+  }
+  return {
+    ...next,
+    markers,
+    fills,
+    hlines,
+    bgcolors,
+    barcolors,
+    signals,
+  };
+}
+
 function mergeIndicatorPatchOutputs(
   state: IndicatorOutputState,
   indicatorId: string,
@@ -60,13 +99,13 @@ function mergeIndicatorPatchOutputs(
 ): IndicatorOutputState {
   return {
     ...state,
-    markers: mergeIndicatorItems(
-      withoutIndicator(state.markers, indicatorId),
-      [
-        ...state.markers.filter((item) => item.indicatorId === indicatorId),
-        ...(normalized.markers || []),
-      ],
-    ),
+    markers: [
+      ...withoutIndicator(state.markers, indicatorId),
+      ...mergeIndicatorItems(
+        state.markers.filter((item) => item.indicatorId === indicatorId),
+        normalized.markers || [],
+      ),
+    ],
     fills: [
       ...withoutIndicator(state.fills, indicatorId),
       ...mergeIndicatorItems(
@@ -144,7 +183,11 @@ function removeIndicatorOutputs(
   state: IndicatorOutputState,
   indicatorId: string,
 ): IndicatorOutputState {
-  const { [indicatorId]: _removed, ...paramSchemas } = state.paramSchemas || {};
+  let paramSchemas = state.paramSchemas;
+  if (Object.prototype.hasOwnProperty.call(paramSchemas, indicatorId)) {
+    const { [indicatorId]: _removed, ...remainingParamSchemas } = paramSchemas;
+    paramSchemas = remainingParamSchemas;
+  }
   return {
     markers: withoutIndicator(state.markers, indicatorId),
     fills: withoutIndicator(state.fills, indicatorId),
@@ -190,34 +233,43 @@ export function indicatorOutputReducer(
 ): IndicatorOutputState {
   switch (action.type) {
     case "reset-context":
-      return {
+      return reuseUnchangedOutputLanes(state, {
         ...createIndicatorOutputState(),
         paramSchemas: state.paramSchemas,
-      };
+      });
     case "hydrate-cache":
-      return hydrateCachedOutputs(state, action.entries);
+      return reuseUnchangedOutputLanes(state, hydrateCachedOutputs(state, action.entries));
     case "snapshot": {
-      const next = replaceIndicatorOutputs(state, action.indicatorId, action.normalized);
+      let next = replaceIndicatorOutputs(state, action.indicatorId, action.normalized);
       const schema = action.schema;
       if (schema && schema.length > 0) {
-        next.paramSchemas = { ...state.paramSchemas, [action.indicatorId]: schema };
+        next = {
+          ...next,
+          paramSchemas: { ...state.paramSchemas, [action.indicatorId]: schema },
+        };
       }
-      return next;
+      return reuseUnchangedOutputLanes(state, next);
     }
     case "patch":
-      return mergeIndicatorPatchOutputs(state, action.indicatorId, action.normalized);
-    case "replace-range":
-      return replaceIndicatorRangeOutputs(
+      return reuseUnchangedOutputLanes(
         state,
-        action.indicatorId,
-        action.normalized,
-        action.range,
+        mergeIndicatorPatchOutputs(state, action.indicatorId, action.normalized),
+      );
+    case "replace-range":
+      return reuseUnchangedOutputLanes(
+        state,
+        replaceIndicatorRangeOutputs(
+          state,
+          action.indicatorId,
+          action.normalized,
+          action.range,
+        ),
       );
     case "remove-indicator":
-      return removeIndicatorOutputs(state, action.indicatorId);
+      return reuseUnchangedOutputLanes(state, removeIndicatorOutputs(state, action.indicatorId));
     case "compute-results": {
       const processedIds = new Set<string>(action.processedIds || []);
-      return {
+      return reuseUnchangedOutputLanes(state, {
         ...state,
         markers: [...withoutAnyIndicator(state.markers, processedIds), ...(action.markers || [])],
         fills: [...withoutAnyIndicator(state.fills, processedIds), ...(action.fills || [])],
@@ -226,7 +278,7 @@ export function indicatorOutputReducer(
         barcolors: [...withoutAnyIndicator(state.barcolors, processedIds), ...(action.barcolors || [])],
         signals: [...withoutAnyIndicator(state.signals, processedIds), ...(action.signals || [])],
         paramSchemas: mergeParamSchemas(state, action.paramSchemas),
-      };
+      });
     }
     default: {
       const unreachable: never = action;

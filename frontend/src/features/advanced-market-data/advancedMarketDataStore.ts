@@ -21,6 +21,29 @@ const MAX_METRIC_RECORDS = 20_000;
 const MAX_FUNDING_REALTIME_RECORDS = 36_000;
 const MAX_IDENTITY_STATES = 16;
 
+export interface AdvancedMarketFrameScheduler {
+  request(callback: () => void): number;
+  cancel(handle: number): void;
+}
+
+function defaultFrameScheduler(): AdvancedMarketFrameScheduler {
+  if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+    return {
+      request: (callback) => window.requestAnimationFrame(callback),
+      cancel: (handle) => window.cancelAnimationFrame(handle),
+    };
+  }
+  // Keep non-browser consumers deterministic; browser delivery is still
+  // frame-coalesced and unit tests can inject a manual frame scheduler.
+  return {
+    request(callback) {
+      callback();
+      return 0;
+    },
+    cancel() {},
+  };
+}
+
 export const EMPTY_ADVANCED_MARKET_SUMMARY: AdvancedMarketSummarySnapshot = Object.freeze({
   markPrice: null,
   indexPrice: null,
@@ -52,6 +75,7 @@ interface IdentityStoreState {
   fundingPreview: MarketStateRecord | null;
   openInterestHistoryByPeriod: Map<string, MarketStateRecord[]>;
   openInterestLive: MarketStateRecord | null;
+  openInterestDisplayHistory: MarketStateRecord[];
   activeOpenInterestPeriod: string;
   summarySnapshot: AdvancedMarketSummarySnapshot;
   metricsSnapshot: AdvancedMarketMetricsSnapshot;
@@ -112,6 +136,48 @@ function compareChannelProgress(left: MarketStateRecord, right: MarketStateRecor
     || compareSameSamplePrecedence(left, right);
 }
 
+function sameShallowRecord(
+  left: Readonly<Record<string, unknown>>,
+  right: Readonly<Record<string, unknown>>,
+): boolean {
+  if (left === right) return true;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of leftKeys) {
+    if (!Object.is(left[key], right[key])) return false;
+  }
+  return true;
+}
+
+function sameMarketRecord(left: MarketStateRecord | null, right: MarketStateRecord | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.topic === right.topic
+    && left.channel === right.channel
+    && left.event_time_ms === right.event_time_ms
+    && left.received_at_ms === right.received_at_ms
+    && left.source === right.source
+    && left.sequence === right.sequence
+    && left.revision === right.revision
+    && left.key.exchange === right.key.exchange
+    && left.key.market_type === right.key.market_type
+    && left.key.symbol === right.key.symbol
+    && left.key.channel === right.key.channel
+    && sameShallowRecord(left.key.params, right.key.params)
+    && sameShallowRecord(left.data, right.data);
+}
+
+function sameRecordSequence(
+  left: readonly MarketStateRecord[],
+  right: readonly MarketStateRecord[],
+): boolean {
+  return left === right || (
+    left.length === right.length
+    && left.every((record, index) => sameMarketRecord(record, right[index] ?? null))
+  );
+}
+
 function metricSampleTime(record: MarketStateRecord): number {
   if (record.channel === "funding_rate") {
     return fundingRateSampleTimeMs(record);
@@ -127,36 +193,45 @@ function mergeRecords(
   if (incoming.length === 0) return current as MarketStateRecord[];
   const byTime = new Map<number, MarketStateRecord>();
   for (const record of current) byTime.set(metricSampleTime(record), record);
+  let changed = false;
   for (const record of incoming) {
     const sampleTime = metricSampleTime(record);
     const previous = byTime.get(sampleTime);
     if (!previous || compareSameSamplePrecedence(record, previous) >= 0) {
+      if (previous && sameMarketRecord(previous, record)) continue;
       byTime.set(sampleTime, record);
+      changed = true;
     }
   }
+  if (!changed) return current as MarketStateRecord[];
   const merged = Array.from(byTime.values()).sort((a, b) => (
     metricSampleTime(a) - metricSampleTime(b) || compareSameSamplePrecedence(a, b)
   ));
-  return merged.length <= maxRecords
+  const bounded = merged.length <= maxRecords
     ? merged
     : merged.slice(merged.length - maxRecords);
+  return sameRecordSequence(current, bounded)
+    ? current as MarketStateRecord[]
+    : bounded;
 }
 
 function appendFundingRealtimeRecord(
   state: IdentityStoreState,
   record: MarketStateRecord,
-): void {
+): boolean {
   const timeline = state.fundingRealtimeHistory;
   const observationMs = fundingRateSampleTimeMs(record);
   const tail = timeline.at(-1);
   if (tail && fundingRateSampleTimeMs(tail) === observationMs) {
-    if (compareChannelProgress(record, tail) >= 0) timeline[timeline.length - 1] = record;
-    return;
+    if (compareChannelProgress(record, tail) < 0 || sameMarketRecord(tail, record)) return false;
+    state.fundingRealtimeHistory = [...timeline.slice(0, -1), record];
+    return true;
   }
-  timeline.push(record);
-  if (timeline.length > MAX_FUNDING_REALTIME_RECORDS) {
-    timeline.splice(0, timeline.length - MAX_FUNDING_REALTIME_RECORDS);
-  }
+  const next = [...timeline, record];
+  state.fundingRealtimeHistory = next.length > MAX_FUNDING_REALTIME_RECORDS
+    ? next.slice(next.length - MAX_FUNDING_REALTIME_RECORDS)
+    : next;
+  return true;
 }
 
 function fundingSettlementCycleKey(record: MarketStateRecord): string {
@@ -188,17 +263,32 @@ function mergeFundingSettlements(
     .slice(-MAX_METRIC_RECORDS);
 }
 
-function refreshFundingDisplayHistory(state: IdentityStoreState): void {
+function refreshFundingDisplayHistory(state: IdentityStoreState): boolean {
   const hybridSettlements = state.activeFundingPeriod
     ? state.fundingHybridSettlementHistoryByPeriod.get(state.activeFundingPeriod) ?? []
     : [];
   const derived = state.activeFundingPeriod
     ? state.fundingDerivedHistoryByPeriod.get(state.activeFundingPeriod) ?? []
     : [];
-  state.fundingDisplayHistory = mergeRecords(
+  const next = mergeRecords(
     mergeFundingSettlements(state.fundingLegacySettlementHistory, hybridSettlements),
     derived,
   );
+  if (sameRecordSequence(state.fundingDisplayHistory, next)) return false;
+  state.fundingDisplayHistory = next;
+  return true;
+}
+
+function refreshOpenInterestDisplayHistory(state: IdentityStoreState): boolean {
+  const periodHistory = state.openInterestHistoryByPeriod.get(
+    state.activeOpenInterestPeriod,
+  ) ?? [];
+  const next = state.openInterestLive
+    ? mergeRecords(periodHistory, [state.openInterestLive])
+    : periodHistory;
+  if (sameRecordSequence(state.openInterestDisplayHistory, next)) return false;
+  state.openInterestDisplayHistory = next;
+  return true;
 }
 
 function sameSummary(
@@ -239,6 +329,7 @@ function createState(): IdentityStoreState {
     fundingPreview: null,
     openInterestHistoryByPeriod: new Map(),
     openInterestLive: null,
+    openInterestDisplayHistory: [],
     activeOpenInterestPeriod: DEFAULT_OPEN_INTEREST_PERIOD,
     summarySnapshot: EMPTY_ADVANCED_MARKET_SUMMARY,
     metricsSnapshot: EMPTY_ADVANCED_MARKET_METRICS,
@@ -251,6 +342,18 @@ function createState(): IdentityStoreState {
 
 export class AdvancedMarketDataStore {
   private readonly states = new Map<string, IdentityStoreState>();
+
+  private readonly scheduler: AdvancedMarketFrameScheduler;
+
+  private readonly pendingSummaryNotifications = new Set<IdentityStoreState>();
+
+  private readonly pendingMetricsNotifications = new Set<IdentityStoreState>();
+
+  private notificationFrame: number | null = null;
+
+  constructor(scheduler: AdvancedMarketFrameScheduler = defaultFrameScheduler()) {
+    this.scheduler = scheduler;
+  }
 
   private state(identityOrKey: AdvancedMarketIdentity | string): IdentityStoreState {
     const key = typeof identityOrKey === "string"
@@ -305,6 +408,7 @@ export class AdvancedMarketDataStore {
     const state = this.state(identity);
     if (state.activeOpenInterestPeriod === normalized) return;
     state.activeOpenInterestPeriod = normalized;
+    refreshOpenInterestDisplayHistory(state);
     this.publishMetrics(state);
   }
 
@@ -328,10 +432,13 @@ export class AdvancedMarketDataStore {
     const state = this.state(identity);
     let summaryChanged = false;
     let metricsChanged = false;
+    let fundingDisplayDirty = false;
+    let openInterestDisplayDirty = false;
     for (const record of records) {
       if (!recordMatchesIdentity(identity, record)) continue;
       const previous = state.latestByChannel.get(record.channel);
       if (previous && compareChannelProgress(record, previous) < 0) continue;
+      if (previous && sameMarketRecord(previous, record)) continue;
       state.latestByChannel.set(record.channel, record);
 
       if (record.channel === "mark_price"
@@ -345,28 +452,31 @@ export class AdvancedMarketDataStore {
               ? normalizeFundingPeriod(record.key.params.period)
               : null;
             if (hybridPeriod) {
-              state.fundingHybridSettlementHistoryByPeriod.set(
-                hybridPeriod,
-                mergeRecords(
-                  state.fundingHybridSettlementHistoryByPeriod.get(hybridPeriod) ?? [],
-                  [record],
-                ),
-              );
+              const current = state.fundingHybridSettlementHistoryByPeriod.get(hybridPeriod) ?? [];
+              const next = mergeRecords(current, [record]);
+              if (next !== current) {
+                state.fundingHybridSettlementHistoryByPeriod.set(hybridPeriod, next);
+                if (hybridPeriod === state.activeFundingPeriod) fundingDisplayDirty = true;
+              }
             } else {
-              state.fundingLegacySettlementHistory = mergeRecords(
+              const next = mergeRecords(
                 state.fundingLegacySettlementHistory,
                 [record],
               );
+              if (next !== state.fundingLegacySettlementHistory) {
+                state.fundingLegacySettlementHistory = next;
+                fundingDisplayDirty = true;
+              }
             }
-            refreshFundingDisplayHistory(state);
           } else {
             const period = normalizeFundingPeriod(record.key.params.period);
             if (period) {
-              state.fundingDerivedHistoryByPeriod.set(
-                period,
-                mergeRecords(state.fundingDerivedHistoryByPeriod.get(period) ?? [], [record]),
-              );
-              if (period === state.activeFundingPeriod) refreshFundingDisplayHistory(state);
+              const current = state.fundingDerivedHistoryByPeriod.get(period) ?? [];
+              const next = mergeRecords(current, [record]);
+              if (next !== current) {
+                state.fundingDerivedHistoryByPeriod.set(period, next);
+                if (period === state.activeFundingPeriod) fundingDisplayDirty = true;
+              }
             }
           }
         } else {
@@ -376,19 +486,27 @@ export class AdvancedMarketDataStore {
           const nextTarget = fundingRateTargetTimeMs(record);
           if (previousTarget !== null && nextTarget !== null && previousTarget !== nextTarget) {
             state.fundingRealtimeHistory = [];
+            metricsChanged = true;
           }
-          appendFundingRealtimeRecord(state, record);
-          state.fundingPreview = record;
+          if (appendFundingRealtimeRecord(state, record)) metricsChanged = true;
+          if (!sameMarketRecord(state.fundingPreview, record)) {
+            state.fundingPreview = record;
+            metricsChanged = true;
+          }
         }
-        metricsChanged = true;
       } else if (record.channel === "open_interest") {
         // Snapshot/WebSocket OI has no period identity. Keep it as a separate
         // live lane so it can paint the current tail without contaminating any
         // REST-history period partition.
-        state.openInterestLive = asOpenInterestLiveProvisional(record);
-        metricsChanged = true;
+        const next = asOpenInterestLiveProvisional(record);
+        if (!sameMarketRecord(state.openInterestLive, next)) {
+          state.openInterestLive = next;
+          openInterestDisplayDirty = true;
+        }
       }
     }
+    if (fundingDisplayDirty && refreshFundingDisplayHistory(state)) metricsChanged = true;
+    if (openInterestDisplayDirty && refreshOpenInterestDisplayHistory(state)) metricsChanged = true;
     if (summaryChanged) this.publishSummary(state);
     if (metricsChanged) this.publishMetrics(state);
   }
@@ -404,6 +522,7 @@ export class AdvancedMarketDataStore {
     ));
     if (filtered.length === 0) return;
     const state = this.state(identity);
+    let metricsChanged = false;
     if (channel === "funding_rate") {
       const history = filtered.filter(isFundingRateHistory);
       const previews = filtered.filter(isFundingRateRealtime);
@@ -417,39 +536,49 @@ export class AdvancedMarketDataStore {
       const hybridSettlements = settlements.filter((record) => (
         record.key.params.view === "hybrid" && fundingPeriod !== null
       ));
-      const legacySettlements = settlements.filter((record) => !hybridSettlements.includes(record));
-      state.fundingLegacySettlementHistory = mergeRecords(
+      const hybridSettlementSet = new Set(hybridSettlements);
+      const legacySettlements = settlements.filter((record) => !hybridSettlementSet.has(record));
+      let fundingDisplayDirty = false;
+      const legacyHistory = mergeRecords(
         state.fundingLegacySettlementHistory,
         legacySettlements,
       );
+      if (legacyHistory !== state.fundingLegacySettlementHistory) {
+        state.fundingLegacySettlementHistory = legacyHistory;
+        fundingDisplayDirty = true;
+      }
       if (fundingPeriod && hybridSettlements.length > 0) {
-        state.fundingHybridSettlementHistoryByPeriod.set(
-          fundingPeriod,
-          mergeRecords(
-            state.fundingHybridSettlementHistoryByPeriod.get(fundingPeriod) ?? [],
-            hybridSettlements,
-          ),
-        );
+        const current = state.fundingHybridSettlementHistoryByPeriod.get(fundingPeriod) ?? [];
+        const next = mergeRecords(current, hybridSettlements);
+        if (next !== current) {
+          state.fundingHybridSettlementHistoryByPeriod.set(fundingPeriod, next);
+          if (fundingPeriod === state.activeFundingPeriod) fundingDisplayDirty = true;
+        }
       }
       if (fundingPeriod && derived.length > 0) {
-        state.fundingDerivedHistoryByPeriod.set(
-          fundingPeriod,
-          mergeRecords(state.fundingDerivedHistoryByPeriod.get(fundingPeriod) ?? [], derived),
-        );
+        const current = state.fundingDerivedHistoryByPeriod.get(fundingPeriod) ?? [];
+        const next = mergeRecords(current, derived);
+        if (next !== current) {
+          state.fundingDerivedHistoryByPeriod.set(fundingPeriod, next);
+          if (fundingPeriod === state.activeFundingPeriod) fundingDisplayDirty = true;
+        }
       }
-      refreshFundingDisplayHistory(state);
+      if (fundingDisplayDirty && refreshFundingDisplayHistory(state)) metricsChanged = true;
       for (const preview of previews.sort(compareChannelProgress)) {
         if (state.fundingPreview
           && compareChannelProgress(preview, state.fundingPreview) < 0) continue;
+        if (sameMarketRecord(state.fundingPreview, preview)) continue;
         const previousTarget = state.fundingPreview
           ? fundingRateTargetTimeMs(state.fundingPreview)
           : null;
         const nextTarget = fundingRateTargetTimeMs(preview);
         if (previousTarget !== null && nextTarget !== null && previousTarget !== nextTarget) {
           state.fundingRealtimeHistory = [];
+          metricsChanged = true;
         }
-        appendFundingRealtimeRecord(state, preview);
+        if (appendFundingRealtimeRecord(state, preview)) metricsChanged = true;
         state.fundingPreview = preview;
+        metricsChanged = true;
       }
     } else {
       const explicitPeriod = normalizePeriod(period);
@@ -463,18 +592,24 @@ export class AdvancedMarketDataStore {
         grouped.set(resolvedPeriod, group);
       }
       if (grouped.size === 0) return;
+      let activeHistoryChanged = false;
       for (const [resolvedPeriod, incoming] of grouped) {
         const current = state.openInterestHistoryByPeriod.get(resolvedPeriod) ?? [];
-        state.openInterestHistoryByPeriod.set(
-          resolvedPeriod,
-          mergeRecords(current, incoming),
-        );
+        const next = mergeRecords(current, incoming);
+        if (next === current) continue;
+        state.openInterestHistoryByPeriod.set(resolvedPeriod, next);
+        if (resolvedPeriod === state.activeOpenInterestPeriod) activeHistoryChanged = true;
       }
+      if (activeHistoryChanged && refreshOpenInterestDisplayHistory(state)) metricsChanged = true;
     }
-    this.publishMetrics(state);
+    if (metricsChanged) this.publishMetrics(state);
   }
 
   clear(): void {
+    if (this.notificationFrame !== null) this.scheduler.cancel(this.notificationFrame);
+    this.notificationFrame = null;
+    this.pendingSummaryNotifications.clear();
+    this.pendingMetricsNotifications.clear();
     this.states.clear();
   }
 
@@ -489,9 +624,11 @@ export class AdvancedMarketDataStore {
     const replacement = createState();
     replacement.summaryListeners = state.summaryListeners;
     replacement.metricsListeners = state.metricsListeners;
+    this.pendingSummaryNotifications.delete(state);
+    this.pendingMetricsNotifications.delete(state);
     this.states.set(key, replacement);
-    notify(replacement.summaryListeners);
-    notify(replacement.metricsListeners);
+    this.queueSummaryNotification(replacement);
+    this.queueMetricsNotification(replacement);
   }
 
   private publishSummary(state: IdentityStoreState): void {
@@ -524,26 +661,56 @@ export class AdvancedMarketDataStore {
     };
     if (sameSummary(next, state.summarySnapshot)) return;
     state.summarySnapshot = next;
-    notify(state.summaryListeners);
+    this.queueSummaryNotification(state);
   }
 
   private publishMetrics(state: IdentityStoreState): void {
+    const previous = state.metricsSnapshot;
+    if (previous.fundingHistory === state.fundingDisplayHistory
+      && previous.fundingRealtimeHistory === state.fundingRealtimeHistory
+      && previous.fundingPreview === state.fundingPreview
+      && previous.openInterestHistory === state.openInterestDisplayHistory
+      && previous.openInterestPeriod === state.activeOpenInterestPeriod
+      && previous.connectionStatus === state.connectionStatus) {
+      return;
+    }
     state.metricsRevision += 1;
-    const periodHistory = state.openInterestHistoryByPeriod.get(
-      state.activeOpenInterestPeriod,
-    ) ?? [];
     state.metricsSnapshot = {
       fundingHistory: state.fundingDisplayHistory,
       fundingRealtimeHistory: state.fundingRealtimeHistory,
       fundingPreview: state.fundingPreview,
-      openInterestHistory: state.openInterestLive
-        ? mergeRecords(periodHistory, [state.openInterestLive])
-        : periodHistory,
+      openInterestHistory: state.openInterestDisplayHistory,
       openInterestPeriod: state.activeOpenInterestPeriod,
       connectionStatus: state.connectionStatus,
       revision: state.metricsRevision,
     };
-    notify(state.metricsListeners);
+    this.queueMetricsNotification(state);
+  }
+
+  private queueSummaryNotification(state: IdentityStoreState): void {
+    this.pendingSummaryNotifications.add(state);
+    this.scheduleNotificationFrame();
+  }
+
+  private queueMetricsNotification(state: IdentityStoreState): void {
+    this.pendingMetricsNotifications.add(state);
+    this.scheduleNotificationFrame();
+  }
+
+  private scheduleNotificationFrame(): void {
+    if (this.notificationFrame !== null) return;
+    let flushedSynchronously = false;
+    const handle = this.scheduler.request(() => {
+      flushedSynchronously = true;
+      this.notificationFrame = null;
+      const summaryStates = [...this.pendingSummaryNotifications];
+      const metricsStates = [...this.pendingMetricsNotifications];
+      this.pendingSummaryNotifications.clear();
+      this.pendingMetricsNotifications.clear();
+      for (const state of summaryStates) notify(state.summaryListeners);
+      for (const state of metricsStates) notify(state.metricsListeners);
+    });
+    if (!flushedSynchronously) this.notificationFrame = handle;
   }
 
   private evictInactiveStates(): void {

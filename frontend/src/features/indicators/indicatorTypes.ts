@@ -467,6 +467,7 @@ export interface IndicatorWsHandlers {
     barTime: number,
     isFinal: boolean,
     message: IndicatorValuesMessage,
+    sourceSubscriptionSignature?: string,
   ) => void;
   onError?: (indicatorId: string, message: IndicatorErrorMessage) => void;
 }

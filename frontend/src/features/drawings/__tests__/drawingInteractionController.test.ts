@@ -10,6 +10,7 @@ import {
   canApplyDrawingVisibilityToCurrentPrimitives,
   cancelFreehandPrimitiveOnSurface,
   commitSavedDrawingAfterDynamicFrame,
+  createDrawingPointerRectCache,
   createDrawingExportVisibilityIntentGate,
   detachAndRemoveDrawingPrimitive,
   dynamicSelectionHandlesForSavedDrawing,
@@ -23,6 +24,7 @@ import {
   runDrawingSurfaceDisposeBarrier,
   scenePaintCoversDrawingHandoff,
   shouldDeferDrawingCoordinateCleanupToChartTypeBoundary,
+  subscribeDrawingPointerRectInvalidation,
   withDrawingExportCaptureScene,
 } from "../drawingInteractionController.js";
 import type { DrawingExportLease } from "../drawingInteractionController.js";
@@ -58,6 +60,111 @@ import {
 function point(x: number): ScreenPoint {
   return { x, y: x };
 }
+
+test("pointerdown recaptures geometry after a passive hover cached the previous rect", () => {
+  let rect = structuralMock<DOMRect>({ left: 40, top: 80 });
+  let rectReads = 0;
+  const container = structuralMock<HTMLElement>({
+    getBoundingClientRect() {
+      rectReads += 1;
+      return rect;
+    },
+  });
+  const cache = createDrawingPointerRectCache();
+
+  cache.capture(container);
+  assert.equal(cache.peek()?.left, 40);
+  rect = structuralMock<DOMRect>({ left: 140, top: 180 });
+  assert.equal(cache.peek()?.left, 40, "passive pointermove must only read the cached rect");
+
+  const pointerDownRect = cache.capture(container);
+  assert.equal(pointerDownRect.left, 140);
+  assert.equal(pointerDownRect.top, 180);
+  assert.equal(rectReads, 2);
+});
+
+test("pointer rect layout subscriptions refresh out of band and fully clean up", () => {
+  let rect = structuralMock<DOMRect>({ left: 10, top: 20 });
+  let rectReads = 0;
+  const documentTarget = structuralMock<Document>({});
+  const container = structuralMock<HTMLElement>({
+    ownerDocument: documentTarget,
+    getBoundingClientRect() {
+      rectReads += 1;
+      return rect;
+    },
+  });
+  const listeners = new Map<string, EventListener>();
+  const removed: string[] = [];
+  const eventTarget = {
+    addEventListener(type: string, listener: EventListener) {
+      listeners.set(type, listener);
+    },
+    removeEventListener(type: string, listener: EventListener) {
+      assert.strictEqual(listeners.get(type), listener);
+      listeners.delete(type);
+      removed.push(type);
+    },
+  };
+  let resizeListener: ResizeObserverCallback | null = null;
+  let observed: Element | null = null;
+  let disconnected = 0;
+  const cache = createDrawingPointerRectCache();
+  const cleanup = subscribeDrawingPointerRectInvalidation({
+    cache,
+    container,
+    eventTarget,
+    createResizeObserver(listener) {
+      resizeListener = listener;
+      return {
+        observe(target) { observed = target; },
+        disconnect() { disconnected += 1; },
+      };
+    },
+  });
+
+  assert.strictEqual(observed, container);
+  assert.equal(cache.peek()?.left, 10);
+  assert.equal(rectReads, 1);
+
+  const descendant = structuralMock<EventTarget>({});
+  const unrelatedScroller = structuralMock<EventTarget>({
+    contains: () => false,
+  });
+  listeners.get("scroll")?.(structuralMock<Event>({ target: descendant }));
+  listeners.get("scroll")?.(structuralMock<Event>({ target: unrelatedScroller }));
+  listeners.get("scroll")?.(structuralMock<Event>({ target: container }));
+  assert.equal(rectReads, 1, "descendant, unrelated, and self scrolls must not read layout");
+
+  const scrollAncestor = structuralMock<EventTarget>({
+    contains: (candidate: Node | null) => candidate === container,
+  });
+  rect = structuralMock<DOMRect>({ left: 30, top: 40 });
+  listeners.get("scroll")?.(structuralMock<Event>({ target: scrollAncestor }));
+  assert.equal(cache.peek()?.left, 30);
+  rect = structuralMock<DOMRect>({ left: 40, top: 50 });
+  listeners.get("scroll")?.(structuralMock<Event>({ target: eventTarget as EventTarget }));
+  assert.equal(cache.peek()?.left, 40, "window scroll must refresh");
+  rect = structuralMock<DOMRect>({ left: 45, top: 55 });
+  listeners.get("scroll")?.(structuralMock<Event>({ target: documentTarget }));
+  assert.equal(cache.peek()?.left, 45, "document scroll must refresh");
+  rect = structuralMock<DOMRect>({ left: 50, top: 60 });
+  const notifyResize = resizeListener as ResizeObserverCallback | null;
+  assert.ok(notifyResize);
+  notifyResize([], structuralMock<ResizeObserver>({}));
+  assert.equal(cache.peek()?.left, 50);
+  assert.equal(rectReads, 5);
+
+  cleanup();
+  cleanup();
+  assert.equal(cache.peek(), null);
+  assert.equal(disconnected, 1);
+  assert.deepEqual(removed.sort(), ["resize", "scroll"]);
+  assert.equal(listeners.size, 0);
+
+  notifyResize([], structuralMock<ResizeObserver>({}));
+  assert.equal(rectReads, 5, "a disposed observer callback must not refresh the cache");
+});
 
 test("scene paint handoff ignores superseded viewport but rejects wrong ownership or stale document", () => {
   const ticket = {

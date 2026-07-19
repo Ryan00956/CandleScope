@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "exactViewportSettleDelayMs": 40,
+  "phase6WorkerBackpressure": {
+    "cadenceMs": 56,
+    "wheelEvents": 96,
+    "workerDelayMs": 192
+  }
+}

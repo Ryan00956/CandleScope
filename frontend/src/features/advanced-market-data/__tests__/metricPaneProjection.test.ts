@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   buildAdvancedMarketPanes,
+  buildFundingRateHistoryProjection,
+  buildFundingRatePaneFromHistoryProjection,
   projectMetricRecordsToCandles,
   resolveOpenInterestPeriod,
 } from "../metricPaneProjection.js";
@@ -368,4 +370,49 @@ test("market pane projection only returns explicitly requested studies", () => {
     ["advanced-open-interest"],
   );
   assert.deepEqual(buildAdvancedMarketPanes(metrics, BARS, []), []);
+});
+
+test("funding history projection keeps base data identity when no realtime tail exists", () => {
+  const settlement = record("funding_rate", 300_000, {
+    funding_rate: 0.0001,
+    funding_time_ms: 300_000,
+    is_final: true,
+    sample_kind: "settlement",
+  });
+  const history = buildFundingRateHistoryProjection([settlement], BARS, "3m");
+  const first = buildFundingRatePaneFromHistoryProjection(history, {
+    fundingRealtimeHistory: [],
+    fundingPreview: null,
+  }, 1_000_000);
+  const laterClock = buildFundingRatePaneFromHistoryProjection(history, {
+    fundingRealtimeHistory: [],
+    fundingPreview: null,
+  }, 2_000_000);
+
+  assert.strictEqual(first.lines[0]?.data, history.points);
+  assert.strictEqual(laterClock.lines[0]?.data, history.points);
+  assert.strictEqual(first.pointMetadata, history.metadata);
+  assert.strictEqual(laterClock.pointMetadata, history.metadata);
+});
+
+test("an unrequested market channel is not projected", () => {
+  const metrics = {
+    fundingHistory: [],
+    fundingRealtimeHistory: [],
+    fundingPreview: null,
+    openInterestHistory: [],
+    openInterestPeriod: "5m",
+    connectionStatus: "live",
+    revision: 0,
+  } as AdvancedMarketMetricsSnapshot;
+  Object.defineProperty(metrics, "fundingHistory", {
+    get() {
+      throw new Error("funding projection should stay cold");
+    },
+  });
+
+  assert.deepEqual(
+    buildAdvancedMarketPanes(metrics, BARS, ["open_interest"]).map((pane) => pane.id),
+    ["advanced-open-interest"],
+  );
 });

@@ -12,6 +12,7 @@ interface ContextOverrides {
   indicatorActions?: object;
   marketActions?: object;
   settingsActions?: object;
+  watchlistView?: object;
 }
 
 function buildContext({
@@ -20,6 +21,7 @@ function buildContext({
   indicatorActions = {},
   marketActions = {},
   settingsActions = {},
+  watchlistView = {},
 }: ContextOverrides = {}): WorkspaceContext {
   return structuralMock<WorkspaceContext>({
     chartSettings: structuralMock<WorkspaceContext["chartSettings"]>(chartSettings),
@@ -54,7 +56,7 @@ function buildContext({
     },
     settingsActions,
     watchlistActions: {},
-    watchlistView: {},
+    watchlistView,
   });
 }
 
@@ -159,6 +161,21 @@ test("chart range handlers separate indicator coverage from user persistence", (
   mustBeDefined(model.chart.chartProps.onVisibleRangeChange)(range);
   assert.deepEqual(indicatorRanges, [range]);
   assert.deepEqual(persistedRanges, [range]);
+});
+
+test("watchlist workspace receives the stable external price store handle", () => {
+  const priceStore = {
+    getSnapshot: () => ({}),
+    getSymbolSnapshot: () => undefined,
+    subscribe: () => () => {},
+    subscribeSymbol: () => () => {},
+  };
+  const model = buildChartWorkspaceViewModel(buildContext({
+    watchlistView: { priceStore },
+  }));
+
+  assert.equal(model.watchlist.priceStore, priceStore);
+  assert.equal("prices" in model.watchlist, false);
 });
 
 test("pane delete controls dispatch to the owning indicator or market study", () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
   fetchSubscriptions,
@@ -18,7 +18,19 @@ import {
   getFullSubscriptionResourceSummary,
   getSubscriptionTierRequestOptions,
 } from "./watchlistSubscriptionPolicy.js";
+import { createWatchlistPriceStore } from "./watchlistPriceStore.js";
+import type {
+  WatchlistPriceStore,
+  WatchlistPriceTick,
+} from "./watchlistPriceStore.js";
 import type { SubscriptionTier, WatchlistGroup } from "./watchlistTypes.js";
+import { createWatchlistPriceSocketSession } from "./watchlistPriceSocketSession.js";
+import {
+  WatchlistTierMutationCoordinator,
+  type WatchlistTierMap,
+} from "./watchlistTierMutationCoordinator.js";
+
+export type { WatchlistPriceTick } from "./watchlistPriceStore.js";
 
 const WATCHLIST_SYNC_DEBOUNCE_MS = 500;
 const PRICE_WS_RECONNECT_MS = 3_000;
@@ -30,15 +42,6 @@ export interface WatchlistSubscriptionContext {
   customIntervalRecords?: CustomIntervalRecord[];
 }
 
-export interface WatchlistPriceTick extends Record<string, unknown> {
-  symbol: string;
-  price?: number;
-  open?: number;
-  daily_change?: number;
-  daily_change_pct?: number;
-  change_pct?: number;
-}
-
 export interface UseWatchlistSubscriptionRuntimeOptions {
   watchlists: WatchlistGroup[];
   subscriptionContext?: WatchlistSubscriptionContext;
@@ -48,7 +51,7 @@ export interface WatchlistSubscriptionRuntime {
   subscriptionTiers: Record<string, SubscriptionTier>;
   subscriptionResourceSummaries: Record<string, ReturnType<typeof getFullSubscriptionResourceSummary>>;
   setSubscriptionTiers: Dispatch<SetStateAction<Record<string, SubscriptionTier>>>;
-  symbolPrices: Record<string, WatchlistPriceTick>;
+  priceStore: WatchlistPriceStore;
   refreshSubscriptions(): Promise<SubscriptionListPayload>;
   handleTierChange(symbol: string, tier: SubscriptionTier): void;
 }
@@ -100,10 +103,11 @@ export function useWatchlistSubscriptionRuntime({
   subscriptionContext = {},
 }: UseWatchlistSubscriptionRuntimeOptions): WatchlistSubscriptionRuntime {
   const [subscriptionTiers, setSubscriptionTiers] = useState<Record<string, SubscriptionTier>>({});
-  const [symbolPrices, setSymbolPrices] = useState<Record<string, WatchlistPriceTick>>({});
+  const [priceStoreController] = useState(createWatchlistPriceStore);
+  const [tierCoordinator] = useState(() => new WatchlistTierMutationCoordinator());
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const priceWsRef = useRef<WebSocket | null>(null);
   const subscriptionTiersRef = useRef(subscriptionTiers);
+  const lifecycleGenerationRef = useRef(0);
   const {
     exchange = "binance",
     exchangeCatalog = null,
@@ -111,15 +115,40 @@ export function useWatchlistSubscriptionRuntime({
     customIntervalRecords = [],
   } = subscriptionContext;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     subscriptionTiersRef.current = subscriptionTiers;
   }, [subscriptionTiers]);
 
-  const refreshSubscriptions = useCallback(async () => {
-    const response = await fetchSubscriptions();
-    setSubscriptionTiers(buildTierMap(response.subscriptions));
-    return response;
+  useLayoutEffect(() => {
+    lifecycleGenerationRef.current += 1;
+    const generation = lifecycleGenerationRef.current;
+    return () => {
+      if (lifecycleGenerationRef.current === generation) {
+        lifecycleGenerationRef.current += 1;
+      }
+      tierCoordinator.cancelPending();
+    };
+  }, [tierCoordinator]);
+
+  const publishSubscriptionTiers = useCallback((next: WatchlistTierMap) => {
+    if (subscriptionTiersRef.current === next) return;
+    subscriptionTiersRef.current = next as Record<string, SubscriptionTier>;
+    setSubscriptionTiers(next as Record<string, SubscriptionTier>);
   }, []);
+
+  const refreshSubscriptions = useCallback(async () => {
+    const lifecycleGeneration = lifecycleGenerationRef.current;
+    const refresh = tierCoordinator.beginRefresh();
+    const response = await fetchSubscriptions();
+    if (lifecycleGenerationRef.current === lifecycleGeneration) {
+      publishSubscriptionTiers(tierCoordinator.mergeRefresh(
+        refresh,
+        subscriptionTiersRef.current,
+        buildTierMap(response.subscriptions),
+      ));
+    }
+    return response;
+  }, [publishSubscriptionTiers, tierCoordinator]);
 
   const resolveNativeIntervals = useCallback((symbol: string) => {
     const parsed = parseSymbolKey(symbol);
@@ -141,32 +170,45 @@ export function useWatchlistSubscriptionRuntime({
 
   const handleTierChange = useCallback((symbol: string, tier: SubscriptionTier) => {
     const prevTier = subscriptionTiersRef.current[symbol] || "none";
+    const lifecycleGeneration = lifecycleGenerationRef.current;
+    const mutation = tierCoordinator.beginMutation(symbol, prevTier, tier);
     const options = getSubscriptionTierRequestOptions({
       symbol,
       tier,
       nativeIntervals: resolveNativeIntervals(symbol),
       customIntervalRecords,
     });
-    setSubscriptionTiers((prev) => ({ ...prev, [symbol]: tier }));
-    updateSubscriptionTier(symbol, tier, options).catch((err) => {
-      console.warn("Failed to update tier:", err);
-      setSubscriptionTiers((current) => ({ ...current, [symbol]: prevTier }));
-    });
-  }, [customIntervalRecords, resolveNativeIntervals]);
+    publishSubscriptionTiers({ ...subscriptionTiersRef.current, [symbol]: tier });
+    updateSubscriptionTier(symbol, tier, options)
+      .then((response) => {
+        if (lifecycleGenerationRef.current !== lifecycleGeneration) return;
+        const resolution = tierCoordinator.resolveSuccess(mutation, response.tier);
+        if (!resolution) return;
+        publishSubscriptionTiers({
+          ...subscriptionTiersRef.current,
+          [resolution.symbol]: resolution.tier,
+        });
+      })
+      .catch((err) => {
+        if (lifecycleGenerationRef.current !== lifecycleGeneration) return;
+        const resolution = tierCoordinator.resolveFailure(mutation);
+        if (!resolution) return;
+        console.warn("Failed to update tier:", err);
+        publishSubscriptionTiers({
+          ...subscriptionTiersRef.current,
+          [resolution.symbol]: resolution.tier,
+        });
+      });
+  }, [
+    customIntervalRecords,
+    publishSubscriptionTiers,
+    resolveNativeIntervals,
+    tierCoordinator,
+  ]);
 
   useEffect(() => {
-    let cancelled = false;
-    fetchSubscriptions()
-      .then((response) => {
-        if (!cancelled) {
-          setSubscriptionTiers(buildTierMap(response.subscriptions));
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    refreshSubscriptions().catch(() => {});
+  }, [refreshSubscriptions]);
 
   useEffect(() => {
     const allSymbols = [...new Set(watchlists.flatMap((watchlist) => watchlist.symbols))];
@@ -190,15 +232,19 @@ export function useWatchlistSubscriptionRuntime({
 
   useEffect(() => {
     const url = getPriceStreamUrl();
-    let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let stopped = false;
+    const socketSession = createWatchlistPriceSocketSession<WebSocket>();
 
     function connect(): void {
-      if (stopped) return;
-      ws = new WebSocket(url);
+      if (socketSession.isStopped()) return;
+      const socket = new WebSocket(url);
+      if (!socketSession.activate(socket)) {
+        socket.close();
+        return;
+      }
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
+        if (!socketSession.accepts(socket)) return;
         try {
           const message: unknown = JSON.parse(String(event.data));
           if (
@@ -209,46 +255,48 @@ export function useWatchlistSubscriptionRuntime({
             && Array.isArray((message as Record<string, unknown>).data)
           ) {
             const ticks = (message as Record<string, unknown>).data as unknown[];
-            setSymbolPrices((prev) => {
-              const next = { ...prev };
-              for (const tick of ticks) {
-                const parsed = parseWatchlistPriceTick(tick);
-                if (!parsed) continue;
-                next[parsed.symbol] = parsed;
-              }
-              return next;
-            });
+            const parsedTicks: WatchlistPriceTick[] = [];
+            for (const tick of ticks) {
+              const parsed = parseWatchlistPriceTick(tick);
+              if (parsed) parsedTicks.push(parsed);
+            }
+            priceStoreController.enqueue(parsedTicks);
           }
         } catch {
           // Price ticks are best effort; ignore malformed packets.
         }
       };
 
-      ws.onclose = () => {
-        if (!stopped) {
-          reconnectTimer = setTimeout(connect, PRICE_WS_RECONNECT_MS);
-        }
+      socket.onclose = () => {
+        if (!socketSession.release(socket) || socketSession.isStopped()) return;
+        reconnectTimer = setTimeout(connect, PRICE_WS_RECONNECT_MS);
       };
 
-      ws.onerror = () => ws?.close();
-      priceWsRef.current = ws;
+      socket.onerror = () => {
+        if (socketSession.accepts(socket)) socket.close();
+      };
     }
 
     connect();
 
     return () => {
-      stopped = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (ws) ws.close();
-      priceWsRef.current = null;
+      const socket = socketSession.stop();
+      if (socket) {
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.onerror = null;
+        socket.close();
+      }
+      priceStoreController.cancelPending();
     };
-  }, []);
+  }, [priceStoreController]);
 
   return {
     subscriptionTiers,
     subscriptionResourceSummaries,
     setSubscriptionTiers,
-    symbolPrices,
+    priceStore: priceStoreController.store,
     refreshSubscriptions,
     handleTierChange,
   };

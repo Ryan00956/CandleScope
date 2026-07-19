@@ -573,6 +573,10 @@ function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function waitForHostEventLoopTurn() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 function waitWithCancelableTimeout(promise, timeoutMs) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => resolve({ timedOut: true, value: null }), timeoutMs);
@@ -4491,17 +4495,28 @@ export function createControlledNetworkAssetTracker(
           quietSequence = latest.observationSequence;
           quietStartedAt = Date.now();
         } else if (Date.now() - quietStartedAt >= quietWindowMs) {
-          return Object.freeze({
-            ...latest,
-            quiescence: Object.freeze({
-              passed: true,
-              timedOut: false,
-              authorityField,
-              quietWindowMs,
-              observationSequence: quietSequence,
-              observedAt: isoNow(),
-            }),
-          });
+          const candidateSequence = quietSequence;
+          await waitForHostEventLoopTurn();
+          retireDestroyedUnattachedWorkerBootstraps();
+          latest = snapshot();
+          if (latest[authorityField] === true
+            && latest.pendingCount === 0
+            && latest.inFlightCount === 0
+            && latest.observationSequence === candidateSequence) {
+            return Object.freeze({
+              ...latest,
+              quiescence: Object.freeze({
+                passed: true,
+                timedOut: false,
+                authorityField,
+                quietWindowMs,
+                observationSequence: candidateSequence,
+                observedAt: isoNow(),
+              }),
+            });
+          }
+          quietSequence = null;
+          quietStartedAt = null;
         }
       } else {
         quietSequence = null;
@@ -4509,6 +4524,8 @@ export function createControlledNetworkAssetTracker(
       }
       await wait(25);
     }
+    await waitForHostEventLoopTurn();
+    retireDestroyedUnattachedWorkerBootstraps();
     latest = snapshot();
     return Object.freeze({
       ...latest,

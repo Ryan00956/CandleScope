@@ -191,6 +191,16 @@ test("main-pane plot rect follows a reordered main pane and reports its DOM offs
   const paneIndexes: Array<number | undefined> = [];
   const priceScaleRequests: Array<readonly [string, number | undefined]> = [];
   const mainPaneIndexRef = { current: 2 };
+  let containerTop = 100;
+  let paneTop = 420;
+  let containerRectReads = 0;
+  let paneRectReads = 0;
+  const paneElement = {
+    getBoundingClientRect: () => {
+      paneRectReads += 1;
+      return { top: paneTop };
+    },
+  };
   const adapter = createLightweightChartAdapter({
     chartRef: {
       current: {
@@ -206,7 +216,10 @@ test("main-pane plot rect follows a reordered main pane and reports its DOM offs
     },
     containerRef: {
       current: {
-        getBoundingClientRect: () => ({ top: 100 }),
+        getBoundingClientRect: () => {
+          containerRectReads += 1;
+          return { top: containerTop };
+        },
       },
     },
     drawingPaneIndexRef: mainPaneIndexRef,
@@ -214,9 +227,7 @@ test("main-pane plot rect follows a reordered main pane and reports its DOM offs
       current: {
         coordinateToPrice: (coordinate: number) => coordinate / 2,
         getPane: () => ({
-          getHTMLElement: () => ({
-            getBoundingClientRect: () => ({ top: 420 }),
-          }),
+          getHTMLElement: () => paneElement,
         }),
         priceToCoordinate: (price: number) => price * 2,
       },
@@ -236,6 +247,21 @@ test("main-pane plot rect follows a reordered main pane and reports its DOM offs
   assert.equal(adapter.containerToDrawingPaneY(344), 24);
   assert.equal(adapter.priceToCoordinate(12), 344);
   assert.equal(adapter.coordinateToPrice(344), 12);
+  assert.equal(containerRectReads, 1);
+  assert.equal(paneRectReads, 1);
+
+  // Coordinate conversions use the cached pane/container relationship. A
+  // layout owner invalidates it explicitly after a real pane move.
+  containerTop = 120;
+  paneTop = 500;
+  assert.equal(adapter.drawingPaneToContainerY(24), 344);
+  assert.equal(containerRectReads, 1);
+  assert.equal(paneRectReads, 1);
+  adapter.notifyDrawingFrameInvalidation();
+  assert.equal(adapter.drawingPaneToContainerY(24), 404);
+  assert.equal(adapter.priceToCoordinate(12), 404);
+  assert.equal(containerRectReads, 2);
+  assert.equal(paneRectReads, 2);
   assert.deepEqual(paneIndexes, [2, 2]);
   assert.deepEqual(priceScaleRequests, [["left", 2], ["left", 2]]);
 });
@@ -1170,6 +1196,82 @@ test("drawing frame exposes a narrow source-lineage span projection", () => {
   });
 });
 
+test("drawing frame session projects a shared lineage resolution once per atomic frame", () => {
+  const rows = [displayRow(0, 100, 0), displayRow(1, 100, 1), displayRow(2, 200, 0)];
+  const lineageIndex = createDrawingLineageIndex(rows);
+  let timeProjectionCalls = 0;
+  const chart = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time: unknown) => {
+        timeProjectionCalls += 1;
+        return isOrdinalAxisTime(time) ? time.order * 10 : null;
+      },
+    }),
+  };
+  const series = { priceToCoordinate: (price: number) => price };
+  const snapshot = createDrawingFrameSnapshotFactory().capture({
+    axisKind: "derived-ordinal",
+    coordinateKey: "BTCUSDT:renko:10:0",
+    dpr: 1,
+    drawingProjectionConfig: "dataset-a:renko:10",
+    heightCssPx: 600,
+    ordinalSeriesIndex: lineageIndex,
+    projectionKey: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceTimeHorizon: 200,
+    surfaceToken: series,
+    themeKey: "dark",
+    viewportKey: "viewport-a",
+    widthCssPx: 900,
+  });
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    drawingCoordinateSnapshotProvider: () => snapshot,
+    seriesRef: { current: series },
+  });
+  const frame = mustBeDefined(adapter.captureDrawingFrame());
+  const span = Object.freeze({
+    exact: Object.freeze({
+      left: Object.freeze({ time: 100, sourceOrdinal: 0 }),
+      right: Object.freeze({ time: 100, sourceOrdinal: 1 }),
+    }),
+    fallback: Object.freeze({
+      fromTime: 100,
+      leftRatio: 0,
+      rightRatio: 1,
+      toTime: 100,
+    }),
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:10",
+  });
+
+  const projected = adapter.runDrawingFrameProjectionSession(frame, () => {
+    const first = adapter.projectDrawingFrameSourceLineageSpan(frame, span);
+    const second = adapter.projectDrawingFrameSourceLineageSpan(frame, span);
+    assert.ok(first);
+    assert.strictEqual(second, first,
+      "session cache should reuse the immutable public coordinate pair");
+    return first;
+  });
+
+  assert.deepEqual(projected, { left: 0, right: 10 });
+  assert.equal(timeProjectionCalls, 2,
+    "the shared resolution should project only its two endpoints inside one frame session");
+  assert.deepEqual(adapter.readDrawingFrameSourceLineageStats(), {
+    exactProjectionCount: 2,
+    fallbackProjectionCount: 0,
+    unresolvedProjectionCount: 0,
+  }, "evidence continues to count requested canonical spans, including cache hits");
+
+  assert.deepEqual(adapter.projectDrawingFrameSourceLineageSpan(frame, span), {
+    left: 0,
+    right: 10,
+  });
+  assert.equal(timeProjectionCalls, 4,
+    "the projection cache must not survive beyond its atomic frame session");
+});
+
 test("source-lineage span world resolution is reused across viewport-only frames", () => {
   const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }, { time: 300 }];
   const timeScale = {
@@ -1283,6 +1385,100 @@ test("drawing frame invalidation subscription hides chart objects and releases l
   assert.equal(sizeHandler, null);
   adapter.notifyDrawingFrameInvalidation();
   assert.deepEqual(calls, ["viewport", "viewport", "manual", "manual"]);
+});
+
+test("pane adapters share one native range, size, and DPR subscription", () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  let visibleHandler: ((range: { from: number; to: number } | null) => void) | null = null;
+  let sizeHandler: ((width: number, height: number) => void) | null = null;
+  let visibleSubscribeCount = 0;
+  let sizeSubscribeCount = 0;
+  let visibleUnsubscribeCount = 0;
+  let sizeUnsubscribeCount = 0;
+  let intervalCount = 0;
+  const clearedIntervals: number[] = [];
+  const timeScale = {
+    subscribeVisibleLogicalRangeChange: (
+      handler: (range: { from: number; to: number } | null) => void,
+    ) => {
+      visibleSubscribeCount += 1;
+      visibleHandler = handler;
+    },
+    subscribeSizeChange: (handler: (width: number, height: number) => void) => {
+      sizeSubscribeCount += 1;
+      sizeHandler = handler;
+    },
+    unsubscribeVisibleLogicalRangeChange: (
+      handler: (range: { from: number; to: number } | null) => void,
+    ) => {
+      visibleUnsubscribeCount += 1;
+      if (visibleHandler === handler) visibleHandler = null;
+    },
+    unsubscribeSizeChange: (handler: (width: number, height: number) => void) => {
+      sizeUnsubscribeCount += 1;
+      if (sizeHandler === handler) sizeHandler = null;
+    },
+  };
+  const testWindow = {
+    devicePixelRatio: 1,
+    setInterval() {
+      intervalCount += 1;
+      return 41;
+    },
+    clearInterval(timer: number) {
+      clearedIntervals.push(timer);
+    },
+  };
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: testWindow,
+  });
+
+  try {
+    const chart = { timeScale: () => timeScale };
+    const adapterA = createLightweightChartAdapter({
+      chartRef: { current: chart },
+      seriesRef: { current: {} },
+    });
+    const adapterB = createLightweightChartAdapter({
+      chartRef: { current: chart },
+      seriesRef: { current: {} },
+    });
+    const reasonsA: unknown[] = [];
+    const reasonsB: unknown[] = [];
+    const unsubscribeA = adapterA.subscribeDrawingFrameInvalidation(
+      (reason) => reasonsA.push(reason),
+    );
+    const unsubscribeB = adapterB.subscribeDrawingFrameInvalidation(
+      (reason) => reasonsB.push(reason),
+    );
+
+    assert.equal(visibleSubscribeCount, 1);
+    assert.equal(sizeSubscribeCount, 1);
+    assert.equal(intervalCount, 1);
+    mustBeDefined<(range: { from: number; to: number } | null) => void>(
+      visibleHandler,
+    )({ from: 1, to: 2 });
+    assert.deepEqual(reasonsA, ["viewport"]);
+    assert.deepEqual(reasonsB, ["viewport"]);
+
+    unsubscribeA();
+    assert.equal(visibleUnsubscribeCount, 0);
+    assert.equal(sizeUnsubscribeCount, 0);
+    mustBeDefined<(width: number, height: number) => void>(sizeHandler)(900, 600);
+    assert.deepEqual(reasonsA, ["viewport"]);
+    assert.deepEqual(reasonsB, ["viewport", "viewport"]);
+
+    unsubscribeB();
+    assert.equal(visibleUnsubscribeCount, 1);
+    assert.equal(sizeUnsubscribeCount, 1);
+    assert.deepEqual(clearedIntervals, [41]);
+    assert.equal(visibleHandler, null);
+    assert.equal(sizeHandler, null);
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
 });
 
 test("drawing frame invalidation observes pure DPR changes and re-arms the resolution query", () => {

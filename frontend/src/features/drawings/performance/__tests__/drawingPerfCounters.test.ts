@@ -700,6 +700,7 @@ test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle pro
     returnedWorkerIdentity: null,
     acceptedWorkerIdentity: workerIdentity,
     publishedWorkerIdentity: workerIdentity,
+    paintedWorkerIdentity: workerIdentity,
     latestSubmittedWorkerIdentity: workerIdentity,
   });
   const unregisterRuntime = registerDrawingPerfPhase6RuntimeProvider(() => phase6Runtime);

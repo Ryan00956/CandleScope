@@ -22,6 +22,7 @@ import {
   isDrawingExportExactSceneEmpty,
   isDrawingHiddenExportFrameCurrent,
   isDrawingHiddenExportSceneRetired,
+  publishVisibleDrawingScenePlan,
   restorePrePresentationHiddenDrawingSceneRuntime,
   shouldKeepDrawingSceneSuspendedWhileHidden,
   shouldUseDrawingDocumentSceneRegistry,
@@ -29,7 +30,10 @@ import {
   transitionDrawingSceneToHidden,
   visibleSceneSelectedId,
 } from "../useDrawingPersistenceLifecycle.js";
-import type { DrawingExportHiddenFrameReceipt } from "../useDrawingPersistenceLifecycle.js";
+import type {
+  DrawingCommittedPaintTicket,
+  DrawingExportHiddenFrameReceipt,
+} from "../useDrawingPersistenceLifecycle.js";
 import { malformedFixture } from "../../../test/testHelpers.js";
 
 function lineFixture(id: string, color = "#fff"): {
@@ -498,6 +502,37 @@ test("committed paint tickets reject non-exact surface and viewport coordinates"
       null,
     );
   }
+});
+
+test("accepted scene publication synchronously notifies overlays before paint acknowledgement", () => {
+  const stamp: DrawingCommittedPaintTicket = Object.freeze({
+    scopeKey: "publication",
+    documentRevision: 3,
+    surfaceGeneration: 5,
+    viewportRevision: 8,
+  });
+  const plan = Object.freeze({ stamp });
+  const order: string[] = [];
+  const listeners = new Set<(candidate: DrawingCommittedPaintTicket) => void>([
+    (candidate) => {
+      assert.strictEqual(candidate, stamp);
+      order.push("overlay");
+    },
+    () => {
+      order.push("throwing-overlay");
+      throw new Error("listener failure");
+    },
+  ]);
+
+  assert.equal(publishVisibleDrawingScenePlan(plan, () => {
+    order.push("publish");
+    return true;
+  }, listeners), true);
+  assert.deepEqual(order, ["publish", "overlay", "throwing-overlay"]);
+
+  order.length = 0;
+  assert.equal(publishVisibleDrawingScenePlan(plan, () => false, listeners), false);
+  assert.deepEqual(order, [], "rejected plans never advance overlay geometry");
 });
 
 test("dynamic overlay owns selection and excludes only its active migrated entity", () => {

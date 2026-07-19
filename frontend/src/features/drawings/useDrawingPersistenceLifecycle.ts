@@ -88,6 +88,7 @@ import {
 import type { DrawingPerfRuntimeSummary } from "./performance/drawingPerfCounters.js";
 import {
   createDrawingScenePrimitiveBridge,
+  drawingSceneBridgePlanMatchesFrame,
 } from "../../chart-adapter/drawingScenePrimitiveBridge.js";
 import type {
   DrawingScenePrimitiveBridge,
@@ -541,6 +542,22 @@ export function createDrawingCommittedPaintTicket(
   });
 }
 
+/** Notify dynamic overlays at accepted publication time, before the chart paint ACK. */
+export function publishVisibleDrawingScenePlan<
+  TPlan extends Readonly<{ stamp: DrawingCommittedPaintTicket }>,
+>(
+  plan: TPlan,
+  publish: (plan: TPlan) => boolean,
+  listeners: ReadonlySet<(stamp: DrawingCommittedPaintTicket) => void>,
+): boolean {
+  if (!publish(plan)) return false;
+  for (const listener of Array.from(listeners)) {
+    if (!listeners.has(listener)) continue;
+    try { listener(plan.stamp); } catch { /* publication remains authoritative */ }
+  }
+  return true;
+}
+
 export function visibleSceneSelectedId(
   selectedId: string | null,
   dynamicOverlayEnabled: boolean,
@@ -827,6 +844,10 @@ export function useDrawingPersistenceLifecycle({
     listener: (stamp: DrawingCommittedPaintTicket) => void,
     options?: Readonly<{ replayLastPaint?: boolean }>,
   ): () => void;
+  subscribeVisibleScenePublication(
+    listener: (stamp: DrawingCommittedPaintTicket) => void,
+    options?: Readonly<{ replayLastPublication?: boolean }>,
+  ): () => void;
   prepareUserMutationScope(): boolean;
   prepareSurfaceDispose(): boolean;
   hitTestScene(x: number, y: number): DrawingDisplayHitResult | null;
@@ -928,6 +949,9 @@ export function useDrawingPersistenceLifecycle({
     ),
     onCurrentPaintRejected: () => scenePaintRecoveryDelegate.read()(),
   }));
+  const [visibleScenePublicationListeners] = useState(() => (
+    new Set<(stamp: DrawingCommittedPaintTicket) => void>()
+  ));
   // Effect cleanups suspend this state-owned runtime instead of disposing it.
   // React StrictMode replays cleanup/setup against the same state instance in
   // development; disposing here would make the second activation permanently
@@ -1224,7 +1248,11 @@ export function useDrawingPersistenceLifecycle({
           dynamicOverlayEnabled,
           activeOverlayEntityIdRef?.current ?? null,
         ),
-        publishScene: (plan) => sceneBridge.publish(plan),
+        publishScene: (plan) => publishVisibleDrawingScenePlan(
+          plan,
+          (candidate) => sceneBridge.publish(candidate),
+          visibleScenePublicationListeners,
+        ),
         subscribeScenePainted: (listener) => sceneBridge.subscribePainted(
           (ack) => listener(ack.stamp),
         ),
@@ -1289,7 +1317,7 @@ export function useDrawingPersistenceLifecycle({
         return result;
       } } : {}),
     });
-  }, [activeOverlayEntityIdRef, authorityMode, dynamicOverlayEnabled, engineMode.effective, hiddenRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime, selectedIdRef]);
+  }, [activeOverlayEntityIdRef, authorityMode, dynamicOverlayEnabled, engineMode.effective, hiddenRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime, selectedIdRef, visibleScenePublicationListeners]);
 
   const commitPrimitiveDraft = useCallback((
     scopeKey: string,
@@ -1496,6 +1524,24 @@ export function useDrawingPersistenceLifecycle({
     if (replayLastPaint && lastPaintedStamp) listener(lastPaintedStamp);
     return unsubscribe;
   }, [sceneBridge]);
+
+  const subscribeVisibleScenePublication = useCallback((
+    listener: (stamp: DrawingCommittedPaintTicket) => void,
+    { replayLastPublication = true }: Readonly<{
+      replayLastPublication?: boolean;
+    }> = {},
+  ): (() => void) => {
+    if (typeof listener !== "function") return () => {};
+    visibleScenePublicationListeners.add(listener);
+    const publishedStamp = sceneBridge.snapshot().publishedPlan?.stamp ?? null;
+    if (replayLastPublication && publishedStamp) listener(publishedStamp);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      visibleScenePublicationListeners.delete(listener);
+    };
+  }, [sceneBridge, visibleScenePublicationListeners]);
 
   const prepareUserMutationScope = useCallback((): boolean => {
     const adapter = adapterGetterRef.current();
@@ -2240,17 +2286,32 @@ export function useDrawingPersistenceLifecycle({
     }
   }, [hiddenRef, sceneRuntime, selectedIdRef]);
 
+  const getCurrentScenePlan = useCallback((): DrawingScreenDisplayList | null => {
+    if (!sceneCanaryEnabledRef.current || hiddenRef.current) return null;
+    const plan = sceneBridge.snapshot().publishedPlan;
+    if (!plan) return null;
+    const document = activeStoreRef.current.getSnapshot();
+    if (plan.stamp.scopeKey !== document.scopeKey
+      || plan.stamp.documentRevision !== document.documentRevision) return null;
+    try {
+      const adapter = sceneAdapterGetterDelegate.read()();
+      const frame = adapter?.captureDrawingFrame?.() ?? null;
+      if (!frame || adapter?.isDrawingFrameCurrent?.(frame) !== true) return null;
+      return drawingSceneBridgePlanMatchesFrame(plan, frame) ? plan : null;
+    } catch {
+      return null;
+    }
+  }, [hiddenRef, sceneAdapterGetterDelegate, sceneBridge]);
+
   const getSceneScreenBox = useCallback((id: string): ScreenBox | null => {
-    if (!sceneCanaryEnabledRef.current) return null;
-    const plan = sceneRuntime.snapshot().plan;
+    const plan = getCurrentScenePlan();
     return plan ? drawingDisplayEntityScreenBox(plan, id) : null;
-  }, [sceneRuntime]);
+  }, [getCurrentScenePlan]);
 
   const getSceneScreenHandles = useCallback((id: string): readonly ScreenPoint[] | null => {
-    if (!sceneCanaryEnabledRef.current) return null;
-    const plan = sceneRuntime.snapshot().plan;
+    const plan = getCurrentScenePlan();
     return plan ? drawingDisplayEntityScreenHandles(plan, id) : null;
-  }, [sceneRuntime]);
+  }, [getCurrentScenePlan]);
 
   const getSavedDrawing = useCallback((id: string): SavedDrawing | null => {
     if (authorityMode !== "document" || !id) return null;
@@ -2790,5 +2851,6 @@ export function useDrawingPersistenceLifecycle({
     waitForExactExportScene,
     revalidateExportScene,
     subscribeVisibleScenePaint,
+    subscribeVisibleScenePublication,
   };
 }

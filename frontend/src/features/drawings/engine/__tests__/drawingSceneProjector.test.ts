@@ -39,6 +39,7 @@ interface AdapterOptions {
   readonly failBatch?: boolean;
   readonly gapPrice?: number;
   readonly gapTime?: number;
+  readonly projectX?: (value: number) => number;
 }
 
 interface TestAdapter extends DrawingSceneProjectionAdapter {
@@ -145,7 +146,9 @@ function createAdapter(options: AdapterOptions = {}): TestAdapter {
       points.forEach((point, index) => {
         const x = numeric(point.logical) ?? numeric(point.time);
         const price = numeric(point.price);
-        if (x !== null && x !== options.gapTime) result[index * 2] = x;
+        if (x !== null && x !== options.gapTime) {
+          result[index * 2] = options.projectX ? options.projectX(x) : x;
+        }
         if (price !== null && price !== options.gapPrice) result[index * 2 + 1] = price;
       });
       return result;
@@ -3080,4 +3083,60 @@ test("position panel and badges measure current-price and PnL text from the atom
   ]);
   assert.deepEqual([...list.handles], [60, 60, 60, 80, 60, 40, 40, 60, 80, 60]);
   assert.deepEqual(list.entities[0]?.handleNames, ["entry", "tp", "sl", "left", "right"]);
+});
+
+test("left-anchored position panel keeps a fixed gap while chart zoom changes position width", () => {
+  const position = createDrawingEntity({
+    id: "left-anchored-position-panel",
+    kind: "position",
+    geometry: {
+      kind: "position",
+      direction: "long",
+      entryPrice: 50,
+      tpPrice: null,
+      slPrice: null,
+      timeRange: { start: { time: 80 }, end: { time: 120 } },
+    },
+    style: {
+      kind: "position",
+      positionSize: 1_000,
+      infoPanelOffset: { anchor: "left", x: 0, y: 0 },
+    },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "left-anchored-position-panel",
+    entities: [position],
+  });
+  const normal = project(
+    document,
+    createFrame({ width: 300, viewportKey: "position-panel-normal" }),
+    createAdapter({ projectX: (value) => value }),
+  );
+  const zoomed = project(
+    document,
+    createFrame({ width: 300, viewportKey: "position-panel-zoomed" }),
+    createAdapter({ projectX: (value) => 100 + (value - 100) * 2 }),
+  );
+  assert.ok(normal);
+  assert.ok(zoomed);
+
+  const panelGap = (list: DrawingScreenDisplayList): number => {
+    const entity = list.entities[0];
+    assert.ok(entity?.renderSpec?.op === "position");
+    const points = entityPoints(list, position.id);
+    const entryOffset = entity.renderSpec.entryLinePointOffset * 2;
+    const panelOffset = entity.renderSpec.panelBoxPointOffset * 2;
+    const entryLeft = Math.min(
+      Number(points[entryOffset]),
+      Number(points[entryOffset + 2]),
+    );
+    const panelRight = Math.max(
+      Number(points[panelOffset]),
+      Number(points[panelOffset + 2]),
+    );
+    return entryLeft - panelRight;
+  };
+
+  assert.equal(panelGap(normal), 8);
+  assert.equal(panelGap(zoomed), 8);
 });

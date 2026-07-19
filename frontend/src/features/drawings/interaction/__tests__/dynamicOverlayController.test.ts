@@ -152,6 +152,33 @@ test("dynamic overlay is latest-wins within one animation frame", () => {
   assert.equal(controller.snapshot().disposed, true);
 });
 
+test("dynamic overlay flush paints immediately and retires its queued animation frame", () => {
+  const { boxes, canvas } = fixture();
+  const frames: Array<() => void> = [];
+  const cancelled: unknown[] = [];
+  const controller = createDynamicOverlayController({
+    canvas,
+    getPlotRect: () => ({ x: 0, y: 0, width: 200, height: 100, dpr: 1 }),
+    requestFrame(callback) { frames.push(callback); return callback; },
+    cancelFrame(handle) { cancelled.push(handle); },
+  });
+  controller.render({ decorations: [{
+    type: "box",
+    box: { x: 10, y: 20, width: 30, height: 40 },
+  }] });
+
+  assert.equal(controller.snapshot().pending, true);
+  controller.flush();
+
+  assert.equal(controller.snapshot().pending, false);
+  assert.equal(controller.snapshot().paintCount, 1);
+  assert.deepEqual(boxes, [[10, 20, 30, 40]]);
+  assert.deepEqual(cancelled, [frames[0]]);
+
+  frames[0]?.();
+  assert.equal(controller.snapshot().paintCount, 1, "retired callback cannot repaint");
+});
+
 test("selected handle feedback paints endpoints without a dashed bounding box", () => {
   const { arcs, boxes, canvas, dashes } = fixture();
   const frames: Array<() => void> = [];

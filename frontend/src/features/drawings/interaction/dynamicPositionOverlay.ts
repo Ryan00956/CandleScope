@@ -10,10 +10,12 @@ import type { DrawingPositionPanelLine } from "../drawingPositionPresentation.js
 import type {
   DrawingDataPoint,
   DrawingDataToScreen,
+  PositionInfoPanelOffset,
   SavedPositionDrawing,
   ScreenBox,
   ScreenPoint,
 } from "../drawingTypes.js";
+import { positionInfoPanelLeft } from "../positionInfoPanelLayout.js";
 import type { DrawingOverlayPlotRect } from "./overlayCanvasSurface.js";
 
 export interface DynamicPositionLevelOverlay {
@@ -32,7 +34,7 @@ export interface DynamicPositionOverlayDecoration {
   readonly direction: "long" | "short";
   readonly entryColor: string;
   readonly entryLine: readonly [ScreenPoint, ScreenPoint];
-  readonly infoPanelOffset: Readonly<{ x: number; y: number }>;
+  readonly infoPanelOffset: Readonly<PositionInfoPanelOffset>;
   readonly lineWidth: number;
   readonly panelLines: readonly DrawingPositionPanelLine[];
   readonly selected: boolean;
@@ -125,6 +127,7 @@ export function buildDynamicPositionOverlayDecoration(
     });
   };
   const infoPanelOffset = Object.freeze({
+    ...(saved.infoPanelOffset?.anchor === "left" ? { anchor: "left" as const } : {}),
     x: typeof saved.infoPanelOffset?.x === "number"
       && Number.isFinite(saved.infoPanelOffset.x)
       ? saved.infoPanelOffset.x
@@ -284,7 +287,13 @@ function drawInfoPanel(
   const boxHeight = item.panelLines.length * lineHeight + paddingY * 2;
   const right = Math.max(entry[0].x, entry[1].x);
   const entryY = (entry[0].y + entry[1].y) / 2;
-  const boxX = right - boxWidth - 8 + item.infoPanelOffset.x;
+  const left = Math.min(entry[0].x, entry[1].x);
+  const boxX = positionInfoPanelLeft(
+    left,
+    right,
+    boxWidth,
+    item.infoPanelOffset,
+  );
   const boxY = Math.max(4, entryY - boxHeight - 8 + item.infoPanelOffset.y);
 
   context.fillStyle = "rgba(30, 33, 40, 0.92)";

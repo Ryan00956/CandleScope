@@ -3,7 +3,10 @@ import test from "node:test";
 
 import { createDrawingFrameSnapshotFactory } from "../drawingFrameSnapshot.js";
 import type { DrawingFrameSnapshot } from "../drawingFrameSnapshot.js";
-import { createDrawingScenePrimitiveBridge } from "../drawingScenePrimitiveBridge.js";
+import {
+  createDrawingScenePrimitiveBridge,
+  drawingSceneBridgePlanMatchesFrame,
+} from "../drawingScenePrimitiveBridge.js";
 
 type Plan = Readonly<{
   stamp: Readonly<{
@@ -56,6 +59,18 @@ function planForFrame(frame: DrawingFrameSnapshot, documentRevision: number): Pl
     }),
   });
 }
+
+test("scene geometry plan matching rejects an advanced viewport frame", () => {
+  const factory = createDrawingFrameSnapshotFactory();
+  const frame = captureFrame(factory, {});
+  const plan = planForFrame(frame, 1);
+
+  assert.equal(drawingSceneBridgePlanMatchesFrame(plan, frame), true);
+  assert.equal(drawingSceneBridgePlanMatchesFrame(plan, Object.freeze({
+    ...frame,
+    viewportRevision: frame.viewportRevision + 1,
+  })), false);
+});
 
 test("scene bridge is idempotent and rejects stale surface generations", () => {
   const factory = createDrawingFrameSnapshotFactory();

@@ -139,7 +139,7 @@ function allDrawingKinds(): SavedDrawing[] {
         end: 200.75,
       },
       positionSize: 1_000,
-      infoPanelOffset: { x: 3.5, y: -2.25 },
+      infoPanelOffset: { anchor: "left", x: 3.5, y: -2.25 },
     },
     {
       type: "shape",

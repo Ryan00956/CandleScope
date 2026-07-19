@@ -814,6 +814,7 @@ export function dynamicSelectionHandlesForSavedDrawing(
   dataToScreen: DrawingDataToScreen,
   screenBox: ScreenBox | null = null,
   sceneHandles: readonly ScreenPoint[] | null = null,
+  positionBarSpacing: number | null = null,
 ): readonly DynamicSelectionHandleSpec[] {
   if ((saved.type === "text" || saved.type === "shape") && screenBox) {
     return dynamicBoxSelectionHandles(screenBox);
@@ -846,8 +847,24 @@ export function dynamicSelectionHandlesForSavedDrawing(
     const start = entryStart ? dataToScreen(entryStart) : null;
     const end = entryEnd ? dataToScreen(entryEnd) : null;
     if (!start || !end) return [];
-    const left = Math.min(start.x, end.x);
-    const right = Math.max(start.x, end.x);
+    const requestedWidth = Math.max(
+      24,
+      Math.min(
+        40,
+        typeof positionBarSpacing === "number"
+          && Number.isFinite(positionBarSpacing)
+          && positionBarSpacing > 0
+          ? positionBarSpacing
+          : 24,
+      ),
+    );
+    let left = Math.min(start.x, end.x);
+    let right = Math.max(start.x, end.x);
+    if (right - left < requestedWidth) {
+      const center = (left + right) / 2;
+      left = center - requestedWidth / 2;
+      right = center + requestedWidth / 2;
+    }
     const middleX = (left + right) / 2;
     const levels: Array<Readonly<{ zone: "entry" | "tp" | "sl"; price: number }>> = [
       Object.freeze({ zone: "entry", price: saved.entryPrice ?? Number.NaN }),
@@ -984,6 +1001,7 @@ export interface SelectedOverlayHandleHitTestOptions {
   readonly dataToScreen: DrawingDataToScreen;
   readonly getSceneScreenBox: (id: string) => ScreenBox | null;
   readonly getSceneScreenHandles: (id: string) => readonly ScreenPoint[] | null;
+  readonly getPositionBarSpacing?: () => number | null;
 }
 
 export function hitTestSelectedOverlayDrawingHandle({
@@ -994,6 +1012,7 @@ export function hitTestSelectedOverlayDrawingHandle({
   dataToScreen,
   getSceneScreenBox,
   getSceneScreenHandles,
+  getPositionBarSpacing,
 }: SelectedOverlayHandleHitTestOptions): DrawingEntityHit | null {
   const saved = getSavedDrawing(selectedId);
   if (!saved) return null;
@@ -1004,6 +1023,7 @@ export function hitTestSelectedOverlayDrawingHandle({
     dataToScreen,
     box,
     getSceneScreenHandles(selectedId),
+    saved.type === "position" ? getPositionBarSpacing?.() ?? null : null,
   );
   const matched = handles.find((handle) => (
     Math.hypot(handle.point.x - x, handle.point.y - y) <= handle.radius
@@ -1389,17 +1409,20 @@ export function useDrawing({
   const onToolChangeRef = useRef(onToolChange);
   const getChartAdapter = useCallback(() => chartAdapter || null, [chartAdapter]);
   const getDynamicFramePresentation = useCallback((): Readonly<{
+    barSpacing: number | null;
     currentPrice: number | null;
     themePalette: DrawingFrameThemePalette;
   }> => {
     try {
       const frame = getChartAdapter()?.captureDrawingFrame?.() ?? null;
       return Object.freeze({
+        barSpacing: frame?.barSpacing ?? null,
         currentPrice: frame ? drawingPositionCurrentPrice(frame) : null,
         themePalette: frame?.themePalette ?? DEFAULT_DRAWING_POSITION_THEME_PALETTE,
       });
     } catch {
       return Object.freeze({
+        barSpacing: null,
         currentPrice: null,
         themePalette: DEFAULT_DRAWING_POSITION_THEME_PALETTE,
       });
@@ -1754,6 +1777,7 @@ export function useDrawing({
     waitForExactExportScene,
     revalidateExportScene,
     subscribeVisibleScenePaint,
+    subscribeVisibleScenePublication,
   } = useDrawingPersistenceLifecycle({
     beforeScopeTransitionRef,
     currentFreehandRef,
@@ -1850,8 +1874,9 @@ export function useDrawing({
       dataToScreen,
       getSceneScreenBox,
       getSceneScreenHandles,
+      getPositionBarSpacing: () => getDynamicFramePresentation().barSpacing,
     });
-  }, [dataToScreen, getSavedDrawing, getSceneScreenBox, getSceneScreenHandles, interactionSurfaceMode, selectedIdRef]);
+  }, [dataToScreen, getDynamicFramePresentation, getSavedDrawing, getSceneScreenBox, getSceneScreenHandles, interactionSurfaceMode, selectedIdRef]);
 
   // ── Hit-test all primitives ──
 
@@ -2111,6 +2136,7 @@ export function useDrawing({
       }
       refresh();
       renderDynamicFeedbackRef.current();
+      if (reason === "viewport") dynamicController?.flush();
     };
     const unsubscribeFrameInvalidation = adapter?.subscribeDrawingFrameInvalidation?.(
       handleFrameInvalidation,
@@ -2226,11 +2252,8 @@ export function useDrawing({
     }
     const decorations: DynamicOverlayDecoration[] = [];
     const selectedId = selectedIdRef.current;
-    const selectionBox = getDynamicScreenBox(selectedId);
-    if (selectionBox) {
-      const sceneHandles = selectedId
-        ? getSceneScreenHandles(selectedId)
-        : null;
+    if (selectedId) {
+      const selectionBox = getDynamicScreenBox(selectedId);
       const selectedPrimitive = selectedId ? getPrimitiveById(selectedId) : null;
       const saved = selectedId ? getSavedDrawing(selectedId) : null;
       const selectionSaved = saved ?? (selectedPrimitive
@@ -2238,11 +2261,17 @@ export function useDrawing({
             selectedPrimitive as unknown as PersistableDrawingPrimitive,
           )
         : null);
-      const fallbackHandles = selectionSaved
-        ? dynamicSelectionHandlesForSavedDrawing(selectionSaved, dataToScreen, selectionBox)
-          .map((handle) => handle.point)
+      const handles = selectionSaved
+        ? dynamicSelectionHandlesForSavedDrawing(
+            selectionSaved,
+            dataToScreen,
+            selectionBox,
+            getSceneScreenHandles(selectedId),
+            selectionSaved.type === "position"
+              ? getDynamicFramePresentation().barSpacing
+              : null,
+          ).map((handle) => handle.point)
         : [];
-      const handles = sceneHandles?.length ? sceneHandles : fallbackHandles;
       const handleDecoration = dynamicSelectedHandleDecoration(handles);
       if (handleDecoration) decorations.push(handleDecoration);
     }
@@ -2336,8 +2365,11 @@ export function useDrawing({
 
   useEffect(() => {
     if (interactionSurfaceMode !== "overlay") return;
-    return subscribeVisibleScenePaint(() => renderDynamicFeedback());
-  }, [interactionSurfaceMode, renderDynamicFeedback, subscribeVisibleScenePaint]);
+    return subscribeVisibleScenePublication(() => {
+      renderDynamicFeedback();
+      dynamicOverlayControllerRef.current?.flush();
+    });
+  }, [interactionSurfaceMode, renderDynamicFeedback, subscribeVisibleScenePublication]);
 
   const makePointerEventSnapshot = useCallback((e: DrawingDomPointerEvent): DrawingPointerEvent => ({
     altKey: !!e.altKey,

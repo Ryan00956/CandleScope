@@ -31,6 +31,10 @@ import type {
   PrimitivePaneView,
   ScreenBox,
 } from "../drawingTypes.js";
+import {
+  positionInfoPanelAnchor,
+  positionInfoPanelLeft,
+} from "../positionInfoPanelLayout.js";
 
 interface PositionScreenRange {
   collapsed: boolean;
@@ -121,6 +125,7 @@ function normalizeInfoPanelOffset(offset: unknown): PositionInfoPanelOffset {
   const x = isRecord(offset) ? Number(offset.x) : Number.NaN;
   const y = isRecord(offset) ? Number(offset.y) : Number.NaN;
   return {
+    ...(isRecord(offset) && offset.anchor === "left" ? { anchor: "left" as const } : {}),
     x: Number.isFinite(x) ? x : 0,
     y: Number.isFinite(y) ? y : 0,
   };
@@ -345,9 +350,9 @@ class PositionRenderer implements PrimitivePaneRenderer {
       ctx.lineTo(rX, eY);
       ctx.stroke();
 
-      // ── Draw info panel on the right side ──
+      // ── Draw the info panel from its persisted horizontal anchor ──
       if (!isPreview && entryPrice != null) {
-        const panelBox = this._drawInfoPanel(ctx, ratio, vRatio, rX, eY, tY, sY, data);
+        const panelBox = this._drawInfoPanel(ctx, ratio, vRatio, lX, rX, eY, tY, sY, data);
         setInfoPanelBox?.(panelBox || null);
       } else {
         setInfoPanelBox?.(null);
@@ -555,6 +560,7 @@ class PositionRenderer implements PrimitivePaneRenderer {
     ctx: CanvasRenderingContext2D,
     ratio: number,
     vRatio: number,
+    lX: number,
     rX: number,
     eY: number,
     _tY: number | null,
@@ -647,9 +653,9 @@ class PositionRenderer implements PrimitivePaneRenderer {
     const boxW = maxW + padX * 2;
     const boxH = lineH * lines.length + padY * 2;
 
-    // Position panel above entry line on right side, plus user-controlled offset.
+    // Position panel above the entry line, anchored to the side chosen by drag.
     const offset = normalizeInfoPanelOffset(infoPanelOffset);
-    const boxX = rX - boxW - 8 * ratio + offset.x * ratio;
+    const boxX = positionInfoPanelLeft(lX, rX, boxW, offset, ratio);
     const targetY = eY - boxH - 8 * vRatio;
     const boxY = Math.max(4 * vRatio, targetY + offset.y * vRatio);
 
@@ -1019,7 +1025,9 @@ export class PositionDrawingPrimitive {
 
   setInfoPanelOffset(offset: unknown): void {
     const next = normalizeInfoPanelOffset(offset);
-    if (next.x === this._infoPanelOffset.x && next.y === this._infoPanelOffset.y) return;
+    if (next.x === this._infoPanelOffset.x
+      && next.y === this._infoPanelOffset.y
+      && positionInfoPanelAnchor(next) === positionInfoPanelAnchor(this._infoPanelOffset)) return;
     this._infoPanelOffset = next;
     this._requestUpdate?.();
   }

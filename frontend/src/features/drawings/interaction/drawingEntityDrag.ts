@@ -5,6 +5,7 @@ import {
   parsePositionTimeRange,
 } from "../drawingContracts.js";
 import { resizedShapeBoxFromHandle } from "../drawingModel.js";
+import { draggedPositionInfoPanelOffset } from "../positionInfoPanelLayout.js";
 import type { DrawingDragDescriptor } from "../drawingDragResizeController.js";
 import type {
   DrawingAnchor,
@@ -290,11 +291,20 @@ function applyPositionDrag(options: DrawingEntityDragOptions): SavedDrawing | nu
 
   if (descriptor.type === "position-panel") {
     const original = descriptor.origInfoPanelOffset;
-    if (!finiteNumber(original.x) || !finiteNumber(original.y)) return null;
-    const infoPanelOffset = Object.freeze({
-      x: original.x + pos.x - descriptor.startMouse.x,
-      y: original.y + pos.y - descriptor.startMouse.y,
-    });
+    if (!drawing.timeRange || !finiteNumber(original.x) || !finiteNumber(original.y)) return null;
+    const range = positionVisualAnchorKeys(drawing.timeRange, drawing.entryPrice, dataToScreen);
+    if (!range) return null;
+    const rawLeft = Math.min(range.startScreen.x, range.endScreen.x);
+    const rawRight = Math.max(range.startScreen.x, range.endScreen.x);
+    const center = (rawLeft + rawRight) / 2;
+    const width = Math.max(24, rawRight - rawLeft);
+    const infoPanelOffset = Object.freeze(draggedPositionInfoPanelOffset({
+      deltaX: pos.x - descriptor.startMouse.x,
+      deltaY: pos.y - descriptor.startMouse.y,
+      original,
+      positionLeft: center - width / 2,
+      positionRight: center + width / 2,
+    }));
     return finiteNumber(infoPanelOffset.x) && finiteNumber(infoPanelOffset.y)
       ? frozenUpdate(drawing, { infoPanelOffset })
       : null;

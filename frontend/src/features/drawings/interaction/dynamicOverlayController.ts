@@ -456,7 +456,7 @@ export function createDynamicOverlayController({
     return true;
   };
 
-  const flush = () => {
+  const paintPendingFrame = () => {
     frameHandle = null;
     const frame = pendingFrame;
     pendingFrame = null;
@@ -622,12 +622,20 @@ export function createDynamicOverlayController({
     });
   };
 
+  const flush = () => {
+    if (frameHandle !== null) {
+      cancelFrame(frameHandle);
+      frameHandle = null;
+    }
+    paintPendingFrame();
+  };
+
   return {
     render(frame) {
       if (disposed) return;
       pendingFrame = frame;
       if (frameHandle !== null) return;
-      frameHandle = requestFrame(flush);
+      frameHandle = requestFrame(paintPendingFrame);
     },
     refreshLayout,
     clear() {

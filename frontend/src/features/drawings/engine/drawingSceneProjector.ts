@@ -71,6 +71,7 @@ import {
   drawingPositionLevelPresentation,
   drawingPositionPanelLines,
 } from "../drawingPositionPresentation.js";
+import { positionInfoPanelLeft } from "../positionInfoPanelLayout.js";
 
 export interface DrawingSceneTextMeasureRequest {
   readonly text: string;
@@ -1602,7 +1603,12 @@ function projectPosition(
   }, 0);
   const panelWidth = panelTextWidth + 16;
   const panelHeight = panelLines.length * 17 + 12;
-  const panelLeft = right - panelWidth - 8 + entity.style.infoPanelOffset.x;
+  const panelLeft = positionInfoPanelLeft(
+    left,
+    right,
+    panelWidth,
+    entity.style.infoPanelOffset,
+  );
   const panelTop = Math.max(4, entryY - panelHeight - 8 + entity.style.infoPanelOffset.y);
   const panelOffset = pushPair(values, {
     x: panelLeft,

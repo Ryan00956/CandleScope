@@ -116,5 +116,11 @@ export function parsePositionInfoPanelOffset(value: unknown): PositionInfoPanelO
   if (!isRecord(value)) return null;
   const x = finiteNumber(value.x);
   const y = finiteNumber(value.y);
-  return x === null || y === null ? null : { x, y };
+  if (x === null || y === null) return null;
+  if (hasOwn(value, "anchor") && value.anchor !== "left" && value.anchor !== "right") {
+    return null;
+  }
+  return value.anchor === "left" || value.anchor === "right"
+    ? { anchor: value.anchor, x, y }
+    : { x, y };
 }

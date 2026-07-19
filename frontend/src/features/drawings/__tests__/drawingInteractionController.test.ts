@@ -1125,7 +1125,7 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
   assert.deepEqual(positionHandles.map((handle) => handle.hit.zone), [
     "entry", "tp", "sl", "left", "right",
   ]);
-  assert.deepEqual(positionHandles.slice(-2).map((handle) => handle.point.x), [10, 30]);
+  assert.deepEqual(positionHandles.slice(-2).map((handle) => handle.point.x), [8, 32]);
 
   const foldedSceneHandles = [
     { x: 50, y: 50 },
@@ -1156,6 +1156,96 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
     dataPoints: [{ time: 10, price: 10 }, { time: 20, price: 20 }],
   };
   assert.deepEqual(dynamicSelectionHandlesForSavedDrawing(freehand, project), []);
+});
+
+test("stale position scene handles fall back to current viewport projection", () => {
+  const saved: SavedDrawing = {
+    id: "position-current-viewport",
+    type: "position",
+    entryPrice: 100,
+    tpPrice: 120,
+    slPrice: 90,
+    timeRange: { start: 10, end: 30 },
+  };
+  const currentProjection: DrawingDataToScreen = (dataPoint) => ({
+    x: typeof dataPoint.time === "number" ? dataPoint.time + 100 : 0,
+    y: 500 - dataPoint.price,
+  });
+
+  const handles = dynamicSelectionHandlesForSavedDrawing(
+    saved,
+    currentProjection,
+    null,
+    null,
+    32,
+  );
+
+  assert.deepEqual(
+    handles.map((handle) => [handle.hit.zone, handle.point.x, handle.point.y]),
+    [
+      ["entry", 120, 400],
+      ["tp", 120, 380],
+      ["sl", 120, 410],
+      ["left", 104, 395],
+      ["right", 136, 395],
+    ],
+  );
+});
+
+test("folded position fallback uses frame bar spacing and keeps optional level order", () => {
+  const folded: SavedDrawing = {
+    type: "position",
+    entryPrice: 100,
+    timeRange: { start: 10, end: 10 },
+  };
+  const handles = dynamicSelectionHandlesForSavedDrawing(
+    folded,
+    (dataPoint) => ({ x: 50, y: 200 - dataPoint.price }),
+    null,
+    null,
+    32,
+  );
+
+  assert.deepEqual(handles.map((handle) => handle.hit.zone), ["entry", "left", "right"]);
+  assert.deepEqual(handles.map((handle) => handle.point), [
+    { x: 50, y: 100 },
+    { x: 34, y: 100 },
+    { x: 66, y: 100 },
+  ]);
+});
+
+test("position handle hit testing shares the current viewport fallback geometry", () => {
+  const selectedId = "position-hit-current-viewport";
+  const saved: SavedDrawing = {
+    id: selectedId,
+    type: "position",
+    entryPrice: 100,
+    tpPrice: 120,
+    slPrice: 90,
+    timeRange: { start: 10, end: 30 },
+  };
+  const options = {
+    selectedId,
+    getSavedDrawing: () => saved,
+    dataToScreen: ((dataPoint) => ({
+      x: typeof dataPoint.time === "number" ? dataPoint.time + 100 : 0,
+      y: 500 - dataPoint.price,
+    })) satisfies DrawingDataToScreen,
+    getSceneScreenBox: () => null,
+    getSceneScreenHandles: () => null,
+    getPositionBarSpacing: () => 32,
+  };
+
+  assert.equal(hitTestSelectedOverlayDrawingHandle({
+    ...options,
+    x: 104,
+    y: 395,
+  })?.zone, "left");
+  assert.equal(hitTestSelectedOverlayDrawingHandle({
+    ...options,
+    x: 20,
+    y: 50,
+  }), null, "the old viewport handle coordinate is no longer interactive");
 });
 
 test("passive feedback does not paint a blue selection box after drawing completion", () => {

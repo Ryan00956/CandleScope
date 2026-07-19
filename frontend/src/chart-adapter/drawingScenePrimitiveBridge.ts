@@ -64,6 +64,22 @@ export interface DrawingScenePrimitiveBridge<TPlan extends DrawingSceneBridgePla
   snapshot(): DrawingScenePrimitiveBridgeSnapshot<TPlan>;
 }
 
+/** Accept scene geometry only when every viewport-bound frame component is current. */
+export function drawingSceneBridgePlanMatchesFrame(
+  plan: DrawingSceneBridgePlan,
+  frame: DrawingFrameSnapshot,
+): boolean {
+  return plan.stamp.surfaceGeneration === frame.surfaceGeneration
+    && plan.stamp.dataRevision === frame.dataRevision
+    && plan.stamp.projectionRevision === frame.projectionRevision
+    && plan.stamp.lineageIndexRevision === frame.lineageIndexRevision
+    && plan.stamp.viewportRevision === frame.viewportRevision
+    && plan.stamp.themeRevision === frame.themeRevision
+    && plan.stamp.widthCssPx === frame.widthCssPx
+    && plan.stamp.heightCssPx === frame.heightCssPx
+    && plan.stamp.dpr === frame.dpr;
+}
+
 /**
  * Generation-safe adapter boundary for the one visible drawing primitive.
  * Failed attach/detach operations retain their credentials so lifecycle code
@@ -88,19 +104,6 @@ export function createDrawingScenePrimitiveBridge<
   let unsubscribePrimitivePaint: (() => void) | null = null;
   const paintListeners = new Set<DrawingSceneBridgePaintListener<TPlan>>();
 
-  const planMatchesFrame = (
-    plan: TPlan,
-    frame: DrawingFrameSnapshot,
-  ): boolean => plan.stamp.surfaceGeneration === frame.surfaceGeneration
-    && plan.stamp.dataRevision === frame.dataRevision
-    && plan.stamp.projectionRevision === frame.projectionRevision
-    && plan.stamp.lineageIndexRevision === frame.lineageIndexRevision
-    && plan.stamp.viewportRevision === frame.viewportRevision
-    && plan.stamp.themeRevision === frame.themeRevision
-    && plan.stamp.widthCssPx === frame.widthCssPx
-    && plan.stamp.heightCssPx === frame.heightCssPx
-    && plan.stamp.dpr === frame.dpr;
-
   const disconnectPrimitivePaint = (): void => {
     unsubscribePrimitivePaint?.();
     unsubscribePrimitivePaint = null;
@@ -117,7 +120,7 @@ export function createDrawingScenePrimitiveBridge<
       const frame = captureDrawingFrame();
       if (!frame || !isDrawingFrameCurrent(frame)) return;
       if (frame.surfaceGeneration !== surfaceGeneration) return;
-      if (!planMatchesFrame(ack.plan, frame)) {
+      if (!drawingSceneBridgePlanMatchesFrame(ack.plan, frame)) {
         // The renderer consumed the exact plan currently owned by this bridge,
         // so this is not a superseded draw. Ask the scene runtime to rebuild
         // from the newer atomic frame instead of waiting forever for an ACK
@@ -198,7 +201,7 @@ export function createDrawingScenePrimitiveBridge<
       if (!frame
         || !isDrawingFrameCurrent(frame)
         || frame.surfaceGeneration !== surfaceGeneration
-        || !planMatchesFrame(plan, frame)) return false;
+        || !drawingSceneBridgePlanMatchesFrame(plan, frame)) return false;
       const published = primitive.publishPlan(plan);
       if (!published) return false;
       // LWC paints only after publication returns. A synchronous callback from

@@ -26,6 +26,7 @@ import { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
 import { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
 import { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitive.js";
 import { parseDrawingAnchor } from "./drawingContracts.js";
+import { draggedPositionInfoPanelOffset } from "./positionInfoPanelLayout.js";
 import type {
   DrawingAnchor,
   DrawingDataPoint,
@@ -373,10 +374,19 @@ export function applyTextAndPositionDrag({
 
     if (type === "position-panel") {
       const { startMouse, origInfoPanelOffset } = dragging;
-      prim.setInfoPanelOffset({
-        x: origInfoPanelOffset.x + (pos.x - startMouse.x),
-        y: origInfoPanelOffset.y + (pos.y - startMouse.y),
-      });
+      const visualAnchors = positionVisualAnchorKeys(prim.timeRange, prim.entryPrice, dataToScreen);
+      if (!visualAnchors) return true;
+      const rawLeft = Math.min(visualAnchors.startScreen.x, visualAnchors.endScreen.x);
+      const rawRight = Math.max(visualAnchors.startScreen.x, visualAnchors.endScreen.x);
+      const center = (rawLeft + rawRight) / 2;
+      const width = Math.max(24, rawRight - rawLeft);
+      prim.setInfoPanelOffset(draggedPositionInfoPanelOffset({
+        deltaX: pos.x - startMouse.x,
+        deltaY: pos.y - startMouse.y,
+        original: origInfoPanelOffset,
+        positionLeft: center - width / 2,
+        positionRight: center + width / 2,
+      }));
       setCursor(chartContainerRef?.current, "grabbing");
       e.preventDefault();
       e.stopPropagation();

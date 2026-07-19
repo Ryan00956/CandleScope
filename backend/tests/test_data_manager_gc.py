@@ -73,7 +73,11 @@ def test_memory_gc_trims_ephemeral_series_instead_of_deleting() -> None:
     assert dm.cache.series_count(key) == 2
 
 
-def test_cache_behavior_store_updates_heat(tmp_path) -> None:
+def test_cache_behavior_store_updates_heat(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.data_engine.data_manager.cache_behavior.time.time",
+        lambda: 2.0,
+    )
     store = CacheBehaviorStore(tmp_path / "behavior.sqlite")
     key = SeriesKey("BTCUSDT", "1m")
 
@@ -239,6 +243,64 @@ def test_event_subscription_handle_is_immutable_and_copies_filters() -> None:
         handle.event_types.add(DataEventType.BAR_UPDATED)
 
     dm.event_bus.unsubscribe(handle)
+
+
+def test_wildcard_observer_does_not_protect_every_gc_series() -> None:
+    dm = DataManager()
+    wildcard_key = SeriesKey("ETHUSDT", "1m")
+    exact_key = SeriesKey("BTCUSDT", "1m")
+    dm.cache.bulk_load(wildcard_key, _bars(5))
+    dm.cache.bulk_load(exact_key, _bars(5))
+
+    async def _callback(_event) -> None:
+        return None
+
+    wildcard = dm.event_bus.subscribe(
+        _callback,
+        event_types={DataEventType.BAR_CLOSED},
+    )
+    exact = dm.event_bus.subscribe(
+        _callback,
+        key=exact_key,
+        event_types={DataEventType.BAR_CLOSED},
+    )
+
+    assert dm.event_bus.get_subscriber_count(exact_key) == 2
+    assert dm.event_bus.get_direct_subscriber_count(exact_key) == 1
+    assert dm.event_bus.get_subscriber_count(wildcard_key) == 1
+    assert dm.event_bus.get_direct_subscriber_count(wildcard_key) == 0
+
+    report = dm.plan_memory_gc({"cold_idle_seconds": 0})
+    victim_keys = {item["key"] for item in report["victims"]}
+
+    assert report["protected_count"] == 1
+    assert str(wildcard_key) in victim_keys
+    assert str(exact_key) not in victim_keys
+
+    dm.event_bus.unsubscribe(exact)
+    assert dm.event_bus.get_subscriber_count(exact_key) == 1
+    assert dm.event_bus.get_direct_subscriber_count(exact_key) == 0
+    dm.event_bus.unsubscribe(wildcard)
+
+
+@pytest.mark.anyio
+async def test_wildcard_observer_does_not_block_ephemeral_trim() -> None:
+    dm = DataManager()
+    key = SeriesKey("BTCUSDT", "1s")
+    dm.cache.bulk_load(key, _bars(5))
+    dm.cache.set_ephemeral_limit(2)
+
+    async def _callback(_event) -> None:
+        return None
+
+    dm.event_bus.subscribe(
+        _callback,
+        event_types={DataEventType.BAR_CLOSED},
+    )
+    await dm.retention.run_ephemeral_trim()
+
+    assert dm.cache.series_count(key) == 2
+    await dm.event_bus.close()
 
 
 def test_auto_gc_invalid_min_score_env_stays_conservative(monkeypatch) -> None:

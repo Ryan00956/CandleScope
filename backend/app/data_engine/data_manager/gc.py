@@ -382,8 +382,9 @@ def _smart_scores(
 ) -> dict[str, Any]:
     key = _series_key_from_victim(entry)
     heat = behavior_heat.get(str(key), {})
-    heat_score = float(heat.get("heat_score", 0) or 0)
-    reuse_probability = min(100.0, heat_score * 8 + int(heat.get("switch_count_24h", 0) or 0) * 12)
+    heat_score = max(0.0, float(heat.get("heat_score", 0) or 0))
+    switch_count = max(0, int(heat.get("switch_count_24h", 0) or 0))
+    reuse_probability = max(0.0, min(100.0, heat_score * 8 + switch_count * 12))
     matched_intents = _matched_storage_intents(data_manager, key)
     intent_rank = max((_intent_rank(item) for item in matched_intents), default=0)
     restore_cost, restore_reason = _restore_cost(entry, matched_intents)
@@ -494,6 +495,13 @@ def _subscribed_keys(data_manager: Any) -> set[SeriesKey]:
 
 def _subscriber_count(data_manager: Any, key: SeriesKey) -> int:
     event_bus = getattr(data_manager, "event_bus", None)
+    get_direct_subscriber_count = getattr(
+        event_bus,
+        "get_direct_subscriber_count",
+        None,
+    )
+    if callable(get_direct_subscriber_count):
+        return int(get_direct_subscriber_count(key) or 0)
     get_subscriber_count = getattr(event_bus, "get_subscriber_count", None)
     if callable(get_subscriber_count):
         return int(get_subscriber_count(key) or 0)

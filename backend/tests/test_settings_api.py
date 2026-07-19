@@ -316,6 +316,21 @@ def test_cache_access_endpoint_records_behavior_signal() -> None:
     assert dm.memory_gc_calls[-1][1]["action"] == "frontend-full-cache-hit"
 
 
+def test_cache_access_endpoint_rejects_untrusted_future_timestamp() -> None:
+    dm = _DataManager()
+    response = _client_with_dm(dm).post(
+        "/api/v1/settings/cache-access",
+        json={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "occurred_at_ms": 9_999_999_999_999,
+        },
+    )
+
+    assert response.status_code == 422
+    assert dm.memory_gc_calls == []
+
+
 def test_storage_gc_run_requires_confirm() -> None:
     dm = _DataManager()
     response = _client_with_dm(dm).post(

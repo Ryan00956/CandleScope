@@ -448,7 +448,7 @@ class StreamCoordinator:
             # Check if stream has subscribers
             sub_count = 0
             if self._bus:
-                sub_count = self._bus.get_subscriber_count(key)
+                sub_count = self._bus.get_direct_subscriber_count(key)
 
             if sub_count > 0:
                 entry.touch()

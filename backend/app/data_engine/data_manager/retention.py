@@ -474,8 +474,9 @@ class RetentionService:
         watermarks: dict[str, Any],
     ) -> dict[str, Any]:
         heat = behavior_heat.get(str(victim.get("key") or ""), {})
-        heat_score = float(heat.get("heat_score", 0) or 0)
-        reuse_probability = min(100.0, heat_score * 8 + int(heat.get("switch_count_24h", 0) or 0) * 12)
+        heat_score = max(0.0, float(heat.get("heat_score", 0) or 0))
+        switch_count = max(0, int(heat.get("switch_count_24h", 0) or 0))
+        reuse_probability = max(0.0, min(100.0, heat_score * 8 + switch_count * 12))
         matched_intents = victim.get("storage_intents") or []
         intent_rank = max((
             {"weak": 1, "normal": 2, "strong": 3}.get(str(item.get("priority") or "").lower(), 0)
@@ -612,7 +613,7 @@ class RetentionService:
             if not is_ephemeral_interval(key.interval):
                 continue
 
-            if self._event_bus.get_subscriber_count(key) > 0:
+            if self._event_bus.get_direct_subscriber_count(key) > 0:
                 skipped += 1
                 continue
 

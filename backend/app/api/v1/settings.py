@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from app.data_engine.data_manager.runtime_pressure import (
     disk_pressure_snapshot,
     storage_file_snapshot,
 )
+from app.data_engine.data_manager.cache_behavior import MAX_FUTURE_EVENT_SKEW_MS
 from app.data_engine.data_manager import (
     MaintenanceBusyError,
     MaintenanceUnavailableError,
@@ -682,12 +684,21 @@ class CacheAccessRecordRequest(BaseModel):
     source: str = "frontend"
     weight: float | None = None
     detail: dict[str, Any] | None = None
-    occurred_at_ms: int | None = None
+    occurred_at_ms: int | None = Field(default=None, ge=0)
 
 
 @router.post("/cache-access")
 async def record_cache_access(request: Request, body: CacheAccessRecordRequest) -> dict:
     """Record a lightweight frontend cache access signal."""
+    if (
+        body.occurred_at_ms is not None
+        and body.occurred_at_ms
+        > int(time.time() * 1000) + MAX_FUTURE_EVENT_SKEW_MS
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="occurred_at_ms exceeds the allowed client clock skew",
+        )
     dm = _get_data_manager(request)
     if dm is None:
         raise HTTPException(status_code=503, detail="DataManager 尚未初始化")

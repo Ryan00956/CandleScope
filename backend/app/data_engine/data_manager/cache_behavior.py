@@ -14,6 +14,7 @@ from .models import SeriesKey
 
 EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 CLEANUP_INTERVAL_MS = 60 * 1000
+MAX_FUTURE_EVENT_SKEW_MS = 5 * 60 * 1000
 DEFAULT_CACHE_BEHAVIOR_DB_PATH = DATA_DIR / "cache_behavior.sqlite"
 
 ACTION_WEIGHTS = {
@@ -53,7 +54,12 @@ class CacheBehaviorStore:
         self._init_db()
 
     def record(self, event: CacheAccessEvent) -> dict[str, Any]:
-        now_ms = int(event.occurred_at_ms or time.time() * 1000)
+        now_ms = int(time.time() * 1000)
+        occurred_at_ms = (
+            now_ms
+            if event.occurred_at_ms is None
+            else min(now_ms, max(0, int(event.occurred_at_ms)))
+        )
         action = str(event.action or "access").strip() or "access"
         source = str(event.source or "backend").strip() or "backend"
         weight = float(event.weight if event.weight is not None else ACTION_WEIGHTS.get(action, 1.0))
@@ -73,7 +79,7 @@ class CacheBehaviorStore:
                     action,
                     source,
                     weight,
-                    now_ms,
+                    occurred_at_ms,
                 ),
             )
             self._cleanup_old_events(conn, now_ms)
@@ -177,7 +183,13 @@ class CacheBehaviorStore:
         if now_ms - self._last_cleanup_ms < CLEANUP_INTERVAL_MS:
             return
         cutoff = now_ms - EVENT_RETENTION_MS
-        conn.execute("DELETE FROM cache_access_events WHERE occurred_at_ms < ?", (cutoff,))
+        conn.execute(
+            """
+            DELETE FROM cache_access_events
+            WHERE occurred_at_ms < ? OR occurred_at_ms > ?
+            """,
+            (cutoff, now_ms),
+        )
         self._last_cleanup_ms = now_ms
 
     def _refresh_all_heat(self, conn: sqlite3.Connection, now_ms: int) -> None:
@@ -193,14 +205,14 @@ class CacheBehaviorStore:
                 (exchange, market_type, symbol, interval, heat_score, last_seen_ms,
                  access_count_1h, access_count_24h, access_count_7d, switch_count_24h)
             SELECT exchange, market_type, symbol, interval,
-                   SUM(weight / (1.0 + ((? - occurred_at_ms) / 3600000.0) / 24.0)),
+                   SUM(weight / (1.0 + MAX(0.0, ((? - occurred_at_ms) / 3600000.0)) / 24.0)),
                    MAX(occurred_at_ms),
                    SUM(CASE WHEN occurred_at_ms >= ? THEN 1 ELSE 0 END),
                    SUM(CASE WHEN occurred_at_ms >= ? THEN 1 ELSE 0 END),
                    COUNT(*),
                    SUM(CASE WHEN action LIKE 'chart%' AND occurred_at_ms >= ? THEN 1 ELSE 0 END)
             FROM cache_access_events
-            WHERE occurred_at_ms >= ?
+            WHERE occurred_at_ms >= ? AND occurred_at_ms <= ?
             GROUP BY exchange, market_type, symbol, interval
             ON CONFLICT(exchange, market_type, symbol, interval)
             DO UPDATE SET
@@ -211,7 +223,7 @@ class CacheBehaviorStore:
                 access_count_7d = excluded.access_count_7d,
                 switch_count_24h = excluded.switch_count_24h
             """,
-            (now_ms, one_hour, one_day, one_day, seven_days),
+            (now_ms, one_hour, one_day, one_day, seven_days, now_ms),
         )
         conn.execute(
             """
@@ -223,9 +235,10 @@ class CacheBehaviorStore:
                   AND events.symbol = cache_series_heat.symbol
                   AND events.interval = cache_series_heat.interval
                   AND events.occurred_at_ms >= ?
+                  AND events.occurred_at_ms <= ?
             )
             """,
-            (seven_days,),
+            (seven_days, now_ms),
         )
         self._last_refresh_ms = now_ms
 
@@ -251,9 +264,16 @@ class CacheBehaviorStore:
             SELECT action, weight, occurred_at_ms
             FROM cache_access_events
             WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ?
-              AND occurred_at_ms >= ?
+              AND occurred_at_ms >= ? AND occurred_at_ms <= ?
             """,
-            (key.exchange, key.market_type, key.symbol, key.interval, seven_days),
+            (
+                key.exchange,
+                key.market_type,
+                key.symbol,
+                key.interval,
+                seven_days,
+                now_ms,
+            ),
         ).fetchall()
         count_1h = sum(1 for _, _, ts in rows if int(ts) >= one_hour)
         count_24h = sum(1 for _, _, ts in rows if int(ts) >= one_day)

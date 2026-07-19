@@ -15,7 +15,11 @@ from app.data_engine.data_manager.gc import (
     execute_memory_gc_plan,
     plan_memory_gc,
 )
-from app.data_engine.data_manager.maintenance import MaintenanceService, _run_storage_batch
+from app.data_engine.data_manager.maintenance import (
+    MaintenanceBusyError,
+    MaintenanceService,
+    _run_storage_batch,
+)
 
 
 def _bars(count: int) -> list[BarData]:
@@ -1038,3 +1042,43 @@ async def test_shutdown_cancellation_waits_for_current_storage_batch() -> None:
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.anyio
+async def test_cancelled_vacuum_holds_maintenance_lock_until_worker_finishes() -> None:
+    class _BlockingVacuumStorage:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.finished = threading.Event()
+
+        def vacuum(self) -> dict:
+            self.started.set()
+            assert self.release.wait(timeout=2)
+            self.finished.set()
+            return {"status": "ok"}
+
+    storage = _BlockingVacuumStorage()
+    dm = DataManager()
+    dm.set_storage(storage)
+    task = asyncio.create_task(dm.vacuum_storage())
+
+    for _ in range(100):
+        if storage.started.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert storage.started.is_set()
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+    assert dm.maintenance._lock.locked() is True
+    assert storage.finished.is_set() is False
+    with pytest.raises(MaintenanceBusyError):
+        await dm.vacuum_storage()
+
+    storage.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert storage.finished.is_set() is True
+    assert dm.maintenance._lock.locked() is False

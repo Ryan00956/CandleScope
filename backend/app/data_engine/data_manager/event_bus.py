@@ -398,6 +398,26 @@ class DataEventBus:
                     count += 1
             return count
 
+    def get_direct_subscriber_count(self, key: SeriesKey) -> int:
+        """Count subscribers that explicitly retain one series.
+
+        Wildcard subscriptions are event observers.  They receive matching
+        events for every series, but they do not express lifecycle ownership
+        of every cache entry or upstream stream.
+        """
+        with self._protection_lock:
+            count = sum(
+                1
+                for handle in self._subscriptions.values()
+                if handle.key == key
+            )
+            count += sum(
+                1
+                for sub in self._queue_subs.values()
+                if sub.handle.key == key
+            )
+            return count
+
     def get_all_subscribed_keys(self) -> set[SeriesKey]:
         """Return all SeriesKeys that have at least one subscriber."""
         with self._protection_lock:

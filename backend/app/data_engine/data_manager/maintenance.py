@@ -1344,7 +1344,7 @@ class MaintenanceService:
 
         async with self._lock:
             started_at_ms = int(time.time() * 1000)
-            result = await run_storage(vacuum)
+            result = await _run_storage_batch(vacuum)
             return {
                 "mode": "vacuum",
                 "owner": "sqlite-storage",

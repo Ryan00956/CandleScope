@@ -21,6 +21,24 @@ export interface BackgroundPrefetchSkipInput {
   interval: string;
 }
 
+export class ChartBackgroundPrefetchAttemptLedger {
+  private scopeKey = "";
+  private readonly attemptedIntervals = new Set<string>();
+
+  enterScope(scopeKey: string): void {
+    if (scopeKey === this.scopeKey) return;
+    this.scopeKey = scopeKey;
+    this.attemptedIntervals.clear();
+  }
+
+  claimInterval(interval: string): boolean {
+    const intervalKey = canonicalizeIntervalValue(interval) || interval.trim();
+    if (!intervalKey || this.attemptedIntervals.has(intervalKey)) return false;
+    this.attemptedIntervals.add(intervalKey);
+    return true;
+  }
+}
+
 export function shouldSkipChartBackgroundPrefetch({
   activeInterval,
   fullCacheRows = 0,
@@ -45,12 +63,14 @@ export function useChartBackgroundPrefetch({
   enabled = true,
 }: UseChartBackgroundPrefetchOptions): void {
   const inFlightRef = useRef(new Set<string>());
+  const attemptLedgerRef = useRef(new ChartBackgroundPrefetchAttemptLedger());
 
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
     const controller = new AbortController();
     const currentSymbolKey = symbolKey(symbol, marketType, exchange);
+    attemptLedgerRef.current.enterScope(currentSymbolKey);
 
     const prefetch = async () => {
       for (const intv of trackedIntervals) {
@@ -66,6 +86,7 @@ export function useChartBackgroundPrefetch({
           inFlight: inFlightRef.current.has(key),
           interval: canonicalInterval,
         })) continue;
+        if (!attemptLedgerRef.current.claimInterval(canonicalInterval)) continue;
 
         inFlightRef.current.add(key);
         try {

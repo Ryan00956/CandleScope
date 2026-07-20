@@ -80,10 +80,12 @@ def plan_memory_gc(
     total_series = int(cache_snapshot.get("total_series", 0) or 0)
     max_total_bars = effective_policy.max_total_bars
     if max_total_bars is None:
-        max_total_bars = max(0, int(cache_snapshot.get("max_bars_per_series", 0) or 0)) * max(
-            1,
-            int(cache_snapshot.get("max_series", 0) or 0),
-        )
+        max_total_bars = int(cache_snapshot.get("max_total_bars", 0) or 0)
+        if max_total_bars <= 0:
+            max_total_bars = max(
+                0,
+                int(cache_snapshot.get("max_bars_per_series", 0) or 0),
+            ) * max(1, int(cache_snapshot.get("max_series", 0) or 0))
     max_series = effective_policy.max_series or int(cache_snapshot.get("max_series", 0) or 0) or None
     runtime_hard_pressure = _runtime_hard_memory_pressure(runtime_pressure)
     pressure = {

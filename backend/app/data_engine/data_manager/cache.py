@@ -14,7 +14,9 @@ Architecture:
 Design goals:
   * **Zero-copy reads** where possible — ``get_bars()`` returns a
     *slice* of the internal list (shallow copy for safety).
-  * **Deterministic memory** — total bars ≤ max_series × max_bars.
+  * **Deterministic memory** — normal series use ``max_bars`` and only a
+    small, LRU-bounded set of paged history series may use the larger history
+    capacity.
   * **O(1) append** for the hot path (realtime bar updates).
   * **O(log n) insert** for out-of-order inserts (backfill).
 
@@ -38,13 +40,23 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from .config import CacheConfig
 from .models import BarData, SeriesKey
 
 logger = logging.getLogger("data_manager.cache")
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryCapacityReservation:
+    """Result of one bounded base-history capacity request."""
+
+    requested_bars: int
+    capacity_bars: int
+    active: bool
+    capped: bool
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -185,6 +197,28 @@ class BarSeries:
             # Empty series — direct load
             self._bars = list(bars)
             self._time_index = [b.time for b in bars]
+        elif bars[-1].time < self._bars[0].time:
+            # Directional history pagination prepends a page that cannot
+            # overlap the already-cached newer suffix.  Avoid rebuilding a
+            # timestamp dict and sorting the whole, progressively larger
+            # retained history on every page.
+            available = max(0, self._max_bars - len(self._bars))
+            if available <= 0:
+                evicted = list(bars)
+            elif len(bars) <= available:
+                self._bars = [*bars, *self._bars]
+                self._time_index = [b.time for b in bars] + self._time_index
+            else:
+                overflow = len(bars) - available
+                evicted = list(bars[:overflow])
+                retained = bars[overflow:]
+                self._bars = [*retained, *self._bars]
+                self._time_index = [b.time for b in retained] + self._time_index
+        elif bars[0].time > self._bars[-1].time:
+            # The symmetrical realtime/prewarm case appends a disjoint newer
+            # page without rematerializing the existing prefix.
+            self._bars.extend(bars)
+            self._time_index.extend(b.time for b in bars)
         else:
             # Merge: combine both sorted lists
             merged: list[BarData] = []
@@ -202,6 +236,21 @@ class BarSeries:
             self._bars = self._bars[overflow:]
             self._time_index = self._time_index[overflow:]
 
+        return evicted
+
+    def set_max_bars(self, max_bars: int) -> list[BarData]:
+        """Change the capacity and return oldest bars removed by a shrink."""
+        normalized = max(1, int(max_bars))
+        if normalized == self._max_bars:
+            return []
+        self._max_bars = normalized
+        self._revision += 1
+        if len(self._bars) <= normalized:
+            return []
+        overflow = len(self._bars) - normalized
+        evicted = self._bars[:overflow]
+        self._bars = self._bars[overflow:]
+        self._time_index = self._time_index[overflow:]
         return evicted
 
     def clear(self) -> None:
@@ -330,6 +379,10 @@ class BarCache:
         self._lock = threading.Lock()
         # OrderedDict for LRU tracking — most recently used at the end
         self._series: OrderedDict[SeriesKey, BarSeries] = OrderedDict()
+        # Expanded history capacities are independently LRU-bounded.  Keeping
+        # the reservation after data invalidation preserves performance while
+        # the removed series guarantees no stale rows survive a repair/delete.
+        self._history_capacities: OrderedDict[SeriesKey, int] = OrderedDict()
         # Monotonic across remove/clear/LRU cycles so a stale plan cannot pass
         # revision checks against a newly-created incarnation of the same key.
         self._next_series_generation = 0
@@ -341,6 +394,9 @@ class BarCache:
         self._hits = 0
         self._misses = 0
         self._evictions = 0
+        self._history_reservation_requests = 0
+        self._history_reservation_capped = 0
+        self._history_reservation_demotions = 0
 
     # ── Public: Write Operations ─────────────────────────────
 
@@ -379,7 +435,7 @@ class BarCache:
             self._on_bars_evicted(key, evicted)
 
     def invalidate(self, key: SeriesKey) -> None:
-        """Remove all cached bars for a series."""
+        """Remove all cached bars while retaining any bounded reservation."""
         with self._lock:
             series = self._series.pop(key, None)
             if series:
@@ -389,6 +445,7 @@ class BarCache:
         """Remove one cached series and return its previous bar count."""
         with self._lock:
             series = self._series.pop(key, None)
+            self._history_capacities.pop(key, None)
             if series is None:
                 return 0
             removed = series.count
@@ -418,6 +475,7 @@ class BarCache:
                 return 0, "stale"
             removed = series.count
             self._series.pop(key, None)
+            self._history_capacities.pop(key, None)
             logger.debug("Conditionally removed cache series %s (%d bars)", key, removed)
             return removed, "removed"
 
@@ -426,7 +484,90 @@ class BarCache:
         with self._lock:
             count = len(self._series)
             self._series.clear()
+            self._history_capacities.clear()
             logger.info("Cache cleared (%d series removed)", count)
+
+    def reserve_history_capacity(
+        self,
+        key: SeriesKey,
+        requested_bars: int,
+    ) -> HistoryCapacityReservation:
+        """Reserve bounded capacity for a recently paged durable series.
+
+        Reservations do not create a series or retain data by themselves.
+        At most ``history_max_series`` keys can be expanded; admitting a new
+        key demotes and immediately trims the least-recently-reserved key.
+        """
+        requested = max(0, int(requested_bars))
+        normal_capacity = max(1, int(self._cfg.max_bars_per_series))
+        history_capacity = max(
+            normal_capacity,
+            int(self._cfg.history_max_bars_per_series),
+        )
+        max_history_series = max(0, int(self._cfg.history_max_series))
+
+        from app.data_engine.interval_policy import is_ephemeral_interval
+
+        if (
+            history_capacity <= normal_capacity
+            or max_history_series <= 0
+            or is_ephemeral_interval(key.interval)
+        ):
+            return HistoryCapacityReservation(
+                requested_bars=requested,
+                capacity_bars=normal_capacity,
+                active=False,
+                capped=requested > normal_capacity,
+            )
+
+        if requested <= normal_capacity:
+            with self._lock:
+                existing = self._history_capacities.get(key)
+                if existing is not None:
+                    self._history_capacities.move_to_end(key)
+                    self._history_reservation_requests += 1
+            return HistoryCapacityReservation(
+                requested_bars=requested,
+                capacity_bars=existing or normal_capacity,
+                active=existing is not None,
+                capped=False,
+            )
+
+        evicted_batches: list[tuple[SeriesKey, list[BarData]]] = []
+        with self._lock:
+            self._history_reservation_requests += 1
+            previous = self._history_capacities.pop(key, None)
+            while len(self._history_capacities) >= max_history_series:
+                demoted_key, _ = self._history_capacities.popitem(last=False)
+                demoted_series = self._series.get(demoted_key)
+                if demoted_series is not None:
+                    evicted = demoted_series.set_max_bars(normal_capacity)
+                    if evicted:
+                        evicted_batches.append((demoted_key, evicted))
+                self._history_reservation_demotions += 1
+
+            capacity = min(
+                history_capacity,
+                max(requested, previous or normal_capacity),
+            )
+            capped = requested > capacity
+            if capped:
+                self._history_reservation_capped += 1
+            self._history_capacities[key] = capacity
+            series = self._series.get(key)
+            if series is not None:
+                evicted = series.set_max_bars(capacity)
+                if evicted:
+                    evicted_batches.append((key, evicted))
+
+        for evicted_key, bars in evicted_batches:
+            self._on_bars_evicted(evicted_key, bars)
+        return HistoryCapacityReservation(
+            requested_bars=requested,
+            capacity_bars=capacity,
+            active=True,
+            capped=capped,
+        )
 
     # ── Public: Read Operations ──────────────────────────────
 
@@ -532,6 +673,7 @@ class BarCache:
                     to_remove.append(key)
             for key in to_remove:
                 self._series.pop(key, None)
+                self._history_capacities.pop(key, None)
                 self._evictions += 1
 
         if to_remove:
@@ -624,10 +766,23 @@ class BarCache:
                 "total_series": len(self._series),
                 "max_series": self._cfg.max_series,
                 "max_bars_per_series": self._cfg.max_bars_per_series,
+                "max_total_bars": self._configured_max_total_bars(),
                 "total_bars": sum(s.count for s in self._series.values()),
                 "hits": self._hits,
                 "misses": self._misses,
                 "evictions": self._evictions,
+                "history": {
+                    "max_bars_per_series": self._cfg.history_max_bars_per_series,
+                    "max_series": self._cfg.history_max_series,
+                    "reservation_count": len(self._history_capacities),
+                    "reservation_requests": self._history_reservation_requests,
+                    "reservation_capped": self._history_reservation_capped,
+                    "reservation_demotions": self._history_reservation_demotions,
+                    "reservations": {
+                        str(key): capacity
+                        for key, capacity in self._history_capacities.items()
+                    },
+                },
                 "series": {
                     str(key): series.snapshot()
                     for key, series in self._series.items()
@@ -653,6 +808,7 @@ class BarCache:
         # Evict LRU series if at capacity
         while len(self._series) >= self._cfg.max_series:
             evicted_key, evicted_series = self._series.popitem(last=False)
+            self._history_capacities.pop(evicted_key, None)
             self._evictions += 1
             logger.debug(
                 "LRU eviction: %s (%d bars)", evicted_key, evicted_series.count,
@@ -664,7 +820,10 @@ class BarCache:
         if is_ephemeral_interval(key.interval):
             max_bars = self._ephemeral_max_bars
         else:
-            max_bars = self._cfg.max_bars_per_series
+            max_bars = self._history_capacities.get(
+                key,
+                self._cfg.max_bars_per_series,
+            )
 
         self._next_series_generation += 1
         series = BarSeries(
@@ -680,6 +839,17 @@ class BarCache:
             return None
         self._series.move_to_end(key)
         return self._series[key]
+
+    def _configured_max_total_bars(self) -> int:
+        """Return the hard configured durable-bar budget."""
+        max_series = max(0, int(self._cfg.max_series))
+        normal = max(0, int(self._cfg.max_bars_per_series))
+        history = max(normal, int(self._cfg.history_max_bars_per_series))
+        expanded_series = min(
+            max_series,
+            max(0, int(self._cfg.history_max_series)),
+        )
+        return normal * max_series + (history - normal) * expanded_series
 
     def _on_bars_evicted(self, key: SeriesKey, bars: list[BarData]) -> None:
         """Notify eviction callbacks (called outside lock — safe for I/O)."""

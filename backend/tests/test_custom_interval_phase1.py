@@ -9,9 +9,14 @@ from app.data_engine.backfill.config import BackfillConfig
 from app.data_engine.backfill.models import GapInfo, GapType
 from app.data_engine.backfill.planner import BackfillPlanner
 from app.data_engine.data_manager.cache import BarCache
-from app.data_engine.data_manager.config import QueryConfig
+from app.data_engine.data_manager.config import CacheConfig, QueryConfig
 from app.data_engine.data_manager.custom_query import CustomIntervalQueryService
-from app.data_engine.data_manager.models import BarData, QueryResult, QuerySource
+from app.data_engine.data_manager.models import (
+    BarData,
+    QueryResult,
+    QuerySource,
+    SeriesKey,
+)
 from app.data_engine.data_manager.query import QueryEngine
 from app.data_engine.history import AlwaysOpenCalendar
 from app.data_engine.interval_policy import compute_bucket_start_ms
@@ -59,6 +64,65 @@ class _IntervalStorage:
         ]
         rows.sort(key=lambda row: int(row["open_time"]))
         return rows[-int(kwargs["limit"]):]
+
+
+def test_custom_intervals_reuse_bounded_shared_base_history() -> None:
+    minute_ms = 60_000
+    storage = _IntervalStorage({
+        "1m": [_row(index * minute_ms, index + 1) for index in range(154)],
+    })
+    cache = BarCache(CacheConfig(
+        max_bars_per_series=5,
+        max_series=20,
+        history_max_bars_per_series=100,
+        history_max_series=1,
+    ))
+    engine = QueryEngine(
+        cache=cache,
+        storage=storage,  # type: ignore[arg-type]
+        config=QueryConfig(default_limit=10, max_limit=10, auto_backfill=False),
+    )
+    before_ms = 154 * minute_ms
+
+    first = engine.query_before(
+        "BTCUSDT",
+        "7m",
+        before_ms=before_ms,
+        limit=8,
+        auto_backfill=False,
+    )
+    first_base_reads = int(first.metadata["base_storage_reads"])
+    assert len(first.bars) == 8
+    assert first_base_reads == 7
+    assert first.metadata["base_cache_reserved_rows"] == 70
+    assert cache.series_count(SeriesKey("BTCUSDT", "1m")) == 70
+
+    storage.calls.clear()
+    second = engine.query_before(
+        "BTCUSDT",
+        "11m",
+        before_ms=before_ms,
+        limit=5,
+        auto_backfill=False,
+    )
+    assert len(second.bars) == 5
+    assert second.metadata["base_storage_reads"] == 1
+    assert second.metadata["target_storage_reads"] == 1
+    assert second.metadata["base_cache_reserved_rows"] == 77
+    assert cache.series_count(SeriesKey("BTCUSDT", "1m")) == 77
+
+    cache.invalidate(SeriesKey("BTCUSDT", "1m"))
+    cache.invalidate(SeriesKey("BTCUSDT", "11m"))
+    storage.calls.clear()
+    after_invalidation = engine.query_before(
+        "BTCUSDT",
+        "11m",
+        before_ms=before_ms,
+        limit=5,
+        auto_backfill=False,
+    )
+    assert after_invalidation.bars == second.bars
+    assert after_invalidation.metadata["base_storage_reads"] == 8
 
 
 def test_custom_query_reuses_complete_materialized_target_storage() -> None:

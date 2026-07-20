@@ -37,7 +37,7 @@ from app.data_engine.history.calendar import (
     expected_bucket_end_ms,
 )
 
-from .cache import BarCache
+from .cache import BarCache, HistoryCapacityReservation
 from .config import QueryConfig
 from .models import BarData, MissingRange, QueryResult, QuerySource, SeriesKey
 
@@ -484,6 +484,8 @@ class CustomIntervalQueryService:
         self._base_pages = 0
         self._base_rows = 0
         self._base_overfetch_rows = 0
+        self._base_cache_reservations = 0
+        self._base_cache_reservation_caps = 0
         self._materialized_probe_seconds = 0.0
         self._base_query_seconds = 0.0
         self._aggregation_seconds = 0.0
@@ -505,6 +507,10 @@ class CustomIntervalQueryService:
                 "base_pages": self._base_pages,
                 "base_rows": self._base_rows,
                 "base_overfetch_rows": self._base_overfetch_rows,
+                "base_cache_reservations": self._base_cache_reservations,
+                "base_cache_reservation_caps": (
+                    self._base_cache_reservation_caps
+                ),
                 "materialized_probe_ms": round(
                     self._materialized_probe_seconds * 1000,
                     2,
@@ -524,6 +530,12 @@ class CustomIntervalQueryService:
             self._base_rows += int(metadata.get("base_rows_fetched") or 0)
             self._base_overfetch_rows += int(
                 metadata.get("base_page_overfetch_rows") or 0
+            )
+            self._base_cache_reservations += int(
+                metadata.get("base_cache_reservation_active") is True
+            )
+            self._base_cache_reservation_caps += int(
+                metadata.get("base_cache_reservation_capped") is True
             )
             self._materialized_probe_seconds += (
                 float(metadata.get("materialized_probe_ms") or 0.0) / 1000
@@ -585,6 +597,17 @@ class CustomIntervalQueryService:
             metadata[f"target_{name}"] = round(target_value, 2)
             metadata[f"base_{name}"] = round(base_value, 2)
         return metadata
+
+    @staticmethod
+    def _base_cache_metadata(
+        reservation: HistoryCapacityReservation,
+    ) -> dict[str, int | bool]:
+        return {
+            "base_cache_requested_rows": reservation.requested_bars,
+            "base_cache_reserved_rows": reservation.capacity_bars,
+            "base_cache_reservation_active": reservation.active,
+            "base_cache_reservation_capped": reservation.capped,
+        }
 
     @staticmethod
     def _annotate_single_base_page(result: QueryResult) -> None:
@@ -1258,6 +1281,16 @@ class CustomIntervalQueryService:
         else:
             base_limit = (effective_limit + 2) * capacity_factor + capacity_factor
 
+        base_cache_reservation = self._cache.reserve_history_capacity(
+            SeriesKey(
+                symbol,
+                base_interval,
+                exchange=exchange,
+                market_type=market_type,
+            ),
+            base_limit,
+        )
+
         seed_limit = min(base_limit, self._cfg.max_limit)
         seed_start_ms = aligned_start_ms if base_limit <= self._cfg.max_limit else None
         base_started_at = time.monotonic()
@@ -1357,6 +1390,7 @@ class CustomIntervalQueryService:
             metadata={
                 **base_result.metadata,
                 **self._combined_io_metadata(materialized_result, base_result),
+                **self._base_cache_metadata(base_cache_reservation),
                 "elapsed_ms": round(elapsed * 1000, 2),
                 "derived_from": base_interval,
                 "aggregation_factor": factor,
@@ -1520,6 +1554,16 @@ class CustomIntervalQueryService:
             base_end_ms = last_bucket_start_ms + custom_ms - 1
         base_limit = (effective_limit + 2) * capacity_factor
 
+        base_cache_reservation = self._cache.reserve_history_capacity(
+            SeriesKey(
+                symbol,
+                base_interval,
+                exchange=exchange,
+                market_type=market_type,
+            ),
+            base_limit,
+        )
+
         base_started_at = time.monotonic()
         base_result = self._page_base_history(
             symbol=symbol,
@@ -1596,6 +1640,7 @@ class CustomIntervalQueryService:
             metadata={
                 **base_result.metadata,
                 **self._combined_io_metadata(materialized_result, base_result),
+                **self._base_cache_metadata(base_cache_reservation),
                 "elapsed_ms": round((time.monotonic() - started_at) * 1000, 2),
                 "derived_from": base_interval,
                 "aggregation_factor": factor,

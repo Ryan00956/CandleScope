@@ -47,6 +47,16 @@ class CacheConfig:
             Maximum number of (symbol, interval) series tracked.
             Least-recently-used series are evicted when exceeded.
 
+        history_max_bars_per_series:
+            Hard per-series ceiling for recently paged, storage-backed
+            history.  Custom intervals can temporarily retain more of their
+            shared base series than ``max_bars_per_series`` so a nearby
+            custom interval does not reread the same SQLite pages.
+
+        history_max_series:
+            Maximum number of base-history series that may use the expanded
+            capacity at once.  Reservations are demoted in LRU order.
+
         prewarm_bars:
             How many bars to load from storage when a series is first
             accessed (cache miss → storage read).
@@ -59,6 +69,10 @@ class CacheConfig:
     max_series: int = 200
     prewarm_bars: int = 1000
     ttl_seconds: int = 0  # 0 = never expire
+    # Appended after the original positional fields for constructor
+    # compatibility with callers that do not use keyword arguments.
+    history_max_bars_per_series: int = 80_000
+    history_max_series: int = 2
 
 
 @dataclass
@@ -179,6 +193,10 @@ class DataManagerConfig:
             "cache": {
                 "max_bars_per_series": self.cache.max_bars_per_series,
                 "max_series": self.cache.max_series,
+                "history_max_bars_per_series": (
+                    self.cache.history_max_bars_per_series
+                ),
+                "history_max_series": self.cache.history_max_series,
                 "prewarm_bars": self.cache.prewarm_bars,
                 "ttl_seconds": self.cache.ttl_seconds,
             },

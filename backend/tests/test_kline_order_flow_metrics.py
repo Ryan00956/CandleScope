@@ -77,6 +77,21 @@ def _storage_components(row: dict) -> tuple:
     )
 
 
+def _sqlite_storage_components(row: dict) -> tuple:
+    return (
+        int(row["open_time"]),
+        float(row["open"]),
+        float(row["high"]),
+        float(row["low"]),
+        float(row["close"]),
+        float(row["volume"]),
+        None if row["quote_volume"] is None else float(row["quote_volume"]),
+        row["trades"],
+        None if row["taker_buy_base"] is None else float(row["taker_buy_base"]),
+        None if row["taker_buy_quote"] is None else float(row["taker_buy_quote"]),
+    )
+
+
 def test_storage_row_keeps_public_single_pass_precision_contract() -> None:
     row = _storage_row()
     row.update({
@@ -129,6 +144,76 @@ def test_compact_storage_components_preserve_mapping_validation_contract() -> No
             compact_bar.normalized_aggregation_values()
             == mapping_bar.normalized_aggregation_values()
         )
+
+
+def test_storage_component_page_fast_path_preserves_fail_closed_contract() -> None:
+    cases = (
+        {},
+        {"taker_buy_base": 12},
+        {"taker_buy_quote": 1_200},
+        {"quote_volume": 0, "taker_buy_quote": 0},
+        {"quote_volume": None, "taker_buy_quote": None},
+        {"trades": None},
+        {
+            "volume": 100.000000004,
+            "taker_buy_base": 100.000000009,
+        },
+    )
+    rows = []
+    expected = []
+    for index, updates in enumerate(cases):
+        row = _storage_row()
+        row["open_time"] += index * 60_000
+        row.update(updates)
+        components = _sqlite_storage_components(row)
+        rows.append(components)
+        expected.append(BarData.from_storage_components(
+            components,
+            exchange="binance",
+            market_type="spot",
+            declared_fields=KLINE_ENHANCED_FIELDS,
+        ))
+
+    actual, fast_path_used = BarData.from_storage_component_page(
+        rows,
+        exchange="binance",
+        market_type="spot",
+        declared_fields=KLINE_ENHANCED_FIELDS,
+    )
+
+    assert fast_path_used is True
+    assert actual == expected
+    assert (
+        [bar.to_kline_dict() for bar in actual]
+        == [bar.to_kline_dict() for bar in expected]
+    )
+    assert (
+        [bar.normalized_aggregation_values() for bar in actual]
+        == [bar.normalized_aggregation_values() for bar in expected]
+    )
+
+
+def test_storage_component_page_falls_back_on_unexpected_sqlite_types() -> None:
+    row = list(_sqlite_storage_components(_storage_row()))
+    row[7] = 25.0  # SQLite INTEGER affinity should normally return ``int``.
+    rows = [tuple(row)]
+    expected = [BarData.from_storage_components(
+        rows[0],
+        exchange="binance",
+        market_type="spot",
+        declared_fields=KLINE_ENHANCED_FIELDS,
+    )]
+
+    actual, fast_path_used = BarData.from_storage_component_page(
+        rows,
+        exchange="binance",
+        market_type="spot",
+        declared_fields=KLINE_ENHANCED_FIELDS,
+    )
+
+    assert fast_path_used is False
+    assert actual == expected
+    assert actual[0].to_kline_dict() == expected[0].to_kline_dict()
 
 
 def test_okx_placeholder_zeros_are_suppressed_by_capability() -> None:

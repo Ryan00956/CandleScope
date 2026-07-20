@@ -29,6 +29,7 @@ from app.data_engine.market_data.kline_metrics import (
     normalize_declared_kline_enhancements,
     normalize_kline_aggregation_fields,
     normalize_prevalidated_kline_aggregation_fields,
+    normalize_validated_kline_aggregation_fields,
     serialize_kline_enhancements,
 )
 from app.data_engine.interval_policy import parse_interval_spec
@@ -310,7 +311,7 @@ class BarData:
     @classmethod
     def from_storage_components(
         cls,
-        row: tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any],
+        row: tuple[Any, ...],
         *,
         exchange: str,
         market_type: str,
@@ -363,6 +364,157 @@ class BarData:
         )
         bar._prevalidated_aggregation_fields = normalized_fields
         return bar
+
+    @classmethod
+    def from_storage_component_page(
+        cls,
+        rows: list[tuple[Any, ...]],
+        *,
+        exchange: str,
+        market_type: str,
+        declared_fields: Collection[str] | None,
+    ) -> tuple[list[BarData], bool]:
+        """Decode one homogeneous SQLite tuple page with a safe fast path.
+
+        SQLite's compact projection normally returns fixed native types.  We
+        prove that contract once for the whole page, then skip repeated
+        coercion and generic finite/type checks while retaining the relational
+        fail-closed rules.  Any unexpected value sends the *entire* page
+        through :meth:`from_storage_components`.
+
+        Returns ``(bars, fast_path_used)`` for query telemetry.
+        """
+        if declared_fields is None:
+            return (
+                [
+                    cls.from_storage_components(
+                        row,
+                        exchange=exchange,
+                        market_type=market_type,
+                    )
+                    for row in rows
+                ],
+                False,
+            )
+        resolved_fields = (
+            declared_fields
+            if isinstance(declared_fields, frozenset)
+            else frozenset(declared_fields)
+        )
+        for row in rows:
+            (
+                open_time,
+                open_price,
+                high,
+                low,
+                close,
+                volume,
+                quote_volume,
+                trades,
+                taker_buy_base,
+                taker_buy_quote,
+            ) = row
+            if not (
+                type(open_time) is int
+                and type(open_price) is float
+                and type(high) is float
+                and type(low) is float
+                and type(close) is float
+                and type(volume) is float
+                and volume >= 0
+                and math.isfinite(volume)
+                and (
+                    quote_volume is None
+                    or (
+                        type(quote_volume) is float
+                        and quote_volume >= 0
+                        and math.isfinite(quote_volume)
+                    )
+                )
+                and (
+                    trades is None
+                    or (type(trades) is int and trades >= 0)
+                )
+                and (
+                    taker_buy_base is None
+                    or (
+                        type(taker_buy_base) is float
+                        and taker_buy_base >= 0
+                        and math.isfinite(taker_buy_base)
+                    )
+                )
+                and (
+                    taker_buy_quote is None
+                    or (
+                        type(taker_buy_quote) is float
+                        and taker_buy_quote >= 0
+                        and math.isfinite(taker_buy_quote)
+                    )
+                )
+            ):
+                return (
+                    [
+                        cls.from_storage_components(
+                            item,
+                            exchange=exchange,
+                            market_type=market_type,
+                            declared_fields=resolved_fields,
+                        )
+                        for item in rows
+                    ],
+                    False,
+                )
+
+        quote_volume_declared = "quote_volume" in resolved_fields
+        trades_declared = "trades" in resolved_fields
+        taker_buy_base_declared = "taker_buy_base" in resolved_fields
+        taker_buy_quote_declared = "taker_buy_quote" in resolved_fields
+        bars: list[BarData] = []
+        append_bar = bars.append
+        for (
+            open_time,
+            open_price,
+            high,
+            low,
+            close,
+            volume,
+            quote_volume,
+            trades,
+            taker_buy_base,
+            taker_buy_quote,
+        ) in rows:
+            normalized = normalize_validated_kline_aggregation_fields(
+                volume=volume,
+                quote_volume=quote_volume,
+                trades=trades,
+                taker_buy_base=taker_buy_base,
+                taker_buy_quote=taker_buy_quote,
+            )
+            normalized_fields = (
+                normalized[0] if quote_volume_declared else None,
+                normalized[1] if trades_declared else None,
+                normalized[2] if taker_buy_base_declared else None,
+                normalized[3] if taker_buy_quote_declared else None,
+            )
+            bar = cls(
+                time=open_time // 1000,
+                open=round(open_price, 8),
+                high=round(high, 8),
+                low=round(low, 8),
+                close=round(close, 8),
+                volume=round(volume, 8),
+                is_closed=True,
+                quote_volume=quote_volume
+                if normalized_fields[0] is not None else None,
+                trades=trades if normalized_fields[1] is not None else None,
+                taker_buy_base=taker_buy_base
+                if normalized_fields[2] is not None else None,
+                taker_buy_quote=taker_buy_quote
+                if normalized_fields[3] is not None else None,
+            )
+            bar._prevalidated_aggregation_fields = normalized_fields
+            append_bar(bar)
+        return bars, True
 
     @classmethod
     def from_bar_state(cls, bar_state: Any, is_closed: bool | None = None) -> BarData:

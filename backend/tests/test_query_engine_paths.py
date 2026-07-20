@@ -120,6 +120,8 @@ def test_query_engine_falls_back_to_storage_and_warms_cache() -> None:
     assert result.metadata["projected_storage_reads"] == 0
     assert result.metadata["projected_storage_rows"] == 0
     assert result.metadata["compact_row_decode_rows"] == 0
+    assert result.metadata["fast_row_decode_rows"] == 0
+    assert result.metadata["compact_decode_fallback_rows"] == 0
     assert result.metadata["legacy_row_decode_rows"] == 2
     snapshot = engine.snapshot()
     assert snapshot["storage_reads"] == 1
@@ -127,6 +129,8 @@ def test_query_engine_falls_back_to_storage_and_warms_cache() -> None:
     assert snapshot["row_decode_rows"] == 2
     assert snapshot["projected_storage_reads"] == 0
     assert snapshot["compact_row_decode_rows"] == 0
+    assert snapshot["fast_row_decode_rows"] == 0
+    assert snapshot["compact_decode_fallback_rows"] == 0
     assert snapshot["legacy_row_decode_rows"] == 2
     assert snapshot["storage_read_ms"] >= 0
     assert snapshot["row_decode_ms"] >= 0
@@ -179,11 +183,15 @@ def test_query_engine_prefers_compact_storage_projection() -> None:
     assert result.metadata["projected_storage_reads"] == 1
     assert result.metadata["projected_storage_rows"] == 2
     assert result.metadata["compact_row_decode_rows"] == 2
+    assert result.metadata["fast_row_decode_rows"] == 0
+    assert result.metadata["compact_decode_fallback_rows"] == 2
     assert result.metadata["legacy_row_decode_rows"] == 0
     snapshot = engine.snapshot()
     assert snapshot["projected_storage_reads"] == 1
     assert snapshot["projected_storage_rows"] == 2
     assert snapshot["compact_row_decode_rows"] == 2
+    assert snapshot["fast_row_decode_rows"] == 0
+    assert snapshot["compact_decode_fallback_rows"] == 2
     assert snapshot["legacy_row_decode_rows"] == 0
 
 
@@ -231,6 +239,8 @@ def test_query_before_prefers_compact_storage_projection() -> None:
     assert result.metadata["projected_storage_reads"] == 1
     assert result.metadata["projected_storage_rows"] == 2
     assert result.metadata["compact_row_decode_rows"] == 2
+    assert result.metadata["fast_row_decode_rows"] == 0
+    assert result.metadata["compact_decode_fallback_rows"] == 2
     assert result.metadata["legacy_row_decode_rows"] == 0
 
 

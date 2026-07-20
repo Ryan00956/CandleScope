@@ -379,6 +379,44 @@ def normalize_prevalidated_kline_aggregation_fields(
     return quote_volume, trades, safe_base_buy, safe_quote_buy
 
 
+def normalize_validated_kline_aggregation_fields(
+    *,
+    volume: float,
+    quote_volume: float | None,
+    trades: int | None,
+    taker_buy_base: float | None,
+    taker_buy_quote: float | None,
+) -> tuple[float | None, int | None, float | None, float | None]:
+    """Normalize one already type-checked storage component bundle.
+
+    Callers must first prove that every supplied value is finite and
+    non-negative and that ``trades`` is integral.  Relational constraints and
+    the legacy zero-quote suppression remain here so a page fast path cannot
+    bypass the fail-closed market-data contract.
+    """
+    safe_base_buy: float | None = None
+    if taker_buy_base is not None:
+        tolerance = max(1e-10, volume * 1e-10)
+        if taker_buy_base <= volume + tolerance:
+            safe_base_buy = min(taker_buy_base, volume)
+    safe_quote_buy: float | None = None
+    if quote_volume is not None and taker_buy_quote is not None:
+        tolerance = max(1e-10, quote_volume * 1e-10)
+        if taker_buy_quote <= quote_volume + tolerance:
+            safe_quote_buy = min(taker_buy_quote, quote_volume)
+    if volume > 0 and quote_volume == 0:
+        quote_volume = None
+        trades = None
+        safe_base_buy = None
+        safe_quote_buy = None
+    return (
+        None if quote_volume is None else round(quote_volume, 8),
+        trades,
+        None if safe_base_buy is None else round(safe_base_buy, 8),
+        None if safe_quote_buy is None else round(safe_quote_buy, 8),
+    )
+
+
 def _raw_kline_aggregation_fields(
     *,
     volume: Any,
@@ -438,28 +476,16 @@ def _raw_kline_aggregation_fields(
         safe_volume = float(volume)
         safe_quote = None if quote_volume is None else float(quote_volume)
         safe_trades = None if trades is None else int(trades)
-        safe_base_buy: float | None = None
-        if taker_buy_base is not None:
-            candidate = float(taker_buy_base)
-            tolerance = max(1e-10, safe_volume * 1e-10)
-            if candidate <= safe_volume + tolerance:
-                safe_base_buy = min(candidate, safe_volume)
-        safe_quote_buy: float | None = None
-        if safe_quote is not None and taker_buy_quote is not None:
-            candidate = float(taker_buy_quote)
-            tolerance = max(1e-10, safe_quote * 1e-10)
-            if candidate <= safe_quote + tolerance:
-                safe_quote_buy = min(candidate, safe_quote)
-        if safe_volume > 0 and safe_quote == 0:
-            safe_quote = None
-            safe_trades = None
-            safe_base_buy = None
-            safe_quote_buy = None
-        return (
-            None if safe_quote is None else round(safe_quote, 8),
-            safe_trades,
-            None if safe_base_buy is None else round(safe_base_buy, 8),
-            None if safe_quote_buy is None else round(safe_quote_buy, 8),
+        return normalize_validated_kline_aggregation_fields(
+            volume=safe_volume,
+            quote_volume=safe_quote,
+            trades=safe_trades,
+            taker_buy_base=(
+                None if taker_buy_base is None else float(taker_buy_base)
+            ),
+            taker_buy_quote=(
+                None if taker_buy_quote is None else float(taker_buy_quote)
+            ),
         )
 
     safe_quote_volume, safe_trades, base_pair, quote_pair = (

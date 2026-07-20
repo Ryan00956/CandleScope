@@ -56,6 +56,8 @@ _IO_COUNT_FIELDS = (
     "projected_storage_rows",
     "row_decode_rows",
     "compact_row_decode_rows",
+    "fast_row_decode_rows",
+    "compact_decode_fallback_rows",
     "legacy_row_decode_rows",
 )
 _IO_TIME_FIELDS = (

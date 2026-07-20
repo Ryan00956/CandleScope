@@ -98,3 +98,5 @@ def test_sqlite_compact_query_keeps_invalid_enhancements_fail_closed(
     assert payload["order_flow"] is None
     assert result.metadata["projected_storage_reads"] == 1
     assert result.metadata["compact_row_decode_rows"] == 1
+    assert result.metadata["fast_row_decode_rows"] == 1
+    assert result.metadata["compact_decode_fallback_rows"] == 0

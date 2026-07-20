@@ -57,13 +57,15 @@ def _connect(
     *,
     timeout_seconds: float = 30.0,
     configure_journal_mode: bool = True,
+    use_row_factory: bool = True,
 ) -> sqlite3.Connection:
     conn = sqlite3.connect(
         str(KLINES_DB_PATH),
         timeout=max(0.0, float(timeout_seconds)),
         check_same_thread=False,
     )
-    conn.row_factory = sqlite3.Row
+    if use_row_factory:
+        conn.row_factory = sqlite3.Row
     if configure_journal_mode:
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
@@ -363,10 +365,10 @@ def query_kline_bar_components(
         sql += " LIMIT ?"
         params.append(limit)
 
-    with _connect() as conn:
+    with _connect(use_row_factory=False) as conn:
         rows = conn.execute(sql, params).fetchall()
 
-    return [tuple(row) for row in rows]
+    return rows
 
 
 def fetch_before(
@@ -407,7 +409,7 @@ def fetch_before_kline_bar_components(
     market_type: str = DEFAULT_MARKET_TYPE,
 ) -> list[KlineBarComponents]:
     """Fetch a compact ascending page strictly before ``before_ms``."""
-    with _connect() as conn:
+    with _connect(use_row_factory=False) as conn:
         rows = conn.execute(
             f"""
             SELECT {_BAR_COMPONENT_PROJECTION}
@@ -419,9 +421,8 @@ def fetch_before_kline_bar_components(
             (exchange, market_type, symbol, interval, before_ms, limit),
         ).fetchall()
 
-    records = [tuple(row) for row in rows]
-    records.reverse()
-    return records
+    rows.reverse()
+    return rows
 
 
 def get_bounds(

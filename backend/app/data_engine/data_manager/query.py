@@ -95,6 +95,8 @@ class _QueryIOMetrics:
     row_decode_rows: int = 0
     row_decode_seconds: float = 0.0
     compact_row_decode_rows: int = 0
+    fast_row_decode_rows: int = 0
+    compact_decode_fallback_rows: int = 0
     legacy_row_decode_rows: int = 0
 
     def metadata(self) -> dict[str, int | float]:
@@ -108,6 +110,8 @@ class _QueryIOMetrics:
             "row_decode_rows": self.row_decode_rows,
             "row_decode_ms": round(self.row_decode_seconds * 1000, 2),
             "compact_row_decode_rows": self.compact_row_decode_rows,
+            "fast_row_decode_rows": self.fast_row_decode_rows,
+            "compact_decode_fallback_rows": self.compact_decode_fallback_rows,
             "legacy_row_decode_rows": self.legacy_row_decode_rows,
         }
 
@@ -161,6 +165,8 @@ class QueryEngine:
         self._row_decode_rows = 0
         self._row_decode_seconds = 0.0
         self._compact_row_decode_rows = 0
+        self._fast_row_decode_rows = 0
+        self._compact_decode_fallback_rows = 0
         self._legacy_row_decode_rows = 0
         self._backfills_triggered = 0
         self.custom_intervals = CustomIntervalQueryService(
@@ -870,6 +876,8 @@ class QueryEngine:
                 "row_decode_rows": self._row_decode_rows,
                 "row_decode_ms": round(self._row_decode_seconds * 1000, 2),
                 "compact_row_decode_rows": self._compact_row_decode_rows,
+                "fast_row_decode_rows": self._fast_row_decode_rows,
+                "compact_decode_fallback_rows": self._compact_decode_fallback_rows,
                 "legacy_row_decode_rows": self._legacy_row_decode_rows,
                 "backfills_triggered": self._backfills_triggered,
             }
@@ -1119,17 +1127,16 @@ class QueryEngine:
         started_at = time.monotonic()
         declared_fields = kline_available_fields(key.exchange, key.market_type)
         compact = bool(rows and isinstance(rows[0], tuple))
+        fast_path_used = False
         try:
             if compact:
-                return [
-                    BarData.from_storage_components(
-                        row,
-                        exchange=key.exchange,
-                        market_type=key.market_type,
-                        declared_fields=declared_fields,
-                    )
-                    for row in rows
-                ]
+                bars, fast_path_used = BarData.from_storage_component_page(
+                    rows,
+                    exchange=key.exchange,
+                    market_type=key.market_type,
+                    declared_fields=declared_fields,
+                )
+                return bars
             return [
                 BarData.from_storage_row(
                     row,
@@ -1146,6 +1153,10 @@ class QueryEngine:
                 io_metrics.row_decode_seconds += elapsed
                 if compact:
                     io_metrics.compact_row_decode_rows += len(rows)
+                    if fast_path_used:
+                        io_metrics.fast_row_decode_rows += len(rows)
+                    else:
+                        io_metrics.compact_decode_fallback_rows += len(rows)
                 else:
                     io_metrics.legacy_row_decode_rows += len(rows)
             with self._metrics_lock:
@@ -1153,6 +1164,10 @@ class QueryEngine:
                 self._row_decode_seconds += elapsed
                 if compact:
                     self._compact_row_decode_rows += len(rows)
+                    if fast_path_used:
+                        self._fast_row_decode_rows += len(rows)
+                    else:
+                        self._compact_decode_fallback_rows += len(rows)
                 else:
                     self._legacy_row_decode_rows += len(rows)
 

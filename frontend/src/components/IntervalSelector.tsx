@@ -1,11 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  canonicalizeIntervalValue,
   formatIntervalDescription,
   formatSecondsCompact,
   getIntervalGroupLabelZh,
   groupIntervalsByDuration,
   INTERVAL_UNITS,
-  normalizeIntervalValue,
+  intervalSemanticSignature,
+  intervalsSemanticallyEquivalent,
   parseIntervalSeconds,
 } from "../utils/intervals";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
@@ -68,17 +70,18 @@ function buildToolbarCustomRecords(
   activeInterval: IntervalString,
 ): CustomIntervalRecord[] {
   const sorted = sortCustomRecords(records);
-  const active = sorted.find((record) => record.value === activeInterval);
+  const active = sorted.find((record) => intervalsSemanticallyEquivalent(record.value, activeInterval));
   const preferred = [
     ...(active ? [active] : []),
-    ...sorted.filter((record) => record.pinned && record.value !== activeInterval),
-    ...sorted.filter((record) => !record.pinned && record.value !== activeInterval),
+    ...sorted.filter((record) => record.pinned && !intervalsSemanticallyEquivalent(record.value, activeInterval)),
+    ...sorted.filter((record) => !record.pinned && !intervalsSemanticallyEquivalent(record.value, activeInterval)),
   ];
 
   const seen = new Set<string>();
   return preferred.filter((record) => {
-    if (seen.has(record.value)) return false;
-    seen.add(record.value);
+    const signature = intervalSemanticSignature(record.value);
+    if (seen.has(signature)) return false;
+    seen.add(signature);
     return true;
   }).slice(0, MAX_TOOLBAR_CUSTOMS);
 }
@@ -109,15 +112,16 @@ function createStatusForValue(
   nativeValueSet: Set<string>,
   customValueSet: Set<string>,
 ): IntervalStatus {
-  const normalized = normalizeIntervalValue(value);
+  const normalized = canonicalizeIntervalValue(value);
   const seconds = parseIntervalSeconds(normalized);
+  const signature = intervalSemanticSignature(normalized);
   if (!normalized || !seconds) {
     return { ok: false, kind: "invalid", text: "请输入大于 0 的数字，并选择 s/m/h/d/w/M 单位。" };
   }
-  if (nativeValueSet.has(normalized)) {
+  if (nativeValueSet.has(signature)) {
     return { ok: false, kind: "native", text: "这是交易所原生周期，可直接选择。" };
   }
-  if (customValueSet.has(normalized)) {
+  if (customValueSet.has(signature)) {
     return { ok: false, kind: "exists", text: "该自定义周期已添加，可直接选择。" };
   }
   return { ok: true, kind: "new", text: `将添加 ${formatIntervalDescription(normalized)} 自定义周期。` };
@@ -164,11 +168,11 @@ function IntervalSelector({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const nativeValueSet = useMemo(
-    () => new Set(nativeIntervals.map((item) => item.value)),
+    () => new Set(nativeIntervals.map((item) => intervalSemanticSignature(item.value))),
     [nativeIntervals],
   );
   const customValueSet = useMemo(
-    () => new Set(savedCustomIntervals),
+    () => new Set(savedCustomIntervals.map(intervalSemanticSignature)),
     [savedCustomIntervals],
   );
   const effectiveCustomRecords = useMemo(
@@ -196,7 +200,7 @@ function IntervalSelector({
     [intervalGroups],
   );
 
-  const normalizedSearch = normalizeIntervalValue(search);
+  const normalizedSearch = canonicalizeIntervalValue(search);
   const searchCreateStatus = useMemo(
     () => createStatusForValue(search, nativeValueSet, customValueSet),
     [customValueSet, nativeValueSet, search],
@@ -228,8 +232,9 @@ function IntervalSelector({
     const seen = new Set();
     return common
       .filter((item) => {
-        if (seen.has(item.value)) return false;
-        seen.add(item.value);
+        const signature = intervalSemanticSignature(item.value);
+        if (seen.has(signature)) return false;
+        seen.add(signature);
         return true;
       })
       .filter((item) => matchesSearch(item, search))
@@ -261,14 +266,14 @@ function IntervalSelector({
   }, [open]);
 
   const selectInterval = useCallback((value: IntervalString) => {
-    onSelectInterval(value);
+    onSelectInterval(canonicalizeIntervalValue(value) || value);
     setOpen(false);
     setSearch("");
     setInlineMessage(null);
   }, [onSelectInterval]);
 
   const createOrSelectInterval = useCallback((value: IntervalString) => {
-    const normalized = normalizeIntervalValue(value);
+    const normalized = canonicalizeIntervalValue(value);
     const status = createStatusForValue(normalized, nativeValueSet, customValueSet);
     if (status.kind === "native" || status.kind === "exists") {
       selectInterval(normalized);
@@ -330,7 +335,7 @@ function IntervalSelector({
     <button
       key={item.value}
       id={`interval-${item.value}`}
-      className={clsx("interval-btn", interval === item.value && "active", item.isCustom && "custom-interval-btn", extraClass)}
+      className={clsx("interval-btn", intervalsSemanticallyEquivalent(interval, item.value) && "active", item.isCustom && "custom-interval-btn", extraClass)}
       onClick={() => selectInterval(item.value)}
       title={item.isCustom ? `自定义周期：${formatIntervalDescription(item.value)}` : item.value}
       type="button"
@@ -342,12 +347,14 @@ function IntervalSelector({
 
   const renderIntervalRow = (item: IntervalItem, index: number): ReactNode => {
     const seconds = item.seconds || parseIntervalSeconds(item.value) || 0;
-    const record = item.record || customIntervalRecords.find((custom) => custom.value === item.value);
+    const record = item.record || customIntervalRecords.find((custom) => (
+      intervalsSemanticallyEquivalent(custom.value, item.value)
+    ));
     const highlighted = index === clampedHighlightIndex;
     return (
       <div
         key={item.value}
-        className={clsx("interval-panel-row", interval === item.value && "active", highlighted && "highlighted")}
+        className={clsx("interval-panel-row", intervalsSemanticallyEquivalent(interval, item.value) && "active", highlighted && "highlighted")}
         onClick={() => selectInterval(item.value)}
         role="button"
         tabIndex={0}
@@ -362,7 +369,7 @@ function IntervalSelector({
           <span className="interval-panel-value">{item.value}</span>
           {item.isCustom && <span className="interval-panel-badge">自定义</span>}
           {record?.pinned && <span className="interval-panel-badge pinned">置顶</span>}
-          {interval === item.value && <span className="interval-panel-badge active">当前</span>}
+          {intervalsSemanticallyEquivalent(interval, item.value) && <span className="interval-panel-badge active">当前</span>}
         </div>
         <div className="interval-panel-meta">
           <span>{formatIntervalDescription(item.value)}</span>

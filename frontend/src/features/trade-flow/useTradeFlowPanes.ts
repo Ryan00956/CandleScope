@@ -72,6 +72,7 @@ export function useTradeFlowPanes(
       bars: seriesStore.snapshot(),
       enabled: true,
       forceFull: false,
+      interval: runtime.view.interval,
       intervalSeconds: seriesStore.intervalSeconds,
       structureRevision: revision.structureRevision,
     });
@@ -79,5 +80,5 @@ export function useTradeFlowPanes(
       (pane.id === "trade-flow-cvd" && cvdVisible)
       || (pane.id === "trade-flow-delta" && deltaVisible)
     ));
-  }, [cvdVisible, deltaVisible, enabled, projection, revision, seriesStore]);
+  }, [cvdVisible, deltaVisible, enabled, projection, revision, runtime.view.interval, seriesStore]);
 }

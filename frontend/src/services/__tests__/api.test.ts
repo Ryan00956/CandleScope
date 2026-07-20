@@ -132,18 +132,37 @@ test("request rejects invalid JSON on a successful response", async (context) =>
 test("exchange endpoints validate the list and capabilities shapes", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
+  const capability = exchangeCapability({
+    capability_schema_version: 3,
+    channels: [{
+      channel: "kline",
+      market_types: ["spot"],
+      history: true,
+      realtime: true,
+      params: { interval: ["1m", "1h"] },
+    }],
+  });
   globalThis.fetch = async (url) => (
     String(url).endsWith("/capabilities")
-      ? jsonResponse(exchangeCapability())
-      : jsonResponse({ count: 1, exchanges: [exchangeCapability()] })
+      ? jsonResponse(capability)
+      : jsonResponse({ count: 1, exchanges: [capability] })
   );
 
   const firstExchange = (await fetchExchanges()).exchanges[0];
   assert.ok(firstExchange);
   assert.equal(firstExchange.exchange, "binance");
-  assert.deepEqual((await fetchExchangeCapabilities()).native_intervals, ["1m", "1h"]);
+  const parsedCapability = await fetchExchangeCapabilities();
+  assert.deepEqual(parsedCapability.native_intervals, ["1m", "1h"]);
+  assert.equal(parsedCapability.capability_schema_version, 3);
+  assert.deepEqual(parsedCapability.channels?.[0]?.params.interval, ["1m", "1h"]);
 
   globalThis.fetch = async () => jsonResponse({ count: 1, exchanges: [{}] });
+  await assert.rejects(() => fetchExchanges(), ApiPayloadError);
+
+  globalThis.fetch = async () => jsonResponse({
+    count: 1,
+    exchanges: [exchangeCapability({ channels: [{ channel: "kline" }] })],
+  });
   await assert.rejects(() => fetchExchanges(), ApiPayloadError);
 });
 

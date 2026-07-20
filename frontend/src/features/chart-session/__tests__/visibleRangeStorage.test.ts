@@ -125,3 +125,99 @@ test("visible ranges write the composite identity key", () => {
     assert.ok(Number.isFinite(entry.savedAt));
   });
 });
+
+test("visible ranges lazily migrate semantic composite aliases onto the canonical key", () => {
+  const aliasKey = "binance::spot::BTCUSDT::60m";
+  const canonicalKey = "binance::spot::BTCUSDT::1h";
+  withLocalStorage({
+    [VISIBLE_RANGE_KEY]: JSON.stringify({
+      [aliasKey]: {
+        barSpacing: 6,
+        rightOffset: 4,
+        rightmostTime: 500,
+        savedAt: 123,
+      },
+    }),
+  }, (storage) => {
+    const expected = {
+      barSpacing: 6,
+      rightOffset: 4,
+      rightmostTime: 500,
+      savedAt: 123,
+    };
+    assert.deepEqual(
+      getVisibleRangeForInterval("BTCUSDT", "1h", "spot", "binance"),
+      expected,
+    );
+    const parsed: unknown = JSON.parse(mustBeDefined(storage.getItem(VISIBLE_RANGE_KEY)));
+    assert.ok(isRecord(parsed));
+    assert.deepEqual(parsed[canonicalKey], expected);
+    assert.deepEqual(parsed[aliasKey], expected);
+    assert.deepEqual(
+      getVisibleRangeForInterval("BTCUSDT", "60m", "spot", "binance"),
+      expected,
+    );
+  });
+});
+
+test("canonical visible range wins over an older alias", () => {
+  withLocalStorage({
+    [VISIBLE_RANGE_KEY]: JSON.stringify({
+      "binance::spot::BTCUSDT::1h": { barSpacing: 9, savedAt: 200 },
+      "binance::spot::BTCUSDT::60m": { barSpacing: 3, savedAt: 100 },
+    }),
+  }, () => {
+    assert.deepEqual(
+      getVisibleRangeForInterval("BTCUSDT", "60m", "spot", "binance"),
+      { barSpacing: 9, savedAt: 200 },
+    );
+  });
+});
+
+test("legacy semantic aliases migrate without deleting the global compatibility key", () => {
+  withLocalStorage({
+    [VISIBLE_RANGE_KEY]: JSON.stringify({
+      "60m": { barSpacing: 7, savedAt: 321 },
+    }),
+  }, (storage) => {
+    assert.deepEqual(
+      getVisibleRangeForInterval("BTCUSDT", "1h", "spot", "binance"),
+      { barSpacing: 7, savedAt: 321 },
+    );
+    const parsed: unknown = JSON.parse(mustBeDefined(storage.getItem(VISIBLE_RANGE_KEY)));
+    assert.ok(isRecord(parsed));
+    assert.ok(Object.prototype.hasOwnProperty.call(parsed, "60m"));
+    assert.deepEqual(parsed["binance::spot::BTCUSDT::1h"], { barSpacing: 7, savedAt: 321 });
+  });
+});
+
+test("visible range canonicalization preserves identity and alignment boundaries", () => {
+  withLocalStorage({
+    [VISIBLE_RANGE_KEY]: JSON.stringify({
+      "binance::spot::ETHUSDT::60m": { barSpacing: 4 },
+      "binance::spot::BTCUSDT::7d": { barSpacing: 5 },
+      "binance::spot::BTCUSDT::30d": { barSpacing: 6 },
+    }),
+  }, () => {
+    assert.equal(getVisibleRangeForInterval("BTCUSDT", "1h", "spot", "binance"), null);
+    assert.equal(getVisibleRangeForInterval("BTCUSDT", "1w", "spot", "binance"), null);
+    assert.equal(getVisibleRangeForInterval("BTCUSDT", "1M", "spot", "binance"), null);
+    assert.equal(getVisibleRangeForInterval("BTCUSDT", "bad", "spot", "binance"), null);
+  });
+});
+
+test("saving an interval alias writes only its canonical composite key", () => {
+  withLocalStorage({}, (storage) => {
+    saveVisibleRangeForInterval(
+      "BTCUSDT",
+      "60m",
+      { barSpacing: 8 },
+      "spot",
+      "binance",
+    );
+    const parsed: unknown = JSON.parse(mustBeDefined(storage.getItem(VISIBLE_RANGE_KEY)));
+    assert.ok(isRecord(parsed));
+    assert.ok(Object.prototype.hasOwnProperty.call(parsed, "binance::spot::BTCUSDT::1h"));
+    assert.equal(Object.prototype.hasOwnProperty.call(parsed, "binance::spot::BTCUSDT::60m"), false);
+  });
+});

@@ -1,6 +1,7 @@
 import type { IndicatorSubPane } from "../indicators/indicatorPaneProjection.js";
 import type { IndicatorValuePoint } from "../indicators/indicatorTypes.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
+import { createIntervalTimeline, type IntervalTimeline } from "../../utils/intervalTimeline.js";
 
 const BUY_COLOR = "#22c55e";
 const SELL_COLOR = "#ef4444";
@@ -23,6 +24,7 @@ export interface KlineOrderFlowProjectionInput {
   bars: readonly KlineBar[];
   enabled: boolean;
   forceFull: boolean;
+  interval?: unknown;
   intervalSeconds: number | null;
   structureRevision?: number;
 }
@@ -47,9 +49,18 @@ function flow(bar: KlineBar | undefined): {
   return { buy, sell, delta, contribution };
 }
 
-function expectedNext(previous: KlineBar | undefined, current: KlineBar | undefined, step: number | null): boolean {
+function expectedNext(
+  previous: KlineBar | undefined,
+  current: KlineBar | undefined,
+  timeline: IntervalTimeline | null,
+): boolean {
   if (!previous || !current) return false;
-  return step === null ? current.time > previous.time : current.time === previous.time + step;
+  return timeline ? timeline.isSuccessor(previous.time, current.time) : current.time > previous.time;
+}
+
+function projectionTimeline(interval: unknown, intervalSeconds: number | null): IntervalTimeline | null {
+  return createIntervalTimeline(interval)
+    ?? createIntervalTimeline(intervalSeconds === null ? null : `${intervalSeconds}s`);
 }
 
 function tailPoint(
@@ -64,14 +75,14 @@ function tailPoint(
   return next;
 }
 
-function fullProjection(bars: readonly KlineBar[], intervalSeconds: number | null): ProjectionState {
+function fullProjection(bars: readonly KlineBar[], timeline: IntervalTimeline | null): ProjectionState {
   const delta: IndicatorValuePoint[] = [];
   const buy: IndicatorValuePoint[] = [];
   const sell: IndicatorValuePoint[] = [];
   let missing = 0;
   let discontinuities = 0;
   for (let index = 1; index < bars.length; index += 1) {
-    if (!expectedNext(bars[index - 1], bars[index], intervalSeconds)) discontinuities += 1;
+    if (!expectedNext(bars[index - 1], bars[index], timeline)) discontinuities += 1;
   }
   for (const bar of bars) {
     const values = flow(bar);
@@ -87,7 +98,7 @@ function fullProjection(bars: readonly KlineBar[], intervalSeconds: number | nul
   let suffixStart = bars.length;
   for (let index = bars.length - 1; index >= 0; index -= 1) {
     if (!flow(bars[index])) break;
-    if (index < bars.length - 1 && !expectedNext(bars[index], bars[index + 1], intervalSeconds)) break;
+    if (index < bars.length - 1 && !expectedNext(bars[index], bars[index + 1], timeline)) break;
     suffixStart = index;
   }
   const cvd: IndicatorValuePoint[] = [];
@@ -115,7 +126,7 @@ function fullProjection(bars: readonly KlineBar[], intervalSeconds: number | nul
 function tailProjection(
   previous: ProjectionState,
   bars: readonly KlineBar[],
-  intervalSeconds: number | null,
+  timeline: IntervalTimeline | null,
 ): ProjectionState | null {
   const bar = bars.at(-1);
   if (!bar
@@ -136,7 +147,7 @@ function tailProjection(
       ? previous.cvd.slice(0, -1)
       : previous.cvd;
     const base = cvdWithoutTail.at(-1);
-    const contiguous = !before || expectedNext(before, bar, intervalSeconds);
+    const contiguous = !before || expectedNext(before, bar, timeline);
     cvdValue = contiguous && (!before || base?.time === before.time)
       ? (base?.value ?? 0) + values.contribution
       : values.contribution;
@@ -264,19 +275,24 @@ export function createKlineOrderFlowProjectionMemo(): {
   let state: ProjectionState | null = null;
   let output: readonly IndicatorSubPane[] = Object.freeze([]);
   let previousStructureRevision = -1;
+  let previousTimelineInterval = "";
   return {
-    project({ bars, enabled, forceFull, intervalSeconds, structureRevision = 0 }) {
+    project({ bars, enabled, forceFull, interval, intervalSeconds, structureRevision = 0 }) {
       if (!enabled) {
         state = null;
         output = Object.freeze([]);
         return output;
       }
-      const structureChanged = structureRevision !== previousStructureRevision;
+      const timeline = projectionTimeline(interval, intervalSeconds);
+      const timelineInterval = timeline?.interval ?? "";
+      const structureChanged = structureRevision !== previousStructureRevision
+        || timelineInterval !== previousTimelineInterval;
       previousStructureRevision = structureRevision;
+      previousTimelineInterval = timelineInterval;
       const next = !forceFull && !structureChanged && state
-        ? tailProjection(state, bars, intervalSeconds)
+        ? tailProjection(state, bars, timeline)
         : null;
-      state = next ?? fullProjection(bars, intervalSeconds);
+      state = next ?? fullProjection(bars, timeline);
       output = panes(state);
       return output;
     },

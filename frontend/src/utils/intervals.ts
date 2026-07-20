@@ -1,5 +1,6 @@
 // Shared interval parsing and display helpers.
 export const CUSTOM_INTERVAL_RE = /^(\d+)([smhdwM])$/;
+export const MAX_CALENDAR_MONTH_INTERVAL = 12_000;
 
 export const INTERVAL_UNIT_SECONDS = {
   s: 1,
@@ -12,10 +13,19 @@ export const INTERVAL_UNIT_SECONDS = {
 
 export type IntervalUnit = keyof typeof INTERVAL_UNIT_SECONDS;
 export type IntervalString = string;
+export type IntervalAlignment = "fixed-epoch" | "weekly-monday" | "calendar-month";
 
 export interface IntervalParts {
   amount: number;
   unit: IntervalUnit;
+}
+
+export interface IntervalSemanticSpec extends IntervalParts {
+  alignment: IntervalAlignment;
+  canonicalValue: IntervalString;
+  widthSeconds: number | null;
+  weekCount: number | null;
+  monthCount: number | null;
 }
 
 export interface IntervalUnitOption {
@@ -55,14 +65,16 @@ export function parseIntervalParts(interval: unknown): IntervalParts | null {
   const unit = match[2];
   if (!amountToken || !unit) return null;
   const amount = parseInt(amountToken, 10);
-  if (!Number.isFinite(amount) || amount <= 0 || !isIntervalUnit(unit)) return null;
+  if (!Number.isSafeInteger(amount) || amount <= 0 || !isIntervalUnit(unit)) return null;
+  if (unit === "M" && amount > MAX_CALENDAR_MONTH_INTERVAL) return null;
   return { amount, unit };
 }
 
 export function parseIntervalSeconds(interval: unknown): number | null {
   const parts = parseIntervalParts(interval);
   if (!parts) return null;
-  return parts.amount * INTERVAL_UNIT_SECONDS[parts.unit];
+  const seconds = parts.amount * INTERVAL_UNIT_SECONDS[parts.unit];
+  return Number.isSafeInteger(seconds) ? seconds : null;
 }
 
 export function normalizeIntervalValue(interval: unknown): IntervalString | "" {
@@ -70,6 +82,73 @@ export function normalizeIntervalValue(interval: unknown): IntervalString | "" {
   const parts = parseIntervalParts(trimmed);
   if (!parts) return "";
   return `${parts.amount}${parts.unit}`;
+}
+
+function canonicalFixedInterval(widthSeconds: number): IntervalString {
+  const units = [
+    ["d", INTERVAL_UNIT_SECONDS.d],
+    ["h", INTERVAL_UNIT_SECONDS.h],
+    ["m", INTERVAL_UNIT_SECONDS.m],
+    ["s", INTERVAL_UNIT_SECONDS.s],
+  ] as const;
+  const unit = units.find(([, seconds]) => widthSeconds % seconds === 0) ?? (["s", 1] as const);
+  return `${widthSeconds / unit[1]}${unit[0]}`;
+}
+
+export function getIntervalSemanticSpec(interval: unknown): IntervalSemanticSpec | null {
+  const parts = parseIntervalParts(interval);
+  if (!parts) return null;
+
+  if (parts.unit === "M") {
+    return {
+      ...parts,
+      alignment: "calendar-month",
+      canonicalValue: `${parts.amount}M`,
+      widthSeconds: null,
+      weekCount: null,
+      monthCount: parts.amount,
+    };
+  }
+
+  if (parts.unit === "w") {
+    if (!Number.isSafeInteger(parts.amount * INTERVAL_UNIT_SECONDS.w)) return null;
+    return {
+      ...parts,
+      alignment: "weekly-monday",
+      canonicalValue: `${parts.amount}w`,
+      widthSeconds: null,
+      weekCount: parts.amount,
+      monthCount: null,
+    };
+  }
+
+  const widthSeconds = parts.amount * INTERVAL_UNIT_SECONDS[parts.unit];
+  if (!Number.isSafeInteger(widthSeconds) || widthSeconds <= 0) return null;
+  return {
+    ...parts,
+    alignment: "fixed-epoch",
+    canonicalValue: canonicalFixedInterval(widthSeconds),
+    widthSeconds,
+    weekCount: null,
+    monthCount: null,
+  };
+}
+
+export function canonicalizeIntervalValue(interval: unknown): IntervalString | "" {
+  return getIntervalSemanticSpec(interval)?.canonicalValue ?? "";
+}
+
+export function intervalSemanticSignature(interval: unknown): string {
+  const spec = getIntervalSemanticSpec(interval);
+  if (!spec) return "";
+  if (spec.alignment === "fixed-epoch") return `${spec.alignment}:${spec.widthSeconds}`;
+  if (spec.alignment === "weekly-monday") return `${spec.alignment}:${spec.weekCount}`;
+  return `${spec.alignment}:${spec.monthCount}`;
+}
+
+export function intervalsSemanticallyEquivalent(left: unknown, right: unknown): boolean {
+  const leftSignature = intervalSemanticSignature(left);
+  return leftSignature !== "" && leftSignature === intervalSemanticSignature(right);
 }
 
 export function getIntervalGroupLabel(seconds: number): string {

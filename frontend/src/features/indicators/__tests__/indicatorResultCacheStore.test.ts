@@ -105,6 +105,13 @@ test("indicator result cache is scoped by chart series context", () => {
   );
 });
 
+test("indicator result cache canonicalizes fixed-duration aliases", () => {
+  assert.equal(
+    buildIndicatorResultCacheKey(maIndicator, { ...baseContext, interval: "60m" }),
+    buildIndicatorResultCacheKey(maIndicator, { ...baseContext, interval: "1h" }),
+  );
+});
+
 test("cache hydration identity changes on re-add but ignores runtime line updates", () => {
   const absent = buildIndicatorCacheHydrationSignature([], baseContext);
   const added = buildIndicatorCacheHydrationSignature([maIndicator], baseContext);

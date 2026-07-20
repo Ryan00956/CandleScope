@@ -19,6 +19,14 @@ test("buildSeriesWindowKey normalizes exchange and market type", () => {
   );
 });
 
+test("window registry key canonicalizes fixed-duration aliases", () => {
+  const base = { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" };
+  assert.equal(
+    buildSeriesWindowKey({ ...base, interval: "60m" }),
+    buildSeriesWindowKey({ ...base, interval: "1h" }),
+  );
+});
+
 test("registry creates, returns, and evicts stores", () => {
   const registry = new SeriesWindowRegistry({ maxBars: 3 });
   const key = buildSeriesWindowKey({ symbol: "BTCUSDT", interval: "1m" });

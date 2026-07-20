@@ -41,6 +41,14 @@ test("initial session keeps valid month intervals and infers an omitted exchange
   });
 });
 
+test("initial session migrates a stored fixed-duration alias", () => {
+  withLocalStorage({
+    [USER_PREFS_KEY]: JSON.stringify({ lastInterval: "60m" }),
+  }, () => {
+    assert.equal(loadInitialChartSession().interval, "1h");
+  });
+});
+
 test("invalid stored interval and identity fields use stable defaults", () => {
   withLocalStorage({
     [USER_PREFS_KEY]: JSON.stringify({

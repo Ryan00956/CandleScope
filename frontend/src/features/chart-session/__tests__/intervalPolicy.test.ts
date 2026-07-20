@@ -102,3 +102,24 @@ test("saved custom provenance is masked when the current exchange supports it na
     nativeIntervals: nativeWithEightHours,
   }), "8h");
 });
+
+test("semantic aliases migrate onto the native canonical interval", () => {
+  const isNative = (_exchange: string, interval: string) => nativeIntervals.some((item) => item.value === interval);
+  assert.deepEqual(getEffectiveCustomIntervalRecords([
+    customInterval("60m", 1),
+    customInterval("24h", 2),
+    customInterval("7d", 3),
+  ], nativeIntervals).map((record) => record.value), ["7d"]);
+  assert.equal(resolveSupportedInterval({
+    exchange: "binance",
+    interval: "60m",
+    exchangeCatalog: {},
+    savedCustomIntervals: ["60m"],
+    nativeIntervals,
+    isNativeIntervalSupported: isNative,
+  }), "1h");
+  assert.equal(getFallbackIntervalAfterCustomClear({
+    interval: "24h",
+    nativeIntervals,
+  }), "1d");
+});

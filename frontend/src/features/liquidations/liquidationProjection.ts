@@ -1,4 +1,4 @@
-import { parseIntervalSeconds } from "../../utils/intervals.js";
+import { createIntervalTimeline, type IntervalTimeline } from "../../utils/intervalTimeline.js";
 import type {
   IndicatorPaneLegendItem,
   IndicatorPanePointMetadata,
@@ -67,7 +67,7 @@ function formatNotional(value: number): string {
 function barIndexAt(
   bars: readonly KlineBar[],
   sampleTimeSeconds: number,
-  intervalSeconds: number,
+  timeline: IntervalTimeline,
 ): number {
   let low = 0;
   let high = bars.length;
@@ -80,7 +80,8 @@ function barIndexAt(
   const index = low - 1;
   const bar = bars[index];
   if (!bar) return -1;
-  const nextTime = bars[index + 1]?.time ?? (bar.time + intervalSeconds);
+  const nextTime = timeline.end(bar.time);
+  if (nextTime === null) return -1;
   return sampleTimeSeconds < nextTime ? index : -1;
 }
 
@@ -138,12 +139,12 @@ export function projectLiquidationsToCandles(
   const sortedEvents = inputsSorted
     ? liveEvents
     : sortedBy(liveEvents, (event) => event.tradeTimeMs);
-  const intervalSeconds = Math.max(60, parseIntervalSeconds(interval) ?? 60);
+  const timeline = createIntervalTimeline(interval) ?? createIntervalTimeline("1m")!;
   const visibleStartMs = sortedBars[0]!.time * 1000;
-  const visibleEndMs = (sortedBars.at(-1)!.time + intervalSeconds) * 1000;
+  const visibleEndMs = (timeline.end(sortedBars.at(-1)!.time) ?? sortedBars.at(-1)!.time) * 1000;
   const buckets = new Map<number, MutableProjectedBucket>();
   const getBucket = (sampleTimeMs: number): MutableProjectedBucket | null => {
-    const index = barIndexAt(sortedBars, sampleTimeMs / 1000, intervalSeconds);
+    const index = barIndexAt(sortedBars, sampleTimeMs / 1000, timeline);
     const bar = sortedBars[index];
     if (!bar) return null;
     let bucket = buckets.get(bar.time);

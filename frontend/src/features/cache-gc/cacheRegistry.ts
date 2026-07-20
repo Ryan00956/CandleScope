@@ -3,6 +3,7 @@ import type {
   CacheRegistrySnapshot,
   CacheResource,
 } from "./cacheGcTypes.js";
+import { canonicalizeIntervalValue } from "../../utils/intervals.js";
 
 const resources = new Map<string, CacheResource>();
 const dependencies = new Map<string, Set<string>>();
@@ -31,7 +32,7 @@ export function klineDependencyKey({
     normalizePart(exchange, "binance").toLowerCase(),
     normalizePart(marketType, "spot").toLowerCase(),
     normalizePart(symbol).toUpperCase(),
-    normalizePart(interval),
+    canonicalizeIntervalValue(interval) || normalizePart(interval),
   ].join(":");
 }
 

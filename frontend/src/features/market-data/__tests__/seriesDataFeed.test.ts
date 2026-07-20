@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SeriesDataFeed as ProductionSeriesDataFeed } from "../feed/seriesDataFeed.js";
+import {
+  capContinuationRanges,
+  countIntervalBarsInRange,
+  projectContinuousRangeToInterval,
+  SeriesDataFeed as ProductionSeriesDataFeed,
+} from "../feed/seriesDataFeed.js";
 import type {
   BackfillCompletedMessage,
   BackfillCompletedOptions,
   FeedResult,
   KlineApi,
+  KlineFetchResult,
   KlineHistoryRequestOptions,
   KlineStreamTickEvent,
   KlineStreamSocket,
@@ -36,6 +42,34 @@ const SERIES = {
   symbol: "BTCUSDT",
   interval: "1h",
 };
+
+test("monthly feed helpers use absolute month anchors and calendar successors", () => {
+  const oct2023Ms = Date.UTC(2023, 9, 1);
+  const mar2024Ms = Date.UTC(2024, 2, 1);
+  assert.deepEqual(projectContinuousRangeToInterval({
+    start: Date.UTC(2024, 0, 15) as never,
+    end: Date.UTC(2024, 5, 15) as never,
+  }, "5M"), {
+    start: oct2023Ms,
+    end: mar2024Ms,
+  });
+
+  const jan2023 = epochSeconds(Date.UTC(2023, 0, 1) / 1_000);
+  const feb2023 = epochSeconds(Date.UTC(2023, 1, 1) / 1_000);
+  const mar2023 = epochSeconds(Date.UTC(2023, 2, 1) / 1_000);
+  assert.equal(countIntervalBarsInRange({ start: jan2023, end: mar2023 }, "1M"), 3);
+  assert.deepEqual(capContinuationRanges(
+    { start: jan2023, end: mar2023 },
+    {
+      missing_ranges: [{
+        start_ms: feb2023 * 1_000,
+        end_ms: mar2023 * 1_000,
+      }],
+    } as KlineFetchResult,
+    jan2023,
+    "1M",
+  ), [{ start: jan2023, end: mar2023 }]);
+});
 
 function rows(times: number[]): KlineBar[] {
   return times.map((time) => ({ time: epochSeconds(time), close: time }));

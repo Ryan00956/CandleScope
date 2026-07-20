@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks.js";
-import { parseIntervalSeconds } from "../../utils/intervals.js";
+import { intervalsSemanticallyEquivalent, parseIntervalSeconds } from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type {
@@ -223,7 +223,7 @@ export function useKlineStreamRuntime({
             },
             onStreamStatus: (msg) => {
               if (!active) return;
-              if (msg.interval === intervalRef.current) {
+              if (intervalsSemanticallyEquivalent(msg.interval, intervalRef.current)) {
                 if (msg.status === "live") {
                   setWsStatus("live");
                   markPerfOnce("ws.kline.live", {
@@ -249,7 +249,7 @@ export function useKlineStreamRuntime({
                 updateRealtimePrice(tick.close);
               }
 
-              if (msgInterval === currentIntv) {
+              if (intervalsSemanticallyEquivalent(msgInterval, currentIntv)) {
                 // The active interval shares one window store with the cache;
                 // commitPatchedChartData applies the tick and keeps React
                 // meta (barCount, coverage) in sync. Applying it twice via

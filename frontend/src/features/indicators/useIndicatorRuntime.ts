@@ -1210,6 +1210,7 @@ export function useIndicatorRuntime(
       range: { start: startSec, end: requestEndSec },
       reason,
       revision,
+      interval: requestContext.interval,
       step,
       getCoveredSegments: (target) => getCachedIndicatorComputedSegments(
         target.indicator,

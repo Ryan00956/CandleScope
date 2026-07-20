@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { fetchExchanges } from "../../services/api.js";
 import type { ExchangeCapabilityPayload } from "../../services/apiPayloadParsers.js";
-import { groupIntervalsByDuration, parseIntervalSeconds } from "../../utils/intervals.js";
+import {
+  canonicalizeIntervalValue,
+  groupIntervalsByDuration,
+  intervalSemanticSignature,
+  intervalsSemanticallyEquivalent,
+  parseIntervalSeconds,
+} from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import type {
   AvailableInterval,
@@ -12,12 +18,14 @@ import type {
   GroupedAvailableIntervals,
   IntervalDayMap,
   NativeInterval,
+  NativeIntervalPurpose,
 } from "./chartSessionTypes.js";
 
 interface ExchangeIntervalFallback {
   label: string;
   intervals: NativeInterval[];
   intervalDays: IntervalDayMap;
+  unsupportedIntervalsByMarket?: Record<string, IntervalString[]>;
 }
 
 const EXCHANGE_INTERVALS: Record<string, ExchangeIntervalFallback> = {
@@ -45,6 +53,9 @@ const EXCHANGE_INTERVALS: Record<string, ExchangeIntervalFallback> = {
       "1s": 0.04, "1m": 1, "3m": 2, "5m": 3, "15m": 7, "30m": 14,
       "1h": 30, "2h": 60, "4h": 90, "6h": 120, "8h": 180, "12h": 180,
       "1d": 365, "3d": 730, "1w": 1095, "1M": 1095,
+    },
+    unsupportedIntervalsByMarket: {
+      futures: ["1s"],
     },
   },
   okx: {
@@ -88,7 +99,8 @@ function normalizeIntervalDayMap(value: unknown): IntervalDayMap {
       const days = item.days ?? item.history_days ?? item.default_days;
       if ((typeof interval !== "string" && typeof interval !== "number")
         || !Number.isFinite(Number(days))) continue;
-      entries.push([String(interval), Number(days)]);
+      const canonical = canonicalizeIntervalValue(interval);
+      if (canonical) entries.push([canonical, Number(days)]);
     }
     return Object.fromEntries(entries);
   }
@@ -96,7 +108,10 @@ function normalizeIntervalDayMap(value: unknown): IntervalDayMap {
   return Object.fromEntries(
     Object.entries(value)
       .filter(([, days]) => Number.isFinite(Number(days)))
-      .map(([interval, days]) => [interval, Number(days)]),
+      .flatMap(([interval, days]) => {
+        const canonical = canonicalizeIntervalValue(interval);
+        return canonical ? [[canonical, Number(days)] as [string, number]] : [];
+      }),
   );
 }
 
@@ -119,12 +134,23 @@ function labelInterval(value: unknown): string {
 }
 
 function intervalItemFromValue(value: unknown): NativeInterval | null {
-  const seconds = parseIntervalSeconds(value);
+  const canonical = canonicalizeIntervalValue(value);
+  const seconds = parseIntervalSeconds(canonical);
   if (!seconds) return null;
-  return { value: String(value), label: labelInterval(value), seconds };
+  return { value: canonical, label: labelInterval(canonical), seconds };
 }
 
-function buildExchangeCatalog(
+function uniqueNativeIntervals(intervals: readonly NativeInterval[]): NativeInterval[] {
+  const seen = new Set<string>();
+  return intervals.filter((interval) => {
+    const signature = intervalSemanticSignature(interval.value);
+    if (!signature || seen.has(signature)) return false;
+    seen.add(signature);
+    return true;
+  });
+}
+
+export function buildExchangeCatalog(
   exchanges: readonly ExchangeCapabilityPayload[],
 ): ExchangeCatalog {
   const catalog: ExchangeCatalog = {};
@@ -141,7 +167,7 @@ function buildExchangeCatalog(
       id: exchangeId,
       label: item.name || fallback?.label || labelInterval(exchangeId),
       markets: Array.isArray(item.markets) ? item.markets : [],
-      nativeIntervals: intervals.length > 0 ? intervals : (fallback?.intervals || []),
+      nativeIntervals: uniqueNativeIntervals(intervals),
       intervalDays: Object.keys(capabilityIntervalDays).length > 0
         ? capabilityIntervalDays
         : fallbackIntervalDays,
@@ -158,6 +184,48 @@ function buildExchangeCatalog(
   return catalog;
 }
 
+function getCapabilityKlineIntervals(
+  config: ExchangeCatalogEntry,
+  marketType: unknown,
+  purpose: NativeIntervalPurpose,
+): NativeInterval[] {
+  const capability = config.raw;
+  if (!capability) {
+    const normalizedMarketType = String(marketType || "spot").toLowerCase();
+    const unsupported = EXCHANGE_INTERVALS[config.id]
+      ?.unsupportedIntervalsByMarket?.[normalizedMarketType] || [];
+    return uniqueNativeIntervals(config.nativeIntervals).filter((item) => (
+      !unsupported.some((value) => intervalsSemanticallyEquivalent(value, item.value))
+    ));
+  }
+
+  if (!Array.isArray(capability.channels)) {
+    const schemaVersion = Number(capability.capability_schema_version ?? 1);
+    return Number.isInteger(schemaVersion) && schemaVersion === 1
+      ? uniqueNativeIntervals(config.nativeIntervals)
+      : [];
+  }
+
+  const normalizedMarketType = String(marketType || "spot").toLowerCase();
+  const intervals: NativeInterval[] = [];
+  for (const channel of capability.channels) {
+    if (channel.channel.toLowerCase() !== "kline") continue;
+    if (!channel.market_types.some((value) => value.toLowerCase() === normalizedMarketType)) continue;
+    if (!channel[purpose]) continue;
+    const configuredIntervals = channel.params.interval;
+    const values = Array.isArray(configuredIntervals)
+      ? configuredIntervals
+      : typeof configuredIntervals === "string"
+        ? [configuredIntervals]
+        : [];
+    for (const value of values) {
+      const interval = intervalItemFromValue(value);
+      if (interval) intervals.push(interval);
+    }
+  }
+  return uniqueNativeIntervals(intervals);
+}
+
 export function getExchangeConfig(
   exchange: unknown,
   catalog: ExchangeCatalog | null = null,
@@ -168,7 +236,6 @@ export function getExchangeConfig(
     label: EXCHANGE_INTERVALS[key]?.label || labelInterval(key),
     markets: [],
     nativeIntervals: EXCHANGE_INTERVALS[key]?.intervals
-      || EXCHANGE_INTERVALS["binance"]?.intervals
       || [],
     intervalDays: EXCHANGE_INTERVALS[key]?.intervalDays || {},
     intervalDaysSource: "fallback",
@@ -183,32 +250,50 @@ export function getExchangeConfig(
 export function getNativeIntervals(
   exchange: unknown,
   catalog: ExchangeCatalog | null = null,
+  marketType: unknown = "spot",
+  purpose: NativeIntervalPurpose = "history",
 ): NativeInterval[] {
-  return getExchangeConfig(exchange, catalog).nativeIntervals;
+  return getCapabilityKlineIntervals(
+    getExchangeConfig(exchange, catalog),
+    marketType,
+    purpose,
+  );
 }
 
 export function getBaseWsIntervals(
   exchange: unknown,
   catalog: ExchangeCatalog | null = null,
+  marketType: unknown = "spot",
 ): IntervalString[] {
   const config = getExchangeConfig(exchange, catalog);
   if (config.protocolFeatures.has("ws.polling_only") || config.wsConnectionModel === "polling_only") {
     return [];
   }
-  return config.nativeIntervals.map((i) => i.value);
+  return getNativeIntervals(exchange, catalog, marketType, "realtime").map((item) => (
+    canonicalizeIntervalValue(item.value) || item.value
+  ));
 }
 
 export function buildSortedIntervals(
   savedCustom: readonly IntervalString[],
   exchange: unknown = "binance",
   catalog: ExchangeCatalog | null = null,
+  marketType: unknown = "spot",
 ): GroupedAvailableIntervals {
-  const native = getNativeIntervals(exchange, catalog);
-  const all: AvailableInterval[] = native.map((i) => ({ ...i, isCustom: false }));
+  const native = getNativeIntervals(exchange, catalog, marketType, "history");
+  const all: AvailableInterval[] = uniqueNativeIntervals(native).map((item) => ({
+    ...item,
+    value: canonicalizeIntervalValue(item.value) || item.value,
+    isCustom: false,
+  }));
+  const seen = new Set(all.map((item) => intervalSemanticSignature(item.value)));
   for (const intv of savedCustom) {
-    const secs = parseIntervalSeconds(intv);
-    if (secs && !all.some((a) => a.value === intv)) {
-      all.push({ value: intv, label: intv, seconds: secs, isCustom: true });
+    const canonical = canonicalizeIntervalValue(intv);
+    const signature = intervalSemanticSignature(canonical);
+    const secs = parseIntervalSeconds(canonical);
+    if (canonical && signature && secs && !seen.has(signature)) {
+      seen.add(signature);
+      all.push({ value: canonical, label: canonical, seconds: secs, isCustom: true });
     }
   }
   return groupIntervalsByDuration(all);
@@ -220,7 +305,11 @@ export function getIntervalDays(
   catalog: ExchangeCatalog | null = null,
 ): number {
   const config = getExchangeConfig(exchange, catalog);
-  if (config.intervalDays[intv]) return config.intervalDays[intv];
+  const canonical = canonicalizeIntervalValue(intv) || intv;
+  if (config.intervalDays[canonical]) return config.intervalDays[canonical];
+  const equivalentDays = Object.entries(config.intervalDays)
+    .find(([value]) => intervalsSemanticallyEquivalent(value, canonical))?.[1];
+  if (equivalentDays) return equivalentDays;
   const secs = parseIntervalSeconds(intv);
   if (!secs) return 7;
   if (secs <= 1) return 1;
@@ -238,8 +327,11 @@ export function isNativeIntervalSupported(
   exchange: unknown,
   interval: IntervalString,
   catalog: ExchangeCatalog | null = null,
+  marketType: unknown = "spot",
+  purpose: NativeIntervalPurpose = "history",
 ): boolean {
-  return getNativeIntervals(exchange, catalog).some((item) => item.value === interval);
+  return getNativeIntervals(exchange, catalog, marketType, purpose)
+    .some((item) => intervalsSemanticallyEquivalent(item.value, interval));
 }
 
 export function useExchangeCatalog(): ExchangeCatalogRuntime {

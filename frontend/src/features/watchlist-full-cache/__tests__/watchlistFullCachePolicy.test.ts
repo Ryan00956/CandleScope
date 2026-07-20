@@ -12,6 +12,7 @@ import type {
   FullCacheTargetOptions,
 } from "../watchlistFullCacheTypes.js";
 import { mustBeDefined } from "../../../test/testHelpers.js";
+import { buildExchangeCatalog } from "../../chart-session/exchangeCatalogRuntime.js";
 
 test("prioritizeFullCacheIntervals puts current and common intervals first", () => {
   assert.deepEqual(
@@ -102,6 +103,23 @@ test("buildFullCachePreloadJobs excludes the active series before applying the c
 });
 
 test("buildWatchlistFullSocketTargets ignores current interval priority", () => {
+  const exchangeCatalog = buildExchangeCatalog([{
+    exchange: "binance",
+    name: "Binance",
+    capability_schema_version: 3,
+    markets: [{ market_type: "spot", product_type: "spot", label: "Spot" }],
+    native_intervals: ["1m", "1h"],
+    channels: [{
+      channel: "kline",
+      market_types: ["spot"],
+      history: true,
+      realtime: true,
+      params: { interval: ["1m", "1h"] },
+    }],
+    protocol_features: [],
+    limits: {},
+    known_limitations: [],
+  }]);
   const base: Omit<FullCacheTargetOptions, "currentSession"> = {
     watchlists: [
       {
@@ -115,6 +133,7 @@ test("buildWatchlistFullSocketTargets ignores current interval priority", () => 
       "spot:BTCUSDT": "full",
     },
     nativeIntervals: [{ value: "1m" }, { value: "1h" }],
+    exchangeCatalog,
     customIntervalRecords: [{ value: "45m" }],
   };
   const oneHourTargets = buildWatchlistFullCacheTargets({
@@ -156,4 +175,68 @@ test("buildWatchlistFullSocketTargets ignores current interval priority", () => 
   );
   assert.deepEqual(oneHourSocketTargets, customSocketTargets);
   assert.deepEqual(mustBeDefined(oneHourSocketTargets[0]).intervals, ["1m", "1h", "45m"]);
+});
+
+test("full-cache REST and WebSocket targets honor history and realtime capabilities", () => {
+  const exchangeCatalog = buildExchangeCatalog([{
+    exchange: "split",
+    name: "Split",
+    capability_schema_version: 3,
+    markets: [
+      { market_type: "spot", product_type: "spot", label: "Spot" },
+      { market_type: "futures", product_type: "perpetual", label: "Futures" },
+    ],
+    native_intervals: ["1m", "5m"],
+    channels: [
+      {
+        channel: "kline",
+        market_types: ["spot"],
+        history: true,
+        realtime: false,
+        params: { interval: ["1m"] },
+      },
+      {
+        channel: "kline",
+        market_types: ["futures"],
+        history: false,
+        realtime: true,
+        params: { interval: ["5m"] },
+      },
+    ],
+    protocol_features: [],
+    limits: {},
+    known_limitations: [],
+  }]);
+  const options: FullCacheTargetOptions = {
+    watchlists: [{
+      id: "default",
+      name: "Watchlist",
+      color: "#3b82f6",
+      symbols: ["split:spot:HISTORY", "split:futures:LIVE"],
+    }],
+    subscriptionTiers: {
+      "split:spot:HISTORY": "full",
+      "split:futures:LIVE": "full",
+    },
+    exchangeCatalog,
+    customIntervalRecords: [{ value: "45m" }],
+  };
+
+  const historyTargets = buildWatchlistFullCacheTargets(options);
+  assert.deepEqual(historyTargets.map((target) => ({
+    symbolKey: target.symbolKey,
+    intervals: target.intervals,
+  })), [{
+    symbolKey: "split:spot:HISTORY",
+    intervals: ["1m", "45m"],
+  }]);
+
+  const realtimeTargets = buildWatchlistFullSocketTargets(options);
+  assert.deepEqual(realtimeTargets.map((target) => ({
+    symbolKey: target.symbolKey,
+    intervals: target.intervals,
+  })), [{
+    symbolKey: "split:futures:LIVE",
+    intervals: ["5m", "45m"],
+  }]);
 });

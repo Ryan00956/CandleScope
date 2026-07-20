@@ -1,10 +1,16 @@
-import { parseIntervalSeconds } from "../../utils/intervals.js";
+import {
+  canonicalizeIntervalValue,
+  intervalSemanticSignature,
+  intervalsSemanticallyEquivalent,
+  parseIntervalSeconds,
+} from "../../utils/intervals.js";
 import type {
   CustomIntervalRecord,
   ExchangeCatalog,
   ExchangeConfig,
   ExchangeId,
   IntervalString,
+  MarketType,
   NativeInterval,
   NativeIntervalSupport,
 } from "./chartSessionTypes.js";
@@ -19,7 +25,7 @@ export function getFallbackNativeInterval(
   nativeIntervals: readonly NativeInterval[],
   preferredInterval: IntervalString = "1h",
 ): IntervalString {
-  return nativeIntervals.find((item) => item.value === preferredInterval)?.value
+  return nativeIntervals.find((item) => intervalsSemanticallyEquivalent(item.value, preferredInterval))?.value
     || nativeIntervals[0]?.value
     || preferredInterval;
 }
@@ -28,12 +34,13 @@ export function getEffectiveCustomIntervalRecords(
   customIntervalRecords: readonly CustomIntervalRecord[],
   nativeIntervals: readonly NativeInterval[],
 ): CustomIntervalRecord[] {
-  const nativeValues = new Set(nativeIntervals.map((item) => item.value));
-  return customIntervalRecords.filter((record) => !nativeValues.has(record.value));
+  const nativeValues = new Set(nativeIntervals.map((item) => intervalSemanticSignature(item.value)));
+  return customIntervalRecords.filter((record) => !nativeValues.has(intervalSemanticSignature(record.value)));
 }
 
 export interface ResolveSupportedIntervalOptions {
   exchange: ExchangeId;
+  marketType?: MarketType;
   interval: IntervalString;
   exchangeCatalog: ExchangeCatalog | null;
   savedCustomIntervals: readonly IntervalString[];
@@ -43,14 +50,20 @@ export interface ResolveSupportedIntervalOptions {
 
 export function resolveSupportedInterval({
   exchange,
+  marketType,
   interval,
   exchangeCatalog,
   savedCustomIntervals,
   nativeIntervals,
   isNativeIntervalSupported,
 }: ResolveSupportedIntervalOptions): IntervalString {
-  if (isNativeIntervalSupported(exchange, interval, exchangeCatalog)) return interval;
-  if (savedCustomIntervals.includes(interval)) return interval;
+  const native = nativeIntervals.find((item) => intervalsSemanticallyEquivalent(item.value, interval));
+  if (native) return native.value;
+  if (isNativeIntervalSupported(exchange, interval, exchangeCatalog, marketType, "history")) {
+    return canonicalizeIntervalValue(interval) || interval;
+  }
+  const custom = savedCustomIntervals.find((item) => intervalsSemanticallyEquivalent(item, interval));
+  if (custom) return canonicalizeIntervalValue(custom) || custom;
   return getFallbackNativeInterval(nativeIntervals, "1h");
 }
 
@@ -59,6 +72,8 @@ export interface CustomIntervalRemoveFallbackOptions {
   customIntervalRecords: readonly CustomIntervalRecord[];
   nativeIntervals: readonly NativeInterval[];
   exchange: ExchangeId;
+  marketType?: MarketType;
+  exchangeCatalog?: ExchangeCatalog | null;
   isNativeIntervalSupported: NativeIntervalSupport;
 }
 
@@ -67,22 +82,36 @@ export function getFallbackIntervalAfterCustomRemove({
   customIntervalRecords,
   nativeIntervals,
   exchange,
+  marketType,
+  exchangeCatalog = null,
   isNativeIntervalSupported,
 }: CustomIntervalRemoveFallbackOptions): IntervalString {
-  if (isNativeIntervalSupported(exchange, removedInterval)) return removedInterval;
+  const nativeEquivalent = nativeIntervals.find((item) => (
+    intervalsSemanticallyEquivalent(item.value, removedInterval)
+  ));
+  if (nativeEquivalent) return nativeEquivalent.value;
+  if (isNativeIntervalSupported(
+    exchange,
+    removedInterval,
+    exchangeCatalog,
+    marketType,
+    "history",
+  )) return removedInterval;
 
   const recentCustom = customIntervalRecords
-    .filter((record) => record.value !== removedInterval)
+    .filter((record) => !intervalsSemanticallyEquivalent(record.value, removedInterval))
     .sort((left, right) => (right.lastUsedAt || 0) - (left.lastUsedAt || 0))[0];
   if (recentCustom) return recentCustom.value;
 
   const removedSeconds = parseIntervalSeconds(removedInterval);
   if (!removedSeconds) {
-    return isNativeIntervalSupported(exchange, "1h") ? "1h" : nativeIntervals[0]?.value || "1m";
+    return isNativeIntervalSupported(exchange, "1h", exchangeCatalog, marketType, "history")
+      ? "1h"
+      : nativeIntervals[0]?.value || "1m";
   }
 
   return [...nativeIntervals]
-    .filter((item) => item.value !== removedInterval)
+    .filter((item) => !intervalsSemanticallyEquivalent(item.value, removedInterval))
     .sort((left, right) => Math.abs(left.seconds - removedSeconds) - Math.abs(right.seconds - removedSeconds))[0]?.value
     || "1h";
 }
@@ -96,7 +125,8 @@ export function getFallbackIntervalAfterCustomClear({
   interval,
   nativeIntervals,
 }: CustomIntervalClearFallbackOptions): IntervalString {
-  if (nativeIntervals.some((item) => item.value === interval)) return interval;
+  const native = nativeIntervals.find((item) => intervalsSemanticallyEquivalent(item.value, interval));
+  if (native) return native.value;
   const currentSeconds = parseIntervalSeconds(interval);
   if (!currentSeconds) return "1h";
   return [...nativeIntervals]

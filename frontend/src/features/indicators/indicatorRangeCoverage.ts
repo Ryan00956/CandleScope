@@ -1,4 +1,5 @@
 import { isIndicatorRecord } from "./indicatorContracts.js";
+import { createIntervalTimeline } from "../../utils/intervalTimeline.js";
 import type {
   IndicatorRange,
   IndicatorRangeOptions,
@@ -14,6 +15,18 @@ function finiteBoundary(value: unknown): number | null {
 function finiteStep(value: unknown): number {
   const normalized = Math.floor(Number(value));
   return Number.isFinite(normalized) && normalized > 0 ? normalized : 1;
+}
+
+function rangeNavigation(options: IndicatorRangeOptions): {
+  next: (value: number) => number;
+  previous: (value: number) => number;
+} {
+  const step = finiteStep(options.step);
+  const timeline = createIntervalTimeline(options.interval);
+  return {
+    next: (value) => timeline?.next(value) ?? (value + step),
+    previous: (value) => timeline?.previous(value) ?? (value - step),
+  };
 }
 
 function firstDefined(...values: unknown[]): unknown {
@@ -114,7 +127,7 @@ export function mergeIndicatorRangeSegments(
   segments: readonly unknown[] = [],
   options: IndicatorRangeOptions = {},
 ): IndicatorRangeSegment[] {
-  const step = finiteStep(options.step);
+  const navigation = rangeNavigation(options);
   const desiredRevision = normalizeIndicatorRevision(options.revision);
   const normalized: IndicatorRangeSegment[] = [];
   for (const segment of segments) {
@@ -130,7 +143,7 @@ export function mergeIndicatorRangeSegments(
     const previous = merged[merged.length - 1];
     if (
       previous
-      && segment.start <= previous.end + step
+      && segment.start <= navigation.next(previous.end)
       && sameRevision(previous.revision, segment.revision)
     ) {
       previous.end = Math.max(previous.end, segment.end);
@@ -148,9 +161,10 @@ export function subtractIndicatorRange(
 ): IndicatorRange[] {
   const desired = normalizeIndicatorRange(desiredInput);
   if (!desired) return [];
-  const step = finiteStep(options.step);
+  const navigation = rangeNavigation(options);
   const covered = mergeIndicatorRangeSegments(coveredSegments, {
-    step,
+    interval: options.interval,
+    step: options.step,
     revision: options.revision,
   });
   const missing: IndicatorRange[] = [];
@@ -159,10 +173,10 @@ export function subtractIndicatorRange(
     if (segment.end < cursor) continue;
     if (segment.start > desired.end) break;
     if (segment.start > cursor) {
-      const missingEnd = Math.min(desired.end, segment.start - step);
+      const missingEnd = Math.min(desired.end, navigation.previous(segment.start));
       if (cursor <= missingEnd) missing.push({ start: cursor, end: missingEnd });
     }
-    cursor = Math.max(cursor, segment.end + step);
+    cursor = Math.max(cursor, navigation.next(segment.end));
     if (cursor > desired.end) break;
   }
   if (cursor <= desired.end) missing.push({ start: cursor, end: desired.end });
@@ -184,11 +198,15 @@ export function invalidateIndicatorRangeSegments(
 ): IndicatorRangeSegment[] {
   const dirty = normalizeIndicatorRange(dirtyInput);
   if (!dirty) return mergeIndicatorRangeSegments(segments, options);
-  const step = finiteStep(options.step);
+  const navigation = rangeNavigation(options);
+  const adjacencyOptions: IndicatorRangeOptions = {
+    interval: options.interval,
+    step: options.step,
+  };
   const cascadeRight = options.cascadeRight !== false;
   const nextRevision = normalizeIndicatorRevision(options.revision);
   const kept: IndicatorRangeSegment[] = [];
-  for (const segment of mergeIndicatorRangeSegments(segments, { step })) {
+  for (const segment of mergeIndicatorRangeSegments(segments, adjacencyOptions)) {
     if (segment.end < dirty.start) {
       kept.push({ ...segment, ...(nextRevision ? { revision: nextRevision } : {}) });
       continue;
@@ -197,7 +215,7 @@ export function invalidateIndicatorRangeSegments(
       kept.push({ ...segment, ...(nextRevision ? { revision: nextRevision } : {}) });
       continue;
     }
-    const leftEnd = dirty.start - step;
+    const leftEnd = navigation.previous(dirty.start);
     if (segment.start <= leftEnd) {
       kept.push({
         start: segment.start,
@@ -206,7 +224,7 @@ export function invalidateIndicatorRangeSegments(
       });
     }
     if (!cascadeRight) {
-      const rightStart = dirty.end + step;
+      const rightStart = navigation.next(dirty.end);
       if (segment.end >= rightStart) {
         kept.push({
           start: Math.max(segment.start, rightStart),
@@ -216,7 +234,7 @@ export function invalidateIndicatorRangeSegments(
       }
     }
   }
-  return mergeIndicatorRangeSegments(kept, { step });
+  return mergeIndicatorRangeSegments(kept, adjacencyOptions);
 }
 
 export function indicatorRangeRightEdge(

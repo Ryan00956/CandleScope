@@ -86,3 +86,28 @@ test("CVD status reports a time-axis discontinuity even when every bar has flow 
   assert.match(panes[0]?.statusText || "", /1 处时间缺口/);
   assert.equal(panes[0]?.pointMetadata?.[0]?.qualityLabel, "最近连续段锚定 0");
 });
+
+test("monthly CVD treats leap-month successors as contiguous and real month gaps as gaps", () => {
+  const jan = Date.UTC(2024, 0, 1) / 1_000;
+  const feb = Date.UTC(2024, 1, 1) / 1_000;
+  const mar = Date.UTC(2024, 2, 1) / 1_000;
+  const projection = createKlineOrderFlowProjectionMemo();
+  const contiguous = projection.project({
+    bars: [bar(jan, 1), bar(feb, 2), bar(mar, 3)],
+    enabled: true,
+    forceFull: true,
+    interval: "1M",
+    intervalSeconds: 2_592_000,
+  });
+  assert.deepEqual(cvdValues(contiguous), [1, 3, 6]);
+
+  const gap = projection.project({
+    bars: [bar(jan, 1), bar(mar, 3)],
+    enabled: true,
+    forceFull: true,
+    interval: "1M",
+    intervalSeconds: 2_592_000,
+  });
+  assert.deepEqual(cvdValues(gap), [3]);
+  assert.match(gap[0]?.statusText || "", /1 处时间缺口/);
+});

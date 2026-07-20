@@ -9,6 +9,7 @@ import {
   toEpochMilliseconds,
   toEpochSeconds,
 } from "./marketDataTypes.js";
+import { intervalsSemanticallyEquivalent } from "../../utils/intervals.js";
 
 export function numericRange(start: unknown, end: unknown): TimeRangeMs | null {
   const startValue = toEpochMilliseconds(start);
@@ -70,6 +71,6 @@ export function isSameSeries(
     String(a.exchange || "").toLowerCase() === String(b.exchange || "").toLowerCase()
     && String(a.marketType || "").toLowerCase() === String(b.marketType || "").toLowerCase()
     && String(a.symbol || "").toUpperCase() === String(b.symbol || "").toUpperCase()
-    && a.interval === b.interval
+    && intervalsSemanticallyEquivalent(a.interval, b.interval)
   );
 }

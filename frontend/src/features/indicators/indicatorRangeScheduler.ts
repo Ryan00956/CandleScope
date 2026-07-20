@@ -54,6 +54,7 @@ interface EnsureCoverageOptions<TTarget, TResult> {
   apply?: (context: SchedulerApplyContext<TTarget, TResult>) => void | Promise<void>;
   execute?: (context: SchedulerExecutionContext<TTarget>) => TResult | Promise<TResult>;
   getCoveredSegments?: (target: TTarget) => readonly IndicatorRangeSegment[];
+  interval?: unknown;
   onError?: (error: unknown, context: Pick<SchedulerExecutionContext<TTarget>, "range" | "reason" | "target">) => void;
   onSettled?: SchedulerSettlementListener<TTarget, TResult>;
   range?: unknown;
@@ -69,6 +70,7 @@ interface SchedulerEntry<TTarget, TResult> {
   epoch: number;
   execute: NonNullable<EnsureCoverageOptions<TTarget, TResult>["execute"]>;
   getCoveredSegments?: EnsureCoverageOptions<TTarget, TResult>["getCoveredSegments"];
+  interval?: unknown;
   listeners: Set<SchedulerSettlementListener<TTarget, TResult>>;
   onError?: EnsureCoverageOptions<TTarget, TResult>["onError"];
   ranges: IndicatorRange[];
@@ -292,7 +294,8 @@ export function createIndicatorRangeScheduler<
     for (const entry of batch) {
       if (entry.epoch !== epoch || entry.sessionKey !== sessionKey) continue;
       const step = positiveStep(entry.step);
-      const desiredRanges = mergeIndicatorRangeSegments(entry.ranges, { step });
+      const rangeOptions = { interval: entry.interval, step };
+      const desiredRanges = mergeIndicatorRangeSegments(entry.ranges, rangeOptions);
       const cachedSegments = entry.getCoveredSegments?.(entry.target) || [];
       const activeTasks = activeTasksFor(entry.targetKey, entry.revision);
       const inFlightSegments = activeSegmentsFor(activeTasks);
@@ -300,9 +303,9 @@ export function createIndicatorRangeScheduler<
         desiredRanges.flatMap((range) => subtractIndicatorRange(
           range,
           cachedSegments,
-          { step, revision: entry.revision },
+          { ...rangeOptions, revision: entry.revision },
         )),
-        { step },
+        rangeOptions,
       );
       const reason = selectReason(entry.reasons);
       if (neededBeyondCache.length === 0) {
@@ -321,9 +324,9 @@ export function createIndicatorRangeScheduler<
         neededBeyondCache.flatMap((range) => subtractIndicatorRange(
           range,
           inFlightSegments,
-          { step, revision: entry.revision },
+          { ...rangeOptions, revision: entry.revision },
         )),
-        { step },
+        rangeOptions,
       );
       const requiredTasks = [...relevantActiveTasks];
       for (const range of missing) {
@@ -352,6 +355,7 @@ export function createIndicatorRangeScheduler<
     apply,
     execute,
     getCoveredSegments,
+    interval,
     onError,
     onSettled,
     range: rangeInput,
@@ -385,6 +389,7 @@ export function createIndicatorRangeScheduler<
           epoch: nextEpoch,
           execute,
           getCoveredSegments,
+          interval,
           listeners: new Set<SchedulerSettlementListener<TTarget, TResult>>(),
           onError,
           ranges: [],
@@ -397,6 +402,7 @@ export function createIndicatorRangeScheduler<
         };
         pending.set(pendingKey, entry);
       }
+      entry.interval = interval;
       entry.ranges.push(range);
       entry.reasons.add(reason);
       if (typeof onSettled === "function") entry.listeners.add(onSettled);

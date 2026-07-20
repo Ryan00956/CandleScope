@@ -27,3 +27,20 @@ test("dataset key ignores compatibility version fields", () => {
     buildChartDatasetKey({ ...session, datasetVersion: 42 }),
   );
 });
+
+test("dataset key canonicalizes fixed-duration aliases", () => {
+  const session = {
+    exchange: "binance",
+    marketType: "spot",
+    symbol: "BTCUSDT",
+    interval: "1h",
+  };
+  assert.equal(
+    buildChartDatasetKey({ ...session, interval: "60m" }),
+    buildChartDatasetKey(session),
+  );
+  assert.notEqual(
+    buildChartDatasetKey({ ...session, interval: "7d" }),
+    buildChartDatasetKey({ ...session, interval: "1w" }),
+  );
+});

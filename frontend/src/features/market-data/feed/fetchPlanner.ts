@@ -13,6 +13,7 @@ import {
   asSeriesKey,
   toEpochSeconds,
 } from "../marketDataTypes.js";
+import { canonicalizeIntervalValue } from "../../../utils/intervals.js";
 
 interface RangeInput {
   start?: unknown;
@@ -40,7 +41,7 @@ export function seriesKeyFor({
     String(exchange || "").toLowerCase(),
     String(marketType || "").toLowerCase(),
     String(symbol || "").toUpperCase(),
-    String(interval || ""),
+    canonicalizeIntervalValue(interval) || String(interval || ""),
   ].join(":"));
 }
 

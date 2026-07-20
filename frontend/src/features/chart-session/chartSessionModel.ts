@@ -1,4 +1,4 @@
-import { normalizeIntervalValue } from "../../utils/intervals.js";
+import { canonicalizeIntervalValue } from "../../utils/intervals.js";
 import { inferExchangeFromSymbol } from "../../utils/symbolKey.js";
 import type { ChartSession, UserPrefs } from "./chartSessionTypes.js";
 
@@ -41,6 +41,6 @@ export function loadInitialChartSession(): ChartSession {
     exchange: nonEmptyString(prefs.lastExchange)
       || inferExchangeFromSymbol(symbol, "binance"),
     marketType: nonEmptyString(prefs.lastMarketType) || "spot",
-    interval: normalizeIntervalValue(prefs.lastInterval) || "1h",
+    interval: canonicalizeIntervalValue(prefs.lastInterval) || "1h",
   };
 }

@@ -298,6 +298,7 @@ export interface IndicatorCoverage {
 }
 
 export interface IndicatorRangeOptions {
+  interval?: unknown;
   step?: unknown;
   revision?: unknown;
   cascadeRight?: boolean;

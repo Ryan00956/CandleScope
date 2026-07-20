@@ -17,6 +17,14 @@ test("series key normalizes case-sensitive dimensions", () => {
   );
 });
 
+test("series key canonicalizes fixed-duration aliases", () => {
+  const base = { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" };
+  assert.equal(
+    seriesKeyFor({ ...base, interval: "60m" }),
+    seriesKeyFor({ ...base, interval: "1h" }),
+  );
+});
+
 test("request key sorts params for stable dedupe", () => {
   const series = { exchange: "binance", marketType: "spot", symbol: "BTCUSDT", interval: "1h" };
   assert.equal(

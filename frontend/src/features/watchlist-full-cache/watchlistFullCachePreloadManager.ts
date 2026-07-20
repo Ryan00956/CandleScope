@@ -10,6 +10,10 @@ import {
   WATCHLIST_FULL_CACHE_MIN_RETAINED_BARS,
 } from "./watchlistFullCacheStore.js";
 import type { FullCachePreloadJob } from "./watchlistFullCacheTypes.js";
+import {
+  canonicalizeIntervalValue,
+  intervalsSemanticallyEquivalent,
+} from "../../utils/intervals.js";
 
 export const WATCHLIST_FULL_CACHE_PRELOAD_LIMIT = WATCHLIST_FULL_CACHE_MIN_RETAINED_BARS;
 export const WATCHLIST_FULL_CACHE_PRELOAD_CONCURRENCY = 2;
@@ -73,7 +77,7 @@ function defaultFetchJob(
 }
 
 export function fullCachePreloadJobKey(job: Pick<FullCachePreloadJob, "interval" | "symbolKey">): string {
-  return `${job.symbolKey}\u0000${job.interval}`;
+  return `${job.symbolKey}\u0000${canonicalizeIntervalValue(job.interval) || job.interval}`;
 }
 
 export function isActiveFullCacheSeries(
@@ -84,7 +88,7 @@ export function isActiveFullCacheSeries(
     activeSeries?.symbolKey
     && activeSeries.interval
     && job.symbolKey === activeSeries.symbolKey
-    && job.interval === activeSeries.interval,
+    && intervalsSemanticallyEquivalent(job.interval, activeSeries.interval),
   );
 }
 

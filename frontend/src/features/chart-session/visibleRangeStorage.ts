@@ -6,6 +6,10 @@ import type {
   VisibleRangeRestorePlan,
   VisibleRangeSnapshot,
 } from "./chartSessionTypes.js";
+import {
+  canonicalizeIntervalValue,
+  intervalsSemanticallyEquivalent,
+} from "../../utils/intervals.js";
 
 const VISIBLE_RANGE_KEY = "candlescope-visible-ranges";
 
@@ -34,7 +38,18 @@ function buildVisibleRangeStorageKey(
   marketType: MarketType = "spot",
   exchange: ExchangeId = "binance",
 ): string {
-  return `${exchange}::${marketType}::${symbol}::${interval}`;
+  const canonicalInterval = canonicalizeIntervalValue(interval);
+  return canonicalInterval
+    ? `${exchange}::${marketType}::${symbol}::${canonicalInterval}`
+    : "";
+}
+
+function persistVisibleRanges(ranges: Record<string, unknown>): void {
+  try {
+    localStorage.setItem(VISIBLE_RANGE_KEY, JSON.stringify(ranges));
+  } catch {
+    // Visible-range persistence is best effort.
+  }
 }
 
 export function normalizeVisibleRange(range: unknown): VisibleRangeSnapshot | null {
@@ -76,10 +91,11 @@ export function saveVisibleRangeForInterval(
   void dataMeta;
   const rangeRecord = isRecord(range) ? range : {};
   const normalized = normalizeVisibleRange({ ...rangeRecord, savedAt: Date.now() });
-  if (!symbol || !interval || !normalized) return;
+  const storageKey = buildVisibleRangeStorageKey(symbol, interval, marketType, exchange);
+  if (!symbol || !storageKey || !normalized) return;
   const ranges = loadVisibleRanges();
-  ranges[buildVisibleRangeStorageKey(symbol, interval, marketType, exchange)] = normalized;
-  localStorage.setItem(VISIBLE_RANGE_KEY, JSON.stringify(ranges));
+  ranges[storageKey] = normalized;
+  persistVisibleRanges(ranges);
 }
 
 export function getVisibleRangeForInterval(
@@ -88,13 +104,48 @@ export function getVisibleRangeForInterval(
   marketType: MarketType = "spot",
   exchange: ExchangeId = "binance",
 ): VisibleRangeSnapshot | null {
-  if (!symbol || !interval) return null;
+  const canonicalInterval = canonicalizeIntervalValue(interval);
+  if (!symbol || !canonicalInterval) return null;
   const ranges = loadVisibleRanges();
-  return (
-    normalizeVisibleRange(ranges[buildVisibleRangeStorageKey(symbol, interval, marketType, exchange)])
-    || normalizeVisibleRange(ranges[interval])
-    || null
+  const canonicalKey = buildVisibleRangeStorageKey(
+    symbol,
+    canonicalInterval,
+    marketType,
+    exchange,
   );
+  if (Object.prototype.hasOwnProperty.call(ranges, canonicalKey)) {
+    return normalizeVisibleRange(ranges[canonicalKey]);
+  }
+
+  const identityPrefix = `${exchange}::${marketType}::${symbol}::`;
+  const rawInterval = String(interval).trim();
+  const rawCompositeKey = `${identityPrefix}${rawInterval}`;
+  const candidateKeys: string[] = [];
+  const addCandidate = (key: string): void => {
+    if (key !== canonicalKey && !candidateKeys.includes(key)) candidateKeys.push(key);
+  };
+
+  addCandidate(rawCompositeKey);
+  for (const key of Object.keys(ranges)) {
+    if (!key.startsWith(identityPrefix)) continue;
+    const storedInterval = key.slice(identityPrefix.length);
+    if (intervalsSemanticallyEquivalent(storedInterval, canonicalInterval)) addCandidate(key);
+  }
+  addCandidate(canonicalInterval);
+  addCandidate(rawInterval);
+  for (const key of Object.keys(ranges)) {
+    if (key.includes("::")) continue;
+    if (intervalsSemanticallyEquivalent(key, canonicalInterval)) addCandidate(key);
+  }
+
+  for (const key of candidateKeys) {
+    const normalized = normalizeVisibleRange(ranges[key]);
+    if (!normalized) continue;
+    ranges[canonicalKey] = normalized;
+    persistVisibleRanges(ranges);
+    return normalized;
+  }
+  return null;
 }
 
 export function planVisibleRangeRestore(

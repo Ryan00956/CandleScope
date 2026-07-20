@@ -108,6 +108,7 @@ export function useTradeFlowRuntime({
   return useMemo<TradeFlowRuntime>(() => ({
     view: {
       identity,
+      interval,
       supported,
       supportMessage: message,
       preferences,
@@ -116,5 +117,5 @@ export function useTradeFlowRuntime({
     },
     actions,
     status: { enabled },
-  }), [actions, enabled, identity, markerSource, message, preferences, store, supported]);
+  }), [actions, enabled, identity, interval, markerSource, message, preferences, store, supported]);
 }

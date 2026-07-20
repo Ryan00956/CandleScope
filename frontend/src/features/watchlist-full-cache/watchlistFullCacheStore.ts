@@ -8,7 +8,7 @@ import {
   unregisterCacheResource,
 } from "../cache-gc/cacheRegistry.js";
 import { parseSymbolKey } from "../../utils/symbolKey.js";
-import { parseIntervalSeconds } from "../../utils/intervals.js";
+import { canonicalizeIntervalValue, parseIntervalSeconds } from "../../utils/intervals.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type { GcVictim } from "../cache-gc/cacheGcTypes.js";
 import type {
@@ -110,7 +110,7 @@ function patchRealtimeKlineTail(
 }
 
 export function fullCacheKey(symbolKey: string, interval: string): string {
-  return `${symbolKey}::${interval}`;
+  return `${symbolKey}::${canonicalizeIntervalValue(interval) || interval}`;
 }
 
 function buildCoverage(rows: KlineBar[]): FullCacheCoverage | null {
@@ -152,14 +152,15 @@ function createEntry(
   interval: string,
   patch: FullCacheEntryPatch = {},
 ): FullCacheEntry {
+  const normalizedInterval = canonicalizeIntervalValue(interval) || interval;
   const rows = patch.rows || [];
-  trimRowsToFullCacheLimit(rows, interval);
+  trimRowsToFullCacheLimit(rows, normalizedInterval);
   const generation = nextEntryGeneration;
   nextEntryGeneration += 1;
   return {
-    key: fullCacheKey(symbolKey, interval),
+    key: fullCacheKey(symbolKey, normalizedInterval),
     symbolKey,
-    interval,
+    interval: normalizedInterval,
     generation,
     revision: 1,
     rows,

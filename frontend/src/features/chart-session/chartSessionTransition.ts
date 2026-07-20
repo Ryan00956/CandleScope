@@ -4,6 +4,7 @@ import type {
   ChartSessionTransition,
   ChartSessionTransitionType,
 } from "./chartSessionTypes.js";
+import { canonicalizeIntervalValue } from "../../utils/intervals.js";
 
 export const CHART_SESSION_TRANSITION_TYPES = Object.freeze({
   SYMBOL_CHANGE: "symbol-change",
@@ -18,7 +19,7 @@ export function buildChartSessionKey<T extends ChartSession>({
   symbol,
   interval,
 }: T): ChartSessionKey {
-  return `${exchange}:${marketType}:${symbol}:${interval}`;
+  return `${exchange}:${marketType}:${symbol}:${canonicalizeIntervalValue(interval) || interval}`;
 }
 
 export interface CreateChartSessionTransitionOptions {

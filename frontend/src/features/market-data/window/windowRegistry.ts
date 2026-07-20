@@ -1,6 +1,7 @@
 import type { MarketSeries, SeriesKey } from "../marketDataTypes.js";
 import { asSeriesKey } from "../marketDataTypes.js";
 import { SeriesWindowStore } from "./seriesWindowStore.js";
+import { canonicalizeIntervalValue } from "../../../utils/intervals.js";
 
 interface SeriesWindowRegistryOptions {
   maxBars?: number;
@@ -20,7 +21,7 @@ export function buildSeriesWindowKey({
     String(exchange || "binance").trim().toLowerCase(),
     String(marketType || "spot").trim().toLowerCase(),
     String(symbol || "").trim(),
-    String(interval || "").trim(),
+    canonicalizeIntervalValue(interval) || String(interval || "").trim(),
   ].join("-"));
 }
 

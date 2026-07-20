@@ -57,6 +57,27 @@ test("dirty correction invalidation keeps the valid prefix and conservatively dr
   );
 });
 
+test("monthly coverage uses calendar successors across leap February", () => {
+  const jan = Date.UTC(2024, 0, 1) / 1_000;
+  const feb = Date.UTC(2024, 1, 1) / 1_000;
+  const mar = Date.UTC(2024, 2, 1) / 1_000;
+  const apr = Date.UTC(2024, 3, 1) / 1_000;
+  const covered = mergeIndicatorRangeSegments([
+    { start: jan, end: jan },
+    { start: feb, end: feb },
+  ], { interval: "1M", step: 2_592_000 });
+  assert.deepEqual(covered, [{ start: jan, end: feb }]);
+  assert.deepEqual(
+    subtractIndicatorRange({ start: jan, end: apr }, covered, { interval: "1M" }),
+    [{ start: mar, end: apr }],
+  );
+  assert.deepEqual(invalidateIndicatorRangeSegments(
+    [{ start: jan, end: apr, revision: { correctionRevision: "1" } }],
+    { start: mar, end: mar },
+    { interval: "1M", revision: { correctionRevision: "2" } },
+  ), [{ start: jan, end: feb, revision: { correctionRevision: "2" } }]);
+});
+
 test("recomputed refresh is limited to the visible invalidated suffix", () => {
   assert.deepEqual(
     planIndicatorDirtyRefresh(

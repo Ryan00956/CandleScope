@@ -141,3 +141,35 @@ test("empty liquidation pane stays visible and states observed-only semantics", 
   assert.match(pane.statusText || "", /空白不等于 0/);
   assert.ok(pane.lines.every((line) => line.data.length === 0));
 });
+
+test("monthly liquidation projection does not stretch a bar across a missing month", () => {
+  const jan = Date.UTC(2024, 0, 1) / 1_000;
+  const febMiddle = Date.UTC(2024, 1, 15) / 1_000;
+  const mar = Date.UTC(2024, 2, 1) / 1_000;
+  const marMiddle = Date.UTC(2024, 2, 15) / 1_000;
+  const janBar = toEpochSeconds(jan);
+  const marBar = toEpochSeconds(mar);
+  assert.ok(janBar);
+  assert.ok(marBar);
+  const monthlyBars: KlineBar[] = [{ time: janBar }, { time: marBar }];
+  const eventAt = (time: number, fingerprint: string): LiquidationEvent => ({
+    ...liveEvent(0, 1_000),
+    tradeTimeMs: time * 1_000,
+    eventTimeMs: time * 1_000,
+    receivedAtMs: time * 1_000 + 1,
+    fingerprint,
+  });
+
+  assert.deepEqual(projectLiquidationsToCandles(
+    [],
+    [eventAt(febMiddle, "gap"), eventAt(marMiddle, "march")],
+    monthlyBars,
+    "1M",
+  ), [{
+    time: mar,
+    longNotional: null,
+    shortNotional: 1_000,
+    hasLiveEvents: true,
+    allRowsFinal: false,
+  }]);
+});

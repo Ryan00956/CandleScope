@@ -8,6 +8,10 @@ import {
   isNativeIntervalSupported,
   useExchangeCatalog,
 } from "./exchangeCatalogRuntime.js";
+import {
+  canonicalizeIntervalValue,
+  intervalsSemanticallyEquivalent,
+} from "../../utils/intervals.js";
 import { useIntervalNoticeRuntime } from "./intervalNoticeRuntime.js";
 import { loadInitialChartSession, updateUserPref } from "./chartSessionModel.js";
 import {
@@ -79,24 +83,28 @@ export function useChartSession({
   );
   const exchangeLimitations = exchangeConfig.knownLimitations || [];
   const nativeIntervals = useMemo(
-    () => getNativeIntervals(exchange, exchangeCatalog),
-    [exchange, exchangeCatalog],
+    () => getNativeIntervals(exchange, exchangeCatalog, marketType, "history"),
+    [exchange, exchangeCatalog, marketType],
   );
   const intervalGroups = useMemo(
-    () => buildSortedIntervals(savedCustomIntervals, exchange, exchangeCatalog),
-    [exchange, exchangeCatalog, savedCustomIntervals],
+    () => buildSortedIntervals(savedCustomIntervals, exchange, exchangeCatalog, marketType),
+    [exchange, exchangeCatalog, marketType, savedCustomIntervals],
   );
   const baseWsIntervals = useMemo(
-    () => getBaseWsIntervals(exchange, exchangeCatalog),
-    [exchange, exchangeCatalog],
+    () => getBaseWsIntervals(exchange, exchangeCatalog, marketType),
+    [exchange, exchangeCatalog, marketType],
   );
   const trackedIntervals = useMemo(
     () => buildRealtimeTrackedIntervals(interval),
     [interval],
   );
   const prefetchIntervals = useMemo(
-    () => Array.from(new Set([...baseWsIntervals, ...savedCustomIntervals, interval])),
-    [baseWsIntervals, interval, savedCustomIntervals],
+    () => Array.from(new Set([
+      ...nativeIntervals.map((item) => item.value),
+      ...savedCustomIntervals,
+      interval,
+    ])),
+    [interval, nativeIntervals, savedCustomIntervals],
   );
   const trackedIntervalsRef = useRef(trackedIntervals);
   useEffect(() => {
@@ -199,10 +207,11 @@ export function useChartSession({
 
     const nextInterval = resolveSupportedInterval({
       exchange: nextExchange,
+      marketType: nextMarketType,
       interval,
       exchangeCatalog,
       savedCustomIntervals,
-      nativeIntervals: getNativeIntervals(nextExchange, exchangeCatalog),
+      nativeIntervals: getNativeIntervals(nextExchange, exchangeCatalog, nextMarketType, "history"),
       isNativeIntervalSupported,
     });
 
@@ -233,12 +242,13 @@ export function useChartSession({
   ]);
 
   const selectInterval = useCallback((nextInterval: IntervalString): void => {
-    if (nextInterval === interval) return;
+    const canonicalInterval = canonicalizeIntervalValue(nextInterval);
+    if (!canonicalInterval || intervalsSemanticallyEquivalent(canonicalInterval, interval)) return;
     saveCurrentVisibleRange();
-    publishTransition(CHART_SESSION_TRANSITION_TYPES.INTERVAL_CHANGE, { interval: nextInterval });
-    setInterval(nextInterval);
-    markIntervalUsed(nextInterval);
-    updateUserPref("lastInterval", nextInterval);
+    publishTransition(CHART_SESSION_TRANSITION_TYPES.INTERVAL_CHANGE, { interval: canonicalInterval });
+    setInterval(canonicalInterval);
+    markIntervalUsed(canonicalInterval);
+    updateUserPref("lastInterval", canonicalInterval);
   }, [interval, markIntervalUsed, publishTransition, saveCurrentVisibleRange]);
 
   const selectMarketType = useCallback((nextMarketType: MarketType): void => {
@@ -265,9 +275,10 @@ export function useChartSession({
   useEffect(() => {
     if (exchangeCatalogStatus === "loading") return undefined;
     if (savedCustomIntervals.includes(interval)) return undefined;
-    if (isNativeIntervalSupported(exchange, interval, exchangeCatalog)) return undefined;
+    if (isNativeIntervalSupported(exchange, interval, exchangeCatalog, marketType, "history")) return undefined;
     const nextInterval = resolveSupportedInterval({
       exchange,
+      marketType,
       interval,
       exchangeCatalog,
       savedCustomIntervals,
@@ -282,12 +293,12 @@ export function useChartSession({
       updateUserPref("lastInterval", nextInterval);
     }, 0);
     return () => clearTimeout(timer);
-  }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, nativeIntervals, publishTransition, savedCustomIntervals]);
+  }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, marketType, nativeIntervals, publishTransition, savedCustomIntervals]);
 
   const createCustomInterval = useCallback((
     nextInterval: IntervalString,
   ): CreateCustomIntervalResult => {
-    if (isNativeIntervalSupported(exchange, nextInterval, exchangeCatalog)) {
+    if (isNativeIntervalSupported(exchange, nextInterval, exchangeCatalog, marketType, "history")) {
       selectInterval(nextInterval);
       return { ok: true, added: false };
     }
@@ -296,7 +307,7 @@ export function useChartSession({
     selectInterval(result.value);
     showIntervalNotice({ type: "success", text: `${result.value} 已添加并切换` });
     return { ok: true, added: result.added };
-  }, [addCustomInterval, exchange, exchangeCatalog, selectInterval, showIntervalNotice]);
+  }, [addCustomInterval, exchange, exchangeCatalog, marketType, selectInterval, showIntervalNotice]);
 
   const removeCustomIntervalAction = useCallback((removedInterval: IntervalString): void => {
     const removed = removeCustomInterval(removedInterval);
@@ -308,9 +319,9 @@ export function useChartSession({
         customIntervalRecords,
         nativeIntervals,
         exchange,
-        isNativeIntervalSupported: (targetExchange, targetInterval) => (
-          isNativeIntervalSupported(targetExchange, targetInterval, exchangeCatalog)
-        ),
+        marketType,
+        exchangeCatalog,
+        isNativeIntervalSupported,
       }));
     }
     showIntervalNotice({
@@ -319,7 +330,7 @@ export function useChartSession({
       actionLabel: "撤销",
       duration: 6500,
     });
-  }, [customIntervalRecords, exchange, exchangeCatalog, interval, nativeIntervals, removeCustomInterval, selectInterval, showIntervalNotice]);
+  }, [customIntervalRecords, exchange, exchangeCatalog, interval, marketType, nativeIntervals, removeCustomInterval, selectInterval, showIntervalNotice]);
 
   const restoreCustomIntervalAction = useCallback((): void => {
     const restored = restoreCustomInterval(lastRemovedIntervalRef.current);

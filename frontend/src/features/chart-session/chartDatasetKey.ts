@@ -1,4 +1,5 @@
 import type { ChartSession, DatasetKey } from "./chartSessionTypes.js";
+import { canonicalizeIntervalValue } from "../../utils/intervals.js";
 
 export function buildChartDatasetKey<T extends ChartSession>({
   exchange,
@@ -6,5 +7,5 @@ export function buildChartDatasetKey<T extends ChartSession>({
   symbol,
   interval,
 }: T): DatasetKey {
-  return [exchange, marketType, symbol, interval].join("-");
+  return [exchange, marketType, symbol, canonicalizeIntervalValue(interval) || interval].join("-");
 }

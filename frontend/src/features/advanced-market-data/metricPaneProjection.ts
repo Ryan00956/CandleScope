@@ -9,7 +9,8 @@ import type {
   IndicatorValuePoint,
 } from "../indicators/indicatorTypes.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
-import { parseIntervalSeconds } from "../../utils/intervals.js";
+import { canonicalizeIntervalValue, parseIntervalSeconds } from "../../utils/intervals.js";
+import { createIntervalTimeline } from "../../utils/intervalTimeline.js";
 import type {
   AdvancedMarketMetricsSnapshot,
   MarketStateRecord,
@@ -265,6 +266,7 @@ function lowerBoundFundingObservation(
 
 export interface FundingRateHistoryProjection {
   bars: readonly KlineBar[];
+  interval?: string;
   intervalSeconds: number;
   points: Array<IndicatorValuePoint & IndicatorColorPoint>;
   metadata: IndicatorPanePointMetadata[];
@@ -309,9 +311,13 @@ export function buildFundingRateHistoryProjection(
     ? Math.max(1, sortedBars[sortedBars.length - 1]!.time - sortedBars[sortedBars.length - 2]!.time)
     : 1;
   const intervalSeconds = parseIntervalSeconds(interval) ?? inferredIntervalSeconds;
+  const canonicalInterval = canonicalizeIntervalValue(interval)
+    || canonicalizeIntervalValue(`${intervalSeconds}s`)
+    || "1s";
   if (sortedBars.length === 0) {
     return {
       bars: sortedBars,
+      interval: canonicalInterval,
       intervalSeconds,
       points: [],
       metadata: [],
@@ -359,7 +365,14 @@ export function buildFundingRateHistoryProjection(
       settlementTimes.add(time);
     }
   }
-  return { bars: sortedBars, intervalSeconds, points, metadata, settlementTimes };
+  return {
+    bars: sortedBars,
+    interval: canonicalInterval,
+    intervalSeconds,
+    points,
+    metadata,
+    settlementTimes,
+  };
 }
 
 function mergeFundingProjection(
@@ -372,6 +385,8 @@ function mergeFundingProjection(
 } {
   const sortedBars = history.bars;
   if (sortedBars.length === 0) return { points: history.points, metadata: history.metadata };
+  const timeline = createIntervalTimeline(history.interval)
+    ?? createIntervalTimeline(`${history.intervalSeconds}s`)!;
   const realtimeTimeline = metrics.fundingRealtimeHistory || [];
   if (realtimeTimeline.length === 0 && !metrics.fundingPreview) {
     return { points: history.points, metadata: history.metadata };
@@ -379,7 +394,7 @@ function mergeFundingProjection(
 
   const visibleStartMs = sortedBars[0]!.time * 1000;
   const visibleEndMs = Math.min(
-    (sortedBars.at(-1)!.time + history.intervalSeconds) * 1000,
+    (timeline.end(sortedBars.at(-1)!.time) ?? sortedBars.at(-1)!.time) * 1000,
     nowMs,
   );
   const firstVisibleObservation = lowerBoundFundingObservation(realtimeTimeline, visibleStartMs);
@@ -406,10 +421,8 @@ function mergeFundingProjection(
   let realtimeIndex = 0;
   let latestRealtime: MarketStateRecord | null = null;
   const overrides = new Map<number, FundingProjectedPoint>();
-  for (const [index, bar] of sortedBars.entries()) {
-    const nominalBarCloseMs = (
-      sortedBars[index + 1]?.time ?? (bar.time + history.intervalSeconds)
-    ) * 1000;
+  for (const bar of sortedBars) {
+    const nominalBarCloseMs = (timeline.end(bar.time) ?? bar.time) * 1000;
     const observationCutoffMs = Math.min(nominalBarCloseMs, nowMs);
     while (realtimeIndex < realtimeRecords.length) {
       const record = realtimeRecords[realtimeIndex];

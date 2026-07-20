@@ -7,7 +7,10 @@ import {
   updateSubscriptionTier,
 } from "../../services/api.js";
 import type { SubscriptionListPayload, SubscriptionPayload } from "../../services/apiPayloadParsers.js";
-import { getNativeIntervals } from "../chart-session/exchangeCatalogRuntime.js";
+import {
+  getBaseWsIntervals,
+  getNativeIntervals,
+} from "../chart-session/exchangeCatalogRuntime.js";
 import type {
   CustomIntervalRecord,
   ExchangeCatalog,
@@ -38,9 +41,7 @@ const WATCHLIST_SYNC_DEBOUNCE_MS = 500;
 const PRICE_WS_RECONNECT_MS = 3_000;
 
 export interface WatchlistSubscriptionContext {
-  exchange?: string;
   exchangeCatalog?: ExchangeCatalog | null;
-  nativeIntervals?: NativeInterval[];
   customIntervalRecords?: CustomIntervalRecord[];
 }
 
@@ -100,6 +101,29 @@ export function parseWatchlistPriceTick(value: unknown): WatchlistPriceTick | nu
   return parsed;
 }
 
+export function resolveWatchlistFullSubscriptionInputs(
+  symbol: string,
+  exchangeCatalog: ExchangeCatalog | null,
+  customIntervalRecords: CustomIntervalRecord[] = [],
+): { nativeIntervals: NativeInterval[]; customIntervalRecords: CustomIntervalRecord[] } {
+  const parsed = parseSymbolKey(symbol);
+  const websocketIntervals = new Set(getBaseWsIntervals(
+    parsed.exchange,
+    exchangeCatalog,
+    parsed.marketType,
+  ));
+  const resolvedNativeIntervals = getNativeIntervals(
+    parsed.exchange,
+    exchangeCatalog,
+    parsed.marketType,
+    "realtime",
+  ).filter((item) => websocketIntervals.has(item.value));
+  return {
+    nativeIntervals: resolvedNativeIntervals,
+    customIntervalRecords: resolvedNativeIntervals.length > 0 ? customIntervalRecords : [],
+  };
+}
+
 export function useWatchlistSubscriptionRuntime({
   watchlists,
   subscriptionContext = {},
@@ -114,9 +138,7 @@ export function useWatchlistSubscriptionRuntime({
   const tierMutationInFlightRef = useRef(new Set<string>());
   const fullIntervalSyncInFlightRef = useRef(new Map<string, string>());
   const {
-    exchange = "binance",
     exchangeCatalog = null,
-    nativeIntervals = [],
     customIntervalRecords = [],
   } = subscriptionContext;
 
@@ -183,23 +205,22 @@ export function useWatchlistSubscriptionRuntime({
     return response;
   }, [publishSubscriptionIntervalSignature, publishSubscriptionTiers, tierCoordinator]);
 
-  const resolveNativeIntervals = useCallback((symbol: string) => {
-    const parsed = parseSymbolKey(symbol);
-    if (parsed.exchange === exchange) return nativeIntervals;
-    return getNativeIntervals(parsed.exchange, exchangeCatalog);
-  }, [exchange, exchangeCatalog, nativeIntervals]);
+  const resolveFullSubscriptionInputs = useCallback((symbol: string) => {
+    return resolveWatchlistFullSubscriptionInputs(
+      symbol,
+      exchangeCatalog,
+      customIntervalRecords,
+    );
+  }, [customIntervalRecords, exchangeCatalog]);
 
   const subscriptionResourceSummaries = useMemo(() => {
     const summaries: Record<string, ReturnType<typeof getFullSubscriptionResourceSummary>> = {};
     const symbols = new Set(watchlists.flatMap((watchlist) => watchlist.symbols || []));
     for (const symbol of symbols) {
-      summaries[symbol] = getFullSubscriptionResourceSummary({
-        nativeIntervals: resolveNativeIntervals(symbol),
-        customIntervalRecords,
-      });
+      summaries[symbol] = getFullSubscriptionResourceSummary(resolveFullSubscriptionInputs(symbol));
     }
     return summaries;
-  }, [customIntervalRecords, resolveNativeIntervals, watchlists]);
+  }, [resolveFullSubscriptionInputs, watchlists]);
 
   const handleTierChange = useCallback((symbol: string, tier: SubscriptionTier) => {
     const prevTier = subscriptionTiersRef.current[symbol] || "none";
@@ -208,8 +229,7 @@ export function useWatchlistSubscriptionRuntime({
     const options = getSubscriptionTierRequestOptions({
       symbol,
       tier,
-      nativeIntervals: resolveNativeIntervals(symbol),
-      customIntervalRecords,
+      ...resolveFullSubscriptionInputs(symbol),
     });
     tierMutationInFlightRef.current.add(symbol);
     publishSubscriptionTiers({ ...subscriptionTiersRef.current, [symbol]: tier });
@@ -243,10 +263,9 @@ export function useWatchlistSubscriptionRuntime({
         tierMutationInFlightRef.current.delete(symbol);
       });
   }, [
-    customIntervalRecords,
     publishSubscriptionIntervalSignature,
     publishSubscriptionTiers,
-    resolveNativeIntervals,
+    resolveFullSubscriptionInputs,
     tierCoordinator,
   ]);
 
@@ -283,8 +302,7 @@ export function useWatchlistSubscriptionRuntime({
       const options = getSubscriptionTierRequestOptions({
         symbol,
         tier,
-        nativeIntervals: resolveNativeIntervals(symbol),
-        customIntervalRecords,
+        ...resolveFullSubscriptionInputs(symbol),
       });
       const desiredIntervals = options.intervals || [];
       const desiredSignature = buildFullSubscriptionIntervalSignature(desiredIntervals);
@@ -321,10 +339,9 @@ export function useWatchlistSubscriptionRuntime({
         });
     }
   }, [
-    customIntervalRecords,
     publishSubscriptionIntervalSignature,
     publishSubscriptionTiers,
-    resolveNativeIntervals,
+    resolveFullSubscriptionInputs,
     subscriptionIntervalSignatures,
     subscriptionTiers,
     watchlists,

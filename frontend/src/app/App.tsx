@@ -84,9 +84,7 @@ export default function App() {
 
   const watchlist = useWatchlistRuntime({
     subscriptionContext: {
-      exchange: chartSession.view.exchange,
       exchangeCatalog: chartSession.view.exchangeCatalog,
-      nativeIntervals: chartSession.view.nativeIntervals,
       customIntervalRecords: chartSession.view.customIntervalRecords,
     },
   });

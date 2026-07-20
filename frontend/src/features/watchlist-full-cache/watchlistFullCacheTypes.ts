@@ -1,4 +1,5 @@
 import type { KlineBar } from "../market-data/marketDataTypes.js";
+import type { ExchangeCatalog } from "../chart-session/chartSessionTypes.js";
 import type {
   IntervalCandidate,
   SubscriptionTier,
@@ -57,14 +58,10 @@ export interface WatchlistSession {
   interval?: string | null;
 }
 
-export interface ExchangeIntervalCatalogEntry {
-  nativeIntervals?: IntervalCandidate[];
-}
-
 export interface FullCacheTargetOptions {
   watchlists?: WatchlistGroup[];
   subscriptionTiers?: Record<string, SubscriptionTier>;
-  exchangeCatalog?: Record<string, ExchangeIntervalCatalogEntry> | null;
+  exchangeCatalog?: ExchangeCatalog | null;
   nativeIntervals?: IntervalCandidate[];
   customIntervalRecords?: IntervalCandidate[];
   currentSession?: WatchlistSession;

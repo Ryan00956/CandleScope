@@ -1,8 +1,12 @@
 import { getFullSubscriptionIntervals } from "../watchlist/watchlistSubscriptionPolicy.js";
+import {
+  getBaseWsIntervals,
+  getNativeIntervals,
+} from "../chart-session/exchangeCatalogRuntime.js";
 import { parseSymbolKey } from "../../utils/symbolKey.js";
 import type { IntervalCandidate, WatchlistGroup } from "../watchlist/watchlistTypes.js";
+import type { NativeIntervalPurpose } from "../chart-session/chartSessionTypes.js";
 import type {
-  ExchangeIntervalCatalogEntry,
   FullCachePreloadJob,
   FullCacheSocketTarget,
   FullCacheTarget,
@@ -19,12 +23,21 @@ function uniqueWatchlistSymbols(watchlists: WatchlistGroup[] = []): string[] {
 
 function getTargetNativeIntervals(
   exchange: string,
-  currentExchange: string | null | undefined,
+  marketType: string,
+  purpose: NativeIntervalPurpose,
+  currentSession: FullCacheTargetOptions["currentSession"],
   currentNativeIntervals: IntervalCandidate[],
-  exchangeCatalog: Record<string, ExchangeIntervalCatalogEntry> | null,
+  exchangeCatalog: FullCacheTargetOptions["exchangeCatalog"],
 ): IntervalCandidate[] {
-  if (exchange === currentExchange) return currentNativeIntervals;
-  return exchangeCatalog?.[exchange]?.nativeIntervals || [];
+  if (
+    purpose === "history"
+    && exchange === (currentSession?.exchange || "binance")
+    && marketType === (currentSession?.marketType || "spot")
+  ) return currentNativeIntervals;
+  if (purpose === "realtime") {
+    return getBaseWsIntervals(exchange, exchangeCatalog || null, marketType);
+  }
+  return getNativeIntervals(exchange, exchangeCatalog || null, marketType, purpose);
 }
 
 export function prioritizeFullCacheIntervals(
@@ -45,27 +58,29 @@ export function prioritizeFullCacheIntervals(
   return ordered.slice(0, limit);
 }
 
-export function buildWatchlistFullCacheTargets({
+function buildWatchlistFullTargets({
   watchlists = [],
   subscriptionTiers = {},
   exchangeCatalog = null,
   nativeIntervals = [],
   customIntervalRecords = [],
   currentSession = {},
-}: FullCacheTargetOptions = {}): FullCacheTarget[] {
+}: FullCacheTargetOptions, purpose: NativeIntervalPurpose): FullCacheTarget[] {
   return uniqueWatchlistSymbols(watchlists)
     .filter((symbolKey) => subscriptionTiers?.[symbolKey] === "full")
     .map((symbolKey) => {
       const parsed = parseSymbolKey(symbolKey);
       const targetNativeIntervals = getTargetNativeIntervals(
         parsed.exchange,
-        currentSession.exchange,
+        parsed.marketType,
+        purpose,
+        currentSession,
         nativeIntervals,
         exchangeCatalog,
       );
       const intervals = getFullSubscriptionIntervals({
         nativeIntervals: targetNativeIntervals,
-        customIntervalRecords,
+        customIntervalRecords: targetNativeIntervals.length > 0 ? customIntervalRecords : [],
       });
       return {
         symbolKey,
@@ -82,11 +97,17 @@ export function buildWatchlistFullCacheTargets({
     .filter((target) => target.intervals.length > 0);
 }
 
+export function buildWatchlistFullCacheTargets(
+  options: FullCacheTargetOptions = {},
+): FullCacheTarget[] {
+  return buildWatchlistFullTargets(options, "history");
+}
+
 export function buildWatchlistFullSocketTargets(
   options: FullCacheTargetOptions = {},
 ): FullCacheSocketTarget[] {
   const currentSession = options.currentSession || {};
-  return buildWatchlistFullCacheTargets({
+  return buildWatchlistFullTargets({
     ...options,
     currentSession: {
       ...(currentSession.exchange === undefined ? {} : { exchange: currentSession.exchange }),
@@ -95,7 +116,7 @@ export function buildWatchlistFullSocketTargets(
       symbol: null,
       symbolKey: null,
     },
-  }).map((target) => ({
+  }, "realtime").map((target) => ({
     symbolKey: target.symbolKey,
     symbol: target.symbol,
     exchange: target.exchange,

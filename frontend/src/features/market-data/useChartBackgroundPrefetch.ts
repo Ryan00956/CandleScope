@@ -3,6 +3,10 @@ import { symbolKey } from "../../utils/symbolKey.js";
 import { getFullCacheEntry } from "../watchlist-full-cache/watchlistFullCacheStore.js";
 import type { FullCacheStatus } from "../watchlist-full-cache/watchlistFullCacheTypes.js";
 import type { UseChartBackgroundPrefetchOptions } from "./marketDataTypes.js";
+import {
+  canonicalizeIntervalValue,
+  intervalsSemanticallyEquivalent,
+} from "../../utils/intervals.js";
 
 const PREFETCH_DELAY_MS = 2_000;
 const PREFETCH_INTERVAL_GAP_MS = 200;
@@ -25,7 +29,7 @@ export function shouldSkipChartBackgroundPrefetch({
   inFlight,
   interval,
 }: BackgroundPrefetchSkipInput): boolean {
-  if (interval === activeInterval || hasMemoryCache || inFlight) return true;
+  if (intervalsSemanticallyEquivalent(interval, activeInterval) || hasMemoryCache || inFlight) return true;
   if (fullCacheStatus === "loading") return true;
   return fullCacheRows > 0 && (fullCacheStatus === "warm" || fullCacheStatus === "live");
 }
@@ -51,21 +55,22 @@ export function useChartBackgroundPrefetch({
     const prefetch = async () => {
       for (const intv of trackedIntervals) {
         if (cancelled) break;
-        const key = `${currentSymbolKey}\u0000${intv}`;
-        const fullCacheEntry = getFullCacheEntry(currentSymbolKey, intv);
+        const canonicalInterval = canonicalizeIntervalValue(intv) || intv;
+        const key = `${currentSymbolKey}\u0000${canonicalInterval}`;
+        const fullCacheEntry = getFullCacheEntry(currentSymbolKey, canonicalInterval);
         if (shouldSkipChartBackgroundPrefetch({
           activeInterval,
           fullCacheRows: fullCacheEntry?.rows.length || 0,
           fullCacheStatus: fullCacheEntry?.status || null,
-          hasMemoryCache: hasCache(symbol, intv, { marketType, exchange }),
+          hasMemoryCache: hasCache(symbol, canonicalInterval, { marketType, exchange }),
           inFlight: inFlightRef.current.has(key),
-          interval: intv,
+          interval: canonicalInterval,
         })) continue;
 
         inFlightRef.current.add(key);
         try {
           await seriesDataFeed.getLatest(
-            { exchange, marketType, symbol, interval: intv },
+            { exchange, marketType, symbol, interval: canonicalInterval },
             {
               limit: PREFETCH_BAR_LIMIT,
               source: "background-prefetch",

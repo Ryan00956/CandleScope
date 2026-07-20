@@ -18,3 +18,9 @@ test("tracked intervals keep 1s special case with 1m price feed", () => {
 test("tracked intervals keep custom current interval with 1m", () => {
   assert.deepEqual(buildRealtimeTrackedIntervals("45m"), ["45m", "1m"]);
 });
+
+test("tracked intervals canonicalize fixed-duration aliases", () => {
+  assert.deepEqual(buildRealtimeTrackedIntervals("60m"), ["1h", "1m"]);
+  assert.deepEqual(buildRealtimeTrackedIntervals("24h", "1d"), ["1d"]);
+  assert.deepEqual(buildRealtimeTrackedIntervals("7d", "1w"), ["7d", "1w"]);
+});

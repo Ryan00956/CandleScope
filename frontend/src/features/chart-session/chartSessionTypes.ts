@@ -50,6 +50,8 @@ export interface NativeInterval {
   label?: string;
 }
 
+export type NativeIntervalPurpose = "history" | "realtime";
+
 export interface AvailableInterval extends NativeInterval {
   isCustom: boolean;
 }
@@ -141,6 +143,8 @@ export type NativeIntervalSupport = (
   exchange: ExchangeId,
   interval: IntervalString,
   exchangeCatalog?: ExchangeCatalog | null,
+  marketType?: MarketType,
+  purpose?: NativeIntervalPurpose,
 ) => boolean;
 
 export interface SelectSymbolInput {

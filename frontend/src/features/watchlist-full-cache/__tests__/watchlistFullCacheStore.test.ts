@@ -60,6 +60,15 @@ function trimVictimFromDiagnostic(entry: WatchlistDiagnosticEntry): GcVictim {
   } as unknown as GcVictim;
 }
 
+test("watchlist full cache aliases share one canonical entry", () => {
+  resetWatchlistFullCache();
+  const symbolKey = "binance:futures:ALIAS";
+  mergeFullCacheRows(symbolKey, "60m", [{ time: epochSeconds(3_600) }], { source: "latest" });
+  assert.equal(fullCacheKey(symbolKey, "60m"), fullCacheKey(symbolKey, "1h"));
+  assert.equal(getFullCacheEntry(symbolKey, "1h")?.interval, "1h");
+  assert.equal(getFullCacheEntry(symbolKey, "1h")?.rows.length, 1);
+});
+
 function planCurrentWatchlistGc(maxKlineBars = 0) {
   const diagnostics = snapshotWatchlistFullCacheDiagnostics();
   return planFrontendGc({

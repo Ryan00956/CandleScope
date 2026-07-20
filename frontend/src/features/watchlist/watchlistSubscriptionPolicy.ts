@@ -1,4 +1,4 @@
-import { normalizeIntervalValue } from "../../utils/intervals.js";
+import { canonicalizeIntervalValue } from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import type {
   FullSubscriptionOptions,
@@ -18,7 +18,7 @@ export function getFullSubscriptionIntervals({
   const intervals: IntervalString[] = [];
 
   for (const item of [...nativeIntervals, ...customIntervalRecords]) {
-    const value = normalizeIntervalValue(intervalValue(item));
+    const value = canonicalizeIntervalValue(intervalValue(item));
     if (!value || seen.has(value)) continue;
     seen.add(value);
     intervals.push(value);
@@ -31,7 +31,7 @@ function normalizedUniqueValues(items: IntervalCandidate[] = []): IntervalString
   const seen = new Set<IntervalString>();
   const values: IntervalString[] = [];
   for (const item of items || []) {
-    const value = normalizeIntervalValue(intervalValue(item));
+    const value = canonicalizeIntervalValue(intervalValue(item));
     if (!value || seen.has(value)) continue;
     seen.add(value);
     values.push(value);

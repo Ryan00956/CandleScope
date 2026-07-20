@@ -1,6 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
-import { normalizeIntervalValue, parseIntervalSeconds } from "../../utils/intervals.js";
-import type { IntervalString } from "../../utils/intervals.js";
+import {
+  canonicalizeIntervalValue,
+  intervalSemanticSignature,
+  parseIntervalSeconds,
+} from "../../utils/intervals.js";
 import type {
   AddCustomIntervalOptions,
   AddCustomIntervalResult,
@@ -30,7 +33,7 @@ function normalizeRecord(
 ): CustomIntervalRecord | null {
   const source = isRecord(item) ? item : null;
   const rawValue = typeof item === "string" ? item : source?.value;
-  const value = normalizeIntervalValue(rawValue);
+  const value = canonicalizeIntervalValue(rawValue);
   const seconds = parseIntervalSeconds(value);
   if (!value || !seconds) return null;
 
@@ -44,25 +47,38 @@ function normalizeRecord(
   };
 }
 
-function sanitizeRecords(raw: unknown): CustomIntervalRecord[] {
+export function sanitizeCustomIntervalRecords(raw: unknown): CustomIntervalRecord[] {
   if (!Array.isArray(raw)) return [];
   const timestamp = now();
-  const seen = new Set<IntervalString>();
-  const records: CustomIntervalRecord[] = [];
+  const recordsBySignature = new Map<string, CustomIntervalRecord>();
 
   raw.forEach((item, index) => {
     const record = normalizeRecord(item, index, timestamp);
-    if (!record || seen.has(record.value)) return;
-    seen.add(record.value);
-    records.push(record);
+    if (!record) return;
+    const signature = intervalSemanticSignature(record.value);
+    const existing = recordsBySignature.get(signature);
+    if (!existing) {
+      recordsBySignature.set(signature, record);
+      return;
+    }
+    recordsBySignature.set(signature, {
+      ...existing,
+      value: record.value,
+      createdAt: Math.min(existing.createdAt, record.createdAt),
+      lastUsedAt: Math.max(existing.lastUsedAt, record.lastUsedAt),
+      usageCount: existing.usageCount + record.usageCount,
+      pinned: existing.pinned || record.pinned,
+      order: Math.min(existing.order, record.order),
+    });
   });
 
-  return records.sort((a, b) => a.order - b.order || a.value.localeCompare(b.value));
+  return [...recordsBySignature.values()]
+    .sort((a, b) => a.order - b.order || a.value.localeCompare(b.value));
 }
 
 function persistRecords(records: readonly CustomIntervalRecord[]): void {
   try {
-    const cleanRecords = sanitizeRecords(records);
+    const cleanRecords = sanitizeCustomIntervalRecords(records);
     localStorage.setItem(CUSTOM_INTERVAL_RECORDS_KEY, JSON.stringify(cleanRecords));
     localStorage.setItem(LEGACY_CUSTOM_INTERVALS_KEY, JSON.stringify(cleanRecords.map((record) => record.value)));
   } catch {
@@ -80,10 +96,13 @@ function readJson(key: string): unknown {
 }
 
 function loadCustomIntervalRecords(): CustomIntervalRecord[] {
-  const metaRecords = sanitizeRecords(readJson(CUSTOM_INTERVAL_RECORDS_KEY));
-  if (metaRecords.length > 0) return metaRecords;
+  const metaRecords = sanitizeCustomIntervalRecords(readJson(CUSTOM_INTERVAL_RECORDS_KEY));
+  if (metaRecords.length > 0) {
+    persistRecords(metaRecords);
+    return metaRecords;
+  }
 
-  const legacyRecords = sanitizeRecords(readJson(LEGACY_CUSTOM_INTERVALS_KEY));
+  const legacyRecords = sanitizeCustomIntervalRecords(readJson(LEGACY_CUSTOM_INTERVALS_KEY));
   if (legacyRecords.length > 0) persistRecords(legacyRecords);
   return legacyRecords;
 }
@@ -92,7 +111,7 @@ export function useCustomIntervals(): CustomIntervalsRuntime {
   const [records, setRecords] = useState<CustomIntervalRecord[]>(loadCustomIntervalRecords);
 
   const saveAndSetRecords = useCallback((nextRecords: readonly CustomIntervalRecord[]) => {
-    const cleanRecords = sanitizeRecords(nextRecords);
+    const cleanRecords = sanitizeCustomIntervalRecords(nextRecords);
     persistRecords(cleanRecords);
     setRecords(cleanRecords);
     return cleanRecords;
@@ -104,7 +123,7 @@ export function useCustomIntervals(): CustomIntervalsRuntime {
     interval: unknown,
     options: AddCustomIntervalOptions = {},
   ): AddCustomIntervalResult => {
-    const value = normalizeIntervalValue(interval);
+    const value = canonicalizeIntervalValue(interval);
     const seconds = parseIntervalSeconds(value);
     if (!value || !seconds) return { ok: false, reason: "invalid" };
 
@@ -139,7 +158,7 @@ export function useCustomIntervals(): CustomIntervalsRuntime {
   }, [records, saveAndSetRecords]);
 
   const markIntervalUsed = useCallback((interval: unknown): void => {
-    const value = normalizeIntervalValue(interval);
+    const value = canonicalizeIntervalValue(interval);
     if (!value || !records.some((record) => record.value === value)) return;
     const timestamp = now();
     saveAndSetRecords(records.map((record) => (
@@ -150,7 +169,7 @@ export function useCustomIntervals(): CustomIntervalsRuntime {
   }, [records, saveAndSetRecords]);
 
   const removeCustomInterval = useCallback((interval: unknown): CustomIntervalRecord | null => {
-    const value = normalizeIntervalValue(interval);
+    const value = canonicalizeIntervalValue(interval);
     const removed = records.find((record) => record.value === value) || null;
     if (!removed) return null;
     saveAndSetRecords(records.filter((record) => record.value !== value));
@@ -170,7 +189,7 @@ export function useCustomIntervals(): CustomIntervalsRuntime {
   const togglePinCustomInterval = useCallback((
     interval: unknown,
   ): CustomIntervalRecord | undefined | null => {
-    const value = normalizeIntervalValue(interval);
+    const value = canonicalizeIntervalValue(interval);
     const target = records.find((record) => record.value === value);
     if (!target) return null;
     const next = records.map((record) => (

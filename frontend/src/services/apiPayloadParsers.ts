@@ -49,11 +49,21 @@ export interface ExchangeMarketPayload extends JsonRecord {
   contract_family?: string | null;
 }
 
+export interface ExchangeChannelCapabilityPayload extends JsonRecord {
+  channel: string;
+  market_types: string[];
+  realtime: boolean;
+  history: boolean;
+  params: JsonRecord;
+}
+
 export interface ExchangeCapabilityPayload extends JsonRecord {
   exchange: string;
   name: string;
   markets: ExchangeMarketPayload[];
   native_intervals: string[];
+  capability_schema_version?: number;
+  channels?: ExchangeChannelCapabilityPayload[];
   protocol_features: string[];
   limits: JsonRecord;
   known_limitations: string[];
@@ -294,13 +304,31 @@ function parseExchangeMarket(value: unknown, path: string): ExchangeMarketPayloa
   return result;
 }
 
+function parseExchangeChannelCapability(
+  value: unknown,
+  path: string,
+): ExchangeChannelCapabilityPayload {
+  const record = expectRecord(value, path);
+  return {
+    ...record,
+    channel: expectNonEmptyString(record.channel, `${path}.channel`),
+    market_types: expectStringArray(record.market_types, `${path}.market_types`),
+    realtime: expectBoolean(record.realtime, `${path}.realtime`),
+    history: expectBoolean(record.history, `${path}.history`),
+    params: expectRecord(record.params, `${path}.params`),
+  };
+}
+
 export function parseExchangeCapability(
   value: unknown,
   path = "response",
 ): ExchangeCapabilityPayload {
   const record = expectRecord(value, path);
   if (!Array.isArray(record.markets)) throw new ApiPayloadError(`${path}.markets`, "expected an array");
-  return {
+  if ("channels" in record && !Array.isArray(record.channels)) {
+    throw new ApiPayloadError(`${path}.channels`, "expected an array");
+  }
+  const result: ExchangeCapabilityPayload = {
     ...record,
     exchange: expectNonEmptyString(record.exchange, `${path}.exchange`),
     name: expectNonEmptyString(record.name, `${path}.name`),
@@ -310,6 +338,22 @@ export function parseExchangeCapability(
     limits: expectRecord(record.limits, `${path}.limits`),
     known_limitations: expectStringArray(record.known_limitations, `${path}.known_limitations`),
   };
+  if ("capability_schema_version" in record) {
+    const schemaVersion = expectNonNegativeInteger(
+      record.capability_schema_version,
+      `${path}.capability_schema_version`,
+    );
+    if (schemaVersion < 1) {
+      throw new ApiPayloadError(`${path}.capability_schema_version`, "expected an integer of at least 1");
+    }
+    result.capability_schema_version = schemaVersion;
+  }
+  if (Array.isArray(record.channels)) {
+    result.channels = record.channels.map((item, index) => (
+      parseExchangeChannelCapability(item, `${path}.channels[${index}]`)
+    ));
+  }
+  return result;
 }
 
 export function parseExchangeListResponse(

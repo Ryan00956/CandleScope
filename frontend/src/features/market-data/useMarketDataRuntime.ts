@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { intervalsSemanticallyEquivalent } from "../../utils/intervals.js";
 import type { MutableRefObject } from "react";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import { resolveInitialRows as resolveWatchlistInitialRows } from "../watchlist-full-cache/watchlistFullCacheResolver.js";
@@ -140,7 +141,7 @@ export function useMarketDataRuntime({
   const updateLastPrice = useCallback((candidate: KlineBar, intv: IntervalString) => {
     setLastPrice((prev) => {
       if (!candidate || candidate.time == null) return prev;
-      if (intv !== intervalRef.current) return prev;
+      if (!intervalsSemanticallyEquivalent(intv, intervalRef.current)) return prev;
       const rtPrice = realtimePriceRef.current;
       if (rtPrice != null) {
         return { ...candidate, close: rtPrice };

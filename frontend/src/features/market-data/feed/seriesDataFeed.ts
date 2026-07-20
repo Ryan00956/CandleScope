@@ -42,7 +42,11 @@ import {
   intersectRanges,
   isUserVisibleBackfillReason,
 } from "../phase1WindowPolicy.js";
-import { parseIntervalSeconds } from "../../../utils/intervals.js";
+import {
+  intervalsSemanticallyEquivalent,
+  parseIntervalSeconds,
+} from "../../../utils/intervals.js";
+import { createIntervalTimeline } from "../../../utils/intervalTimeline.js";
 import { InflightRegistry } from "./inflightRegistry.js";
 import { KlineStreamSubscription } from "./klineStreamSubscription.js";
 import {
@@ -318,7 +322,7 @@ function derivedTargetRangeFromDetail(
   for (const rawTarget of detail.derived_repair_targets) {
     if (!rawTarget || typeof rawTarget !== "object") continue;
     const target = rawTarget as Record<string, unknown>;
-    if (String(target.interval || "") !== interval) continue;
+    if (!intervalsSemanticallyEquivalent(target.interval, interval)) continue;
     const range = eventRangeFromDetail({
       request_start_ms: target.request_start_ms ?? target.start_ms ?? target.range_start_ms,
       request_end_ms: target.request_end_ms ?? target.end_ms ?? target.range_end_ms,
@@ -328,36 +332,41 @@ function derivedTargetRangeFromDetail(
   return combinedRange;
 }
 
-function projectContinuousRangeToInterval(
+export function projectContinuousRangeToInterval(
   range: TimeRangeMs | null,
   interval: string,
 ): TimeRangeMs | null {
   if (!range) return null;
-  const monthly = /^(\d+)M$/.exec(interval);
-  if (monthly?.[1]) {
-    const months = Number(monthly[1]);
-    const bucket = (value: number): number => {
-      const date = new Date(value);
-      const monthIndex = Math.floor(date.getUTCMonth() / months) * months;
-      return Date.UTC(date.getUTCFullYear(), monthIndex, 1);
-    };
-    return {
-      start: bucket(range.start) as TimeRangeMs["start"],
-      end: bucket(range.end) as TimeRangeMs["end"],
-    };
-  }
-  const seconds = parseIntervalSeconds(interval);
-  if (!seconds || seconds <= 0) return null;
-  const widthMs = seconds * 1_000;
-  const weekly = /^\d+w$/.test(interval);
-  const offsetMs = weekly ? 4 * 86_400_000 : 0;
-  const bucket = (value: number): number => (
-    Math.floor((value - offsetMs) / widthMs) * widthMs + offsetMs
-  );
+  const timeline = createIntervalTimeline(interval);
+  if (!timeline) return null;
+  const start = timeline.floor(range.start / 1_000);
+  const end = timeline.floor(range.end / 1_000);
+  if (start === null || end === null) return null;
   return {
-    start: bucket(range.start) as TimeRangeMs["start"],
-    end: bucket(range.end) as TimeRangeMs["end"],
+    start: (start * 1_000) as TimeRangeMs["start"],
+    end: (end * 1_000) as TimeRangeMs["end"],
   };
+}
+
+export function countIntervalBarsInRange(range: TimeRangeSec, interval: string): number | null {
+  const timeline = createIntervalTimeline(interval);
+  if (!timeline) return null;
+  const startFloor = timeline.floor(range.start);
+  const end = timeline.floor(range.end);
+  if (startFloor === null || end === null) return null;
+  const start = startFloor === range.start ? startFloor : timeline.next(startFloor);
+  if (start === null || end < start) return null;
+  if (timeline.spec.alignment === "calendar-month") {
+    const startDate = new Date(start * 1_000);
+    const endDate = new Date(end * 1_000);
+    const startMonth = startDate.getUTCFullYear() * 12 + startDate.getUTCMonth();
+    const endMonth = endDate.getUTCFullYear() * 12 + endDate.getUTCMonth();
+    return Math.floor((endMonth - startMonth) / timeline.spec.monthCount!) + 1;
+  }
+  const width = timeline.spec.alignment === "weekly-monday"
+    ? timeline.spec.weekCount! * 604_800
+    : timeline.spec.widthSeconds!;
+  return Math.floor((end - start) / width) + 1;
 }
 
 /** A result can contain renderable rows while its requested range is still incomplete. */
@@ -456,12 +465,13 @@ function combineTerminalCallbacks(
   };
 }
 
-function capContinuationRanges(
+export function capContinuationRanges(
   range: TimeRangeSec,
   result: KlineFetchResult,
   continuation: EpochSeconds,
-  intervalSeconds: number,
+  interval: string,
 ): TimeRangeSec[] {
+  const timeline = createIntervalTimeline(interval);
   const candidates: TimeRangeSec[] = [{ start: range.start, end: continuation }];
   for (const missing of missingRanges(result)) {
     const startMs = toEpochMilliseconds(missing.start_ms);
@@ -483,7 +493,8 @@ function capContinuationRanges(
   const merged: TimeRangeSec[] = [];
   for (const candidate of candidates) {
     const previous = merged.at(-1);
-    if (previous && candidate.start <= previous.end + intervalSeconds) {
+    const successor = previous ? timeline?.next(previous.end) : null;
+    if (previous && successor != null && candidate.start <= successor) {
       previous.end = Math.max(previous.end, candidate.end) as EpochSeconds;
     } else {
       merged.push({ ...candidate });
@@ -1275,9 +1286,8 @@ export class SeriesDataFeed {
     fetchedRange: TimeRangeSec,
     result: KlineFetchResult,
   ): void {
-    const intervalSeconds = parseIntervalSeconds(series.interval);
     if (
-      !intervalSeconds
+      !createIntervalTimeline(series.interval)
       || result.verified_contiguous !== true
       || isKlineResultRepairPending(result)
     ) {
@@ -1292,7 +1302,7 @@ export class SeriesDataFeed {
       ) {
         continue;
       }
-      if (!this.isGapRangeSatisfied(result, pending.range, intervalSeconds)) continue;
+      if (!this.isGapRangeSatisfied(result, pending.range, series.interval)) continue;
       this.pendingGapRepairs.delete(repairKey);
       pending.onResolved?.();
     }
@@ -1383,7 +1393,7 @@ export class SeriesDataFeed {
   private isGapRangeSatisfied(
     result: KlineFetchResult,
     range: TimeRangeSec,
-    intervalSeconds: number,
+    interval: string,
   ): boolean {
     if (result.truncated || result.verified_contiguous === false || missingRanges(result).length > 0) {
       return false;
@@ -1391,7 +1401,8 @@ export class SeriesDataFeed {
     if (isKlineResultRepairPending(result)) return false;
     if (result.verified_contiguous === true) return true;
     if (result.history_state === "exhausted" && result.retryable === false) return true;
-    const expectedBars = Math.floor((range.end - range.start) / intervalSeconds) + 1;
+    const expectedBars = countIntervalBarsInRange(range, interval);
+    if (expectedBars === null) return false;
     return rowsFromResult(result).length >= expectedBars;
   }
 
@@ -1407,8 +1418,8 @@ export class SeriesDataFeed {
     const current = this.pendingGapRepairs.get(this.gapRepairKey(series, range));
     const resolvedCallback = onResolved || current?.onResolved;
     const terminalCallback = onTerminal || current?.onTerminal;
-    const intervalSeconds = parseIntervalSeconds(series.interval);
-    if (intervalSeconds && this.isGapRangeSatisfied(result, range, intervalSeconds)) {
+    const intervalTimeline = createIntervalTimeline(series.interval);
+    if (intervalTimeline && this.isGapRangeSatisfied(result, range, series.interval)) {
       this.clearPendingGapRepair(series, range);
       resolvedCallback?.();
       return;
@@ -1444,12 +1455,12 @@ export class SeriesDataFeed {
       ? null
       : millisecondsToSeconds(continuationMs);
     if (
-      intervalSeconds
+      intervalTimeline
       && continuation != null
       && continuation >= range.start
       && continuation < range.end
     ) {
-      const children = capContinuationRanges(range, result, continuation, intervalSeconds);
+      const children = capContinuationRanges(range, result, continuation, series.interval);
       const madeProgress = children.length > 1
         || children[0]?.start !== range.start
         || children[0]?.end !== range.end;
@@ -1712,16 +1723,18 @@ export class SeriesDataFeed {
   ): TimeRangeMs | null {
     const candidates = [...this.pendingGapRepairs.values()]
       .filter((pending) => isSameSeries(pending.series, series));
-    const intervalSeconds = parseIntervalSeconds(series.interval);
+    const timeline = createIntervalTimeline(series.interval);
     for (const pending of candidates) {
       const range = {
         start: secondsToMilliseconds(pending.range.start),
         end: secondsToMilliseconds(pending.range.end),
       };
-      if (!baseEventRange || !intervalSeconds) return range;
+      if (!baseEventRange || !timeline) return range;
+      const end = timeline.end(pending.range.end);
+      if (end === null) return range;
       const componentCoverage = {
         start: range.start,
-        end: (Number(range.end) + intervalSeconds * 1_000 - 1) as TimeRangeMs["end"],
+        end: (end * 1_000 - 1) as TimeRangeMs["end"],
       };
       if (intersectRanges(baseEventRange, componentCoverage)) return range;
     }
@@ -1777,9 +1790,11 @@ export class SeriesDataFeed {
     const derivedIntervals = derivedIntervalsFromDetail(detail);
     if (
       activeSeries
-      && activeSeries.interval !== baseEventSeries.interval
+      && !intervalsSemanticallyEquivalent(activeSeries.interval, baseEventSeries.interval)
       && sameInstrument(activeSeries, baseEventSeries)
-      && derivedIntervals.includes(activeSeries.interval)
+      && derivedIntervals.some((interval) => (
+        intervalsSemanticallyEquivalent(interval, activeSeries.interval)
+      ))
     ) {
       eventSeries = activeSeries;
       eventRange = derivedTargetRangeFromDetail(detail, activeSeries.interval)

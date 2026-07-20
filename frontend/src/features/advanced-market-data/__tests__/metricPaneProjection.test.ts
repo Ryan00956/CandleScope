@@ -280,6 +280,36 @@ test("funding realtime never survives a target boundary inside a large K", () =>
   assert.equal(pane?.pointMetadata?.[0]?.sourceLabel, "模型历史估算");
 });
 
+test("monthly funding tail ends at the next calendar month in a leap year", () => {
+  const feb = epochSeconds(Date.UTC(2024, 1, 1) / 1_000);
+  const marchMiddayMs = Date.UTC(2024, 2, 1, 12);
+  const estimate = record("funding_rate", feb * 1_000, {
+    funding_rate: 0.0001,
+    sample_time_ms: feb * 1_000,
+    sample_kind: "estimate",
+    provenance: "derived_history",
+    quality: "estimated",
+    is_final: false,
+  });
+  const afterClose = record("funding_rate", marchMiddayMs, {
+    funding_rate: 0.0002,
+    observed_at_ms: marchMiddayMs,
+    next_funding_time_ms: Date.UTC(2024, 3, 1),
+    sample_kind: "preview",
+    provenance: "exchange_realtime",
+    quality: "live",
+    is_final: false,
+  });
+  const history = buildFundingRateHistoryProjection([estimate], [{ time: feb }], "1M");
+  const pane = buildFundingRatePaneFromHistoryProjection(history, {
+    fundingRealtimeHistory: [afterClose],
+    fundingPreview: afterClose,
+  }, Date.UTC(2024, 2, 2));
+
+  assert.equal(pane.pointMetadata?.[0]?.sourceLabel, "模型历史估算");
+  assert.deepEqual(pane.lines[0]?.data.map((point) => point.time), [feb]);
+});
+
 test("funding realtime includes the K ending at target but not the K starting there", () => {
   const bars: KlineBar[] = [0, 180].map((time) => ({ time: epochSeconds(time) }));
   const estimates = bars.map((bar) => record("funding_rate", bar.time * 1000, {

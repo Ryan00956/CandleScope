@@ -108,3 +108,14 @@ test("full interval resync compares normalized sets and suppresses duplicate inf
     observedSignature: observed,
   }), false);
 });
+
+test("full interval policy canonicalizes semantic aliases without merging calendar alignments", () => {
+  assert.deepEqual(getFullSubscriptionIntervals({
+    nativeIntervals: [{ value: "1h" }, { value: "1w" }, { value: "1M" }],
+    customIntervalRecords: [{ value: "60m" }, { value: "7d" }, { value: "30d" }],
+  }), ["1h", "1w", "1M", "7d", "30d"]);
+  assert.equal(
+    buildFullSubscriptionIntervalSignature(["60m", "24h"]),
+    buildFullSubscriptionIntervalSignature(["1h", "1d"]),
+  );
+});

@@ -9,6 +9,7 @@ import {
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
+import { canonicalizeIntervalValue } from "../../utils/intervals.js";
 import { buildSeriesWindowKey } from "../market-data/window/windowRegistry.js";
 import {
   fetchAdvancedMarketHistory,
@@ -137,7 +138,7 @@ export function buildAdvancedMarketHistoryContextKey(
   interval: string,
   channels: readonly MarketStateMetricChannel[],
 ): string {
-  return `${identityKey}|${interval}|${channels.join("|")}`;
+  return `${identityKey}|${canonicalizeIntervalValue(interval) || interval}|${channels.join("|")}`;
 }
 
 export function buildTailFirstHistoryRanges(

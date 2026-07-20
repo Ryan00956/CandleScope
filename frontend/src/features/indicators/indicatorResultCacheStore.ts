@@ -20,7 +20,7 @@ import {
   registerCacheResource,
   unregisterCacheResource,
 } from "../cache-gc/cacheRegistry.js";
-import { parseIntervalSeconds } from "../../utils/intervals.js";
+import { canonicalizeIntervalValue, parseIntervalSeconds } from "../../utils/intervals.js";
 import {
   indicatorRangeRightEdge,
   indicatorRevisionsCompatible,
@@ -129,7 +129,7 @@ function normalizeContext(
     exchange: normalizeSeriesPart(context.exchange, "binance").toLowerCase(),
     marketType: normalizeSeriesPart(context.marketType, "spot").toLowerCase(),
     symbol: normalizeSeriesPart(context.symbol, "UNKNOWN").toUpperCase(),
-    interval: normalizeSeriesPart(context.interval, "1m"),
+    interval: canonicalizeIntervalValue(context.interval) || "1m",
     candleUpColor: normalizeSeriesPart(context.candleUpColor),
     candleDownColor: normalizeSeriesPart(context.candleDownColor),
   };
@@ -387,6 +387,10 @@ function rangeStep(context: IndicatorContextInput = {}): number {
   return parseIntervalSeconds(context.interval) || 1;
 }
 
+function rangeOptions(context: IndicatorContextInput = {}) {
+  return { interval: context.interval, step: rangeStep(context) };
+}
+
 function appendComputedRange(
   segments: IndicatorRangeSegment[] | undefined,
   rangeInput: unknown,
@@ -395,7 +399,7 @@ function appendComputedRange(
 ): IndicatorRangeSegment[] {
   const range = normalizeIndicatorRange(rangeInput);
   if (!range)
-    return mergeIndicatorRangeSegments(segments, { step: rangeStep(context) });
+    return mergeIndicatorRangeSegments(segments, rangeOptions(context));
   const normalizedRevision = normalizeIndicatorRevision(revision);
   return mergeIndicatorRangeSegments(
     [
@@ -405,7 +409,7 @@ function appendComputedRange(
         ...(normalizedRevision ? { revision: normalizedRevision } : {}),
       },
     ],
-    { step: rangeStep(context) },
+    rangeOptions(context),
   );
 }
 
@@ -416,9 +420,8 @@ function clearStaleRange(
 ): IndicatorRangeSegment[] {
   const range = normalizeIndicatorRange(rangeInput);
   if (!range) return segments || [];
-  const step = rangeStep(context);
   return (segments || []).flatMap((segment) =>
-    subtractIndicatorRange(segment, [range], { step }),
+    subtractIndicatorRange(segment, [range], rangeOptions(context)),
   );
 }
 
@@ -915,9 +918,8 @@ export function getCachedIndicatorComputedSegments(
     )
   )
     return [];
-  const step = rangeStep(entry.context);
   return mergeIndicatorRangeSegments(entry.computedSegments || [], {
-    step,
+    ...rangeOptions(entry.context),
     revision,
   }).map(clone);
 }
@@ -969,7 +971,7 @@ export function invalidateCachedIndicatorRange(
   );
   const normalizedRange = normalizeIndicatorRange(range);
   if (!normalizedRange) return current;
-  const step = rangeStep(current.context);
+  const coverageOptions = rangeOptions(current.context);
   const cascadeRight = options.cascadeRight !== false;
   const invalidatedEnd = cascadeRight
     ? (current.computedSegments || []).reduce(
@@ -987,12 +989,12 @@ export function invalidateCachedIndicatorRange(
       {
         cascadeRight,
         revision,
-        step,
+        ...coverageOptions,
       },
     ),
     staleSegments: mergeIndicatorRangeSegments(
       [...(current.staleSegments || []), staleRange],
-      { step },
+      coverageOptions,
     ),
     revision: revision || current.revision || null,
   });
@@ -1208,7 +1210,7 @@ export function trimIndicatorResultCacheEntries(
               segment,
               [{ start: 1, end: Number(victim.keepStart) - 1 }],
               {
-                step: rangeStep(entry.context),
+                ...rangeOptions(entry.context),
               },
             ),
           ),

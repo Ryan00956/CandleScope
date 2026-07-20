@@ -123,6 +123,7 @@ export interface TradeFlowPreferenceActions {
 export interface TradeFlowRuntime {
   view: {
     identity: TradeFlowIdentity;
+    interval: string;
     supported: boolean;
     supportMessage: string | null;
     preferences: TradeFlowPreferences;

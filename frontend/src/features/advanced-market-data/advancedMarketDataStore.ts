@@ -15,7 +15,7 @@ import {
   isFundingRateHistory,
   isFundingRateRealtime,
 } from "./fundingRateSemantics.js";
-import { normalizeIntervalValue } from "../../utils/intervals.js";
+import { canonicalizeIntervalValue } from "../../utils/intervals.js";
 
 const MAX_METRIC_RECORDS = 20_000;
 const MAX_FUNDING_REALTIME_RECORDS = 36_000;
@@ -96,7 +96,7 @@ function normalizePeriod(value: unknown): string | null {
 }
 
 function normalizeFundingPeriod(value: unknown): string | null {
-  return normalizeIntervalValue(value) || null;
+  return canonicalizeIntervalValue(value) || null;
 }
 
 function asOpenInterestLiveProvisional(record: MarketStateRecord): MarketStateRecord {

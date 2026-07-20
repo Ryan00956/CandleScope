@@ -290,9 +290,10 @@ def test_kline_ws_forwards_bar_updated_event_from_data_manager() -> None:
         }
         message = ws.receive_json()
 
-    assert message == {
-        "type": "kline",
-        "exchange": "binance",
+        assert message == {
+            "type": "kline",
+            "event_type": "bar.updated",
+            "exchange": "binance",
         "symbol": "BTCUSDT",
         "interval": "1m",
         "market_type": "spot",

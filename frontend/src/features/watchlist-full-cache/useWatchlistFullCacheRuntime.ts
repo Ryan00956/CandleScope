@@ -10,7 +10,9 @@ import {
   buildWatchlistFullCacheTargets,
 } from "./watchlistFullCachePolicy.js";
 import {
+  getFullCacheRealtimeVersion,
   markFullCacheError,
+  isTrustedFullCachePreload,
   mergeFullCacheRows,
   setFullCacheEntryStatus,
   WATCHLIST_FULL_CACHE_MIN_RETAINED_BARS,
@@ -146,6 +148,7 @@ export function useWatchlistFullCacheRuntime({
         index += 1;
         if (!job) continue;
         setFullCacheEntryStatus(job.symbolKey, job.interval, "loading", { source: "latest" });
+        const expectedRealtimeVersion = getFullCacheRealtimeVersion();
         try {
           const result = await fetchLatestKlines(
             job.symbol,
@@ -157,9 +160,16 @@ export function useWatchlistFullCacheRuntime({
             { signal: controller.signal },
           );
           if (controller.signal.aborted) return;
+          if (!isTrustedFullCachePreload(result)) {
+            setFullCacheEntryStatus(job.symbolKey, job.interval, "stale", {
+              source: "latest-untrusted",
+            });
+            continue;
+          }
           mergeFullCacheRows(job.symbolKey, job.interval, normalizeHttpRows(result?.data || []), {
             status: "warm",
             source: typeof result?.source === "string" ? result.source : "latest",
+            expectedRealtimeVersion,
           });
         } catch (error) {
           if (!controller.signal.aborted) markFullCacheError(job.symbolKey, job.interval, error);

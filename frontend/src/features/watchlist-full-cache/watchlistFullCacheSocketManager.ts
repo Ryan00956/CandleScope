@@ -104,6 +104,12 @@ function parseSocketKline(value: unknown): KlineBar | null {
   return time == null ? null : { ...parsed, time };
 }
 
+function socketEventType(message: Record<string, unknown>): string | null {
+  if (typeof message.event_type === "string") return message.event_type;
+  if (typeof message.eventType === "string") return message.eventType;
+  return null;
+}
+
 export function createWatchlistFullCacheSocketManager(
   options: WatchlistFullCacheSocketManagerOptions = {},
 ): WatchlistFullCacheSocketManager {
@@ -232,7 +238,7 @@ export function createWatchlistFullCacheSocketManager(
           connection.target.symbolKey,
           message.interval,
           tick,
-          { source: "ws" },
+          { source: "ws", eventType: socketEventType(message) },
         );
       } catch (error) {
         connection.target.intervals.forEach((interval) => {

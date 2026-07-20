@@ -4,8 +4,11 @@ import test from "node:test";
 import {
   fullCacheKey,
   getFullCacheEntry,
+  getFullCacheRealtimeVersion,
+  getFullCacheRealtimeTrackedRowCount,
   getWatchlistFullCacheMaxBars,
   getWarmRows,
+  isTrustedFullCachePreload,
   mergeFullCacheRows,
   patchFullCacheRealtimeKline,
   resetWatchlistFullCache,
@@ -20,6 +23,13 @@ import {
   epochSeconds,
   mustBeDefined,
 } from "../../../test/testHelpers.js";
+
+test("full-cache preload fails closed without explicit row finality", () => {
+  assert.equal(isTrustedFullCachePreload({ all_rows_final: true, data: [] }), true);
+  assert.equal(isTrustedFullCachePreload({ all_rows_final: false, data: [] }), false);
+  assert.equal(isTrustedFullCachePreload({ data: [] }), false);
+  assert.equal(isTrustedFullCachePreload(null), false);
+});
 
 type WatchlistDiagnosticEntry = ReturnType<
   typeof snapshotWatchlistFullCacheDiagnostics
@@ -118,6 +128,160 @@ test("watchlist full cache patches realtime klines without replacing other inter
     mustBeDefined(getWarmRows("spot:BTCUSDT", "1h")).rows.map((row) => row.close),
     [11],
   );
+});
+
+test("watchlist full cache lets a newer REST merge replace an old cached timestamp", () => {
+  resetWatchlistFullCache();
+
+  const symbol = "spot:BTCUSDT";
+  const time = epochSeconds(1_000);
+  mergeFullCacheRows(symbol, "1h", [
+    { time, close: 10, volume: 1, is_closed: true },
+  ], { source: "cache", nowMs: 100 });
+
+  const repaired = mergeFullCacheRows(symbol, "1h", [
+    { time, close: 11, volume: 20, is_closed: true },
+  ], { source: "rest-verified", nowMs: 200 });
+
+  assert.deepEqual(repaired.rows, [
+    { time, close: 11, volume: 20, is_closed: true },
+  ]);
+  assert.equal(repaired.source, "rest-verified");
+  assert.equal(repaired.lastUpdatedMs, 200);
+});
+
+test("watchlist full cache keeps a concurrent WS amendment over an older REST snapshot", () => {
+  resetWatchlistFullCache();
+
+  const symbol = "spot:BTCUSDT";
+  const time = epochSeconds(1_000);
+  mergeFullCacheRows(symbol, "1h", [
+    { time, close: 10, volume: 1, is_closed: true },
+  ], { source: "cache", nowMs: 100 });
+  const expectedRealtimeVersion = getFullCacheRealtimeVersion();
+
+  patchFullCacheRealtimeKline(
+    symbol,
+    "1h",
+    { time, close: 20, volume: 30, is_closed: true },
+    { eventType: "bar.amended", nowMs: 200 },
+  );
+  const merged = mergeFullCacheRows(symbol, "1h", [
+    { time, close: 10, volume: 1, is_closed: true },
+  ], {
+    source: "latest",
+    nowMs: 300,
+    expectedRealtimeVersion,
+  });
+
+  assert.deepEqual(merged.rows, [
+    { time, close: 20, volume: 30, is_closed: true },
+  ]);
+  assert.equal(merged.source, "ws");
+  assert.equal(merged.lastRealtimeMs, 200);
+});
+
+test("watchlist full cache still accepts REST repairs for rows untouched by concurrent WS", () => {
+  resetWatchlistFullCache();
+
+  const symbol = "spot:BTCUSDT";
+  const repairedTime = epochSeconds(1_000);
+  const tailTime = epochSeconds(1_060);
+  mergeFullCacheRows(symbol, "1m", [
+    { time: repairedTime, close: 10, is_closed: true },
+    { time: tailTime, close: 2, is_closed: false },
+  ]);
+  const expectedRealtimeVersion = getFullCacheRealtimeVersion();
+
+  patchFullCacheRealtimeKline(
+    symbol,
+    "1m",
+    { time: tailTime, close: 3, is_closed: true },
+    { eventType: "bar.closed", nowMs: 200 },
+  );
+  const merged = mergeFullCacheRows(symbol, "1m", [
+    { time: repairedTime, close: 11, is_closed: true },
+    { time: tailTime, close: 2, is_closed: true },
+  ], { expectedRealtimeVersion, nowMs: 300 });
+
+  assert.deepEqual(merged.rows.map((row) => row.close), [11, 3]);
+});
+
+test("watchlist full cache lets trusted REST final data beat a concurrent forming update", () => {
+  resetWatchlistFullCache();
+
+  const symbol = "spot:BTCUSDT";
+  const time = epochSeconds(1_000);
+  mergeFullCacheRows(symbol, "1m", [
+    { time, close: 10, is_closed: false },
+  ]);
+  const expectedRealtimeVersion = getFullCacheRealtimeVersion();
+
+  patchFullCacheRealtimeKline(
+    symbol,
+    "1m",
+    { time, close: 11, is_closed: false },
+    { eventType: "bar.updated", nowMs: 200 },
+  );
+  const merged = mergeFullCacheRows(symbol, "1m", [
+    { time, close: 12, is_closed: true },
+  ], { expectedRealtimeVersion, source: "latest", nowMs: 300 });
+
+  assert.deepEqual(merged.rows, [{ time, close: 12, is_closed: true }]);
+  assert.equal(merged.source, "latest");
+});
+
+test("watchlist full cache applies BAR_AMENDED to an arbitrary retained timestamp", () => {
+  resetWatchlistFullCache();
+
+  const symbol = "spot:BTCUSDT";
+  const firstTime = epochSeconds(1_000);
+  const amendedTime = epochSeconds(1_060);
+  const tailTime = epochSeconds(1_120);
+  mergeFullCacheRows(symbol, "1m", [
+    { time: firstTime, close: 1, is_closed: true },
+    { time: amendedTime, close: 2, is_closed: true },
+    { time: tailTime, close: 3, is_closed: false },
+  ]);
+  const before = mustBeDefined(getFullCacheEntry(symbol, "1m"));
+  const rows = before.rows;
+
+  const amended = patchFullCacheRealtimeKline(
+    symbol,
+    "1m",
+    { time: amendedTime, close: 20, volume: 50 },
+    { eventType: "bar.amended", nowMs: 200 },
+  );
+
+  assert.strictEqual(amended.rows, rows);
+  assert.deepEqual(amended.rows.map((row) => row.close), [1, 20, 3]);
+  assert.equal(amended.rows[1]?.is_closed, true);
+  assert.equal(amended.lastRealtimeMs, 200);
+});
+
+test("watchlist full cache rejects a partial tail update over final data", () => {
+  resetWatchlistFullCache();
+
+  const symbol = "spot:BTCUSDT";
+  const time = epochSeconds(1_000);
+  mergeFullCacheRows(symbol, "1h", [
+    { time, close: 11, volume: 20, is_closed: true },
+  ], { source: "rest-verified", nowMs: 100 });
+  const before = mustBeDefined(getFullCacheEntry(symbol, "1h"));
+
+  const ignored = patchFullCacheRealtimeKline(
+    symbol,
+    "1h",
+    { time, close: 10, volume: 1, is_closed: false },
+    { eventType: "bar.updated", nowMs: 200 },
+  );
+
+  assert.strictEqual(ignored, before);
+  assert.deepEqual(ignored.rows, [
+    { time, close: 11, volume: 20, is_closed: true },
+  ]);
+  assert.equal(ignored.lastUpdatedMs, 100);
+  assert.equal(ignored.lastRealtimeMs, null);
 });
 
 test("watchlist full cache uses the same O(1) realtime tail path for every interval", () => {
@@ -348,6 +512,27 @@ test("watchlist full cache stays bounded during long-running realtime appends", 
   assert.equal(finalEntry.rows[0]?.close, appendedBars - maxBars + 1);
   assert.equal(finalEntry.rows.at(-1)?.close, appendedBars);
   assert.equal(finalEntry.coverage?.bars, maxBars);
+});
+
+test("watchlist full cache bounds authoritative realtime row revisions with retention", () => {
+  resetWatchlistFullCache();
+
+  const symbol = "spot:BTCUSDT";
+  const interval = "1s";
+  const maxBars = getWatchlistFullCacheMaxBars(interval);
+  const appendedBars = maxBars + 200;
+
+  for (let index = 0; index < appendedBars; index += 1) {
+    patchFullCacheRealtimeKline(
+      symbol,
+      interval,
+      { time: epochSeconds(200_000 + index), close: index + 1, is_closed: true },
+      { eventType: "bar.closed", nowMs: index + 1 },
+    );
+  }
+
+  assert.equal(getFullCacheEntry(symbol, interval)?.rows.length, maxBars);
+  assert.equal(getFullCacheRealtimeTrackedRowCount(symbol, interval), maxBars);
 });
 
 test("watchlist diagnostics expose exact safe trim plans only above the subscribed tail", () => {

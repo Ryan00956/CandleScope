@@ -9,10 +9,14 @@ import type {
 } from "../watchlistFullCacheSocketManager.js";
 import {
   getFullCacheEntry,
+  mergeFullCacheRows,
   resetWatchlistFullCache,
 } from "../watchlistFullCacheStore.js";
 import type { FullCacheSocketTarget } from "../watchlistFullCacheTypes.js";
-import { mustBeDefined } from "../../../test/testHelpers.js";
+import {
+  epochSeconds,
+  mustBeDefined,
+} from "../../../test/testHelpers.js";
 
 class FakeSocket implements WatchlistFullCacheSocketLike {
   readyState = 0;
@@ -181,6 +185,40 @@ test("late events from an obsolete socket generation cannot stale the replacemen
   assert.equal(current.subscribed, true);
   assert.equal(timers.pending().length, 0);
 
+  manager.dispose();
+});
+
+test("socket manager routes BAR_AMENDED to a retained historical row", () => {
+  resetWatchlistFullCache();
+  mergeFullCacheRows(TARGET.symbolKey, "1m", [
+    { time: epochSeconds(1), close: 1, is_closed: true },
+    { time: epochSeconds(2), close: 2, is_closed: true },
+    { time: epochSeconds(3), close: 3, is_closed: false },
+  ]);
+  const socket = new FakeSocket();
+  const manager = createWatchlistFullCacheSocketManager({
+    createSocket: () => socket,
+  });
+
+  manager.syncTargets([{ ...TARGET, intervals: ["1m"] }]);
+  socket.emitOpen();
+  socket.emitMessage(JSON.stringify({
+    type: "kline",
+    event_type: "bar.amended",
+    interval: "1m",
+    data: {
+      time: 2,
+      open: 20,
+      high: 21,
+      low: 19,
+      close: 20,
+      volume: 100,
+      is_closed: true,
+    },
+  }));
+
+  const entry = mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1m"));
+  assert.deepEqual(entry.rows.map((row) => row.close), [1, 20, 3]);
   manager.dispose();
 });
 

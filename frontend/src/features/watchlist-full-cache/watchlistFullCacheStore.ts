@@ -20,12 +20,19 @@ import type {
 } from "./watchlistFullCacheTypes.js";
 
 const entries = new Map<string, FullCacheEntry>();
+const realtimeRowVersions = new Map<string, Map<number, number>>();
+let realtimeVersion = 0;
 const KLINE_ROW_ESTIMATED_BYTES = 200;
 let nextEntryGeneration = 1;
 
 export const WATCHLIST_FULL_CACHE_MIN_RETAINED_BARS = 500;
 export const WATCHLIST_FULL_CACHE_DEFAULT_MAX_BARS = MAX_SERIES_BARS;
 const WATCHLIST_FULL_CACHE_SUB_MINUTE_SPAN_SECONDS = 60 * 60;
+
+export function isTrustedFullCachePreload(result: unknown): boolean {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return false;
+  return (result as Record<string, unknown>).all_rows_final === true;
+}
 
 type FullCacheEntryPatch = Partial<Omit<
   FullCacheEntry,
@@ -58,10 +65,40 @@ function trimRowsToFullCacheLimit(rows: KlineBar[], interval: string): number {
   return overflow;
 }
 
-function mergeByTime(older: KlineBar[], current: KlineBar[]): KlineBar[] {
-  const merged = [...older, ...current];
+function pruneFullCacheRealtimeRowVersions(
+  symbolKey: string,
+  interval: string,
+  rows: KlineBar[],
+): void {
+  const key = fullCacheKey(symbolKey, interval);
+  const rowVersions = realtimeRowVersions.get(key);
+  if (!rowVersions) return;
+  const firstTime = rows.at(0)?.time;
+  const lastTime = rows.at(-1)?.time;
+  if (firstTime == null || lastTime == null) {
+    realtimeRowVersions.delete(key);
+    return;
+  }
+  for (const time of rowVersions.keys()) {
+    if (time < firstTime || time > lastTime) rowVersions.delete(time);
+  }
+  if (rowVersions.size === 0) realtimeRowVersions.delete(key);
+}
+
+function mergeByTime(
+  current: KlineBar[],
+  incoming: KlineBar[],
+  preserveCurrent?: (time: number) => boolean,
+): KlineBar[] {
+  // HTTP/history normally wins duplicate timestamps so a verified repair is
+  // not hidden by old warm rows. A request-scoped predicate may preserve only
+  // timestamps touched by realtime after that HTTP request began.
   const uniq = new Map<number, KlineBar>();
-  for (const item of merged) {
+  for (const item of current) {
+    uniq.set(item.time, item);
+  }
+  for (const item of incoming) {
+    if (uniq.has(item.time) && preserveCurrent?.(item.time)) continue;
     uniq.set(item.time, item);
   }
   return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
@@ -79,9 +116,9 @@ function deduplicateByTime(data: KlineBar[]): KlineBar[] {
 /**
  * Apply the ordered realtime contract without scanning historical rows.
  *
- * Browser K-line sockets only forward CREATED / UPDATED / CLOSED events for a
- * series, so supported realtime writes are a tail replacement or a newer-bar
- * append. Historical repairs remain the responsibility of mergeFullCacheRows.
+ * CREATED / UPDATED / CLOSED events stay on this constant-sized tail path.
+ * BAR_AMENDED is handled separately because it is explicitly allowed to
+ * replace an arbitrary retained historical timestamp.
  * The rows array is module-owned and intentionally mutated so consumers retain
  * their existing array reference. Retention enforcement is applied separately
  * after an append.
@@ -89,6 +126,7 @@ function deduplicateByTime(data: KlineBar[]): KlineBar[] {
 function patchRealtimeKlineTail(
   rows: KlineBar[],
   incoming: KlineBar | null | undefined,
+  authoritative: boolean,
 ): boolean {
   if (rows.length === 0 || !incoming || incoming.time == null) return false;
 
@@ -100,6 +138,9 @@ function patchRealtimeKlineTail(
   if (next.time < last.time) return false;
 
   if (next.time === last.time) {
+    // Once a REST/closed/amended row has been marked final, an ordinary
+    // forming-bar update must not regress it back to a partial snapshot.
+    if (last.is_closed === true && !authoritative) return false;
     if (klineRowsEqual([last], [next])) return false;
     rows[lastIndex] = next;
     return true;
@@ -109,8 +150,81 @@ function patchRealtimeKlineTail(
   return true;
 }
 
+function patchHistoricalKlineAmendment(
+  rows: KlineBar[],
+  incoming: KlineBar | null | undefined,
+): boolean {
+  if (rows.length === 0 || !incoming || incoming.time == null) return false;
+
+  const next: KlineBar = { ...incoming, is_closed: true };
+  const first = rows[0];
+  if (!first || next.time < first.time) return false;
+
+  let low = 0;
+  let high = rows.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const candidate = rows[middle];
+    if (candidate && candidate.time < next.time) low = middle + 1;
+    else high = middle;
+  }
+
+  const existing = rows[low];
+  if (existing?.time === next.time) {
+    if (klineRowsEqual([existing], [next])) return false;
+    rows[low] = next;
+    return true;
+  }
+
+  // Do not grow the retained window backwards for an amendment outside its
+  // coverage, but repair a missing timestamp inside the retained range.
+  rows.splice(low, 0, next);
+  return true;
+}
+
+function isAuthoritativeRealtimeEvent(
+  eventType: string | null | undefined,
+  tick: KlineBar | null | undefined,
+): boolean {
+  return eventType === "bar.closed"
+    || eventType === "bar.amended"
+    || tick?.is_closed === true;
+}
+
 export function fullCacheKey(symbolKey: string, interval: string): string {
   return `${symbolKey}::${interval}`;
+}
+
+export function getFullCacheRealtimeVersion(): number {
+  return realtimeVersion;
+}
+
+export function getFullCacheRealtimeTrackedRowCount(
+  symbolKey: string,
+  interval: string,
+): number {
+  return realtimeRowVersions.get(fullCacheKey(symbolKey, interval))?.size || 0;
+}
+
+function advanceFullCacheRealtimeVersion(
+  symbolKey: string,
+  interval: string,
+  time: number,
+): void {
+  const key = fullCacheKey(symbolKey, interval);
+  realtimeVersion += 1;
+  const rowVersions = realtimeRowVersions.get(key) || new Map<number, number>();
+  rowVersions.set(time, realtimeVersion);
+  realtimeRowVersions.set(key, rowVersions);
+}
+
+function realtimeRowChangedAfter(
+  symbolKey: string,
+  interval: string,
+  time: number,
+  version: number,
+): boolean {
+  return (realtimeRowVersions.get(fullCacheKey(symbolKey, interval))?.get(time) || 0) > version;
 }
 
 function buildCoverage(rows: KlineBar[]): FullCacheCoverage | null {
@@ -184,6 +298,7 @@ export function ensureFullCacheEntry(
   if (current) {
     const rows = patch.rows || current.rows;
     trimRowsToFullCacheLimit(rows, interval);
+    pruneFullCacheRealtimeRowVersions(symbolKey, interval, rows);
     const next = {
       ...current,
       ...patch,
@@ -280,6 +395,7 @@ export function setFullCacheEntrySubscribed(
   const current = entries.get(key);
   if (!current) return ensureFullCacheEntry(symbolKey, interval, { subscribed });
   const trimmedBars = trimRowsToFullCacheLimit(current.rows, interval);
+  pruneFullCacheRealtimeRowVersions(symbolKey, interval, current.rows);
   if (current.subscribed === subscribed && trimmedBars === 0) return current;
   const next: FullCacheEntry = {
     ...current,
@@ -296,12 +412,38 @@ export function mergeFullCacheRows(
   symbolKey: string,
   interval: string,
   rows: KlineBar[],
-  options: FullCacheEntryPatch & { nowMs?: number } = {},
+  options: FullCacheEntryPatch & {
+    nowMs?: number;
+    expectedRealtimeVersion?: number;
+  } = {},
 ): FullCacheEntry {
-  if (!rows?.length) return ensureFullCacheEntry(symbolKey, interval, options);
+  if (!rows?.length) {
+    const entryPatch: FullCacheEntryPatch & {
+      nowMs?: number;
+      expectedRealtimeVersion?: number;
+    } = { ...options };
+    delete entryPatch.nowMs;
+    delete entryPatch.expectedRealtimeVersion;
+    return ensureFullCacheEntry(symbolKey, interval, entryPatch);
+  }
   const current = ensureFullCacheEntry(symbolKey, interval);
-  const merged = current.rows.length > 0 ? mergeByTime(rows, current.rows) : deduplicateByTime(rows);
+  const expectedRealtimeVersion = options.expectedRealtimeVersion;
+  const merged = current.rows.length > 0
+    ? mergeByTime(
+      current.rows,
+      rows,
+      expectedRealtimeVersion == null
+        ? undefined
+        : (time) => realtimeRowChangedAfter(
+          symbolKey,
+          interval,
+          time,
+          expectedRealtimeVersion,
+        ),
+    )
+    : deduplicateByTime(rows);
   trimRowsToFullCacheLimit(merged, interval);
+  pruneFullCacheRealtimeRowVersions(symbolKey, interval, merged);
   if (klineRowsEqual(current.rows, merged)) return current;
   const next: FullCacheEntry = {
     ...current,
@@ -323,21 +465,48 @@ export function patchFullCacheRealtimeKline(
   symbolKey: string,
   interval: string,
   tick: KlineBar | null | undefined,
-  options: FullCacheEntryPatch & { nowMs?: number } = {},
+  options: FullCacheEntryPatch & { nowMs?: number; eventType?: string | null } = {},
 ): FullCacheEntry {
   const current = entries.get(fullCacheKey(symbolKey, interval));
   if (!current || !current.rows.length) {
     const nowMs = options.nowMs || Date.now();
-    return mergeFullCacheRows(symbolKey, interval, tick ? [tick] : [], {
+    const next = mergeFullCacheRows(symbolKey, interval, tick ? [tick] : [], {
       ...options,
       status: "live",
       source: options.source || "ws",
       lastRealtimeMs: nowMs,
       nowMs,
     });
+    if (
+      tick?.time != null
+      && isAuthoritativeRealtimeEvent(options.eventType, tick)
+    ) {
+      advanceFullCacheRealtimeVersion(symbolKey, interval, tick.time);
+    }
+    return next;
   }
-  const patched = patchRealtimeKlineTail(current.rows, tick);
+  const amended = options.eventType === "bar.amended";
+  const acceptedRealtimeOrder = tick?.time != null && (
+    amended
+      ? tick.time >= (current.rows[0]?.time ?? Number.POSITIVE_INFINITY)
+      : tick.time >= (current.rows.at(-1)?.time ?? Number.POSITIVE_INFINITY)
+  );
+  const patched = amended
+    ? patchHistoricalKlineAmendment(current.rows, tick)
+    : patchRealtimeKlineTail(
+      current.rows,
+      tick,
+      isAuthoritativeRealtimeEvent(options.eventType, tick),
+    );
   const trimmedBars = trimRowsToFullCacheLimit(current.rows, interval);
+  if (
+    acceptedRealtimeOrder
+    && isAuthoritativeRealtimeEvent(options.eventType, tick)
+    && tick?.time != null
+  ) {
+    advanceFullCacheRealtimeVersion(symbolKey, interval, tick.time);
+  }
+  pruneFullCacheRealtimeRowVersions(symbolKey, interval, current.rows);
   if (!patched && trimmedBars === 0) return current;
   const nowMs = options.nowMs || Date.now();
   const next: FullCacheEntry = {
@@ -482,6 +651,7 @@ export function trimWatchlistFullCacheEntries(victims: GcVictim[] = []) {
         continue;
       }
       entry.rows.splice(0, currentPlan.removedBars);
+      pruneFullCacheRealtimeRowVersions(entry.symbolKey, entry.interval, entry.rows);
       entry.coverage = buildCoverage(entry.rows);
       entry.revision += 1;
       entries.set(key, entry);
@@ -505,6 +675,7 @@ export function trimWatchlistFullCacheEntries(victims: GcVictim[] = []) {
       continue;
     }
     entries.delete(key);
+    realtimeRowVersions.delete(key);
     unregisterCacheResource("watchlist-full-cache", key);
     const bars = entry.rows?.length || 0;
     removed.push({
@@ -530,4 +701,5 @@ export function resetWatchlistFullCache(): void {
     unregisterCacheResource("watchlist-full-cache", key);
   }
   entries.clear();
+  realtimeRowVersions.clear();
 }

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import asyncio
 
-from app.api.v1.stream_klines import _KlineWsOutbox, should_forward_browser_event
+from app.api.v1.stream_klines import (
+    _KlineWsOutbox,
+    _serialize_kline_event,
+    should_forward_browser_event,
+)
 from app.data_engine.data_manager.models import (
     BarData,
     DataEvent,
@@ -42,6 +46,27 @@ def test_bar_events_are_forwarded_regardless_of_audience() -> None:
     )
 
     assert should_forward_browser_event(event) is True
+
+
+def test_kline_event_envelope_preserves_amended_semantics() -> None:
+    event = DataEvent(
+        event_type=DataEventType.BAR_AMENDED,
+        key=SeriesKey("BTCUSDT", "1h"),
+        bar=BarData(
+            time=1_700_000_000,
+            open=1,
+            high=3,
+            low=0.5,
+            close=2,
+            volume=10,
+        ),
+    )
+
+    payload = _serialize_kline_event(event)
+
+    assert payload["event_type"] == "bar.amended"
+    assert payload["data"]["is_closed"] is True
+    assert payload["data"]["time"] == 1_700_000_000
 
 
 def test_multi_kline_outbox_keeps_latest_forming_update_without_crossing_final() -> None:

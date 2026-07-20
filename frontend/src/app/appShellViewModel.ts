@@ -44,6 +44,7 @@ function buildAppShellViewModelContext({
     indicatorView: indicators.view,
     indicatorActions: indicators.actions,
     indicatorComputing: indicatorStatus.computing,
+    indicatorRealtimeMode: indicatorStatus.realtimeMode,
     watchlistView: watchlist.view,
     watchlistActions: watchlist.actions,
     orderBookView: orderBook.view,

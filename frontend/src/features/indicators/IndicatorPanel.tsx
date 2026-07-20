@@ -133,6 +133,7 @@ export interface IndicatorPanelProps {
   onUpdateParams(indicatorId: string, params: IndicatorParams): void;
   onUpdateScript(indicatorId: string, script: string): void;
   computing: boolean;
+  realtimeMode?: "enabled" | "degraded" | "historical-only";
   onRecompute?: (force?: boolean) => void;
   marketStudies?: readonly IndicatorPanelMarketStudy[];
   onAddMarketStudy?: (studyId: string) => void;
@@ -270,6 +271,7 @@ export default function IndicatorPanel({
   onUpdateParams,
   onUpdateScript,
   computing,
+  realtimeMode = "enabled",
   onRecompute,
   marketStudies = [],
   onAddMarketStudy,
@@ -634,6 +636,22 @@ plot(ma, "MA", color=line_color)
               <h3 className="indicator-panel-title">
                 📊 指标
                 {computing && <span className="indicator-computing-badge">计算中...</span>}
+                {realtimeMode === "historical-only" && (
+                  <span
+                    className="indicator-computing-badge"
+                    title="指标实时订阅已停用；当前通过 HTTP 补齐已收盘 K 线的指标值。"
+                  >
+                    仅已收盘值
+                  </span>
+                )}
+                {realtimeMode === "degraded" && (
+                  <span
+                    className="indicator-computing-badge"
+                    title="至少一个指标的实时订阅不可用；受影响指标通过 HTTP 补齐已收盘值。"
+                  >
+                    部分仅已收盘值
+                  </span>
+                )}
               </h3>
               <button className="indicator-panel-close" onClick={onClose}>✕</button>
             </div>

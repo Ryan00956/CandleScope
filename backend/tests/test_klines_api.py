@@ -939,7 +939,7 @@ def test_history_count_back_overrides_days_window() -> None:
         params={
             "symbol": "BTCUSDT",
             "interval": "1h",
-            "days": 30,
+            "days": 45_000,
             "count_back": 10,
             "max_wait_ms": 0,
             "exchange": "binance",
@@ -952,6 +952,27 @@ def test_history_count_back_overrides_days_window() -> None:
     assert payload["count_back"] == 10
     _symbol, _interval, start_ms, end_ms, _exchange, _market_type = calls[0]
     assert end_ms - start_ms == 9 * 60 * 60 * 1000
+
+
+def test_history_rejects_oversized_days_without_count_back() -> None:
+    dm = DataManager()
+
+    response = _client(dm).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "days": 3651,
+            "max_wait_ms": 0,
+            "exchange": "binance",
+            "market_type": "spot",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "days must be less than or equal to 3650 when count_back is omitted",
+    }
 
 
 def test_history_count_back_monthly_steps_calendar_buckets_without_calendar(
@@ -1004,6 +1025,48 @@ def test_history_count_back_monthly_steps_calendar_buckets_without_calendar(
         "backfill_reason": "initial_history",
         "backfill_requester": "klines_history",
     }]
+
+
+def test_history_count_back_monthly_stops_at_unix_epoch_without_calendar(
+    monkeypatch,
+) -> None:
+    february_1970_open_ms = 2_678_400_000
+
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def query(self, symbol: str, interval: str, **kwargs) -> QueryResult:
+            self.calls.append({"symbol": symbol, "interval": interval, **kwargs})
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                source=QuerySource.EMPTY,
+                total=0,
+            )
+
+    monkeypatch.setattr(
+        klines_api,
+        "_last_closed_open_ms",
+        lambda interval, *args, **kwargs: february_1970_open_ms,
+    )
+    dm = _HistoryDataManager()
+
+    response = _client(dm).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1M",
+            "count_back": 1_500,
+            "max_wait_ms": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert dm.calls[0]["start_ms"] == 0
+    assert dm.calls[0]["end_ms"] == february_1970_open_ms
+    assert dm.calls[0]["limit"] == 1_500
 
 
 def test_cap_range_request_monthly_uses_exact_calendar_boundaries() -> None:

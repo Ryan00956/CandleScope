@@ -415,6 +415,22 @@ test("OI period follows chart resolution with a 5m floor", () => {
   assert.equal(resolveOpenInterestPeriod("5m"), "5m");
   assert.equal(resolveOpenInterestPeriod("8h"), "6h");
   assert.equal(resolveOpenInterestPeriod("1d"), "1d");
+  assert.equal(resolveOpenInterestPeriod("47m"), "30m");
+  assert.equal(resolveOpenInterestPeriod("60m"), "1h");
+});
+
+test("47m chart projects 30m OI samples forward without lookahead", () => {
+  const chartBars: KlineBar[] = [0, 2_820, 5_640]
+    .map((time) => ({ time: epochSeconds(time) }));
+  const points = projectMetricRecordsToCandles([
+    record("open_interest", 1_800_000, { open_interest: 10 }),
+    record("open_interest", 3_600_000, { open_interest: 20 }),
+  ], chartBars, { valueField: "open_interest" });
+
+  assert.deepEqual(points, [
+    { time: epochSeconds(2_820), value: 10 },
+    { time: epochSeconds(5_640), value: 20 },
+  ]);
 });
 
 test("market pane projection only returns explicitly requested studies", () => {

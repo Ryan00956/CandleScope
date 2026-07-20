@@ -34,6 +34,7 @@ async def handle_pyne_indicator_subscribe(
     client_id: str,
     symbol: str,
     interval: str,
+    requested_interval: str | None = None,
     exchange: str,
     market_type: str,
     name: str,
@@ -194,12 +195,17 @@ async def handle_pyne_indicator_subscribe(
 
     subscribed_payload = {
         "type": "indicator.subscribed",
+        "ok": True,
         "clientId": client_id,
         "indicatorId": meta["indicatorId"],
         "kind": "script",
         "exchange": exchange,
         "symbol": symbol,
         "interval": interval,
+        "requestedInterval": requested_interval or interval,
+        "canonicalInterval": interval,
+        "subscriptionStatus": "accepted",
+        "realtimeStatus": "live",
         "market_type": market_type,
         "name": name,
         "customId": custom_id or None,
@@ -237,10 +243,6 @@ async def handle_pyne_indicator_subscribe(
                 end_s=int(resume_plan.end),
             )
             resume_patch["dataRevision"] = data_revision
-
-    await send_json(subscribed_payload)
-    if resume_patch is not None:
-        await send_json(resume_patch)
 
     async def _on_data_event(event) -> None:
         existing = custom_tasks.get(client_id)
@@ -354,6 +356,9 @@ async def handle_pyne_indicator_subscribe(
         },
     )
     custom_handles[client_id] = handle
+    await send_json(subscribed_payload)
+    if resume_patch is not None:
+        await send_json(resume_patch)
 
 
 def _payload_times(payload: dict[str, Any] | None) -> list[int]:

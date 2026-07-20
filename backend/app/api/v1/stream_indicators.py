@@ -24,7 +24,8 @@ from app.api.v1.stream_utils import (
 )
 from app.core import config
 from app.core.runtime_metrics import ws_runtime_metrics
-from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_policy import parse_interval_ms, parse_interval_spec
+from app.data_engine.interval_resolution import IntervalResolutionError
 from app.indicator import registry as indicator_registry
 from app.indicator.events import IndicatorEvent
 from app.indicator.resume import plan_indicator_resume
@@ -32,6 +33,63 @@ from app.indicator.serialization import (
     build_indicator_snapshot_payload,
     build_ws_error_payload,
 )
+
+
+def _indicator_subscription_failure(
+    *,
+    client_id: str,
+    requested_interval: str,
+    interval: str,
+    code: str,
+    message: str,
+    hint: str,
+) -> dict[str, Any]:
+    """Build a terminal per-indicator acknowledgement for a rejected subscription."""
+    payload = build_ws_error_payload(
+        code,
+        message,
+        client_id=client_id,
+        hint=hint,
+    )
+    payload.update({
+        "type": "indicator.subscribed",
+        "ok": False,
+        "subscriptionStatus": "failed",
+        "realtimeStatus": "unavailable",
+        "requestedInterval": requested_interval,
+        "canonicalInterval": interval,
+        "interval": interval,
+        "failure": {
+            "interval": interval,
+            "code": code,
+            "message": message,
+        },
+    })
+    return payload
+
+
+def _indicator_stream_failure(
+    *,
+    client_id: str,
+    requested_interval: str,
+    interval: str,
+    exc: Exception,
+) -> dict[str, Any]:
+    if isinstance(exc, IntervalResolutionError):
+        detail = exc.to_dict()
+        code = str(detail.get("code") or "INDICATOR_STREAM_SUBSCRIPTION_FAILED")
+        message = str(detail.get("message") or exc)
+    else:
+        code = "INDICATOR_STREAM_SUBSCRIPTION_FAILED"
+        message = f"Realtime indicator stream is unavailable for interval {interval}."
+    return _indicator_subscription_failure(
+        client_id=client_id,
+        requested_interval=requested_interval,
+        interval=interval,
+        code=code,
+        message=message,
+        hint="实时指标订阅不可用；前端应停止该订阅，并通过 HTTP 历史接口补齐已收盘指标值。",
+    )
 
 
 async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
@@ -225,7 +283,8 @@ async def _handle_indicator_subscribe(
 ) -> None:
     client_id = str(msg.get("clientId") or "").strip()
     symbol = str(msg.get("symbol") or "BTCUSDT").upper().strip()
-    interval = str(msg.get("interval") or "1m").strip()
+    requested_interval = str(msg.get("interval") or "1m").strip()
+    interval = requested_interval
     exchange = _normalize_exchange(str(msg.get("exchange") or "binance"))
     market_type = _normalize_market_type(str(msg.get("market_type") or msg.get("marketType") or "spot"))
     indicator_name = str(msg.get("name") or msg.get("indicator") or "").upper().strip()
@@ -254,13 +313,27 @@ async def _handle_indicator_subscribe(
         or client_id in client_meta
     )
     if not is_existing_client and len(client_meta) >= int(config.INDICATOR_WS_MAX_SUBSCRIPTIONS):
-        await send_json(build_ws_error_payload(
-            "INDICATOR_SUBSCRIPTION_LIMIT",
-            f"Too many indicator subscriptions (max {config.INDICATOR_WS_MAX_SUBSCRIPTIONS}).",
+        await send_json(_indicator_subscription_failure(
             client_id=client_id,
+            requested_interval=requested_interval,
+            interval=interval,
+            code="INDICATOR_SUBSCRIPTION_LIMIT",
+            message=f"Too many indicator subscriptions (max {config.INDICATOR_WS_MAX_SUBSCRIPTIONS}).",
             hint="请减少同一 WS 连接上的指标数量，或调大 INDICATOR_WS_MAX_SUBSCRIPTIONS。",
         ))
         return
+    interval_spec = parse_interval_spec(requested_interval)
+    if interval_spec is None or not _validate_ws_interval(requested_interval):
+        await send_json(_indicator_subscription_failure(
+            client_id=client_id,
+            requested_interval=requested_interval,
+            interval=requested_interval,
+            code="INVALID_INTERVAL",
+            message=f"Unsupported interval: {requested_interval}.",
+            hint="请使用后端支持的原生或自定义周期。",
+        ))
+        return
+    interval = interval_spec.canonical
     if is_script:
         range_service = getattr(indicator_engine, "indicator_range_service", None)
         script_revision = (
@@ -282,70 +355,94 @@ async def _handle_indicator_subscribe(
             if range_service is not None
             else None
         )
-        await handle_pyne_indicator_subscribe(
-            dm=dm,
-            custom_handles=custom_handles,
-            custom_tasks=custom_tasks,
-            queue=queue,
-            client_meta=client_meta,
-            client_id=client_id,
-            symbol=symbol,
-            interval=interval,
-            exchange=exchange,
-            market_type=market_type,
-            name=str(msg.get("displayName") or msg.get("name") or client_id),
-            custom_id=custom_id,
-            script=script,
-            params=params,
-            security_mode=msg.get("securityMode"),
-            history_limit=history_limit,
-            send_json=send_json,
-            stream_consumer_id=(
-                f"ws:indicator:{exchange}:{market_type}:{symbol}:{interval}:"
-                f"{client_id}:{id(websocket)}"
-            ),
-            unsubscribe_client=lambda cid: _unsubscribe_indicator_client(
-                cid,
+        stream_consumer_id = (
+            f"ws:indicator:{exchange}:{market_type}:{symbol}:{interval}:"
+            f"{client_id}:{id(websocket)}"
+        )
+        try:
+            await handle_pyne_indicator_subscribe(
+                dm=dm,
+                custom_handles=custom_handles,
+                custom_tasks=custom_tasks,
+                queue=queue,
+                client_meta=client_meta,
+                client_id=client_id,
+                symbol=symbol,
+                interval=interval,
+                requested_interval=requested_interval,
+                exchange=exchange,
+                market_type=market_type,
+                name=str(msg.get("displayName") or msg.get("name") or client_id),
+                custom_id=custom_id,
+                script=script,
+                params=params,
+                security_mode=msg.get("securityMode"),
+                history_limit=history_limit,
+                send_json=send_json,
+                stream_consumer_id=stream_consumer_id,
+                unsubscribe_client=lambda cid: _unsubscribe_indicator_client(
+                    cid,
+                    dm=dm,
+                    indicator_engine=indicator_engine,
+                    subscribed=subscribed,
+                    custom_handles=custom_handles,
+                    custom_tasks=custom_tasks,
+                    client_meta=client_meta,
+                ),
+                queue_message=_queue_indicator_message,
+                range_service=range_service,
+                data_revision=script_revision,
+                resume_from=msg.get("resumeFrom") or msg.get("resume_from"),
+                client_server_epoch=msg.get("serverEpoch") or msg.get("server_epoch"),
+                client_correction_revision=(
+                    msg.get("correctionRevision")
+                    if msg.get("correctionRevision") is not None
+                    else msg.get("correction_revision")
+                ),
+            )
+        except Exception as exc:
+            had_meta = client_id in client_meta
+            await _unsubscribe_indicator_client(
+                client_id,
                 dm=dm,
                 indicator_engine=indicator_engine,
                 subscribed=subscribed,
                 custom_handles=custom_handles,
                 custom_tasks=custom_tasks,
                 client_meta=client_meta,
-            ),
-            queue_message=_queue_indicator_message,
-            range_service=range_service,
-            data_revision=script_revision,
-            resume_from=msg.get("resumeFrom") or msg.get("resume_from"),
-            client_server_epoch=msg.get("serverEpoch") or msg.get("server_epoch"),
-            client_correction_revision=(
-                msg.get("correctionRevision")
-                if msg.get("correctionRevision") is not None
-                else msg.get("correction_revision")
-            ),
-        )
+            )
+            if not had_meta:
+                await _release_indicator_stream(dm, {
+                    "exchange": exchange,
+                    "market_type": market_type,
+                    "symbol": symbol,
+                    "interval": interval,
+                    "streamConsumerId": stream_consumer_id,
+                })
+            await send_json(_indicator_stream_failure(
+                client_id=client_id,
+                requested_interval=requested_interval,
+                interval=interval,
+                exc=exc,
+            ))
         return
     if not indicator_name:
-        await send_json(build_ws_error_payload(
-            "INDICATOR_NAME_REQUIRED",
-            "Builtin indicator name is required.",
+        await send_json(_indicator_subscription_failure(
             client_id=client_id,
+            requested_interval=requested_interval,
+            interval=interval,
+            code="INDICATOR_NAME_REQUIRED",
+            message="Builtin indicator name is required.",
             hint="builtin 订阅需要传 name，例如 MA、MACD、RSI。",
         ))
         return
-    if not _validate_ws_interval(interval):
-        await send_json(build_ws_error_payload(
-            "INVALID_INTERVAL",
-            f"Unsupported interval: {interval}.",
-            client_id=client_id,
-            hint="请使用后端支持的原生或自定义周期。",
-        ))
-        return
     if indicator_registry.get(indicator_name) is None:
-        await send_json(build_ws_error_payload(
-            "INDICATOR_NOT_FOUND",
-            f"Unknown builtin indicator: {indicator_name}.",
+        await send_json(_indicator_subscription_failure(
             client_id=client_id,
+            requested_interval=requested_interval,
+            interval=interval,
+            code="INDICATOR_NOT_FOUND",
+            message=f"Unknown builtin indicator: {indicator_name}.",
             hint="请检查指标名称是否存在于 /api/v1/indicators/registry。",
         ))
         return
@@ -365,7 +462,6 @@ async def _handle_indicator_subscribe(
         f"{client_id}:{id(websocket)}"
     )
     stream_ensured = False
-    meta_registered = False
     try:
         await dm.ensure_stream(
             symbol,
@@ -449,9 +545,11 @@ async def _handle_indicator_subscribe(
             "indicatorId": key.uid,
             "streamConsumerId": consumer_id,
         }
-        meta_registered = True
-    except Exception:
-        if stream_ensured and not meta_registered:
+    except Exception as exc:
+        if client_id in subscribed:
+            indicator_engine.unsubscribe(subscribed.pop(client_id))
+        client_meta.pop(client_id, None)
+        if stream_ensured:
             await _release_indicator_stream(dm, {
                 "exchange": exchange,
                 "market_type": market_type,
@@ -459,16 +557,27 @@ async def _handle_indicator_subscribe(
                 "interval": interval,
                 "streamConsumerId": consumer_id,
             })
-        raise
+        await send_json(_indicator_stream_failure(
+            client_id=client_id,
+            requested_interval=requested_interval,
+            interval=interval,
+            exc=exc,
+        ))
+        return
 
     subscribed_payload = {
         "type": "indicator.subscribed",
+        "ok": True,
         "clientId": client_id,
         "indicatorId": key.uid,
         "kind": "builtin",
         "exchange": key.exchange,
         "symbol": symbol,
         "interval": interval,
+        "requestedInterval": requested_interval,
+        "canonicalInterval": interval,
+        "subscriptionStatus": "accepted",
+        "realtimeStatus": "live",
         "market_type": market_type,
         "name": indicator_name,
         "seeded": result is not None,

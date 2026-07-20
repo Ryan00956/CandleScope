@@ -23,6 +23,11 @@ let isResolvedIndicatorRangeEmpty = structuralMock<
 >(() => {
   throw new Error("indicator runtime not loaded");
 });
+let resolveIndicatorRealtimeMode = structuralMock<
+  RuntimeModule["resolveIndicatorRealtimeMode"]
+>(() => {
+  throw new Error("indicator runtime not loaded");
+});
 
 test.before(async () => {
   server = await createServer({
@@ -34,9 +39,17 @@ test.before(async () => {
     hostedIndicatorRangeRequestsReady,
     isTypedIndicatorRangeWait,
     isResolvedIndicatorRangeEmpty,
-  } = structuralMock<RuntimeModule>(await server.ssrLoadModule(
+    resolveIndicatorRealtimeMode,
+} = structuralMock<RuntimeModule>(await server.ssrLoadModule(
     "/src/features/indicators/useIndicatorRuntime.js",
   )));
+});
+
+test("indicator realtime follows the main K-line fallback boundary", () => {
+  assert.equal(resolveIndicatorRealtimeMode(true, "live"), "enabled");
+  assert.equal(resolveIndicatorRealtimeMode(true, "reconnecting"), "enabled");
+  assert.equal(resolveIndicatorRealtimeMode(true, "fallback"), "historical-only");
+  assert.equal(resolveIndicatorRealtimeMode(false, "idle"), "historical-only");
 });
 
 test("hosted range waits for all subscribed acknowledgements then fails open at the deadline", () => {

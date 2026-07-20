@@ -75,6 +75,29 @@ test("kline endpoints validate payloads and forward AbortSignal", async (context
   assert.deepEqual(payload.data, [kline()]);
 });
 
+test("count-back history omits the redundant days window", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let capturedUrl = "";
+  globalThis.fetch = async (url) => {
+    capturedUrl = String(url);
+    return jsonResponse({ data: [] });
+  };
+
+  await fetchKlinesHistory(
+    "BTCUSDT",
+    "1M",
+    45_000,
+    "futures",
+    "binance",
+    { countBack: 1_500 },
+  );
+
+  const params = new URL(capturedUrl, "http://localhost").searchParams;
+  assert.equal(params.get("count_back"), "1500");
+  assert.equal(params.has("days"), false);
+});
+
 test("kline parser rejects malformed bars, metadata, and millisecond timestamps", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });

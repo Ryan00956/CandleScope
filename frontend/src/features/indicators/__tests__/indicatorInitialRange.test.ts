@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   inferFixedIntervalClosedThrough,
+  nextIndicatorBarTime,
   planDeferredRightCatchup,
   resolveInitialHostedRange,
 } from "../indicatorRangePlanning.js";
@@ -135,6 +136,17 @@ test("resolveInitialHostedRange handles irregular monthly spacing", () => {
   assert.equal(range.end, barAt(monthBars, 3).time);
   assert.equal(range.startIndex, 0);
   assert.equal(range.endIndex, 3);
+});
+
+test("right catchup advances monthly bars by the calendar instead of median seconds", () => {
+  const february = Date.UTC(2024, 1, 1) / 1_000;
+  const march = Date.UTC(2024, 2, 1) / 1_000;
+  const april = Date.UTC(2024, 3, 1) / 1_000;
+
+  assert.equal(nextIndicatorBarTime(february, "1M", 31 * 86_400), march);
+  assert.equal(nextIndicatorBarTime(march, "1M", 29 * 86_400), april);
+  assert.equal(nextIndicatorBarTime(february, "47m", null), february + 47 * 60);
+  assert.equal(nextIndicatorBarTime(february, "60m", null), february + 60 * 60);
 });
 
 test("planDeferredRightCatchup coalesces moving right edge without resetting grace", () => {

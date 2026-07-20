@@ -223,6 +223,52 @@ test("missing acknowledgement retries the identical subscription then reconnects
   controller.close();
 });
 
+test("a failed subscription acknowledgement settles without retry and isolates the next config", () => {
+  const sockets: FakeSocket[] = [];
+  const timers = createTimers();
+  const received: IndicatorWsMessage[] = [];
+  const controller = new IndicatorStreamConnection({
+    url: "ws://example/indicators",
+    socketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    onMessage: (message) => received.push(message),
+    reconnectBaseMs: 5,
+    reconnectMaxMs: 5,
+    subscriptionAckTimeoutMs: 10,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+
+  controller.setSubscriptions([subscription("vol:v1", "BTCUSDT")]);
+  controller.start();
+  const failedSocket = sockets[0] as FakeSocket;
+  failedSocket.open();
+  failedSocket.message({
+    type: "indicator.subscribed",
+    clientId: "vol",
+    interval: "1d",
+    subscriptionStatus: "failed",
+    realtimeStatus: "unavailable",
+    ok: false,
+    failure: { code: "INDICATOR_STREAM_SUBSCRIPTION_FAILED", message: "unavailable" },
+  });
+
+  assert.deepEqual(received.map((message) => message.type), ["indicator.subscribed"]);
+  assert.equal(failedSocket.sent.length, 1);
+  assert.equal(timers.timers.filter((timer) => timer.active).length, 0);
+
+  controller.setSubscriptions([subscription("vol:v2", "ETHUSDT")]);
+  assert.equal(failedSocket.closed, true);
+  timers.run(timers.timers.length - 1);
+  const freshSocket = sockets[1] as FakeSocket;
+  freshSocket.open();
+  assert.equal(wireMessage(freshSocket, 0).symbol, "ETHUSDT");
+  controller.close();
+});
+
 test("a superseded in-flight subscription gets a fresh socket and stale previews are ignored", () => {
   const sockets: FakeSocket[] = [];
   const timers = createTimers();

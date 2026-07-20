@@ -994,6 +994,43 @@ def test_range_meta_builtin_indicator_id_matches_ws_key_with_params_hash() -> No
     assert meta_a["indicatorId"] != meta_b["indicatorId"]
 
 
+@pytest.mark.parametrize(
+    ("requested", "canonical"),
+    [
+        ("45m", "45m"),
+        ("47m", "47m"),
+        ("60m", "1h"),
+        ("1M", "1M"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["builtin", "script"])
+def test_range_meta_canonicalizes_custom_intervals_for_builtin_and_pyne(
+    requested: str,
+    canonical: str,
+    kind: str,
+) -> None:
+    request_kwargs = {
+        "clientId": f"{kind}-{requested}",
+        "kind": kind,
+        "symbol": "BTCUSDT",
+        "interval": requested,
+        "start": 1,
+        "end": 2,
+    }
+    if kind == "builtin":
+        request_kwargs["name"] = "MA"
+        request_kwargs["params"] = {"period": 2}
+    else:
+        request_kwargs["script"] = 'plot(close, title="Close")'
+
+    meta = indicators_api._build_range_meta(
+        indicators_api.IndicatorRangeRequest(**request_kwargs),
+    )
+
+    assert meta["interval"] == canonical
+    assert f":{canonical}:" in meta["indicatorId"]
+
+
 def test_indicator_engine_routes_exchange_scoped_updates() -> None:
     engine = create_engine()
     events: list[IndicatorEvent] = []

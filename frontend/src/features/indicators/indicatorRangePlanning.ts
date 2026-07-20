@@ -1,4 +1,5 @@
 import { parseIntervalParts, parseIntervalSeconds } from "../../utils/intervals.js";
+import { createIntervalTimeline } from "../../utils/intervalTimeline.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type {
   DeferredRightCatchupPlan,
@@ -14,6 +15,23 @@ const INITIAL_VISIBLE_PADDING_RATIO = 0.35;
 const INITIAL_VISIBLE_PADDING_MAX_BARS = 1_000;
 
 export const RIGHT_CATCHUP_GRACE_MS = 1_500;
+
+export function nextIndicatorBarTime(
+  lastBarTime: unknown,
+  interval: unknown,
+  fallbackSeconds: unknown = null,
+): number | null {
+  const normalized = normalizeRangeBoundary(lastBarTime);
+  if (!normalized) return null;
+  const semanticNext = createIntervalTimeline(interval)?.next(normalized);
+  if (semanticNext !== null && semanticNext !== undefined) {
+    return normalizeRangeBoundary(semanticNext);
+  }
+  const fallback = Math.floor(Number(fallbackSeconds));
+  return Number.isFinite(fallback) && fallback > 0
+    ? normalizeRangeBoundary(normalized + fallback)
+    : null;
+}
 
 function normalizeRangeBoundary(value: unknown): number | null {
   const normalized = Math.floor(Number(value));

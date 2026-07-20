@@ -40,6 +40,7 @@ from app.core import config
 from app.core.executors import executors_snapshot, run_indicator, run_pyne_wait, run_storage
 from app.core.runtime_metrics import ws_runtime_metrics
 from app.data_engine.data_manager.models import BarData
+from app.data_engine.interval_policy import parse_interval_spec
 from app.indicator import registry, IndicatorEngine, create_engine
 from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.pyne.cache import pyne_cache
@@ -517,7 +518,9 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
     exchange = _normalize_exchange(req.exchange)
     market_type = _resolve_range_market_type(req)
     symbol = req.symbol.upper().strip()
-    interval = req.interval.strip()
+    requested_interval = req.interval.strip()
+    interval_spec = parse_interval_spec(requested_interval)
+    interval = interval_spec.canonical if interval_spec is not None else requested_interval
     params = req.params if isinstance(req.params, dict) else {}
     kind = str(req.kind or "").strip().lower()
     script = req.script or ""
@@ -525,8 +528,8 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
     custom_id = (req.customId or req.customIndicatorId or "").strip()
     indicator_name = name.upper()
 
-    if not _validate_interval_name(interval):
-        raise ValueError(f"Unsupported interval: {interval}.")
+    if interval_spec is None or not _validate_interval_name(requested_interval):
+        raise ValueError(f"Unsupported interval: {requested_interval}.")
 
     is_script = kind in {"script", "custom", "pyne"} or bool(custom_id) or (script and not indicator_name)
     if is_script:

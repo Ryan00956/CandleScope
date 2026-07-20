@@ -36,6 +36,7 @@ import {
 } from "./indicatorWsRuntime.js";
 import {
   inferFixedIntervalClosedThrough,
+  nextIndicatorBarTime,
   planDeferredRightCatchup,
   RIGHT_CATCHUP_GRACE_MS,
   resolveInitialHostedRange,
@@ -107,6 +108,7 @@ interface UseIndicatorRuntimeOptions {
   indicatorRangeRequests?: IndicatorRangeEvent[];
   consumeIndicatorRangeRequest?: (requestId: number) => void;
   marketType?: string;
+  realtimeEnabled?: boolean;
   seriesReady?: number;
   sessionKey?: string;
   savedVisibleRange?: unknown;
@@ -126,6 +128,7 @@ interface ResolvedIndicatorRuntimeInputs {
   indicatorRangeRequests: IndicatorRangeEvent[];
   consumeIndicatorRangeRequest?: (requestId: number) => void;
   marketType: string;
+  realtimeEnabled: boolean;
   seriesReady: number;
   sessionKey: string;
   savedVisibleRange: IndicatorVisibleRange | null;
@@ -234,7 +237,21 @@ export interface IndicatorRuntime {
     updateIndicatorParams(indicatorId: string, params: IndicatorParams): void;
     updateIndicatorScript(indicatorId: string, script: string): void;
   };
-  status: { computing: boolean };
+  status: {
+    computing: boolean;
+    realtimeMode: IndicatorRealtimeMode;
+  };
+}
+
+export type IndicatorRealtimeMode = "enabled" | "degraded" | "historical-only";
+
+export function resolveIndicatorRealtimeMode(
+  webSocketReady: boolean,
+  wsStatus: MarketDataRuntime["view"]["wsStatus"] | undefined,
+): IndicatorRealtimeMode {
+  return webSocketReady && wsStatus !== "fallback"
+    ? "enabled"
+    : "historical-only";
 }
 
 function useLatestRef<T>(value: T): MutableRefObject<T> {
@@ -252,6 +269,10 @@ function resolveRuntimeInputs(
   const marketDataView = options.marketData?.view;
   const marketDataActions = options.marketData?.actions;
   const marketDataStatus = options.marketData?.status;
+  const realtimeMode = resolveIndicatorRealtimeMode(
+    options.session?.status.webSocketReady ?? true,
+    marketDataView?.wsStatus,
+  );
   const inputs: ResolvedIndicatorRuntimeInputs = {
     candleDownColor: options.candleDownColor || "#ef4444",
     candleUpColor: options.candleUpColor || "#22c55e",
@@ -262,6 +283,7 @@ function resolveRuntimeInputs(
     interval: options.interval ?? sessionView?.interval ?? "",
     indicatorRangeRequests: options.indicatorRangeRequests ?? marketDataStatus?.indicatorRangeRequests ?? [],
     marketType: options.marketType ?? sessionView?.marketType ?? "spot",
+    realtimeEnabled: options.realtimeEnabled ?? (realtimeMode === "enabled"),
     seriesReady: options.seriesReady ?? (marketDataStatus?.activeChartReady ? 1 : 0),
     sessionKey: options.sessionKey ?? sessionView?.sessionKey ?? "",
     savedVisibleRange: asIndicatorVisibleRange(
@@ -473,24 +495,29 @@ function latestLineTime(indicator: IndicatorDefinition): number | null {
 function resolveMissingHostedRightRange(
   chartData: KlineBar[],
   hostedIndicators: IndicatorDefinition[],
-): (IndicatorRange & { intervalSeconds: number }) | null {
+  interval: string,
+): IndicatorRange | null {
   const end = normalizeRangeBoundary(chartData?.[chartData.length - 1]?.time);
   if (!end) return null;
   const intervalSeconds = inferIntervalSecondsFromChartData(chartData);
-  if (!intervalSeconds || intervalSeconds <= 0) return null;
 
   let start: number | null = null;
   for (const indicator of hostedIndicators) {
     const lastIndicatorTime = latestLineTime(indicator);
     if (!lastIndicatorTime) continue;
-    const candidateStart = lastIndicatorTime + intervalSeconds;
+    const candidateStart = nextIndicatorBarTime(
+      lastIndicatorTime,
+      interval,
+      intervalSeconds,
+    );
+    if (!candidateStart) continue;
     if (candidateStart <= end) {
       start = start == null ? candidateStart : Math.min(start, candidateStart);
     }
   }
 
   if (start == null || start > end) return null;
-  return { start, end, intervalSeconds };
+  return { start, end };
 }
 
 function isContinuousChartRange(chartData: KlineBar[], intervalSeconds: number | null): boolean {
@@ -521,6 +548,7 @@ export function useIndicatorRuntime(
     indicatorRangeRequests,
     consumeIndicatorRangeRequest,
     marketType,
+    realtimeEnabled,
     seriesReady,
     sessionKey,
     savedVisibleRange,
@@ -548,9 +576,20 @@ export function useIndicatorRuntime(
     undefined,
     createIndicatorOutputState,
   );
+  const [realtimeUnavailableIndicatorContexts, setRealtimeUnavailableIndicatorContexts] = useState<
+    Map<string, string>
+  >(
+    () => new Map(),
+  );
 
   const removeIndicator = useCallback((indicatorId: string) => {
     removeActiveIndicator(indicatorId);
+    setRealtimeUnavailableIndicatorContexts((previous) => {
+      if (!previous.has(indicatorId)) return previous;
+      const next = new Map(previous);
+      next.delete(indicatorId);
+      return next;
+    });
     outputDispatch({ type: "remove-indicator", indicatorId });
     onIndicatorRemoved?.(indicatorId);
   }, [onIndicatorRemoved, removeActiveIndicator]);
@@ -769,6 +808,29 @@ export function useIndicatorRuntime(
       setSubscriptionAckTick((tick) => tick + 1);
     }, INDICATOR_SUBSCRIPTION_ACK_TIMEOUT_MS);
   }, []);
+
+  const markHostedRealtimeUnavailable = useCallback((
+    indicatorId: string,
+    unavailable: boolean,
+  ) => {
+    const normalizedId = String(indicatorId);
+    const context = runtimeContextRef.current;
+    const contextKey = [
+      context.sessionKey,
+      context.exchange,
+      context.marketType,
+      context.symbol,
+      context.interval,
+    ].join("|");
+    setRealtimeUnavailableIndicatorContexts((previous) => {
+      if (unavailable && previous.get(normalizedId) === contextKey) return previous;
+      if (!unavailable && !previous.has(normalizedId)) return previous;
+      const next = new Map(previous);
+      if (unavailable) next.set(normalizedId, contextKey);
+      else next.delete(normalizedId);
+      return next;
+    });
+  }, [runtimeContextRef]);
 
   const applyWsSnapshot = useCallback((indicatorId: string, payload: IndicatorSnapshotMessage) => {
     const error = payload?.ok === false ? formatIndicatorError(payload) : null;
@@ -1118,7 +1180,8 @@ export function useIndicatorRuntime(
       requestContext.symbol,
       requestContext.interval,
     ].join("|");
-    const subscriptionGateExempt = options.waitForSubscription === false
+    const subscriptionGateExempt = !realtimeEnabled
+      || options.waitForSubscription === false
       || reason === "recomputed"
       || reason === "ws-history-required";
     if (
@@ -1309,6 +1372,7 @@ export function useIndicatorRuntime(
     getIndicatorCacheContext,
     indicatorRangeBatcher,
     indicatorRangeScheduler,
+    realtimeEnabled,
     runtimeContextRef,
     setIndicatorError,
   ]);
@@ -1383,6 +1447,31 @@ export function useIndicatorRuntime(
   ) => {
     const indicator = activeIndicatorsRef.current.find((item) => item.id === indicatorId);
     if (!indicator) return;
+    if (payload?.subscriptionStatus === "failed" || payload?.ok === false) {
+      markHostedRealtimeUnavailable(indicatorId, true);
+      markHostedSubscriptionReady(indicatorId);
+      const failureMessage = payload?.failure?.message
+        || payload?.errorDetail?.message
+        || payload?.error
+        || "Indicator realtime subscription is unavailable";
+      setIndicatorError(
+        indicatorId,
+        `${failureMessage}；已切换为 HTTP 已收盘值补齐。`,
+      );
+      const currentChartData = chartDataRef.current || [];
+      const visibleRange = typeof getCurrentVisibleRange === "function"
+        ? asIndicatorVisibleRange(getCurrentVisibleRange())
+        : savedVisibleRange;
+      const desired = resolveInitialHostedRange(currentChartData, [indicator], visibleRange);
+      if (desired) {
+        requestIndicatorRange(desired.start, desired.end, "ws-subscription-failed", {
+          indicatorIds: [indicatorId],
+          waitForSubscription: false,
+        });
+      }
+      return;
+    }
+    markHostedRealtimeUnavailable(indicatorId, false);
     const resumeStatus = payload?.resumeStatus || payload?.resume_status || "legacy";
     if (resumeStatus === "patch") {
       hostedPendingResumePatchIdsRef.current.add(String(indicatorId));
@@ -1449,8 +1538,10 @@ export function useIndicatorRuntime(
     getCurrentVisibleRange,
     getIndicatorCacheContext,
     markHostedSubscriptionReady,
+    markHostedRealtimeUnavailable,
     requestIndicatorRange,
     savedVisibleRange,
+    setIndicatorError,
   ]);
 
   const { forceHostedSubscriptions } = useIndicatorStreamController({
@@ -1476,6 +1567,7 @@ export function useIndicatorRuntime(
     handleIndicatorSubscribed,
     interval,
     marketType,
+    realtimeEnabled,
     resetHostedSubscriptionReadiness,
     setIndicatorError,
     symbol,
@@ -1681,7 +1773,7 @@ export function useIndicatorRuntime(
       return;
     }
 
-    const missingRange = resolveMissingHostedRightRange(chartData, hostedIndicators);
+    const missingRange = resolveMissingHostedRightRange(chartData, hostedIndicators, interval);
     if (!missingRange) {
       autoRightCatchupPendingRef.current = null;
       if (autoRightCatchupTimerRef.current) {
@@ -1790,6 +1882,10 @@ export function useIndicatorRuntime(
   });
 
   useLayoutEffect(() => {
+    if (!realtimeEnabled) {
+      realtimeIndicatorBatcherRef.current?.clear();
+      provisionalIndicatorPreviewsRef.current.clear();
+    }
     const cachedEntries = resolveCachedIndicatorResults(activeIndicatorsRef.current, getIndicatorCacheContext());
     const cachedById = new Map(cachedEntries.map((entry) => [entry.indicatorId, entry]));
     setActiveIndicators((prev) =>
@@ -1811,6 +1907,7 @@ export function useIndicatorRuntime(
     interval,
     indicatorCacheHydrationSignature,
     marketType,
+    realtimeEnabled,
     setActiveIndicators,
     symbol,
   ]);
@@ -1855,9 +1952,34 @@ export function useIndicatorRuntime(
     updateIndicatorScript,
   ]);
 
+  const hasRealtimeUnavailableHostedIndicator = useMemo(() => (
+    getVisibleHostedIndicators(activeIndicators).some(
+      (indicator) => realtimeUnavailableIndicatorContexts.get(indicator.id) === [
+        sessionKey,
+        exchange,
+        marketType,
+        symbol,
+        interval,
+      ].join("|"),
+    )
+  ), [
+    activeIndicators,
+    exchange,
+    interval,
+    marketType,
+    realtimeUnavailableIndicatorContexts,
+    sessionKey,
+    symbol,
+  ]);
+
   const status = useMemo(() => ({
     computing,
-  }), [computing]);
+    realtimeMode: !realtimeEnabled
+      ? "historical-only" as const
+      : hasRealtimeUnavailableHostedIndicator
+        ? "degraded" as const
+        : "enabled" as const,
+  }), [computing, hasRealtimeUnavailableHostedIndicator, realtimeEnabled]);
 
   return {
     view,

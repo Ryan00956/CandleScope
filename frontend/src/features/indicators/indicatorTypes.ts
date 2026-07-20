@@ -598,7 +598,21 @@ export interface IndicatorRecomputedMessage extends IndicatorWsBase {
 export interface IndicatorSubscribedMessage extends IndicatorWsBase {
   type: "indicator.subscribed";
   clientId: string;
+  ok?: boolean | null;
   indicatorId?: string;
+  subscriptionStatus?: "accepted" | "failed" | string;
+  realtimeStatus?: "live" | "unavailable" | string;
+  requestedInterval?: string;
+  canonicalInterval?: string;
+  failure?: {
+    interval?: string;
+    code?: string;
+    message?: string;
+  };
+  code?: string;
+  error?: string | null;
+  detail?: unknown;
+  errorDetail?: IndicatorErrorDetail;
   resumeStatus?: string;
   resume_status?: string;
   resumeReason?: string | null;

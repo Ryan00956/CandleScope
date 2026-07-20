@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.api.v1.stream_indicators import _handle_indicator_subscribe
 from app.data_engine.data_manager.models import BarData
 from app.indicator import create_engine
@@ -28,13 +30,149 @@ class _DataManager:
     def __init__(self, bars: list[BarData]) -> None:
         self.bars = bars
         self.query_calls = 0
+        self.ensure_stream_calls: list[tuple[tuple, dict]] = []
+        self.subscriptions: list[dict] = []
 
     async def ensure_stream(self, *args, **kwargs) -> None:
+        self.ensure_stream_calls.append((args, kwargs))
         return None
 
     def query_latest(self, *args, **kwargs):
         self.query_calls += 1
         return SimpleNamespace(bars=self.bars)
+
+    def subscribe(self, **kwargs):
+        self.subscriptions.append(kwargs)
+        return f"handle-{len(self.subscriptions)}"
+
+    def unsubscribe(self, _handle) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("requested", "canonical"),
+    [
+        ("45m", "45m"),
+        ("47m", "47m"),
+        ("60m", "1h"),
+        ("1M", "1M"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["builtin", "script"])
+def test_indicator_ws_canonicalizes_custom_intervals_before_subscription(
+    requested: str,
+    canonical: str,
+    kind: str,
+) -> None:
+    async def _run() -> None:
+        dm = _DataManager(_bars())
+        engine = create_engine()
+        subscribed = {}
+        client_meta = {}
+        sent: list[dict] = []
+
+        async def send_json(payload: dict) -> bool:
+            sent.append(payload)
+            return True
+
+        message = {
+            "action": "subscribe",
+            "clientId": f"{kind}-{requested}",
+            "kind": kind,
+            "symbol": "BTCUSDT",
+            "interval": requested,
+            "historyLimit": 100,
+        }
+        if kind == "builtin":
+            message["name"] = "VOL"
+        else:
+            message["script"] = 'plot(close, title="Close")'
+
+        await _handle_indicator_subscribe(
+            websocket=SimpleNamespace(),
+            dm=dm,
+            indicator_engine=engine,
+            subscribed=subscribed,
+            custom_handles={},
+            custom_tasks={},
+            queue=asyncio.Queue(),
+            client_meta=client_meta,
+            seed_query_cache={},
+            send_json=send_json,
+            msg=message,
+        )
+
+        acknowledgement = next(item for item in sent if item["type"] == "indicator.subscribed")
+        assert acknowledgement["subscriptionStatus"] == "accepted"
+        assert acknowledgement["requestedInterval"] == requested
+        assert acknowledgement["canonicalInterval"] == canonical
+        assert acknowledgement["interval"] == canonical
+        assert dm.ensure_stream_calls[0][0][1] == canonical
+        assert client_meta[message["clientId"]]["interval"] == canonical
+        if kind == "builtin":
+            assert next(iter(subscribed.values())).interval == canonical
+        else:
+            assert dm.subscriptions[0]["interval"] == canonical
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("kind", ["builtin", "script"])
+def test_indicator_ws_stream_failure_is_a_terminal_failed_ack(kind: str) -> None:
+    class _FailingDataManager(_DataManager):
+        async def ensure_stream(self, *args, **kwargs) -> None:
+            self.ensure_stream_calls.append((args, kwargs))
+            raise RuntimeError("stream start failed")
+
+    async def _run() -> None:
+        dm = _FailingDataManager(_bars())
+        sent: list[dict] = []
+        subscribed = {}
+        client_meta = {}
+
+        async def send_json(payload: dict) -> bool:
+            sent.append(payload)
+            return True
+
+        message = {
+            "action": "subscribe",
+            "clientId": f"failed-{kind}",
+            "kind": kind,
+            "symbol": "BTCUSDT",
+            "interval": "60m",
+        }
+        if kind == "builtin":
+            message["name"] = "VOL"
+        else:
+            message["script"] = 'plot(close, title="Close")'
+
+        await _handle_indicator_subscribe(
+            websocket=SimpleNamespace(),
+            dm=dm,
+            indicator_engine=create_engine(),
+            subscribed=subscribed,
+            custom_handles={},
+            custom_tasks={},
+            queue=asyncio.Queue(),
+            client_meta=client_meta,
+            seed_query_cache={},
+            send_json=send_json,
+            msg=message,
+        )
+
+        assert len(sent) == 1
+        acknowledgement = sent[0]
+        assert acknowledgement["type"] == "indicator.subscribed"
+        assert acknowledgement["ok"] is False
+        assert acknowledgement["subscriptionStatus"] == "failed"
+        assert acknowledgement["realtimeStatus"] == "unavailable"
+        assert acknowledgement["requestedInterval"] == "60m"
+        assert acknowledgement["canonicalInterval"] == "1h"
+        assert acknowledgement["failure"]["code"] == "INDICATOR_STREAM_SUBSCRIPTION_FAILED"
+        assert subscribed == {}
+        assert client_meta == {}
+
+    asyncio.run(_run())
 
 
 def test_builtin_subscribe_coalesces_seed_query_and_sends_small_resume_patch():

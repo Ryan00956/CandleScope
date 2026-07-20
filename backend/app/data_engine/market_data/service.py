@@ -22,6 +22,7 @@ from app.data_engine.interval_policy import (
     compute_bucket_start_ms,
     last_closed_bar_open_ms,
     parse_interval_ms,
+    parse_interval_spec,
 )
 from app.data_engine.history import (
     BoundaryReason,
@@ -455,9 +456,10 @@ class MarketDataService:
                 raise ValueError(
                     "hybrid funding history is currently available only for binance futures",
                 )
-            period_ms = parse_interval_ms(period or "")
-            if period_ms is None or period_ms <= 0:
+            period_spec = parse_interval_spec(period or "")
+            if period_spec is None:
                 raise ValueError("hybrid funding history requires a valid chart period")
+            period = period_spec.canonical
             if self._metrics_repository is None:
                 raise ValueError("hybrid funding history requires metric storage")
 

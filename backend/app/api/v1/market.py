@@ -7,6 +7,7 @@ import time
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
+from app.data_engine.interval_policy import parse_interval_spec
 
 
 router = APIRouter(prefix="/market", tags=["market"])
@@ -80,6 +81,10 @@ async def market_history(
                 raise ValueError("hybrid history is available only for funding_rate")
             if period is None:
                 raise ValueError("hybrid funding history requires a chart period")
+            period_spec = parse_interval_spec(period)
+            if period_spec is None:
+                raise ValueError("hybrid funding history requires a valid chart period")
+            period = period_spec.canonical
         key = MarketStreamKey.build(exchange, market_type, symbol, parsed_channel)
         history_kwargs = {
             "period": period,

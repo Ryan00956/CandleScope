@@ -163,7 +163,7 @@ export async function fetchKlinesHistory(
   const payload = await request(buildUrl("/klines/history", {
     symbol,
     interval,
-    days,
+    days: options.countBack == null ? days : undefined,
     count_back: options.countBack,
     exchange,
     market_type: marketType,

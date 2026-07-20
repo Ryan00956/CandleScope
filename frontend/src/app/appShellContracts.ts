@@ -91,6 +91,7 @@ export interface AppShellViewModelContext {
   indicatorView: IndicatorShellRuntime["view"];
   indicatorActions: IndicatorShellRuntime["actions"];
   indicatorComputing: boolean;
+  indicatorRealtimeMode: IndicatorRuntime["status"]["realtimeMode"];
   watchlistView: WatchlistRuntime["view"];
   watchlistActions: WatchlistRuntime["actions"];
   orderBookView: OrderBookRuntime["view"];

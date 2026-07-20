@@ -59,6 +59,7 @@ export interface UseIndicatorStreamControllerOptions {
   ) => void;
   interval: string;
   marketType: string;
+  realtimeEnabled: boolean;
   resetHostedSubscriptionReadiness?: () => void;
   setIndicatorError(indicatorId: string, error: string): void;
   symbol: string;
@@ -113,6 +114,7 @@ export function useIndicatorStreamController({
   handleIndicatorSubscribed,
   interval,
   marketType,
+  realtimeEnabled,
   resetHostedSubscriptionReadiness,
   setIndicatorError,
   symbol,
@@ -295,7 +297,7 @@ export function useIndicatorStreamController({
   }, []);
 
   useEffect(() => {
-    if (!symbol || !interval || !hasWsHostedIndicators || !chartDataReady) {
+    if (!symbol || !interval || !hasWsHostedIndicators || !chartDataReady || !realtimeEnabled) {
       const connection = connectionRef.current;
       if (connection) {
         connection.close();
@@ -394,12 +396,13 @@ export function useIndicatorStreamController({
     hasWsHostedIndicators,
     interval,
     marketType,
+    realtimeEnabled,
     symbol,
     requestRecomputedRange,
   ]);
 
   useEffect(() => {
-    if (!hasWsHostedIndicators || !chartDataReady) return;
+    if (!hasWsHostedIndicators || !chartDataReady || !realtimeEnabled) return;
     syncHostedSubscriptions(false);
   }, [
     candleDownColor,
@@ -410,6 +413,7 @@ export function useIndicatorStreamController({
     chartHistoryFirstTime,
     hasWsHostedIndicators,
     indicatorWsSignature,
+    realtimeEnabled,
     syncHostedSubscriptions,
   ]);
 

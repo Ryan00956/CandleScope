@@ -216,6 +216,25 @@ def test_market_history_explicit_hybrid_view_is_forwarded_and_identified() -> No
     assert wrong_channel.status_code == 422
 
 
+def test_hybrid_funding_canonicalizes_irregular_chart_period_alias() -> None:
+    dm = _MarketDataManager()
+    response = _client(dm).get(
+        "/api/v1/market/history",
+        params={
+            "channel": "funding_rate",
+            "period": "2820s",
+            "view": "hybrid",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["key"]["params"] == {
+        "period": "47m",
+        "view": "hybrid",
+    }
+    assert dm.history_calls[0]["period"] == "47m"
+
+
 def test_market_history_expired_empty_page_is_complete_and_not_retryable() -> None:
     class _ExpiredHistoryManager(_MarketDataManager):
         async def market_history_page(self, key: MarketStreamKey, **kwargs):

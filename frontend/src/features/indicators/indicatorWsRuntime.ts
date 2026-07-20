@@ -262,6 +262,7 @@ function parseIndicatorWsRecord(value: unknown): IndicatorWsMessage {
   if (type === "indicator.subscribed") {
     const revisionValue =
       record.dataRevision ?? record.data_revision ?? record.revision;
+    const envelope = parseIndicatorPayloadEnvelope(record, path);
     const message: IndicatorSubscribedMessage = { type, clientId };
     if (seq !== undefined) message.seq = seq;
     const indicatorId = optionalIndicatorString(
@@ -276,6 +277,22 @@ function parseIndicatorWsRecord(value: unknown): IndicatorWsMessage {
     const interval = optionalIndicatorString(
       record.interval,
       `${path}.interval`,
+    );
+    const subscriptionStatus = optionalIndicatorString(
+      record.subscriptionStatus ?? record.subscription_status,
+      `${path}.subscriptionStatus`,
+    );
+    const realtimeStatus = optionalIndicatorString(
+      record.realtimeStatus ?? record.realtime_status,
+      `${path}.realtimeStatus`,
+    );
+    const requestedInterval = optionalIndicatorString(
+      record.requestedInterval ?? record.requested_interval,
+      `${path}.requestedInterval`,
+    );
+    const canonicalInterval = optionalIndicatorString(
+      record.canonicalInterval ?? record.canonical_interval,
+      `${path}.canonicalInterval`,
     );
     if (indicatorId !== undefined) message.indicatorId = indicatorId;
     if (resumeStatus !== undefined) message.resumeStatus = resumeStatus;
@@ -294,6 +311,35 @@ function parseIndicatorWsRecord(value: unknown): IndicatorWsMessage {
       );
     }
     if (interval !== undefined) message.interval = interval;
+    if (envelope.ok !== null) message.ok = envelope.ok;
+    if (subscriptionStatus !== undefined) message.subscriptionStatus = subscriptionStatus;
+    if (realtimeStatus !== undefined) message.realtimeStatus = realtimeStatus;
+    if (requestedInterval !== undefined) message.requestedInterval = requestedInterval;
+    if (canonicalInterval !== undefined) message.canonicalInterval = canonicalInterval;
+    if (record.failure !== undefined && record.failure !== null) {
+      const failureRecord = expectIndicatorRecord(record.failure, `${path}.failure`);
+      const failure: NonNullable<IndicatorSubscribedMessage["failure"]> = {};
+      const failureInterval = optionalIndicatorString(
+        failureRecord.interval,
+        `${path}.failure.interval`,
+      );
+      const failureCode = optionalIndicatorString(
+        failureRecord.code,
+        `${path}.failure.code`,
+      );
+      const failureMessage = optionalIndicatorString(
+        failureRecord.message ?? failureRecord.error,
+        `${path}.failure.message`,
+      );
+      if (failureInterval !== undefined) failure.interval = failureInterval;
+      if (failureCode !== undefined) failure.code = failureCode;
+      if (failureMessage !== undefined) failure.message = failureMessage;
+      message.failure = failure;
+    }
+    if (envelope.code !== undefined) message.code = envelope.code;
+    if (envelope.error !== undefined) message.error = envelope.error;
+    if (envelope.detail !== undefined) message.detail = envelope.detail;
+    if (envelope.errorDetail !== undefined) message.errorDetail = envelope.errorDetail;
     return message;
   }
 

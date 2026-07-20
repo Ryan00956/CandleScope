@@ -140,6 +140,40 @@ test("indicator.subscribed dispatches revision and resume acknowledgement", () =
   );
 });
 
+test("indicator.subscribed parses a terminal failed realtime acknowledgement", () => {
+  const parsed = parseIndicatorWsMessage(JSON.stringify({
+    type: "indicator.subscribed",
+    clientId: "ma-1",
+    ok: false,
+    interval: "1h",
+    requestedInterval: "60m",
+    canonicalInterval: "1h",
+    subscriptionStatus: "failed",
+    realtimeStatus: "unavailable",
+    code: "INDICATOR_STREAM_SUBSCRIPTION_FAILED",
+    error: "Realtime indicator stream is unavailable for interval 1h.",
+    failure: {
+      interval: "1h",
+      code: "INDICATOR_STREAM_SUBSCRIPTION_FAILED",
+      message: "Realtime indicator stream is unavailable for interval 1h.",
+    },
+    errorDetail: {
+      message: "Realtime indicator stream is unavailable for interval 1h.",
+      hint: "Use HTTP history.",
+    },
+  }));
+
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.equal(parsed.message.type, "indicator.subscribed");
+  if (parsed.message.type !== "indicator.subscribed") return;
+  assert.equal(parsed.message.subscriptionStatus, "failed");
+  assert.equal(parsed.message.requestedInterval, "60m");
+  assert.equal(parsed.message.canonicalInterval, "1h");
+  assert.equal(parsed.message.failure?.code, "INDICATOR_STREAM_SUBSCRIPTION_FAILED");
+  assert.equal(parsed.message.errorDetail?.hint, "Use HTTP history.");
+});
+
 test("history-required preserves compatible cache unless revision data invalidates it", () => {
   const compatible = resolveIndicatorSubscriptionCachePolicy({
     resumeStatus: "history_required",

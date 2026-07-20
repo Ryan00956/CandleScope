@@ -1142,7 +1142,7 @@ async def get_klines_history(
     request: Request,
     symbol: str = Query("BTCUSDT", description="Trading symbol"),
     interval: str = Query("1h", description="Kline interval"),
-    days: float = Query(7, ge=0.001, le=3650, description="Historical days (supports fractional, e.g. 0.04)"),
+    days: float = Query(7, ge=0.001, description="Historical days (supports fractional, e.g. 0.04); capped at 3650 unless count_back is provided"),
     count_back: int | None = Query(None, ge=1, le=MAX_RANGE_RESPONSE_BARS, description="Newest bar count to return; overrides days window when provided"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
@@ -1158,6 +1158,11 @@ async def get_klines_history(
     ),
 ):
     """Get historical K-line bars for a time range."""
+    if count_back is None and days > 3650:
+        raise HTTPException(
+            status_code=422,
+            detail="days must be less than or equal to 3650 when count_back is omitted",
+        )
     _validate_interval(interval)
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
@@ -1181,15 +1186,25 @@ async def get_klines_history(
             start_ms = end_ms
             if calendar is not None:
                 for _ in range(count_back - 1):
+                    if start_ms <= 0:
+                        break
                     previous = calendar.previous_expected_open(start_ms, interval)
                     if previous is None:
                         break
-                    start_ms = previous
+                    start_ms = max(0, previous)
             elif is_monthly_interval(interval):
                 for _ in range(count_back - 1):
-                    start_ms = _previous_expected_open_ms(start_ms, interval)
+                    if start_ms <= 0:
+                        break
+                    start_ms = max(
+                        0,
+                        _previous_expected_open_ms(start_ms, interval),
+                    )
             else:
-                start_ms = end_ms - int((count_back - 1) * interval_secs * 1000)
+                start_ms = max(
+                    0,
+                    end_ms - int((count_back - 1) * interval_secs * 1000),
+                )
             needed_limit = min(MAX_RANGE_RESPONSE_BARS, count_back)
         else:
             start_ms = end_ms - int(days * 24 * 60 * 60 * 1000)

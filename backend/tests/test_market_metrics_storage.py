@@ -11,6 +11,7 @@ from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
 from app.data_engine.market_data.service import (
     MarketDataService,
+    MarketHistoryPage,
     _HistoryRefreshPlan,
     _inferred_funding_interval_ms,
     _next_funding_cycle_ms,
@@ -942,6 +943,31 @@ async def test_hybrid_funding_is_dense_no_lookahead_and_excludes_forming_bar(
     assert page.events[0].data["funding_time_ms"] == cycle_ms + 2
     assert page.events[0].data["funding_cycle_ms"] == cycle_ms
     assert all(event.event_time_ms < cycle_ms + 5 * 60_000 for event in page.events)
+    await service.shutdown()
+
+
+@_async_test
+async def test_hybrid_funding_service_canonicalizes_irregular_period_alias(tmp_path) -> None:
+    repository = MarketMetricsRepository(tmp_path / "hybrid-canonical-period.sqlite")
+    service = MarketDataService(_Factory(), metrics_repository=repository)
+    captured: dict[str, object] = {}
+
+    async def _capture(event_key, *, period, **kwargs):
+        captured["event_key"] = event_key
+        captured["period"] = period
+        captured["kwargs"] = kwargs
+        return MarketHistoryPage(events=[])
+
+    service._hybrid_funding_history_page = _capture
+    await service.history_page(
+        _key(MarketChannel.FUNDING_RATE),
+        period="2820s",
+        view="hybrid",
+        limit=5,
+    )
+
+    assert captured["period"] == "47m"
+    assert captured["event_key"].params == (("period", "47m"), ("view", "hybrid"))
     await service.shutdown()
 
 

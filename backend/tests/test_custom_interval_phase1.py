@@ -168,6 +168,10 @@ def test_identical_custom_derivations_singleflight_base_work() -> None:
     assert first_result.bars == second_result.bars
     assert first_result is not second_result
     assert first_result.metadata is not second_result.metadata
+    assert first_result.metadata["singleflight_role"] == "owner"
+    assert second_result.metadata["singleflight_role"] == "join"
+    assert service.snapshot()["singleflight_owners"] == 1
+    assert service.snapshot()["singleflight_joins"] == 1
 
 
 def test_fixed_custom_aggregation_avoids_generic_row_materialization() -> None:
@@ -259,6 +263,90 @@ def test_custom_base_pagination_is_hard_bounded_without_inventing_a_gap() -> Non
     assert result.history_state == "ready"
     assert result.retryable is False
     assert result.missing_ranges == []
+
+
+def test_custom_range_pagination_caps_the_final_page_to_remaining_source_rows() -> None:
+    page_limits: list[int] = []
+
+    def _base_query(*args, **kwargs) -> QueryResult:
+        raise AssertionError("the seeded range should not issue another base range query")
+
+    def _base_query_before(
+        symbol: str,
+        interval: str,
+        before_ms: int,
+        limit: int,
+        **kwargs,
+    ) -> QueryResult:
+        page_limits.append(limit)
+        last_open = ((before_ms - 1) // 60_000) * 60_000
+        first_open = last_open - (limit - 1) * 60_000
+        bars = [
+            BarData(
+                time=open_ms // 1000,
+                open=1,
+                high=2,
+                low=1,
+                close=2,
+                volume=1,
+            )
+            for open_ms in range(first_open, last_open + 1, 60_000)
+        ]
+        return QueryResult(
+            bars=bars,
+            symbol=symbol,
+            interval=interval,
+            source=QuerySource.STORAGE,
+            total=len(bars),
+            has_more=True,
+            complete=True,
+        )
+
+    initial = QueryResult(
+        bars=[
+            BarData(
+                time=index * 60,
+                open=1,
+                high=2,
+                low=1,
+                close=2,
+                volume=1,
+            )
+            for index in range(20, 30)
+        ],
+        symbol="BTCUSDT",
+        interval="1m",
+        source=QuerySource.STORAGE,
+        total=10,
+        has_more=True,
+        complete=True,
+    )
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(default_limit=10, max_limit=10),
+        base_query=_base_query,
+        base_query_before=_base_query_before,
+    )
+
+    result = service._page_base_history(
+        symbol="BTCUSDT",
+        interval="1m",
+        before_ms=30 * 60_000,
+        target_limit=25,
+        lower_bound_ms=5 * 60_000,
+        exchange="binance",
+        market_type="spot",
+        auto_backfill=False,
+        initial_result=initial,
+    )
+
+    assert page_limits == [10, 5]
+    assert [bar.time_ms for bar in result.bars] == list(range(5 * 60_000, 30 * 60_000, 60_000))
+    assert result.metadata["base_page_count"] == 3
+    assert result.metadata["base_rows_fetched"] == 25
+    assert result.metadata["base_rows_unique"] == 25
+    assert result.metadata["base_rows_returned"] == 25
+    assert result.metadata["base_page_overfetch_rows"] == 0
 
 
 def test_base_repair_projection_uses_canonical_containing_open_for_47m() -> None:

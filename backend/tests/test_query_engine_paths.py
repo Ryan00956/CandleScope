@@ -114,6 +114,17 @@ def test_query_engine_falls_back_to_storage_and_warms_cache() -> None:
     )
     assert [bar.time for bar in warmed] == [60, 120]
 
+    assert result.metadata["storage_reads"] == 1
+    assert result.metadata["storage_rows"] == 2
+    assert result.metadata["row_decode_rows"] == 2
+    snapshot = engine.snapshot()
+    assert snapshot["storage_reads"] == 1
+    assert snapshot["storage_rows"] == 2
+    assert snapshot["row_decode_rows"] == 2
+    assert snapshot["storage_read_ms"] >= 0
+    assert snapshot["row_decode_ms"] >= 0
+    assert snapshot["custom_intervals"]["logical_queries"] == 0
+
 
 def test_query_engine_triggers_backfill_when_cache_and_storage_are_empty() -> None:
     cache = BarCache()
@@ -351,6 +362,12 @@ def test_high_factor_custom_query_pages_fully_stored_base_without_false_backfill
     assert result.retryable is False
     assert result.has_more is False
     assert triggered == []
+    snapshot = engine.snapshot()
+    assert result.metadata["base_page_count"] >= 2
+    assert result.metadata["storage_reads"] > 1
+    assert snapshot["storage_reads"] == result.metadata["storage_reads"]
+    assert snapshot["storage_rows"] == result.metadata["storage_rows"]
+    assert snapshot["query_before_calls"] > result.metadata["base_page_count"]
 
 
 def test_query_before_keeps_has_more_when_backfill_is_deferred_to_facade() -> None:

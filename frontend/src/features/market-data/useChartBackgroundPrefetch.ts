@@ -5,12 +5,16 @@ import type { FullCacheStatus } from "../watchlist-full-cache/watchlistFullCache
 import type { UseChartBackgroundPrefetchOptions } from "./marketDataTypes.js";
 import {
   canonicalizeIntervalValue,
+  intervalTiles,
   intervalsSemanticallyEquivalent,
+  parseIntervalSeconds,
 } from "../../utils/intervals.js";
 
 const PREFETCH_DELAY_MS = 2_000;
 const PREFETCH_INTERVAL_GAP_MS = 200;
 const PREFETCH_BAR_LIMIT = 500;
+export const PREFETCH_SOURCE_ROW_BUDGET = 10_000;
+const PREFETCH_SOURCE_PADDING_BARS = 3;
 
 export interface BackgroundPrefetchSkipInput {
   activeInterval: string;
@@ -19,6 +23,35 @@ export interface BackgroundPrefetchSkipInput {
   hasMemoryCache: boolean;
   inFlight: boolean;
   interval: string;
+  nativeIntervals?: readonly string[];
+  sourceRowBudget?: number;
+  targetBarLimit?: number;
+}
+
+export function estimateBackgroundPrefetchSourceRows(
+  interval: string,
+  nativeIntervals: readonly string[],
+  targetBarLimit = PREFETCH_BAR_LIMIT,
+): number | null {
+  const targetSeconds = parseIntervalSeconds(interval);
+  if (!targetSeconds || targetBarLimit <= 0) return null;
+  if (nativeIntervals.some((candidate) => (
+    intervalsSemanticallyEquivalent(candidate, interval)
+  ))) return targetBarLimit;
+
+  const bestBaseSeconds = nativeIntervals.reduce((best, candidate) => {
+    const candidateSeconds = parseIntervalSeconds(candidate);
+    if (
+      !candidateSeconds
+      || candidateSeconds >= targetSeconds
+      || !intervalTiles(candidate, interval)
+    ) return best;
+    return Math.max(best, candidateSeconds);
+  }, 0);
+  if (bestBaseSeconds <= 0) return null;
+
+  const factor = Math.ceil(targetSeconds / bestBaseSeconds);
+  return (targetBarLimit + PREFETCH_SOURCE_PADDING_BARS) * factor;
 }
 
 export class ChartBackgroundPrefetchAttemptLedger {
@@ -46,10 +79,22 @@ export function shouldSkipChartBackgroundPrefetch({
   hasMemoryCache,
   inFlight,
   interval,
+  nativeIntervals = [],
+  sourceRowBudget = PREFETCH_SOURCE_ROW_BUDGET,
+  targetBarLimit = PREFETCH_BAR_LIMIT,
 }: BackgroundPrefetchSkipInput): boolean {
   if (intervalsSemanticallyEquivalent(interval, activeInterval) || hasMemoryCache || inFlight) return true;
   if (fullCacheStatus === "loading") return true;
-  return fullCacheRows > 0 && (fullCacheStatus === "warm" || fullCacheStatus === "live");
+  if (fullCacheRows > 0 && (fullCacheStatus === "warm" || fullCacheStatus === "live")) return true;
+  if (nativeIntervals.length > 0) {
+    const estimatedSourceRows = estimateBackgroundPrefetchSourceRows(
+      interval,
+      nativeIntervals,
+      targetBarLimit,
+    );
+    if (estimatedSourceRows == null || estimatedSourceRows > sourceRowBudget) return true;
+  }
+  return false;
 }
 
 export function useChartBackgroundPrefetch({
@@ -58,6 +103,7 @@ export function useChartBackgroundPrefetch({
   marketType,
   activeInterval,
   trackedIntervals,
+  nativeIntervals,
   hasCache,
   seriesDataFeed,
   enabled = true,
@@ -85,6 +131,7 @@ export function useChartBackgroundPrefetch({
           hasMemoryCache: hasCache(symbol, canonicalInterval, { marketType, exchange }),
           inFlight: inFlightRef.current.has(key),
           interval: canonicalInterval,
+          nativeIntervals,
         })) continue;
         if (!attemptLedgerRef.current.claimInterval(canonicalInterval)) continue;
 
@@ -117,5 +164,5 @@ export function useChartBackgroundPrefetch({
       controller.abort();
       clearTimeout(timer);
     };
-  }, [activeInterval, enabled, exchange, hasCache, marketType, seriesDataFeed, symbol, trackedIntervals]);
+  }, [activeInterval, enabled, exchange, hasCache, marketType, nativeIntervals, seriesDataFeed, symbol, trackedIntervals]);
 }

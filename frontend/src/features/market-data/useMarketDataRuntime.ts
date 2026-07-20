@@ -371,6 +371,7 @@ export function useMarketDataRuntime({
     marketType,
     activeInterval: interval,
     trackedIntervals: prefetchIntervals,
+    nativeIntervals: nativeIntervalValues,
     hasCache,
     seriesDataFeed,
     enabled: activeChartReady && marketDataReady,

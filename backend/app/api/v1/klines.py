@@ -26,7 +26,6 @@ from app.core.executors import run_storage
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 from app.exchanges.symbols import normalize_symbol
 from app.core.market import (
-    INTERVAL_SECONDS,
     VALID_INTERVALS,
     parse_custom_interval,
 )
@@ -202,25 +201,35 @@ def _backfill_request_ids(result: Any) -> list[str]:
     return ids
 
 
-async def _wait_for_backfill_requests(
+def _backfill_wait_tasks(
     request: Request,
     result: Any,
-) -> bool:
+) -> set[asyncio.Task[bool]]:
     request_ids = _backfill_request_ids(result)
     if not request_ids:
-        return False
+        return set()
 
     coordinator = _get_backfill_coordinator(request)
     wait_for_request = getattr(coordinator, "wait_for_request", None)
     if not callable(wait_for_request):
-        return False
+        return set()
 
-    try:
-        await asyncio.gather(*(wait_for_request(request_id) for request_id in request_ids))
-        return True
-    except Exception:
-        logger.debug("Waiting for backfill requests failed", exc_info=True)
-        return False
+    async def _wait_one(request_id: str) -> bool:
+        try:
+            await wait_for_request(request_id)
+            return True
+        except Exception:
+            logger.debug(
+                "Waiting for backfill request %s failed",
+                request_id,
+                exc_info=True,
+            )
+            return False
+
+    return {
+        asyncio.create_task(_wait_one(request_id))
+        for request_id in request_ids
+    }
 
 
 async def _poll_backfill_storage(
@@ -232,40 +241,42 @@ async def _poll_backfill_storage(
     wait_through_partial_rows: bool = False,
     ready: Callable[[Any], bool] | None = None,
 ) -> Any:
-    """Interleave exact backfill waiting with bounded storage re-queries.
+    """Wait on exact repairs and re-query only on completion or timeout.
 
     Empty cold starts can return as soon as any rows appear.  A partial range
     with a known tail/interior repair must instead keep waiting for the exact
     repair future (within the same bounded budget), otherwise the API returns
-    the known incomplete history immediately.
+    the known incomplete history immediately.  When exact request ids are not
+    available, retain the legacy bounded polling fallback.
     """
     deadline = time.monotonic() + max(0.0, timeout_seconds)
-    wait_task: asyncio.Task[bool] | None = (
-        asyncio.create_task(_wait_for_backfill_requests(request, result))
-        if _backfill_request_ids(result)
-        else None
-    )
-    exact_wait_completed = False
+    wait_tasks = _backfill_wait_tasks(request, result)
+    exact_wait_available = bool(wait_tasks)
+    exact_completion_observed = False
 
     try:
         while True:
             remaining = deadline - time.monotonic()
-            if remaining > 0:
-                wait_seconds = min(0.2, remaining)
-                if wait_task is None:
-                    await asyncio.sleep(wait_seconds)
-                else:
-                    done, _pending = await asyncio.wait(
-                        {wait_task},
-                        timeout=wait_seconds,
+            if wait_tasks:
+                done: set[asyncio.Task[bool]] = set()
+                if remaining > 0:
+                    done, pending = await asyncio.wait(
+                        wait_tasks,
+                        timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-                    if wait_task in done:
-                        exact_wait_completed = await wait_task
-                        wait_task = None
+                    wait_tasks = set(pending)
+                for task in done:
+                    exact_completion_observed = await task or exact_completion_observed
+                if done and not wait_tasks and not exact_completion_observed:
+                    # The exact waiter failed rather than completed; retain the
+                    # bounded polling fallback instead of returning early.
+                    exact_wait_available = False
+            elif remaining > 0 and not exact_wait_available:
+                await asyncio.sleep(min(0.2, remaining))
 
-            # Always inspect storage after each bounded wait, including the
-            # final timeout. One chunk may have committed while another exact
-            # request is still pending.
+            # Exact ids avoid periodic full-history scans: storage is inspected
+            # only when one repair finishes or when the bounded budget expires.
             result = await requery(False)
             result_ready = (
                 bool(ready(result))
@@ -273,18 +284,16 @@ async def _poll_backfill_storage(
                 else bool(result.bars and not wait_through_partial_rows)
             )
             if (
-                exact_wait_completed
-                or time.monotonic() >= deadline
+                time.monotonic() >= deadline
                 or result_ready
+                or (exact_completion_observed and not wait_tasks)
             ):
                 return result
     finally:
-        if wait_task is not None:
+        for wait_task in wait_tasks:
             wait_task.cancel()
-            try:
-                await wait_task
-            except asyncio.CancelledError:
-                pass
+        if wait_tasks:
+            await asyncio.gather(*wait_tasks, return_exceptions=True)
 
 
 def _last_closed_open_ms(

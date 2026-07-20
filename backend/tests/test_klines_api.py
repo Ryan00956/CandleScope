@@ -522,7 +522,7 @@ def test_history_before_waits_for_backfill_future_before_returning_rows() -> Non
     ]
 
 
-def test_history_requeries_storage_after_backfill_future_times_out() -> None:
+def test_history_exact_wait_requeries_storage_once_after_timeout() -> None:
     class _HistoryDataManager:
         def __init__(self) -> None:
             self.calls: list[bool | None] = []
@@ -560,6 +560,7 @@ def test_history_requeries_storage_after_backfill_future_times_out() -> None:
     dm = _HistoryDataManager()
     client = _client_with_runtime(dm, _NeverCompletesCoordinator())
 
+    started = time.perf_counter()
     response = client.get(
         "/api/v1/klines/history",
         params={
@@ -568,16 +569,16 @@ def test_history_requeries_storage_after_backfill_future_times_out() -> None:
             "days": 0.001,
             "exchange": "binance",
             "market_type": "spot",
-            "max_wait_ms": 10,
+            "max_wait_ms": 250,
         },
     )
+    elapsed = time.perf_counter() - started
 
     assert response.status_code == 200
     assert response.json()["count"] == 0
     assert response.json()["backfill_triggered"] is True
-    assert dm.calls[0] is None
-    assert len(dm.calls) >= 2
-    assert all(auto_backfill is False for auto_backfill in dm.calls[1:])
+    assert dm.calls == [None, False]
+    assert elapsed < 1.0
 
 
 def test_history_waits_for_a_scheduled_partial_tail_repair() -> None:

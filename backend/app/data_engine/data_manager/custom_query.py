@@ -48,6 +48,16 @@ logger = logging.getLogger("data_manager.custom_query")
 
 
 _MAX_CUSTOM_BASE_PAGES = 32
+_IO_COUNT_FIELDS = (
+    "storage_reads",
+    "storage_rows",
+    "storage_failures",
+    "row_decode_rows",
+)
+_IO_TIME_FIELDS = (
+    "storage_read_ms",
+    "row_decode_ms",
+)
 
 
 def _bar_data_to_storage_rows(
@@ -458,10 +468,66 @@ class CustomIntervalQueryService:
         self._bar_aggregator = bar_aggregator
         self._flight_lock = threading.Lock()
         self._flights: dict[tuple[Any, ...], Future[QueryResult]] = {}
+        self._metrics_lock = threading.Lock()
+        self._logical_queries = 0
+        self._singleflight_owners = 0
+        self._singleflight_joins = 0
+        self._query_failures = 0
+        self._materialized_hits = 0
+        self._derived_queries = 0
+        self._base_pages = 0
+        self._base_rows = 0
+        self._base_overfetch_rows = 0
+        self._materialized_probe_seconds = 0.0
+        self._base_query_seconds = 0.0
+        self._aggregation_seconds = 0.0
 
     def set_bar_aggregator(self, bar_aggregator: Any | None) -> None:
         """Retain runtime wiring compatibility; reads use the pure bulk reducer."""
         self._bar_aggregator = bar_aggregator
+
+    def snapshot(self) -> dict[str, int | float]:
+        """Return cumulative custom-query work, including joined singleflights."""
+        with self._metrics_lock:
+            return {
+                "logical_queries": self._logical_queries,
+                "singleflight_owners": self._singleflight_owners,
+                "singleflight_joins": self._singleflight_joins,
+                "query_failures": self._query_failures,
+                "materialized_hits": self._materialized_hits,
+                "derived_queries": self._derived_queries,
+                "base_pages": self._base_pages,
+                "base_rows": self._base_rows,
+                "base_overfetch_rows": self._base_overfetch_rows,
+                "materialized_probe_ms": round(
+                    self._materialized_probe_seconds * 1000,
+                    2,
+                ),
+                "base_query_ms": round(self._base_query_seconds * 1000, 2),
+                "aggregation_ms": round(self._aggregation_seconds * 1000, 2),
+            }
+
+    def _record_owner_result(self, result: QueryResult) -> None:
+        metadata = result.metadata
+        with self._metrics_lock:
+            if metadata.get("target_materialized") is True:
+                self._materialized_hits += 1
+            elif metadata.get("target_materialized") is False:
+                self._derived_queries += 1
+            self._base_pages += int(metadata.get("base_page_count") or 0)
+            self._base_rows += int(metadata.get("base_rows_fetched") or 0)
+            self._base_overfetch_rows += int(
+                metadata.get("base_page_overfetch_rows") or 0
+            )
+            self._materialized_probe_seconds += (
+                float(metadata.get("materialized_probe_ms") or 0.0) / 1000
+            )
+            self._base_query_seconds += (
+                float(metadata.get("base_query_ms") or 0.0) / 1000
+            )
+            self._aggregation_seconds += (
+                float(metadata.get("aggregation_ms") or 0.0) / 1000
+            )
 
     def _calendar_for(self, key: SeriesKey) -> Any | None:
         if self._calendar_provider is None:
@@ -483,6 +549,45 @@ class CustomIntervalQueryService:
             excluded_ranges=[dict(item) for item in result.excluded_ranges],
         )
 
+    @staticmethod
+    def _metric_value(result: QueryResult | None, name: str) -> int | float:
+        if result is None:
+            return 0
+        value = result.metadata.get(name, 0)
+        try:
+            return float(value) if name in _IO_TIME_FIELDS else int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _combined_io_metadata(
+        cls,
+        target_result: QueryResult | None,
+        base_result: QueryResult | None,
+    ) -> dict[str, int | float]:
+        metadata: dict[str, int | float] = {}
+        for name in _IO_COUNT_FIELDS:
+            target_value = int(cls._metric_value(target_result, name))
+            base_value = int(cls._metric_value(base_result, name))
+            metadata[name] = target_value + base_value
+            metadata[f"target_{name}"] = target_value
+            metadata[f"base_{name}"] = base_value
+        for name in _IO_TIME_FIELDS:
+            target_value = float(cls._metric_value(target_result, name))
+            base_value = float(cls._metric_value(base_result, name))
+            metadata[name] = round(target_value + base_value, 2)
+            metadata[f"target_{name}"] = round(target_value, 2)
+            metadata[f"base_{name}"] = round(base_value, 2)
+        return metadata
+
+    @staticmethod
+    def _annotate_single_base_page(result: QueryResult) -> None:
+        result.metadata.setdefault("base_page_count", 1)
+        result.metadata.setdefault("base_rows_fetched", len(result.bars))
+        result.metadata.setdefault("base_rows_unique", len(result.bars))
+        result.metadata.setdefault("base_rows_returned", len(result.bars))
+        result.metadata.setdefault("base_page_overfetch_rows", 0)
+
     def _run_singleflight(
         self,
         identity: tuple[Any, ...],
@@ -496,15 +601,28 @@ class CustomIntervalQueryService:
                 flight = Future()
                 self._flights[identity] = flight
 
+        with self._metrics_lock:
+            self._logical_queries += 1
+            if owner:
+                self._singleflight_owners += 1
+            else:
+                self._singleflight_joins += 1
+
         if not owner:
-            return self._clone_result(flight.result())
+            joined = self._clone_result(flight.result())
+            joined.metadata["singleflight_role"] = "join"
+            return joined
 
         try:
             result = compute()
         except BaseException as exc:
+            with self._metrics_lock:
+                self._query_failures += 1
             flight.set_exception(exc)
             raise
         else:
+            result.metadata["singleflight_role"] = "owner"
+            self._record_owner_result(result)
             flight.set_result(self._clone_result(result))
             return result
         finally:
@@ -564,22 +682,31 @@ class CustomIntervalQueryService:
         # that authoritative base history is exhausted.
         return explicit_range or len(bars) >= effective_limit
 
-    @staticmethod
+    @classmethod
     def _materialized_result(
+        cls,
         result: QueryResult,
         bars: list[BarData],
         *,
         base_interval: str,
         factor: int,
         started_at: float,
+        materialized_probe_ms: float,
     ) -> QueryResult:
-        cloned = CustomIntervalQueryService._clone_result(result)
+        cloned = cls._clone_result(result)
         cloned.bars = list(bars)
         cloned.total = len(bars)
         cloned.metadata.update({
+            **cls._combined_io_metadata(result, None),
             "elapsed_ms": round((time.monotonic() - started_at) * 1000, 2),
             "derived_from": base_interval,
             "aggregation_factor": factor,
+            "materialized_probe_ms": round(materialized_probe_ms, 2),
+            "base_query_ms": 0.0,
+            "aggregation_ms": 0.0,
+            "base_page_count": 0,
+            "base_rows_fetched": 0,
+            "base_page_overfetch_rows": 0,
             "target_materialized": True,
             "target_materialized_rows": len(bars),
         })
@@ -827,15 +954,15 @@ class CustomIntervalQueryService:
             if initial_result.bars:
                 cursor_ms = min(bar.time_ms for bar in initial_result.bars)
 
+        source_interval_ms = parse_interval_ms(interval)
         page_capacity = max(1, int(target_limit))
         if lower_bound_ms is not None:
-            interval_ms = parse_interval_ms(interval)
-            if interval_ms is not None and interval_ms > 0:
+            if source_interval_ms is not None and source_interval_ms > 0:
                 span_capacity = (
                     max(0, int(before_ms) - int(lower_bound_ms))
-                    + interval_ms
+                    + source_interval_ms
                     - 1
-                ) // interval_ms + 1
+                ) // source_interval_ms
                 page_capacity = max(page_capacity, span_capacity)
         requested_max_pages = max(
             2,
@@ -861,11 +988,21 @@ class CustomIntervalQueryService:
                     break
 
             remaining = max(1, target_limit - len(by_time))
-            page_limit = (
-                self._cfg.max_limit
-                if lower_bound_ms is not None
-                else min(self._cfg.max_limit, remaining)
-            )
+            page_limit = min(self._cfg.max_limit, remaining)
+            if (
+                lower_bound_ms is not None
+                and source_interval_ms is not None
+                and source_interval_ms > 0
+            ):
+                remaining_span_rows = max(
+                    1,
+                    (
+                        max(0, cursor_ms - int(lower_bound_ms))
+                        + source_interval_ms
+                        - 1
+                    ) // source_interval_ms,
+                )
+                page_limit = min(page_limit, remaining_span_rows)
             page = self._base_query_before(
                 symbol,
                 interval,
@@ -895,6 +1032,23 @@ class CustomIntervalQueryService:
         if lower_bound_ms is not None:
             bars = [bar for bar in bars if bar.time_ms >= lower_bound_ms]
         merged = self._merge_base_page_results(results, bars)
+        for name in _IO_COUNT_FIELDS:
+            merged.metadata[name] = sum(
+                int(self._metric_value(result, name))
+                for result in results
+            )
+        for name in _IO_TIME_FIELDS:
+            merged.metadata[name] = round(sum(
+                float(self._metric_value(result, name))
+                for result in results
+            ), 2)
+        merged.metadata.update({
+            "base_page_count": len(results),
+            "base_rows_fetched": sum(len(result.bars) for result in results),
+            "base_rows_unique": len(by_time),
+            "base_rows_returned": len(bars),
+            "base_page_overfetch_rows": max(0, len(by_time) - len(bars)),
+        })
         still_needs_rows = bool(
             (
                 lower_bound_ms is not None
@@ -1005,6 +1159,7 @@ class CustomIntervalQueryService:
         )
         capacity_factor = _base_capacity_factor(interval, base_interval, factor)
         custom_ms = custom_seconds * 1000
+        materialized_started_at = time.monotonic()
         materialized_result = self._read_materialized_target(
             symbol=symbol,
             interval=interval,
@@ -1019,6 +1174,7 @@ class CustomIntervalQueryService:
             interval=interval,
             calendar=calendar,
         )
+        materialized_probe_ms = (time.monotonic() - materialized_started_at) * 1000
         if self._materialized_is_complete(
             materialized_result,
             materialized_bars,
@@ -1031,6 +1187,7 @@ class CustomIntervalQueryService:
                 base_interval=base_interval,
                 factor=factor,
                 started_at=started_at,
+                materialized_probe_ms=materialized_probe_ms,
             )
 
         month_count = parse_monthly_count(interval)
@@ -1097,6 +1254,7 @@ class CustomIntervalQueryService:
 
         seed_limit = min(base_limit, self._cfg.max_limit)
         seed_start_ms = aligned_start_ms if base_limit <= self._cfg.max_limit else None
+        base_started_at = time.monotonic()
         base_result = self._base_query(
             symbol,
             base_interval,
@@ -1123,6 +1281,9 @@ class CustomIntervalQueryService:
                 auto_backfill=auto_backfill,
                 initial_result=base_result,
             )
+        self._annotate_single_base_page(base_result)
+        base_query_ms = (time.monotonic() - base_started_at) * 1000
+        aggregation_started_at = time.monotonic()
         derived_bars = self.aggregate_custom_bars(
             base_result.bars,
             symbol=symbol,
@@ -1139,6 +1300,7 @@ class CustomIntervalQueryService:
             interval=interval,
             calendar=calendar,
         )
+        aggregation_ms = (time.monotonic() - aggregation_started_at) * 1000
         if materialized_bars:
             combined = {bar.time: bar for bar in derived_bars}
             # A structurally valid target row is the already-materialized
@@ -1188,9 +1350,13 @@ class CustomIntervalQueryService:
             missing_ranges=base_result.missing_ranges,
             metadata={
                 **base_result.metadata,
+                **self._combined_io_metadata(materialized_result, base_result),
                 "elapsed_ms": round(elapsed * 1000, 2),
                 "derived_from": base_interval,
                 "aggregation_factor": factor,
+                "materialized_probe_ms": round(materialized_probe_ms, 2),
+                "base_query_ms": round(base_query_ms, 2),
+                "aggregation_ms": round(aggregation_ms, 2),
                 "base_source": base_result.source.value,
                 "omitted_incomplete_aggregates": omitted_incomplete,
                 "target_materialized": False,
@@ -1285,6 +1451,7 @@ class CustomIntervalQueryService:
         )
         capacity_factor = _base_capacity_factor(interval, base_interval, factor)
         custom_ms = custom_seconds * 1000
+        materialized_started_at = time.monotonic()
         materialized_result = self._read_materialized_target_before(
             symbol=symbol,
             interval=interval,
@@ -1298,6 +1465,7 @@ class CustomIntervalQueryService:
             interval=interval,
             calendar=calendar,
         )
+        materialized_probe_ms = (time.monotonic() - materialized_started_at) * 1000
         if self._materialized_is_complete(
             materialized_result,
             materialized_bars,
@@ -1310,6 +1478,7 @@ class CustomIntervalQueryService:
                 base_interval=base_interval,
                 factor=factor,
                 started_at=started_at,
+                materialized_probe_ms=materialized_probe_ms,
             )
 
         month_count = parse_monthly_count(interval)
@@ -1345,6 +1514,7 @@ class CustomIntervalQueryService:
             base_end_ms = last_bucket_start_ms + custom_ms - 1
         base_limit = (effective_limit + 2) * capacity_factor
 
+        base_started_at = time.monotonic()
         base_result = self._page_base_history(
             symbol=symbol,
             interval=base_interval,
@@ -1355,6 +1525,9 @@ class CustomIntervalQueryService:
             market_type=market_type,
             auto_backfill=auto_backfill,
         )
+        self._annotate_single_base_page(base_result)
+        base_query_ms = (time.monotonic() - base_started_at) * 1000
+        aggregation_started_at = time.monotonic()
         derived_bars = self.aggregate_custom_bars(
             base_result.bars,
             symbol=symbol,
@@ -1370,6 +1543,7 @@ class CustomIntervalQueryService:
             interval=interval,
             calendar=calendar,
         )
+        aggregation_ms = (time.monotonic() - aggregation_started_at) * 1000
         derived_bars = [bar for bar in derived_bars if bar.time_ms < before_ms]
         if materialized_bars:
             combined = {bar.time: bar for bar in derived_bars}
@@ -1415,9 +1589,13 @@ class CustomIntervalQueryService:
             missing_ranges=base_result.missing_ranges,
             metadata={
                 **base_result.metadata,
+                **self._combined_io_metadata(materialized_result, base_result),
                 "elapsed_ms": round((time.monotonic() - started_at) * 1000, 2),
                 "derived_from": base_interval,
                 "aggregation_factor": factor,
+                "materialized_probe_ms": round(materialized_probe_ms, 2),
+                "base_query_ms": round(base_query_ms, 2),
+                "aggregation_ms": round(aggregation_ms, 2),
                 "base_source": base_result.source.value,
                 "omitted_incomplete_aggregates": omitted_incomplete,
                 "target_materialized": False,

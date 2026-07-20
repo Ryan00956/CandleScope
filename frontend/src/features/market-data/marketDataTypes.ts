@@ -109,6 +109,7 @@ export interface UseChartBackgroundPrefetchOptions
   extends Pick<MarketSeries, "exchange" | "marketType" | "symbol"> {
   activeInterval: IntervalString;
   trackedIntervals: readonly IntervalString[];
+  nativeIntervals: readonly IntervalString[];
   hasCache: HasMarketCache;
   seriesDataFeed: SeriesDataFeed;
   enabled?: boolean;

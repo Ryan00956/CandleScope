@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   ChartBackgroundPrefetchAttemptLedger,
+  estimateBackgroundPrefetchSourceRows,
+  PREFETCH_SOURCE_ROW_BUDGET,
   shouldSkipChartBackgroundPrefetch,
 } from "../useChartBackgroundPrefetch.js";
 
@@ -57,4 +59,30 @@ test("background prefetch attempts reset for a new symbol or market scope", () =
 
   attempts.enterScope("futures:ETHUSDT");
   assert.equal(attempts.claimInterval("6h"), true);
+});
+
+test("background prefetch enforces a bounded source-row budget for derived intervals", () => {
+  const nativeIntervals = ["1m", "3m", "5m", "15m", "1h"];
+
+  assert.equal(estimateBackgroundPrefetchSourceRows("1h", nativeIntervals), 500);
+  assert.equal(estimateBackgroundPrefetchSourceRows("45m", nativeIntervals), 1_509);
+  assert.equal(estimateBackgroundPrefetchSourceRows("57m", nativeIntervals), 9_557);
+  assert.equal(estimateBackgroundPrefetchSourceRows("47m", nativeIntervals), 23_641);
+
+  const base = {
+    activeInterval: "1h",
+    fullCacheRows: 0,
+    fullCacheStatus: null,
+    hasMemoryCache: false,
+    inFlight: false,
+    nativeIntervals,
+  } as const;
+  assert.equal(shouldSkipChartBackgroundPrefetch({ ...base, interval: "45m" }), false);
+  assert.equal(shouldSkipChartBackgroundPrefetch({ ...base, interval: "57m" }), false);
+  assert.equal(shouldSkipChartBackgroundPrefetch({ ...base, interval: "47m" }), true);
+  assert.equal(shouldSkipChartBackgroundPrefetch({
+    ...base,
+    interval: "47m",
+    sourceRowBudget: PREFETCH_SOURCE_ROW_BUDGET * 3,
+  }), false);
 });

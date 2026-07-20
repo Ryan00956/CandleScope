@@ -26,7 +26,9 @@ Usage::
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.data_engine.interval_policy import (
@@ -79,6 +81,28 @@ logger = logging.getLogger("data_manager.query")
 BackfillTrigger = Callable[[str, str, int, int, str, str], None]
 
 
+@dataclass
+class _QueryIOMetrics:
+    """Per-invocation storage/decode work attached to ``QueryResult`` metadata."""
+
+    storage_reads: int = 0
+    storage_rows: int = 0
+    storage_read_seconds: float = 0.0
+    storage_failures: int = 0
+    row_decode_rows: int = 0
+    row_decode_seconds: float = 0.0
+
+    def metadata(self) -> dict[str, int | float]:
+        return {
+            "storage_reads": self.storage_reads,
+            "storage_rows": self.storage_rows,
+            "storage_read_ms": round(self.storage_read_seconds * 1000, 2),
+            "storage_failures": self.storage_failures,
+            "row_decode_rows": self.row_decode_rows,
+            "row_decode_ms": round(self.row_decode_seconds * 1000, 2),
+        }
+
+
 class QueryEngine:
     """Three-level query engine: Cache → Storage → Backfill.
 
@@ -115,9 +139,16 @@ class QueryEngine:
         self._interval_resolver = interval_resolver or IntervalResolver()
 
         # Metrics
+        self._metrics_lock = threading.Lock()
         self._queries = 0
+        self._query_before_calls = 0
         self._cache_hits = 0
         self._storage_reads = 0
+        self._storage_rows = 0
+        self._storage_read_seconds = 0.0
+        self._storage_failures = 0
+        self._row_decode_rows = 0
+        self._row_decode_seconds = 0.0
         self._backfills_triggered = 0
         self.custom_intervals = CustomIntervalQueryService(
             cache=self._cache,
@@ -221,7 +252,9 @@ class QueryEngine:
         no storage reads, no backfill triggers.
         """
         t0 = time.monotonic()
-        self._queries += 1
+        io_metrics = _QueryIOMetrics()
+        with self._metrics_lock:
+            self._queries += 1
         allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
 
         route = self._interval_resolver.resolve(
@@ -258,7 +291,10 @@ class QueryEngine:
             )
             start_s = start_ms // 1000 if start_ms else None
             end_s = end_ms // 1000 if end_ms else None
-            return self._query_cache_only(key, start_s, end_s, effective_limit, t0)
+            return self._attach_io_metrics(
+                self._query_cache_only(key, start_s, end_s, effective_limit, t0),
+                io_metrics,
+            )
         effective_limit = min(
             limit or self._cfg.default_limit,
             self._cfg.max_limit,
@@ -306,9 +342,10 @@ class QueryEngine:
             interval=interval,
             key=key,
         ):
-            self._cache_hits += 1
+            with self._metrics_lock:
+                self._cache_hits += 1
             elapsed = time.monotonic() - t0
-            return self._apply_history_contract(QueryResult(
+            return self._attach_io_metrics(self._apply_history_contract(QueryResult(
                 bars=cached,
                 symbol=key.symbol,
                 interval=key.interval,
@@ -319,7 +356,7 @@ class QueryEngine:
                 has_more=self._cache.series_count(key) > len(cached),
                 cache_hit=True,
                 metadata={"elapsed_ms": round(elapsed * 1000, 2)},
-            ), planned)
+            ), planned), io_metrics)
 
         # ── Step 2: Try storage ──────────────────────────────
         storage_bars: list[BarData] = []
@@ -327,20 +364,22 @@ class QueryEngine:
         missing_ranges: list[MissingRange] = []
 
         if self._storage is not None:
-            self._storage_reads += 1
             try:
-                rows = self._storage.query_bars(
-                    symbol=key.symbol,
-                    interval=key.interval,
-                    start_ms=start_ms,
-                    end_ms=end_ms,
-                    limit=effective_limit,
-                    order="DESC",
-                    exchange=key.exchange,
-                    market_type=key.market_type,
+                rows = self._measure_storage_read(
+                    io_metrics,
+                    lambda: self._storage.query_bars(
+                        symbol=key.symbol,
+                        interval=key.interval,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        limit=effective_limit,
+                        order="DESC",
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    ),
                 )
                 rows.reverse()
-                storage_bars = self._storage_rows_to_bars(key, rows)
+                storage_bars = self._storage_rows_to_bars(key, rows, io_metrics)
             except Exception as exc:
                 logger.error("Storage query failed: %s", exc, exc_info=True)
 
@@ -359,7 +398,12 @@ class QueryEngine:
         # We detect each gap and do targeted storage reads to fill them.
         if merged and len(merged) >= 2:
             merged = self._fill_interior_gaps(
-                key, merged, interval, missing_ranges, auto_backfill=allow_backfill,
+                key,
+                merged,
+                interval,
+                missing_ranges,
+                auto_backfill=allow_backfill,
+                io_metrics=io_metrics,
             )
             backfill_triggered = bool(
                 allow_backfill and missing_ranges and self._backfill_trigger is not None
@@ -392,7 +436,7 @@ class QueryEngine:
                 backfill_triggered = allow_backfill and self._backfill_trigger is not None
 
             elapsed = time.monotonic() - t0
-            return self._apply_history_contract(QueryResult(
+            return self._attach_io_metrics(self._apply_history_contract(QueryResult(
                 bars=[],
                 symbol=key.symbol,
                 interval=key.interval,
@@ -405,7 +449,7 @@ class QueryEngine:
                 backfill_triggered=backfill_triggered,
                 missing_ranges=missing_ranges,
                 metadata={"elapsed_ms": round(elapsed * 1000, 2)},
-            ), planned, boundary_reached=bool(planned and planned[0].terminal))
+            ), planned, boundary_reached=bool(planned and planned[0].terminal)), io_metrics)
 
         # ── Step 4: Check completeness & backfill ────────────
         tail_range: tuple[int, int] | None = None
@@ -495,7 +539,7 @@ class QueryEngine:
         tail_gap = any(item.reason == "query_tail_gap" for item in missing_ranges)
 
         elapsed = time.monotonic() - t0
-        return self._apply_history_contract(QueryResult(
+        return self._attach_io_metrics(self._apply_history_contract(QueryResult(
             bars=merged,
             symbol=key.symbol,
             interval=key.interval,
@@ -509,7 +553,7 @@ class QueryEngine:
             has_tail_gap=tail_gap,
             missing_ranges=missing_ranges,
             metadata={"elapsed_ms": round(elapsed * 1000, 2)},
-        ), planned)
+        ), planned), io_metrics)
 
     # ── Public: Convenience Methods ──────────────────────────
 
@@ -541,6 +585,9 @@ class QueryEngine:
         _materialized_only: bool = False,
     ) -> QueryResult:
         """Query bars strictly before a timestamp (for pagination)."""
+        io_metrics = _QueryIOMetrics()
+        with self._metrics_lock:
+            self._query_before_calls += 1
         allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
         route = self._interval_resolver.resolve(
             exchange=exchange,
@@ -577,7 +624,7 @@ class QueryEngine:
         # Ephemeral intervals are cache-only — skip storage and backfill
         if is_ephemeral_interval(interval):
             cached = self._cache.get_before(key, before_s, effective_limit)
-            return self._apply_history_contract(QueryResult(
+            return self._attach_io_metrics(self._apply_history_contract(QueryResult(
                 bars=cached,
                 symbol=key.symbol,
                 interval=key.interval,
@@ -589,7 +636,7 @@ class QueryEngine:
                 cache_hit=bool(cached),
                 backfill_triggered=False,
                 metadata={"ephemeral": True},
-            ), planned)
+            ), planned), io_metrics)
 
         # Try cache first
         cached = self._cache.get_before(key, before_s, effective_limit)
@@ -606,7 +653,9 @@ class QueryEngine:
                 history_end_ms=history_end_ms,
             ) is None
         ):
-            return self._apply_history_contract(QueryResult(
+            with self._metrics_lock:
+                self._cache_hits += 1
+            return self._attach_io_metrics(self._apply_history_contract(QueryResult(
                 bars=cached,
                 symbol=key.symbol,
                 interval=key.interval,
@@ -616,21 +665,24 @@ class QueryEngine:
                 total=len(cached),
                 has_more=True,
                 cache_hit=True,
-            ), planned)
+            ), planned), io_metrics)
 
         # Fall back to storage
         storage_bars: list[BarData] = []
         if self._storage is not None:
             try:
-                rows = self._storage.fetch_before(
-                    symbol=key.symbol,
-                    interval=key.interval,
-                    before_ms=before_ms,
-                    limit=effective_limit,
-                    exchange=key.exchange,
-                    market_type=key.market_type,
+                rows = self._measure_storage_read(
+                    io_metrics,
+                    lambda: self._storage.fetch_before(
+                        symbol=key.symbol,
+                        interval=key.interval,
+                        before_ms=before_ms,
+                        limit=effective_limit,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    ),
                 )
-                storage_bars = self._storage_rows_to_bars(key, rows)
+                storage_bars = self._storage_rows_to_bars(key, rows, io_metrics)
                 if storage_bars:
                     self._cache.bulk_load(key, storage_bars)
             except Exception as exc:
@@ -651,6 +703,7 @@ class QueryEngine:
                 auto_backfill=allow_backfill and history_fetch_allowed,
                 repair_start_ms=history_start_ms,
                 repair_end_ms=history_end_ms,
+                io_metrics=io_metrics,
             )
             if len(merged) > effective_limit:
                 merged = merged[-effective_limit:]
@@ -663,6 +716,7 @@ class QueryEngine:
                 history_end_ms=history_end_ms,
                 missing_ranges=missing_ranges,
                 auto_backfill=allow_backfill and history_fetch_allowed,
+                io_metrics=io_metrics,
             )
             if len(merged) > effective_limit:
                 merged = merged[-effective_limit:]
@@ -757,7 +811,7 @@ class QueryEngine:
         )
         if boundary_reached and result.bars:
             result.earliest_available_ms = result.bars[0].time_ms
-        return result
+        return self._attach_io_metrics(result, io_metrics)
 
     def get_bounds(
         self,
@@ -799,11 +853,22 @@ class QueryEngine:
     # ── Public: Snapshot ─────────────────────────────────────
 
     def snapshot(self) -> dict:
+        with self._metrics_lock:
+            metrics = {
+                "total_queries": self._queries,
+                "query_before_calls": self._query_before_calls,
+                "cache_hits": self._cache_hits,
+                "storage_reads": self._storage_reads,
+                "storage_rows": self._storage_rows,
+                "storage_read_ms": round(self._storage_read_seconds * 1000, 2),
+                "storage_failures": self._storage_failures,
+                "row_decode_rows": self._row_decode_rows,
+                "row_decode_ms": round(self._row_decode_seconds * 1000, 2),
+                "backfills_triggered": self._backfills_triggered,
+            }
         return {
-            "total_queries": self._queries,
-            "cache_hits": self._cache_hits,
-            "storage_reads": self._storage_reads,
-            "backfills_triggered": self._backfills_triggered,
+            **metrics,
+            "custom_intervals": self.custom_intervals.snapshot(),
             "config": {
                 "default_limit": self._cfg.default_limit,
                 "max_limit": self._cfg.max_limit,
@@ -1037,22 +1102,72 @@ class QueryEngine:
         result.next_before_ms = result.bars[0].time_ms if result.has_more and result.bars else None
         return result
 
-    @staticmethod
     def _storage_rows_to_bars(
+        self,
         key: SeriesKey,
         rows: list[dict[str, Any]],
+        io_metrics: _QueryIOMetrics | None = None,
     ) -> list[BarData]:
         """Convert one storage page with capability resolution amortized."""
+        started_at = time.monotonic()
         declared_fields = kline_available_fields(key.exchange, key.market_type)
-        return [
-            BarData.from_storage_row(
-                row,
-                exchange=key.exchange,
-                market_type=key.market_type,
-                declared_fields=declared_fields,
-            )
-            for row in rows
-        ]
+        try:
+            return [
+                BarData.from_storage_row(
+                    row,
+                    exchange=key.exchange,
+                    market_type=key.market_type,
+                    declared_fields=declared_fields,
+                )
+                for row in rows
+            ]
+        finally:
+            elapsed = time.monotonic() - started_at
+            if io_metrics is not None:
+                io_metrics.row_decode_rows += len(rows)
+                io_metrics.row_decode_seconds += elapsed
+            with self._metrics_lock:
+                self._row_decode_rows += len(rows)
+                self._row_decode_seconds += elapsed
+
+    def _measure_storage_read(
+        self,
+        io_metrics: _QueryIOMetrics,
+        read: Callable[[], list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        """Measure one physical storage call for both local and cumulative metrics."""
+        started_at = time.monotonic()
+        try:
+            rows = read()
+        except BaseException:
+            elapsed = time.monotonic() - started_at
+            io_metrics.storage_reads += 1
+            io_metrics.storage_read_seconds += elapsed
+            io_metrics.storage_failures += 1
+            with self._metrics_lock:
+                self._storage_reads += 1
+                self._storage_read_seconds += elapsed
+                self._storage_failures += 1
+            raise
+
+        elapsed = time.monotonic() - started_at
+        row_count = len(rows)
+        io_metrics.storage_reads += 1
+        io_metrics.storage_rows += row_count
+        io_metrics.storage_read_seconds += elapsed
+        with self._metrics_lock:
+            self._storage_reads += 1
+            self._storage_rows += row_count
+            self._storage_read_seconds += elapsed
+        return rows
+
+    @staticmethod
+    def _attach_io_metrics(
+        result: QueryResult,
+        io_metrics: _QueryIOMetrics,
+    ) -> QueryResult:
+        result.metadata.update(io_metrics.metadata())
+        return result
 
     def _merge(
         self, a: list[BarData], b: list[BarData],
@@ -1128,6 +1243,7 @@ class QueryEngine:
         auto_backfill: bool = True,
         repair_start_ms: int | None = None,
         repair_end_ms: int | None = None,
+        io_metrics: _QueryIOMetrics | None = None,
     ) -> list[BarData]:
         """Detect interior gaps and fill them from storage.
 
@@ -1171,15 +1287,19 @@ class QueryEngine:
                     continue
 
                 try:
-                    rows = self._storage.query_bars(
-                        symbol=key.symbol,
-                        interval=key.interval,
-                        start_ms=missing_start_ms,
-                        end_ms=missing_end_ms,
-                        limit=5000,  # generous limit for gap fills
-                        order="ASC",
-                        exchange=key.exchange,
-                        market_type=key.market_type,
+                    metrics = io_metrics or _QueryIOMetrics()
+                    rows = self._measure_storage_read(
+                        metrics,
+                        lambda: self._storage.query_bars(
+                            symbol=key.symbol,
+                            interval=key.interval,
+                            start_ms=missing_start_ms,
+                            end_ms=missing_end_ms,
+                            limit=5000,  # generous limit for gap fills
+                            order="ASC",
+                            exchange=key.exchange,
+                            market_type=key.market_type,
+                        ),
                     )
                     fill_bars = self._storage_rows_to_bars(
                         key,
@@ -1190,6 +1310,7 @@ class QueryEngine:
                             <= int(row["open_time"])
                             <= missing_end_ms
                         ],
+                        metrics,
                     )
                     if fill_bars:
                         all_fill_bars.extend(fill_bars)
@@ -1300,6 +1421,7 @@ class QueryEngine:
         history_end_ms: int,
         missing_ranges: list[MissingRange],
         auto_backfill: bool,
+        io_metrics: _QueryIOMetrics | None = None,
     ) -> list[BarData]:
         """Fill and report the right-boundary gap of a count-based page."""
         gap = self._before_right_gap(key, bars, history_end_ms=history_end_ms)
@@ -1309,15 +1431,19 @@ class QueryEngine:
         original_tail = bars[-1]
         if self._storage is not None:
             try:
-                rows = self._storage.query_bars(
-                    symbol=key.symbol,
-                    interval=key.interval,
-                    start_ms=gap[0],
-                    end_ms=gap[1],
-                    limit=5000,
-                    order="ASC",
-                    exchange=key.exchange,
-                    market_type=key.market_type,
+                metrics = io_metrics or _QueryIOMetrics()
+                rows = self._measure_storage_read(
+                    metrics,
+                    lambda: self._storage.query_bars(
+                        symbol=key.symbol,
+                        interval=key.interval,
+                        start_ms=gap[0],
+                        end_ms=gap[1],
+                        limit=5000,
+                        order="ASC",
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    ),
                 )
                 fill_bars = self._storage_rows_to_bars(
                     key,
@@ -1326,6 +1452,7 @@ class QueryEngine:
                         for row in rows
                         if gap[0] <= int(row["open_time"]) <= gap[1]
                     ],
+                    metrics,
                 )
             except Exception as exc:
                 logger.error(
@@ -1347,6 +1474,7 @@ class QueryEngine:
                     auto_backfill=auto_backfill,
                     repair_start_ms=gap[0],
                     repair_end_ms=gap[1],
+                    io_metrics=io_metrics,
                 )
                 bars = self._merge(bars, repaired_tail)
 
@@ -1398,7 +1526,9 @@ class QueryEngine:
         else:
             bars = self._cache.get_latest(key, limit)
 
-        self._cache_hits += 1 if bars else 0
+        if bars:
+            with self._metrics_lock:
+                self._cache_hits += 1
         elapsed = time.monotonic() - started_at
         return QueryResult(
             bars=bars,
@@ -1689,7 +1819,8 @@ class QueryEngine:
         if self._backfill_trigger is None:
             return missing_range
 
-        self._backfills_triggered += 1
+        with self._metrics_lock:
+            self._backfills_triggered += 1
         try:
             self._backfill_trigger(
                 key.symbol,
@@ -1706,7 +1837,8 @@ class QueryEngine:
 
     def note_backfill_triggered(self, count: int = 1) -> None:
         """Record externally submitted backfill requests in query metrics."""
-        self._backfills_triggered += max(0, count)
+        with self._metrics_lock:
+            self._backfills_triggered += max(0, count)
 
     def _missing_bounds_between(
         self,

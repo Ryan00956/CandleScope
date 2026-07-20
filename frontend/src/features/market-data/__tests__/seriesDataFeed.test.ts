@@ -107,6 +107,293 @@ test("data-plane predicate blocks every HTTP and WebSocket transport boundary", 
   assert.equal(stream.sendPing(), false);
 });
 
+test("same-epoch history keeps concurrent realtime rows while repairing untouched timestamps", async () => {
+  let resolveFetch!: (result: KlineFetchResult) => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const visible = new Map<number, KlineBar>([
+    [1_000, { time: epochSeconds(1_000), close: 10, is_closed: true }],
+    [1_060, { time: epochSeconds(1_060), close: 20, is_closed: false }],
+  ]);
+  const commitRows = (_symbol: string, _interval: string, incoming: KlineBar[]) => {
+    for (const row of incoming) visible.set(row.time, row);
+  };
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesHistory: async () => {
+        markStarted();
+        return new Promise<KlineFetchResult>((resolve) => { resolveFetch = resolve; });
+      },
+    },
+    commitMergedChartData: commitRows,
+  });
+
+  const request = feed.getHistory(SERIES, { commit: "always" });
+  await started;
+  const realtimeTail = {
+    time: epochSeconds(1_060),
+    close: 23,
+    is_closed: false,
+  };
+  feed.recordRealtimeRows(SERIES, [realtimeTail]);
+  visible.set(realtimeTail.time, realtimeTail);
+  resolveFetch({
+    all_rows_final: false,
+    data: [
+      { time: epochSeconds(1_000), close: 11, is_closed: true },
+      { time: epochSeconds(1_060), close: 21, is_closed: false },
+    ],
+  });
+
+  const result = await request;
+  assert.equal(visible.get(1_000)?.close, 11);
+  assert.equal(visible.get(1_060)?.close, 23);
+  assert.equal(result.data.at(-1)?.close, 23);
+});
+
+test("background tracked interval cache uses the same realtime row fence", async () => {
+  const backgroundSeries = { ...SERIES, interval: "1m" };
+  let resolveFetch!: (result: KlineFetchResult) => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  let cached: KlineBar = { time: epochSeconds(1_000), close: 10, is_closed: false };
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesHistory: async () => {
+        markStarted();
+        return new Promise<KlineFetchResult>((resolve) => { resolveFetch = resolve; });
+      },
+    },
+    mergeCacheData: (_symbol, _interval, incoming) => {
+      cached = mustBeDefined(incoming.at(-1));
+    },
+  });
+
+  const request = feed.getHistory(backgroundSeries, { commit: "cache" });
+  await started;
+  const realtime = { time: epochSeconds(1_000), close: 15, is_closed: false };
+  feed.recordRealtimeRows(backgroundSeries, [realtime]);
+  cached = realtime;
+  resolveFetch({
+    all_rows_final: false,
+    data: [{ time: epochSeconds(1_000), close: 12, is_closed: false }],
+  });
+
+  const result = await request;
+  assert.equal(cached.close, 15);
+  assert.equal(result.data[0]?.close, 15);
+});
+
+test("trusted final latest may close a concurrent forming realtime row", async () => {
+  let resolveFetch!: (result: KlineFetchResult) => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  let visible: KlineBar = { time: epochSeconds(1_000), close: 10, is_closed: false };
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchLatestKlines: async () => {
+        markStarted();
+        return new Promise<KlineFetchResult>((resolve) => { resolveFetch = resolve; });
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitPatchedChartData: (_symbol, _interval, incoming) => {
+      visible = mustBeDefined(incoming.at(-1));
+    },
+  });
+
+  const request = feed.getLatest(SERIES);
+  await started;
+  const realtimeForming = { time: epochSeconds(1_000), close: 11, is_closed: false };
+  feed.recordRealtimeRows(SERIES, [realtimeForming]);
+  visible = realtimeForming;
+  resolveFetch({
+    all_rows_final: true,
+    data: [{ time: epochSeconds(1_000), close: 12, is_closed: true }],
+  });
+
+  const result = await request;
+  assert.equal(visible.close, 12);
+  assert.equal(visible.is_closed, true);
+  assert.equal(result.data[0]?.close, 12);
+});
+
+test("trusted final promotion fences a second older same-epoch history response", async () => {
+  let resolveLatest!: (result: KlineFetchResult) => void;
+  let resolveHistory!: (result: KlineFetchResult) => void;
+  let markLatestStarted!: () => void;
+  let markHistoryStarted!: () => void;
+  const latestStarted = new Promise<void>((resolve) => { markLatestStarted = resolve; });
+  const historyStarted = new Promise<void>((resolve) => { markHistoryStarted = resolve; });
+  let visible: KlineBar = { time: epochSeconds(1_000), close: 10, is_closed: false };
+  const commitRows = (_symbol: string, _interval: string, incoming: KlineBar[]) => {
+    visible = mustBeDefined(incoming.at(-1));
+  };
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchLatestKlines: async () => {
+        markLatestStarted();
+        return new Promise<KlineFetchResult>((resolve) => { resolveLatest = resolve; });
+      },
+      fetchKlinesHistory: async () => {
+        markHistoryStarted();
+        return new Promise<KlineFetchResult>((resolve) => { resolveHistory = resolve; });
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: commitRows,
+    commitPatchedChartData: commitRows,
+  });
+
+  const historyRequest = feed.getHistory(SERIES);
+  await historyStarted;
+  const realtimeForming = { time: epochSeconds(1_000), close: 11, is_closed: false };
+  feed.recordRealtimeRows(SERIES, [realtimeForming]);
+  visible = realtimeForming;
+  const latestRequest = feed.getLatest(SERIES);
+  await latestStarted;
+
+  resolveLatest({
+    all_rows_final: true,
+    data: [{ time: epochSeconds(1_000), close: 12, is_closed: true }],
+  });
+  await latestRequest;
+  assert.equal(visible.close, 12);
+  assert.equal(visible.is_closed, true);
+
+  resolveHistory({
+    all_rows_final: false,
+    data: [{ time: epochSeconds(1_000), close: 10, is_closed: false }],
+  });
+  const historyResult = await historyRequest;
+  assert.equal(visible.close, 12);
+  assert.equal(visible.is_closed, true);
+  assert.equal(historyResult.data[0]?.close, 12);
+});
+
+test("an old epoch response cannot promote a row into the new epoch realtime fence", async () => {
+  const resolvers: Array<(result: KlineFetchResult) => void> = [];
+  const started: Array<() => void> = [];
+  let visible: KlineBar = { time: epochSeconds(1_000), close: 10, is_closed: false };
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchLatestKlines: async () => {
+        started.shift()?.();
+        return new Promise<KlineFetchResult>((resolve) => { resolvers.push(resolve); });
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitPatchedChartData: (_symbol, _interval, incoming) => {
+      visible = mustBeDefined(incoming.at(-1));
+    },
+  });
+  const oldStarted = new Promise<void>((resolve) => { started.push(resolve); });
+  const oldRequest = feed.getLatest(SERIES);
+  await oldStarted;
+
+  feed.beginEpoch(SERIES);
+  const newStarted = new Promise<void>((resolve) => { started.push(resolve); });
+  const newRequest = feed.getLatest(SERIES);
+  await newStarted;
+  const realtime = { time: epochSeconds(1_000), close: 11, is_closed: false };
+  feed.recordRealtimeRows(SERIES, [realtime]);
+  visible = realtime;
+
+  mustBeDefined(resolvers.shift())({
+    all_rows_final: true,
+    data: [{ time: epochSeconds(1_000), close: 99, is_closed: true }],
+  });
+  const oldResult = await oldRequest;
+  assert.equal(oldResult.stale, true);
+  assert.equal(visible.close, 11);
+
+  mustBeDefined(resolvers.shift())({
+    all_rows_final: false,
+    data: [{ time: epochSeconds(1_000), close: 10, is_closed: false }],
+  });
+  const newResult = await newRequest;
+  assert.equal(newResult.stale, false);
+  assert.equal(newResult.data[0]?.close, 11);
+  assert.equal(visible.close, 11);
+});
+
+test("concurrent realtime close or amendment dominates an older trusted HTTP row", async () => {
+  let resolveFetch!: (result: KlineFetchResult) => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  let visible: KlineBar = { time: epochSeconds(1_000), close: 10, is_closed: true };
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchLatestKlines: async () => {
+        markStarted();
+        return new Promise<KlineFetchResult>((resolve) => { resolveFetch = resolve; });
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitPatchedChartData: (_symbol, _interval, incoming) => {
+      visible = mustBeDefined(incoming.at(-1));
+    },
+  });
+
+  const request = feed.getLatest(SERIES);
+  await started;
+  const amended = { time: epochSeconds(1_000), close: 30, is_closed: true };
+  feed.recordRealtimeRows(SERIES, [amended]);
+  visible = amended;
+  resolveFetch({
+    all_rows_final: true,
+    data: [{ time: epochSeconds(1_000), close: 20, is_closed: true }],
+  });
+
+  const result = await request;
+  assert.equal(visible.close, 30);
+  assert.equal(result.data[0]?.close, 30);
+});
+
+test("retained realtime amendment also fences HTTP begun after the amendment", async () => {
+  const resolvers: Array<(result: KlineFetchResult) => void> = [];
+  const starters: Array<() => void> = [];
+  let visible: KlineBar = { time: epochSeconds(1_000), close: 10, is_closed: true };
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchLatestKlines: async () => {
+        starters.shift()?.();
+        return new Promise<KlineFetchResult>((resolve) => { resolvers.push(resolve); });
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitPatchedChartData: (_symbol, _interval, incoming) => {
+      visible = mustBeDefined(incoming.at(-1));
+    },
+  });
+
+  const oldStarted = new Promise<void>((resolve) => { starters.push(resolve); });
+  const oldRequest = feed.getLatest(SERIES, { source: "old-latest" });
+  await oldStarted;
+  const amended = { time: epochSeconds(1_000), close: 30, is_closed: true };
+  feed.recordRealtimeRows(SERIES, [amended]);
+  visible = amended;
+
+  const newerStarted = new Promise<void>((resolve) => { starters.push(resolve); });
+  const newerRequest = feed.getLatest(SERIES, { source: "newer-latest" });
+  await newerStarted;
+  mustBeDefined(resolvers[1])({
+    all_rows_final: true,
+    data: [{ time: epochSeconds(1_000), close: 20, is_closed: true }],
+  });
+  const newerResult = await newerRequest;
+  assert.equal(newerResult.data[0]?.close, 30);
+  assert.equal(visible.close, 30);
+
+  mustBeDefined(resolvers[0])({
+    all_rows_final: true,
+    data: [{ time: epochSeconds(1_000), close: 10, is_closed: true }],
+  });
+  const oldResult = await oldRequest;
+  assert.equal(oldResult.data[0]?.close, 30);
+  assert.equal(visible.close, 30);
+});
+
 test("range pagination re-checks the data-plane predicate before every page", async () => {
   let allowed = true;
   let calls = 0;

@@ -8,6 +8,11 @@ export interface PanePointerLayout {
   boundaries: readonly PanePointerBoundary[];
 }
 
+export interface PanePointerTarget {
+  paneId: string;
+  paneIndex: number;
+}
+
 export function buildPanePointerLayout(
   paneIds: readonly string[],
   paneHeights: readonly number[],
@@ -40,6 +45,20 @@ export function paneIdAtClientY(
     const isLast = index === layout.boundaries.length - 1;
     if (clientY >= boundary.top && (clientY < boundary.bottom || (isLast && clientY <= boundary.bottom))) {
       return boundary.paneId;
+    }
+  }
+  return null;
+}
+
+export function paneTargetAtClientY(
+  layout: PanePointerLayout | null | undefined,
+  clientY: number,
+): PanePointerTarget | null {
+  if (!layout || !Number.isFinite(clientY)) return null;
+  for (const [paneIndex, boundary] of layout.boundaries.entries()) {
+    const isLast = paneIndex === layout.boundaries.length - 1;
+    if (clientY >= boundary.top && (clientY < boundary.bottom || (isLast && clientY <= boundary.bottom))) {
+      return { paneId: boundary.paneId, paneIndex };
     }
   }
   return null;

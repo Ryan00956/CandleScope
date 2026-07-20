@@ -18,7 +18,17 @@ import type {
 const SOCKET_OPEN = 1;
 const DEFAULT_RECONNECT_BASE_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_MS = 30_000;
+const DEFAULT_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
+const DEFAULT_SUBSCRIPTION_RETRY_LIMIT = 3;
 const RECONNECT_JITTER_RATIO = 0.25;
+const PERMANENT_SUBSCRIPTION_FAILURE_CODES = new Set([
+  "invalid_interval",
+  "unknown_exchange",
+  "kline_channel_unavailable",
+  "purpose_unsupported",
+  "no_native_intervals",
+  "no_exact_base",
+]);
 
 export interface WatchlistFullCacheSocketLike {
   readyState: number;
@@ -39,6 +49,8 @@ export interface WatchlistFullCacheSocketManagerOptions {
   random?: () => number;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
+  subscriptionRetryBaseMs?: number;
+  subscriptionRetryLimit?: number;
 }
 
 export interface WatchlistFullCacheSocketManager {
@@ -55,6 +67,8 @@ interface SocketConnection {
   reconnectTimer: TimerHandle | null;
   activeIntervals: Set<string>;
   rejectedIntervals: Set<string>;
+  subscriptionRetryAttempts: Map<string, number>;
+  subscriptionRetryTimers: Map<string, TimerHandle>;
 }
 
 function normalizeTarget(target: FullCacheSocketTarget): FullCacheSocketTarget {
@@ -114,6 +128,7 @@ function normalizedMessageIntervals(value: unknown): string[] {
 }
 
 interface SubscriptionFailure {
+  code: string;
   interval: string;
   message: string;
 }
@@ -131,7 +146,7 @@ function subscriptionFailures(value: unknown): SubscriptionFailure[] {
       : typeof candidate.error === "string"
         ? candidate.error
         : "Interval subscription failed";
-    failures.push({ interval, message: `${code}: ${detail}` });
+    failures.push({ code, interval, message: `${code}: ${detail}` });
   });
   return failures;
 }
@@ -155,6 +170,12 @@ function parseSocketKline(value: unknown): KlineBar | null {
   return time == null ? null : { ...parsed, time };
 }
 
+function socketEventType(message: Record<string, unknown>): string | null {
+  if (typeof message.event_type === "string") return message.event_type;
+  if (typeof message.eventType === "string") return message.eventType;
+  return null;
+}
+
 export function createWatchlistFullCacheSocketManager(
   options: WatchlistFullCacheSocketManagerOptions = {},
 ): WatchlistFullCacheSocketManager {
@@ -174,6 +195,14 @@ export function createWatchlistFullCacheSocketManager(
   const reconnectMaxMs = Math.max(
     reconnectBaseMs,
     options.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS,
+  );
+  const subscriptionRetryBaseMs = Math.max(
+    1,
+    options.subscriptionRetryBaseMs ?? DEFAULT_SUBSCRIPTION_RETRY_BASE_MS,
+  );
+  const subscriptionRetryLimit = Math.max(
+    0,
+    Math.floor(options.subscriptionRetryLimit ?? DEFAULT_SUBSCRIPTION_RETRY_LIMIT),
   );
   const connections = new Map<string, SocketConnection>();
   let disposed = false;
@@ -214,6 +243,18 @@ export function createWatchlistFullCacheSocketManager(
     }, delayMs);
   }
 
+  function cancelSubscriptionRetry(connection: SocketConnection, interval: string): void {
+    const handle = connection.subscriptionRetryTimers.get(interval);
+    if (handle == null) return;
+    cancel(handle);
+    connection.subscriptionRetryTimers.delete(interval);
+  }
+
+  function cancelAllSubscriptionRetries(connection: SocketConnection): void {
+    for (const handle of connection.subscriptionRetryTimers.values()) cancel(handle);
+    connection.subscriptionRetryTimers.clear();
+  }
+
   function handleSocketFailure(
     connection: SocketConnection,
     socket: WatchlistFullCacheSocketLike,
@@ -221,6 +262,7 @@ export function createWatchlistFullCacheSocketManager(
     error: unknown,
   ): void {
     if (!isCurrent(connection, socket, generation)) return;
+    cancelAllSubscriptionRetries(connection);
     markTargetSubscribed(connection.target, false);
     connection.target.intervals.forEach((interval) => {
       markFullCacheError(connection.target.symbolKey, interval, error);
@@ -274,6 +316,11 @@ export function createWatchlistFullCacheSocketManager(
     ));
     if (requestedIntervals.length === 0) return;
     requestedIntervals.forEach((interval) => connection.activeIntervals.delete(interval));
+    requestedIntervals.forEach((interval) => {
+      cancelSubscriptionRetry(connection, interval);
+      connection.subscriptionRetryAttempts.delete(interval);
+      connection.rejectedIntervals.delete(interval);
+    });
     connection.requestSequence += 1;
     try {
       socket.send(JSON.stringify({
@@ -286,8 +333,69 @@ export function createWatchlistFullCacheSocketManager(
     }
   }
 
+  function scheduleSubscriptionRetry(
+    connection: SocketConnection,
+    socket: WatchlistFullCacheSocketLike,
+    generation: number,
+    interval: string,
+  ): void {
+    if (!isCurrent(connection, socket, generation)
+      || connection.activeIntervals.has(interval)
+      || connection.rejectedIntervals.has(interval)
+      || connection.subscriptionRetryTimers.has(interval)) return;
+    const failures = (connection.subscriptionRetryAttempts.get(interval) || 0) + 1;
+    connection.subscriptionRetryAttempts.set(interval, failures);
+    const exhaustedFastRetries = failures > subscriptionRetryLimit;
+    if (exhaustedFastRetries) {
+      // A transient ACK failure must not become a permanent rejection while
+      // the socket remains open. After the bounded fast-retry burst, keep a
+      // low-frequency recovery probe alive until success, removal, or close.
+      connection.subscriptionRetryAttempts.set(interval, subscriptionRetryLimit);
+    }
+    const delayMs = exhaustedFastRetries
+      ? reconnectMaxMs
+      : Math.min(
+        reconnectMaxMs,
+        subscriptionRetryBaseMs * (2 ** Math.min(failures - 1, 16)),
+      );
+    const handle = schedule(() => {
+      connection.subscriptionRetryTimers.delete(interval);
+      if (!isCurrent(connection, socket, generation)
+        || socket.readyState !== SOCKET_OPEN
+        || !connection.target.intervals.includes(interval)
+        || connection.activeIntervals.has(interval)
+        || connection.rejectedIntervals.has(interval)) return;
+      sendSubscription(connection, socket, generation, [interval]);
+    }, delayMs);
+    connection.subscriptionRetryTimers.set(interval, handle);
+  }
+
+  function markSubscriptionFailure(
+    connection: SocketConnection,
+    socket: WatchlistFullCacheSocketLike,
+    generation: number,
+    failure: SubscriptionFailure,
+  ): void {
+    if (!connection.target.intervals.includes(failure.interval)) return;
+    connection.activeIntervals.delete(failure.interval);
+    setFullCacheEntrySubscribed(connection.target.symbolKey, failure.interval, false);
+    markFullCacheError(
+      connection.target.symbolKey,
+      failure.interval,
+      new Error(failure.message),
+    );
+    if (PERMANENT_SUBSCRIPTION_FAILURE_CODES.has(failure.code)) {
+      cancelSubscriptionRetry(connection, failure.interval);
+      connection.rejectedIntervals.add(failure.interval);
+      return;
+    }
+    scheduleSubscriptionRetry(connection, socket, generation, failure.interval);
+  }
+
   function handleControlMessage(
     connection: SocketConnection,
+    socket: WatchlistFullCacheSocketLike,
+    generation: number,
     message: Record<string, unknown>,
   ): void {
     const messageType = message.type;
@@ -296,20 +404,20 @@ export function createWatchlistFullCacheSocketManager(
       && messageType !== "warning") return;
 
     const failures = subscriptionFailures(message.failed);
-    failures.forEach((failure) => {
-      if (!connection.target.intervals.includes(failure.interval)) return;
-      connection.activeIntervals.delete(failure.interval);
-      connection.rejectedIntervals.add(failure.interval);
-      setFullCacheEntrySubscribed(connection.target.symbolKey, failure.interval, false);
-      markFullCacheError(
-        connection.target.symbolKey,
-        failure.interval,
-        new Error(failure.message),
-      );
-    });
-    if (messageType === "warning") return;
+    if (messageType === "warning") {
+      failures.forEach((failure) => {
+        if (!connection.target.intervals.includes(failure.interval)) return;
+        markFullCacheError(
+          connection.target.symbolKey,
+          failure.interval,
+          new Error(failure.message),
+        );
+      });
+      return;
+    }
 
     const acknowledged = normalizedMessageIntervals(message.intervals);
+    const requested = normalizedMessageIntervals(message.requested_intervals);
     const hasActiveSnapshot = Array.isArray(message.active_intervals);
     if (hasActiveSnapshot) {
       connection.activeIntervals = new Set(normalizedMessageIntervals(message.active_intervals));
@@ -321,6 +429,8 @@ export function createWatchlistFullCacheSocketManager(
 
     connection.target.intervals.forEach((interval) => {
       if (connection.activeIntervals.has(interval)) {
+        cancelSubscriptionRetry(connection, interval);
+        connection.subscriptionRetryAttempts.delete(interval);
         connection.rejectedIntervals.delete(interval);
         setFullCacheEntrySubscribed(connection.target.symbolKey, interval, true);
         const current = getFullCacheEntry(connection.target.symbolKey, interval);
@@ -330,6 +440,19 @@ export function createWatchlistFullCacheSocketManager(
             lastError: null,
           });
         }
+        return;
+      }
+      const failure = failures.find((candidate) => candidate.interval === interval);
+      if (messageType === "subscribed" && failure) {
+        markSubscriptionFailure(connection, socket, generation, failure);
+        return;
+      }
+      if (messageType === "subscribed" && requested.includes(interval)) {
+        markSubscriptionFailure(connection, socket, generation, {
+          code: "subscription_not_acknowledged",
+          interval,
+          message: "subscription_not_acknowledged: Interval missing from active subscription ACK",
+        });
         return;
       }
       if (hasActiveSnapshot || acknowledged.includes(interval)) {
@@ -348,6 +471,8 @@ export function createWatchlistFullCacheSocketManager(
     connection.generation = generation;
     connection.activeIntervals.clear();
     connection.rejectedIntervals.clear();
+    connection.subscriptionRetryAttempts.clear();
+    cancelAllSubscriptionRetries(connection);
     markTargetSubscribed(connection.target, false);
 
     let socket: WatchlistFullCacheSocketLike;
@@ -370,7 +495,7 @@ export function createWatchlistFullCacheSocketManager(
         const message: unknown = JSON.parse(String(event.data));
         if (!isJsonRecord(message)) return;
         if (message.type !== "kline") {
-          handleControlMessage(connection, message);
+          handleControlMessage(connection, socket, generation, message);
           return;
         }
         const interval = canonicalizeIntervalValue(message.interval);
@@ -381,13 +506,15 @@ export function createWatchlistFullCacheSocketManager(
         // healthy. Reset backoff only after the server delivers a valid event.
         connection.reconnectAttempt = 0;
         connection.activeIntervals.add(interval);
+        cancelSubscriptionRetry(connection, interval);
+        connection.subscriptionRetryAttempts.delete(interval);
         connection.rejectedIntervals.delete(interval);
         setFullCacheEntrySubscribed(connection.target.symbolKey, interval, true);
         patchFullCacheRealtimeKline(
           connection.target.symbolKey,
           interval,
           tick,
-          { source: "ws" },
+          { source: "ws", eventType: socketEventType(message) },
         );
       } catch (error) {
         connection.target.intervals.forEach((interval) => {
@@ -407,6 +534,7 @@ export function createWatchlistFullCacheSocketManager(
       if (!isCurrent(connection, socket, generation)) return;
       connection.socket = null;
       connection.activeIntervals.clear();
+      cancelAllSubscriptionRetries(connection);
       markTargetSubscribed(connection.target, false);
       markTargetStatus(connection.target, "stale");
       scheduleReconnect(connection);
@@ -421,6 +549,7 @@ export function createWatchlistFullCacheSocketManager(
       cancel(connection.reconnectTimer);
       connection.reconnectTimer = null;
     }
+    cancelAllSubscriptionRetries(connection);
     markTargetSubscribed(connection.target, false);
     markTargetStatus(connection.target, "stale");
     const socket = connection.socket;
@@ -461,6 +590,17 @@ export function createWatchlistFullCacheSocketManager(
           const intervalsChanged = !sameIntervals(previousTarget.intervals, target.intervals);
           const added = addedIntervals(previousTarget.intervals, target.intervals);
           const removedIntervals = markRemovedIntervalsUnsubscribed(previousTarget, target);
+          removedIntervals.forEach((interval) => {
+            cancelSubscriptionRetry(existing, interval);
+            existing.subscriptionRetryAttempts.delete(interval);
+            existing.rejectedIntervals.delete(interval);
+            existing.activeIntervals.delete(interval);
+          });
+          added.forEach((interval) => {
+            cancelSubscriptionRetry(existing, interval);
+            existing.subscriptionRetryAttempts.delete(interval);
+            existing.rejectedIntervals.delete(interval);
+          });
           const currentSocket = existing.socket;
           existing.target = target;
           if (removedIntervals.length > 0 && currentSocket?.readyState === SOCKET_OPEN) {
@@ -489,6 +629,8 @@ export function createWatchlistFullCacheSocketManager(
           reconnectTimer: null,
           activeIntervals: new Set(),
           rejectedIntervals: new Set(),
+          subscriptionRetryAttempts: new Map(),
+          subscriptionRetryTimers: new Map(),
         };
         connections.set(target.symbolKey, connection);
         openSocket(connection);

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from app.core.executors import run_storage
 from app.data_engine.interval_policy import is_ephemeral_interval
 
-from ..bar_aggregator import BarEvent, BarEventType, BarState
+from ..bar_aggregator import BarEvent, BarEventType, BarFinality, BarState
 from .cache import BarCache
 from .event_bus import DataEventBus
 from .models import BarData, DataEvent, DataEventType, SeriesKey, StorageBackend
@@ -62,16 +62,77 @@ class AggregatorBridge:
             is_closed=dm_event_type in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED),
         )
 
-        await self._persist_bar_event(bar_state, dm_event_type)
+        storage_source = self._authoritative_storage_source(bar_state, dm_event_type)
+        if (
+            dm_event_type in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED)
+            and storage_source is None
+        ):
+            logger.warning(
+                "Dropped non-authoritative %s for %s@%s bucket=%d finality=%s reason=%s",
+                dm_event_type.value,
+                key.symbol,
+                key.interval,
+                bar_state.bucket_start_ms,
+                getattr(getattr(bar_state, "finality", None), "value", None),
+                getattr(bar_state, "close_reason", None),
+            )
+            return
+        if storage_source is not None and bar_data.source != storage_source:
+            bar_data = bar_data.with_source(storage_source)
 
-        if dm_event_type == DataEventType.BAR_CLOSED:
-            self._cache.append(key, bar_data)
-        elif dm_event_type in (
+        cache_write_event = dm_event_type in (
             DataEventType.BAR_CREATED,
             DataEventType.BAR_UPDATED,
+            DataEventType.BAR_CLOSED,
             DataEventType.BAR_AMENDED,
-        ):
-            self._cache.upsert(key, bar_data)
+        )
+        if cache_write_event:
+            can_accept, canonical = self._cache.can_accept_upsert(key, bar_data)
+            if not can_accept:
+                logger.warning(
+                    "Dropped lower-quality %s for %s bucket=%d before durable write "
+                    "incoming_source=%s canonical_source=%s",
+                    dm_event_type.value,
+                    key,
+                    bar_state.bucket_start_ms,
+                    bar_data.source,
+                    canonical.source if canonical is not None else None,
+                )
+                return
+
+        # Durable quality arbitration is authoritative when production
+        # storage is present. A zero affected-row result means SQLite retained
+        # a higher-ranked canonical row, so cache and downstream consumers
+        # must not observe the rejected event. None preserves availability for
+        # storage-less/ephemeral paths and legacy test doubles.
+        durable_accepted = await self._persist_bar_event(
+            bar_state,
+            dm_event_type,
+            storage_source,
+        )
+        if durable_accepted is False:
+            logger.warning(
+                "Dropped durable-rejected %s for %s bucket=%d source=%s",
+                dm_event_type.value,
+                key,
+                bar_state.bucket_start_ms,
+                bar_data.source,
+            )
+            return
+
+        if cache_write_event:
+            accepted, canonical = self._cache.upsert_if_accepted(key, bar_data)
+            if not accepted:
+                logger.warning(
+                    "Dropped lower-quality %s for %s bucket=%d "
+                    "incoming_source=%s canonical_source=%s",
+                    dm_event_type.value,
+                    key,
+                    bar_state.bucket_start_ms,
+                    bar_data.source,
+                    canonical.source,
+                )
+                return
 
         self._mark_bar_received(key)
 
@@ -89,26 +150,28 @@ class AggregatorBridge:
         self,
         bar_state: BarState,
         event_type: DataEventType,
-    ) -> None:
-        """Persist finalized or corrected bars so storage matches live state."""
+        source: str | None,
+    ) -> bool | None:
+        """Persist a final bar and report durable quality acceptance.
+
+        ``True`` means at least one row was accepted, ``False`` means the
+        durable source-rank predicate rejected it, and ``None`` means storage
+        was not applicable, unavailable, failed, or did not expose an affected
+        row count. The latter preserves the existing live-path availability.
+        """
         if is_ephemeral_interval(bar_state.interval):
-            return
+            return None
 
         storage = self._storage_provider()
         if storage is None:
-            return
+            return None
 
-        if event_type not in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED):
-            return
+        if source is None:
+            return None
 
         row = bar_state.to_storage_dict()
-        source = (
-            "data_manager_amended"
-            if event_type == DataEventType.BAR_AMENDED
-            else "data_manager_closed"
-        )
         try:
-            await run_storage(
+            affected = await run_storage(
                 storage.upsert_bars,
                 bar_state.symbol,
                 bar_state.interval,
@@ -117,6 +180,9 @@ class AggregatorBridge:
                 bar_state.exchange,
                 bar_state.market_type,
             )
+            if affected is None:
+                return None
+            return int(affected) > 0
         except Exception as exc:
             logger.warning(
                 "Failed to persist %s for %s@%s %s: %s",
@@ -127,3 +193,23 @@ class AggregatorBridge:
                 exc,
                 exc_info=True,
             )
+            return None
+
+    @staticmethod
+    def _authoritative_storage_source(
+        bar_state: BarState,
+        event_type: DataEventType,
+    ) -> str | None:
+        """Return durable provenance only for a proven final bar."""
+        if event_type not in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED):
+            return None
+        finality = getattr(bar_state, "finality", None)
+        if getattr(finality, "value", finality) != BarFinality.AUTHORITATIVE.value:
+            return None
+        if event_type == DataEventType.BAR_AMENDED:
+            return "data_manager_amended"
+        return {
+            "source_close": "data_manager_exchange_closed",
+            "composite_close": "data_manager_composite_closed",
+            "batch": "backfill_rest_verified",
+        }.get(str(getattr(bar_state, "close_reason", "") or ""))

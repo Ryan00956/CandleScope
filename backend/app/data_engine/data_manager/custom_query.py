@@ -27,15 +27,14 @@ from app.data_engine.interval_policy import (
     parse_monthly_count,
     row_is_closed,
 )
-from app.data_engine.market_data.kline_metrics import (
-    serialize_kline_enhancements,
-)
+from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
 from app.data_engine.interval_resolution import IntervalRoute
 from app.data_engine.history.calendar import (
     AlwaysOpenCalendar,
     containing_expected_open_ms,
     expected_bucket_end_ms,
 )
+from app.data_engine.kline_quality import incoming_source_can_replace, source_rank
 
 from .cache import BarCache, HistoryCapacityReservation
 from .config import QueryConfig
@@ -706,8 +705,10 @@ class CustomIntervalQueryService:
             # ``complete`` describes range coverage, not row freshness.  A
             # forming materialized target can be coverage-complete while its
             # base components have already advanced.  Only finalized target
-            # rows are safe for the no-base-read historical fast path.
-            or any(not bar.is_closed for bar in bars)
+            # rows with trusted provenance are safe for the no-base-read
+            # historical fast path. ``is_closed`` alone includes legacy
+            # timeout closes and cannot establish immutable finality.
+            or any(not bar.trusted_final for bar in bars)
         ):
             return False
         # A materialized range may legitimately contain fewer rows than the
@@ -745,6 +746,41 @@ class CustomIntervalQueryService:
             "target_materialized_rows": len(bars),
         })
         return cloned
+
+    @staticmethod
+    def _promote_rebuilt_finality(
+        bars: list[BarData],
+        base_result: QueryResult,
+    ) -> list[BarData]:
+        """Mark complete derived buckets trusted only from all-final inputs."""
+        if base_result.metadata.get("all_rows_final") is not True:
+            return bars
+        return [
+            bar.with_source("backfill_aggregated")
+            if bar.is_closed and not bar.trusted_final
+            else bar
+            for bar in bars
+        ]
+
+    @staticmethod
+    def _merge_materialized_with_rebuilt(
+        materialized: list[BarData],
+        rebuilt: list[BarData],
+    ) -> list[BarData]:
+        """Merge target rows using provenance, preferring fresh equals."""
+        combined = {bar.time: bar for bar in materialized}
+        for bar in rebuilt:
+            existing = combined.get(bar.time)
+            if (
+                existing is None
+                # A provisional/forming target is never an authority over a
+                # fresh base reconstruction, even if malformed legacy state
+                # retained a nominally high-ranked source string.
+                or not existing.trusted_final
+                or incoming_source_can_replace(existing.source, bar.source)
+            ):
+                combined[bar.time] = bar
+        return sorted(combined.values(), key=lambda bar: bar.time)
 
     def _read_materialized_target(
         self,
@@ -899,8 +935,13 @@ class CustomIntervalQueryService:
                 exclusions_by_identity.setdefault(identity, dict(exclusion))
 
         missing_ranges = list(missing_by_identity.values())
+        all_rows_final = all(
+            result.metadata.get("all_rows_final") is True
+            for result in results
+        )
         pending = bool(
             missing_ranges
+            or not all_rows_final
             or any(result.retryable or result.history_state == "pending" for result in results)
         )
         if pending:
@@ -939,6 +980,15 @@ class CustomIntervalQueryService:
             missing_ranges=missing_ranges,
             metadata={
                 **newest.metadata,
+                "all_rows_final": all_rows_final,
+                "expected_closed_rows": sum(
+                    int(result.metadata.get("expected_closed_rows") or 0)
+                    for result in results
+                ),
+                "untrusted_final_rows": sum(
+                    int(result.metadata.get("untrusted_final_rows") or 0)
+                    for result in results
+                ),
                 "base_page_count": len(results),
             },
             history_state=history_state,
@@ -1051,7 +1101,12 @@ class CustomIntervalQueryService:
                 break
             next_cursor_ms = min(bar.time_ms for bar in page.bars)
             for bar in page.bars:
-                by_time[bar.time] = bar
+                existing = by_time.get(bar.time)
+                if existing is None or source_rank(bar.source) > source_rank(existing.source):
+                    # Pages are read newest-to-oldest. Preserve the newer page
+                    # on equal authority, but never let it mask a higher-grade
+                    # row from an overlapping older page.
+                    by_time[bar.time] = bar
             if next_cursor_ms >= cursor_ms:
                 logger.error(
                     "Custom base pagination made no progress for %s %s at %d",
@@ -1344,15 +1399,17 @@ class CustomIntervalQueryService:
             interval=interval,
             calendar=calendar,
         )
+        derived_bars = self._promote_rebuilt_finality(derived_bars, base_result)
         aggregation_ms = (time.monotonic() - aggregation_started_at) * 1000
         if materialized_bars:
             # The materialized target was unable to satisfy the finalized
             # fast-path contract, so a just-rebuilt base aggregate is the
             # authoritative value at overlapping opens.  Materialized rows
             # remain useful only to fill opens the base query did not return.
-            combined = {bar.time: bar for bar in materialized_bars}
-            combined.update({bar.time: bar for bar in derived_bars})
-            derived_bars = sorted(combined.values(), key=lambda bar: bar.time)
+            derived_bars = self._merge_materialized_with_rebuilt(
+                materialized_bars,
+                derived_bars,
+            )
             if start_ms is not None:
                 derived_bars = [bar for bar in derived_bars if bar.time_ms >= start_ms]
             if end_ms is not None:
@@ -1599,15 +1656,18 @@ class CustomIntervalQueryService:
             interval=interval,
             calendar=calendar,
         )
+        derived_bars = self._promote_rebuilt_finality(derived_bars, base_result)
         aggregation_ms = (time.monotonic() - aggregation_started_at) * 1000
         derived_bars = [bar for bar in derived_bars if bar.time_ms < before_ms]
         if materialized_bars:
             # Once base reconstruction was required, it wins overlaps and
             # materialized rows only fill otherwise-unavailable opens.
-            combined = {bar.time: bar for bar in materialized_bars}
-            combined.update({bar.time: bar for bar in derived_bars})
+            combined = self._merge_materialized_with_rebuilt(
+                materialized_bars,
+                derived_bars,
+            )
             derived_bars = sorted(
-                (bar for bar in combined.values() if bar.time_ms < before_ms),
+                (bar for bar in combined if bar.time_ms < before_ms),
                 key=lambda bar: bar.time,
             )
         derived_total = len(derived_bars)

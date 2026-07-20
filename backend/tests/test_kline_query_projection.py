@@ -51,6 +51,7 @@ def test_sqlite_adapter_compact_projection_matches_full_rows(
             row["trades"],
             row["taker_buy_base"],
             row["taker_buy_quote"],
+            row["source"],
         )
         for row in full_rows
     ]

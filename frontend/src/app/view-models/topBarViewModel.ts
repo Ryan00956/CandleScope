@@ -14,6 +14,7 @@ export function buildTopBarViewModel({
   tradeFlowView,
   watchlistActions,
   watchlistView,
+  replayEntry,
 }: AppShellViewModelContext): TopBarProps {
   const {
     symbol,
@@ -51,5 +52,6 @@ export function buildTopBarViewModel({
     },
     marketSummary: { displayData, isUp, priceChange, amplitude },
     advancedMarketData: advancedMarketView,
+    replayEntry,
   };
 }

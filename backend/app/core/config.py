@@ -4,13 +4,124 @@ CandleScope global configuration.
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 logger = logging.getLogger("candlescope.config")
+
+
+_REPLAY_TRUE_VALUES = {"1", "true", "yes", "on"}
+_REPLAY_FALSE_VALUES = {"0", "false", "no", "off"}
+_REPLAY_BUDGETS: dict[str, int] = {
+    "REPLAY_MAX_ACTIVE_SESSIONS": 8,
+    "REPLAY_COMMAND_QUEUE_SIZE": 256,
+    "REPLAY_EVENT_BUFFER_SIZE": 10_000,
+    "REPLAY_MAX_EMIT_FPS": 30,
+    "REPLAY_MAX_WARMUP_BARS": 5_000,
+    "REPLAY_MAX_BAR_DATASET_ROWS": 100_000,
+    "REPLAY_MAX_HORIZON_DAYS": 30,
+    "REPLAY_TRADE_PAGE_ROWS": 50_000,
+    "REPLAY_CHECKPOINT_EVENT_INTERVAL": 10_000,
+    "REPLAY_CHECKPOINT_VIRTUAL_MS": 300_000,
+    "REPLAY_EVENT_SUBSCRIBER_QUEUE": 256,
+    "REPLAY_CONTROLLER_TTL_SECONDS": 10,
+    "REPLAY_IDLE_TTL_SECONDS": 3_600,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaySettings:
+    enabled: bool
+    db_path: Path
+    max_active_sessions: int
+    command_queue_size: int
+    event_buffer_size: int
+    max_emit_fps: int
+    max_warmup_bars: int
+    max_bar_dataset_rows: int
+    max_horizon_days: int
+    trade_page_rows: int
+    checkpoint_event_interval: int
+    checkpoint_virtual_ms: int
+    event_subscriber_queue: int
+    controller_ttl_seconds: int
+    idle_ttl_seconds: int
+
+
+def _strict_replay_bool(environment: Mapping[str, str], name: str, default: str) -> bool:
+    raw_value = environment.get(name, default)
+    normalized = raw_value.strip().lower()
+    if normalized in _REPLAY_TRUE_VALUES:
+        return True
+    if normalized in _REPLAY_FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{name} must be one of 0/1, false/true, no/yes, or off/on"
+    )
+
+
+def _bounded_replay_int(environment: Mapping[str, str], name: str) -> int:
+    safe_upper_bound = _REPLAY_BUDGETS[name]
+    raw_value = environment.get(name, str(safe_upper_bound))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 1 or value > safe_upper_bound:
+        raise ValueError(
+            f"{name} must be between 1 and the frozen safety limit "
+            f"{safe_upper_bound}"
+        )
+    return value
+
+
+def _paths_refer_to_same_file(left: Path, right: Path) -> bool:
+    left_resolved = left.expanduser().resolve()
+    right_resolved = right.expanduser().resolve()
+    if left_resolved == right_resolved:
+        return True
+    if left_resolved.exists() and right_resolved.exists():
+        return os.path.samefile(left_resolved, right_resolved)
+    return False
+
+
+def load_replay_settings(
+    environment: Mapping[str, str],
+    *,
+    data_dir: Path,
+    klines_db_path: Path,
+) -> ReplaySettings:
+    """Load strict, fail-closed replay limits from an environment mapping."""
+
+    replay_db_path = Path(environment.get("REPLAY_DB_PATH", str(data_dir / "replay.db")))
+    if _paths_refer_to_same_file(replay_db_path, klines_db_path):
+        raise ValueError("REPLAY_DB_PATH must not identify KLINES_DB_PATH")
+    values = {
+        name: _bounded_replay_int(environment, name)
+        for name in _REPLAY_BUDGETS
+    }
+    return ReplaySettings(
+        enabled=_strict_replay_bool(environment, "REPLAY_ENABLED", "0"),
+        db_path=replay_db_path,
+        max_active_sessions=values["REPLAY_MAX_ACTIVE_SESSIONS"],
+        command_queue_size=values["REPLAY_COMMAND_QUEUE_SIZE"],
+        event_buffer_size=values["REPLAY_EVENT_BUFFER_SIZE"],
+        max_emit_fps=values["REPLAY_MAX_EMIT_FPS"],
+        max_warmup_bars=values["REPLAY_MAX_WARMUP_BARS"],
+        max_bar_dataset_rows=values["REPLAY_MAX_BAR_DATASET_ROWS"],
+        max_horizon_days=values["REPLAY_MAX_HORIZON_DAYS"],
+        trade_page_rows=values["REPLAY_TRADE_PAGE_ROWS"],
+        checkpoint_event_interval=values["REPLAY_CHECKPOINT_EVENT_INTERVAL"],
+        checkpoint_virtual_ms=values["REPLAY_CHECKPOINT_VIRTUAL_MS"],
+        event_subscriber_queue=values["REPLAY_EVENT_SUBSCRIBER_QUEUE"],
+        controller_ttl_seconds=values["REPLAY_CONTROLLER_TTL_SECONDS"],
+        idle_ttl_seconds=values["REPLAY_IDLE_TTL_SECONDS"],
+    )
 
 # Server
 HOST = os.getenv("CANDLE_HOST", "0.0.0.0")
@@ -20,6 +131,30 @@ PORT = int(os.getenv("CANDLE_PORT", "8000"))
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("CANDLE_DATA_DIR", BASE_DIR / "data"))
 KLINES_DB_PATH = Path(os.getenv("KLINES_DB_PATH", DATA_DIR / "candlescope.db"))
+
+# Replay remains disabled by default and owns a database separate from K-lines.
+# These limits are frozen Phase 0 safety ceilings; environment overrides may
+# tighten them, but cannot silently widen them without a reviewed code change.
+REPLAY_SETTINGS = load_replay_settings(
+    os.environ,
+    data_dir=DATA_DIR,
+    klines_db_path=KLINES_DB_PATH,
+)
+REPLAY_ENABLED = REPLAY_SETTINGS.enabled
+REPLAY_DB_PATH = REPLAY_SETTINGS.db_path
+REPLAY_MAX_ACTIVE_SESSIONS = REPLAY_SETTINGS.max_active_sessions
+REPLAY_COMMAND_QUEUE_SIZE = REPLAY_SETTINGS.command_queue_size
+REPLAY_EVENT_BUFFER_SIZE = REPLAY_SETTINGS.event_buffer_size
+REPLAY_MAX_EMIT_FPS = REPLAY_SETTINGS.max_emit_fps
+REPLAY_MAX_WARMUP_BARS = REPLAY_SETTINGS.max_warmup_bars
+REPLAY_MAX_BAR_DATASET_ROWS = REPLAY_SETTINGS.max_bar_dataset_rows
+REPLAY_MAX_HORIZON_DAYS = REPLAY_SETTINGS.max_horizon_days
+REPLAY_TRADE_PAGE_ROWS = REPLAY_SETTINGS.trade_page_rows
+REPLAY_CHECKPOINT_EVENT_INTERVAL = REPLAY_SETTINGS.checkpoint_event_interval
+REPLAY_CHECKPOINT_VIRTUAL_MS = REPLAY_SETTINGS.checkpoint_virtual_ms
+REPLAY_EVENT_SUBSCRIBER_QUEUE = REPLAY_SETTINGS.event_subscriber_queue
+REPLAY_CONTROLLER_TTL_SECONDS = REPLAY_SETTINGS.controller_ttl_seconds
+REPLAY_IDLE_TTL_SECONDS = REPLAY_SETTINGS.idle_ttl_seconds
 
 # TradeFlow is storage-backend neutral at the service boundary.  SQLite is the
 # first rollup implementation; raw aggregate-trade Parquet is opt-in because it

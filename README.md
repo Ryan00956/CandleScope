@@ -16,6 +16,7 @@ Lightweight trading chart software built with FastAPI, React, Vite, and Lightwei
 
 - [Quick Start](#quick-start)
 - [What It Does](#what-it-does)
+- [Replay Training (Opt-In)](#replay-training-opt-in)
 - [Architecture](#architecture)
 - [Backend](#backend)
 - [Frontend](#frontend)
@@ -97,6 +98,157 @@ CandleScope is a local-first market charting application with:
 - Multi-pane chart layout for price, volume, and oscillator indicators.
 - Settings tools for proxy testing, symbol metadata refresh, storage repair, gap scanning, and retention limits.
 
+## Replay Training (Opt-In)
+
+Replay v1 is a local-first, deterministic market-training runtime. It opens in
+an independent `replay.html` document with its own composition root; the live
+page never swaps its market source or owns replay state. Replay is disabled by
+default on both sides:
+
+```text
+REPLAY_ENABLED=0
+VITE_REPLAY_ENTRY_ENABLED=0
+```
+
+The frontend flag only hides or shows the live-page entry. The backend
+capability is authoritative, including for direct `replay.html` access.
+
+Supported v1 fidelity:
+
+| Source | Data fidelity | Execution fidelity | Boundary |
+|---|---|---|---|
+| Closed K-lines | `EXACT_BAR_COVERAGE` | `BAR_CONSERVATIVE` | Uses a frozen, contiguous BAR snapshot. Ambiguous intrabar paths use a deterministic adverse policy. |
+| Binance USD-M aggregate trades | `EXACT_AGG_TRADE_COVERAGE` | `AGG_TRADE_TAPE` | Requires a checksum-verified, exact archive partition. Fills are tape-volume constrained and strict-cross; they are not queue-exact. |
+
+Both sources use the same deterministic actor, virtual clock,
+`paper_linear_v1` broker, ledger, replay.v1 HTTP/WebSocket protocol, blind
+timeline, report, and independent replay UI. Sessions restart in `PAUSED`, and
+the report exposes its actual data/execution fidelity and integrity hashes.
+
+Replay v1 explicitly does **not** support:
+
+- `RAW_TRADE`: aggregate trades are not renamed or claimed as raw individual fills.
+- `L2_BOOK`: no historical order-book queue position or book-assisted fill fidelity.
+- `EXCHANGE_FUTURES_EXACT`: no historical funding, maintenance-margin tiers, liquidation/ADL, or exact exchange account semantics.
+
+### Prepare Isolated Data
+
+Never point replay at a K-line database or raw archive that another worktree is
+actively writing. Create an SQLite-consistent BAR snapshot first:
+
+```powershell
+Set-Location backend
+.\.venv\Scripts\python.exe scripts\snapshot_replay_klines.py `
+  --source .\data\candlescope.db `
+  --destination .\data\replay-dev\source-candlescope.db `
+  --require-quick-check
+```
+
+AGG_TRADE is optional. Its importer accepts only the official Binance USD-M
+daily archive, verifies the published SHA-256 before parsing, and quarantines
+identity/schema/checksum conflicts. The end date is inclusive:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\import_binance_public_agg_trades.py `
+  --exchange binance `
+  --market-type futures `
+  --symbol BTCUSDT `
+  --start 2026-06-01 `
+  --end 2026-06-02 `
+  --archive-dir .\data\replay-dev\raw_agg_trades `
+  --require-checksum
+
+.\.venv\Scripts\python.exe scripts\audit_replay_trade_archive.py `
+  --exchange binance `
+  --market-type futures `
+  --symbol BTCUSDT `
+  --start 2026-06-01 `
+  --end 2026-06-02 `
+  --archive-dir .\data\replay-dev\raw_agg_trades `
+  --require-exact
+```
+
+Real archives and local replay databases are runtime data and must not be
+committed to Git.
+
+### Run a Dedicated Replay Development Pair
+
+The example files are [`backend/.env.replay.example`](backend/.env.replay.example)
+and [`frontend/.env.replay.example`](frontend/.env.replay.example). A dedicated
+pair avoids the normal `18080` / `15173` services:
+
+```powershell
+# Terminal 1
+Set-Location backend
+$env:CANDLE_DATA_DIR = '.\data\replay-dev'
+$env:KLINES_DB_PATH = '.\data\replay-dev\source-candlescope.db'
+$env:REPLAY_DB_PATH = '.\data\replay-dev\replay.db'
+$env:REPLAY_ENABLED = '1'
+# Set to 1 only after an exact AGG_TRADE archive passes the audit above.
+$env:RAW_AGG_TRADE_ARCHIVE_ENABLED = '0'
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 18082
+
+# Terminal 2
+Set-Location frontend
+$env:VITE_API_PROXY_TARGET = 'http://127.0.0.1:18082'
+$env:VITE_DEV_PORT = '15175'
+$env:VITE_REPLAY_ENTRY_ENABLED = '1'
+npm run dev
+```
+
+Open `http://127.0.0.1:15175/`; the replay entry opens a new page with
+`noopener`. A direct replay URL remains fail-closed if the backend capability
+is disabled or its dataset/persistence checks fail.
+
+### Recovery, Disable, and Verification
+
+- Graceful backend shutdown pauses and checkpoints an active session before
+  closing replay storage. Restart recovery never resumes wall-clock autoplay.
+- Controller loss pauses playback. Sequence/epoch gaps resynchronize through
+  an atomic snapshot; dataset, checkpoint, or persistence faults fail closed.
+- To disable replay, set `REPLAY_ENABLED=0`, restart the backend, set
+  `VITE_REPLAY_ENTRY_ENABLED=0`, and restart/rebuild the frontend. Keep
+  `replay.db`; disabling or rolling back must not delete training records.
+- An old build without replay routes ignores the retained `replay.db`. To
+  disable only AGG_TRADE, set `RAW_AGG_TRADE_ARCHIVE_ENABLED=0`; BAR replay can
+  remain independently available.
+
+Release-quality local checks:
+
+```powershell
+Set-Location H:\program\CandleScope-kline-replay
+$ReplayHead = (git rev-parse HEAD).Trim()
+$ReplayEvidenceRoot = "H:\program\CandleScope-release-evidence\$ReplayHead"
+New-Item -ItemType Directory -Force $ReplayEvidenceRoot | Out-Null
+
+Set-Location backend
+.\.venv\Scripts\python.exe scripts\audit_replay_determinism.py `
+  > "$ReplayEvidenceRoot\replay-determinism.json"
+.\.venv\Scripts\python.exe scripts\benchmark_replay.py `
+  --bars 43200 --trades 1000000 --trade-page-rows 50000 `
+  --checkpoint-event-interval 10000 `
+  --baseline ..\docs\perf-baselines\replay-v1-backend-20260718.json `
+  > "$ReplayEvidenceRoot\replay-backend-1m.json"
+
+Set-Location ..\frontend
+npm run smoke:replay -- --timeout-ms 120000 `
+  > "$ReplayEvidenceRoot\replay-smoke.json"
+node scripts\replay-soak.mjs `
+  --duration-ms 14400000 --cycles 100 --projection-events 1000000 `
+  --sample-ms 60000 --timeout-ms 120000 `
+  --out "$ReplayEvidenceRoot\replay-browser-soak.json"
+node scripts\replay-rollback-drill.mjs `
+  --baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f `
+  --timeout-ms 120000 `
+  --out "$ReplayEvidenceRoot\replay-rollback.json"
+```
+
+Release evidence commands reject a dirty worktree or a changing Git HEAD.
+Keep their outputs outside the repository so one completed gate cannot make
+the next gate fail the clean-tree check. The 4-hour soak is a real release
+gate, not a short harness mode. Passing these local gates does not by itself
+authorize default enablement or replace a production observation window.
+
 ## Architecture
 
 Current backend data flow:
@@ -167,6 +319,7 @@ Core backend modules:
 | `app/data_engine/data_manager` | Public data facade for query/cache/events/streams/backfill/prices/maintenance |
 | `app/data_engine/backfill` | Historical detect/plan/fetch/reconcile/report pipeline behind the scheduler |
 | `app/data_engine/storage` | SQLite K-line repository and gap ledger |
+| `app/replay` | Deterministic replay actor, sources, paper broker, persistence, and reports |
 | `app/indicator` | Built-in indicators, Pyne runtime, indicator streaming |
 
 ## Frontend

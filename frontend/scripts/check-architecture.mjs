@@ -28,6 +28,10 @@ const RULES = {
   drawingPublicRuntimeNoRawChartSeries: "drawing-public-runtime-no-raw-chart-series",
   drawingWorkerNoChartRuntimeImport: "drawing-worker-no-chart-runtime-import",
   sourceTypescriptOnly: "source-typescript-only",
+  replayComponentNoServiceImport: "replay-component-no-service-import",
+  liveAppNoReplayBars: "live-app-no-replay-bars",
+  replayAppNoLiveRuntimeImport: "replay-app-no-live-runtime-import",
+  replayAppNoPrivateTradingImport: "replay-app-no-private-trading-import",
 };
 
 const allowlist = [];
@@ -288,8 +292,42 @@ function isFeatureRuntimePath(filePath) {
   return /Runtime\.(?:js|jsx|ts|tsx)$/.test(parts.at(-1));
 }
 
+function isReplayComponentPath(filePath) {
+  return filePath.startsWith("src/features/replay/components/");
+}
+
+function isReplayAppPath(filePath) {
+  const normalized = normalizeModulePath(filePath);
+  return normalized === "src/replay-main"
+    || normalized.startsWith("src/features/replay/");
+}
+
+function isForbiddenReplayLiveRuntimeTarget(target) {
+  if (target === "src/features/market-data/useMarketDataRuntime") return true;
+  if (target.startsWith("src/features/market-data/runtime/")) return true;
+  return [
+    "src/features/advanced-market/",
+    "src/features/advanced-market-data/",
+    "src/features/order-book/",
+    "src/features/full-order-book/",
+    "src/features/liquidation/",
+    "src/features/liquidations/",
+    "src/features/watchlist/",
+    "src/features/watchlist-full-cache/",
+    "src/features/alerts/",
+  ].some((prefix) => target.startsWith(prefix));
+}
+
+function isForbiddenPrivateTradingTarget(target) {
+  const normalized = target.toLowerCase();
+  return normalized.startsWith("src/features/trading/")
+    || normalized.startsWith("src/services/trading")
+    || normalized.startsWith("src/services/private")
+    || /(?:^|\/)(?:api-?keys?|credentials|private-trading|signing)(?:\/|$)/.test(normalized);
+}
+
 function checkImports(absPath, filePath, content, projectDirectory) {
-  for (const { specifier, line } of importSpecifiers(content)) {
+  for (const { specifier, line, typeOnly } of importSpecifiers(content)) {
     const target = resolveImportSpecifier(absPath, specifier, projectDirectory);
     const normalizedTarget = normalizeModulePath(target);
     const lightweightChartsImport = isLightweightChartsImport(specifier);
@@ -313,6 +351,38 @@ function checkImports(absPath, filePath, content, projectDirectory) {
         line,
         target: normalizedTarget,
         message: `component/app layer imports service module ${specifier}`,
+      });
+    }
+
+    if (isReplayComponentPath(filePath) && normalizedTarget.startsWith("src/services/")) {
+      addViolation({
+        rule: RULES.replayComponentNoServiceImport,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: `replay component imports service module ${specifier}; send intent through feature-local actions`,
+      });
+    }
+
+    if (isReplayAppPath(filePath) && !typeOnly
+      && isForbiddenReplayLiveRuntimeTarget(normalizedTarget)) {
+      addViolation({
+        rule: RULES.replayAppNoLiveRuntimeImport,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: `replay entry graph value-imports live runtime ${specifier}`,
+      });
+    }
+
+    if (isReplayAppPath(filePath) && !typeOnly
+      && isForbiddenPrivateTradingTarget(normalizedTarget)) {
+      addViolation({
+        rule: RULES.replayAppNoPrivateTradingImport,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: `replay entry graph value-imports private trading dependency ${specifier}`,
       });
     }
 
@@ -455,6 +525,80 @@ function checkDrawingWorkerReachableImports(sourceModules, projectDirectory) {
   }
 }
 
+function checkReplayEntryReachableImports(sourceModules, projectDirectory) {
+  const root = sourceModules.get("src/replay-main");
+  if (!root) return;
+  const visited = new Set();
+  const reportedTargets = new Set();
+  const resolveSourceModule = (importer, specifier) => {
+    if (!specifier.startsWith(".") && !specifier.startsWith("src/")) return null;
+    const normalized = normalizeModulePath(
+      resolveImportSpecifier(importer.absPath, specifier, projectDirectory),
+    );
+    return sourceModules.get(normalized) ?? sourceModules.get(`${normalized}/index`) ?? null;
+  };
+
+  const report = (rule, imported, normalizedTarget, chain, label) => {
+    const reportKey = `${rule}:${normalizedTarget}`;
+    if (reportedTargets.has(reportKey)) return;
+    reportedTargets.add(reportKey);
+    addViolation({
+      rule,
+      filePath: root.filePath,
+      line: chain[0]?.line ?? imported.line,
+      target: normalizedTarget,
+      message: `replay entry reaches ${label} through ${[
+        root.filePath,
+        ...chain.map((item) => item.target),
+        normalizedTarget,
+      ].join(" -> ")}`,
+    });
+  };
+
+  const visit = (module, chain) => {
+    if (visited.has(module.filePath) || isTestSourcePath(module.filePath)) return;
+    visited.add(module.filePath);
+    for (const imported of importSpecifiers(module.content)) {
+      if (imported.typeOnly) continue;
+      const normalizedTarget = normalizeModulePath(resolveImportSpecifier(
+        module.absPath,
+        imported.specifier,
+        projectDirectory,
+      ));
+      // Replay-local modules are already covered by the direct rule. This
+      // graph check closes the shared-helper escape hatch without duplicating
+      // the same violation.
+      if (!isReplayAppPath(module.filePath)
+        && isForbiddenReplayLiveRuntimeTarget(normalizedTarget)) {
+        report(
+          RULES.replayAppNoLiveRuntimeImport,
+          imported,
+          normalizedTarget,
+          chain,
+          "live runtime dependency",
+        );
+        continue;
+      }
+      if (!isReplayAppPath(module.filePath)
+        && isForbiddenPrivateTradingTarget(normalizedTarget)) {
+        report(
+          RULES.replayAppNoPrivateTradingImport,
+          imported,
+          normalizedTarget,
+          chain,
+          "private trading dependency",
+        );
+        continue;
+      }
+      const targetModule = resolveSourceModule(module, imported.specifier);
+      if (!targetModule) continue;
+      visit(targetModule, [...chain, { line: imported.line, target: targetModule.filePath }]);
+    }
+  };
+
+  visit(root, []);
+}
+
 function checkDrawingHotPathReachableLocalStorageWrites(sourceModules, projectDirectory) {
   const resolveSourceModule = (importer, specifier) => {
     if (!specifier.startsWith(".") && !specifier.startsWith("src/")) return null;
@@ -584,6 +728,20 @@ function checkAppRuntimeBridge(filePath, content) {
       });
     }
   }
+}
+
+function checkLiveAppReplayOwnership(filePath, content) {
+  if (normalizeModulePath(filePath) !== "src/app/App") return;
+  const stripped = stripCommentsAndStrings(content);
+  const replayOwnershipPattern = /\b(?:replayBars|setReplayBars|replayBarStore|replaySeriesStore)\b|\buseState\s*<\s*(?:ReadonlyArray\s*<\s*)?ReplayBar\b/g;
+  const match = replayOwnershipPattern.exec(stripped);
+  if (!match) return;
+  addViolation({
+    rule: RULES.liveAppNoReplayBars,
+    filePath,
+    line: lineNumberAt(stripped, match.index),
+    message: "live App must not own replay bars or replay series state",
+  });
 }
 
 function findMatchingBrace(content, openIndex) {
@@ -768,11 +926,13 @@ export function runArchitectureCheck({
     checkComponentRawTimeScaleWrites(filePath, content);
     checkFeatureRuntimeJsx(filePath, content);
     checkAppRuntimeBridge(filePath, content);
+    checkLiveAppReplayOwnership(filePath, content);
     checkFeatureRuntimeLegacyCompatFields(filePath, content);
     checkDrawingPublicRuntimeRawChartSeries(filePath, content);
   }
   checkDrawingWorkerReachableImports(sourceModules, projectDirectory);
   checkDrawingHotPathReachableLocalStorageWrites(sourceModules, projectDirectory);
+  checkReplayEntryReachableImports(sourceModules, projectDirectory);
 
   for (const entry of allowlist) {
     const key = allowlistKey(entry);

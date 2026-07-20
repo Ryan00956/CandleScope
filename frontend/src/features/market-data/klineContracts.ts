@@ -68,6 +68,7 @@ export interface HistoryMissingRange extends Record<string, unknown> {
 
 export interface KlineFetchResult extends Record<string, unknown> {
   data?: KlineBar[];
+  all_rows_final?: boolean;
   has_more?: boolean;
   has_tail_gap?: boolean;
   source?: string;

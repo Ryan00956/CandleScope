@@ -375,3 +375,128 @@ test("public drawing runtime guard allows facade actions and internal host adapt
 
   assert.deepEqual(result, { ok: true, violations: [] });
 });
+
+test("replay components reject direct service imports", (t) => {
+  const result = runArchitectureFixture(t, {
+    "src/features/replay/components/ReplayOrderTicket.tsx": `
+      import { postReplayCommand } from "../../../services/api.js";
+      export function ReplayOrderTicket() { return <button onClick={postReplayCommand}>Order</button>; }
+    `,
+    "src/services/api.ts": "export const postReplayCommand = () => undefined;\n",
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.violations.map(({ rule, filePath }) => ({ rule, filePath })), [{
+    rule: "replay-component-no-service-import",
+    filePath: "src/features/replay/components/ReplayOrderTicket.tsx",
+  }]);
+});
+
+test("replay runtime modules reject JSX", (t) => {
+  const result = runArchitectureFixture(t, {
+    "src/features/replay/useReplayRuntime.tsx": `
+      export function useReplayRuntime() { return <div>runtime</div>; }
+    `,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.violations[0]?.rule, "feature-runtime-no-jsx");
+});
+
+test("live App rejects replay bar ownership", (t) => {
+  const result = runArchitectureFixture(t, {
+    "src/app/App.tsx": `
+      import { useState } from "react";
+      export function App() {
+        const [replayBars] = useState<unknown[]>([]);
+        return <main>{replayBars.length}</main>;
+      }
+    `,
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.violations.map(({ rule, filePath }) => ({ rule, filePath })), [{
+    rule: "live-app-no-replay-bars",
+    filePath: "src/app/App.tsx",
+  }]);
+});
+
+test("ReplayApp rejects value imports from live and private trading runtimes", (t) => {
+  const result = runArchitectureFixture(t, {
+    "src/features/replay/ReplayApp.tsx": `
+      import { useMarketDataRuntime } from "../market-data/useMarketDataRuntime.js";
+      import { useAdvancedMarketDataRuntime } from "../advanced-market-data/useAdvancedMarketDataRuntime.js";
+      import { useLiquidationRuntime } from "../liquidations/useLiquidationRuntime.js";
+      import { useWatchlistRuntime } from "../watchlist/useWatchlistRuntime.js";
+      import { submitSignedOrder } from "../../services/private-trading.js";
+      export function ReplayApp() {
+        void useMarketDataRuntime;
+        void useAdvancedMarketDataRuntime;
+        void useLiquidationRuntime;
+        void useWatchlistRuntime;
+        void submitSignedOrder;
+        return <main>Replay</main>;
+      }
+    `,
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(
+    result.violations.map(({ rule }) => rule),
+    [
+      "replay-app-no-live-runtime-import",
+      "replay-app-no-live-runtime-import",
+      "replay-app-no-live-runtime-import",
+      "replay-app-no-live-runtime-import",
+      "replay-app-no-private-trading-import",
+    ],
+  );
+});
+
+test("ReplayApp permits erased type imports from shared contracts", (t) => {
+  const result = runArchitectureFixture(t, {
+    "src/features/replay/ReplayApp.tsx": `
+      import type { MarketDataRuntimeContract } from "../market-data/marketDataRuntimeContract.js";
+      import type { WatchlistItem } from "../watchlist/watchlistTypes.js";
+      export type ReplayDependencies = MarketDataRuntimeContract & { watchlist?: WatchlistItem };
+      export function ReplayApp() { return <main>Replay</main>; }
+    `,
+  });
+
+  assert.deepEqual(result, { ok: true, violations: [] });
+});
+
+test("replay entry graph rejects live and private imports hidden behind a helper", (t) => {
+  const result = runArchitectureFixture(t, {
+    "src/replay-main.tsx": `
+      import { replayBridge } from "./chart-adapter/replayBridge.js";
+      void replayBridge;
+    `,
+    "src/chart-adapter/replayBridge.ts": `
+      import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
+      import { submitSignedOrder } from "../services/private-trading.js";
+      export const replayBridge = [useMarketDataRuntime, submitSignedOrder];
+    `,
+    "src/features/market-data/useMarketDataRuntime.ts": `
+      export const useMarketDataRuntime = () => null;
+    `,
+    "src/services/private-trading.ts": `
+      export const submitSignedOrder = () => null;
+    `,
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(
+    result.violations.map(({ rule, filePath }) => ({ rule, filePath })),
+    [
+      {
+        rule: "replay-app-no-live-runtime-import",
+        filePath: "src/replay-main.tsx",
+      },
+      {
+        rule: "replay-app-no-private-trading-import",
+        filePath: "src/replay-main.tsx",
+      },
+    ],
+  );
+});

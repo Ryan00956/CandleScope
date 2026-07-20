@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 
 from app.data_engine.data_manager.cache import BarCache
 from app.data_engine.data_manager.config import QueryConfig
-from app.data_engine.data_manager.models import BarData, QuerySource, SeriesKey
+from app.data_engine.data_manager.custom_query import CustomIntervalQueryService
+from app.data_engine.data_manager.models import BarData, QueryResult, QuerySource, SeriesKey
 from app.data_engine.data_manager.query import QueryEngine
 from app.data_engine.history import SessionCalendar
 
@@ -17,6 +18,7 @@ def _bar(time_s: int, close: float = 1) -> BarData:
         low=close - 1,
         close=close,
         volume=close * 10,
+        source="backfill",
     )
 
 
@@ -28,6 +30,7 @@ def _row(open_time_ms: int, close: float = 1) -> dict:
         "low": close - 1,
         "close": close,
         "volume": close * 10,
+        "source": "backfill",
     }
 
 
@@ -145,8 +148,8 @@ def test_query_engine_prefers_compact_storage_projection() -> None:
         def query_bar_components(self, **kwargs):
             self.compact_calls.append(kwargs)
             return [
-                (120_000, 2, 3, 1, 2, 20, 40, 2, 12, 24),
-                (60_000, 1, 2, 0, 1, 10, 20, 1, 6, 12),
+                (120_000, 2, 3, 1, 2, 20, 40, 2, 12, 24, "backfill"),
+                (60_000, 1, 2, 0, 1, 10, 20, 1, 6, 12, "backfill"),
             ]
 
         def query_bars(self, **kwargs):
@@ -170,6 +173,7 @@ def test_query_engine_prefers_compact_storage_projection() -> None:
     )
 
     assert [bar.time for bar in result.bars] == [60, 120]
+    assert all(bar.source == "backfill" and bar.trusted_final for bar in result.bars)
     assert storage.compact_calls == [{
         "symbol": "BTCUSDT",
         "interval": "1m",
@@ -203,8 +207,8 @@ def test_query_before_prefers_compact_storage_projection() -> None:
         def fetch_before_bar_components(self, **kwargs):
             self.compact_calls.append(kwargs)
             return [
-                (60_000, 1, 2, 0, 1, 10, 20, 1, 6, 12),
-                (120_000, 2, 3, 1, 2, 20, 40, 2, 12, 24),
+                (60_000, 1, 2, 0, 1, 10, 20, 1, 6, 12, "backfill"),
+                (120_000, 2, 3, 1, 2, 20, 40, 2, 12, 24, "backfill"),
             ]
 
         def fetch_before(self, **kwargs):
@@ -228,6 +232,7 @@ def test_query_before_prefers_compact_storage_projection() -> None:
     )
 
     assert [bar.time for bar in result.bars] == [60, 120]
+    assert all(bar.source == "backfill" and bar.trusted_final for bar in result.bars)
     assert storage.compact_calls == [{
         "symbol": "BTCUSDT",
         "interval": "1m",
@@ -486,6 +491,227 @@ def test_high_factor_custom_query_pages_fully_stored_base_without_false_backfill
     assert snapshot["storage_reads"] == result.metadata["storage_reads"]
     assert snapshot["storage_rows"] == result.metadata["storage_rows"]
     assert snapshot["query_before_calls"] > result.metadata["base_page_count"]
+
+
+def test_custom_base_pages_combine_finality_and_quality_fail_closed() -> None:
+    newest = QueryResult(
+        bars=[BarData(
+            time=60,
+            open=1,
+            high=1,
+            low=1,
+            close=1,
+            volume=1,
+            source="data_manager_closed",
+        )],
+        symbol="BTCUSDT",
+        interval="1m",
+        source=QuerySource.CACHE,
+        total=1,
+        has_more=True,
+        complete=True,
+        metadata={
+            "all_rows_final": False,
+            "expected_closed_rows": 1,
+            "untrusted_final_rows": 1,
+        },
+    )
+
+    def _older_page(*args, **kwargs) -> QueryResult:
+        return QueryResult(
+            bars=[_bar(0, close=3), _bar(60, close=2)],
+            symbol="BTCUSDT",
+            interval="1m",
+            source=QuerySource.STORAGE,
+            total=2,
+            has_more=False,
+            complete=True,
+            metadata={
+                "all_rows_final": True,
+                "expected_closed_rows": 2,
+                "untrusted_final_rows": 0,
+            },
+        )
+
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(max_limit=2),
+        base_query=lambda *args, **kwargs: newest,
+        base_query_before=_older_page,
+    )
+
+    result = service._page_base_history(
+        symbol="BTCUSDT",
+        interval="1m",
+        before_ms=120_000,
+        target_limit=2,
+        lower_bound_ms=None,
+        exchange="binance",
+        market_type="spot",
+        auto_backfill=False,
+        initial_result=newest,
+    )
+
+    assert [(bar.time, bar.close, bar.source) for bar in result.bars] == [
+        (0, 3, "backfill"),
+        (60, 2, "backfill"),
+    ]
+    assert result.metadata["all_rows_final"] is False
+    assert result.metadata["untrusted_final_rows"] == 1
+    assert result.history_state == "pending"
+    assert result.complete is False
+
+
+def test_custom_materialized_fast_path_requires_trusted_final_source() -> None:
+    class _IntervalStorage:
+        def __init__(
+            self,
+            target_source: str,
+            *,
+            target_is_closed: bool = True,
+        ) -> None:
+            self.target_source = target_source
+            self.target_is_closed = target_is_closed
+            self.calls: list[str] = []
+
+        def query_bars(self, **kwargs):
+            interval = str(kwargs["interval"])
+            self.calls.append(interval)
+            if interval == "45m":
+                rows = [{
+                    **_row(0, close=10),
+                    "source": self.target_source,
+                    "is_closed": self.target_is_closed,
+                }]
+            elif interval == "15m":
+                rows = [_row(index * 900_000, close=20) for index in range(3)]
+            else:
+                rows = []
+            start_ms = kwargs.get("start_ms")
+            end_ms = kwargs.get("end_ms")
+            eligible = [
+                row for row in rows
+                if (start_ms is None or row["open_time"] >= start_ms)
+                and (end_ms is None or row["open_time"] <= end_ms)
+            ]
+            eligible.sort(
+                key=lambda row: row["open_time"],
+                reverse=kwargs.get("order") == "DESC",
+            )
+            return eligible[: int(kwargs.get("limit") or len(eligible))]
+
+    trusted_storage = _IntervalStorage("repair_derived_verified")
+    trusted_engine = QueryEngine(
+        cache=BarCache(),
+        storage=trusted_storage,  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+    trusted = trusted_engine.query(
+        "BTCUSDT",
+        "45m",
+        start_ms=0,
+        end_ms=0,
+        limit=1,
+        auto_backfill=False,
+    )
+
+    assert trusted.metadata["target_materialized"] is True
+    assert trusted.bars[0].close == 10
+    assert trusted.bars[0].trusted_final is True
+    assert trusted_storage.calls == ["45m"]
+
+    ambiguous_storage = _IntervalStorage("data_manager_closed")
+    ambiguous_engine = QueryEngine(
+        cache=BarCache(),
+        storage=ambiguous_storage,  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+    rebuilt = ambiguous_engine.query(
+        "BTCUSDT",
+        "45m",
+        start_ms=0,
+        end_ms=0,
+        limit=1,
+        auto_backfill=False,
+    )
+
+    assert rebuilt.metadata["target_materialized"] is False
+    assert rebuilt.bars[0].close == 20
+    assert rebuilt.bars[0].source == "backfill_aggregated"
+    assert ambiguous_storage.calls == ["45m", "15m"]
+
+    malformed_provisional_storage = _IntervalStorage(
+        "backfill",
+        target_is_closed=False,
+    )
+    malformed_provisional_engine = QueryEngine(
+        cache=BarCache(),
+        storage=malformed_provisional_storage,  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+    repaired_provisional = malformed_provisional_engine.query(
+        "BTCUSDT",
+        "45m",
+        start_ms=0,
+        end_ms=0,
+        limit=1,
+        auto_backfill=False,
+    )
+
+    assert repaired_provisional.bars[0].close == 20
+    assert repaired_provisional.bars[0].trusted_final is True
+    assert repaired_provisional.metadata["target_materialized"] is False
+    assert malformed_provisional_storage.calls == ["45m", "15m"]
+
+
+def test_custom_base_rebuild_merges_materialized_rows_by_source_quality() -> None:
+    class _IntervalStorage:
+        def query_bars(self, **kwargs):
+            interval = str(kwargs["interval"])
+            if interval == "45m":
+                rows = [{
+                    **_row(0, close=99),
+                    "source": "repair_derived_verified",
+                }]
+            elif interval == "15m":
+                rows = [
+                    _row(index * 900_000, close=float(index + 1))
+                    for index in range(6)
+                ]
+            else:
+                rows = []
+            start_ms = kwargs.get("start_ms")
+            end_ms = kwargs.get("end_ms")
+            eligible = [
+                row for row in rows
+                if (start_ms is None or row["open_time"] >= start_ms)
+                and (end_ms is None or row["open_time"] <= end_ms)
+            ]
+            eligible.sort(
+                key=lambda row: row["open_time"],
+                reverse=kwargs.get("order") == "DESC",
+            )
+            return eligible[: int(kwargs.get("limit") or len(eligible))]
+
+    engine = QueryEngine(
+        cache=BarCache(),
+        storage=_IntervalStorage(),  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+    result = engine.query(
+        "BTCUSDT",
+        "45m",
+        start_ms=0,
+        end_ms=2_700_000,
+        limit=2,
+        auto_backfill=False,
+    )
+
+    assert result.metadata["target_materialized"] is False
+    assert [(bar.time_ms, bar.close, bar.source) for bar in result.bars] == [
+        (0, 99, "repair_derived_verified"),
+        (2_700_000, 6, "backfill_aggregated"),
+    ]
 
 
 def test_query_before_keeps_has_more_when_backfill_is_deferred_to_facade() -> None:

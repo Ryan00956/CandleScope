@@ -9,10 +9,14 @@ import type {
 } from "../watchlistFullCacheSocketManager.js";
 import {
   getFullCacheEntry,
+  mergeFullCacheRows,
   resetWatchlistFullCache,
 } from "../watchlistFullCacheStore.js";
 import type { FullCacheSocketTarget } from "../watchlistFullCacheTypes.js";
-import { mustBeDefined } from "../../../test/testHelpers.js";
+import {
+  epochSeconds,
+  mustBeDefined,
+} from "../../../test/testHelpers.js";
 
 class FakeSocket implements WatchlistFullCacheSocketLike {
   readyState = 0;
@@ -238,6 +242,40 @@ test("late events from an obsolete socket generation cannot stale the replacemen
   manager.dispose();
 });
 
+test("socket manager routes BAR_AMENDED to a retained historical row", () => {
+  resetWatchlistFullCache();
+  mergeFullCacheRows(TARGET.symbolKey, "1m", [
+    { time: epochSeconds(1), close: 1, is_closed: true },
+    { time: epochSeconds(2), close: 2, is_closed: true },
+    { time: epochSeconds(3), close: 3, is_closed: false },
+  ]);
+  const socket = new FakeSocket();
+  const manager = createWatchlistFullCacheSocketManager({
+    createSocket: () => socket,
+  });
+
+  manager.syncTargets([{ ...TARGET, intervals: ["1m"] }]);
+  socket.emitOpen();
+  socket.emitMessage(JSON.stringify({
+    type: "kline",
+    event_type: "bar.amended",
+    interval: "1m",
+    data: {
+      time: 2,
+      open: 20,
+      high: 21,
+      low: 19,
+      close: 20,
+      volume: 100,
+      is_closed: true,
+    },
+  }));
+
+  const entry = mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1m"));
+  assert.deepEqual(entry.rows.map((row) => row.close), [1, 20, 3]);
+  manager.dispose();
+});
+
 test("socket manager unsubscribes intervals removed from a live target", () => {
   resetWatchlistFullCache();
   const socket = new FakeSocket();
@@ -362,5 +400,118 @@ test("socket manager canonicalizes semantic aliases before subscribe and ACK", (
   assert.equal(canonical.status, "warm");
   assert.equal(canonical.subscribed, true);
 
+  manager.dispose();
+});
+
+test("socket manager keeps a cooldown recovery probe after bounded transient retries", () => {
+  resetWatchlistFullCache();
+  const socket = new FakeSocket();
+  const timers = createFakeTimers();
+  const target = { ...TARGET, intervals: ["45m"] };
+  const manager = createWatchlistFullCacheSocketManager({
+    createSocket: () => socket,
+    schedule: timers.schedule,
+    cancel: timers.cancel,
+    subscriptionRetryBaseMs: 100,
+    subscriptionRetryLimit: 2,
+    reconnectMaxMs: 1_000,
+  });
+
+  manager.syncTargets([target]);
+  socket.emitOpen();
+  const failure = [{
+    interval: "45m",
+    code: "stream_subscription_failed",
+    message: "temporary ingestion failure",
+  }];
+  emitSubscribed(socket, requestIdAt(socket, 0), [], [], failure);
+  assert.equal(timers.pending()[0]?.delayMs, 100);
+
+  timers.runNext();
+  assert.equal(socket.sent.length, 2);
+  emitSubscribed(socket, requestIdAt(socket, 1), [], [], failure);
+  assert.equal(timers.pending()[0]?.delayMs, 200);
+
+  timers.runNext();
+  assert.equal(socket.sent.length, 3);
+  emitSubscribed(socket, requestIdAt(socket, 2), [], [], failure);
+  assert.equal(timers.pending()[0]?.delayMs, 1_000);
+  manager.syncTargets([target]);
+  assert.equal(socket.sent.length, 3);
+
+  const entry = mustBeDefined(getFullCacheEntry(target.symbolKey, "45m"));
+  assert.equal(entry.status, "error");
+  assert.equal(entry.subscribed, false);
+
+  timers.runNext();
+  assert.equal(socket.sent.length, 4, "cooldown probe must keep transient failure recoverable");
+  emitSubscribed(socket, requestIdAt(socket, 3), ["45m"], ["45m"]);
+  assert.equal(mustBeDefined(getFullCacheEntry(target.symbolKey, "45m")).subscribed, true);
+  assert.equal(timers.pending().length, 0);
+  manager.dispose();
+});
+
+test("socket manager clears transient rejection state after a retry succeeds", () => {
+  resetWatchlistFullCache();
+  const socket = new FakeSocket();
+  const timers = createFakeTimers();
+  const target = { ...TARGET, intervals: ["60m", "1h"] };
+  const manager = createWatchlistFullCacheSocketManager({
+    createSocket: () => socket,
+    schedule: timers.schedule,
+    cancel: timers.cancel,
+    subscriptionRetryBaseMs: 100,
+    subscriptionRetryLimit: 2,
+  });
+
+  manager.syncTargets([target]);
+  socket.emitOpen();
+  emitSubscribed(socket, requestIdAt(socket, 0), [], [], [{
+    interval: "60m",
+    code: "stream_subscription_failed",
+    message: "temporary ingestion failure",
+  }]);
+  timers.runNext();
+  assert.deepEqual(sentMessages(socket)[1], {
+    action: "subscribe",
+    intervals: ["1h"],
+    request_id: "watchlist-1-2",
+  });
+
+  emitSubscribed(socket, requestIdAt(socket, 1), ["60m"], ["60m"]);
+  assert.equal(timers.pending().length, 0);
+  const entry = mustBeDefined(getFullCacheEntry(target.symbolKey, "1h"));
+  assert.equal(entry.status, "warm");
+  assert.equal(entry.subscribed, true);
+  assert.equal(entry.lastError, null);
+  manager.dispose();
+});
+
+test("disabling the socket manager closes connections and cancels ACK retries", () => {
+  resetWatchlistFullCache();
+  const socket = new FakeSocket();
+  const timers = createFakeTimers();
+  const target = { ...TARGET, intervals: ["45m"] };
+  const manager = createWatchlistFullCacheSocketManager({
+    createSocket: () => socket,
+    schedule: timers.schedule,
+    cancel: timers.cancel,
+  });
+
+  manager.syncTargets([target]);
+  socket.emitOpen();
+  emitSubscribed(socket, requestIdAt(socket, 0), [], [], [{
+    interval: "45m",
+    code: "stream_subscription_failed",
+    message: "temporary ingestion failure",
+  }]);
+  assert.equal(timers.pending().length, 1);
+
+  manager.syncTargets([target], false);
+  assert.equal(socket.closed, true);
+  assert.equal(timers.pending().length, 0);
+  const entry = mustBeDefined(getFullCacheEntry(target.symbolKey, "45m"));
+  assert.equal(entry.status, "stale");
+  assert.equal(entry.subscribed, false);
   manager.dispose();
 });

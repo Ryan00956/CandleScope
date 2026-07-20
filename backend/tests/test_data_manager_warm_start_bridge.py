@@ -9,13 +9,15 @@ from app.data_engine.bar_aggregator import (
     BarAggregatorConfig,
     BarEvent,
     BarEventType,
+    BarFinality,
     BarState,
 )
 from app.data_engine.data_manager.aggregator_bridge import AggregatorBridge
 from app.data_engine.data_manager.cache import BarCache
 from app.data_engine.data_manager.event_bus import DataEventBus
-from app.data_engine.data_manager.models import DataEventType, SeriesKey
+from app.data_engine.data_manager.models import BarData, DataEventType, SeriesKey
 from app.data_engine.data_manager.warm_start import AggregatorWarmStartService
+from app.data_engine.storage import klines_repo
 
 
 def _row(open_time_ms: int, interval_ms: int, close: float) -> dict:
@@ -449,6 +451,8 @@ def test_aggregator_bridge_persists_closed_and_amended_events() -> None:
             volume=10,
             exchange="okx",
             market_type="spot",
+            finality=BarFinality.AUTHORITATIVE,
+            close_reason="source_close",
         )
         amended = BarState(
             symbol="BTC-USDT",
@@ -462,6 +466,8 @@ def test_aggregator_bridge_persists_closed_and_amended_events() -> None:
             volume=20,
             exchange="okx",
             market_type="spot",
+            finality=BarFinality.AUTHORITATIVE,
+            close_reason="backfill_amendment",
         )
 
         await bridge.on_bar_event(BarEvent(BarEventType.CLOSED, original))
@@ -471,7 +477,7 @@ def test_aggregator_bridge_persists_closed_and_amended_events() -> None:
 
         key = SeriesKey("BTC-USDT", "1m", exchange="okx", market_type="spot")
         assert [call["source"] for call in storage.upsert_calls] == [
-            "data_manager_closed",
+            "data_manager_exchange_closed",
             "data_manager_amended",
         ]
         assert storage.upsert_calls[1]["rows"][0]["close"] == 3
@@ -488,6 +494,202 @@ def test_aggregator_bridge_persists_closed_and_amended_events() -> None:
         ]
         assert events[1].previous_bar is not None
         assert events[1].previous_bar.close == 2
+        await bus.close()
+
+    asyncio.run(_run())
+
+
+def test_aggregator_bridge_drops_provisional_close_before_cache_and_bus() -> None:
+    async def _run() -> None:
+        cache = BarCache()
+        bus = DataEventBus()
+        storage = _Storage()
+        marked: list[SeriesKey] = []
+        events = []
+
+        async def _capture(event):
+            events.append(event)
+
+        bus.subscribe(_capture)
+        bridge = AggregatorBridge(
+            cache=cache,
+            event_bus=bus,
+            storage_provider=lambda: storage,  # type: ignore[return-value]
+            mark_bar_received=marked.append,
+            is_started=lambda: True,
+        )
+        key = SeriesKey("BTC-USDT", "1m", exchange="okx", market_type="spot")
+        provisional = BarState(
+            symbol="BTC-USDT",
+            interval="1m",
+            bucket_start_ms=60_000,
+            bucket_end_ms=120_000,
+            open=1,
+            high=3,
+            low=0.5,
+            close=2,
+            volume=10,
+            exchange="okx",
+            market_type="spot",
+            finality=BarFinality.PROVISIONAL,
+            close_reason="time_based",
+        )
+
+        await bridge.on_bar_event(BarEvent(BarEventType.CLOSED, provisional))
+
+        assert storage.upsert_calls == []
+        assert cache.get_latest(key, 1) == []
+        assert marked == []
+        assert events == []
+        await bus.close()
+
+    asyncio.run(_run())
+
+
+def test_aggregator_bridge_drops_amendment_below_cached_source_quality() -> None:
+    async def _run() -> None:
+        cache = BarCache()
+        bus = DataEventBus()
+        storage = _Storage()
+        marked: list[SeriesKey] = []
+        events = []
+
+        async def _capture(event):
+            events.append(event)
+
+        bus.subscribe(_capture)
+        bridge = AggregatorBridge(
+            cache=cache,
+            event_bus=bus,
+            storage_provider=lambda: storage,  # type: ignore[return-value]
+            mark_bar_received=marked.append,
+            is_started=lambda: True,
+        )
+        key = SeriesKey("BTC-USDT", "1m", exchange="okx", market_type="spot")
+        cache.upsert(key, BarData(
+            time=60,
+            open=1,
+            high=5,
+            low=0.5,
+            close=4,
+            volume=30,
+            is_closed=True,
+            source="repair_binance_rest_verified",
+        ))
+        lower_quality_amendment = BarState(
+            symbol="BTC-USDT",
+            interval="1m",
+            bucket_start_ms=60_000,
+            bucket_end_ms=120_000,
+            open=1,
+            high=3,
+            low=0.5,
+            close=2,
+            volume=10,
+            exchange="okx",
+            market_type="spot",
+            finality=BarFinality.AUTHORITATIVE,
+            close_reason="backfill_amendment",
+        )
+
+        await bridge.on_bar_event(
+            BarEvent(BarEventType.AMENDED, lower_quality_amendment)
+        )
+
+        canonical = cache.get_latest(key, 1)
+        assert len(canonical) == 1
+        assert canonical[0].close == 4
+        assert canonical[0].source == "repair_binance_rest_verified"
+        assert storage.upsert_calls == []
+        assert marked == []
+        assert events == []
+        await bus.close()
+
+    asyncio.run(_run())
+
+
+def test_aggregator_bridge_honors_durable_rejection_with_cold_cache(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def _run() -> None:
+        monkeypatch.setattr(
+            klines_repo,
+            "KLINES_DB_PATH",
+            tmp_path / "bridge-quality.sqlite",
+        )
+        klines_repo.init_klines_storage()
+        verified_row = {
+            "open_time": 60_000,
+            "close_time": 119_999,
+            "open": 1,
+            "high": 5,
+            "low": 0.5,
+            "close": 4,
+            "volume": 30,
+            "quote_volume": None,
+            "trades": None,
+            "taker_buy_base": None,
+            "taker_buy_quote": None,
+        }
+        assert klines_repo.upsert_klines(
+            "BTC-USDT",
+            "1m",
+            [verified_row],
+            source="repair_binance_rest_verified",
+            exchange="okx",
+            market_type="spot",
+        ) == 1
+
+        cache = BarCache()
+        bus = DataEventBus()
+        marked: list[SeriesKey] = []
+        events = []
+
+        async def _capture(event):
+            events.append(event)
+
+        bus.subscribe(_capture)
+        bridge = AggregatorBridge(
+            cache=cache,
+            event_bus=bus,
+            storage_provider=klines_repo.KlinesRepoAdapter,
+            mark_bar_received=marked.append,
+            is_started=lambda: True,
+        )
+        rejected_amendment = BarState(
+            symbol="BTC-USDT",
+            interval="1m",
+            bucket_start_ms=60_000,
+            bucket_end_ms=120_000,
+            open=1,
+            high=3,
+            low=0.5,
+            close=2,
+            volume=10,
+            exchange="okx",
+            market_type="spot",
+            finality=BarFinality.AUTHORITATIVE,
+            close_reason="backfill_amendment",
+        )
+
+        await bridge.on_bar_event(
+            BarEvent(BarEventType.AMENDED, rejected_amendment)
+        )
+
+        durable = klines_repo.query_klines(
+            "BTC-USDT",
+            "1m",
+            exchange="okx",
+            market_type="spot",
+        )
+        key = SeriesKey("BTC-USDT", "1m", exchange="okx", market_type="spot")
+        assert len(durable) == 1
+        assert durable[0]["close"] == 4
+        assert durable[0]["source"] == "repair_binance_rest_verified"
+        assert cache.get_latest(key, 1) == []
+        assert marked == []
+        assert events == []
         await bus.close()
 
     asyncio.run(_run())

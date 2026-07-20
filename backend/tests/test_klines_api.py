@@ -41,6 +41,27 @@ def test_range_verifier_rejects_explicitly_unclosed_bar_inside_closed_range() ->
     assert verification["missing_ranges"][0]["start_ms"] == 60_000
 
 
+def test_history_contract_fails_closed_when_finality_metadata_is_absent() -> None:
+    result = QueryResult(
+        bars=[],
+        source=QuerySource.EMPTY,
+        total=0,
+        history_state="ready",
+        complete=True,
+    )
+
+    payload = klines_api._history_contract_payload(
+        result,
+        verified_contiguous=True,
+        missing_ranges=[],
+    )
+
+    assert payload["all_rows_final"] is False
+    assert payload["history_state"] == "pending"
+    assert payload["complete"] is False
+    assert payload["retryable"] is True
+
+
 def test_custom_verification_does_not_duplicate_reported_base_component_repair() -> None:
     verification_missing = [{
         "symbol": "BTCUSDT",
@@ -306,6 +327,53 @@ def test_strict_range_withholds_unverified_partial_rows() -> None:
     assert permissive_payload["renderable"] is True
 
 
+def test_strict_range_withholds_contiguous_but_untrusted_rows() -> None:
+    class _RangeDataManager:
+        def query(self, symbol, interval, *, exchange, market_type, **kwargs) -> QueryResult:
+            bars = [
+                BarData(time=60, open=1, high=2, low=1, close=2, volume=1),
+                BarData(time=120, open=2, high=3, low=2, close=3, volume=1),
+            ]
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(bars),
+                history_state="ready",
+                complete=True,
+                metadata={"all_rows_final": False},
+            )
+
+    client = _client(_RangeDataManager())
+    params = {
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "start_ms": 60_000,
+        "end_ms": 120_000,
+        "repair": "none",
+    }
+
+    strict_payload = client.get("/api/v1/klines/range", params=params).json()
+    permissive_payload = client.get(
+        "/api/v1/klines/range",
+        params={**params, "strict": False},
+    ).json()
+
+    assert strict_payload["verified_contiguous"] is True
+    assert strict_payload["all_rows_final"] is False
+    assert strict_payload["renderable"] is False
+    assert strict_payload["data"] == []
+    assert strict_payload["history_state"] == "pending"
+    assert strict_payload["complete"] is False
+    assert strict_payload["retryable"] is True
+    assert permissive_payload["renderable"] is True
+    assert len(permissive_payload["data"]) == 2
+    assert permissive_payload["complete"] is False
+
+
 def test_get_klines_returns_503_without_data_manager() -> None:
     client = _client()
 
@@ -476,6 +544,7 @@ def test_history_before_waits_for_backfill_future_before_returning_rows() -> Non
                 source=QuerySource.STORAGE,
                 total=len(bars),
                 has_more=True,
+                metadata={"all_rows_final": True},
             )
 
     class _BackfillCoordinator:
@@ -600,9 +669,10 @@ def test_history_waits_for_a_scheduled_partial_tail_repair() -> None:
             auto_backfill: bool | None = None,
         ) -> QueryResult:
             self.calls.append(auto_backfill)
-            bars = [BarData(time=1_700_000_000, open=1, high=2, low=1, close=2, volume=10)]
+            first_open = ((start_ms + 59_999) // 60_000) * 60_000
+            bars = [BarData(time=first_open // 1000, open=1, high=2, low=1, close=2, volume=10)]
             if self.tail_repaired:
-                bars.append(BarData(time=1_700_000_060, open=2, high=3, low=2, close=3, volume=11))
+                bars.append(BarData(time=(first_open // 1000) + 60, open=2, high=3, low=2, close=3, volume=11))
             return QueryResult(
                 bars=bars,
                 symbol=symbol,
@@ -614,7 +684,10 @@ def test_history_waits_for_a_scheduled_partial_tail_repair() -> None:
                 has_more=True,
                 backfill_triggered=len(self.calls) == 1,
                 has_tail_gap=not self.tail_repaired,
-                metadata={"backfill_request_ids": ["req-partial-tail"]},
+                metadata={
+                    "backfill_request_ids": ["req-partial-tail"],
+                    "all_rows_final": self.tail_repaired,
+                },
             )
 
     class _CompletedCoordinator:
@@ -694,6 +767,7 @@ def test_history_verification_only_gap_submits_and_waits_for_exact_request(
                 market_type=market_type,
                 source=QuerySource.STORAGE,
                 total=len(bars),
+                metadata={"all_rows_final": self.repaired},
             )
 
         def request_backfill(self, *args, **kwargs):
@@ -770,7 +844,12 @@ def test_history_returns_promptly_when_completed_backfill_has_no_rows() -> None:
                 source=QuerySource.EMPTY,
                 total=0,
                 backfill_triggered=len(self.calls) == 1,
-                metadata={"backfill_request_ids": ["req-history-completed"]},
+                metadata={
+                    "backfill_request_ids": ["req-history-completed"],
+                    "all_rows_final": True,
+                },
+                history_state="exhausted",
+                complete=True,
             )
 
     class _CompletedCoordinator:
@@ -828,6 +907,7 @@ def test_history_before_returns_partial_write_when_aggregate_wait_times_out() ->
                         low=1,
                         close=2,
                         volume=10,
+                        source="backfill",
                     )
                 ]
                 return QueryResult(
@@ -839,6 +919,9 @@ def test_history_before_returns_partial_write_when_aggregate_wait_times_out() ->
                     source=QuerySource.STORAGE,
                     total=len(bars),
                     has_more=True,
+                    history_state="ready",
+                    complete=True,
+                    metadata={"all_rows_final": True},
                 )
             return QueryResult(
                 bars=[],
@@ -888,6 +971,159 @@ def test_history_before_returns_partial_write_when_aggregate_wait_times_out() ->
     assert payload["has_more"] is True
     assert dm.calls == [None, False]
     assert elapsed < 1.0
+
+
+def test_history_before_stops_polling_only_after_rows_are_final() -> None:
+    class _BeforeDataManager:
+        def __init__(self) -> None:
+            self.calls: list[bool | None] = []
+
+        def query_before(
+            self,
+            symbol,
+            interval,
+            before_ms,
+            limit,
+            exchange,
+            *,
+            market_type,
+            auto_backfill=None,
+            **kwargs,
+        ) -> QueryResult:
+            self.calls.append(auto_backfill)
+            repaired = len(self.calls) > 1
+            return QueryResult(
+                bars=[BarData(
+                    time=(before_ms // 1000) - 60,
+                    open=1,
+                    high=2,
+                    low=1,
+                    close=2,
+                    volume=10,
+                    source="backfill" if repaired else "data_manager_closed",
+                )],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=1,
+                has_more=True,
+                backfill_triggered=not repaired,
+                missing_ranges=[] if repaired else [MissingRange(
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=before_ms - 60_000,
+                    end_ms=before_ms - 60_000,
+                    exchange=exchange,
+                    market_type=market_type,
+                    reason="query_untrusted_finality",
+                )],
+                history_state="ready" if repaired else "pending",
+                complete=repaired,
+                retryable=not repaired,
+                metadata={"all_rows_final": repaired},
+            )
+
+    dm = _BeforeDataManager()
+    started = time.perf_counter()
+    response = _client(dm).get(
+        "/api/v1/klines/history/before",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "before": 1_700_000_000,
+            "bars": 1,
+            "max_wait_ms": 2000,
+        },
+    )
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    assert dm.calls == [None, False]
+    assert response.json()["all_rows_final"] is True
+    assert response.json()["history_state"] == "ready"
+    assert elapsed < 1.0
+
+
+def test_history_before_exact_request_completion_cannot_bypass_finality() -> None:
+    class _BeforeDataManager:
+        def __init__(self) -> None:
+            self.calls: list[bool | None] = []
+
+        def query_before(
+            self,
+            symbol,
+            interval,
+            before_ms,
+            limit,
+            exchange,
+            *,
+            market_type,
+            auto_backfill=None,
+            **kwargs,
+        ) -> QueryResult:
+            self.calls.append(auto_backfill)
+            return QueryResult(
+                bars=[BarData(
+                    time=(before_ms // 1000) - 60,
+                    open=1,
+                    high=2,
+                    low=1,
+                    close=2,
+                    volume=10,
+                    source="data_manager_closed",
+                )],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=1,
+                has_more=True,
+                backfill_triggered=len(self.calls) == 1,
+                missing_ranges=[MissingRange(
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=before_ms - 60_000,
+                    end_ms=before_ms - 60_000,
+                    exchange=exchange,
+                    market_type=market_type,
+                    reason="query_untrusted_finality",
+                )],
+                history_state="pending",
+                complete=False,
+                retryable=True,
+                metadata={
+                    "all_rows_final": False,
+                    "backfill_request_ids": ["req-before-failed"],
+                },
+            )
+
+    class _FailedCoordinator:
+        async def wait_for_request(self, request_id: str):
+            assert request_id == "req-before-failed"
+            return object()
+
+    dm = _BeforeDataManager()
+    started = time.perf_counter()
+    response = _client_with_runtime(dm, _FailedCoordinator()).get(
+        "/api/v1/klines/history/before",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "before": 1_700_000_000,
+            "bars": 1,
+            "max_wait_ms": 80,
+        },
+    )
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    assert response.json()["all_rows_final"] is False
+    assert response.json()["history_state"] == "pending"
+    assert len(dm.calls) >= 2
+    assert elapsed >= 0.05
 
 
 def test_history_query_triggers_data_manager_backfill_request_when_empty() -> None:
@@ -1211,6 +1447,52 @@ def test_latest_endpoint_does_not_trigger_backfill_when_storage_is_empty() -> No
     assert calls == []
 
 
+def test_latest_endpoint_exposes_untrusted_finality_as_pending() -> None:
+    class _LatestDataManager(_FakeDataManager):
+        def query_latest(
+            self,
+            symbol,
+            interval,
+            limit,
+            exchange="binance",
+            *,
+            market_type="spot",
+            **kwargs,
+        ) -> QueryResult:
+            return QueryResult(
+                bars=[BarData(
+                    time=60,
+                    open=1,
+                    high=2,
+                    low=1,
+                    close=2,
+                    volume=1,
+                    source="data_manager_closed",
+                )],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=1,
+                history_state="ready",
+                complete=True,
+                metadata={"all_rows_final": False},
+            )
+
+    response = _client(_LatestDataManager()).get(
+        "/api/v1/klines/latest",
+        params={"symbol": "BTCUSDT", "interval": "1h", "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["all_rows_final"] is False
+    assert payload["history_state"] == "pending"
+    assert payload["complete"] is False
+    assert payload["retryable"] is True
+
+
 def test_history_endpoint_submits_initial_history_demand_metadata() -> None:
     calls: list[tuple[tuple, dict]] = []
     dm = DataManager()
@@ -1264,8 +1546,24 @@ def test_range_query_reports_exact_visible_gap() -> None:
             assert auto_backfill is False
             return QueryResult(
                 bars=[
-                    BarData(time=60, open=1, high=2, low=1, close=2, volume=10),
-                    BarData(time=180, open=3, high=4, low=3, close=4, volume=30),
+                    BarData(
+                        time=60,
+                        open=1,
+                        high=2,
+                        low=1,
+                        close=2,
+                        volume=10,
+                        source="backfill",
+                    ),
+                    BarData(
+                        time=180,
+                        open=3,
+                        high=4,
+                        low=3,
+                        close=4,
+                        volume=30,
+                        source="backfill",
+                    ),
                 ],
                 symbol=symbol,
                 interval=interval,
@@ -1411,6 +1709,7 @@ def test_range_verification_only_gap_honours_covering_ledger_suppression() -> No
                 total=2,
                 history_state="ready",
                 complete=True,
+                metadata={"all_rows_final": True},
             )
 
         def get_backfill_suppression(
@@ -1600,6 +1899,7 @@ def test_range_wait_binds_verification_only_request_and_requeries_without_resubm
                 market_type=market_type,
                 source=QuerySource.STORAGE,
                 total=len(bars),
+                metadata={"all_rows_final": self.repaired},
             )
 
         def request_backfill(self, *args, **kwargs):

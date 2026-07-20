@@ -437,6 +437,7 @@ class Reconciler:
                         bars,
                         exchange=exchange,
                         market_type=market_type,
+                        require_authoritative=True,
                     )
                     custom_bars_from_agg = []
                     for bar_state in batch_states:

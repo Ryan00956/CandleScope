@@ -1,0 +1,33 @@
+{
+  "input": {
+    "protocol": "replay.v1",
+    "source_kind": "bar",
+    "exchange": "binance",
+    "market_type": "spot",
+    "symbol": "BTCUSDT",
+    "base_interval": "1m",
+    "display_interval": "5m",
+    "start_policy": "random_eligible",
+    "requested_start_ms": null,
+    "warmup_bars": 500,
+    "horizon_ms": 604800000,
+    "random_seed": 20260718,
+    "quality_mode": "exact",
+    "blind_mode": true,
+    "initial_equity": "10000.00",
+    "quote_asset": "USDT",
+    "execution_model": "paper_linear_v1",
+    "fee_model": {
+      "maker_bps": "2.0",
+      "taker_bps": "4.0"
+    },
+    "slippage_model": {
+      "kind": "fixed_bps",
+      "market_bps": "1.0"
+    },
+    "max_leverage": "5.0",
+    "pause_on_controller_loss": true
+  },
+  "canonical_json": "{\"base_interval\":\"1m\",\"blind_mode\":true,\"display_interval\":\"5m\",\"exchange\":\"binance\",\"execution_model\":\"paper_linear_v1\",\"fee_model\":{\"maker_bps\":\"2\",\"taker_bps\":\"4\"},\"horizon_ms\":604800000,\"initial_equity\":\"10000\",\"market_type\":\"spot\",\"max_leverage\":\"5\",\"pause_on_controller_loss\":true,\"protocol\":\"replay.v1\",\"quality_mode\":\"exact\",\"quote_asset\":\"USDT\",\"random_seed\":20260718,\"requested_start_ms\":null,\"slippage_model\":{\"kind\":\"fixed_bps\",\"market_bps\":\"1\"},\"source_kind\":\"bar\",\"start_policy\":\"random_eligible\",\"symbol\":\"BTCUSDT\",\"warmup_bars\":500}",
+  "sha256": "sha256:f68cf4bca50a4d95e8e30fc1d221bdf76664f0e1af35a34a263527c5ebd34e93"
+}

@@ -27,6 +27,8 @@ from collections import OrderedDict
 from .config import BarAggregatorConfig
 from .models import (
     BarInput,
+    BarInputSource,
+    BarFinality,
     BarState,
     BarStatus,
     BarStateChange,
@@ -41,6 +43,24 @@ logger = logging.getLogger("bar_aggregator.L3_BarState")
 # ═══════════════════════════════════════════════════════════════
 #  Default Merge Strategy
 # ═══════════════════════════════════════════════════════════════
+
+
+def has_complete_closed_component_coverage(state: BarState) -> bool:
+    """Return whether component snapshots authoritatively cover the bucket."""
+    ordered = sorted(
+        state.source_snapshots.values(),
+        key=lambda item: (int(item["open_time_ms"]), int(item["close_time_ms"])),
+    )
+    if not ordered or not all(bool(item.get("is_closed")) for item in ordered):
+        return False
+    if int(ordered[0]["open_time_ms"]) != state.bucket_start_ms:
+        return False
+    if int(ordered[-1]["close_time_ms"]) + 1 < state.bucket_end_ms:
+        return False
+    return all(
+        int(current["open_time_ms"]) == int(previous["close_time_ms"]) + 1
+        for previous, current in zip(ordered, ordered[1:])
+    )
 
 
 class StandardOHLCVMerge:
@@ -233,14 +253,34 @@ class ComponentSnapshotOHLCVMerge:
         return False
 
     @classmethod
-    def _should_replace(cls, existing: dict, candidate: dict) -> bool:
+    def _should_replace(
+        cls,
+        existing: dict,
+        candidate: dict,
+        *,
+        allow_authoritative_correction: bool = False,
+    ) -> bool:
         if candidate == existing:
-            return False
-        if not cls._is_monotonic_candidate(existing, candidate):
             return False
 
         existing_sequence = existing.get("sequence")
         candidate_sequence = candidate.get("sequence")
+        if (
+            allow_authoritative_correction
+            and int(candidate["close_time_ms"]) == int(existing["close_time_ms"])
+            and existing_sequence is not None
+            and candidate_sequence is not None
+            and int(candidate_sequence) > int(existing_sequence)
+        ):
+            # A closed backfill snapshot with a strictly newer freshness
+            # sequence is an authoritative correction. It may legitimately
+            # reduce extrema, volume, or other cumulative fields that a bad
+            # earlier snapshot overstated.
+            return True
+
+        if not cls._is_monotonic_candidate(existing, candidate):
+            return False
+
         if existing_sequence is not None and candidate_sequence is not None:
             if int(candidate_sequence) < int(existing_sequence):
                 return False
@@ -264,7 +304,14 @@ class ComponentSnapshotOHLCVMerge:
         input_key = bar_input.input_key
         candidate = self._snapshot_from_input(bar_input)
         existing = snapshots.get(input_key)
-        if existing is not None and not self._should_replace(existing, candidate):
+        if existing is not None and not self._should_replace(
+            existing,
+            candidate,
+            allow_authoritative_correction=(
+                bar_input.source == BarInputSource.BACKFILL
+                and bar_input.is_closed
+            ),
+        ):
             logger.debug(
                 "Ignored non-monotonic or stale component snapshot %s "
                 "(existing_sequence=%r, candidate_sequence=%r)",
@@ -431,6 +478,7 @@ class BarStateEngine:
                 else None
             )
             state = merge_strategy.apply(state, bar_input, is_new=False)
+            self._mark_authoritative_close_policy(state, bar_input)
             self._active[key] = state
             if (
                 merge_strategy is self._component_merge_strategy
@@ -449,7 +497,8 @@ class BarStateEngine:
             # For backfill data, we overwrite (is_new=True) instead of merge,
             # because backfill bars are complete final data and should replace
             # existing state rather than accumulate on top of it.
-            if bar_input.source.value == "backfill":
+            if bar_input.source == BarInputSource.BACKFILL:
+                was_authoritative = old_state.finality == BarFinality.AUTHORITATIVE
                 previous_component = (
                     old_state.source_snapshots.get(bar_input.input_key)
                     if merge_strategy is self._component_merge_strategy
@@ -457,11 +506,22 @@ class BarStateEngine:
                 )
                 state = merge_strategy.apply(old_state, bar_input, is_new=True)
                 state.status = BarStatus.CLOSED  # keep it closed
+                if bar_input.merge_mode != MergeMode.COMPONENT:
+                    state.finality = BarFinality.AUTHORITATIVE
+                    state.close_reason = "backfill_amendment"
+                elif has_complete_closed_component_coverage(state):
+                    # Late component repair may promote a provisional close
+                    # only after the state proves complete closed coverage.
+                    state.finality = BarFinality.AUTHORITATIVE
+                    state.close_reason = "backfill_amendment"
                 self._closed[key] = state
                 if (
                     merge_strategy is self._component_merge_strategy
                     and previous_component is not None
                     and state.source_snapshots.get(bar_input.input_key) is previous_component
+                    and was_authoritative == (
+                        state.finality == BarFinality.AUTHORITATIVE
+                    )
                 ):
                     return state, BarStateChange.NO_CHANGE
                 return state, BarStateChange.AMENDED
@@ -484,12 +544,33 @@ class BarStateEngine:
             volume=0.0,
         )
         state = merge_strategy.apply(state, bar_input, is_new=True)
+        self._mark_authoritative_close_policy(state, bar_input)
         self._active[key] = state
 
         # Evict oldest active bars if limit exceeded
         self._enforce_active_limit(exchange, market_type, symbol)
 
         return state, BarStateChange.CREATED
+
+    def _mark_authoritative_close_policy(
+        self,
+        state: BarState,
+        bar_input: BarInput,
+    ) -> None:
+        """Mark native cumulative snapshots as requiring explicit finality."""
+        merge_mode = bar_input.merge_mode
+        if merge_mode is None:
+            merge_mode = (
+                MergeMode.INCREMENTAL
+                if bar_input.source_interval == "tick"
+                else MergeMode.SNAPSHOT
+            )
+        # Native/cumulative kline snapshots are only final when their source
+        # explicitly confirms closure (for example Binance ``x=true``).
+        # Incremental trade-built bars intentionally retain the legacy
+        # next-bucket/timeout policy because they have no source-close flag.
+        if merge_mode in (MergeMode.SNAPSHOT, MergeMode.PRICE_ONLY):
+            state.requires_authoritative_close = True
 
     # ── Public: State Queries ────────────────────────────────
 
@@ -648,8 +729,9 @@ class BarStateEngine:
     def _enforce_active_limit(self, exchange: str, market_type: str, symbol: str) -> None:
         """Evict oldest active bars if over the limit.
 
-        Force-closed bars are appended to ``self.evicted_closed`` so the
-        aggregator can emit CLOSED events for them after processing.
+        Bars which require an explicit source-close confirmation are expired
+        rather than promoted to CLOSED.  Other bars retain the legacy
+        force-close behavior and are appended to ``self.evicted_closed``.
         """
         normalized_exchange = exchange.strip().lower()
         normalized_market = market_type.strip().lower()
@@ -661,11 +743,32 @@ class BarStateEngine:
             oldest_key = symbol_keys.pop(0)
             state = self._active.pop(oldest_key, None)
             if state:
+                if (
+                    state.requires_authoritative_close
+                    and not state.last_close_received
+                ):
+                    state.close_reason = "active_capacity_unconfirmed"
+                    state.finality = BarFinality.PROVISIONAL
+                    logger.warning(
+                        "Expiring unconfirmed active bar at capacity: "
+                        "%s:%s:%s@%s bucket=%d",
+                        normalized_exchange,
+                        normalized_market,
+                        symbol,
+                        self._interval,
+                        oldest_key[3],
+                    )
+                    state.status = BarStatus.EXPIRED
+                    state.updated_at_ms = int(time.time() * 1000)
+                    self.evicted_expired.append(state)
+                    continue
                 logger.warning(
                     "Force-closing oldest active bar: %s:%s:%s@%s bucket=%d",
                     normalized_exchange, normalized_market, symbol, self._interval, oldest_key[3],
                 )
                 state.status = BarStatus.CLOSED
+                state.close_reason = "active_capacity_fallback"
+                state.finality = BarFinality.PROVISIONAL
                 state.updated_at_ms = int(time.time() * 1000)
                 self._closed[oldest_key] = state
                 self.evicted_closed.append(state)

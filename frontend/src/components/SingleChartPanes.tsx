@@ -93,6 +93,7 @@ import { createPaneCrosshairStoreLifecycle } from "./paneCrosshairStore";
 import {
   buildPanePointerLayout,
   paneIdAtClientY,
+  paneTargetAtClientY,
   type PanePointerLayout,
 } from "./panePointerModel";
 import {
@@ -250,6 +251,8 @@ export interface SingleChartPanesProps {
   theme: string;
   customBg: string;
   timezone?: string;
+  timeFormatter?: ((timeSeconds: number) => string) | undefined;
+  tickMarkFormatter?: ((timeSeconds: number, tickMarkType: number) => string) | undefined;
   savedVisibleRange?: SavedVisibleRangeSnapshot | null;
   dataMeta?: ChartDataCommitMeta | null;
   onViewportRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
@@ -282,6 +285,9 @@ export interface SingleChartPanesProps {
 }
 
 type AdapterChart = Parameters<typeof createMainSeries>[0];
+type AdapterPriceScale = ReturnType<AdapterChart["priceScale"]>;
+type PriceScaleOptions = ReturnType<AdapterPriceScale["options"]>;
+type PriceScaleOptionsPatch = Parameters<AdapterPriceScale["applyOptions"]>[0];
 type ChartCrosshairParam = Parameters<Parameters<AdapterChart["subscribeCrosshairMove"]>[0]>[0];
 type VisibleLogicalRange = Parameters<
   Parameters<ReturnType<AdapterChart["timeScale"]>["subscribeVisibleLogicalRangeChange"]>[0]
@@ -370,9 +376,14 @@ interface ActiveSurfaceOwner {
   surfaceConfigKey: string | null;
 }
 
-interface PriceScaleContextMenuPosition {
+interface PriceScaleContextMenuState {
   x: number;
   y: number;
+  paneId: string;
+  paneIndex: number;
+  autoScale: boolean;
+  invertScale: boolean;
+  mode: number;
 }
 
 interface ChartPointerGestureState {
@@ -1150,6 +1161,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   theme,
   customBg,
   timezone = "Local",
+  timeFormatter,
+  tickMarkFormatter,
   savedVisibleRange = null,
   dataMeta = null,
   onViewportRangeChange = null,
@@ -1453,8 +1466,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const [retainedDrawingPaneMountKeys, setRetainedDrawingPaneMountKeys] = useState<
     ReadonlySet<string>
   >(() => new Set());
-  const [isAutoScale, setIsAutoScale] = useState(true);
-  const [contextMenu, setContextMenu] = useState<PriceScaleContextMenuPosition | null>(null);
+  const [contextMenu, setContextMenu] = useState<PriceScaleContextMenuState | null>(null);
   const [paneOrder, setPaneOrder] = useState<string[]>(() => {
     const stored = loadPaneOrder();
     return stored.includes("main") ? stored : ["main", ...stored];
@@ -2030,6 +2042,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       timezone,
       interval: intervalRef.current,
       showTimeScale: true,
+      ...(timeFormatter ? { timeFormatter } : {}),
+      ...(tickMarkFormatter ? { tickMarkFormatter } : {}),
     });
     options.layout = {
       ...options.layout,
@@ -2341,7 +2355,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
       }
     };
-  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, tickMarkFormatter, timeFormatter, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -2495,7 +2509,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const chart = chartRef.current;
     if (!chart) return;
     const applyAppearance = () => {
-      applyChartPaneAppearance(chart, { theme, customBg, timezone, interval });
+      applyChartPaneAppearance(chart, {
+        theme,
+        customBg,
+        timezone,
+        interval,
+        ...(timeFormatter ? { timeFormatter } : {}),
+        ...(tickMarkFormatter ? { tickMarkFormatter } : {}),
+      });
       chart.applyOptions({ layout: buildPaneLayoutOptions() });
       appliedAppearanceIntervalRef.current = interval;
       notifyDrawingFrameInvalidation();
@@ -2566,7 +2587,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }
     });
     return () => cancelAnimationFrame(frameId);
-  }, [chartAdapter, customBg, interval, notifyDrawingFrameInvalidation, theme, timezone]);
+  }, [chartAdapter, customBg, interval, notifyDrawingFrameInvalidation, theme, tickMarkFormatter, timeFormatter, timezone]);
 
   useEffect(() => {
     const activeType = mainSeriesTypeRef.current || resolvedChartType;
@@ -2829,7 +2850,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       materializedMainPaneIndexRef.current = mainPaneIndex;
       chart?.priceScale("right", mainPaneIndex).applyOptions({ autoScale: true });
       notifyDrawingFrameInvalidation();
-      setIsAutoScale(true);
     } catch { /* */ }
   }, [notifyDrawingFrameInvalidation]);
 
@@ -2837,9 +2857,21 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const rect = containerRef.current?.getBoundingClientRect?.();
     if (!rect) return;
     if (event.clientX < rect.right - PRICE_SCALE_CONTEXT_HIT_WIDTH) return;
-    const plotRect = chartAdapter.getMainPanePlotRect?.() ?? null;
-    const localY = event.clientY - rect.top;
-    if (plotRect && (localY < plotRect.y || localY > plotRect.y + plotRect.height)) return;
+    const target = paneTargetAtClientY(panePointerLayoutRef.current, event.clientY);
+    if (!target) return;
+    const chart = chartRef.current;
+    const activePaneIds = activePaneIdsRef.current;
+    if (!chart
+      || target.paneIndex >= (chart.panes?.()?.length ?? 0)
+      || activePaneIds[target.paneIndex] !== target.paneId) {
+      return;
+    }
+    let scaleOptions: PriceScaleOptions;
+    try {
+      scaleOptions = chart.priceScale("right", target.paneIndex).options();
+    } catch {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     const margin = PRICE_SCALE_CONTEXT_MENU_MARGIN;
@@ -2848,8 +2880,27 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     setContextMenu({
       x: Math.min(Math.max(event.clientX, rect.left + margin), maxX),
       y: Math.min(Math.max(event.clientY, rect.top + margin), maxY),
+      paneId: target.paneId,
+      paneIndex: target.paneIndex,
+      autoScale: scaleOptions.autoScale,
+      invertScale: scaleOptions.invertScale,
+      mode: scaleOptions.mode,
     });
-  }, [chartAdapter]);
+  }, []);
+
+  const applyContextMenuPriceScaleOptions = useCallback((options: PriceScaleOptionsPatch) => {
+    if (!contextMenu) return false;
+    const chart = chartRef.current;
+    const paneIndex = activePaneIdsRef.current.indexOf(contextMenu.paneId);
+    if (!chart || paneIndex < 0 || paneIndex >= (chart.panes?.()?.length ?? 0)) return false;
+    try {
+      chart.priceScale("right", paneIndex).applyOptions(options);
+      notifyDrawingFrameInvalidation();
+      return true;
+    } catch {
+      return false;
+    }
+  }, [contextMenu, notifyDrawingFrameInvalidation]);
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -4088,38 +4139,31 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         >
           <button
             type="button"
-            className={`price-scale-menu-item${isAutoScale ? " active" : ""}`}
-             onClick={() => {
-               const next = !isAutoScale;
-               try {
-                 const chart = chartRef.current;
-                 const mainPaneIndex = resolveMainPaneIndex(
-                   chart,
-                   mainSeriesRef.current,
-                   materializedMainPaneIndexRef.current,
-                 );
-                 materializedMainPaneIndexRef.current = mainPaneIndex;
-                 chart?.priceScale("right", mainPaneIndex).applyOptions({ autoScale: next });
-                 notifyDrawingFrameInvalidation();
-              } catch { /* */ }
-              setIsAutoScale(next);
+            className={`price-scale-menu-item${contextMenu.autoScale ? " active" : ""}`}
+            onClick={() => {
+              applyContextMenuPriceScaleOptions({ autoScale: !contextMenu.autoScale });
               setContextMenu(null);
             }}
           >
-            <span className="price-scale-menu-check">{isAutoScale ? "✓" : ""}</span>
+            <span className="price-scale-menu-check">{contextMenu.autoScale ? "✓" : ""}</span>
             <span>自动缩放</span>
             <span className="price-scale-menu-label-en">Auto Scale</span>
           </button>
-          {onInvertScaleChange && (
+          {(contextMenu.paneId !== "main" || onInvertScaleChange) && (
             <button
               type="button"
-              className={`price-scale-menu-item${invertScale ? " active" : ""}`}
+              className={`price-scale-menu-item${contextMenu.invertScale ? " active" : ""}`}
               onClick={() => {
-                onInvertScaleChange(!invertScale);
+                const next = !contextMenu.invertScale;
+                if (contextMenu.paneId === "main" && onInvertScaleChange) {
+                  onInvertScaleChange(next);
+                } else {
+                  applyContextMenuPriceScaleOptions({ invertScale: next });
+                }
                 setContextMenu(null);
               }}
             >
-              <span className="price-scale-menu-check">{invertScale ? "✓" : ""}</span>
+              <span className="price-scale-menu-check">{contextMenu.invertScale ? "✓" : ""}</span>
               <span>反转坐标轴</span>
               <span className="price-scale-menu-label-en">Invert Scale</span>
             </button>
@@ -4129,13 +4173,17 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
             <button
               type="button"
               key={mode.value}
-              className={`price-scale-menu-item${priceScaleMode === mode.value ? " active" : ""}`}
+              className={`price-scale-menu-item${contextMenu.mode === mode.value ? " active" : ""}`}
               onClick={() => {
-                onPriceScaleModeChange?.(mode.value);
+                if (contextMenu.paneId === "main" && onPriceScaleModeChange) {
+                  onPriceScaleModeChange(mode.value);
+                } else {
+                  applyContextMenuPriceScaleOptions({ mode: mode.value });
+                }
                 setContextMenu(null);
               }}
             >
-              <span className="price-scale-menu-check">{priceScaleMode === mode.value ? "✓" : ""}</span>
+              <span className="price-scale-menu-check">{contextMenu.mode === mode.value ? "✓" : ""}</span>
               <span>{mode.label}</span>
               <span className="price-scale-menu-label-en">{mode.labelEn}</span>
             </button>

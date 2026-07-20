@@ -4,6 +4,7 @@ import ChartWorkspace from "./ChartWorkspace";
 import LazyFeatureSurfaces from "./LazyFeatureSurfaces";
 import StatusBar from "./StatusBar";
 import TopBar from "./TopBar";
+import MarketPageFrame from "./MarketPageFrame";
 import { buildAppShellViewModel } from "./appShellViewModel";
 import type { AppShellProps } from "./appShellContracts.js";
 
@@ -22,6 +23,7 @@ function AppShell({
   tradeFlow,
   exportFlow,
   alerts,
+  replayEntry,
 }: AppShellProps) {
   const model = useMemo(
     () => buildAppShellViewModel({
@@ -37,6 +39,7 @@ function AppShell({
       tradeFlow,
       exportFlow,
       alerts,
+      replayEntry,
     }),
     [
       session,
@@ -51,6 +54,7 @@ function AppShell({
       tradeFlow,
       exportFlow,
       alerts,
+      replayEntry,
     ],
   );
 
@@ -66,17 +70,14 @@ function AppShell({
   }), [model.chartWorkspace, chartSurfaceRef]);
 
   return (
-    <div className="app-layout" ref={pageExportRef}>
-      <TopBar {...model.topBar} />
-
-      <IntervalSelector {...model.intervalSelector} />
-
-      <ChartWorkspace {...chartWorkspace} />
-
-      <LazyFeatureSurfaces surfaces={model.lazySurfaces} />
-
-      <StatusBar status={model.statusBar} />
-    </div>
+    <MarketPageFrame
+      rootRef={pageExportRef}
+      topBar={<TopBar {...model.topBar} />}
+      intervalSelector={<IntervalSelector {...model.intervalSelector} />}
+      workspace={<ChartWorkspace {...chartWorkspace} />}
+      featureSurfaces={<LazyFeatureSurfaces surfaces={model.lazySurfaces} />}
+      statusBar={<StatusBar status={model.statusBar} />}
+    />
   );
 }
 

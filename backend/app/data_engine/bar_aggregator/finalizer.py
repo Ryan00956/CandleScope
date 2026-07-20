@@ -46,6 +46,7 @@ from .models import (
     BarStatus,
     BarEvent,
     BarEventType,
+    BarFinality,
     BarStateChange,
     BarInput,
     BarInputSource,
@@ -56,6 +57,24 @@ from .models import (
 from .time_bucket import TimeBucketEngine
 
 logger = logging.getLogger("bar_aggregator.L4_Finalizer")
+
+
+def _has_complete_closed_component_coverage(state: BarState) -> bool:
+    """Prove that closed component snapshots cover the whole target bucket."""
+    ordered = sorted(
+        state.source_snapshots.values(),
+        key=lambda item: (int(item["open_time_ms"]), int(item["close_time_ms"])),
+    )
+    if not ordered or not all(bool(item.get("is_closed")) for item in ordered):
+        return False
+    if int(ordered[0]["open_time_ms"]) != state.bucket_start_ms:
+        return False
+    if int(ordered[-1]["close_time_ms"]) + 1 < state.bucket_end_ms:
+        return False
+    return all(
+        int(current["open_time_ms"]) == int(previous["close_time_ms"]) + 1
+        for previous, current in zip(ordered, ordered[1:])
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -79,25 +98,31 @@ class SourceCloseFinalizer:
         # Only trigger on input events (not timers)
         if trigger.trigger_type != "input":
             return False
-        if trigger.input is None or trigger.input.merge_mode not in {
-            MergeMode.SNAPSHOT,
-            MergeMode.INCREMENTAL,
-        }:
+        if trigger.input is None:
+            return False
+        merge_mode = trigger.input.merge_mode
+        if merge_mode is None:
+            merge_mode = (
+                MergeMode.INCREMENTAL
+                if trigger.input.source_interval == "tick"
+                else MergeMode.SNAPSHOT
+            )
+        if merge_mode != MergeMode.SNAPSHOT:
             return False
         # The BarStateEngine sets last_close_received when is_closed=True
         return state.last_close_received
 
 
 class CompositeCloseFinalizer:
-    """Close a custom-interval bar when its LAST component source bar is closed.
+    """Close a derived bar after closed components cover its entire bucket.
 
     For a 91m custom bar built from 1m source bars:
     - The 91m bucket spans [T, T+91m)
     - The last 1m component is [T+90m, T+91m)
-    - When that last 1m bar's is_closed=True arrives, close the 91m bar
+    - Once all 91 closed 1m components are present, close the 91m bar
 
-    This requires the TimeBucketEngine to determine whether the input
-    is the last component of the bucket.
+    Coverage, rather than arrival order, is authoritative because repair and
+    replay components may arrive out of order.
     """
 
     def __init__(self, time_bucket: TimeBucketEngine) -> None:
@@ -115,12 +140,11 @@ class CompositeCloseFinalizer:
         ):
             return False
 
-        # Check if this input is the last component of the bucket
-        return self._time_bucket.is_last_component(
-            input_open_time_ms=bar_input.open_time_ms,
-            input_close_time_ms=bar_input.close_time_ms,
-            bucket_start_ms=state.bucket_start_ms,
-        )
+        # Complete coverage is the authority proof. Do not require the
+        # currently processed component to be chronologically last: replay and
+        # repair inputs may arrive out of order after the last component has
+        # already been seen.
+        return _has_complete_closed_component_coverage(state)
 
 
 class EventDrivenFinalizer:
@@ -132,6 +156,8 @@ class EventDrivenFinalizer:
 
     def should_close(self, state: BarState, trigger: FinalizeTrigger) -> bool:
         if trigger.trigger_type != "next_bucket":
+            return False
+        if state.requires_authoritative_close and not state.last_close_received:
             return False
         # The trigger carries the next bucket's start time
         if trigger.next_bucket_start is not None:
@@ -154,6 +180,8 @@ class TimeBasedFinalizer:
         self._timeout_ms = timeout_ms
 
     def should_close(self, state: BarState, trigger: FinalizeTrigger) -> bool:
+        if state.requires_authoritative_close and not state.last_close_received:
+            return False
         # Works with both "timer" and "input" triggers
         now_ms = trigger.current_time_ms
         deadline = state.bucket_end_ms + self._timeout_ms
@@ -166,15 +194,13 @@ class BatchFinalizer:
     For **standard intervals** (e.g. 1m, 5m), each backfill bar maps
     1-to-1 with a bucket, so the bar can be sealed immediately.
 
-    For **custom intervals** (e.g. 91m), a single bucket is built from
+    For **derived intervals** (e.g. 91m), a single bucket is built from
     many component source bars.  In this case we must wait until the
-    *last* component bar arrives (i.e. ``is_closed=True`` on the final
-    component) before sealing.  Closing prematurely would produce
-    incomplete OHLCV data.
+    the complete set of closed component bars before sealing. Closing
+    prematurely would produce incomplete OHLCV data.
 
-    When ``time_bucket`` is provided the strategy delegates to
-    ``TimeBucketEngine.is_last_component()``; otherwise it falls back
-    to the simple "close immediately" behaviour.
+    When ``time_bucket`` is provided the strategy treats COMPONENT inputs as
+    derived coverage; otherwise it retains the native compatibility path.
     """
 
     def __init__(self, time_bucket: TimeBucketEngine | None = None) -> None:
@@ -186,20 +212,17 @@ class BatchFinalizer:
 
         bar_input = trigger.input
 
-        # Compatibility only; default chains always provide the timeline.
-        if self._time_bucket is None:
+        # Native backfill bars map 1:1 to the target bucket and are already
+        # complete. Derived/component targets must prove full closed coverage.
+        if bar_input is None or bar_input.merge_mode != MergeMode.COMPONENT:
             return True
 
-        # Custom interval: only close when the *last* component bar
-        # of the bucket has been received with is_closed=True.
-        if bar_input is None or not bar_input.is_closed:
+        # Component target: only close once every component covering the
+        # bucket has been received closed. Inputs may be out of order.
+        if not bar_input.is_closed or self._time_bucket is None:
             return False
 
-        return self._time_bucket.is_last_component(
-            input_open_time_ms=bar_input.open_time_ms,
-            input_close_time_ms=bar_input.close_time_ms,
-            bucket_start_ms=state.bucket_start_ms,
-        )
+        return _has_complete_closed_component_coverage(state)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -302,8 +325,20 @@ class Finalizer:
             return None
 
         for name, strategy in self._strategies:
+            # Backfill is a finite component set. Only BatchFinalizer may
+            # decide when that set proves a complete target bucket; letting an
+            # old timestamp fall through to time_based would seal the first
+            # component before the rest of the batch is applied.
+            if trigger.is_backfill and name != "batch":
+                continue
             try:
                 if strategy.should_close(state, trigger):
+                    state.close_reason = name
+                    state.finality = (
+                        BarFinality.AUTHORITATIVE
+                        if name in {"batch", "source_close", "composite_close"}
+                        else BarFinality.PROVISIONAL
+                    )
                     logger.debug(
                         "Bar closed by '%s': %s@%s bucket=%d",
                         name, state.symbol, state.interval, state.bucket_start_ms,
@@ -333,15 +368,25 @@ class Finalizer:
         return self.check(state, trigger)
 
     def flush(self, state: BarState) -> BarEvent:
-        """Force-close a bar regardless of strategies.
+        """Finalize a bar during teardown without inventing source authority.
 
-        Used during shutdown or when a pipeline is being torn down.
+        Unconfirmed native snapshots become EXPIRED; all other bars preserve
+        the legacy forced-CLOSED behavior.
 
         Returns:
-            BarEvent(CLOSED)
+            BarEvent(CLOSED or EXPIRED)
         """
+        unconfirmed = self.requires_authoritative_close(state)
+        state.close_reason = (
+            "shutdown_unconfirmed" if unconfirmed else "shutdown_fallback"
+        )
+        state.finality = BarFinality.PROVISIONAL
         return BarEvent(
-            event_type=BarEventType.CLOSED,
+            event_type=(
+                BarEventType.EXPIRED
+                if unconfirmed
+                else BarEventType.CLOSED
+            ),
             bar=state,
         )
 
@@ -352,9 +397,40 @@ class Finalizer:
             states: List of active BarStates to close
 
         Returns:
-            List of BarEvent(CLOSED) for each bar
+            List of BarEvent(CLOSED or EXPIRED) for each bar
         """
         return [self.flush(s) for s in states if s.status == BarStatus.FORMING]
+
+    @staticmethod
+    def requires_authoritative_close(state: BarState) -> bool:
+        """Return whether a forming bar must fail closed without source confirmation."""
+        return (
+            state.status == BarStatus.FORMING
+            and state.requires_authoritative_close
+            and not state.last_close_received
+        )
+
+    def should_expire_unconfirmed(
+        self,
+        state: BarState,
+        trigger: FinalizeTrigger,
+    ) -> bool:
+        """Decide when an unconfirmed native snapshot must be discarded."""
+        if not self.requires_authoritative_close(state):
+            return False
+        if trigger.trigger_type == "flush":
+            return True
+        if trigger.trigger_type == "next_bucket":
+            return (
+                trigger.next_bucket_start is not None
+                and trigger.next_bucket_start > state.bucket_start_ms
+            )
+        if trigger.trigger_type == "timer":
+            return (
+                trigger.current_time_ms
+                >= state.bucket_end_ms + self._cfg.finalize_timeout_ms
+            )
+        return False
 
     # ── Public: Snapshot ─────────────────────────────────────
 
@@ -371,13 +447,15 @@ class Finalizer:
     # ── Internal: Default Chain ──────────────────────────────
 
     def _build_default_chain(self) -> None:
-        """Build the default strategy chain based on config and interval type."""
+        """Build the default strategy chain; individual strategies gate by input mode."""
         # 1. Batch finalizer (always present, handles backfill)
         self._strategies.append(("batch", BatchFinalizer(self._time_bucket)))
 
-        # 2. Source close is gated by SNAPSHOT/INCREMENTAL input semantics.
-        if self._cfg.use_source_close_signal:
-            self._strategies.append(("source_close", SourceCloseFinalizer()))
+        # 2. Source close is a non-optional authority boundary for native
+        # cumulative snapshots.  The legacy config flag remains readable for
+        # compatibility, but disabling it must not restore timeout-based
+        # promotion of a partial exchange K-line.
+        self._strategies.append(("source_close", SourceCloseFinalizer()))
 
         # 3. Composite close is gated by COMPONENT input semantics.
         if self._cfg.use_composite_close:

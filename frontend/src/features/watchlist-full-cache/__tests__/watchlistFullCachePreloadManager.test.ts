@@ -8,6 +8,7 @@ import {
 import {
   getFullCacheEntry,
   mergeFullCacheRows,
+  patchFullCacheRealtimeKline,
   resetWatchlistFullCache,
   setFullCacheEntryStatus,
 } from "../watchlistFullCacheStore.js";
@@ -56,7 +57,7 @@ test("preload manager excludes the active series and skips warm or externally lo
     limit: 2,
     fetchJob: async (job) => {
       calls.push(`${job.symbol}@${job.interval}`);
-      return { data: rows(2), source: "test" };
+      return { all_rows_final: true, data: rows(2), source: "test" };
     },
   });
 
@@ -91,7 +92,11 @@ test("incremental sync preserves active work and a partial success does not spin
   manager.syncJobs([first, second, third]);
   assert.deepEqual(calls, ["BTCUSDT"], "syncing a new target must not restart the active job");
 
-  mustBeDefined(pending.get("BTCUSDT"))({ data: rows(1), source: "partial-test" });
+  mustBeDefined(pending.get("BTCUSDT"))({
+    all_rows_final: true,
+    data: rows(1),
+    source: "partial-test",
+  });
   await nextTurn();
   assert.deepEqual(calls, ["BTCUSDT", "ETHUSDT"]);
   assert.equal(
@@ -112,7 +117,7 @@ test("an unrelated resync does not retry a settled partial job", async () => {
     limit: 2,
     fetchJob: async (job) => {
       calls.push(`${job.symbol}@${job.interval}`);
-      return { data: rows(1), source: "partial-test" };
+      return { all_rows_final: true, data: rows(1), source: "partial-test" };
     },
   });
 
@@ -136,7 +141,7 @@ test("making an inflight job active aborts it without putting the old job back i
     fetchJob: (job, _limit, signal) => new Promise((resolve, reject) => {
       calls.push(job.symbol);
       if (job !== first) {
-        resolve({ data: rows(1), source: "test" });
+        resolve({ all_rows_final: true, data: rows(1), source: "test" });
         return;
       }
       signal.addEventListener("abort", () => {
@@ -155,5 +160,79 @@ test("making an inflight job active aborts it without putting the old job back i
   assert.equal(firstAborted, true);
   assert.deepEqual(calls, ["BTCUSDT", "ETHUSDT"]);
   assert.equal(calls.filter((symbol) => symbol === "BTCUSDT").length, 1);
+  manager.dispose();
+});
+
+test("preload manager fails closed when history finality is not explicit", async () => {
+  resetWatchlistFullCache();
+  const job = preloadJob("BTCUSDT", "45m");
+  const manager = createWatchlistFullCachePreloadManager({
+    fetchJob: async () => ({ data: rows(2), source: "untrusted-test" }),
+  });
+
+  manager.syncJobs([job]);
+  await nextTurn();
+
+  const entry = mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval));
+  assert.equal(entry.status, "stale");
+  assert.equal(entry.source, "latest-untrusted");
+  assert.deepEqual(entry.rows, []);
+  manager.dispose();
+});
+
+test("preload manager fences concurrent authoritative realtime rows from older HTTP", async () => {
+  resetWatchlistFullCache();
+  const job = preloadJob("BTCUSDT", "1m");
+  const time = epochSeconds(1_000);
+  const baseRow = mustBeDefined(rows(1)[0]);
+  mergeFullCacheRows(job.symbolKey, job.interval, [
+    { ...baseRow, time, close: 10, is_closed: true },
+  ]);
+  const pending = new Map<string, (result: FullCachePreloadFetchResult) => void>();
+  const manager = createWatchlistFullCachePreloadManager({
+    fetchJob: (candidate) => new Promise((resolve) => {
+      pending.set(candidate.symbol, resolve);
+    }),
+  });
+
+  manager.syncJobs([job]);
+  patchFullCacheRealtimeKline(
+    job.symbolKey,
+    job.interval,
+    { ...baseRow, time, close: 20, is_closed: true },
+    { eventType: "bar.amended", source: "ws", nowMs: 200 },
+  );
+  mustBeDefined(pending.get(job.symbol))({
+    all_rows_final: true,
+    data: [{ ...baseRow, time, close: 10, is_closed: true }],
+    source: "latest",
+  });
+  await nextTurn();
+
+  const entry = mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval));
+  assert.equal(entry.rows[0]?.close, 20);
+  assert.equal(entry.status, "live");
+  manager.dispose();
+});
+
+test("disabling preload aborts active work and clears loading state", async () => {
+  resetWatchlistFullCache();
+  const job = preloadJob("BTCUSDT", "45m");
+  let aborted = false;
+  const manager = createWatchlistFullCachePreloadManager({
+    fetchJob: (_job, _limit, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => {
+        aborted = true;
+        reject(new DOMException("Aborted", "AbortError"));
+      }, { once: true });
+    }),
+  });
+
+  manager.syncJobs([job]);
+  manager.syncJobs([job], { enabled: false });
+  await nextTurn();
+
+  assert.equal(aborted, true);
+  assert.equal(mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval)).status, "idle");
   manager.dispose();
 });

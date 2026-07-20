@@ -135,6 +135,26 @@ interface ApplyResultOptions {
   source: string;
   commit: FeedCommitMode;
   mode: FeedApplyMode;
+  expectedRealtimeVersion?: number;
+}
+
+interface RealtimeRowMutation {
+  version: number;
+  row: KlineBar;
+  authoritative: boolean;
+}
+
+interface RealtimeFenceState {
+  version: number;
+  activeRequests: Map<symbol, number>;
+  rows: Map<EpochSeconds, RealtimeRowMutation>;
+}
+
+interface RealtimeRequestFence {
+  key: SeriesKey;
+  token: symbol;
+  version: number;
+  state: RealtimeFenceState;
 }
 
 interface PendingGapRepair {
@@ -578,6 +598,7 @@ export class SeriesDataFeed {
   commitMergedChartData: CommitChartData;
   commitPatchedChartData: CommitChartData;
   patchCacheTick: PatchCacheTick;
+  private realtimeFenceBySeries: Map<SeriesKey, RealtimeFenceState>;
 
   constructor(config: SeriesDataFeedConfig = {}) {
     this.inflight = new InflightRegistry();
@@ -604,6 +625,7 @@ export class SeriesDataFeed {
     this.commitMergedChartData = noopCommitChartData;
     this.commitPatchedChartData = noopCommitChartData;
     this.patchCacheTick = noopPatchCacheTick;
+    this.realtimeFenceBySeries = new Map();
     this.configure(config);
   }
 
@@ -652,6 +674,9 @@ export class SeriesDataFeed {
       if (this.seriesKey(pending.series) === key) this.pendingGapRepairs.delete(repairKey);
     }
     this.gapPlannerNextAllowedAt.delete(key);
+    // The epoch gate makes every request from the previous session stale, so
+    // its request-scoped realtime mutations can be released as well.
+    this.realtimeFenceBySeries.delete(key);
     return next;
   }
 
@@ -710,6 +735,100 @@ export class SeriesDataFeed {
 
   isCurrent(series: MarketSeries, epoch: number): boolean {
     return this.currentEpoch(series) === epoch;
+  }
+
+  recordRealtimeRows(series: MarketSeries, rows: readonly KlineBar[]): void {
+    if (!rows.length) return;
+    const key = this.seriesKey(series);
+    let state = this.realtimeFenceBySeries.get(key);
+    if (!state) {
+      state = { version: 0, activeRequests: new Map(), rows: new Map() };
+      this.realtimeFenceBySeries.set(key, state);
+    }
+
+    for (const row of rows) {
+      if (row?.time == null) continue;
+      state.version += 1;
+      if (state.activeRequests.size === 0) continue;
+      const previous = state.rows.get(row.time);
+      state.rows.set(row.time, {
+        version: state.version,
+        row: { ...row },
+        // Once a realtime close/amendment has been observed for this request
+        // window, never let an older HTTP snapshot regain authority.
+        authoritative: previous?.authoritative === true || row.is_closed === true,
+      });
+    }
+  }
+
+  private beginRealtimeRequest(series: MarketSeries): RealtimeRequestFence {
+    const key = this.seriesKey(series);
+    let state = this.realtimeFenceBySeries.get(key);
+    if (!state) {
+      state = { version: 0, activeRequests: new Map(), rows: new Map() };
+      this.realtimeFenceBySeries.set(key, state);
+    }
+    const token = Symbol(key);
+    state.activeRequests.set(token, state.version);
+    return { key, token, version: state.version, state };
+  }
+
+  private endRealtimeRequest(fence: RealtimeRequestFence): void {
+    const state = this.realtimeFenceBySeries.get(fence.key);
+    if (!state || state !== fence.state) return;
+    state.activeRequests.delete(fence.token);
+    if (state.activeRequests.size === 0) {
+      state.rows.clear();
+      return;
+    }
+    let oldestVersion = Number.POSITIVE_INFINITY;
+    for (const version of state.activeRequests.values()) {
+      oldestVersion = Math.min(oldestVersion, version);
+    }
+    for (const [time, mutation] of state.rows) {
+      if (mutation.version <= oldestVersion) state.rows.delete(time);
+    }
+  }
+
+  private reconcileRealtimeRows(
+    series: MarketSeries,
+    result: KlineFetchResult,
+    rows: KlineBar[],
+    expectedRealtimeVersion: number | undefined,
+  ): KlineBar[] {
+    if (expectedRealtimeVersion == null || rows.length === 0) return rows;
+    const state = this.realtimeFenceBySeries.get(this.seriesKey(series));
+    if (!state || state.rows.size === 0) return rows;
+    const trustedFinalResponse = result.all_rows_final === true;
+    let changed = false;
+    const reconciled = rows.map((row) => {
+      const mutation = state.rows.get(row.time);
+      if (!mutation) return row;
+      if (mutation.authoritative) {
+        changed = true;
+        return mutation.row;
+      }
+      if (
+        trustedFinalResponse
+        && row.is_closed === true
+      ) {
+        // Match the watchlist preload contract: a provenance-verified final
+        // HTTP row may close a concurrently forming realtime row. Promote the
+        // fence too, so another older same-epoch request cannot subsequently
+        // restore that forming snapshot.
+        state.version += 1;
+        state.rows.set(row.time, {
+          version: state.version,
+          row: { ...row },
+          authoritative: true,
+        });
+        return row;
+      }
+      if (mutation.version <= expectedRealtimeVersion) return row;
+      changed = true;
+      return mutation.row;
+    });
+    return changed ? reconciled : rows;
   }
 
   private acquireEpochLease(
@@ -2113,6 +2232,7 @@ export class SeriesDataFeed {
       source,
       requestScope,
     });
+    const realtimeFence = this.beginRealtimeRequest(series);
     return this.inflight.run(key, async () => {
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
@@ -2133,7 +2253,10 @@ export class SeriesDataFeed {
         source,
         commit,
         mode: "range",
+        expectedRealtimeVersion: realtimeFence.version,
       });
+    }).finally(() => {
+      this.endRealtimeRequest(realtimeFence);
     });
   }
 
@@ -2157,6 +2280,7 @@ export class SeriesDataFeed {
       source,
       requestScope,
     });
+    const realtimeFence = this.beginRealtimeRequest(series);
     return this.inflight.run(key, async () => {
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
@@ -2176,9 +2300,12 @@ export class SeriesDataFeed {
         source,
         commit,
         mode: "range",
+        expectedRealtimeVersion: realtimeFence.version,
       });
       if (!applied.stale) this.updateBeforePageAvailability(series, before, applied);
       return applied;
+    }).finally(() => {
+      this.endRealtimeRequest(realtimeFence);
     });
   }
 
@@ -2217,6 +2344,7 @@ export class SeriesDataFeed {
       maxPages,
       requestScope,
     });
+    const realtimeFence = this.beginRealtimeRequest(series);
     return this.inflight.run(key, async () => {
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
@@ -2250,6 +2378,7 @@ export class SeriesDataFeed {
           source,
           commit,
           mode: "range",
+          expectedRealtimeVersion: realtimeFence.version,
         });
         finalResult = applied;
         pages.push(applied);
@@ -2333,6 +2462,8 @@ export class SeriesDataFeed {
         } : {}),
         ...(finalResult?.plan === undefined ? {} : { plan: finalResult.plan }),
       };
+    }).finally(() => {
+      this.endRealtimeRequest(realtimeFence);
     });
   }
 
@@ -2349,6 +2480,7 @@ export class SeriesDataFeed {
     if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
     const epoch = this.currentEpoch(series);
     const key = requestKeyFor("latest", series, { apiSource, epoch, limit, source });
+    const realtimeFence = this.beginRealtimeRequest(series);
     return this.inflight.run(key, async () => {
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
@@ -2367,20 +2499,29 @@ export class SeriesDataFeed {
         source,
         commit,
         mode: "tick",
+        expectedRealtimeVersion: realtimeFence.version,
       });
+    }).finally(() => {
+      this.endRealtimeRequest(realtimeFence);
     });
   }
 
   applyResult(
     series: MarketSeries,
     result: KlineFetchResult,
-    { epoch, source, commit, mode }: ApplyResultOptions,
+    { epoch, source, commit, mode, expectedRealtimeVersion }: ApplyResultOptions,
   ): AppliedKlineResult {
-    const rows = rowsFromResult(result);
+    const rawRows = rowsFromResult(result);
     const active = this.shouldCommitActive(series);
     if (!this.isCurrent(series, epoch)) {
-      return { ...result, data: rows, rows, committed: false, stale: true, active };
+      return { ...result, data: rawRows, rows: rawRows, committed: false, stale: true, active };
     }
+    const rows = this.reconcileRealtimeRows(
+      series,
+      result,
+      rawRows,
+      expectedRealtimeVersion,
+    );
 
     this.invalidateBeforePageAvailabilityFromObservation(series, {
       rows,

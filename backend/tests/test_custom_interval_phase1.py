@@ -27,6 +27,7 @@ def _row(
     value: float = 1,
     *,
     is_closed: bool = True,
+    source: str = "backfill",
 ) -> dict:
     return {
         "open_time": open_time_ms,
@@ -36,6 +37,7 @@ def _row(
         "close": value,
         "volume": value,
         "is_closed": is_closed,
+        "source": source,
     }
 
 
@@ -132,7 +134,10 @@ def test_custom_intervals_reuse_bounded_shared_base_history() -> None:
 
 def test_custom_query_reuses_complete_materialized_target_storage() -> None:
     storage = _IntervalStorage({
-        "45m": [_row(0, 10), _row(2_700_000, 20)],
+        "45m": [
+            _row(0, 10, source="backfill_aggregated"),
+            _row(2_700_000, 20, source="backfill_aggregated"),
+        ],
         "15m": [_row(index * 900_000) for index in range(6)],
     })
     engine = QueryEngine(
@@ -159,7 +164,7 @@ def test_custom_query_reuses_complete_materialized_target_storage() -> None:
 
 def test_custom_query_derives_only_after_materialized_target_is_incomplete() -> None:
     storage = _IntervalStorage({
-        "45m": [_row(0, 10)],
+        "45m": [_row(0, 10, source="backfill_aggregated")],
         "15m": [_row(index * 900_000, index + 1) for index in range(6)],
     })
     engine = QueryEngine(
@@ -187,7 +192,7 @@ def test_custom_query_derives_only_after_materialized_target_is_incomplete() -> 
 
 def test_custom_query_rebuilds_forming_materialized_tail_from_base() -> None:
     storage = _IntervalStorage({
-        "45m": [_row(0, 10, is_closed=False)],
+        "45m": [_row(0, 10, is_closed=False, source="")],
         "15m": [
             _row(0, 12),
             _row(900_000, 16),
@@ -200,14 +205,18 @@ def test_custom_query_rebuilds_forming_materialized_tail_from_base() -> None:
         config=QueryConfig(auto_backfill=False),
     )
 
-    result = engine.query(
-        "BTCUSDT",
-        "45m",
-        start_ms=0,
-        end_ms=0,
-        limit=1,
-        auto_backfill=False,
-    )
+    # At 35 minutes the third 15m component and its containing 45m bar are
+    # legitimately forming.  Freeze the policy clock so this remains a
+    # forming-tail freshness test instead of malformed ancient history.
+    with patch("app.data_engine.data_manager.query.time.time", return_value=2_100):
+        result = engine.query(
+            "BTCUSDT",
+            "45m",
+            start_ms=0,
+            end_ms=0,
+            limit=1,
+            auto_backfill=False,
+        )
 
     assert len(result.bars) == 1
     assert result.bars[0].close == 20
@@ -223,7 +232,15 @@ def test_identical_custom_derivations_singleflight_base_work() -> None:
     release = threading.Event()
     calls: list[int] = []
     base_bars = [
-        BarData(time=index * 900, open=1, high=2, low=1, close=2, volume=1)
+        BarData(
+            time=index * 900,
+            open=1,
+            high=2,
+            low=1,
+            close=2,
+            volume=1,
+            source="backfill",
+        )
         for index in range(3)
     ]
 
@@ -286,6 +303,7 @@ def test_fixed_custom_aggregation_avoids_generic_row_materialization() -> None:
             close=2,
             volume=1,
             is_closed=True,
+            source="backfill",
         )
         for index in range(37)
     ]
@@ -335,6 +353,7 @@ def test_custom_base_pagination_is_hard_bounded_without_inventing_a_gap() -> Non
                 low=1,
                 close=2,
                 volume=1,
+                source="backfill",
             )],
             symbol=symbol,
             interval=interval,
@@ -342,6 +361,7 @@ def test_custom_base_pagination_is_hard_bounded_without_inventing_a_gap() -> Non
             total=1,
             has_more=True,
             complete=True,
+            metadata={"all_rows_final": True},
         )
 
     service = CustomIntervalQueryService(
@@ -391,6 +411,7 @@ def test_custom_range_pagination_caps_the_final_page_to_remaining_source_rows() 
                 low=1,
                 close=2,
                 volume=1,
+                source="backfill",
             )
             for open_ms in range(first_open, last_open + 1, 60_000)
         ]
@@ -413,6 +434,7 @@ def test_custom_range_pagination_caps_the_final_page_to_remaining_source_rows() 
                 low=1,
                 close=2,
                 volume=1,
+                source="backfill",
             )
             for index in range(20, 30)
         ],
@@ -500,6 +522,7 @@ def test_calendar_range_reads_the_complete_requested_final_bucket() -> None:
             low=index,
             close=index + 1,
             volume=1,
+            source="backfill",
         )
         for index in range(6)
     ]

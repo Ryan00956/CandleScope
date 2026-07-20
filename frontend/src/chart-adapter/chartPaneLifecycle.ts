@@ -28,6 +28,8 @@ interface PaneAppearanceOptions {
   customBg?: string;
   timezone?: string;
   interval?: string;
+  timeFormatter?: (timeSeconds: number) => string;
+  tickMarkFormatter?: (timeSeconds: number, tickMarkType: TickMarkType) => string;
 }
 
 function hasProperty<K extends PropertyKey>(
@@ -163,6 +165,8 @@ export function buildChartPaneOptions({
   timezone,
   interval,
   showTimeScale,
+  timeFormatter,
+  tickMarkFormatter,
 }: PaneAppearanceOptions & {
   container: HTMLElement;
   showTimeScale?: boolean;
@@ -197,7 +201,9 @@ export function buildChartPaneOptions({
       autoScale: true,
       minimumWidth: 80,
     },
-    ...(loc.localization ? { localization: loc.localization } : {}),
+    ...(timeFormatter
+      ? { localization: { timeFormatter: (time: ChartTime) => timeFormatter(formatterSourceTime(time)) } }
+      : loc.localization ? { localization: loc.localization } : {}),
     timeScale: {
       borderColor,
       timeVisible: true,
@@ -205,7 +211,9 @@ export function buildChartPaneOptions({
       rightOffset: 5,
       barSpacing: 8,
       ...(showTimeScale !== undefined ? { visible: showTimeScale } : {}),
-      ...(loc.timeScale ? { tickMarkFormatter: loc.timeScale.tickMarkFormatter } : {}),
+      ...(tickMarkFormatter
+        ? { tickMarkFormatter: (time: ChartTime, type: TickMarkType) => tickMarkFormatter(formatterSourceTime(time), type) }
+        : loc.timeScale ? { tickMarkFormatter: loc.timeScale.tickMarkFormatter } : {}),
     },
     handleScroll: { vertTouchDrag: false },
   };
@@ -213,7 +221,7 @@ export function buildChartPaneOptions({
 
 export function applyChartPaneAppearance(
   chart: IChartApiBase<ChartTime>,
-  { theme, customBg, timezone, interval }: PaneAppearanceOptions,
+  { theme, customBg, timezone, interval, timeFormatter, tickMarkFormatter }: PaneAppearanceOptions,
 ): void {
   const loc = buildLocalizationOptions(timezone, interval);
   const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({
@@ -225,8 +233,12 @@ export function applyChartPaneAppearance(
     grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
     rightPriceScale: { borderColor },
     timeScale: { borderColor },
-    ...(loc.localization ? { localization: loc.localization } : {}),
-    ...(loc.timeScale ? { timeScale: { tickMarkFormatter: loc.timeScale.tickMarkFormatter } } : {}),
+    ...(timeFormatter
+      ? { localization: { timeFormatter: (time: ChartTime) => timeFormatter(formatterSourceTime(time)) } }
+      : loc.localization ? { localization: loc.localization } : {}),
+    ...(tickMarkFormatter
+      ? { timeScale: { tickMarkFormatter: (time: ChartTime, type: TickMarkType) => tickMarkFormatter(formatterSourceTime(time), type) } }
+      : loc.timeScale ? { timeScale: { tickMarkFormatter: loc.timeScale.tickMarkFormatter } } : {}),
   };
   chart.applyOptions(appearanceOptions);
 }

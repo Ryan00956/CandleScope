@@ -3,7 +3,9 @@ import type { TransportKlineBar } from "../../services/apiPayloadParsers.js";
 import { toEpochSeconds } from "../market-data/marketDataTypes.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import {
+  getFullCacheRealtimeVersion,
   getFullCacheEntry,
+  isTrustedFullCachePreload,
   markFullCacheError,
   mergeFullCacheRows,
   setFullCacheEntryStatus,
@@ -24,6 +26,7 @@ export interface ActiveFullCacheSeries {
 }
 
 export interface FullCachePreloadFetchResult {
+  all_rows_final?: boolean;
   data?: TransportKlineBar[];
   source?: unknown;
 }
@@ -137,6 +140,7 @@ export function createWatchlistFullCachePreloadManager(
       if (!job || shouldSkipSettledFullCachePreload(job, limit)) continue;
 
       const controller = new AbortController();
+      const expectedRealtimeVersion = getFullCacheRealtimeVersion();
       attemptedKeys.add(key);
       active.set(key, { controller, job });
       setFullCacheEntryStatus(job.symbolKey, job.interval, "loading", { source: "latest" });
@@ -147,9 +151,20 @@ export function createWatchlistFullCachePreloadManager(
             restoreStatusAfterAbort(job);
             return;
           }
+          if (!isTrustedFullCachePreload(result)) {
+            const current = getFullCacheEntry(job.symbolKey, job.interval);
+            if (current?.status !== "live") {
+              setFullCacheEntryStatus(job.symbolKey, job.interval, "stale", {
+                source: "latest-untrusted",
+              });
+            }
+            return;
+          }
+          const current = getFullCacheEntry(job.symbolKey, job.interval);
           mergeFullCacheRows(job.symbolKey, job.interval, normalizeHttpRows(result?.data || []), {
-            status: "warm",
+            status: current?.status === "live" ? "live" : "warm",
             source: typeof result?.source === "string" ? result.source : "latest",
+            expectedRealtimeVersion,
           });
         })
         .catch((error) => {

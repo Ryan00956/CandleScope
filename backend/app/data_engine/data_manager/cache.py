@@ -43,6 +43,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
+from app.data_engine.kline_quality import incoming_source_can_replace
+
 from .config import CacheConfig
 from .models import BarData, SeriesKey
 
@@ -141,8 +143,10 @@ class BarSeries:
         evicted: list[BarData] = []
 
         if self._bars and self._bars[-1].time == bar.time:
-            # Update in-place
-            self._bars[-1] = bar
+            # Source quality is monotonic at a timestamp: a forming/ambiguous
+            # update must not regress an already verified final bar.
+            if incoming_source_can_replace(self._bars[-1].source, bar.source):
+                self._bars[-1] = bar
             return evicted
 
         if self._bars and bar.time < self._bars[-1].time:
@@ -172,8 +176,8 @@ class BarSeries:
         idx = bisect.bisect_left(self._time_index, bar.time)
 
         if idx < len(self._time_index) and self._time_index[idx] == bar.time:
-            # Replace existing
-            self._bars[idx] = bar
+            if incoming_source_can_replace(self._bars[idx].source, bar.source):
+                self._bars[idx] = bar
             return []
 
         return self._insert_sorted(bar)
@@ -189,12 +193,30 @@ class BarSeries:
         if not bars:
             return []
 
+        # Storage pages are normally sorted and unique. Preserve the direct
+        # prepend/append fast paths while still honoring the public duplicate
+        # replacement contract for less disciplined callers.
+        if any(
+            current.time <= previous.time
+            for previous, current in zip(bars, bars[1:])
+        ):
+            selected: dict[int, BarData] = {}
+            for bar in bars:
+                existing = selected.get(bar.time)
+                if existing is None or incoming_source_can_replace(
+                    existing.source,
+                    bar.source,
+                ):
+                    selected[bar.time] = bar
+            bars = sorted(selected.values(), key=lambda item: item.time)
+
         self._last_access_ms = int(time.time() * 1000)
         self._revision += 1
         evicted: list[BarData] = []
 
         if not self._bars:
-            # Empty series — direct load
+            # The page was normalized above, so an empty series is a direct
+            # load without sacrificing source-quality arbitration.
             self._bars = list(bars)
             self._time_index = [b.time for b in bars]
         elif bars[-1].time < self._bars[0].time:
@@ -224,7 +246,12 @@ class BarSeries:
             merged: list[BarData] = []
             existing_map = {b.time: b for b in self._bars}
             for b in bars:
-                existing_map[b.time] = b  # new data wins on conflict
+                existing = existing_map.get(b.time)
+                if existing is None or incoming_source_can_replace(
+                    existing.source,
+                    b.source,
+                ):
+                    existing_map[b.time] = b
             merged = sorted(existing_map.values(), key=lambda b: b.time)
             self._bars = merged
             self._time_index = [b.time for b in merged]
@@ -324,7 +351,8 @@ class BarSeries:
         idx = bisect.bisect_left(self._time_index, bar.time)
 
         if idx < len(self._time_index) and self._time_index[idx] == bar.time:
-            self._bars[idx] = bar
+            if incoming_source_can_replace(self._bars[idx].source, bar.source):
+                self._bars[idx] = bar
             return []
 
         self._bars.insert(idx, bar)
@@ -420,6 +448,54 @@ class BarCache:
             evicted = series.upsert(bar)
         if evicted:
             self._on_bars_evicted(key, evicted)
+
+    def upsert_if_accepted(
+        self,
+        key: SeriesKey,
+        bar: BarData,
+    ) -> tuple[bool, BarData]:
+        """Atomically quality-arbitrate an upsert and return the canonical bar.
+
+        Existing ``append``/``upsert`` callers remain source compatible. Event
+        bridges that must keep cache, persistence, and downstream publication
+        consistent can use this result to suppress a rejected lower-quality
+        update before it escapes the cache boundary.
+        """
+        with self._lock:
+            series = self._get_or_create(key)
+            existing = series.get_bar_at(bar.time)
+            if (
+                existing is not None
+                and not incoming_source_can_replace(existing.source, bar.source)
+            ):
+                return False, existing
+            evicted = series.upsert(bar)
+        if evicted:
+            self._on_bars_evicted(key, evicted)
+        return True, bar
+
+    def can_accept_upsert(
+        self,
+        key: SeriesKey,
+        bar: BarData,
+    ) -> tuple[bool, BarData | None]:
+        """Read-only source-quality precheck for a later atomic upsert.
+
+        This is advisory because another writer may win after the lock is
+        released. Callers that perform I/O between the check and mutation must
+        finish with :meth:`upsert_if_accepted` to close that race.
+        """
+        with self._lock:
+            series = self._series.get(key)
+            if series is None:
+                return True, None
+            existing = series.get_bar_at(bar.time)
+            if existing is None:
+                return True, None
+            return (
+                incoming_source_can_replace(existing.source, bar.source),
+                existing,
+            )
 
     def bulk_load(self, key: SeriesKey, bars: list[BarData]) -> None:
         """Load multiple bars into a series (prewarm / backfill path).

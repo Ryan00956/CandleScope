@@ -1,0 +1,57 @@
+{
+  "schema_version": "replay-v1-backend-baseline.v1",
+  "recorded_at": "2026-07-18",
+  "environment": {
+    "os": "Windows 11 10.0.26200",
+    "machine": "AMD64",
+    "python": "3.13.9",
+    "git_head_before_phase9": "2bcf3a7eb464cca5f36488e5d920275e9b3c6f44"
+  },
+  "scope": {
+    "bar": "43,200 generated bars through ReplaySessionActor",
+    "agg_trade": "1,000,000 generated, 50,000-row paged aggregate trades through ReplaySessionActor, AGG_TRADE_TAPE_V1, and TradeReplayBarBuilder",
+    "sqlite_persistence": false,
+    "browser_heap": false,
+    "note": "SQLite failure semantics and browser heap are gated by separate Phase 9 evidence; this file must not be cited for those boundaries."
+  },
+  "candidate_observation": {
+    "bar": {
+      "elapsed_seconds": 6.980303,
+      "events_per_second": 6188.84,
+      "peak_delta_bytes": 1662976,
+      "late_half_growth_bytes": 0,
+      "component_snapshot_materializations": 43201,
+      "checkpoint_latency_max_ms": 0.124,
+      "state_hash": "sha256:a8e075765751881efeb34630aa40a0ce37784d9881d9af5f7517cfc5018244ae"
+    },
+    "agg_trade": {
+      "elapsed_seconds": 1360.791904,
+      "events_per_second": 734.87,
+      "peak_delta_bytes": 54050816,
+      "late_half_growth_bytes": 8450048,
+      "component_snapshot_materializations": 1000001,
+      "checkpoint_latency_p95_ms": 0.362,
+      "checkpoint_latency_max_ms": 0.692,
+      "archive_page_calls": 20,
+      "archive_max_page_rows": 50000,
+      "state_hash": "sha256:e70488fb086eb0f7c7dacc9e35692803dfdda926562d7b8e1b190481864e461a",
+      "report_hash": "sha256:7b18e68016ee29652f987c2ffc4fe321ba87d627f6c3783a8d049b2cab54a724"
+    }
+  },
+  "acceptance_thresholds": {
+    "bar_min_events_per_second": 5000,
+    "bar_max_peak_delta_bytes": 16777216,
+    "bar_max_late_half_growth_bytes": 4194304,
+    "trade_min_events_per_second": 600,
+    "trade_max_peak_delta_bytes": 100663296,
+    "trade_max_late_half_growth_bytes": 16777216,
+    "projection_max_fps": 30,
+    "trade_max_page_rows": 50000
+  },
+  "freeze_policy": {
+    "thresholds_selected_after_candidate_observation": true,
+    "candidate_is_not_release_verification": true,
+    "independent_full_scale_verification_required": true,
+    "thresholds_must_not_be_relaxed_to_make_a_failed_run_pass": true
+  }
+}

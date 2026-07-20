@@ -1,0 +1,148 @@
+import { useState } from "react";
+import { formatReplayPublicTime, replayOwnsController, replayProgress } from "../replayUiModel.js";
+import type { ReplaySpeed } from "../replayTypes.js";
+import type { ReplayRuntime } from "../useReplayRuntime.js";
+
+const SPEEDS: readonly ReplaySpeed[] = [1, 5, 15, 30, 60, 120, 300, 600, "MAX"];
+
+export interface ReplayControlBarProps {
+  readonly runtime: ReplayRuntime;
+}
+
+export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
+  const [showEnd, setShowEnd] = useState(false);
+  const [openOrderDisposition, setOpenOrderDisposition] = useState<"expire" | "cancel" | "preserve">("expire");
+  const [positionDisposition, setPositionDisposition] = useState<"keep" | "mark_close">("keep");
+  const store = runtime.store;
+  const config = store.sessionConfig;
+  const tradeTape = config?.source_kind === "agg_trade";
+  const ownsController = replayOwnsController(store, runtime.clientInstanceId);
+  const pending = runtime.pendingCommand?.type ?? null;
+  const forkPending = runtime.forkPending;
+  const disabled = pending !== null || forkPending || store.connectionState !== "connected" || !ownsController;
+  const progress = replayProgress(store);
+  const publicTime = formatReplayPublicTime(store.virtualTimeMs, {
+    blindMode: config?.blind_mode ?? true,
+    originMs: store.replayStartMs,
+  });
+  const command = (type: Parameters<ReplayRuntime["actions"]["submitCommand"]>[0], payload: Parameters<ReplayRuntime["actions"]["submitCommand"]>[1] = {}) => {
+    void runtime.actions.submitCommand(type, payload).catch(() => undefined);
+  };
+
+  return (
+    <section className="replay-control-stack" aria-label="K 线回放控制">
+      {store.connectionState !== "connected" && (
+        <div className="replay-recovery-banner" role="status">
+          回放连接 {store.connectionState}；恢复原子 snapshot 前所有命令已禁用。
+          <button type="button" onClick={() => runtime.actions.requestResync("manual recovery")}>重新同步</button>
+        </div>
+      )}
+      {!ownsController && (
+        <div className="replay-controller-banner" role="status">
+          {store.controllerClientId ? "另一个页面持有控制权；当前为只读 viewer。" : "当前没有 controller lease。"}
+          <button
+            type="button"
+            data-replay-action="takeover-controller"
+            disabled={pending !== null || forkPending || store.connectionState !== "connected"}
+            onClick={() => void runtime.actions.acquireController(store.controllerClientId !== null).catch(() => undefined)}
+          >
+            {store.controllerClientId ? "接管控制权" : "获取控制权"}
+          </button>
+        </div>
+      )}
+      {(runtime.commandError || store.error) && (
+        <div className="replay-command-error" role="alert" data-replay-command-error={runtime.commandError?.code ?? store.error?.code}>
+          <strong>{runtime.commandError?.code ?? store.error?.code}</strong>
+          <span>{runtime.commandError?.message ?? store.error?.message}</span>
+          {(runtime.commandError?.details?.needs_resync === true) && <span>命令结果未知；已请求服务端原子 resync，状态收敛前不会接受下一条命令。</span>}
+          {(runtime.commandError?.code === "REVISION_CONFLICT") && <span>已请求服务端原子 resync，请等待状态收敛。</span>}
+          {runtime.commandRecoveryPending && (
+            <button
+              type="button"
+              data-replay-action="reconcile-command"
+              disabled={!runtime.commandRecoveryReady || runtime.commandRecoveryInFlight}
+              onClick={() => void runtime.actions.retryPendingCommandRecovery().catch(() => undefined)}
+            >{runtime.commandRecoveryInFlight ? "正在用同一 command_id 对账…" : "用同一 command_id 重试对账"}</button>
+          )}
+        </div>
+      )}
+      <div className="replay-control-bar">
+        <button type="button" data-replay-action="end" disabled={disabled || store.state === "ENDED"} onClick={() => setShowEnd(true)}>结束</button>
+        <button type="button" data-replay-action="fork" disabled={pending !== null || forkPending} onClick={() => void runtime.actions.forkSession().catch(() => undefined)}>Fork</button>
+        <button type="button" data-replay-action="step" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("step", { count: 1 })}>
+          {pending === "step" ? "单步中…" : "单步 →"}
+        </button>
+        <button
+          type="button"
+          data-replay-action={store.state === "PLAYING" ? "pause" : "play"}
+          disabled={disabled || !["PAUSED", "PLAYING"].includes(store.state ?? "")}
+          onClick={() => command(store.state === "PLAYING" ? "pause" : "play")}
+        >
+          {pending === "pause" ? "正在暂停…" : pending === "play" ? "正在播放…" : store.state === "PLAYING" ? "暂停 ‖" : "播放 ▶"}
+        </button>
+        <button type="button" data-replay-action="advance" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("advance_by", { ms: 300_000 })}>
+          {pending === "advance_by" ? "推进中…" : "前进 5m ⇥"}
+        </button>
+        <label className="replay-speed-control">
+          速度
+          <select
+            data-replay-action="speed"
+            value={String(store.speed ?? 1)}
+            disabled={disabled || store.state === "ENDED"}
+            onChange={(event) => command("set_speed", { speed: event.target.value === "MAX" ? "MAX" : Number(event.target.value) as ReplaySpeed })}
+          >
+            {SPEEDS.map((speed) => <option key={String(speed)} value={String(speed)}>{speed === "MAX" ? "MAX" : `${speed}×`}</option>)}
+          </select>
+        </label>
+        <div className="replay-progress" data-replay-progress={progress === null ? "unknown" : progress.toFixed(4)}>
+          <span>{publicTime}</span>
+          <progress max={1} value={progress ?? 0} aria-label="回放进度" />
+          <span>{progress === null ? "进度未知" : `${(progress * 100).toFixed(1)}%`}</span>
+        </div>
+        <div className="replay-fidelity-chips">
+          <span>{tradeTape ? "AGG_TRADE" : `BAR_${config?.base_interval.toUpperCase() ?? "--"}`}</span>
+          <span>PAPER_LINEAR_V1</span>
+          <span>{tradeTape ? "EXACT_AGG_TRADE" : "EXACT_BAR"}</span>
+          <span>{tradeTape ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE"}</span>
+        </div>
+      </div>
+
+      {showEnd && (
+        <div className="replay-modal-backdrop" role="presentation">
+          <section className="replay-end-dialog" role="dialog" aria-modal="true" aria-labelledby="replay-end-title">
+            <h2 id="replay-end-title">结束训练回放</h2>
+            <p>先暂停并固化报告。按最后已揭示 mark 平仓会记录为合成的 SESSION_END_MARK_CLOSE。</p>
+            <label>未成交订单
+              <select value={openOrderDisposition} onChange={(event) => setOpenOrderDisposition(event.target.value as typeof openOrderDisposition)}>
+                <option value="expire">到期</option><option value="cancel">取消</option><option value="preserve">保留到报告</option>
+              </select>
+            </label>
+            <label>持仓
+              <select value={positionDisposition} onChange={(event) => setPositionDisposition(event.target.value as typeof positionDisposition)}>
+                <option value="keep">保留未实现状态</option><option value="mark_close">按已揭示 mark 合成平仓</option>
+              </select>
+            </label>
+            <div className="replay-dialog-actions">
+              <button type="button" onClick={() => setShowEnd(false)}>取消</button>
+              <button
+                type="button"
+                data-replay-action="confirm-end"
+                onClick={() => {
+                  setShowEnd(false);
+                  void (async () => {
+                    if (runtime.store.state === "PLAYING") await runtime.actions.submitCommand("pause", {});
+                    await runtime.actions.submitCommand("end_session", {
+                      open_order_disposition: openOrderDisposition,
+                      position_disposition: positionDisposition,
+                    });
+                    await runtime.actions.loadReport();
+                  })().catch(() => undefined);
+                }}
+              >确认结束</button>
+            </div>
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}

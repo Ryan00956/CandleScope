@@ -424,6 +424,13 @@ export function useKlineStreamRuntime({
                 updateRealtimePrice(tick.close);
               }
 
+              // Fence both the rendered interval and background tracked/base
+              // intervals before either store path observes the realtime row.
+              seriesDataFeed.recordRealtimeRows(
+                { exchange, marketType, symbol, interval: msgInterval },
+                [tick],
+              );
+
               if (intervalsSemanticallyEquivalent(msgInterval, currentIntv)) {
                 stopPolling();
                 setWsStatus("live");

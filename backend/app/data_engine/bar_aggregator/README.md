@@ -108,8 +108,8 @@ Finalizers combine multiple close signals:
 | `BAR_AGG_ALIGNMENT_EPOCH_MS` | custom alignment epoch |
 | `BAR_AGG_MAX_ACTIVE_BARS` | max forming buckets per series |
 | `BAR_AGG_MAX_CLOSED_BARS` | recent closed bars retained in memory |
-| `BAR_AGG_USE_SOURCE_CLOSE` | use exchange close signal |
-| `BAR_AGG_FINALIZE_TIMEOUT_MS` | force-close timeout |
+| `BAR_AGG_USE_SOURCE_CLOSE` | legacy compatibility flag; native snapshots always require the exchange close signal |
+| `BAR_AGG_FINALIZE_TIMEOUT_MS` | fallback deadline; unconfirmed native snapshots expire instead of closing |
 | `BAR_AGG_USE_EVENT_DRIVEN_CLOSE` | close previous bucket when next bucket arrives |
 | `BAR_AGG_USE_COMPOSITE_CLOSE` | close custom bars from component close state |
 | `BAR_AGG_UPDATE_THROTTLE_MS` | throttle `UPDATED` events |

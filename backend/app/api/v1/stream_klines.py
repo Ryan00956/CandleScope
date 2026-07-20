@@ -122,6 +122,30 @@ def should_forward_browser_event(event) -> bool:
     return getattr(event, "audience", "user") != "internal"
 
 
+def _serialize_kline_event(event) -> dict[str, Any]:
+    """Serialize a bar event without erasing its lifecycle semantics.
+
+    ``is_closed`` alone cannot distinguish an ordinary close from a historical
+    correction.  Keeping the event type in the envelope lets browser caches
+    apply ``bar.amended`` to an interior timestamp while older clients can
+    continue to rely on the existing payload shape.
+    """
+    data = event.bar.to_kline_dict() if event.bar else {}
+    data["is_closed"] = event.event_type in {
+        DataEventType.BAR_CLOSED,
+        DataEventType.BAR_AMENDED,
+    }
+    return {
+        "type": "kline",
+        "event_type": event.event_type.value,
+        "exchange": event.key.exchange,
+        "symbol": event.key.symbol,
+        "interval": event.key.interval,
+        "market_type": event.key.market_type,
+        "data": data,
+    }
+
+
 async def stream_single_kline(
     websocket: WebSocket,
     dm,
@@ -277,18 +301,7 @@ async def stream_multi_kline(
                 )
                 return
 
-            bar_dict = {
-                "type": "kline",
-                "exchange": event.key.exchange,
-                "symbol": event.key.symbol,
-                "interval": event.key.interval,
-                "market_type": event.key.market_type,
-                "data": event.bar.to_kline_dict() if event.bar else {},
-            }
-            bar_dict["data"]["is_closed"] = event.event_type in {
-                DataEventType.BAR_CLOSED,
-                DataEventType.BAR_AMENDED,
-            }
+            bar_dict = _serialize_kline_event(event)
             await event_queue.put(
                 bar_dict,
                 key=event_key,
@@ -550,18 +563,7 @@ async def forward_events_to_ws(
                 except Exception:
                     return
                 continue
-            bar_dict = {
-                "type": "kline",
-                "exchange": event.key.exchange,
-                "symbol": event.key.symbol,
-                "interval": event.key.interval,
-                "market_type": event.key.market_type,
-                "data": event.bar.to_kline_dict() if event.bar else {},
-            }
-            bar_dict["data"]["is_closed"] = event.event_type in {
-                DataEventType.BAR_CLOSED,
-                DataEventType.BAR_AMENDED,
-            }
+            bar_dict = _serialize_kline_event(event)
 
             try:
                 await send_json_with_timeout(websocket, bar_dict)

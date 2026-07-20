@@ -49,6 +49,7 @@ from app.api.v1.klines import router as klines_router
 from app.api.v1.liquidations import router as liquidations_router
 from app.api.v1.market import router as market_router
 from app.api.v1.order_book import router as order_book_router
+from app.api.v1.replay import router as replay_router
 from app.api.v1.trade_flow import router as trade_flow_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.stream import router as stream_router
@@ -102,6 +103,7 @@ app.include_router(exchanges_router, prefix="/api/v1")
 app.include_router(symbols_router, prefix="/api/v1")
 app.include_router(subscriptions_router, prefix="/api/v1")
 app.include_router(price_ws_router, prefix="/api/v1")
+app.include_router(replay_router, prefix="/api/v1")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -118,6 +120,7 @@ async def _init_data_manager() -> None:
         TradeFlowConfigurationError,
         start_data_engine,
     )
+    from app.replay.runtime import ReplayStartupError
 
     try:
         from app.alerts.facade import AlertFacade
@@ -165,6 +168,7 @@ async def _init_data_manager() -> None:
         LiquidationConfigurationError,
         OrderBookConfigurationError,
         FullOrderBookConfigurationError,
+        ReplayStartupError,
     ) as exc:
         logger.critical(
             "Advanced market-data configuration prevents safe startup: %s",
@@ -283,16 +287,27 @@ async def health_check() -> dict:
 async def debug_snapshot() -> dict:
     """Full diagnostic snapshot of the DataManager (dev/debug only)."""
     dm = getattr(app.state, "data_manager", None)
-    if dm is None:
-        return {"error": "DataManager not initialized"}
     try:
-        snapshot = dm.snapshot()
+        snapshot = {"error": "DataManager not initialized"} if dm is None else dm.snapshot()
         snapshot["executors"] = executors_snapshot()
         lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
         snapshot["runtime"] = {
             "event_loop_lag": lag_monitor.snapshot() if lag_monitor is not None else None,
             "websocket": ws_runtime_metrics.snapshot(),
         }
+        replay_runtime = getattr(app.state, "replay_runtime", None)
+        replay_service = getattr(app.state, "replay_service", None)
+        if replay_runtime is not None:
+            snapshot["replay"] = replay_runtime.diagnostics(redact_paths=True)
+        elif replay_service is not None:
+            snapshot["replay"] = replay_service.diagnostics(redact_paths=True)
+        else:
+            snapshot["replay"] = {
+                "enabled": False,
+                "available": False,
+                "reason": "REPLAY_DISABLED",
+                "sessions": {},
+            }
         return snapshot
     except Exception as exc:
         return {"error": str(exc)}

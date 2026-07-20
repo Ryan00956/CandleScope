@@ -74,6 +74,7 @@ from .models import (
     AlignmentMode,
     BarInput,
     BarInputSource,
+    BarFinality,
     BarState,
     BarStateChange,
     BarEvent,
@@ -259,7 +260,9 @@ class BarAggregator:
     ) -> None:
         """Unregister a (symbol, interval) target.
 
-        Does NOT destroy the pipeline — other symbols may use it.
+        Does NOT destroy the pipeline — other symbols may use it.  Any
+        forming state for this exact target is discarded so a detached
+        stream cannot later be promoted to CLOSED by timeout or shutdown.
         """
         symbol = symbol.upper()
         exchange = exchange.lower().strip()
@@ -268,9 +271,32 @@ class BarAggregator:
         if spec is not None:
             interval = spec.canonical
         self._router.unregister_target(symbol, interval, exchange=exchange, market_type=market_type)
+        pipeline = self._pipelines.get(interval)
+        expired = 0
+        if pipeline is not None:
+            for state in pipeline.bar_state.get_all_active(exchange, market_type, symbol):
+                state.close_reason = "target_removed"
+                if pipeline.bar_state.expire_bar(
+                    exchange,
+                    market_type,
+                    symbol,
+                    state.bucket_start_ms,
+                ) is not None:
+                    expired += 1
         key = (exchange, market_type, symbol)
         if key in self._symbol_intervals:
             self._symbol_intervals[key].discard(interval)
+            if not self._symbol_intervals[key]:
+                self._symbol_intervals.pop(key, None)
+        if expired:
+            logger.info(
+                "Expired %d forming bars while removing target %s:%s:%s@%s",
+                expired,
+                exchange,
+                market_type,
+                symbol,
+                interval,
+            )
 
     def get_targets(self) -> list[tuple[str, str, str, str]]:
         """Return all registered (symbol, interval) targets."""
@@ -463,8 +489,17 @@ class BarAggregator:
         bars: list[Any],
         exchange: str = "binance",
         market_type: str = "spot",
+        *,
+        require_authoritative: bool = False,
     ) -> list[BarState]:
-        """Aggregate a batch in an isolated aggregator instance."""
+        """Aggregate a batch in an isolated aggregator instance.
+
+        Persistence callers must set ``require_authoritative`` so a partial
+        historical component set cannot become durable merely because the
+        time-based fallback closed it. Diagnostic callers retain incomplete
+        active states, explicitly marked provisional, so capability masks and
+        gap evidence remain inspectable without becoming publishable data.
+        """
         temp = BarAggregator(self._cfg)
         temp.add_target(
             symbol,
@@ -475,6 +510,11 @@ class BarAggregator:
         rows_by_open_time: dict[int, BarState] = {}
 
         async def _capture(event: BarEvent) -> None:
+            if (
+                require_authoritative
+                and event.bar.finality != BarFinality.AUTHORITATIVE
+            ):
+                return
             rows_by_open_time[event.bar.bucket_start_ms] = event.bar
 
         temp.publisher.on_bar_closed(_capture)
@@ -515,6 +555,14 @@ class BarAggregator:
                     exchange=exchange,
                     market_type=market_type,
                 )
+        if not require_authoritative:
+            for state in temp.get_active_bars(
+                symbol,
+                target_interval,
+                exchange=exchange,
+                market_type=market_type,
+            ):
+                rows_by_open_time.setdefault(state.bucket_start_ms, state)
         return [rows_by_open_time[key] for key in sorted(rows_by_open_time)]
 
     # ── Public: Layer Access (advanced customization) ────────
@@ -728,6 +776,16 @@ class BarAggregator:
                         if emit_events:
                             await self._publisher.emit_closed(closed)
                         await self._drain_eviction_buffers(pipeline, emit_events=emit_events)
+                elif pipeline.finalizer.should_expire_unconfirmed(state, trigger):
+                    state.close_reason = "next_bucket_unconfirmed"
+                    expired = pipeline.bar_state.expire_bar(
+                        exchange,
+                        market_type,
+                        symbol,
+                        state.bucket_start_ms,
+                    )
+                    if expired is not None and emit_events:
+                        await self._publisher.emit_expired(expired)
 
     # ── Internal: Eviction Buffer Drain ──────────────────────
 
@@ -776,22 +834,60 @@ class BarAggregator:
         for interval, pipeline in self._pipelines.items():
             # Get all active bars across all symbols
             for key, state in list(pipeline.bar_state._active.items()):
-                close_event = pipeline.finalizer.check_timeout(state)
+                trigger = FinalizeTrigger(
+                    trigger_type="timer",
+                    current_time_ms=int(time.time() * 1000),
+                )
+                close_event = pipeline.finalizer.check(state, trigger)
                 if close_event is not None:
                     closed = pipeline.bar_state.close_bar(
                         state.exchange, state.market_type, state.symbol, state.bucket_start_ms,
                     )
                     if closed is not None:
                         await self._publisher.emit_closed(closed)
+                elif pipeline.finalizer.should_expire_unconfirmed(state, trigger):
+                    state.close_reason = "timeout_unconfirmed"
+                    expired = pipeline.bar_state.expire_bar(
+                        state.exchange,
+                        state.market_type,
+                        state.symbol,
+                        state.bucket_start_ms,
+                    )
+                    if expired is not None:
+                        await self._publisher.emit_expired(expired)
 
     # ── Internal: Flush ──────────────────────────────────────
 
     async def _flush_all(self) -> None:
-        """Force-close all active bars (used during shutdown)."""
+        """Finalize active bars during shutdown without inventing authority."""
         for interval, pipeline in self._pipelines.items():
             for key in list(pipeline.bar_state._active.keys()):
                 exchange, market_type, symbol, bucket_start = key
-                closed = pipeline.bar_state.close_bar(exchange, market_type, symbol, bucket_start)
-                if closed is not None:
-                    await self._publisher.emit_closed(closed)
+                state = pipeline.bar_state.get_active(
+                    exchange,
+                    market_type,
+                    symbol,
+                    bucket_start,
+                )
+                if state is None:
+                    continue
+                event = pipeline.finalizer.flush(state)
+                if event.event_type == BarEventType.CLOSED:
+                    closed = pipeline.bar_state.close_bar(
+                        exchange,
+                        market_type,
+                        symbol,
+                        bucket_start,
+                    )
+                    if closed is not None:
+                        await self._publisher.emit_closed(closed)
+                else:
+                    expired = pipeline.bar_state.expire_bar(
+                        exchange,
+                        market_type,
+                        symbol,
+                        bucket_start,
+                    )
+                    if expired is not None:
+                        await self._publisher.emit_expired(expired)
         logger.info("Flushed all active bars")

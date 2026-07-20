@@ -16,6 +16,7 @@ import type { CrosshairData, MarketSummary } from "../features/market-data/kline
 import type { MarketDisplayData } from "../features/market-data/marketDataView.js";
 import type { SymbolSearchProps } from "../features/symbol-search/SymbolSearch.js";
 import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
+import type { ReplayEntryCapabilityView } from "../features/replay/useReplayEntryCapability.js";
 import { useAdvancedMarketSummary } from "../features/advanced-market-data/useAdvancedMarketSnapshots.js";
 
 export interface TopBarSymbolSearchModel extends Omit<SymbolSearchProps, "onSelect"> {
@@ -38,6 +39,7 @@ export interface TopBarProps {
     displayData: MarketDisplayData | null;
   };
   advancedMarketData: AdvancedMarketRuntimeView;
+  replayEntry: ReplayEntryCapabilityView;
 }
 
 function isCompleteMarketDisplayData(
@@ -50,7 +52,7 @@ function isCompleteMarketDisplayData(
     && typeof value.close === "number";
 }
 
-function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData }: TopBarProps) {
+function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, replayEntry }: TopBarProps) {
   const {
     currentSymbol,
     currentMarketType,
@@ -87,6 +89,29 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData }: T
         <div className="logo-icon">📈</div>
         <span className="logo-text">CandleScope</span>
       </div>
+
+      {replayEntry.state === "enabled" && (
+        <a
+          className="replay-entry-link"
+          data-replay-entry="enabled"
+          href={replayEntry.href}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          K 线回放 ↗
+        </a>
+      )}
+      {(replayEntry.state === "checking" || replayEntry.state === "disabled") && (
+        <button
+          className="replay-entry-link replay-entry-disabled"
+          data-replay-entry={replayEntry.state}
+          type="button"
+          disabled
+          title={replayEntry.reason}
+        >
+          K 线回放 ↗
+        </button>
+      )}
 
       <SymbolSearch
         currentSymbol={currentSymbol}

@@ -119,6 +119,9 @@ class _StreamEntry:
         self.key = key
         self.info = StreamInfo(key=key)
         self.handle: Any = None       # ingestion handle
+        # Shared startup task.  Concurrent ensure_stream() callers for the
+        # same key await this task instead of observing a transient STARTING
+        # status as if startup had completed.
         self.task: asyncio.Task | None = None
         self._last_subscriber_at_ms = int(time.time() * 1000)
 
@@ -272,6 +275,8 @@ class StreamCoordinator:
                 self._streams.pop(key, None)
             else:
                 entry.touch()
+                if entry.info.status is StreamStatus.STARTING:
+                    return await self._wait_for_stream_start(entry)
                 return entry.info
 
         # Auto-start if configured
@@ -283,49 +288,17 @@ class StreamCoordinator:
             base_spec = parse_interval_spec(route.base_interval or "")
             if base_spec is None:  # guarded by resolver
                 raise ValueError(f"invalid resolved realtime base: {route.base_interval!r}")
-            base_info = await self.ensure_stream(
-                symbol,
-                base_spec.canonical,
-                exchange=route.exchange,
-                market_type=route.market_type,
-            )
-            base_key = base_info.key
-
-            # A derived stream has no ingestion handle of its own.  Its
-            # liveness is therefore exactly bounded by the resolved base
-            # stream.  Do not publish a synthetic ACTIVE entry when the base
-            # failed (or ingestion is disabled), otherwise callers can ACK a
-            # stream that can never produce bars.
-            if base_info.status is not StreamStatus.ACTIVE:
-                detail = (
-                    f"base stream {base_key} is {base_info.status.value}"
-                    + (f": {base_info.error}" if base_info.error else "")
-                )
-                return StreamInfo(
-                    key=key,
-                    status=base_info.status,
-                    error=detail,
-                )
-
-            # Create a passive StreamEntry (no WS connection of its own)
             entry = _StreamEntry(key)
-            entry.info.status = StreamStatus.ACTIVE
+            entry.info.status = StreamStatus.STARTING
             entry.info.started_at_ms = int(time.time() * 1000)
             self._streams[key] = entry
-
-            logger.info(
-                "Derived interval %s: aggregating from base stream %s",
-                key, base_key,
+            entry.task = asyncio.create_task(
+                self._start_derived_stream(
+                    entry,
+                    base_interval=base_spec.canonical,
+                )
             )
-
-            # Emit stream-started event
-            if self._bus:
-                await self._bus.emit(DataEvent(
-                    event_type=DataEventType.STREAM_STARTED,
-                    key=key,
-                ))
-
-            return entry.info
+            return await self._wait_for_stream_start(entry)
 
         return await self._start_stream(
             key,
@@ -349,20 +322,28 @@ class StreamCoordinator:
         entry.info.status = StreamStatus.STOPPING
         logger.info("Stopping stream: %s", key)
 
-        # Stop ingestion handle
-        if entry.handle is not None:
-            try:
-                await entry.handle.stop()
-            except Exception as exc:
-                logger.error("Error stopping ingestion for %s: %s", key, exc)
-
-        # Cancel task
-        if entry.task is not None and not entry.task.done():
+        # Quiesce startup before inspecting the handle.  Otherwise a startup
+        # can publish its handle after the first ``None`` check, leaving a
+        # physically running ingestion stream behind an already-popped entry.
+        current_task = asyncio.current_task()
+        if (
+            entry.task is not None
+            and entry.task is not current_task
+            and not entry.task.done()
+        ):
             entry.task.cancel()
             try:
                 await entry.task
             except asyncio.CancelledError:
                 pass
+
+        # Stop any handle that startup published before it completed or while
+        # it was responding to cancellation.
+        if entry.handle is not None:
+            try:
+                await entry.handle.stop()
+            except Exception as exc:
+                logger.error("Error stopping ingestion for %s: %s", key, exc)
 
         entry.info.status = StreamStatus.STOPPED
 
@@ -635,6 +616,93 @@ class StreamCoordinator:
 
     # ── Internal: Stream Start ───────────────────────────────
 
+    @staticmethod
+    async def _wait_for_stream_start(entry: _StreamEntry) -> StreamInfo:
+        """Wait for a shared startup attempt to reach its terminal status."""
+        task = entry.task
+        if task is None:
+            entry.info.status = StreamStatus.ERROR
+            entry.info.error = "stream startup task is missing"
+            return entry.info
+        # A caller cancelling its own ensure must not cancel the shared start
+        # that other concurrent callers are also awaiting.
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
+            # stop_stream() canceled the shared startup task.  It has already
+            # moved the entry out of STARTING, so return that fail-closed
+            # lifecycle state to the waiter.
+        return entry.info
+
+    async def _start_derived_stream(
+        self,
+        entry: _StreamEntry,
+        *,
+        base_interval: str,
+    ) -> None:
+        """Start one passive derived stream after its native base is live."""
+        key = entry.key
+        try:
+            base_info = await self.ensure_stream(
+                key.symbol,
+                base_interval,
+                exchange=key.exchange,
+                market_type=key.market_type,
+            )
+            base_key = base_info.key
+
+            # A derived stream has no ingestion handle of its own.  Its
+            # liveness is therefore exactly bounded by the resolved base
+            # stream.  Do not publish a synthetic ACTIVE entry when the base
+            # failed (or ingestion is disabled), otherwise callers can ACK a
+            # stream that can never produce bars.
+            if base_info.status is not StreamStatus.ACTIVE:
+                entry.info.status = StreamStatus.ERROR
+                entry.info.error = (
+                    f"base stream {base_key} is {base_info.status.value}"
+                    + (f": {base_info.error}" if base_info.error else "")
+                )
+                return
+
+            entry.info.status = StreamStatus.ACTIVE
+            logger.info(
+                "Derived interval %s: aggregating from base stream %s",
+                key, base_key,
+            )
+
+            if self._bus:
+                await self._bus.emit(DataEvent(
+                    event_type=DataEventType.STREAM_STARTED,
+                    key=key,
+                ))
+        except asyncio.CancelledError:
+            if entry.info.status is StreamStatus.STOPPING:
+                raise
+            entry.info.status = StreamStatus.ERROR
+            entry.info.error = "derived stream startup was cancelled"
+        except Exception as exc:
+            entry.info.status = StreamStatus.ERROR
+            entry.info.error = str(exc)
+            logger.error(
+                "Failed to start derived stream %s: %s",
+                key,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            # A failed passive entry has no physical handle and must not remain
+            # discoverable as a stream.  Waiters already hold ``entry`` and
+            # still receive this exact ERROR info after the shared task ends.
+            # The identity guard avoids deleting a newer retry entry.
+            if (
+                entry.info.status is StreamStatus.ERROR
+                and self._streams.get(key) is entry
+            ):
+                self._streams.pop(key, None)
+
     async def _start_stream(
         self,
         key: SeriesKey,
@@ -654,6 +722,19 @@ class StreamCoordinator:
         entry.info.status = StreamStatus.STARTING
         entry.info.started_at_ms = int(time.time() * 1000)
         self._streams[key] = entry
+        entry.task = asyncio.create_task(
+            self._run_stream_start(entry, protocol_interval=protocol_interval)
+        )
+        return await self._wait_for_stream_start(entry)
+
+    async def _run_stream_start(
+        self,
+        entry: _StreamEntry,
+        *,
+        protocol_interval: str | None = None,
+    ) -> None:
+        """Run one physical startup attempt shared by all same-key callers."""
+        key = entry.key
 
         logger.info("Starting stream: %s", key)
 
@@ -693,6 +774,12 @@ class StreamCoordinator:
 
                 handle = await self._ingestion_factory.start(**start_kwargs)
                 entry.handle = handle
+                if entry.info.status is StreamStatus.STOPPING:
+                    # A cancellation-resistant factory may still return a
+                    # handle after stop_stream() removed this entry. Publish
+                    # the handle for stop_stream() to close, but never revive
+                    # the detached stream or emit STREAM_STARTED.
+                    return
                 entry.info.status = StreamStatus.ACTIVE
 
                 # Emit event
@@ -702,6 +789,12 @@ class StreamCoordinator:
                         key=key,
                     ))
 
+            except asyncio.CancelledError:
+                if entry.info.status is StreamStatus.STOPPING:
+                    raise
+                entry.info.status = StreamStatus.ERROR
+                entry.info.error = "stream startup was cancelled"
+                logger.error("Stream startup was cancelled: %s", key)
             except Exception as exc:
                 entry.info.status = StreamStatus.ERROR
                 entry.info.error = str(exc)
@@ -717,8 +810,6 @@ class StreamCoordinator:
             # No ingestion factory — stream is "passive" (manual push only)
             entry.info.status = StreamStatus.ACTIVE
             logger.info("Stream %s started in passive mode (no ingestion factory)", key)
-
-        return entry.info
 
     # ── Internal: Prewarm ────────────────────────────────────
 

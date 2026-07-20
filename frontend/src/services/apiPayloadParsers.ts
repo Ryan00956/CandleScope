@@ -36,6 +36,7 @@ export interface TransportKlineOrderFlow extends JsonRecord {
 
 export interface TransportKlineResponse extends JsonRecord {
   data: TransportKlineBar[];
+  all_rows_final?: boolean;
   has_more?: boolean;
   truncated?: boolean;
   next_end_ms?: number | null;
@@ -255,6 +256,7 @@ export function parseKlineResponse(
     "has_tail_gap",
     "backfill_triggered",
     "verified_contiguous",
+    "all_rows_final",
     "renderable",
   ]) {
     optionalBoolean(record, key, path);

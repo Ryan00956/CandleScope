@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from app.core.config import KLINES_DB_PATH
 from app.core.executors import run_storage
+from app.data_engine.kline_quality import source_rank_sql
 from app.data_engine.history.calendar import (
     AlwaysOpenCalendar,
     CalendarRegistry,
@@ -40,10 +41,11 @@ KlineBarComponents = tuple[
     Any,
     Any,
     Any,
+    Any,
 ]
 _BAR_COMPONENT_PROJECTION = """
     open_time, open, high, low, close, volume,
-    quote_volume, trades, taker_buy_base, taker_buy_quote
+    quote_volume, trades, taker_buy_base, taker_buy_quote, source
 """
 
 
@@ -257,8 +259,11 @@ def upsert_klines(
     ]
 
     with _connect() as conn:
+        incoming_rank_sql = source_rank_sql("excluded.source")
+        stored_rank_sql = source_rank_sql("klines.source")
+        changes_before = conn.total_changes
         conn.executemany(
-            """
+            f"""
             INSERT INTO klines (
                 exchange, market_type, symbol, interval, open_time,
                 close_time, open, high, low, close, volume, quote_volume,
@@ -278,12 +283,14 @@ def upsert_klines(
                 taker_buy_quote = excluded.taker_buy_quote,
                 source = excluded.source,
                 updated_at = excluded.updated_at
+            WHERE {incoming_rank_sql} >= {stored_rank_sql}
             """,
             payload,
         )
+        affected = conn.total_changes - changes_before
         conn.commit()
 
-    return len(rows)
+    return int(affected)
 
 
 def query_klines(
@@ -341,8 +348,9 @@ def query_kline_bar_components(
 
     The resolved series key already owns exchange, market type, symbol, and
     interval.  Durable rows are closed by definition, so copying identity,
-    close-time, and source columns into every Python object only adds SQLite
-    I/O and allocation cost.
+    close-time columns into every Python object only adds SQLite I/O and
+    allocation cost. Source remains in the projection because it determines
+    finality and replacement quality for each durable row.
     """
     where = ["exchange = ?", "market_type = ?", "symbol = ?", "interval = ?"]
     params: list[object] = [exchange, market_type, symbol, interval]

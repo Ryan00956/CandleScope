@@ -1,0 +1,24 @@
+{
+  "schema": "replay-catalog-fixture.v1",
+  "identity": {
+    "exchange": "binance",
+    "market_type": "spot",
+    "symbol": "BTCUSDT"
+  },
+  "start_ms": 1710000000000,
+  "interval": "1m",
+  "interval_ms": 60000,
+  "bar_count": 13,
+  "gap_offsets": [5],
+  "forming_offset": 12,
+  "now_ms": 1710000750000,
+  "warmup_bars": 2,
+  "horizon_ms": 180000,
+  "random_seed": 20260718,
+  "manual_start_offset": 8,
+  "expected": {
+    "catalog_epoch": "sha256:231f555321c4524168ea7e984a1721a60c3250fc9df9c9cd7723fb4b4531080e",
+    "random_start_ms": 1710000480000,
+    "dataset_epoch": "sha256:437fa44c338a66cc00642ac1743fd2210a64dec3d94182a9899bbaca209ed3a0"
+  }
+}

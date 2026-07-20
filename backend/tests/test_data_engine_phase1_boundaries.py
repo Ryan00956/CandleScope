@@ -15,6 +15,7 @@ from app.data_engine.bar_aggregator import (
     BarAggregatorConfig,
     BarEvent,
     BarEventType,
+    BarFinality,
     BarInput,
     BarInputSource,
     BarState,
@@ -39,6 +40,8 @@ from app.data_engine.data_manager.models import (
     QueryResult,
     QuerySource,
     SeriesKey,
+    StreamInfo,
+    StreamStatus,
 )
 from app.data_engine.data_manager.query import QueryEngine
 from app.data_engine.data_manager.retention import RetentionService
@@ -603,13 +606,77 @@ def test_stream_policy_plans_okx_base_stream_without_facade_logic() -> None:
     assert [key.interval for key in plan.prerequisite_streams] == ["1m"]
 
 
+def test_data_manager_failed_start_rolls_back_all_targets_before_best_effort_stops() -> None:
+    async def _run() -> None:
+        dm = DataManager()
+        plan = dm.stream_policy.plan(
+            "BTC-USDT", "45m", exchange="okx", market_type="spot",
+        )
+        stop_calls: list[SeriesKey] = []
+        targets_seen_during_stop: list[list[tuple[str, str, str, str]]] = []
+
+        async def _ensure_stream(symbol, interval, *, exchange, market_type):
+            key = SeriesKey(
+                symbol, interval, exchange=exchange, market_type=market_type,
+            )
+            return StreamInfo(
+                key=key,
+                status=StreamStatus.ERROR,
+                error="injected start failure",
+            )
+
+        async def _stop_stream(symbol, interval, *, exchange, market_type):
+            key = SeriesKey(
+                symbol, interval, exchange=exchange, market_type=market_type,
+            )
+            stop_calls.append(key)
+            targets_seen_during_stop.append(dm.bar_aggregator.get_targets())
+            if key == plan.requested:
+                raise RuntimeError("injected stop failure")
+
+        dm.coordinator.ensure_stream = _ensure_stream  # type: ignore[method-assign]
+        dm.coordinator.stop_stream = _stop_stream  # type: ignore[method-assign]
+
+        try:
+            await dm.ensure_stream(
+                "BTC-USDT",
+                "45m",
+                exchange="okx",
+                market_type="spot",
+                consumer_id="test:rollback",
+            )
+        except RuntimeError as exc:
+            assert "injected start failure" in str(exc)
+        else:
+            raise AssertionError("failed stream start must fail closed")
+
+        expected_keys = list(dm._stream_plan_lease_keys(plan))
+        assert stop_calls == expected_keys
+        assert all(targets == [] for targets in targets_seen_during_stop)
+        assert dm.bar_aggregator.get_targets() == []
+        assert dm._stream_leases == {}
+        assert dm.storage_intents.snapshot()["intent_count"] == 0
+
+    asyncio.run(_run())
+
+
 def test_data_manager_stream_leases_reuse_upstream_until_last_consumer() -> None:
     async def _run() -> None:
+        active_during_physical_stop: list[bool] = []
+
         class _Handle:
             def __init__(self) -> None:
                 self.stopped = 0
 
             async def stop(self) -> None:
+                active_during_physical_stop.append(bool(
+                    dm.bar_aggregator.get_active_bars(
+                        "BTC-USDT",
+                        "1m",
+                        exchange="okx",
+                        market_type="spot",
+                    )
+                ))
                 self.stopped += 1
 
         class _Factory:
@@ -653,6 +720,37 @@ def test_data_manager_stream_leases_reuse_upstream_until_last_consumer() -> None
 
         key = ("okx", "spot", "BTC-USDT", "1m")
         assert factory.starts == [key]
+        closed_events = []
+
+        async def _capture_closed(event) -> None:
+            closed_events.append(event)
+
+        dm.bar_aggregator.publisher.on_bar_closed(_capture_closed)
+        bucket_start_ms = dm.bar_aggregator.compute_bucket(
+            "1m", int(time.time() * 1000),
+        )
+        assert bucket_start_ms is not None
+        await dm.bar_aggregator.ingest_bar_input(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1m",
+            BarInput(
+                symbol="BTC-USDT",
+                source_interval="1m",
+                exchange="okx",
+                market_type="spot",
+                open_time_ms=bucket_start_ms,
+                close_time_ms=bucket_start_ms + 59_999,
+                open=10,
+                high=11,
+                low=9,
+                close=10,
+                volume=1,
+                source=BarInputSource.REALTIME,
+                is_closed=False,
+            ),
+        )
 
         await dm.release_stream(
             "BTC-USDT",
@@ -667,6 +765,13 @@ def test_data_manager_stream_leases_reuse_upstream_until_last_consumer() -> None
             is not None
         )
         assert factory.handles[key].stopped == 0
+        assert dm.bar_aggregator.get_bucket_state(
+            "BTC-USDT",
+            "1m",
+            bucket_start_ms,
+            exchange="okx",
+            market_type="spot",
+        ) is not None
 
         await dm.release_stream(
             "BTC-USDT",
@@ -681,6 +786,15 @@ def test_data_manager_stream_leases_reuse_upstream_until_last_consumer() -> None
             dm.get_stream_info("BTC-USDT", "1m", exchange="okx", market_type="spot")
             is None
         )
+        assert dm.bar_aggregator.get_bucket_state(
+            "BTC-USDT",
+            "1m",
+            bucket_start_ms,
+            exchange="okx",
+            market_type="spot",
+        ) is None
+        assert active_during_physical_stop == [False]
+        assert closed_events == []
 
     asyncio.run(_run())
 
@@ -917,6 +1031,195 @@ def test_stream_coordinator_forwards_real_market_event_to_bar_aggregator() -> No
         await factory.on_market_event(event)
 
         assert aggregator.events == [event]
+
+    asyncio.run(_run())
+
+
+def test_stream_coordinator_singleflights_concurrent_start_to_terminal_status() -> None:
+    async def _run_case(*, fail: bool) -> None:
+        class _Handle:
+            def __init__(self) -> None:
+                self.stop_calls = 0
+
+            async def stop(self) -> None:
+                self.stop_calls += 1
+
+        class _SlowFactory:
+            def __init__(self) -> None:
+                self.start_calls = 0
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.handle = _Handle()
+
+            async def start(
+                self,
+                symbol,
+                interval,
+                on_market_event,
+                exchange="binance",
+                market_type="spot",
+                on_gap=None,
+            ):
+                self.start_calls += 1
+                self.started.set()
+                await self.release.wait()
+                if fail:
+                    raise RuntimeError("injected slow start failure")
+                return self.handle
+
+        factory = _SlowFactory()
+        coord = StreamCoordinator()
+        coord.set_ingestion_factory(factory)
+        coord.set_bar_aggregator(object())
+
+        first = asyncio.create_task(
+            coord.ensure_stream(
+                "BTC-USDT", "1m", exchange="okx", market_type="spot",
+            )
+        )
+        await factory.started.wait()
+        second = asyncio.create_task(
+            coord.ensure_stream(
+                "BTC-USDT", "1m", exchange="okx", market_type="spot",
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert factory.start_calls == 1
+        assert not second.done()
+
+        factory.release.set()
+        first_info, second_info = await asyncio.gather(first, second)
+
+        expected_status = StreamStatus.ERROR if fail else StreamStatus.ACTIVE
+        assert first_info is second_info
+        assert first_info.status is expected_status
+        assert factory.start_calls == 1
+        if fail:
+            assert first_info.error == "injected slow start failure"
+
+        await coord.stop_all()
+        assert factory.handle.stop_calls == (0 if fail else 1)
+
+    async def _run() -> None:
+        await _run_case(fail=False)
+        await _run_case(fail=True)
+
+    asyncio.run(_run())
+
+
+def test_stream_coordinator_concurrent_derived_failure_cleans_passive_entry() -> None:
+    async def _run() -> None:
+        class _SlowFailingFactory:
+            def __init__(self) -> None:
+                self.start_calls = 0
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def start(
+                self,
+                symbol,
+                interval,
+                on_market_event,
+                exchange="binance",
+                market_type="spot",
+                on_gap=None,
+            ):
+                self.start_calls += 1
+                self.started.set()
+                await self.release.wait()
+                raise RuntimeError("injected derived base failure")
+
+        factory = _SlowFailingFactory()
+        coord = StreamCoordinator()
+        coord.set_ingestion_factory(factory)
+        coord.set_bar_aggregator(object())
+
+        first = asyncio.create_task(
+            coord.ensure_stream(
+                "BTC-USDT", "45m", exchange="okx", market_type="spot",
+            )
+        )
+        await factory.started.wait()
+        second = asyncio.create_task(
+            coord.ensure_stream(
+                "BTC-USDT", "45m", exchange="okx", market_type="spot",
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert factory.start_calls == 1
+        assert not second.done()
+
+        factory.release.set()
+        first_info, second_info = await asyncio.gather(first, second)
+
+        assert first_info is second_info
+        assert first_info.status is StreamStatus.ERROR
+        assert "injected derived base failure" in str(first_info.error)
+        assert not coord.has_stream(
+            "BTC-USDT", "45m", exchange="okx", market_type="spot",
+        )
+        assert factory.start_calls == 1
+
+        await coord.stop_all()
+
+    asyncio.run(_run())
+
+
+def test_stream_coordinator_stop_closes_handle_returned_during_start_cancel() -> None:
+    async def _run() -> None:
+        class _Handle:
+            def __init__(self) -> None:
+                self.stop_calls = 0
+
+            async def stop(self) -> None:
+                self.stop_calls += 1
+
+        class _CancellationResistantFactory:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+                self.handle = _Handle()
+
+            async def start(
+                self,
+                symbol,
+                interval,
+                on_market_event,
+                exchange="binance",
+                market_type="spot",
+                on_gap=None,
+            ):
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # Model a third-party factory that completes initialization
+                    # despite cancellation and hands ownership to the caller.
+                    self.cancelled.set()
+                    return self.handle
+
+        factory = _CancellationResistantFactory()
+        coord = StreamCoordinator()
+        coord.set_ingestion_factory(factory)
+        coord.set_bar_aggregator(object())
+
+        ensure_task = asyncio.create_task(
+            coord.ensure_stream(
+                "BTC-USDT", "1m", exchange="okx", market_type="spot",
+            )
+        )
+        await factory.started.wait()
+        await coord.stop_stream(
+            "BTC-USDT", "1m", exchange="okx", market_type="spot",
+        )
+        info = await ensure_task
+
+        assert factory.cancelled.is_set()
+        assert factory.handle.stop_calls == 1
+        assert info.status is StreamStatus.STOPPED
+        assert coord.get_all_streams() == []
 
     asyncio.run(_run())
 
@@ -1315,6 +1618,8 @@ def test_aggregator_bridge_persists_closed_bar_and_preserves_exchange() -> None:
             volume=10,
             exchange="okx",
             market_type="spot",
+            finality=BarFinality.AUTHORITATIVE,
+            close_reason="source_close",
         )
 
         await bridge.on_bar_event(BarEvent(BarEventType.CLOSED, state))
@@ -1322,6 +1627,7 @@ def test_aggregator_bridge_persists_closed_bar_and_preserves_exchange() -> None:
         key = SeriesKey("BTC-USDT", "1m", exchange="okx", market_type="spot")
         assert storage.calls[0]["exchange"] == "okx"
         assert storage.calls[0]["market_type"] == "spot"
+        assert storage.calls[0]["source"] == "data_manager_exchange_closed"
         assert cache.get_latest(key, 1)[0].close == 2
         assert marked == [key]
         await _wait_until(lambda: len(events) == 1)
@@ -1657,7 +1963,15 @@ def test_calendar_backed_two_month_before_expands_through_real_month_end() -> No
 
 def test_high_factor_custom_before_pages_base_rows_instead_of_reporting_capacity_gap() -> None:
     base_bars = [
-        BarData(time=index * 60, open=1, high=2, low=1, close=2, volume=1)
+        BarData(
+            time=index * 60,
+            open=1,
+            high=2,
+            low=1,
+            close=2,
+            volume=1,
+            source="backfill",
+        )
         for index in range(182)
     ]
     calls: list[tuple[int, int]] = []
@@ -1687,6 +2001,11 @@ def test_high_factor_custom_before_pages_base_rows_instead_of_reporting_capacity
             complete=True,
             retryable=False,
             terminal_reason=None if has_more else "source_exhausted",
+            metadata={
+                "all_rows_final": True,
+                "expected_closed_rows": len(page),
+                "untrusted_final_rows": 0,
+            },
         )
 
     service = CustomIntervalQueryService(
@@ -2087,6 +2406,60 @@ def test_bar_aggregator_aggregate_batch_is_isolated() -> None:
         assert states[0].low == 0.5
         assert states[0].close == 2.5
         assert states[0].volume == 6
+
+    asyncio.run(_run())
+
+
+def test_bar_aggregator_authoritative_batch_rejects_partial_component_coverage() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig())
+        only_last_component = [{
+            "open_time": 60_000,
+            "close_time": 119_999,
+            "open": 2,
+            "high": 3,
+            "low": 1,
+            "close": 2.5,
+            "volume": 4,
+        }]
+
+        diagnostic = await agg.aggregate_batch(
+            "BTCUSDT",
+            "2m",
+            "1m",
+            only_last_component,
+        )
+        durable = await agg.aggregate_batch(
+            "BTCUSDT",
+            "2m",
+            "1m",
+            only_last_component,
+            require_authoritative=True,
+        )
+        complete = await agg.aggregate_batch(
+            "BTCUSDT",
+            "2m",
+            "1m",
+            [
+                {
+                    "open_time": 0,
+                    "close_time": 59_999,
+                    "open": 1,
+                    "high": 2,
+                    "low": 0.5,
+                    "close": 1.5,
+                    "volume": 3,
+                },
+                only_last_component[0],
+            ],
+            require_authoritative=True,
+        )
+
+        assert len(diagnostic) == 1
+        assert diagnostic[0].finality == BarFinality.PROVISIONAL
+        assert durable == []
+        assert len(complete) == 1
+        assert complete[0].finality == BarFinality.AUTHORITATIVE
 
     asyncio.run(_run())
 

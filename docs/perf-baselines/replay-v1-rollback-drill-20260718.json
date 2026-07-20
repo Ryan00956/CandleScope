@@ -1,0 +1,259 @@
+{
+  "schema_version": "replay-v1-rollback-drill.v1",
+  "recorded_at": "2026-07-18",
+  "passed": true,
+  "configuration": {
+    "currentCommit": "2bcf3a7eb464cca5f36488e5d920275e9b3c6f44",
+    "baselineCommit": "c9a1ddbfe316c68c91787b69c783baeeb0670a9f",
+    "replayDbRetained": true,
+    "isolatedFixtureRows": 4000
+  },
+  "featureFlagRollback": {
+    "enabled": {
+      "liveBefore": {
+        "interval": "1m",
+        "symbol": "BTCUSDT",
+        "bars": 1,
+        "canvasCount": 7,
+        "prefs": "{\"lastExchange\":\"binance\",\"lastMarketType\":\"spot\",\"lastSymbol\":\"BTCUSDT\",\"lastInterval\":\"1m\"}",
+        "replayEntry": "K 线回放 ↗",
+        "anyReplayEntry": true
+      },
+      "initial": {
+        "connection": "connected",
+        "state": "PAUSED",
+        "sourceSequence": 0,
+        "revision": 0,
+        "stateHash": "sha256:90a0ba4379aed6e8487d30937284d73df879e617add11b1175d80a5352eda1f3",
+        "cursorMs": 946684800000,
+        "bars": 40
+      },
+      "playing": {
+        "connection": "connected",
+        "state": "PLAYING",
+        "sourceSequence": 0,
+        "revision": 3,
+        "stateHash": "sha256:90a0ba4379aed6e8487d30937284d73df879e617add11b1175d80a5352eda1f3",
+        "cursorMs": 946684800000,
+        "bars": 40
+      },
+      "progressed": {
+        "connection": "connected",
+        "state": "PLAYING",
+        "sourceSequence": 1,
+        "revision": 3,
+        "stateHash": "sha256:9d8e3f2cf8f80f547bef3d9458611c07aafef1d6789427720651a3e2b7ad2287",
+        "cursorMs": 946684859999,
+        "bars": 41
+      },
+      "sessionId": "a79d49071d9b451eafb8c78ef1b11ccd",
+      "persisted": {
+        "event_sequence": 8,
+        "revision": 4,
+        "session_id": "a79d49071d9b451eafb8c78ef1b11ccd",
+        "source_sequence": 3,
+        "state": "PAUSED",
+        "state_hash": "sha256:f81bf3766c08870b5f335e8ed39cd444380bc46976d79df0371286d3769b0acd",
+        "status_reason": "shutdown_pause"
+      }
+    },
+    "disabled": {
+      "capabilities": {
+        "protocol": "replay.v1",
+        "enabled": false,
+        "available": false,
+        "reason": "REPLAY_DISABLED",
+        "sources": {
+          "bar": {
+            "enabled": false,
+            "reason": "REPLAY_DISABLED"
+          },
+          "agg_trade": {
+            "enabled": false,
+            "reason": "REPLAY_DISABLED"
+          }
+        },
+        "execution_models": [],
+        "limits": {
+          "max_active_sessions": 8,
+          "max_warmup_bars": 5000,
+          "max_bar_dataset_rows": 100000,
+          "max_horizon_days": 30,
+          "event_buffer_size": 10000,
+          "subscriber_queue": 256
+        },
+        "persistence": {
+          "opened": false,
+          "schema_version": null,
+          "degraded": false,
+          "degraded_reason": null
+        }
+      },
+      "liveAfter": {
+        "interval": "1m",
+        "symbol": "BTCUSDT",
+        "bars": 1500,
+        "canvasCount": 11,
+        "prefs": "{\"lastExchange\":\"binance\",\"lastMarketType\":\"spot\",\"lastSymbol\":\"BTCUSDT\",\"lastInterval\":\"1m\"}",
+        "replayEntry": "",
+        "anyReplayEntry": false
+      },
+      "replayPage": {
+        "error": "REPLAY_DISABLED",
+        "canvasCount": 0,
+        "text": "◀\nCandleScope K 线回放\nREPLAY\n实时行情 ↗\n--\n服务端权威历史时间轴 · --\nREPLAY\nSMA 20 · revealed-only\n本地指标边界\n!\nK 线回放不可用\nREPLAY_DISABLED: K-line replay is unavailable\n此独立页面 fail closed；不会回退到 live 或 mock K 线。\n重试回放能力\n打开实时行情 ↗\nK 线回放 · REPLAY\nERROR\n0 bars\nBAR · EXACT · BAR_CONSERVATIVE\nController: 无\nidle\n无 live feeds · replay.v1"
+      },
+      "transitionRejectedReplaySocketAttempts": 4,
+      "replayStreamsAfterDisabledDocument": 5,
+      "klines": {
+        "count": 10,
+        "source": "cache"
+      },
+      "settings": {
+        "mode": "none"
+      }
+    },
+    "replayDatabase": {
+      "afterGracefulShutdown": {
+        "files": [
+          {
+            "name": "replay.db",
+            "size": 679936,
+            "sha256": "ddf75801fa16a1aebaf1f1163d9df7e820810a70cd7305ad7f33a70ed2a20cdb"
+          },
+          {
+            "name": "replay.db-shm",
+            "size": 32768,
+            "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+          },
+          {
+            "name": "replay.db-wal",
+            "size": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "sha256": "ea0ff27175baa9f75ad13c46349da2efd4794f20e3c5d9cfeaefb9868720867f"
+      },
+      "whileDisabled": {
+        "files": [
+          {
+            "name": "replay.db",
+            "size": 679936,
+            "sha256": "ddf75801fa16a1aebaf1f1163d9df7e820810a70cd7305ad7f33a70ed2a20cdb"
+          },
+          {
+            "name": "replay.db-shm",
+            "size": 32768,
+            "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+          },
+          {
+            "name": "replay.db-wal",
+            "size": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "sha256": "ea0ff27175baa9f75ad13c46349da2efd4794f20e3c5d9cfeaefb9868720867f"
+      },
+      "afterDisabledShutdown": {
+        "files": [
+          {
+            "name": "replay.db",
+            "size": 679936,
+            "sha256": "ddf75801fa16a1aebaf1f1163d9df7e820810a70cd7305ad7f33a70ed2a20cdb"
+          },
+          {
+            "name": "replay.db-shm",
+            "size": 32768,
+            "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+          },
+          {
+            "name": "replay.db-wal",
+            "size": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "sha256": "ea0ff27175baa9f75ad13c46349da2efd4794f20e3c5d9cfeaefb9868720867f"
+      }
+    }
+  },
+  "oldBuildRollback": {
+    "commit": "c9a1ddbfe316c68c91787b69c783baeeb0670a9f",
+    "replayCapabilitiesStatus": 404,
+    "live": {
+      "interval": "1m",
+      "symbol": "BTCUSDT",
+      "bars": 1500,
+      "canvasCount": 7,
+      "prefs": "{\"lastExchange\":\"binance\",\"lastMarketType\":\"spot\",\"lastSymbol\":\"BTCUSDT\",\"lastInterval\":\"1m\"}",
+      "replayEntry": "",
+      "anyReplayEntry": false
+    },
+    "klines": {
+      "count": 10,
+      "source": "cache"
+    },
+    "settings": {
+      "mode": "none"
+    },
+    "replayDatabase": {
+      "whileRunning": {
+        "files": [
+          {
+            "name": "replay.db",
+            "size": 679936,
+            "sha256": "ddf75801fa16a1aebaf1f1163d9df7e820810a70cd7305ad7f33a70ed2a20cdb"
+          },
+          {
+            "name": "replay.db-shm",
+            "size": 32768,
+            "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+          },
+          {
+            "name": "replay.db-wal",
+            "size": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "sha256": "ea0ff27175baa9f75ad13c46349da2efd4794f20e3c5d9cfeaefb9868720867f"
+      },
+      "afterShutdown": {
+        "files": [
+          {
+            "name": "replay.db",
+            "size": 679936,
+            "sha256": "ddf75801fa16a1aebaf1f1163d9df7e820810a70cd7305ad7f33a70ed2a20cdb"
+          },
+          {
+            "name": "replay.db-shm",
+            "size": 32768,
+            "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+          },
+          {
+            "name": "replay.db-wal",
+            "size": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "sha256": "ea0ff27175baa9f75ad13c46349da2efd4794f20e3c5d9cfeaefb9868720867f"
+      }
+    }
+  },
+  "acceptance": {
+    "passed": true,
+    "checks": {
+      "active_session_was_playing": true,
+      "graceful_shutdown_persisted_paused": true,
+      "disabled_capability_closed": true,
+      "disabled_entry_hidden": true,
+      "open_replay_failed_closed": true,
+      "live_identity_preserved": true,
+      "live_data_and_settings_preserved": true,
+      "disabled_restart_preserved_replay_db": true,
+      "old_backend_ignored_replay_route": true,
+      "old_frontend_ignored_replay_entry": true,
+      "old_live_data_and_settings_healthy": true,
+      "old_build_preserved_replay_db": true,
+      "browser_runtime_clean": true
+    }
+  }
+}

@@ -550,10 +550,16 @@ async function main() {
     }
     await waitForValue(replayCdp, `document.querySelector('[data-replay-panel="report"]') !== null`, args.timeoutMs, "training report panel");
     assert(ended.revealed === "false", "session end implicitly revealed actual history", ended);
-    const revealTakeoverVisible = await evaluate(replayCdp, `(() => { const button = document.querySelector('[data-replay-action="takeover-controller"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`);
-    if (revealTakeoverVisible) {
-      await click(replayCdp, '[data-replay-action="takeover-controller"]');
-    }
+    // Ending a session intentionally releases the controller lease. The report
+    // can render from the replay.ended event before the end command's pending
+    // state is cleared, so a one-shot enabled check races that acknowledgement.
+    await waitForValue(
+      replayCdp,
+      `(() => { const button = document.querySelector('[data-replay-action="takeover-controller"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`,
+      args.timeoutMs,
+      "reveal takeover readiness",
+    );
+    await click(replayCdp, '[data-replay-action="takeover-controller"]');
     await waitForValue(replayCdp, `(() => { const button = document.querySelector('[data-replay-action="reveal-history"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "reveal controller readiness");
     await click(replayCdp, '[data-replay-action="reveal-history"]');
     await waitForValue(replayCdp, `document.querySelector('[data-replay-history-revealed="true"]') !== null`, args.timeoutMs, "explicit history reveal");

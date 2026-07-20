@@ -1910,7 +1910,7 @@ def test_session_three_month_before_pages_to_complete_calendar_bucket() -> None:
     )]
 
 
-def test_custom_interval_query_service_uses_bar_aggregator_batch() -> None:
+def test_custom_interval_query_service_uses_one_pure_bulk_aggregation_path() -> None:
     class _Aggregator:
         def __init__(self) -> None:
             self.calls = []
@@ -1984,13 +1984,12 @@ def test_custom_interval_query_service_uses_bar_aggregator_batch() -> None:
         market_type="spot",
     )
 
-    assert aggregator.calls[0]["symbol"] == "BTC-USDT"
-    assert aggregator.calls[0]["target_interval"] == "45m"
-    assert aggregator.calls[0]["source_interval"] == "15m"
-    assert aggregator.calls[0]["bars"][0]["close_time"] == 899_999
-    assert aggregator.calls[0]["exchange"] == "okx"
-    assert result.bars[0].open == 10
-    assert result.bars[0].close == 11
+    assert aggregator.calls == []
+    assert result.bars[0].open == 1
+    assert result.bars[0].high == 4
+    assert result.bars[0].low == 0.5
+    assert result.bars[0].close == 2.5
+    assert result.bars[0].volume == 6
     assert result.bars[0].is_closed is True
 
 

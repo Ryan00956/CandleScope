@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import time
-import asyncio
 import logging
 import threading
 from bisect import bisect_right
 from collections.abc import Callable
+from concurrent.futures import Future
+from dataclasses import replace
 from typing import Any
 
 from app.data_engine.interval_policy import (
@@ -25,7 +26,10 @@ from app.data_engine.interval_policy import (
     row_is_closed,
 )
 from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
-from app.data_engine.history.calendar import expected_bucket_end_ms
+from app.data_engine.history.calendar import (
+    containing_expected_open_ms,
+    expected_bucket_end_ms,
+)
 
 from .cache import BarCache
 from .config import QueryConfig
@@ -37,54 +41,30 @@ CalendarProvider = Callable[[SeriesKey], Any | None]
 logger = logging.getLogger("data_manager.custom_query")
 
 
-def _run_async_blocking(coro):
-    """Run an async helper from sync query code, even inside an active loop."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    result: dict[str, Any] = {}
-
-    def _runner() -> None:
-        try:
-            result["value"] = asyncio.run(coro)
-        except Exception as exc:  # pragma: no cover - re-raised in caller thread
-            result["error"] = exc
-
-    thread = threading.Thread(target=_runner, name="custom-query-aggregate", daemon=True)
-    thread.start()
-    thread.join()
-    if "error" in result:
-        raise result["error"]
-    return result.get("value")
+_MAX_CUSTOM_BASE_PAGES = 32
 
 
 def _bar_data_to_storage_rows(
     bars: list[BarData],
     source_interval: str,
 ) -> list[dict]:
-    """Convert query output bars back into BarAggregator batch input rows."""
+    """Compatibility conversion used by interval-contract tests/tools."""
     source_ms = parse_interval_ms(source_interval) or 60_000
-    rows: list[dict] = []
-    for bar in bars:
-        open_time_ms = bar.time_ms
-        rows.append({
-            "open_time": open_time_ms,
-            "close_time": open_time_ms + source_ms - 1,
-            "open": bar.open,
-            "high": bar.high,
-            "low": bar.low,
-            "close": bar.close,
-            "volume": bar.volume,
-            "quote_volume": bar.quote_volume,
-            "trades": bar.trades,
-            "taker_buy_base": bar.taker_buy_base,
-            "taker_buy_quote": bar.taker_buy_quote,
-            "enhanced_fields": sorted(bar.enhanced_fields),
-            "is_closed": bool(bar.is_closed),
-        })
-    return rows
+    return [{
+        "open_time": bar.time_ms,
+        "close_time": bar.time_ms + source_ms - 1,
+        "open": bar.open,
+        "high": bar.high,
+        "low": bar.low,
+        "close": bar.close,
+        "volume": bar.volume,
+        "quote_volume": bar.quote_volume,
+        "trades": bar.trades,
+        "taker_buy_base": bar.taker_buy_base,
+        "taker_buy_quote": bar.taker_buy_quote,
+        "enhanced_fields": sorted(bar.enhanced_fields),
+        "is_closed": bool(bar.is_closed),
+    } for bar in bars]
 
 
 def _aggregate_rows_to_interval(
@@ -104,7 +84,11 @@ def _aggregate_rows_to_interval(
     if calendar is not None and interval is not None:
         first_ms = min(int(row["time"]) for row in base_rows) * 1000
         last_ms = max(int(row["time"]) for row in base_rows) * 1000
-        first_bucket_ms = calendar.previous_expected_open(first_ms + 1, interval)
+        first_bucket_ms = containing_expected_open_ms(
+            calendar,
+            first_ms,
+            interval,
+        )
         expected_bucket_starts = list(calendar.expected_opens(
             first_bucket_ms if first_bucket_ms is not None else first_ms,
             last_ms,
@@ -261,6 +245,8 @@ class CustomIntervalQueryService:
         config: QueryConfig,
         base_query: BaseQuery,
         base_query_before: BaseQueryBefore | None = None,
+        target_query: BaseQuery | None = None,
+        target_query_before: BaseQueryBefore | None = None,
         calendar_provider: CalendarProvider | None = None,
         bar_aggregator: Any | None = None,
     ) -> None:
@@ -268,11 +254,15 @@ class CustomIntervalQueryService:
         self._cfg = config
         self._base_query = base_query
         self._base_query_before = base_query_before
+        self._target_query = target_query
+        self._target_query_before = target_query_before
         self._calendar_provider = calendar_provider
         self._bar_aggregator = bar_aggregator
+        self._flight_lock = threading.Lock()
+        self._flights: dict[tuple[Any, ...], Future[QueryResult]] = {}
 
     def set_bar_aggregator(self, bar_aggregator: Any | None) -> None:
-        """Set the BarAggregator used for closed custom-bucket aggregation."""
+        """Retain runtime wiring compatibility; reads use the pure bulk reducer."""
         self._bar_aggregator = bar_aggregator
 
     def _calendar_for(self, key: SeriesKey) -> Any | None:
@@ -282,6 +272,177 @@ class CustomIntervalQueryService:
             return self._calendar_provider(key)
         except Exception as exc:
             logger.error("Custom interval calendar resolution failed for %s: %s", key, exc)
+            return None
+
+    @staticmethod
+    def _clone_result(result: QueryResult) -> QueryResult:
+        """Detach mutable response containers before sharing a flight result."""
+        return replace(
+            result,
+            bars=list(result.bars),
+            missing_ranges=[replace(item) for item in result.missing_ranges],
+            metadata=dict(result.metadata),
+            excluded_ranges=[dict(item) for item in result.excluded_ranges],
+        )
+
+    def _run_singleflight(
+        self,
+        identity: tuple[Any, ...],
+        compute: Callable[[], QueryResult],
+    ) -> QueryResult:
+        """Share one synchronous derivation for an identical series/range."""
+        with self._flight_lock:
+            flight = self._flights.get(identity)
+            owner = flight is None
+            if flight is None:
+                flight = Future()
+                self._flights[identity] = flight
+
+        if not owner:
+            return self._clone_result(flight.result())
+
+        try:
+            result = compute()
+        except BaseException as exc:
+            flight.set_exception(exc)
+            raise
+        else:
+            flight.set_result(self._clone_result(result))
+            return result
+        finally:
+            with self._flight_lock:
+                if self._flights.get(identity) is flight:
+                    self._flights.pop(identity, None)
+
+    @staticmethod
+    def _canonical_materialized_bars(
+        bars: list[BarData],
+        *,
+        interval: str,
+        calendar: Any | None,
+    ) -> list[BarData]:
+        """Keep only rows whose timestamps are valid target-bucket opens."""
+        interval_ms = parse_interval_ms(interval)
+        if interval_ms is None or interval_ms <= 0:
+            return []
+        trusted: list[BarData] = []
+        for bar in bars:
+            if calendar is None:
+                expected_open_ms = compute_bucket_start_ms(
+                    bar.time_ms,
+                    interval_ms,
+                    interval=interval,
+                )
+            else:
+                expected_open_ms = containing_expected_open_ms(
+                    calendar,
+                    bar.time_ms,
+                    interval,
+                )
+            if expected_open_ms == bar.time_ms:
+                trusted.append(bar)
+        return trusted
+
+    @staticmethod
+    def _materialized_is_complete(
+        result: QueryResult | None,
+        bars: list[BarData],
+        *,
+        effective_limit: int,
+        explicit_range: bool,
+    ) -> bool:
+        if (
+            result is None
+            or not bars
+            or len(bars) != len(result.bars)
+            or result.missing_ranges
+            or result.retryable
+            or not result.complete
+        ):
+            return False
+        # A materialized range may legitimately contain fewer rows than the
+        # limit when both requested edges are covered.  Count/directional
+        # queries require a full page: a target-storage left edge is not proof
+        # that authoritative base history is exhausted.
+        return explicit_range or len(bars) >= effective_limit
+
+    @staticmethod
+    def _materialized_result(
+        result: QueryResult,
+        bars: list[BarData],
+        *,
+        base_interval: str,
+        factor: int,
+        started_at: float,
+    ) -> QueryResult:
+        cloned = CustomIntervalQueryService._clone_result(result)
+        cloned.bars = list(bars)
+        cloned.total = len(bars)
+        cloned.metadata.update({
+            "elapsed_ms": round((time.monotonic() - started_at) * 1000, 2),
+            "derived_from": base_interval,
+            "aggregation_factor": factor,
+            "target_materialized": True,
+            "target_materialized_rows": len(bars),
+        })
+        return cloned
+
+    def _read_materialized_target(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        start_ms: int | None,
+        end_ms: int | None,
+        limit: int,
+        exchange: str,
+        market_type: str,
+    ) -> QueryResult | None:
+        if self._target_query is None:
+            return None
+        try:
+            return self._target_query(
+                symbol,
+                interval,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=limit,
+                exchange=exchange,
+                market_type=market_type,
+                auto_backfill=False,
+            )
+        except Exception as exc:
+            logger.warning("Materialized custom target read failed for %s: %s", interval, exc)
+            return None
+
+    def _read_materialized_target_before(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        before_ms: int,
+        limit: int,
+        exchange: str,
+        market_type: str,
+    ) -> QueryResult | None:
+        if self._target_query_before is None:
+            return None
+        try:
+            return self._target_query_before(
+                symbol,
+                interval,
+                before_ms,
+                limit,
+                exchange=exchange,
+                market_type=market_type,
+                auto_backfill=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Materialized custom target pagination read failed for %s: %s",
+                interval,
+                exc,
+            )
             return None
 
     def project_base_repair_to_target(
@@ -320,20 +481,11 @@ class CustomIntervalQueryService:
                     interval_ms,
                     interval=target_interval,
                 )
-            candidate = calendar.previous_expected_open(
-                int(component_open_ms) + 1,
-                target_interval,
-            )
-            if candidate is None:
-                return None
-            bucket_end_ms = expected_bucket_end_ms(
+            return containing_expected_open_ms(
                 calendar,
-                candidate,
+                int(component_open_ms),
                 target_interval,
             )
-            if candidate <= component_open_ms < bucket_end_ms:
-                return int(candidate)
-            return None
 
         target_start_ms = _containing_open(int(start_ms))
         target_end_ms = _containing_open(int(end_ms))
@@ -487,10 +639,11 @@ class CustomIntervalQueryService:
                     - 1
                 ) // interval_ms + 1
                 page_capacity = max(page_capacity, span_capacity)
-        max_pages = max(
+        requested_max_pages = max(
             2,
             (page_capacity + self._cfg.max_limit - 1) // self._cfg.max_limit + 4,
         )
+        max_pages = min(requested_max_pages, _MAX_CUSTOM_BASE_PAGES)
         while len(results) < max_pages:
             reached_lower_bound = bool(
                 lower_bound_ms is not None
@@ -543,9 +696,75 @@ class CustomIntervalQueryService:
         bars = sorted(by_time.values(), key=lambda bar: bar.time)
         if lower_bound_ms is not None:
             bars = [bar for bar in bars if bar.time_ms >= lower_bound_ms]
-        return self._merge_base_page_results(results, bars)
+        merged = self._merge_base_page_results(results, bars)
+        still_needs_rows = bool(
+            (
+                lower_bound_ms is not None
+                and (not bars or bars[0].time_ms > lower_bound_ms)
+            )
+            or (lower_bound_ms is None and len(bars) < target_limit)
+        )
+        page_capped = bool(
+            requested_max_pages > max_pages
+            and len(results) >= max_pages
+            and still_needs_rows
+            and results
+            and (
+                results[-1].has_more
+                or results[-1].retryable
+                or bool(results[-1].missing_ranges)
+            )
+        )
+        if page_capped:
+            # This is deliberate pagination, not evidence of missing source
+            # history.  Advertising a synthetic MissingRange here would send
+            # the verifier/backfill path after data that already exists and
+            # recreate the repair storm this budget is meant to prevent.
+            merged.has_more = True
+            merged.metadata["base_pagination_capped"] = True
+            merged.metadata["base_page_limit"] = max_pages
+        return merged
 
     def query_from_base(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        start_ms: int | None,
+        end_ms: int | None,
+        limit: int | None,
+        started_at: float,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        auto_backfill: bool | None = None,
+    ) -> QueryResult:
+        identity = (
+            "range",
+            exchange.strip().lower(),
+            market_type.strip().lower(),
+            symbol.strip().upper(),
+            interval,
+            start_ms,
+            end_ms,
+            limit,
+            auto_backfill,
+        )
+        return self._run_singleflight(
+            identity,
+            lambda: self._query_from_base_impl(
+                symbol=symbol,
+                interval=interval,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=limit,
+                started_at=started_at,
+                exchange=exchange,
+                market_type=market_type,
+                auto_backfill=auto_backfill,
+            ),
+        )
+
+    def _query_from_base_impl(
         self,
         *,
         symbol: str,
@@ -580,6 +799,33 @@ class CustomIntervalQueryService:
         base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
         capacity_factor = _base_capacity_factor(interval, base_interval, factor)
         custom_ms = custom_seconds * 1000
+        materialized_result = self._read_materialized_target(
+            symbol=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=effective_limit,
+            exchange=exchange,
+            market_type=market_type,
+        )
+        materialized_bars = self._canonical_materialized_bars(
+            materialized_result.bars if materialized_result is not None else [],
+            interval=interval,
+            calendar=calendar,
+        )
+        if self._materialized_is_complete(
+            materialized_result,
+            materialized_bars,
+            effective_limit=effective_limit,
+            explicit_range=start_ms is not None or end_ms is not None,
+        ):
+            return self._materialized_result(
+                materialized_result,
+                materialized_bars,
+                base_interval=base_interval,
+                factor=factor,
+                started_at=started_at,
+            )
 
         month_count = parse_monthly_count(interval)
         aligned_start_ms = None
@@ -612,8 +858,9 @@ class CustomIntervalQueryService:
         base_end_ms = end_ms
         if end_ms is not None:
             if calendar is not None:
-                end_bucket_start_ms = calendar.previous_expected_open(
-                    int(end_ms) + 1,
+                end_bucket_start_ms = containing_expected_open_ms(
+                    calendar,
+                    int(end_ms),
                     interval,
                 )
                 if end_bucket_start_ms is not None:
@@ -686,6 +933,17 @@ class CustomIntervalQueryService:
             interval=interval,
             calendar=calendar,
         )
+        if materialized_bars:
+            combined = {bar.time: bar for bar in derived_bars}
+            # A structurally valid target row is the already-materialized
+            # canonical result; prefer it over an on-read rebuild at the same
+            # open (notably for the live/forming tail).
+            combined.update({bar.time: bar for bar in materialized_bars})
+            derived_bars = sorted(combined.values(), key=lambda bar: bar.time)
+            if start_ms is not None:
+                derived_bars = [bar for bar in derived_bars if bar.time_ms >= start_ms]
+            if end_ms is not None:
+                derived_bars = [bar for bar in derived_bars if bar.time_ms <= end_ms]
         derived_total = len(derived_bars)
         if derived_total > effective_limit:
             derived_bars = derived_bars[-effective_limit:]
@@ -700,16 +958,25 @@ class CustomIntervalQueryService:
             or base_result.missing_ranges
             or base_result.retryable
         )
+        result_source = (
+            QuerySource.MIXED
+            if materialized_bars and base_result.bars
+            else materialized_result.source
+            if materialized_bars and materialized_result is not None
+            else base_result.source
+        )
         return QueryResult(
             bars=derived_bars,
             symbol=key.symbol,
             interval=key.interval,
             exchange=key.exchange,
             market_type=key.market_type,
-            source=base_result.source,
+            source=result_source,
             total=len(derived_bars),
             has_more=has_more,
-            cache_hit=base_result.cache_hit,
+            cache_hit=base_result.cache_hit or bool(
+                materialized_result is not None and materialized_result.cache_hit
+            ),
             backfill_triggered=base_result.backfill_triggered,
             has_tail_gap=base_result.has_tail_gap,
             missing_ranges=base_result.missing_ranges,
@@ -720,6 +987,8 @@ class CustomIntervalQueryService:
                 "aggregation_factor": factor,
                 "base_source": base_result.source.value,
                 "omitted_incomplete_aggregates": omitted_incomplete,
+                "target_materialized": False,
+                "target_materialized_rows": len(materialized_bars),
             },
             history_state=base_result.history_state,
             complete=base_result.complete,
@@ -738,6 +1007,39 @@ class CustomIntervalQueryService:
         )
 
     def query_before(
+        self,
+        symbol: str,
+        interval: str,
+        before_ms: int,
+        limit: int,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        auto_backfill: bool | None = None,
+    ) -> QueryResult:
+        identity = (
+            "before",
+            exchange.strip().lower(),
+            market_type.strip().lower(),
+            symbol.strip().upper(),
+            interval,
+            int(before_ms),
+            int(limit),
+            auto_backfill,
+        )
+        return self._run_singleflight(
+            identity,
+            lambda: self._query_before_impl(
+                symbol,
+                interval,
+                before_ms,
+                limit,
+                exchange=exchange,
+                market_type=market_type,
+                auto_backfill=auto_backfill,
+            ),
+        )
+
+    def _query_before_impl(
         self,
         symbol: str,
         interval: str,
@@ -769,11 +1071,38 @@ class CustomIntervalQueryService:
         base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
         capacity_factor = _base_capacity_factor(interval, base_interval, factor)
         custom_ms = custom_seconds * 1000
+        materialized_result = self._read_materialized_target_before(
+            symbol=symbol,
+            interval=interval,
+            before_ms=before_ms,
+            limit=effective_limit,
+            exchange=exchange,
+            market_type=market_type,
+        )
+        materialized_bars = self._canonical_materialized_bars(
+            materialized_result.bars if materialized_result is not None else [],
+            interval=interval,
+            calendar=calendar,
+        )
+        if self._materialized_is_complete(
+            materialized_result,
+            materialized_bars,
+            effective_limit=effective_limit,
+            explicit_range=False,
+        ):
+            return self._materialized_result(
+                materialized_result,
+                materialized_bars,
+                base_interval=base_interval,
+                factor=factor,
+                started_at=started_at,
+            )
 
         month_count = parse_monthly_count(interval)
         if calendar is not None:
-            last_bucket_start_ms = calendar.previous_expected_open(
-                before_ms,
+            last_bucket_start_ms = containing_expected_open_ms(
+                calendar,
+                int(before_ms) - 1,
                 interval,
             )
             if last_bucket_start_ms is None:
@@ -828,6 +1157,13 @@ class CustomIntervalQueryService:
             calendar=calendar,
         )
         derived_bars = [bar for bar in derived_bars if bar.time_ms < before_ms]
+        if materialized_bars:
+            combined = {bar.time: bar for bar in derived_bars}
+            combined.update({bar.time: bar for bar in materialized_bars})
+            derived_bars = sorted(
+                (bar for bar in combined.values() if bar.time_ms < before_ms),
+                key=lambda bar: bar.time,
+            )
         derived_total = len(derived_bars)
         if derived_total > effective_limit:
             derived_bars = derived_bars[-effective_limit:]
@@ -841,16 +1177,25 @@ class CustomIntervalQueryService:
             or base_result.missing_ranges
             or base_result.retryable
         )
+        result_source = (
+            QuerySource.MIXED
+            if materialized_bars and base_result.bars
+            else materialized_result.source
+            if materialized_bars and materialized_result is not None
+            else base_result.source
+        )
         return QueryResult(
             bars=derived_bars,
             symbol=key.symbol,
             interval=key.interval,
             exchange=key.exchange,
             market_type=key.market_type,
-            source=base_result.source,
+            source=result_source,
             total=len(derived_bars),
             has_more=has_more,
-            cache_hit=base_result.cache_hit,
+            cache_hit=base_result.cache_hit or bool(
+                materialized_result is not None and materialized_result.cache_hit
+            ),
             backfill_triggered=base_result.backfill_triggered,
             has_tail_gap=base_result.has_tail_gap,
             missing_ranges=base_result.missing_ranges,
@@ -861,6 +1206,8 @@ class CustomIntervalQueryService:
                 "aggregation_factor": factor,
                 "base_source": base_result.source.value,
                 "omitted_incomplete_aggregates": omitted_incomplete,
+                "target_materialized": False,
+                "target_materialized_rows": len(materialized_bars),
             },
             history_state=base_result.history_state,
             complete=base_result.complete,
@@ -889,7 +1236,7 @@ class CustomIntervalQueryService:
         exchange: str = "binance",
         market_type: str = "spot",
     ) -> list[BarData]:
-        """Aggregate standard-interval bars into a custom interval."""
+        """Aggregate through the canonical pure bulk reducer exactly once."""
         custom_seconds = parse_custom_interval(interval)
         if custom_seconds is None or not base_bars:
             return []
@@ -904,39 +1251,6 @@ class CustomIntervalQueryService:
             source_interval=source_interval,
             calendar=calendar,
         )
-        if self._bar_aggregator is not None and source_interval is not None:
-            canonical_closed = {bar.time: bar.is_closed for bar in result}
-            try:
-                states = _run_async_blocking(self._bar_aggregator.aggregate_batch(
-                    symbol.upper(),
-                    interval,
-                    source_interval,
-                    _bar_data_to_storage_rows(base_bars, source_interval),
-                    exchange=exchange,
-                    market_type=market_type,
-                ))
-            except Exception as exc:
-                logger.warning(
-                    "BarAggregator custom query aggregation failed for %s from %s: %s",
-                    interval,
-                    source_interval,
-                    exc,
-                )
-            else:
-                aggregated = {
-                    int(state.bucket_start_ms) // 1000: BarData.from_bar_state(
-                        state,
-                        is_closed=canonical_closed.get(
-                            int(state.bucket_start_ms) // 1000,
-                        ),
-                    )
-                    for state in states
-                }
-                if aggregated:
-                    result = [
-                        aggregated.get(bar.time, bar)
-                        for bar in result
-                    ]
 
         if start_ms is not None:
             result = [bar for bar in result if bar.time_ms >= start_ms]

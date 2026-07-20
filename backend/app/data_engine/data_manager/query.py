@@ -113,6 +113,8 @@ class QueryEngine:
             config=self._cfg,
             base_query=self.query,
             base_query_before=self.query_before,
+            target_query=self._query_materialized_target,
+            target_query_before=self._query_materialized_target_before,
             calendar_provider=self._calendar_for,
         )
 
@@ -156,6 +158,20 @@ class QueryEngine:
         """Set the BarAggregator used for custom interval read aggregation."""
         self.custom_intervals.set_bar_aggregator(bar_aggregator)
 
+    def _query_materialized_target(self, *args: Any, **kwargs: Any) -> QueryResult:
+        """Read a derived target through the common cache/storage path only."""
+        kwargs["_materialized_only"] = True
+        return self.query(*args, **kwargs)
+
+    def _query_materialized_target_before(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> QueryResult:
+        """Read a derived target page without recursively deriving it."""
+        kwargs["_materialized_only"] = True
+        return self.query_before(*args, **kwargs)
+
     # ── Public: Main Query ───────────────────────────────────
 
     def query(
@@ -168,6 +184,7 @@ class QueryEngine:
         exchange: str = "binance",
         market_type: str = "spot",
         auto_backfill: bool | None = None,
+        _materialized_only: bool = False,
     ) -> QueryResult:
         """Query bars for a (symbol, interval) with flexible parameters.
 
@@ -196,7 +213,7 @@ class QueryEngine:
         self._queries += 1
         allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
 
-        if is_custom_interval(interval):
+        if is_custom_interval(interval) and not _materialized_only:
             return self.custom_intervals.query_from_base(
                 symbol=symbol,
                 interval=interval,
@@ -506,10 +523,11 @@ class QueryEngine:
         exchange: str = "binance",
         market_type: str = "spot",
         auto_backfill: bool | None = None,
+        _materialized_only: bool = False,
     ) -> QueryResult:
         """Query bars strictly before a timestamp (for pagination)."""
         allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
-        if is_custom_interval(interval):
+        if is_custom_interval(interval) and not _materialized_only:
             return self.custom_intervals.query_before(
                 symbol,
                 interval,

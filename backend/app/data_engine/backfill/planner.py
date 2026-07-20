@@ -51,6 +51,7 @@ from app.data_engine.interval_policy import (
     parse_interval_ms,
     parse_monthly_count,
 )
+from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 from .config import BackfillConfig
 from .models import (
     GapInfo,
@@ -194,13 +195,27 @@ class BackfillPlanner:
                 logger.warning("Cannot parse interval '%s', skipping gap", interval)
                 continue
 
-            if is_standard_interval(interval):
-                # Standard interval — direct fetch
+            native_intervals = self._native_intervals_for(
+                gap.exchange,
+                gap.market_type,
+            )
+            can_fetch_target = (
+                interval in native_intervals
+                if native_intervals is not None
+                else is_standard_interval(interval)
+            )
+            if can_fetch_target:
+                # Exchange-native interval — direct fetch.
                 tasks = self._plan_standard_gap(gap, interval_ms)
                 all_tasks.extend(tasks)
             else:
-                # Custom interval — decompose, then plan
-                decomp = self._decompose_interval(interval, interval_ms)
+                # Derived interval (including a globally standard interval the
+                # selected exchange does not expose) — fetch native components.
+                decomp = self._decompose_interval(
+                    interval,
+                    interval_ms,
+                    allowed_intervals=native_intervals,
+                )
                 decompositions.append(decomp)
                 if interval not in custom_intervals:
                     custom_intervals.append(interval)
@@ -238,6 +253,35 @@ class BackfillPlanner:
             len(gaps), len(all_tasks), total_bars, total_requests,
         )
         return plan
+
+    @staticmethod
+    def _native_intervals_for(
+        exchange: str,
+        market_type: str,
+    ) -> set[str] | None:
+        """Resolve the exchange/market K-line intervals safe for REST history."""
+        try:
+            bootstrap_default_adapters()
+            capabilities = get_exchange_registry().get_capabilities(exchange)
+        except (KeyError, RuntimeError, ValueError):
+            return None
+
+        channel_resolver = getattr(capabilities, "channel_capability", None)
+        if callable(channel_resolver):
+            try:
+                channel = channel_resolver("kline", market_type)
+            except (TypeError, ValueError):
+                channel = None
+            params = getattr(channel, "params", None)
+            if isinstance(params, dict):
+                declared = params.get("interval")
+                if isinstance(declared, (list, tuple, set)) and declared:
+                    return {str(value) for value in declared}
+
+        declared = getattr(capabilities, "native_intervals", None)
+        if isinstance(declared, (list, tuple, set)) and declared:
+            return {str(value) for value in declared}
+        return None
 
     # ── Internal: Standard gap planning ──────────────────────
 
@@ -343,7 +387,11 @@ class BackfillPlanner:
     # ── Internal: Interval decomposition ─────────────────────
 
     def _decompose_interval(
-        self, interval: str, duration_ms: int,
+        self,
+        interval: str,
+        duration_ms: int,
+        *,
+        allowed_intervals: set[str] | None = None,
     ) -> IntervalDecomposition:
         """Decompose a custom interval into standard interval components.
 
@@ -361,7 +409,9 @@ class BackfillPlanner:
         #    per bucket, so we estimate conservatively (31 days × months).
         import re
         _monthly_match = re.match(r"^(\d+)M$", interval)
-        if _monthly_match:
+        if _monthly_match and (
+            allowed_intervals is None or "1d" in allowed_intervals
+        ):
             month_count = int(_monthly_match.group(1))
             # Conservative estimate: 31 days per month
             estimated_days = month_count * 31
@@ -387,21 +437,8 @@ class BackfillPlanner:
         # 1. Check pre-registered mappings
         if interval in self._interval_mappings:
             components = self._interval_mappings[interval]
-            logger.debug("Using pre-registered mapping for %s", interval)
-            return IntervalDecomposition(
-                custom_interval=interval,
-                custom_duration_ms=duration_ms,
-                components=components,
-                is_standard=False,
-                alignment_mode=alignment_mode,
-                alignment_epoch_ms=self._cfg.alignment_epoch_ms,
-            )
-
-        # 2. Check user-supplied function
-        if self._custom_decomposition_fn is not None:
-            try:
-                components = self._custom_decomposition_fn(interval, duration_ms)
-                logger.debug("Using custom decomposition function for %s", interval)
+            if self._components_are_allowed(components, allowed_intervals):
+                logger.debug("Using pre-registered mapping for %s", interval)
                 return IntervalDecomposition(
                     custom_interval=interval,
                     custom_duration_ms=duration_ms,
@@ -409,6 +446,30 @@ class BackfillPlanner:
                     is_standard=False,
                     alignment_mode=alignment_mode,
                     alignment_epoch_ms=self._cfg.alignment_epoch_ms,
+                )
+            logger.warning(
+                "Ignoring mapping for %s because it contains non-native intervals",
+                interval,
+            )
+
+        # 2. Check user-supplied function
+        if self._custom_decomposition_fn is not None:
+            try:
+                components = self._custom_decomposition_fn(interval, duration_ms)
+                if self._components_are_allowed(components, allowed_intervals):
+                    logger.debug("Using custom decomposition function for %s", interval)
+                    return IntervalDecomposition(
+                        custom_interval=interval,
+                        custom_duration_ms=duration_ms,
+                        components=components,
+                        is_standard=False,
+                        alignment_mode=alignment_mode,
+                        alignment_epoch_ms=self._cfg.alignment_epoch_ms,
+                    )
+                logger.warning(
+                    "Custom decomposition for %s contains non-native intervals; "
+                    "falling back to algorithmic",
+                    interval,
                 )
             except Exception as exc:
                 logger.warning(
@@ -419,14 +480,14 @@ class BackfillPlanner:
         # 3. Algorithmic decomposition
         strategy = self._cfg.decomposition_strategy
         if strategy == DecompStrategy.GREEDY_DESCENDING.value:
-            components = self._decompose_greedy(duration_ms)
+            components = self._decompose_greedy(duration_ms, allowed_intervals)
         elif strategy == DecompStrategy.MIN_REQUESTS.value:
-            components = self._decompose_min_requests(duration_ms)
+            components = self._decompose_min_requests(duration_ms, allowed_intervals)
         elif strategy == DecompStrategy.SINGLE_BASE.value:
-            components = self._decompose_single_base(duration_ms)
+            components = self._decompose_single_base(duration_ms, allowed_intervals)
         else:
             logger.warning("Unknown strategy '%s', using greedy", strategy)
-            components = self._decompose_greedy(duration_ms)
+            components = self._decompose_greedy(duration_ms, allowed_intervals)
 
         self._metrics.inc("decompositions_computed")
 
@@ -438,7 +499,10 @@ class BackfillPlanner:
         # BarAggregator model much better.
         distinct_intervals = {c.interval for c in components}
         if len(distinct_intervals) > 1:
-            single_interval_components = self._decompose_min_requests(duration_ms)
+            single_interval_components = self._decompose_min_requests(
+                duration_ms,
+                allowed_intervals,
+            )
             logger.warning(
                 "Mixed decomposition for %s is lossy (%s); falling back to "
                 "single-source decomposition %s",
@@ -463,7 +527,32 @@ class BackfillPlanner:
             alignment_epoch_ms=self._cfg.alignment_epoch_ms,
         )
 
-    def _decompose_greedy(self, duration_ms: int) -> list[IntervalComponent]:
+    @staticmethod
+    def _components_are_allowed(
+        components: list[IntervalComponent],
+        allowed_intervals: set[str] | None,
+    ) -> bool:
+        return bool(components) and (
+            allowed_intervals is None
+            or all(component.interval in allowed_intervals for component in components)
+        )
+
+    def _standard_candidates(
+        self,
+        allowed_intervals: set[str] | None,
+    ) -> list[tuple[str, int]]:
+        if allowed_intervals is None:
+            return self._standard_sorted_desc
+        return [
+            item for item in self._standard_sorted_desc
+            if item[0] in allowed_intervals
+        ]
+
+    def _decompose_greedy(
+        self,
+        duration_ms: int,
+        allowed_intervals: set[str] | None = None,
+    ) -> list[IntervalComponent]:
         """Greedy descending decomposition.
 
         Use the largest standard interval that fits, then fill the
@@ -479,7 +568,7 @@ class BackfillPlanner:
         remaining = duration_ms
         max_components = self._cfg.max_decomposition_components
 
-        for iv_str, iv_ms in self._standard_sorted_desc:
+        for iv_str, iv_ms in self._standard_candidates(allowed_intervals):
             if len(components) >= max_components:
                 break
             if iv_ms > remaining:
@@ -503,7 +592,11 @@ class BackfillPlanner:
 
         return components
 
-    def _decompose_min_requests(self, duration_ms: int) -> list[IntervalComponent]:
+    def _decompose_min_requests(
+        self,
+        duration_ms: int,
+        allowed_intervals: set[str] | None = None,
+    ) -> list[IntervalComponent]:
         """Pick the single standard interval that minimizes total REST pages.
 
         For a gap of N custom buckets, each bucket needs ``duration_ms / iv_ms``
@@ -517,7 +610,7 @@ class BackfillPlanner:
         best_pages = float("inf")
         best_ms = 0
 
-        for iv_str, iv_ms in self._standard_sorted_desc:
+        for iv_str, iv_ms in self._standard_candidates(allowed_intervals):
             if iv_ms > duration_ms:
                 continue
             if duration_ms % iv_ms != 0:
@@ -541,14 +634,19 @@ class BackfillPlanner:
         # Fallback to greedy
         logger.debug("min_requests: no single interval divides evenly, "
                       "falling back to greedy")
-        return self._decompose_greedy(duration_ms)
+        return self._decompose_greedy(duration_ms, allowed_intervals)
 
-    def _decompose_single_base(self, duration_ms: int) -> list[IntervalComponent]:
+    def _decompose_single_base(
+        self,
+        duration_ms: int,
+        allowed_intervals: set[str] | None = None,
+    ) -> list[IntervalComponent]:
         """Use the smallest standard interval that divides the custom duration.
 
         Simple but potentially many bars.
         """
-        for iv_str, iv_ms in reversed(self._standard_sorted_desc):
+        candidates = self._standard_candidates(allowed_intervals)
+        for iv_str, iv_ms in reversed(candidates):
             if iv_ms > duration_ms:
                 continue
             if duration_ms % iv_ms == 0:
@@ -560,7 +658,7 @@ class BackfillPlanner:
                 )]
 
         # Last resort: use 1s or 1m
-        fallback = self._standard_sorted_desc[-1] if self._standard_sorted_desc else ("1m", 60_000)
+        fallback = candidates[-1] if candidates else ("1m", 60_000)
         iv_str, iv_ms = fallback
         count = duration_ms // iv_ms
         if count == 0:

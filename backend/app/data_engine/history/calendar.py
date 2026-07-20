@@ -101,6 +101,42 @@ def expected_bucket_end_ms(
     return resolved if resolved > int(open_ms) else natural_end_ms
 
 
+def containing_expected_open_ms(
+    calendar: TradingCalendar,
+    timestamp_ms: int,
+    interval: str,
+) -> int | None:
+    """Return the canonical expected open containing ``timestamp_ms``.
+
+    ``previous_expected_open`` is a strict stepping primitive: callers must
+    pass an already-canonical open.  Applying it to an arbitrary timestamp
+    (for example ``component_open + 1``) preserves that arbitrary offset on an
+    always-open calendar and can manufacture opens ending in ``...001``.  The
+    bounded range contract canonicalises the candidate first, while the bucket
+    end check keeps session closures fail-closed.
+    """
+    timestamp_ms = int(timestamp_ms)
+    width_ms = _interval_width_ms(interval)
+    search_start_ms = max(
+        0,
+        timestamp_ms - min(_SEARCH_HORIZON_MS, max(width_ms * 2, _DAY_MS)),
+    )
+    candidate = calendar.last_expected_open(
+        search_start_ms,
+        timestamp_ms,
+        interval,
+    )
+    if candidate is None:
+        return None
+    candidate = int(candidate)
+    if (
+        candidate <= timestamp_ms
+        and timestamp_ms < expected_bucket_end_ms(calendar, candidate, interval)
+    ):
+        return candidate
+    return None
+
+
 def latest_closed_expected_open_ms(
     calendar: TradingCalendar,
     now_ms: int,

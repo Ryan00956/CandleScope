@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { fetchLatestKlines, getMultiStreamUrl } from "../../services/api.js";
-import { isJsonRecord, parseKlineBar } from "../../services/apiPayloadParsers.js";
+import { fetchLatestKlines } from "../../services/api.js";
 import type { TransportKlineBar } from "../../services/apiPayloadParsers.js";
 import { symbolKey } from "../../utils/symbolKey.js";
 import { toEpochSeconds } from "../market-data/marketDataTypes.js";
@@ -11,20 +10,18 @@ import {
   buildWatchlistFullCacheTargets,
 } from "./watchlistFullCachePolicy.js";
 import {
-  ensureFullCacheEntry,
   markFullCacheError,
   mergeFullCacheRows,
-  patchFullCacheRealtimeKline,
   setFullCacheEntryStatus,
+  WATCHLIST_FULL_CACHE_MIN_RETAINED_BARS,
 } from "./watchlistFullCacheStore.js";
+import { createWatchlistFullCacheSocketManager } from "./watchlistFullCacheSocketManager.js";
 import type {
-  FullCacheSocketTarget,
-  FullCacheStatus,
   FullCacheTarget,
   FullCacheTargetOptions,
 } from "./watchlistFullCacheTypes.js";
 
-const PRELOAD_LIMIT = 500;
+const PRELOAD_LIMIT = WATCHLIST_FULL_CACHE_MIN_RETAINED_BARS;
 const MAX_PRELOAD_JOBS = 16;
 const MAX_PRELOAD_CONCURRENCY = 2;
 
@@ -36,70 +33,11 @@ export interface WatchlistFullCacheRuntime {
   targets: FullCacheTarget[];
 }
 
-function markTargetStatus(target: FullCacheSocketTarget, status: FullCacheStatus): void {
-  target.intervals.forEach((interval) => {
-    setFullCacheEntryStatus(target.symbolKey, interval, status);
-  });
-}
-
-function closeAllSockets(sockets: Map<string, WebSocket>): void {
-  for (const socket of sockets.values()) {
-    try { socket.close(); } catch { /* ignore */ }
-  }
-  sockets.clear();
-}
-
-function parseSocketKline(value: unknown): KlineBar | null {
-  const parsed = parseKlineBar(value, "watchlist-full-cache.websocket.data");
-  const time = toEpochSeconds(parsed.time);
-  return time == null ? null : { ...parsed, time };
-}
-
 function normalizeHttpRows(rows: TransportKlineBar[]): KlineBar[] {
   return rows.flatMap((row) => {
     const time = toEpochSeconds(row.time);
     return time == null ? [] : [{ ...row, time }];
   });
-}
-
-function attachSocketHandlers(
-  socket: WebSocket,
-  target: FullCacheSocketTarget,
-  sockets: Map<string, WebSocket>,
-): void {
-  socket.onopen = () => {
-    socket.send(JSON.stringify({ action: "subscribe", intervals: target.intervals }));
-    markTargetStatus(target, "live");
-  };
-
-  socket.onmessage = (event) => {
-    try {
-      if (event.data === "pong") return;
-      const message: unknown = JSON.parse(String(event.data));
-      if (!isJsonRecord(message)
-        || message.type !== "kline"
-        || !message.data
-        || typeof message.interval !== "string") return;
-      const tick = parseSocketKline(message.data);
-      if (!tick) return;
-      patchFullCacheRealtimeKline(target.symbolKey, message.interval, tick, {
-        source: "ws",
-      });
-    } catch (error) {
-      target.intervals.forEach((interval) => markFullCacheError(target.symbolKey, interval, error));
-    }
-  };
-
-  socket.onerror = () => {
-    target.intervals.forEach((interval) => setFullCacheEntryStatus(target.symbolKey, interval, "error"));
-  };
-
-  socket.onclose = () => {
-    markTargetStatus(target, "stale");
-    if (sockets.get(target.symbolKey) === socket) {
-      sockets.delete(target.symbolKey);
-    }
-  };
 }
 
 export function useWatchlistFullCacheRuntime({
@@ -111,7 +49,9 @@ export function useWatchlistFullCacheRuntime({
   currentSession = {},
   enabled = true,
 }: UseWatchlistFullCacheRuntimeOptions = {}): WatchlistFullCacheRuntime {
-  const socketsRef = useRef<Map<string, WebSocket>>(new Map());
+  const socketManagerRef = useRef<ReturnType<typeof createWatchlistFullCacheSocketManager> | null>(
+    null,
+  );
   const {
     symbol: currentSymbol,
     exchange: currentExchange,
@@ -179,53 +119,16 @@ export function useWatchlistFullCacheRuntime({
   );
 
   useEffect(() => {
-    const sockets = socketsRef.current;
-    return () => closeAllSockets(sockets);
+    const manager = createWatchlistFullCacheSocketManager();
+    socketManagerRef.current = manager;
+    return () => {
+      manager.dispose();
+      if (socketManagerRef.current === manager) socketManagerRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
-    const sockets = socketsRef.current;
-    if (!enabled) {
-      closeAllSockets(sockets);
-      return undefined;
-    }
-
-    const activeSymbolKeys = new Set(socketTargets.map((target) => target.symbolKey));
-
-    for (const [symbolKeyValue, socket] of sockets.entries()) {
-      if (!activeSymbolKeys.has(symbolKeyValue)) {
-        try { socket.close(); } catch { /* ignore */ }
-        sockets.delete(symbolKeyValue);
-      }
-    }
-
-    for (const target of socketTargets) {
-      target.intervals.forEach((interval) => {
-        ensureFullCacheEntry(target.symbolKey, interval);
-      });
-
-      if (sockets.has(target.symbolKey)) {
-        const socket = sockets.get(target.symbolKey);
-        if (socket) attachSocketHandlers(socket, target, sockets);
-        if (socket?.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ action: "subscribe", intervals: target.intervals }));
-        }
-        continue;
-      }
-
-      let socket: WebSocket;
-      try {
-        socket = new WebSocket(getMultiStreamUrl(target.symbol, target.marketType, target.exchange));
-      } catch (error) {
-        target.intervals.forEach((interval) => markFullCacheError(target.symbolKey, interval, error));
-        continue;
-      }
-
-      sockets.set(target.symbolKey, socket);
-      attachSocketHandlers(socket, target, sockets);
-    }
-
-    return undefined;
+    socketManagerRef.current?.syncTargets(socketTargets, enabled);
   }, [enabled, socketTargets]);
 
   useEffect(() => {

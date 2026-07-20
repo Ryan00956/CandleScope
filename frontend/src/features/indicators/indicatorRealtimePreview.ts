@@ -89,7 +89,8 @@ export function applyRealtimeIndicatorValuesToLines({
     candleUpColor,
   );
   const isSingleLine = targetLines.length === 1 && Object.keys(values).length === 1;
-  return targetLines.map((line) => {
+  let changed = targetLines !== lines;
+  const nextLines = targetLines.map((line) => {
     const value = resolveWsValue(line, values, isSingleLine);
     if (value === undefined) return line;
     const point: IndicatorValuePoint = { time: barTime, value: Number(value) };
@@ -102,8 +103,89 @@ export function applyRealtimeIndicatorValuesToLines({
       value,
     });
     if (line.type === "histogram" && histogramColor) point.color = histogramColor;
-    return { ...line, data: upsertLinePoint(line.data, point) };
+    const previousLastTime = line.data.at(-1)?.time;
+    const data = upsertLinePoint(line.data, point);
+    if (data === line.data) return line;
+    changed = true;
+    const renderUpdate: "tail" | "full" = Number.isFinite(point.value)
+      && (previousLastTime === undefined || barTime >= previousLastTime)
+      ? "tail"
+      : "full";
+    return {
+      ...line,
+      data,
+      renderUpdate,
+    };
   });
+  return changed ? nextLines : lines;
+}
+
+export interface ContextualProvisionalIndicatorPreview {
+  contextKey: string;
+  indicatorConfigSignature: string;
+  preview: ProvisionalIndicatorPreview;
+}
+
+export function currentContextualProvisionalIndicatorPreview(
+  candidate: ContextualProvisionalIndicatorPreview | null | undefined,
+  contextKey: string,
+  indicatorConfigSignature: string,
+): ContextualProvisionalIndicatorPreview | null {
+  return candidate?.contextKey === contextKey
+    && candidate.indicatorConfigSignature === indicatorConfigSignature
+    ? candidate
+    : null;
+}
+
+export interface StageContextualProvisionalIndicatorPreviewOptions {
+  currentContextKey: string;
+  currentIndicatorConfigSignature: string;
+  incomingIndicatorConfigSignature: string;
+  indicatorId: string;
+  isFinal: boolean;
+  preview: ProvisionalIndicatorPreview;
+  previews: Map<string, ContextualProvisionalIndicatorPreview>;
+}
+
+/**
+ * Keeps the synchronous provisional map behind the same configuration
+ * boundary as the frame batch. Values without the current wire configuration
+ * identity are rejected synchronously; the batcher independently guards the
+ * later race where the configuration changes after a valid value was queued.
+ */
+export function stageContextualProvisionalIndicatorPreview({
+  currentContextKey,
+  currentIndicatorConfigSignature,
+  incomingIndicatorConfigSignature,
+  indicatorId,
+  isFinal,
+  preview,
+  previews,
+}: StageContextualProvisionalIndicatorPreviewOptions): boolean {
+  const candidate = previews.get(indicatorId);
+  const current = currentContextualProvisionalIndicatorPreview(
+    candidate,
+    currentContextKey,
+    currentIndicatorConfigSignature,
+  );
+  if (candidate && !current) previews.delete(indicatorId);
+
+  if (incomingIndicatorConfigSignature !== currentIndicatorConfigSignature) {
+    return false;
+  }
+  if (!isFinal) {
+    if (current && preview.barTime < current.preview.barTime) return false;
+    previews.set(indicatorId, {
+      contextKey: currentContextKey,
+      indicatorConfigSignature: incomingIndicatorConfigSignature,
+      preview,
+    });
+    return true;
+  }
+  if (current && preview.barTime >= current.preview.barTime) {
+    previews.delete(indicatorId);
+  }
+  return true;
 }
 
 function hasPointAt(lines: IndicatorLine[], time: number): boolean {

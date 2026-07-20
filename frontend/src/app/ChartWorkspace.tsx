@@ -11,6 +11,8 @@ import type { OrderBookRuntime } from "../features/order-book/orderBookTypes.js"
 import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
 import { useAdvancedMarketPanes } from "../features/advanced-market-data/useAdvancedMarketPanes.js";
 import MarketWorkspaceFrame from "./MarketWorkspaceFrame.js";
+import { useTradeFlowPanes } from "../features/trade-flow/useTradeFlowPanes.js";
+import type { TradeFlowRuntime } from "../features/trade-flow/tradeFlowTypes.js";
 
 const ExportPanel = React.lazy(() => import("../features/export/ExportPanel"));
 const DrawingToolbar = React.lazy(() => import("../features/drawings/DrawingToolbar"));
@@ -29,6 +31,7 @@ export interface ChartWorkspaceProps {
   chart: ChartWorkspaceChartModel;
   watchlist: WatchlistSidebarProps;
   orderBook: OrderBookRuntime;
+  tradeFlow: TradeFlowRuntime;
   errorBoundary?: ComponentType<PropsWithChildren>;
 }
 
@@ -38,17 +41,21 @@ function ChartWorkspace({
   chart,
   watchlist,
   orderBook,
+  tradeFlow,
   errorBoundary = ChartErrorBoundary,
 }: ChartWorkspaceProps) {
   const Boundary = errorBoundary;
   const advancedPanes = useAdvancedMarketPanes(chart.advancedMarketData);
+  const tradeFlowPanes = useTradeFlowPanes(tradeFlow, chart.chartProps.seriesStore);
   const chartProps = React.useMemo(() => ({
     ...chart.chartProps,
+    externalMarkerSource: tradeFlow.view.markerSource,
     subPanes: [
+      ...tradeFlowPanes,
       ...advancedPanes,
       ...(chart.chartProps.subPanes || []),
     ],
-  }), [advancedPanes, chart.chartProps]);
+  }), [advancedPanes, chart.chartProps, tradeFlow.view.markerSource, tradeFlowPanes]);
 
   const chartNode = chart.error ? (
           <div className="chart-area">
@@ -97,7 +104,7 @@ function ChartWorkspace({
             />
           )}
         >
-          <RightMarketRail watchlist={watchlist} orderBook={orderBook} />
+          <RightMarketRail watchlist={watchlist} orderBook={orderBook} tradeFlow={tradeFlow} />
         </React.Suspense>
       )}
     />

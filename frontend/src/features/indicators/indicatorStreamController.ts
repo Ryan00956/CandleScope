@@ -14,6 +14,10 @@ import {
   type IndicatorStreamSubscription,
 } from "./indicatorStreamConnection.js";
 import { formatIndicatorError } from "./indicatorPayloadRuntime.js";
+import {
+  buildCurrentHostedIndicatorSignatures,
+  isCurrentHostedIndicatorMessage,
+} from "./indicatorStreamIdentity.js";
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type {
@@ -218,6 +222,43 @@ export function useIndicatorStreamController({
   const chartHistoryFirstTime = chartDataMeta?.firstTime ?? chartData?.[0]?.time ?? null;
   const chartDataVersion = chartDataMeta?.version ?? 0;
   const chartDataStatus = chartDataMeta?.status || "idle";
+  const currentHostedSignatureKey = JSON.stringify([
+    exchange,
+    marketType,
+    symbol,
+    interval,
+    candleUpColor,
+    candleDownColor,
+    indicatorWsSignature,
+  ]);
+  const currentHostedSignaturesRef = useRef<ReadonlyMap<string, string> | null>(null);
+  if (currentHostedSignaturesRef.current === null) {
+    // React permits deterministic lazy ref initialization during render. Keep
+    // line hydration/realtime output renders from rebuilding JSON identities;
+    // later semantic changes publish only from the committed layout effect.
+    currentHostedSignaturesRef.current = buildCurrentHostedIndicatorSignatures(
+      activeIndicators,
+      { candleDownColor, candleUpColor, exchange, interval, marketType, symbol },
+    );
+  }
+  const currentHostedSignatureKeyRef = useRef(currentHostedSignatureKey);
+  useLayoutEffect(() => {
+    if (currentHostedSignatureKeyRef.current === currentHostedSignatureKey) return;
+    currentHostedSignaturesRef.current = buildCurrentHostedIndicatorSignatures(
+      activeIndicators,
+      { candleDownColor, candleUpColor, exchange, interval, marketType, symbol },
+    );
+    currentHostedSignatureKeyRef.current = currentHostedSignatureKey;
+  }, [
+    activeIndicators,
+    candleDownColor,
+    candleUpColor,
+    currentHostedSignatureKey,
+    exchange,
+    interval,
+    marketType,
+    symbol,
+  ]);
 
   const syncHostedSubscriptions = useCallback((force = false): boolean => {
     const connection = connectionRef.current;
@@ -272,7 +313,13 @@ export function useIndicatorStreamController({
       onError: (error) => {
         console.warn("Indicator WS connection recovery:", error);
       },
-      onMessage: (message, { wsGeneration }) => {
+      onMessage: (message, { subscriptionSignature, wsGeneration }) => {
+        const currentSignatures = currentHostedSignaturesRef.current;
+        if (!currentSignatures || !isCurrentHostedIndicatorMessage(
+          message,
+          subscriptionSignature,
+          currentSignatures,
+        )) return;
         const handlers = handlerRefs.current;
         dispatchIndicatorWsMessage(message, {
           onSnapshot: (indicatorId, payload) => {
@@ -314,7 +361,7 @@ export function useIndicatorStreamController({
               formatIndicatorError(payload, "Indicator WS error"),
             );
           },
-        });
+        }, subscriptionSignature);
       },
       onParseError: (error) => {
         console.warn("Indicator WS message parse failed:", error);

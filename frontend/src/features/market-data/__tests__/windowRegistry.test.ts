@@ -31,6 +31,9 @@ test("registry creates, returns, and evicts stores", () => {
   assert.equal(registry.has(key), true);
   assert.deepEqual(store.snapshot().map((row) => row.time), [2, 3, 4]);
   assert.equal(registry.meta(key).symbol, "BTCUSDT");
+  const firstMetaRevision = Number(registry.meta(key).metaRevision);
+  registry.touchMeta(key, { source: "cache-hit" });
+  assert.equal(registry.meta(key).metaRevision, firstMetaRevision + 1);
 
   const evicted = mustBeDefined(registry.evict(key));
   assert.equal(evicted.key, key);

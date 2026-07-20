@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
 
+import {
+  DEVICE_METRICS_DPR_EPSILON,
+  devicePixelRatioMatches,
+} from "./drawing-device-metrics.mjs";
+
 const DEDICATED_SCHEMA_VERSION = "drawing-rollback-drill/v2";
 const PHASE6_SCHEMA_VERSION = "drawing-engine-v2-perf/v1";
 const DRAWING_WORKER_SCHEMA_VERSION = 1;
 const DRAWING_DOCUMENT_RECORD_SCHEMA_VERSION = 1;
 const DRAWING_DOCUMENT_MANIFEST_SCHEMA_VERSION = 1;
 const DRAWING_DOCUMENT_DATABASE_NAME = "candlescope-drawings-v2";
-const DEVICE_METRICS_DPR_EPSILON = 0.001;
 const DEVICE_METRICS_CSS_EPSILON = 0.01;
 const DEVICE_METRICS_BACKING_PIXEL_EPSILON = 1;
 const NATIVE_RECEIPT_CLOCK_SKEW_MS = 2;
@@ -3172,7 +3176,7 @@ function validPhase6BackpressureRun(run, configuredDpr) {
     && run?.browserWindow?.windowState === "normal"
     && run?.browserWindow?.visibilityState === "visible"
     && run?.browserWindow?.hidden === false
-    && run?.browserWindow?.devicePixelRatio === configuredDpr
+    && devicePixelRatioMatches(run?.browserWindow?.devicePixelRatio, configuredDpr)
     && runtime?.engineMode === "scene-canary"
     && runtime?.backend === "worker"
     && runtime?.backendSource === "environment"

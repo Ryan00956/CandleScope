@@ -18,7 +18,7 @@ from app.data_engine.interval_policy import (
 )
 
 from .backfill_coordinator import RepairRequest
-from .models import BarData
+from .models import BarData, SeriesKey
 
 logger = logging.getLogger("data_manager.maintenance")
 
@@ -34,6 +34,8 @@ _STORAGE_ROW_FLOAT_FIELDS = (
 )
 _STORAGE_ROW_INT_FIELDS = ("open_time", "close_time", "trades")
 _STANDARD_INTERVALS = set(STANDARD_INTERVAL_MS) - {"1s", "1M"}
+_MAX_STORAGE_GC_BATCH_ROWS = 1_000
+_MAX_GAP_REPAIR_CONCURRENCY = 4
 
 
 class MaintenanceBusyError(RuntimeError):
@@ -42,6 +44,128 @@ class MaintenanceBusyError(RuntimeError):
 
 class MaintenanceUnavailableError(RuntimeError):
     """Raised when required maintenance dependencies are not available."""
+
+
+async def _run_storage_batch(
+    func: Callable[..., Any],
+    *args: Any,
+    _on_completed: Callable[[Any], None] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Let an in-flight storage transaction finish before honoring cancellation.
+
+    ``_on_completed`` runs on the event-loop thread after the storage worker has
+    finished, including when cancellation arrived while the transaction was in
+    flight.  Destructive callers use it to restore cache coherence before the
+    cancellation is propagated.
+    """
+    task = asyncio.create_task(run_storage(func, *args, **kwargs))
+    try:
+        result = await asyncio.shield(task)
+        if _on_completed is not None:
+            _on_completed(result)
+        return result
+    except asyncio.CancelledError as cancelled:
+        # A task can be cancelled repeatedly during shutdown.  Keep shielding
+        # the executor future until the transaction really finishes so the
+        # maintenance mutex cannot be released while SQLite is still mutating.
+        storage_failed = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                logger.exception(
+                    "storage batch failed while shutdown waited for completion"
+                )
+                storage_failed = True
+                break
+        if task.done() and not task.cancelled() and not storage_failed:
+            try:
+                result = task.result()
+                if _on_completed is not None:
+                    _on_completed(result)
+            except Exception:
+                logger.exception(
+                    "storage batch failed while shutdown waited for completion"
+                )
+        raise cancelled
+
+
+def _storage_victim_identity(victim: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(victim.get("exchange") or "binance").strip().lower(),
+        str(victim.get("market_type") or "spot").strip().lower(),
+        str(victim.get("symbol") or "").strip().upper(),
+        str(victim.get("interval") or "").strip(),
+    )
+
+
+def _intersect_revalidated_storage_series(
+    original_series: list[dict[str, Any]],
+    fresh_series: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Never let execution exceed either the confirmed or the fresh plan."""
+    fresh_by_key = {
+        _storage_victim_identity(victim): victim
+        for victim in fresh_series
+    }
+    selected: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for original in original_series:
+        fresh = fresh_by_key.get(_storage_victim_identity(original))
+        original_rows = max(0, int(original.get("would_delete_rows", 0) or 0))
+        if fresh is None or original_rows <= 0:
+            skipped.append({
+                **original,
+                "deleted_rows": 0,
+                "batches": 0,
+                "status": "adjusted-at-revalidation",
+                "message": "fresh storage plan no longer authorizes this deletion",
+            })
+            continue
+
+        fresh_rows = max(0, int(fresh.get("would_delete_rows", 0) or 0))
+        keep_rows = max(
+            int(original.get("keep_rows", 0) or 0),
+            int(fresh.get("keep_rows", 0) or 0),
+        )
+        fresh_current_rows = max(0, int(fresh.get("current_rows", 0) or 0))
+        allowed_rows = min(
+            original_rows,
+            fresh_rows,
+            max(0, fresh_current_rows - keep_rows),
+        )
+        if allowed_rows <= 0:
+            skipped.append({
+                **original,
+                "deleted_rows": 0,
+                "batches": 0,
+                "status": "adjusted-at-revalidation",
+                "message": "fresh storage pressure/retention state requires no rows",
+                "current_rows_at_revalidation": fresh_current_rows,
+                "keep_rows_at_revalidation": keep_rows,
+            })
+            continue
+
+        original_estimate = max(
+            0,
+            int(original.get("would_free_estimated_bytes", 0) or 0),
+        )
+        selected.append({
+            **original,
+            "keep_rows": keep_rows,
+            "would_delete_rows": allowed_rows,
+            "would_free_estimated_bytes": int(
+                original_estimate * allowed_rows / original_rows
+            ) if original_rows else 0,
+            "execution_revalidated": True,
+            "current_rows_at_revalidation": fresh_current_rows,
+            "fresh_would_delete_rows": fresh_rows,
+            "fresh_reason": fresh.get("reason"),
+        })
+    return selected, skipped
 
 
 class RepairRequester(Protocol):
@@ -63,6 +187,9 @@ class MaintenanceService:
         bars_backfilled: Callable[..., Awaitable[None]],
         active_targets: Callable[[], Iterable[tuple[str, str, str, str]]],
         seed_active_bar: Callable[..., Awaitable[None]],
+        storage_gc_protection: Callable[[SeriesKey, list[dict[str, Any]], int | None], str | None] | None = None,
+        storage_gc_delete_batch: Callable[..., dict[str, Any]] | None = None,
+        storage_gc_replanner: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         self._storage_provider = storage_provider
         self._aggregator_config_snapshot = aggregator_config_snapshot
@@ -70,6 +197,9 @@ class MaintenanceService:
         self._bars_backfilled = bars_backfilled
         self._active_targets = active_targets
         self._seed_active_bar = seed_active_bar
+        self._storage_gc_protection = storage_gc_protection
+        self._storage_gc_delete_batch = storage_gc_delete_batch
+        self._storage_gc_replanner = storage_gc_replanner
         self._lock = asyncio.Lock()
 
     async def repair_custom_storage(
@@ -491,12 +621,13 @@ class MaintenanceService:
                         if interior_gaps:
                             gaps_found += len(interior_gaps)
                             gap_errors: list[str] = []
+                            repair_requests: list[RepairRequest] = []
                             for gap_start, gap_end, _gap_diff in interior_gaps:
                                 missing_start = int(gap_start) + interval_ms
                                 missing_end = int(gap_end) - interval_ms
                                 if missing_start > missing_end:
                                     continue
-                                outcome = await backfill_coordinator.request_and_wait(RepairRequest(
+                                repair_requests.append(RepairRequest(
                                     symbol=symbol,
                                     interval=interval,
                                     start_ms=missing_start,
@@ -509,6 +640,17 @@ class MaintenanceService:
                                         "gap_type": "interior",
                                     },
                                 ))
+
+                            repair_results = await _request_repairs_bounded(
+                                backfill_coordinator,
+                                repair_requests,
+                                max_concurrency=_MAX_GAP_REPAIR_CONCURRENCY,
+                            )
+                            for succeeded, result in repair_results:
+                                if not succeeded:
+                                    gap_errors.append(str(result))
+                                    continue
+                                outcome = result
                                 if _outcome_failed(outcome):
                                     gap_errors.extend(_outcome_errors(outcome))
                                     continue
@@ -630,13 +772,227 @@ class MaintenanceService:
 
         async with self._lock:
             started_at_ms = int(time.time() * 1000)
-            batch_size = max(1, int(batch_size or 1))
+            batch_size = min(
+                _MAX_STORAGE_GC_BATCH_ROWS,
+                max(1, int(batch_size or 1)),
+            )
+            expires_at_ms = int(plan.get("expires_at_ms", 0) or 0)
+            if expires_at_ms and started_at_ms > expires_at_ms:
+                return {
+                    **plan,
+                    "mode": "execute",
+                    "status": "stale",
+                    "stale_reason": "plan-expired",
+                    "batch_size": batch_size,
+                    "deleted_rows": 0,
+                    "affected_series": 0,
+                    "elapsed_ms": 0,
+                    "errors": [],
+                    "checkpoint_result": None,
+                    "results": [],
+                }
             results: list[dict] = []
             errors: list[str] = []
             total_deleted = 0
             affected_series = 0
+            checkpoint = getattr(storage, "wal_checkpoint_truncate", None)
+            checkpoint_before_result = None
+            checkpoint_blocked = False
+            revalidation_blocked = False
+            execution_revalidation: dict[str, Any] | None = None
+            checkpoint_recommended = bool(plan.get("checkpoint_recommended"))
+            if checkpoint_recommended and not callable(checkpoint):
+                checkpoint_blocked = True
+                errors.append("wal_checkpoint_truncate: unsupported")
+                checkpoint_before_result = {
+                    "status": "blocked",
+                    "error": "checkpoint-unsupported",
+                }
+            elif callable(checkpoint) and checkpoint_recommended:
+                try:
+                    checkpoint_before_result = await _run_storage_batch(checkpoint)
+                    if int((checkpoint_before_result or {}).get("busy", 0) or 0) > 0:
+                        checkpoint_blocked = True
+                        errors.append("wal_checkpoint_truncate: checkpoint-busy")
+                        checkpoint_before_result = {
+                            **(checkpoint_before_result or {}),
+                            "status": "blocked",
+                            "error": "checkpoint-busy",
+                        }
+                except Exception as exc:
+                    checkpoint_blocked = True
+                    errors.append(f"wal_checkpoint_truncate: {exc}")
+                    checkpoint_before_result = {"status": "error", "error": str(exc)}
 
-            for victim in plan.get("series", []) or []:
+            original_series = list(plan.get("series", []) or [])
+            planned_series = [] if checkpoint_blocked else original_series
+            budget_revalidation_required = bool(
+                plan.get("planner_version")
+                and any(
+                    "sqlite-budget" in str(victim.get("reason") or "")
+                    for victim in original_series
+                )
+            )
+            if not checkpoint_blocked and budget_revalidation_required:
+                if self._storage_gc_replanner is None:
+                    revalidation_blocked = True
+                    errors.append("storage execution revalidation is unsupported")
+                    execution_revalidation = {
+                        "status": "blocked",
+                        "reason": "execution-replanner-unsupported",
+                    }
+                    planned_series = []
+                else:
+                    try:
+                        fresh_plan = await _run_storage_batch(
+                            self._storage_gc_replanner,
+                            plan,
+                        )
+                        if fresh_plan.get("available") is False:
+                            revalidation_blocked = True
+                            errors.append(
+                                "storage execution revalidation unavailable: "
+                                f"{fresh_plan.get('reason') or 'unknown'}"
+                            )
+                            execution_revalidation = {
+                                "status": "blocked",
+                                "reason": fresh_plan.get("reason") or "unavailable",
+                                "fresh_plan": fresh_plan,
+                            }
+                            planned_series = []
+                        else:
+                            fresh_watermarks = dict(
+                                fresh_plan.get("watermarks") or {}
+                            )
+                            fresh_required_logical_relief = int(
+                                fresh_watermarks.get(
+                                    "required_logical_relief_bytes",
+                                    fresh_plan.get(
+                                        "required_logical_relief_bytes",
+                                        0,
+                                    ),
+                                ) or 0
+                            )
+                            fresh_required_physical_relief = int(
+                                fresh_watermarks.get(
+                                    "required_physical_relief_bytes",
+                                    fresh_plan.get(
+                                        "required_physical_relief_bytes",
+                                        0,
+                                    ),
+                                ) or 0
+                            )
+                            fresh_planning_blocked = bool(
+                                (
+                                    fresh_required_physical_relief > 0
+                                    and fresh_watermarks.get(
+                                        "relief_planning_available"
+                                    ) is False
+                                )
+                                or (
+                                    fresh_required_logical_relief > 0
+                                    and fresh_watermarks.get(
+                                        "klines_budget_planning_available"
+                                    ) is False
+                                )
+                            )
+                            if fresh_planning_blocked:
+                                revalidation_blocked = True
+                                planned_series = []
+                                blocked_reason = str(
+                                    fresh_watermarks.get(
+                                        "owner_planning_blocked_reason"
+                                    )
+                                    or fresh_watermarks.get(
+                                        "planning_blocked_reason"
+                                    )
+                                    or "fresh-budget-relief-planning-unavailable"
+                                )
+                                errors.append(
+                                    "storage execution revalidation blocked: "
+                                    f"{blocked_reason}"
+                                )
+                                execution_revalidation = {
+                                    "status": "blocked",
+                                    "reason": blocked_reason,
+                                    "fresh_plan": fresh_plan,
+                                }
+                            else:
+                                planned_series, revalidation_skipped = (
+                                    _intersect_revalidated_storage_series(
+                                        original_series,
+                                        list(fresh_plan.get("series", []) or []),
+                                    )
+                                )
+                                results.extend(revalidation_skipped)
+                                execution_revalidation = {
+                                    "status": "ok",
+                                    "original_victim_count": len(original_series),
+                                    "authorized_victim_count": len(planned_series),
+                                    "skipped_victim_count": len(revalidation_skipped),
+                                    "fresh_generated_at_ms": fresh_plan.get("generated_at_ms"),
+                                    "fresh_expires_at_ms": fresh_plan.get("expires_at_ms"),
+                                    "fresh_watermarks": fresh_plan.get("watermarks"),
+                                    "fresh_file_snapshot": fresh_plan.get(
+                                        "execution_file_snapshot"
+                                    ),
+                                    "fresh_mode": fresh_plan.get("mode"),
+                                    "fresh_auto_skipped": fresh_plan.get(
+                                        "autoSkipped"
+                                    ),
+                                    "adjusted": bool(
+                                        revalidation_skipped
+                                        or len(planned_series) != len(original_series)
+                                        or sum(
+                                            int(victim.get("would_delete_rows", 0) or 0)
+                                            for victim in planned_series
+                                        ) < sum(
+                                            int(victim.get("would_delete_rows", 0) or 0)
+                                            for victim in original_series
+                                        )
+                                    ),
+                                }
+                    except Exception as exc:
+                        revalidation_blocked = True
+                        planned_series = []
+                        errors.append(f"storage execution revalidation: {exc}")
+                        execution_revalidation = {
+                            "status": "error",
+                            "reason": str(exc),
+                        }
+            declared_backend_batch_limit = max(
+                0,
+                int(
+                    getattr(
+                        storage,
+                        "storage_gc_delete_max_batch_rows",
+                        0,
+                    ) or 0
+                ),
+            )
+            declared_backend_deadline_ms = max(
+                0,
+                int(
+                    getattr(
+                        storage,
+                        "storage_gc_delete_deadline_ms",
+                        0,
+                    ) or 0
+                ),
+            )
+            bounded_delete_candidate = getattr(storage, "delete_oldest_batch", None)
+            guarded_delete_batch = self._storage_gc_delete_batch
+            bounded_delete = (
+                bounded_delete_candidate
+                if callable(bounded_delete_candidate)
+                and declared_backend_batch_limit > 0
+                and declared_backend_deadline_ms > 0
+                and callable(guarded_delete_batch)
+                else None
+            )
+            if declared_backend_batch_limit > 0:
+                batch_size = min(batch_size, declared_backend_batch_limit)
+            for victim in planned_series:
                 symbol = str(victim.get("symbol") or "").upper()
                 interval = str(victim.get("interval") or "")
                 exchange = str(victim.get("exchange") or "binance")
@@ -647,6 +1003,40 @@ class MaintenanceService:
                 batches = 0
                 status = "skipped"
                 message = ""
+                last_protection_epoch: int | None = None
+                max_guard_wait_ms = 0
+                max_guard_hold_ms = 0
+                total_guard_wait_ms = 0
+                total_guard_hold_ms = 0
+                max_backend_delete_elapsed_ms = 0.0
+                total_backend_delete_elapsed_ms = 0.0
+                last_contract_error = ""
+
+                key = SeriesKey(
+                    symbol,
+                    interval,
+                    exchange=exchange,
+                    market_type=market_type,
+                ) if symbol and interval else None
+                protection_reason = (
+                    self._storage_gc_protection(
+                        key,
+                        list(victim.get("storage_intents") or []),
+                        keep_rows,
+                    )
+                    if key is not None and self._storage_gc_protection is not None
+                    else None
+                )
+
+                if expires_at_ms and int(time.time() * 1000) > expires_at_ms:
+                    results.append({
+                        **victim,
+                        "deleted_rows": 0,
+                        "batches": 0,
+                        "status": "stale",
+                        "message": "storage GC plan expired before this victim executed",
+                    })
+                    continue
 
                 if not symbol or not interval or expected <= 0:
                     results.append({
@@ -657,51 +1047,195 @@ class MaintenanceService:
                         "message": "没有可删除行",
                     })
                     continue
+                if protection_reason:
+                    results.append({
+                        **victim,
+                        "deleted_rows": 0,
+                        "batches": 0,
+                        "status": "protected-at-execute",
+                        "message": protection_reason,
+                    })
+                    continue
+                if not callable(bounded_delete):
+                    unsupported = (
+                        f"{exchange}:{market_type}:{symbol}@{interval}: "
+                        "bounded delete_oldest_batch is unsupported"
+                    )
+                    errors.append(unsupported)
+                    results.append({
+                        **victim,
+                        "deleted_rows": 0,
+                        "batches": 0,
+                        "status": "unsupported",
+                        "message": (
+                            "storage GC integration does not publish bounded "
+                            "row/latency and guarded-ordering contracts"
+                        ),
+                    })
+                    continue
 
                 try:
                     while deleted < expected:
+                        if expires_at_ms and int(time.time() * 1000) > expires_at_ms:
+                            status = "stale"
+                            message = "storage GC plan expired between delete batches"
+                            break
+                        protection_reason = (
+                            self._storage_gc_protection(
+                                key,
+                                list(victim.get("storage_intents") or []),
+                                keep_rows,
+                            )
+                            if key is not None and self._storage_gc_protection is not None
+                            else None
+                        )
+                        if protection_reason:
+                            status = "protected-at-execute"
+                            message = protection_reason
+                            break
                         remaining = expected - deleted
                         step = min(batch_size, remaining)
-                        delete_batch = getattr(storage, "delete_oldest_batch", None)
-                        if callable(delete_batch):
-                            count = await run_storage(
-                                delete_batch,
-                                symbol=symbol,
-                                interval=interval,
-                                keep=keep_rows,
-                                batch_size=step,
-                                exchange=exchange,
-                                market_type=market_type,
+                        delete_kwargs = {
+                            "symbol": symbol,
+                            "interval": interval,
+                            "keep": keep_rows,
+                            "batch_size": step,
+                            "exchange": exchange,
+                            "market_type": market_type,
+                        }
+
+                        def invalidate_completed_batch(batch_result: Any) -> None:
+                            if (
+                                isinstance(batch_result, dict)
+                                and bool(batch_result.get("cache_invalidated"))
+                            ):
+                                return
+                            completed_count = (
+                                (batch_result or {}).get("deleted_rows", 0)
+                                if isinstance(batch_result, dict)
+                                else batch_result
                             )
-                        else:
-                            count = await run_storage(
-                                storage.delete_oldest,
-                                symbol=symbol,
-                                interval=interval,
-                                keep=keep_rows,
-                                exchange=exchange,
-                                market_type=market_type,
+                            if int(completed_count or 0) > 0:
+                                self._cache_invalidator(
+                                    symbol,
+                                    interval,
+                                    exchange=exchange,
+                                    market_type=market_type,
+                                )
+
+                        batch_result = await _run_storage_batch(
+                            guarded_delete_batch,
+                            key=key,
+                            planned_intents=list(victim.get("storage_intents") or []),
+                            planned_keep_rows=keep_rows,
+                            planned_protection_epoch=int(
+                                plan.get("protection_epoch_at_plan", 0) or 0
+                            ),
+                            expires_at_ms=expires_at_ms,
+                            delete_func=bounded_delete,
+                            delete_kwargs=delete_kwargs,
+                            _on_completed=invalidate_completed_batch,
+                        )
+                        stale_reason = str(
+                            (batch_result or {}).get("stale_reason") or ""
+                        )
+                        protection_reason = str(
+                            (batch_result or {}).get("protection_reason") or ""
+                        )
+                        last_protection_epoch = int(
+                            (batch_result or {}).get(
+                                "protection_epoch_at_completion",
+                                (batch_result or {}).get("protection_epoch", 0),
+                            ) or 0
+                        )
+                        guard_wait_ms = int(
+                            (batch_result or {}).get("guard_wait_ms", 0) or 0
+                        )
+                        guard_hold_ms = int(
+                            (batch_result or {}).get("guard_hold_ms", 0) or 0
+                        )
+                        max_guard_wait_ms = max(max_guard_wait_ms, guard_wait_ms)
+                        max_guard_hold_ms = max(max_guard_hold_ms, guard_hold_ms)
+                        total_guard_wait_ms += guard_wait_ms
+                        total_guard_hold_ms += guard_hold_ms
+                        backend_delete_elapsed_ms = float(
+                            (batch_result or {}).get(
+                                "backend_delete_elapsed_ms",
+                                0.0,
+                            ) or 0.0
+                        )
+                        max_backend_delete_elapsed_ms = max(
+                            max_backend_delete_elapsed_ms,
+                            backend_delete_elapsed_ms,
+                        )
+                        total_backend_delete_elapsed_ms += (
+                            backend_delete_elapsed_ms
+                        )
+                        if stale_reason:
+                            status = "stale"
+                            message = stale_reason
+                            break
+                        if protection_reason:
+                            status = "protected-at-execute"
+                            message = protection_reason
+                            break
+                        count = (batch_result or {}).get("deleted_rows", 0)
+                        backend_contract_error = str(
+                            (batch_result or {}).get("contract_error") or ""
+                        )
+                        deadline_contract_error = (
+                            "bounded delete exceeded declared deadline target: "
+                            f"{backend_delete_elapsed_ms:.3f}ms > "
+                            f"{declared_backend_deadline_ms}ms"
+                            if (
+                                declared_backend_deadline_ms > 0
+                                and backend_delete_elapsed_ms
+                                > declared_backend_deadline_ms
                             )
+                            else ""
+                        )
+                        contract_error = "; ".join(
+                            error
+                            for error in (
+                                backend_contract_error,
+                                deadline_contract_error,
+                            )
+                            if error
+                        )
+                        last_contract_error = contract_error or last_contract_error
                         count = int(count or 0)
                         if count <= 0:
+                            if contract_error:
+                                status = "error"
+                                message = contract_error
+                                errors.append(
+                                    f"{exchange}:{market_type}:{symbol}@{interval}: "
+                                    f"{contract_error}"
+                                )
                             break
+                        first_successful_batch = deleted == 0
                         deleted += count
+                        total_deleted += count
                         batches += 1
+                        if first_successful_batch:
+                            affected_series += 1
+                        if contract_error:
+                            status = "error"
+                            message = contract_error
+                            errors.append(
+                                f"{exchange}:{market_type}:{symbol}@{interval}: "
+                                f"{contract_error}"
+                            )
+                            break
 
                     if deleted > 0:
-                        self._cache_invalidator(
-                            symbol,
-                            interval,
-                            exchange=exchange,
-                            market_type=market_type,
-                        )
-                        total_deleted += deleted
-                        affected_series += 1
-                        status = "deleted"
-                        message = f"已删除 {deleted} 行"
+                        if status == "skipped":
+                            status = "deleted"
+                            message = f"已删除 {deleted} 行"
                     else:
-                        status = "unchanged"
-                        message = "执行时已无需删除"
+                        if status == "skipped":
+                            status = "unchanged"
+                            message = "执行时已无需删除"
                 except Exception as exc:
                     status = "error"
                     message = str(exc)
@@ -713,27 +1247,101 @@ class MaintenanceService:
                     "batches": batches,
                     "status": status,
                     "message": message,
+                    "protection_epoch": last_protection_epoch,
+                    "max_guard_wait_ms": max_guard_wait_ms,
+                    "max_guard_hold_ms": max_guard_hold_ms,
+                    "total_guard_wait_ms": total_guard_wait_ms,
+                    "total_guard_hold_ms": total_guard_hold_ms,
+                    "max_backend_delete_elapsed_ms": round(
+                        max_backend_delete_elapsed_ms,
+                        3,
+                    ),
+                    "total_backend_delete_elapsed_ms": round(
+                        total_backend_delete_elapsed_ms,
+                        3,
+                    ),
+                    "contract_error": last_contract_error or None,
                 })
 
-            checkpoint_result = None
-            checkpoint = getattr(storage, "wal_checkpoint_truncate", None)
+            checkpoint_result = checkpoint_before_result
             if callable(checkpoint) and total_deleted > 0:
                 try:
-                    checkpoint_result = await run_storage(checkpoint)
+                    checkpoint_result = await _run_storage_batch(checkpoint)
+                    if int((checkpoint_result or {}).get("busy", 0) or 0) > 0:
+                        errors.append("wal_checkpoint_truncate: checkpoint-busy")
+                        checkpoint_result = {
+                            **(checkpoint_result or {}),
+                            "status": "blocked",
+                            "error": "checkpoint-busy",
+                        }
                 except Exception as exc:
                     errors.append(f"wal_checkpoint_truncate: {exc}")
                     checkpoint_result = {"status": "error", "error": str(exc)}
 
+            execution_drift = any(
+                (
+                    str(result.get("status") or "") in {
+                        "protected-at-execute",
+                        "stale",
+                        "skipped",
+                    }
+                    or (
+                        str(result.get("status") or "")
+                        != "adjusted-at-revalidation"
+                        and int(result.get("deleted_rows", 0) or 0)
+                        < int(result.get("would_delete_rows", 0) or 0)
+                    )
+                )
+                for result in results
+            )
             return {
                 **plan,
                 "mode": "execute",
-                "status": "ok" if not errors else "partial",
+                "status": (
+                    "blocked"
+                    if checkpoint_blocked or revalidation_blocked
+                    else "partial"
+                    if errors
+                    else "constrained"
+                    if execution_drift
+                    else "ok"
+                ),
                 "batch_size": batch_size,
+                "backend_delete_contract": {
+                    "max_batch_rows": declared_backend_batch_limit or None,
+                    "deadline_ms": declared_backend_deadline_ms or None,
+                    "deadline_target_ms": declared_backend_deadline_ms or None,
+                    "deadline_semantics": "observable-target-not-hard-realtime-guarantee",
+                    "ordering_guard_supported": callable(guarded_delete_batch),
+                    "supported": bounded_delete is not None,
+                },
                 "deleted_rows": total_deleted,
                 "affected_series": affected_series,
                 "elapsed_ms": int(time.time() * 1000) - started_at_ms,
                 "errors": errors,
+                "checkpoint_before_result": checkpoint_before_result,
                 "checkpoint_result": checkpoint_result,
+                "execution_revalidation": execution_revalidation,
+                "max_guard_wait_ms": max(
+                    (int(result.get("max_guard_wait_ms", 0) or 0) for result in results),
+                    default=0,
+                ),
+                "max_guard_hold_ms": max(
+                    (int(result.get("max_guard_hold_ms", 0) or 0) for result in results),
+                    default=0,
+                ),
+                "max_backend_delete_elapsed_ms": max(
+                    (
+                        float(
+                            result.get(
+                                "max_backend_delete_elapsed_ms",
+                                0.0,
+                            ) or 0.0
+                        )
+                        for result in results
+                    ),
+                    default=0.0,
+                ),
                 "vacuum_recommended": bool(plan.get("vacuum_recommended")) or total_deleted > 0,
                 "results": results,
             }
@@ -749,7 +1357,7 @@ class MaintenanceService:
 
         async with self._lock:
             started_at_ms = int(time.time() * 1000)
-            result = await run_storage(vacuum)
+            result = await _run_storage_batch(vacuum)
             return {
                 "mode": "vacuum",
                 "owner": "sqlite-storage",
@@ -965,6 +1573,46 @@ def _outcome_errors(outcome: Any) -> list[str]:
     if error:
         errors.append(str(error))
     return errors
+
+
+async def _request_repairs_bounded(
+    coordinator: RepairRequester,
+    requests: list[RepairRequest],
+    *,
+    max_concurrency: int,
+) -> list[tuple[bool, Any]]:
+    """Run repairs with a fixed worker count and stable result ordering."""
+    if not requests:
+        return []
+    results: list[tuple[bool, Any] | None] = [None] * len(requests)
+    next_index = 0
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while next_index < len(requests):
+            index = next_index
+            next_index += 1
+            try:
+                results[index] = (
+                    True,
+                    await coordinator.request_and_wait(requests[index]),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Fail closed: the caller records the error and never counts
+                # this gap as repaired.
+                results[index] = (False, exc)
+
+    workers = [
+        asyncio.create_task(_worker(), name=f"storage-gap-repair:{index}")
+        for index in range(min(max(1, int(max_concurrency)), len(requests)))
+    ]
+    await asyncio.gather(*workers)
+    return [
+        result if result is not None else (False, RuntimeError("repair did not run"))
+        for result in results
+    ]
 
 
 async def _find_storage_gap_ranges(

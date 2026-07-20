@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { MarketDataRuntime } from "../market-data/useMarketDataRuntime.js";
@@ -9,9 +9,17 @@ import { useActiveIndicatorStore } from "./activeIndicatorStore.js";
 import { resolveRealtimeHistogramColor } from "./indicatorRealtimeColor.js";
 import {
   applyRealtimeIndicatorValuesToLines,
+  currentContextualProvisionalIndicatorPreview,
+  stageContextualProvisionalIndicatorPreview,
   shouldRetainProvisionalIndicatorPreview,
+  type ContextualProvisionalIndicatorPreview,
   type ProvisionalIndicatorPreview,
 } from "./indicatorRealtimePreview.js";
+import {
+  buildIndicatorRealtimeConfigSignature,
+  createIndicatorRealtimeValueBatcher,
+  type IndicatorRealtimeValueUpdate,
+} from "./indicatorRealtimeBatcher.js";
 import { computeIndicatorRangeBatch } from "../../services/indicatorApi.js";
 import { useIndicatorComputeController } from "./indicatorComputeController.js";
 import { parseIntervalParts, parseIntervalSeconds } from "../../utils/intervals.js";
@@ -33,6 +41,7 @@ import {
   resolveInitialHostedRange,
 } from "./indicatorRangePlanning.js";
 import {
+  acquireActiveIndicatorCacheLeases,
   buildIndicatorCacheContext,
   buildIndicatorCacheHydrationSignature,
   buildIndicatorResultCacheKey,
@@ -129,11 +138,6 @@ interface IndicatorPreviewContext {
   marketType: string;
   sessionKey: string;
   symbol: string;
-}
-
-interface ContextualProvisionalIndicatorPreview {
-  contextKey: string;
-  preview: ProvisionalIndicatorPreview;
 }
 
 interface HostedReadinessOptions {
@@ -590,20 +594,51 @@ export function useIndicatorRuntime(
     sessionKey,
     symbol,
   });
+  const realtimeIndicatorBatcherRef = useRef<
+    ReturnType<typeof createIndicatorRealtimeValueBatcher> | null
+  >(null);
 
-  const resolveProvisionalIndicatorPreview = useCallback((indicatorId: string) => {
-    const candidate = provisionalIndicatorPreviewsRef.current.get(indicatorId);
+  const resolveRealtimeIndicatorConfigSignature = useCallback((
+    indicator: IndicatorDefinition,
+  ) => {
+    const context = runtimeContextRef.current;
+    return buildIndicatorRealtimeConfigSignature(indicator, {
+      candleDownColor: candleDownColorRef.current,
+      candleUpColor: candleUpColorRef.current,
+      chartData: chartDataRef.current || [],
+      chartDataLength: chartDataRef.current?.length || 0,
+      exchange: context.exchange,
+      interval: context.interval,
+      marketType: context.marketType,
+      symbol: context.symbol,
+    });
+  }, [
+    candleDownColorRef,
+    candleUpColorRef,
+    chartDataRef,
+    runtimeContextRef,
+  ]);
+
+  const resolveProvisionalIndicatorPreview = useCallback((indicator: IndicatorDefinition) => {
+    const candidate = provisionalIndicatorPreviewsRef.current.get(indicator.id);
     if (!candidate) return null;
     const contextKey = buildIndicatorPreviewContextKey(runtimeContextRef.current);
-    return candidate.contextKey === contextKey ? candidate : null;
-  }, [runtimeContextRef]);
+    const current = currentContextualProvisionalIndicatorPreview(
+      candidate,
+      contextKey,
+      resolveRealtimeIndicatorConfigSignature(indicator),
+    );
+    if (!current) provisionalIndicatorPreviewsRef.current.delete(indicator.id);
+    return current;
+  }, [resolveRealtimeIndicatorConfigSignature, runtimeContextRef]);
 
   const reapplyProvisionalIndicatorPreview = useCallback((
     indicator: IndicatorDefinition,
     lines: IndicatorLine[],
     payload: Partial<IndicatorPayloadEnvelope> | null | undefined,
   ): IndicatorLine[] => {
-    const candidate = resolveProvisionalIndicatorPreview(indicator.id);
+    const targetIndicator = lines === indicator.lines ? indicator : { ...indicator, lines };
+    const candidate = resolveProvisionalIndicatorPreview(targetIndicator);
     if (!candidate) return lines;
     if (!shouldRetainProvisionalIndicatorPreview(candidate.preview, lines, payload)) {
       provisionalIndicatorPreviewsRef.current.delete(indicator.id);
@@ -614,7 +649,7 @@ export function useIndicatorRuntime(
       barTime: candidate.preview.barTime,
       candleDownColor: candleDownColorRef.current,
       candleUpColor: candleUpColorRef.current,
-      indicator,
+      indicator: targetIndicator,
       lines,
       values: candidate.preview.values,
     });
@@ -644,15 +679,35 @@ export function useIndicatorRuntime(
     marketType,
     symbol,
   ]);
+  const indicatorCacheRuntimeLeaseId = useId();
+
+  useLayoutEffect(() => acquireActiveIndicatorCacheLeases(
+    activeIndicatorsRef.current,
+    {
+      candleDownColor,
+      candleUpColor,
+      exchange,
+      interval,
+      marketType,
+      symbol,
+    },
+    `active-indicator-${indicatorCacheRuntimeLeaseId}`,
+  ), [
+    activeIndicatorsRef,
+    candleDownColor,
+    candleUpColor,
+    exchange,
+    indicatorCacheHydrationSignature,
+    indicatorCacheRuntimeLeaseId,
+    interval,
+    marketType,
+    symbol,
+  ]);
 
   useLayoutEffect(() => {
     initialHostedRangeSignaturesRef.current.clear();
     autoRightCatchupRangeSignaturesRef.current.clear();
   }, [indicatorCacheHydrationSignature]);
-
-  useLayoutEffect(() => {
-    provisionalIndicatorPreviewsRef.current.clear();
-  }, [exchange, interval, marketType, sessionKey, symbol]);
 
   const resetHostedSubscriptionReadiness = useCallback(() => {
     const context = runtimeContextRef.current;
@@ -857,88 +912,178 @@ export function useIndicatorRuntime(
     setActiveIndicators,
   ]);
 
+  const flushRealtimeIndicatorValues = useCallback((
+    updates: readonly IndicatorRealtimeValueUpdate[],
+  ) => {
+    const contextKey = buildIndicatorPreviewContextKey(runtimeContextRef.current);
+    const currentUpdates = updates.filter((update) => update.contextKey === contextKey);
+    if (currentUpdates.length === 0) return;
+    const updatesByIndicator = new Map<string, IndicatorRealtimeValueUpdate[]>();
+    for (const update of currentUpdates) {
+      const queued = updatesByIndicator.get(update.indicatorId) ?? [];
+      queued.push(update);
+      updatesByIndicator.set(update.indicatorId, queued);
+    }
+    const hasFinalUpdate = currentUpdates.some((update) => update.isFinal);
+    const cacheContext = hasFinalUpdate ? getIndicatorCacheContext() : null;
+
+    setActiveIndicators((prev) => {
+      let changed = false;
+      const next = prev.map((indicator) => {
+        const indicatorConfigSignature = resolveRealtimeIndicatorConfigSignature(indicator);
+        const queued = updatesByIndicator.get(indicator.id)?.filter(
+          (update) => update.indicatorConfigSignature === indicatorConfigSignature,
+        );
+        if (!queued?.length || !Array.isArray(indicator.lines)) return indicator;
+        let lines = indicator.lines;
+        for (const update of queued) {
+          const bar = update.bar;
+          const resolveHistogramColor = (line: IndicatorLine, value: unknown) => (
+            resolveRealtimeHistogramColor({
+              bar,
+              downColor: candleDownColorRef.current,
+              indicator,
+              line,
+              upColor: candleUpColorRef.current,
+              value,
+            })
+          );
+          if (update.isFinal && cacheContext) {
+            upsertCachedIndicatorLinePoint(
+              indicator,
+              cacheContext,
+              update.values,
+              update.barTime,
+              resolveHistogramColor,
+            );
+            const dataRevision = normalizeIndicatorRevision(update.payload);
+            if (dataRevision) {
+              rebaseCachedIndicatorRevision(indicator, cacheContext, dataRevision);
+            }
+          }
+          lines = applyRealtimeIndicatorValuesToLines({
+            ...(bar ? { bar } : {}),
+            barTime: update.barTime,
+            candleDownColor: candleDownColorRef.current,
+            candleUpColor: candleUpColorRef.current,
+            indicator,
+            lines,
+            values: update.values,
+          });
+        }
+        if (lines === indicator.lines && indicator.error == null) return indicator;
+        changed = true;
+        return { ...indicator, lines, error: null };
+      });
+      return changed ? next : prev;
+    });
+  }, [
+    candleDownColorRef,
+    candleUpColorRef,
+    getIndicatorCacheContext,
+    resolveRealtimeIndicatorConfigSignature,
+    runtimeContextRef,
+    setActiveIndicators,
+  ]);
+
+  useLayoutEffect(() => {
+    const batcher = createIndicatorRealtimeValueBatcher({
+      isUpdateCurrent: (update) => {
+        const indicator = activeIndicatorsRef.current.find(
+          (candidate) => candidate.id === update.indicatorId,
+        );
+        return Boolean(indicator
+          && resolveRealtimeIndicatorConfigSignature(indicator)
+            === update.indicatorConfigSignature);
+      },
+      onFlush: flushRealtimeIndicatorValues,
+    });
+    realtimeIndicatorBatcherRef.current = batcher;
+    provisionalIndicatorPreviewsRef.current.clear();
+    return () => {
+      batcher.clear();
+      if (realtimeIndicatorBatcherRef.current === batcher) {
+        realtimeIndicatorBatcherRef.current = null;
+      }
+    };
+  }, [
+    activeIndicatorsRef,
+    exchange,
+    flushRealtimeIndicatorValues,
+    interval,
+    marketType,
+    resolveRealtimeIndicatorConfigSignature,
+    sessionKey,
+    symbol,
+  ]);
+
   const applyWsValues = useCallback((
     indicatorId: string,
     values: Record<string, unknown>,
     barTime: number,
     isFinal = true,
     payload: IndicatorValuesMessage | null = null,
+    sourceSubscriptionSignature?: string,
   ) => {
     if (!values || !barTime) return;
+    const indicator = activeIndicatorsRef.current.find((candidate) => candidate.id === indicatorId);
+    if (!indicator) return;
+    const currentIndicatorConfigSignature = resolveRealtimeIndicatorConfigSignature(indicator);
+    // Every production value message originates in IndicatorStreamConnection,
+    // which attaches the signature of the subscription that actually received
+    // it. Missing provenance or a late frame from the previous same-id config
+    // must fail closed before it can touch preview, revision, frame, or cache
+    // state. The batcher repeats this check at flush time for config changes
+    // that happen after a valid value was queued.
+    if (
+      !sourceSubscriptionSignature
+      || sourceSubscriptionSignature !== currentIndicatorConfigSignature
+    ) {
+      return;
+    }
+    const indicatorConfigSignature = sourceSubscriptionSignature;
     const dataRevision = isFinal ? normalizeIndicatorRevision(payload) : null;
     if (dataRevision) seriesRevisionRef.current = dataRevision;
     const currentChartData = chartDataRef.current || [];
     const payloadBar = payload?.bar;
+    const tailBar = currentChartData.at(-1);
     const bar = payloadBar && Number(payloadBar.time) === Number(barTime)
       ? payloadBar
-      : currentChartData.find((item) => Number(item.time) === Number(barTime));
+      : Number(tailBar?.time) === Number(barTime)
+        ? tailBar
+        : currentChartData.find((item) => Number(item.time) === Number(barTime));
+    const contextKey = buildIndicatorPreviewContextKey(runtimeContextRef.current);
+    const preview: ProvisionalIndicatorPreview = { barTime, values };
+    if (bar) preview.bar = bar;
+    const shouldEnqueue = stageContextualProvisionalIndicatorPreview({
+      currentContextKey: contextKey,
+      currentIndicatorConfigSignature,
+      incomingIndicatorConfigSignature: indicatorConfigSignature,
+      indicatorId,
+      isFinal,
+      preview,
+      previews: provisionalIndicatorPreviewsRef.current,
+    });
+    // A delayed preview for an older forming bar must not overwrite the newer
+    // provisional point or enter the frame batch. Values always retain their
+    // exact timestamp; they are never aligned by a nearby candle index.
+    if (!shouldEnqueue) return;
 
-    const existingPreview = resolveProvisionalIndicatorPreview(indicatorId);
-    if (!isFinal) {
-      // A delayed preview for an older forming bar must not overwrite the
-      // newer provisional point. Values always retain their exact timestamp;
-      // they are never aligned by a nearby main-series candle index.
-      if (existingPreview && barTime < existingPreview.preview.barTime) return;
-      const preview: ProvisionalIndicatorPreview = { barTime, values };
-      if (bar) preview.bar = bar;
-      provisionalIndicatorPreviewsRef.current.set(indicatorId, {
-        contextKey: buildIndicatorPreviewContextKey(runtimeContextRef.current),
-        preview,
-      });
-    } else if (
-      existingPreview
-      && barTime >= existingPreview.preview.barTime
-    ) {
-      // A final update supersedes the matching preview (or an older one when
-      // the exchange has already opened the next bar).
-      provisionalIndicatorPreviewsRef.current.delete(indicatorId);
-    }
-
-    setActiveIndicators((prev) =>
-      prev.map((indicator) => {
-        if (indicator.id !== indicatorId || !Array.isArray(indicator.lines)) return indicator;
-        const resolveHistogramColor = (line: IndicatorLine, value: unknown) => (
-          resolveRealtimeHistogramColor({
-            bar,
-            downColor: candleDownColorRef.current,
-            indicator,
-            line,
-            upColor: candleUpColorRef.current,
-            value,
-          })
-        );
-        if (isFinal) {
-          upsertCachedIndicatorLinePoint(
-            indicator,
-            getIndicatorCacheContext(),
-            values,
-            barTime,
-            resolveHistogramColor,
-          );
-          if (dataRevision) {
-            rebaseCachedIndicatorRevision(indicator, getIndicatorCacheContext(), dataRevision);
-          }
-        }
-        const lines = applyRealtimeIndicatorValuesToLines({
-          ...(bar ? { bar } : {}),
-          barTime,
-          candleDownColor: candleDownColorRef.current,
-          candleUpColor: candleUpColorRef.current,
-          indicator,
-          lines: indicator.lines,
-          values,
-        });
-        return { ...indicator, lines, error: null };
-      })
-    );
+    realtimeIndicatorBatcherRef.current?.enqueue({
+      ...(bar ? { bar } : {}),
+      barTime,
+      contextKey,
+      indicatorId,
+      indicatorConfigSignature,
+      isFinal,
+      payload,
+      values,
+    });
   }, [
-    candleDownColorRef,
-    candleUpColorRef,
+    activeIndicatorsRef,
     chartDataRef,
-    getIndicatorCacheContext,
-    resolveProvisionalIndicatorPreview,
+    resolveRealtimeIndicatorConfigSignature,
     runtimeContextRef,
-    setActiveIndicators,
   ]);
 
   const setIndicatorError = useCallback((indicatorId: string, error: string) => {

@@ -272,12 +272,7 @@ async def health_check() -> dict:
     result: dict = {"status": "ok"}
     if dm is not None:
         try:
-            snapshot = dm.snapshot()
-            result["data_manager"] = {
-                "started": snapshot.get("started", False),
-                "active_streams": snapshot.get("coordinator", {}).get("active_streams", 0),
-                "cache_series": snapshot.get("cache", {}).get("series_count", 0),
-            }
+            result["data_manager"] = dm.health_snapshot()
             lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
             if lag_monitor is not None:
                 result["event_loop_lag"] = lag_monitor.snapshot()

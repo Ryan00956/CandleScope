@@ -9,9 +9,7 @@ import {
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import {
-  clampHistoryRangeToNow,
   mergeHistoryCoverage,
-  nextUncoveredHistoryRange,
   type MarketHistoryRange,
 } from "../advanced-market-data/marketHistoryCoverage.js";
 import type {
@@ -19,6 +17,10 @@ import type {
   AdvancedMarketIdentity,
 } from "../advanced-market-data/advancedMarketDataTypes.js";
 import { fetchLiquidationHistory, getLiquidationStreamUrl } from "./liquidationApi.js";
+import {
+  LiquidationHistoryRequestCoordinator,
+  normalizeLiquidationHistoryRange,
+} from "./liquidationHistoryRequests.js";
 import { liquidationStore } from "./liquidationStore.js";
 import { LiquidationStreamController } from "./liquidationStreamController.js";
 import type {
@@ -70,21 +72,10 @@ function parseVisibleRange(value: unknown): MarketHistoryRange | null {
   const from = Number(value.time.from);
   const to = Number(value.time.to);
   if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
-  return normalizeRange({
+  return normalizeLiquidationHistoryRange({
     startMs: Math.floor(Math.min(from, to) * 1000),
     endMs: Math.ceil(Math.max(from, to) * 1000),
   });
-}
-
-function normalizeRange(range: MarketHistoryRange): MarketHistoryRange {
-  const clamped = clampHistoryRangeToNow(range) ?? {
-    startMs: Math.max(0, Math.floor(Math.min(range.startMs, range.endMs))),
-    endMs: Math.max(0, Math.ceil(Math.max(range.startMs, range.endMs))),
-  };
-  return {
-    startMs: Math.max(0, Math.floor(clamped.startMs / MINUTE_MS) * MINUTE_MS),
-    endMs: Math.max(0, Math.ceil((clamped.endMs + 1) / MINUTE_MS) * MINUTE_MS - 1),
-  };
 }
 
 function isAbortError(error: unknown): boolean {
@@ -137,7 +128,7 @@ export function useLiquidationRuntime({
     seriesReady,
   });
   const coverageRef = useRef(new Map<LiquidationPositionSide, MarketHistoryRange[]>());
-  const inFlightRef = useRef(new Set<string>());
+  const requestCoordinatorRef = useRef(new LiquidationHistoryRequestCoordinator());
   const abortControllersRef = useRef(new Set<AbortController>());
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -155,7 +146,7 @@ export function useLiquidationRuntime({
     generationRef.current += 1;
     for (const controller of abortControllersRef.current) controller.abort();
     abortControllersRef.current = new Set();
-    inFlightRef.current = new Set();
+    requestCoordinatorRef.current.clear();
     clearRetryTimer();
     if (clearCoverage) coverageRef.current = new Map();
   }, [clearRetryTimer]);
@@ -182,79 +173,80 @@ export function useLiquidationRuntime({
   const loadHistory = useCallback((rawRange: MarketHistoryRange): boolean => {
     const context = activeRef.current;
     if (!context.enabled || !context.seriesReady) return false;
-    const requested = normalizeRange(rawRange);
+    const requested = normalizeLiquidationHistoryRange(rawRange);
+    if (!requested) return false;
     const expectedGeneration = generationRef.current;
     let scheduled = false;
     for (const side of LIQUIDATION_SIDES) {
-      const uncovered = nextUncoveredHistoryRange(
-        coverageRef.current.get(side) || [],
+      const claims = requestCoordinatorRef.current.claim(
+        side,
         requested,
+        coverageRef.current.get(side) || [],
       );
-      if (!uncovered) continue;
-      const requestKey = `${context.identityKey}:${side}:${uncovered.startMs}:${uncovered.endMs}`;
-      if (inFlightRef.current.has(requestKey)) continue;
-      scheduled = true;
-      inFlightRef.current.add(requestKey);
-      const controller = new AbortController();
-      abortControllersRef.current.add(controller);
-      const isCurrent = (): boolean => {
-        const current = activeRef.current;
-        return !disposedRef.current
-          && !controller.signal.aborted
-          && generationRef.current === expectedGeneration
-          && current.enabled
-          && current.seriesReady
-          && current.identityKey === context.identityKey
-          && current.interval === context.interval;
-      };
-      void (async () => {
-        let pageStartMs = uncovered.startMs;
-        try {
-          setHistoryError(null);
-          for (let page = 0; page < MAX_HISTORY_PAGES_PER_LOAD; page += 1) {
-            if (!isCurrent() || pageStartMs > uncovered.endMs) return;
-            const payload = await fetchLiquidationHistory(context.identity, {
-              positionSide: side,
-              startMs: pageStartMs,
-              endMs: uncovered.endMs,
-              limit: HISTORY_PAGE_LIMIT,
-              signal: controller.signal,
-            });
-            if (!isCurrent()) return;
-            assertHistoryIdentity(context.identity, side, payload);
-            liquidationStore.mergeHistory(context.identity, payload.data, payload.quality);
-            setQuality(payload.quality);
-            const tail = payload.data.at(-1);
-            if (!payload.hasMore) {
+      if (claims.length > 0) scheduled = true;
+      for (const claim of claims) {
+        const uncovered = claim.range;
+        const controller = new AbortController();
+        abortControllersRef.current.add(controller);
+        const isCurrent = (): boolean => {
+          const current = activeRef.current;
+          return !disposedRef.current
+            && !controller.signal.aborted
+            && generationRef.current === expectedGeneration
+            && current.enabled
+            && current.seriesReady
+            && current.identityKey === context.identityKey
+            && current.interval === context.interval;
+        };
+        void (async () => {
+          let pageStartMs = uncovered.startMs;
+          try {
+            setHistoryError(null);
+            for (let page = 0; page < MAX_HISTORY_PAGES_PER_LOAD; page += 1) {
+              if (!isCurrent() || pageStartMs > uncovered.endMs) return;
+              const payload = await fetchLiquidationHistory(context.identity, {
+                positionSide: side,
+                startMs: pageStartMs,
+                endMs: uncovered.endMs,
+                limit: HISTORY_PAGE_LIMIT,
+                signal: controller.signal,
+              });
+              if (!isCurrent()) return;
+              assertHistoryIdentity(context.identity, side, payload);
+              liquidationStore.mergeHistory(context.identity, payload.data, payload.quality);
+              setQuality(payload.quality);
+              const tail = payload.data.at(-1);
+              if (!payload.hasMore) {
+                coverageRef.current.set(side, mergeHistoryCoverage(
+                  coverageRef.current.get(side) || [],
+                  uncovered,
+                ));
+                return;
+              }
+              if (!tail || tail.bucketStartMs < pageStartMs) {
+                throw new Error(`Liquidation ${side} history did not advance its cursor`);
+              }
+              const coveredEndMs = Math.min(uncovered.endMs, tail.bucketStartMs);
               coverageRef.current.set(side, mergeHistoryCoverage(
                 coverageRef.current.get(side) || [],
-                uncovered,
+                { startMs: pageStartMs, endMs: coveredEndMs },
               ));
-              return;
+              pageStartMs = tail.bucketStartMs + MINUTE_MS;
             }
-            if (!tail || tail.bucketStartMs < pageStartMs) {
-              throw new Error(`Liquidation ${side} history did not advance its cursor`);
+            if (pageStartMs <= uncovered.endMs && isCurrent()) {
+              setHistoryToken((value) => value + 1);
             }
-            const coveredEndMs = Math.min(uncovered.endMs, tail.bucketStartMs);
-            coverageRef.current.set(side, mergeHistoryCoverage(
-              coverageRef.current.get(side) || [],
-              { startMs: pageStartMs, endMs: coveredEndMs },
-            ));
-            pageStartMs = tail.bucketStartMs + MINUTE_MS;
+          } catch (caught: unknown) {
+            if (isAbortError(caught) || !isCurrent()) return;
+            console.warn(`Liquidation ${side} history failed:`, caught);
+            setHistoryError(caught instanceof Error ? caught.message : String(caught));
+            scheduleHistoryRetry(expectedGeneration);
+          } finally {
+            requestCoordinatorRef.current.release(claim);
+            abortControllersRef.current.delete(controller);
           }
-          if (pageStartMs <= uncovered.endMs && isCurrent()) {
-            setHistoryToken((value) => value + 1);
-          }
-        } catch (caught: unknown) {
-          if (isAbortError(caught) || !isCurrent()) return;
-          console.warn(`Liquidation ${side} history failed:`, caught);
-          setHistoryError(caught instanceof Error ? caught.message : String(caught));
-          scheduleHistoryRetry(expectedGeneration);
-        } finally {
-          inFlightRef.current.delete(requestKey);
-          abortControllersRef.current.delete(controller);
-        }
-      })();
+        })();
+      }
     }
     return scheduled;
   }, [scheduleHistoryRetry]);

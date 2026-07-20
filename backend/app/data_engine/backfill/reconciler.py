@@ -287,15 +287,25 @@ class Reconciler:
         strategy = DeduplicationStrategy(self._cfg.reconcile_dedup_strategy)
         batch_size = self._cfg.reconcile_write_batch_size
 
-        # Get existing open_times for dedup
-        min_ot = bars[0].open_time
-        max_ot = bars[-1].open_time
-        try:
-            existing = await self._storage.get_existing_open_times(
-                symbol, interval, min_ot, max_ot, exchange=exchange, market_type=market_type,
-            )
-        except Exception:
-            existing = set()
+        # Overwrite/backfill-wins are unconditional upserts.  Reading the
+        # entire range first only produced a diagnostic dedup count and doubled
+        # storage I/O, so reserve that lookup for policies that actually need
+        # existence to make a write decision.
+        existing: set[int] = set()
+        if strategy is DeduplicationStrategy.SKIP or self._custom_dedup_fn is not None:
+            min_ot = bars[0].open_time
+            max_ot = bars[-1].open_time
+            try:
+                existing = await self._storage.get_existing_open_times(
+                    symbol,
+                    interval,
+                    min_ot,
+                    max_ot,
+                    exchange=exchange,
+                    market_type=market_type,
+                )
+            except Exception:
+                existing = set()
 
         to_write: list[FetchedBar] = []
         skipped = 0

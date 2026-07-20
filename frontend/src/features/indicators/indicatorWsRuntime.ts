@@ -384,6 +384,7 @@ export function resolveIndicatorWsSequenceState(
 export function dispatchIndicatorWsMessage(
   message: IndicatorWsMessage,
   handlers: IndicatorWsHandlers,
+  sourceSubscriptionSignature?: string,
 ): boolean {
   switch (message.type) {
     case "heartbeat":
@@ -412,6 +413,7 @@ export function dispatchIndicatorWsMessage(
         message.barTime,
         message.type === "indicator.update",
         message,
+        sourceSubscriptionSignature,
       );
       return true;
     case "indicator.error":

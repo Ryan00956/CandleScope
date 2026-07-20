@@ -106,6 +106,8 @@ class _Handle:
 class _Factory:
     def __init__(self) -> None:
         self.start_calls = []
+        self.start_gates: dict[str, asyncio.Event] = {}
+        self.start_entered: dict[str, asyncio.Event] = {}
         self.callbacks = {}
         self.stop_calls: list[tuple[str, str, str, int, int]] = []
         self.stop_gate: asyncio.Event | None = None
@@ -124,6 +126,10 @@ class _Factory:
             descriptor.update_interval_ms,
         )
         self.start_calls.append(descriptor)
+        gate = self.start_gates.get(descriptor.symbol)
+        if gate is not None:
+            self.start_entered.setdefault(descriptor.symbol, asyncio.Event()).set()
+            await gate.wait()
         self.callbacks[identity] = callback
         return _Handle(self, identity)
 
@@ -158,6 +164,14 @@ async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
 
 
 @_async_test
+async def test_default_stop_budget_exceeds_transport_close_bound() -> None:
+    service = OrderBookService(_Factory())
+
+    assert service.diagnostics()["shutdown"]["physical_stop_timeout_seconds"] == 5.0
+    await service.shutdown()
+
+
+@_async_test
 async def test_consumers_share_one_physical_feed_until_last_release() -> None:
     factory = _Factory()
     service = _service(factory)
@@ -187,21 +201,90 @@ async def test_consumers_share_one_physical_feed_until_last_release() -> None:
 
 
 @_async_test
+async def test_cancel_after_start_returns_cleans_unpublished_reservation() -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    service = _service(factory)
+    key = _key()
+    starting = asyncio.create_task(
+        service.ensure_stream(key, consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    assert factory.stop_invocations == 1
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service.engine.diagnostics()["active_streams"] == 0
+    assert await service.ensure_stream(key, consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    await service.shutdown()
+
+
+@_async_test
+async def test_keyed_lifecycle_parallelizes_symbols_and_singleflights_identity() -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    factory.start_entered["BTCUSDT"] = asyncio.Event()
+    service = _service(factory)
+    btc = _key()
+    eth = _key(symbol="ETHUSDT")
+
+    first = asyncio.create_task(service.ensure_stream(btc, consumer_id="btc-one"))
+    await factory.start_entered["BTCUSDT"].wait()
+    same_identity = asyncio.create_task(
+        service.ensure_stream(btc, consumer_id="btc-two"),
+    )
+
+    assert await asyncio.wait_for(
+        service.ensure_stream(eth, consumer_id="eth"),
+        timeout=0.25,
+    ) is True
+    assert len(factory.start_calls) == 2
+    assert not same_identity.done()
+
+    factory.start_gates["BTCUSDT"].set()
+    assert await first is True
+    assert await same_identity is True
+    assert len(factory.start_calls) == 2
+
+    await service.shutdown()
+    assert len(factory.stop_calls) == 2
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service._identity_locks.active_keys == 0  # noqa: SLF001
+
+
+@_async_test
 async def test_levels_and_update_interval_are_part_of_immutable_identity() -> None:
     factory = _Factory()
     service = _service(factory)
     fast = _key(depth_levels=5, update_interval_ms=100)
     deep = _key(depth_levels=20, update_interval_ms=500)
+    spot = _key(market_type="spot", depth_levels=20, update_interval_ms=1000)
 
     await service.ensure_stream(fast, consumer_id="same-consumer")
     await service.ensure_stream(deep, consumer_id="same-consumer")
+    await service.ensure_stream(spot, consumer_id="same-consumer")
 
-    assert len(factory.start_calls) == 2
+    assert len(factory.start_calls) == 3
     assert {
-        (item.depth_levels, item.update_interval_ms)
+        (item.market_type, item.depth_levels, item.update_interval_ms)
         for item in factory.start_calls
-    } == {(5, 100), (20, 500)}
-    assert service.diagnostics()["physical_streams"] == 2
+    } == {
+        ("futures", 5, 100),
+        ("futures", 20, 500),
+        ("spot", 20, 1000),
+    }
+    assert service.diagnostics()["physical_streams"] == 3
     await service.shutdown()
 
 
@@ -223,12 +306,17 @@ async def test_invalid_or_unsupported_keys_fail_before_start() -> None:
         await service.ensure_stream(_key(mode="full"), consumer_id="full")
     with pytest.raises(ValueError, match="mode='partial'"):
         await service.ensure_stream(_key(mode="Partial"), consumer_id="mixed-case")
-    with pytest.raises(ValueError, match="market_type='futures'"):
+    with pytest.raises(ValueError, match="'spot' or 'futures'"):
         await service.ensure_stream(
-            _key(market_type="spot"),
-            consumer_id="spot",
+            _key(market_type="margin"),
+            consumer_id="margin",
         )
-    with pytest.raises(ValueError, match="100, 250, or 500"):
+    with pytest.raises(ValueError, match="100, 1000"):
+        await service.ensure_stream(
+            _key(market_type="spot", update_interval_ms=250),
+            consumer_id="spot-wrong-speed",
+        )
+    with pytest.raises(ValueError, match="100, 250, 500"):
         await service.ensure_stream(
             _key(update_interval_ms=1_000),
             consumer_id="slow",

@@ -331,3 +331,16 @@ def test_engine_bounds_rollup_rows_and_orders_snapshots() -> None:
         "rollup_rows_per_stream": 2,
         "streams": 64,
     }
+
+
+def test_raw_tail_selects_newest_events_without_sorting_the_full_ring() -> None:
+    engine = LiquidationEngine(raw_ring_size=10)
+    engine.ingest(_event(trade_time_ms=3_000))
+    engine.ingest(_event(trade_time_ms=1_000))
+    engine.ingest(_event(trade_time_ms=2_000))
+
+    assert [
+        event.trade_time_ms
+        for event in engine.raw_tail(("binance", "futures", "BTCUSDT"), 2)
+    ] == [2_000, 3_000]
+    assert engine.raw_tail(("binance", "futures", "BTCUSDT"), 0) == ()

@@ -421,6 +421,7 @@ test("position persistence keeps both canonical endpoints across projection swit
         },
       },
       _positionSize: 1000,
+      _infoPanelOffset: { anchor: "left", x: 0, y: 4 },
     })]);
 
     const saved = mustSavedPosition(loadDrawings("derived-position")[0]);
@@ -440,6 +441,7 @@ test("position persistence keeps both canonical endpoints across projection swit
     });
     assert.equal(JSON.stringify(saved.timeRange).includes("order"), false);
     assert.equal(JSON.stringify(saved.timeRange).includes("logical"), false);
+    assert.deepEqual(saved.infoPanelOffset, { anchor: "left", x: 0, y: 4 });
   } finally {
     if (previousLocalStorage === undefined) Reflect.deleteProperty(globalThis, "localStorage");
     else globalThis.localStorage = previousLocalStorage;

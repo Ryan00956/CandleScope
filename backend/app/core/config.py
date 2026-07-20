@@ -244,7 +244,10 @@ ORDER_BOOK_MAX_SNAPSHOT_AGE_MS = int(
     os.getenv("ORDER_BOOK_MAX_SNAPSHOT_AGE_MS", "5000")
 )
 ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS = float(
-    os.getenv("ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS", "2.0")
+    # The ingestion transport owns an inner two-second WebSocket close bound.
+    # Keep the service-level budget above it so a graceful close at that bound
+    # is not misclassified as an order-book lifecycle failure.
+    os.getenv("ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS", "5.0")
 )
 
 # Full Order Books are rebuilt from a REST seed plus every ordered diff-depth

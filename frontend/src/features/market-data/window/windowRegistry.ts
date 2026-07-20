@@ -62,10 +62,15 @@ export class SeriesWindowRegistry {
 
   touchMeta(key: string, patch: Record<string, unknown> = {}): void {
     const current = this._meta.get(key) || {};
+    const currentMetaRevision = Number(current.metaRevision);
     this._meta.set(key, {
       ...current,
       ...patch,
       lastAccessMs: Date.now(),
+      metaRevision:
+        (Number.isSafeInteger(currentMetaRevision) && currentMetaRevision >= 0
+          ? currentMetaRevision
+          : 0) + 1,
     });
   }
 

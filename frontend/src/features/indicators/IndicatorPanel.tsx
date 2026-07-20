@@ -61,6 +61,21 @@ const CATEGORY_ICONS: Record<string, string> = {
   "Volume": "📦",
 };
 
+const CATEGORY_GROUP_KEYS: Record<string, string> = {
+  "趋势": "trend",
+  "动量": "momentum",
+  "震荡": "oscillator",
+  "波动率": "volatility",
+  "成交量": "volume",
+  "合约数据": "contract-data",
+  "自定义": "custom",
+};
+
+function categoryGroupKey(category: string | null | undefined, fallback: string): string {
+  const raw = category || fallback;
+  return CATEGORY_GROUP_KEYS[CATEGORY_LABELS[raw] || raw] || raw;
+}
+
 const SOURCE_OPTIONS = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4"];
 const ENGINE_SCRIPT_MARKER = "# __ENGINE__:";
 
@@ -77,6 +92,7 @@ export interface IndicatorPanelMarketStudy {
   id: string;
   name: string;
   description?: string;
+  category?: string;
   added: boolean;
   visible: boolean;
   supported: boolean;
@@ -236,9 +252,10 @@ function marketStudyMatchesSearch(
     study.name,
     study.id,
     study.description,
+    study.category,
+    CATEGORY_LABELS[study.category || "contract-data"],
     study.unsupportedReason,
     study.statusText,
-    "合约数据",
   ].some((value) => String(value || "").toLowerCase().includes(query));
 }
 
@@ -554,10 +571,20 @@ plot(ma, "MA", color=line_color)
   // Group presets by category
   const groupedPresets: Record<string, CatalogIndicator[]> = {};
   for (const p of filteredPresets) {
-    const cat = p.category || "custom";
+    const cat = categoryGroupKey(p.category, "custom");
     if (!groupedPresets[cat]) groupedPresets[cat] = [];
     groupedPresets[cat].push(p);
   }
+  const groupedMarketStudies: Record<string, IndicatorPanelMarketStudy[]> = {};
+  for (const study of filteredMarketStudies) {
+    const cat = categoryGroupKey(study.category, "contract-data");
+    if (!groupedMarketStudies[cat]) groupedMarketStudies[cat] = [];
+    groupedMarketStudies[cat].push(study);
+  }
+  const groupedCategoryOrder = Array.from(new Set([
+    ...(presetsLoading ? [] : Object.keys(groupedPresets)),
+    ...Object.keys(groupedMarketStudies),
+  ]));
 
   const isActive = (presetId: string): boolean => activeIndicators.some((i) => i.id === presetId);
 
@@ -649,10 +676,14 @@ plot(ma, "MA", color=line_color)
                     />
                   </div>
 
-                  {presetsLoading ? (
+                  {presetsLoading && (
                     <div className="indicator-loading">加载中...</div>
-                  ) : (
-                    Object.entries(groupedPresets).map(([cat, items]) => (
+                  )}
+
+                  {groupedCategoryOrder.map((cat) => {
+                    const items = groupedPresets[cat] || [];
+                    const studies = groupedMarketStudies[cat] || [];
+                    return (
                       <div key={cat} className="indicator-category-group">
                         <div className="indicator-category-label">
                           <span>{CATEGORY_ICONS[cat] || "📌"}</span>
@@ -698,63 +729,54 @@ plot(ma, "MA", color=line_color)
                             </div>
                           </div>
                         ))}
-                      </div>
-                    ))
-                  )}
-
-                  {filteredMarketStudies.length > 0 && (
-                    <div className="indicator-category-group">
-                      <div className="indicator-category-label">
-                        <span>{CATEGORY_ICONS["contract-data"]}</span>
-                        <span>{CATEGORY_LABELS["contract-data"]}</span>
-                      </div>
-                      {filteredMarketStudies.map((study) => {
-                        const callback = study.added ? onRemoveMarketStudy : onAddMarketStudy;
-                        const disabled = !study.supported || !callback;
-                        const disabledReason = study.supported
-                          ? "操作暂不可用"
-                          : study.unsupportedReason || "当前品种不支持";
-                        return (
-                          <div
-                            key={study.id}
-                            className={`indicator-preset-item ${study.added ? "is-active" : ""}`}
-                          >
-                            <div className="indicator-preset-info">
-                              <span className="indicator-preset-name">
-                                {study.name}
-                                <IndicatorBadge tone="neutral">market-data</IndicatorBadge>
-                                <IndicatorBadge tone="sub">副图</IndicatorBadge>
-                                {!study.supported && (
-                                  <IndicatorBadge tone="neutral">不可用</IndicatorBadge>
-                                )}
-                              </span>
-                              <span className="indicator-preset-desc">
-                                {study.description}
-                                {!study.supported && (
-                                  <span style={{ display: "block", color: "#f59e0b", marginTop: 3 }}>
-                                    {disabledReason}
-                                  </span>
-                                )}
-                              </span>
+                        {studies.map((study) => {
+                          const callback = study.added ? onRemoveMarketStudy : onAddMarketStudy;
+                          const disabled = !study.supported || !callback;
+                          const disabledReason = study.supported
+                            ? "操作暂不可用"
+                            : study.unsupportedReason || "当前品种不支持";
+                          return (
+                            <div
+                              key={study.id}
+                              className={`indicator-preset-item ${study.added ? "is-active" : ""}`}
+                            >
+                              <div className="indicator-preset-info">
+                                <span className="indicator-preset-name">
+                                  {study.name}
+                                  <IndicatorBadge tone="neutral">market-data</IndicatorBadge>
+                                  <IndicatorBadge tone="sub">副图</IndicatorBadge>
+                                  {!study.supported && (
+                                    <IndicatorBadge tone="neutral">不可用</IndicatorBadge>
+                                  )}
+                                </span>
+                                <span className="indicator-preset-desc">
+                                  {study.description}
+                                  {!study.supported && (
+                                    <span style={{ display: "block", color: "#f59e0b", marginTop: 3 }}>
+                                      {disabledReason}
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                              <div className="indicator-preset-actions">
+                                <button
+                                  className={`indicator-add-btn ${study.added ? "added" : ""}`}
+                                  onClick={() => callback?.(study.id)}
+                                  disabled={disabled}
+                                  title={disabled
+                                    ? disabledReason
+                                    : study.added ? "从图表移除" : "添加到图表"}
+                                  style={disabled ? { cursor: "not-allowed", opacity: 0.45 } : undefined}
+                                >
+                                  {study.added ? "✓" : "+"}
+                                </button>
+                              </div>
                             </div>
-                            <div className="indicator-preset-actions">
-                              <button
-                                className={`indicator-add-btn ${study.added ? "added" : ""}`}
-                                onClick={() => callback?.(study.id)}
-                                disabled={disabled}
-                                title={disabled
-                                  ? disabledReason
-                                  : study.added ? "从图表移除" : "添加到图表"}
-                                style={disabled ? { cursor: "not-allowed", opacity: 0.45 } : undefined}
-                              >
-                                {study.added ? "✓" : "+"}
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
 
                   {!presetsLoading
                     && filteredPresets.length === 0

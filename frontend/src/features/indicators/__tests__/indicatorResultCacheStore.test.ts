@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  acquireActiveIndicatorCacheLeases,
   cacheIndicatorSnapshot as cacheIndicatorSnapshotProduction,
   buildIndicatorCacheHydrationSignature,
+  buildIndicatorResultCacheKey,
   getCachedIndicatorComputedSegments,
   getCachedIndicatorResult,
   invalidateCachedIndicatorRange,
   replaceCachedIndicatorRange as replaceCachedIndicatorRangeProduction,
   resetIndicatorResultCache,
+  snapshotIndicatorResultCacheEntries,
   snapshotIndicatorResultCacheDiagnostics,
   trimIndicatorResultCacheEntries,
   upsertCachedIndicatorLinePoint,
@@ -345,7 +348,195 @@ test("complex indicator outputs are not range-trimmed", () => {
 
   const entry = mustBeDefined(snapshotIndicatorResultCacheDiagnostics().entries[0]);
   assert.equal(entry.trimSafety.safeRangeTrim, false);
-  trimIndicatorResultCacheEntries([{ key: entry.key, action: "trim-range", keepStart: 20 }]);
+  const result = trimIndicatorResultCacheEntries([
+    { key: entry.key, action: "trim-range", keepStart: 20 },
+  ]);
 
-  assert.equal(getCachedIndicatorResult(maIndicator, baseContext), null);
+  assert.equal(result.removedCount, 0);
+  assert.equal(result.skipped[0]?.reason, "trim-no-longer-safe");
+  assert.notEqual(getCachedIndicatorResult(maIndicator, baseContext), null);
+});
+
+test("indicator diagnostics account for nested complex output data", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+
+  cacheIndicatorSnapshot(maIndicator, baseContext, {
+    lines: [{
+      outputName: "ma",
+      data: [{ time: 10, value: 1 }, { time: 20, value: 2 }],
+      colorData: [{ time: 10, color: "red" }, { time: 20, color: "green" }],
+    }],
+    markers: [{
+      id: "m",
+      data: [{ time: 10, text: "a" }, { time: 20, text: "b" }],
+    }],
+    bgcolors: [{
+      id: "bg",
+      regions: [{ time: 10, color: "red" }, { time: 20, color: "green" }],
+    }],
+  });
+
+  const diagnostics = snapshotIndicatorResultCacheDiagnostics();
+  const entry = mustBeDefined(diagnostics.entries[0]);
+  assert.equal(entry.points, 2);
+  assert.equal(entry.items, 8);
+  assert.equal(entry.estimatedBytes, 1_120);
+  assert.equal(diagnostics.totalItems, 8);
+  assert.equal(diagnostics.estimatedBytes, 1_120);
+});
+
+test("indicator diagnostics expose an exact safe trim plan", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+
+  cacheIndicatorSnapshot(maIndicator, baseContext, {
+    lines: [{
+      outputName: "ma",
+      data: [
+        { time: 10, value: 1 },
+        { time: 20, value: 2 },
+        { time: 30, value: 3 },
+        { time: 40, value: 4 },
+      ],
+      colorData: [
+        { time: 10, color: "red" },
+        { time: 20, color: "red" },
+        { time: 30, color: "green" },
+        { time: 40, color: "green" },
+      ],
+    }],
+  });
+
+  const entry = mustBeDefined(snapshotIndicatorResultCacheDiagnostics().entries[0]);
+  assert.deepEqual(entry.trimPlan, {
+    keepStart: 25,
+    removedPoints: 2,
+    removedItems: 2,
+    removedEstimatedBytes: 400,
+  });
+});
+
+test("indicator GC rejects a victim after the cache generation changes", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+
+  cacheIndicatorSnapshot(maIndicator, baseContext, {
+    lines: [{ outputName: "ma", data: [{ time: 10, value: 1 }] }],
+  });
+  const entry = mustBeDefined(snapshotIndicatorResultCacheDiagnostics().entries[0]);
+  assert.notEqual(getCachedIndicatorResult(maIndicator, baseContext), null);
+
+  const result = trimIndicatorResultCacheEntries([{
+    key: entry.key,
+    action: "delete-entry",
+    generation: entry.generation,
+  }]);
+
+  assert.equal(result.removedCount, 0);
+  assert.equal(result.skipped[0]?.reason, "generation-changed");
+  assert.notEqual(getCachedIndicatorResult(maIndicator, baseContext), null);
+});
+
+test("active indicator lease publishes active diagnostics and survives resource recreation", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+
+  const release = acquireActiveIndicatorCacheLeases(
+    [maIndicator],
+    baseContext,
+    "test-active-runtime",
+  );
+  try {
+    cacheIndicatorSnapshot(maIndicator, baseContext, {
+      lines: [{ outputName: "ma", data: [{ time: 10, value: 1 }] }],
+    });
+    let entry = mustBeDefined(snapshotIndicatorResultCacheDiagnostics().entries[0]);
+    assert.equal(entry.tier, "active");
+    assert.equal(entry.activeLeaseCount, 1);
+
+    resetIndicatorResultCache();
+    cacheIndicatorSnapshot(maIndicator, baseContext, {
+      lines: [{ outputName: "ma", data: [{ time: 20, value: 2 }] }],
+    });
+    entry = mustBeDefined(snapshotIndicatorResultCacheDiagnostics().entries[0]);
+    assert.equal(entry.tier, "active");
+    assert.equal(entry.activeLeaseCount, 1);
+  } finally {
+    release();
+  }
+
+  const releasedEntry = mustBeDefined(snapshotIndicatorResultCacheDiagnostics().entries[0]);
+  assert.equal(releasedEntry.tier, "warm");
+  assert.equal(releasedEntry.activeLeaseCount, 0);
+});
+
+test("indicator GC rechecks an active lease acquired after planning", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+
+  cacheIndicatorSnapshot(maIndicator, baseContext, {
+    lines: [{ outputName: "ma", data: [{ time: 10, value: 1 }] }],
+  });
+  const planned = mustBeDefined(snapshotIndicatorResultCacheDiagnostics().entries[0]);
+  assert.equal(planned.tier, "warm");
+
+  const release = acquireActiveIndicatorCacheLeases(
+    [maIndicator],
+    baseContext,
+    "test-toctou-runtime",
+  );
+  try {
+    const result = trimIndicatorResultCacheEntries([{
+      key: planned.key,
+      action: "delete-entry",
+      generation: planned.generation,
+      lastAccessMs: planned.lastAccessMs,
+    }]);
+    assert.equal(result.removedCount, 0);
+    assert.equal(result.skipped[0]?.reason, "active-lease");
+    assert.equal(snapshotIndicatorResultCacheEntries().length, 1);
+  } finally {
+    release();
+  }
+});
+
+test("indicator cache capacity eviction skips active indicator leases", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+
+  const release = acquireActiveIndicatorCacheLeases(
+    [maIndicator],
+    baseContext,
+    "test-capacity-runtime",
+  );
+  try {
+    cacheIndicatorSnapshot(maIndicator, baseContext, {
+      lines: [{ outputName: "ma", data: [{ time: 1, value: 1 }] }],
+    });
+    for (let index = 0; index < 80; index += 1) {
+      cacheIndicatorSnapshot({
+        ...maIndicator,
+        id: `other-${index}`,
+      }, baseContext, {
+        lines: [{ outputName: "ma", data: [{ time: index + 2, value: index }] }],
+      });
+    }
+
+    const keys = new Set(snapshotIndicatorResultCacheEntries().map((entry) => entry.key));
+    assert.equal(keys.size, 80);
+    assert.equal(keys.has(buildIndicatorResultCacheKey(maIndicator, baseContext)), true);
+    assert.equal(keys.has(buildIndicatorResultCacheKey({
+      ...maIndicator,
+      id: "other-0",
+    }, baseContext)), false);
+  } finally {
+    release();
+  }
 });

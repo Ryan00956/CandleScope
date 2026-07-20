@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from decimal import Decimal
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import app.api.v1.full_order_book as full_order_book_module
 from app.api.v1.full_order_book import (
+    clear_full_order_book_projection_cache,
+    full_order_book_projection_cache_info,
     router as full_order_book_router,
     serialize_record,
 )
+from app.api.v1.order_book_projection import project_order_book_levels
 from app.data_engine.ingestion.models import DataSource
 from app.data_engine.market_data.events import HubRecord, MarketStateEvent
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
@@ -51,6 +56,27 @@ class _FullOrderBookDataManager:
         return True
 
 
+class _CountingLevels(Sequence[tuple[float, float]]):
+    def __init__(self, *, count: int, first_price: float, direction: int) -> None:
+        self.count = count
+        self.first_price = first_price
+        self.direction = direction
+        self.accesses = 0
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index: int | slice):
+        if isinstance(index, slice):
+            return tuple(self[item] for item in range(*index.indices(self.count)))
+        if index < 0:
+            index += self.count
+        if not 0 <= index < self.count:
+            raise IndexError(index)
+        self.accesses += 1
+        return self.first_price + self.direction * index, 1.0
+
+
 def _client(data_manager: object | None = None) -> TestClient:
     app = FastAPI()
     app.include_router(full_order_book_router, prefix="/api/v1")
@@ -62,11 +88,12 @@ def _client(data_manager: object | None = None) -> TestClient:
 def _key(
     symbol: str = "BTCUSDT",
     *,
+    market_type: str = "futures",
     update_interval_ms: int = 250,
 ) -> MarketStreamKey:
     return MarketStreamKey.build(
         "binance",
-        "futures",
+        market_type,
         symbol,
         MarketChannel.FULL_DEPTH,
         params={
@@ -84,6 +111,7 @@ def _record(
     bids: list[list[float]] | None = None,
     asks: list[list[float]] | None = None,
     exchange_full_depth_exhaustive: bool | None = None,
+    revision: int = 1,
 ) -> HubRecord:
     bid_levels = bids or [[100.0, 1.0], [99.0, 2.0], [98.0, 3.0]]
     ask_levels = asks or [[101.0, 1.0], [102.0, 2.0], [103.0, 3.0]]
@@ -114,7 +142,7 @@ def _record(
                 ),
             },
         ),
-        revision=1,
+        revision=revision,
     )
 
 
@@ -226,6 +254,24 @@ def test_full_order_book_auto_grouping_uses_symbol_scale_and_degrades_without_ti
     assert unavailable["bids"] == [[60_000.9, 1.0], [60_000.2, 2.0]]
 
 
+def test_canonical_raw_projection_reports_truncation_without_tick_metadata() -> None:
+    projection = project_order_book_levels(
+        {
+            "bids": [[100.0, 1.0], [99.0, 2.0], [98.0, 3.0]],
+            "asks": [[101.0, 1.0], [102.0, 2.0], [103.0, 3.0]],
+        },
+        price_grouping="raw",
+        price_tick_size=None,
+        limit=2,
+        source_levels_canonical=True,
+    )
+
+    assert projection.bids == [[100.0, 1.0], [99.0, 2.0]]
+    assert projection.asks == [[101.0, 1.0], [102.0, 2.0]]
+    assert projection.price_window_bid_truncated is True
+    assert projection.price_window_ask_truncated is True
+
+
 def test_full_order_book_omits_incomplete_outer_bucket_from_bounded_source() -> None:
     record = _record(
         _key(),
@@ -281,6 +327,124 @@ def test_full_order_book_limits_sparse_levels_to_near_price_window() -> None:
     assert data["full_projection"] is False
 
 
+def test_full_order_book_http_supports_spot_with_market_default_cadence() -> None:
+    dm = _FullOrderBookDataManager()
+    response = _client(dm).get(
+        "/api/v1/full-order-book/snapshot?market_type=spot&symbol=ethusdt",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["key"] == _key(
+        "ETHUSDT",
+        market_type="spot",
+        update_interval_ms=1000,
+    ).to_dict()
+    assert dm.release_calls == dm.ensure_calls
+
+
+def test_full_order_book_raw_projection_reads_only_requested_canonical_top_levels() -> None:
+    clear_full_order_book_projection_cache()
+    bids = _CountingLevels(count=5_000, first_price=10_000, direction=-1)
+    asks = _CountingLevels(count=5_000, first_price=10_001, direction=1)
+    key = _key()
+    record = HubRecord(
+        event=MarketStateEvent(
+            key=key,
+            event_time_ms=1_700_000_001_000,
+            received_at_ms=1_700_000_001_001,
+            source=DataSource.WEBSOCKET,
+            sequence=1_000,
+            data={
+                "state": "live",
+                "live": True,
+                "last_update_id": 1_000,
+                "snapshot_limit": 1_000,
+                "book_bid_levels": len(bids),
+                "book_ask_levels": len(asks),
+                "top_bid": 10_000.0,
+                "top_ask": 10_001.0,
+                "mid_price": 10_000.5,
+                "bids": bids,
+                "asks": asks,
+                "exchange_full_depth_exhaustive": False,
+                "_canonical_level_order": True,
+            },
+        ),
+        revision=1,
+    )
+
+    data = serialize_record(
+        record,
+        limit=20,
+        price_grouping="raw",
+        price_tick_size=Decimal("1"),
+    )["data"]
+
+    assert len(data["bids"]) == len(data["asks"]) == 20
+    assert data["aggregation_source_bid_levels"] == 5_000
+    assert data["aggregation_source_ask_levels"] == 5_000
+    assert bids.accesses == asks.accesses == 20
+
+
+def test_full_order_book_projection_cache_shares_work_per_record_and_options(
+    monkeypatch,
+) -> None:
+    clear_full_order_book_projection_cache()
+    calls = 0
+    original = full_order_book_module.project_order_book_levels
+
+    def _counted_projection(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        full_order_book_module,
+        "project_order_book_levels",
+        _counted_projection,
+    )
+    record = _record(_key(), update_id=47)
+
+    first = serialize_record(record, limit=2)
+    first["data"]["output_limit"] = 999
+    second = serialize_record(record, limit=2)
+    different_options = serialize_record(record, limit=3)
+
+    assert calls == 2
+    assert second["data"]["output_limit"] == 2
+    assert different_options["data"]["output_limit"] == 3
+    assert full_order_book_projection_cache_info() == {
+        "entries": 2,
+        "max_entries": 128,
+        "hits": 1,
+        "misses": 2,
+        "evictions": 0,
+    }
+
+
+def test_full_order_book_projection_cache_evicts_older_stream_revision_options() -> None:
+    clear_full_order_book_projection_cache()
+    key = _key()
+    first_revision = _record(key, update_id=47, revision=1)
+    second_revision = _record(key, update_id=48, revision=2)
+
+    serialize_record(first_revision, limit=2)
+    serialize_record(first_revision, limit=3)
+    assert full_order_book_projection_cache_info()["entries"] == 2
+
+    serialize_record(second_revision, limit=4)
+    assert full_order_book_projection_cache_info() == {
+        "entries": 1,
+        "max_entries": 128,
+        "hits": 0,
+        "misses": 3,
+        "evictions": 2,
+    }
+
+    serialize_record(second_revision, limit=5)
+    assert full_order_book_projection_cache_info()["entries"] == 2
+
+
 def test_full_order_book_http_rejects_unsupported_contract_before_leasing() -> None:
     dm = _FullOrderBookDataManager()
     client = _client(dm)
@@ -289,7 +453,10 @@ def test_full_order_book_http_rejects_unsupported_contract_before_leasing() -> N
         "/api/v1/full-order-book/snapshot?update_interval_ms=1000",
     ).status_code == 422
     assert client.get(
-        "/api/v1/full-order-book/snapshot?market_type=spot",
+        "/api/v1/full-order-book/snapshot?market_type=margin",
+    ).status_code == 422
+    assert client.get(
+        "/api/v1/full-order-book/snapshot?market_type=spot&update_interval_ms=250",
     ).status_code == 422
     assert client.get(
         "/api/v1/full-order-book/snapshot?limit=1001",

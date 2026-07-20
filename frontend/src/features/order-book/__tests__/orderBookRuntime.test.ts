@@ -362,3 +362,33 @@ test("P3 controller clears a snapshot when its client freshness watchdog expires
   assert.equal(store.getSnapshot().book, null);
   controller.close();
 });
+
+test("spot controller subscribes with the native market identity and cadence", () => {
+  const socket = new FakeSocket();
+  const { store } = flushableStore();
+  const controller = new OrderBookStreamController({
+    url: "ws://example/api/v1/stream/order-book",
+    identity: { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" },
+    mode: "partial",
+    partialDepth: 20,
+    updateIntervalMs: 1000,
+    fullOutputLimit: 100,
+    fullPriceGrouping: "auto",
+    store,
+    socketFactory: () => socket,
+  });
+
+  controller.start();
+  socket.open();
+  socket.message({ type: "connected", protocol: "orderbook.v1" });
+  const subscribe = JSON.parse(socket.sent[0] || "{}") as {
+    streams: Array<{
+      market_type?: unknown;
+      params?: Record<string, unknown>;
+    }>;
+  };
+
+  assert.equal(subscribe.streams[0]?.market_type, "spot");
+  assert.equal(subscribe.streams[0]?.params?.update_interval_ms, 1000);
+  controller.close();
+});

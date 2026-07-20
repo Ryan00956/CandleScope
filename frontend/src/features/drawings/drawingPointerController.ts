@@ -1,6 +1,9 @@
 import { useCallback, useEffect } from "react";
 import type { MutableRefObject } from "react";
 import type { ScreenPoint } from "./drawingTypes.js";
+import {
+  subscribeSharedDrawingDocumentEvent,
+} from "./sharedDrawingDocumentEventHub.js";
 
 export type DrawingDomPointerEvent = MouseEvent | PointerEvent | TouchEvent;
 export type DrawingPointerHandler = (event: DrawingDomPointerEvent) => void;
@@ -56,17 +59,42 @@ export function useDrawingPointerEvents({
     if (!container) return undefined;
 
     const supportsPointerEvents = typeof window !== "undefined" && "PointerEvent" in window;
+    const sharedDocumentEventCleanups: Array<() => void> = [];
 
     if (supportsPointerEvents) {
       container.addEventListener("pointerdown", handleMouseDown, true);
-      document.addEventListener("pointermove", handleMouseMove, true);
-      document.addEventListener("pointerup", handleMouseUp, true);
-      document.addEventListener("pointercancel", handlePointerCancel, true);
+      sharedDocumentEventCleanups.push(
+        subscribeSharedDrawingDocumentEvent(
+          document,
+          "pointermove",
+          (event) => handleMouseMove(event as PointerEvent),
+        ),
+        subscribeSharedDrawingDocumentEvent(
+          document,
+          "pointerup",
+          (event) => handleMouseUp(event as PointerEvent),
+        ),
+        subscribeSharedDrawingDocumentEvent(
+          document,
+          "pointercancel",
+          (event) => handlePointerCancel(event as PointerEvent),
+        ),
+      );
       container.addEventListener("pointerleave", handleMouseLeave);
     } else {
       container.addEventListener("mousedown", handleMouseDown, true);
-      document.addEventListener("mousemove", handleMouseMove, true);
-      document.addEventListener("mouseup", handleMouseUp, true);
+      sharedDocumentEventCleanups.push(
+        subscribeSharedDrawingDocumentEvent(
+          document,
+          "mousemove",
+          (event) => handleMouseMove(event as MouseEvent),
+        ),
+        subscribeSharedDrawingDocumentEvent(
+          document,
+          "mouseup",
+          (event) => handleMouseUp(event as MouseEvent),
+        ),
+      );
       container.addEventListener("mouseleave", handleMouseLeave);
       container.addEventListener("touchstart", handleMouseDown, { passive: false, capture: true });
       container.addEventListener("touchmove", handleMouseMove, { passive: false });
@@ -81,20 +109,16 @@ export function useDrawingPointerEvents({
     return () => {
       if (supportsPointerEvents) {
         container.removeEventListener("pointerdown", handleMouseDown, true);
-        document.removeEventListener("pointermove", handleMouseMove, true);
-        document.removeEventListener("pointerup", handleMouseUp, true);
-        document.removeEventListener("pointercancel", handlePointerCancel, true);
         container.removeEventListener("pointerleave", handleMouseLeave);
       } else {
         container.removeEventListener("mousedown", handleMouseDown, true);
-        document.removeEventListener("mousemove", handleMouseMove, true);
-        document.removeEventListener("mouseup", handleMouseUp, true);
         container.removeEventListener("mouseleave", handleMouseLeave);
         container.removeEventListener("touchstart", handleMouseDown, true);
         container.removeEventListener("touchmove", handleMouseMove);
         container.removeEventListener("touchend", handleMouseUp);
         container.removeEventListener("touchcancel", handlePointerCancel);
       }
+      for (const cleanup of sharedDocumentEventCleanups) cleanup();
 
       container.removeEventListener("dblclick", handleDblClick);
       container.removeEventListener("contextmenu", handleContextMenu);

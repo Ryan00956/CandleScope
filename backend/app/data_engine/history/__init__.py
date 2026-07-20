@@ -7,7 +7,9 @@ from app.data_engine.history.calendar import (
     SessionWindow,
     TradingCalendar,
     WeeklySessionCalendar,
+    expected_bucket_end_ms,
     get_history_calendar_registry,
+    latest_closed_expected_open_ms,
     register_trading_calendar,
 )
 from app.data_engine.history.models import (
@@ -56,6 +58,8 @@ __all__ = [
     "TradingCalendar",
     "WeeklySessionCalendar",
     "ResolvedHistoryContext",
+    "expected_bucket_end_ms",
     "get_history_calendar_registry",
+    "latest_closed_expected_open_ms",
     "register_trading_calendar",
 ]

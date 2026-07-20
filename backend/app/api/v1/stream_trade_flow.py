@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from typing import Any
+from uuid import uuid4
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -32,7 +33,8 @@ async def stream_trade_flow(websocket: WebSocket, dm: Any) -> None:
     and this handler sends that snapshot before forwarding queued batches.
     """
 
-    consumer_id = f"ws:trade-flow:{id(websocket)}"
+    connection_id = uuid4().hex
+    consumer_id = f"ws:trade-flow:{connection_id}"
     active: list[MarketStreamKey] = []
     attachment: Any = None
     tasks: list[asyncio.Task[None]] = []
@@ -215,11 +217,11 @@ async def stream_trade_flow(websocket: WebSocket, dm: Any) -> None:
         tasks = [
             asyncio.create_task(
                 _read_after_subscribe(),
-                name=f"trade-flow-ws-read-{id(websocket)}",
+                name=f"trade-flow-ws-read-{connection_id}",
             ),
             asyncio.create_task(
                 _forward(),
-                name=f"trade-flow-ws-forward-{id(websocket)}",
+                name=f"trade-flow-ws-forward-{connection_id}",
             ),
         ]
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

@@ -36,8 +36,6 @@ export type LiveInkPaintSubscriber = (
 export interface LiveInkControllerOptions {
   readonly canvas: HTMLCanvasElement;
   readonly getPlotRect: () => DrawingOverlayPlotRect | null;
-  readonly requestFrame?: (callback: () => void) => unknown;
-  readonly cancelFrame?: (handle: unknown) => void;
 }
 
 export interface LiveInkControllerSnapshot {
@@ -63,20 +61,6 @@ export interface LiveInkController {
   snapshot(): LiveInkControllerSnapshot;
 }
 
-function defaultRequestFrame(callback: () => void): unknown {
-  return typeof requestAnimationFrame === "function"
-    ? requestAnimationFrame(callback)
-    : setTimeout(callback, 0);
-}
-
-function defaultCancelFrame(handle: unknown): void {
-  if (typeof cancelAnimationFrame === "function" && typeof handle === "number") {
-    cancelAnimationFrame(handle);
-  } else {
-    clearTimeout(handle as ReturnType<typeof setTimeout>);
-  }
-}
-
 function finitePoint(point: ScreenPoint | null): point is ScreenPoint {
   return !!point && Number.isFinite(point.x) && Number.isFinite(point.y);
 }
@@ -90,8 +74,6 @@ function paintStampCoversTicket(ticket: LiveInkPaintStamp, stamp: LiveInkPaintSt
 export function createLiveInkController({
   canvas,
   getPlotRect,
-  requestFrame = defaultRequestFrame,
-  cancelFrame = defaultCancelFrame,
 }: LiveInkControllerOptions): LiveInkController {
   const chunks: LiveInkChunk[] = [];
   let sampleCount = 0;
@@ -106,15 +88,12 @@ export function createLiveInkController({
   let historicalReplayCount = 0;
   let clearCount = 0;
   let paintUnsubscribe: (() => void) | null = null;
-  let handoffFrame: unknown = null;
   let handoffGeneration = 0;
 
   const resetHandoff = () => {
     handoffGeneration += 1;
     paintUnsubscribe?.();
     paintUnsubscribe = null;
-    if (handoffFrame !== null) cancelFrame(handoffFrame);
-    handoffFrame = null;
     retainingFinalFrame = false;
   };
 
@@ -272,18 +251,21 @@ export function createLiveInkController({
       resetHandoff();
       retainingFinalFrame = true;
       const generation = handoffGeneration;
-      paintUnsubscribe = subscribe((stamp) => {
+      const unsubscribe = subscribe((stamp) => {
         if (disposed
           || generation !== handoffGeneration
           || !paintStampCoversTicket(ticket, stamp)) return;
-        paintUnsubscribe?.();
-        paintUnsubscribe = null;
-        handoffFrame = requestFrame(() => {
-          handoffFrame = null;
-          if (disposed || generation !== handoffGeneration) return;
-          clear();
-        });
+        // The scene renderer acknowledges only after the static canvas has
+        // consumed this covering plan. Retire live ink in the same JS turn so
+        // the browser's next composite sees one layer, never a double-painted
+        // handoff frame.
+        clear();
       });
+      // A replaying subscription can acknowledge synchronously before it
+      // returns its disposer. In that case clear() advanced the generation;
+      // dispose the just-created listener instead of retaining it forever.
+      if (disposed || generation !== handoffGeneration) unsubscribe();
+      else paintUnsubscribe = unsubscribe;
     },
     refreshLayout: ensureLayout,
     cancel: clear,

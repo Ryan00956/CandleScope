@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { markPerfOnce } from "../../runtime/performance/perfMarks";
 import { parseSymbolKey } from "../../utils/symbolKey";
 import type {
@@ -10,6 +10,7 @@ import type {
 } from "react";
 import type { SymbolSelection } from "../symbol-search/useSymbolSearchRuntime.js";
 import type { WatchlistRuntime } from "./useWatchlistRuntime.js";
+import type { WatchlistPriceStore } from "./watchlistPriceStore.js";
 import type { SubscriptionTier, WatchlistGroup } from "./watchlistTypes.js";
 import {
   createWatchlistId,
@@ -66,7 +67,6 @@ const noopAction = (...args: unknown[]): void => {
 
 type WatchlistLayout = WatchlistRuntime["view"]["layout"];
 type WatchlistActions = WatchlistRuntime["actions"];
-type WatchlistPrices = WatchlistRuntime["view"]["prices"];
 type SubscriptionResourceSummaries = WatchlistRuntime["view"]["subscriptionResourceSummaries"];
 type DragType = "list" | "symbol";
 type DropPosition = "above" | "below";
@@ -84,6 +84,100 @@ function watchlistColorStyle(color: string): WatchlistCssVars {
   return { "--wl-color": color || "#3b82f6" };
 }
 
+const emptyUnsubscribe = (): void => {};
+
+interface WatchlistSymbolLiveColumnsProps {
+  compositeKey: string;
+  symbol: string;
+  marketType: string;
+  exchange: string;
+  priceStore: WatchlistPriceStore | undefined;
+  tierKnown: boolean;
+  subscriptionTier: SubscriptionTier | undefined;
+  fullTierTitle: string | undefined;
+}
+
+const WatchlistSymbolLiveColumns = memo(function WatchlistSymbolLiveColumns({
+  compositeKey,
+  symbol,
+  marketType,
+  exchange,
+  priceStore,
+  tierKnown,
+  subscriptionTier,
+  fullTierTitle,
+}: WatchlistSymbolLiveColumnsProps) {
+  const subscribe = useCallback((listener: () => void) => (
+    priceStore?.subscribeSymbol(compositeKey, listener) ?? emptyUnsubscribe
+  ), [compositeKey, priceStore]);
+  const getSnapshot = useCallback(
+    () => priceStore?.getSymbolSnapshot(compositeKey),
+    [compositeKey, priceStore],
+  );
+  const tick = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const price = tick?.price;
+  const previousPriceRef = useRef<number | undefined>(undefined);
+  const [flashDirection, setFlashDirection] = useState<PriceFlashDirection | undefined>();
+
+  useEffect(() => {
+    const previousPrice = previousPriceRef.current;
+    previousPriceRef.current = price;
+    if (price === undefined || previousPrice === undefined || price === previousPrice) return undefined;
+    const publishTimer = setTimeout(() => {
+      setFlashDirection(price > previousPrice ? "up" : "down");
+    }, 0);
+    const clearTimer = setTimeout(() => setFlashDirection(undefined), 1_200);
+    return () => {
+      clearTimeout(publishTimer);
+      clearTimeout(clearTimer);
+    };
+  }, [price]);
+
+  const tier = tierKnown ? (subscriptionTier ?? "none") : (tick ? "price" : "none");
+  const tierDot = tier === "full" ? "wl-tier-full" : tier === "price" ? "wl-tier-price" : "";
+  const tierTitle = tier === "full"
+    ? fullTierTitle || "完全订阅：保活价格和可切换周期 K 线"
+    : "仅价格：保活价格列";
+  const hasPrice = typeof price === "number" && tier !== "none";
+  const change = hasPrice
+    ? (tick?.daily_change ?? (price - (tick?.open ?? price)))
+    : null;
+  const changePct = hasPrice ? (tick?.daily_change_pct ?? tick?.change_pct ?? 0) : null;
+  const isUp = change !== null ? change >= 0 : null;
+
+  return (
+    <>
+      {tierDot && <span className={`wl-tier-dot ${tierDot}`} title={tierTitle}/>}
+      <span className="wl-sym-name">
+        {symbol}
+        {marketType === "futures" && <span className="wl-market-badge futures">合约</span>}
+        <span className={`wl-exchange-badge ${exchange}`}>
+          {exchange === "okx" ? "OKX" : exchange === "binance" ? "币安" : exchange.toUpperCase()}
+        </span>
+      </span>
+      {hasPrice ? (
+        <>
+          <span className={`wl-col-price ${flashDirection ? `wl-flash-${flashDirection}` : ""}`}>
+            {formatPrice(price)}
+          </span>
+          <span className={`wl-col-change ${isUp ? "wl-val-up" : "wl-val-down"}`}>
+            {isUp ? "+" : ""}{formatChange(change ?? 0)}
+          </span>
+          <span className={`wl-col-changepct ${isUp ? "wl-val-up" : "wl-val-down"}`}>
+            {isUp ? "+" : ""}{formatPct(changePct ?? 0)}%
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="wl-col-price wl-col-empty">—</span>
+          <span className="wl-col-change wl-col-empty">—</span>
+          <span className="wl-col-changepct wl-col-empty">—</span>
+        </>
+      )}
+    </>
+  );
+});
+
 export interface WatchlistSidebarProps {
   currentSymbol: string;
   currentMarketType?: string | null;
@@ -93,7 +187,7 @@ export interface WatchlistSidebarProps {
   onWatchlistsChange?: (watchlists: WatchlistGroup[]) => void;
   layout?: WatchlistLayout;
   actions?: Partial<WatchlistActions>;
-  prices?: WatchlistPrices;
+  priceStore?: WatchlistPriceStore;
   subscriptionTiers?: Record<string, SubscriptionTier>;
   subscriptionResourceSummaries?: SubscriptionResourceSummaries;
   onTierChange?: (symbol: string, tier: SubscriptionTier) => void;
@@ -109,7 +203,7 @@ export default function WatchlistSidebar({
   watchlists = [], onWatchlistsChange,
   layout,
   actions,
-  prices, subscriptionTiers, subscriptionResourceSummaries, onTierChange,
+  priceStore, subscriptionTiers, subscriptionResourceSummaries, onTierChange,
 }: WatchlistSidebarProps) {
   const setWatchlists = useCallback((updater: SetStateAction<WatchlistGroup[]>) => {
     if (actions?.setWatchlists) {
@@ -139,68 +233,8 @@ export default function WatchlistSidebar({
   const [dragSourceListId, setDragSourceListId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
 
-  // ── Price flash tracking ──
-  const prevPricesRef = useRef<WatchlistPrices>({});
-
-  // Track which symbols are currently flashing and their direction
-  const [flashStates, setFlashStates] = useState<Record<string, PriceFlashDirection>>({});
-  const flashTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-
   useEffect(() => {
     markPerfOnce("lazy.watchlist.ready");
-  }, []);
-
-  // Detect price changes and trigger flash animation
-  useEffect(() => {
-    if (!prices) return;
-    const prev = prevPricesRef.current;
-    const newFlashes: Record<string, PriceFlashDirection> = {};
-
-    for (const [key, tick] of Object.entries(prices)) {
-      const prevTick = prev[key];
-      if (
-        prevTick
-        && typeof tick.price === "number"
-        && typeof prevTick.price === "number"
-        && tick.price !== prevTick.price
-      ) {
-        const direction = tick.price > prevTick.price ? "up" : "down";
-        newFlashes[key] = direction;
-
-        // Clear existing timer
-        if (flashTimersRef.current[key]) {
-          clearTimeout(flashTimersRef.current[key]);
-        }
-
-        // Set timer to clear flash (color only, no animation)
-        flashTimersRef.current[key] = setTimeout(() => {
-          setFlashStates((prev) => {
-            const next = { ...prev };
-            delete next[key];
-            return next;
-          });
-          delete flashTimersRef.current[key];
-        }, 1200);
-      }
-    }
-
-    if (Object.keys(newFlashes).length > 0) {
-      setTimeout(() => {
-        setFlashStates((prev) => ({ ...prev, ...newFlashes }));
-      }, 0);
-    }
-
-    prevPricesRef.current = { ...prices };
-  }, [prices]);
-
-  // Cleanup flash timers on unmount
-  useEffect(() => {
-    const timers = flashTimersRef.current;
-    return () => {
-      for (const t of Object.values(timers)) {
-        clearTimeout(t);
-      }
-    };
   }, []);
 
   const editInputRef = useRef<HTMLInputElement | null>(null);
@@ -505,26 +539,7 @@ export default function WatchlistSidebar({
       && ex === (currentExchange || "binance")
     );
     const isDragged = dragType === "symbol" && dragSymbol === compositeKey && dragSourceListId === wl.id;
-    const tick = prices?.[compositeKey];
     const tierKnown = Object.prototype.hasOwnProperty.call(subscriptionTiers || {}, compositeKey);
-    const tierVal = tierKnown ? subscriptionTiers?.[compositeKey] : (tick ? "price" : "none");
-    const tierDot = tierVal === "full" ? "wl-tier-full" : tierVal === "price" ? "wl-tier-price" : "";
-    const tierTitle = tierVal === "full"
-      ? subscriptionResourceSummaries?.[compositeKey]?.tooltip || "完全订阅：保活价格和可切换周期 K 线"
-      : "仅价格：保活价格列";
-    const flashDir = flashStates[compositeKey]; // "up" | "down" | undefined
-
-    // Use daily (1D) change data from backend (matches 1D chart)
-    const price = tick?.price;
-    const hasPrice = typeof price === "number" && tierVal !== "none";
-    const change = hasPrice
-      ? (tick?.daily_change ?? (price - (tick?.open ?? price)))
-      : null;
-    const changePct = hasPrice ? (tick?.daily_change_pct ?? tick?.change_pct ?? 0) : null;
-    const isUp = change !== null ? change >= 0 : null;
-    
-    // Determine price color: flash color on update, otherwise default
-    const priceColorClass = flashDir ? `wl-flash-${flashDir}` : "";
 
     return (
       <div key={compositeKey} className="wl-sym-wrapper">
@@ -550,41 +565,16 @@ export default function WatchlistSidebar({
             </svg>
           </span>
 
-          {/* Tier dot */}
-          {tierDot && <span className={`wl-tier-dot ${tierDot}`} title={tierTitle}/>}
-
-          {/* Symbol name + market badge + exchange badge */}
-          <span className="wl-sym-name">
-            {sym}
-            {mt === "futures" && <span className="wl-market-badge futures">合约</span>}
-            <span className={`wl-exchange-badge ${ex}`}>{ex === "okx" ? "OKX" : ex === "binance" ? "币安" : ex.toUpperCase()}</span>
-          </span>
-
-          {/* Price columns — only if not "仅收藏" */}
-          {hasPrice ? (
-            <>
-              {/* Latest price */}
-              <span className={`wl-col-price ${priceColorClass}`}>
-                {formatPrice(price)}
-              </span>
-
-              {/* Change (absolute) */}
-              <span className={`wl-col-change ${isUp ? "wl-val-up" : "wl-val-down"}`}>
-                {isUp ? "+" : ""}{formatChange(change ?? 0)}
-              </span>
-
-              {/* Change % */}
-              <span className={`wl-col-changepct ${isUp ? "wl-val-up" : "wl-val-down"}`}>
-                {isUp ? "+" : ""}{formatPct(changePct ?? 0)}%
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="wl-col-price wl-col-empty">—</span>
-              <span className="wl-col-change wl-col-empty">—</span>
-              <span className="wl-col-changepct wl-col-empty">—</span>
-            </>
-          )}
+          <WatchlistSymbolLiveColumns
+            compositeKey={compositeKey}
+            symbol={sym}
+            marketType={mt}
+            exchange={ex}
+            priceStore={priceStore}
+            tierKnown={tierKnown}
+            subscriptionTier={subscriptionTiers?.[compositeKey]}
+            fullTierTitle={subscriptionResourceSummaries?.[compositeKey]?.tooltip}
+          />
 
           {/* Delete button */}
           <button className="wl-sym-del" onClick={(e) => { e.stopPropagation(); removeSymbol(wl.id, compositeKey); }} title="移除">

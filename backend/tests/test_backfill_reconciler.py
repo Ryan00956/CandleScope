@@ -146,7 +146,10 @@ def test_reconciler_accepts_backfill_wins_and_legacy_newer_wins() -> None:
         )
 
         class _Storage:
+            existing_queries = 0
+
             async def get_existing_open_times(self, *args, **kwargs):
+                self.existing_queries += 1
                 return {60_000}
 
             async def upsert_bars(self, symbol, interval, rows, **kwargs):
@@ -166,9 +169,10 @@ def test_reconciler_accepts_backfill_wins_and_legacy_newer_wins() -> None:
             BackfillPlan(gaps=[gap], tasks=[task]),
         )
 
-        assert result.bars_deduplicated == 1
+        assert result.bars_deduplicated == 0
         assert result.bars_skipped == 0
         assert result.bars_written == 1
+        assert reconciler._storage.existing_queries == 0
 
     asyncio.run(_run("backfill_wins"))
     asyncio.run(_run("newer_wins"))

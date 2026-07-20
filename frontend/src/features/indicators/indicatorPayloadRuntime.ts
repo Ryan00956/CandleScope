@@ -218,16 +218,31 @@ export function upsertLinePoint(
   data: IndicatorValuePoint[],
   point: { time: number; value: unknown; color?: string },
 ): IndicatorValuePoint[] {
-  const next = Array.isArray(data) ? [...data] : [];
-  const idx = next.findIndex((item) => item.time === point.time);
+  const current = Array.isArray(data) ? data : [];
+  const tail = current.at(-1);
+  const idx = tail?.time === point.time
+    ? current.length - 1
+    : current.findIndex((item) => item.time === point.time);
   if (point.value == null || Number.isNaN(Number(point.value))) {
-    if (idx !== -1) next.splice(idx, 1);
+    if (idx === -1) return current;
+    const next = [...current];
+    next.splice(idx, 1);
     return next;
   }
   const normalized = { ...point, value: Number(point.value) };
+  if (idx !== -1) {
+    const existing = current[idx];
+    if (
+      existing?.value === normalized.value
+      && existing.color === normalized.color
+    ) {
+      return current;
+    }
+  }
+  const next = [...current];
   if (idx === -1) {
     next.push(normalized);
-    next.sort((a, b) => a.time - b.time);
+    if (tail && tail.time > normalized.time) next.sort((a, b) => a.time - b.time);
   } else {
     next[idx] = { ...next[idx], ...normalized };
   }
@@ -341,6 +356,7 @@ export function mergeIndicatorLines(
       ...current,
       ...line,
       data: mergeTimeData(current.data, line.data),
+      renderUpdate: "full",
       ...(current.colorData || line.colorData
         ? { colorData: mergeTimeData(current.colorData ?? [], line.colorData ?? []) }
         : {}),
@@ -358,9 +374,10 @@ export function replaceIndicatorLinesRange(
   const range = normalizeRange(rangeInput);
   if (!range) return mergeIndicatorLines(existing, incoming);
 
-  const merged = (existing || []).map((line) => ({
+  const merged: IndicatorLine[] = (existing || []).map((line) => ({
     ...line,
     data: replaceTimeDataRange(line.data, [], range),
+    renderUpdate: "full" as const,
     ...(line.colorData
       ? { colorData: replaceTimeDataRange(line.colorData, [], range) }
       : {}),
@@ -376,6 +393,7 @@ export function replaceIndicatorLinesRange(
     const incomingLine = {
       ...line,
       data: replaceTimeDataRange([], line.data, range),
+      renderUpdate: "full" as const,
       ...(line.colorData
         ? { colorData: replaceTimeDataRange([], line.colorData, range) }
         : {}),
@@ -395,6 +413,7 @@ export function replaceIndicatorLinesRange(
       ...current,
       ...line,
       data: replaceTimeDataRange(current.data, line.data, range),
+      renderUpdate: "full",
       ...(current.colorData || line.colorData
         ? {
             colorData: replaceTimeDataRange(

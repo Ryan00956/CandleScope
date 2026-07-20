@@ -19,6 +19,7 @@ from app.data_engine.ingestion.models import MarketEvent, StreamDescriptor, Stre
 
 from .events import HubRecord, MarketStateEvent
 from .hub import MarketEventHub, MarketHubSubscription
+from .lifecycle import KeyedAsyncLockPool, drain_cancellation_safe_cleanup
 from .models import MarketChannel, MarketStreamKey
 from .order_book import OrderBookEngine, OrderBookIdentity
 
@@ -27,7 +28,10 @@ logger = logging.getLogger("data_engine.market_data.order_book")
 
 _REQUIRED_PARAMS = frozenset({"mode", "depth_levels", "update_interval_ms"})
 _BINANCE_PARTIAL_LEVELS = frozenset({5, 10, 20})
-_BINANCE_FUTURES_UPDATE_INTERVALS_MS = frozenset({100, 250, 500})
+_BINANCE_UPDATE_INTERVALS_MS = {
+    "spot": frozenset({100, 1000}),
+    "futures": frozenset({100, 250, 500}),
+}
 
 
 class _IngestionFactory(Protocol):
@@ -83,7 +87,7 @@ class OrderBookService:
         event_queue_size: int = 256,
         default_max_pending: int = 32,
         max_snapshot_age_ms: int = 5_000,
-        physical_stop_timeout_seconds: float = 2.0,
+        physical_stop_timeout_seconds: float = 5.0,
     ) -> None:
         self._factory = ingestion_factory
         self._max_streams = max(1, int(max_streams))
@@ -103,6 +107,7 @@ class OrderBookService:
         self._pending_events: dict[MarketStreamKey, _PendingEvent] = {}
         self._physical: dict[MarketStreamKey, _PhysicalLease] = {}
         self._lifecycle_lock = asyncio.Lock()
+        self._identity_locks = KeyedAsyncLockPool[MarketStreamKey]()
         self._worker: asyncio.Task[None] | None = None
         self._shutdown_task: asyncio.Task[None] | None = None
         self._pending_stop_finalizers: set[asyncio.Task[None]] = set()
@@ -150,56 +155,59 @@ class OrderBookService:
 
         validated = self._validate_key(key)
         consumer = _consumer_id(consumer_id)
-        async with self._lifecycle_lock:
-            self._ensure_open()
-            existing = self._physical.get(validated)
-            if existing is not None:
-                if (
-                    existing.stop_task is not None
-                    and existing.stop_task.done()
-                    and self._reconcile_completed_stop_locked(validated, existing)
-                ):
-                    existing = None
-            if existing is not None:
-                if existing.stop_task is not None and not existing.stop_task.done():
-                    raise RuntimeError("order-book physical stream stop is still in progress")
-                if existing.stop_state != "active":
-                    if not await self._stop_physical(validated, existing):
+        async with self._identity_locks.hold(validated):
+            stale_entry: _PhysicalLease | None = None
+            async with self._lifecycle_lock:
+                self._ensure_open()
+                existing = self._physical.get(validated)
+                if existing is not None and existing.stop_task is not None:
+                    if existing.stop_task.done() and self._reconcile_completed_stop_locked(
+                        validated,
+                        existing,
+                    ):
+                        existing = None
+                    elif not existing.stop_task.done():
                         raise RuntimeError(
-                            "order-book physical stream is unavailable after a failed stop",
+                            "order-book physical stream stop is still in progress",
                         )
-                    self._physical.pop(validated, None)
-                    self._activation_started_at_ms.pop(validated, None)
-                    self._last_event_time_ms.pop(validated, None)
-                    self._last_published_at_ms.pop(validated, None)
-                    if self._stream_generations.get(validated) is existing.generation:
-                        self._stream_generations.pop(validated, None)
-                    self.engine.deactivate_stream(_identity(validated))
-                    existing = None
-                else:
+                if existing is not None and existing.stop_state == "active":
                     if consumer in existing.consumers:
                         return False
                     existing.consumers.add(consumer)
                     return True
-            if len(self._physical) >= self._max_streams:
-                raise RuntimeError(
-                    f"order-book physical stream limit reached ({self._max_streams})",
-                )
+                stale_entry = existing
+
+            if stale_entry is not None:
+                if not await self._stop_physical(validated, stale_entry):
+                    raise RuntimeError(
+                        "order-book physical stream is unavailable after a failed stop",
+                    )
+                async with self._lifecycle_lock:
+                    self._retire_entry_locked(validated, stale_entry)
 
             identity = _identity(validated)
-            activated = self.engine.activate_stream(identity)
-            if not activated:
-                raise RuntimeError(
-                    "order-book engine identity is active without a physical lease",
-                )
-            self._start_worker()
-            self._activation_started_at_ms[validated] = int(time.time() * 1000)
             generation = object()
-            self._stream_generations[validated] = generation
+            reservation = _PhysicalLease(
+                handle=None,
+                generation=generation,
+                stop_state="starting",
+            )
+            async with self._lifecycle_lock:
+                self._ensure_open()
+                if len(self._physical) >= self._max_streams:
+                    raise RuntimeError(
+                        f"order-book physical stream limit reached ({self._max_streams})",
+                    )
+                if not self.engine.activate_stream(identity):
+                    raise RuntimeError(
+                        "order-book engine identity is active without a physical lease",
+                    )
+                self._physical[validated] = reservation
+                self._start_worker()
+                self._activation_started_at_ms[validated] = int(time.time() * 1000)
+                self._stream_generations[validated] = generation
 
             async def _on_event(event: MarketEvent) -> None:
-                # Deliberately no await: browser delivery and engine processing
-                # can never backpressure the ingestion callback.
                 self._offer_event(validated, event, generation=generation)
 
             try:
@@ -208,20 +216,43 @@ class OrderBookService:
                     _on_event,
                 )
             except BaseException:
-                self._activation_started_at_ms.pop(validated, None)
-                self._last_event_time_ms.pop(validated, None)
-                self._last_published_at_ms.pop(validated, None)
-                if self._stream_generations.get(validated) is generation:
-                    self._stream_generations.pop(validated, None)
-                if activated:
-                    self.engine.deactivate_stream(identity)
+                await drain_cancellation_safe_cleanup(
+                    self._cleanup_start_reservation(validated, reservation),
+                    name=(
+                        f"order-book-start-cleanup-{validated.exchange}-"
+                        f"{validated.market_type}-{validated.symbol}"
+                    ),
+                )
                 raise
-            self._physical[validated] = _PhysicalLease(
-                handle=handle,
-                generation=generation,
-                consumers={consumer},
+
+            try:
+                reservation.handle = handle
+                async with self._lifecycle_lock:
+                    if not self._closing and not self._closed:
+                        if self._physical.get(validated) is reservation:
+                            reservation.stop_state = "active"
+                            reservation.consumers.add(consumer)
+                            return True
+            except BaseException:
+                await drain_cancellation_safe_cleanup(
+                    self._cleanup_start_reservation(validated, reservation),
+                    name=(
+                        f"order-book-start-cleanup-{validated.exchange}-"
+                        f"{validated.market_type}-{validated.symbol}"
+                    ),
+                )
+                raise
+
+            caller_cancelled = await drain_cancellation_safe_cleanup(
+                self._cleanup_start_reservation(validated, reservation),
+                name=(
+                    f"order-book-start-cleanup-{validated.exchange}-"
+                    f"{validated.market_type}-{validated.symbol}"
+                ),
             )
-            return True
+            if caller_cancelled:
+                raise asyncio.CancelledError
+            raise RuntimeError("order-book service closed while stream was starting")
 
     async def release_stream(
         self,
@@ -231,22 +262,18 @@ class OrderBookService:
     ) -> bool:
         validated = self._validate_key(key)
         consumer = _consumer_id(consumer_id)
-        async with self._lifecycle_lock:
-            entry = self._physical.get(validated)
-            if entry is None or consumer not in entry.consumers:
-                return False
-            if len(entry.consumers) > 1:
-                entry.consumers.remove(consumer)
-                return True
+        async with self._identity_locks.hold(validated):
+            async with self._lifecycle_lock:
+                entry = self._physical.get(validated)
+                if entry is None or consumer not in entry.consumers:
+                    return False
+                if len(entry.consumers) > 1:
+                    entry.consumers.remove(consumer)
+                    return True
             if not await self._stop_physical(validated, entry):
                 return False
-            self._physical.pop(validated, None)
-            self._activation_started_at_ms.pop(validated, None)
-            self._last_event_time_ms.pop(validated, None)
-            self._last_published_at_ms.pop(validated, None)
-            if self._stream_generations.get(validated) is entry.generation:
-                self._stream_generations.pop(validated, None)
-            self.engine.deactivate_stream(_identity(validated))
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(validated, entry)
             return True
 
     def current(
@@ -435,20 +462,14 @@ class OrderBookService:
 
     async def _shutdown_impl(self) -> None:
         self._accepting_events = False
-        stop_items = tuple(self._physical.items())
-        if stop_items:
-            await asyncio.gather(*(
-                self._stop_physical(key, entry)
-                for key, entry in stop_items
-            ))
+        async with self._lifecycle_lock:
+            keys = tuple(self._physical)
+        if keys:
+            await asyncio.gather(*(self._shutdown_key(key) for key in keys))
         await asyncio.sleep(0)
-        for key in tuple(self._physical):
-            self.engine.deactivate_stream(_identity(key))
-        self._physical.clear()
-        self._activation_started_at_ms.clear()
-        self._stream_generations.clear()
-        self._last_event_time_ms.clear()
-        self._last_published_at_ms.clear()
+        async with self._lifecycle_lock:
+            for key, entry in tuple(self._physical.items()):
+                self._retire_entry_locked(key, entry)
 
         if self._worker is not None:
             await self._event_queue.join()
@@ -456,6 +477,17 @@ class OrderBookService:
             await asyncio.shield(self._worker)
         await self.hub.close()
         self._closed = True
+
+    async def _shutdown_key(self, key: MarketStreamKey) -> None:
+        async with self._identity_locks.hold(key):
+            async with self._lifecycle_lock:
+                entry = self._physical.get(key)
+                if entry is None:
+                    return
+                entry.consumers.clear()
+            await self._stop_physical(key, entry)
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(key, entry)
 
     def _start_worker(self) -> None:
         if self._worker is None:
@@ -626,6 +658,19 @@ class OrderBookService:
         self._metrics["physical_stops_succeeded"] += 1
         return True
 
+    async def _cleanup_start_reservation(
+        self,
+        key: MarketStreamKey,
+        entry: _PhysicalLease,
+    ) -> None:
+        if entry.handle is None:
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(key, entry)
+            return
+        if await self._stop_physical(key, entry):
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(key, entry)
+
     def _reconcile_completed_stop_locked(
         self,
         key: MarketStreamKey,
@@ -702,11 +747,28 @@ class OrderBookService:
         entry: _PhysicalLease,
         stop_task: asyncio.Task[Any],
     ) -> None:
-        async with self._lifecycle_lock:
-            if not entry.reconcile_stop_on_completion or entry.stop_task is not stop_task:
-                self._consume_task_exception(stop_task)
-                return
-            self._reconcile_completed_stop_locked(key, entry)
+        async with self._identity_locks.hold(key):
+            async with self._lifecycle_lock:
+                if not entry.reconcile_stop_on_completion or entry.stop_task is not stop_task:
+                    self._consume_task_exception(stop_task)
+                    return
+                self._reconcile_completed_stop_locked(key, entry)
+
+    def _retire_entry_locked(
+        self,
+        key: MarketStreamKey,
+        entry: _PhysicalLease,
+    ) -> bool:
+        if self._physical.get(key) is not entry:
+            return False
+        self._physical.pop(key, None)
+        self._activation_started_at_ms.pop(key, None)
+        self._last_event_time_ms.pop(key, None)
+        self._last_published_at_ms.pop(key, None)
+        if self._stream_generations.get(key) is entry.generation:
+            self._stream_generations.pop(key, None)
+        self.engine.deactivate_stream(_identity(key))
+        return True
 
     @staticmethod
     def _clear_stop_task(
@@ -789,11 +851,17 @@ class OrderBookService:
         if depth_levels not in _BINANCE_PARTIAL_LEVELS:
             raise ValueError("partial order-book depth_levels must be one of 5, 10, or 20")
         if key.exchange == "binance":
-            if key.market_type != "futures":
-                raise ValueError("Binance partial order-book service requires market_type='futures'")
-            if update_interval_ms not in _BINANCE_FUTURES_UPDATE_INTERVALS_MS:
+            allowed_intervals = _BINANCE_UPDATE_INTERVALS_MS.get(key.market_type)
+            if allowed_intervals is None:
                 raise ValueError(
-                    "Binance Futures update_interval_ms must be one of 100, 250, or 500",
+                    "Binance partial order-book service requires market_type "
+                    "to be 'spot' or 'futures'",
+                )
+            if update_interval_ms not in allowed_intervals:
+                supported = ", ".join(str(value) for value in sorted(allowed_intervals))
+                raise ValueError(
+                    f"Binance {key.market_type} update_interval_ms must be one of "
+                    f"{supported}",
                 )
         return key
 

@@ -41,10 +41,24 @@ test("indicator value dispatch distinguishes preview from final update", () => {
     values: unknown;
     barTime: number;
     isFinal: boolean;
+    sourceSubscriptionSignature: string | undefined;
   }> = [];
-  const handlers = {
-    onValues: (indicatorId: string, values: unknown, barTime: number, isFinal: boolean) => {
-      calls.push({ indicatorId, values, barTime, isFinal });
+  const handlers: WsHandlers = {
+    onValues: (
+      indicatorId,
+      values,
+      barTime,
+      isFinal,
+      _message,
+      sourceSubscriptionSignature,
+    ) => {
+      calls.push({
+        indicatorId,
+        values,
+        barTime,
+        isFinal,
+        sourceSubscriptionSignature,
+      });
     },
   };
 
@@ -53,17 +67,29 @@ test("indicator value dispatch distinguishes preview from final update", () => {
     clientId: "ma-1",
     values: { ma: 10 },
     barTime: 100,
-  }, handlers), true);
+  }, handlers, "config-a"), true);
   assert.equal(dispatchIndicatorWsMessage({
     type: "indicator.update",
     clientId: "ma-1",
     values: { ma: 11 },
     barTime: 160,
-  }, handlers), true);
+  }, handlers, "config-b"), true);
 
   assert.deepEqual(calls, [
-    { indicatorId: "ma-1", values: { ma: 10 }, barTime: 100, isFinal: false },
-    { indicatorId: "ma-1", values: { ma: 11 }, barTime: 160, isFinal: true },
+    {
+      indicatorId: "ma-1",
+      values: { ma: 10 },
+      barTime: 100,
+      isFinal: false,
+      sourceSubscriptionSignature: "config-a",
+    },
+    {
+      indicatorId: "ma-1",
+      values: { ma: 11 },
+      barTime: 160,
+      isFinal: true,
+      sourceSubscriptionSignature: "config-b",
+    },
   ]);
 });
 

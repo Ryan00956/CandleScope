@@ -651,6 +651,7 @@ body {
   background: var(--bg-secondary);
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+  contain: layout paint style;
 }
 
 .order-book-dock.collapsed {
@@ -699,6 +700,41 @@ body {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+
+.market-dock-tabs {
+  display: inline-flex;
+  min-width: 0;
+  padding: 2px;
+  gap: 1px;
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+}
+
+.market-dock-tabs button {
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.market-dock-tabs button:hover,
+.market-dock-tabs button:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
+.market-dock-tabs button.active {
+  background: var(--bg-secondary);
+  color: var(--accent-blue);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
 }
 
 .ob-symbol {
@@ -842,26 +878,36 @@ body {
 }
 
 .ob-levels {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   overflow-anchor: none;
   overscroll-behavior: contain;
+  contain: strict;
 }
 
-.ob-asks {
-  display: flex;
-  flex-direction: column-reverse;
+.ob-levels-window {
+  flex: 0 0 auto;
+  position: relative;
+  width: 100%;
+}
+
+.ob-asks .ob-levels-window {
+  margin-top: auto;
 }
 
 .ob-level-row {
-  position: relative;
-  flex: 0 0 22px;
+  position: absolute;
+  inset: 0 0 auto;
+  height: 22px;
   min-height: 22px;
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 22px;
   cursor: default;
+  contain: layout paint style;
 }
 
 .ob-level-row:hover { background: var(--bg-hover); }
@@ -947,6 +993,272 @@ body {
   border-color: var(--accent-blue);
   color: var(--accent-blue);
 }
+
+/* ── TradeFlow: bounded tape and throttled profile ── */
+.trade-flow-dock {
+  --tf-buy: var(--wl-up-color);
+  --tf-sell: var(--wl-down-color);
+}
+
+.tf-header .market-dock-tabs {
+  flex-shrink: 0;
+}
+
+.tf-status {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  margin-left: auto;
+  gap: 4px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tf-status-live { color: var(--tf-buy); }
+.tf-status-connecting,
+.tf-status-reconnecting { color: var(--accent-blue); }
+.tf-status-connecting .tf-status-dot,
+.tf-status-reconnecting .tf-status-dot { animation: ob-status-pulse 1.2s ease-in-out infinite; }
+.tf-status-gap,
+.tf-status-error { color: #f59e0b; }
+
+.tf-controls {
+  display: grid;
+  flex: 0 0 42px;
+  grid-template-columns: minmax(126px, 1.25fr) minmax(72px, 0.75fr) minmax(72px, 0.75fr);
+  align-items: center;
+  min-width: 0;
+  padding: 5px 6px;
+  gap: 5px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.tf-side-switch {
+  display: inline-flex;
+  min-width: 0;
+  padding: 2px;
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+}
+
+.tf-side-switch button {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tf-side-switch button.active {
+  background: var(--bg-secondary);
+  color: var(--accent-blue);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  font-weight: 650;
+}
+
+.tf-controls label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  gap: 3px;
+  color: var(--text-muted);
+  font-size: 8.5px;
+}
+
+.tf-controls select {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 13px 0 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 9px;
+}
+
+.tf-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  contain: strict;
+}
+
+.tf-summary {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  min-height: 38px;
+  padding: 3px 8px;
+  gap: 2px 8px;
+  border-bottom: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-tertiary) 82%, transparent);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.tf-summary span:nth-child(even) { text-align: right; }
+.tf-summary-buy { color: var(--tf-buy); }
+.tf-summary-sell { color: var(--tf-sell); }
+
+.tf-tape-header,
+.tf-tape-row {
+  display: grid;
+  grid-template-columns: 28px minmax(72px, 1fr) minmax(48px, 0.65fr) minmax(58px, 0.8fr) minmax(78px, 0.9fr);
+  align-items: center;
+  min-width: 0;
+  padding: 0 7px;
+  gap: 5px;
+}
+
+.tf-tape-header {
+  flex: 0 0 24px;
+  height: 24px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 9px;
+  user-select: none;
+}
+
+.tf-tape-header span:not(:first-child),
+.tf-tape-row > span:not(:first-child),
+.tf-tape-row time { text-align: right; }
+
+.tf-tape-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  contain: strict;
+}
+
+.tf-tape-row {
+  height: 22px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 22px;
+  contain: layout paint style;
+}
+
+.tf-tape-row:hover { background: var(--bg-hover); }
+.tf-tape-row time { color: var(--text-muted); font-size: 8.5px; }
+.tf-tape-side { font-weight: 800; text-align: center !important; }
+.tf-tape-row.tf-buy .tf-tape-side,
+.tf-tape-row.tf-buy > span:nth-child(2) { color: var(--tf-buy); }
+.tf-tape-row.tf-sell .tf-tape-side,
+.tf-tape-row.tf-sell > span:nth-child(2) { color: var(--tf-sell); }
+.tf-tape-row.tf-large {
+  background: color-mix(in srgb, #f59e0b 8%, transparent);
+  box-shadow: inset 2px 0 #f59e0b;
+  font-weight: 650;
+}
+
+.tf-empty {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 16px;
+  gap: 6px;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 10px;
+}
+
+.tf-empty strong { color: var(--text-secondary); font-size: 12px; }
+.tf-empty-gap strong,
+.tf-empty-error strong { color: #f59e0b; }
+.tf-empty button {
+  padding: 4px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+}
+.tf-empty button:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
+
+.tf-profile-caption {
+  display: flex;
+  flex: 0 0 27px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+.tf-profile-caption span:last-child { color: var(--text-muted); }
+
+.tf-profile-header,
+.tf-profile-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 1fr) minmax(53px, 0.72fr) minmax(53px, 0.72fr) minmax(56px, 0.76fr) minmax(44px, 0.58fr);
+  align-items: center;
+  min-width: 0;
+  padding: 0 7px;
+  gap: 4px;
+}
+
+.tf-profile-header {
+  flex: 0 0 23px;
+  height: 23px;
+  color: var(--text-muted);
+  font-size: 8.5px;
+  user-select: none;
+}
+.tf-profile-header span:not(:first-child),
+.tf-profile-row > span:not(:first-child) { text-align: right; }
+
+.tf-profile-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  contain: strict;
+}
+
+.tf-profile-row {
+  position: relative;
+  height: 22px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  contain: layout paint style;
+}
+.tf-profile-row > span:not(.tf-profile-bars) { position: relative; z-index: 1; }
+.tf-profile-bars { position: absolute; inset: 1px 0; z-index: 0; }
+.tf-profile-bars i { position: absolute; right: 0; height: 50%; opacity: 0.11; }
+.tf-profile-buy-bar { top: 0; background: var(--tf-buy); }
+.tf-profile-sell-bar { bottom: 0; background: var(--tf-sell); }
+.tf-profile-buy { color: var(--tf-buy); }
+.tf-profile-sell { color: var(--tf-sell); }
 
 .sr-only {
   position: absolute !important;

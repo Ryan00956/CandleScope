@@ -3,7 +3,11 @@ import {
   isOhlcMainChartType,
   normalizeMainChartType,
 } from "../shared/mainChartTypes.js";
-import { sourceTimeFromChartTime } from "./chartTime.js";
+import {
+  chartTimesEqual,
+  compareChartTimes,
+  sourceTimeFromChartTime,
+} from "./chartTime.js";
 import type { MainChartType } from "../shared/mainChartTypes.js";
 import type {
   ChartSeriesInputRow,
@@ -197,13 +201,18 @@ export function buildMainSeriesData(
   return (rows || []).map(toPoint);
 }
 
-function finiteCloses(rows: ChartSeriesInputRow[] = []): number[] {
-  const closes: number[] = [];
-  for (const row of rows || []) {
-    const close = validClose(row);
-    if (close != null) closes.push(close);
-  }
-  return closes;
+function buildHistogramReferenceOptions(
+  minimum: number | null,
+  maximum: number | null,
+): Record<string, unknown> {
+  if (minimum == null || maximum == null) return {};
+  const spread = maximum - minimum;
+  const padding = spread > 0
+    ? spread * 0.08
+    : Math.max(Math.abs(minimum) * 0.005, 1e-8);
+  const candidate = minimum - padding;
+  const base = minimum > 0 ? Math.max(minimum * 0.01, candidate) : candidate;
+  return { base };
 }
 
 export function buildMainSeriesReferenceOptions(
@@ -221,24 +230,253 @@ export function buildMainSeriesReferenceOptions(
     return {};
   }
 
-  const closes = finiteCloses(rows);
-  const firstClose = closes[0];
-  if (firstClose == null) return {};
-  let minimum = firstClose;
-  let maximum = firstClose;
-  for (let index = 1; index < closes.length; index += 1) {
-    const close = closes[index];
+  let minimum: number | null = null;
+  let maximum: number | null = null;
+  for (const row of rows || []) {
+    const close = validClose(row);
     if (close == null) continue;
-    minimum = Math.min(minimum, close);
-    maximum = Math.max(maximum, close);
+    minimum = minimum == null ? close : Math.min(minimum, close);
+    maximum = maximum == null ? close : Math.max(maximum, close);
   }
-  const spread = maximum - minimum;
-  const padding = spread > 0
-    ? spread * 0.08
-    : Math.max(Math.abs(minimum) * 0.005, 1e-8);
-  const candidate = minimum - padding;
-  const base = minimum > 0 ? Math.max(minimum * 0.01, candidate) : candidate;
-  return { base };
+  return buildHistogramReferenceOptions(minimum, maximum);
+}
+
+export interface MainSeriesReferenceDelta {
+  type: string;
+  addedRight?: number;
+  appended?: boolean;
+  replaced?: boolean;
+  trimmedLeft?: number;
+  trimmedRight?: number;
+}
+
+interface HistogramExtremaEntry {
+  close: number;
+  time: ChartTime;
+}
+
+interface HistogramExtremaQueue {
+  entries: HistogramExtremaEntry[];
+  head: number;
+}
+
+interface HistogramTailUndo {
+  inserted: boolean;
+  poppedMaximum: HistogramExtremaEntry[];
+  poppedMinimum: HistogramExtremaEntry[];
+  time: ChartTime | null;
+}
+
+interface HistogramReferenceState {
+  firstTime: ChartTime | null;
+  lastTime: ChartTime | null;
+  maximum: HistogramExtremaQueue;
+  minimum: HistogramExtremaQueue;
+  rowCount: number;
+  tailUndo: HistogramTailUndo | null;
+}
+
+function createExtremaQueue(): HistogramExtremaQueue {
+  return { entries: [], head: 0 };
+}
+
+function queueBack(queue: HistogramExtremaQueue): HistogramExtremaEntry | null {
+  return queue.entries.length > queue.head
+    ? queue.entries[queue.entries.length - 1] ?? null
+    : null;
+}
+
+function queueFront(queue: HistogramExtremaQueue): HistogramExtremaEntry | null {
+  return queue.entries[queue.head] ?? null;
+}
+
+function compactExtremaQueue(queue: HistogramExtremaQueue): void {
+  if (queue.head < 256 || queue.head * 2 < queue.entries.length) return;
+  queue.entries = queue.entries.slice(queue.head);
+  queue.head = 0;
+}
+
+function evictExtremaBefore(queue: HistogramExtremaQueue, firstTime: ChartTime): void {
+  while (queue.head < queue.entries.length) {
+    const entry = queue.entries[queue.head];
+    if (!entry || compareChartTimes(entry.time, firstTime) >= 0) break;
+    queue.head += 1;
+  }
+  compactExtremaQueue(queue);
+}
+
+function insertHistogramTail(
+  state: HistogramReferenceState,
+  row: ChartSeriesInputRow | null | undefined,
+): void {
+  const time = row?.time ?? null;
+  const close = validClose(row);
+  const undo: HistogramTailUndo = {
+    inserted: false,
+    poppedMaximum: [],
+    poppedMinimum: [],
+    time,
+  };
+  if (time == null || close == null) {
+    state.tailUndo = undo;
+    return;
+  }
+
+  let minimumBack = queueBack(state.minimum);
+  while (minimumBack && minimumBack.close >= close) {
+    const popped = state.minimum.entries.pop();
+    if (popped) undo.poppedMinimum.push(popped);
+    minimumBack = queueBack(state.minimum);
+  }
+  state.minimum.entries.push({ close, time });
+
+  let maximumBack = queueBack(state.maximum);
+  while (maximumBack && maximumBack.close <= close) {
+    const popped = state.maximum.entries.pop();
+    if (popped) undo.poppedMaximum.push(popped);
+    maximumBack = queueBack(state.maximum);
+  }
+  state.maximum.entries.push({ close, time });
+  undo.inserted = true;
+  state.tailUndo = undo;
+}
+
+function restorePoppedEntries(
+  queue: HistogramExtremaQueue,
+  entries: HistogramExtremaEntry[],
+): void {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry) queue.entries.push(entry);
+  }
+}
+
+function rollbackHistogramTail(state: HistogramReferenceState): boolean {
+  const undo = state.tailUndo;
+  if (!undo || !chartTimesEqual(undo.time, state.lastTime)) return false;
+  if (undo.inserted) {
+    const minimumBack = queueBack(state.minimum);
+    const maximumBack = queueBack(state.maximum);
+    if (!minimumBack || !maximumBack
+      || !chartTimesEqual(minimumBack.time, undo.time)
+      || !chartTimesEqual(maximumBack.time, undo.time)) {
+      return false;
+    }
+    state.minimum.entries.pop();
+    state.maximum.entries.pop();
+  }
+  restorePoppedEntries(state.minimum, undo.poppedMinimum);
+  restorePoppedEntries(state.maximum, undo.poppedMaximum);
+  state.tailUndo = null;
+  return true;
+}
+
+function histogramOptionsFromState(state: HistogramReferenceState): Record<string, unknown> {
+  return buildHistogramReferenceOptions(
+    queueFront(state.minimum)?.close ?? null,
+    queueFront(state.maximum)?.close ?? null,
+  );
+}
+
+/**
+ * Keeps histogram reference bounds off the realtime O(N) path. The two
+ * monotonic queues retain the next extrema when the window trims from the
+ * left, while the undo record makes a forming-bar replacement reversible.
+ */
+export class MainSeriesReferenceTracker {
+  private histogramState: HistogramReferenceState | null = null;
+  private histogramScanCount = 0;
+
+  get fullHistogramScanCount(): number {
+    return this.histogramScanCount;
+  }
+
+  reset(): void {
+    this.histogramState = null;
+  }
+
+  resolve(
+    chartType: MainChartType | string | null | undefined,
+    rows: ChartSeriesInputRow[] = [],
+    delta: MainSeriesReferenceDelta | null = null,
+  ): Record<string, unknown> {
+    const resolvedType = normalizeMainChartType(chartType);
+    if (resolvedType !== "histogram") {
+      this.histogramState = null;
+      return buildMainSeriesReferenceOptions(resolvedType, rows);
+    }
+
+    if (!this.histogramState || !delta || !this.applyDelta(rows, delta)) {
+      this.rebuildHistogram(rows);
+    }
+    return this.histogramState ? histogramOptionsFromState(this.histogramState) : {};
+  }
+
+  private rebuildHistogram(rows: ChartSeriesInputRow[]): void {
+    const state: HistogramReferenceState = {
+      firstTime: rows.at(0)?.time ?? null,
+      lastTime: rows.at(-1)?.time ?? null,
+      maximum: createExtremaQueue(),
+      minimum: createExtremaQueue(),
+      rowCount: rows.length,
+      tailUndo: null,
+    };
+    for (const row of rows) insertHistogramTail(state, row);
+    this.histogramState = state;
+    this.histogramScanCount += 1;
+  }
+
+  private applyDelta(
+    rows: ChartSeriesInputRow[],
+    delta: MainSeriesReferenceDelta,
+  ): boolean {
+    const state = this.histogramState;
+    if (!state || Number(delta.trimmedRight || 0) > 0) return false;
+
+    if (delta.type === "tick" && delta.replaced === true && delta.appended !== true) {
+      if (Number(delta.trimmedLeft || 0) !== 0
+        || rows.length !== state.rowCount
+        || !chartTimesEqual(rows.at(0)?.time, state.firstTime)
+        || !chartTimesEqual(rows.at(-1)?.time, state.lastTime)
+        || !rollbackHistogramTail(state)) {
+        return false;
+      }
+      insertHistogramTail(state, rows.at(-1));
+      return true;
+    }
+
+    const appendCount = delta.type === "tick" && delta.appended === true
+      ? 1
+      : (delta.type === "append" ? Number(delta.addedRight || 0) : 0);
+    if (!Number.isSafeInteger(appendCount) || appendCount <= 0) return false;
+    const trimmedLeft = Number(delta.trimmedLeft || 0);
+    if (!Number.isSafeInteger(trimmedLeft) || trimmedLeft < 0
+      || rows.length !== state.rowCount + appendCount - trimmedLeft) {
+      return false;
+    }
+
+    const firstTime = rows.at(0)?.time ?? null;
+    const lastTime = rows.at(-1)?.time ?? null;
+    if (firstTime == null || lastTime == null) return false;
+    const previousTailIndex = rows.length - appendCount - 1;
+    if (previousTailIndex >= 0
+      && !chartTimesEqual(rows[previousTailIndex]?.time, state.lastTime)) {
+      return false;
+    }
+    if (state.lastTime != null && compareChartTimes(lastTime, state.lastTime) <= 0) return false;
+
+    evictExtremaBefore(state.minimum, firstTime);
+    evictExtremaBefore(state.maximum, firstTime);
+    state.tailUndo = null;
+    const firstAppendedIndex = Math.max(0, rows.length - appendCount);
+    for (let index = firstAppendedIndex; index < rows.length; index += 1) {
+      insertHistogramTail(state, rows[index]);
+    }
+    state.firstTime = firstTime;
+    state.lastTime = lastTime;
+    state.rowCount = rows.length;
+    return true;
+  }
 }
 
 export function buildMainSeriesStyleOptions(chartType: MainChartType | string | null | undefined, {

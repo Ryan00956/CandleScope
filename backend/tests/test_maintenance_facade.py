@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 
 from app.data_engine.data_manager import DataManager
+from app.data_engine.data_manager.backfill_coordinator import RepairRequest
+from app.data_engine.data_manager.maintenance import _request_repairs_bounded
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +76,62 @@ def test_data_manager_exposes_maintenance_facade_methods() -> None:
                 "market_type": "spot",
             },
         )
+
+    asyncio.run(_run())
+
+
+def test_interior_gap_repairs_are_bounded_ordered_and_fail_closed() -> None:
+    async def _run() -> None:
+        class _Coordinator:
+            def __init__(self) -> None:
+                self.active = 0
+                self.max_active = 0
+
+            async def request_and_wait(self, request):
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                try:
+                    await asyncio.sleep((10 - request.start_ms) * 0.0001)
+                    if request.start_ms == 5:
+                        raise RuntimeError("upstream failed")
+                    return request.request_id
+                finally:
+                    self.active -= 1
+
+        coordinator = _Coordinator()
+        requests = [
+            RepairRequest(
+                symbol="BTCUSDT",
+                interval="1m",
+                start_ms=index,
+                end_ms=index,
+                request_id=f"gap-{index}",
+            )
+            for index in range(10)
+        ]
+
+        results = await _request_repairs_bounded(
+            coordinator,
+            requests,
+            max_concurrency=3,
+        )
+
+        assert coordinator.max_active == 3
+        assert [
+            value if succeeded else str(value)
+            for succeeded, value in results
+        ] == [
+            "gap-0",
+            "gap-1",
+            "gap-2",
+            "gap-3",
+            "gap-4",
+            "upstream failed",
+            "gap-6",
+            "gap-7",
+            "gap-8",
+            "gap-9",
+        ]
 
     asyncio.run(_run())
 

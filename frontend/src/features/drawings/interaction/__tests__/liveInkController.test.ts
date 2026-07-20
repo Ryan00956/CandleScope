@@ -104,9 +104,8 @@ test("highlighter applies opacity once to its whole dedicated canvas", () => {
   assert.equal(context.globalCompositeOperation, "source-over");
 });
 
-test("final ink survives stale paint and clears after a covering superseding viewport paint", () => {
+test("final ink survives stale paint and clears atomically on a covering viewport paint", () => {
   const { canvas } = canvasFixture();
-  const frames: Array<() => void> = [];
   const listeners = new Set<(stamp: {
     scopeKey: string;
     documentRevision: number;
@@ -116,11 +115,6 @@ test("final ink survives stale paint and clears after a covering superseding vie
   const controller = createLiveInkController({
     canvas,
     getPlotRect: () => rect,
-    requestFrame(callback) { frames.push(callback); return callback; },
-    cancelFrame(handle) {
-      const index = frames.indexOf(handle as () => void);
-      if (index >= 0) frames.splice(index, 1);
-    },
   });
   controller.start({ tool: "pen", color: "#fff", lineWidth: 2, opacity: 1 }, { x: 50, y: 20 });
   controller.appendFrame([{ x: 60, y: 30 }]);
@@ -133,22 +127,39 @@ test("final ink survives stale paint and clears after a covering superseding vie
   for (const listener of listeners) {
     listener({ scopeKey: "BTC", documentRevision: 6, surfaceGeneration: 3, viewportRevision: 12 });
   }
-  assert.equal(frames.length, 0);
   assert.equal(controller.snapshot().sampleCount, 2);
   for (const listener of listeners) {
     listener({ scopeKey: "ETH", documentRevision: 8, surfaceGeneration: 3, viewportRevision: 12 });
     listener({ scopeKey: "BTC", documentRevision: 8, surfaceGeneration: 4, viewportRevision: 12 });
   }
-  assert.equal(frames.length, 0);
   assert.equal(controller.snapshot().sampleCount, 2);
   for (const listener of listeners) {
     listener({ scopeKey: "BTC", documentRevision: 7, surfaceGeneration: 3, viewportRevision: 12 });
   }
-  assert.equal(frames.length, 1);
-  assert.equal(controller.snapshot().sampleCount, 2);
-  frames.shift()?.();
   assert.equal(controller.snapshot().sampleCount, 0);
   assert.equal(controller.snapshot().retainingFinalFrame, false);
+});
+
+test("a synchronously replayed covering paint clears ink and disposes its listener", () => {
+  const { canvas } = canvasFixture();
+  const controller = createLiveInkController({ canvas, getPlotRect: () => rect });
+  const ticket = {
+    scopeKey: "BTC",
+    documentRevision: 7,
+    surfaceGeneration: 3,
+    viewportRevision: 11,
+  };
+  let disposeCount = 0;
+  controller.start({ tool: "pen", color: "#fff", lineWidth: 2, opacity: 1 }, { x: 50, y: 20 });
+  controller.appendFrame([{ x: 60, y: 30 }]);
+  assert.equal(controller.finish(), true);
+  controller.retainUntilPaint(ticket, (listener) => {
+    listener(ticket);
+    return () => { disposeCount += 1; };
+  });
+  assert.equal(controller.snapshot().sampleCount, 0);
+  assert.equal(controller.snapshot().retainingFinalFrame, false);
+  assert.equal(disposeCount, 1);
 });
 
 test("cancel and dispose synchronously release samples and pending handoff", () => {

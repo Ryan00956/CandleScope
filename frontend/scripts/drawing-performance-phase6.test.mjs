@@ -28,6 +28,19 @@ const stamp = Object.freeze({
   heightCssPx: 700,
   dpr: 1,
 });
+const latestWorkerIdentity = Object.freeze({
+  schemaVersion: 1,
+  jobId: 8,
+  generation: 8,
+  stamp,
+});
+const latestWorkerPaintReceipt = Object.freeze({
+  kind: "drawing-scene-bridge-paint-ack",
+  observedAt: "2026-07-18T08:00:00.000Z",
+  stamp,
+  attachmentRevision: 1,
+  paintSequence: 9,
+});
 
 function phase5Probe() {
   return {
@@ -80,7 +93,22 @@ function actionFor(id) {
     };
   }
   if (id === PHASE6_SCENARIO_IDS.workerBackpressure) {
-    return { workerBackpressureWheelEventsDispatched: 96, ...currentPaint };
+    return {
+      workerBackpressureWheelEventsDispatched: 96,
+      workerDrainWaitPassed: true,
+      workerDrainBackend: "worker",
+      workerDrainQueueDepthCurrent: 0,
+      workerDrainInFlightCurrent: 0,
+      workerDrainResultDelta: 2,
+      workerDrainRequestedStamp: stamp,
+      workerDrainPublishedStamp: stamp,
+      workerDrainPaintedStamp: stamp,
+      workerDrainLatestSubmittedIdentity: latestWorkerIdentity,
+      workerDrainPublishedIdentity: latestWorkerIdentity,
+      workerDrainPaintedIdentity: latestWorkerIdentity,
+      workerDrainPaintReceipt: latestWorkerPaintReceipt,
+      ...currentPaint,
+    };
   }
   return { wheelEventsDispatched: 60, panEventsDispatched: 36, ...currentPaint };
 }
@@ -128,6 +156,14 @@ function runtimeFor(id) {
     lastRequestedStamp: stamp,
     lastPublishedStamp: stamp,
     lastPaintedStamp: stamp,
+    latestSubmittedWorkerIdentity:
+      id === PHASE6_SCENARIO_IDS.workerBackpressure ? latestWorkerIdentity : null,
+    publishedWorkerIdentity:
+      id === PHASE6_SCENARIO_IDS.workerBackpressure ? latestWorkerIdentity : null,
+    paintedWorkerIdentity:
+      id === PHASE6_SCENARIO_IDS.workerBackpressure ? latestWorkerIdentity : null,
+    paintReceipt:
+      id === PHASE6_SCENARIO_IDS.workerBackpressure ? latestWorkerPaintReceipt : null,
   };
 }
 
@@ -311,6 +347,73 @@ test("formal Phase 6 acceptance requires the full 5+1 production matrix", () => 
   assert.equal(result.attributableLongTaskPassed, true);
 });
 
+test("formal Phase 6 rejects forged empty stamp and worker identity convergence", () => {
+  const forgeries = [
+    {
+      name: "empty stamp",
+      stamp: {},
+      identity(stampValue) {
+        return { schemaVersion: 1, jobId: 8, generation: 8, stamp: stampValue };
+      },
+    },
+    {
+      name: "empty identity",
+      stamp,
+      identity() {
+        return {};
+      },
+    },
+    {
+      name: "negative identity sequences",
+      stamp,
+      identity(stampValue) {
+        return { schemaVersion: 1, jobId: -8, generation: -8, stamp: stampValue };
+      },
+    },
+  ];
+
+  for (const forgery of forgeries) {
+    const report = passingReport();
+    const pressure = report.scenarios.find(
+      (item) => item.id === PHASE6_SCENARIO_IDS.workerBackpressure,
+    );
+    const measured = pressure.rawRuns[1];
+    const forgedStamp = forgery.stamp;
+    const forgedIdentity = forgery.identity(forgedStamp);
+    Object.assign(measured.phase6Probe.runtime, {
+      lastRequestedStamp: forgedStamp,
+      lastPublishedStamp: forgedStamp,
+      lastPaintedStamp: forgedStamp,
+      latestSubmittedWorkerIdentity: forgedIdentity,
+      publishedWorkerIdentity: forgedIdentity,
+      paintedWorkerIdentity: forgedIdentity,
+      paintReceipt: { ...latestWorkerPaintReceipt, stamp: forgedStamp },
+    });
+    Object.assign(measured.action, {
+      workerDrainRequestedStamp: forgedStamp,
+      workerDrainPublishedStamp: forgedStamp,
+      workerDrainPaintedStamp: forgedStamp,
+      workerDrainLatestSubmittedIdentity: forgedIdentity,
+      workerDrainPublishedIdentity: forgedIdentity,
+      workerDrainPaintedIdentity: forgedIdentity,
+      workerDrainPaintReceipt: { ...latestWorkerPaintReceipt, stamp: forgedStamp },
+    });
+
+    const result = acceptance(report);
+    assert.equal(result.passed, false, forgery.name);
+    assert.equal(result.runtimeEvidencePassed, false, forgery.name);
+    assert.equal(result.actionCoveragePassed, false, forgery.name);
+    const runtimeEvidence = result.runtimeEvidence.find(
+      (item) => item.runId === measured.id,
+    );
+    const actionEvidence = result.actionEvidence.find(
+      (item) => item.runId === measured.id,
+    );
+    assert.equal(runtimeEvidence?.backpressurePassed, false, forgery.name);
+    assert.equal(actionEvidence?.workerDrainPassed, false, forgery.name);
+  }
+});
+
 test("formal Phase 6 rejects headless, hidden, and DPR-drifted browser evidence", () => {
   const headlessReport = passingReport();
   headlessReport.configuration.headless = true;
@@ -332,6 +435,22 @@ test("formal Phase 6 rejects headless, hidden, and DPR-drifted browser evidence"
   const dpr = acceptance(dprReport);
   assert.equal(dpr.passed, false);
   assert.equal(dpr.browserEnvironmentPassed, false);
+});
+
+test("formal Phase 6 accepts Chrome device-scale float round-trip noise", () => {
+  const report = passingReport();
+  for (const scenarioValue of report.scenarios) {
+    for (const runValue of scenarioValue.rawRuns) {
+      runValue.browserWindow.devicePixelRatio = 1.0000000298023224;
+      runValue.bench.devicePixelRatio = 1.0000000298023224;
+    }
+  }
+  const result = acceptance(report);
+  assert.equal(result.browserEnvironmentPassed, true);
+  assert.equal(result.browserEnvironmentEvidence.every((evidence) => (
+    evidence.windowDprPassed && evidence.benchDprPassed
+  )), true);
+  assert.equal(result.passed, true);
 });
 
 test("formal Phase 6 acceptance supports more than five measured repetitions", () => {

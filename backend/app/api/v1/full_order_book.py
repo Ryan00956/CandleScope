@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from contextlib import suppress
 from decimal import Decimal
+from threading import RLock
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -21,11 +23,29 @@ from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
 
 PROTOCOL = "orderbook.full.v1"
 UPSTREAM_SNAPSHOT_LIMIT = 1_000
-ALLOWED_UPDATE_INTERVALS_MS = frozenset({100, 250, 500})
+ALLOWED_UPDATE_INTERVALS_BY_MARKET = {
+    "spot": frozenset({100, 1000}),
+    "futures": frozenset({100, 250, 500}),
+}
+DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET = {"spot": 1000, "futures": 250}
+ALLOWED_UPDATE_INTERVALS_MS = frozenset().union(
+    *ALLOWED_UPDATE_INTERVALS_BY_MARKET.values(),
+)
 MAX_OUTPUT_LEVELS = 1_000
 
 router = APIRouter(prefix="/full-order-book", tags=["full-order-book"])
 logger = logging.getLogger("api.full_order_book")
+
+_SERIALIZATION_CACHE_MAX_ENTRIES = 128
+_serialization_cache: OrderedDict[
+    tuple[Any, ...],
+    tuple[Any, dict[str, Any]],
+] = OrderedDict()
+_serialization_cache_lock = RLock()
+_serialization_build_lock = RLock()
+_serialization_cache_hits = 0
+_serialization_cache_misses = 0
+_serialization_cache_evictions = 0
 
 
 @router.get("/snapshot")
@@ -34,7 +54,7 @@ async def full_order_book_snapshot(
     symbol: str = Query("BTCUSDT"),
     exchange: str = Query("binance"),
     market_type: str = Query("futures"),
-    update_interval_ms: int = Query(default=250),
+    update_interval_ms: int | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=MAX_OUTPUT_LEVELS),
     price_grouping: str = Query(default="raw"),
     wait_ms: int = Query(default=5_000, ge=100, le=15_000),
@@ -96,7 +116,7 @@ async def full_order_book_snapshot(
         "protocol": PROTOCOL,
         **contract_metadata(output_limit=limit),
         "price_grouping": grouping,
-        "data": serialize_record(
+        "data": await serialize_record_async(
             record,
             limit=limit,
             price_grouping=grouping,
@@ -122,19 +142,26 @@ def full_order_book_key(
     exchange: str,
     market_type: str,
     symbol: str,
-    update_interval_ms: int,
+    update_interval_ms: int | None,
 ) -> MarketStreamKey:
     exchange_name = str(exchange).strip().lower()
     market = str(market_type).strip().lower()
-    if exchange_name != "binance" or market != "futures":
+    if exchange_name != "binance" or market not in ALLOWED_UPDATE_INTERVALS_BY_MARKET:
         raise HTTPException(
             status_code=422,
-            detail="full order books currently support binance futures only",
+            detail="full order books currently support binance spot and futures only",
         )
-    if update_interval_ms not in ALLOWED_UPDATE_INTERVALS_MS:
+    resolved_interval_ms = (
+        DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET[market]
+        if update_interval_ms is None
+        else update_interval_ms
+    )
+    allowed_intervals = ALLOWED_UPDATE_INTERVALS_BY_MARKET[market]
+    if resolved_interval_ms not in allowed_intervals:
+        supported = ", ".join(str(value) for value in sorted(allowed_intervals))
         raise HTTPException(
             status_code=422,
-            detail="update_interval_ms must be one of 100, 250, or 500",
+            detail=f"binance {market} update_interval_ms must be one of {supported}",
         )
     try:
         return MarketStreamKey.build(
@@ -145,7 +172,7 @@ def full_order_book_key(
             params={
                 "mode": "full",
                 "snapshot_limit": UPSTREAM_SNAPSHOT_LIMIT,
-                "update_interval_ms": update_interval_ms,
+                "update_interval_ms": resolved_interval_ms,
             },
         )
     except (TypeError, ValueError) as exc:
@@ -159,7 +186,54 @@ def serialize_record(
     price_grouping: PriceGrouping = "raw",
     price_tick_size: Decimal | None = None,
 ) -> dict[str, Any]:
-    """Serialize a hub record, group its full projection, then clip visible rows."""
+    """Serialize and share one projection per immutable hub revision/options."""
+
+    # Decimal aggregation is CPU-bound and may materialize a complete lazy
+    # source.  A build lock provides cross-client single-flight semantics for
+    # the same immutable records; async transports call this function in a
+    # worker thread so the event loop never pays that cost.
+    with _serialization_build_lock:
+        return _serialize_record_locked(
+            record,
+            limit=limit,
+            price_grouping=price_grouping,
+            price_tick_size=price_tick_size,
+        )
+
+
+async def serialize_record_async(
+    record: Any,
+    *,
+    limit: int,
+    price_grouping: PriceGrouping = "raw",
+    price_tick_size: Decimal | None = None,
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        serialize_record,
+        record,
+        limit=limit,
+        price_grouping=price_grouping,
+        price_tick_size=price_tick_size,
+    )
+
+
+def _serialize_record_locked(
+    record: Any,
+    *,
+    limit: int,
+    price_grouping: PriceGrouping,
+    price_tick_size: Decimal | None,
+) -> dict[str, Any]:
+
+    cache_key = _serialization_cache_key(
+        record,
+        limit=limit,
+        price_grouping=price_grouping,
+        price_tick_size=price_tick_size,
+    )
+    cached = _serialization_cache_get(cache_key, record)
+    if cached is not None:
+        return _copy_serialized_envelope(cached)
 
     to_dict = getattr(record, "to_dict", None)
     if not callable(to_dict):
@@ -168,6 +242,9 @@ def serialize_record(
     data = payload.get("data")
     if isinstance(data, dict):
         projected = dict(data)
+        source_levels_canonical = (
+            projected.pop("_canonical_level_order", False) is True
+        )
         projection = project_order_book_levels(
             projected,
             price_grouping=price_grouping,
@@ -176,6 +253,7 @@ def serialize_record(
             omit_incomplete_outer_bucket=(
                 projected.get("exchange_full_depth_exhaustive") is False
             ),
+            source_levels_canonical=source_levels_canonical,
         )
         projected["bids"] = projection.bids
         projected["asks"] = projection.asks
@@ -220,7 +298,119 @@ def serialize_record(
             projected["full_projection"] = full_projection
         projected["output_limit"] = limit
         payload["data"] = projected
-    return payload
+    _serialization_cache_put(cache_key, record, payload)
+    return _copy_serialized_envelope(payload)
+
+
+def full_order_book_projection_cache_info() -> dict[str, int]:
+    """Expose bounded-cache counters for diagnostics and regression tests."""
+
+    with _serialization_cache_lock:
+        return {
+            "entries": len(_serialization_cache),
+            "max_entries": _SERIALIZATION_CACHE_MAX_ENTRIES,
+            "hits": _serialization_cache_hits,
+            "misses": _serialization_cache_misses,
+            "evictions": _serialization_cache_evictions,
+        }
+
+
+def clear_full_order_book_projection_cache() -> None:
+    global _serialization_cache_hits
+    global _serialization_cache_misses
+    global _serialization_cache_evictions
+
+    with _serialization_cache_lock:
+        _serialization_cache.clear()
+        _serialization_cache_hits = 0
+        _serialization_cache_misses = 0
+        _serialization_cache_evictions = 0
+
+
+def _serialization_cache_key(
+    record: Any,
+    *,
+    limit: int,
+    price_grouping: PriceGrouping,
+    price_tick_size: Decimal | None,
+) -> tuple[Any, ...] | None:
+    event = getattr(record, "event", None)
+    key = getattr(event, "key", None)
+    if event is None or key is None or getattr(record, "revision", None) is None:
+        return None
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return (
+        key,
+        int(limit),
+        price_grouping,
+        str(price_tick_size) if price_tick_size is not None else None,
+    )
+
+
+def _serialization_cache_get(
+    cache_key: tuple[Any, ...] | None,
+    record: Any,
+) -> dict[str, Any] | None:
+    global _serialization_cache_hits
+    global _serialization_cache_misses
+
+    if cache_key is None:
+        return None
+    with _serialization_cache_lock:
+        entry = _serialization_cache.get(cache_key)
+        if entry is None or entry[0] is not record:
+            _serialization_cache_misses += 1
+            return None
+        _serialization_cache.move_to_end(cache_key)
+        _serialization_cache_hits += 1
+        return entry[1]
+
+
+def _serialization_cache_put(
+    cache_key: tuple[Any, ...] | None,
+    record: Any,
+    payload: dict[str, Any],
+) -> None:
+    global _serialization_cache_evictions
+
+    if cache_key is None:
+        return
+    with _serialization_cache_lock:
+        # Projection payloads retain the HubRecord and its potentially large
+        # lazy book revision.  Keep all option variants for the current record,
+        # but do not let variants from older revisions of the same stream build
+        # up until the global LRU limit is reached.
+        stream_key = cache_key[0]
+        stale_keys = [
+            existing_key
+            for existing_key, (
+                existing_record,
+                _existing_payload,
+            ) in _serialization_cache.items()
+            if existing_key[0] == stream_key and existing_record is not record
+        ]
+        for stale_key in stale_keys:
+            del _serialization_cache[stale_key]
+            _serialization_cache_evictions += 1
+        _serialization_cache[cache_key] = (record, payload)
+        _serialization_cache.move_to_end(cache_key)
+        while len(_serialization_cache) > _SERIALIZATION_CACHE_MAX_ENTRIES:
+            _serialization_cache.popitem(last=False)
+            _serialization_cache_evictions += 1
+
+
+def _copy_serialized_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    # Callers add transport envelopes but never mutate level rows.  Copy the
+    # two mapping layers while sharing the expensive immutable-by-convention
+    # projection arrays between clients of the same hub revision.
+    copied = dict(payload)
+    data = copied.get("data")
+    if isinstance(data, dict):
+        copied["data"] = dict(data)
+    return copied
 
 
 def contract_metadata(*, output_limit: int) -> dict[str, Any]:
@@ -243,7 +433,10 @@ __all__ = [
     "PROTOCOL",
     "UPSTREAM_SNAPSHOT_LIMIT",
     "contract_metadata",
+    "clear_full_order_book_projection_cache",
+    "full_order_book_projection_cache_info",
     "full_order_book_key",
     "router",
     "serialize_record",
+    "serialize_record_async",
 ]

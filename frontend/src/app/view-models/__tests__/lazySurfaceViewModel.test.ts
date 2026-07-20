@@ -49,6 +49,21 @@ test("indicator panel receives capability-aware market studies and routed action
     },
     settingsActions: {},
     settingsView: {},
+    tradeFlowActions: {
+      addIndicator: (id: string) => calls.push(`add:${id}`),
+      removeIndicator: (id: string) => calls.push(`remove:${id}`),
+      toggleIndicatorVisibility: (id: string) => calls.push(`toggle:${id}`),
+    },
+    tradeFlowView: {
+      supported: true,
+      supportMessage: null,
+      preferences: {
+        indicators: {
+          cvd: { added: true, visible: false },
+          delta: { added: false, visible: false },
+        },
+      },
+    },
     watchlistView: { watchlists: [] },
   });
 
@@ -57,6 +72,7 @@ test("indicator panel receives capability-aware market studies and routed action
     id: "market:funding-rate",
     name: "资金费率",
     description: "Funding",
+    category: "contract-data",
     added: true,
     visible: false,
     supported: false,
@@ -65,15 +81,34 @@ test("indicator panel receives capability-aware market studies and routed action
     statusText: "仅合约市场支持",
     error: null,
   });
+  assert.deepEqual(panel.marketStudies?.[1], {
+    id: "trade-flow:cvd",
+    name: "CVD（累计成交量差）",
+    description: "基于 K 线主动买卖量构建的连续前缀和；与右侧实时订单流独立。",
+    category: "volume",
+    added: true,
+    visible: false,
+    supported: true,
+    unsupportedReason: null,
+    status: "dormant",
+    statusText: "已隐藏；右侧成交/分布视图不受影响",
+    error: null,
+  });
 
   panel.onAddMarketStudy?.("market:funding-rate");
   panel.onRemoveMarketStudy?.("market:funding-rate");
   panel.onToggleMarketStudyVisibility?.("market:funding-rate");
+  panel.onAddMarketStudy?.("trade-flow:delta");
+  panel.onRemoveMarketStudy?.("trade-flow:cvd");
+  panel.onToggleMarketStudyVisibility?.("trade-flow:cvd");
   panel.onAddMarketStudy?.("unknown");
   assert.deepEqual(calls, [
     "add:market:funding-rate",
     "remove:market:funding-rate",
     "toggle:market:funding-rate",
+    "add:trade-flow:delta",
+    "remove:trade-flow:cvd",
+    "toggle:trade-flow:cvd",
   ]);
 });
 
@@ -113,6 +148,17 @@ test("hidden liquidation study reports that collection continues", () => {
     },
     settingsActions: {},
     settingsView: {},
+    tradeFlowActions: {},
+    tradeFlowView: {
+      supported: true,
+      supportMessage: null,
+      preferences: {
+        indicators: {
+          cvd: { added: false, visible: false },
+          delta: { added: false, visible: false },
+        },
+      },
+    },
     watchlistView: { watchlists: [] },
   });
 

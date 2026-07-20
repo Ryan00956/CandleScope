@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AdvancedMarketDataStore } from "../advancedMarketDataStore.js";
+import {
+  AdvancedMarketDataStore,
+  type AdvancedMarketFrameScheduler,
+} from "../advancedMarketDataStore.js";
 import { buildAdvancedMarketIdentityKey } from "../advancedMarketDataTypes.js";
 import type {
   AdvancedMarketChannel,
@@ -14,6 +17,30 @@ const IDENTITY: AdvancedMarketIdentity = {
   marketType: "futures",
   symbol: "BTCUSDT",
 };
+
+function manualFrameScheduler() {
+  const callbacks = new Map<number, () => void>();
+  let nextHandle = 1;
+  const scheduler: AdvancedMarketFrameScheduler = {
+    request(callback) {
+      const handle = nextHandle++;
+      callbacks.set(handle, callback);
+      return handle;
+    },
+    cancel(handle) {
+      callbacks.delete(handle);
+    },
+  };
+  return {
+    scheduler,
+    get pendingCount() { return callbacks.size; },
+    flush() {
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      for (const callback of pending) callback();
+    },
+  };
+}
 
 function record(
   channel: AdvancedMarketChannel,
@@ -75,6 +102,72 @@ test("summary lane is latest-only, ignores stale records, and stays separate fro
   }, 3000)]);
   assert.equal(metricNotifications, 1);
   assert.equal(summaryNotifications, 1);
+});
+
+test("browser-frame delivery coalesces metric updates and exposes only the latest snapshot", () => {
+  const frame = manualFrameScheduler();
+  const store = new AdvancedMarketDataStore(frame.scheduler);
+  const key = buildAdvancedMarketIdentityKey(IDENTITY);
+  let notifications = 0;
+  store.subscribeMetrics(key, () => { notifications += 1; });
+
+  store.applyRecords(IDENTITY, [record("open_interest", { open_interest: 1 }, 1000)]);
+  store.applyRecords(IDENTITY, [record("open_interest", { open_interest: 2 }, 2000)]);
+  store.applyRecords(IDENTITY, [record("open_interest", { open_interest: 3 }, 3000)]);
+
+  assert.equal(frame.pendingCount, 1);
+  assert.equal(notifications, 0);
+  assert.equal(store.getMetricsSnapshot(key).openInterestHistory.at(-1)?.data.open_interest, 3);
+  frame.flush();
+  assert.equal(notifications, 1);
+});
+
+test("an identical cloned metric record preserves the snapshot and emits no extra frame", () => {
+  const frame = manualFrameScheduler();
+  const store = new AdvancedMarketDataStore(frame.scheduler);
+  const key = buildAdvancedMarketIdentityKey(IDENTITY);
+  let notifications = 0;
+  store.subscribeMetrics(key, () => { notifications += 1; });
+  const first = record("open_interest", {
+    open_interest: 50_000,
+    is_final: false,
+    sample_kind: "provisional",
+  }, 1000);
+
+  store.applyRecords(IDENTITY, [first]);
+  frame.flush();
+  const snapshot = store.getMetricsSnapshot(key);
+  store.applyRecords(IDENTITY, [{
+    ...first,
+    key: { ...first.key, params: { ...first.key.params } },
+    data: { ...first.data },
+  }]);
+
+  assert.strictEqual(store.getMetricsSnapshot(key), snapshot);
+  assert.equal(frame.pendingCount, 0);
+  assert.equal(notifications, 1);
+});
+
+test("merging the same history page preserves metric array and snapshot references", () => {
+  const store = new AdvancedMarketDataStore();
+  const key = buildAdvancedMarketIdentityKey(IDENTITY);
+  const history = record("open_interest", {
+    open_interest: 42_000,
+    is_final: true,
+    sample_kind: "final",
+  }, 1000);
+  store.mergeMetricHistory(IDENTITY, "open_interest", [history], "5m");
+  const first = store.getMetricsSnapshot(key);
+
+  store.mergeMetricHistory(IDENTITY, "open_interest", [{
+    ...history,
+    key: { ...history.key, params: { ...history.key.params } },
+    data: { ...history.data },
+  }], "5m");
+
+  const second = store.getMetricsSnapshot(key);
+  assert.strictEqual(second, first);
+  assert.strictEqual(second.openInterestHistory, first.openInterestHistory);
 });
 
 test("funding history keeps settlements and overwrites preview separately", () => {
@@ -236,6 +329,32 @@ test("funding realtime keeps bounded observations and resets at cycle boundary",
   const snapshot = store.getMetricsSnapshot(key);
   assert.deepEqual(snapshot.fundingRealtimeHistory, [nextCycle]);
   assert.strictEqual(snapshot.fundingPreview, nextCycle);
+});
+
+test("a published funding snapshot is not mutated by later realtime observations", () => {
+  const store = new AdvancedMarketDataStore();
+  const key = buildAdvancedMarketIdentityKey(IDENTITY);
+  const first = record("funding_rate", {
+    funding_rate: 0.0001,
+    observed_at_ms: 10_000,
+    next_funding_time_ms: 9_000_000,
+    sample_kind: "preview",
+    provenance: "exchange_realtime",
+    quality: "live",
+    is_final: false,
+  }, 10_000);
+  const second = record("funding_rate", {
+    ...first.data,
+    funding_rate: 0.0002,
+    observed_at_ms: 20_000,
+  }, 20_000);
+
+  store.applyRecords(IDENTITY, [first]);
+  const previous = store.getMetricsSnapshot(key);
+  store.applyRecords(IDENTITY, [second]);
+
+  assert.deepEqual(previous.fundingRealtimeHistory, [first]);
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingRealtimeHistory, [first, second]);
 });
 
 test("funding realtime observations do not use epoch buckets for week or calendar month", () => {

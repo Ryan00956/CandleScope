@@ -10,8 +10,14 @@ import {
   canApplyDrawingVisibilityToCurrentPrimitives,
   cancelFreehandPrimitiveOnSurface,
   commitSavedDrawingAfterDynamicFrame,
+  createDrawingPointerRectCache,
   createDrawingExportVisibilityIntentGate,
   detachAndRemoveDrawingPrimitive,
+  dynamicDecorationsForSavedDrawingDraft,
+  dynamicOverlayExactPaintAction,
+  dynamicOverlayStaticTakeoverTiming,
+  dynamicPassiveFeedbackDecorations,
+  dynamicSelectedHandleDecoration,
   dynamicSelectionHandlesForSavedDrawing,
   hitTestSelectedOverlayDrawingHandle,
   hitTestOverlayDrawingEntity,
@@ -23,6 +29,7 @@ import {
   runDrawingSurfaceDisposeBarrier,
   scenePaintCoversDrawingHandoff,
   shouldDeferDrawingCoordinateCleanupToChartTypeBoundary,
+  subscribeDrawingPointerRectInvalidation,
   withDrawingExportCaptureScene,
 } from "../drawingInteractionController.js";
 import type { DrawingExportLease } from "../drawingInteractionController.js";
@@ -41,7 +48,11 @@ import {
 } from "../useDrawingPersistenceLifecycle.js";
 import type { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
 import type { DrawingPrimitiveHit } from "../drawingSelectionController.js";
-import type { DrawingDisplayHitResult } from "../rendering/drawingDisplayList.js";
+import type {
+  DrawingDisplayHitResult,
+  DrawingScreenDisplayList,
+} from "../rendering/drawingDisplayList.js";
+import type { DrawingScenePaintAck } from "../rendering/DrawingScenePrimitive.js";
 import type {
   ActiveDrawingMovePayload,
   DrawingDataToScreen,
@@ -58,6 +69,111 @@ import {
 function point(x: number): ScreenPoint {
   return { x, y: x };
 }
+
+test("pointerdown recaptures geometry after a passive hover cached the previous rect", () => {
+  let rect = structuralMock<DOMRect>({ left: 40, top: 80 });
+  let rectReads = 0;
+  const container = structuralMock<HTMLElement>({
+    getBoundingClientRect() {
+      rectReads += 1;
+      return rect;
+    },
+  });
+  const cache = createDrawingPointerRectCache();
+
+  cache.capture(container);
+  assert.equal(cache.peek()?.left, 40);
+  rect = structuralMock<DOMRect>({ left: 140, top: 180 });
+  assert.equal(cache.peek()?.left, 40, "passive pointermove must only read the cached rect");
+
+  const pointerDownRect = cache.capture(container);
+  assert.equal(pointerDownRect.left, 140);
+  assert.equal(pointerDownRect.top, 180);
+  assert.equal(rectReads, 2);
+});
+
+test("pointer rect layout subscriptions refresh out of band and fully clean up", () => {
+  let rect = structuralMock<DOMRect>({ left: 10, top: 20 });
+  let rectReads = 0;
+  const documentTarget = structuralMock<Document>({});
+  const container = structuralMock<HTMLElement>({
+    ownerDocument: documentTarget,
+    getBoundingClientRect() {
+      rectReads += 1;
+      return rect;
+    },
+  });
+  const listeners = new Map<string, EventListener>();
+  const removed: string[] = [];
+  const eventTarget = {
+    addEventListener(type: string, listener: EventListener) {
+      listeners.set(type, listener);
+    },
+    removeEventListener(type: string, listener: EventListener) {
+      assert.strictEqual(listeners.get(type), listener);
+      listeners.delete(type);
+      removed.push(type);
+    },
+  };
+  let resizeListener: ResizeObserverCallback | null = null;
+  let observed: Element | null = null;
+  let disconnected = 0;
+  const cache = createDrawingPointerRectCache();
+  const cleanup = subscribeDrawingPointerRectInvalidation({
+    cache,
+    container,
+    eventTarget,
+    createResizeObserver(listener) {
+      resizeListener = listener;
+      return {
+        observe(target) { observed = target; },
+        disconnect() { disconnected += 1; },
+      };
+    },
+  });
+
+  assert.strictEqual(observed, container);
+  assert.equal(cache.peek()?.left, 10);
+  assert.equal(rectReads, 1);
+
+  const descendant = structuralMock<EventTarget>({});
+  const unrelatedScroller = structuralMock<EventTarget>({
+    contains: () => false,
+  });
+  listeners.get("scroll")?.(structuralMock<Event>({ target: descendant }));
+  listeners.get("scroll")?.(structuralMock<Event>({ target: unrelatedScroller }));
+  listeners.get("scroll")?.(structuralMock<Event>({ target: container }));
+  assert.equal(rectReads, 1, "descendant, unrelated, and self scrolls must not read layout");
+
+  const scrollAncestor = structuralMock<EventTarget>({
+    contains: (candidate: Node | null) => candidate === container,
+  });
+  rect = structuralMock<DOMRect>({ left: 30, top: 40 });
+  listeners.get("scroll")?.(structuralMock<Event>({ target: scrollAncestor }));
+  assert.equal(cache.peek()?.left, 30);
+  rect = structuralMock<DOMRect>({ left: 40, top: 50 });
+  listeners.get("scroll")?.(structuralMock<Event>({ target: eventTarget as EventTarget }));
+  assert.equal(cache.peek()?.left, 40, "window scroll must refresh");
+  rect = structuralMock<DOMRect>({ left: 45, top: 55 });
+  listeners.get("scroll")?.(structuralMock<Event>({ target: documentTarget }));
+  assert.equal(cache.peek()?.left, 45, "document scroll must refresh");
+  rect = structuralMock<DOMRect>({ left: 50, top: 60 });
+  const notifyResize = resizeListener as ResizeObserverCallback | null;
+  assert.ok(notifyResize);
+  notifyResize([], structuralMock<ResizeObserver>({}));
+  assert.equal(cache.peek()?.left, 50);
+  assert.equal(rectReads, 5);
+
+  cleanup();
+  cleanup();
+  assert.equal(cache.peek(), null);
+  assert.equal(disconnected, 1);
+  assert.deepEqual(removed.sort(), ["resize", "scroll"]);
+  assert.equal(listeners.size, 0);
+
+  notifyResize([], structuralMock<ResizeObserver>({}));
+  assert.equal(rectReads, 5, "a disposed observer callback must not refresh the cache");
+});
 
 test("scene paint handoff ignores superseded viewport but rejects wrong ownership or stale document", () => {
   const ticket = {
@@ -1015,7 +1131,7 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
   assert.deepEqual(positionHandles.map((handle) => handle.hit.zone), [
     "entry", "tp", "sl", "left", "right",
   ]);
-  assert.deepEqual(positionHandles.slice(-2).map((handle) => handle.point.x), [10, 30]);
+  assert.deepEqual(positionHandles.slice(-2).map((handle) => handle.point.x), [8, 32]);
 
   const foldedSceneHandles = [
     { x: 50, y: 50 },
@@ -1048,6 +1164,262 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
   assert.deepEqual(dynamicSelectionHandlesForSavedDrawing(freehand, project), []);
 });
 
+test("stale position scene handles fall back to current viewport projection", () => {
+  const saved: SavedDrawing = {
+    id: "position-current-viewport",
+    type: "position",
+    entryPrice: 100,
+    tpPrice: 120,
+    slPrice: 90,
+    timeRange: { start: 10, end: 30 },
+  };
+  const currentProjection: DrawingDataToScreen = (dataPoint) => ({
+    x: typeof dataPoint.time === "number" ? dataPoint.time + 100 : 0,
+    y: 500 - dataPoint.price,
+  });
+
+  const handles = dynamicSelectionHandlesForSavedDrawing(
+    saved,
+    currentProjection,
+    null,
+    null,
+    32,
+  );
+
+  assert.deepEqual(
+    handles.map((handle) => [handle.hit.zone, handle.point.x, handle.point.y]),
+    [
+      ["entry", 120, 400],
+      ["tp", 120, 380],
+      ["sl", 120, 410],
+      ["left", 104, 395],
+      ["right", 136, 395],
+    ],
+  );
+});
+
+test("folded position fallback uses frame bar spacing and keeps optional level order", () => {
+  const folded: SavedDrawing = {
+    type: "position",
+    entryPrice: 100,
+    timeRange: { start: 10, end: 10 },
+  };
+  const handles = dynamicSelectionHandlesForSavedDrawing(
+    folded,
+    (dataPoint) => ({ x: 50, y: 200 - dataPoint.price }),
+    null,
+    null,
+    32,
+  );
+
+  assert.deepEqual(handles.map((handle) => handle.hit.zone), ["entry", "left", "right"]);
+  assert.deepEqual(handles.map((handle) => handle.point), [
+    { x: 50, y: 100 },
+    { x: 34, y: 100 },
+    { x: 66, y: 100 },
+  ]);
+});
+
+test("position handle hit testing shares the current viewport fallback geometry", () => {
+  const selectedId = "position-hit-current-viewport";
+  const saved: SavedDrawing = {
+    id: selectedId,
+    type: "position",
+    entryPrice: 100,
+    tpPrice: 120,
+    slPrice: 90,
+    timeRange: { start: 10, end: 30 },
+  };
+  const options = {
+    selectedId,
+    getSavedDrawing: () => saved,
+    dataToScreen: ((dataPoint) => ({
+      x: typeof dataPoint.time === "number" ? dataPoint.time + 100 : 0,
+      y: 500 - dataPoint.price,
+    })) satisfies DrawingDataToScreen,
+    getSceneScreenBox: () => null,
+    getSceneScreenHandles: () => null,
+    getPositionBarSpacing: () => 32,
+  };
+
+  assert.equal(hitTestSelectedOverlayDrawingHandle({
+    ...options,
+    x: 104,
+    y: 395,
+  })?.zone, "left");
+  assert.equal(hitTestSelectedOverlayDrawingHandle({
+    ...options,
+    x: 20,
+    y: 50,
+  }), null, "the old viewport handle coordinate is no longer interactive");
+});
+
+test("passive feedback does not paint a blue selection box after drawing completion", () => {
+  let screenBoxReads = 0;
+  const selectedOnly = dynamicPassiveFeedbackDecorations({
+    selectedId: "completed-line",
+    hover: null,
+    getScreenBox() {
+      screenBoxReads += 1;
+      return { x: 10, y: 20, width: 40, height: 30 };
+    },
+  });
+
+  assert.deepEqual(selectedOnly, []);
+  assert.equal(screenBoxReads, 0, "selection bounds are not read for passive painting");
+
+  const hover = dynamicPassiveFeedbackDecorations({
+    selectedId: "completed-line",
+    hover: { id: "other-line", point: { x: 30, y: 40 }, eraser: false },
+    getScreenBox() {
+      screenBoxReads += 1;
+      return { x: 20, y: 30, width: 50, height: 10 };
+    },
+  });
+  assert.deepEqual(hover, [{
+    type: "box",
+    box: { x: 20, y: 30, width: 50, height: 10 },
+    color: "#ff6b6b",
+  }], "red hover feedback remains available");
+});
+
+test("selected feedback keeps drag handles without a bounding box", () => {
+  const decoration = dynamicSelectedHandleDecoration([
+    { x: 10, y: 20 },
+    { x: 50, y: 60 },
+    { x: Number.NaN, y: 80 },
+  ]);
+
+  assert.deepEqual(decoration, {
+    type: "handles",
+    handles: [{ x: 10, y: 20 }, { x: 50, y: 60 }],
+    color: "#3b82f6",
+  });
+  assert.notEqual(decoration?.type, "box");
+});
+
+test("dynamic drag takeover waits for static exclusion and bridges a quick release", () => {
+  const stamp = malformedFixture<DrawingScreenDisplayList["stamp"]>({
+    scopeKey: "BTCUSDT:15m",
+    documentRevision: 7,
+    surfaceGeneration: 3,
+    viewportRevision: 11,
+  });
+  const included = malformedFixture<DrawingScreenDisplayList>({
+    stamp,
+    entities: [{ id: "fib" }],
+  });
+  const excluded = malformedFixture<DrawingScreenDisplayList>({
+    stamp,
+    entities: [],
+  });
+  const ack = (plan: DrawingScreenDisplayList): DrawingScenePaintAck => ({
+    plan,
+    stamp: plan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(included), desiredOwner: "dynamic", entityId: "fib",
+  }), "ignore", "dynamic full geometry cannot appear while static still owns it");
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(excluded), desiredOwner: "dynamic", entityId: "fib",
+  }), "paint-dynamic");
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(excluded), desiredOwner: "static", entityId: "fib",
+  }), "paint-dynamic", "late exclusion paint is bridged after quick pointerup");
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(included), desiredOwner: "static", entityId: "fib",
+  }), "paint-static");
+});
+
+test("quick no-move ownership stays singular across same-stamp exclusion and restoration paints", () => {
+  const stamp = malformedFixture<DrawingScreenDisplayList["stamp"]>({
+    scopeKey: "BTCUSDT:15m",
+    documentRevision: 7,
+    surfaceGeneration: 3,
+    viewportRevision: 11,
+  });
+  const plan = (ids: readonly string[]) => malformedFixture<DrawingScreenDisplayList>({
+    stamp,
+    entities: ids.map((id) => ({ id })),
+  });
+  const exclusion = plan([]);
+  const restoration = plan(["fib"]);
+  const ack = (candidate: DrawingScreenDisplayList): DrawingScenePaintAck => ({
+    plan: candidate,
+    stamp: candidate.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+
+  let staticOwner = true;
+  let dynamicOwner = false;
+  assert.equal(Number(staticOwner) + Number(dynamicOwner), 1);
+
+  staticOwner = false;
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(exclusion), desiredOwner: "static", entityId: "fib",
+  }), "paint-dynamic");
+  dynamicOwner = true;
+  assert.equal(Number(staticOwner) + Number(dynamicOwner), 1);
+
+  staticOwner = true;
+  assert.equal(dynamicOverlayExactPaintAction({
+    ack: ack(restoration), desiredOwner: "static", entityId: "fib",
+  }), "paint-static");
+  dynamicOwner = false;
+  assert.equal(Number(staticOwner) + Number(dynamicOwner), 1);
+});
+
+test("creation retires dynamic pixels immediately while drag restoration crosses one bitmap swap", () => {
+  assert.equal(dynamicOverlayStaticTakeoverTiming(false), "immediate");
+  assert.equal(dynamicOverlayStaticTakeoverTiming(true), "next-frame");
+});
+
+test("fibonacci draft without explicit levels previews the default retracement grid", () => {
+  const fibonacci: SavedDrawing = {
+    id: "fibonacci-default-preview",
+    type: "fibonacci",
+    dataPoints: [
+      { time: 10, price: 20 },
+      { time: 50, price: 80 },
+    ],
+    color: "#123456",
+    lineWidth: 2,
+  };
+  const decorations = dynamicDecorationsForSavedDrawingDraft(
+    fibonacci,
+    (point) => typeof point.time === "number"
+      ? { x: point.time, y: point.price }
+      : null,
+  );
+
+  assert.equal(decorations.length, 1, "one complete Fibonacci draft owns its trend, bands, and levels");
+  const decoration = decorations[0];
+  assert.equal(decoration?.type, "fibonacci");
+  if (decoration?.type !== "fibonacci") return;
+  assert.deepEqual(decoration.trend, [{ x: 10, y: 20 }, { x: 50, y: 80 }]);
+  assert.deepEqual(decoration.levels.map((level) => level.color), [
+    "#787b86", "#f44336", "#81c784", "#4caf50", "#009688", "#64b5f6", "#787b86",
+  ]);
+  assert.deepEqual(decoration.levels.map((level) => level.label?.text), [
+    "0 (20.00)",
+    "0.236 (34.16)",
+    "0.382 (42.92)",
+    "0.5 (50.00)",
+    "0.618 (57.08)",
+    "0.786 (67.16)",
+    "1 (80.00)",
+  ]);
+  assert.deepEqual(
+    decoration.levels[0]?.label?.anchor,
+    { x: 14, y: 18 },
+  );
+  assert.deepEqual(decoration.handles, [{ x: 10, y: 20 }, { x: 50, y: 80 }]);
+});
+
 test("position creation paints its complete dynamic handoff frame before document commit", () => {
   const position: SavedDrawing = {
     id: "position-handoff",
@@ -1072,13 +1444,17 @@ test("position creation paints its complete dynamic handoff frame before documen
     project,
     (decorations) => {
       order.push("dynamic");
-      assert.equal(decorations.length, 3);
-      assert.deepEqual(decorations.map((decoration) => decoration.type), [
-        "line", "line", "line",
+      assert.equal(decorations.length, 1);
+      const decoration = decorations[0];
+      assert.equal(decoration?.type, "position");
+      if (decoration?.type !== "position") return;
+      assert.equal(decoration.entryColor, "#2196f3");
+      assert.equal(decoration.tpLevel?.color, themePalette.upColor);
+      assert.equal(decoration.slLevel?.color, themePalette.downColor);
+      assert.deepEqual(decoration.panelLines.map((line) => line.label), [
+        "入场", "止盈", "止损", "现价", "盈亏比", "仓位",
       ]);
-      assert.deepEqual(decorations.map((decoration) => (
-        decoration.type === "line" ? decoration.color : null
-      )), ["#3b82f6", themePalette.upColor, themePalette.downColor]);
+      assert.equal(decoration.badgeText, "LONG");
     },
     () => {
       assert.deepEqual(order, ["dynamic"]);
@@ -1086,6 +1462,7 @@ test("position creation paints its complete dynamic handoff frame before documen
       return receipt;
     },
     themePalette,
+    110,
   );
 
   assert.strictEqual(result, receipt);
@@ -1113,9 +1490,12 @@ test("short-position dynamic levels follow the static scene price-direction pale
     position,
     project,
     (decorations) => {
-      assert.deepEqual(decorations.map((decoration) => (
-        decoration.type === "line" ? decoration.color : null
-      )), ["#3b82f6", themePalette.downColor, themePalette.upColor]);
+      const decoration = decorations[0];
+      assert.equal(decoration?.type, "position");
+      if (decoration?.type !== "position") return;
+      assert.equal(decoration.tpLevel?.color, themePalette.downColor);
+      assert.equal(decoration.slLevel?.color, themePalette.upColor);
+      assert.equal(decoration.badgeColor, themePalette.downColor);
     },
     () => undefined,
     themePalette,

@@ -36,6 +36,7 @@ export interface DrawingEngineHostProps {
     chartAdapter: DrawingChartAdapter | null;
     chartContainerRef: MutableRefObject<HTMLElement | null>;
     activeTool: DrawingToolId | null;
+    manageChartCursor?: boolean;
     onToolChange?: ((tool: DrawingToolId | null) => void) | null;
     penColor: string;
     penSize: number;
@@ -61,6 +62,7 @@ function DrawingEngineHost({
     chartAdapter,
     chartContainerRef,
     activeTool,
+    manageChartCursor = true,
     onToolChange,
     penColor,
     penSize,
@@ -97,6 +99,7 @@ function DrawingEngineHost({
         chartAdapter,
         chartContainerRef,
         activeTool,
+        manageChartCursor,
         penColor,
         penSize,
         textFontSize,

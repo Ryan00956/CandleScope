@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
@@ -6,8 +6,6 @@ import type { CommitChartData } from "./klineContracts.js";
 import type { EpochSeconds, KlineBar } from "./marketDataTypes.js";
 import type { SeriesDataFeed } from "./feed/seriesDataFeed.js";
 
-const PENDING_LOAD_MORE_LEFT_SAFETY_MAX_ATTEMPTS = 1;
-const PENDING_LOAD_MORE_LEFT_SAFETY_MS = 3_000;
 const LOAD_MORE_PAGE_SIZE = 500;
 
 export type LoadMoreLeft = (oldestLoadedTime?: EpochSeconds | null) => Promise<void>;
@@ -45,7 +43,6 @@ export function useChartLoadMoreLeft({
 }: UseChartLoadMoreLeftOptions): ChartLoadMoreLeftRuntime {
   const [loadingMoreLeft, setLoadingMoreLeft] = useState(false);
   const [hasMoreLeft, setHasMoreLeft] = useState(true);
-  const handleNeedMoreLeftRef = useRef<LoadMoreLeft | null>(null);
   const oldestChartTime = chartData[0]?.time ?? null;
 
   const handleNeedMoreLeft = useCallback(
@@ -64,7 +61,10 @@ export function useChartLoadMoreLeft({
           bars: LOAD_MORE_PAGE_SIZE,
           source: "history-before-page",
         });
-        if (result.skipped) return;
+        if (result.skipped) {
+          if (result.reason === "history-exhausted") setHasMoreLeft(false);
+          return;
+        }
         if (result.stale || result.active === false) return;
         const older = result.data || [];
 
@@ -72,22 +72,19 @@ export function useChartLoadMoreLeft({
           if (!result.committed) {
             commitMergedChartData(symbol, interval, older, { source: "history-before-page" });
           }
-        } else if (result.has_more) {
-          console.log(`[LoadMoreLeft] 0 bars returned for ${interval}, backfill likely in progress - will retry soon`);
-
-          setTimeout(() => {
-            if (!seriesDataFeed.markBeforePageSafetyRetry(
-              series,
-              before,
-              PENDING_LOAD_MORE_LEFT_SAFETY_MAX_ATTEMPTS,
-            )) {
-              return;
-            }
-            void handleNeedMoreLeftRef.current?.(before);
-          }, PENDING_LOAD_MORE_LEFT_SAFETY_MS);
+          void seriesDataFeed.repairVisibleGaps(series, older, null, {
+            source: "before-page-gap-planner",
+            maxScanBars: LOAD_MORE_PAGE_SIZE + 2,
+          });
         }
 
-        if (typeof result.has_more === "boolean") {
+        if (result.pending) {
+          console.log(`[LoadMoreLeft] Partial page returned for ${interval}; repair remains pending`);
+        }
+
+        if (result.pending) {
+          setHasMoreLeft(true);
+        } else if (typeof result.has_more === "boolean") {
           setHasMoreLeft(result.has_more);
         } else if (older.length === 0) {
           setHasMoreLeft(false);
@@ -112,10 +109,6 @@ export function useChartLoadMoreLeft({
       symbol,
     ],
   );
-
-  useEffect(() => {
-    handleNeedMoreLeftRef.current = handleNeedMoreLeft;
-  }, [handleNeedMoreLeft]);
 
   return {
     loadingMoreLeft,

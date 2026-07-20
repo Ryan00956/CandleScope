@@ -30,10 +30,20 @@ test("top bar indicator count includes added market-data studies", () => {
       exchangeCatalog: {},
     },
     settingsActions: {},
+    tradeFlowView: {
+      preferences: {
+        indicators: {
+          cvd: { added: true, visible: true },
+          delta: { added: false, visible: false },
+        },
+      },
+    },
     watchlistActions: {},
     watchlistView: { watchlists: [] },
   });
 
   const model = buildTopBarViewModel(context);
-  assert.equal(model.controls.activeIndicatorCount, 3);
+  assert.equal(model.controls.activeIndicatorCount, 4);
+  assert.equal("orderFlowEnabled" in model.controls, false);
+  assert.equal("onToggleOrderFlow" in model.controls, false);
 });

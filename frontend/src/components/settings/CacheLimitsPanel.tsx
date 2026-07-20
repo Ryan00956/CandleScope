@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type {
     CacheRowLimits,
     ChartSettings,
@@ -141,6 +142,20 @@ export default function CacheLimitsPanel({
     const currentSqliteBudget = settings.sqliteStorageBudgetBytes ?? null;
     const rowLimitsEnabled = Boolean(settings.storageRowLimitsEnabled);
     const isCustomPreset = currentPreset === 'custom';
+    const [frontendBudgetDraft, setFrontendBudgetDraft] = useState(
+        String(bytesToMbInput(currentFrontendBudget)),
+    );
+    const [sqliteBudgetDraft, setSqliteBudgetDraft] = useState(
+        bytesToGbInput(currentSqliteBudget),
+    );
+
+    useEffect(() => {
+        setFrontendBudgetDraft(String(bytesToMbInput(currentFrontendBudget)));
+    }, [currentFrontendBudget]);
+
+    useEffect(() => {
+        setSqliteBudgetDraft(bytesToGbInput(currentSqliteBudget));
+    }, [currentSqliteBudget]);
 
     const handlePresetChange = (presetKey: string) => {
         const preset = DB_PRESETS.find((item) => item.key === presetKey);
@@ -172,17 +187,27 @@ export default function CacheLimitsPanel({
         });
     };
 
-    const handleFrontendBudgetChange = (value: string) => {
+    const commitFrontendBudget = () => {
+        const parsed = Number(frontendBudgetDraft);
+        if (!Number.isFinite(parsed) || parsed < 16 || parsed > 4096) {
+            setFrontendBudgetDraft(String(bytesToMbInput(currentFrontendBudget)));
+            return;
+        }
         onUpdate({
             ...settings,
-            frontendCacheBudgetBytes: mbInputToBytes(value),
+            frontendCacheBudgetBytes: mbInputToBytes(frontendBudgetDraft),
         });
     };
 
-    const handleSqliteBudgetChange = (value: string) => {
+    const commitSqliteBudget = () => {
+        const parsed = Number(sqliteBudgetDraft);
+        if (sqliteBudgetDraft !== '' && (!Number.isFinite(parsed) || parsed <= 0 || parsed > 16384)) {
+            setSqliteBudgetDraft(bytesToGbInput(currentSqliteBudget));
+            return;
+        }
         onUpdate({
             ...settings,
-            sqliteStorageBudgetBytes: gbInputToBytes(value),
+            sqliteStorageBudgetBytes: gbInputToBytes(sqliteBudgetDraft),
         });
     };
 
@@ -237,7 +262,8 @@ export default function CacheLimitsPanel({
                     <span className="st-badge st-badge-db">持久化</span>
                 </div>
                 <div className="st-group-desc">
-                    分钟级及以上的 K 线数据持久化到数据库。优先按 SQLite 预算治理；未设置预算时自动数据库 GC 只诊断不删库。
+                    分钟级及以上 K 线持久化到数据库。SQLite 预算用于 DB + WAL 水位与清理规划；
+                    SHM 仅展示、不计入可回收压力。自动删除数据库行默认关闭，只有后端显式启用后才会执行；VACUUM 始终手动。
                 </div>
 
                 <div className="st-tier-table">
@@ -250,10 +276,19 @@ export default function CacheLimitsPanel({
                             <input
                                 type="number"
                                 className="st-tier-input"
-                                value={bytesToMbInput(currentFrontendBudget)}
+                                value={frontendBudgetDraft}
                                 min={16}
+                                max={4096}
                                 step={16}
-                                onChange={(event) => handleFrontendBudgetChange(event.target.value)}
+                                onChange={(event) => setFrontendBudgetDraft(event.target.value)}
+                                onBlur={commitFrontendBudget}
+                                onKeyDown={(event) => {
+                                    if (event.key === 'Enter') event.currentTarget.blur();
+                                    if (event.key === 'Escape') {
+                                        event.preventDefault();
+                                        setFrontendBudgetDraft(String(bytesToMbInput(currentFrontendBudget)));
+                                    }
+                                }}
                                 title="前端缓存最大估算内存 MB"
                             />
                         </div>
@@ -263,22 +298,31 @@ export default function CacheLimitsPanel({
                     <div className="st-tier-row">
                         <div className="st-tier-col-name">
                             <span className="st-tier-label">SQLite 数据库预算</span>
-                            <span className="st-tier-desc">包含 DB/WAL/SHM 文件；留空表示不自动删库</span>
+                            <span className="st-tier-desc">DB + WAL 规划水位；留空表示不设置预算</span>
                         </div>
                         <div className="st-tier-col-limit">
                             <input
                                 type="number"
                                 className="st-tier-input"
-                                value={bytesToGbInput(currentSqliteBudget)}
+                                value={sqliteBudgetDraft}
                                 min={0}
+                                max={16384}
                                 step={0.25}
                                 placeholder="未设置"
-                                onChange={(event) => handleSqliteBudgetChange(event.target.value)}
-                                title="SQLite 最大占用 GB，留空表示不自动删库"
+                                onChange={(event) => setSqliteBudgetDraft(event.target.value)}
+                                onBlur={commitSqliteBudget}
+                                onKeyDown={(event) => {
+                                    if (event.key === 'Enter') event.currentTarget.blur();
+                                    if (event.key === 'Escape') {
+                                        event.preventDefault();
+                                        setSqliteBudgetDraft(bytesToGbInput(currentSqliteBudget));
+                                    }
+                                }}
+                                title="SQLite DB + WAL 规划预算（GB）；自动删除需后端显式启用"
                             />
                         </div>
                         <span className="st-tier-col-time">GB</span>
-                        <span className="st-tier-col-size">{currentSqliteBudget ? barsToStorageSize(Math.floor(currentSqliteBudget / 200)) : '未启用'}</span>
+                        <span className="st-tier-col-size">{currentSqliteBudget ? barsToStorageSize(Math.floor(currentSqliteBudget / 200)) : '未设置'}</span>
                     </div>
                 </div>
 
@@ -314,7 +358,8 @@ export default function CacheLimitsPanel({
                     </button>
                 </div>
                 <div className="st-group-desc">
-                    这些上限只在启用后作为额外硬规则。预算 GC 仍会优先参考冷热、活跃订阅、自定义周期和 storage intent 风险。
+                    这些上限只在启用后作为额外硬规则。清理规划仍会优先参考冷热、活跃订阅、自定义周期和 storage intent 风险；
+                    自动行删除能力仍由后端独立控制。
                 </div>
 
                 <label className="st-info-box" style={{ marginTop: 0 }}>
@@ -371,7 +416,7 @@ export default function CacheLimitsPanel({
 
                 {showAdvanced && (
                     <div className="st-advanced-hint">
-                        <span>输入 <strong>0</strong> 表示该级别不使用行数上限。预算治理仍由 SQLite 数据库预算控制。</span>
+                        <span>输入 <strong>0</strong> 表示该级别不使用行数上限。SQLite 预算只定义规划水位，不会自行开启自动行删除。</span>
                     </div>
                 )}
             </div>

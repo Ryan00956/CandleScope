@@ -5,6 +5,7 @@ import importlib.util
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core import market as core_market
@@ -34,6 +35,7 @@ from app.data_engine.data_manager.models import (
     BarData,
     DataEvent,
     DataEventType,
+    MissingRange,
     QueryResult,
     QuerySource,
     SeriesKey,
@@ -44,6 +46,7 @@ from app.data_engine.data_manager.coordinator import StreamCoordinator
 from app.data_engine.data_manager.stream_policy import StreamEnsurePlanner
 from app.data_engine.data_manager.subscriptions import SubscriptionService, SubscriptionTier
 from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
+from app.data_engine.history import AlwaysOpenCalendar, SessionCalendar
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -533,6 +536,32 @@ def test_data_manager_submits_query_missing_ranges_explicitly() -> None:
     assert result.backfill_triggered is True
     assert [r.reason for r in result.missing_ranges] == ["query_empty"]
     assert calls == [("BTC-USDT", "1m", 60_000, 120_000, "okx", "spot")]
+
+
+def test_data_manager_reports_missing_ranges_without_resubmitting_on_poll() -> None:
+    class _Storage:
+        def query_bars(self, **kwargs):
+            return []
+
+    calls: list[tuple] = []
+    dm = DataManager()
+    dm.set_storage(_Storage())  # type: ignore[arg-type]
+    dm.set_backfill_trigger(lambda *args: calls.append(args))
+
+    result = dm.query(
+        "BTC-USDT",
+        "1m",
+        start_ms=60_000,
+        end_ms=120_000,
+        limit=2,
+        exchange="okx",
+        market_type="spot",
+        auto_backfill=False,
+    )
+
+    assert result.backfill_triggered is False
+    assert [item.reason for item in result.missing_ranges] == ["query_empty"]
+    assert calls == []
 
 
 def test_data_manager_exposes_backfill_request_ids_from_trigger() -> None:
@@ -1366,6 +1395,521 @@ def test_custom_interval_query_service_aggregates_45m_from_base() -> None:
     assert result.metadata["derived_from"] == "15m"
 
 
+def test_custom_interval_omits_aggregate_with_known_base_component_gap() -> None:
+    base_bars = [
+        BarData(time=0, open=1, high=2, low=1, close=2, volume=1),
+        BarData(time=1_800, open=3, high=4, low=2, close=3, volume=1),
+    ]
+    gap = MissingRange(
+        symbol="BTCUSDT",
+        interval="15m",
+        start_ms=900_000,
+        end_ms=900_000,
+    )
+
+    def _base_query(*args, **kwargs) -> QueryResult:
+        return QueryResult(
+            bars=base_bars,
+            symbol="BTCUSDT",
+            interval="15m",
+            source=QuerySource.STORAGE,
+            total=len(base_bars),
+            has_more=True,
+            missing_ranges=[gap],
+            complete=False,
+            retryable=True,
+        )
+
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(default_limit=10, max_limit=100),
+        base_query=_base_query,
+    )
+
+    partial = service._aggregate_read_only(
+        base_bars,
+        "45m",
+        45 * 60,
+        source_interval="15m",
+    )
+    result = service.query_from_base(
+        symbol="BTCUSDT",
+        interval="45m",
+        start_ms=None,
+        end_ms=None,
+        limit=10,
+        started_at=time.monotonic(),
+    )
+
+    assert len(partial) == 1
+    assert partial[0].is_closed is False
+    assert result.bars == []
+    assert result.missing_ranges == [gap]
+    assert result.metadata["omitted_incomplete_aggregates"] == 1
+
+
+def test_data_manager_projects_custom_base_repair_into_derived_completion_target() -> None:
+    calls: list[tuple[tuple, dict]] = []
+    dm = DataManager()
+
+    def _trigger(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "base-repair"
+
+    dm.set_backfill_trigger(_trigger)
+    result = QueryResult(
+        bars=[],
+        symbol="BTCUSDT",
+        interval="45m",
+        exchange="binance",
+        market_type="spot",
+        source=QuerySource.EMPTY,
+        missing_ranges=[MissingRange(
+            symbol="BTCUSDT",
+            interval="15m",
+            start_ms=900_000,
+            end_ms=1_800_000,
+            exchange="binance",
+            market_type="spot",
+            reason="query_interior_gap",
+        )],
+        metadata={"derived_from": "15m"},
+    )
+
+    dm._submit_missing_ranges(result, reason="visible_range_gap")
+
+    assert calls[0][0][1:4] == ("15m", 900_000, 1_800_000)
+    assert calls[0][1]["metadata"]["derived_repair_targets"] == [{
+        "interval": "45m",
+        "start_ms": 0,
+        "end_ms": 0,
+    }]
+
+    native_result = QueryResult(
+        bars=[],
+        symbol="BTCUSDT",
+        interval="15m",
+        exchange="binance",
+        market_type="spot",
+        source=QuerySource.EMPTY,
+        missing_ranges=[MissingRange(
+            symbol="BTCUSDT",
+            interval="15m",
+            start_ms=900_000,
+            end_ms=900_000,
+            exchange="binance",
+            market_type="spot",
+        )],
+    )
+    dm._submit_missing_ranges(native_result)
+    assert "derived_repair_targets" not in calls[1][1]["metadata"]
+
+
+def test_custom_interval_range_fetches_complete_final_bucket_and_propagates_contract() -> None:
+    calls: list[dict] = []
+    base_bars = [
+        BarData(time=value, open=1, high=2, low=1, close=2, volume=1)
+        for value in (0, 900, 1_800, 2_700, 3_600, 4_500)
+    ]
+
+    def _base_query(*args, **kwargs) -> QueryResult:
+        calls.append(kwargs)
+        return QueryResult(
+            bars=base_bars,
+            symbol="BTCUSDT",
+            interval="15m",
+            source=QuerySource.STORAGE,
+            total=len(base_bars),
+            has_more=False,
+            cache_hit=False,
+            history_state="ready",
+            complete=True,
+            retryable=False,
+            availability_revision="base-v2",
+            excluded_ranges=[{
+                "start_ms": 9_000_000,
+                "end_ms": 9_900_000,
+                "disposition": "closed",
+                "reason": "market_closed",
+            }],
+        )
+
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(default_limit=10, max_limit=100),
+        base_query=_base_query,
+    )
+    result = service.query_from_base(
+        symbol="BTCUSDT",
+        interval="45m",
+        start_ms=0,
+        end_ms=2_700_000,
+        limit=2,
+        started_at=time.monotonic(),
+        auto_backfill=False,
+    )
+
+    assert calls[0]["end_ms"] == 5_399_999
+    assert calls[0]["auto_backfill"] is False
+    assert [(bar.time_ms, bar.volume, bar.is_closed) for bar in result.bars] == [
+        (0, 3, True),
+        (2_700_000, 3, True),
+    ]
+    assert result.history_state == "ready"
+    assert result.complete is True
+    assert result.retryable is False
+    assert result.availability_revision == "base-v2"
+    assert result.excluded_ranges[0]["reason"] == "market_closed"
+
+
+def test_custom_interval_before_uses_directional_base_contract_and_auto_backfill_override() -> None:
+    calls: list[tuple[tuple, dict]] = []
+    base_bars = [
+        BarData(time=value, open=1, high=2, low=1, close=2, volume=1)
+        for value in (0, 900, 1_800)
+    ]
+
+    def _base_query(*args, **kwargs) -> QueryResult:
+        raise AssertionError("directional custom pagination must use query_before")
+
+    def _base_query_before(*args, **kwargs) -> QueryResult:
+        calls.append((args, kwargs))
+        return QueryResult(
+            bars=base_bars,
+            symbol="BTCUSDT",
+            interval="15m",
+            source=QuerySource.STORAGE,
+            total=3,
+            has_more=False,
+            cache_hit=False,
+            history_state="exhausted",
+            complete=True,
+            retryable=False,
+            terminal_reason="source_exhausted",
+            earliest_available_ms=0,
+        )
+
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(default_limit=10, max_limit=100),
+        base_query=_base_query,
+        base_query_before=_base_query_before,
+    )
+    result = service.query_before(
+        "BTCUSDT",
+        "45m",
+        before_ms=2_700_000,
+        limit=1,
+        auto_backfill=False,
+    )
+
+    assert calls[0][0][2] == 2_700_000
+    assert calls[0][1]["auto_backfill"] is False
+    assert len(result.bars) == 1
+    assert result.has_more is False
+    assert result.history_state == "exhausted"
+    assert result.complete is True
+    assert result.retryable is False
+    assert result.terminal_reason == "source_exhausted"
+    assert result.next_before_ms is None
+
+
+def test_calendar_backed_two_month_before_expands_through_real_month_end() -> None:
+    calls: list[int] = []
+
+    def _base_query(*args, **kwargs) -> QueryResult:
+        raise AssertionError("directional custom pagination must use query_before")
+
+    def _base_query_before(symbol, interval, before_ms, limit, **kwargs) -> QueryResult:
+        calls.append(before_ms)
+        return QueryResult(
+            bars=[],
+            symbol=symbol,
+            interval=interval,
+            source=QuerySource.EMPTY,
+            total=0,
+            has_more=False,
+            history_state="exhausted",
+            complete=True,
+            retryable=False,
+            terminal_reason="source_exhausted",
+        )
+
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(default_limit=10, max_limit=100),
+        base_query=_base_query,
+        base_query_before=_base_query_before,
+        calendar_provider=lambda _key: AlwaysOpenCalendar(),
+    )
+    may_first_ms = int(datetime(2024, 5, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+    service.query_before(
+        "BTCUSDT",
+        "2M",
+        before_ms=may_first_ms,
+        limit=1,
+        auto_backfill=False,
+    )
+
+    assert calls[0] == may_first_ms
+
+
+def test_high_factor_custom_before_pages_base_rows_instead_of_reporting_capacity_gap() -> None:
+    base_bars = [
+        BarData(time=index * 60, open=1, high=2, low=1, close=2, volume=1)
+        for index in range(182)
+    ]
+    calls: list[tuple[int, int]] = []
+
+    def _base_query(*args, **kwargs) -> QueryResult:
+        raise AssertionError("directional custom pagination must use query_before")
+
+    def _base_query_before(
+        symbol,
+        interval,
+        before_ms,
+        limit,
+        **kwargs,
+    ) -> QueryResult:
+        eligible = [bar for bar in base_bars if bar.time_ms < before_ms]
+        page = eligible[-limit:]
+        has_more = len(eligible) > len(page)
+        calls.append((before_ms, limit))
+        return QueryResult(
+            bars=page,
+            symbol=symbol,
+            interval=interval,
+            source=QuerySource.STORAGE,
+            total=len(page),
+            has_more=has_more,
+            history_state="ready" if has_more else "exhausted",
+            complete=True,
+            retryable=False,
+            terminal_reason=None if has_more else "source_exhausted",
+        )
+
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(default_limit=2, max_limit=10),
+        base_query=_base_query,
+        base_query_before=_base_query_before,
+    )
+    result = service.query_before(
+        "BTCUSDT",
+        "91m",
+        before_ms=182 * 60_000,
+        limit=2,
+        auto_backfill=False,
+    )
+
+    assert len(calls) > 1
+    assert len(result.bars) == 2
+    assert [bar.volume for bar in result.bars] == [91, 91]
+    assert result.missing_ranges == []
+    assert result.backfill_triggered is False
+    assert result.history_state == "exhausted"
+    assert result.complete is True
+    assert result.has_more is False
+
+
+def test_custom_interval_aggregation_uses_session_anchor() -> None:
+    calendar = SessionCalendar(
+        calendar_id="test.0930.utc",
+        timezone_name="UTC",
+        weekly_sessions={weekday: (("09:30", "12:00"),) for weekday in range(5)},
+    )
+    day = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    session_start_s = int(day.replace(hour=9, minute=30).timestamp())
+    base_bars = [
+        BarData(
+            time=session_start_s + index * 900,
+            open=1,
+            high=2,
+            low=1,
+            close=2,
+            volume=1,
+        )
+        for index in range(6)
+    ]
+
+    result = CustomIntervalQueryService._aggregate_read_only(
+        base_bars,
+        "45m",
+        45 * 60,
+        source_interval="15m",
+        calendar=calendar,
+    )
+
+    assert [bar.time for bar in result] == [session_start_s, session_start_s + 2_700]
+    assert [bar.volume for bar in result] == [3, 3]
+
+
+def test_custom_interval_session_tail_closes_at_short_session_edge() -> None:
+    calendar = SessionCalendar(
+        calendar_id="test.0930.short-tail.utc",
+        timezone_name="UTC",
+        weekly_sessions={weekday: (("09:30", "12:00"),) for weekday in range(5)},
+    )
+    day = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    session_start_s = int(day.replace(hour=9, minute=30).timestamp())
+    base_bars = [
+        BarData(
+            time=session_start_s + index * 900,
+            open=1,
+            high=2,
+            low=1,
+            close=2,
+            volume=1,
+            is_closed=True,
+        )
+        for index in range(10)
+    ]
+
+    result = CustomIntervalQueryService._aggregate_read_only(
+        base_bars,
+        "45m",
+        45 * 60,
+        source_interval="15m",
+        calendar=calendar,
+    )
+
+    assert [bar.time for bar in result] == [
+        session_start_s,
+        session_start_s + 2_700,
+        session_start_s + 5_400,
+        session_start_s + 8_100,
+    ]
+    assert [bar.volume for bar in result] == [3, 3, 3, 1]
+    assert all(bar.is_closed for bar in result)
+
+
+def test_session_month_aggregation_uses_real_opens_and_expected_components() -> None:
+    calendar = SessionCalendar(
+        calendar_id="test.ny.month-components",
+        timezone_name="America/New_York",
+        weekly_sessions={weekday: (("09:30", "16:00"),) for weekday in range(5)},
+        holidays=("2024-01-01",),
+    )
+    expected_open_ms = int(
+        datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc).timestamp() * 1000
+    )
+
+    for target_interval, canonical_end in (
+        ("2M", datetime(2024, 3, 1, tzinfo=timezone.utc)),
+        ("3M", datetime(2024, 4, 1, tzinfo=timezone.utc)),
+    ):
+        end_ms = int(canonical_end.timestamp() * 1000)
+        source_opens = list(calendar.expected_opens(
+            expected_open_ms,
+            end_ms - 1,
+            "1d",
+        ))
+        bars = [
+            BarData(
+                time=open_ms // 1000,
+                open=1,
+                high=2,
+                low=1,
+                close=2,
+                volume=1,
+                is_closed=True,
+            )
+            for open_ms in source_opens
+        ]
+
+        complete = CustomIntervalQueryService._aggregate_read_only(
+            bars,
+            target_interval,
+            (60 if target_interval == "2M" else 90) * 86_400,
+            source_interval="1d",
+            calendar=calendar,
+        )
+        incomplete = CustomIntervalQueryService._aggregate_read_only(
+            bars[:3] + bars[4:],
+            target_interval,
+            (60 if target_interval == "2M" else 90) * 86_400,
+            source_interval="1d",
+            calendar=calendar,
+        )
+
+        assert len(complete) == 1
+        assert complete[0].time_ms == expected_open_ms
+        assert complete[0].volume == len(source_opens)
+        assert complete[0].is_closed is True
+        assert len(incomplete) == 1
+        assert incomplete[0].time_ms == expected_open_ms
+        assert incomplete[0].is_closed is False
+
+
+def test_session_three_month_before_pages_to_complete_calendar_bucket() -> None:
+    calendar = SessionCalendar(
+        calendar_id="test.ny.3m-pagination",
+        timezone_name="America/New_York",
+        weekly_sessions={weekday: (("09:30", "16:00"),) for weekday in range(5)},
+        holidays=("2024-01-01",),
+    )
+    expected_open_ms = int(
+        datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc).timestamp() * 1000
+    )
+    before_ms = int(datetime(2024, 4, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    source_bars = [
+        BarData(
+            time=open_ms // 1000,
+            open=1,
+            high=2,
+            low=1,
+            close=2,
+            volume=1,
+            is_closed=True,
+        )
+        for open_ms in calendar.expected_opens(expected_open_ms, before_ms - 1, "1d")
+    ]
+    calls: list[tuple[int, int]] = []
+
+    def _base_query(*args, **kwargs) -> QueryResult:
+        raise AssertionError("calendar pagination must use query_before")
+
+    def _base_query_before(symbol, interval, cursor_ms, limit, **kwargs) -> QueryResult:
+        eligible = [bar for bar in source_bars if bar.time_ms < cursor_ms]
+        page = eligible[-limit:]
+        calls.append((cursor_ms, limit))
+        return QueryResult(
+            bars=page,
+            symbol=symbol,
+            interval=interval,
+            source=QuerySource.STORAGE,
+            total=len(page),
+            has_more=len(eligible) > len(page),
+            history_state="ready" if len(eligible) > len(page) else "exhausted",
+            complete=True,
+        )
+
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(default_limit=1, max_limit=7),
+        base_query=_base_query,
+        base_query_before=_base_query_before,
+        calendar_provider=lambda _key: calendar,
+    )
+    result = service.query_before(
+        "TEST",
+        "3M",
+        before_ms=before_ms,
+        limit=1,
+        exchange="test",
+        market_type="spot",
+        auto_backfill=False,
+    )
+
+    assert len(calls) > 1
+    assert [(bar.time_ms, bar.volume, bar.is_closed) for bar in result.bars] == [(
+        expected_open_ms,
+        len(source_bars),
+        True,
+    )]
+
+
 def test_custom_interval_query_service_uses_bar_aggregator_batch() -> None:
     class _Aggregator:
         def __init__(self) -> None:
@@ -1447,6 +1991,7 @@ def test_custom_interval_query_service_uses_bar_aggregator_batch() -> None:
     assert aggregator.calls[0]["exchange"] == "okx"
     assert result.bars[0].open == 10
     assert result.bars[0].close == 11
+    assert result.bars[0].is_closed is True
 
 
 def test_bar_aggregator_seed_active_bar_does_not_emit_events() -> None:

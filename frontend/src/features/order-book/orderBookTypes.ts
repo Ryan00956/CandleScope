@@ -1,5 +1,7 @@
 export const PARTIAL_DEPTH_LEVELS = [5, 10, 20] as const;
-export const UPDATE_INTERVALS_MS = [100, 250, 500] as const;
+export const UPDATE_INTERVALS_MS = [100, 250, 500, 1000] as const;
+export const SPOT_UPDATE_INTERVALS_MS = [100, 1000] as const;
+export const FUTURES_UPDATE_INTERVALS_MS = [100, 250, 500] as const;
 export const FULL_OUTPUT_LIMITS = [20, 50, 100] as const;
 export const PARTIAL_PRICE_GROUPINGS = ["auto", "raw", "10"] as const;
 export const FULL_PRICE_GROUPINGS = ["auto", "raw", "10", "100", "1000"] as const;
@@ -104,6 +106,8 @@ export interface OrderBookRuntime {
     supported: boolean;
     supportMessage: string | null;
     preferences: OrderBookPreferences;
+    updateIntervalMs: OrderBookUpdateIntervalMs;
+    updateIntervalsMs: readonly OrderBookUpdateIntervalMs[];
     store: OrderBookExternalStore;
   };
   actions: OrderBookPreferenceActions & {

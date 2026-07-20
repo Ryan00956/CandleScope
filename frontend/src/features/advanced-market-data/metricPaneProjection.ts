@@ -55,6 +55,16 @@ interface FundingProjectionCandidate {
   stale: boolean;
 }
 
+type FundingMetricsInput = Pick<
+  AdvancedMarketMetricsSnapshot,
+  "fundingHistory" | "fundingRealtimeHistory" | "fundingPreview"
+>;
+
+type OpenInterestMetricsInput = Pick<
+  AdvancedMarketMetricsSnapshot,
+  "openInterestHistory"
+>;
+
 const FUNDING_REALTIME_STALE_AFTER_MS = 15_000;
 
 const FUNDING_RATE_LEGEND: readonly IndicatorPaneLegendItem[] = Object.freeze([
@@ -86,6 +96,28 @@ const FUNDING_RATE_LEGEND: readonly IndicatorPaneLegendItem[] = Object.freeze([
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function sortedIfNeeded<T>(
+  values: readonly T[],
+  compare: (left: T, right: T) => number,
+): readonly T[] {
+  for (let index = 1; index < values.length; index += 1) {
+    const previous = values[index - 1];
+    const current = values[index];
+    if (previous !== undefined && current !== undefined && compare(previous, current) > 0) {
+      return [...values].sort(compare);
+    }
+  }
+  return values;
+}
+
+function fundingHistoryRecords(
+  records: readonly MarketStateRecord[],
+): readonly MarketStateRecord[] {
+  return records.every(isFundingRateHistory)
+    ? records
+    : records.filter(isFundingRateHistory);
 }
 
 function isFinal(record: MarketStateRecord): boolean {
@@ -231,30 +263,71 @@ function lowerBoundFundingObservation(
   return low;
 }
 
-function projectFundingRateTrajectory(
-  metrics: AdvancedMarketMetricsSnapshot,
-  bars: readonly KlineBar[],
-  interval: unknown,
-  nowMs: number,
-): {
+export interface FundingRateHistoryProjection {
+  bars: readonly KlineBar[];
+  intervalSeconds: number;
   points: Array<IndicatorValuePoint & IndicatorColorPoint>;
   metadata: IndicatorPanePointMetadata[];
-} {
-  if (bars.length === 0) return { points: [], metadata: [] };
-  const sortedBars = [...bars].sort((left, right) => left.time - right.time);
+  settlementTimes: ReadonlySet<number>;
+}
+
+interface FundingProjectedPoint {
+  point: IndicatorValuePoint & IndicatorColorPoint;
+  metadata: IndicatorPanePointMetadata;
+}
+
+function projectFundingCandidate(
+  time: number,
+  candidate: FundingProjectionCandidate,
+): FundingProjectedPoint | null {
+  const rawValue = finiteNumber(candidate.record.data.funding_rate);
+  if (rawValue === null) return null;
+  const value = rawValue * 100;
+  return {
+    point: {
+      time,
+      value,
+      color: fundingColor(candidate.record, value, candidate.carried, candidate.stale),
+    },
+    metadata: fundingPointMetadata(
+      candidate.record,
+      time,
+      value,
+      candidate.carried,
+      candidate.stale,
+    ),
+  };
+}
+
+export function buildFundingRateHistoryProjection(
+  fundingHistory: readonly MarketStateRecord[],
+  bars: readonly KlineBar[],
+  interval: unknown,
+): FundingRateHistoryProjection {
+  const sortedBars = sortedIfNeeded(bars, (left, right) => left.time - right.time);
   const inferredIntervalSeconds = sortedBars.length > 1
     ? Math.max(1, sortedBars[sortedBars.length - 1]!.time - sortedBars[sortedBars.length - 2]!.time)
     : 1;
   const intervalSeconds = parseIntervalSeconds(interval) ?? inferredIntervalSeconds;
+  if (sortedBars.length === 0) {
+    return {
+      bars: sortedBars,
+      intervalSeconds,
+      points: [],
+      metadata: [],
+      settlementTimes: new Set(),
+    };
+  }
   const candidates = new Map<number, FundingProjectionCandidate>();
-  const historicalRecords = metrics.fundingHistory
-    .filter(isFundingRateHistory)
-    .sort((left, right) => (
+  const historicalRecords = sortedIfNeeded(
+    fundingHistoryRecords(fundingHistory),
+    (left, right) => (
       fundingRateSampleTimeMs(left) - fundingRateSampleTimeMs(right)
       || fundingPrecedence(left) - fundingPrecedence(right)
       || left.received_at_ms - right.received_at_ms
       || left.revision - right.revision
-    ));
+    ),
+  );
   let historyBarIndex = 0;
   for (const record of historicalRecords) {
     if (finiteNumber(record.data.funding_rate) === null) continue;
@@ -274,10 +347,39 @@ function projectFundingRateTrajectory(
     }
   }
 
+  const points: Array<IndicatorValuePoint & IndicatorColorPoint> = [];
+  const metadata: IndicatorPanePointMetadata[] = [];
+  const settlementTimes = new Set<number>();
+  for (const [time, candidate] of [...candidates.entries()].sort(([left], [right]) => left - right)) {
+    const projected = projectFundingCandidate(time, candidate);
+    if (!projected) continue;
+    points.push(projected.point);
+    metadata.push(projected.metadata);
+    if (fundingRateProvenance(candidate.record) === "exchange_settlement") {
+      settlementTimes.add(time);
+    }
+  }
+  return { bars: sortedBars, intervalSeconds, points, metadata, settlementTimes };
+}
+
+function mergeFundingProjection(
+  history: FundingRateHistoryProjection,
+  metrics: Pick<FundingMetricsInput, "fundingRealtimeHistory" | "fundingPreview">,
+  nowMs: number,
+): {
+  points: Array<IndicatorValuePoint & IndicatorColorPoint>;
+  metadata: IndicatorPanePointMetadata[];
+} {
+  const sortedBars = history.bars;
+  if (sortedBars.length === 0) return { points: history.points, metadata: history.metadata };
   const realtimeTimeline = metrics.fundingRealtimeHistory || [];
+  if (realtimeTimeline.length === 0 && !metrics.fundingPreview) {
+    return { points: history.points, metadata: history.metadata };
+  }
+
   const visibleStartMs = sortedBars[0]!.time * 1000;
   const visibleEndMs = Math.min(
-    (sortedBars.at(-1)!.time + intervalSeconds) * 1000,
+    (sortedBars.at(-1)!.time + history.intervalSeconds) * 1000,
     nowMs,
   );
   const firstVisibleObservation = lowerBoundFundingObservation(realtimeTimeline, visibleStartMs);
@@ -303,8 +405,11 @@ function projectFundingRateTrajectory(
   }
   let realtimeIndex = 0;
   let latestRealtime: MarketStateRecord | null = null;
+  const overrides = new Map<number, FundingProjectedPoint>();
   for (const [index, bar] of sortedBars.entries()) {
-    const nominalBarCloseMs = (sortedBars[index + 1]?.time ?? (bar.time + intervalSeconds)) * 1000;
+    const nominalBarCloseMs = (
+      sortedBars[index + 1]?.time ?? (bar.time + history.intervalSeconds)
+    ) * 1000;
     const observationCutoffMs = Math.min(nominalBarCloseMs, nowMs);
     while (realtimeIndex < realtimeRecords.length) {
       const record = realtimeRecords[realtimeIndex];
@@ -319,41 +424,40 @@ function projectFundingRateTrajectory(
     const carried = latestRealtime.data.carried === true || observedAtMs < bar.time * 1000;
     const stale = latestRealtime.data.stale === true
       || observationCutoffMs - observedAtMs > FUNDING_REALTIME_STALE_AFTER_MS;
-    const existing = candidates.get(bar.time);
-    if (existing && fundingRateProvenance(existing.record) === "exchange_settlement") continue;
-    candidates.set(bar.time, {
+    if (history.settlementTimes.has(bar.time)) continue;
+    const projected = projectFundingCandidate(bar.time, {
       record: latestRealtime,
       sampleTimeMs: observedAtMs,
       carried,
       stale,
     });
+    if (projected) overrides.set(bar.time, projected);
   }
 
-  const projected = [...candidates.entries()]
-    .sort(([left], [right]) => left - right)
-    .flatMap(([time, candidate]) => {
-      const rawValue = finiteNumber(candidate.record.data.funding_rate);
-      if (rawValue === null) return [];
-      const value = rawValue * 100;
-      return [{
-        point: {
-          time,
-          value,
-          color: fundingColor(candidate.record, value, candidate.carried, candidate.stale),
-        },
-        metadata: fundingPointMetadata(
-          candidate.record,
-          time,
-          value,
-          candidate.carried,
-          candidate.stale,
-        ),
-      }];
-    });
-  return {
-    points: projected.map(({ point }) => point),
-    metadata: projected.map(({ metadata }) => metadata),
-  };
+  if (overrides.size === 0) return { points: history.points, metadata: history.metadata };
+  const realtime = [...overrides.entries()].sort(([left], [right]) => left - right);
+  const points: Array<IndicatorValuePoint & IndicatorColorPoint> = [];
+  const metadata: IndicatorPanePointMetadata[] = [];
+  let historyIndex = 0;
+  let realtimeIndexForMerge = 0;
+  while (historyIndex < history.points.length || realtimeIndexForMerge < realtime.length) {
+    const historyPoint = history.points[historyIndex];
+    const realtimeEntry = realtime[realtimeIndexForMerge];
+    if (realtimeEntry && (!historyPoint || realtimeEntry[0] <= historyPoint.time)) {
+      points.push(realtimeEntry[1].point);
+      metadata.push(realtimeEntry[1].metadata);
+      realtimeIndexForMerge += 1;
+      if (historyPoint && historyPoint.time === realtimeEntry[0]) historyIndex += 1;
+      continue;
+    }
+    if (historyPoint) {
+      points.push(historyPoint);
+      const historyMetadata = history.metadata[historyIndex];
+      if (historyMetadata) metadata.push(historyMetadata);
+      historyIndex += 1;
+    }
+  }
+  return { points, metadata };
 }
 
 export function resolveOpenInterestPeriod(interval: unknown): string {
@@ -376,8 +480,8 @@ export function projectMetricRecordsToCandles(
   }: MetricProjectionOptions,
 ): IndicatorValuePoint[] {
   if (records.length === 0 || bars.length === 0) return [];
-  const sortedBars = [...bars].sort((a, b) => a.time - b.time);
-  const sortedRecords = [...records].sort((a, b) => (
+  const sortedBars = sortedIfNeeded(bars, (a, b) => a.time - b.time);
+  const sortedRecords = sortedIfNeeded(records, (a, b) => (
     marketMetricSampleTimeMs(a) - marketMetricSampleTimeMs(b)
     || a.received_at_ms - b.received_at_ms
     || a.revision - b.revision
@@ -419,21 +523,32 @@ export function projectMetricRecordsToCandles(
     }
   }
 
-  return Array.from(candidates.values())
-    .sort((a, b) => Number(a.point.time) - Number(b.point.time))
-    .map(({ point }) => point);
+  // Records and the bar cursor both move monotonically, so Map insertion order
+  // is already chart-time order.  Returning the unique candidates avoids both
+  // the old O(k log k) sort and duplicate output when an upstream bar array
+  // contains a repeated timestamp.
+  return Array.from(candidates.values(), ({ point }) => point);
 }
 
-export function buildAdvancedMarketPanes(
-  metrics: AdvancedMarketMetricsSnapshot,
+export function buildFundingRatePane(
+  metrics: FundingMetricsInput,
   bars: readonly KlineBar[],
-  channels: readonly MarketStateMetricChannel[] = ["funding_rate", "open_interest"],
   interval: unknown = null,
   nowMs: number = Date.now(),
-): IndicatorSubPane[] {
-  const requestedChannels = new Set(channels);
-  const fundingProjection = projectFundingRateTrajectory(metrics, bars, interval, nowMs);
-  const tailBar = bars.at(-1);
+): IndicatorSubPane {
+  return buildFundingRatePaneFromHistoryProjection(
+    buildFundingRateHistoryProjection(metrics.fundingHistory, bars, interval),
+    metrics,
+    nowMs,
+  );
+}
+
+export function buildFundingRatePaneFromHistoryProjection(
+  history: FundingRateHistoryProjection,
+  metrics: Pick<FundingMetricsInput, "fundingRealtimeHistory" | "fundingPreview">,
+  nowMs: number = Date.now(),
+): IndicatorSubPane {
+  const fundingProjection = mergeFundingProjection(history, metrics, nowMs);
   const fundingLine: IndicatorLine = {
     id: "advanced-funding-rate-line",
     indicatorId: "advanced-market-data",
@@ -444,7 +559,23 @@ export function buildAdvancedMarketPanes(
     data: fundingProjection.points,
     colorData: fundingProjection.points,
   };
+  return {
+    id: "advanced-funding",
+    label: "资金费率 (%)",
+    lines: [fundingLine],
+    owner: { kind: "market-study", id: "market:funding-rate" },
+    dataMarketPane: "funding-rate",
+    legendItems: FUNDING_RATE_LEGEND,
+    pointMetadata: fundingProjection.metadata,
+  };
+}
 
+export function buildOpenInterestPane(
+  metrics: OpenInterestMetricsInput,
+  bars: readonly KlineBar[],
+): IndicatorSubPane {
+  const sortedBars = sortedIfNeeded(bars, (left, right) => left.time - right.time);
+  const tailBar = sortedBars.at(-1);
   const openInterestLine: IndicatorLine = {
     id: "advanced-open-interest-line",
     indicatorId: "advanced-market-data",
@@ -453,16 +584,19 @@ export function buildAdvancedMarketPanes(
     type: "line",
     color: "#60a5fa",
     lineWidth: 2,
-    data: projectMetricRecordsToCandles(metrics.openInterestHistory, bars, {
+    data: projectMetricRecordsToCandles(metrics.openInterestHistory, sortedBars, {
       valueField: "open_interest",
       finalWins: true,
     }),
   };
-  const latestProvisionalOpenInterest = [...metrics.openInterestHistory]
-    .reverse()
-    .find((record) => (
-      record.data.is_final === false || record.data.sample_kind === "provisional"
-    ));
+  let latestProvisionalOpenInterest: MarketStateRecord | undefined;
+  for (let index = metrics.openInterestHistory.length - 1; index >= 0; index -= 1) {
+    const record = metrics.openInterestHistory[index];
+    if (record && (record.data.is_final === false || record.data.sample_kind === "provisional")) {
+      latestProvisionalOpenInterest = record;
+      break;
+    }
+  }
   const provisionalOpenInterestValue = finiteNumber(
     latestProvisionalOpenInterest?.data.open_interest,
   );
@@ -472,41 +606,29 @@ export function buildAdvancedMarketPanes(
     if (existingIndex >= 0) openInterestLine.data[existingIndex] = previewPoint;
     else openInterestLine.data.push(previewPoint);
   }
+  return {
+    id: "advanced-open-interest",
+    label: "Open Interest",
+    lines: [openInterestLine],
+    owner: { kind: "market-study", id: "market:open-interest" },
+    dataMarketPane: "open-interest",
+  };
+}
 
-  const panes: Array<IndicatorSubPane & {
-    channel: MarketStateMetricChannel;
-    owner: NonNullable<IndicatorSubPane["owner"]>;
-  }> = [
-    {
-      channel: "funding_rate",
-      id: "advanced-funding",
-      label: "资金费率 (%)",
-      lines: [fundingLine],
-      owner: { kind: "market-study", id: "market:funding-rate" },
-      dataMarketPane: "funding-rate",
-      legendItems: FUNDING_RATE_LEGEND,
-      pointMetadata: fundingProjection.metadata,
-    },
-    {
-      channel: "open_interest",
-      id: "advanced-open-interest",
-      label: "Open Interest",
-      lines: [openInterestLine],
-      owner: { kind: "market-study", id: "market:open-interest" },
-      dataMarketPane: "open-interest",
-    },
-  ];
-  return panes
-    .filter((pane) => requestedChannels.has(pane.channel))
-    .map((pane) => ({
-      id: pane.id,
-      label: pane.label,
-      lines: pane.lines,
-      owner: pane.owner,
-      ...(pane.dataMarketPane === undefined
-        ? {}
-        : { dataMarketPane: pane.dataMarketPane }),
-      ...(pane.legendItems === undefined ? {} : { legendItems: pane.legendItems }),
-      ...(pane.pointMetadata === undefined ? {} : { pointMetadata: pane.pointMetadata }),
-    }));
+export function buildAdvancedMarketPanes(
+  metrics: AdvancedMarketMetricsSnapshot,
+  bars: readonly KlineBar[],
+  channels: readonly MarketStateMetricChannel[] = ["funding_rate", "open_interest"],
+  interval: unknown = null,
+  nowMs: number = Date.now(),
+): IndicatorSubPane[] {
+  const requestedChannels = new Set(channels);
+  const panes: IndicatorSubPane[] = [];
+  if (requestedChannels.has("funding_rate")) {
+    panes.push(buildFundingRatePane(metrics, bars, interval, nowMs));
+  }
+  if (requestedChannels.has("open_interest")) {
+    panes.push(buildOpenInterestPane(metrics, bars));
+  }
+  return panes;
 }

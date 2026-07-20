@@ -92,6 +92,7 @@ export function renderMarkers({
   markerStateRef: MutableRef<{
     target: MainSeriesHandle | null;
     state: "empty" | "markers";
+    source?: IndicatorMarkerGroup[] | null | undefined;
   }>;
   paneId: string;
   recordPerfEvent: PerfEventRecorder;
@@ -100,7 +101,7 @@ export function renderMarkers({
   if (markerTargetRef.current && markerTargetRef.current.series !== targetSeries) {
     try { markerTargetRef.current.plugin.detach(); } catch { /* */ }
     markerTargetRef.current = null;
-    markerStateRef.current = { target: null, state: "empty" };
+    markerStateRef.current = { target: null, state: "empty", source: null };
     recordPerfEvent("chart.markerSeries.clear", {
       paneId,
       reason: "target-change",
@@ -108,6 +109,13 @@ export function renderMarkers({
   }
   if (!targetSeries) return;
   const series = targetSeries;
+
+  if (
+    markerStateRef.current.target === targetSeries
+    && markerStateRef.current.source === indicatorMarkers
+  ) {
+    return;
+  }
 
   function getPlugin(): ISeriesMarkersPluginApi<ChartTime> {
     const currentTarget = markerTargetRef.current;
@@ -123,7 +131,7 @@ export function renderMarkers({
     const markerState = markerStateRef.current;
     if (markerState.target !== targetSeries || markerState.state !== "empty") {
       try { getPlugin().setMarkers([]); } catch { /* */ }
-      markerStateRef.current = { target: targetSeries, state: "empty" };
+      markerStateRef.current = { target: targetSeries, state: "empty", source: indicatorMarkers };
       recordPerfEvent("chart.markerSeries.clear", {
         paneId,
         reason: "empty",
@@ -136,7 +144,7 @@ export function renderMarkers({
 
   try {
     getPlugin().setMarkers(allMarkers);
-    markerStateRef.current = { target: targetSeries, state: "markers" };
+    markerStateRef.current = { target: targetSeries, state: "markers", source: indicatorMarkers };
     recordPerfEvent("chart.markerSeries.setMarkers", {
       paneId,
       groups: indicatorMarkers.length,

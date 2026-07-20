@@ -14,7 +14,7 @@ export interface WatchlistRuntime {
   view: {
     watchlists: ReturnType<typeof useWatchlistStore>["watchlists"];
     layout: ReturnType<typeof useWatchlistStore>["layout"];
-    prices: WatchlistSubscriptionRuntime["symbolPrices"];
+    priceStore: WatchlistSubscriptionRuntime["priceStore"];
     subscriptionTiers: WatchlistSubscriptionRuntime["subscriptionTiers"];
     subscriptionResourceSummaries: WatchlistSubscriptionRuntime["subscriptionResourceSummaries"];
   };
@@ -24,6 +24,8 @@ export interface WatchlistRuntime {
   >;
   status: Record<string, never>;
 }
+
+const EMPTY_WATCHLIST_STATUS: Record<string, never> = Object.freeze({});
 
 export function useWatchlistRuntime({
   subscriptionContext,
@@ -37,7 +39,7 @@ export function useWatchlistRuntime({
   const view = useMemo(() => ({
     watchlists: store.watchlists,
     layout: store.layout,
-    prices: subscriptions.symbolPrices,
+    priceStore: subscriptions.priceStore,
     subscriptionTiers: subscriptions.subscriptionTiers,
     subscriptionResourceSummaries: subscriptions.subscriptionResourceSummaries,
   }), [
@@ -45,7 +47,7 @@ export function useWatchlistRuntime({
     store.watchlists,
     subscriptions.subscriptionResourceSummaries,
     subscriptions.subscriptionTiers,
-    subscriptions.symbolPrices,
+    subscriptions.priceStore,
   ]);
 
   const actions = useMemo(() => ({
@@ -60,9 +62,9 @@ export function useWatchlistRuntime({
     subscriptions.setSubscriptionTiers,
   ]);
 
-  return {
+  return useMemo(() => ({
     view,
     actions,
-    status: {},
-  };
+    status: EMPTY_WATCHLIST_STATUS,
+  }), [actions, view]);
 }

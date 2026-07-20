@@ -1,4 +1,5 @@
 import type { DrawingFrameSnapshot } from "../../../chart-adapter/drawingFrameSnapshot.js";
+import drawingPerformanceContract from "../../../../contracts/drawing-performance.json";
 import type {
   CoordinateDataPoint,
   DrawingCoordinateResolution,
@@ -212,6 +213,8 @@ export interface DrawingSceneRuntimeSnapshot {
   readonly acceptedWorkerIdentity: DrawingWorkerJobHeader | null;
   /** Most recent accepted worker result whose scene publication succeeded. */
   readonly publishedWorkerIdentity: DrawingWorkerJobHeader | null;
+  /** Worker publication identity acknowledged by the exact visible paint callback. */
+  readonly paintedWorkerIdentity: DrawingWorkerJobHeader | null;
   /** Exact identity returned by the most recent successful worker submission. */
   readonly latestSubmittedWorkerIdentity: DrawingWorkerJobHeader | null;
   /** Exact stamp acknowledged by the generation-safe visible paint callback. */
@@ -309,6 +312,11 @@ interface ExactPaintEvidence {
   readonly paintSequence: number;
   readonly observedAt: string;
   readonly stamp: DrawingRenderRevisionStamp;
+  readonly workerIdentity: DrawingWorkerJobHeader | null;
+}
+
+interface ScenePublicationWorkerBinding {
+  readonly workerIdentity: DrawingWorkerJobHeader | null;
 }
 
 interface ExactPaintWaiter {
@@ -358,6 +366,12 @@ function defaultNow(): number {
 }
 
 const MAX_PHASE6_WORKER_IDENTITY_HISTORY = 32;
+
+// Every viewport invalidation restarts this timer, so continuous wheel/pan
+// input stays on the same-frame main-thread LOD path. Roughly two to three
+// 60 Hz frames of quiet time reserve 80 ms of the 120 ms exact-paint budget for
+// projection, the worker round-trip, scheduler jitter, and the next paint.
+const EXACT_VIEWPORT_SETTLE_DELAY_MS = drawingPerformanceContract.exactViewportSettleDelayMs;
 
 function snapshotWorkerIdentity(header: DrawingWorkerJobHeader): DrawingWorkerJobHeader {
   return Object.freeze({
@@ -682,6 +696,14 @@ function freehandRawPointCount(nodes: readonly DrawingSceneNode[]): number {
   return count;
 }
 
+function hasSourceLineageFreehand(nodes: readonly DrawingSceneNode[]): boolean {
+  return nodes.some((node) => {
+    const geometry = node.entity.geometry;
+    return (geometry.kind === "freehand" || geometry.kind === "highlighter")
+      && (geometry.stroke?.spans.length ?? 0) > 0;
+  });
+}
+
 /**
  * Invisible Phase 3 scene owner. It observes the authoritative document and
  * adapter frame, but it never creates a canvas, attaches a chart primitive,
@@ -748,6 +770,15 @@ export function createDrawingSceneRuntime({
   let acceptedWorkerIdentity: DrawingWorkerJobHeader | null = null;
   let publishedWorkerIdentity: DrawingWorkerJobHeader | null = null;
   let latestSubmittedWorkerIdentity: DrawingWorkerJobHeader | null = null;
+  // A render stamp identifies chart state, not the producer of one concrete
+  // visible publication. The same stamp can be published first by a worker
+  // and then by the main-thread exact/continuous path (or vice versa). Bind
+  // provenance to the actual immutable display-list object acknowledged by
+  // the primitive so a later same-stamp paint can never inherit it globally.
+  let workerBindingByPublishedPlan = new WeakMap<
+    DrawingScreenDisplayList,
+    ScenePublicationWorkerBinding
+  >();
   let staleWorkerPublishCount = 0;
   let rawPointCount = 0;
   let renderedPointCount = 0;
@@ -815,6 +846,13 @@ export function createDrawingSceneRuntime({
     acceptedWorkerIdentity = null;
     publishedWorkerIdentity = null;
     latestSubmittedWorkerIdentity = null;
+    workerBindingByPublishedPlan = new WeakMap();
+    if (lastExactPaintEvidence?.workerIdentity) {
+      lastExactPaintEvidence = Object.freeze({
+        ...lastExactPaintEvidence,
+        workerIdentity: null,
+      });
+    }
   };
 
   const ensureWorkerClient = (): DrawingWorkerClient | null => {
@@ -900,7 +938,6 @@ export function createDrawingSceneRuntime({
             )) {
               effectiveRasterBackend = "main-thread";
               lastWorkerPublishedStamp = Object.freeze({ ...response.header.stamp });
-              publishedWorkerIdentity = acceptedIdentity;
             } else {
               releaseDrawingWorkerDrawResult(response.result);
             }
@@ -932,7 +969,6 @@ export function createDrawingSceneRuntime({
             }
             effectiveRasterBackend = "worker";
             lastWorkerPublishedStamp = Object.freeze({ ...response.header.stamp });
-            publishedWorkerIdentity = acceptedIdentity;
           } catch {
             releaseDrawingWorkerDrawResult(response.result);
             disableWorkerRaster();
@@ -1007,7 +1043,9 @@ export function createDrawingSceneRuntime({
 
   const submitWorkerPlan = (plan: SceneRenderPlan): boolean => {
     if (!plan.list.entities.some((entity) => entity.renderSpec?.op === "freehand"
-      && isDrawingWorkerRasterCompositeOperation(entity.renderSpec.compositeOperation))) return false;
+      && isDrawingWorkerRasterCompositeOperation(entity.renderSpec.compositeOperation))) {
+      return false;
+    }
     const client = ensureWorkerClient();
     if (!client?.available) return false;
     const patchBatch = workerEntityPatches(
@@ -1123,7 +1161,7 @@ export function createDrawingSceneRuntime({
       if (disposed || faulted || !binding) return;
       lodToleranceClass = "settledExact";
       invalidateScene("viewport-exact");
-    }, 100);
+    }, EXACT_VIEWPORT_SETTLE_DELAY_MS);
   };
 
   const scheduleParityInvalidation = (delayMs: number): void => {
@@ -1243,6 +1281,23 @@ export function createDrawingSceneRuntime({
     parityWorkHandle = requestParityWork(runParityWork);
   };
 
+  const createRenderInput = (
+    activeBinding: DrawingSceneRuntimeBinding,
+    document: DrawingDocument,
+    frame: DrawingFrameSnapshot,
+  ): SceneRenderInput => {
+    invalidateChangedCoordinateSpace(frame);
+    return Object.freeze({
+      adapter: activeBinding.adapter,
+      binding: activeBinding,
+      document,
+      frame,
+      stamp: frameStamp(document, frame),
+      lodToleranceClass,
+      sceneEpoch,
+    });
+  };
+
   const readInput = (): SceneRenderInput | null => {
     if (disposed || faulted || mode === "legacy" || !binding || !registry) return null;
     const document = binding.store.getSnapshot();
@@ -1258,16 +1313,7 @@ export function createDrawingSceneRuntime({
       onSkipped?.("drawing-frame-unavailable");
       return null;
     }
-    invalidateChangedCoordinateSpace(frame);
-    return Object.freeze({
-      adapter: binding.adapter,
-      binding,
-      document,
-      frame,
-      stamp: frameStamp(document, frame),
-      lodToleranceClass,
-      sceneEpoch,
-    });
+    return createRenderInput(binding, document, frame);
   };
 
   function publishPreparedPlan(
@@ -1277,6 +1323,11 @@ export function createDrawingSceneRuntime({
     source: "main-thread" | "worker",
     workerIdentity: DrawingWorkerJobHeader | null = null,
   ): boolean {
+    const publicationWorkerBinding = Object.freeze({
+      workerIdentity: source === "worker" && workerIdentity
+        ? snapshotWorkerIdentity(workerIdentity)
+        : null,
+    });
     const currentDocument = plan.binding.store.getSnapshot();
     const documentCurrent = currentDocument === plan.document
       && plan.binding.renderer.documentSnapshot() === plan.document
@@ -1307,6 +1358,10 @@ export function createDrawingSceneRuntime({
     let visiblePublicationAccepted = true;
     let visiblePublicationError: unknown = null;
     if (mode === "scene-canary") {
+      // Install provenance before crossing the visible publication boundary.
+      // A bridge may acknowledge only this exact immutable plan; rejected
+      // publications remove the provisional binding below.
+      workerBindingByPublishedPlan.set(publishedList, publicationWorkerBinding);
       try {
         visiblePublicationAccepted = plan.binding.publishScene?.(publishedList) === true;
       } catch (error) {
@@ -1315,6 +1370,7 @@ export function createDrawingSceneRuntime({
       }
     }
     if (!visiblePublicationAccepted) {
+      workerBindingByPublishedPlan.delete(publishedList);
       onSkipped?.("scene-publish-surface-stale");
       // A rejected visible publication is an ownership failure, not a stale
       // projector input. Stop consuming frame invalidations so a missing or
@@ -1337,6 +1393,7 @@ export function createDrawingSceneRuntime({
     latestPlan = publishedList;
     latestHitIndex = publishedHitIndex;
     latestPublishedPlan = plan;
+    publishedWorkerIdentity = publicationWorkerBinding.workerIdentity;
     latestOwnedEntityCount = plan.totalEntityCount;
     rawPointCount = freehandRawPointCount(plan.sceneNodes);
     renderedPointCount = publishedList.entities.reduce((count, entity) => (
@@ -1380,11 +1437,21 @@ export function createDrawingSceneRuntime({
     return true;
   }
 
-  const scheduler: DrawingRenderScheduler = createDrawingRenderScheduler<
+  const scheduler: DrawingRenderScheduler<SceneRenderInput> = createDrawingRenderScheduler<
     SceneRenderInput,
     SceneRenderPlan
   >({
     readInput,
+    isInputCurrent(input, plan) {
+      return !disposed
+        && !faulted
+        && input.binding === binding
+        && input.binding.store.getSnapshot() === input.document
+        && input.binding.renderer.documentSnapshot() === input.document
+        && input.adapter.isDrawingFrameCurrent(input.frame)
+        && input.sceneEpoch === sceneEpoch
+        && drawingRenderRevisionKey(plan.stamp) === drawingRenderRevisionKey(input.stamp);
+    },
     buildPlan(input) {
       const activeRegistry = registry;
       if (!activeRegistry || input.binding !== binding) return null;
@@ -1473,10 +1540,20 @@ export function createDrawingSceneRuntime({
       try {
         // A worker round-trip cannot complete before the chart consumes this
         // frame. During updateAllViews publish the continuous/main-thread plan
-        // immediately; the normal 100 ms settle pass still uses the worker.
-        if (mode === "scene-canary"
-          && !publishingFromChartUpdate
-          && submitWorkerPlan(plan)) return;
+        // immediately; the quiet-window settle pass also submits worker raster.
+        if (mode === "scene-canary" && !publishingFromChartUpdate) {
+          const workerSubmitted = submitWorkerPlan(plan);
+          if (workerSubmitted) {
+            const publishExactLatencyHedge = plan.lodToleranceClass === "settledExact"
+              && latestPublishedPlan?.binding === binding
+              && !hasSourceLineageFreehand(plan.sceneNodes);
+            // A worker round-trip must not spend the stop-to-painted SLO. Once
+            // visible pixels already exist, publish the same exact plan now and
+            // let the bounded latest-wins worker replace it with a raster later.
+            // First publication remains worker-owned.
+            if (!publishExactLatencyHedge) return;
+          }
+        }
         publishPreparedPlan(plan, plan.list, plan.hitIndex, "main-thread");
       } finally {
         const publishDurationMs = Math.max(0, now() - publishStartedAt);
@@ -1512,6 +1589,7 @@ export function createDrawingSceneRuntime({
       || mode !== "scene-canary"
       || !binding
       || !registry
+      || latestOwnedEntityCount === 0
       || publishingFromChartUpdate) return false;
 
     let document: DrawingDocument;
@@ -1519,6 +1597,7 @@ export function createDrawingSceneRuntime({
     try {
       document = binding.store.getSnapshot();
       if (binding.renderer.documentSnapshot() !== document) return false;
+      if (document.zOrder.length === 0) return false;
       frame = binding.adapter.captureDrawingFrame();
     } catch (error) {
       onError?.(error);
@@ -1550,9 +1629,10 @@ export function createDrawingSceneRuntime({
     }
 
     if (!invalidateScene("chart-frame-sync")) return false;
+    const input = createRenderInput(binding, document, frame);
     publishingFromChartUpdate = true;
     try {
-      return scheduler.flushNow();
+      return scheduler.flushNow(input);
     } finally {
       publishingFromChartUpdate = false;
     }
@@ -1610,6 +1690,7 @@ export function createDrawingSceneRuntime({
       paintSequence: ack.paintSequence,
       observedAt: new Date().toISOString(),
       stamp: Object.freeze({ ...ack.stamp }),
+      workerIdentity: workerBindingByPublishedPlan.get(ack.plan)?.workerIdentity ?? null,
     });
     if (!isNewerExactPaintEvidence(evidence, lastExactPaintEvidence)) return;
     lastExactPaintEvidence = evidence;
@@ -1937,6 +2018,7 @@ export function createDrawingSceneRuntime({
         returnedWorkerIdentity,
         acceptedWorkerIdentity,
         publishedWorkerIdentity,
+        paintedWorkerIdentity: lastExactPaintEvidence?.workerIdentity ?? null,
         latestSubmittedWorkerIdentity,
         lastPaintedStamp: lastExactPaintEvidence?.stamp ?? null,
         paintReceipt,

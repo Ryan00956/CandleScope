@@ -12,13 +12,15 @@ from typing import Any
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 
 from app.api.v1.full_order_book import (
+    ALLOWED_UPDATE_INTERVALS_BY_MARKET,
     ALLOWED_UPDATE_INTERVALS_MS,
+    DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET,
     MAX_OUTPUT_LEVELS,
     PROTOCOL,
     UPSTREAM_SNAPSHOT_LIMIT,
     contract_metadata,
     full_order_book_key,
-    serialize_record,
+    serialize_record_async,
 )
 from app.api.v1.order_book_projection import (
     FULL_PRICE_GROUPINGS,
@@ -176,19 +178,20 @@ async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
                     output_limit=max(item.output_limit for item in streams),
                 ),
             })
+            serialized_current = await asyncio.gather(*(
+                serialize_record_async(
+                    record,
+                    limit=requested_by_key[record.event.key].output_limit,
+                    price_grouping=requested_by_key[record.event.key].price_grouping,
+                    price_tick_size=requested_by_key[record.event.key].price_tick_size,
+                )
+                for record in attachment.current.values()
+            ))
             await _send_json({
                 "type": "snapshot",
                 "protocol": PROTOCOL,
                 "request_id": request_id,
-                "data": [
-                    serialize_record(
-                        record,
-                        limit=requested_by_key[record.event.key].output_limit,
-                        price_grouping=requested_by_key[record.event.key].price_grouping,
-                        price_tick_size=requested_by_key[record.event.key].price_tick_size,
-                    )
-                    for record in attachment.current.values()
-                ],
+                "data": serialized_current,
                 **contract_metadata(
                     output_limit=max(item.output_limit for item in streams),
                 ),
@@ -215,7 +218,7 @@ async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
                 ),
                 "protocol": PROTOCOL,
                 "state": record.event.data.get("state", "live" if live else "stale"),
-                "data": serialize_record(
+                "data": await serialize_record_async(
                     record,
                     limit=output_limit,
                     price_grouping=requested.price_grouping,
@@ -253,6 +256,10 @@ async def stream_full_order_book(websocket: WebSocket, dm: Any) -> None:
             "max_subscriptions": MAX_SUBSCRIPTIONS,
             "max_output_levels": MAX_OUTPUT_LEVELS,
             "allowed_update_intervals_ms": sorted(ALLOWED_UPDATE_INTERVALS_MS),
+            "allowed_update_intervals_ms_by_market": {
+                market: sorted(intervals)
+                for market, intervals in ALLOWED_UPDATE_INTERVALS_BY_MARKET.items()
+            },
             "allowed_price_groupings": list(FULL_PRICE_GROUPINGS),
             **contract_metadata(output_limit=MAX_OUTPUT_LEVELS),
         })
@@ -321,12 +328,14 @@ def _parse_streams(raw_streams: object) -> list[_RequestedStream]:
         )
         if snapshot_limit != UPSTREAM_SNAPSHOT_LIMIT:
             raise ValueError(f"snapshot_limit must be {UPSTREAM_SNAPSHOT_LIMIT}")
+        market_type = str(
+            raw.get("market_type", raw.get("marketType", "futures")),
+        ).strip().lower()
+        default_interval_ms = DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET.get(market_type, 250)
         update_interval_ms = _integer_param(
-            params.get("update_interval_ms", 250),
+            params.get("update_interval_ms", default_interval_ms),
             "update_interval_ms",
         )
-        if update_interval_ms not in ALLOWED_UPDATE_INTERVALS_MS:
-            raise ValueError("update_interval_ms must be one of 100, 250, or 500")
         output_limit = _integer_param(
             params.get("output_limit", raw.get("limit", 100)),
             "output_limit",
@@ -337,7 +346,7 @@ def _parse_streams(raw_streams: object) -> list[_RequestedStream]:
         try:
             key = full_order_book_key(
                 exchange=str(raw.get("exchange", "binance")),
-                market_type=str(raw.get("market_type", raw.get("marketType", "futures"))),
+                market_type=market_type,
                 symbol=raw.get("symbol"),
                 update_interval_ms=update_interval_ms,
             )

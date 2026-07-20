@@ -61,6 +61,8 @@ class _Handle:
 class _Factory:
     def __init__(self) -> None:
         self.start_calls = []
+        self.start_gates: dict[str, asyncio.Event] = {}
+        self.start_entered: dict[str, asyncio.Event] = {}
         self.stop_calls: list[tuple[str, str, str]] = []
         self.callbacks = {}
         self.stop_gate: asyncio.Event | None = None
@@ -78,12 +80,46 @@ class _Factory:
             descriptor.symbol,
         )
         self.start_calls.append(descriptor)
+        gate = self.start_gates.get(descriptor.symbol)
+        if gate is not None:
+            self.start_entered.setdefault(descriptor.symbol, asyncio.Event()).set()
+            await gate.wait()
         self.callbacks[identity] = callback
         return _Handle(self, identity)
 
     async def emit(self, event: MarketEvent) -> None:
         identity = (event.exchange, event.market_type, event.symbol)
         await self.callbacks[identity](event)
+
+
+class _BlockingRollupStore(SQLiteLiquidationRollupStore):
+    def __init__(self, path: Path, *, blocked_symbol: str) -> None:
+        super().__init__(path)
+        self.blocked_symbol = blocked_symbol
+        self.query_calls: list[str] = []
+        self.query_entered = asyncio.Event()
+        self.query_gate = asyncio.Event()
+
+    async def query_recent_rollups(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        position_side: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        self.query_calls.append(symbol)
+        if symbol == self.blocked_symbol:
+            self.query_entered.set()
+            await self.query_gate.wait()
+        return await super().query_recent_rollups(
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            position_side=position_side,
+            limit=limit,
+        )
 
 
 def _event(
@@ -224,6 +260,161 @@ async def test_consumer_leases_share_one_physical_feed_until_last_release(
 
 
 @_async_test
+async def test_cancel_after_start_returns_cleans_unpublished_reservation(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    service = _service(factory, tmp_path / "liquidation.sqlite")
+    starting = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    assert factory.stop_invocations == 1
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service.engine.diagnostics()["active_streams"] == 0
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    await service.shutdown()
+
+
+@_async_test
+async def test_failed_cancelled_start_cleanup_fails_closed_until_recovered(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    factory.stop_error = RuntimeError("transport stop failed")
+    service = _service(factory, tmp_path / "liquidation.sqlite")
+    starting = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    diagnostics = service.diagnostics()
+    assert diagnostics["physical_streams"] == 1
+    assert diagnostics["physical"][0]["stop_state"] == "stop_failed"
+    assert diagnostics["physical"][0]["consumers"] == 0
+    with pytest.raises(RuntimeError, match="unavailable after a failed stop"):
+        await service.ensure_stream(_key(), consumer_id="blocked-replacement")
+    assert len(factory.start_calls) == 1
+    assert factory.stop_invocations == 2
+
+    factory.stop_error = None
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    assert factory.stop_invocations == 3
+    await service.shutdown()
+
+
+@_async_test
+async def test_timed_out_cancelled_start_cleanup_blocks_replacement_until_late_stop(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    factory.stop_gate = asyncio.Event()
+    factory.stop_ignores_cancellation = True
+    service = _service(
+        factory,
+        tmp_path / "liquidation.sqlite",
+        physical_stop_timeout_seconds=0.02,
+    )
+    starting = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    assert service.diagnostics()["physical"][0]["stop_state"] == "stopping"
+    with pytest.raises(RuntimeError, match="stop is still in progress"):
+        await service.ensure_stream(_key(), consumer_id="blocked-replacement")
+    assert len(factory.start_calls) == 1
+
+    factory.stop_gate.set()
+    await _wait_until(lambda: service.diagnostics()["physical_streams"] == 0)
+    assert service.engine.diagnostics()["active_streams"] == 0
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    await service.shutdown()
+
+
+@_async_test
+async def test_keyed_lifecycle_keeps_slow_sqlite_load_identity_local(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    store = _BlockingRollupStore(
+        tmp_path / "blocking-liquidation.sqlite",
+        blocked_symbol="BTCUSDT",
+    )
+    service = _service(
+        factory,
+        tmp_path / "unused.sqlite",
+        rollup_store=store,
+    )
+
+    first = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="btc-one"),
+    )
+    await store.query_entered.wait()
+    same_identity = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="btc-two"),
+    )
+
+    assert await asyncio.wait_for(
+        service.ensure_stream(_key("ETHUSDT"), consumer_id="eth"),
+        timeout=0.5,
+    ) is True
+    assert store.query_calls.count("BTCUSDT") == 1
+    assert store.query_calls.count("ETHUSDT") == 1
+    assert len(factory.start_calls) == 1
+    assert not same_identity.done()
+
+    store.query_gate.set()
+    assert await first is True
+    assert await same_identity is True
+    assert len(factory.start_calls) == 2
+
+    await service.shutdown()
+    assert len(factory.stop_calls) == 2
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service._identity_locks.active_keys == 0  # noqa: SLF001
+
+
+@_async_test
 async def test_binance_spot_and_wrong_channel_are_rejected_before_start(
     tmp_path,
 ) -> None:
@@ -309,6 +500,11 @@ async def test_history_merges_live_and_persisted_rows_and_filters_side(
     ]
     assert all_rows[0]["filled_notional"] == 500
     assert all_rows[0]["is_final"] is True
+    assert all_rows[0]["updated_at_ms"] == START_MS + 10
+    assert "received_at_ms" not in all_rows[0]
+    assert "bucket_open_ms" not in all_rows[0]
+    assert "bucket_close_ms" not in all_rows[0]
+    assert "source" not in all_rows[0]
     assert [row["position_side"] for row in short_rows] == ["short"]
     assert short_rows[-1]["filled_notional"] == 30
     await service.shutdown()

@@ -7,7 +7,8 @@ import {
   unregisterCacheResource,
 } from "../cache-gc/cacheRegistry.js";
 import { recordFrontendCacheAccess } from "../cache-gc/cacheAccessRuntime.js";
-import type { CacheDiagnosticsEntry } from "../cache-gc/cacheGcTypes.js";
+import { validateChartCacheGcVictim } from "../cache-gc/chartCacheGcSafety.js";
+import type { GcVictim } from "../cache-gc/cacheGcTypes.js";
 import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks.js";
 import { assertWindowBudget } from "../../runtime/performance/windowBudgetAssert.js";
 import { parseIntervalSeconds } from "../../utils/intervals.js";
@@ -24,6 +25,17 @@ import {
 } from "./window/windowRegistry.js";
 
 const KLINE_ROW_ESTIMATED_BYTES = 200;
+const SERIES_STORE_GC_GENERATIONS = new WeakMap<SeriesWindowStore, number>();
+let nextSeriesStoreGcGeneration = 1;
+
+function seriesStoreGcGeneration(store: SeriesWindowStore): number {
+  const existing = SERIES_STORE_GC_GENERATIONS.get(store);
+  if (existing != null) return existing;
+  const generation = nextSeriesStoreGcGeneration;
+  nextSeriesStoreGcGeneration += 1;
+  SERIES_STORE_GC_GENERATIONS.set(store, generation);
+  return generation;
+}
 
 export type ChartDataStatus = "idle" | "loading" | "provisional" | "ready" | string;
 
@@ -113,7 +125,7 @@ export interface ChartDataRuntime {
   hasCache(symbol: SymbolCode, interval: IntervalString, options?: CacheIdentityOptions): boolean;
   clearCache(): void;
   getCacheDiagnostics(): Record<string, unknown>;
-  trimCacheEntries(victims?: CacheDiagnosticsEntry[]): Record<string, unknown>;
+  trimCacheEntries(victims?: GcVictim[]): Record<string, unknown>;
   mergeCacheData(symbol: SymbolCode, interval: IntervalString, rows: KlineBar[], options?: CacheIdentityOptions): KlineBar[] | undefined;
   patchCacheTick(symbol: SymbolCode, interval: IntervalString, row: KlineBar, options?: CacheIdentityOptions): KlineBar[] | undefined;
   replaceChartData(symbol: SymbolCode, interval: IntervalString, rows: KlineBar[], options?: ReplaceChartDataOptions): void;
@@ -630,8 +642,11 @@ export function useChartDataRuntime({
         exchange: meta.exchange || exchange,
         marketType: meta.marketType || marketType,
         source: meta.source || "cache",
-        lastAccessMs: meta.lastAccessMs || null,
-        lastUpdatedMs: meta.lastUpdatedMs || null,
+        lastAccessMs: meta.lastAccessMs ?? null,
+        lastUpdatedMs: meta.lastUpdatedMs ?? null,
+        generation: seriesStoreGcGeneration(store),
+        revision: Number(store.version),
+        metaRevision: Number(meta.metaRevision),
         ...stats,
       };
     });
@@ -647,13 +662,12 @@ export function useChartDataRuntime({
     };
   }, [cacheKey, describeRows, exchange, interval, marketType, symbol, windowRegistry]);
 
-  const trimCacheEntries = useCallback((victims: CacheDiagnosticsEntry[] = []) => {
+  const trimCacheEntries = useCallback((victims: GcVictim[] = []) => {
     const activeKey = cacheKey(symbol, interval);
-    const keys = new Set(
-      victims
-        .map((victim) => victim?.key)
-        .filter((key): key is string => Boolean(key)),
-    );
+    const byKey = new Map<string, GcVictim>();
+    for (const victim of victims) {
+      if (typeof victim?.key === "string" && victim.key) byKey.set(victim.key, victim);
+    }
     const removed: Array<{
       owner: string;
       key: string;
@@ -662,8 +676,30 @@ export function useChartDataRuntime({
       lastTime: EpochSeconds | null;
       estimatedBytes: number;
     }> = [];
-    for (const key of keys) {
-      if (key === activeKey) continue;
+    const skipped: Array<{ key: string; reason: string }> = [];
+    for (const [key, victim] of byKey.entries()) {
+      const store = windowRegistry.get(key);
+      if (!store) {
+        skipped.push({ key, reason: "entry-missing" });
+        continue;
+      }
+      const meta = windowRegistry.meta(key);
+      const stats = describeRows(store.snapshot());
+      const validation = validateChartCacheGcVictim(victim, {
+        key,
+        activeKey,
+        generation: seriesStoreGcGeneration(store),
+        revision: Number(store.version),
+        metaRevision: Number(meta.metaRevision),
+        lastAccessMs: typeof meta.lastAccessMs === "number" ? meta.lastAccessMs : null,
+        lastUpdatedMs: typeof meta.lastUpdatedMs === "number" ? meta.lastUpdatedMs : null,
+        bars: stats.bars,
+        estimatedBytes: stats.estimatedBytes,
+      });
+      if (!validation.allowed) {
+        skipped.push({ key, reason: validation.reason });
+        continue;
+      }
       const evicted = windowRegistry.evict(key);
       if (!evicted) continue;
       unregisterCacheResource("chart-data-cache", key);
@@ -682,8 +718,9 @@ export function useChartDataRuntime({
       removedBars: removed.reduce((total, entry) => total + entry.bars, 0),
       removedEstimatedBytes: removed.reduce((total, entry) => total + entry.estimatedBytes, 0),
       removed,
+      skipped,
     };
-  }, [cacheKey, interval, symbol, windowRegistry]);
+  }, [cacheKey, describeRows, interval, symbol, windowRegistry]);
 
   useEffect(() => {
     const release = acquireCacheLease("chart-data-cache", cacheKey(symbol, interval), "active-chart", {

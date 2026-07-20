@@ -327,7 +327,10 @@ export interface PositionTimeRange {
   end: HorizontalDrawingAnchor | null;
 }
 
+export type PositionInfoPanelAnchor = "left" | "right";
+
 export interface PositionInfoPanelOffset {
+  anchor?: PositionInfoPanelAnchor;
   x: number;
   y: number;
 }

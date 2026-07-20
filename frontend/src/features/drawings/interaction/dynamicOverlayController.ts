@@ -11,6 +11,12 @@ import {
   syncDrawingOverlayCanvas,
 } from "./overlayCanvasSurface.js";
 import type { DrawingOverlayPlotRect } from "./overlayCanvasSurface.js";
+import {
+  drawDynamicPositionOverlayDecoration,
+} from "./dynamicPositionOverlay.js";
+import type {
+  DynamicPositionOverlayDecoration,
+} from "./dynamicPositionOverlay.js";
 
 export type DynamicAngleOverlayDecoration = Readonly<{
   type: "angle";
@@ -24,6 +30,24 @@ export type DynamicAngleOverlayDecoration = Readonly<{
   color: string;
   lineWidth: number;
   selected: boolean;
+}>;
+
+export type DynamicFibonacciLevelOverlay = Readonly<{
+  color: string;
+  line: readonly [ScreenPoint, ScreenPoint];
+  label?: Readonly<{
+    anchor: ScreenPoint;
+    text: string;
+  }>;
+}>;
+
+export type DynamicFibonacciOverlayDecoration = Readonly<{
+  type: "fibonacci";
+  trend: readonly [ScreenPoint, ScreenPoint];
+  color: string;
+  lineWidth: number;
+  levels: readonly DynamicFibonacciLevelOverlay[];
+  handles?: readonly ScreenPoint[];
 }>;
 
 export type DynamicOverlayDecoration =
@@ -43,8 +67,13 @@ export type DynamicOverlayDecoration =
       dashed?: boolean;
       extension?: BasicLineToolId;
       handles?: readonly ScreenPoint[];
+      label?: Readonly<{
+        anchor: ScreenPoint;
+        text: string;
+      }>;
     }>
   | DynamicAngleOverlayDecoration
+  | DynamicFibonacciOverlayDecoration
   | Readonly<{
       type: "axis-line";
       point: ScreenPoint;
@@ -64,6 +93,12 @@ export type DynamicOverlayDecoration =
       dashed?: boolean;
       handles?: readonly ScreenPoint[];
     }>
+  | Readonly<{
+      type: "handles";
+      handles: readonly ScreenPoint[];
+      color: string;
+    }>
+  | DynamicPositionOverlayDecoration
   | Readonly<{
       type: "cursor-ring";
       center: ScreenPoint;
@@ -383,6 +418,92 @@ function drawDynamicAngleDecoration(
   context.restore();
 }
 
+function validFibonacciDecoration(item: DynamicFibonacciOverlayDecoration): boolean {
+  return finitePointPair(item.trend)
+    && typeof item.color === "string"
+    && item.color.trim().length > 0
+    && Number.isFinite(item.lineWidth)
+    && item.lineWidth > 0
+    && item.levels.every((level) => (
+      !!level
+      && typeof level.color === "string"
+      && level.color.trim().length > 0
+      && finitePointPair(level.line)
+      && (level.label === undefined || (
+        !!level.label
+        && finitePoint(level.label.anchor)
+        && typeof level.label.text === "string"
+        && level.label.text.length > 0
+      ))
+    ));
+}
+
+/** Paint a complete Fibonacci draft, including the legacy 10% level bands. */
+function drawDynamicFibonacciDecoration(
+  context: CanvasRenderingContext2D,
+  item: DynamicFibonacciOverlayDecoration,
+  rect: DrawingOverlayPlotRect,
+): void {
+  if (!validFibonacciDecoration(item)) return;
+  const localPoint = (point: ScreenPoint): ScreenPoint => ({
+    x: point.x - rect.x,
+    y: point.y - rect.y,
+  });
+  const trend = item.trend.map(localPoint) as unknown as readonly [ScreenPoint, ScreenPoint];
+  const levels = item.levels.map((level) => {
+    const line = level.line.map(localPoint) as unknown as readonly [ScreenPoint, ScreenPoint];
+    return {
+      ...level,
+      line,
+      y: (line[0].y + line[1].y) / 2,
+      ...(level.label
+        ? { label: { ...level.label, anchor: localPoint(level.label.anchor) } }
+        : {}),
+    };
+  }).sort((left, right) => left.y - right.y);
+  const minX = Math.min(trend[0].x, trend[1].x);
+  const maxX = Math.max(trend[0].x, trend[1].x);
+
+  context.save();
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.strokeStyle = item.color;
+  context.lineWidth = item.lineWidth;
+  context.setLineDash([6, 4]);
+  context.beginPath();
+  context.moveTo(trend[0].x, trend[0].y);
+  context.lineTo(trend[1].x, trend[1].y);
+  context.stroke();
+  context.setLineDash([]);
+
+  context.globalAlpha = 0.1;
+  for (let index = 0; index < levels.length - 1; index += 1) {
+    const first = levels[index];
+    const second = levels[index + 1];
+    if (!first || !second) continue;
+    context.fillStyle = second.color;
+    context.fillRect(minX, first.y, maxX - minX, second.y - first.y);
+  }
+  context.globalAlpha = 1;
+
+  context.font = "11px sans-serif";
+  context.textAlign = "left";
+  context.textBaseline = "bottom";
+  for (const level of levels) {
+    context.strokeStyle = level.color;
+    context.fillStyle = level.color;
+    context.lineWidth = item.lineWidth;
+    context.beginPath();
+    context.moveTo(level.line[0].x, level.line[0].y);
+    context.lineTo(level.line[1].x, level.line[1].y);
+    context.stroke();
+    if (level.label) {
+      context.fillText(level.label.text, level.label.anchor.x, level.label.anchor.y);
+    }
+  }
+  context.restore();
+}
+
 export function createDynamicOverlayController({
   canvas,
   getPlotRect,
@@ -440,7 +561,7 @@ export function createDynamicOverlayController({
     return true;
   };
 
-  const flush = () => {
+  const paintPendingFrame = () => {
     frameHandle = null;
     const frame = pendingFrame;
     pendingFrame = null;
@@ -474,6 +595,10 @@ export function createDynamicOverlayController({
         for (const handle of item.handles ?? []) {
           drawHandle(context, handle, layout.rect, item.color ?? "#3b82f6");
         }
+      } else if (item.type === "handles") {
+        for (const handle of item.handles) {
+          drawHandle(context, handle, layout.rect, item.color);
+        }
       } else if (item.type === "line") {
         if (!finitePoint(item.from) || !finitePoint(item.to)) continue;
         const [from, to] = extendDynamicLine(
@@ -490,11 +615,30 @@ export function createDynamicOverlayController({
         context.lineTo(to.x - layout.rect.x, to.y - layout.rect.y);
         context.stroke();
         context.setLineDash([]);
+        if (item.label
+          && finitePoint(item.label.anchor)
+          && typeof item.label.text === "string"
+          && item.label.text.length > 0) {
+          context.fillStyle = item.color;
+          context.font = "11px sans-serif";
+          context.textAlign = "left";
+          context.textBaseline = "bottom";
+          context.fillText(
+            item.label.text,
+            item.label.anchor.x - layout.rect.x,
+            item.label.anchor.y - layout.rect.y,
+          );
+        }
         for (const handle of item.handles ?? []) {
           drawHandle(context, handle, layout.rect, item.color);
         }
       } else if (item.type === "angle") {
         drawDynamicAngleDecoration(context, item, layout.rect);
+      } else if (item.type === "fibonacci") {
+        drawDynamicFibonacciDecoration(context, item, layout.rect);
+        for (const handle of item.handles ?? []) {
+          drawHandle(context, handle, layout.rect, item.color);
+        }
       } else if (item.type === "axis-line") {
         if (!finitePoint(item.point)) continue;
         const x = item.point.x - layout.rect.x;
@@ -562,6 +706,8 @@ export function createDynamicOverlayController({
         for (const handle of item.handles ?? []) {
           drawHandle(context, handle, layout.rect, item.color);
         }
+      } else if (item.type === "position") {
+        drawDynamicPositionOverlayDecoration(context, item, layout.rect);
       } else if (finitePoint(item.center)) {
         context.beginPath();
         context.arc(
@@ -586,12 +732,20 @@ export function createDynamicOverlayController({
     });
   };
 
+  const flush = () => {
+    if (frameHandle !== null) {
+      cancelFrame(frameHandle);
+      frameHandle = null;
+    }
+    paintPendingFrame();
+  };
+
   return {
     render(frame) {
       if (disposed) return;
       pendingFrame = frame;
       if (frameHandle !== null) return;
-      frameHandle = requestFrame(flush);
+      frameHandle = requestFrame(paintPendingFrame);
     },
     refreshLayout,
     clear() {

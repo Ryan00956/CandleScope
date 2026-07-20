@@ -7,6 +7,8 @@ import {
   applyLineSeriesData,
   buildFillRenderEntries,
   canUseTrailingSeriesUpdate,
+  filterEntriesByTime,
+  normalizeLineSeriesData,
 } from "../chartSeriesData.js";
 import type { OrdinalAxisTime } from "../../features/chart-representation/chartRepresentationTypes.js";
 import { mustBeDefined, structuralMock } from "../../test/testHelpers.js";
@@ -63,6 +65,54 @@ test("realtime histogram point colors override historical colorData and survive 
     { time: 20, value: -2, color: "realtime-red" },
     { time: 30, value: 3, color: "realtime-green" },
   ]);
+});
+
+test("time filtering and normalization reuse immutable inputs until the time axis changes", () => {
+  const data = [{ time: 10, value: 1 }, { time: 20, value: 2 }];
+  const allowed = new Set([10]);
+  const firstFiltered = filterEntriesByTime(data, allowed);
+  const firstNormalized = normalizeLineSeriesData({ data }, allowed);
+
+  assert.equal(filterEntriesByTime(data, allowed), firstFiltered);
+  assert.equal(normalizeLineSeriesData({ data }, allowed), firstNormalized);
+
+  allowed.add(20);
+  assert.notEqual(filterEntriesByTime(data, allowed), firstFiltered);
+  assert.notEqual(normalizeLineSeriesData({ data }, allowed), firstNormalized);
+  assert.deepEqual(filterEntriesByTime(data, allowed), data);
+});
+
+test("histogram normalization preserves stable point identity across tail updates", () => {
+  const first = { time: 10, value: 1 };
+  const previous = normalizeLineSeriesData({
+    type: "histogram",
+    data: [first, { time: 20, value: 2 }],
+    colorData: [{ time: 10, color: "red" }, { time: 20, color: "green" }],
+  }, new Set([10, 20]));
+  const next = normalizeLineSeriesData({
+    type: "histogram",
+    data: [first, { time: 20, value: 3 }],
+    colorData: [{ time: 10, color: "red" }, { time: 20, color: "green" }],
+  }, new Set([10, 20]));
+
+  assert.equal(previous[0], next[0]);
+  assert.equal(canUseTrailingSeriesUpdate(previous, next), true);
+});
+
+test("line normalization reuses unchanged data and invalidates when the mutable axis grows", () => {
+  const allowed = new Set([10]);
+  const line = {
+    id: "plot",
+    data: [{ time: 10, value: 1 }, { time: 20, value: 2 }],
+  };
+  const first = alignIndicatorLinesToTimes([line], allowed)[0]?.data;
+  const second = alignIndicatorLinesToTimes([line], allowed)[0]?.data;
+  assert.equal(second, first);
+
+  allowed.add(20);
+  const expanded = alignIndicatorLinesToTimes([line], allowed)[0]?.data;
+  assert.notEqual(expanded, first);
+  assert.deepEqual(expanded, line.data);
 });
 
 test("alignIndicatorMarkersToTimes and bgcolors clip payloads to the main bar time set", () => {
@@ -218,6 +268,24 @@ test("applyLineSeriesData clears existing indicator series when next data is emp
   assert.equal(detail.reason, "clear");
 });
 
+test("applyLineSeriesData performs no chart write for an unchanged normalized array", () => {
+  const calls: string[] = [];
+  const data = [{ time: 10, value: 1 }];
+  const result = applyLineSeriesData(
+    structuralMock<NonNullable<Parameters<typeof applyLineSeriesData>[0]>>({
+      setData: () => { calls.push("setData"); },
+      update: () => { calls.push("update"); },
+    }),
+    data,
+    data,
+    {},
+    null,
+  );
+
+  assert.equal(result, "unchanged");
+  assert.deepEqual(calls, []);
+});
+
 test("applyLineSeriesData can force a full reset for custom ordinal axes", () => {
   const calls: Array<[string, unknown]> = [];
   const series = structuralMock<NonNullable<Parameters<typeof applyLineSeriesData>[0]>>({
@@ -244,4 +312,32 @@ test("applyLineSeriesData can force a full reset for custom ordinal axes", () =>
 
   assert.equal(result, "setData");
   assert.deepEqual(calls, [["setData", next]]);
+});
+
+test("applyLineSeriesData trusts an explicit realtime tail hint without weakening range updates", () => {
+  const calls: Array<[string, unknown]> = [];
+  const series = structuralMock<NonNullable<Parameters<typeof applyLineSeriesData>[0]>>({
+    setData: (data: unknown) => { calls.push(["setData", data]); },
+    update: (point: unknown) => { calls.push(["update", point]); },
+  });
+  const previous = [
+    { time: 10, value: 1 },
+    { time: 20, value: 2 },
+  ];
+  const next = [
+    { time: 10, value: 999 },
+    { time: 20, value: 3 },
+  ];
+
+  assert.equal(applyLineSeriesData(series, next, previous, {}, null), "setData");
+  calls.length = 0;
+  assert.equal(applyLineSeriesData(
+    series,
+    next,
+    previous,
+    {},
+    null,
+    { trustedTrailingUpdate: true },
+  ), "update");
+  assert.deepEqual(calls, [["update", next[1]]]);
 });

@@ -39,6 +39,7 @@ interface AdapterOptions {
   readonly failBatch?: boolean;
   readonly gapPrice?: number;
   readonly gapTime?: number;
+  readonly projectX?: (value: number) => number;
 }
 
 interface TestAdapter extends DrawingSceneProjectionAdapter {
@@ -145,7 +146,9 @@ function createAdapter(options: AdapterOptions = {}): TestAdapter {
       points.forEach((point, index) => {
         const x = numeric(point.logical) ?? numeric(point.time);
         const price = numeric(point.price);
-        if (x !== null && x !== options.gapTime) result[index * 2] = x;
+        if (x !== null && x !== options.gapTime) {
+          result[index * 2] = options.projectX ? options.projectX(x) : x;
+        }
         if (price !== null && price !== options.gapPrice) result[index * 2 + 1] = price;
       });
       return result;
@@ -1779,15 +1782,108 @@ test("source-lineage affine price evidence builds LOD without projecting every r
     );
     assert.ok(list);
     assert.ok((list.entities[0]?.pointCount ?? points.length) < points.length / 2);
-    assert.equal(finalProjectionSizes.includes(points.length), false,
-      "an affine lineage hierarchy must project only its selected publication vertices");
-    assert.ok(finalProjectionSizes.some((size) => size > 0 && size < points.length));
+    assert.deepEqual(finalProjectionSizes, [3],
+      "a strict affine lineage certificate needs only candidate extrema/midpoint evidence");
     const exactSourcePoints = points.map((point) => Object.freeze({
       x: point.ratio * 320,
       y: inverted ? point.price * 2 : 200 - point.price * 2,
     }));
     assert.ok(maximumPointToPolylineError(exactSourcePoints, entityPoints(list, entity.id))
       <= 0.500_001, "affine lineage LOD must keep the settled exact CSS error contract");
+  }
+});
+
+test("source-lineage publication rejects sub-pixel nonlinearity above machine precision", () => {
+  const points = Object.freeze(Array.from({ length: 1_024 }, (_, index) => {
+    const ratio = index / 1_023;
+    return Object.freeze({
+      span: 0,
+      ratio,
+      price: 50 + Math.sin(ratio * Math.PI * 16) * 25,
+    });
+  }));
+  const spans = Object.freeze([Object.freeze({
+    exact: Object.freeze({
+      left: Object.freeze({ time: 0, sourceOrdinal: 0 }),
+      right: Object.freeze({ time: 320, sourceOrdinal: 0 }),
+    }),
+    fallback: Object.freeze({ fromTime: 0, toTime: 320, leftRatio: 0, rightRatio: 1 }),
+  })]);
+  const entity = createDrawingEntity({
+    id: "lineage-near-affine-publication",
+    kind: "highlighter",
+    geometry: { kind: "highlighter", stroke: {
+      version: 3,
+      sourceProjection: "renko",
+      sourceProjectionConfig: "dataset:renko:near-affine",
+      spans,
+      points,
+    } },
+    style: { kind: "highlighter", brushShape: "square", lineWidth: 2 },
+  });
+  const document = createDrawingDocument({ scopeKey: entity.id, entities: [entity] });
+  const projectPrice = (price: number) => (
+    200 - price * 2 + 0.02 * ((price - 50) / 50) ** 2
+  );
+  const finalProjectionSizes: number[] = [];
+  const adapter: DrawingSceneProjectionAdapter = {
+    ...createAdapter(),
+    resolveDrawingFrameDataPoints(_frame, requests) {
+      return Object.freeze(requests.map(() => Object.freeze({
+        kind: "logical" as const,
+        logical: 0,
+      })));
+    },
+    projectDrawingFrameResolvedDataPoints(_frame, _resolutions, requests) {
+      finalProjectionSizes.push(requests.length);
+      const projected = new Float64Array(requests.length * 2);
+      projected.fill(Number.NaN);
+      requests.forEach((request, index) => {
+        const price = numeric(request.price);
+        if (price === null) return;
+        projected[index * 2] = 0;
+        projected[index * 2 + 1] = projectPrice(price);
+      });
+      return projected;
+    },
+    projectDrawingFrameSourceLineageSpan() {
+      return Object.freeze({ left: 0, right: 320 });
+    },
+  };
+  const frame = createFrame({
+    width: 320,
+    height: 200,
+    minHorizontal: 0,
+    maxHorizontal: 320,
+    minLogical: 0,
+    maxLogical: 320,
+    minPrice: 0,
+    maxPrice: 100,
+    priceProjectionSamples: Object.freeze([0, 50, 100].map((price) => Object.freeze({
+      price,
+      coordinateCssPx: projectPrice(price),
+    }))),
+    viewportKey: "lineage-near-affine-publication",
+  });
+
+  const list = project(document, frame, adapter, registryNodes(document), null, "settledExact");
+  assert.ok(list);
+  assert.equal(finalProjectionSizes[0], 3,
+    "candidate extrema/midpoint must provide public evidence for the strict certificate");
+  assert.equal(finalProjectionSizes.includes(points.length), false,
+    "sub-pixel nonlinearity may retain the bounded affine hierarchy proxy");
+  assert.ok(finalProjectionSizes.some((size) => size > 3 && size < points.length),
+    "nonlinearity above machine precision must publicly project selected vertices");
+  const published = entityPoints(list, entity.id);
+  for (let offset = 0; offset < published.length; offset += 2) {
+    const x = Number(published[offset]);
+    const y = Number(published[offset + 1]);
+    const sourceIndex = Math.round(x / 320 * 1_023);
+    const sourcePoint = points[sourceIndex];
+    assert.ok(sourcePoint);
+    assert.ok(Math.abs(x - sourcePoint.ratio * 320) <= 1e-9);
+    assert.ok(Math.abs(y - projectPrice(sourcePoint.price)) <= 1e-9,
+      "published Y must retain the public exact nonlinear projection");
   }
 });
 
@@ -1934,6 +2030,7 @@ test("source-lineage LOD keeps span endpoints and gaps while reusing viewport-in
   let resolveCalls = 0;
   let legacyBatchCalls = 0;
   const finalProjectionSizes: number[] = [];
+  const yOnlyFinalProjectionSizes: number[] = [];
   const spanProjectionLefts: number[] = [];
   const base = createAdapter();
   const adapter: DrawingSceneProjectionAdapter = {
@@ -1953,6 +2050,9 @@ test("source-lineage LOD keeps span endpoints and gaps while reusing viewport-in
     },
     projectDrawingFrameResolvedDataPoints(frame, resolutions, requests) {
       finalProjectionSizes.push(requests.length);
+      if (requests.length > 0 && resolutions.every((resolution) => resolution === null)) {
+        yOnlyFinalProjectionSizes.push(requests.length);
+      }
       const viewport = frame.drawingViewport;
       if (!viewport || viewport.minLogical === undefined || viewport.maxLogical === undefined) {
         return null;
@@ -2068,6 +2168,8 @@ test("source-lineage LOD keeps span endpoints and gaps while reusing viewport-in
   assert.ok(finalProjectionSizes.includes(points.length),
     "the nonlinear hierarchy must be built from one exact bounded candidate projection");
   assert.ok(finalProjectionSizes.some((size) => size > 0 && size < points.length));
+  assert.ok(yOnlyFinalProjectionSizes.some((size) => size > 0 && size < points.length),
+    "selected lineage LOD vertices must request price Y without reprojecting overwritten X");
   assert.deepEqual(spanProjectionLefts, [0, 110, 220, 0, 110, 220],
     "the settled pass may refresh selected span coordinates but must reuse the screen hierarchy");
   assert.equal(JSON.stringify(entity.geometry), canonicalBefore);
@@ -2981,4 +3083,60 @@ test("position panel and badges measure current-price and PnL text from the atom
   ]);
   assert.deepEqual([...list.handles], [60, 60, 60, 80, 60, 40, 40, 60, 80, 60]);
   assert.deepEqual(list.entities[0]?.handleNames, ["entry", "tp", "sl", "left", "right"]);
+});
+
+test("left-anchored position panel keeps a fixed gap while chart zoom changes position width", () => {
+  const position = createDrawingEntity({
+    id: "left-anchored-position-panel",
+    kind: "position",
+    geometry: {
+      kind: "position",
+      direction: "long",
+      entryPrice: 50,
+      tpPrice: null,
+      slPrice: null,
+      timeRange: { start: { time: 80 }, end: { time: 120 } },
+    },
+    style: {
+      kind: "position",
+      positionSize: 1_000,
+      infoPanelOffset: { anchor: "left", x: 0, y: 0 },
+    },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "left-anchored-position-panel",
+    entities: [position],
+  });
+  const normal = project(
+    document,
+    createFrame({ width: 300, viewportKey: "position-panel-normal" }),
+    createAdapter({ projectX: (value) => value }),
+  );
+  const zoomed = project(
+    document,
+    createFrame({ width: 300, viewportKey: "position-panel-zoomed" }),
+    createAdapter({ projectX: (value) => 100 + (value - 100) * 2 }),
+  );
+  assert.ok(normal);
+  assert.ok(zoomed);
+
+  const panelGap = (list: DrawingScreenDisplayList): number => {
+    const entity = list.entities[0];
+    assert.ok(entity?.renderSpec?.op === "position");
+    const points = entityPoints(list, position.id);
+    const entryOffset = entity.renderSpec.entryLinePointOffset * 2;
+    const panelOffset = entity.renderSpec.panelBoxPointOffset * 2;
+    const entryLeft = Math.min(
+      Number(points[entryOffset]),
+      Number(points[entryOffset + 2]),
+    );
+    const panelRight = Math.max(
+      Number(points[panelOffset]),
+      Number(points[panelOffset + 2]),
+    );
+    return entryLeft - panelRight;
+  };
+
+  assert.equal(panelGap(normal), 8);
+  assert.equal(panelGap(zoomed), 8);
 });

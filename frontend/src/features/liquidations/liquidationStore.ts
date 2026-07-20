@@ -21,6 +21,8 @@ export const EMPTY_LIQUIDATION_SNAPSHOT: LiquidationSnapshot = Object.freeze({
 interface LiquidationEntry {
   rollups: Map<string, LiquidationRollup>;
   liveEvents: Map<string, LiquidationEvent>;
+  sortedRollups: readonly LiquidationRollup[];
+  sortedLiveEvents: readonly LiquidationEvent[];
   listeners: Set<() => void>;
   connectionStatus: AdvancedMarketConnectionStatus;
   quality: LiquidationQualityMetadata | null;
@@ -75,23 +77,88 @@ function rollupCoversEvent(rollup: LiquidationRollup | undefined, event: Liquida
     && rollup.lastEventTimeMs >= event.tradeTimeMs;
 }
 
-function trimOldestBy<T>(
-  values: Map<string, T>,
-  limit: number,
-  timeOf: (value: T) => number,
-): void {
-  if (values.size <= limit) return;
-  const excess = values.size - limit;
-  const oldest = [...values.entries()]
-    .sort((left, right) => timeOf(left[1]) - timeOf(right[1]))
-    .slice(0, excess);
-  for (const [key] of oldest) values.delete(key);
+function mergeSortedChanges<T>(
+  current: readonly T[],
+  changes: readonly T[],
+  keyOf: (value: T) => string,
+  compare: (left: T, right: T) => number,
+): readonly T[] {
+  if (changes.length === 0) return current;
+  const changedKeys = new Set(changes.map(keyOf));
+  const retained = current.filter((value) => !changedKeys.has(keyOf(value)));
+  const sortedChanges = [...changes].sort(compare);
+  const merged: T[] = [];
+  let currentIndex = 0;
+  let changeIndex = 0;
+  while (currentIndex < retained.length || changeIndex < sortedChanges.length) {
+    const currentValue = retained[currentIndex];
+    const changedValue = sortedChanges[changeIndex];
+    if (changedValue === undefined || (
+      currentValue !== undefined && compare(currentValue, changedValue) <= 0
+    )) {
+      if (currentValue !== undefined) merged.push(currentValue);
+      currentIndex += 1;
+    } else {
+      merged.push(changedValue);
+      changeIndex += 1;
+    }
+  }
+  return Object.freeze(merged);
 }
+
+function trimOldestSorted<T>(
+  values: Map<string, T>,
+  sortedValues: readonly T[],
+  limit: number,
+  keyOf: (value: T) => string,
+): readonly T[] {
+  if (sortedValues.length <= limit) return sortedValues;
+  const excess = sortedValues.length - limit;
+  for (let index = 0; index < excess; index += 1) {
+    const value = sortedValues[index];
+    if (value !== undefined) values.delete(keyOf(value));
+  }
+  return Object.freeze(sortedValues.slice(excess));
+}
+
+function trimOldestEvents(
+  values: Map<string, LiquidationEvent>,
+  sortedValues: readonly LiquidationEvent[],
+  limit: number,
+): readonly LiquidationEvent[] {
+  if (values.size <= limit) return sortedValues;
+  const removed = new Set<string>();
+  while (values.size > limit) {
+    let oldest: LiquidationEvent | null = null;
+    for (const event of values.values()) {
+      if (!oldest || event.receivedAtMs < oldest.receivedAtMs) oldest = event;
+    }
+    if (!oldest) break;
+    values.delete(oldest.fingerprint);
+    removed.add(oldest.fingerprint);
+  }
+  return removed.size === 0
+    ? sortedValues
+    : Object.freeze(sortedValues.filter((event) => !removed.has(event.fingerprint)));
+}
+
+const compareRollups = (left: LiquidationRollup, right: LiquidationRollup): number => (
+  left.bucketStartMs - right.bucketStartMs
+  || left.positionSide.localeCompare(right.positionSide)
+);
+
+const compareEvents = (left: LiquidationEvent, right: LiquidationEvent): number => (
+  left.tradeTimeMs - right.tradeTimeMs
+  || left.receivedAtMs - right.receivedAtMs
+  || left.fingerprint.localeCompare(right.fingerprint)
+);
 
 function createEntry(): LiquidationEntry {
   return {
     rollups: new Map(),
     liveEvents: new Map(),
+    sortedRollups: Object.freeze([]),
+    sortedLiveEvents: Object.freeze([]),
     listeners: new Set(),
     connectionStatus: "disabled",
     quality: null,
@@ -123,6 +190,7 @@ export class LiquidationStore {
     const key = identityKey(identity);
     const entry = this.entry(key);
     let changed = entry.quality !== quality;
+    const changedRollups = new Map<string, LiquidationRollup>();
     entry.quality = quality;
     for (const rollup of rollups) {
       if (!rollupMatchesIdentity(rollup, key)) continue;
@@ -130,19 +198,39 @@ export class LiquidationStore {
       const current = entry.rollups.get(naturalKey);
       if (!shouldReplaceRollup(current, rollup)) continue;
       entry.rollups.set(naturalKey, rollup);
+      changedRollups.set(naturalKey, rollup);
       changed = true;
     }
-    for (const [fingerprint, event] of entry.liveEvents) {
+    if (changedRollups.size > 0) {
+      entry.sortedRollups = mergeSortedChanges(
+        entry.sortedRollups,
+        [...changedRollups.values()],
+        rollupKey,
+        compareRollups,
+      );
+    }
+    const retainedLiveEvents: LiquidationEvent[] = [];
+    for (const event of entry.sortedLiveEvents) {
       const base = entry.rollups.get(rollupKey({
         bucketStartMs: Math.floor(event.tradeTimeMs / 60_000) * 60_000,
         positionSide: event.positionSide,
       }));
       if (rollupCoversEvent(base, event)) {
-        entry.liveEvents.delete(fingerprint);
+        entry.liveEvents.delete(event.fingerprint);
         changed = true;
+      } else {
+        retainedLiveEvents.push(event);
       }
     }
-    trimOldestBy(entry.rollups, MAX_ROLLUPS_PER_IDENTITY, (row) => row.bucketStartMs);
+    if (retainedLiveEvents.length !== entry.sortedLiveEvents.length) {
+      entry.sortedLiveEvents = Object.freeze(retainedLiveEvents);
+    }
+    entry.sortedRollups = trimOldestSorted(
+      entry.rollups,
+      entry.sortedRollups,
+      MAX_ROLLUPS_PER_IDENTITY,
+      rollupKey,
+    );
     if (changed) this.publish(entry);
   }
 
@@ -154,6 +242,7 @@ export class LiquidationStore {
     const key = identityKey(identity);
     const entry = this.entry(key);
     let changed = entry.quality !== quality;
+    const changedEvents: LiquidationEvent[] = [];
     entry.quality = quality;
     for (const event of events) {
       if (!eventMatchesIdentity(event, key) || entry.liveEvents.has(event.fingerprint)) continue;
@@ -163,9 +252,22 @@ export class LiquidationStore {
       }));
       if (rollupCoversEvent(base, event)) continue;
       entry.liveEvents.set(event.fingerprint, event);
+      changedEvents.push(event);
       changed = true;
     }
-    trimOldestBy(entry.liveEvents, MAX_LIVE_EVENTS_PER_IDENTITY, (event) => event.receivedAtMs);
+    if (changedEvents.length > 0) {
+      entry.sortedLiveEvents = mergeSortedChanges(
+        entry.sortedLiveEvents,
+        changedEvents,
+        (event) => event.fingerprint,
+        compareEvents,
+      );
+    }
+    entry.sortedLiveEvents = trimOldestEvents(
+      entry.liveEvents,
+      entry.sortedLiveEvents,
+      MAX_LIVE_EVENTS_PER_IDENTITY,
+    );
     if (changed) this.publish(entry);
   }
 
@@ -186,10 +288,16 @@ export class LiquidationStore {
     const entry = this.entry(identityKey(identity));
     let changed = entry.liveEvents.size > 0;
     entry.liveEvents.clear();
+    entry.sortedLiveEvents = Object.freeze([]);
     for (const [key, row] of entry.rollups) {
       if (row.isFinal) continue;
       entry.rollups.delete(key);
       changed = true;
+    }
+    if (changed) {
+      entry.sortedRollups = Object.freeze(
+        entry.sortedRollups.filter((row) => row.isFinal),
+      );
     }
     if (changed) this.publish(entry);
   }
@@ -211,16 +319,10 @@ export class LiquidationStore {
     entry.revision += 1;
     entry.snapshot = Object.freeze({
       rollups: Object.freeze(
-        [...entry.rollups.values()].sort((left, right) => (
-          left.bucketStartMs - right.bucketStartMs
-          || left.positionSide.localeCompare(right.positionSide)
-        )),
+        entry.sortedRollups,
       ),
       liveEvents: Object.freeze(
-        [...entry.liveEvents.values()].sort((left, right) => (
-          left.tradeTimeMs - right.tradeTimeMs
-          || left.receivedAtMs - right.receivedAtMs
-        )),
+        entry.sortedLiveEvents,
       ),
       connectionStatus: entry.connectionStatus,
       quality: entry.quality,

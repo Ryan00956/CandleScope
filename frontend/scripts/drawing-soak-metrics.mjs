@@ -1,3 +1,5 @@
+import { devicePixelRatioMatches } from "./drawing-device-metrics.mjs";
+
 export const DRAWING_SOAK_DEFAULTS = Object.freeze({
   durationMs: 66 * 60 * 1_000,
   warmupMs: 5 * 60 * 1_000,
@@ -2165,7 +2167,10 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
     && report.readiness?.browserWindowInitial?.windowState === "normal"
     && report.readiness?.browserWindowInitial?.visibilityState === "visible"
     && report.readiness?.browserWindowInitial?.hidden === false
-    && report.readiness?.browserWindowInitial?.devicePixelRatio === 1.5
+    && devicePixelRatioMatches(
+      report.readiness?.browserWindowInitial?.devicePixelRatio,
+      1.5,
+    )
     && nonNegativeNumber(report.readiness?.refreshRatePreflight?.refreshRateHz) !== null
     && report.readiness.refreshRatePreflight.refreshRateHz
       >= DRAWING_SOAK_FIXED_CONTRACT.refreshRateHzMin
@@ -2175,7 +2180,10 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
     && report.readiness?.browserWindowFinal?.windowState === "normal"
     && report.readiness?.browserWindowFinal?.visibilityState === "visible"
     && report.readiness?.browserWindowFinal?.hidden === false
-    && report.readiness?.browserWindowFinal?.devicePixelRatio === 1.5
+    && devicePixelRatioMatches(
+      report.readiness?.browserWindowFinal?.devicePixelRatio,
+      1.5,
+    )
     && report.readiness?.drawingEngineDomEvidenceInitial?.passed === true
     && report.readiness?.drawingEngineDomEvidenceFinal?.passed === true
     && report.readiness?.probeStopped?.started === true

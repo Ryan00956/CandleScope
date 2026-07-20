@@ -10,6 +10,8 @@ without observed events.
 from __future__ import annotations
 
 import hashlib
+import heapq
+import itertools
 import json
 import math
 from collections import OrderedDict, deque
@@ -457,6 +459,7 @@ class _BucketAccumulator:
 @dataclass(slots=True)
 class _StreamState:
     raw_events: deque[NormalizedLiquidation]
+    raw_event_inversions: int = 0
     fingerprints: OrderedDict[str, None] = field(default_factory=OrderedDict)
     buckets: dict[tuple[int, PositionSide], _BucketAccumulator] = field(
         default_factory=dict,
@@ -681,7 +684,7 @@ class LiquidationEngine:
         if state is None:
             return ()
         records = tuple(state.raw_events)
-        if ordered:
+        if ordered and state.raw_event_inversions:
             records = tuple(
                 sorted(
                     records,
@@ -693,6 +696,36 @@ class LiquidationEngine:
                 ),
             )
         return records
+
+    def raw_tail(
+        self,
+        identity: StreamIdentity,
+        limit: int,
+    ) -> tuple[NormalizedLiquidation, ...]:
+        """Return the newest ordered events without sorting the whole ring."""
+        state = self._streams.get(_normalize_identity(identity))
+        if state is None:
+            return ()
+        bounded = max(0, int(limit))
+        if bounded == 0:
+            return ()
+        if bounded >= len(state.raw_events):
+            return self.raw_snapshot(identity)
+
+        def _key(item: NormalizedLiquidation) -> tuple[int, int, str]:
+            return item.trade_time_ms, item.event_time_ms, item.fingerprint
+
+        if state.raw_event_inversions == 0:
+            return tuple(
+                itertools.islice(
+                    state.raw_events,
+                    len(state.raw_events) - bounded,
+                    None,
+                ),
+            )
+        newest = heapq.nlargest(bounded, state.raw_events, key=_key)
+        newest.sort(key=_key)
+        return tuple(newest)
 
     def rollup_snapshot(
         self,
@@ -773,9 +806,36 @@ class LiquidationEngine:
         event: NormalizedLiquidation,
     ) -> None:
         if len(state.raw_events) >= self._raw_ring_size:
+            if len(state.raw_events) >= 2:
+                first = state.raw_events[0]
+                second = state.raw_events[1]
+                if (
+                    first.trade_time_ms,
+                    first.event_time_ms,
+                    first.fingerprint,
+                ) > (
+                    second.trade_time_ms,
+                    second.event_time_ms,
+                    second.fingerprint,
+                ):
+                    state.raw_event_inversions -= 1
             evicted = state.raw_events.popleft()
             state.fingerprints.pop(evicted.fingerprint, None)
             self._metrics["raw_events_evicted"] += 1
+        if state.raw_events:
+            previous = state.raw_events[-1]
+            previous_key = (
+                previous.trade_time_ms,
+                previous.event_time_ms,
+                previous.fingerprint,
+            )
+            event_key = (
+                event.trade_time_ms,
+                event.event_time_ms,
+                event.fingerprint,
+            )
+            if previous_key > event_key:
+                state.raw_event_inversions += 1
         state.raw_events.append(event)
         state.fingerprints[event.fingerprint] = None
 

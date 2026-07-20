@@ -12,6 +12,7 @@ import {
   buildMainSeriesReferenceOptions,
   buildMainSeriesStyleOptions,
   createMainSeriesPointConverter,
+  MainSeriesReferenceTracker,
   toMainSeriesPoint,
 } from "../mainSeriesModel.js";
 import { createMainSeries, replaceMainSeries } from "../seriesLifecycle.js";
@@ -389,6 +390,53 @@ test("ordinary chart types do not scan the full window for reference options", (
   });
   assert.deepEqual(buildMainSeriesReferenceOptions("candlestick", rows), {});
   assert.deepEqual(buildMainSeriesReferenceOptions("line", rows), {});
+});
+
+test("histogram reference tracker updates realtime tail deltas without rescanning the window", () => {
+  const tracker = new MainSeriesReferenceTracker();
+  let rows = [
+    { time: 10, close: 1 },
+    { time: 20, close: 2 },
+    { time: 30, close: 3 },
+  ];
+
+  assert.deepEqual(
+    tracker.resolve("histogram", rows),
+    buildMainSeriesReferenceOptions("histogram", rows),
+  );
+  assert.equal(tracker.fullHistogramScanCount, 1);
+
+  rows = [rows[0]!, rows[1]!, { time: 30, close: 2.5 }];
+  assert.deepEqual(
+    tracker.resolve("histogram", rows, { type: "tick", replaced: true }),
+    buildMainSeriesReferenceOptions("histogram", rows),
+  );
+  assert.equal(tracker.fullHistogramScanCount, 1);
+
+  rows = [rows[1]!, rows[2]!, { time: 40, close: 4 }];
+  assert.deepEqual(
+    tracker.resolve("histogram", rows, {
+      type: "tick",
+      appended: true,
+      trimmedLeft: 1,
+    }),
+    buildMainSeriesReferenceOptions("histogram", rows),
+  );
+  assert.equal(tracker.fullHistogramScanCount, 1);
+
+  rows = [rows[0]!, rows[1]!, { time: 40, close: 1.5 }];
+  assert.deepEqual(
+    tracker.resolve("histogram", rows, { type: "tick", replaced: true }),
+    buildMainSeriesReferenceOptions("histogram", rows),
+  );
+  assert.equal(tracker.fullHistogramScanCount, 1);
+
+  rows = [rows[0]!, { time: 30, close: 9 }, rows[2]!];
+  assert.deepEqual(
+    tracker.resolve("histogram", rows, { type: "mid-merge" }),
+    buildMainSeriesReferenceOptions("histogram", rows),
+  );
+  assert.equal(tracker.fullHistogramScanCount, 2);
 });
 
 test("tail conversion can rebuild histogram colors from a new first row", () => {

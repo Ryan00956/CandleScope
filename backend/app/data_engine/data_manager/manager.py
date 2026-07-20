@@ -78,27 +78,36 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
 from app.core.executors import run_storage
-from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_policy import is_custom_interval, parse_interval_ms
 from app.data_engine.market_data.models import MarketStreamKey
 
 from .aggregator_bridge import AggregatorBridge
-from .auto_gc import AutoGcPolicy, auto_gc_loop, run_auto_gc_once
+from .auto_gc import (
+    AutoGcPolicy,
+    auto_gc_loop,
+    filter_auto_storage_plan,
+    run_auto_gc_once,
+)
 from .cache import BarCache
 from .config import DataManagerConfig
 from .coordinator import IngestionFactory, StreamCoordinator
 from .event_bus import DataEventBus, MiddlewareHook
 from .cache_behavior import CacheAccessEvent, CacheBehaviorStore
-from .gc import plan_memory_gc, run_memory_gc
+from .gc import execute_memory_gc_plan, plan_memory_gc
 from .daily_open import DailyOpenService
 from .models import (
     BarData,
     DataEvent,
     DataEventType,
     EventCallback,
+    MissingRange,
     QueryResult,
     SeriesKey,
     StorageBackend,
@@ -112,8 +121,12 @@ from .price_cache import PriceSnapshot, PriceSnapshotCache, normalize_price_key,
 from .query import BackfillTrigger, QueryEngine
 from .backfill_coordinator import priority_for_reason
 from .retention import RetentionService
-from .runtime_pressure import disk_pressure_snapshot, process_memory_snapshot
-from .storage_intents import StorageIntentRegistry, WILDCARD_INTERVAL
+from .runtime_pressure import (
+    disk_pressure_snapshot,
+    process_memory_snapshot,
+    storage_file_snapshot,
+)
+from .storage_intents import PRIORITY_RANK, StorageIntentRegistry, WILDCARD_INTERVAL
 from .stream_policy import StreamEnsurePlanner
 from .warm_start import AggregatorWarmStartService
 
@@ -123,6 +136,10 @@ from ..bar_aggregator import (
 )
 
 logger = logging.getLogger("data_manager")
+
+_CACHE_ACCESS_FLUSH_SECONDS = 0.25
+_CACHE_ACCESS_BATCH_SIZE = 256
+_CACHE_ACCESS_MAX_PENDING_IDENTITIES = 2_048
 
 
 class BackfillReconcilerLike(Protocol):
@@ -169,10 +186,16 @@ class DataManager:
 
     def __init__(self, config: DataManagerConfig | None = None) -> None:
         self._cfg = config or DataManagerConfig()
+        self._storage_gc_guard = threading.RLock()
+        self._storage_gc_protection_epoch = 0
 
         # ── Core components ──────────────────────────────────
         self.cache = BarCache(self._cfg.cache)
-        self.event_bus = DataEventBus(self._cfg.event_bus)
+        self.event_bus = DataEventBus(
+            self._cfg.event_bus,
+            protection_lock=self._storage_gc_guard,
+            on_subscription_change=self._mark_storage_gc_protection_changed,
+        )
         self.coordinator = StreamCoordinator(
             config=self._cfg.coordinator,
             cache=self.cache,
@@ -189,8 +212,23 @@ class DataManager:
         self._cleanup_task: asyncio.Task | None = None
         self._auto_gc_task: asyncio.Task | None = None
         self._cache_access_loop: asyncio.AbstractEventLoop | None = None
-        self._cache_access_tasks: set[asyncio.Task] = set()
+        self._cache_access_writer_task: asyncio.Task | None = None
+        self._cache_access_wakeup = asyncio.Event()
+        self._cache_access_stopping = False
+        self._cache_access_pending: OrderedDict[
+            tuple[SeriesKey, str, str, float | None, int],
+            CacheAccessEvent,
+        ] = OrderedDict()
+        self._cache_access_writer_stats: dict[str, int] = {
+            "signals": 0,
+            "coalesced": 0,
+            "dropped": 0,
+            "batches": 0,
+            "failed_batches": 0,
+            "persisted_signals": 0,
+        }
         self._backfill_trigger: BackfillTrigger | None = None
+        self._backfill_suppression_lookup: Any | None = None
 
         # ── BarAggregator (L1–L5) ───────────────────────────
         self.bar_aggregator = BarAggregator(BarAggregatorConfig())
@@ -219,7 +257,10 @@ class DataManager:
             backfill_trigger_provider=lambda: self._backfill_trigger,
         )
         self.price_cache = PriceSnapshotCache()
-        self.storage_intents = StorageIntentRegistry()
+        self.storage_intents = StorageIntentRegistry(
+            lock=self._storage_gc_guard,
+            on_change=self._mark_storage_gc_protection_changed,
+        )
         self.cache_behavior = CacheBehaviorStore()
         self._subscriptions: Any = None
         self._price_stream_controller: PriceStreamControllerLike | None = None
@@ -232,6 +273,10 @@ class DataManager:
         self._memory_gc_last_report: dict[str, Any] | None = None
         self._storage_gc_last_report: dict[str, Any] | None = None
         self._auto_gc_last_report: dict[str, Any] | None = None
+        self._auto_gc_health: dict[str, Any] = {
+            "status": "not-started",
+            "task_alive": False,
+        }
         self._auto_gc_policy = AutoGcPolicy.from_env()
 
         # Wire BarAggregator output → DataManager → Cache + EventBus
@@ -247,6 +292,9 @@ class DataManager:
             bars_backfilled=self.on_bars_backfilled,
             active_targets=self.bar_aggregator.get_targets,
             seed_active_bar=self.warm_start.seed_if_needed,
+            storage_gc_protection=self._storage_gc_protection_reason,
+            storage_gc_delete_batch=self._storage_gc_delete_batch,
+            storage_gc_replanner=self._storage_gc_replan_for_execution,
         )
 
         # Compatibility reference for older settings code.
@@ -445,6 +493,26 @@ class DataManager:
 
         return sorted(item for item in series if item[2] and item[3])
 
+    def gap_audit_tail_series(self) -> list[tuple[str, str, str, str]]:
+        """Return live/prewarm series whose closed tail should stay current."""
+        series: set[tuple[str, str, str, str]] = set()
+        for exchange, market_type, symbol in self.prewarm_targets():
+            for interval in self.prewarm_intervals():
+                series.add((
+                    exchange.strip().lower(),
+                    self._normalize_market_type(market_type),
+                    symbol.upper().strip(),
+                    interval,
+                ))
+        for exchange, market_type, symbol, interval in self.bar_aggregator.get_targets():
+            series.add((
+                exchange.strip().lower(),
+                self._normalize_market_type(market_type),
+                symbol.upper().strip(),
+                interval,
+            ))
+        return sorted(item for item in series if item[2] and item[3])
+
     def set_subscription_service(self, service: Any | None) -> None:
         """Attach the runtime-owned subscription service."""
         self._subscriptions = service
@@ -500,6 +568,39 @@ class DataManager:
 
         self.coordinator.set_gap_handler(_handle_ingestion_gap)
 
+    def set_backfill_suppression_lookup(self, lookup: Any | None) -> None:
+        """Inject a read-only, non-blocking ledger suppression lookup."""
+        if lookup is not None and not callable(lookup):
+            raise TypeError("backfill suppression lookup must be callable")
+        self._backfill_suppression_lookup = lookup
+
+    def get_backfill_suppression(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        end_ms: int,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> dict[str, Any] | None:
+        """Return a cached exact/covering repair cooldown, if one exists."""
+        lookup = self._backfill_suppression_lookup
+        if not callable(lookup):
+            return None
+        try:
+            result = lookup(
+                str(symbol or "").strip().upper(),
+                str(interval or "").strip(),
+                int(start_ms),
+                int(end_ms),
+                str(exchange or "binance").strip().lower(),
+                self._normalize_market_type(market_type),
+            )
+        except Exception:
+            logger.exception("Backfill suppression lookup failed")
+            return None
+        return dict(result) if isinstance(result, dict) else None
+
     # ═══════════════════════════════════════════════════════════
     #  Lifecycle
     # ═══════════════════════════════════════════════════════════
@@ -517,6 +618,11 @@ class DataManager:
             return
         self._started = True
         self._cache_access_loop = asyncio.get_running_loop()
+        self._cache_access_stopping = False
+        self._cache_access_writer_task = asyncio.create_task(
+            self._cache_access_writer_loop(),
+            name="data-manager-cache-access-writer",
+        )
         logger.info("DataManager starting...")
 
         # Start BarAggregator
@@ -575,12 +681,9 @@ class DataManager:
                 await self._auto_gc_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.exception("Auto GC task failed during shutdown")
             self._auto_gc_task = None
-
-        if self._cache_access_tasks:
-            await asyncio.gather(*self._cache_access_tasks, return_exceptions=True)
-            self._cache_access_tasks.clear()
-        self._cache_access_loop = None
 
         # Stop coordinator (stops ingestion streams)
         await self.coordinator.shutdown()
@@ -590,6 +693,20 @@ class DataManager:
 
         # Close event bus
         await self.event_bus.close()
+
+        # Stream teardown can emit final cache-access signals.  Drain them only
+        # after every producer has stopped, then detach the owning loop.
+        self._cache_access_stopping = True
+        self._cache_access_wakeup.set()
+        if self._cache_access_writer_task is not None:
+            try:
+                await self._cache_access_writer_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Cache access writer failed during shutdown")
+            self._cache_access_writer_task = None
+        self._cache_access_loop = None
 
         logger.info("DataManager shutdown complete")
 
@@ -649,6 +766,11 @@ class DataManager:
             result,
             reason=backfill_reason,
             requester=backfill_requester,
+            submit=(
+                self.query_engine.auto_backfill_default
+                if auto_backfill is None
+                else bool(auto_backfill)
+            ),
         )
 
     def query_latest(
@@ -684,6 +806,11 @@ class DataManager:
             result,
             reason=backfill_reason,
             requester=backfill_requester,
+            submit=(
+                self.query_engine.auto_backfill_default
+                if auto_backfill is None
+                else bool(auto_backfill)
+            ),
         )
 
     def query_before(
@@ -717,6 +844,11 @@ class DataManager:
             result,
             reason=backfill_reason,
             requester=backfill_requester,
+            submit=(
+                self.query_engine.auto_backfill_default
+                if auto_backfill is None
+                else bool(auto_backfill)
+            ),
         )
 
     def _submit_missing_ranges(
@@ -725,14 +857,40 @@ class DataManager:
         *,
         reason: str | None = None,
         requester: str = "query",
+        submit: bool = True,
     ) -> QueryResult:
         """Submit QueryEngine-detected missing ranges via DataManager."""
-        if self._backfill_trigger is None or not result.missing_ranges:
+        if not result.missing_ranges:
             return result
 
+        original_history_state = result.history_state
         submitted = 0
         request_ids: list[str] = []
-        for missing in result.missing_ranges:
+        suppressions: list[dict[str, Any]] = []
+        actionable_missing: list[MissingRange] = []
+        for missing in list(result.missing_ranges):
+            suppression = self.get_backfill_suppression(
+                missing.symbol,
+                missing.interval,
+                missing.start_ms,
+                missing.end_ms,
+                missing.exchange,
+                missing.market_type,
+            )
+            if suppression is not None:
+                suppressions.append({
+                    **suppression,
+                    "symbol": missing.symbol,
+                    "interval": missing.interval,
+                    "exchange": missing.exchange,
+                    "market_type": missing.market_type,
+                    "requested_start_ms": missing.start_ms,
+                    "requested_end_ms": missing.end_ms,
+                })
+                continue
+            actionable_missing.append(missing)
+            if not submit or self._backfill_trigger is None:
+                continue
             demand_reason = reason or self._semantic_reason_for_missing(missing.reason)
             metadata = {
                 "query_reason": missing.reason,
@@ -741,6 +899,22 @@ class DataManager:
                     "end_ms": missing.end_ms,
                 },
             }
+            if (
+                is_custom_interval(result.interval)
+                and result.interval != missing.interval
+                and result.metadata.get("derived_from") == missing.interval
+            ):
+                target = self.query_engine.custom_intervals.project_base_repair_to_target(
+                    symbol=missing.symbol,
+                    target_interval=result.interval,
+                    base_interval=missing.interval,
+                    start_ms=missing.start_ms,
+                    end_ms=missing.end_ms,
+                    exchange=missing.exchange,
+                    market_type=missing.market_type,
+                )
+                if target is not None:
+                    metadata["derived_repair_targets"] = [target]
             try:
                 request_id = self._call_backfill_trigger(
                     missing.symbol,
@@ -768,6 +942,51 @@ class DataManager:
                     missing.end_ms,
                     exc,
                     exc_info=True,
+                )
+
+        if suppressions:
+            # A durable cooldown is an explicit terminal exclusion for the
+            # current request, not an actionable repair gap.  Leaving it in
+            # ``missing_ranges`` makes the API contract (and therefore the
+            # chart) pending forever even though every retry is suppressed.
+            result.missing_ranges = actionable_missing
+            result.has_tail_gap = any(
+                missing.reason == "query_tail_gap"
+                for missing in actionable_missing
+            )
+            result.metadata["backfill_suppressions"] = suppressions
+            retry_deadlines = [
+                int(item["retry_at_ms"])
+                for item in suppressions
+                if item.get("retry_at_ms") is not None
+            ]
+            if retry_deadlines:
+                result.metadata["backfill_retry_at_ms"] = min(retry_deadlines)
+            existing_exclusions = list(result.excluded_ranges)
+            for item in suppressions:
+                existing_exclusions.append({
+                    "start_ms": int(item["requested_start_ms"]),
+                    "end_ms": int(item["requested_end_ms"]),
+                    "disposition": "terminal",
+                    "reason": f"gap_ledger_{item.get('ledger_status') or 'suppressed'}",
+                    "ledger_status": item.get("ledger_status"),
+                    "retry_at_ms": item.get("retry_at_ms"),
+                })
+            result.excluded_ranges = existing_exclusions
+            if not actionable_missing and submitted == 0:
+                # A terminal interior exclusion completes this requested
+                # window, but it is not proof of the series' left boundary.
+                # Preserve a genuinely exhausted result; otherwise keep
+                # pagination state (has_more/next_before_ms) intact.
+                result.history_state = (
+                    "exhausted"
+                    if original_history_state == "exhausted"
+                    else "ready"
+                )
+                result.complete = True
+                result.retryable = False
+                result.terminal_reason = (
+                    f"gap_ledger_{suppressions[0].get('ledger_status') or 'suppressed'}"
                 )
 
         if submitted:
@@ -837,6 +1056,15 @@ class DataManager:
         if self._backfill_trigger is None:
             return False
         market_type = self._normalize_market_type(market_type)
+        if self.get_backfill_suppression(
+            symbol,
+            interval,
+            start_ms,
+            end_ms,
+            exchange,
+            market_type,
+        ) is not None:
+            return False
         self._call_backfill_trigger(
             symbol,
             interval,
@@ -1277,29 +1505,6 @@ class DataManager:
             market_type=plan.requested.market_type,
         )
 
-        for target in plan.aggregation_targets:
-            self.bar_aggregator.add_target(
-                target.symbol,
-                target.interval,
-                exchange=target.exchange,
-                market_type=target.market_type,
-            )
-
-        for stream in plan.prerequisite_streams:
-            await self.coordinator.ensure_stream(
-                stream.symbol,
-                stream.interval,
-                exchange=stream.exchange,
-                market_type=stream.market_type,
-            )
-
-        info = await self.coordinator.ensure_stream(
-            plan.requested.symbol,
-            plan.requested.interval,
-            exchange=plan.requested.exchange,
-            market_type=plan.requested.market_type,
-        )
-
         lease_keys = self._stream_plan_lease_keys(plan)
         stream_consumer = self._stream_consumer_id(
             consumer_id,
@@ -1318,6 +1523,32 @@ class DataManager:
         )
 
         try:
+            # Publish hard protection before any stream/aggregator transition.
+            # A bounded storage-delete batch and stream activation therefore
+            # have one shared linearization boundary.
+            for target in plan.aggregation_targets:
+                self.bar_aggregator.add_target(
+                    target.symbol,
+                    target.interval,
+                    exchange=target.exchange,
+                    market_type=target.market_type,
+                )
+
+            for stream in plan.prerequisite_streams:
+                await self.coordinator.ensure_stream(
+                    stream.symbol,
+                    stream.interval,
+                    exchange=stream.exchange,
+                    market_type=stream.market_type,
+                )
+
+            info = await self.coordinator.ensure_stream(
+                plan.requested.symbol,
+                plan.requested.interval,
+                exchange=plan.requested.exchange,
+                market_type=plan.requested.market_type,
+            )
+
             await self.warm_start.seed_if_needed(
                 plan.requested.symbol,
                 plan.requested.interval,
@@ -1426,10 +1657,13 @@ class DataManager:
     ) -> None:
         """Stop a running data stream."""
         market_type = self._normalize_market_type(market_type)
-        self._stream_leases.pop(
-            SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
-            None,
-        )
+        with self._storage_gc_guard:
+            removed = self._stream_leases.pop(
+                SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
+                None,
+            )
+            if removed is not None:
+                self._mark_storage_gc_protection_changed()
         await self.coordinator.stop_stream(symbol, interval, exchange=exchange, market_type=market_type)
         self.bar_aggregator.remove_target(
             symbol, interval, exchange=exchange, market_type=market_type,
@@ -1465,9 +1699,15 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> None:
-        for key in keys:
-            lease = self._stream_leases.setdefault(key, _StreamLease())
-            lease.consumers.add(consumer_id)
+        with self._storage_gc_guard:
+            changed = False
+            for key in keys:
+                lease = self._stream_leases.setdefault(key, _StreamLease())
+                before = len(lease.consumers)
+                lease.consumers.add(consumer_id)
+                changed = changed or len(lease.consumers) != before
+            if changed:
+                self._mark_storage_gc_protection_changed()
 
     def _release_stream_leases(
         self,
@@ -1475,16 +1715,22 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> list[SeriesKey]:
-        empty_keys: list[SeriesKey] = []
-        for key in keys:
-            lease = self._stream_leases.get(key)
-            if lease is None:
-                continue
-            lease.consumers.discard(consumer_id)
-            if not lease.consumers:
-                self._stream_leases.pop(key, None)
-                empty_keys.append(key)
-        return empty_keys
+        with self._storage_gc_guard:
+            empty_keys: list[SeriesKey] = []
+            changed = False
+            for key in keys:
+                lease = self._stream_leases.get(key)
+                if lease is None:
+                    continue
+                before = len(lease.consumers)
+                lease.consumers.discard(consumer_id)
+                changed = changed or len(lease.consumers) != before
+                if not lease.consumers:
+                    self._stream_leases.pop(key, None)
+                    empty_keys.append(key)
+            if changed:
+                self._mark_storage_gc_protection_changed()
+            return empty_keys
 
     def _register_stream_storage_intents(
         self,
@@ -1777,9 +2023,46 @@ class DataManager:
         self._memory_gc_last_report = report
         return report
 
+    async def plan_memory_gc_async(
+        self,
+        policy: dict[str, Any] | None = None,
+        *,
+        scoring: str = "smart",
+    ) -> dict[str, Any]:
+        """Plan memory GC without running SQLite/disk probes on the event loop.
+
+        Learned behavior and runtime probes are independent inputs and may be
+        captured on the storage executor.  The actual cache/protection snapshot
+        remains on the event-loop thread so it is adjacent to conditional
+        execution and cannot be queued behind unrelated storage work.
+        """
+        behavior_heat, runtime_pressure = await asyncio.gather(
+            run_storage(self.cache_behavior.heat_map),
+            run_storage(self.runtime_pressure_snapshot),
+        )
+        report = plan_memory_gc(
+            self,
+            policy,
+            behavior_heat=behavior_heat,
+            runtime_pressure=runtime_pressure,
+            scoring=scoring,
+        )
+        self._memory_gc_last_report = report
+        return report
+
     def run_memory_gc(self, policy: dict[str, Any] | None = None) -> dict[str, Any]:
         """Execute DataManager memory cache cleanup and return a report."""
-        report = run_memory_gc(self, policy)
+        report = execute_memory_gc_plan(self, self.plan_memory_gc(policy))
+        self._memory_gc_last_report = report
+        return report
+
+    async def run_memory_gc_async(
+        self,
+        policy: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Plan asynchronously, then conditionally execute on the event loop."""
+        plan = await self.plan_memory_gc_async(policy)
+        report = execute_memory_gc_plan(self, plan)
         self._memory_gc_last_report = report
         return report
 
@@ -1796,6 +2079,7 @@ class DataManager:
         return {
             "owner": "auto-gc",
             "policy": self._auto_gc_policy.to_dict(),
+            "health": dict(self._auto_gc_health),
             "last_report": self._auto_gc_last_report or {
                 "mode": "not-run",
                 "status": "idle",
@@ -1812,18 +2096,111 @@ class DataManager:
         scoring: str = "smart",
     ) -> dict[str, Any]:
         """Return a dry-run plan for SQLite retention cleanup."""
+        protected_keys, storage_intents, protection_epoch = (
+            self._storage_gc_planning_snapshot()
+        )
         report = self.retention.plan_storage_gc(
             db_limits=db_limits,
             sqlite_budget_bytes=sqlite_budget_bytes,
             storage_row_limits_enabled=storage_row_limits_enabled,
-            protected_keys=self._protected_storage_keys(),
-            storage_intents=self.storage_intents,
+            protected_keys=protected_keys,
+            storage_intents=storage_intents,
             behavior_heat=self.cache_behavior.heat_map(),
             runtime_pressure=self.runtime_pressure_snapshot(file_snapshot=file_snapshot),
             scoring=scoring,
             file_snapshot=file_snapshot,
         )
+        report["protection_epoch_at_plan"] = protection_epoch
         self._storage_gc_last_report = report
+        return report
+
+    async def plan_storage_gc_async(
+        self,
+        *,
+        db_limits: dict[str, int] | None = None,
+        sqlite_budget_bytes: int | None = None,
+        storage_row_limits_enabled: bool | None = None,
+        file_snapshot: dict[str, Any] | None = None,
+        scoring: str = "smart",
+    ) -> dict[str, Any]:
+        """Capture loop-owned protection state before offloading storage planning."""
+        protected_keys, storage_intents, protection_epoch = (
+            self._storage_gc_planning_snapshot()
+        )
+        behavior_heat = await run_storage(self.cache_behavior.heat_map)
+        runtime_pressure = self.runtime_pressure_snapshot(file_snapshot=file_snapshot)
+        report = await run_storage(
+            self.retention.plan_storage_gc,
+            db_limits=db_limits,
+            sqlite_budget_bytes=sqlite_budget_bytes,
+            storage_row_limits_enabled=storage_row_limits_enabled,
+            protected_keys=protected_keys,
+            storage_intents=storage_intents,
+            behavior_heat=behavior_heat,
+            runtime_pressure=runtime_pressure,
+            scoring=scoring,
+            file_snapshot=file_snapshot,
+        )
+        report["protection_epoch_at_plan"] = protection_epoch
+        self._storage_gc_last_report = report
+        return report
+
+    def _storage_gc_replan_for_execution(
+        self,
+        confirmed_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Refresh physical pressure and intersect it later with the confirmed plan.
+
+        This method runs on the storage executor after any pre-delete
+        checkpoint.  It only produces a fresh plan; ``MaintenanceService``
+        enforces that execution cannot exceed either plan.
+        """
+        policy = dict(confirmed_plan.get("policy") or {})
+        storage = getattr(self.query_engine, "storage", None)
+        storage_path = (
+            getattr(storage, "db_path", None)
+            or getattr(storage, "_db_path", None)
+        )
+        if storage_path is None:
+            from app.core.config import KLINES_DB_PATH
+
+            storage_path = KLINES_DB_PATH
+        fresh_files = storage_file_snapshot(storage_path)
+        protected_keys, storage_intents, protection_epoch = (
+            self._storage_gc_planning_snapshot()
+        )
+        report = self.retention.plan_storage_gc(
+            db_limits=policy.get("db_limits"),
+            sqlite_budget_bytes=policy.get("sqlite_budget_bytes"),
+            storage_row_limits_enabled=policy.get("storage_row_limits_enabled"),
+            protected_keys=protected_keys,
+            storage_intents=storage_intents,
+            behavior_heat=self.cache_behavior.heat_map(),
+            runtime_pressure=self.runtime_pressure_snapshot(
+                file_snapshot=fresh_files,
+            ),
+            scoring=(
+                "smart"
+                if int(confirmed_plan.get("scoringVersion", 1) or 0) > 0
+                else "legacy"
+            ),
+            file_snapshot=fresh_files,
+        )
+        if (
+            str(confirmed_plan.get("mode") or "") == "auto-plan"
+            or confirmed_plan.get("autoPolicy") is not None
+        ):
+            report = filter_auto_storage_plan(
+                report,
+                AutoGcPolicy.from_mapping(
+                    dict(confirmed_plan.get("autoPolicy") or {})
+                ),
+            )
+        report["protection_epoch_at_plan"] = protection_epoch
+        report["execution_file_snapshot"] = fresh_files
+        report["revalidation_of_generated_at_ms"] = confirmed_plan.get(
+            "generated_at_ms"
+        )
         return report
 
     def register_storage_intent(
@@ -1893,29 +2270,178 @@ class DataManager:
         interval: str,
         **kwargs: Any,
     ) -> None:
-        """Record cache behavior off the caller's hot path when the loop is running."""
+        """Coalesce cache behavior off the caller's hot path.
+
+        One writer owns at most one storage-executor submission.  This keeps
+        high-rate query telemetry from building an unbounded set of asyncio
+        tasks or an unbounded ThreadPoolExecutor queue.
+        """
         loop = self._cache_access_loop
         if loop is None or loop.is_closed():
             self.record_cache_access(symbol, interval, **kwargs)
             return
 
-        def _submit() -> None:
-            task = asyncio.create_task(run_storage(self.record_cache_access, symbol, interval, **kwargs))
-            self._cache_access_tasks.add(task)
-
-            def _done(done_task: asyncio.Task) -> None:
-                self._cache_access_tasks.discard(done_task)
-                try:
-                    done_task.result()
-                except Exception as exc:
-                    logger.debug("deferred cache access recording failed: %s", exc)
-
-            task.add_done_callback(_done)
+        event = self._cache_access_event(symbol, interval, **kwargs)
 
         try:
-            loop.call_soon_threadsafe(_submit)
+            loop.call_soon_threadsafe(self._enqueue_cache_access, event)
         except RuntimeError:
             self.record_cache_access(symbol, interval, **kwargs)
+
+    def _cache_access_event(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        action: str = "access",
+        source: str = "backend",
+        weight: float | None = None,
+        detail: dict[str, Any] | None = None,
+        occurred_at_ms: int | None = None,
+    ) -> CacheAccessEvent:
+        return CacheAccessEvent(
+            key=SeriesKey(
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=self._normalize_market_type(market_type),
+            ),
+            action=action,
+            source=source,
+            weight=weight,
+            detail=detail,
+            occurred_at_ms=occurred_at_ms,
+        )
+
+    def _enqueue_cache_access(self, event: CacheAccessEvent) -> None:
+        server_now_ms = int(time.time() * 1000)
+        occurred_at_ms = (
+            server_now_ms
+            if event.occurred_at_ms is None
+            else min(server_now_ms, max(0, int(event.occurred_at_ms)))
+        )
+        bucket_ms = occurred_at_ms - (occurred_at_ms % 60_000)
+        identity = (
+            event.key,
+            str(event.action or "access"),
+            str(event.source or "backend"),
+            event.weight,
+            bucket_ms,
+        )
+        self._cache_access_writer_stats["signals"] += max(1, int(event.count or 1))
+        current = self._cache_access_pending.get(identity)
+        if current is not None:
+            self._cache_access_pending[identity] = CacheAccessEvent(
+                key=current.key,
+                action=current.action,
+                source=current.source,
+                weight=current.weight,
+                detail=event.detail or current.detail,
+                occurred_at_ms=max(
+                    int(current.occurred_at_ms or 0),
+                    occurred_at_ms,
+                ),
+                count=max(1, int(current.count or 1)) + max(1, int(event.count or 1)),
+            )
+            self._cache_access_pending.move_to_end(identity)
+            self._cache_access_writer_stats["coalesced"] += max(1, int(event.count or 1))
+        elif len(self._cache_access_pending) >= _CACHE_ACCESS_MAX_PENDING_IDENTITIES:
+            self._cache_access_writer_stats["dropped"] += max(1, int(event.count or 1))
+            return
+        else:
+            self._cache_access_pending[identity] = CacheAccessEvent(
+                key=event.key,
+                action=event.action,
+                source=event.source,
+                weight=event.weight,
+                detail=event.detail,
+                occurred_at_ms=occurred_at_ms,
+                count=max(1, int(event.count or 1)),
+            )
+
+        task = self._cache_access_writer_task
+        if task is None or task.done():
+            self._cache_access_writer_task = asyncio.create_task(
+                self._cache_access_writer_loop(),
+                name="data-manager-cache-access-writer",
+            )
+        self._cache_access_wakeup.set()
+
+    async def _cache_access_writer_loop(self) -> None:
+        flush_deadline: float | None = None
+        while True:
+            if not self._cache_access_pending:
+                flush_deadline = None
+                if self._cache_access_stopping or not self._started:
+                    return
+                self._cache_access_wakeup.clear()
+                await self._cache_access_wakeup.wait()
+                continue
+
+            if not self._cache_access_stopping:
+                loop = asyncio.get_running_loop()
+                if flush_deadline is None:
+                    # Anchor cadence to the first pending signal.  Later
+                    # wakeups may coalesce data but must not postpone this
+                    # deadline indefinitely under continuous traffic.
+                    flush_deadline = loop.time() + _CACHE_ACCESS_FLUSH_SECONDS
+                remaining = flush_deadline - loop.time()
+                if remaining > 0:
+                    self._cache_access_wakeup.clear()
+                    try:
+                        await asyncio.wait_for(
+                            self._cache_access_wakeup.wait(),
+                            timeout=remaining,
+                        )
+                        continue
+                    except TimeoutError:
+                        pass
+
+            batch: list[CacheAccessEvent] = []
+            while self._cache_access_pending and len(batch) < _CACHE_ACCESS_BATCH_SIZE:
+                _identity, event = self._cache_access_pending.popitem(last=False)
+                batch.append(event)
+            try:
+                await run_storage(
+                    self.cache_behavior.record_batch,
+                    batch,
+                    refresh_heat=False,
+                )
+                self._cache_access_writer_stats["batches"] += 1
+                self._cache_access_writer_stats["persisted_signals"] += sum(
+                    max(1, int(event.count or 1))
+                    for event in batch
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._cache_access_writer_stats["failed_batches"] += 1
+                self._cache_access_writer_stats["dropped"] += sum(
+                    max(1, int(event.count or 1))
+                    for event in batch
+                )
+                logger.debug("deferred cache access batch failed: %s", exc)
+
+            flush_deadline = None
+
+            if self._cache_access_stopping and not self._cache_access_pending:
+                return
+
+    def _cache_access_writer_snapshot(self) -> dict[str, Any]:
+        pending_signals = sum(
+            max(1, int(event.count or 1))
+            for event in self._cache_access_pending.values()
+        )
+        task = self._cache_access_writer_task
+        return {
+            **self._cache_access_writer_stats,
+            "pending_identities": len(self._cache_access_pending),
+            "pending_signals": pending_signals,
+            "max_pending_identities": _CACHE_ACCESS_MAX_PENDING_IDENTITIES,
+            "task_alive": task is not None and not task.done(),
+        }
 
     def record_cache_access_deferred(
         self,
@@ -1940,29 +2466,29 @@ class DataManager:
         occurred_at_ms: int | None = None,
     ) -> dict[str, Any]:
         """Persist one cache access signal for future GC scoring."""
-        key = SeriesKey(
+        event = self._cache_access_event(
             symbol,
             interval,
             exchange=exchange,
-            market_type=self._normalize_market_type(market_type),
+            market_type=market_type,
+            action=action,
+            source=source,
+            weight=weight,
+            detail=detail,
+            occurred_at_ms=occurred_at_ms,
         )
         try:
-            return self.cache_behavior.record(CacheAccessEvent(
-                key=key,
-                action=action,
-                source=source,
-                weight=weight,
-                detail=detail,
-                occurred_at_ms=occurred_at_ms,
-            ))
+            return self.cache_behavior.record(event)
         except Exception as exc:
-            logger.debug("cache access recording failed for %s: %s", key, exc)
+            logger.debug("cache access recording failed for %s: %s", event.key, exc)
             return {}
 
     def cache_behavior_snapshot(self, *, limit: int = 50) -> dict[str, Any]:
         """Return learned cache behavior heat for diagnostics."""
         try:
-            return self.cache_behavior.snapshot(limit=limit)
+            snapshot = self.cache_behavior.snapshot(limit=limit)
+            snapshot["writer"] = self._cache_access_writer_snapshot()
+            return snapshot
         except Exception as exc:
             return {
                 "owner": "cache-behavior",
@@ -1999,8 +2525,7 @@ class DataManager:
         batch_size: int = 10_000,
     ) -> dict[str, Any]:
         """Execute SQLite retention cleanup using a fresh dry-run plan."""
-        plan = await run_storage(
-            self.plan_storage_gc,
+        plan = await self.plan_storage_gc_async(
             db_limits=db_limits,
             sqlite_budget_bytes=sqlite_budget_bytes,
             storage_row_limits_enabled=storage_row_limits_enabled,
@@ -2214,6 +2739,17 @@ class DataManager:
             },
         }
 
+    def health_snapshot(self) -> dict[str, Any]:
+        """Return the small, in-memory subset used by the liveness endpoint."""
+        cache = self.cache.health_snapshot()
+        coordinator = self.coordinator.health_snapshot()
+        return {
+            "started": self._started,
+            "active_streams": coordinator["active_streams"],
+            "cache_series": cache["series_count"],
+            "cache_bars": cache["total_bars"],
+        }
+
     @property
     def config(self) -> DataManagerConfig:
         """Access the configuration (read-only reference)."""
@@ -2224,15 +2760,168 @@ class DataManager:
         return (market_type or "spot").strip().lower()
 
     def _protected_storage_keys(self) -> set[SeriesKey]:
-        keys: set[SeriesKey] = set()
-        keys.update(self.event_bus.get_all_subscribed_keys())
-        keys.update(self._stream_leases.keys())
-        for info in self.coordinator.get_all_streams():
-            if info.status in (StreamStatus.ACTIVE, StreamStatus.STARTING):
-                keys.add(info.key)
-        for exchange, market_type, symbol, interval in self.bar_aggregator.get_targets():
-            keys.add(SeriesKey(symbol, interval, exchange=exchange, market_type=market_type))
-        return keys
+        with self._storage_gc_guard:
+            keys: set[SeriesKey] = set()
+            keys.update(self.event_bus.get_all_subscribed_keys())
+            keys.update(self._stream_leases.keys())
+            for info in self.coordinator.get_all_streams():
+                if info.status in (StreamStatus.ACTIVE, StreamStatus.STARTING):
+                    keys.add(info.key)
+            for exchange, market_type, symbol, interval in self.bar_aggregator.get_targets():
+                keys.add(SeriesKey(symbol, interval, exchange=exchange, market_type=market_type))
+            return keys
+
+    def _storage_gc_planning_snapshot(self) -> tuple[set[SeriesKey], Any, int]:
+        """Capture protection inputs and their diagnostic epoch atomically."""
+        with self._storage_gc_guard:
+            return (
+                self._protected_storage_keys(),
+                self.storage_intents.clone(),
+                self._storage_gc_protection_epoch,
+            )
+
+    def _mark_storage_gc_protection_changed(self) -> None:
+        self._storage_gc_protection_epoch += 1
+
+    def _storage_gc_protection_reason(
+        self,
+        key: SeriesKey,
+        planned_intents: list[dict[str, Any]],
+        planned_keep_rows: int | None = None,
+    ) -> str | None:
+        """Return the current hard protection reason for a storage GC key."""
+        with self._storage_gc_guard:
+            if key in self._protected_storage_keys():
+                return "series became active, subscribed, or leased after planning"
+            current_intents = [intent.to_dict() for intent in self.storage_intents.match(key)]
+            planned_ids = {str(intent.get("id") or "") for intent in planned_intents}
+            current_ids = {str(intent.get("id") or "") for intent in current_intents}
+            if current_ids - planned_ids:
+                return "series gained a storage intent after planning"
+
+            def intent_semantics(intents: list[dict[str, Any]]) -> tuple[int, int, bool]:
+                keep_rows = max(
+                    (int(intent.get("effective_keep_rows", 0) or 0) for intent in intents),
+                    default=0,
+                )
+                priority = max(
+                    (
+                        PRIORITY_RANK.get(
+                            str(intent.get("priority") or "").strip().lower(),
+                            0,
+                        )
+                        for intent in intents
+                    ),
+                    default=0,
+                )
+                stream_required = any(bool(intent.get("stream_required")) for intent in intents)
+                return keep_rows, priority, stream_required
+
+            planned_keep, planned_priority, planned_stream = intent_semantics(planned_intents)
+            current_keep, current_priority, current_stream = intent_semantics(current_intents)
+            if (
+                current_keep > planned_keep
+                or current_priority > planned_priority
+                or (current_stream and not planned_stream)
+            ):
+                return "series storage intent protection became stronger after planning"
+            if planned_keep_rows is not None and current_keep > int(planned_keep_rows):
+                return "current storage intent keep floor exceeds the planned keep rows"
+            return None
+
+    def _storage_gc_delete_batch(
+        self,
+        *,
+        key: SeriesKey,
+        planned_intents: list[dict[str, Any]],
+        planned_keep_rows: int,
+        planned_protection_epoch: int = 0,
+        expires_at_ms: int = 0,
+        delete_func: Any,
+        delete_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Linearize the final protection check with one bounded delete batch."""
+        guard_requested_at = time.perf_counter()
+        with self._storage_gc_guard:
+            guard_acquired_at = time.perf_counter()
+            authorized_at_ms = int(time.time() * 1000)
+            protection_epoch_at_check = self._storage_gc_protection_epoch
+            if expires_at_ms and authorized_at_ms > int(expires_at_ms):
+                return {
+                    "deleted_rows": 0,
+                    "cache_invalidated": False,
+                    "stale_reason": "storage GC plan expired at final batch authorization",
+                    "protection_reason": None,
+                    "planned_protection_epoch": int(planned_protection_epoch or 0),
+                    "protection_epoch": protection_epoch_at_check,
+                    "protection_epoch_at_check": protection_epoch_at_check,
+                    "protection_epoch_at_completion": protection_epoch_at_check,
+                    "backend_delete_elapsed_ms": 0.0,
+                    "guard_wait_ms": int(
+                        (guard_acquired_at - guard_requested_at) * 1000
+                    ),
+                    "guard_hold_ms": int(
+                        (time.perf_counter() - guard_acquired_at) * 1000
+                    ),
+                }
+            protection_reason = self._storage_gc_protection_reason(
+                key,
+                planned_intents,
+                planned_keep_rows,
+            )
+            if protection_reason:
+                return {
+                    "deleted_rows": 0,
+                    "cache_invalidated": False,
+                    "stale_reason": None,
+                    "protection_reason": protection_reason,
+                    "planned_protection_epoch": int(planned_protection_epoch or 0),
+                    "protection_epoch": protection_epoch_at_check,
+                    "protection_epoch_at_check": protection_epoch_at_check,
+                    "protection_epoch_at_completion": protection_epoch_at_check,
+                    "backend_delete_elapsed_ms": 0.0,
+                    "guard_wait_ms": int(
+                        (guard_acquired_at - guard_requested_at) * 1000
+                    ),
+                    "guard_hold_ms": int(
+                        (time.perf_counter() - guard_acquired_at) * 1000
+                    ),
+                }
+            delete_started_at = time.perf_counter()
+            deleted = int(delete_func(**delete_kwargs) or 0)
+            backend_delete_elapsed_ms = (
+                time.perf_counter() - delete_started_at
+            ) * 1000.0
+            if deleted > 0:
+                # Keep deletion and invalidation in the same ordering domain as
+                # stream/lease/intent activation.  A later activation therefore
+                # cannot have freshly loaded bars cleared by this GC batch.
+                self.cache.invalidate(key)
+            protection_epoch_at_completion = self._storage_gc_protection_epoch
+            batch_limit = int(delete_kwargs.get("batch_size", 0) or 0)
+            contract_error = (
+                "bounded delete returned more rows than the authorized batch"
+                if deleted < 0 or (batch_limit > 0 and deleted > batch_limit)
+                else None
+            )
+            return {
+                "deleted_rows": deleted,
+                "cache_invalidated": deleted > 0,
+                "stale_reason": None,
+                "protection_reason": None,
+                "planned_protection_epoch": int(planned_protection_epoch or 0),
+                "protection_epoch": protection_epoch_at_completion,
+                "protection_epoch_at_check": protection_epoch_at_check,
+                "protection_epoch_at_completion": protection_epoch_at_completion,
+                "backend_delete_elapsed_ms": backend_delete_elapsed_ms,
+                "guard_wait_ms": int(
+                    (guard_acquired_at - guard_requested_at) * 1000
+                ),
+                "guard_hold_ms": int(
+                    (time.perf_counter() - guard_acquired_at) * 1000
+                ),
+                "contract_error": contract_error,
+            }
 
     # ═══════════════════════════════════════════════════════════
     #  Async Context Manager

@@ -11,6 +11,7 @@ import type { ChartSettings } from "../features/settings/chartAppearanceSettings
 import type { WatchlistRuntime } from "../features/watchlist/useWatchlistRuntime.js";
 import type { OrderBookRuntime } from "../features/order-book/orderBookTypes.js";
 import type { ReplayEntryCapabilityView } from "../features/replay/useReplayEntryCapability.js";
+import type { TradeFlowRuntime } from "../features/trade-flow/tradeFlowTypes.js";
 import type { ChartWorkspaceProps } from "./ChartWorkspace.js";
 import type { LazyFeatureSurfaceModels } from "./LazyFeatureSurfaces.js";
 import type { StatusBarModel } from "./StatusBar.js";
@@ -72,6 +73,7 @@ export interface AppShellRuntimeInputs {
   priceScale: PriceScaleShellRuntime;
   watchlist: WatchlistRuntime;
   orderBook: OrderBookRuntime;
+  tradeFlow: TradeFlowRuntime;
   exportFlow: ExportRuntime;
   alerts: AlertsShellRuntime;
   replayEntry: ReplayEntryCapabilityView;
@@ -96,6 +98,9 @@ export interface AppShellViewModelContext {
   orderBookView: OrderBookRuntime["view"];
   orderBookActions: OrderBookRuntime["actions"];
   orderBookStatus: OrderBookRuntime["status"];
+  tradeFlowView: TradeFlowRuntime["view"];
+  tradeFlowActions: TradeFlowRuntime["actions"];
+  tradeFlowStatus: TradeFlowRuntime["status"];
   settingsView: SettingsShellRuntime["view"];
   settingsActions: SettingsShellRuntime["actions"];
   chartSettings: ChartSettings;

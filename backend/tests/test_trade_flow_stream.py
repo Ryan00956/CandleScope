@@ -157,6 +157,10 @@ def test_trade_flow_ws_sends_atomic_recent_then_append_batch_and_releases() -> N
 
     assert len(dm.ensure_calls) == 1
     assert dm.release_calls == dm.ensure_calls
+    consumer_id = dm.ensure_calls[0][1]
+    connection_id = consumer_id.removeprefix("ws:trade-flow:")
+    assert len(connection_id) == 32
+    assert int(connection_id, 16) >= 0
     assert dm.attach_calls[0][1:] == (25, 4_096)
     assert dm.subscription.closed is True
     assert dm._leases == set()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Literal, Mapping, Sequence
@@ -60,9 +61,8 @@ def project_order_book_levels(
     limit: int | None = None,
     max_auto_multiplier: int = 1_000,
     omit_incomplete_outer_bucket: bool = False,
+    source_levels_canonical: bool = False,
 ) -> OrderBookProjection:
-    bids = _level_pairs(data.get("bids"), side="bids")
-    asks = _level_pairs(data.get("asks"), side="asks")
     price_step = _effective_price_step(
         data,
         price_grouping=price_grouping,
@@ -73,6 +73,25 @@ def project_order_book_levels(
         price_tick_size is not None
         and price_step is not None
         and price_step > price_tick_size
+    )
+    raw_bids = data.get("bids")
+    raw_asks = data.get("asks")
+    source_bid_levels = _sequence_length(raw_bids, side="bids")
+    source_ask_levels = _sequence_length(raw_asks, side="asks")
+    bounded_canonical = (
+        source_levels_canonical
+        and not aggregation_applied
+        and limit is not None
+    )
+    bids = _level_pairs(
+        raw_bids,
+        side="bids",
+        max_items=limit if bounded_canonical else None,
+    )
+    asks = _level_pairs(
+        raw_asks,
+        side="asks",
+        max_items=limit if bounded_canonical else None,
     )
     if aggregation_applied:
         bid_buckets = _aggregate_side(bids, price_step, side="bids")
@@ -85,8 +104,12 @@ def project_order_book_levels(
     all_ask_buckets = ask_buckets
     bid_buckets = _price_window(all_bid_buckets, price_step, limit, side="bids")
     ask_buckets = _price_window(all_ask_buckets, price_step, limit, side="asks")
-    price_window_bid_truncated = len(bid_buckets) < len(all_bid_buckets)
-    price_window_ask_truncated = len(ask_buckets) < len(all_ask_buckets)
+    if bounded_canonical:
+        price_window_bid_truncated = len(bid_buckets) < source_bid_levels
+        price_window_ask_truncated = len(ask_buckets) < source_ask_levels
+    else:
+        price_window_bid_truncated = len(bid_buckets) < len(all_bid_buckets)
+        price_window_ask_truncated = len(ask_buckets) < len(all_ask_buckets)
 
     incomplete_outer_bid_bucket_omitted = False
     incomplete_outer_ask_bucket_omitted = False
@@ -111,10 +134,14 @@ def project_order_book_levels(
         price_step=float(price_step) if price_step is not None else None,
         price_grouping=price_grouping,
         aggregation_applied=aggregation_applied,
-        source_bid_levels=len(bids),
-        source_ask_levels=len(asks),
-        bucket_bid_levels=len(all_bid_buckets),
-        bucket_ask_levels=len(all_ask_buckets),
+        source_bid_levels=source_bid_levels,
+        source_ask_levels=source_ask_levels,
+        bucket_bid_levels=(
+            source_bid_levels if bounded_canonical else len(all_bid_buckets)
+        ),
+        bucket_ask_levels=(
+            source_ask_levels if bounded_canonical else len(all_ask_buckets)
+        ),
         price_window_bid_truncated=price_window_bid_truncated,
         price_window_ask_truncated=price_window_ask_truncated,
         incomplete_outer_bid_bucket_omitted=incomplete_outer_bid_bucket_omitted,
@@ -153,7 +180,11 @@ def _reference_price(data: Mapping[str, Any]) -> Decimal | None:
             return parsed
     for side in ("bids", "asks"):
         raw_levels = data.get(side)
-        if isinstance(raw_levels, (list, tuple)) and raw_levels:
+        if (
+            isinstance(raw_levels, SequenceABC)
+            and not isinstance(raw_levels, (str, bytes))
+            and raw_levels
+        ):
             first = raw_levels[0]
             if isinstance(first, (list, tuple)) and first:
                 parsed = _positive_decimal(first[0])
@@ -162,15 +193,35 @@ def _reference_price(data: Mapping[str, Any]) -> Decimal | None:
     return None
 
 
-def _level_pairs(value: object, *, side: str) -> list[tuple[Decimal, Decimal]]:
-    if not isinstance(value, (list, tuple)):
+def _sequence_length(value: object, *, side: str) -> int:
+    if not isinstance(value, SequenceABC) or isinstance(value, (str, bytes)):
         raise TypeError(f"order-book {side} must be a sequence")
+    return len(value)
+
+
+def _level_pairs(
+    value: object,
+    *,
+    side: str,
+    max_items: int | None = None,
+) -> list[tuple[Decimal, Decimal]]:
+    length = _sequence_length(value, side=side)
     parsed: list[tuple[Decimal, Decimal]] = []
-    for index, raw in enumerate(value):
-        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
-            raise TypeError(f"order-book {side}[{index}] must be a price/quantity pair")
-        price = _positive_decimal(raw[0])
-        quantity = _positive_decimal(raw[1])
+    assert isinstance(value, SequenceABC)
+    bounded_length = length if max_items is None else min(length, max_items)
+    for index in range(bounded_length):
+        raw = value[index]
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            raw_price, raw_quantity = raw
+        elif hasattr(raw, "price") and hasattr(raw, "quantity"):
+            raw_price = getattr(raw, "price")
+            raw_quantity = getattr(raw, "quantity")
+        else:
+            raise TypeError(
+                f"order-book {side}[{index}] must be a price/quantity pair",
+            )
+        price = _positive_decimal(raw_price)
+        quantity = _positive_decimal(raw_quantity)
         if price is None or quantity is None:
             raise ValueError(f"order-book {side}[{index}] must contain positive values")
         parsed.append((price, quantity))

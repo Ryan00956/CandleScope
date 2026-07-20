@@ -3,9 +3,96 @@ const PHASE6_CURRENT_PAINT_ACTIONS = Object.freeze([
   "phase6-worker-backpressure",
   "phase6-main-thread-fallback",
 ]);
+const PHASE6_WORKER_DRAIN_ACTIONS = Object.freeze([
+  "phase6-worker-backpressure",
+]);
 
 export function phase6ActionRequiresCurrentPaint(action) {
   return PHASE6_CURRENT_PAINT_ACTIONS.includes(action);
+}
+
+export function phase6ActionRequiresWorkerDrain(action) {
+  return PHASE6_WORKER_DRAIN_ACTIONS.includes(action);
+}
+
+/**
+ * Canonical Phase 6 terminal condition for the delayed-worker fixture. Keep
+ * this function closure-free: the runner serializes the same predicate into
+ * Chrome, while report acceptance calls it directly in Node.
+ */
+export function phase6LatestWorkerPaintConverged(runtime) {
+  const revisionKeys = [
+    "documentRevision",
+    "surfaceGeneration",
+    "dataRevision",
+    "projectionRevision",
+    "lineageIndexRevision",
+    "viewportRevision",
+    "themeRevision",
+  ];
+  const positiveNumberKeys = [
+    "widthCssPx",
+    "heightCssPx",
+    "dpr",
+  ];
+  const isRecord = (value) => value !== null
+    && typeof value === "object"
+    && !Array.isArray(value);
+  const hasOwn = (record, key) => Object.prototype.hasOwnProperty.call(record, key);
+  const validStamp = (stamp) => isRecord(stamp)
+    && hasOwn(stamp, "scopeKey")
+    && typeof stamp.scopeKey === "string"
+    && stamp.scopeKey.length > 0
+    && revisionKeys.every((key) => hasOwn(stamp, key)
+      && Number.isSafeInteger(stamp[key])
+      && stamp[key] >= 0)
+    && positiveNumberKeys.every((key) => hasOwn(stamp, key)
+      && typeof stamp[key] === "number"
+      && Number.isFinite(stamp[key])
+      && stamp[key] > 0);
+  const sameStamp = (left, right) => validStamp(left)
+    && validStamp(right)
+    && left.scopeKey === right.scopeKey
+    && revisionKeys.every((key) => left[key] === right[key])
+    && positiveNumberKeys.every((key) => left[key] === right[key]);
+  const validIdentity = (identity) => isRecord(identity)
+    && hasOwn(identity, "schemaVersion")
+    && identity.schemaVersion === 1
+    && hasOwn(identity, "jobId")
+    && Number.isSafeInteger(identity.jobId)
+    && identity.jobId > 0
+    && hasOwn(identity, "generation")
+    && Number.isSafeInteger(identity.generation)
+    && identity.generation > 0
+    && hasOwn(identity, "stamp")
+    && validStamp(identity.stamp);
+  const sameIdentity = (left, right) => validIdentity(left)
+    && validIdentity(right)
+    && left.schemaVersion === right.schemaVersion
+    && left.jobId === right.jobId
+    && left.generation === right.generation
+    && sameStamp(left.stamp, right.stamp);
+  const latest = runtime?.latestSubmittedWorkerIdentity;
+  const published = runtime?.publishedWorkerIdentity;
+  const painted = runtime?.paintedWorkerIdentity;
+  const requestedStamp = runtime?.lastRequestedStamp;
+  const receipt = runtime?.paintReceipt;
+  return runtime?.backend === "worker"
+    && runtime?.queueDepthCurrent === 0
+    && runtime?.inFlightCurrent === 0
+    && Number.isSafeInteger(runtime?.workerResultDelta)
+    && runtime.workerResultDelta > 0
+    && sameStamp(requestedStamp, runtime?.lastPublishedStamp)
+    && sameStamp(requestedStamp, runtime?.lastPaintedStamp)
+    && sameStamp(requestedStamp, latest?.stamp)
+    && sameIdentity(latest, published)
+    && sameIdentity(latest, painted)
+    && receipt?.kind === "drawing-scene-bridge-paint-ack"
+    && Number.isSafeInteger(receipt?.attachmentRevision)
+    && receipt.attachmentRevision >= 0
+    && Number.isSafeInteger(receipt?.paintSequence)
+    && receipt.paintSequence > 0
+    && sameStamp(requestedStamp, receipt?.stamp);
 }
 
 /**
@@ -65,14 +152,74 @@ export async function waitForPhase6ActionCurrentPaint({
 }
 
 /**
+ * The backpressure fixture deliberately keeps the exact worker behind the
+ * continuous main-thread LOD publication. A current visible paint therefore
+ * does not prove that the latest exact worker request has taken authority.
+ * Wait for that second, stronger convergence boundary before freezing probe
+ * evidence so formal runs cannot sample a healthy queue mid-drain.
+ */
+export async function waitForPhase6ActionWorkerDrain({
+  action,
+  timeoutMs,
+  workerDelayMs,
+  waitForWorkerDrain,
+}) {
+  if (!phase6ActionRequiresWorkerDrain(action)) {
+    return Object.freeze({ required: false, result: null });
+  }
+  if (typeof waitForWorkerDrain !== "function") {
+    throw new Error(`Phase 6 ${action} worker-drain probe is unavailable`);
+  }
+  const configuredDelayMs = Number(workerDelayMs);
+  const convergenceTimeoutMs = Number.isFinite(configuredDelayMs) && configuredDelayMs >= 0
+    ? Math.max(2_000, configuredDelayMs * 2 + 1_000)
+    : 5_000;
+  const safeTimeoutMs = Math.min(10_000, convergenceTimeoutMs, Math.max(
+    0,
+    Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 5_000,
+  ));
+  // CDP's outer command timeout is deliberately much wider than the page
+  // contract. Bound the host await independently so a lost/non-resolving page
+  // promise cannot strand one formal run until that outer timeout fires.
+  const hostGraceMs = 250;
+  let hostTimeoutHandle = null;
+  const hostTimeout = new Promise((resolve) => {
+    hostTimeoutHandle = setTimeout(() => resolve({
+      passed: false,
+      reason: "phase6-latest-worker-drain-host-timeout",
+      pageTimeoutMs: safeTimeoutMs,
+      hostGraceMs,
+    }), safeTimeoutMs + hostGraceMs);
+  });
+  let result;
+  try {
+    result = await Promise.race([
+      Promise.resolve().then(() => waitForWorkerDrain(safeTimeoutMs)),
+      hostTimeout,
+    ]);
+  } finally {
+    if (hostTimeoutHandle !== null) clearTimeout(hostTimeoutHandle);
+  }
+  if (result?.passed !== true) {
+    throw new Error(`Phase 6 ${action} did not drain to the latest exact worker paint: ${JSON.stringify(result)}`);
+  }
+  return Object.freeze({ required: true, result });
+}
+
+/**
  * Installed in the benchmark page through CDP. Keep this function completely
  * self-contained: drawing-performance.mjs serializes it with toString().
  */
-export function phase6BrowserProbeBootstrap() {
+export function phase6BrowserProbeBootstrap(
+  workerPaintConverged = phase6LatestWorkerPaintConverged,
+) {
   window.__CANDLESCOPE_PHASE6_PROBE__?.stop?.();
   const drawingHandle = window.__CANDLESCOPE_DRAWING_PERF__;
   if (!drawingHandle?.report) {
     return { started: false, reason: "drawing-perf-handle-missing" };
+  }
+  if (typeof workerPaintConverged !== "function") {
+    return { started: false, reason: "phase6-worker-paint-contract-missing" };
   }
 
   const finite = (value) => {
@@ -399,6 +546,7 @@ export function phase6BrowserProbeBootstrap() {
       returnedWorkerIdentity: safeClone(valueAt(phase6, ["returnedWorkerIdentity"])),
       acceptedWorkerIdentity: safeClone(valueAt(phase6, ["acceptedWorkerIdentity"])),
       publishedWorkerIdentity: safeClone(valueAt(phase6, ["publishedWorkerIdentity"])),
+      paintedWorkerIdentity: safeClone(valueAt(phase6, ["paintedWorkerIdentity"])),
       latestSubmittedWorkerIdentity: safeClone(valueAt(
         phase6,
         ["latestSubmittedWorkerIdentity"],
@@ -433,6 +581,36 @@ export function phase6BrowserProbeBootstrap() {
         requestedStamp: safeClone(runtime?.lastRequestedStamp),
         paintedStamp: safeClone(runtime?.lastPaintedStamp),
         reason: "phase6-current-plan-paint-timeout",
+      };
+    },
+    async waitForWorkerDrain(timeoutMs = 5_000) {
+      const safeTimeoutMs = Math.max(0, nonNegative(timeoutMs) ?? 5_000);
+      const deadline = performance.now() + safeTimeoutMs;
+      let runtime = null;
+      const evidence = () => ({
+        backend: runtime?.backend ?? null,
+        queueDepthCurrent: runtime?.queueDepthCurrent ?? null,
+        inFlightCurrent: runtime?.inFlightCurrent ?? null,
+        workerResultDelta: runtime?.workerResultDelta ?? null,
+        requestedStamp: safeClone(runtime?.lastRequestedStamp),
+        publishedStamp: safeClone(runtime?.lastPublishedStamp),
+        paintedStamp: safeClone(runtime?.lastPaintedStamp),
+        latestSubmittedWorkerIdentity: safeClone(runtime?.latestSubmittedWorkerIdentity),
+        publishedWorkerIdentity: safeClone(runtime?.publishedWorkerIdentity),
+        paintedWorkerIdentity: safeClone(runtime?.paintedWorkerIdentity),
+        paintReceipt: safeClone(runtime?.paintReceipt),
+      });
+      do {
+        const raw = readRaw();
+        runtime = normalizeRuntime(raw, readCounters(raw));
+        const exactCurrent = workerPaintConverged(runtime) === true;
+        if (exactCurrent) return { passed: true, ...evidence() };
+        await new Promise((resolve) => setTimeout(resolve, 16));
+      } while (performance.now() <= deadline);
+      return {
+        passed: false,
+        reason: "phase6-latest-worker-drain-timeout",
+        ...evidence(),
       };
     },
     async runHitOracle(points) {

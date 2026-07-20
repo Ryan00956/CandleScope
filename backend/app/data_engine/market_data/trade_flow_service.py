@@ -32,6 +32,7 @@ from app.data_engine.storage.trade_flow_store import (
 )
 from app.data_engine.storage.trade_flow_writer import TradeFlowRollupWriter
 from .append_hub import AppendBatchHub, AppendBatchSubscription
+from .lifecycle import KeyedAsyncLockPool, drain_cancellation_safe_cleanup
 from .models import DeliveryClass, MarketChannel, MarketStreamKey, TransportMode
 from .trade_flow import (
     NormalizedAggTrade,
@@ -79,6 +80,7 @@ class TradeFlowAttachment:
 class _PhysicalLease:
     handle: Any
     consumers: set[str] = field(default_factory=set)
+    idle_stop_task: asyncio.Task[None] | None = None
     stop_task: asyncio.Task[Any] | None = None
     stop_state: str = "active"
     reconcile_stop_on_completion: bool = False
@@ -132,7 +134,12 @@ class TradeFlowService:
         max_query_limit: int = 5000,
         max_attach_recent: int = 2000,
         max_streams: int | None = None,
-        physical_stop_timeout_seconds: float = 2.0,
+        # The shared ingestion session already gives the underlying WebSocket
+        # close operation up to two seconds.  The service-level deadline must
+        # leave reconciliation overhead beyond that inner boundary; using the
+        # same value turns a successful close into a false timeout/late-success.
+        physical_stop_timeout_seconds: float = 3.0,
+        physical_idle_grace_seconds: float = 30.0,
     ) -> None:
         self._factory = ingestion_factory
         self.engine = engine or TradeFlowEngine()
@@ -192,6 +199,10 @@ class TradeFlowService:
             0.01,
             min(float(physical_stop_timeout_seconds), 30.0),
         )
+        self._physical_idle_grace_seconds = max(
+            0.0,
+            min(float(physical_idle_grace_seconds), 300.0),
+        )
         engine_max_streams = max(1, int(self.engine.diagnostics()["max_streams"]))
         requested_max_streams = (
             engine_max_streams
@@ -205,6 +216,7 @@ class TradeFlowService:
 
         self._physical: dict[StreamIdentity, _PhysicalLease] = {}
         self._lifecycle_lock = asyncio.Lock()
+        self._identity_locks = KeyedAsyncLockPool[StreamIdentity]()
         self._ingest_task: asyncio.Task[None] | None = None
         self._repair_task: asyncio.Task[None] | None = None
         self._flush_task: asyncio.Task[None] | None = None
@@ -212,6 +224,8 @@ class TradeFlowService:
         self._flush_stop = asyncio.Event()
         self._shutdown_complete = asyncio.Event()
         self._shutdown_task: asyncio.Task[None] | None = None
+        self._pending_idle_stop_tasks: set[asyncio.Task[None]] = set()
+        self._pending_physical_stop_tasks: set[asyncio.Task[Any]] = set()
         self._pending_stop_finalizers: set[asyncio.Task[None]] = set()
         self._pending_repair_tasks: set[asyncio.Task[None]] = set()
         self._repair_in_flight = 0
@@ -255,6 +269,9 @@ class TradeFlowService:
             "physical_stop_wait_cancellations": 0,
             "physical_stop_tasks_reused": 0,
             "physical_stops_late_succeeded": 0,
+            "physical_idle_stops_scheduled": 0,
+            "physical_idle_stops_cancelled": 0,
+            "physical_idle_stops_expired": 0,
             "last_physical_stop_error": None,
             "last_repair_error": None,
         }
@@ -269,62 +286,148 @@ class TradeFlowService:
 
         identity = self._validate_identity(key)
         consumer = _consumer_id(consumer_id)
-        async with self._lifecycle_lock:
-            self._ensure_open()
-            existing = self._physical.get(identity)
-            if existing is not None:
-                if (
-                    existing.stop_task is not None
-                    and existing.stop_task.done()
-                    and self._reconcile_completed_stop_locked(identity, existing)
-                ):
-                    existing = None
-            if existing is not None:
-                if existing.stop_task is not None and not existing.stop_task.done():
-                    raise RuntimeError(
-                        "trade-flow physical stream stop is still in progress",
+        cleanup_attempted = False
+        while True:
+            stop_wait: tuple[_PhysicalLease, asyncio.Task[Any]] | None = None
+            reservation: _PhysicalLease | None = None
+            async with self._identity_locks.hold(identity):
+                async with self._lifecycle_lock:
+                    self._ensure_open()
+                    existing = self._physical.get(identity)
+                    if existing is not None:
+                        if (
+                            existing.stop_task is not None
+                            and existing.stop_task.done()
+                            and self._reconcile_completed_stop_locked(identity, existing)
+                        ):
+                            existing = None
+                    if existing is not None:
+                        if existing.stop_task is not None:
+                            stop_wait = (existing, existing.stop_task)
+                            cleanup_attempted = True
+                        elif existing.stop_state != "active":
+                            if cleanup_attempted:
+                                raise RuntimeError(
+                                    "trade-flow physical stream is unavailable after "
+                                    "a failed stop",
+                                )
+                            stop_wait = (
+                                existing,
+                                self._start_physical_stop_locked(identity, existing),
+                            )
+                            cleanup_attempted = True
+                        else:
+                            self._cancel_idle_stop_locked(existing)
+                            if consumer in existing.consumers:
+                                return False
+                            existing.consumers.add(consumer)
+                            return True
+
+                    if existing is None:
+                        if len(self._physical) >= self._max_streams:
+                            raise RuntimeError(
+                                "trade-flow physical stream limit reached "
+                                f"({self._max_streams})",
+                            )
+                        if not self.engine.activate_stream(identity):
+                            raise RuntimeError(
+                                "trade-flow engine identity is active without a physical lease",
+                            )
+                        reservation = _PhysicalLease(
+                            handle=None,
+                            stop_state="starting",
+                        )
+                        self._physical[identity] = reservation
+                        self._start_workers()
+
+                if stop_wait is None:
+                    assert reservation is not None
+
+                    async def _on_event(event: MarketEvent) -> None:
+                        await self._enqueue_live(identity, event)
+
+                    async def _on_l5_gap(marker: Any) -> None:
+                        # L5 detection is diagnostic only.  The engine's exact
+                        # agg_trade_id gap is the sole trigger for REST repair.
+                        self._metrics["l5_gaps_observed"] += 1
+                        self._metrics["l5_missing_events_observed"] += max(
+                            0,
+                            int(getattr(marker, "expected_count", 0) or 0),
+                        )
+
+                    try:
+                        handle = await self._factory.start_market(
+                            _descriptor(identity),
+                            _on_event,
+                            on_gap=_on_l5_gap,
+                        )
+                    except BaseException:
+                        await drain_cancellation_safe_cleanup(
+                            self._cleanup_start_reservation(identity, reservation),
+                            name=(
+                                f"trade-flow-start-cleanup-{identity[0]}-"
+                                f"{identity[1]}-{identity[2]}"
+                            ),
+                        )
+                        raise
+
+                    try:
+                        # Publish the transport into the reservation before the
+                        # next await.  Cancellation while acquiring the
+                        # lifecycle lock can then stop the real handle instead
+                        # of leaving a handle=None ghost lease.
+                        reservation.handle = handle
+                        async with self._lifecycle_lock:
+                            if (
+                                not self._closing
+                                and not self._closed
+                                and self._physical.get(identity) is reservation
+                            ):
+                                reservation.stop_state = "active"
+                                reservation.consumers.add(consumer)
+                                return True
+                    except BaseException:
+                        await drain_cancellation_safe_cleanup(
+                            self._cleanup_start_reservation(identity, reservation),
+                            name=(
+                                f"trade-flow-start-cleanup-{identity[0]}-"
+                                f"{identity[1]}-{identity[2]}"
+                            ),
+                        )
+                        raise
+
+                    caller_cancelled = await drain_cancellation_safe_cleanup(
+                        self._cleanup_start_reservation(identity, reservation),
+                        name=(
+                            f"trade-flow-start-cleanup-{identity[0]}-"
+                            f"{identity[1]}-{identity[2]}"
+                        ),
                     )
-                if consumer in existing.consumers:
-                    return False
-                existing.consumers.add(consumer)
-                return True
-            if len(self._physical) >= self._max_streams:
-                raise RuntimeError(
-                    "trade-flow physical stream limit reached "
-                    f"({self._max_streams})",
-                )
+                    if caller_cancelled:
+                        raise asyncio.CancelledError
+                    raise RuntimeError(
+                        "trade-flow service closed while stream was starting",
+                    )
 
-            self._start_workers()
-            descriptor = _descriptor(identity)
-
-            async def _on_event(event: MarketEvent) -> None:
-                await self._enqueue_live(identity, event)
-
-            async def _on_l5_gap(marker: Any) -> None:
-                # L5 detection is diagnostic only.  The engine's exact
-                # agg_trade_id gap is the sole trigger for REST repair.
-                self._metrics["l5_gaps_observed"] += 1
-                self._metrics["l5_missing_events_observed"] += max(
-                    0,
-                    int(getattr(marker, "expected_count", 0) or 0),
-                )
-
-            activated = self.engine.activate_stream(identity)
-            try:
-                handle = await self._factory.start_market(
-                    descriptor,
-                    _on_event,
-                    on_gap=_on_l5_gap,
-                )
-            except BaseException:
-                if activated:
-                    self.engine.deactivate_stream(identity)
-                raise
-            self._physical[identity] = _PhysicalLease(
-                handle=handle,
-                consumers={consumer},
+            # Do not serialize every waiter behind the keyed lock while the
+            # shared physical stop performs network I/O.  All callers for this
+            # identity can observe and await the same cleanup owner; the keyed
+            # lock still protects transitions and same-identity start
+            # single-flight above.
+            assert stop_wait is not None
+            entry, stop_task = stop_wait
+            stopped = await self._wait_for_physical_stop(
+                identity,
+                entry,
+                stop_task,
             )
-            return True
+            if stopped:
+                continue
+            if not stop_task.done():
+                raise RuntimeError(
+                    "trade-flow physical stream cleanup did not finish "
+                    "before the deadline",
+                )
 
     async def release_stream(
         self,
@@ -334,21 +437,20 @@ class TradeFlowService:
     ) -> bool:
         identity = _normalize_identity(key)
         consumer = _consumer_id(consumer_id)
-        async with self._lifecycle_lock:
-            entry = self._physical.get(identity)
-            if entry is None or consumer not in entry.consumers:
-                return False
-            if len(entry.consumers) > 1:
+        async with self._identity_locks.hold(identity):
+            async with self._lifecycle_lock:
+                entry = self._physical.get(identity)
+                if entry is None or consumer not in entry.consumers:
+                    return False
                 entry.consumers.remove(consumer)
-                return True
+                if entry.consumers:
+                    return True
+                if not self._closing and self._physical_idle_grace_seconds > 0:
+                    self._schedule_idle_stop_locked(identity, entry)
+                    return True
+                stop_task = self._start_physical_stop_locked(identity, entry)
 
-            if not await self._stop_physical(identity, entry):
-                # Keep the lease registered so a failed/cancel-resistant feed
-                # cannot be replaced by a second physical subscription.
-                return False
-            self._physical.pop(identity, None)
-            self.engine.deactivate_stream(identity)
-            return True
+        return await self._wait_for_physical_stop(identity, entry, stop_task)
 
     def recent(
         self,
@@ -361,7 +463,7 @@ class TradeFlowService:
         self._ensure_readable()
         identity = self._validate_identity(key)
         bounded = _bounded_limit(limit, self._max_attach_recent)
-        return list(self.engine.raw_snapshot(identity)[-bounded:])
+        return list(self.engine.raw_tail(identity, bounded))
 
     async def recent_rollups(
         self,
@@ -469,6 +571,21 @@ class TradeFlowService:
         identities = tuple(dict.fromkeys(self._validate_identity(key) for key in keys))
         if not identities:
             raise ValueError("trade-flow attachment requires at least one identity")
+        unavailable = [
+            identity
+            for identity in identities
+            if (
+                (entry := self._physical.get(identity)) is None
+                or entry.stop_state != "active"
+                or entry.stop_task is not None
+                or not entry.consumers
+            )
+        ]
+        if unavailable:
+            raise RuntimeError(
+                "trade-flow attachment requires active leased physical streams; "
+                f"unavailable for {unavailable}",
+            )
         degraded = [
             identity
             for identity in identities
@@ -491,7 +608,7 @@ class TradeFlowService:
         )
         recent = {
             identity: (
-                self.engine.raw_snapshot(identity)[-bounded_recent:]
+                self.engine.raw_tail(identity, bounded_recent)
                 if bounded_recent
                 else ()
             )
@@ -582,6 +699,7 @@ class TradeFlowService:
                     "market_type": identity[1],
                     "symbol": identity[2],
                     "consumers": len(entry.consumers),
+                    "idle_stop_pending": entry.idle_stop_task is not None,
                     "stop_state": entry.stop_state,
                 }
                 for identity, entry in sorted(self._physical.items())
@@ -612,8 +730,14 @@ class TradeFlowService:
                 "pending": self._archive_queue.qsize(),
                 "limit": self._archive_queue.maxsize,
             },
+            "pending_idle_stops": len(self._pending_idle_stop_tasks),
+            "physical_idle_grace_seconds": self._physical_idle_grace_seconds,
             "shutdown": {
                 "degraded": self._shutdown_degraded,
+                "pending_idle_stops": len(self._pending_idle_stop_tasks),
+                "pending_physical_stop_tasks": len(
+                    self._pending_physical_stop_tasks
+                ),
                 "pending_stop_finalizers": len(self._pending_stop_finalizers),
                 "physical_stop_timeout_seconds": (
                     self._physical_stop_timeout_seconds
@@ -650,19 +774,19 @@ class TradeFlowService:
         """Perform cleanup once; feed-stop degradation cannot block draining."""
 
         self._accepting_events = False
+        await self._cancel_idle_stops()
         await self._drain_stop_finalizers()
-        identities = tuple(self._physical)
-        stop_items = tuple(self._physical.items())
-        if stop_items:
+        async with self._lifecycle_lock:
+            identities = tuple(self._physical)
+        if identities:
             await asyncio.gather(*(
-                self._stop_physical(identity, entry)
-                for identity, entry in stop_items
+                self._shutdown_identity(identity) for identity in identities
             ))
         await asyncio.sleep(0)
         await self._drain_stop_finalizers()
-        self._physical.clear()
-        for identity in identities:
-            self.engine.deactivate_stream(identity)
+        async with self._lifecycle_lock:
+            for identity, entry in tuple(self._physical.items()):
+                self._retire_entry_locked(identity, entry)
 
         if self._ingest_task is not None:
             await self._command_queue.join()
@@ -690,33 +814,135 @@ class TradeFlowService:
         self._closed = True
         self._shutdown_complete.set()
 
+    def _schedule_idle_stop_locked(
+        self,
+        identity: StreamIdentity,
+        entry: _PhysicalLease,
+    ) -> None:
+        """Arm one cancellable grace timer for an active zero-consumer lease."""
+
+        existing = entry.idle_stop_task
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._stop_after_idle_grace(identity, entry),
+            name=(
+                f"trade-flow-idle-stop-{identity[0]}-"
+                f"{identity[1]}-{identity[2]}"
+            ),
+        )
+        entry.idle_stop_task = task
+        self._pending_idle_stop_tasks.add(task)
+        self._metrics["physical_idle_stops_scheduled"] += 1
+        task.add_done_callback(self._pending_idle_stop_tasks.discard)
+        task.add_done_callback(self._consume_task_exception)
+
+    def _cancel_idle_stop_locked(
+        self,
+        entry: _PhysicalLease,
+    ) -> asyncio.Task[None] | None:
+        task = entry.idle_stop_task
+        if task is None:
+            return None
+        entry.idle_stop_task = None
+        self._pending_idle_stop_tasks.discard(task)
+        if not task.done() and task.cancel():
+            self._metrics["physical_idle_stops_cancelled"] += 1
+        return task
+
+    async def _cancel_idle_stops(self) -> None:
+        tasks: list[asyncio.Task[None]] = []
+        async with self._lifecycle_lock:
+            for entry in self._physical.values():
+                task = self._cancel_idle_stop_locked(entry)
+                if task is not None:
+                    tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _stop_after_idle_grace(
+        self,
+        identity: StreamIdentity,
+        entry: _PhysicalLease,
+    ) -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        try:
+            await asyncio.sleep(self._physical_idle_grace_seconds)
+            async with self._identity_locks.hold(identity):
+                async with self._lifecycle_lock:
+                    if (
+                        self._physical.get(identity) is not entry
+                        or entry.idle_stop_task is not current
+                    ):
+                        return
+                    entry.idle_stop_task = None
+                    self._pending_idle_stop_tasks.discard(current)
+                    if (
+                        entry.consumers
+                        or entry.stop_task is not None
+                        or entry.stop_state != "active"
+                    ):
+                        return
+                    self._metrics["physical_idle_stops_expired"] += 1
+                    stop_task = self._start_physical_stop_locked(identity, entry)
+
+            await self._wait_for_physical_stop(identity, entry, stop_task)
+        except asyncio.CancelledError:
+            return
+
+    async def _shutdown_identity(self, identity: StreamIdentity) -> None:
+        async with self._identity_locks.hold(identity):
+            async with self._lifecycle_lock:
+                entry = self._physical.get(identity)
+                if entry is None:
+                    return
+                entry.consumers.clear()
+            await self._stop_physical(identity, entry)
+
     async def _stop_physical(
         self,
         identity: StreamIdentity,
         entry: _PhysicalLease,
     ) -> bool:
-        """Stop one feed within its own deadline without blocking drain."""
+        """Stop one feed without holding the global lifecycle lock while waiting."""
 
-        self._metrics["physical_stops_attempted"] += 1
-        stop_task = entry.stop_task
-        if stop_task is not None and stop_task.done():
-            entry.reconcile_stop_on_completion = False
-            completed_successfully = False
-            if not stop_task.cancelled():
-                try:
-                    completed_successfully = stop_task.result() is not False
-                except (asyncio.CancelledError, Exception):
-                    completed_successfully = False
-            self._clear_stop_task(
-                entry,
-                stop_task,
-                state="stopped" if completed_successfully else "stop_failed",
-            )
-            if completed_successfully:
-                self._metrics["physical_stops_late_succeeded"] += 1
+        async with self._lifecycle_lock:
+            if self._physical.get(identity) is not entry:
                 return True
-            stop_task = None
+            if (
+                entry.stop_task is not None
+                and entry.stop_task.done()
+                and self._reconcile_completed_stop_locked(identity, entry)
+            ):
+                return True
+            stop_task = self._start_physical_stop_locked(identity, entry)
+        return await self._wait_for_physical_stop(identity, entry, stop_task)
+
+    async def _cleanup_start_reservation(
+        self,
+        identity: StreamIdentity,
+        entry: _PhysicalLease,
+    ) -> None:
+        if entry.handle is None:
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(identity, entry)
+            return
+        stopped = await self._stop_physical(identity, entry)
+        if stopped:
+            async with self._lifecycle_lock:
+                self._retire_entry_locked(identity, entry)
+
+    def _start_physical_stop_locked(
+        self,
+        identity: StreamIdentity,
+        entry: _PhysicalLease,
+    ) -> asyncio.Task[Any]:
+        """Create or reuse the sole cleanup owner while lifecycle state is locked."""
+
+        stop_task = entry.stop_task
         if stop_task is None:
+            self._metrics["physical_stops_attempted"] += 1
             stop_task = asyncio.create_task(
                 entry.handle.stop(),
                 name=(
@@ -726,9 +952,23 @@ class TradeFlowService:
             )
             entry.stop_task = stop_task
             entry.reconcile_stop_on_completion = False
+            self._pending_physical_stop_tasks.add(stop_task)
+            stop_task.add_done_callback(
+                self._pending_physical_stop_tasks.discard,
+            )
         else:
             self._metrics["physical_stop_tasks_reused"] += 1
         entry.stop_state = "stopping"
+        return stop_task
+
+    async def _wait_for_physical_stop(
+        self,
+        identity: StreamIdentity,
+        entry: _PhysicalLease,
+        stop_task: asyncio.Task[Any],
+    ) -> bool:
+        """Bound one caller's wait without cancelling the shared cleanup owner."""
+
         try:
             result = await asyncio.wait_for(
                 asyncio.shield(stop_task),
@@ -738,8 +978,6 @@ class TradeFlowService:
                 raise RuntimeError("physical stream reported stop failure")
         except TimeoutError:
             self._metrics["physical_stop_timeouts"] += 1
-            if stop_task.cancel():
-                self._metrics["physical_stop_tasks_cancelled"] += 1
             self._arm_late_stop_reconciliation(identity, entry, stop_task)
             self._record_physical_stop_failure(
                 identity,
@@ -751,27 +989,37 @@ class TradeFlowService:
             current = asyncio.current_task()
             if current is not None and current.cancelling():
                 self._metrics["physical_stop_wait_cancellations"] += 1
-                if stop_task.cancel():
-                    self._metrics["physical_stop_tasks_cancelled"] += 1
                 self._arm_late_stop_reconciliation(identity, entry, stop_task)
                 self._record_physical_stop_failure(
                     identity,
                     "caller cancelled while stop was in progress",
                 )
                 raise
-            self._clear_stop_task(entry, stop_task, state="stop_cancelled")
-            self._metrics["physical_stop_failures"] += 1
+            async with self._lifecycle_lock:
+                if entry.stop_task is not stop_task:
+                    return self._physical.get(identity) is not entry
+                self._clear_stop_task(entry, stop_task, state="stop_cancelled")
+                self._metrics["physical_stop_failures"] += 1
             self._record_physical_stop_failure(identity, "stop task was cancelled")
             return False
         except Exception as exc:
-            self._clear_stop_task(entry, stop_task, state="stop_failed")
-            self._metrics["physical_stop_failures"] += 1
+            async with self._lifecycle_lock:
+                if entry.stop_task is not stop_task:
+                    return self._physical.get(identity) is not entry
+                self._clear_stop_task(entry, stop_task, state="stop_failed")
+                self._metrics["physical_stop_failures"] += 1
             self._record_physical_stop_failure(identity, str(exc))
             return False
         else:
-            self._clear_stop_task(entry, stop_task, state="stopped")
-            self._metrics["physical_stops_succeeded"] += 1
-            return True
+            async with self._lifecycle_lock:
+                if entry.stop_task is not stop_task:
+                    return self._physical.get(identity) is not entry
+                self._clear_stop_task(entry, stop_task, state="stopped")
+                if self._physical.get(identity) is entry:
+                    self._physical.pop(identity, None)
+                    self.engine.deactivate_stream(identity)
+                self._metrics["physical_stops_succeeded"] += 1
+                return True
 
     def _reconcile_completed_stop_locked(
         self,
@@ -855,41 +1103,51 @@ class TradeFlowService:
     ) -> None:
         """Consume a detached stop result and repair lease truthfulness."""
 
-        async with self._lifecycle_lock:
-            if (
-                not entry.reconcile_stop_on_completion
-                or entry.stop_task is not stop_task
-            ):
-                self._consume_task_exception(stop_task)
-                return
-            entry.reconcile_stop_on_completion = False
-            if stop_task.cancelled():
-                self._clear_stop_task(entry, stop_task, state="stop_cancelled")
-                return
-            try:
-                result = stop_task.result()
-            except asyncio.CancelledError:
-                self._clear_stop_task(entry, stop_task, state="stop_cancelled")
-                return
-            except Exception as exc:
-                self._clear_stop_task(entry, stop_task, state="stop_failed")
-                self._metrics["physical_stop_failures"] += 1
-                self._record_physical_stop_failure(identity, f"late failure: {exc}")
-                return
-            if result is False:
-                self._clear_stop_task(entry, stop_task, state="stop_failed")
-                self._metrics["physical_stop_failures"] += 1
-                self._record_physical_stop_failure(
-                    identity,
-                    "late physical stream reported stop failure",
-                )
-                return
+        async with self._identity_locks.hold(identity):
+            async with self._lifecycle_lock:
+                if (
+                    not entry.reconcile_stop_on_completion
+                    or entry.stop_task is not stop_task
+                ):
+                    self._consume_task_exception(stop_task)
+                    return
+                entry.reconcile_stop_on_completion = False
+                if stop_task.cancelled():
+                    self._clear_stop_task(entry, stop_task, state="stop_cancelled")
+                    return
+                try:
+                    result = stop_task.result()
+                except asyncio.CancelledError:
+                    self._clear_stop_task(entry, stop_task, state="stop_cancelled")
+                    return
+                except Exception as exc:
+                    self._clear_stop_task(entry, stop_task, state="stop_failed")
+                    self._metrics["physical_stop_failures"] += 1
+                    self._record_physical_stop_failure(identity, f"late failure: {exc}")
+                    return
+                if result is False:
+                    self._clear_stop_task(entry, stop_task, state="stop_failed")
+                    self._metrics["physical_stop_failures"] += 1
+                    self._record_physical_stop_failure(
+                        identity,
+                        "late physical stream reported stop failure",
+                    )
+                    return
 
-            self._clear_stop_task(entry, stop_task, state="stopped")
-            if self._physical.get(identity) is entry:
-                self._physical.pop(identity, None)
-                self.engine.deactivate_stream(identity)
-            self._metrics["physical_stops_late_succeeded"] += 1
+                self._clear_stop_task(entry, stop_task, state="stopped")
+                self._retire_entry_locked(identity, entry)
+                self._metrics["physical_stops_late_succeeded"] += 1
+
+    def _retire_entry_locked(
+        self,
+        identity: StreamIdentity,
+        entry: _PhysicalLease,
+    ) -> bool:
+        if self._physical.get(identity) is not entry:
+            return False
+        self._physical.pop(identity, None)
+        self.engine.deactivate_stream(identity)
+        return True
 
     @staticmethod
     def _clear_stop_task(

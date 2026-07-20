@@ -448,7 +448,7 @@ class StreamCoordinator:
             # Check if stream has subscribers
             sub_count = 0
             if self._bus:
-                sub_count = self._bus.get_subscriber_count(key)
+                sub_count = self._bus.get_direct_subscriber_count(key)
 
             if sub_count > 0:
                 entry.touch()
@@ -595,6 +595,13 @@ class StreamCoordinator:
                 "base_interval": self._cfg.base_interval,
             },
             "streams": [e.info.to_dict() for e in self._streams.values()],
+        }
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """Return constant-size liveness state without serializing streams."""
+        return {
+            "active_streams": len(self._streams),
+            "reaper_running": self._reaper_task is not None and not self._reaper_task.done(),
         }
 
     # ── Internal: Stream Start ───────────────────────────────

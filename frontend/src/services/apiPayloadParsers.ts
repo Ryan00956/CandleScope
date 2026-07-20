@@ -20,6 +20,18 @@ export interface TransportKlineBar extends JsonRecord {
   close: number;
   volume: number;
   is_closed?: boolean;
+  quote_volume?: number | null;
+  trades?: number | null;
+  taker_buy_base?: number | null;
+  taker_buy_quote?: number | null;
+  order_flow?: TransportKlineOrderFlow | null;
+}
+
+export interface TransportKlineOrderFlow extends JsonRecord {
+  taker_sell_base: number;
+  volume_delta_base: number;
+  taker_buy_ratio_base: number | null;
+  cvd_contribution_base: number;
 }
 
 export interface TransportKlineResponse extends JsonRecord {
@@ -27,6 +39,7 @@ export interface TransportKlineResponse extends JsonRecord {
   has_more?: boolean;
   truncated?: boolean;
   next_end_ms?: number | null;
+  retry_at_ms?: number | null;
 }
 
 export interface ExchangeMarketPayload extends JsonRecord {
@@ -139,6 +152,43 @@ function optionalFiniteNumber(record: JsonRecord, key: string, path: string): vo
   if (key in record && record[key] != null) expectFiniteNumber(record[key], `${path}.${key}`);
 }
 
+function expectNonNegativeNumber(value: unknown, path: string): number {
+  const parsed = expectFiniteNumber(value, path);
+  if (parsed < 0) throw new ApiPayloadError(path, "expected a non-negative number");
+  return parsed;
+}
+
+function nullableNonNegativeNumber(
+  record: JsonRecord,
+  key: string,
+  path: string,
+): number | null | undefined {
+  if (!(key in record)) return undefined;
+  if (record[key] == null) return null;
+  return expectNonNegativeNumber(record[key], `${path}.${key}`);
+}
+
+function parseKlineOrderFlow(value: unknown, path: string): TransportKlineOrderFlow | null {
+  if (value == null) return null;
+  const record = expectRecord(value, path);
+  const ratio = record.taker_buy_ratio_base == null
+    ? null
+    : expectFiniteNumber(record.taker_buy_ratio_base, `${path}.taker_buy_ratio_base`);
+  if (ratio !== null && (ratio < 0 || ratio > 1)) {
+    throw new ApiPayloadError(`${path}.taker_buy_ratio_base`, "expected a ratio between 0 and 1");
+  }
+  return {
+    ...record,
+    taker_sell_base: expectNonNegativeNumber(record.taker_sell_base, `${path}.taker_sell_base`),
+    volume_delta_base: expectFiniteNumber(record.volume_delta_base, `${path}.volume_delta_base`),
+    taker_buy_ratio_base: ratio,
+    cvd_contribution_base: expectFiniteNumber(
+      record.cvd_contribution_base,
+      `${path}.cvd_contribution_base`,
+    ),
+  };
+}
+
 export function parseKlineBar(value: unknown, path = "kline"): TransportKlineBar {
   const record = expectRecord(value, path);
   const time = expectNonNegativeInteger(record.time, `${path}.time`);
@@ -157,6 +207,20 @@ export function parseKlineBar(value: unknown, path = "kline"): TransportKlineBar
   };
   if ("is_closed" in record) {
     bar.is_closed = expectBoolean(record.is_closed, `${path}.is_closed`);
+  }
+  const quoteVolume = nullableNonNegativeNumber(record, "quote_volume", path);
+  if (quoteVolume !== undefined) bar.quote_volume = quoteVolume;
+  if ("trades" in record) {
+    bar.trades = record.trades == null
+      ? null
+      : expectNonNegativeInteger(record.trades, `${path}.trades`);
+  }
+  const takerBuyBase = nullableNonNegativeNumber(record, "taker_buy_base", path);
+  if (takerBuyBase !== undefined) bar.taker_buy_base = takerBuyBase;
+  const takerBuyQuote = nullableNonNegativeNumber(record, "taker_buy_quote", path);
+  if (takerBuyQuote !== undefined) bar.taker_buy_quote = takerBuyQuote;
+  if ("order_flow" in record) {
+    bar.order_flow = parseKlineOrderFlow(record.order_flow, `${path}.order_flow`);
   }
   return bar;
 }
@@ -195,6 +259,7 @@ export function parseKlineResponse(
     "query_end_ms",
     "before",
     "bars",
+    "retry_at_ms",
   ]) {
     optionalFiniteNumber(record, key, path);
   }

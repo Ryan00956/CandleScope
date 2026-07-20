@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   LiquidationPayloadError,
   parseLiquidationHistoryPayload,
+  parseLiquidationRollup,
   parseLiquidationSocketMessage,
 } from "../liquidationParser.js";
 
@@ -36,6 +37,30 @@ function event(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function rollup(overrides: Record<string, unknown> = {}) {
+  return {
+    exchange: "binance",
+    market_type: "futures",
+    symbol: "BTCUSDT",
+    period: "1m",
+    position_side: "long",
+    bucket_start_ms: 1_700_000_000_000,
+    bucket_end_ms: 1_700_000_060_000,
+    filled_quantity: 0.5,
+    filled_notional: 25_000,
+    event_count: 1,
+    max_event_notional: 25_000,
+    first_event_time_ms: 1_700_000_000_100,
+    last_event_time_ms: 1_700_000_000_100,
+    is_final: true,
+    revision: 1,
+    updated_at_ms: 1_700_000_000_120,
+    source_quality: "sampled_best_effort",
+    source_exhaustive: false,
+    ...overrides,
+  };
+}
+
 test("liquidation history parser preserves observed-only quality and direction buckets", () => {
   const payload = parseLiquidationHistoryPayload({
     type: "liquidation.history",
@@ -48,26 +73,7 @@ test("liquidation history parser preserves observed-only quality and direction b
       params: { period: "1m", position_side: "long" },
     },
     count: 1,
-    data: [{
-      exchange: "binance",
-      market_type: "futures",
-      symbol: "BTCUSDT",
-      period: "1m",
-      position_side: "long",
-      bucket_start_ms: 1_700_000_000_000,
-      bucket_end_ms: 1_700_000_060_000,
-      filled_quantity: 0.5,
-      filled_notional: 25_000,
-      event_count: 1,
-      max_event_notional: 25_000,
-      first_event_time_ms: 1_700_000_000_100,
-      last_event_time_ms: 1_700_000_000_100,
-      is_final: true,
-      revision: 1,
-      updated_at_ms: 1_700_000_000_120,
-      source_quality: "sampled_best_effort",
-      source_exhaustive: false,
-    }],
+    data: [rollup()],
     has_more: false,
     coverage: {
       earliest_ms: 1_700_000_000_000,
@@ -88,6 +94,17 @@ test("liquidation history parser preserves observed-only quality and direction b
     backfillable: false,
     exchangeUpdateIntervalMs: 1000,
   });
+});
+
+test("liquidation rollups reject storage timestamp aliases at the v1 boundary", () => {
+  assert.throws(
+    () => parseLiquidationRollup(rollup({
+      updated_at_ms: undefined,
+      received_at_ms: 1_700_000_000_120,
+    })),
+    (error) => error instanceof LiquidationPayloadError
+      && error.path === "liquidation.rollup.updated_at_ms",
+  );
 });
 
 test("liquidation socket parser rejects dishonest quality and side conflicts", () => {

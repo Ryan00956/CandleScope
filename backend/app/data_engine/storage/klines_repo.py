@@ -4,9 +4,7 @@ import sqlite3
 import time
 import logging
 from pathlib import Path
-from typing import Callable
-
-import pandas as pd
+from typing import Any, Callable
 
 from app.core.config import KLINES_DB_PATH
 from app.core.executors import run_storage
@@ -38,14 +36,27 @@ def interval_to_milliseconds(interval: str) -> int:
     return INTERVAL_SECONDS[interval] * 1000
 
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(KLINES_DB_PATH), timeout=30, check_same_thread=False)
+def _connect(
+    *,
+    timeout_seconds: float = 30.0,
+    configure_journal_mode: bool = True,
+) -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        str(KLINES_DB_PATH),
+        timeout=max(0.0, float(timeout_seconds)),
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-    except sqlite3.OperationalError as exc:
-        logger.warning("SQLite WAL mode unavailable for %s, falling back to DELETE journal: %s", KLINES_DB_PATH, exc)
-        conn.execute("PRAGMA journal_mode=DELETE;")
+    if configure_journal_mode:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+        except sqlite3.OperationalError as exc:
+            logger.warning(
+                "SQLite WAL mode unavailable for %s, falling back to DELETE journal: %s",
+                KLINES_DB_PATH,
+                exc,
+            )
+            conn.execute("PRAGMA journal_mode=DELETE;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
@@ -160,7 +171,12 @@ def init_klines_storage() -> None:
         )
 
 
-def dataframe_to_rows(df: pd.DataFrame) -> list[dict]:
+def dataframe_to_rows(df: Any) -> list[dict]:
+    # Pandas is only needed by this legacy conversion helper.  Keeping it out
+    # of the module import path avoids paying its sizeable startup/RSS cost for
+    # every API worker and storage subprocess.
+    import pandas as pd
+
     if df is None or df.empty:
         return []
 
@@ -488,6 +504,9 @@ def scan_klines_gaps(
             "missing_bars": 0,
             "scanned_bars": 0,
             "truncated": False,
+            "first_open_time": None,
+            "last_open_time": None,
+            "resume_from_ms": None,
             "error": f"Unsupported interval: {interval}",
         }
 
@@ -510,6 +529,9 @@ def scan_klines_gaps(
             "missing_bars": 0,
             "scanned_bars": 0,
             "truncated": False,
+            "first_open_time": None,
+            "last_open_time": None,
+            "resume_from_ms": None,
             "error": "Trading calendar could not be resolved",
         }
 
@@ -573,6 +595,9 @@ def scan_klines_gaps(
             "missing_bars": sum(gap["missing_bars"] for gap in gaps),
             "scanned_bars": 0,
             "truncated": truncated,
+            "first_open_time": None,
+            "last_open_time": None,
+            "resume_from_ms": None,
             "calendar_id": selected_calendar.calendar_id,
         }
 
@@ -653,6 +678,11 @@ def scan_klines_gaps(
         "missing_bars": sum(gap["missing_bars"] for gap in gaps),
         "scanned_bars": len(opens),
         "truncated": truncated,
+        "first_open_time": opens[0],
+        "last_open_time": opens[-1],
+        # Resume inclusively so the next page retains the boundary pair used
+        # to detect a gap between this page and the next one.
+        "resume_from_ms": opens[-1] if truncated else None,
         "calendar_id": selected_calendar.calendar_id,
     }
 
@@ -672,6 +702,12 @@ class KlinesRepoAdapter:
         dm = DataManager()
         dm.set_storage(KlinesRepoAdapter())
     """
+
+    # DataManager holds its protection ordering guard while invoking one GC
+    # batch.  Only backends that explicitly publish a bounded latency/row
+    # contract are eligible for that destructive path.
+    storage_gc_delete_max_batch_rows = 1_000
+    storage_gc_delete_deadline_ms = 50
 
     def __init__(
         self,
@@ -753,6 +789,151 @@ class KlinesRepoAdapter:
             exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
         )
+
+    def count_bars(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        end_ms: int,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> int:
+        """Count one exact series range without materialising its rows."""
+        resolved_exchange = exchange or self._exchange
+        resolved_market_type = market_type or self._market_type
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM klines
+                WHERE exchange = ?
+                  AND market_type = ?
+                  AND symbol = ?
+                  AND interval = ?
+                  AND open_time >= ?
+                  AND open_time <= ?
+                """,
+                (
+                    resolved_exchange,
+                    resolved_market_type,
+                    symbol,
+                    interval,
+                    int(start_ms),
+                    int(end_ms),
+                ),
+            ).fetchone()
+        return int(row["cnt"] if row is not None else 0)
+
+    def verify_contiguous_range(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        end_ms: int,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> dict:
+        """Exactly compare stored opens with the calendar sequence.
+
+        The SQLite cursor streams rows from one read snapshot, so this remains
+        bounded-memory even for a range that needed several audit passes.
+        Unlike a count-only check it also rejects off-grid replacements.
+        """
+        resolved_exchange = exchange or self._exchange
+        resolved_market_type = market_type or self._market_type
+        interval_ms = parse_interval_ms(interval)
+        if interval_ms is None or interval_ms <= 0:
+            return {
+                "verified_contiguous": None,
+                "error": f"Unsupported interval: {interval}",
+            }
+        selected_calendar = _resolve_trading_calendar(
+            exchange=resolved_exchange,
+            market_type=resolved_market_type,
+            symbol=symbol,
+            calendar=None,
+            calendar_resolver=self._calendar_resolver,
+            calendar_registry=self._calendar_registry,
+        )
+        if selected_calendar is None:
+            return {
+                "verified_contiguous": None,
+                "error": "Trading calendar could not be resolved",
+            }
+
+        range_start = int(start_ms)
+        range_end = int(end_ms)
+        if range_end < range_start:
+            return {
+                "verified_contiguous": False,
+                "error": "Invalid verification range",
+            }
+        expected_open = selected_calendar.first_expected_open(
+            range_start,
+            range_end,
+            interval,
+        )
+        actual_count = 0
+        expected_count = 0
+        with _connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT open_time
+                FROM klines
+                WHERE exchange = ?
+                  AND market_type = ?
+                  AND symbol = ?
+                  AND interval = ?
+                  AND open_time >= ?
+                  AND open_time <= ?
+                ORDER BY open_time ASC
+                """,
+                (
+                    resolved_exchange,
+                    resolved_market_type,
+                    symbol,
+                    interval,
+                    range_start,
+                    range_end,
+                ),
+            )
+            for row in cursor:
+                actual_open = int(row["open_time"])
+                actual_count += 1
+                if expected_open is None or actual_open != expected_open:
+                    return {
+                        "verified_contiguous": False,
+                        "actual_count": actual_count,
+                        "expected_count": expected_count,
+                        "expected_open_time": expected_open,
+                        "actual_open_time": actual_open,
+                    }
+                expected_count += 1
+                next_expected = selected_calendar.next_expected_open(
+                    expected_open,
+                    interval,
+                )
+                if next_expected is not None and next_expected <= expected_open:
+                    return {
+                        "verified_contiguous": None,
+                        "actual_count": actual_count,
+                        "expected_count": expected_count,
+                        "error": "Trading calendar did not advance",
+                    }
+                expected_open = (
+                    next_expected
+                    if next_expected is not None and next_expected <= range_end
+                    else None
+                )
+
+        verified = expected_open is None
+        return {
+            "verified_contiguous": verified,
+            "actual_count": actual_count,
+            "expected_count": expected_count + (0 if verified else 1),
+            "expected_open_time": expected_open,
+        }
 
     def list_series(
         self,
@@ -1131,9 +1312,20 @@ def delete_oldest_klines_batch(
     """Delete at most *batch_size* oldest bars while keeping newest *keep* rows."""
     if keep < 0:
         keep = 0
-    batch_size = max(1, int(batch_size or 1))
+    batch_size = min(1_000, max(1, int(batch_size or 1)))
 
-    with _connect() as conn:
+    # Storage GC is ordered with stream/subscription activation.  Fail fast on
+    # lock contention instead of holding that ordering guard through SQLite's
+    # normal 30-second busy timeout.
+    with _connect(
+        timeout_seconds=0.05,
+        configure_journal_mode=False,
+    ) as conn:
+        execution_deadline = time.perf_counter() + 0.05
+        conn.set_progress_handler(
+            lambda: 1 if time.perf_counter() >= execution_deadline else 0,
+            1_000,
+        )
         count_row = conn.execute(
             "SELECT COUNT(*) AS cnt FROM klines "
             "WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ?",
@@ -1162,7 +1354,14 @@ def delete_oldest_klines_batch(
 
 def wal_checkpoint_truncate() -> dict:
     """Run a WAL truncate checkpoint and return SQLite's result tuple."""
-    with _connect() as conn:
+    # Automatic checkpointing must never occupy the storage executor through
+    # the normal 30-second busy timeout.  Do not negotiate journal mode here;
+    # an initialized database is already in WAL mode and contention fails
+    # closed through the returned busy flag.
+    with _connect(
+        timeout_seconds=0.05,
+        configure_journal_mode=False,
+    ) as conn:
         row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
     values = tuple(row) if row is not None else ()
     return {

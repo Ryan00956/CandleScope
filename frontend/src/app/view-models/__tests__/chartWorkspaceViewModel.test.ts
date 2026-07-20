@@ -12,6 +12,8 @@ interface ContextOverrides {
   indicatorActions?: object;
   marketActions?: object;
   settingsActions?: object;
+  tradeFlowActions?: object;
+  watchlistView?: object;
 }
 
 function buildContext({
@@ -20,6 +22,8 @@ function buildContext({
   indicatorActions = {},
   marketActions = {},
   settingsActions = {},
+  tradeFlowActions = {},
+  watchlistView = {},
 }: ContextOverrides = {}): WorkspaceContext {
   return structuralMock<WorkspaceContext>({
     chartSettings: structuralMock<WorkspaceContext["chartSettings"]>(chartSettings),
@@ -53,8 +57,11 @@ function buildContext({
       symbol: "BTCUSDT",
     },
     settingsActions,
+    tradeFlowActions,
+    tradeFlowStatus: { enabled: false },
+    tradeFlowView: {},
     watchlistActions: {},
-    watchlistView: {},
+    watchlistView,
   });
 }
 
@@ -161,6 +168,21 @@ test("chart range handlers separate indicator coverage from user persistence", (
   assert.deepEqual(persistedRanges, [range]);
 });
 
+test("watchlist workspace receives the stable external price store handle", () => {
+  const priceStore = {
+    getSnapshot: () => ({}),
+    getSymbolSnapshot: () => undefined,
+    subscribe: () => () => {},
+    subscribeSymbol: () => () => {},
+  };
+  const model = buildChartWorkspaceViewModel(buildContext({
+    watchlistView: { priceStore },
+  }));
+
+  assert.equal(model.watchlist.priceStore, priceStore);
+  assert.equal("prices" in model.watchlist, false);
+});
+
 test("pane delete controls dispatch to the owning indicator or market study", () => {
   const removed: string[] = [];
   const model = buildChartWorkspaceViewModel(buildContext({
@@ -169,6 +191,9 @@ test("pane delete controls dispatch to the owning indicator or market study", ()
     },
     indicatorActions: {
       removeIndicator: (id: string) => { removed.push(`indicator:${id}`); },
+    },
+    tradeFlowActions: {
+      removeIndicator: (id: string) => { removed.push(`trade-flow:${id}`); },
     },
   }));
   const removePane = mustBeDefined(model.chart.chartProps.onRemoveSubPane);
@@ -191,9 +216,22 @@ test("pane delete controls dispatch to the owning indicator or market study", ()
     lines: [],
     owner: { kind: "market-study", id: "not-a-market-study" },
   });
+  removePane({
+    id: "trade-flow-cvd",
+    label: "CVD",
+    lines: [],
+    owner: { kind: "trade-flow", id: "trade-flow:cvd" },
+  });
+  removePane({
+    id: "unknown-trade-flow",
+    label: "Unknown",
+    lines: [],
+    owner: { kind: "trade-flow", id: "workspace" },
+  });
 
   assert.deepEqual(removed, [
     "indicator:rsi",
     "market:market:funding-rate",
+    "trade-flow:trade-flow:cvd",
   ]);
 });

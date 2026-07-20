@@ -61,12 +61,23 @@ class BarSeries:
     Not thread-safe on its own — the outer ``BarCache`` handles locking.
     """
 
-    __slots__ = ("_bars", "_max_bars", "_last_access_ms", "_time_index")
+    __slots__ = (
+        "_bars",
+        "_max_bars",
+        "_last_access_ms",
+        "_generation",
+        "_revision",
+        "_access_revision",
+        "_time_index",
+    )
 
-    def __init__(self, max_bars: int = 5000) -> None:
+    def __init__(self, max_bars: int = 5000, *, generation: int = 0) -> None:
         self._bars: list[BarData] = []
         self._max_bars = max_bars
         self._last_access_ms: int = int(time.time() * 1000)
+        self._generation = int(generation)
+        self._revision = 0
+        self._access_revision = 0
         # Separate sorted list of timestamps for fast bisect lookups
         self._time_index: list[int] = []
 
@@ -79,6 +90,21 @@ class BarSeries:
     @property
     def last_access_ms(self) -> int:
         return self._last_access_ms
+
+    @property
+    def generation(self) -> int:
+        """Cache-wide incarnation id that never repeats for a recreated key."""
+        return self._generation
+
+    @property
+    def revision(self) -> int:
+        """Monotonic mutation revision used by conditional maintenance."""
+        return self._revision
+
+    @property
+    def access_revision(self) -> int:
+        """Monotonic read revision used to invalidate stale GC plans."""
+        return self._access_revision
 
     @property
     def earliest_time(self) -> int | None:
@@ -99,6 +125,7 @@ class BarSeries:
         Returns a list of evicted bars (may be empty).
         """
         self._last_access_ms = int(time.time() * 1000)
+        self._revision += 1
         evicted: list[BarData] = []
 
         if self._bars and self._bars[-1].time == bar.time:
@@ -129,6 +156,7 @@ class BarSeries:
         Returns evicted bars.
         """
         self._last_access_ms = int(time.time() * 1000)
+        self._revision += 1
         idx = bisect.bisect_left(self._time_index, bar.time)
 
         if idx < len(self._time_index) and self._time_index[idx] == bar.time:
@@ -150,6 +178,7 @@ class BarSeries:
             return []
 
         self._last_access_ms = int(time.time() * 1000)
+        self._revision += 1
         evicted: list[BarData] = []
 
         if not self._bars:
@@ -177,6 +206,8 @@ class BarSeries:
 
     def clear(self) -> None:
         """Remove all bars from this series."""
+        if self._bars:
+            self._revision += 1
         self._bars.clear()
         self._time_index.clear()
 
@@ -184,7 +215,7 @@ class BarSeries:
 
     def get_latest(self, limit: int) -> list[BarData]:
         """Return the most recent ``limit`` bars (ascending order)."""
-        self._last_access_ms = int(time.time() * 1000)
+        self._mark_access()
         if limit >= len(self._bars):
             return list(self._bars)
         return list(self._bars[-limit:])
@@ -200,7 +231,7 @@ class BarSeries:
         Times are in **seconds** (matching ``BarData.time``).
         Returns bars sorted ascending, capped by ``limit``.
         """
-        self._last_access_ms = int(time.time() * 1000)
+        self._mark_access()
 
         if not self._bars:
             return []
@@ -220,6 +251,7 @@ class BarSeries:
 
     def get_bar_at(self, time_seconds: int) -> BarData | None:
         """Get a single bar at an exact timestamp."""
+        self._mark_access()
         idx = bisect.bisect_left(self._time_index, time_seconds)
         if idx < len(self._time_index) and self._time_index[idx] == time_seconds:
             return self._bars[idx]
@@ -227,12 +259,16 @@ class BarSeries:
 
     def get_before(self, before_time: int, limit: int) -> list[BarData]:
         """Get bars strictly before ``before_time``, ascending order."""
-        self._last_access_ms = int(time.time() * 1000)
+        self._mark_access()
         idx = bisect.bisect_left(self._time_index, before_time)
         start = max(0, idx - limit)
         return list(self._bars[start:idx])
 
     # ── Internal ─────────────────────────────────────────────
+
+    def _mark_access(self) -> None:
+        self._last_access_ms = int(time.time() * 1000)
+        self._access_revision += 1
 
     def _insert_sorted(self, bar: BarData) -> list[BarData]:
         """Insert a bar in sorted position.  Returns evicted bars."""
@@ -258,6 +294,9 @@ class BarSeries:
             "earliest_time": self.earliest_time,
             "latest_time": self.latest_time,
             "last_access_ms": self._last_access_ms,
+            "generation": self._generation,
+            "revision": self._revision,
+            "access_revision": self._access_revision,
         }
 
 
@@ -291,6 +330,9 @@ class BarCache:
         self._lock = threading.Lock()
         # OrderedDict for LRU tracking — most recently used at the end
         self._series: OrderedDict[SeriesKey, BarSeries] = OrderedDict()
+        # Monotonic across remove/clear/LRU cycles so a stale plan cannot pass
+        # revision checks against a newly-created incarnation of the same key.
+        self._next_series_generation = 0
         # Eviction callbacks
         self._eviction_callbacks: list[Any] = []
         # Configurable ephemeral cache limit (default 86400 = 24h of 1s)
@@ -352,6 +394,32 @@ class BarCache:
             removed = series.count
             logger.debug("Removed cache series %s (%d bars)", key, removed)
             return removed
+
+    def remove_series_if_unchanged(
+        self,
+        key: SeriesKey,
+        *,
+        expected_generation: int,
+        expected_revision: int,
+        expected_access_revision: int,
+        expected_last_access_ms: int,
+    ) -> tuple[int, str]:
+        """Atomically remove a series only when its plan snapshot is current."""
+        with self._lock:
+            series = self._series.get(key)
+            if series is None:
+                return 0, "missing"
+            if (
+                series.generation != expected_generation
+                or series.revision != expected_revision
+                or series.access_revision != expected_access_revision
+                or series.last_access_ms != expected_last_access_ms
+            ):
+                return 0, "stale"
+            removed = series.count
+            self._series.pop(key, None)
+            logger.debug("Conditionally removed cache series %s (%d bars)", key, removed)
+            return removed, "removed"
 
     def clear(self) -> None:
         """Remove all cached data."""
@@ -488,11 +556,48 @@ class BarCache:
             overflow = series.count - max_bars
             series._bars = series._bars[overflow:]
             series._time_index = series._time_index[overflow:]
+            series._revision += 1
             logger.debug(
                 "Trimmed %s: removed %d oldest bars (kept %d)",
                 key, overflow, series.count,
             )
             return overflow
+
+    def trim_series_if_unchanged(
+        self,
+        key: SeriesKey,
+        max_bars: int,
+        *,
+        expected_generation: int,
+        expected_revision: int,
+        expected_access_revision: int,
+        expected_last_access_ms: int,
+    ) -> tuple[int, str]:
+        """Atomically trim a series only when its plan snapshot is current."""
+        with self._lock:
+            series = self._series.get(key)
+            if series is None:
+                return 0, "missing"
+            if (
+                series.generation != expected_generation
+                or series.revision != expected_revision
+                or series.access_revision != expected_access_revision
+                or series.last_access_ms != expected_last_access_ms
+            ):
+                return 0, "stale"
+            if series.count <= max_bars:
+                return 0, "unchanged"
+            overflow = series.count - max_bars
+            series._bars = series._bars[overflow:]
+            series._time_index = series._time_index[overflow:]
+            series._revision += 1
+            logger.debug(
+                "Conditionally trimmed %s: removed %d oldest bars (kept %d)",
+                key,
+                overflow,
+                series.count,
+            )
+            return overflow, "trimmed"
 
     def set_ephemeral_limit(self, max_bars: int) -> None:
         """Update the ephemeral cache limit (e.g. from user settings).
@@ -500,8 +605,11 @@ class BarCache:
         Does NOT immediately trim existing series — the periodic
         cleanup task handles that.
         """
-        self._ephemeral_max_bars = max_bars
-        logger.info("Ephemeral cache limit updated to %d bars", max_bars)
+        normalized = int(max_bars)
+        if normalized < 1 or normalized > 1_000_000:
+            raise ValueError("ephemeral cache limit must be between 1 and 1000000 bars")
+        self._ephemeral_max_bars = normalized
+        logger.info("Ephemeral cache limit updated to %d bars", normalized)
 
     def get_ephemeral_limit(self) -> int:
         """Return the configured max bars for ephemeral cache series."""
@@ -524,6 +632,14 @@ class BarCache:
                     str(key): series.snapshot()
                     for key, series in self._series.items()
                 },
+            }
+
+    def health_snapshot(self) -> dict[str, int]:
+        """Return the constant-size counters needed by ``/health``."""
+        with self._lock:
+            return {
+                "series_count": len(self._series),
+                "total_bars": sum(series.count for series in self._series.values()),
             }
 
     # ── Internal ─────────────────────────────────────────────
@@ -550,7 +666,11 @@ class BarCache:
         else:
             max_bars = self._cfg.max_bars_per_series
 
-        series = BarSeries(max_bars=max_bars)
+        self._next_series_generation += 1
+        series = BarSeries(
+            max_bars=max_bars,
+            generation=self._next_series_generation,
+        )
         self._series[key] = series
         return series
 

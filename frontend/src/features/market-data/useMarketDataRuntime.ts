@@ -16,6 +16,7 @@ import { useSessionTransitionReset } from "./useSessionTransitionReset.js";
 import { INDICATOR_RANGE_REQUEST_REASONS, useMarketDataEvents } from "./marketDataEvents.js";
 import { defaultKlineApi } from "./feed/klineApi.js";
 import { SeriesDataFeed } from "./feed/seriesDataFeed.js";
+import type { VisibleTimeRangeLike } from "./feed/gapRepairPlanner.js";
 import type {
   BackfillCompletedMessage,
   IndicatorRangeEvent,
@@ -212,6 +213,16 @@ export function useMarketDataRuntime({
     setDataSource,
   });
 
+  const getSeriesCacheRows = useCallback((series: {
+    exchange: ExchangeId;
+    marketType: MarketType;
+    symbol: SymbolCode;
+    interval: IntervalString;
+  }) => getCache(series.symbol, series.interval, {
+    marketType: series.marketType,
+    exchange: series.exchange,
+  }) || [], [getCache]);
+
   const handleBackfillCompleted = useCallback((msg: BackfillCompletedMessage) => seriesDataFeed.handleBackfillCompleted(msg, {
     activeSeries: {
       exchange,
@@ -221,20 +232,18 @@ export function useMarketDataRuntime({
     },
     loading: loadingRef.current,
     pendingInitial: pendingInitialHistoryRef.current,
+    getPendingInitial: () => pendingInitialHistoryRef.current,
     clearPendingInitial: () => {
       pendingInitialHistoryRef.current = null;
     },
-    getCacheRows: (series) => getCache(series.symbol, series.interval, {
-      marketType: series.marketType,
-      exchange: series.exchange,
-    }) || [],
+    getCacheRows: getSeriesCacheRows,
     setLastPrice,
     setError,
     setConnectionStatus,
     setLoading,
   }), [
     exchange,
-    getCache,
+    getSeriesCacheRows,
     intervalRef,
     loadingRef,
     marketType,
@@ -256,6 +265,7 @@ export function useMarketDataRuntime({
     seriesDataFeed,
     commitPatchedChartData,
     patchCacheTick,
+    getCacheRows: getSeriesCacheRows,
     updateLastPrice,
     updateRealtimePrice,
     handleBackfillCompleted,
@@ -303,6 +313,27 @@ export function useMarketDataRuntime({
     void loadData(symbol, interval, marketType, exchange);
   }, [exchange, interval, loadData, marketType, symbol]);
 
+  const handleMarketVisibleRangeChange = useCallback((range: unknown) => {
+    handleVisibleRangeChange(range, chartDataMeta);
+    const series = { exchange, marketType, symbol, interval };
+    const heldRows = getSeriesCacheRows(series);
+    void seriesDataFeed.repairVisibleGaps(
+      series,
+      heldRows,
+      range as VisibleTimeRangeLike,
+      { source: "visible-window-gap-planner" },
+    );
+  }, [
+    chartDataMeta,
+    exchange,
+    getSeriesCacheRows,
+    handleVisibleRangeChange,
+    interval,
+    marketType,
+    seriesDataFeed,
+    symbol,
+  ]);
+
   const display = useMemo(
     () => buildChartDisplayState({
       lastPrice: lastPrice as MarketDisplayData | null,
@@ -332,7 +363,7 @@ export function useMarketDataRuntime({
       retry,
       loadMoreLeft: handleNeedMoreLeft,
       onCrosshairMove: publishCrosshairData,
-      onVisibleRangeChange: (range: unknown) => handleVisibleRangeChange(range, chartDataMeta),
+      onVisibleRangeChange: handleMarketVisibleRangeChange,
       consumeIndicatorRangeRequest,
     },
     status: {

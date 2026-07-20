@@ -93,15 +93,54 @@ function addNotional(
   else bucket.shortNotional = (bucket.shortNotional ?? 0) + notional;
 }
 
+function sortedBy<T>(
+  values: readonly T[],
+  timeOf: (value: T) => number,
+): readonly T[] {
+  for (let index = 1; index < values.length; index += 1) {
+    const previous = values[index - 1];
+    const current = values[index];
+    if (previous && current && timeOf(previous) > timeOf(current)) {
+      return [...values].sort((left, right) => timeOf(left) - timeOf(right));
+    }
+  }
+  return values;
+}
+
+function lowerBoundBy<T>(
+  values: readonly T[],
+  target: number,
+  timeOf: (value: T) => number,
+): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const value = values[middle];
+    if (value && timeOf(value) < target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
 export function projectLiquidationsToCandles(
   rollups: readonly LiquidationRollup[],
   liveEvents: readonly LiquidationEvent[],
   bars: readonly KlineBar[],
   interval: unknown,
+  { inputsSorted = false }: { inputsSorted?: boolean } = {},
 ): ProjectedBucket[] {
   if (bars.length === 0) return [];
-  const sortedBars = [...bars].sort((left, right) => left.time - right.time);
+  const sortedBars = inputsSorted ? bars : sortedBy(bars, (bar) => bar.time);
+  const sortedRollups = inputsSorted
+    ? rollups
+    : sortedBy(rollups, (row) => row.bucketStartMs);
+  const sortedEvents = inputsSorted
+    ? liveEvents
+    : sortedBy(liveEvents, (event) => event.tradeTimeMs);
   const intervalSeconds = Math.max(60, parseIntervalSeconds(interval) ?? 60);
+  const visibleStartMs = sortedBars[0]!.time * 1000;
+  const visibleEndMs = (sortedBars.at(-1)!.time + intervalSeconds) * 1000;
   const buckets = new Map<number, MutableProjectedBucket>();
   const getBucket = (sampleTimeMs: number): MutableProjectedBucket | null => {
     const index = barIndexAt(sortedBars, sampleTimeMs / 1000, intervalSeconds);
@@ -122,25 +161,36 @@ export function projectLiquidationsToCandles(
     return bucket;
   };
 
-  for (const row of rollups) {
+  const rollupStart = lowerBoundBy(sortedRollups, visibleStartMs, (row) => row.bucketStartMs);
+  const rollupEnd = lowerBoundBy(sortedRollups, visibleEndMs, (row) => row.bucketStartMs);
+  for (let index = rollupStart; index < rollupEnd; index += 1) {
+    const row = sortedRollups[index];
+    if (!row) continue;
     const bucket = getBucket(row.bucketStartMs);
     if (!bucket) continue;
     addNotional(bucket, row.positionSide, row.filledNotional);
     bucket.rowCount += 1;
     bucket.allRowsFinal = bucket.allRowsFinal && row.isFinal;
   }
-  for (const event of liveEvents) {
+  const eventStart = lowerBoundBy(sortedEvents, visibleStartMs, (event) => event.tradeTimeMs);
+  const eventEnd = lowerBoundBy(sortedEvents, visibleEndMs, (event) => event.tradeTimeMs);
+  for (let index = eventStart; index < eventEnd; index += 1) {
+    const event = sortedEvents[index];
+    if (!event) continue;
     const bucket = getBucket(event.tradeTimeMs);
     if (!bucket) continue;
     addNotional(bucket, event.positionSide, event.executedNotional);
     bucket.hasLiveEvents = true;
   }
-  return [...buckets.values()]
-    .sort((left, right) => left.time - right.time)
-    .map(({ rowCount, ...bucket }) => ({
-      ...bucket,
+  return sortedBars.flatMap((bar) => {
+    const bucket = buckets.get(bar.time);
+    if (!bucket) return [];
+    const { rowCount, ...projected } = bucket;
+    return [{
+      ...projected,
       allRowsFinal: rowCount > 0 && bucket.allRowsFinal && !bucket.hasLiveEvents,
-    }));
+    }];
+  });
 }
 
 function metadataForBucket(bucket: ProjectedBucket): IndicatorPanePointMetadata {
@@ -183,6 +233,7 @@ export function buildLiquidationPane(
     snapshot.liveEvents,
     bars,
     interval,
+    { inputsSorted: true },
   );
   const longData: IndicatorValuePoint[] = projected.flatMap((bucket) => (
     bucket.longNotional === null ? [] : [{ time: bucket.time, value: bucket.longNotional }]

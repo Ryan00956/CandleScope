@@ -44,6 +44,19 @@ export interface KlineBar extends Record<string, unknown> {
   low?: number;
   close?: number;
   volume?: number;
+  is_closed?: boolean;
+  quote_volume?: number | null;
+  trades?: number | null;
+  taker_buy_base?: number | null;
+  taker_buy_quote?: number | null;
+  order_flow?: KlineOrderFlow | null;
+}
+
+export interface KlineOrderFlow extends Record<string, unknown> {
+  taker_sell_base: number;
+  volume_delta_base: number;
+  taker_buy_ratio_base: number | null;
+  cvd_contribution_base: number;
 }
 
 export interface KlineBarInput extends Record<string, unknown> {

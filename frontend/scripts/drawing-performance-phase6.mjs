@@ -1,4 +1,6 @@
 import { PHASE6_LINEAGE_REPRESENTATION } from "./drawing-performance-phase6-lineage.mjs";
+import { phase6LatestWorkerPaintConverged } from "./drawing-performance-phase6-browser.mjs";
+import { devicePixelRatioMatches } from "./drawing-device-metrics.mjs";
 
 export const PHASE6_MIN_MEASURED_RUNS = 5;
 export const PHASE6_MIN_WARMUP_RUNS = 1;
@@ -277,6 +279,7 @@ function runtimeEvidenceForRun(scenarioId, run) {
     : null;
   const anchorResolveDelta = finiteNonNegative(runtime?.anchorResolveDelta);
   const workerResultDelayMs = finiteNonNegative(runtime?.workerResultDelayMs);
+  const latestWorkerPainted = phase6LatestWorkerPaintConverged(runtime);
   const sourceLineageExactResolveCount = finiteNonNegative(
     runtime?.sourceLineageExactResolveCount,
   );
@@ -333,6 +336,7 @@ function runtimeEvidenceForRun(scenarioId, run) {
       && workerJobDelta >= pendingDropDelta + 2
       && workerResultDelta !== null
       && staleResultDropDelta !== null
+      && latestWorkerPainted
       && workerResultDelayMs !== null
       && workerResultDelayMs === finiteNonNegative(probe?.backpressureDelayMs)
       && workerResultDelayMs > 0
@@ -400,6 +404,7 @@ function runtimeEvidenceForRun(scenarioId, run) {
     backend: runtime?.backend ?? null,
     backendSource: runtime?.backendSource ?? null,
     workerResultDelayMs,
+    latestWorkerPainted,
     sourceLineageExactResolveCount,
     sourceLineageFallbackResolveCount,
     sourceLineageUnresolvedResolveCount,
@@ -501,10 +506,26 @@ function actionEvidenceForRun(scenarioId, run) {
     };
   }
   if (scenarioId === PHASE6_SCENARIO_IDS.workerBackpressure) {
+    const workerDrainPassed = action.workerDrainWaitPassed === true
+      && phase6LatestWorkerPaintConverged({
+        backend: action.workerDrainBackend,
+        queueDepthCurrent: action.workerDrainQueueDepthCurrent,
+        inFlightCurrent: action.workerDrainInFlightCurrent,
+        workerResultDelta: action.workerDrainResultDelta,
+        lastRequestedStamp: action.workerDrainRequestedStamp,
+        lastPublishedStamp: action.workerDrainPublishedStamp,
+        lastPaintedStamp: action.workerDrainPaintedStamp,
+        latestSubmittedWorkerIdentity: action.workerDrainLatestSubmittedIdentity,
+        publishedWorkerIdentity: action.workerDrainPublishedIdentity,
+        paintedWorkerIdentity: action.workerDrainPaintedIdentity,
+        paintReceipt: action.workerDrainPaintReceipt,
+      });
     return {
       currentPaintPassed,
+      workerDrainPassed,
       passed: finiteNonNegative(action.workerBackpressureWheelEventsDispatched) >= 64
-        && currentPaintPassed,
+        && currentPaintPassed
+        && workerDrainPassed,
     };
   }
   return {
@@ -572,15 +593,21 @@ export function buildPhase6Acceptance(report, args = {}) {
   );
   const configuredDpr = Number(report?.environment?.dpr);
   const browserEnvironmentEvidence = requiredScenarios.flatMap((scenario) => measuredRuns(scenario)
-    .map((run) => ({
-      scenarioId: scenario.id,
-      runId: run?.id ?? null,
-      windowState: run?.browserWindow?.windowState ?? null,
-      visibilityState: run?.browserWindow?.visibilityState ?? null,
-      hidden: run?.browserWindow?.hidden ?? null,
-      windowDpr: finiteNumber(run?.browserWindow?.devicePixelRatio),
-      benchDpr: finiteNumber(run?.bench?.devicePixelRatio),
-    })));
+    .map((run) => {
+      const windowDpr = finiteNumber(run?.browserWindow?.devicePixelRatio);
+      const benchDpr = finiteNumber(run?.bench?.devicePixelRatio);
+      return {
+        scenarioId: scenario.id,
+        runId: run?.id ?? null,
+        windowState: run?.browserWindow?.windowState ?? null,
+        visibilityState: run?.browserWindow?.visibilityState ?? null,
+        hidden: run?.browserWindow?.hidden ?? null,
+        windowDpr,
+        benchDpr,
+        windowDprPassed: devicePixelRatioMatches(windowDpr, configuredDpr),
+        benchDprPassed: devicePixelRatioMatches(benchDpr, configuredDpr),
+      };
+    }));
   const browserEnvironmentPassed = headedModePassed
     && Number.isFinite(configuredDpr)
     && configuredDpr > 0
@@ -589,8 +616,8 @@ export function buildPhase6Acceptance(report, args = {}) {
       evidence.windowState === "normal"
       && evidence.visibilityState === "visible"
       && evidence.hidden === false
-      && evidence.windowDpr === configuredDpr
-      && evidence.benchDpr === configuredDpr
+      && evidence.windowDprPassed
+      && evidence.benchDprPassed
     ));
   const runtimeEvidencePassed = runtimeEvidence.length
     === measuredRunCount

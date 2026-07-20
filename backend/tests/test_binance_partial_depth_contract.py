@@ -116,6 +116,12 @@ def test_partial_depth_capability_is_replaceable_snapshot_with_current_speeds() 
         "bids",
         "asks",
     }
+    spot = BinancePlugin().capabilities().channel_capability(
+        MarketChannel.DEPTH,
+        "spot",
+    )
+    assert spot is not None
+    assert spot.update_intervals_ms == (100, 1000)
 
 
 def test_default_depth_stream_names_preserve_existing_unsuffixed_behavior() -> None:

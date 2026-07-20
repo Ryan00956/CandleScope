@@ -1,6 +1,7 @@
 import type { ChartWorkspaceProps } from "../ChartWorkspace.js";
 import type { AppShellViewModelContext } from "../appShellContracts.js";
 import { isMarketMetricId } from "../../features/advanced-market-data/marketMetricSelectionTypes.js";
+import { isTradeFlowIndicatorId } from "../../features/trade-flow/tradeFlowTypes.js";
 
 function errorMessage(error: unknown): string | null {
   if (error == null) return null;
@@ -34,6 +35,9 @@ export function buildChartWorkspaceViewModel({
   orderBookActions,
   orderBookStatus,
   orderBookView,
+  tradeFlowActions,
+  tradeFlowStatus,
+  tradeFlowView,
 }: AppShellViewModelContext): ChartWorkspaceProps {
   const {
     symbol,
@@ -158,6 +162,10 @@ export function buildChartWorkspaceViewModel({
           }
           if (owner.kind === "market-study" && isMarketMetricId(owner.id)) {
             advancedMarketActions.removeMarketStudy(owner.id);
+            return;
+          }
+          if (owner.kind === "trade-flow" && isTradeFlowIndicatorId(owner.id)) {
+            tradeFlowActions.removeIndicator(owner.id);
           }
         },
         invertScale: priceScaleView.invertScale,
@@ -174,7 +182,7 @@ export function buildChartWorkspaceViewModel({
       watchlists: watchlistView.watchlists,
       layout: watchlistView.layout,
       actions: watchlistActions,
-      prices: watchlistView.prices,
+      priceStore: watchlistView.priceStore,
       subscriptionTiers: watchlistView.subscriptionTiers,
       subscriptionResourceSummaries: watchlistView.subscriptionResourceSummaries,
       onTierChange: watchlistActions.handleTierChange,
@@ -185,6 +193,11 @@ export function buildChartWorkspaceViewModel({
       view: orderBookView,
       actions: orderBookActions,
       status: orderBookStatus,
+    },
+    tradeFlow: {
+      view: tradeFlowView,
+      actions: tradeFlowActions,
+      status: tradeFlowStatus,
     },
   };
 }

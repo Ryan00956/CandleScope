@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from app.api.v1.stream_klines import should_forward_browser_event
+import asyncio
+
+from app.api.v1.stream_klines import _KlineWsOutbox, should_forward_browser_event
 from app.data_engine.data_manager.models import (
     BarData,
     DataEvent,
@@ -40,3 +42,38 @@ def test_bar_events_are_forwarded_regardless_of_audience() -> None:
     )
 
     assert should_forward_browser_event(event) is True
+
+
+def test_multi_kline_outbox_keeps_latest_forming_update_without_crossing_final() -> None:
+    async def _run() -> None:
+        outbox = _KlineWsOutbox(maxsize=8)
+        key = ("binance", "spot", "BTCUSDT", "1m")
+
+        assert await outbox.put({"seq": 1}, key=key, replaceable=True)
+        assert await outbox.put({"seq": 2}, key=key, replaceable=True)
+        assert await outbox.put({"seq": 3, "closed": True}, key=key)
+        assert await outbox.put({"seq": 4}, key=key, replaceable=True)
+
+        assert await outbox.get() == {"seq": 2}
+        assert await outbox.get() == {"seq": 3, "closed": True}
+        assert await outbox.get() == {"seq": 4}
+
+    asyncio.run(_run())
+
+
+def test_multi_kline_outbox_keeps_forming_index_after_final_enqueue_timeout() -> None:
+    async def _run() -> None:
+        outbox = _KlineWsOutbox(maxsize=1)
+        key = ("binance", "spot", "BTCUSDT", "1m")
+
+        assert await outbox.put({"seq": 1}, key=key, replaceable=True)
+        assert not await outbox.put(
+            {"seq": 2, "closed": True},
+            key=key,
+            timeout=0.01,
+        )
+        assert await outbox.put({"seq": 3}, key=key, replaceable=True)
+        assert outbox._queue.qsize() == 1
+        assert await outbox.get() == {"seq": 3}
+
+    asyncio.run(_run())

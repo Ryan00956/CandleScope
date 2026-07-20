@@ -88,12 +88,14 @@ import {
 import type { DrawingPerfRuntimeSummary } from "./performance/drawingPerfCounters.js";
 import {
   createDrawingScenePrimitiveBridge,
+  drawingSceneBridgePlanMatchesFrame,
 } from "../../chart-adapter/drawingScenePrimitiveBridge.js";
 import type {
   DrawingScenePrimitiveBridge,
   DrawingScenePrimitiveBridgeSnapshot,
 } from "../../chart-adapter/drawingScenePrimitiveBridge.js";
 import { DrawingScenePrimitive } from "./rendering/DrawingScenePrimitive.js";
+import type { DrawingScenePaintAck } from "./rendering/DrawingScenePrimitive.js";
 import {
   drawingDisplayEntityScreenHandles,
   drawingDisplayEntityScreenBox,
@@ -541,6 +543,22 @@ export function createDrawingCommittedPaintTicket(
   });
 }
 
+/** Notify dynamic overlays at accepted publication time, before the chart paint ACK. */
+export function publishVisibleDrawingScenePlan<
+  TPlan extends Readonly<{ stamp: DrawingCommittedPaintTicket }>,
+>(
+  plan: TPlan,
+  publish: (plan: TPlan) => boolean,
+  listeners: ReadonlySet<(stamp: DrawingCommittedPaintTicket) => void>,
+): boolean {
+  if (!publish(plan)) return false;
+  for (const listener of Array.from(listeners)) {
+    if (!listeners.has(listener)) continue;
+    try { listener(plan.stamp); } catch { /* publication remains authoritative */ }
+  }
+  return true;
+}
+
 export function visibleSceneSelectedId(
   selectedId: string | null,
   dynamicOverlayEnabled: boolean,
@@ -812,6 +830,7 @@ export function useDrawingPersistenceLifecycle({
   completeSurfaceDispose(): void;
   invalidateSurfaceCredentialsForSeriesReplacement(): void;
   invalidateVisibleScene(): boolean;
+  flushVisibleScene(): boolean;
   synchronizeVisibleSceneVisibility(
     hidden: boolean,
     options?: DrawingSceneHiddenTransitionOptions,
@@ -827,6 +846,11 @@ export function useDrawingPersistenceLifecycle({
     listener: (stamp: DrawingCommittedPaintTicket) => void,
     options?: Readonly<{ replayLastPaint?: boolean }>,
   ): () => void;
+  subscribeVisibleScenePublication(
+    listener: (stamp: DrawingCommittedPaintTicket) => void,
+    options?: Readonly<{ replayLastPublication?: boolean }>,
+  ): () => void;
+  subscribeVisibleSceneExactPaint(listener: (ack: DrawingScenePaintAck) => void): () => void;
   prepareUserMutationScope(): boolean;
   prepareSurfaceDispose(): boolean;
   hitTestScene(x: number, y: number): DrawingDisplayHitResult | null;
@@ -848,6 +872,11 @@ export function useDrawingPersistenceLifecycle({
   ): boolean;
 } {
   const authorityMode = resolveDrawingDocumentAuthorityMode();
+  // The process-wide diagnostics API remains backward compatible while every
+  // native pane owns an independent drawing runtime. Main-pane providers win
+  // when mounted; a subpane provider remains available when it is the only
+  // restored surface.
+  const drawingPerfProviderPriority = symbol.endsWith("__main") ? 100 : 0;
   const [engineMode] = useState(() => (
     authorityMode === "document"
       ? resolvePhase4DrawingEngineMode()
@@ -923,6 +952,9 @@ export function useDrawingPersistenceLifecycle({
     ),
     onCurrentPaintRejected: () => scenePaintRecoveryDelegate.read()(),
   }));
+  const [visibleScenePublicationListeners] = useState(() => (
+    new Set<(stamp: DrawingCommittedPaintTicket) => void>()
+  ));
   // Effect cleanups suspend this state-owned runtime instead of disposing it.
   // React StrictMode replays cleanup/setup against the same state instance in
   // development; disposing here would make the second activation permanently
@@ -1219,7 +1251,11 @@ export function useDrawingPersistenceLifecycle({
           dynamicOverlayEnabled,
           activeOverlayEntityIdRef?.current ?? null,
         ),
-        publishScene: (plan) => sceneBridge.publish(plan),
+        publishScene: (plan) => publishVisibleDrawingScenePlan(
+          plan,
+          (candidate) => sceneBridge.publish(candidate),
+          visibleScenePublicationListeners,
+        ),
         subscribeScenePainted: (listener) => sceneBridge.subscribePainted(
           (ack) => listener(ack.stamp),
         ),
@@ -1284,7 +1320,7 @@ export function useDrawingPersistenceLifecycle({
         return result;
       } } : {}),
     });
-  }, [activeOverlayEntityIdRef, authorityMode, dynamicOverlayEnabled, engineMode.effective, hiddenRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime, selectedIdRef]);
+  }, [activeOverlayEntityIdRef, authorityMode, dynamicOverlayEnabled, engineMode.effective, hiddenRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime, selectedIdRef, visibleScenePublicationListeners]);
 
   const commitPrimitiveDraft = useCallback((
     scopeKey: string,
@@ -1454,6 +1490,13 @@ export function useDrawingPersistenceLifecycle({
     return sceneRuntime.invalidate("interaction-overlay") || adapterInvalidated;
   }, [authorityMode, engineMode.effective, sceneAdapterGetterDelegate, sceneRuntime]);
 
+  const flushVisibleScene = useCallback((): boolean => {
+    if (authorityMode !== "document"
+      || engineMode.effective !== "scene-canary"
+      || !sceneCanaryEnabledRef.current) return false;
+    return sceneRuntime.flushNow();
+  }, [authorityMode, engineMode.effective, sceneRuntime]);
+
   const synchronizeVisibleSceneVisibility = useCallback((
     hidden: boolean,
     options: DrawingSceneHiddenTransitionOptions = {},
@@ -1490,6 +1533,31 @@ export function useDrawingPersistenceLifecycle({
     const lastPaintedStamp = sceneBridge.snapshot().lastPaintedStamp;
     if (replayLastPaint && lastPaintedStamp) listener(lastPaintedStamp);
     return unsubscribe;
+  }, [sceneBridge]);
+
+  const subscribeVisibleScenePublication = useCallback((
+    listener: (stamp: DrawingCommittedPaintTicket) => void,
+    { replayLastPublication = true }: Readonly<{
+      replayLastPublication?: boolean;
+    }> = {},
+  ): (() => void) => {
+    if (typeof listener !== "function") return () => {};
+    visibleScenePublicationListeners.add(listener);
+    const publishedStamp = sceneBridge.snapshot().publishedPlan?.stamp ?? null;
+    if (replayLastPublication && publishedStamp) listener(publishedStamp);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      visibleScenePublicationListeners.delete(listener);
+    };
+  }, [sceneBridge, visibleScenePublicationListeners]);
+
+  const subscribeVisibleSceneExactPaint = useCallback((
+    listener: (ack: DrawingScenePaintAck) => void,
+  ): (() => void) => {
+    if (typeof listener !== "function") return () => {};
+    return sceneBridge.subscribePainted(listener);
   }, [sceneBridge]);
 
   const prepareUserMutationScope = useCallback((): boolean => {
@@ -2004,7 +2072,7 @@ export function useDrawingPersistenceLifecycle({
         }),
       ...(plotRect ? { mainPanePlotRect: plotRect } : {}),
     };
-  }), [engineMode.effective, primitivesRef, sceneAdapterGetterDelegate, sceneBridge, sceneDocumentOnlyEnabled, sceneRuntime]);
+  }, { priority: drawingPerfProviderPriority }), [drawingPerfProviderPriority, engineMode.effective, primitivesRef, sceneAdapterGetterDelegate, sceneBridge, sceneDocumentOnlyEnabled, sceneRuntime]);
 
   useEffect(() => registerDrawingPerfPhase6RuntimeProvider(() => {
     const bridgeSnapshot = sceneBridge.snapshot();
@@ -2137,11 +2205,13 @@ export function useDrawingPersistenceLifecycle({
       returnedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.returnedWorkerIdentity),
       acceptedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.acceptedWorkerIdentity),
       publishedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.publishedWorkerIdentity),
+      paintedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.paintedWorkerIdentity),
       latestSubmittedWorkerIdentity: snapshotWorkerIdentity(
         runtimeSnapshot.latestSubmittedWorkerIdentity,
       ),
     });
-  }), [
+  }, { priority: drawingPerfProviderPriority }), [
+    drawingPerfProviderPriority,
     engineMode.effective,
     rasterBackend,
     sceneAdapterGetterDelegate,
@@ -2151,7 +2221,7 @@ export function useDrawingPersistenceLifecycle({
 
   useEffect(() => registerDrawingPerfActivePersistenceDocumentRecordProvider(() => (
     encodeDrawingDocumentRecord(activeStoreRef.current.getSnapshot(), 0)
-  )), []);
+  ), { priority: drawingPerfProviderPriority }), [drawingPerfProviderPriority]);
 
   useEffect(() => registerDrawingPerfLegacyCompatibilitySnapshotProvider(() => {
     const scopeKey = activeStoreRef.current.getSnapshot().scopeKey;
@@ -2165,7 +2235,7 @@ export function useDrawingPersistenceLifecycle({
       normalizedRaw: JSON.stringify(loaded.savedDrawings),
       record,
     });
-  }), []);
+  }, { priority: drawingPerfProviderPriority }), [drawingPerfProviderPriority]);
 
   useEffect(() => registerDrawingPerfPhase6HitOracleProvider((points) => {
     const runtimeSnapshot = sceneRuntime.snapshot();
@@ -2212,11 +2282,12 @@ export function useDrawingPersistenceLifecycle({
       indexedResults: Object.freeze(indexedResults),
       oracleResults: Object.freeze(oracleResults),
     });
-  }), [sceneRuntime, selectedIdRef]);
+  }, { priority: drawingPerfProviderPriority }), [drawingPerfProviderPriority, sceneRuntime, selectedIdRef]);
 
   useEffect(() => registerDrawingPerfShadowParityRequester(
     () => sceneRuntime.requestParity(),
-  ), [sceneRuntime]);
+    { priority: drawingPerfProviderPriority },
+  ), [drawingPerfProviderPriority, sceneRuntime]);
 
   const hitTestScene = useCallback((x: number, y: number): DrawingDisplayHitResult | null => {
     if (!sceneCanaryEnabledRef.current || hiddenRef.current) return null;
@@ -2232,17 +2303,32 @@ export function useDrawingPersistenceLifecycle({
     }
   }, [hiddenRef, sceneRuntime, selectedIdRef]);
 
+  const getCurrentScenePlan = useCallback((): DrawingScreenDisplayList | null => {
+    if (!sceneCanaryEnabledRef.current || hiddenRef.current) return null;
+    const plan = sceneBridge.snapshot().publishedPlan;
+    if (!plan) return null;
+    const document = activeStoreRef.current.getSnapshot();
+    if (plan.stamp.scopeKey !== document.scopeKey
+      || plan.stamp.documentRevision !== document.documentRevision) return null;
+    try {
+      const adapter = sceneAdapterGetterDelegate.read()();
+      const frame = adapter?.captureDrawingFrame?.() ?? null;
+      if (!frame || adapter?.isDrawingFrameCurrent?.(frame) !== true) return null;
+      return drawingSceneBridgePlanMatchesFrame(plan, frame) ? plan : null;
+    } catch {
+      return null;
+    }
+  }, [hiddenRef, sceneAdapterGetterDelegate, sceneBridge]);
+
   const getSceneScreenBox = useCallback((id: string): ScreenBox | null => {
-    if (!sceneCanaryEnabledRef.current) return null;
-    const plan = sceneRuntime.snapshot().plan;
+    const plan = getCurrentScenePlan();
     return plan ? drawingDisplayEntityScreenBox(plan, id) : null;
-  }, [sceneRuntime]);
+  }, [getCurrentScenePlan]);
 
   const getSceneScreenHandles = useCallback((id: string): readonly ScreenPoint[] | null => {
-    if (!sceneCanaryEnabledRef.current) return null;
-    const plan = sceneRuntime.snapshot().plan;
+    const plan = getCurrentScenePlan();
     return plan ? drawingDisplayEntityScreenHandles(plan, id) : null;
-  }, [sceneRuntime]);
+  }, [getCurrentScenePlan]);
 
   const getSavedDrawing = useCallback((id: string): SavedDrawing | null => {
     if (authorityMode !== "document" || !id) return null;
@@ -2765,6 +2851,7 @@ export function useDrawingPersistenceLifecycle({
     completeSurfaceDispose,
     invalidateSurfaceCredentialsForSeriesReplacement,
     invalidateVisibleScene,
+    flushVisibleScene,
     synchronizeVisibleSceneVisibility,
     persistActiveScopeDrawings,
     persistDetachedDrawings,
@@ -2782,5 +2869,7 @@ export function useDrawingPersistenceLifecycle({
     waitForExactExportScene,
     revalidateExportScene,
     subscribeVisibleScenePaint,
+    subscribeVisibleScenePublication,
+    subscribeVisibleSceneExactPaint,
   };
 }

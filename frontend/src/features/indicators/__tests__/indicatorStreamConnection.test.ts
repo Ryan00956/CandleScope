@@ -120,6 +120,66 @@ test("first forming preview is delivered before its subscribe acknowledgement", 
   controller.close();
 });
 
+test("messages retain wire signature and socket generation across a same-client replacement", () => {
+  const sockets: FakeSocket[] = [];
+  const timers = createTimers();
+  const received: Array<{
+    generation: number;
+    signature: string | undefined;
+    type: IndicatorWsMessage["type"];
+  }> = [];
+  const controller = new IndicatorStreamConnection({
+    url: "ws://example/indicators",
+    socketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    onMessage: (message, context) => received.push({
+      generation: context.wsGeneration,
+      signature: context.subscriptionSignature,
+      type: message.type,
+    }),
+    reconnectBaseMs: 5,
+    reconnectMaxMs: 5,
+    subscriptionAckTimeoutMs: 0,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+
+  controller.setSubscriptions([subscription("vol:v1")]);
+  controller.start();
+  const firstSocket = sockets[0] as FakeSocket;
+  firstSocket.open();
+  firstSocket.message({
+    type: "indicator.preview",
+    clientId: "vol",
+    values: { volume: 10 },
+    barTime: 1_700_000_000,
+  });
+  firstSocket.message({ type: "indicator.subscribed", clientId: "vol", interval: "1d" });
+
+  controller.setSubscriptions([subscription("vol:v2")]);
+  timers.run(0);
+  const secondSocket = sockets[1] as FakeSocket;
+  secondSocket.open();
+  secondSocket.message({
+    type: "indicator.preview",
+    clientId: "vol",
+    values: { volume: 20 },
+    barTime: 1_700_000_060,
+  });
+  secondSocket.message({ type: "indicator.subscribed", clientId: "vol", interval: "1d" });
+
+  assert.deepEqual(received, [
+    { generation: 1, signature: "vol:v1", type: "indicator.preview" },
+    { generation: 1, signature: "vol:v1", type: "indicator.subscribed" },
+    { generation: 2, signature: "vol:v2", type: "indicator.preview" },
+    { generation: 2, signature: "vol:v2", type: "indicator.subscribed" },
+  ]);
+  controller.close();
+});
+
 test("missing acknowledgement retries the identical subscription then reconnects", () => {
   const sockets: FakeSocket[] = [];
   const timers = createTimers();

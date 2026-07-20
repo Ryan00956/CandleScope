@@ -61,6 +61,8 @@ class _Handle:
 class _Factory:
     def __init__(self) -> None:
         self.start_calls = []
+        self.start_gates: dict[str, asyncio.Event] = {}
+        self.start_entered: dict[str, asyncio.Event] = {}
         self.stop_calls: list[tuple[str, str, str]] = []
         self.callbacks = {}
         self.gap_callbacks = {}
@@ -81,6 +83,10 @@ class _Factory:
             descriptor.symbol,
         )
         self.start_calls.append(descriptor)
+        gate = self.start_gates.get(descriptor.symbol)
+        if gate is not None:
+            self.start_entered.setdefault(descriptor.symbol, asyncio.Event()).set()
+            await gate.wait()
         self.callbacks[identity] = callback
         self.gap_callbacks[identity] = on_gap
         return _Handle(self, identity)
@@ -145,6 +151,9 @@ def _key(symbol: str = "BTCUSDT") -> MarketStreamKey:
 def _service(factory: _Factory, tmp_path, **kwargs) -> TradeFlowService:
     store = SQLiteTradeFlowRollupStore(tmp_path / "trade-flow.sqlite")
     writer = TradeFlowRollupWriter(store, flush_interval_seconds=0.01)
+    use_default_idle_grace = kwargs.pop("use_default_idle_grace", False)
+    if not use_default_idle_grace:
+        kwargs.setdefault("physical_idle_grace_seconds", 0)
     return TradeFlowService(
         factory,
         engine=kwargs.pop(
@@ -186,7 +195,210 @@ async def test_consumer_leases_share_one_physical_feed(tmp_path) -> None:
 
 
 @_async_test
-async def test_last_consumer_release_uses_bounded_stop_and_can_retry(tmp_path) -> None:
+async def test_last_consumer_release_enters_idle_grace_with_active_handle(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    service = _service(
+        factory,
+        tmp_path,
+        use_default_idle_grace=True,
+    )
+    await service.ensure_stream(_key(), consumer_id="owner")
+
+    assert await service.release_stream(_key(), consumer_id="owner") is True
+    diagnostics = service.diagnostics()
+    assert diagnostics["physical_streams"] == 1
+    assert diagnostics["logical_leases"] == 0
+    assert diagnostics["pending_idle_stops"] == 1
+    assert diagnostics["physical_idle_grace_seconds"] == 30.0
+    assert diagnostics["shutdown"]["physical_stop_timeout_seconds"] == 3.0
+    assert diagnostics["physical"][0]["idle_stop_pending"] is True
+    assert diagnostics["physical"][0]["stop_state"] == "active"
+    assert factory.stop_invocations == 0
+    with pytest.raises(RuntimeError, match="active leased physical streams"):
+        service.attach(_key())
+    await service.shutdown()
+
+
+@_async_test
+async def test_replacement_cancels_idle_stop_and_reuses_active_handle(tmp_path) -> None:
+    factory = _Factory()
+    service = _service(
+        factory,
+        tmp_path,
+        physical_idle_grace_seconds=0.05,
+    )
+    await service.ensure_stream(_key(), consumer_id="owner")
+    await service.release_stream(_key(), consumer_id="owner")
+
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    diagnostics = service.diagnostics()
+    assert diagnostics["pending_idle_stops"] == 0
+    assert diagnostics["physical"][0]["idle_stop_pending"] is False
+    assert diagnostics["physical"][0]["consumers"] == 1
+    assert diagnostics["physical_idle_stops_cancelled"] == 1
+    assert len(factory.start_calls) == 1
+    assert factory.stop_invocations == 0
+    await asyncio.sleep(0.07)
+    assert factory.stop_invocations == 0
+    await service.shutdown()
+
+
+@_async_test
+async def test_idle_grace_deadline_stops_physical_stream_once(tmp_path) -> None:
+    factory = _Factory()
+    service = _service(
+        factory,
+        tmp_path,
+        physical_idle_grace_seconds=0.02,
+    )
+    await service.ensure_stream(_key(), consumer_id="owner")
+    await service.release_stream(_key(), consumer_id="owner")
+
+    await _wait_until(lambda: service.diagnostics()["physical_streams"] == 0)
+    assert factory.stop_invocations == 1
+    assert factory.stop_calls == [IDENTITY]
+    assert service.diagnostics()["physical_idle_stops_expired"] == 1
+    await asyncio.sleep(0.03)
+    assert factory.stop_invocations == 1
+    await service.shutdown()
+
+
+@_async_test
+async def test_shutdown_bypasses_idle_grace_and_stops_immediately(tmp_path) -> None:
+    factory = _Factory()
+    service = _service(
+        factory,
+        tmp_path,
+        physical_idle_grace_seconds=30,
+    )
+    await service.ensure_stream(_key(), consumer_id="owner")
+    await service.release_stream(_key(), consumer_id="owner")
+    assert service.diagnostics()["pending_idle_stops"] == 1
+
+    await asyncio.wait_for(service.shutdown(), timeout=0.2)
+    assert factory.stop_invocations == 1
+    assert factory.stop_calls == [IDENTITY]
+    diagnostics = service.diagnostics()
+    assert diagnostics["pending_idle_stops"] == 0
+    assert diagnostics["physical_idle_stops_cancelled"] == 1
+    assert diagnostics["physical_idle_stops_expired"] == 0
+    assert diagnostics["physical_stops_attempted"] == 1
+
+
+@_async_test
+async def test_concurrent_replacements_cancel_one_idle_stop_without_restart(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    service = _service(
+        factory,
+        tmp_path,
+        physical_idle_grace_seconds=0.1,
+    )
+    await service.ensure_stream(_key(), consumer_id="owner")
+    await service.release_stream(_key(), consumer_id="owner")
+
+    replacements = [
+        asyncio.create_task(
+            service.ensure_stream(_key(), consumer_id=f"replacement-{index}"),
+        )
+        for index in range(10)
+    ]
+    assert await asyncio.gather(*replacements) == [True] * 10
+    diagnostics = service.diagnostics()
+    assert diagnostics["logical_leases"] == 10
+    assert diagnostics["pending_idle_stops"] == 0
+    assert diagnostics["physical_idle_stops_cancelled"] == 1
+    assert len(factory.start_calls) == 1
+    assert factory.stop_invocations == 0
+
+    await asyncio.sleep(0.12)
+    assert factory.stop_invocations == 0
+    for index in range(10):
+        assert await service.release_stream(
+            _key(),
+            consumer_id=f"replacement-{index}",
+        ) is True
+    assert service.diagnostics()["pending_idle_stops"] == 1
+    await service.shutdown()
+    assert factory.stop_invocations == 1
+
+
+@_async_test
+async def test_concurrent_replacements_after_idle_deadline_share_cleanup_owner(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.stop_gate = asyncio.Event()
+    service = _service(
+        factory,
+        tmp_path,
+        physical_idle_grace_seconds=0.01,
+        physical_stop_timeout_seconds=0.2,
+    )
+    await service.ensure_stream(_key(), consumer_id="owner")
+    await service.release_stream(_key(), consumer_id="owner")
+    await factory.stop_started.wait()
+
+    replacements = [
+        asyncio.create_task(
+            service.ensure_stream(_key(), consumer_id=f"replacement-{index}"),
+        )
+        for index in range(10)
+    ]
+    await asyncio.sleep(0.01)
+    assert all(task.done() is False for task in replacements)
+    assert factory.stop_invocations == 1
+    factory.stop_gate.set()
+
+    assert await asyncio.gather(*replacements) == [True] * 10
+    assert factory.stop_invocations == 1
+    assert len(factory.start_calls) == 2
+    assert service.diagnostics()["logical_leases"] == 10
+    await service.shutdown()
+
+
+@_async_test
+async def test_keyed_lifecycle_parallelizes_symbols_and_singleflights_identity(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    factory.start_entered["BTCUSDT"] = asyncio.Event()
+    service = _service(factory, tmp_path)
+
+    first = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="btc-one"),
+    )
+    await factory.start_entered["BTCUSDT"].wait()
+    same_identity = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="btc-two"),
+    )
+
+    assert await asyncio.wait_for(
+        service.ensure_stream(_key("ETHUSDT"), consumer_id="eth"),
+        timeout=0.25,
+    ) is True
+    assert len(factory.start_calls) == 2
+    assert not same_identity.done()
+
+    factory.start_gates["BTCUSDT"].set()
+    assert await first is True
+    assert await same_identity is True
+    assert len(factory.start_calls) == 2
+
+    await service.shutdown()
+    assert len(factory.stop_calls) == 2
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service._identity_locks.active_keys == 0  # noqa: SLF001
+
+
+@_async_test
+async def test_last_consumer_release_drops_lease_and_reconciles_late_stop(
+    tmp_path,
+) -> None:
     factory = _Factory()
     factory.stop_gate = asyncio.Event()
     service = _service(
@@ -203,25 +415,30 @@ async def test_last_consumer_release_uses_bounded_stop_and_can_retry(tmp_path) -
 
     assert released is False
     assert service.diagnostics()["physical_streams"] == 1
+    assert service.diagnostics()["logical_leases"] == 0
+    assert service.diagnostics()["physical"][0]["consumers"] == 0
+    assert service.diagnostics()["physical"][0]["stop_state"] == "stopping"
     assert service.engine.diagnostics()["active_streams"] == 1
     assert service.diagnostics()["physical_stop_timeouts"] == 1
+    assert service.diagnostics()["physical_stop_tasks_cancelled"] == 0
+    with pytest.raises(RuntimeError, match="cleanup did not finish"):
+        await service.ensure_stream(_key(), consumer_id="replacement")
+    assert factory.stop_invocations == 1
+    assert service.diagnostics()["logical_leases"] == 0
+    assert service.diagnostics()["physical"][0]["stop_state"] == "stopping"
 
     factory.stop_gate.set()
     await _wait_until(
-        lambda: service.diagnostics()["physical"][0]["stop_state"]
-        == "stop_cancelled",
+        lambda: service.diagnostics()["physical_streams"] == 0,
     )
-    assert await service.release_stream(
-        _key(),
-        consumer_id="bounded-release",
-    ) is True
-    assert service.diagnostics()["physical_streams"] == 0
     assert service.engine.diagnostics()["active_streams"] == 0
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
     await service.shutdown()
 
 
 @_async_test
-async def test_cancelled_release_reconciles_late_success_without_dead_lease(
+async def test_replacement_waits_for_cancelled_releaser_cleanup_without_dead_lease(
     tmp_path,
 ) -> None:
     factory = _Factory()
@@ -245,41 +462,149 @@ async def test_cancelled_release_reconciles_late_success_without_dead_lease(
     diagnostics = service.diagnostics()
     assert diagnostics["physical_streams"] == 1
     assert diagnostics["physical"][0]["stop_state"] == "stopping"
+    assert diagnostics["physical"][0]["consumers"] == 0
     assert diagnostics["physical_stop_wait_cancellations"] == 1
     assert service.engine.diagnostics()["active_streams"] == 1
-    with pytest.raises(RuntimeError, match="stop is still in progress"):
-        await service.ensure_stream(_key(), consumer_id="replacement")
 
-    # Repeated release reuses the cancellation-resistant task rather than
-    # creating an unbounded chain of stop coroutines.
-    assert await service.release_stream(
-        _key(),
-        consumer_id="cancelled-release",
-    ) is False
+    replacement = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="replacement"),
+    )
+    await asyncio.sleep(0.01)
+    assert replacement.done() is False
     assert factory.stop_invocations == 1
-
-    # Queue ensure ahead of the async finalizer, then let the cancellation-
-    # resistant stop finish. ensure_stream must synchronously reconcile the
-    # done stop instead of attaching to its dead lease.
-    await service._lifecycle_lock.acquire()  # noqa: SLF001
-    try:
-        replacement = asyncio.create_task(
-            service.ensure_stream(_key(), consumer_id="replacement"),
-        )
-        await asyncio.sleep(0)
-        factory.stop_gate.set()
-        old_stop = service._physical[IDENTITY].stop_task  # noqa: SLF001
-        assert old_stop is not None
-        await asyncio.wait_for(asyncio.shield(old_stop), timeout=0.5)
-    finally:
-        service._lifecycle_lock.release()  # noqa: SLF001
+    factory.stop_gate.set()
 
     assert await replacement is True
     assert service.engine.diagnostics()["active_streams"] == 1
-    assert service.diagnostics()["physical_stops_late_succeeded"] == 1
     assert service.diagnostics()["physical"][0]["stop_state"] == "active"
+    assert service.diagnostics()["physical"][0]["consumers"] == 1
     assert len(factory.start_calls) == 2
     assert factory.stop_invocations == 1
+    await service.shutdown()
+
+
+@_async_test
+async def test_pending_stop_does_not_block_a_different_identity(tmp_path) -> None:
+    factory = _Factory()
+    factory.stop_gate = asyncio.Event()
+    service = _service(
+        factory,
+        tmp_path,
+        physical_stop_timeout_seconds=0.05,
+    )
+    await service.ensure_stream(_key(), consumer_id="btc")
+
+    release = asyncio.create_task(
+        service.release_stream(_key(), consumer_id="btc"),
+    )
+    await factory.stop_started.wait()
+    assert await asyncio.wait_for(
+        service.ensure_stream(_key("ETHUSDT"), consumer_id="eth"),
+        timeout=0.02,
+    ) is True
+
+    factory.stop_gate.set()
+    assert await release is True
+    assert await service.release_stream(
+        _key("ETHUSDT"),
+        consumer_id="eth",
+    ) is True
+    await service.shutdown()
+
+
+@_async_test
+async def test_cancel_after_start_returns_cleans_unpublished_reservation(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.start_gates["BTCUSDT"] = asyncio.Event()
+    service = _service(factory, tmp_path)
+    starting = asyncio.create_task(
+        service.ensure_stream(_key(), consumer_id="cancelled-start"),
+    )
+    await factory.start_entered.setdefault("BTCUSDT", asyncio.Event()).wait()
+
+    async with service._lifecycle_lock:
+        factory.start_gates["BTCUSDT"].set()
+        await asyncio.sleep(0)
+        assert len(factory.start_calls) == 1
+        assert starting.done() is False
+        starting.cancel()
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    assert factory.stop_invocations == 1
+    assert service.diagnostics()["physical_streams"] == 0
+    assert service.engine.diagnostics()["active_streams"] == 0
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    await service.shutdown()
+
+
+@_async_test
+async def test_failed_stop_is_cleaned_before_replacement_can_start(tmp_path) -> None:
+    factory = _Factory()
+    factory.stop_error = RuntimeError("transport stop failed")
+    service = _service(factory, tmp_path)
+    await service.ensure_stream(_key(), consumer_id="owner")
+
+    assert await service.release_stream(_key(), consumer_id="owner") is False
+    diagnostics = service.diagnostics()
+    assert diagnostics["logical_leases"] == 0
+    assert diagnostics["physical"][0]["stop_state"] == "stop_failed"
+    with pytest.raises(RuntimeError, match="unavailable after a failed stop"):
+        await service.ensure_stream(_key(), consumer_id="replacement")
+    assert len(factory.start_calls) == 1
+    assert factory.stop_invocations == 2
+
+    factory.stop_error = None
+    assert await service.ensure_stream(_key(), consumer_id="replacement") is True
+    assert len(factory.start_calls) == 2
+    assert service.diagnostics()["physical"][0]["stop_state"] == "active"
+    await service.shutdown()
+
+
+@_async_test
+async def test_failed_stop_has_one_cleanup_owner_for_concurrent_replacements(
+    tmp_path,
+) -> None:
+    factory = _Factory()
+    factory.stop_gate = asyncio.Event()
+    factory.stop_error = RuntimeError("transport stop failed")
+    service = _service(factory, tmp_path)
+    await service.ensure_stream(_key(), consumer_id="owner")
+
+    release = asyncio.create_task(
+        service.release_stream(_key(), consumer_id="owner"),
+    )
+    await factory.stop_started.wait()
+    replacements = [
+        asyncio.create_task(
+            service.ensure_stream(_key(), consumer_id=f"replacement-{index}"),
+        )
+        for index in range(10)
+    ]
+    await asyncio.sleep(0.01)
+    assert all(task.done() is False for task in replacements)
+
+    factory.stop_gate.set()
+    assert await release is False
+    results = await asyncio.gather(*replacements, return_exceptions=True)
+    assert all(
+        isinstance(result, RuntimeError)
+        and "unavailable after a failed stop" in str(result)
+        for result in results
+    )
+    assert factory.stop_invocations == 1
+    assert len(factory.start_calls) == 1
+    assert service.diagnostics()["physical_stops_attempted"] == 1
+
+    factory.stop_error = None
+    assert await service.ensure_stream(_key(), consumer_id="recovered") is True
+    assert factory.stop_invocations == 2
+    assert len(factory.start_calls) == 2
     await service.shutdown()
 
 
@@ -506,9 +831,20 @@ async def test_hung_physical_stop_times_out_but_durability_drains(tmp_path) -> N
     assert diagnostics["shutdown"]["degraded"] is True
     assert diagnostics["physical_stops_attempted"] == 1
     assert diagnostics["physical_stop_timeouts"] == 1
-    assert diagnostics["physical_stop_tasks_cancelled"] == 1
+    assert diagnostics["physical_stop_tasks_cancelled"] == 0
     assert diagnostics["rollup_writer"]["durable_batches_pending"] == 0
     assert diagnostics["last_physical_stop_error"]
+    assert diagnostics["shutdown"]["pending_physical_stop_tasks"] == 1
+
+    factory.stop_gate.set()
+    await _wait_until(
+        lambda: service.diagnostics()["shutdown"][
+            "pending_physical_stop_tasks"
+        ] == 0,
+    )
+    await _wait_until(
+        lambda: service.diagnostics()["physical_stops_late_succeeded"] == 1,
+    )
 
 
 @_async_test

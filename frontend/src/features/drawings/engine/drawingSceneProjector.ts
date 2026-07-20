@@ -66,7 +66,12 @@ import type {
 } from "../rendering/drawingRenderDefaults.js";
 import type { DrawingRenderRevisionStamp } from "./drawingRenderScheduler.js";
 import type { DrawingSceneNode } from "./drawingSceneRegistry.js";
-import { drawingPositionLevelColor } from "../drawingPositionColors.js";
+import {
+  drawingPositionCurrentPrice,
+  drawingPositionLevelPresentation,
+  drawingPositionPanelLines,
+} from "../drawingPositionPresentation.js";
+import { positionInfoPanelLeft } from "../positionInfoPanelLayout.js";
 
 export interface DrawingSceneTextMeasureRequest {
   readonly text: string;
@@ -1514,112 +1519,6 @@ function horizontalAnchorDataPoint(
   return anchor && typeof anchor === "object" ? { ...anchor, price } : null;
 }
 
-function formatPositionPrice(price: number): string {
-  if (price >= 1_000) {
-    return price.toLocaleString("en-US", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
-  }
-  if (price >= 1) return price.toFixed(4);
-  if (price >= 0.01) return price.toFixed(6);
-  return price.toFixed(8);
-}
-
-function positionPnlPercent(entryPrice: number, price: number, isLong: boolean): number {
-  if (!entryPrice) return 0;
-  return isLong
-    ? ((price - entryPrice) / entryPrice) * 100
-    : ((entryPrice - price) / entryPrice) * 100;
-}
-
-function positionCurrentPrice(frame: DrawingFrameSnapshot): number | null {
-  const last = frame.seriesData.at(-1);
-  if (!last) return null;
-  if (finiteNumber(last.close)) return last.close;
-  return finiteNumber(last.value) ? last.value : null;
-}
-
-interface PositionPanelPaintLine {
-  readonly label: string;
-  readonly value: string;
-  readonly extra: string | null;
-  readonly color: string;
-}
-
-function signedPositionValue(value: number): string {
-  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
-}
-
-function positionPanelLines(
-  entity: PositionDrawingRenderEntity,
-  currentPrice: number | null,
-  upColor: string,
-  downColor: string,
-): readonly PositionPanelPaintLine[] {
-  const { direction, entryPrice, slPrice, tpPrice } = entity.geometry;
-  const size = entity.style.positionSize;
-  const isLong = direction === "long";
-  const priceColor = (price: number): string => drawingPositionLevelColor(
-    entryPrice,
-    price,
-    { upColor, downColor },
-  );
-  const lines: PositionPanelPaintLine[] = [Object.freeze({
-    label: "入场",
-    value: formatPositionPrice(entryPrice),
-    extra: null,
-    color: "#2196f3",
-  })];
-  if (tpPrice !== null) {
-    const percent = positionPnlPercent(entryPrice, tpPrice, isLong);
-    const pnl = size ? size * percent / 100 : null;
-    lines.push(Object.freeze({
-      label: "止盈",
-      value: `${formatPositionPrice(tpPrice)} (${signedPositionValue(percent)}%)`,
-      extra: pnl === null ? null : signedPositionValue(pnl),
-      color: priceColor(tpPrice),
-    }));
-  }
-  if (slPrice !== null) {
-    const percent = positionPnlPercent(entryPrice, slPrice, isLong);
-    const pnl = size ? size * percent / 100 : null;
-    lines.push(Object.freeze({
-      label: "止损",
-      value: `${formatPositionPrice(slPrice)} (${signedPositionValue(percent)}%)`,
-      extra: pnl === null ? null : signedPositionValue(pnl),
-      color: priceColor(slPrice),
-    }));
-  }
-  if (currentPrice !== null && finiteNumber(currentPrice)) {
-    const percent = positionPnlPercent(entryPrice, currentPrice, isLong);
-    const pnl = size ? size * percent / 100 : null;
-    lines.push(Object.freeze({
-      label: "现价",
-      value: `${formatPositionPrice(currentPrice)} (${signedPositionValue(percent)}%)`,
-      extra: pnl === null ? null : signedPositionValue(pnl),
-      color: priceColor(currentPrice),
-    }));
-  }
-  if (tpPrice !== null && slPrice !== null && entryPrice) {
-    const reward = Math.abs(tpPrice - entryPrice);
-    const risk = Math.abs(slPrice - entryPrice);
-    if (risk > 0) lines.push(Object.freeze({
-      label: "盈亏比",
-      value: `1 : ${(reward / risk).toFixed(2)}`,
-      extra: null,
-      color: "#ffab40",
-    }));
-  }
-  if (size) lines.push(Object.freeze({
-    label: "仓位",
-    value: `$${size.toFixed(0)}`,
-    extra: null,
-    color: "#b0bec5",
-  }));
-  return Object.freeze(lines);
-}
-
 function projectPosition(
   entity: PositionDrawingRenderEntity,
   frame: DrawingFrameSnapshot,
@@ -1682,12 +1581,15 @@ function projectPosition(
   const slOffsets = slY === null ? null : appendPriceZone("sl", slY);
 
   const { upColor, downColor } = frame.themePalette;
-  const panelLines = positionPanelLines(
-    entity,
-    positionCurrentPrice(frame),
-    upColor,
-    downColor,
-  );
+  const panelLines = drawingPositionPanelLines({
+    currentPrice: drawingPositionCurrentPrice(frame),
+    direction: entity.geometry.direction,
+    entryPrice,
+    positionSize: entity.style.positionSize,
+    slPrice,
+    themePalette: frame.themePalette,
+    tpPrice,
+  });
   const panelFont = 11;
   const panelTextWidth = panelLines.reduce((width, line) => {
     const text = `${line.label}: ${line.value}${line.extra ? ` ${line.extra}` : ""}`;
@@ -1701,7 +1603,12 @@ function projectPosition(
   }, 0);
   const panelWidth = panelTextWidth + 16;
   const panelHeight = panelLines.length * 17 + 12;
-  const panelLeft = right - panelWidth - 8 + entity.style.infoPanelOffset.x;
+  const panelLeft = positionInfoPanelLeft(
+    left,
+    right,
+    panelWidth,
+    entity.style.infoPanelOffset,
+  );
   const panelTop = Math.max(4, entryY - panelHeight - 8 + entity.style.infoPanelOffset.y);
   const panelOffset = pushPair(values, {
     x: panelLeft,
@@ -1765,15 +1672,16 @@ function projectPosition(
     offsets: Readonly<{ bodyOffset: number; lineOffset: number }> | null,
   ) => {
     if (price === null || !offsets) return null;
-    const percent = positionPnlPercent(entryPrice, price, isLong);
-    const pnl = entity.style.positionSize ? entity.style.positionSize * percent / 100 : 0;
+    const presentation = drawingPositionLevelPresentation({
+      direction: entity.geometry.direction,
+      entryPrice,
+      positionSize: entity.style.positionSize,
+      themePalette: frame.themePalette,
+    }, price);
     return Object.freeze({
       linePointOffset: offsets.lineOffset,
       bodyPointOffset: offsets.bodyOffset,
-      priceText: formatPositionPrice(price),
-      percentText: `${signedPositionValue(percent)}%`,
-      pnlText: pnl === 0 ? null : signedPositionValue(pnl),
-      color: drawingPositionLevelColor(entryPrice, price, frame.themePalette),
+      ...presentation,
     });
   };
   const tpLevel = positionLevelSpec(tpPrice, tpOffsets);
@@ -2205,6 +2113,7 @@ interface CachedDrawingWorldResolution {
 interface CachedDrawingLodSelection {
   readonly kind: "lod";
   readonly pathInterpolation: "linear";
+  readonly publicationAffinePriceProjection: CertifiedAffinePriceProjection | null;
   readonly selection: DrawingLodSelection;
 }
 
@@ -2212,6 +2121,7 @@ interface CachedDrawingScreenHierarchy {
   readonly kind: "screen-hierarchy";
   readonly hierarchy: DrawingLodHierarchy;
   readonly priceProjectionResidualCssPx: number;
+  readonly publicationAffinePriceProjection: CertifiedAffinePriceProjection | null;
   readonly quadraticSmoothingDeviationCssPx: number;
   readonly screenCoordinates: Float64Array;
 }
@@ -2225,6 +2135,7 @@ interface FreehandLodPlan {
   readonly selection: DrawingLodSelection;
   readonly lineageSpanCoordinates: ReadonlyMap<number, LineageSpanScreenCoordinates> | null;
   readonly pathInterpolation: "linear";
+  readonly publicationAffinePriceProjection: CertifiedAffinePriceProjection | null;
 }
 
 interface CertifiedAffinePriceProjection {
@@ -2236,9 +2147,11 @@ interface CertifiedAffinePriceProjection {
 }
 
 const DRAWING_AFFINE_PRICE_PROJECTION_RESIDUAL_LIMIT_CSS_PX = 0.25;
+const DRAWING_AFFINE_PRICE_PUBLICATION_ULP_FACTOR = 256;
 
 function certifiedAffinePriceProjection(
   samples: readonly Readonly<{ price: number; coordinateCssPx: number }>[],
+  residualLimitCssPx = DRAWING_AFFINE_PRICE_PROJECTION_RESIDUAL_LIMIT_CSS_PX,
 ): CertifiedAffinePriceProjection | null {
   if (samples.length < 3) return null;
   const ordered = [...samples].sort((left, right) => left.price - right.price);
@@ -2257,8 +2170,7 @@ function certifiedAffinePriceProjection(
     const predicted = slopeCssPxPerPrice * sample.price + interceptCssPx;
     residualCssPx = Math.max(residualCssPx, Math.abs(predicted - sample.coordinateCssPx));
   }
-  if (!finiteNumber(residualCssPx)
-    || residualCssPx > DRAWING_AFFINE_PRICE_PROJECTION_RESIDUAL_LIMIT_CSS_PX) return null;
+  if (!finiteNumber(residualCssPx) || residualCssPx > residualLimitCssPx) return null;
   return Object.freeze({
     interceptCssPx,
     maximumPrice: last.price,
@@ -2266,6 +2178,37 @@ function certifiedAffinePriceProjection(
     residualCssPx,
     slopeCssPxPerPrice,
   });
+}
+
+/**
+ * Publication is stricter than hierarchy construction. The hierarchy may use
+ * a sub-pixel affine proxy because its residual is charged to the LOD error
+ * budget; published vertices may bypass the public price projector only when
+ * public samples over the actual candidate price domain agree to floating
+ * point round-off. The magnitude includes the two potentially cancelling
+ * affine terms, not only the small final CSS coordinate.
+ */
+function certifiedPublicationAffinePriceProjection(
+  samples: readonly Readonly<{ price: number; coordinateCssPx: number }>[],
+): CertifiedAffinePriceProjection | null {
+  let numericMagnitude = 1;
+  for (const sample of samples) {
+    if (!finiteNumber(sample.price) || !finiteNumber(sample.coordinateCssPx)) return null;
+    numericMagnitude = Math.max(numericMagnitude, Math.abs(sample.coordinateCssPx));
+  }
+  const loose = certifiedAffinePriceProjection(samples);
+  if (!loose) return null;
+  numericMagnitude = Math.max(numericMagnitude, Math.abs(loose.interceptCssPx));
+  for (const sample of samples) {
+    numericMagnitude = Math.max(
+      numericMagnitude,
+      Math.abs(loose.slopeCssPxPerPrice * sample.price),
+    );
+  }
+  const residualLimitCssPx = numericMagnitude
+    * Number.EPSILON
+    * DRAWING_AFFINE_PRICE_PUBLICATION_ULP_FACTOR;
+  return certifiedAffinePriceProjection(samples, residualLimitCssPx);
 }
 
 type CachedDrawingProjectionValue =
@@ -2732,12 +2675,14 @@ function selectFreehandLod(
       selection: cached.selection,
       lineageSpanCoordinates,
       pathInterpolation: cached.pathInterpolation,
+      publicationAffinePriceProjection: cached.publicationAffinePriceProjection,
     });
   }
 
   let hierarchy: DrawingLodHierarchy | null = null;
   let lineageSpanCoordinates: ReadonlyMap<number, LineageSpanScreenCoordinates> | null = null;
   let priceProjectionResidualCssPx = 0;
+  let publicationAffinePriceProjection: CertifiedAffinePriceProjection | null = null;
   let quadraticSmoothingDeviationCssPx = 0;
   let screenCoordinates: Float64Array | null = null;
   const cachedHierarchy = cache.entries.get(hierarchyKey);
@@ -2745,6 +2690,7 @@ function selectFreehandLod(
     retainRecentDrawingScreenHierarchy(cache, requestId, hierarchyKey);
     hierarchy = cachedHierarchy.hierarchy;
     priceProjectionResidualCssPx = cachedHierarchy.priceProjectionResidualCssPx;
+    publicationAffinePriceProjection = cachedHierarchy.publicationAffinePriceProjection;
     quadraticSmoothingDeviationCssPx = cachedHierarchy.quadraticSmoothingDeviationCssPx;
     screenCoordinates = cachedHierarchy.screenCoordinates;
   } else {
@@ -2805,59 +2751,71 @@ function selectFreehandLod(
       const candidateOutsideSampleEnvelope = usedAffineLineageProxy
         && (minimumCandidatePrice < affinePriceProjection.minimumPrice - priceEnvelopeEpsilon
           || maximumCandidatePrice > affinePriceProjection.maximumPrice + priceEnvelopeEpsilon);
-      if (candidateOutsideSampleEnvelope) {
-        // A locally near-linear log scale can otherwise look affine across the
-        // pane samples yet diverge badly for an offscreen point retained by a
-        // visible chunk. Extend the certificate over the actual candidate
-        // price domain with only extrema + midpoint public final projections.
-        let middleCandidateIndex = minimumCandidateIndex;
-        let middleDistance = Number.POSITIVE_INFINITY;
-        const middleCandidatePrice = (minimumCandidatePrice + maximumCandidatePrice) / 2;
-        for (const sourcePointIndex of candidateIndexes) {
-          const price = requests[sourcePointIndex]?.price;
-          if (!finiteNumber(price)) continue;
-          const distance = Math.abs(price - middleCandidatePrice);
-          if (distance < middleDistance) {
-            middleDistance = distance;
-            middleCandidateIndex = sourcePointIndex;
-          }
-        }
-        const evidenceIndexes = Array.from(new Set([
-          minimumCandidateIndex,
-          middleCandidateIndex,
-          maximumCandidateIndex,
-        ].filter((index) => index >= 0)));
-        const evidenceRequests = evidenceIndexes.map((index) => requests[index]).filter(
-          (request): request is CoordinateDataPoint => request !== undefined,
-        );
-        const evidenceResolutions = evidenceIndexes.map((index) => resolutions[index] ?? null);
+      if (usedAffineLineageProxy) {
+        // The inverse pane samples are sufficient for a bounded-error LOD
+        // proxy, but not for replacing public priceToCoordinate at
+        // publication. Always extend the evidence over the actual candidate
+        // domain with public extrema + midpoint projections. This also keeps
+        // the existing extrapolation guard for offscreen chunk points.
+        const middleCandidatePrice = minimumCandidatePrice / 2 + maximumCandidatePrice / 2;
+        const minimumCandidateRequest = requests[minimumCandidateIndex];
+        const maximumCandidateRequest = requests[maximumCandidateIndex];
+        const evidenceRequests = minimumCandidateRequest && maximumCandidateRequest
+          ? Object.freeze([
+              minimumCandidateRequest,
+              Object.freeze({
+                ...minimumCandidateRequest,
+                price: middleCandidatePrice,
+              }),
+              maximumCandidateRequest,
+            ])
+          : [];
+        // Evidence certifies only price -> Y. Null X resolutions avoid three
+        // irrelevant time-scale projections and also make the synthetic exact
+        // domain midpoint independent of any source anchor.
+        const evidenceResolutions = evidenceRequests.map(() => null);
         const finalProject = adapter.projectDrawingFrameResolvedDataPoints;
         let exactEvidence: Float64Array | null = null;
-        if (finalProject && evidenceRequests.length === evidenceIndexes.length) {
+        if (finalProject && evidenceRequests.length === 3) {
           try {
             exactEvidence = finalProject(frame, evidenceResolutions, evidenceRequests);
           } catch {
             exactEvidence = null;
           }
         }
-        if (!validProjectedBuffer(exactEvidence, evidenceRequests.length)) {
-          usedAffineLineageProxy = false;
+        if (evidenceRequests.length !== 3
+          || !validProjectedBuffer(exactEvidence, evidenceRequests.length)) {
+          // Failure to cover an extrapolated candidate domain invalidates the
+          // proxy. Inside the pane sample envelope, retain the existing loose
+          // hierarchy certificate but keep publication on the exact path.
+          if (candidateOutsideSampleEnvelope) usedAffineLineageProxy = false;
         } else {
           drawingPerfCounters.recordFinalProjection(evidenceRequests.length);
           const extendedSamples = [...priceProjectionSamples];
+          let evidenceComplete = true;
           for (let index = 0; index < evidenceRequests.length; index += 1) {
             const price = evidenceRequests[index]?.price;
             const coordinateCssPx = exactEvidence[index * 2 + 1];
             if (!finiteNumber(price) || !finiteNumber(coordinateCssPx)) {
-              usedAffineLineageProxy = false;
+              evidenceComplete = false;
               break;
             }
             extendedSamples.push(Object.freeze({ price, coordinateCssPx }));
           }
-          affinePriceProjection = usedAffineLineageProxy
+          const extendedAffinePriceProjection = evidenceComplete
             ? certifiedAffinePriceProjection(extendedSamples)
             : null;
-          if (!affinePriceProjection) usedAffineLineageProxy = false;
+          if (extendedAffinePriceProjection) {
+            affinePriceProjection = extendedAffinePriceProjection;
+            publicationAffinePriceProjection = certifiedPublicationAffinePriceProjection(
+              extendedSamples,
+            );
+          } else if (evidenceComplete || candidateOutsideSampleEnvelope) {
+            // Public evidence that disagrees with the proxy is authoritative.
+            // A malformed extrapolation sample is equally insufficient to
+            // cover the candidate domain.
+            usedAffineLineageProxy = false;
+          }
         }
       }
     }
@@ -2890,8 +2848,8 @@ function selectFreehandLod(
       // Non-lineage strokes and price modes whose three public samples do not
       // prove an affine map keep the exact public final projector as the
       // screen-error oracle. The certified lineage fast path above only
-      // chooses a hierarchy; selected publication vertices are still sent
-      // through this projector by projectFreehandLod.
+      // chooses a hierarchy. Publication bypasses this projector only when a
+      // separate machine-precision certificate covers the candidate domain.
       const candidateRequests = candidateIndexes.map(
         (pointIndex) => requests[pointIndex],
       ).filter((request): request is CoordinateDataPoint => request !== undefined);
@@ -2946,6 +2904,7 @@ function selectFreehandLod(
       kind: "screen-hierarchy" as const,
       hierarchy,
       priceProjectionResidualCssPx,
+      publicationAffinePriceProjection,
       quadraticSmoothingDeviationCssPx,
       screenCoordinates,
     }), Math.max(
@@ -2993,10 +2952,12 @@ function selectFreehandLod(
     selection,
     lineageSpanCoordinates,
     pathInterpolation: "linear" as const,
+    publicationAffinePriceProjection,
   });
   cache.entries.set(lodKey, Object.freeze({
     kind: "lod" as const,
     pathInterpolation: plan.pathInterpolation,
+    publicationAffinePriceProjection: plan.publicationAffinePriceProjection,
     selection: plan.selection,
   }), Math.max(
     64,
@@ -3038,25 +2999,112 @@ function projectFreehandLod(
 ): EntityProjection {
   const finalProject = adapter.projectDrawingFrameResolvedDataPoints;
   const { selection } = plan;
-  if (!finalProject || selection.selectedPointCount === 0) return null;
+  if (selection.selectedPointCount === 0) return null;
   const sourceIndexes = selection.pointIndexes;
   const selectedRequests = new Array<CoordinateDataPoint>(sourceIndexes.length);
   const selectedResolutions = new Array<DrawingCoordinateResolution | null>(sourceIndexes.length);
+  // Source-lineage points own X through the already current-frame span
+  // projection. Passing their source-anchor resolutions through the public
+  // final projector would call timeToCoordinate for every selected point and
+  // immediately overwrite those X values below. Keep an explicit ownership
+  // bit so unresolved lineage remains a canonical NaN gap, while mixed
+  // absolute-time points still receive their ordinary X projection.
+  const lineageStroke = entity.geometry.stroke
+    && entity.geometry.stroke.spans.length > 0
+    && plan.lineageSpanCoordinates
+    ? entity.geometry.stroke
+    : null;
+  const lineageOwnedX = lineageStroke ? new Uint8Array(sourceIndexes.length) : null;
+  const selectedLineageX = lineageStroke ? new Float64Array(sourceIndexes.length) : null;
+  selectedLineageX?.fill(Number.NaN);
   for (let selectedIndex = 0; selectedIndex < sourceIndexes.length; selectedIndex += 1) {
     const sourcePointIndex = sourceIndexes[selectedIndex];
     const request = sourcePointIndex === undefined ? undefined : requests[sourcePointIndex];
     if (sourcePointIndex === undefined || request === undefined) return PROJECTION_FAILED;
     selectedRequests[selectedIndex] = request;
-    selectedResolutions[selectedIndex] = resolutions[sourcePointIndex] ?? null;
+    const lineageX = lineageStroke
+      ? projectedLineageX(
+          lineageStroke,
+          sourcePointIndex,
+          plan.lineageSpanCoordinates,
+        )
+      : null;
+    if (lineageX !== null && lineageOwnedX && selectedLineageX) {
+      lineageOwnedX[selectedIndex] = 1;
+      selectedLineageX[selectedIndex] = lineageX;
+      selectedResolutions[selectedIndex] = null;
+    } else {
+      selectedResolutions[selectedIndex] = resolutions[sourcePointIndex] ?? null;
+    }
   }
   let projected: Float64Array | null = null;
-  try {
-    projected = finalProject(frame, selectedResolutions, selectedRequests);
-  } catch {
-    projected = null;
+  const publicationAffinePriceProjection = plan.publicationAffinePriceProjection;
+  let usePublicationAffinePriceProjection = publicationAffinePriceProjection !== null
+    && lineageOwnedX !== null;
+  if (usePublicationAffinePriceProjection && publicationAffinePriceProjection) {
+    projected = new Float64Array(selectedRequests.length * 2);
+    projected.fill(Number.NaN);
+    const exactSelectedIndexes: number[] = [];
+    const priceDomainEpsilon = Math.max(
+      1,
+      Math.abs(publicationAffinePriceProjection.minimumPrice),
+      Math.abs(publicationAffinePriceProjection.maximumPrice),
+    ) * Number.EPSILON * 16;
+    for (let selectedIndex = 0; selectedIndex < selectedRequests.length; selectedIndex += 1) {
+      if (lineageOwnedX?.[selectedIndex] !== 1) {
+        exactSelectedIndexes.push(selectedIndex);
+        continue;
+      }
+      const price = selectedRequests[selectedIndex]?.price;
+      if (!finiteNumber(price)
+        || price < publicationAffinePriceProjection.minimumPrice - priceDomainEpsilon
+        || price > publicationAffinePriceProjection.maximumPrice + priceDomainEpsilon) {
+        usePublicationAffinePriceProjection = false;
+        break;
+      }
+      const y = publicationAffinePriceProjection.slopeCssPxPerPrice * price
+        + publicationAffinePriceProjection.interceptCssPx;
+      if (!finiteNumber(y)) {
+        usePublicationAffinePriceProjection = false;
+        break;
+      }
+      projected[selectedIndex * 2 + 1] = y;
+    }
+    if (usePublicationAffinePriceProjection && exactSelectedIndexes.length > 0) {
+      const exactRequests = exactSelectedIndexes.map((index) => selectedRequests[index]).filter(
+        (request): request is CoordinateDataPoint => request !== undefined,
+      );
+      const exactResolutions = exactSelectedIndexes.map(
+        (index) => selectedResolutions[index] ?? null,
+      );
+      let exactProjected: Float64Array | null = null;
+      if (finalProject && exactRequests.length === exactSelectedIndexes.length) {
+        try {
+          exactProjected = finalProject(frame, exactResolutions, exactRequests);
+        } catch {
+          exactProjected = null;
+        }
+      }
+      if (!validProjectedBuffer(exactProjected, exactRequests.length)) return PROJECTION_FAILED;
+      drawingPerfCounters.recordFinalProjection(exactRequests.length);
+      exactSelectedIndexes.forEach((selectedIndex, exactIndex) => {
+        if (!projected || !exactProjected) return;
+        projected[selectedIndex * 2] = exactProjected[exactIndex * 2] ?? Number.NaN;
+        projected[selectedIndex * 2 + 1] = exactProjected[exactIndex * 2 + 1] ?? Number.NaN;
+      });
+    }
+  }
+  if (!usePublicationAffinePriceProjection) {
+    if (!finalProject) return PROJECTION_FAILED;
+    try {
+      projected = finalProject(frame, selectedResolutions, selectedRequests);
+    } catch {
+      projected = null;
+    }
+    if (!validProjectedBuffer(projected, selectedRequests.length)) return PROJECTION_FAILED;
+    drawingPerfCounters.recordFinalProjection(selectedRequests.length);
   }
   if (!validProjectedBuffer(projected, selectedRequests.length)) return PROJECTION_FAILED;
-  drawingPerfCounters.recordFinalProjection(selectedRequests.length);
   const separatorCount = selection.pathBreaks.length;
   const points = new Float64Array((sourceIndexes.length + separatorCount) * 2);
   const pathBreaks: number[] = [];
@@ -3074,14 +3122,10 @@ function projectFreehandLod(
     const projectedX = projected[selectedIndex * 2];
     const y = projected[selectedIndex * 2 + 1];
     const sourcePointIndex = sourceIndexes[selectedIndex];
-    const lineageX = sourcePointIndex === undefined
-      ? null
-      : projectedLineageX(
-          entity.geometry.stroke,
-          sourcePointIndex,
-          plan.lineageSpanCoordinates,
-        );
-    const x = lineageX ?? projectedX;
+    const ownedLineageX = lineageOwnedX?.[selectedIndex] === 1
+      ? selectedLineageX?.[selectedIndex]
+      : undefined;
+    const x = ownedLineageX === undefined ? projectedX : ownedLineageX;
     if (!finiteNumber(x) || !finiteNumber(y)) {
       points[outputPointIndex * 2] = Number.NaN;
       points[outputPointIndex * 2 + 1] = Number.NaN;

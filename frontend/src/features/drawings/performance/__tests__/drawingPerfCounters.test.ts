@@ -13,6 +13,7 @@ import {
   registerDrawingPerfLegacyCompatibilitySnapshotProvider,
   registerDrawingPerfPhase6HitOracleProvider,
   registerDrawingPerfPhase6RuntimeProvider,
+  registerDrawingPerfRuntimeSummaryProvider,
   registerDrawingPerfShadowParityRequester,
   type DrawingPerfDebugHandle,
   type DrawingPerfSummaryEventDetail,
@@ -584,6 +585,35 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
   assert.equal(installDrawingPerfDebugHandle(null), null);
 });
 
+test("higher-priority pane diagnostics own the global handle and release to a fallback", () => {
+  const handle = installDrawingPerfDebugHandle({});
+  const summary = (entityCount: number) => ({
+    entityCount,
+    pointCount: entityCount * 2,
+    typeCounts: { line: entityCount },
+  });
+  const unregisterSubPane = registerDrawingPerfRuntimeSummaryProvider(
+    () => summary(1),
+    { priority: 0 },
+  );
+  const unregisterMainPane = registerDrawingPerfRuntimeSummaryProvider(
+    () => summary(2),
+    { priority: 100 },
+  );
+  const unregisterLaterSubPane = registerDrawingPerfRuntimeSummaryProvider(
+    () => summary(3),
+    { priority: 0 },
+  );
+
+  assert.equal(handle?.readRuntimeSummary()?.entityCount, 2);
+  unregisterMainPane();
+  assert.equal(handle?.readRuntimeSummary()?.entityCount, 3);
+  unregisterLaterSubPane();
+  assert.equal(handle?.readRuntimeSummary()?.entityCount, 1);
+  unregisterSubPane();
+  assert.equal(handle?.readRuntimeSummary(), null);
+});
+
 test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle providers", () => {
   const handle = installDrawingPerfDebugHandle({});
   const workerIdentity = Object.freeze({
@@ -670,6 +700,7 @@ test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle pro
     returnedWorkerIdentity: null,
     acceptedWorkerIdentity: workerIdentity,
     publishedWorkerIdentity: workerIdentity,
+    paintedWorkerIdentity: workerIdentity,
     latestSubmittedWorkerIdentity: workerIdentity,
   });
   const unregisterRuntime = registerDrawingPerfPhase6RuntimeProvider(() => phase6Runtime);

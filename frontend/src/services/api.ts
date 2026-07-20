@@ -310,27 +310,30 @@ export async function testProxyConnection({ mode, custom_proxy }: ProxySettingsI
   });
 }
 
-interface CacheLimitsInput {
+export interface CacheLimitsInput {
   dbLimits?: unknown;
   ephemeralBars?: unknown;
   sqliteBudgetBytes?: number | null;
   storageRowLimitsEnabled?: boolean;
 }
 
-export async function updateCacheLimits({
-  dbLimits,
-  ephemeralBars,
-  sqliteBudgetBytes,
-  storageRowLimitsEnabled,
-}: CacheLimitsInput): Promise<unknown> {
+export function buildCacheLimitsRequestBody(input: CacheLimitsInput): UnknownRecord {
+  const body: UnknownRecord = {};
+  if (Object.hasOwn(input, "dbLimits")) body.db_limits = input.dbLimits;
+  if (Object.hasOwn(input, "ephemeralBars")) body.ephemeral_bars = input.ephemeralBars;
+  if (Object.hasOwn(input, "sqliteBudgetBytes")) {
+    body.sqlite_budget_bytes = input.sqliteBudgetBytes;
+  }
+  if (Object.hasOwn(input, "storageRowLimitsEnabled")) {
+    body.storage_row_limits_enabled = input.storageRowLimitsEnabled;
+  }
+  return body;
+}
+
+export async function updateCacheLimits(input: CacheLimitsInput): Promise<unknown> {
   return request(`${API_BASE}/settings/cache-limits`, {
     method: "POST",
-    body: {
-      db_limits: dbLimits,
-      ephemeral_bars: ephemeralBars,
-      sqlite_budget_bytes: sqliteBudgetBytes ?? null,
-      storage_row_limits_enabled: Boolean(storageRowLimitsEnabled),
-    },
+    body: buildCacheLimitsRequestBody(input),
   });
 }
 
@@ -401,7 +404,7 @@ export async function planStorageGc(policy: StoragePolicy = {}): Promise<unknown
 }
 
 export async function runStorageGc({
-  batchSize = 10_000,
+  batchSize = 1_000,
   policy = {},
 }: { batchSize?: number; policy?: StoragePolicy } = {}): Promise<unknown> {
   return request(`${API_BASE}/settings/cache-gc/storage/run`, {

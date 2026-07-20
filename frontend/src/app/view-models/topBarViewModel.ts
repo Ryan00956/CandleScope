@@ -11,6 +11,7 @@ export function buildTopBarViewModel({
   sessionActions,
   sessionView,
   settingsActions,
+  tradeFlowView,
   watchlistActions,
   watchlistView,
   replayEntry,
@@ -45,7 +46,9 @@ export function buildTopBarViewModel({
       alertPanelOpen: alertsView.isOpen,
       onToggleAlertPanel: alertsActions.togglePanel,
       activeIndicatorCount: indicatorView.activeIndicators.length
-        + advancedMarketView.marketStudies.filter((study) => study.added).length,
+        + advancedMarketView.marketStudies.filter((study) => study.added).length
+        + Object.values(tradeFlowView.preferences.indicators)
+          .filter((indicator) => indicator.added).length,
     },
     marketSummary: { displayData, isUp, priceChange, amplitude },
     advancedMarketData: advancedMarketView,

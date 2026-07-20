@@ -36,6 +36,40 @@ export function buildBgcolorSignature(regions: BgcolorRegion[] = []): string {
   return JSON.stringify(regions.map((region) => [chartTimeKey(region.time), region.color]));
 }
 
+export function sliceBgcolorRegionsForVisibleRange(
+  regions: readonly BgcolorRegion[],
+  visibleRange: { from: ChartTime; to: ChartTime } | null | undefined,
+): readonly BgcolorRegion[] {
+  if (!visibleRange || regions.length === 0) return regions;
+  const from = compareChartTimes(visibleRange.from, visibleRange.to) <= 0
+    ? visibleRange.from
+    : visibleRange.to;
+  const to = from === visibleRange.from ? visibleRange.to : visibleRange.from;
+  let low = 0;
+  let high = regions.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const region = regions[middle];
+    if (region && compareChartTimes(region.time, from) < 0) low = middle + 1;
+    else high = middle;
+  }
+  const firstVisible = low;
+  low = firstVisible;
+  high = regions.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const region = regions[middle];
+    if (region && compareChartTimes(region.time, to) <= 0) low = middle + 1;
+    else high = middle;
+  }
+  // Keep one neighbor on each side because a partially visible bar can have
+  // its center just outside the time range while its background still clips
+  // into the viewport.
+  const start = Math.max(0, firstVisible - 1);
+  const end = Math.min(regions.length, low + 1);
+  return regions.slice(start, end);
+}
+
 interface BgcolorRendererData {
   chart: IChartApiBase<ChartTime> | null;
   regions: BgcolorRegion[];
@@ -62,10 +96,14 @@ class BgcolorPaneRenderer implements IPrimitivePaneRenderer {
       const width = scope.bitmapSize.width;
       const height = scope.bitmapSize.height;
       const timeScale = chart.timeScale();
+      const visibleRegions = sliceBgcolorRegionsForVisibleRange(
+        regions,
+        timeScale.getVisibleRange?.() ?? null,
+      );
       const barSpacing = Math.max(1, timeScale.options?.()?.barSpacing || 8);
       const barWidth = Math.max(1, barSpacing - 1);
 
-      for (const region of regions) {
+      for (const region of visibleRegions) {
         const x = timeScale.timeToCoordinate(region.time);
         if (x == null || !Number.isFinite(x)) continue;
 
@@ -161,11 +199,18 @@ export function renderBgcolors({
   bgcolorStateRef: MutableRef<{
     pane: PaneHandle | null | undefined;
     signature: string;
+    source?: IndicatorBgcolorGroup[] | null;
   }>;
   paneId: string;
   recordPerfEvent: PerfEventRecorder;
   onError?: (error: unknown) => void;
 }): void {
+  if (
+    bgcolorStateRef.current.pane === pane
+    && bgcolorStateRef.current.source === indicatorBgcolors
+  ) {
+    return;
+  }
   const regions = flattenBgcolorRegions(indicatorBgcolors);
   const signature = buildBgcolorSignature(regions);
 
@@ -186,7 +231,7 @@ export function renderBgcolors({
       bgcolorPrimitiveRef.current = null;
       recordPerfEvent("chart.bgcolorPrimitive.remove", { paneId });
     }
-    bgcolorStateRef.current = { pane, signature };
+    bgcolorStateRef.current = { pane, signature, source: indicatorBgcolors };
     return;
   }
 
@@ -216,7 +261,7 @@ export function renderBgcolors({
         regions: regions.length,
       });
     }
-    bgcolorStateRef.current = { pane, signature };
+    bgcolorStateRef.current = { pane, signature, source: indicatorBgcolors };
   } catch (error) {
     onError?.(error);
   }

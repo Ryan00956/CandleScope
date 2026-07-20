@@ -56,6 +56,14 @@ export interface HistoryExcludedRange extends Record<string, unknown> {
   start_ms: EpochMilliseconds | number;
   end_ms: EpochMilliseconds | number;
   reason?: string;
+  retry_at_ms?: EpochMilliseconds | number | null;
+}
+
+export interface HistoryMissingRange extends Record<string, unknown> {
+  start_ms: EpochMilliseconds | number;
+  end_ms: EpochMilliseconds | number;
+  reason?: string;
+  missing_bars?: number;
 }
 
 export interface KlineFetchResult extends Record<string, unknown> {
@@ -74,7 +82,10 @@ export interface KlineFetchResult extends Record<string, unknown> {
   earliest_available_ms?: EpochMilliseconds | number | null;
   next_before_ms?: EpochMilliseconds | number | null;
   availability_revision?: string | null;
+  retry_at_ms?: EpochMilliseconds | number | null;
   excluded_ranges?: HistoryExcludedRange[];
+  missing_ranges?: HistoryMissingRange[];
+  verified_contiguous?: boolean;
 }
 
 export interface BeforePageAvailability {
@@ -82,6 +93,7 @@ export interface BeforePageAvailability {
   historyState: "exhausted";
   terminalReason: string | null;
   availabilityRevision: string | null;
+  retryAtMs: EpochMilliseconds | number | null;
 }
 
 export interface KlineRequestOptions {
@@ -204,12 +216,17 @@ export interface FeedResult extends KlineFetchResult {
   pending?: boolean;
   pages?: AppliedKlineResult[];
   pageCount?: number;
+  pagination_stop_reason?: "cap" | "missing-cursor" | "stalled-cursor";
 }
 
 export interface PendingBeforePage {
   before: EpochSeconds;
+  bars?: number;
+  range?: TimeRangeMs | null;
   safetyAttempts?: number;
   completionAttempts?: number;
+  pollAttempts?: number;
+  nextPollAt?: number;
 }
 
 export interface BackfillCompletedDetail extends Record<string, unknown> {
@@ -219,6 +236,9 @@ export interface BackfillCompletedDetail extends Record<string, unknown> {
   request_start_ms?: unknown;
   request_end_ms?: unknown;
   verified_contiguous?: boolean;
+  request_id?: unknown;
+  derived_for_intervals?: unknown;
+  derived_repair_targets?: unknown;
 }
 
 export interface BackfillCompletedMessage {
@@ -242,6 +262,7 @@ export interface BackfillCompletedOptions {
   activeSeries?: MarketSeries | null;
   loading?: boolean;
   pendingInitial?: PendingInitialSeries | null;
+  getPendingInitial?: () => PendingInitialSeries | null;
   clearPendingInitial?: () => void;
   getCacheRows?: (series: MarketSeries) => KlineBar[];
   getFallbackDays?: (series: MarketSeries) => number | null;

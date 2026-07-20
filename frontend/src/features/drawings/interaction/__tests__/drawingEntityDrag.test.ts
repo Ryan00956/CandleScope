@@ -236,6 +236,35 @@ test("position TP, SL, and panel drags stay immutable and retain command semanti
   assert.equal(Object.isFrozen(panel.infoPanelOffset), true);
 });
 
+test("position panel drag switches to a stable left-edge anchor without a jump", () => {
+  const original = positionDrawing();
+  const panel = drawingOfType(apply({
+    id: "position",
+    type: "position-panel",
+    startMouse: { x: 0, y: 0 },
+    origInfoPanelOffset: { x: 0, y: 0 },
+  }, original, {
+    pos: { x: -100, y: 5 },
+  }), "position");
+
+  assert.deepEqual(panel.infoPanelOffset, { anchor: "left", x: 0, y: 5 });
+
+  const afterZoom = drawingOfType(apply({
+    id: "position",
+    type: "position-panel",
+    startMouse: { x: 0, y: 0 },
+    origInfoPanelOffset: panel.infoPanelOffset ?? { x: 0, y: 0 },
+  }, panel, {
+    pos: { x: 0, y: 0 },
+    dataToScreen: (point) => ({
+      x: 100 + (Number(point.time) - 100) * 2,
+      y: point.price,
+    }),
+  }), "position");
+
+  assert.deepEqual(afterZoom.infoPanelOffset, { anchor: "left", x: 0, y: 5 });
+});
+
 test("position whole drag atomically moves derived and absolute-future anchors", () => {
   const original: SavedDrawing = {
     id: "position",

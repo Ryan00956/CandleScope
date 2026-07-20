@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeSettings } from "../chartAppearanceSettings.js";
+import { normalizeSettings, parseStoredSettings } from "../chartAppearanceSettings.js";
 
 test("settings normalization backfills cache budget defaults for old saved settings", () => {
   const settings = normalizeSettings({
@@ -103,4 +103,42 @@ test("settings normalization validates Line Break runtime options", () => {
   for (const value of [0, -1, 51, "invalid"]) {
     assert.equal(normalizeSettings({ lineBreakNumberOfLines: value }).lineBreakNumberOfLines, 3);
   }
+});
+
+test("settings storage and GC limits fail closed on malformed values", () => {
+  assert.deepEqual(parseStoredSettings("{broken").cacheLimits, {
+    minutes: 200000,
+    hours: 50000,
+    daily: 0,
+  });
+
+  const settings = normalizeSettings({
+    cacheLimits: { minutes: -1, hours: "bad", daily: 100 },
+    ephemeralCacheBars: -1,
+    frontendCacheBudgetBytes: 1,
+    sqliteStorageBudgetBytes: -5,
+    storageRowLimitsEnabled: "yes",
+  });
+  assert.equal(settings.cacheLimits.minutes, 200000);
+  assert.equal(settings.cacheLimits.hours, 50000);
+  assert.equal(settings.cacheLimits.daily, 100);
+  assert.equal(settings.ephemeralCacheBars, 86400);
+  assert.equal(settings.frontendCacheBudgetBytes, 64 * 1024 * 1024);
+  assert.equal(settings.sqliteStorageBudgetBytes, null);
+  assert.equal(settings.storageRowLimitsEnabled, false);
+
+  const coercionTraps = normalizeSettings({
+    cacheLimits: { minutes: null, hours: false, daily: true },
+    ephemeralCacheBars: true,
+    frontendCacheBudgetBytes: "",
+    sqliteStorageBudgetBytes: true,
+  });
+  assert.deepEqual(coercionTraps.cacheLimits, {
+    minutes: 200000,
+    hours: 50000,
+    daily: 0,
+  });
+  assert.equal(coercionTraps.ephemeralCacheBars, 86400);
+  assert.equal(coercionTraps.frontendCacheBudgetBytes, 64 * 1024 * 1024);
+  assert.equal(coercionTraps.sqliteStorageBudgetBytes, null);
 });

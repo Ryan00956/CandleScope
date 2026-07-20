@@ -17,7 +17,10 @@ export interface FullCacheEntry {
   key: string;
   symbolKey: string;
   interval: string;
+  generation: number;
+  revision: number;
   rows: KlineBar[];
+  subscribed?: boolean;
   status: FullCacheStatus;
   source: string;
   lastUpdatedMs: number;
@@ -25,6 +28,17 @@ export interface FullCacheEntry {
   lastRealtimeMs: number | null;
   lastError: string | null;
   coverage: FullCacheCoverage | null;
+}
+
+export interface FullCacheTrimSafety {
+  safeRangeTrim: true;
+}
+
+export interface FullCacheTrimPlan {
+  keepStart: KlineBar["time"];
+  keepBars: number;
+  removedBars: number;
+  removedEstimatedBytes: number;
 }
 
 export interface WarmCacheRow {

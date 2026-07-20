@@ -13,6 +13,7 @@ import {
   DEFAULT_FIXTURE_OPTIONS,
   fixtureTimeOffsetDenominator,
 } from "./drawing-performance-fixtures.mjs";
+import { devicePixelRatioMatches } from "./drawing-device-metrics.mjs";
 import {
   buildDrawingPerformanceReport,
   DRAWING_PERFORMANCE_HARD_GATES,
@@ -44,8 +45,10 @@ import {
 import {
   phase6ActionRequiresCurrentPaint,
   phase6BrowserProbeBootstrap,
+  phase6LatestWorkerPaintConverged,
   phase6SceneReadiness,
   waitForPhase6ActionCurrentPaint,
+  waitForPhase6ActionWorkerDrain,
 } from "./drawing-performance-phase6-browser.mjs";
 import { buildDrawingPerformanceMockBars } from "./drawing-performance-mock-data.mjs";
 import {
@@ -74,10 +77,18 @@ import {
 } from "./drawing-soak-metrics.mjs";
 import { createDrawingInputPaintFenceTracker } from "./drawing-performance-input-fence.mjs";
 import { runDrawingEventLatencyCalibration } from "./drawing-event-latency-calibration.mjs";
+import drawingPerformanceContract from "../contracts/drawing-performance.json" with { type: "json" };
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
 const DEFAULT_MOCK_END_TIME = 1_783_987_200;
+const DEFAULT_WHEEL_INTERVAL_MS = 24;
+const PHASE6_WORKER_BACKPRESSURE_DELAY_MS =
+  drawingPerformanceContract.phase6WorkerBackpressure.workerDelayMs;
+const PHASE6_WORKER_BACKPRESSURE_CADENCE_MS =
+  drawingPerformanceContract.phase6WorkerBackpressure.cadenceMs;
+const PHASE6_WORKER_BACKPRESSURE_WHEEL_EVENTS =
+  drawingPerformanceContract.phase6WorkerBackpressure.wheelEvents;
 const PHASE0_MIN_MEASURED_RUNS = 5;
 const PHASE0_MIN_WARMUP_RUNS = 1;
 const PHASE0_POINTER_SAMPLES = 4_096;
@@ -438,7 +449,7 @@ function parsePhase(value) {
   return phase;
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   let scenariosExplicit = false;
   let dprExplicit = false;
   let barsExplicit = false;
@@ -461,6 +472,7 @@ function parseArgs(argv) {
     mockEndTime: DEFAULT_MOCK_END_TIME,
     intervalSeconds: 3_600,
     wheelEvents: 60,
+    wheelIntervalMs: DEFAULT_WHEEL_INTERVAL_MS,
     hoverEvents: 240,
     pointerSamples: PHASE5_POINTER_SAMPLE_COUNT,
     settleMs: 750,
@@ -510,6 +522,12 @@ function parseArgs(argv) {
       args.intervalSeconds = parseNumber(argv[++index], "--interval-seconds", { min: 1, integer: true });
     } else if (arg === "--wheel-events") {
       args.wheelEvents = parseNumber(argv[++index], "--wheel-events", { min: 1, integer: true });
+    } else if (arg === "--wheel-interval-ms") {
+      args.wheelIntervalMs = parseNumber(
+        argv[++index],
+        "--wheel-interval-ms",
+        { min: 0, integer: true },
+      );
     } else if (arg === "--hover-events") {
       args.hoverEvents = parseNumber(argv[++index], "--hover-events", { min: 1, integer: true });
     } else if (arg === "--pointer-samples") {
@@ -715,8 +733,52 @@ function parseArgs(argv) {
   return args;
 }
 
+export function drawingWheelConfiguration(args) {
+  return {
+    wheelEvents: args.wheelEvents,
+    wheelIntervalMs: args.wheelIntervalMs,
+  };
+}
+
+export function drawingWorkerBackpressureConfiguration() {
+  return Object.freeze({
+    cadenceMs: PHASE6_WORKER_BACKPRESSURE_CADENCE_MS,
+    exactViewportSettleDelayMs: drawingPerformanceContract.exactViewportSettleDelayMs,
+    performanceContractVersion: drawingPerformanceContract.version,
+    wheelEvents: PHASE6_WORKER_BACKPRESSURE_WHEEL_EVENTS,
+    workerDelayMs: PHASE6_WORKER_BACKPRESSURE_DELAY_MS,
+  });
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function withDrawingPerformanceHostDeadline(
+  operation,
+  timeoutMs,
+  label = "drawing performance operation",
+) {
+  if (typeof operation !== "function") {
+    throw new TypeError("drawing performance host deadline requires an operation");
+  }
+  const parsedTimeoutMs = Number(timeoutMs);
+  const safeTimeoutMs = Number.isFinite(parsedTimeoutMs)
+    ? Math.max(1, Math.trunc(parsedTimeoutMs))
+    : 1;
+  let timer = null;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} exceeded the ${safeTimeoutMs}ms host wall-clock deadline`));
+        }, safeTimeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 }
 
 function freePort() {
@@ -1574,7 +1636,9 @@ async function installScenarioBootstrap(cdp, fixture, scenario, { soak = false }
       phase6ForceMainThreadFallback:
         scenario?.id === PHASE6_SCENARIO_IDS.mainThreadFallback,
       phase6WorkerDelayMs:
-        scenario?.id === PHASE6_SCENARIO_IDS.workerBackpressure ? 96 : 0,
+        scenario?.id === PHASE6_SCENARIO_IDS.workerBackpressure
+          ? PHASE6_WORKER_BACKPRESSURE_DELAY_MS
+          : 0,
       chartSettings: scenario?.id === PHASE6_SCENARIO_IDS.freehandLineageZoomPan
         ? phase6LineageSettings()
         : { chartType: "candlestick" },
@@ -1881,7 +1945,13 @@ async function dispatchMouseMove(cdp, x, y, buttons = 0, modifiers = 0) {
   });
 }
 
-async function runWheel(cdp, rect, count) {
+export async function runWheel(
+  cdp,
+  rect,
+  count,
+  intervalMs = DEFAULT_WHEEL_INTERVAL_MS,
+  waitForInterval = wait,
+) {
   const x = Math.round(rect.x + rect.width * 0.56);
   const y = Math.round(rect.y + rect.height * 0.52);
   for (let index = 0; index < count; index += 1) {
@@ -1892,7 +1962,7 @@ async function runWheel(cdp, rect, count) {
       deltaX: 0,
       deltaY: index % 2 === 0 ? -92 : 92,
     });
-    await wait(24);
+    if (intervalMs > 0) await waitForInterval(intervalMs);
   }
   return count;
 }
@@ -1919,13 +1989,14 @@ async function runWheelBurst(cdp, rect, count) {
   return count;
 }
 
-async function runWorkerBackpressureWheelCadence(cdp, rect, count) {
+async function runWorkerBackpressureWheelCadence(cdp, rect, count, cadenceMs) {
   const x = Math.round(rect.x + rect.width * 0.56);
   const y = Math.round(rect.y + rect.height * 0.52);
-  // One trusted wheel input per display frame forces distinct viewport scene
-  // builds faster than the benchmark's delayed worker can finish. This is what
-  // exercises the real 1-in-flight + 1-pending latest-wins queue; large CDP
-  // Promise batches serialize too slowly and collapse into a few rebuilds.
+  // Continuous input intentionally stays on the same-frame main-thread LOD
+  // lane and debounces worker exact projection until the viewport is quiet.
+  // Leave one quiet window between inputs, but keep that cadence well below
+  // the injected worker delay. This exercises the real 1-in-flight +
+  // 1-pending-latest queue without regressing continuous gesture scheduling.
   for (let index = 0; index < count; index += 1) {
     await cdp.send("Input.dispatchMouseEvent", {
       type: "mouseWheel",
@@ -1934,7 +2005,7 @@ async function runWorkerBackpressureWheelCadence(cdp, rect, count) {
       deltaX: 0,
       deltaY: index % 2 === 0 ? -92 : 92,
     });
-    await waitNextAnimationFrame(cdp);
+    await wait(cadenceMs);
   }
   return count;
 }
@@ -2728,7 +2799,12 @@ async function runScenarioAction(cdp, scenario, fixture, args, rect, runtimeSumm
     workerBackpressureWheelEventsDispatched: 0,
   };
   if (scenario.action === "viewport" || scenario.action === "mixed") {
-    result.wheelEventsDispatched = await runWheel(cdp, rect, args.wheelEvents);
+    result.wheelEventsDispatched = await runWheel(
+      cdp,
+      rect,
+      args.wheelEvents,
+      args.wheelIntervalMs,
+    );
     result.panEventsDispatched = await runPan(cdp, rect);
   }
   if (scenario.action === "mixed") {
@@ -2794,7 +2870,12 @@ async function runScenarioAction(cdp, scenario, fixture, args, rect, runtimeSumm
   }
   if (scenario.action === "phase6-viewport"
     || scenario.action === "phase6-main-thread-fallback") {
-    result.wheelEventsDispatched = await runWheel(cdp, rect, args.wheelEvents);
+    result.wheelEventsDispatched = await runWheel(
+      cdp,
+      rect,
+      args.wheelEvents,
+      args.wheelIntervalMs,
+    );
     result.panEventsDispatched = await runPan(cdp, rect);
   }
   if (scenario.action === "phase6-hit-index") {
@@ -2835,7 +2916,8 @@ async function runScenarioAction(cdp, scenario, fixture, args, rect, runtimeSumm
     result.workerBackpressureWheelEventsDispatched = await runWorkerBackpressureWheelCadence(
       cdp,
       rect,
-      96,
+      PHASE6_WORKER_BACKPRESSURE_WHEEL_EVENTS,
+      PHASE6_WORKER_BACKPRESSURE_CADENCE_MS,
     );
   }
   return result;
@@ -2970,7 +3052,12 @@ async function stopPhase5Probe(cdp) {
 }
 
 async function startPhase6Probe(cdp) {
-  return evaluateJson(cdp, phase6BrowserProbeBootstrap);
+  const value = await evaluate(
+    cdp,
+    "JSON.stringify((" + phase6BrowserProbeBootstrap + ")(("
+      + phase6LatestWorkerPaintConverged + ")))",
+  );
+  return typeof value === "string" ? JSON.parse(value) : null;
 }
 
 async function callPhase6Probe(cdp, method, ...args) {
@@ -2982,9 +3069,28 @@ async function callPhase6Probe(cdp, method, ...args) {
   return typeof value === "string" ? JSON.parse(value) : value ?? null;
 }
 
-async function stopPhase6Probe(cdp) {
-  const result = await callPhase6Probe(cdp, "stop");
-  await evaluate(cdp, "delete window.__CANDLESCOPE_PHASE6_PROBE__; true");
+async function stopPhase6Probe(cdp, hostTimeoutMs = 2_000) {
+  let result = null;
+  let stopError = null;
+  try {
+    result = await withDrawingPerformanceHostDeadline(
+      () => callPhase6Probe(cdp, "stop"),
+      hostTimeoutMs,
+      "Phase 6 probe stop",
+    );
+  } catch (error) {
+    stopError = error;
+  }
+  try {
+    await withDrawingPerformanceHostDeadline(
+      () => evaluate(cdp, "delete window.__CANDLESCOPE_PHASE6_PROBE__; true"),
+      hostTimeoutMs,
+      "Phase 6 probe deletion",
+    );
+  } catch (error) {
+    stopError ??= error;
+  }
+  if (stopError !== null) throw stopError;
   return result && typeof result === "object"
     ? { ...result, stopped: true }
     : { started: false, stopped: true, result: result ?? null };
@@ -3393,7 +3499,7 @@ async function preparePhase9Soak(
       browserWindowId,
       args.headless,
     );
-    if (browserWindowInitial.devicePixelRatio !== args.dpr) {
+    if (!devicePixelRatioMatches(browserWindowInitial.devicePixelRatio, args.dpr)) {
       throw new Error("Phase 9 browser DPR did not match the fixed configuration: "
         + JSON.stringify(browserWindowInitial));
     }
@@ -4304,6 +4410,10 @@ async function runOneScenario(
   browserWindowId,
 ) {
   let bootstrapIdentifier = await installScenarioBootstrap(cdp, fixture, scenario);
+  let phase4Probe = null;
+  let phase5Probe = null;
+  let phase6Probe = null;
+  let phase6ProbeStarted = false;
   const runStartedAt = Date.now();
   const consoleStart = diagnostics.consoleErrors.length;
   const exceptionStart = diagnostics.runtimeExceptions.length;
@@ -4420,9 +4530,6 @@ async function runOneScenario(
     // browser timing so its low-frequency full parity probe cannot be counted
     // as a new action Long Task in the formal legacy/shadow comparison.
     await evaluate(cdp, "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.(); true");
-    let phase4Probe = null;
-    let phase5Probe = null;
-    let phase6Probe = null;
     let phase6CurrentPaintBaseline = null;
     if (args.phase === "phase4") {
       const startedProbe = await startPhase4FrameProbe(cdp);
@@ -4440,6 +4547,7 @@ async function runOneScenario(
     }
     if (args.phase === "phase6") {
       const startedProbe = await startPhase6Probe(cdp);
+      phase6ProbeStarted = startedProbe?.started === true;
       if (startedProbe?.started !== true) {
         throw new Error("Phase 6 runtime probe could not start: " + JSON.stringify(startedProbe));
       }
@@ -4486,6 +4594,37 @@ async function runOneScenario(
         currentPaintedStamp: paint?.paintedStamp ?? null,
       };
     }
+    if (args.phase === "phase6") {
+      const drainWait = await waitForPhase6ActionWorkerDrain({
+        action: scenario.action,
+        timeoutMs: args.timeoutMs,
+        workerDelayMs: PHASE6_WORKER_BACKPRESSURE_DELAY_MS,
+        waitForWorkerDrain: (timeoutMs) => callPhase6Probe(
+          cdp,
+          "waitForWorkerDrain",
+          timeoutMs,
+        ),
+      });
+      if (drainWait.required) {
+        const drain = drainWait.result;
+        action = {
+          ...action,
+          workerDrainWaitPassed: drain?.passed === true,
+          workerDrainBackend: drain?.backend ?? null,
+          workerDrainQueueDepthCurrent: drain?.queueDepthCurrent ?? null,
+          workerDrainInFlightCurrent: drain?.inFlightCurrent ?? null,
+          workerDrainResultDelta: drain?.workerResultDelta ?? null,
+          workerDrainRequestedStamp: drain?.requestedStamp ?? null,
+          workerDrainPublishedStamp: drain?.publishedStamp ?? null,
+          workerDrainPaintedStamp: drain?.paintedStamp ?? null,
+          workerDrainLatestSubmittedIdentity:
+            drain?.latestSubmittedWorkerIdentity ?? null,
+          workerDrainPublishedIdentity: drain?.publishedWorkerIdentity ?? null,
+          workerDrainPaintedIdentity: drain?.paintedWorkerIdentity ?? null,
+          workerDrainPaintReceipt: drain?.paintReceipt ?? null,
+        };
+      }
+    }
     if (args.phase === "phase4") {
       phase4Probe = await stopPhase4FrameProbe(cdp);
       if (phase4Probe?.started !== true) {
@@ -4514,6 +4653,7 @@ async function runOneScenario(
     }
     if (args.phase === "phase6") {
       phase6Probe = await stopPhase6Probe(cdp);
+      phase6ProbeStarted = false;
       if (phase6Probe?.started !== true) {
         throw new Error("Phase 6 runtime probe could not stop: " + JSON.stringify(phase6Probe));
       }
@@ -4715,6 +4855,9 @@ async function runOneScenario(
       durationMs: Date.now() - runStartedAt,
     };
   } finally {
+    if (phase6ProbeStarted) {
+      await stopPhase6Probe(cdp).catch(() => {});
+    }
     if (bootstrapIdentifier) {
       await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
         identifier: bootstrapIdentifier,
@@ -5257,7 +5400,7 @@ function buildPhase3LegacyBaselineAcceptance(report, args) {
   };
 }
 
-function buildPhase1Comparison(report, compareBefore) {
+export function buildPhase1Comparison(report, compareBefore) {
   if (!compareBefore) {
     return {
       applicable: false,
@@ -5299,6 +5442,8 @@ function buildPhase1Comparison(report, compareBefore) {
     fixtureDpr: beforeScenario?.fixture?.dpr === afterScenario?.fixture?.dpr,
     points: beforeScenario?.fixture?.points === afterScenario?.fixture?.points,
     seed: before.configuration?.seed === report.configuration?.seed,
+    wheelIntervalMs: before.configuration?.wheelIntervalMs
+      === report.configuration?.wheelIntervalMs,
     viewportHeight: before.environment?.viewport?.height === report.environment?.viewport?.height,
     viewportWidth: before.environment?.viewport?.width === report.environment?.viewport?.width,
   };
@@ -5336,7 +5481,7 @@ function buildPhase1Comparison(report, compareBefore) {
   };
 }
 
-function buildPhase3Comparison(report, compareBefore) {
+export function buildPhase3Comparison(report, compareBefore) {
   if (!compareBefore) {
     return { applicable: false, passed: false, failureReasons: ["legacy-baseline-not-provided"] };
   }
@@ -5421,6 +5566,8 @@ function buildPhase3Comparison(report, compareBefore) {
     viewportHeight: before.environment?.viewport?.height === report.environment?.viewport?.height,
     viewportWidth: before.environment?.viewport?.width === report.environment?.viewport?.width,
     wheelEvents: before.configuration?.wheelEvents === report.configuration?.wheelEvents,
+    wheelIntervalMs: before.configuration?.wheelIntervalMs
+      === report.configuration?.wheelIntervalMs,
   };
   const contextComparable = Object.values(contextChecks).every(Boolean);
   const modesPassed = before.context?.mode === "legacy" && report.context?.mode === "shadow";
@@ -5834,7 +5981,8 @@ async function main() {
     report.configuration.intervalSeconds = args.intervalSeconds;
     report.configuration.mockEndTime = args.mockEndTime;
     report.configuration.settleMs = args.settleMs;
-    report.configuration.wheelEvents = args.wheelEvents;
+    Object.assign(report.configuration, drawingWheelConfiguration(args));
+    report.configuration.workerBackpressure = drawingWorkerBackpressureConfiguration();
     report.configuration.hoverEvents = args.hoverEvents;
     report.configuration.pointerSamples = args.pointerSamples;
     report.configuration.drawingCoordinateProjectorMode = drawingCoordinateProjectorMode;
@@ -5972,7 +6120,10 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

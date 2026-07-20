@@ -316,6 +316,7 @@ export interface DrawingPerfPhase6RuntimeSnapshot {
   readonly returnedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
   readonly acceptedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
   readonly publishedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
+  readonly paintedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
   readonly latestSubmittedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
 }
 
@@ -361,6 +362,11 @@ export interface DrawingPerfInteractionHandoffSnapshot {
 
 export type DrawingPerfRuntimeSummaryProvider = () => DrawingPerfRuntimeSummary | null;
 export type DrawingPerfShadowParityRequester = () => boolean;
+
+export interface DrawingPerfProviderRegistrationOptions {
+  /** Higher-priority drawing surfaces own the process-wide diagnostic handle. */
+  priority?: number;
+}
 
 export interface DrawingPerfBootstrapConfig {
   /** Benchmark-only: retain a larger drainable raw sample stream. */
@@ -1341,17 +1347,76 @@ export function accumulateDrawingPerfFrameWork(
   return true;
 }
 
-let runtimeSummaryProvider: DrawingPerfRuntimeSummaryProvider | null = null;
-let phase6RuntimeProvider: DrawingPerfPhase6RuntimeProvider | null = null;
-let activePersistenceDocumentRecordProvider:
-  DrawingPerfActivePersistenceDocumentRecordProvider | null = null;
-let legacyCompatibilitySnapshotProvider:
-  DrawingPerfLegacyCompatibilitySnapshotProvider | null = null;
-let phase6HitOracleProvider: DrawingPerfPhase6HitOracleProvider | null = null;
-let shadowParityRequester: DrawingPerfShadowParityRequester | null = null;
+interface DrawingPerfProviderRegistration<T> {
+  readonly priority: number;
+  readonly provider: T;
+  readonly sequence: number;
+}
+
+let drawingPerfProviderSequence = 0;
+const runtimeSummaryProviders: Array<
+  DrawingPerfProviderRegistration<DrawingPerfRuntimeSummaryProvider>
+> = [];
+const phase6RuntimeProviders: Array<
+  DrawingPerfProviderRegistration<DrawingPerfPhase6RuntimeProvider>
+> = [];
+const activePersistenceDocumentRecordProviders: Array<
+  DrawingPerfProviderRegistration<DrawingPerfActivePersistenceDocumentRecordProvider>
+> = [];
+const legacyCompatibilitySnapshotProviders: Array<
+  DrawingPerfProviderRegistration<DrawingPerfLegacyCompatibilitySnapshotProvider>
+> = [];
+const phase6HitOracleProviders: Array<
+  DrawingPerfProviderRegistration<DrawingPerfPhase6HitOracleProvider>
+> = [];
+const shadowParityRequesters: Array<
+  DrawingPerfProviderRegistration<DrawingPerfShadowParityRequester>
+> = [];
 let interactionHandoffSequence = 0;
 let preparedInteractionHandoff: DrawingPerfInteractionHandoffRecord | null = null;
 let acknowledgedInteractionHandoff: DrawingPerfInteractionHandoffRecord | null = null;
+
+function registerDrawingPerfProvider<T>(
+  registrations: Array<DrawingPerfProviderRegistration<T>>,
+  provider: T | null,
+  options: DrawingPerfProviderRegistrationOptions = {},
+): () => void {
+  if (provider === null) {
+    registrations.splice(0, registrations.length);
+    return () => {};
+  }
+  drawingPerfProviderSequence = drawingPerfProviderSequence >= Number.MAX_SAFE_INTEGER
+    ? 1
+    : drawingPerfProviderSequence + 1;
+  const priority = typeof options.priority === "number" && Number.isFinite(options.priority)
+    ? options.priority
+    : 0;
+  const registration = Object.freeze({
+    priority,
+    provider,
+    sequence: drawingPerfProviderSequence,
+  });
+  registrations.push(registration);
+  return () => {
+    const index = registrations.indexOf(registration);
+    if (index >= 0) registrations.splice(index, 1);
+  };
+}
+
+function activeDrawingPerfProvider<T>(
+  registrations: readonly DrawingPerfProviderRegistration<T>[],
+): T | null {
+  let active: DrawingPerfProviderRegistration<T> | null = null;
+  for (const registration of registrations) {
+    if (!active
+      || registration.priority > active.priority
+      || (registration.priority === active.priority
+        && registration.sequence > active.sequence)) {
+      active = registration;
+    }
+  }
+  return active?.provider ?? null;
+}
 
 function validInteractionHandoffStamp(
   stamp: DrawingPerfInteractionHandoffStamp,
@@ -1422,14 +1487,13 @@ function resetDrawingPerfInteractionHandoff(): void {
 
 export function registerDrawingPerfRuntimeSummaryProvider(
   provider: DrawingPerfRuntimeSummaryProvider | null,
+  options: DrawingPerfProviderRegistrationOptions = {},
 ): () => void {
-  runtimeSummaryProvider = provider;
-  return () => {
-    if (runtimeSummaryProvider === provider) runtimeSummaryProvider = null;
-  };
+  return registerDrawingPerfProvider(runtimeSummaryProviders, provider, options);
 }
 
 export function readDrawingPerfRuntimeSummary(): DrawingPerfRuntimeSummary | null {
+  const runtimeSummaryProvider = activeDrawingPerfProvider(runtimeSummaryProviders);
   if (!runtimeSummaryProvider) return null;
   try {
     const summary = runtimeSummaryProvider();
@@ -1496,26 +1560,27 @@ export function readDrawingPerfRuntimeSummary(): DrawingPerfRuntimeSummary | nul
 
 export function registerDrawingPerfPhase6RuntimeProvider(
   provider: DrawingPerfPhase6RuntimeProvider | null,
+  options: DrawingPerfProviderRegistrationOptions = {},
 ): () => void {
-  phase6RuntimeProvider = provider;
-  return () => {
-    if (phase6RuntimeProvider === provider) phase6RuntimeProvider = null;
-  };
+  return registerDrawingPerfProvider(phase6RuntimeProviders, provider, options);
 }
 
 export function registerDrawingPerfActivePersistenceDocumentRecordProvider(
   provider: DrawingPerfActivePersistenceDocumentRecordProvider | null,
+  options: DrawingPerfProviderRegistrationOptions = {},
 ): () => void {
-  activePersistenceDocumentRecordProvider = provider;
-  return () => {
-    if (activePersistenceDocumentRecordProvider === provider) {
-      activePersistenceDocumentRecordProvider = null;
-    }
-  };
+  return registerDrawingPerfProvider(
+    activePersistenceDocumentRecordProviders,
+    provider,
+    options,
+  );
 }
 
 export function readDrawingPerfActivePersistenceDocumentRecord(
 ): DrawingPerfActivePersistenceDocumentRecord | null {
+  const activePersistenceDocumentRecordProvider = activeDrawingPerfProvider(
+    activePersistenceDocumentRecordProviders,
+  );
   if (!activePersistenceDocumentRecordProvider) return null;
   try {
     return activePersistenceDocumentRecordProvider();
@@ -1526,17 +1591,16 @@ export function readDrawingPerfActivePersistenceDocumentRecord(
 
 export function registerDrawingPerfLegacyCompatibilitySnapshotProvider(
   provider: DrawingPerfLegacyCompatibilitySnapshotProvider | null,
+  options: DrawingPerfProviderRegistrationOptions = {},
 ): () => void {
-  legacyCompatibilitySnapshotProvider = provider;
-  return () => {
-    if (legacyCompatibilitySnapshotProvider === provider) {
-      legacyCompatibilitySnapshotProvider = null;
-    }
-  };
+  return registerDrawingPerfProvider(legacyCompatibilitySnapshotProviders, provider, options);
 }
 
 export function readDrawingPerfLegacyCompatibilitySnapshot(
 ): DrawingPerfLegacyCompatibilitySnapshot | null {
+  const legacyCompatibilitySnapshotProvider = activeDrawingPerfProvider(
+    legacyCompatibilitySnapshotProviders,
+  );
   if (!legacyCompatibilitySnapshotProvider) return null;
   try {
     return legacyCompatibilitySnapshotProvider();
@@ -1547,14 +1611,13 @@ export function readDrawingPerfLegacyCompatibilitySnapshot(
 
 export function registerDrawingPerfPhase6HitOracleProvider(
   provider: DrawingPerfPhase6HitOracleProvider | null,
+  options: DrawingPerfProviderRegistrationOptions = {},
 ): () => void {
-  phase6HitOracleProvider = provider;
-  return () => {
-    if (phase6HitOracleProvider === provider) phase6HitOracleProvider = null;
-  };
+  return registerDrawingPerfProvider(phase6HitOracleProviders, provider, options);
 }
 
 export function readDrawingPerfPhase6Runtime(): DrawingPerfPhase6RuntimeSnapshot | null {
+  const phase6RuntimeProvider = activeDrawingPerfProvider(phase6RuntimeProviders);
   if (!phase6RuntimeProvider) return null;
   try {
     return phase6RuntimeProvider();
@@ -1566,6 +1629,7 @@ export function readDrawingPerfPhase6Runtime(): DrawingPerfPhase6RuntimeSnapshot
 export function runDrawingPerfPhase6HitOracle(
   points: readonly Readonly<{ x: number; y: number }>[],
 ): DrawingPerfPhase6HitOracleResult {
+  const phase6HitOracleProvider = activeDrawingPerfProvider(phase6HitOracleProviders);
   if (!phase6HitOracleProvider) {
     return Object.freeze({
       queryCount: 0,
@@ -1579,14 +1643,13 @@ export function runDrawingPerfPhase6HitOracle(
 
 export function registerDrawingPerfShadowParityRequester(
   requester: DrawingPerfShadowParityRequester | null,
+  options: DrawingPerfProviderRegistrationOptions = {},
 ): () => void {
-  shadowParityRequester = requester;
-  return () => {
-    if (shadowParityRequester === requester) shadowParityRequester = null;
-  };
+  return registerDrawingPerfProvider(shadowParityRequesters, requester, options);
 }
 
 export function requestDrawingPerfShadowParity(): boolean {
+  const shadowParityRequester = activeDrawingPerfProvider(shadowParityRequesters);
   if (!shadowParityRequester) return false;
   try {
     return shadowParityRequester() === true;

@@ -27,10 +27,22 @@ _DEFAULT_PARTIAL_DEPTH_UPDATE_INTERVAL_MS = {
     "spot": 1000,
     "futures": 250,
 }
-_FULL_DEPTH_UPDATE_INTERVALS_MS = {100, 250, 500}
-_DEFAULT_FULL_DEPTH_UPDATE_INTERVAL_MS = 250
-_FULL_DEPTH_SNAPSHOT_LIMITS = {5, 10, 20, 50, 100, 500, 1000}
-_DEFAULT_FULL_DEPTH_SNAPSHOT_LIMIT = 500
+_FULL_DEPTH_UPDATE_INTERVALS_MS = {
+    "spot": {100, 1000},
+    "futures": {100, 250, 500},
+}
+_DEFAULT_FULL_DEPTH_UPDATE_INTERVAL_MS = {
+    "spot": 1000,
+    "futures": 250,
+}
+_FULL_DEPTH_SNAPSHOT_LIMITS = {
+    "spot": {5, 10, 20, 50, 100, 500, 1000, 5000},
+    "futures": {5, 10, 20, 50, 100, 500, 1000},
+}
+_DEFAULT_FULL_DEPTH_SNAPSHOT_LIMIT = {
+    "spot": 1000,
+    "futures": 500,
+}
 
 
 class BinanceNormalizer:
@@ -281,6 +293,7 @@ class BinanceNormalizer:
         payload: dict,
         msg: RawMessage,
     ) -> MarketEvent | None:
+        market_type = self._descriptor.market_type.strip().lower()
         update_interval_ms = self._full_depth_update_interval()
         if update_interval_ms is None or payload.get("e") != "depthUpdate":
             return None
@@ -298,16 +311,27 @@ class BinanceNormalizer:
 
         first_update_id = self._positive_int(payload.get("U"))
         final_update_id = self._positive_int(payload.get("u"))
-        previous_final_update_id = self._positive_int(payload.get("pu"))
+        previous_final_update_id = (
+            self._positive_int(payload.get("pu"))
+            if market_type == "futures"
+            else None
+        )
         event_time_ms = self._positive_int(payload.get("E"))
-        transaction_time_ms = self._positive_int(payload.get("T"))
+        transaction_time_ms = (
+            self._positive_int(payload.get("T"))
+            if market_type == "futures"
+            else None
+        )
         if (
             first_update_id is None
             or final_update_id is None
-            or previous_final_update_id is None
             or event_time_ms is None
-            or transaction_time_ms is None
             or first_update_id > final_update_id
+        ):
+            return None
+        if market_type == "futures" and (
+            previous_final_update_id is None
+            or transaction_time_ms is None
             or previous_final_update_id >= final_update_id
         ):
             return None
@@ -572,14 +596,21 @@ class BinanceNormalizer:
         if not isinstance(payload, dict) or update_interval_ms is None:
             return None
 
+        market_type = self._descriptor.market_type.strip().lower()
         last_update_id = self._positive_int(payload.get("lastUpdateId"))
-        event_time_ms = self._positive_int(payload.get("E"))
-        transaction_time_ms = self._positive_int(payload.get("T"))
-        if (
-            last_update_id is None
-            or event_time_ms is None
-            or transaction_time_ms is None
-        ):
+        if last_update_id is None:
+            return None
+        if market_type == "futures":
+            event_time_ms = self._positive_int(payload.get("E"))
+            transaction_time_ms = self._positive_int(payload.get("T"))
+            if event_time_ms is None or transaction_time_ms is None:
+                return None
+        elif market_type == "spot":
+            # Spot REST depth snapshots carry no exchange event/transaction
+            # timestamps.  The intake receipt is the only honest timestamp.
+            event_time_ms = msg.received_at_ms
+            transaction_time_ms = None
+        else:
             return None
 
         bids = self._normalize_full_depth_levels(
@@ -597,10 +628,10 @@ class BinanceNormalizer:
 
         snapshot_limit = msg.request_limit
         if snapshot_limit is None:
-            snapshot_limit = _DEFAULT_FULL_DEPTH_SNAPSHOT_LIMIT
+            snapshot_limit = _DEFAULT_FULL_DEPTH_SNAPSHOT_LIMIT[market_type]
         elif (
             type(snapshot_limit) is not int
-            or snapshot_limit not in _FULL_DEPTH_SNAPSHOT_LIMITS
+            or snapshot_limit not in _FULL_DEPTH_SNAPSHOT_LIMITS[market_type]
         ):
             return None
 
@@ -731,16 +762,19 @@ class BinanceNormalizer:
         return depth_levels, update_interval_ms
 
     def _full_depth_update_interval(self) -> int | None:
-        if self._descriptor.market_type.strip().lower() != "futures":
+        market_type = self._descriptor.market_type.strip().lower()
+        allowed_intervals = _FULL_DEPTH_UPDATE_INTERVALS_MS.get(market_type)
+        default_interval = _DEFAULT_FULL_DEPTH_UPDATE_INTERVAL_MS.get(market_type)
+        if allowed_intervals is None or default_interval is None:
             return None
         if self._descriptor.depth_levels is not None:
             return None
         update_interval_ms = self._descriptor.update_interval_ms
         if update_interval_ms is None:
-            return _DEFAULT_FULL_DEPTH_UPDATE_INTERVAL_MS
+            return default_interval
         if (
             type(update_interval_ms) is not int
-            or update_interval_ms not in _FULL_DEPTH_UPDATE_INTERVALS_MS
+            or update_interval_ms not in allowed_intervals
         ):
             return None
         return update_interval_ms

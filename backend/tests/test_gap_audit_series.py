@@ -33,3 +33,7 @@ def test_data_manager_gap_audit_series_includes_prewarm_active_and_storage() -> 
         ("okx", "spot", "ETH-USDT", "5m"),
         ("okx", "spot", "SOL-USDT", "15m"),
     ]
+    assert dm.gap_audit_tail_series() == [
+        ("okx", "spot", "BTC-USDT", "1m"),
+        ("okx", "spot", "SOL-USDT", "15m"),
+    ]

@@ -229,6 +229,7 @@ function normalizePositionOffsetForRender(
   const x = Number(offset?.x);
   const y = Number(offset?.y);
   return Object.freeze({
+    ...(offset?.anchor === "left" ? { anchor: "left" as const } : {}),
     x: Number.isFinite(x) ? x : 0,
     y: Number.isFinite(y) ? y : 0,
   });

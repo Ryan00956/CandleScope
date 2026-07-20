@@ -18,6 +18,7 @@ import type {
   CoordinateSeriesBridge,
   DrawingCoordinateContext,
   DrawingCoordinateResolution,
+  DrawingSourceLineageSpanProjection,
   DrawingSourceLineageSpanResolution,
   DrawingSeriesProviders,
   ScreenPoint,
@@ -28,6 +29,9 @@ import {
   isDrawingFrameSnapshot,
 } from "./drawingFrameSnapshot.js";
 import type { DrawingFrameSnapshot } from "./drawingFrameSnapshot.js";
+import {
+  subscribeSharedDrawingFrameInvalidation,
+} from "./drawingFrameInvalidationHub.js";
 
 export type DrawingFrameInvalidationReason = "manual" | "viewport";
 import type { DrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex.js";
@@ -84,6 +88,8 @@ interface LightweightChartAdapterOptions {
   chartRef: RefOrValue<AdapterChart>;
   seriesRef: RefOrValue<AdapterSeries>;
   containerRef?: RefOrValue<HTMLElement>;
+  drawingPaneIndexRef?: RefOrValue<number>;
+  /** @deprecated Use drawingPaneIndexRef for pane-scoped drawing adapters. */
   mainPaneIndexRef?: RefOrValue<number>;
   seriesDataRef?: RefOrValue<DisplayRow[]>;
   seriesDataMapRef?: RefOrValue<LookupMap>;
@@ -106,6 +112,20 @@ interface FreehandCaptureIdentityRecord {
 interface DrawingFrameProjectionSessionState {
   readonly context: DrawingCoordinateContext;
   readonly invalidationEpoch: number;
+  /**
+   * Viewport projection is pure for one atomic frame. Multiple canonical
+   * strokes may share the same immutable world-lineage resolution, so retain
+   * its public time-scale projection only for this synchronous scene build.
+   * The WeakMap is released with the session and cannot retain documents or
+   * grow across viewport revisions.
+   */
+  readonly lineageProjectionCache: WeakMap<
+    DrawingSourceLineageSpanResolution,
+    Readonly<{
+      coordinates: Readonly<{ left: number; right: number }> | null;
+      mode: DrawingSourceLineageSpanProjection["mode"] | null;
+    }>
+  >;
   readonly lineageStats: {
     exactProjectionCount: number;
     fallbackProjectionCount: number;
@@ -225,6 +245,7 @@ export function createLightweightChartAdapter({
   chartRef,
   seriesRef,
   containerRef = null,
+  drawingPaneIndexRef = null,
   mainPaneIndexRef = null,
   seriesDataRef = null,
   seriesDataMapRef = null,
@@ -238,9 +259,61 @@ export function createLightweightChartAdapter({
 }: LightweightChartAdapterOptions) {
   const getChart = () => getRefValue(chartRef);
   const getSeries = () => getRefValue(seriesRef);
-  const getMainPaneIndex = () => {
-    const value = getRefValue(mainPaneIndexRef);
+  const getDrawingPaneIndex = () => {
+    const drawingPaneIndex = getRefValue(drawingPaneIndexRef);
+    const value = drawingPaneIndex ?? getRefValue(mainPaneIndexRef);
     return Number.isInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+  };
+  let drawingPaneGeometryCache: Readonly<{
+    container: HTMLElement | null;
+    offsetY: number;
+    paneElement: HTMLElement | null;
+    valid: boolean;
+  }> = Object.freeze({
+    container: null,
+    offsetY: 0,
+    paneElement: null,
+    valid: false,
+  });
+  const getDrawingPaneElement = (): HTMLElement | null => (
+    getSeries()?.getPane?.()?.getHTMLElement?.() ?? null
+  ) as HTMLElement | null;
+  const refreshDrawingPaneGeometry = (
+    container: HTMLElement | null = getRefValue(containerRef) ?? null,
+    paneElement?: HTMLElement | null,
+  ): number => {
+    const resolvedPaneElement = container
+      ? paneElement === undefined ? getDrawingPaneElement() : paneElement
+      : null;
+    const containerRect = container?.getBoundingClientRect?.() ?? null;
+    const paneRect = resolvedPaneElement?.getBoundingClientRect?.() ?? null;
+    const rawOffset = containerRect && paneRect ? paneRect.top - containerRect.top : 0;
+    const offsetY = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+    drawingPaneGeometryCache = Object.freeze({
+      container,
+      offsetY,
+      paneElement: resolvedPaneElement,
+      valid: true,
+    });
+    return offsetY;
+  };
+  const getDrawingPaneOffsetY = (): number => {
+    const container = getRefValue(containerRef) ?? null;
+    if (!container) {
+      if (!drawingPaneGeometryCache.valid
+        || drawingPaneGeometryCache.container !== null
+        || drawingPaneGeometryCache.paneElement !== null) {
+        return refreshDrawingPaneGeometry(null, null);
+      }
+      return 0;
+    }
+    const paneElement = getDrawingPaneElement();
+    if (!drawingPaneGeometryCache.valid
+      || drawingPaneGeometryCache.container !== container
+      || drawingPaneGeometryCache.paneElement !== paneElement) {
+      return refreshDrawingPaneGeometry(container, paneElement);
+    }
+    return drawingPaneGeometryCache.offsetY;
   };
   const getSeriesData = (): DisplayRow[] => {
     const data = getRefValue(seriesDataRef);
@@ -383,6 +456,7 @@ export function createLightweightChartAdapter({
   const drawingFrameInvalidationListeners = new Set<(
     reason?: DrawingFrameInvalidationReason,
   ) => void>();
+  let unsubscribeSharedFrameInvalidation: (() => void) | null = null;
   let drawingFrameInvalidationEpoch = 0;
   const advanceDrawingFrameInvalidationEpoch = (): void => {
     drawingFrameInvalidationEpoch = drawingFrameInvalidationEpoch >= Number.MAX_SAFE_INTEGER
@@ -391,7 +465,9 @@ export function createLightweightChartAdapter({
   };
   const emitDrawingFrameInvalidation = (
     reason: DrawingFrameInvalidationReason = "manual",
+    refreshPaneGeometry = reason === "manual",
   ) => {
+    if (refreshPaneGeometry) refreshDrawingPaneGeometry();
     advanceDrawingFrameInvalidationEpoch();
     for (const listener of drawingFrameInvalidationListeners) {
       safeCall(() => listener(reason), undefined);
@@ -433,6 +509,7 @@ export function createLightweightChartAdapter({
     const session = Object.freeze({
       context: createDrawingFrameCoordinateContext(snapshot),
       invalidationEpoch: drawingFrameInvalidationEpoch,
+      lineageProjectionCache: new WeakMap(),
       lineageStats: {
         exactProjectionCount: 0,
         fallbackProjectionCount: 0,
@@ -588,26 +665,43 @@ export function createLightweightChartAdapter({
         span,
         context,
       );
-      const projected = projectSourceLineageSpanWithMode(
-        timeScale,
-        resolution,
-        context,
-      );
-      if (!projected
-        || !Number.isFinite(projected.left)
-        || !Number.isFinite(projected.right)
-        || projected.left >= projected.right) {
+      const cachedProjection = session && resolution
+        ? session.lineageProjectionCache.get(resolution)
+        : undefined;
+      let coordinates = cachedProjection?.coordinates;
+      let mode = cachedProjection?.mode;
+      if (cachedProjection === undefined) {
+        const projected = projectSourceLineageSpanWithMode(
+          timeScale,
+          resolution,
+          context,
+        );
+        if (!projected
+          || !Number.isFinite(projected.left)
+          || !Number.isFinite(projected.right)
+          || projected.left >= projected.right) {
+          coordinates = null;
+          mode = null;
+        } else {
+          coordinates = Object.freeze({ left: projected.left, right: projected.right });
+          mode = projected.mode;
+        }
+        if (session && resolution) {
+          session.lineageProjectionCache.set(resolution, Object.freeze({ coordinates, mode }));
+        }
+      }
+      if (!coordinates || mode === null || mode === undefined) {
         if (session) session.lineageStats.unresolvedProjectionCount += 1;
         else drawingLineageUnresolvedProjectionCount += 1;
         return null;
       }
       if (!session && !isDrawingFrameCurrent(snapshot)) return null;
-      if (projected.mode === "exact") {
+      if (mode === "exact") {
         if (session) session.lineageStats.exactProjectionCount += 1;
         else drawingLineageExactProjectionCount += 1;
       } else if (session) session.lineageStats.fallbackProjectionCount += 1;
       else drawingLineageFallbackProjectionCount += 1;
-      return Object.freeze({ left: projected.left, right: projected.right });
+      return coordinates;
     }, null),
     readDrawingFrameSourceLineageStats: () => Object.freeze({
       exactProjectionCount: drawingLineageExactProjectionCount,
@@ -619,68 +713,27 @@ export function createLightweightChartAdapter({
     ) => {
       if (typeof listener !== "function") return () => {};
       drawingFrameInvalidationListeners.add(listener);
-      const timeScale = safeCall(() => getChart()?.timeScale(), null);
-      const notify = () => {
-        advanceDrawingFrameInvalidationEpoch();
-        safeCall(() => listener("viewport"), undefined);
-      };
-      safeCall(() => timeScale?.subscribeVisibleLogicalRangeChange?.(notify), undefined);
-      safeCall(() => timeScale?.subscribeSizeChange?.(notify), undefined);
-      let dprMediaQuery: MediaQueryList | null = null;
-      let dprChangeListener: (() => void) | null = null;
-      let dprPollTimer: number | null = null;
-      let observedDpr = currentDevicePixelRatio();
-      let dprDisposed = false;
-      const removeDprMediaQueryListener = () => {
-        if (!dprMediaQuery || !dprChangeListener) return;
-        if (typeof dprMediaQuery.removeEventListener === "function") {
-          dprMediaQuery.removeEventListener("change", dprChangeListener);
-        } else {
-          dprMediaQuery.removeListener?.(dprChangeListener);
-        }
-        dprMediaQuery = null;
-        dprChangeListener = null;
-      };
-      const detectDprChange = () => {
-        if (dprDisposed) return;
-        const nextDpr = currentDevicePixelRatio();
-        if (nextDpr === observedDpr) return;
-        observedDpr = nextDpr;
-        notify();
-        armDprMediaQuery();
-      };
-      const armDprMediaQuery = () => {
-        removeDprMediaQueryListener();
-        if (dprDisposed
-          || typeof window === "undefined"
-          || typeof window.matchMedia !== "function") return;
-        observedDpr = currentDevicePixelRatio();
-        dprMediaQuery = window.matchMedia(`(resolution: ${observedDpr}dppx)`);
-        dprChangeListener = detectDprChange;
-        if (typeof dprMediaQuery.addEventListener === "function") {
-          dprMediaQuery.addEventListener("change", dprChangeListener);
-        } else {
-          dprMediaQuery.addListener?.(dprChangeListener);
-        }
-      };
-      armDprMediaQuery();
-      if (typeof window !== "undefined" && typeof window.setInterval === "function") {
-        // Chromium's device-metrics override, and some monitor/zoom changes,
-        // update devicePixelRatio without dispatching resize or MediaQueryList
-        // change. Keep a low-frequency fallback only while a drawing consumer
-        // is subscribed so the scene and overlay cannot retain stale bitmaps.
-        dprPollTimer = window.setInterval(detectDprChange, 250);
+      if (drawingFrameInvalidationListeners.size === 1) {
+        const timeScale = safeCall(() => getChart()?.timeScale(), null);
+        unsubscribeSharedFrameInvalidation = subscribeSharedDrawingFrameInvalidation(
+          timeScale,
+          (source) => {
+            // Horizontal viewport churn cannot move a pane relative to its
+            // container. Refresh DOM geometry only for a real size change;
+            // coordinate conversion then stays layout-read-free for the full
+            // wheel/pan frame.
+            emitDrawingFrameInvalidation("viewport", source === "size");
+          },
+        );
       }
+      let disposed = false;
       return () => {
-        dprDisposed = true;
-        if (dprPollTimer !== null && typeof window !== "undefined") {
-          window.clearInterval(dprPollTimer);
-          dprPollTimer = null;
-        }
-        removeDprMediaQueryListener();
+        if (disposed) return;
+        disposed = true;
         drawingFrameInvalidationListeners.delete(listener);
-        safeCall(() => timeScale?.unsubscribeVisibleLogicalRangeChange?.(notify), undefined);
-        safeCall(() => timeScale?.unsubscribeSizeChange?.(notify), undefined);
+        if (drawingFrameInvalidationListeners.size > 0) return;
+        unsubscribeSharedFrameInvalidation?.();
+        unsubscribeSharedFrameInvalidation = null;
       };
     },
     notifyDrawingFrameInvalidation: emitDrawingFrameInvalidation,
@@ -739,10 +792,17 @@ export function createLightweightChartAdapter({
           : ordinalSeriesIndex?.revision ?? null;
         if (isDrawingFrameSnapshot(snapshot)) context.drawingFrameSnapshot = snapshot;
       }
+      const paneOffsetY = getDrawingPaneOffsetY();
+      const paneLocalPoints = paneOffsetY === 0
+        ? screenPoints
+        : screenPoints.map((point) => ({
+            x: point.x,
+            y: typeof point.y === "number" ? point.y - paneOffsetY : point.y,
+          }));
       const batch = captureSourceLineageFreehandStrokeBatch(
         chart,
         series,
-        screenPoints,
+        paneLocalPoints,
         context,
       );
       if (!batch) return null;
@@ -752,7 +812,18 @@ export function createLightweightChartAdapter({
           batch.sourceProjection,
           batch.sourceProjectionConfig,
         ),
-        ...batch,
+        sourceProjection: batch.sourceProjection,
+        sourceProjectionConfig: batch.sourceProjectionConfig,
+        // The coordinate bridge consumes pane-local Y, but live-ink feedback
+        // and interaction drafts remain container-local. Restore the original
+        // samples before the batch crosses back into the drawing controller.
+        captures: Object.freeze(batch.captures.map((capture) => Object.freeze({
+          ...capture,
+          screen: Object.freeze({
+            x: capture.screen.x,
+            y: capture.screen.y + paneOffsetY,
+          }),
+        }))),
       });
     }, null),
     axisTimeToDrawingAnchor: (time: unknown) => safeCall(() => {
@@ -815,7 +886,24 @@ export function createLightweightChartAdapter({
       }
       return detached;
     },
-    priceToCoordinate: (price: number) => safeCall(() => getSeries()?.priceToCoordinate(price), null),
+    // Drawing interaction points are container-local while Lightweight Charts
+    // price coordinates are pane-local. Keep this adapter boundary explicit so
+    // the same controller can own the main pane, reordered panes, and native
+    // indicator panes without leaking DOM offsets into persisted geometry.
+    drawingPaneToContainerY: (y: number) => safeCall(
+      () => y + getDrawingPaneOffsetY(),
+      y,
+    ),
+    containerToDrawingPaneY: (y: number) => safeCall(
+      () => y - getDrawingPaneOffsetY(),
+      y,
+    ),
+    priceToCoordinate: (price: number) => safeCall(() => {
+      const coordinate = getSeries()?.priceToCoordinate(price);
+      return typeof coordinate === "number" && Number.isFinite(coordinate)
+        ? coordinate + getDrawingPaneOffsetY()
+        : null;
+    }, null),
     timeToCoordinate: (time: unknown) => safeCall(() => getChart()?.timeScale().timeToCoordinate(time), null),
     timeToCoordinateInterpolated: (time: unknown) => safeCall(() => {
       const series = registerCurrentDrawingSeries();
@@ -826,7 +914,9 @@ export function createLightweightChartAdapter({
         createDrawingCoordinateContext(),
       );
     }, null),
-    coordinateToPrice: (y: number) => safeCall(() => getSeries()?.coordinateToPrice(y), null),
+    coordinateToPrice: (y: number) => safeCall(() => (
+      getSeries()?.coordinateToPrice(y - getDrawingPaneOffsetY()) ?? null
+    ), null),
     coordinateToTime: (x: number) => safeCall(() => getChart()?.timeScale().coordinateToTime(x), null),
     coordinateToLogical: (x: number) => safeCall(() => getChart()?.timeScale().coordinateToLogical(x), null),
     logicalToCoordinate: (logical: number) => safeCall(() => getChart()?.timeScale().logicalToCoordinate(logical), null),
@@ -835,23 +925,17 @@ export function createLightweightChartAdapter({
       null,
     ),
     getBarSpacing: () => safeCall(() => getChart()?.timeScale().options?.().barSpacing, null),
-    getMainPanePlotRect: (): Readonly<MainPanePlotRect> | null => safeCall(() => {
+    getDrawingPanePlotRect: (): Readonly<MainPanePlotRect> | null => safeCall(() => {
       const chart = getChart();
       if (!chart) return null;
 
-      const paneIndex = getMainPaneIndex();
+      const paneIndex = getDrawingPaneIndex();
       // paneSize describes the plot surface for the requested pane, excluding
       // both price scales and the time scale. Its coordinates are pane-local,
       // so resolve the pane element's vertical offset for DOM overlays.
       const pane = chart.paneSize(paneIndex);
       const leftPriceScaleWidth = chart.priceScale("left", paneIndex).width();
-      const container = getRefValue(containerRef);
-      const paneElement = getSeries()?.getPane?.()?.getHTMLElement?.() ?? null;
-      const containerRect = container?.getBoundingClientRect?.() ?? null;
-      const paneRect = paneElement?.getBoundingClientRect?.() ?? null;
-      const paneOffsetY = containerRect && paneRect
-        ? paneRect.top - containerRect.top
-        : 0;
+      const paneOffsetY = getDrawingPaneOffsetY();
       if (!pane
         || !Number.isFinite(pane.width)
         || pane.width <= 0
@@ -862,6 +946,31 @@ export function createLightweightChartAdapter({
         || !Number.isFinite(paneOffsetY)
         || paneOffsetY < 0) return null;
 
+      return Object.freeze({
+        x: leftPriceScaleWidth,
+        y: paneOffsetY,
+        width: pane.width,
+        height: pane.height,
+        dpr: currentDevicePixelRatio(),
+      });
+    }, null),
+    // Transitional alias retained for existing consumers and diagnostics.
+    getMainPanePlotRect: (): Readonly<MainPanePlotRect> | null => safeCall(() => {
+      const chart = getChart();
+      if (!chart) return null;
+      const paneIndex = getDrawingPaneIndex();
+      const pane = chart.paneSize(paneIndex);
+      const leftPriceScaleWidth = chart.priceScale("left", paneIndex).width();
+      const paneOffsetY = getDrawingPaneOffsetY();
+      if (!pane
+        || !Number.isFinite(pane.width)
+        || pane.width <= 0
+        || !Number.isFinite(pane.height)
+        || pane.height <= 0
+        || !Number.isFinite(leftPriceScaleWidth)
+        || leftPriceScaleWidth < 0
+        || !Number.isFinite(paneOffsetY)
+        || paneOffsetY < 0) return null;
       return Object.freeze({
         x: leftPriceScaleWidth,
         y: paneOffsetY,

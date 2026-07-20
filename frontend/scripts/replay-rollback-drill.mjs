@@ -209,7 +209,10 @@ function startBackend({ python, root, port, enabled, paths, baseline = false }) 
 function startVite({ root, port, backendPort, entryEnabled }) {
   const vitePath = path.join(root, "node_modules", "vite", "bin", "vite.js");
   assert(fs.existsSync(vitePath), "Vite entrypoint is missing", { vitePath });
-  const child = spawn(process.execPath, [vitePath], {
+  // The detached baseline worktree deliberately reuses the installed
+  // node_modules tree. Rebuild Vite's optimizer cache on every transition so
+  // a force-stopped current build cannot leave stale metadata for the old one.
+  const child = spawn(process.execPath, [vitePath, "--force"], {
     cwd: root,
     env: {
       ...process.env,
@@ -274,7 +277,30 @@ async function createTarget(debugBase, url = "about:blank") {
 }
 
 function captureTarget(cdp) {
-  const capture = { consoleErrors: [], exceptions: [], webSockets: [] };
+  const requestUrls = new Map();
+  const capture = {
+    consoleErrors: [],
+    exceptions: [],
+    failedResponses: [],
+    loadingFailures: [],
+    webSockets: [],
+  };
+  cdp.on("Network.requestWillBeSent", ({ requestId, request }) => {
+    if (requestId && request?.url) requestUrls.set(requestId, request.url);
+  });
+  cdp.on("Network.responseReceived", ({ response }) => {
+    if (Number(response?.status) >= 400) {
+      capture.failedResponses.push({ status: response.status, url: response.url });
+    }
+  });
+  cdp.on("Network.loadingFailed", ({ requestId, errorText, canceled, type }) => {
+    capture.loadingFailures.push({
+      url: requestUrls.get(requestId) || null,
+      errorText: errorText || "unknown",
+      canceled: Boolean(canceled),
+      type: type || null,
+    });
+  });
   cdp.on("Network.webSocketCreated", ({ url }) => capture.webSockets.push(url));
   cdp.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
     capture.exceptions.push(exceptionDetails?.exception?.description || exceptionDetails?.text || "runtime exception");
@@ -283,6 +309,21 @@ function captureTarget(cdp) {
     if (type === "error" || type === "assert") capture.consoleErrors.push(args?.map((item) => item.value ?? item.description).join(" ") || type);
   });
   return capture;
+}
+
+async function browserDiagnostic(cdp) {
+  return evaluate(cdp, `(() => {
+    const text = document.body?.innerText || "";
+    return {
+      url: location.href,
+      title: document.title,
+      readyState: document.readyState,
+      canvasCount: document.querySelectorAll("canvas").length,
+      barMatches: [...text.matchAll(/([0-9]+)[ ]+bars/g)].map((match) => Number(match[1])),
+      bodyTail: text.slice(-4_000),
+      viteError: document.querySelector("vite-error-overlay")?.shadowRoot?.textContent?.slice(-4_000) || "",
+    };
+  })()`);
 }
 
 async function evaluate(cdp, expression, { userGesture = false } = {}) {
@@ -481,6 +522,18 @@ async function main() {
   const chromeTail = processTail(chrome);
   const connections = [];
   const processes = [];
+  const processRecords = [];
+  const browserCaptures = [];
+  const trackProcess = (label, started) => {
+    processes.push(started.child);
+    processRecords.push({ label, ...started });
+    return started;
+  };
+  const trackBrowser = (label, cdp) => {
+    const capture = captureTarget(cdp);
+    browserCaptures.push({ label, cdp, capture });
+    return capture;
+  };
   let oldWorktreeAdded = false;
   let oldNodeModulesLinked = false;
   let result = null;
@@ -489,16 +542,20 @@ async function main() {
   try {
     await waitForHttp(`${debugBase}/json/version`, chrome, args.timeoutMs);
 
-    const enabledBackend = startBackend({ python, root: backendRoot, port: backendPort, enabled: true, paths });
-    processes.push(enabledBackend.child);
+    const enabledBackend = trackProcess(
+      "current-enabled-backend",
+      startBackend({ python, root: backendRoot, port: backendPort, enabled: true, paths }),
+    );
     await waitForHttp(`${currentBackendOrigin}/__replay_smoke__/fixture`, enabledBackend.child, args.timeoutMs);
-    const enabledVite = startVite({ root: frontendRoot, port: frontendPort, backendPort, entryEnabled: true });
-    processes.push(enabledVite.child);
+    const enabledVite = trackProcess(
+      "current-enabled-vite",
+      startVite({ root: frontendRoot, port: frontendPort, backendPort, entryEnabled: true }),
+    );
     await waitForHttp(`${currentFrontendOrigin}/`, enabledVite.child, args.timeoutMs);
 
     const live = await createTarget(debugBase);
     connections.push(live.cdp);
-    const liveCapture = captureTarget(live.cdp);
+    const liveCapture = trackBrowser("current-live", live.cdp);
     const preferences = JSON.stringify({ lastExchange: "binance", lastMarketType: "spot", lastSymbol: "BTCUSDT", lastInterval: "1m" });
     await live.cdp.send("Page.addScriptToEvaluateOnNewDocument", {
       source: `try { localStorage.setItem("candlescope-user-prefs", ${JSON.stringify(preferences)}); } catch {}`,
@@ -511,7 +568,7 @@ async function main() {
 
     const replay = await openReplayFromLive({ liveCdp: live.cdp, debugBase, timeoutMs: args.timeoutMs });
     connections.push(replay.cdp);
-    const replayCapture = captureTarget(replay.cdp);
+    const replayCapture = trackBrowser("current-replay", replay.cdp);
     await waitForValue(replay.cdp, `(() => { const button = document.querySelector('[data-replay-action="create-session"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "replay session dialog");
     await click(replay.cdp, '[data-replay-action="create-session"]');
     const initial = await waitForReplayStatus(replay.cdp, `(value) => value.connection === "connected" && value.state === "PAUSED" && value.bars > 0`, args.timeoutMs, "initial replay snapshot");
@@ -533,11 +590,15 @@ async function main() {
     assert(persisted?.status_reason === "shutdown_pause", "graceful feature rollback did not persist shutdown_pause", persisted);
     const digestAfterGracefulShutdown = replayDatabaseDigest(paths.replay);
 
-    const disabledBackend = startBackend({ python, root: backendRoot, port: backendPort, enabled: false, paths });
-    processes.push(disabledBackend.child);
+    const disabledBackend = trackProcess(
+      "current-disabled-backend",
+      startBackend({ python, root: backendRoot, port: backendPort, enabled: false, paths }),
+    );
     await waitForHttp(`${currentBackendOrigin}/__replay_smoke__/fixture`, disabledBackend.child, args.timeoutMs);
-    const disabledVite = startVite({ root: frontendRoot, port: frontendPort, backendPort, entryEnabled: false });
-    processes.push(disabledVite.child);
+    const disabledVite = trackProcess(
+      "current-disabled-vite",
+      startVite({ root: frontendRoot, port: frontendPort, backendPort, entryEnabled: false }),
+    );
     await waitForHttp(`${currentFrontendOrigin}/`, disabledVite.child, args.timeoutMs);
     const disabledCapabilities = await readJson(`${currentBackendOrigin}/api/v1/replay/capabilities`);
     assert(disabledCapabilities?.enabled === false && disabledCapabilities?.available === false, "disabled backend advertised replay", disabledCapabilities);
@@ -590,11 +651,15 @@ async function main() {
     const [oldBackendPort, oldFrontendPort] = await Promise.all([freePort(), freePort()]);
     const oldBackendOrigin = `http://127.0.0.1:${oldBackendPort}`;
     const oldFrontendOrigin = `http://127.0.0.1:${oldFrontendPort}`;
-    const oldBackend = startBackend({ python, root: oldBackendRoot, port: oldBackendPort, enabled: true, paths, baseline: true });
-    processes.push(oldBackend.child);
+    const oldBackend = trackProcess(
+      "baseline-backend",
+      startBackend({ python, root: oldBackendRoot, port: oldBackendPort, enabled: true, paths, baseline: true }),
+    );
     await waitForHttp(`${oldBackendOrigin}/__replay_smoke__/fixture`, oldBackend.child, args.timeoutMs);
-    const oldVite = startVite({ root: oldFrontendRoot, port: oldFrontendPort, backendPort: oldBackendPort, entryEnabled: true });
-    processes.push(oldVite.child);
+    const oldVite = trackProcess(
+      "baseline-vite",
+      startVite({ root: oldFrontendRoot, port: oldFrontendPort, backendPort: oldBackendPort, entryEnabled: true }),
+    );
     await waitForHttp(`${oldFrontendOrigin}/`, oldVite.child, args.timeoutMs);
 
     const oldKlines = await readJson(`${oldBackendOrigin}/api/v1/klines/?symbol=BTCUSDT&interval=1m&limit=10&exchange=binance&market_type=spot`);
@@ -606,7 +671,7 @@ async function main() {
 
     const oldLive = await createTarget(debugBase);
     connections.push(oldLive.cdp);
-    const oldLiveCapture = captureTarget(oldLive.cdp);
+    const oldLiveCapture = trackBrowser("baseline-live", oldLive.cdp);
     await oldLive.cdp.send("Page.addScriptToEvaluateOnNewDocument", {
       source: `try { localStorage.setItem("candlescope-user-prefs", ${JSON.stringify(preferences)}); } catch {}`,
     });
@@ -698,13 +763,26 @@ async function main() {
     }, null, 2));
   } catch (error) {
     failure = error;
+    const browserTargets = await Promise.all(browserCaptures.map(async ({ label, cdp, capture }) => ({
+      label,
+      capture,
+      page: await browserDiagnostic(cdp).catch((diagnosticError) => ({
+        diagnosticError: diagnosticError?.message || String(diagnosticError),
+      })),
+    })));
     writeJson(`${args.out}.failed.json`, {
       schema_version: "replay-v1-rollback-drill-failure.v1",
       recorded_at: releaseEvidence.recorded_at,
       release_evidence: releaseEvidence.evidence,
       passed: false,
       error: error.stack || error.message || String(error),
-      processTails: processes.map((child) => ({ pid: child.pid, exitCode: child.exitCode })),
+      processTails: processRecords.map(({ label, child, tail }) => ({
+        label,
+        pid: child.pid,
+        exitCode: child.exitCode,
+        tail: tail(),
+      })),
+      browserTargets,
       chromeTail: chromeTail(),
     });
   } finally {

@@ -1276,6 +1276,15 @@ class _FailingWarmStart:
         raise RuntimeError("warm start failed")
 
 
+class _ErrorStatusCoordinator(_RollbackCoordinator):
+    async def ensure_stream(self, symbol, interval, exchange="binance", market_type="spot"):
+        return StreamInfo(
+            SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
+            status=StreamStatus.ERROR,
+            error="injected coordinator failure",
+        )
+
+
 @pytest.mark.anyio
 async def test_ensure_stream_rolls_back_leases_and_intents_when_warm_start_fails() -> None:
     dm = DataManager()
@@ -1296,3 +1305,23 @@ async def test_ensure_stream_rolls_back_leases_and_intents_when_warm_start_fails
     assert key not in dm._stream_leases
     assert dm.storage_intents.snapshot()["intent_count"] == 0
     assert coordinator.stopped == [key]
+
+
+@pytest.mark.anyio
+async def test_ensure_stream_rolls_back_when_coordinator_returns_error_status() -> None:
+    dm = DataManager()
+    coordinator = _ErrorStatusCoordinator()
+    dm.coordinator = coordinator
+
+    with pytest.raises(RuntimeError, match="prerequisite stream .* is error"):
+        await dm.ensure_stream(
+            "BTCUSDT",
+            "45m",
+            focus_scope="websocket",
+            consumer_id="ws:kline:test",
+        )
+
+    assert dm._stream_leases == {}
+    assert dm.storage_intents.snapshot()["intent_count"] == 0
+    assert dm.bar_aggregator.get_targets() == []
+    assert coordinator.stopped

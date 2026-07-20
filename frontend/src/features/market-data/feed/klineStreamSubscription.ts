@@ -26,12 +26,27 @@ import {
 } from "../../../utils/intervals.js";
 
 const SOCKET_OPEN = 1;
+const DEFAULT_SUBSCRIPTION_RETRY_BASE_MS = 500;
+const DEFAULT_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
+const MAX_SUBSCRIPTION_RETRY_EXPONENT = 16;
+
+const PERMANENT_SUBSCRIPTION_FAILURE_CODES = new Set([
+  "invalid_interval",
+  "unknown_exchange",
+  "kline_channel_unavailable",
+  "purpose_unsupported",
+  "no_native_intervals",
+  "no_exact_base",
+  "unsupported",
+]);
 
 type StreamSeries = Pick<MarketSeries, "symbol" | "marketType" | "exchange">;
 
 interface KlineStreamSubscriptionConfig extends KlineStreamOptions {
   api: KlineApi;
   series: StreamSeries;
+  subscriptionRetryBaseMs?: number;
+  subscriptionRetryMaxMs?: number;
 }
 
 interface StreamCallbacks {
@@ -155,6 +170,19 @@ function canonicalIntervalList(intervals: readonly IntervalString[] = []): Inter
   return canonical;
 }
 
+function isPermanentSubscriptionFailure(
+  failure: KlineStreamIntervalFailure | undefined,
+): boolean {
+  const code = typeof failure?.code === "string"
+    ? failure.code.trim().toLowerCase()
+    : "";
+  return PERMANENT_SUBSCRIPTION_FAILURE_CODES.has(code);
+}
+
+function positiveRetryDelay(value: number, fallback: number): number {
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+}
+
 function parseBackfillMessage(record: JsonRecord): KlineStreamBackfillMessage {
   const detail = expectRecord(record.detail, "websocket.detail");
   return {
@@ -209,9 +237,14 @@ export class KlineStreamSubscription implements KlineStreamController {
   activeIntervals: Set<IntervalString>;
   rejectedIntervals: Set<IntervalString>;
   pendingRequests: Map<string, PendingSubscriptionRequest>;
+  subscriptionRetryAttempts: Map<IntervalString, number>;
+  subscriptionRetryTimers: Map<IntervalString, ReturnType<typeof setTimeout>>;
+  subscriptionRetryBaseMs: number;
+  subscriptionRetryMaxMs: number;
   callbacks: StreamCallbacks;
   socket: KlineStreamSocket;
   requestSequence: number;
+  disposed: boolean;
 
   constructor({
     api,
@@ -226,6 +259,8 @@ export class KlineStreamSubscription implements KlineStreamController {
     onError = () => undefined,
     onClose = () => undefined,
     onParseError = () => undefined,
+    subscriptionRetryBaseMs = DEFAULT_SUBSCRIPTION_RETRY_BASE_MS,
+    subscriptionRetryMaxMs = DEFAULT_SUBSCRIPTION_RETRY_MAX_MS,
   }: KlineStreamSubscriptionConfig) {
     this.api = api;
     this.series = series;
@@ -233,7 +268,21 @@ export class KlineStreamSubscription implements KlineStreamController {
     this.activeIntervals = new Set();
     this.rejectedIntervals = new Set();
     this.pendingRequests = new Map();
+    this.subscriptionRetryAttempts = new Map();
+    this.subscriptionRetryTimers = new Map();
+    this.subscriptionRetryBaseMs = positiveRetryDelay(
+      subscriptionRetryBaseMs,
+      DEFAULT_SUBSCRIPTION_RETRY_BASE_MS,
+    );
+    this.subscriptionRetryMaxMs = Math.max(
+      this.subscriptionRetryBaseMs,
+      positiveRetryDelay(
+        subscriptionRetryMaxMs,
+        DEFAULT_SUBSCRIPTION_RETRY_MAX_MS,
+      ),
+    );
     this.requestSequence = 0;
+    this.disposed = false;
     this.callbacks = {
       onOpen,
       onStreamStatus,
@@ -266,6 +315,7 @@ export class KlineStreamSubscription implements KlineStreamController {
     this.activeIntervals.clear();
     this.rejectedIntervals.clear();
     this.pendingRequests.clear();
+    this.clearAllSubscriptionRetries();
   }
 
   readyState(): number | undefined {
@@ -292,8 +342,64 @@ export class KlineStreamSubscription implements KlineStreamController {
     this.rejectedIntervals.forEach((interval) => {
       if (!next.has(interval)) this.rejectedIntervals.delete(interval);
     });
+    this.subscriptionRetryTimers.forEach((_timer, interval) => {
+      if (!next.has(interval)) this.clearSubscriptionRetry(interval);
+    });
     this.desiredIntervals = nextIntervals;
     this.syncSubscriptions();
+  }
+
+  clearSubscriptionRetry(interval: IntervalString): void {
+    const timer = this.subscriptionRetryTimers.get(interval);
+    if (timer !== undefined) clearTimeout(timer);
+    this.subscriptionRetryTimers.delete(interval);
+    this.subscriptionRetryAttempts.delete(interval);
+  }
+
+  clearAllSubscriptionRetries(): void {
+    this.subscriptionRetryTimers.forEach((timer) => clearTimeout(timer));
+    this.subscriptionRetryTimers.clear();
+    this.subscriptionRetryAttempts.clear();
+  }
+
+  scheduleSubscriptionRetry(interval: IntervalString): void {
+    if (
+      this.disposed
+      || !this.desiredIntervals.includes(interval)
+      || this.subscriptionRetryTimers.has(interval)
+    ) return;
+
+    const attempt = (this.subscriptionRetryAttempts.get(interval) ?? 0) + 1;
+    this.subscriptionRetryAttempts.set(interval, attempt);
+    const exponent = Math.min(attempt - 1, MAX_SUBSCRIPTION_RETRY_EXPONENT);
+    const delayMs = Math.min(
+      this.subscriptionRetryMaxMs,
+      this.subscriptionRetryBaseMs * (2 ** exponent),
+    );
+    const timer = setTimeout(() => {
+      this.subscriptionRetryTimers.delete(interval);
+      if (this.disposed || !this.desiredIntervals.includes(interval)) return;
+      this.syncSubscriptions();
+    }, delayMs);
+    this.subscriptionRetryTimers.set(interval, timer);
+  }
+
+  handleSubscriptionFailure(
+    interval: IntervalString,
+    failure?: KlineStreamIntervalFailure,
+  ): void {
+    this.activeIntervals.delete(interval);
+    if (!this.desiredIntervals.includes(interval)) {
+      this.clearSubscriptionRetry(interval);
+      return;
+    }
+    if (isPermanentSubscriptionFailure(failure)) {
+      this.clearSubscriptionRetry(interval);
+      this.rejectedIntervals.add(interval);
+      return;
+    }
+    this.rejectedIntervals.delete(interval);
+    this.scheduleSubscriptionRetry(interval);
   }
 
   pendingIntervals(action: SubscriptionAction): Set<IntervalString> {
@@ -345,6 +451,7 @@ export class KlineStreamSubscription implements KlineStreamController {
       !this.activeIntervals.has(interval)
       && !pendingSubscriptions.has(interval)
       && !this.rejectedIntervals.has(interval)
+      && !this.subscriptionRetryTimers.has(interval)
     ));
     const toUnsubscribe = Array.from(this.activeIntervals).filter((interval) => (
       !desired.has(interval) && !pendingUnsubscriptions.has(interval)
@@ -366,6 +473,11 @@ export class KlineStreamSubscription implements KlineStreamController {
     const failed = canonicalIntervalList(
       message.failed?.map((failure) => failure.interval),
     );
+    const failureByInterval = new Map<IntervalString, KlineStreamIntervalFailure>();
+    message.failed?.forEach((failure) => {
+      const interval = canonicalInterval(failure.interval);
+      if (interval) failureByInterval.set(interval, failure);
+    });
 
     if (message.active_intervals !== undefined) {
       this.activeIntervals = new Set(canonicalIntervalList(message.active_intervals));
@@ -376,17 +488,19 @@ export class KlineStreamSubscription implements KlineStreamController {
     }
 
     if (message.type === "subscribed") {
-      accepted.forEach((interval) => this.rejectedIntervals.delete(interval));
+      accepted.forEach((interval) => {
+        this.rejectedIntervals.delete(interval);
+        this.clearSubscriptionRetry(interval);
+      });
       failed.forEach((interval) => {
-        this.activeIntervals.delete(interval);
-        if (this.desiredIntervals.includes(interval)) this.rejectedIntervals.add(interval);
+        this.handleSubscriptionFailure(interval, failureByInterval.get(interval));
       });
 
       const acknowledged = new Set([...accepted, ...failed]);
       if (message.requested_intervals !== undefined || request?.action === "subscribe") {
         requested.forEach((interval) => {
           if (!this.activeIntervals.has(interval) && !acknowledged.has(interval)) {
-            this.rejectedIntervals.add(interval);
+            this.handleSubscriptionFailure(interval);
           }
           acknowledged.add(interval);
         });
@@ -397,13 +511,12 @@ export class KlineStreamSubscription implements KlineStreamController {
       this.forgetPendingIntervals("unsubscribe", acknowledged);
     } else if (failed.length > 0) {
       failed.forEach((interval) => {
-        this.activeIntervals.delete(interval);
-        if (this.desiredIntervals.includes(interval)) this.rejectedIntervals.add(interval);
+        this.handleSubscriptionFailure(interval, failureByInterval.get(interval));
       });
       this.forgetPendingIntervals("subscribe", failed);
     } else if (message.type === "error" && request?.action === "subscribe") {
       request.intervals.forEach((interval) => {
-        if (this.desiredIntervals.includes(interval)) this.rejectedIntervals.add(interval);
+        this.handleSubscriptionFailure(interval);
       });
       this.pendingRequests.delete(message.request_id ?? "");
     }
@@ -427,6 +540,7 @@ export class KlineStreamSubscription implements KlineStreamController {
     if (!canonical || !this.desiredIntervals.includes(canonical)) return;
     this.activeIntervals.add(canonical);
     this.rejectedIntervals.delete(canonical);
+    this.clearSubscriptionRetry(canonical);
     this.forgetPendingIntervals("subscribe", [canonical]);
   }
 
@@ -459,6 +573,8 @@ export class KlineStreamSubscription implements KlineStreamController {
   }
 
   close(): void {
+    this.disposed = true;
+    this.clearAllSubscriptionRetries();
     try {
       this.socket?.close();
     } catch {

@@ -476,6 +476,7 @@ class EventRouter:
         try:
             exchange = self._extract_exchange(event)
             market_type = self._extract_market_type(event)
+            sequence = self._kline_freshness_sequence(event, data)
             return BarInput(
                 symbol=getattr(event, "symbol", "").upper(),
                 source_interval=data.get("interval", "1m"),
@@ -499,7 +500,7 @@ class EventRouter:
                     market_type,
                     data,
                 ),
-                sequence=int(data.get("open_time", 0)),
+                sequence=sequence,
             )
         except (KeyError, ValueError, TypeError) as exc:
             logger.warning("Failed to convert kline event: %s", exc)
@@ -586,7 +587,7 @@ class EventRouter:
                         bar,
                         explicit_fields=explicit_fields,
                     ),
-                    sequence=int(bar.get("open_time", 0)),
+                    sequence=self._fetched_bar_freshness_sequence(bar),
                 )
             else:
                 # Duck-type: assume FetchedBar dataclass
@@ -623,11 +624,67 @@ class EventRouter:
                         enhanced_values,
                         explicit_fields=getattr(bar, "enhanced_fields", None),
                     ),
-                    sequence=int(getattr(bar, "open_time", 0)),
+                    sequence=self._fetched_bar_freshness_sequence(bar),
                 )
         except (KeyError, ValueError, TypeError, AttributeError) as exc:
             logger.warning("Failed to convert fetched bar: %s", exc)
             return None
+
+    @staticmethod
+    def _kline_freshness_sequence(event: Any, data: dict) -> int | None:
+        """Extract an update sequence, never substituting component identity.
+
+        Normalizers historically expose a kline's ``open_time`` as
+        ``MarketEvent.sequence``.  That value is useful for deduplication of
+        closed bars but cannot order cumulative updates for the same bar.
+        Prefer a distinct exchange sequence, then a distinct exchange event
+        timestamp.  When neither exists, the state engine will require
+        monotonic cumulative evidence before replacing the component.
+        """
+        open_time_ms = int(data.get("open_time", 0))
+        for value in (
+            data.get("update_id"),
+            data.get("last_update_id"),
+            data.get("sequence"),
+            getattr(event, "sequence", None),
+        ):
+            if value is None:
+                continue
+            sequence = int(value)
+            if sequence > 0 and sequence != open_time_ms:
+                return sequence
+
+        event_time_ms = getattr(event, "event_time_ms", None)
+        if event_time_ms is not None:
+            sequence = int(event_time_ms)
+            if sequence > 0 and sequence != open_time_ms:
+                return sequence
+        return None
+
+    @staticmethod
+    def _fetched_bar_freshness_sequence(bar: Any) -> int | None:
+        """Return explicit fetched-row freshness metadata when available."""
+        if isinstance(bar, dict):
+            values = (
+                bar.get("sequence"),
+                bar.get("event_time_ms"),
+                bar.get("updated_at_ms"),
+            )
+            open_time_ms = int(bar.get("open_time", 0))
+        else:
+            values = (
+                getattr(bar, "sequence", None),
+                getattr(bar, "event_time_ms", None),
+                getattr(bar, "updated_at_ms", None),
+            )
+            open_time_ms = int(getattr(bar, "open_time", 0))
+        for value in values:
+            if value is None:
+                continue
+            sequence = int(value)
+            if sequence > 0 and sequence != open_time_ms:
+                return sequence
+        return None
 
     @staticmethod
     def _extract_exchange(event: Any) -> str:

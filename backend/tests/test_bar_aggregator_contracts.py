@@ -8,8 +8,11 @@ from app.data_engine.bar_aggregator import (
     BarAggregatorConfig,
     BarInput,
     BarInputSource,
+    BarStateChange,
+    BarStateEngine,
     EventRouter,
     MergeMode,
+    TimeBucketEngine,
 )
 from app.data_engine.data_manager.models import (
     DataEvent,
@@ -25,11 +28,15 @@ def _input(
     *,
     source_interval: str,
     close: float,
+    open_price: float | None = None,
+    high: float | None = None,
+    low: float | None = None,
     volume: float = 1,
     trades: int = 1,
     source: BarInputSource = BarInputSource.BACKFILL,
     is_closed: bool = True,
     merge_mode: MergeMode | None = None,
+    sequence: int | None = None,
 ) -> BarInput:
     interval_ms = {
         "1m": 60_000,
@@ -43,9 +50,9 @@ def _input(
         market_type="spot",
         open_time_ms=open_time_ms,
         close_time_ms=open_time_ms + interval_ms - 1,
-        open=close,
-        high=close + 1,
-        low=close - 1,
+        open=close if open_price is None else open_price,
+        high=close + 1 if high is None else high,
+        low=close - 1 if low is None else low,
         close=close,
         volume=volume,
         quote_volume=volume * 10,
@@ -55,19 +62,23 @@ def _input(
         source=source,
         is_closed=is_closed,
         merge_mode=merge_mode,
+        sequence=sequence,
     )
 
 
-def _market_event(exchange: str) -> MarketEvent:
+def _market_event(exchange: str, *, event_time_ms: int = 60_000) -> MarketEvent:
     prefix = f"{exchange}:spot:" if exchange != "binance" else ""
     return MarketEvent(
         event_type=StreamType.KLINE,
         symbol="BTC-USDT",
         exchange=exchange,
-        event_time_ms=60_000,
+        event_time_ms=event_time_ms,
         received_at_ms=60_001,
         source=DataSource.WEBSOCKET,
         stream_key=f"{prefix}BTC-USDT@kline_1m",
+        # Kline normalizers historically use the component identity here;
+        # EventRouter must not mistake it for an update sequence.
+        sequence=60_000,
         data={
             "interval": "1m",
             "open_time": 60_000,
@@ -84,6 +95,118 @@ def _market_event(exchange: str) -> MarketEvent:
             "is_closed": False,
         },
     )
+
+
+def test_component_snapshot_rejects_stale_update_for_same_input_key() -> None:
+    engine = BarStateEngine(
+        BarAggregatorConfig(),
+        TimeBucketEngine(2_700_000),
+        "45m",
+    )
+    newer = _input(
+        0,
+        source_interval="15m",
+        close=110,
+        open_price=100,
+        high=112,
+        low=99,
+        volume=10,
+        is_closed=True,
+        merge_mode=MergeMode.COMPONENT,
+        sequence=200,
+    )
+    state, change = engine.apply("okx", "spot", "BTC-USDT", 0, newer)
+    assert change is BarStateChange.CREATED
+    assert state.close == 110
+    assert state.volume == 10
+    assert state.last_close_received is True
+
+    stale = _input(
+        0,
+        source_interval="15m",
+        close=105,
+        open_price=100,
+        high=108,
+        low=100,
+        volume=5,
+        is_closed=False,
+        merge_mode=MergeMode.COMPONENT,
+        sequence=100,
+    )
+    state, change = engine.apply("okx", "spot", "BTC-USDT", 0, stale)
+
+    assert change is BarStateChange.NO_CHANGE
+    assert state.close == 110
+    assert state.volume == 10
+    assert state.last_close_received is True
+    assert state.source_snapshots[newer.input_key]["sequence"] == 200
+
+
+def test_component_snapshot_without_sequence_requires_monotonic_progress() -> None:
+    engine = BarStateEngine(
+        BarAggregatorConfig(),
+        TimeBucketEngine(2_700_000),
+        "45m",
+    )
+    first = _input(
+        0,
+        source_interval="15m",
+        close=10,
+        volume=1,
+        is_closed=False,
+        merge_mode=MergeMode.COMPONENT,
+    )
+    engine.apply("okx", "spot", "BTC-USDT", 0, first)
+
+    progressed = _input(
+        0,
+        source_interval="15m",
+        close=11,
+        open_price=10,
+        high=12,
+        low=9,
+        volume=2,
+        is_closed=False,
+        merge_mode=MergeMode.COMPONENT,
+    )
+    state, change = engine.apply("okx", "spot", "BTC-USDT", 0, progressed)
+    assert change is BarStateChange.UPDATED
+    assert state.close == 11
+    assert state.volume == 2
+
+    ambiguous = _input(
+        0,
+        source_interval="15m",
+        close=9,
+        open_price=10,
+        high=12,
+        low=9,
+        volume=2,
+        is_closed=False,
+        merge_mode=MergeMode.COMPONENT,
+    )
+    state, change = engine.apply("okx", "spot", "BTC-USDT", 0, ambiguous)
+    assert change is BarStateChange.NO_CHANGE
+    assert state.close == 11
+    assert state.volume == 2
+
+
+def test_event_router_uses_exchange_event_time_for_kline_freshness() -> None:
+    async def _run() -> None:
+        router = EventRouter(BarAggregatorConfig())
+        routed: list[BarInput] = []
+
+        async def _capture(exchange, market_type, symbol, interval, bar_input):
+            routed.append(bar_input)
+
+        router.set_on_bar_input(_capture)
+        router.register_target("BTC-USDT", "1m", exchange="binance", market_type="spot")
+        await router.on_market_event(_market_event("binance", event_time_ms=60_500))
+
+        assert len(routed) == 1
+        assert routed[0].sequence == 60_500
+
+    asyncio.run(_run())
 
 
 def test_series_key_topic_and_subscription_matching_include_market_identity() -> None:

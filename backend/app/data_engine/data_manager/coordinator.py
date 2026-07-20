@@ -291,6 +291,22 @@ class StreamCoordinator:
             )
             base_key = base_info.key
 
+            # A derived stream has no ingestion handle of its own.  Its
+            # liveness is therefore exactly bounded by the resolved base
+            # stream.  Do not publish a synthetic ACTIVE entry when the base
+            # failed (or ingestion is disabled), otherwise callers can ACK a
+            # stream that can never produce bars.
+            if base_info.status is not StreamStatus.ACTIVE:
+                detail = (
+                    f"base stream {base_key} is {base_info.status.value}"
+                    + (f": {base_info.error}" if base_info.error else "")
+                )
+                return StreamInfo(
+                    key=key,
+                    status=base_info.status,
+                    error=detail,
+                )
+
             # Create a passive StreamEntry (no WS connection of its own)
             entry = _StreamEntry(key)
             entry.info.status = StreamStatus.ACTIVE

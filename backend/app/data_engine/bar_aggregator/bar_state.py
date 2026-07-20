@@ -169,8 +169,88 @@ class ComponentSnapshotOHLCVMerge:
             "taker_buy_quote": bar_input.taker_buy_quote,
             "enhanced_fields": bar_input.enhanced_fields,
             "is_closed": bar_input.is_closed,
-            "sequence": bar_input.sequence if bar_input.sequence is not None else bar_input.open_time_ms,
+            # ``open_time_ms`` identifies the component; it says nothing about
+            # which of two cumulative snapshots for that component is newer.
+            # Keep an unavailable freshness sequence explicit so replacement
+            # can fall back to monotonic cumulative evidence instead of
+            # silently treating every update as equally fresh.
+            "sequence": bar_input.sequence,
         }
+
+    @staticmethod
+    def _is_monotonic_candidate(existing: dict, candidate: dict) -> bool:
+        """Return whether ``candidate`` can safely supersede ``existing``.
+
+        Kline component payloads are cumulative snapshots.  Even a payload
+        with a newer transport timestamp must not make finality, extrema, or
+        additive totals move backwards.  A deliberate correction that needs
+        to reduce one of these fields must rebuild/expire the target bucket
+        instead of being mistaken for an ordinary live update.
+        """
+        if int(candidate["close_time_ms"]) != int(existing["close_time_ms"]):
+            return False
+        if float(candidate["open"]) != float(existing["open"]):
+            return False
+        if bool(existing["is_closed"]) and not bool(candidate["is_closed"]):
+            return False
+        if float(candidate["high"]) < float(existing["high"]):
+            return False
+        if float(candidate["low"]) > float(existing["low"]):
+            return False
+        if float(candidate["volume"]) < float(existing["volume"]):
+            return False
+
+        existing_fields = frozenset(existing["enhanced_fields"])
+        candidate_fields = frozenset(candidate["enhanced_fields"])
+        if not existing_fields.issubset(candidate_fields):
+            return False
+        for field in existing_fields:
+            if field == "trades":
+                if int(candidate[field]) < int(existing[field]):
+                    return False
+            elif float(candidate[field]) < float(existing[field]):
+                return False
+        return True
+
+    @staticmethod
+    def _has_monotonic_progress(existing: dict, candidate: dict) -> bool:
+        """Return whether cumulative/finality fields prove forward progress."""
+        if not bool(existing["is_closed"]) and bool(candidate["is_closed"]):
+            return True
+        if float(candidate["high"]) > float(existing["high"]):
+            return True
+        if float(candidate["low"]) < float(existing["low"]):
+            return True
+        if float(candidate["volume"]) > float(existing["volume"]):
+            return True
+        existing_fields = frozenset(existing["enhanced_fields"])
+        for field in existing_fields:
+            if field == "trades":
+                if int(candidate[field]) > int(existing[field]):
+                    return True
+            elif float(candidate[field]) > float(existing[field]):
+                return True
+        return False
+
+    @classmethod
+    def _should_replace(cls, existing: dict, candidate: dict) -> bool:
+        if candidate == existing:
+            return False
+        if not cls._is_monotonic_candidate(existing, candidate):
+            return False
+
+        existing_sequence = existing.get("sequence")
+        candidate_sequence = candidate.get("sequence")
+        if existing_sequence is not None and candidate_sequence is not None:
+            if int(candidate_sequence) < int(existing_sequence):
+                return False
+            if int(candidate_sequence) > int(existing_sequence):
+                return True
+
+        # Equal or unavailable sequences are not freshness evidence.  Accept
+        # only when cumulative/finality fields themselves prove progress;
+        # ambiguous close-only changes fail closed.
+        return cls._has_monotonic_progress(existing, candidate)
 
     def apply(self, state: BarState, bar_input: BarInput, is_new: bool) -> BarState:
         now_ms = int(time.time() * 1000)
@@ -181,13 +261,26 @@ class ComponentSnapshotOHLCVMerge:
             # Keep the existing component history and merge the new snapshot.
             pass
 
-        snapshots[bar_input.input_key] = self._snapshot_from_input(bar_input)
+        input_key = bar_input.input_key
+        candidate = self._snapshot_from_input(bar_input)
+        existing = snapshots.get(input_key)
+        if existing is not None and not self._should_replace(existing, candidate):
+            logger.debug(
+                "Ignored non-monotonic or stale component snapshot %s "
+                "(existing_sequence=%r, candidate_sequence=%r)",
+                input_key,
+                existing.get("sequence"),
+                candidate.get("sequence"),
+            )
+            return state
+
+        snapshots[input_key] = candidate
         ordered = sorted(
             snapshots.values(),
             key=lambda snap: (
                 int(snap["open_time_ms"]),
                 int(snap["close_time_ms"]),
-                int(snap["sequence"]),
+                int(snap["sequence"]) if snap.get("sequence") is not None else -1,
             ),
         )
 
@@ -332,8 +425,19 @@ class BarStateEngine:
         if key in self._active:
             # Existing active bar — merge
             state = self._active[key]
+            previous_component = (
+                state.source_snapshots.get(bar_input.input_key)
+                if merge_strategy is self._component_merge_strategy
+                else None
+            )
             state = merge_strategy.apply(state, bar_input, is_new=False)
             self._active[key] = state
+            if (
+                merge_strategy is self._component_merge_strategy
+                and previous_component is not None
+                and state.source_snapshots.get(bar_input.input_key) is previous_component
+            ):
+                return state, BarStateChange.NO_CHANGE
             # Move to end (most recently updated)
             self._active.move_to_end(key)
             return state, BarStateChange.UPDATED
@@ -346,9 +450,20 @@ class BarStateEngine:
             # because backfill bars are complete final data and should replace
             # existing state rather than accumulate on top of it.
             if bar_input.source.value == "backfill":
+                previous_component = (
+                    old_state.source_snapshots.get(bar_input.input_key)
+                    if merge_strategy is self._component_merge_strategy
+                    else None
+                )
                 state = merge_strategy.apply(old_state, bar_input, is_new=True)
                 state.status = BarStatus.CLOSED  # keep it closed
                 self._closed[key] = state
+                if (
+                    merge_strategy is self._component_merge_strategy
+                    and previous_component is not None
+                    and state.source_snapshots.get(bar_input.input_key) is previous_component
+                ):
+                    return state, BarStateChange.NO_CHANGE
                 return state, BarStateChange.AMENDED
             # Realtime data for an already-closed bar — ignore
             return old_state, BarStateChange.NO_CHANGE

@@ -703,6 +703,11 @@ class CustomIntervalQueryService:
             or result.missing_ranges
             or result.retryable
             or not result.complete
+            # ``complete`` describes range coverage, not row freshness.  A
+            # forming materialized target can be coverage-complete while its
+            # base components have already advanced.  Only finalized target
+            # rows are safe for the no-base-read historical fast path.
+            or any(not bar.is_closed for bar in bars)
         ):
             return False
         # A materialized range may legitimately contain fewer rows than the
@@ -1341,11 +1346,12 @@ class CustomIntervalQueryService:
         )
         aggregation_ms = (time.monotonic() - aggregation_started_at) * 1000
         if materialized_bars:
-            combined = {bar.time: bar for bar in derived_bars}
-            # A structurally valid target row is the already-materialized
-            # canonical result; prefer it over an on-read rebuild at the same
-            # open (notably for the live/forming tail).
-            combined.update({bar.time: bar for bar in materialized_bars})
+            # The materialized target was unable to satisfy the finalized
+            # fast-path contract, so a just-rebuilt base aggregate is the
+            # authoritative value at overlapping opens.  Materialized rows
+            # remain useful only to fill opens the base query did not return.
+            combined = {bar.time: bar for bar in materialized_bars}
+            combined.update({bar.time: bar for bar in derived_bars})
             derived_bars = sorted(combined.values(), key=lambda bar: bar.time)
             if start_ms is not None:
                 derived_bars = [bar for bar in derived_bars if bar.time_ms >= start_ms]
@@ -1596,8 +1602,10 @@ class CustomIntervalQueryService:
         aggregation_ms = (time.monotonic() - aggregation_started_at) * 1000
         derived_bars = [bar for bar in derived_bars if bar.time_ms < before_ms]
         if materialized_bars:
-            combined = {bar.time: bar for bar in derived_bars}
-            combined.update({bar.time: bar for bar in materialized_bars})
+            # Once base reconstruction was required, it wins overlaps and
+            # materialized rows only fill otherwise-unavailable opens.
+            combined = {bar.time: bar for bar in materialized_bars}
+            combined.update({bar.time: bar for bar in derived_bars})
             derived_bars = sorted(
                 (bar for bar in combined.values() if bar.time_ms < before_ms),
                 key=lambda bar: bar.time,

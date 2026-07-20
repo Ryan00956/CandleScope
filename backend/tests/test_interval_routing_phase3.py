@@ -17,7 +17,7 @@ from app.data_engine.bar_aggregator.router import EventRouter
 from app.data_engine.data_manager.cache import BarCache
 from app.data_engine.data_manager.config import QueryConfig
 from app.data_engine.data_manager.coordinator import StreamCoordinator
-from app.data_engine.data_manager.models import SeriesKey
+from app.data_engine.data_manager.models import SeriesKey, StreamStatus
 from app.data_engine.data_manager.query import QueryEngine
 from app.data_engine.data_manager.stream_policy import StreamEnsurePlanner
 from app.data_engine.history import AlwaysOpenCalendar
@@ -254,6 +254,26 @@ def test_stream_coordinator_keeps_canonical_identity_but_uses_native_protocol_sp
         assert info.key.interval == "1h"
         assert factory.calls[0]["interval"] == "60m"
         await coordinator.stop_stream("BTC-USDT", "1h", exchange="stub")
+
+    asyncio.run(_run())
+
+
+def test_stream_coordinator_never_activates_derived_stream_when_base_start_fails() -> None:
+    class _FailingFactory:
+        async def start(self, **_kwargs):
+            raise RuntimeError("injected base start failure")
+
+    async def _run() -> None:
+        coordinator = StreamCoordinator()
+        coordinator.set_ingestion_factory(_FailingFactory())  # type: ignore[arg-type]
+        coordinator.set_bar_aggregator(BarAggregator())
+
+        info = await coordinator.ensure_stream("BTCUSDT", "45m")
+
+        assert info.key.interval == "45m"
+        assert info.status is StreamStatus.ERROR
+        assert "injected base start failure" in str(info.error)
+        assert not coordinator.has_stream("BTCUSDT", "45m")
 
     asyncio.run(_run())
 

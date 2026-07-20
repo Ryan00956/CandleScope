@@ -22,7 +22,12 @@ from app.data_engine.history import AlwaysOpenCalendar
 from app.data_engine.interval_policy import compute_bucket_start_ms
 
 
-def _row(open_time_ms: int, value: float = 1) -> dict:
+def _row(
+    open_time_ms: int,
+    value: float = 1,
+    *,
+    is_closed: bool = True,
+) -> dict:
     return {
         "open_time": open_time_ms,
         "open": value,
@@ -30,7 +35,7 @@ def _row(open_time_ms: int, value: float = 1) -> dict:
         "low": value - 1,
         "close": value,
         "volume": value,
-        "is_closed": True,
+        "is_closed": is_closed,
     }
 
 
@@ -173,11 +178,44 @@ def test_custom_query_derives_only_after_materialized_target_is_incomplete() -> 
     )
 
     assert [bar.time_ms for bar in result.bars] == [0, 2_700_000]
-    assert result.bars[0].close == 10  # trusted target wins on overlap
+    assert result.bars[0].close == 3  # current base rebuild wins on overlap
     assert result.bars[1].close == 6
     assert result.metadata["target_materialized"] is False
     assert result.metadata["target_materialized_rows"] == 1
     assert "15m" in [call["interval"] for call in storage.calls]
+
+
+def test_custom_query_rebuilds_forming_materialized_tail_from_base() -> None:
+    storage = _IntervalStorage({
+        "45m": [_row(0, 10, is_closed=False)],
+        "15m": [
+            _row(0, 12),
+            _row(900_000, 16),
+            _row(1_800_000, 20, is_closed=False),
+        ],
+    })
+    engine = QueryEngine(
+        cache=BarCache(),
+        storage=storage,  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+
+    result = engine.query(
+        "BTCUSDT",
+        "45m",
+        start_ms=0,
+        end_ms=0,
+        limit=1,
+        auto_backfill=False,
+    )
+
+    assert len(result.bars) == 1
+    assert result.bars[0].close == 20
+    assert result.bars[0].volume == 48
+    assert result.bars[0].is_closed is False
+    assert result.metadata["target_materialized"] is False
+    assert result.metadata["target_materialized_rows"] == 1
+    assert [call["interval"] for call in storage.calls] == ["45m", "15m"]
 
 
 def test_identical_custom_derivations_singleflight_base_work() -> None:

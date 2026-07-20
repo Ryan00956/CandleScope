@@ -13,7 +13,7 @@ from app.api.v1.stream_utils import (
     send_text_with_timeout,
     validate_ws_interval,
 )
-from app.data_engine.data_manager.models import DataEventType
+from app.data_engine.data_manager.models import DataEventType, StreamStatus
 from app.data_engine.interval_policy import parse_interval_spec
 from app.data_engine.interval_resolution import IntervalResolutionError
 
@@ -91,6 +91,23 @@ def _subscription_failure(interval: str, exc: Exception) -> dict[str, str]:
     }
 
 
+def _require_active_stream_info(info: Any, interval: str) -> None:
+    """Reject explicit non-active coordinator results from facade/test doubles."""
+    status = getattr(info, "status", None)
+    if status is None:
+        # Compatibility with legacy facades that return None after a
+        # successful ensure.  DataManager itself always returns StreamInfo.
+        return
+    status_value = status.value if isinstance(status, StreamStatus) else str(status)
+    if status_value == StreamStatus.ACTIVE.value:
+        return
+    error = getattr(info, "error", None)
+    detail = f"stream {interval} is {status_value}"
+    if error:
+        detail = f"{detail}: {error}"
+    raise RuntimeError(detail)
+
+
 def _with_request_id(payload: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
     """Echo an optional request identifier without changing legacy messages."""
     if "request_id" in message:
@@ -119,14 +136,24 @@ async def stream_single_kline(
         interval = spec.canonical
     consumer_id = f"ws:klines:{exchange}:{market_type}:{symbol}:{interval}:{id(websocket)}"
     try:
-        await dm.ensure_stream(
-            symbol,
-            interval,
-            exchange=exchange,
-            market_type=market_type,
-            focus_scope="websocket",
-            consumer_id=consumer_id,
-        )
+        try:
+            info = await dm.ensure_stream(
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=market_type,
+                focus_scope="websocket",
+                consumer_id=consumer_id,
+            )
+            _require_active_stream_info(info, interval)
+        except Exception as exc:
+            failure = _subscription_failure(interval, exc)
+            await send_json_with_timeout(websocket, {
+                "type": "error",
+                "detail": "Stream could not be subscribed",
+                "failed": [failure],
+            })
+            return
 
         await send_json_with_timeout(websocket, {
             "type": "subscribed",
@@ -344,7 +371,7 @@ async def stream_multi_kline(
                             continue
                         if iv not in active_intervals:
                             try:
-                                await dm.ensure_stream(
+                                info = await dm.ensure_stream(
                                     symbol,
                                     iv,
                                     exchange=exchange,
@@ -352,6 +379,7 @@ async def stream_multi_kline(
                                     focus_scope="websocket",
                                     consumer_id=consumer_id,
                                 )
+                                _require_active_stream_info(info, iv)
                                 handle = dm.subscribe(
                                     callback=event_callback,
                                     symbol=symbol,

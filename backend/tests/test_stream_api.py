@@ -12,7 +12,10 @@ from app.data_engine.data_manager.models import (
     DataEvent,
     DataEventType,
     SeriesKey,
+    StreamInfo,
+    StreamStatus,
 )
+from app.data_engine.data_manager.manager import DataManager
 from app.data_engine.data_manager.subscriptions import SubscriptionTier
 from app.data_engine.interval_resolution import (
     IntervalPurpose,
@@ -187,6 +190,21 @@ class _MultiStreamDataManager:
         self.unsubscribed.append(handle)
 
 
+class _StoppedStatusSingleStreamDataManager(_SingleStreamDataManager):
+    async def ensure_stream(self, symbol: str, interval: str, **kwargs) -> StreamInfo:
+        await super().ensure_stream(symbol, interval, **kwargs)
+        return StreamInfo(
+            SeriesKey(
+                symbol,
+                interval,
+                exchange=kwargs["exchange"],
+                market_type=kwargs["market_type"],
+            ),
+            status=StreamStatus.STOPPED,
+            error="ingestion disabled",
+        )
+
+
 class _PartiallyFailingMultiStreamDataManager(_MultiStreamDataManager):
     async def ensure_stream(self, symbol: str, interval: str, **kwargs) -> None:
         await super().ensure_stream(symbol, interval, **kwargs)
@@ -199,6 +217,26 @@ class _PartiallyFailingMultiStreamDataManager(_MultiStreamDataManager):
                 interval=interval,
                 purpose=IntervalPurpose.REALTIME,
             )
+
+
+class _StoppedStatusMultiStreamDataManager(_MultiStreamDataManager):
+    async def ensure_stream(self, symbol: str, interval: str, **kwargs) -> StreamInfo:
+        await super().ensure_stream(symbol, interval, **kwargs)
+        return StreamInfo(
+            SeriesKey(
+                symbol,
+                interval,
+                exchange=kwargs["exchange"],
+                market_type=kwargs["market_type"],
+            ),
+            status=StreamStatus.STOPPED,
+            error="ingestion disabled",
+        )
+
+
+class _FailingKlineIngestionFactory:
+    async def start(self, **_kwargs):
+        raise RuntimeError("injected ingestion failure")
 
 
 class _PriceDataManager:
@@ -370,6 +408,26 @@ def test_single_kline_ws_canonicalises_alias_for_entire_lifecycle() -> None:
     assert dm.release_stream_calls[0]["interval"] == "1h"
 
 
+def test_single_kline_ws_sends_failed_ack_for_explicit_stopped_stream_info() -> None:
+    dm = _StoppedStatusSingleStreamDataManager()
+    client = _stream_client(dm)
+
+    with client.websocket_connect(
+        "/api/v1/stream/klines?symbol=BTCUSDT&interval=1m"
+    ) as ws:
+        assert ws.receive_json() == {
+            "type": "error",
+            "detail": "Stream could not be subscribed",
+            "failed": [{
+                "interval": "1m",
+                "code": "stream_subscription_failed",
+                "message": "stream 1m is stopped: ingestion disabled",
+            }],
+        }
+
+    assert [call["interval"] for call in dm.release_stream_calls] == ["1m"]
+
+
 def test_kline_ws_forwards_amended_bar_as_closed_replacement() -> None:
     dm = _SingleStreamDataManager(DataEventType.BAR_AMENDED)
     client = _stream_client(dm)
@@ -538,6 +596,57 @@ def test_kline_multi_ws_isolates_one_interval_ensure_failure() -> None:
         "request_id": "mixed-1",
     }
     assert [call["interval"] for call in dm.subscribe_calls] == ["1m"]
+
+
+def test_kline_multi_ws_rejects_explicit_stopped_stream_info() -> None:
+    dm = _StoppedStatusMultiStreamDataManager(emit_backfill=False)
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines_multi?symbol=BTCUSDT") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({
+            "action": "subscribe",
+            "intervals": ["1m"],
+            "request_id": "stopped-1",
+        })
+        assert ws.receive_json()["type"] == "warning"
+        subscribed = ws.receive_json()
+
+    assert subscribed["intervals"] == []
+    assert subscribed["active_intervals"] == []
+    assert subscribed["failed"] == [{
+        "interval": "1m",
+        "code": "stream_subscription_failed",
+        "message": "stream 1m is stopped: ingestion disabled",
+    }]
+    assert dm.subscribe_calls == []
+    assert [call["interval"] for call in dm.release_stream_calls] == ["1m"]
+
+
+def test_kline_multi_ws_failing_real_coordinator_rolls_back_and_acks_failure() -> None:
+    dm = DataManager()
+    dm.set_ingestion_factory(_FailingKlineIngestionFactory())  # type: ignore[arg-type]
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines_multi?symbol=BTCUSDT") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({
+            "action": "subscribe",
+            "intervals": ["45m"],
+            "request_id": "failed-start-1",
+        })
+        assert ws.receive_json()["type"] == "warning"
+        subscribed = ws.receive_json()
+
+    assert subscribed["intervals"] == []
+    assert subscribed["active_intervals"] == []
+    assert subscribed["failed"][0]["interval"] == "45m"
+    assert subscribed["failed"][0]["code"] == "stream_subscription_failed"
+    assert "injected ingestion failure" in subscribed["failed"][0]["message"]
+    assert dm._stream_leases == {}
+    assert dm.storage_intents.snapshot()["intent_count"] == 0
+    assert dm.bar_aggregator.get_targets() == []
+    assert dm.coordinator.health_snapshot()["active_streams"] == 0
 
 
 def test_kline_multi_ws_dedupes_semantic_interval_aliases() -> None:

@@ -2474,6 +2474,60 @@ test("subscribeBars applies mixed ACKs without retrying rejected custom interval
   });
 });
 
+test("subscribeBars retries recoverable subscription failures after bounded backoff", async () => {
+  let socket = null;
+  const feed = new SeriesDataFeed({
+    api: { getMultiStreamUrl: () => "ws://example.test/klines" },
+  });
+  const subscription = feed.subscribeBars(
+    { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" },
+    {
+      intervals: ["45m"],
+      subscriptionRetryBaseMs: 30,
+      subscriptionRetryMaxMs: 30,
+      socketFactory: (url) => {
+        socket = new FakeSocket(url);
+        return socket;
+      },
+    },
+  );
+
+  const activeSocket = mustBeDefined<FakeSocket>(socket);
+  mustBeDefined(activeSocket.onopen)(partialMock<Event>({}));
+  const initialRequest = parseSentSubscriptionRequest(mustBeDefined(activeSocket.sent[0]));
+  activeSocket.emit({
+    type: "subscribed",
+    request_id: initialRequest.request_id,
+    requested_intervals: ["45m"],
+    intervals: [],
+    failed: [{
+      interval: "45m",
+      code: "stream_subscription_failed",
+      message: "temporary upstream outage",
+    }],
+    active_intervals: [],
+  });
+
+  // A recoverable NACK must not synchronously recurse into another request.
+  assert.equal(activeSocket.sent.length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(activeSocket.sent.length, 2);
+  const retryRequest = parseSentSubscriptionRequest(mustBeDefined(activeSocket.sent[1]));
+  assert.deepEqual(retryRequest.intervals, ["45m"]);
+
+  activeSocket.emit({
+    type: "subscribed",
+    request_id: retryRequest.request_id,
+    requested_intervals: ["45m"],
+    intervals: ["45m"],
+    failed: [],
+    active_intervals: ["45m"],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(activeSocket.sent.length, 2);
+  subscription.close();
+});
+
 test("subscribeBars canonicalizes semantic aliases before tracking ACK state", () => {
   let socket = null;
   const feed = new SeriesDataFeed({

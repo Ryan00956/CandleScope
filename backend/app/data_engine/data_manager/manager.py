@@ -1545,11 +1545,15 @@ class DataManager:
                 )
 
             for stream in plan.prerequisite_streams:
-                await self.coordinator.ensure_stream(
+                prerequisite_info = await self.coordinator.ensure_stream(
                     stream.symbol,
                     stream.interval,
                     exchange=stream.exchange,
                     market_type=stream.market_type,
+                )
+                self._require_active_stream(
+                    prerequisite_info,
+                    role="prerequisite",
                 )
 
             info = await self.coordinator.ensure_stream(
@@ -1558,6 +1562,7 @@ class DataManager:
                 exchange=plan.requested.exchange,
                 market_type=plan.requested.market_type,
             )
+            self._require_active_stream(info, role="requested")
 
             await self.warm_start.seed_if_needed(
                 plan.requested.symbol,
@@ -1578,21 +1583,35 @@ class DataManager:
                 consumer_id=stream_consumer,
             )
             for key in empty_keys:
-                await self.coordinator.stop_stream(
-                    key.symbol,
-                    key.interval,
-                    exchange=key.exchange,
-                    market_type=key.market_type,
-                )
-                self.bar_aggregator.remove_target(
-                    key.symbol,
-                    key.interval,
-                    exchange=key.exchange,
-                    market_type=key.market_type,
-                )
+                try:
+                    await self.coordinator.stop_stream(
+                        key.symbol,
+                        key.interval,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    )
+                except Exception:
+                    logger.exception("Failed to stop rolled-back stream %s", key)
+                finally:
+                    self.bar_aggregator.remove_target(
+                        key.symbol,
+                        key.interval,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    )
             raise
 
         return info
+
+    @staticmethod
+    def _require_active_stream(info: StreamInfo, *, role: str) -> None:
+        """Fail closed when a coordinator start attempt did not become active."""
+        if info.status is StreamStatus.ACTIVE:
+            return
+        detail = f"{role} stream {info.key} is {info.status.value}"
+        if info.error:
+            detail = f"{detail}: {info.error}"
+        raise RuntimeError(detail)
 
     async def release_stream(
         self,

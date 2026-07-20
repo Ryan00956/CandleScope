@@ -157,6 +157,9 @@ def _evaluate(
             _required_number(bar_projection, "max_fps")
             <= _required_number(thresholds, "projection_max_fps")
         ),
+        "bar_projection_no_capacity_forced_flushes": (
+            _required_number(bar_projection, "capacity_forced_flushes") == 0
+        ),
         "bar_retained_structures_bounded": (
             bar_bounds.get("retained_structures_bounded") is True
         ),
@@ -175,6 +178,9 @@ def _evaluate(
         "trade_projection_max_fps": (
             _required_number(trade_projection, "max_fps")
             <= _required_number(thresholds, "projection_max_fps")
+        ),
+        "trade_projection_no_capacity_forced_flushes": (
+            _required_number(trade_projection, "capacity_forced_flushes") == 0
         ),
         "trade_page_bound": (
             _required_number(trade_bounds, "archive_max_page_rows")

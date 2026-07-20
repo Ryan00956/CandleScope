@@ -8,13 +8,14 @@ import math
 import re
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from types import MappingProxyType
-from typing import Awaitable, Callable, Mapping, Protocol, Sequence
+from typing import Awaitable, Callable, Protocol, Sequence
 
 from .canonical import canonical_sha256
 from .checkpoints import CheckpointCodec, CheckpointError, CheckpointRing
-from .clock import VirtualClock
+from .clock import CLOCK_SCHEMA_VERSION, ClockSnapshot, VirtualClock
 from .commands import CommandHistory, CommandResult, ParsedCommand, parse_command
 from .constants import (
     REPLAY_CORE_VERSION,
@@ -36,7 +37,7 @@ from .models import (
     validate_timestamp_ms,
 )
 from .projection import ProjectionBatch, ProjectionCoalescer
-from .sources.base import ReplayMarketSource
+from .sources.base import ReplayMarketSource, SourceCursor
 
 
 ACTOR_STATE_HASH_SCHEMA_VERSION = "replay-actor-state-hash.v1"
@@ -152,12 +153,22 @@ class ActorMutation:
 
 @dataclass(frozen=True, slots=True)
 class _ActorRollback:
-    payload: Mapping[str, object]
+    component_state: Mapping[str, object]
+    expected_state_hash: str
     source: ReplayMarketSource
+    source_cursor: SourceCursor
+    clock: ClockSnapshot
     state: SessionState
     status_reason: str
     controller_client_id: str | None
     controller_deadline_wall: float | None
+    revision: int
+    sequence: int
+    domain_command_position: int
+    command_log_offset: int
+    event_chain_hash: str
+    revealed: bool
+    journal_entries: tuple[Mapping[str, object], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,15 +430,22 @@ class ReplaySessionActor:
         # hashes/checkpoints for one actor state can safely reuse the same
         # materialization until a reducer mutation explicitly invalidates it.
         self._component_state_cache: dict[str, object] | None = None
+        self._component_state_revision = 0
+        self._state_hash_cache_key: tuple[object, ...] | None = None
+        self._state_hash_cache: str | None = None
 
         self._queue: asyncio.Queue[_ActorRequest] = asyncio.Queue(
             maxsize=self._queue_size
         )
         self._events = ReplayEventBuffer(max_events=self._event_buffer_size)
-        self._coalescer = ProjectionCoalescer(max_fps=self._max_emit_fps)
+        self._coalescer = ProjectionCoalescer(
+            max_fps=self._max_emit_fps,
+            max_pending_events=self._event_buffer_size,
+        )
         self._projection_buffer: deque[ProjectionBatch] = deque(
             maxlen=self._event_buffer_size,
         )
+        self._projection_buffer_domain_events = 0
         self._command_history = CommandHistory(max_records=max_command_records)
         self._checkpoint_codec = CheckpointCodec()
         self._max_recent_checkpoints = self._positive_int(
@@ -494,6 +512,8 @@ class ReplaySessionActor:
             "controller_expirations": 0,
             "controller_takeovers": 0,
             "projection_buffer_evictions": 0,
+            "projection_buffer_evicted_domain_events": 0,
+            "projection_buffer_oversize_drops": 0,
             "checkpoints_created": 0,
             "checkpoint_bytes": 0,
             "shutdown_attempts": 0,
@@ -781,6 +801,8 @@ class ReplaySessionActor:
             "projection": projection,
             "projection_coalesced": projection["ordinary_coalesced"],
             "projection_buffer_size": len(self._projection_buffer),
+            "projection_buffer_domain_events": self._projection_buffer_domain_events,
+            "projection_buffer_capacity_events": self._event_buffer_size,
             "checkpoints": self._checkpoints.diagnostics(),
             "command_history": self._command_history.diagnostics(),
             "command_ack_latency_ms": self._command_ack_latency.snapshot(),
@@ -1879,7 +1901,7 @@ class ReplaySessionActor:
             self._controller_client_id = None
             self._controller_deadline_wall = None
         component_state = self._component_state()
-        state_hash = self._compute_state_hash(component_state=component_state)
+        state_hash = self._compute_state_hash()
         if publish:
             self._emit(
                 ReplayEventType.DELTA,
@@ -2446,7 +2468,11 @@ class ReplaySessionActor:
                 ReplayErrorCode.DATASET_MISMATCH,
                 "replay source cannot provide an isolated cursor fork",
             )
-        if canonical_sha256(source.snapshot_ref()) != self._snapshot_ref_hash:
+        snapshot_ref = source.snapshot_ref()
+        if (
+            type(snapshot_ref) is not type(self._snapshot_ref)
+            or snapshot_ref != self._snapshot_ref
+        ):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
                 "forked replay source changed immutable identity",
@@ -2459,18 +2485,44 @@ class ReplaySessionActor:
         return source
 
     def _capture_rollback(self) -> _ActorRollback:
+        source = self._fork_current_source()
+        component_state = MappingProxyType(dict(self._component_state()))
+        expected_state_hash = self._compute_state_hash()
         return _ActorRollback(
-            payload=self._checkpoint_payload(),
-            source=self._fork_current_source(),
+            component_state=component_state,
+            expected_state_hash=expected_state_hash,
+            source=source,
+            source_cursor=source.cursor(),
+            clock=ClockSnapshot(
+                schema_version=CLOCK_SCHEMA_VERSION,
+                virtual_time_ms=self._clock.virtual_time_ms,
+                speed=self._clock.speed,
+                playing=self._clock.playing,
+            ),
             state=self._state,
             status_reason=self._status_reason,
             controller_client_id=self._controller_client_id,
             controller_deadline_wall=self._controller_deadline_wall,
+            revision=self._revision,
+            sequence=self._sequence,
+            domain_command_position=self._domain_command_position,
+            command_log_offset=self._command_log_offset,
+            event_chain_hash=self._event_chain_hash,
+            revealed=self._revealed,
+            journal_entries=tuple(
+                MappingProxyType(dict(entry)) for entry in self._journal_entries
+            ),
         )
 
-    def _begin_candidate(self, *, capture_source_events: bool = True) -> None:
+    def _begin_candidate(
+        self,
+        *,
+        capture_source_events: bool | None = None,
+    ) -> None:
         if self._pending_events is not None or self._pending_source_events is not None:
             raise RuntimeError("nested replay actor mutation candidate")
+        if capture_source_events is None:
+            capture_source_events = self._mutation_hook is not None
         self._pending_events = []
         self._pending_source_events = [] if capture_source_events else None
 
@@ -2482,13 +2534,45 @@ class ReplaySessionActor:
     ) -> None:
         self._pending_events = None
         self._pending_source_events = None
-        self._restore_payload(
-            rollback.payload,
-            restore_public_position=False,
-            source_override=rollback.source,
+        snapshot_ref = rollback.source.snapshot_ref()
+        if (
+            type(snapshot_ref) is not type(self._snapshot_ref)
+            or snapshot_ref != self._snapshot_ref
+            or canonical_sha256(snapshot_ref) != self._snapshot_ref_hash
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "rollback source changed immutable identity",
+            )
+        if rollback.source.cursor() != rollback.source_cursor:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "rollback source changed its isolated cursor",
+            )
+        self._invalidate_component_state()
+        self._reducer.restore(rollback.component_state)
+        self._source = rollback.source
+        should_play = (
+            not force_paused
+            and rollback.state is SessionState.PLAYING
+            and rollback.clock.playing
         )
-        self._revision = int(rollback.payload["revision"])
-        self._sequence = int(rollback.payload["event_sequence"])
+        self._clock = VirtualClock.from_snapshot(
+            ClockSnapshot(
+                schema_version=CLOCK_SCHEMA_VERSION,
+                virtual_time_ms=rollback.clock.virtual_time_ms,
+                speed=rollback.clock.speed,
+                playing=should_play,
+            ),
+            monotonic=self._monotonic,
+        )
+        self._revision = rollback.revision
+        self._sequence = rollback.sequence
+        self._domain_command_position = rollback.domain_command_position
+        self._command_log_offset = rollback.command_log_offset
+        self._event_chain_hash = rollback.event_chain_hash
+        self._revealed = rollback.revealed
+        self._journal_entries = [dict(entry) for entry in rollback.journal_entries]
         self._status_reason = rollback.status_reason
         self._controller_client_id = rollback.controller_client_id
         self._controller_deadline_wall = rollback.controller_deadline_wall
@@ -2499,8 +2583,19 @@ class ReplaySessionActor:
             self._controller_deadline_wall = None
         else:
             self._state = rollback.state
-            if rollback.state is SessionState.PLAYING:
-                self._clock.start()
+        # Validate the restored deterministic state once on the exceptional
+        # path without charging every successful mutation for checkpoint
+        # materialization and a duplicate state hash.
+        restored_state_hash = self._compute_state_hash()
+        if restored_state_hash != rollback.expected_state_hash:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "lightweight rollback state hash does not match captured state",
+                details={
+                    "expected_state_hash": rollback.expected_state_hash,
+                    "actual_state_hash": restored_state_hash,
+                },
+            )
 
     async def _commit_mutation(
         self,
@@ -2514,33 +2609,33 @@ class ReplaySessionActor:
         state_hash: str | None = None,
     ) -> None:
         pending_events = tuple(self._pending_events or ())
-        events = tuple(event for event, _ in pending_events)
-        source_events = tuple(self._pending_source_events or ())
-        components = (
-            self._component_state()
-            if component_state is None
-            else dict(component_state)
-        )
-        persisted_components = dict(components)
-        persisted_components["journal"] = [
-            dict(entry) for entry in self._journal_entries
-        ]
-        mutation = ActorMutation(
-            kind=kind,
-            session_id=self.session_id,
-            session_state=self._durable_state(
-                component_state=components,
-                state_hash=state_hash,
-            ),
-            checkpoint=checkpoint,
-            events=events,
-            source_events=source_events,
-            component_state=persisted_components,
-            command=command,
-            result=result,
-            error=error,
-        )
         if self._mutation_hook is not None:
+            events = tuple(event for event, _ in pending_events)
+            source_events = tuple(self._pending_source_events or ())
+            components = (
+                self._component_state()
+                if component_state is None
+                else dict(component_state)
+            )
+            persisted_components = dict(components)
+            persisted_components["journal"] = [
+                dict(entry) for entry in self._journal_entries
+            ]
+            mutation = ActorMutation(
+                kind=kind,
+                session_id=self.session_id,
+                session_state=self._durable_state(
+                    component_state=components,
+                    state_hash=state_hash,
+                ),
+                checkpoint=checkpoint,
+                events=events,
+                source_events=source_events,
+                component_state=persisted_components,
+                command=command,
+                result=result,
+                error=error,
+            )
             await self._mutation_hook(mutation)
         for event, mandatory in pending_events:
             self._publish_event(event, mandatory=mandatory)
@@ -3011,6 +3106,9 @@ class ReplaySessionActor:
 
     def _invalidate_component_state(self) -> None:
         self._component_state_cache = None
+        self._component_state_revision += 1
+        self._state_hash_cache_key = None
+        self._state_hash_cache = None
 
     def _component_state(self) -> dict[str, object]:
         cached = self._component_state_cache
@@ -3028,12 +3126,30 @@ class ReplaySessionActor:
         component_state: Mapping[str, object] | None = None,
     ) -> str:
         cursor = self._cursor()
+        cache_key = (
+            self._component_state_revision,
+            cursor.virtual_time_ms,
+            cursor.source_sequence,
+            cursor.last_base_bar_open_ms,
+            cursor.last_trade_time_ms,
+            cursor.last_agg_trade_id,
+            cursor.at_end,
+            self._event_chain_hash,
+            self._domain_command_position,
+            self._revealed,
+        )
+        if (
+            component_state is None
+            and self._state_hash_cache_key == cache_key
+            and self._state_hash_cache is not None
+        ):
+            return self._state_hash_cache
         components = (
             self._component_state()
             if component_state is None
             else dict(component_state)
         )
-        return canonical_sha256(
+        state_hash = canonical_sha256(
             {
                 "schema_version": ACTOR_STATE_HASH_SCHEMA_VERSION,
                 "core_version": REPLAY_CORE_VERSION,
@@ -3058,6 +3174,10 @@ class ReplaySessionActor:
                 "components": components,
             }
         )
+        if component_state is None:
+            self._state_hash_cache_key = cache_key
+            self._state_hash_cache = state_hash
+        return state_hash
 
     def _command_result(
         self,
@@ -3260,11 +3380,34 @@ class ReplaySessionActor:
 
     def _store_projection_batches(self, batches: tuple[ProjectionBatch, ...]) -> None:
         for batch in batches:
-            if len(self._projection_buffer) == self._projection_buffer.maxlen:
-                self._metrics["projection_buffer_evictions"] = (
-                    int(self._metrics["projection_buffer_evictions"] or 0) + 1
+            if batch.event_count > self._event_buffer_size:
+                while self._projection_buffer:
+                    self._evict_oldest_projection_batch()
+                self._metrics["projection_buffer_oversize_drops"] = (
+                    int(self._metrics["projection_buffer_oversize_drops"] or 0) + 1
                 )
+                continue
+            while (
+                self._projection_buffer
+                and self._projection_buffer_domain_events + batch.event_count
+                > self._event_buffer_size
+            ):
+                self._evict_oldest_projection_batch()
             self._projection_buffer.append(batch)
+            self._projection_buffer_domain_events += batch.event_count
+
+    def _evict_oldest_projection_batch(self) -> None:
+        evicted = self._projection_buffer.popleft()
+        self._projection_buffer_domain_events -= evicted.event_count
+        if self._projection_buffer_domain_events < 0:
+            raise RuntimeError("projection buffer domain-event accounting underflow")
+        self._metrics["projection_buffer_evicted_domain_events"] = (
+            int(self._metrics["projection_buffer_evicted_domain_events"] or 0)
+            + evicted.event_count
+        )
+        self._metrics["projection_buffer_evictions"] = (
+            int(self._metrics["projection_buffer_evictions"] or 0) + 1
+        )
 
     def _materialize_clock(self) -> None:
         if not self._clock.playing:

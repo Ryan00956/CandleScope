@@ -203,3 +203,93 @@ def test_projection_batch_wire_range_and_bar_updates_preserve_structural_appends
         ("tick", 2_000, "3"),
         ("append", 3_000, "4"),
     ]
+
+
+def test_projection_pending_merge_defers_event_materialization_until_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [_event(sequence) for sequence in (1, 2, 3)]
+    original_post_init = ReplayEvent.__post_init__
+    materializations = 0
+
+    def counted_post_init(event: ReplayEvent) -> None:
+        nonlocal materializations
+        materializations += 1
+        original_post_init(event)
+
+    monkeypatch.setattr(ReplayEvent, "__post_init__", counted_post_init)
+    coalescer = ProjectionCoalescer(max_fps=30)
+    assert coalescer.offer(events[0], wall_time=40.0)
+    assert coalescer.offer(events[1], wall_time=40.001) == ()
+    assert coalescer.offer(events[2], wall_time=40.002) == ()
+    assert materializations == 0
+
+    flushed = coalescer.flush()
+    assert [(batch.sequence_from, batch.sequence_to) for batch in flushed] == [
+        (2, 3)
+    ]
+    assert materializations == 1
+
+
+def test_projection_rejects_malformed_batch_without_partially_mutating_pending() -> None:
+    def delta(sequence: int, bar_update: object) -> ReplayEvent:
+        return ReplayEvent(
+            type=ReplayEventType.DELTA,
+            protocol=REPLAY_PROTOCOL,
+            session_id="session-events",
+            sequence=sequence,
+            revision=1,
+            virtual_time_ms=2_000 + sequence,
+            state_hash=DIGEST,
+            data_epoch=DIGEST,
+            data={
+                "projection": {
+                    "bar_update": bar_update,
+                    "orders": [],
+                    "fills": [],
+                    "warnings": [],
+                    "position": {},
+                    "account": {},
+                }
+            },
+        )
+
+    def append(open_time_ms: int) -> dict[str, object]:
+        return {"action": "append", "bar": {"open_time_ms": open_time_ms}}
+
+    coalescer = ProjectionCoalescer(max_fps=30)
+    assert coalescer.offer(_event(1), wall_time=50.0)
+    assert coalescer.offer(delta(2, append(2_000)), wall_time=50.001) == ()
+    assert coalescer.offer(delta(3, append(3_000)), wall_time=50.002) == ()
+    malformed = {"action": "batch", "updates": [append(4_000), 42]}
+    emitted = coalescer.offer(delta(4, malformed), wall_time=50.003)
+
+    assert [(batch.sequence_from, batch.sequence_to) for batch in emitted] == [
+        (2, 3),
+        (4, 4),
+    ]
+    prior = emitted[0].latest_event.data["projection"]["bar_update"]
+    assert [
+        update["bar"]["open_time_ms"] for update in prior["updates"]
+    ] == [2_000, 3_000]
+
+
+def test_projection_frozen_wall_forces_lossless_bounded_frames() -> None:
+    coalescer = ProjectionCoalescer(max_fps=30, max_pending_events=2)
+    emitted = list(coalescer.offer(_event(1), wall_time=60.0))
+    for sequence in range(2, 8):
+        emitted.extend(coalescer.offer(_event(sequence), wall_time=60.0))
+        assert coalescer.diagnostics()["pending_events"] <= 2
+    emitted.extend(coalescer.flush())
+
+    assert [(batch.sequence_from, batch.sequence_to) for batch in emitted] == [
+        (1, 1),
+        (2, 3),
+        (4, 5),
+        (6, 7),
+    ]
+    assert sum(batch.event_count for batch in emitted) == 7
+    diagnostics = coalescer.diagnostics()
+    assert diagnostics["capacity_forced_flushes"] == 3
+    assert diagnostics["pending_events"] == 0
+    assert diagnostics["max_pending_events"] == 2

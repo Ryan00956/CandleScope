@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from types import MappingProxyType
-from typing import Mapping, TypeVar
+from typing import TypeVar
 
 from .constants import (
     REPLAY_PROTOCOL,

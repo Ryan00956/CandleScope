@@ -163,7 +163,7 @@ def _benchmark_section(*, trade: bool) -> dict[str, object]:
     return {
         "result": {"events_per_second": 100},
         "memory": {"peak_delta_bytes": 0, "late_half_growth_bytes": 0},
-        "projection": {"max_fps": 30},
+        "projection": {"max_fps": 30, "capacity_forced_flushes": 0},
         "bounds": bounds,
     }
 

@@ -6,11 +6,18 @@ from functools import wraps
 
 import pytest
 
+import app.replay.actor as actor_module
 from app.replay.actor import ReplaySessionActor
 from app.replay.checkpoints import CheckpointCodec
-from app.replay.constants import REPLAY_PROTOCOL, CommandType, SessionState
+from app.replay.constants import (
+    REPLAY_PROTOCOL,
+    CommandType,
+    ReplayEventType,
+    SessionState,
+)
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
-from app.replay.models import ReplayCommand
+from app.replay.models import ReplayCommand, ReplayEvent
+from app.replay.projection import ProjectionBatch
 from tests.fixtures.replay.actor_fakes import (
     CountingReducer,
     FixtureEvent,
@@ -78,6 +85,48 @@ def _actor(**kwargs) -> ReplaySessionActor:
         checkpoint_virtual_ms=kwargs.pop("checkpoint_virtual_ms", 1_000),
         **kwargs,
     )
+
+
+def test_projection_buffer_is_bounded_by_domain_events_and_drops_oversize_batch() -> (
+    None
+):
+    actor = _actor(event_buffer_size=5)
+    digest = "sha256:" + ("a" * 64)
+
+    def batch(sequence_from: int, sequence_to: int) -> ProjectionBatch:
+        event = ReplayEvent(
+            type=ReplayEventType.DELTA,
+            protocol=REPLAY_PROTOCOL,
+            session_id="session-actor",
+            sequence=sequence_to,
+            revision=0,
+            virtual_time_ms=1_000 + sequence_to,
+            state_hash=digest,
+            data_epoch=digest,
+            data={},
+        )
+        return ProjectionBatch(sequence_from, sequence_to, event, False)
+
+    actor._store_projection_batches((batch(1, 2), batch(3, 5)))
+    assert [(item.sequence_from, item.sequence_to) for item in actor.projections()] == [
+        (1, 2),
+        (3, 5),
+    ]
+    assert actor.diagnostics()["projection_buffer_domain_events"] == 5
+
+    actor._store_projection_batches((batch(6, 7),))
+    assert [(item.sequence_from, item.sequence_to) for item in actor.projections()] == [
+        (3, 5),
+        (6, 7),
+    ]
+    actor._store_projection_batches((batch(8, 13),))
+    diagnostics = actor.diagnostics()
+    assert actor.projections() == ()
+    assert diagnostics["projection_buffer_domain_events"] == 0
+    assert diagnostics["projection_buffer_capacity_events"] == 5
+    assert diagnostics["projection_buffer_evictions"] == 3
+    assert diagnostics["projection_buffer_evicted_domain_events"] == 7
+    assert diagnostics["projection_buffer_oversize_drops"] == 1
 
 
 @_async_test
@@ -545,6 +594,231 @@ async def test_source_fork_that_returns_shared_instance_fails_closed() -> None:
     assert (await actor.snapshot()).cursor.source_sequence == 0
     with pytest.raises(ReplayDomainError):
         await actor.shutdown(step_timeout=0.1)
+
+
+@_async_test
+async def test_source_fork_that_changes_snapshot_identity_fails_closed() -> None:
+    events = event_fixture()
+
+    class ForgedIdentityForkSource(FixtureSource):
+        def fork(self):
+            forked = FixtureSource(
+                events,
+                data_epoch="sha256:" + ("e" * 64),
+            )
+            forked._index = self._index
+            return forked
+
+    actor = ReplaySessionActor(
+        session_id="session-forged-fork-source",
+        config=session_config(),
+        source_factory=lambda: ForgedIdentityForkSource(events),
+        initial_virtual_time_ms=1_000,
+        command_queue_size=8,
+        event_buffer_size=64,
+        max_emit_fps=30,
+        controller_ttl_seconds=1,
+        checkpoint_event_interval=2,
+        checkpoint_virtual_ms=1_000,
+    )
+    await actor.start()
+    with pytest.raises(ReplayDomainError) as failure:
+        await actor.submit(
+            _command("acquire-forged-fork", CommandType.ACQUIRE_CONTROLLER, revision=0)
+        )
+    assert failure.value.code is ReplayErrorCode.DATASET_MISMATCH
+    assert (await actor.snapshot()).cursor.source_sequence == 0
+    with pytest.raises(ReplayDomainError):
+        await actor.shutdown(step_timeout=0.1)
+
+
+def test_lightweight_rollback_capture_reuses_hash_without_checkpoint_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = _actor(reducer=CountingReducer())
+    expected_state_hash = actor._compute_state_hash()
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("rollback capture performed duplicate canonical work")
+
+    monkeypatch.setattr(actor, "_checkpoint_payload", unexpected)
+    monkeypatch.setattr(actor_module, "canonical_sha256", unexpected)
+    rollback = actor._capture_rollback()
+
+    assert rollback.expected_state_hash == expected_state_hash
+    assert dict(rollback.component_state) == {"count": 0, "total": 0}
+    assert rollback.source_cursor.source_sequence == 0
+
+
+def test_lightweight_rollback_rejects_fork_cursor_drift() -> None:
+    actor = _actor(reducer=CountingReducer())
+    rollback = actor._capture_rollback()
+    assert rollback.source.next() is not None
+
+    with pytest.raises(ReplayDomainError) as mismatch:
+        actor._restore_rollback(rollback, force_paused=False)
+
+    assert mismatch.value.code is ReplayErrorCode.DATASET_MISMATCH
+    assert "cursor" in mismatch.value.message
+
+
+def test_lightweight_rollback_rejects_reducer_that_silently_restores_wrong_state() -> (
+    None
+):
+    class BadRestoreReducer(CountingReducer):
+        def restore(self, state) -> None:
+            del state
+            self.count = 999
+            self.total = 999
+
+    actor = _actor(reducer=BadRestoreReducer())
+    rollback = actor._capture_rollback()
+
+    with pytest.raises(ReplayDomainError) as mismatch:
+        actor._restore_rollback(rollback, force_paused=False)
+
+    assert mismatch.value.code is ReplayErrorCode.DATASET_MISMATCH
+    assert mismatch.value.details["expected_state_hash"] == rollback.expected_state_hash
+    assert mismatch.value.details["actual_state_hash"] != rollback.expected_state_hash
+
+
+@_async_test
+async def test_mutating_reducer_exception_restores_exact_lightweight_state() -> None:
+    class MutatingRaiseReducer(CountingReducer):
+        def apply_source_event(self, event: FixtureEvent):
+            super().apply_source_event(event)
+            raise RuntimeError("injected reducer failure after mutation")
+
+    reducer = MutatingRaiseReducer()
+    actor = _actor(reducer=reducer)
+    await actor.start()
+    before = await actor.durable_state()
+    before_components = actor._component_state()
+    before_journal = tuple(dict(entry) for entry in actor._journal_entries)
+
+    with pytest.raises(RuntimeError, match="after mutation"):
+        await actor._process_source_event(publish=True)
+
+    after = await actor.durable_state()
+    for field_name in (
+        "state",
+        "revision",
+        "event_sequence",
+        "source_sequence",
+        "state_hash",
+        "cursor",
+    ):
+        assert after[field_name] == before[field_name]
+    assert actor._component_state() == before_components
+    assert tuple(dict(entry) for entry in actor._journal_entries) == before_journal
+    assert reducer.snapshot() == {"count": 0, "total": 0}
+    await actor.shutdown()
+
+
+@_async_test
+async def test_source_persistence_failure_restores_exact_lightweight_state() -> None:
+    async def reject_source(mutation) -> None:
+        if mutation.kind == "source_event":
+            raise RuntimeError("injected source persistence failure")
+
+    reducer = CountingReducer()
+    actor = _actor(reducer=reducer, mutation_hook=reject_source)
+    await actor.start()
+    before = await actor.durable_state()
+    before_components = actor._component_state()
+    before_journal = tuple(dict(entry) for entry in actor._journal_entries)
+
+    await actor._process_source_event(publish=True)
+
+    after = await actor.durable_state()
+    for field_name in (
+        "revision",
+        "event_sequence",
+        "source_sequence",
+        "state_hash",
+        "cursor",
+    ):
+        assert after[field_name] == before[field_name]
+    assert actor._component_state() == before_components
+    assert tuple(dict(entry) for entry in actor._journal_entries) == before_journal
+    assert after["state"] == "PAUSED"
+    assert reducer.snapshot() == {"count": 0, "total": 0}
+    assert actor.diagnostics()["persistence_failures"] == 1
+    await actor.shutdown()
+
+
+@_async_test
+async def test_optional_mutation_hook_preserves_actor_state_events_and_checkpoints() -> (
+    None
+):
+    mutations = []
+
+    async def capture(mutation) -> None:
+        mutations.append(mutation)
+
+    without_hook = _actor(
+        reducer=CountingReducer(),
+        events=event_fixture(count=3),
+        checkpoint_event_interval=1,
+    )
+    with_hook = _actor(
+        reducer=CountingReducer(),
+        events=event_fixture(count=3),
+        checkpoint_event_interval=1,
+        mutation_hook=capture,
+    )
+    for actor in (without_hook, with_hook):
+        await actor.start()
+        await actor.submit(
+            _command("parity-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0)
+        )
+        await actor.submit(
+            _command(
+                "parity-step",
+                CommandType.STEP,
+                revision=1,
+                payload={"count": 2},
+            )
+        )
+
+    without_snapshot = await without_hook.snapshot()
+    with_snapshot = await with_hook.snapshot()
+    assert without_snapshot.to_dict() == with_snapshot.to_dict()
+    assert [
+        event.to_dict() for event in without_hook.event_buffer_after(0) or ()
+    ] == [event.to_dict() for event in with_hook.event_buffer_after(0) or ()]
+    assert without_hook.latest_checkpoint_blob() == with_hook.latest_checkpoint_blob()
+
+    step_mutation = next(
+        mutation
+        for mutation in mutations
+        if mutation.command is not None
+        and mutation.command.command_id == "parity-step"
+    )
+    # Atomic STEP remains checkpoint-backed and deliberately does not persist
+    # a duplicate source-event batch.
+    assert step_mutation.source_events == ()
+
+    for actor in (without_hook, with_hook):
+        await actor.submit(_command("parity-play", CommandType.PLAY, revision=2))
+        await _wait_for_state(actor, SessionState.ENDED)
+
+    without_ended = await without_hook.snapshot()
+    with_ended = await with_hook.snapshot()
+    assert without_ended.to_dict() == with_ended.to_dict()
+    assert [
+        event.to_dict() for event in without_hook.event_buffer_after(0) or ()
+    ] == [event.to_dict() for event in with_hook.event_buffer_after(0) or ()]
+    assert without_hook.latest_checkpoint_blob() == with_hook.latest_checkpoint_blob()
+
+    source_mutation = next(
+        mutation for mutation in mutations if mutation.kind == "source_event"
+    )
+    assert len(source_mutation.source_events) == 1
+    assert source_mutation.source_events[0]["value"] == 3
+
+    await without_hook.shutdown()
+    await with_hook.shutdown()
 
 
 @_async_test

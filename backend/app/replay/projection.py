@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 from .constants import REPLAY_PROTOCOL, ReplayEventType
 from .models import ReplayEvent
 
 
 _UNMERGEABLE = object()
+_PROJECTION_FIELDS = {
+    "bar_update",
+    "orders",
+    "fills",
+    "warnings",
+    "position",
+    "account",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,21 +48,113 @@ class ProjectionBatch:
         return payload
 
 
+@dataclass(slots=True)
+class _PendingProjection:
+    """Mutable, actor-owned accumulator materialized only when a frame is sent."""
+
+    sequence_from: int
+    latest_event: ReplayEvent
+    projection: dict[str, object] | None = None
+    bar_updates: list[dict[str, object]] | None = None
+    orders: list[object] | None = None
+    fills: list[object] | None = None
+    warnings: list[object] | None = None
+
+    @property
+    def event_count(self) -> int:
+        return self.latest_event.sequence - self.sequence_from + 1
+
+    def merge(self, latest: ReplayEvent) -> bool:
+        _validate_shared_identity(self.latest_event, latest)
+        if self.projection is None:
+            previous = _projection_parts(self.latest_event)
+            if previous is None:
+                return False
+        else:
+            previous = None
+        incoming = _projection_parts(latest)
+        if incoming is None:
+            return False
+
+        if previous is not None:
+            self.projection, bar_updates, orders, fills, warnings = previous
+            self.bar_updates = bar_updates
+            self.orders = orders
+            self.fills = fills
+            self.warnings = warnings
+
+        assert self.bar_updates is not None
+        assert self.orders is not None
+        assert self.fills is not None
+        assert self.warnings is not None
+        projection, bar_updates, orders, fills, warnings = incoming
+        for update in bar_updates:
+            _append_compacted_update(self.bar_updates, update)
+        self.orders.extend(orders)
+        self.fills.extend(fills)
+        self.warnings.extend(warnings)
+        self.projection = projection
+        self.latest_event = latest
+        return True
+
+    def to_batch(self) -> ProjectionBatch:
+        latest = self.latest_event
+        if self.projection is None:
+            materialized = latest
+        else:
+            assert self.bar_updates is not None
+            assert self.orders is not None
+            assert self.fills is not None
+            assert self.warnings is not None
+            projection = dict(self.projection)
+            projection["bar_update"] = _materialize_bar_updates(self.bar_updates)
+            projection["orders"] = self.orders
+            projection["fills"] = self.fills
+            projection["warnings"] = self.warnings
+            data = dict(latest.data)
+            data["projection"] = projection
+            materialized = ReplayEvent(
+                type=latest.type,
+                protocol=latest.protocol,
+                session_id=latest.session_id,
+                sequence=latest.sequence,
+                revision=latest.revision,
+                virtual_time_ms=latest.virtual_time_ms,
+                state_hash=latest.state_hash,
+                data_epoch=latest.data_epoch,
+                data=data,
+            )
+        return ProjectionBatch(
+            sequence_from=self.sequence_from,
+            sequence_to=latest.sequence,
+            latest_event=materialized,
+            mandatory=False,
+        )
+
+
 class ProjectionCoalescer:
-    def __init__(self, *, max_fps: int) -> None:
+    def __init__(self, *, max_fps: int, max_pending_events: int = 10_000) -> None:
         if isinstance(max_fps, bool) or not isinstance(max_fps, int) or max_fps < 1:
             raise ValueError("max_fps must be a positive integer")
+        if (
+            isinstance(max_pending_events, bool)
+            or not isinstance(max_pending_events, int)
+            or max_pending_events < 1
+        ):
+            raise ValueError("max_pending_events must be a positive integer")
         self._max_fps = max_fps
+        self._max_pending_events = max_pending_events
         self._minimum_interval = 1.0 / max_fps
         self._last_ordinary_emit_wall: float | None = None
         self._last_offer_wall: float | None = None
-        self._pending: ProjectionBatch | None = None
+        self._pending: _PendingProjection | None = None
         self._metrics = {
             "domain_events": 0,
             "ordinary_emitted": 0,
             "ordinary_coalesced": 0,
             "mandatory_emitted": 0,
             "flushes": 0,
+            "capacity_forced_flushes": 0,
         }
 
     def offer(
@@ -103,22 +203,16 @@ class ProjectionCoalescer:
             return tuple(emitted)
 
         if self._pending is None:
-            self._pending = ProjectionBatch(
+            self._pending = _PendingProjection(
                 sequence_from=event.sequence,
-                sequence_to=event.sequence,
                 latest_event=event,
-                mandatory=False,
             )
         else:
-            merged_event = _merge_ordinary_events(
-                self._pending.latest_event,
-                event,
-            )
-            if merged_event is None:
+            if not self._pending.merge(event):
                 # An ordinary payload that is not semantically replaceable
                 # must never inherit the previous range: doing so would claim
                 # delivery of a frame whose payload was silently discarded.
-                previous = self._pending
+                previous = self._pending.to_batch()
                 self._pending = None
                 emitted.extend(
                     (
@@ -134,19 +228,20 @@ class ProjectionCoalescer:
                 self._last_ordinary_emit_wall = wall
                 self._metrics["ordinary_emitted"] += 2
                 return tuple(emitted)
-            self._pending = ProjectionBatch(
-                sequence_from=self._pending.sequence_from,
-                sequence_to=event.sequence,
-                latest_event=merged_event,
-                mandatory=False,
-            )
             self._metrics["ordinary_coalesced"] += 1
         if due:
-            pending = self._pending
+            pending = self._pending.to_batch()
             assert pending is not None
             self._pending = None
             self._last_ordinary_emit_wall = wall
             self._metrics["ordinary_emitted"] += 1
+            return (pending,)
+        if self._pending.event_count >= self._max_pending_events:
+            pending = self._pending.to_batch()
+            self._pending = None
+            self._last_ordinary_emit_wall = wall
+            self._metrics["ordinary_emitted"] += 1
+            self._metrics["capacity_forced_flushes"] += 1
             return (pending,)
         return ()
 
@@ -158,7 +253,7 @@ class ProjectionCoalescer:
             self._last_offer_wall = wall
         if self._pending is None:
             return ()
-        pending = self._pending
+        pending = self._pending.to_batch()
         self._pending = None
         if self._last_offer_wall is not None:
             self._last_ordinary_emit_wall = self._last_offer_wall
@@ -191,6 +286,10 @@ class ProjectionCoalescer:
             **self._metrics,
             "max_fps": self._max_fps,
             "pending": int(self._pending is not None),
+            "pending_events": (
+                0 if self._pending is None else self._pending.event_count
+            ),
+            "max_pending_events": self._max_pending_events,
         }
 
     @staticmethod
@@ -201,6 +300,57 @@ class ProjectionCoalescer:
         if not math.isfinite(wall):
             raise ValueError("wall_time must be finite")
         return wall
+
+
+def _validate_shared_identity(previous: ReplayEvent, latest: ReplayEvent) -> None:
+    if (
+        previous.protocol != REPLAY_PROTOCOL
+        or latest.protocol != REPLAY_PROTOCOL
+        or previous.session_id != latest.session_id
+        or previous.data_epoch != latest.data_epoch
+    ):
+        raise ValueError("projection events do not share one replay identity")
+
+
+def _projection_parts(
+    event: ReplayEvent,
+) -> tuple[
+    dict[str, object],
+    list[dict[str, object]],
+    list[object],
+    list[object],
+    list[object],
+] | None:
+    if event.type is not ReplayEventType.DELTA:
+        return None
+    projection = event.data.get("projection")
+    if not isinstance(projection, Mapping) or not _PROJECTION_FIELDS.issubset(
+        projection
+    ):
+        return None
+    bar_updates: list[dict[str, object]] = []
+    bar_update = projection.get("bar_update")
+    if bar_update is not None:
+        if not isinstance(bar_update, Mapping) or not _collect_bar_update(
+            bar_update,
+            bar_updates,
+        ):
+            return None
+    arrays: list[list[object]] = []
+    for field_name in ("orders", "fills", "warnings"):
+        value = projection.get(field_name)
+        if not isinstance(value, (list, tuple)):
+            return None
+        arrays.append(list(value))
+    return dict(projection), bar_updates, arrays[0], arrays[1], arrays[2]
+
+
+def _materialize_bar_updates(updates: list[dict[str, object]]) -> object:
+    if not updates:
+        return None
+    if len(updates) == 1:
+        return updates[0]
+    return {"action": "batch", "updates": updates}
 
 
 def _merge_ordinary_events(
@@ -214,59 +364,20 @@ def _merge_ordinary_events(
     future caller cannot silently discard them.
     """
 
-    if (
-        previous.protocol != REPLAY_PROTOCOL
-        or latest.protocol != REPLAY_PROTOCOL
-        or previous.session_id != latest.session_id
-        or previous.data_epoch != latest.data_epoch
-    ):
-        raise ValueError("projection events do not share one replay identity")
-    if (
-        previous.type is not ReplayEventType.DELTA
-        or latest.type is not ReplayEventType.DELTA
-    ):
-        return None
-    previous_projection = previous.data.get("projection")
-    latest_projection = latest.data.get("projection")
-    if not isinstance(previous_projection, Mapping) or not isinstance(
-        latest_projection,
-        Mapping,
-    ):
-        return None
-    merged_projection = _merge_projection(
-        previous_projection,
-        latest_projection,
+    pending = _PendingProjection(
+        sequence_from=previous.sequence,
+        latest_event=previous,
     )
-    if merged_projection is None:
+    if not pending.merge(latest):
         return None
-    merged_data = dict(latest.data)
-    merged_data["projection"] = merged_projection
-    return ReplayEvent(
-        type=latest.type,
-        protocol=latest.protocol,
-        session_id=latest.session_id,
-        sequence=latest.sequence,
-        revision=latest.revision,
-        virtual_time_ms=latest.virtual_time_ms,
-        state_hash=latest.state_hash,
-        data_epoch=latest.data_epoch,
-        data=merged_data,
-    )
+    return pending.to_batch().latest_event
 
 
 def _merge_projection(
     previous: Mapping[str, object],
     latest: Mapping[str, object],
 ) -> dict[str, object] | None:
-    projection_fields = {
-        "bar_update",
-        "orders",
-        "fills",
-        "warnings",
-        "position",
-        "account",
-    }
-    if not projection_fields.issubset(previous) or not projection_fields.issubset(
+    if not _PROJECTION_FIELDS.issubset(previous) or not _PROJECTION_FIELDS.issubset(
         latest
     ):
         return None
@@ -299,11 +410,7 @@ def _merge_bar_updates(previous: object, latest: object) -> object:
             return _UNMERGEABLE
         if not _collect_bar_update(candidate, updates):
             return _UNMERGEABLE
-    if not updates:
-        return None
-    if len(updates) == 1:
-        return updates[0]
-    return {"action": "batch", "updates": updates}
+    return _materialize_bar_updates(updates)
 
 
 def _collect_bar_update(

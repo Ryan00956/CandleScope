@@ -538,10 +538,16 @@ async def run_actor_benchmark(
     allowed_projection_count = math.ceil(elapsed_seconds * 30) + 1
     if ordinary_emitted > allowed_projection_count:
         raise RuntimeError("aggregate-trade actor projection exceeded 30 FPS")
+    if int(projection["capacity_forced_flushes"]) != 0:
+        raise RuntimeError(
+            "aggregate-trade projection required a capacity-forced flush"
+        )
     retained_structures_bounded = (
         int(diagnostics["command_queue_high_water"]) <= command_queue_size
         and int(events["retained"]) <= event_buffer_size
         and int(diagnostics["projection_buffer_size"]) <= event_buffer_size
+        and int(diagnostics["projection_buffer_domain_events"])
+        <= event_buffer_size
         and int(checkpoints["records"]) <= 33
     )
     if not retained_structures_bounded:
@@ -592,6 +598,7 @@ async def run_actor_benchmark(
             "mandatory_emitted": projection["mandatory_emitted"],
             "ordinary_per_second": round(ordinary_emitted / elapsed_seconds, 3),
             "max_fps": projection["max_fps"],
+            "capacity_forced_flushes": projection["capacity_forced_flushes"],
         },
         "bounds": {
             "archive_page_calls": archive.page_calls,
@@ -601,6 +608,12 @@ async def run_actor_benchmark(
             "event_buffer_retained": events["retained"],
             "event_buffer_capacity": events["max_events"],
             "projection_buffer_retained": diagnostics["projection_buffer_size"],
+            "projection_buffer_domain_events": diagnostics[
+                "projection_buffer_domain_events"
+            ],
+            "projection_buffer_capacity_events": diagnostics[
+                "projection_buffer_capacity_events"
+            ],
             "checkpoint_retained": checkpoints["records"],
             "retained_structures_bounded": retained_structures_bounded,
             "full_history_materialized": False,

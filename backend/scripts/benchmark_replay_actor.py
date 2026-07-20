@@ -55,9 +55,19 @@ class BenchmarkReducer:
             raise TypeError("benchmark reducer requires ReplayBar events")
         self.count += 1
         self.last_close_time_ms = event.close_time_ms
+        # This Phase 2 workload intentionally isolates the actor rather than
+        # re-benchmarking the paper broker or display-bar builder.  It still
+        # uses the complete DELTA projection field envelope so the rate limiter
+        # is exercised under its current, fail-closed merge contract.
         return {
             "count": self.count,
             "last_close_time_ms": self.last_close_time_ms,
+            "bar_update": None,
+            "orders": (),
+            "fills": (),
+            "warnings": (),
+            "position": {},
+            "account": {},
         }
 
     def snapshot(self) -> Mapping[str, object]:
@@ -361,6 +371,8 @@ async def run_benchmark(
         int(diagnostics["command_queue_high_water"]) <= command_queue_size
         and int(events["retained"]) <= event_buffer_size
         and int(diagnostics["projection_buffer_size"]) <= event_buffer_size
+        and int(diagnostics["projection_buffer_domain_events"])
+        <= event_buffer_size
         and int(checkpoints["records"]) <= 33
     )
     if not retained_structures_bounded:
@@ -368,6 +380,8 @@ async def run_benchmark(
     allowed_projection_count = math.ceil(elapsed_seconds * 30) + 1
     if int(projection["ordinary_emitted"]) > allowed_projection_count:
         raise RuntimeError("ordinary projection exceeded the 30 fps budget")
+    if int(projection["capacity_forced_flushes"]) != 0:
+        raise RuntimeError("ordinary projection required a capacity-forced flush")
     if int(diagnostics["events_processed"]) != bar_count:
         raise RuntimeError("benchmark actor did not process the complete fixture")
 
@@ -426,6 +440,7 @@ async def run_benchmark(
             "ordinary_coalesced": projection["ordinary_coalesced"],
             "ordinary_per_second": round(ordinary_projection_rate, 3),
             "max_fps": projection["max_fps"],
+            "capacity_forced_flushes": projection["capacity_forced_flushes"],
         },
         "memory": {
             "baseline_rss_bytes": baseline_rss,
@@ -444,6 +459,12 @@ async def run_benchmark(
             "event_buffer_retained": events["retained"],
             "event_buffer_capacity": events["max_events"],
             "projection_buffer_retained": diagnostics["projection_buffer_size"],
+            "projection_buffer_domain_events": diagnostics[
+                "projection_buffer_domain_events"
+            ],
+            "projection_buffer_capacity_events": diagnostics[
+                "projection_buffer_capacity_events"
+            ],
             "checkpoint_retained": checkpoints["records"],
             "checkpoint_capacity": 33,
         },

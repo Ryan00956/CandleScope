@@ -25,6 +25,7 @@ from typing import Any, Callable, Awaitable, Collection, Protocol, runtime_check
 
 from app.data_engine.market_data.kline_metrics import (
     KLINE_ENHANCED_FIELDS,
+    normalize_declared_kline_components,
     normalize_declared_kline_enhancements,
     normalize_kline_aggregation_fields,
     normalize_prevalidated_kline_aggregation_fields,
@@ -301,6 +302,63 @@ class BarData:
             taker_buy_base=float(row["taker_buy_base"])
             if normalized_fields[2] is not None else None,
             taker_buy_quote=float(row["taker_buy_quote"])
+            if normalized_fields[3] is not None else None,
+        )
+        bar._prevalidated_aggregation_fields = normalized_fields
+        return bar
+
+    @classmethod
+    def from_storage_components(
+        cls,
+        row: tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any],
+        *,
+        exchange: str,
+        market_type: str,
+        declared_fields: Collection[str] | None = None,
+    ) -> BarData:
+        """Create from the compact SQLite query projection.
+
+        The tuple order is ``open_time, OHLCV, quote_volume, trades,
+        taker_buy_base, taker_buy_quote``.  Identity and source columns are
+        intentionally supplied by the resolved series key rather than copied
+        once per row.
+        """
+        (
+            open_time,
+            open_price,
+            high,
+            low,
+            close,
+            volume,
+            quote_volume,
+            trades,
+            taker_buy_base,
+            taker_buy_quote,
+        ) = row
+        normalized_fields = normalize_declared_kline_components(
+            exchange,
+            market_type,
+            volume=volume,
+            quote_volume=quote_volume,
+            trades=trades,
+            taker_buy_base=taker_buy_base,
+            taker_buy_quote=taker_buy_quote,
+            explicit_fields=declared_fields,
+        )
+        bar = cls(
+            time=int(open_time) // 1000,
+            open=round(float(open_price), 8),
+            high=round(float(high), 8),
+            low=round(float(low), 8),
+            close=round(float(close), 8),
+            volume=round(float(volume), 8),
+            is_closed=True,
+            quote_volume=float(quote_volume)
+            if normalized_fields[0] is not None else None,
+            trades=int(trades) if normalized_fields[1] is not None else None,
+            taker_buy_base=float(taker_buy_base)
+            if normalized_fields[2] is not None else None,
+            taker_buy_quote=float(taker_buy_quote)
             if normalized_fields[3] is not None else None,
         )
         bar._prevalidated_aggregation_fields = normalized_fields

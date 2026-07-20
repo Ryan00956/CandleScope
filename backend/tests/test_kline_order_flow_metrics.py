@@ -62,6 +62,21 @@ def test_binance_storage_row_exposes_raw_and_derived_kline_metrics() -> None:
     }
 
 
+def _storage_components(row: dict) -> tuple:
+    return (
+        row["open_time"],
+        row["open"],
+        row["high"],
+        row["low"],
+        row["close"],
+        row["volume"],
+        row["quote_volume"],
+        row["trades"],
+        row["taker_buy_base"],
+        row["taker_buy_quote"],
+    )
+
+
 def test_storage_row_keeps_public_single_pass_precision_contract() -> None:
     row = _storage_row()
     row.update({
@@ -81,6 +96,39 @@ def test_storage_row_keeps_public_single_pass_precision_contract() -> None:
     assert bar.taker_buy_base == row["taker_buy_base"]
     assert bar.to_kline_dict()["taker_buy_base"] == expected["taker_buy_base"]
     assert bar.normalized_aggregation_fields()[2] == 100.0
+
+
+def test_compact_storage_components_preserve_mapping_validation_contract() -> None:
+    cases = (
+        {},
+        {"taker_buy_base": 12},
+        {"taker_buy_quote": 1_200},
+        {"quote_volume": 0, "taker_buy_quote": 0},
+        {"trades": 1.5},
+        {"quote_volume": float("nan")},
+    )
+    for updates in cases:
+        row = _storage_row()
+        row.update(updates)
+        mapping_bar = BarData.from_storage_row(
+            row,
+            exchange="binance",
+            market_type="spot",
+            declared_fields=KLINE_ENHANCED_FIELDS,
+        )
+        compact_bar = BarData.from_storage_components(
+            _storage_components(row),
+            exchange="binance",
+            market_type="spot",
+            declared_fields=KLINE_ENHANCED_FIELDS,
+        )
+
+        assert compact_bar == mapping_bar
+        assert compact_bar.to_kline_dict() == mapping_bar.to_kline_dict()
+        assert (
+            compact_bar.normalized_aggregation_values()
+            == mapping_bar.normalized_aggregation_values()
+        )
 
 
 def test_okx_placeholder_zeros_are_suppressed_by_capability() -> None:

@@ -79,6 +79,7 @@ logger = logging.getLogger("data_manager.query")
 
 # Signature for the optional backfill trigger callback
 BackfillTrigger = Callable[[str, str, int, int, str, str], None]
+StorageQueryRow = dict[str, Any] | tuple[Any, ...]
 
 
 @dataclass
@@ -89,8 +90,12 @@ class _QueryIOMetrics:
     storage_rows: int = 0
     storage_read_seconds: float = 0.0
     storage_failures: int = 0
+    projected_storage_reads: int = 0
+    projected_storage_rows: int = 0
     row_decode_rows: int = 0
     row_decode_seconds: float = 0.0
+    compact_row_decode_rows: int = 0
+    legacy_row_decode_rows: int = 0
 
     def metadata(self) -> dict[str, int | float]:
         return {
@@ -98,8 +103,12 @@ class _QueryIOMetrics:
             "storage_rows": self.storage_rows,
             "storage_read_ms": round(self.storage_read_seconds * 1000, 2),
             "storage_failures": self.storage_failures,
+            "projected_storage_reads": self.projected_storage_reads,
+            "projected_storage_rows": self.projected_storage_rows,
             "row_decode_rows": self.row_decode_rows,
             "row_decode_ms": round(self.row_decode_seconds * 1000, 2),
+            "compact_row_decode_rows": self.compact_row_decode_rows,
+            "legacy_row_decode_rows": self.legacy_row_decode_rows,
         }
 
 
@@ -147,8 +156,12 @@ class QueryEngine:
         self._storage_rows = 0
         self._storage_read_seconds = 0.0
         self._storage_failures = 0
+        self._projected_storage_reads = 0
+        self._projected_storage_rows = 0
         self._row_decode_rows = 0
         self._row_decode_seconds = 0.0
+        self._compact_row_decode_rows = 0
+        self._legacy_row_decode_rows = 0
         self._backfills_triggered = 0
         self.custom_intervals = CustomIntervalQueryService(
             cache=self._cache,
@@ -365,18 +378,13 @@ class QueryEngine:
 
         if self._storage is not None:
             try:
-                rows = self._measure_storage_read(
+                rows = self._query_storage_rows(
+                    key,
                     io_metrics,
-                    lambda: self._storage.query_bars(
-                        symbol=key.symbol,
-                        interval=key.interval,
-                        start_ms=start_ms,
-                        end_ms=end_ms,
-                        limit=effective_limit,
-                        order="DESC",
-                        exchange=key.exchange,
-                        market_type=key.market_type,
-                    ),
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    limit=effective_limit,
+                    order="DESC",
                 )
                 rows.reverse()
                 storage_bars = self._storage_rows_to_bars(key, rows, io_metrics)
@@ -671,16 +679,11 @@ class QueryEngine:
         storage_bars: list[BarData] = []
         if self._storage is not None:
             try:
-                rows = self._measure_storage_read(
+                rows = self._fetch_storage_rows_before(
+                    key,
                     io_metrics,
-                    lambda: self._storage.fetch_before(
-                        symbol=key.symbol,
-                        interval=key.interval,
-                        before_ms=before_ms,
-                        limit=effective_limit,
-                        exchange=key.exchange,
-                        market_type=key.market_type,
-                    ),
+                    before_ms=before_ms,
+                    limit=effective_limit,
                 )
                 storage_bars = self._storage_rows_to_bars(key, rows, io_metrics)
                 if storage_bars:
@@ -862,8 +865,12 @@ class QueryEngine:
                 "storage_rows": self._storage_rows,
                 "storage_read_ms": round(self._storage_read_seconds * 1000, 2),
                 "storage_failures": self._storage_failures,
+                "projected_storage_reads": self._projected_storage_reads,
+                "projected_storage_rows": self._projected_storage_rows,
                 "row_decode_rows": self._row_decode_rows,
                 "row_decode_ms": round(self._row_decode_seconds * 1000, 2),
+                "compact_row_decode_rows": self._compact_row_decode_rows,
+                "legacy_row_decode_rows": self._legacy_row_decode_rows,
                 "backfills_triggered": self._backfills_triggered,
             }
         return {
@@ -1105,13 +1112,24 @@ class QueryEngine:
     def _storage_rows_to_bars(
         self,
         key: SeriesKey,
-        rows: list[dict[str, Any]],
+        rows: list[StorageQueryRow],
         io_metrics: _QueryIOMetrics | None = None,
     ) -> list[BarData]:
         """Convert one storage page with capability resolution amortized."""
         started_at = time.monotonic()
         declared_fields = kline_available_fields(key.exchange, key.market_type)
+        compact = bool(rows and isinstance(rows[0], tuple))
         try:
+            if compact:
+                return [
+                    BarData.from_storage_components(
+                        row,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                        declared_fields=declared_fields,
+                    )
+                    for row in rows
+                ]
             return [
                 BarData.from_storage_row(
                     row,
@@ -1126,15 +1144,107 @@ class QueryEngine:
             if io_metrics is not None:
                 io_metrics.row_decode_rows += len(rows)
                 io_metrics.row_decode_seconds += elapsed
+                if compact:
+                    io_metrics.compact_row_decode_rows += len(rows)
+                else:
+                    io_metrics.legacy_row_decode_rows += len(rows)
             with self._metrics_lock:
                 self._row_decode_rows += len(rows)
                 self._row_decode_seconds += elapsed
+                if compact:
+                    self._compact_row_decode_rows += len(rows)
+                else:
+                    self._legacy_row_decode_rows += len(rows)
+
+    def _query_storage_rows(
+        self,
+        key: SeriesKey,
+        io_metrics: _QueryIOMetrics,
+        *,
+        start_ms: int | None,
+        end_ms: int | None,
+        limit: int,
+        order: str,
+    ) -> list[StorageQueryRow]:
+        """Use the optional compact storage projection when available."""
+        storage = self._storage
+        if storage is None:
+            return []
+        compact_query = getattr(storage, "query_bar_components", None)
+        if callable(compact_query):
+            return self._measure_storage_read(
+                io_metrics,
+                lambda: compact_query(
+                    symbol=key.symbol,
+                    interval=key.interval,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    limit=limit,
+                    order=order,
+                    exchange=key.exchange,
+                    market_type=key.market_type,
+                ),
+                projected=True,
+            )
+        return self._measure_storage_read(
+            io_metrics,
+            lambda: storage.query_bars(
+                symbol=key.symbol,
+                interval=key.interval,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=limit,
+                order=order,
+                exchange=key.exchange,
+                market_type=key.market_type,
+            ),
+        )
+
+    def _fetch_storage_rows_before(
+        self,
+        key: SeriesKey,
+        io_metrics: _QueryIOMetrics,
+        *,
+        before_ms: int,
+        limit: int,
+    ) -> list[StorageQueryRow]:
+        """Use the optional compact before-page projection when available."""
+        storage = self._storage
+        if storage is None:
+            return []
+        compact_fetch = getattr(storage, "fetch_before_bar_components", None)
+        if callable(compact_fetch):
+            return self._measure_storage_read(
+                io_metrics,
+                lambda: compact_fetch(
+                    symbol=key.symbol,
+                    interval=key.interval,
+                    before_ms=before_ms,
+                    limit=limit,
+                    exchange=key.exchange,
+                    market_type=key.market_type,
+                ),
+                projected=True,
+            )
+        return self._measure_storage_read(
+            io_metrics,
+            lambda: storage.fetch_before(
+                symbol=key.symbol,
+                interval=key.interval,
+                before_ms=before_ms,
+                limit=limit,
+                exchange=key.exchange,
+                market_type=key.market_type,
+            ),
+        )
 
     def _measure_storage_read(
         self,
         io_metrics: _QueryIOMetrics,
-        read: Callable[[], list[dict[str, Any]]],
-    ) -> list[dict[str, Any]]:
+        read: Callable[[], list[StorageQueryRow]],
+        *,
+        projected: bool = False,
+    ) -> list[StorageQueryRow]:
         """Measure one physical storage call for both local and cumulative metrics."""
         started_at = time.monotonic()
         try:
@@ -1144,10 +1254,14 @@ class QueryEngine:
             io_metrics.storage_reads += 1
             io_metrics.storage_read_seconds += elapsed
             io_metrics.storage_failures += 1
+            if projected:
+                io_metrics.projected_storage_reads += 1
             with self._metrics_lock:
                 self._storage_reads += 1
                 self._storage_read_seconds += elapsed
                 self._storage_failures += 1
+                if projected:
+                    self._projected_storage_reads += 1
             raise
 
         elapsed = time.monotonic() - started_at
@@ -1155,10 +1269,16 @@ class QueryEngine:
         io_metrics.storage_reads += 1
         io_metrics.storage_rows += row_count
         io_metrics.storage_read_seconds += elapsed
+        if projected:
+            io_metrics.projected_storage_reads += 1
+            io_metrics.projected_storage_rows += row_count
         with self._metrics_lock:
             self._storage_reads += 1
             self._storage_rows += row_count
             self._storage_read_seconds += elapsed
+            if projected:
+                self._projected_storage_reads += 1
+                self._projected_storage_rows += row_count
         return rows
 
     @staticmethod
@@ -1168,6 +1288,13 @@ class QueryEngine:
     ) -> QueryResult:
         result.metadata.update(io_metrics.metadata())
         return result
+
+    @staticmethod
+    def _storage_row_open_time(row: StorageQueryRow) -> int:
+        """Read the timestamp from either legacy mappings or compact tuples."""
+        if isinstance(row, tuple):
+            return int(row[0])
+        return int(row["open_time"])
 
     def _merge(
         self, a: list[BarData], b: list[BarData],
@@ -1288,18 +1415,13 @@ class QueryEngine:
 
                 try:
                     metrics = io_metrics or _QueryIOMetrics()
-                    rows = self._measure_storage_read(
+                    rows = self._query_storage_rows(
+                        key,
                         metrics,
-                        lambda: self._storage.query_bars(
-                            symbol=key.symbol,
-                            interval=key.interval,
-                            start_ms=missing_start_ms,
-                            end_ms=missing_end_ms,
-                            limit=5000,  # generous limit for gap fills
-                            order="ASC",
-                            exchange=key.exchange,
-                            market_type=key.market_type,
-                        ),
+                        start_ms=missing_start_ms,
+                        end_ms=missing_end_ms,
+                        limit=5000,  # generous limit for gap fills
+                        order="ASC",
                     )
                     fill_bars = self._storage_rows_to_bars(
                         key,
@@ -1307,7 +1429,7 @@ class QueryEngine:
                             row
                             for row in rows
                             if missing_start_ms
-                            <= int(row["open_time"])
+                            <= self._storage_row_open_time(row)
                             <= missing_end_ms
                         ],
                         metrics,
@@ -1432,25 +1554,20 @@ class QueryEngine:
         if self._storage is not None:
             try:
                 metrics = io_metrics or _QueryIOMetrics()
-                rows = self._measure_storage_read(
+                rows = self._query_storage_rows(
+                    key,
                     metrics,
-                    lambda: self._storage.query_bars(
-                        symbol=key.symbol,
-                        interval=key.interval,
-                        start_ms=gap[0],
-                        end_ms=gap[1],
-                        limit=5000,
-                        order="ASC",
-                        exchange=key.exchange,
-                        market_type=key.market_type,
-                    ),
+                    start_ms=gap[0],
+                    end_ms=gap[1],
+                    limit=5000,
+                    order="ASC",
                 )
                 fill_bars = self._storage_rows_to_bars(
                     key,
                     [
                         row
                         for row in rows
-                        if gap[0] <= int(row["open_time"]) <= gap[1]
+                        if gap[0] <= self._storage_row_open_time(row) <= gap[1]
                     ],
                     metrics,
                 )

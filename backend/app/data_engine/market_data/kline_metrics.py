@@ -102,6 +102,36 @@ def normalize_declared_kline_enhancements(
     explicit_fields: Collection[str] | None = None,
 ) -> tuple[float | None, int | None, float | None, float | None]:
     """Return capability-gated raw fields without allocating a field set."""
+    return normalize_declared_kline_components(
+        exchange,
+        market_type,
+        volume=values.get("volume"),
+        quote_volume=values.get("quote_volume"),
+        trades=values.get("trades"),
+        taker_buy_base=values.get("taker_buy_base"),
+        taker_buy_quote=values.get("taker_buy_quote"),
+        explicit_fields=explicit_fields,
+    )
+
+
+def normalize_declared_kline_components(
+    exchange: str,
+    market_type: str,
+    *,
+    volume: Any,
+    quote_volume: Any,
+    trades: Any,
+    taker_buy_base: Any,
+    taker_buy_quote: Any,
+    explicit_fields: Collection[str] | None = None,
+) -> tuple[float | None, int | None, float | None, float | None]:
+    """Normalize projected storage components without rebuilding a mapping.
+
+    This is the positional equivalent of
+    :func:`normalize_declared_kline_enhancements`.  Keeping both entry points
+    on the same validation helper preserves the existing capability-gated,
+    fail-closed behavior for compact SQLite reads.
+    """
     declared = _resolve_available_fields(
         exchange,
         market_type,
@@ -109,7 +139,16 @@ def normalize_declared_kline_enhancements(
     )
     if not declared:
         return None, None, None, None
-    return _normalize_declared_fields(declared, values)
+    return _mask_declared_fields(
+        declared,
+        _raw_kline_aggregation_fields(
+            volume=volume,
+            quote_volume=quote_volume,
+            trades=trades,
+            taker_buy_base=taker_buy_base,
+            taker_buy_quote=taker_buy_quote,
+        ),
+    )
 
 
 def _resolve_available_fields(
@@ -136,6 +175,13 @@ def _normalize_declared_fields(
         taker_buy_base=values.get("taker_buy_base"),
         taker_buy_quote=values.get("taker_buy_quote"),
     )
+    return _mask_declared_fields(declared, normalized)
+
+
+def _mask_declared_fields(
+    declared: frozenset[str],
+    normalized: tuple[float | None, int | None, float | None, float | None],
+) -> tuple[float | None, int | None, float | None, float | None]:
     return (
         normalized[0] if "quote_volume" in declared else None,
         normalized[1] if "trades" in declared else None,

@@ -52,7 +52,11 @@ _IO_COUNT_FIELDS = (
     "storage_reads",
     "storage_rows",
     "storage_failures",
+    "projected_storage_reads",
+    "projected_storage_rows",
     "row_decode_rows",
+    "compact_row_decode_rows",
+    "legacy_row_decode_rows",
 )
 _IO_TIME_FIELDS = (
     "storage_read_ms",

@@ -29,6 +29,23 @@ _ALWAYS_OPEN_CALENDAR = (
     _CALENDAR_REGISTRY.get("crypto.24x7.utc") or AlwaysOpenCalendar()
 )
 
+KlineBarComponents = tuple[
+    Any,
+    Any,
+    Any,
+    Any,
+    Any,
+    Any,
+    Any,
+    Any,
+    Any,
+    Any,
+]
+_BAR_COMPONENT_PROJECTION = """
+    open_time, open, high, low, close, volume,
+    quote_volume, trades, taker_buy_base, taker_buy_quote
+"""
+
 
 def interval_to_milliseconds(interval: str) -> int:
     if interval not in INTERVAL_SECONDS:
@@ -307,6 +324,51 @@ def query_klines(
     return [dict(r) for r in rows]
 
 
+def query_kline_bar_components(
+    symbol: str,
+    interval: str,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    limit: int | None = None,
+    order: str = "ASC",
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+) -> list[KlineBarComponents]:
+    """Query only fields required to construct and aggregate ``BarData``.
+
+    The resolved series key already owns exchange, market type, symbol, and
+    interval.  Durable rows are closed by definition, so copying identity,
+    close-time, and source columns into every Python object only adds SQLite
+    I/O and allocation cost.
+    """
+    where = ["exchange = ?", "market_type = ?", "symbol = ?", "interval = ?"]
+    params: list[object] = [exchange, market_type, symbol, interval]
+
+    if start_ms is not None:
+        where.append("open_time >= ?")
+        params.append(start_ms)
+    if end_ms is not None:
+        where.append("open_time <= ?")
+        params.append(end_ms)
+
+    order_sql = "DESC" if order.upper() == "DESC" else "ASC"
+    sql = f"""
+        SELECT {_BAR_COMPONENT_PROJECTION}
+        FROM klines
+        WHERE {" AND ".join(where)}
+        ORDER BY open_time {order_sql}
+    """
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    return [tuple(row) for row in rows]
+
+
 def fetch_before(
     symbol: str,
     interval: str,
@@ -331,6 +393,33 @@ def fetch_before(
         ).fetchall()
 
     records = [dict(r) for r in rows]
+    records.reverse()
+    return records
+
+
+def fetch_before_kline_bar_components(
+    symbol: str,
+    interval: str,
+    before_ms: int,
+    limit: int = 500,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+) -> list[KlineBarComponents]:
+    """Fetch a compact ascending page strictly before ``before_ms``."""
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_BAR_COMPONENT_PROJECTION}
+            FROM klines
+            WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ? AND open_time < ?
+            ORDER BY open_time DESC
+            LIMIT ?
+            """,
+            (exchange, market_type, symbol, interval, before_ms, limit),
+        ).fetchall()
+
+    records = [tuple(row) for row in rows]
     records.reverse()
     return records
 
@@ -756,6 +845,29 @@ class KlinesRepoAdapter:
             market_type=market_type or self._market_type,
         )
 
+    def query_bar_components(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int | None = None,
+        order: str = "ASC",
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> list[KlineBarComponents]:
+        """Query the compact projection consumed by ``QueryEngine``."""
+        return query_kline_bar_components(
+            symbol=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit,
+            order=order,
+            exchange=exchange or self._exchange,
+            market_type=market_type or self._market_type,
+        )
+
     def upsert_bars(
         self,
         symbol: str,
@@ -1007,6 +1119,25 @@ class KlinesRepoAdapter:
     ) -> list[dict]:
         """Fetch bars before a timestamp, ordered ASC."""
         return fetch_before(
+            symbol=symbol,
+            interval=interval,
+            before_ms=before_ms,
+            limit=limit,
+            exchange=exchange or self._exchange,
+            market_type=market_type or self._market_type,
+        )
+
+    def fetch_before_bar_components(
+        self,
+        symbol: str,
+        interval: str,
+        before_ms: int,
+        limit: int = 500,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> list[KlineBarComponents]:
+        """Fetch the compact projection consumed by ``QueryEngine``."""
+        return fetch_before_kline_bar_components(
             symbol=symbol,
             interval=interval,
             before_ms=before_ms,

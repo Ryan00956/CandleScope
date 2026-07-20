@@ -117,13 +117,121 @@ def test_query_engine_falls_back_to_storage_and_warms_cache() -> None:
     assert result.metadata["storage_reads"] == 1
     assert result.metadata["storage_rows"] == 2
     assert result.metadata["row_decode_rows"] == 2
+    assert result.metadata["projected_storage_reads"] == 0
+    assert result.metadata["projected_storage_rows"] == 0
+    assert result.metadata["compact_row_decode_rows"] == 0
+    assert result.metadata["legacy_row_decode_rows"] == 2
     snapshot = engine.snapshot()
     assert snapshot["storage_reads"] == 1
     assert snapshot["storage_rows"] == 2
     assert snapshot["row_decode_rows"] == 2
+    assert snapshot["projected_storage_reads"] == 0
+    assert snapshot["compact_row_decode_rows"] == 0
+    assert snapshot["legacy_row_decode_rows"] == 2
     assert snapshot["storage_read_ms"] >= 0
     assert snapshot["row_decode_ms"] >= 0
     assert snapshot["custom_intervals"]["logical_queries"] == 0
+
+
+def test_query_engine_prefers_compact_storage_projection() -> None:
+    class _CompactStorage:
+        def __init__(self) -> None:
+            self.compact_calls: list[dict] = []
+
+        def query_bar_components(self, **kwargs):
+            self.compact_calls.append(kwargs)
+            return [
+                (120_000, 2, 3, 1, 2, 20, 40, 2, 12, 24),
+                (60_000, 1, 2, 0, 1, 10, 20, 1, 6, 12),
+            ]
+
+        def query_bars(self, **kwargs):
+            raise AssertionError("legacy projection must not be queried")
+
+    storage = _CompactStorage()
+    engine = QueryEngine(
+        cache=BarCache(),
+        storage=storage,  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+
+    result = engine.query(
+        "BTCUSDT",
+        "1m",
+        start_ms=60_000,
+        end_ms=120_000,
+        limit=2,
+        exchange="binance",
+        market_type="spot",
+    )
+
+    assert [bar.time for bar in result.bars] == [60, 120]
+    assert storage.compact_calls == [{
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "start_ms": 60_000,
+        "end_ms": 120_000,
+        "limit": 2,
+        "order": "DESC",
+        "exchange": "binance",
+        "market_type": "spot",
+    }]
+    assert result.metadata["projected_storage_reads"] == 1
+    assert result.metadata["projected_storage_rows"] == 2
+    assert result.metadata["compact_row_decode_rows"] == 2
+    assert result.metadata["legacy_row_decode_rows"] == 0
+    snapshot = engine.snapshot()
+    assert snapshot["projected_storage_reads"] == 1
+    assert snapshot["projected_storage_rows"] == 2
+    assert snapshot["compact_row_decode_rows"] == 2
+    assert snapshot["legacy_row_decode_rows"] == 0
+
+
+def test_query_before_prefers_compact_storage_projection() -> None:
+    class _CompactBeforeStorage:
+        def __init__(self) -> None:
+            self.compact_calls: list[dict] = []
+
+        def fetch_before_bar_components(self, **kwargs):
+            self.compact_calls.append(kwargs)
+            return [
+                (60_000, 1, 2, 0, 1, 10, 20, 1, 6, 12),
+                (120_000, 2, 3, 1, 2, 20, 40, 2, 12, 24),
+            ]
+
+        def fetch_before(self, **kwargs):
+            raise AssertionError("legacy projection must not be queried")
+
+    storage = _CompactBeforeStorage()
+    engine = QueryEngine(
+        cache=BarCache(),
+        storage=storage,  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+
+    result = engine.query_before(
+        "BTCUSDT",
+        "1m",
+        before_ms=180_000,
+        limit=2,
+        exchange="binance",
+        market_type="spot",
+        auto_backfill=False,
+    )
+
+    assert [bar.time for bar in result.bars] == [60, 120]
+    assert storage.compact_calls == [{
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "before_ms": 180_000,
+        "limit": 2,
+        "exchange": "binance",
+        "market_type": "spot",
+    }]
+    assert result.metadata["projected_storage_reads"] == 1
+    assert result.metadata["projected_storage_rows"] == 2
+    assert result.metadata["compact_row_decode_rows"] == 2
+    assert result.metadata["legacy_row_decode_rows"] == 0
 
 
 def test_query_engine_triggers_backfill_when_cache_and_storage_are_empty() -> None:

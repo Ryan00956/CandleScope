@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import json
 import platform
+import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -26,19 +28,72 @@ DEFAULT_BASELINE = (
     / "perf-baselines"
     / "replay-v1-backend-20260718.json"
 )
+_GIT_OBJECT_ID = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+
+
+def _utc_recorded_at() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _run_git(*arguments: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=BACKEND_ROOT.parent,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("release evidence requires an accessible Git repository") from exc
+
+
+def _release_git_evidence() -> dict[str, object]:
+    head_result = _run_git("rev-parse", "--verify", "HEAD^{commit}")
+    head = head_result.stdout.strip()
+    if head_result.returncode != 0 or _GIT_OBJECT_ID.fullmatch(head) is None:
+        raise RuntimeError("release evidence requires a valid Git HEAD commit")
+
+    status_result = _run_git(
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
+    if status_result.returncode != 0:
+        raise RuntimeError("release evidence requires a Git working tree")
+    if status_result.stdout:
+        raise RuntimeError("release evidence requires a clean Git working tree")
+    verified_head_result = _run_git("rev-parse", "--verify", "HEAD^{commit}")
+    verified_head = verified_head_result.stdout.strip()
+    if (
+        verified_head_result.returncode != 0
+        or _GIT_OBJECT_ID.fullmatch(verified_head) is None
+        or verified_head.lower() != head.lower()
+    ):
+        raise RuntimeError("release evidence Git HEAD changed during clean-tree verification")
+    return {
+        "git_head": head.lower(),
+        "git_dirty": False,
+    }
 
 
 def _git_head() -> str | None:
-    completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=BACKEND_ROOT.parent,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        completed = _run_git("rev-parse", "--verify", "HEAD^{commit}")
+    except RuntimeError:
+        return None
     value = completed.stdout.strip()
-    return value if completed.returncode == 0 and value else None
+    return (
+        value.lower()
+        if completed.returncode == 0 and _GIT_OBJECT_ID.fullmatch(value)
+        else None
+    )
 
 
 def _required_number(payload: Mapping[str, object], key: str) -> float:
@@ -150,13 +205,24 @@ def _load_thresholds(path: Path) -> Mapping[str, object]:
 
 
 async def run_suite(args: argparse.Namespace) -> dict[str, object]:
+    release_evidence = (
+        _release_git_evidence()
+        if args.baseline is not None
+        else None
+    )
+    git_head = (
+        str(release_evidence["git_head"])
+        if release_evidence is not None
+        else _git_head()
+    )
     report: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
+        "recorded_at": _utc_recorded_at(),
         "environment": {
             "python": sys.version.split()[0],
             "platform": platform.platform(),
             "machine": platform.machine(),
-            "git_head": _git_head(),
+            "git_head": git_head,
         },
         "scope": {
             "bar": "generated source -> ReplaySessionActor -> bounded projection/checkpoint",
@@ -168,6 +234,8 @@ async def run_suite(args: argparse.Namespace) -> dict[str, object]:
             "browser_heap": False,
         },
     }
+    if release_evidence is not None:
+        report.update(release_evidence)
     if not args.skip_bar:
         report["bar"] = await run_bar_benchmark(
             bar_count=args.bars,

@@ -7,6 +7,8 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { captureReplayReleaseEvidence } from "./replay-release-evidence.mjs";
+
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDirectory, "..");
 const repositoryRoot = path.resolve(frontendRoot, "..");
@@ -435,11 +437,16 @@ function writeJson(filePath, value) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const releaseEvidence = captureReplayReleaseEvidence(repositoryRoot);
   const chromePath = findChrome(args.chromePath);
   if (!chromePath) throw new Error("Chrome or Edge not found; set CHROME_PATH or --chrome-path");
   const python = nativePython();
   const baselineCommit = runSync("git", ["rev-parse", `${args.baseline}^{commit}`]);
   const currentCommit = runSync("git", ["rev-parse", "HEAD"]);
+  assert(currentCommit === releaseEvidence.evidence.git_head, "release evidence HEAD changed before rollback drill", {
+    captured: releaseEvidence.evidence.git_head,
+    current: currentCommit,
+  });
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "candlescope-replay-rollback-"));
   const oldWorktree = path.join(tempRoot, "old-build");
   const paths = {
@@ -640,7 +647,8 @@ async function main() {
 
     result = {
       schema_version: "replay-v1-rollback-drill.v1",
-      recorded_at: "2026-07-18",
+      recorded_at: releaseEvidence.recorded_at,
+      release_evidence: releaseEvidence.evidence,
       passed: true,
       configuration: {
         currentCommit,
@@ -692,7 +700,8 @@ async function main() {
     failure = error;
     writeJson(`${args.out}.failed.json`, {
       schema_version: "replay-v1-rollback-drill-failure.v1",
-      recorded_at: "2026-07-18",
+      recorded_at: releaseEvidence.recorded_at,
+      release_evidence: releaseEvidence.evidence,
       passed: false,
       error: error.stack || error.message || String(error),
       processTails: processes.map((child) => ({ pid: child.pid, exitCode: child.exitCode })),

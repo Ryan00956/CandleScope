@@ -6,6 +6,8 @@ import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { captureReplayReleaseEvidence } from "./replay-release-evidence.mjs";
+
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDirectory, "..");
 const repositoryRoot = path.resolve(frontendRoot, "..");
@@ -315,6 +317,7 @@ function assertReplayNetwork(capture, frontendOrigin) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const releaseEvidence = captureReplayReleaseEvidence(repositoryRoot);
   const chromePath = findChrome(args.chromePath);
   if (!chromePath) throw new Error("Chrome or Edge not found; set CHROME_PATH or --chrome-path");
   const [backendPort, frontendPort, debugPort] = await Promise.all([freePort(), freePort(), freePort()]);
@@ -584,6 +587,9 @@ async function main() {
     assert(!liveCapture.webSockets.some((url) => /\/stream\/replay\//.test(url)), "live target opened replay WebSocket", liveCapture.webSockets);
 
     const summary = {
+      schema_version: "replay-v1-browser-smoke.v1",
+      recorded_at: releaseEvidence.recorded_at,
+      release_evidence: releaseEvidence.evidence,
       passed: true,
       fixture: { offline: true, rows: 4_000, backendPort, frontendPort },
       live: { before: liveBefore, after: liveAfter, webSockets: [...new Set(liveCapture.webSockets)] },
@@ -603,7 +609,7 @@ async function main() {
     };
     console.log(JSON.stringify(summary, null, 2));
   } catch (error) {
-    error.message = `${error.message}\nBackend tail:\n${backendTail().join("\n")}\nVite tail:\n${viteTail().join("\n")}\nChrome tail:\n${chromeTail().join("\n")}`;
+    error.message = `${error.message}\nRelease evidence:\n${JSON.stringify(releaseEvidence, null, 2)}\nBackend tail:\n${backendTail().join("\n")}\nVite tail:\n${viteTail().join("\n")}\nChrome tail:\n${chromeTail().join("\n")}`;
     throw error;
   } finally {
     for (const connection of connections) connection.close();

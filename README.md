@@ -216,20 +216,38 @@ is disabled or its dataset/persistence checks fail.
 Release-quality local checks:
 
 ```powershell
+Set-Location H:\program\CandleScope-kline-replay
+$ReplayHead = (git rev-parse HEAD).Trim()
+$ReplayEvidenceRoot = "H:\program\CandleScope-release-evidence\$ReplayHead"
+New-Item -ItemType Directory -Force $ReplayEvidenceRoot | Out-Null
+
 Set-Location backend
-.\.venv\Scripts\python.exe scripts\audit_replay_determinism.py
+.\.venv\Scripts\python.exe scripts\audit_replay_determinism.py `
+  > "$ReplayEvidenceRoot\replay-determinism.json"
 .\.venv\Scripts\python.exe scripts\benchmark_replay.py `
-  --baseline ..\docs\perf-baselines\replay-v1-backend-20260718.json
+  --bars 43200 --trades 1000000 --trade-page-rows 50000 `
+  --checkpoint-event-interval 10000 `
+  --baseline ..\docs\perf-baselines\replay-v1-backend-20260718.json `
+  > "$ReplayEvidenceRoot\replay-backend-1m.json"
 
 Set-Location ..\frontend
-npm run smoke:replay -- --timeout-ms 120000
-npm run soak:replay:4h
-npm run drill:replay:rollback -- --timeout-ms 120000
+npm run smoke:replay -- --timeout-ms 120000 `
+  > "$ReplayEvidenceRoot\replay-smoke.json"
+node scripts\replay-soak.mjs `
+  --duration-ms 14400000 --cycles 100 --projection-events 1000000 `
+  --sample-ms 60000 --timeout-ms 120000 `
+  --out "$ReplayEvidenceRoot\replay-browser-soak.json"
+node scripts\replay-rollback-drill.mjs `
+  --baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f `
+  --timeout-ms 120000 `
+  --out "$ReplayEvidenceRoot\replay-rollback.json"
 ```
 
-The 4-hour soak is a real release gate, not a short harness mode. Passing these
-local gates does not by itself authorize default enablement or replace a
-production observation window.
+Release evidence commands reject a dirty worktree or a changing Git HEAD.
+Keep their outputs outside the repository so one completed gate cannot make
+the next gate fail the clean-tree check. The 4-hour soak is a real release
+gate, not a short harness mode. Passing these local gates does not by itself
+authorize default enablement or replace a production observation window.
 
 ## Architecture
 

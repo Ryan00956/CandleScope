@@ -7,6 +7,8 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { captureReplayReleaseEvidence } from "./replay-release-evidence.mjs";
+
 const scriptPath = fileURLToPath(import.meta.url);
 const scriptDirectory = path.dirname(scriptPath);
 const frontendRoot = path.resolve(scriptDirectory, "..");
@@ -797,6 +799,7 @@ function writeJson(outputPath, payload) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const releaseEvidence = captureReplayReleaseEvidence(repositoryRoot);
   const chromePath = findChrome(args.chromePath);
   if (!chromePath) throw new Error("Chrome or Edge not found; set CHROME_PATH or --chrome-path");
   const [backendPort, frontendPort, debugPort] = await Promise.all([freePort(), freePort(), freePort()]);
@@ -1137,7 +1140,8 @@ async function main() {
     };
     result = {
       schema_version: "replay-v1-browser-soak.v1",
-      recorded_at: "2026-07-18",
+      recorded_at: releaseEvidence.recorded_at,
+      release_evidence: releaseEvidence.evidence,
       mode: args.allowShort ? "harness-validation" : "release-4h",
       config: {
         durationMs: args.durationMs,
@@ -1218,7 +1222,8 @@ async function main() {
   } catch (error) {
     const failure = {
       schema_version: "replay-v1-browser-soak-failure.v1",
-      recorded_at: "2026-07-18",
+      recorded_at: releaseEvidence.recorded_at,
+      release_evidence: releaseEvidence.evidence,
       passed: false,
       error: error.stack || error.message || String(error),
       backendTail: backendTail(),

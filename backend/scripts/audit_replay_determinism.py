@@ -8,10 +8,12 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
@@ -85,6 +87,61 @@ PATHS = (
 )
 SOURCES = ("bar", "agg_trade")
 DEFAULT_GOLDEN_DIR = BACKEND_ROOT / "tests" / "fixtures" / "replay"
+_GIT_OBJECT_ID = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+
+
+def _utc_recorded_at() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _run_git(*arguments: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=BACKEND_ROOT.parent,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("determinism evidence requires an accessible Git repository") from exc
+
+
+def _release_git_evidence() -> dict[str, object]:
+    head_result = _run_git("rev-parse", "--verify", "HEAD^{commit}")
+    head = head_result.stdout.strip()
+    if head_result.returncode != 0 or _GIT_OBJECT_ID.fullmatch(head) is None:
+        raise RuntimeError("determinism evidence requires a valid Git HEAD commit")
+
+    status_result = _run_git(
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
+    if status_result.returncode != 0:
+        raise RuntimeError("determinism evidence requires a Git working tree")
+    if status_result.stdout:
+        raise RuntimeError("determinism evidence requires a clean Git working tree")
+    verified_head_result = _run_git("rev-parse", "--verify", "HEAD^{commit}")
+    verified_head = verified_head_result.stdout.strip()
+    if (
+        verified_head_result.returncode != 0
+        or _GIT_OBJECT_ID.fullmatch(verified_head) is None
+        or verified_head.lower() != head.lower()
+    ):
+        raise RuntimeError(
+            "determinism evidence Git HEAD changed during clean-tree verification"
+        )
+    return {
+        "git_head": head.lower(),
+        "git_dirty": False,
+    }
 
 
 def _bar_dataset() -> BarDatasetSnapshot:
@@ -937,6 +994,8 @@ def _golden_path(golden_dir: Path, source: str) -> Path:
 def _parent_payload(args: argparse.Namespace) -> dict[str, object]:
     if args.repetitions < 2:
         raise ValueError("--repetitions must be at least 2")
+    release_evidence = _release_git_evidence()
+    recorded_at = _utc_recorded_at()
     candidates = {
         source: _candidate(source, repetitions=args.repetitions)
         for source in SOURCES
@@ -944,6 +1003,8 @@ def _parent_payload(args: argparse.Namespace) -> dict[str, object]:
     if args.print_candidates:
         return {
             "schema_version": SCHEMA_VERSION,
+            "recorded_at": recorded_at,
+            **release_evidence,
             "candidates": candidates,
         }
 
@@ -971,6 +1032,8 @@ def _parent_payload(args: argparse.Namespace) -> dict[str, object]:
         }
     return {
         "schema_version": SCHEMA_VERSION,
+        "recorded_at": recorded_at,
+        **release_evidence,
         "passed": True,
         "python": sys.version.split()[0],
         "sources": results,

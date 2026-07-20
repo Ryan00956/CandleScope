@@ -182,6 +182,13 @@ class _MultiStreamDataManager:
         self.unsubscribed.append(handle)
 
 
+class _PartiallyFailingMultiStreamDataManager(_MultiStreamDataManager):
+    async def ensure_stream(self, symbol: str, interval: str, **kwargs) -> None:
+        await super().ensure_stream(symbol, interval, **kwargs)
+        if interval == "7m":
+            raise ValueError("no exact realtime base")
+
+
 class _PriceDataManager:
     def get_prices_snapshot(self) -> list[dict]:
         return [{
@@ -337,6 +344,20 @@ def test_kline_ws_forwards_bar_updated_event_from_data_manager() -> None:
     }]
 
 
+def test_single_kline_ws_canonicalises_alias_for_entire_lifecycle() -> None:
+    dm = _SingleStreamDataManager()
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines?symbol=BTCUSDT&interval=60m") as ws:
+        subscribed = ws.receive_json()
+        message = ws.receive_json()
+
+    assert subscribed["interval"] == "1h"
+    assert message["interval"] == "1h"
+    assert dm.ensure_stream_calls[0]["interval"] == "1h"
+    assert dm.release_stream_calls[0]["interval"] == "1h"
+
+
 def test_kline_ws_forwards_amended_bar_as_closed_replacement() -> None:
     dm = _SingleStreamDataManager(DataEventType.BAR_AMENDED)
     client = _stream_client(dm)
@@ -461,6 +482,37 @@ def test_kline_multi_ws_unsubscribe_releases_stream_consumer() -> None:
         "focus_scope": "websocket",
         "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
     }]
+
+
+def test_kline_multi_ws_isolates_one_interval_ensure_failure() -> None:
+    dm = _PartiallyFailingMultiStreamDataManager(emit_backfill=False)
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines_multi?symbol=BTCUSDT") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({"action": "subscribe", "intervals": ["7m", "1m"]})
+        warning = ws.receive_json()
+        subscribed = ws.receive_json()
+
+    assert warning["type"] == "warning"
+    assert warning["failed"][0]["interval"] == "7m"
+    assert subscribed["type"] == "subscribed"
+    assert subscribed["intervals"] == ["1m"]
+    assert [call["interval"] for call in dm.subscribe_calls] == ["1m"]
+
+
+def test_kline_multi_ws_dedupes_semantic_interval_aliases() -> None:
+    dm = _MultiStreamDataManager(emit_backfill=False)
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines_multi?symbol=BTCUSDT") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({"action": "subscribe", "intervals": ["60m", "1h"]})
+        subscribed = ws.receive_json()
+
+    assert subscribed["intervals"] == ["1h"]
+    assert [call["interval"] for call in dm.ensure_stream_calls] == ["1h"]
+    assert [call["interval"] for call in dm.subscribe_calls] == ["1h"]
 
 
 def test_subscriptions_prices_returns_data_manager_price_snapshot() -> None:

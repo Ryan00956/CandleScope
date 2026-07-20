@@ -28,10 +28,13 @@ from app.exchanges.symbols import normalize_symbol
 from app.core.market import (
     INTERVAL_SECONDS,
     VALID_INTERVALS,
-    find_best_base_interval,
-    find_optimal_fetch_plan,
-    is_custom_interval,
     parse_custom_interval,
+)
+from app.data_engine.interval_resolution import (
+    IntervalPurpose,
+    IntervalResolutionError,
+    IntervalResolver,
+    IntervalRouteKind,
 )
 from app.data_engine.interval_policy import (
     compute_bucket_end_ms,
@@ -42,6 +45,7 @@ from app.data_engine.interval_policy import (
 )
 from app.data_engine.history import (
     TradingCalendar,
+    containing_expected_open_ms,
     expected_bucket_end_ms,
     latest_closed_expected_open_ms,
 )
@@ -113,24 +117,36 @@ def _validate_exchange(exchange: str) -> str:
     return normalized
 
 
-def _resolve_interval(interval: str) -> dict:
-    """Return resolution info for the requested interval."""
-    if not is_custom_interval(interval):
-        secs = INTERVAL_SECONDS.get(interval, 60)
-        return {
-            "is_custom": False,
-            "custom_seconds": secs,
-            "base_interval": interval,
-            "factor": 1,
-        }
-
-    custom_seconds = parse_custom_interval(interval)
-    base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
+def _resolve_interval(
+    interval: str,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+    purpose: IntervalPurpose = IntervalPurpose.HISTORY,
+) -> dict:
+    """Return exchange-aware resolution info for the requested interval."""
+    route = IntervalResolver().resolve(
+        exchange=exchange,
+        market_type=market_type,
+        interval=interval,
+        purpose=purpose,
+    )
+    base_interval = (
+        route.native_interval
+        if route.kind is IntervalRouteKind.NATIVE
+        else route.base_interval
+    )
+    base_ms = parse_interval_ms(base_interval or "") or route.spec.nominal_ms
+    factor = max(1, route.spec.nominal_ms // base_ms)
     return {
-        "is_custom": True,
-        "custom_seconds": custom_seconds,
+        "is_custom": route.kind is IntervalRouteKind.DERIVED,
+        "custom_seconds": route.spec.nominal_ms // 1000,
         "base_interval": base_interval,
         "factor": factor,
+        "canonical_interval": route.canonical_interval,
+        "native_interval": route.native_interval,
+        "kind": route.kind.value,
+        "purpose": route.purpose.value,
     }
 
 
@@ -144,6 +160,12 @@ def _bars_to_dicts(bars: list) -> list[dict]:
         else b
         for b in bars
     ]
+
+
+def _query_http_exception(exc: Exception, prefix: str) -> HTTPException:
+    if isinstance(exc, IntervalResolutionError):
+        return HTTPException(status_code=400, detail=exc.to_dict())
+    return HTTPException(status_code=500, detail=f"{prefix}: {exc}")
 
 
 def _call_data_manager_method(method: Any, *args: Any, **kwargs: Any) -> Any:
@@ -411,11 +433,10 @@ def _cap_range_request(
         }
 
     if calendar is not None:
-        # ``previous_expected_open`` is strict.  Asking immediately after the
-        # caller's inclusive edge includes an exact expected open at end_ms
-        # without admitting a later session-anchored bar (for example 15:30
-        # when the requested edge is 15:00).
-        last_open = calendar.previous_expected_open(int(end_ms) + 1, interval)
+        # Canonicalise an arbitrary inclusive edge to its containing expected
+        # bucket.  Strict stepping with ``end_ms + 1`` leaks that +1 offset on
+        # always-open calendars for non-standard widths such as 47m.
+        last_open = containing_expected_open_ms(calendar, int(end_ms), interval)
         if last_open is None or last_open < start_ms:
             requested_bars = 0
             query_start_ms = start_ms
@@ -1015,7 +1036,7 @@ async def get_klines(
             market_type=market_type,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DataManager query failed: {exc}") from exc
+        raise _query_http_exception(exc, "DataManager query failed") from exc
     finally:
         release_stream = getattr(dm, "release_stream", None)
         if stream_ensured and callable(release_stream):
@@ -1084,7 +1105,7 @@ async def get_latest_klines(
             backfill_requester="klines_latest",
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DataManager latest query failed: {exc}") from exc
+        raise _query_http_exception(exc, "DataManager latest query failed") from exc
     finally:
         release_stream = getattr(dm, "release_stream", None)
         if stream_ensured and callable(release_stream):
@@ -1260,7 +1281,7 @@ async def get_klines_history(
             )
             data, verification = _verify_history_result(result)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DataManager history query failed: {exc}") from exc
+        raise _query_http_exception(exc, "DataManager history query failed") from exc
 
     _schedule_related_interval_warmup(
         dm,
@@ -1462,7 +1483,7 @@ async def get_klines_range(
             data, verification = _verify_range_result(result)
             backfill_triggered = backfill_triggered or bool(result.backfill_triggered)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DataManager range query failed: {exc}") from exc
+        raise _query_http_exception(exc, "DataManager range query failed") from exc
 
     missing_ranges = _merge_missing_ranges(
         [r.to_dict() for r in result.missing_ranges],
@@ -1579,7 +1600,7 @@ async def get_klines_before(
             )
             has_more = bool(result.has_more) if result.bars else not terminal
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DataManager before query failed: {exc}") from exc
+        raise _query_http_exception(exc, "DataManager before query failed") from exc
 
     data = _bars_to_dicts(result.bars)
     return {
@@ -1605,13 +1626,38 @@ async def get_klines_before(
 @router.get("/resolve")
 async def resolve_interval_info(
     interval: str = Query(..., description="Interval to resolve, e.g. '7m' or '45m'"),
+    exchange: str = Query(DEFAULT_EXCHANGE),
+    market_type: str = Query(DEFAULT_MARKET_TYPE),
+    purpose: IntervalPurpose = Query(IntervalPurpose.HISTORY),
 ):
     """Return resolution metadata for a given interval string."""
     _validate_interval(interval)
-    res = _resolve_interval(interval)
-    plan = find_optimal_fetch_plan(res["custom_seconds"]) if res["is_custom"] else None
+    exchange = _validate_exchange(exchange)
+    market_type = _validate_market_type(market_type)
+    try:
+        res = _resolve_interval(
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            purpose=purpose,
+        )
+    except IntervalResolutionError as exc:
+        raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
+    plan = (
+        {
+            "use_multi_res": False,
+            "base_interval": res["base_interval"],
+            "factor": res["factor"],
+        }
+        if res["is_custom"]
+        else None
+    )
     return {
         "interval": interval,
+        "canonical_interval": res["canonical_interval"],
+        "kind": res["kind"],
+        "native_interval": res["native_interval"],
+        "purpose": res["purpose"],
         "is_custom": res["is_custom"],
         "custom_seconds": res["custom_seconds"],
         "base_interval": res["base_interval"],

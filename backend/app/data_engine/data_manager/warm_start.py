@@ -9,10 +9,16 @@ from typing import Any
 
 from app.data_engine.interval_policy import (
     is_monthly_interval,
-    is_standard_interval,
     parse_custom_interval,
+    parse_interval_spec,
     parse_monthly_count,
     row_is_closed,
+)
+from app.data_engine.interval_resolution import (
+    IntervalPurpose,
+    IntervalResolver,
+    IntervalRoute,
+    IntervalRouteKind,
 )
 from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
 
@@ -44,12 +50,14 @@ class AggregatorWarmStartService:
         base_interval: str,
         storage_provider: StorageProvider,
         backfill_trigger_provider: BackfillProvider,
+        interval_resolver: IntervalResolver | None = None,
     ) -> None:
         self._cache = cache
         self._bar_aggregator = bar_aggregator
         self._base_interval = base_interval
         self._storage_provider = storage_provider
         self._backfill_trigger_provider = backfill_trigger_provider
+        self._interval_resolver = interval_resolver or IntervalResolver()
 
     async def seed_if_needed(
         self,
@@ -64,7 +72,14 @@ class AggregatorWarmStartService:
     ) -> None:
         """Seed the relevant active bucket after DataManager starts a stream."""
         market_type = self._normalize_market_type(market_type)
-        if not is_standard_interval(interval):
+        route = self._interval_resolver.resolve(
+            exchange=exchange,
+            market_type=market_type,
+            interval=interval,
+            purpose=IntervalPurpose.REALTIME,
+        )
+        interval = route.canonical_interval
+        if route.kind is IntervalRouteKind.DERIVED:
             try:
                 await self._seed_custom_interval(
                     symbol,
@@ -73,6 +88,7 @@ class AggregatorWarmStartService:
                     market_type=market_type,
                     focus_scope=focus_scope,
                     subscription_tier=subscription_tier,
+                    route=route,
                 )
             except Exception as exc:
                 logger.warning(
@@ -90,6 +106,7 @@ class AggregatorWarmStartService:
                     market_type=market_type,
                     focus_scope=focus_scope,
                     subscription_tier=subscription_tier,
+                    route=route,
                 )
             return
 
@@ -120,6 +137,7 @@ class AggregatorWarmStartService:
         market_type: str = "spot",
         focus_scope: str = "foreground",
         subscription_tier: str | None = None,
+        route: IntervalRoute | None = None,
     ) -> None:
         """Seed the currently-forming custom bucket from recent base bars."""
         symbol = symbol.upper()
@@ -129,8 +147,11 @@ class AggregatorWarmStartService:
         if storage is None:
             return
 
-        base_interval = self._base_interval
+        base_interval = route.base_interval if route is not None else self._base_interval
+        if base_interval is None:
+            raise ValueError("derived warm-start route has no base interval")
         base_seconds = parse_custom_interval(base_interval) or 60
+        base_spec = parse_interval_spec(base_interval)
         now_ms = int(time.time() * 1000)
         bucket_start_ms = self._bar_aggregator.compute_bucket(interval, now_ms)
         if bucket_start_ms is None:
@@ -156,7 +177,11 @@ class AggregatorWarmStartService:
         for open_time_ms, row in rows_by_open_time.items():
             row.setdefault(
                 "close_time",
-                open_time_ms + (base_seconds * 1000) - 1,
+                (
+                    base_spec.next_ms(open_time_ms) - 1
+                    if base_spec is not None
+                    else open_time_ms + (base_seconds * 1000) - 1
+                ),
             )
 
         cached_rows = self._cache.query(
@@ -169,7 +194,11 @@ class AggregatorWarmStartService:
             if open_time_ms < fetch_start_ms:
                 continue
 
-            close_time_ms = open_time_ms + (base_seconds * 1000) - 1
+            close_time_ms = (
+                base_spec.next_ms(open_time_ms) - 1
+                if base_spec is not None
+                else open_time_ms + (base_seconds * 1000) - 1
+            )
             rows_by_open_time[open_time_ms] = {
                 "open_time": open_time_ms,
                 "close_time": close_time_ms,
@@ -515,6 +544,7 @@ class AggregatorWarmStartService:
         market_type: str = "spot",
         focus_scope: str = "foreground",
         subscription_tier: str | None = None,
+        route: IntervalRoute | None = None,
     ) -> None:
         """Force a recent custom-interval rebuild to overwrite stale rows."""
         interval_seconds = parse_custom_interval(interval) or 60
@@ -544,7 +574,9 @@ class AggregatorWarmStartService:
                     "focus_scope": focus_scope,
                     "subscription_tier": subscription_tier,
                     "requested_interval": interval,
-                    "base_interval": self._base_interval,
+                    "base_interval": (
+                        route.base_interval if route is not None else self._base_interval
+                    ),
                     "had_stream": False,
                 },
             )

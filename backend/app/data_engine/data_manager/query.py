@@ -32,11 +32,15 @@ from typing import Any, Callable
 from app.data_engine.interval_policy import (
     compute_bucket_end_ms,
     compute_bucket_start_ms,
-    is_custom_interval,
     is_ephemeral_interval,
     latest_eligible_bar_open_ms,
     parse_custom_interval,
     parse_interval_ms,
+)
+from app.data_engine.interval_resolution import (
+    IntervalPurpose,
+    IntervalResolver,
+    IntervalRouteKind,
 )
 from app.data_engine.history import (
     BoundaryReason,
@@ -48,6 +52,7 @@ from app.data_engine.history import (
     HistoryRequestPlanner,
     HistorySeriesKey,
     ResolvedHistoryContext,
+    containing_expected_open_ms,
     latest_closed_expected_open_ms,
 )
 from app.exchanges import HistoryEmptyPageSemantics
@@ -96,12 +101,14 @@ class QueryEngine:
         config: QueryConfig | None = None,
         backfill_trigger: BackfillTrigger | None = None,
         history_policy: ExchangeHistoryPolicyResolver | None = None,
+        interval_resolver: IntervalResolver | None = None,
     ) -> None:
         self._cache = cache
         self._storage = storage
         self._cfg = config or QueryConfig()
         self._backfill_trigger = backfill_trigger
         self._history_policy = history_policy
+        self._interval_resolver = interval_resolver or IntervalResolver()
 
         # Metrics
         self._queries = 0
@@ -213,7 +220,17 @@ class QueryEngine:
         self._queries += 1
         allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
 
-        if is_custom_interval(interval) and not _materialized_only:
+        route = self._interval_resolver.resolve(
+            exchange=exchange,
+            market_type=market_type,
+            interval=interval,
+            purpose=IntervalPurpose.HISTORY,
+        )
+        exchange = route.exchange
+        market_type = route.market_type
+        interval = route.canonical_interval
+
+        if route.kind is IntervalRouteKind.DERIVED and not _materialized_only:
             return self.custom_intervals.query_from_base(
                 symbol=symbol,
                 interval=interval,
@@ -224,6 +241,7 @@ class QueryEngine:
                 exchange=exchange,
                 market_type=market_type,
                 auto_backfill=auto_backfill,
+                route=route,
             )
 
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
@@ -527,7 +545,16 @@ class QueryEngine:
     ) -> QueryResult:
         """Query bars strictly before a timestamp (for pagination)."""
         allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
-        if is_custom_interval(interval) and not _materialized_only:
+        route = self._interval_resolver.resolve(
+            exchange=exchange,
+            market_type=market_type,
+            interval=interval,
+            purpose=IntervalPurpose.HISTORY,
+        )
+        exchange = route.exchange
+        market_type = route.market_type
+        interval = route.canonical_interval
+        if route.kind is IntervalRouteKind.DERIVED and not _materialized_only:
             return self.custom_intervals.query_before(
                 symbol,
                 interval,
@@ -536,6 +563,7 @@ class QueryEngine:
                 exchange=exchange,
                 market_type=market_type,
                 auto_backfill=auto_backfill,
+                route=route,
             )
 
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
@@ -879,7 +907,11 @@ class QueryEngine:
         """Return the expected-open window for a count-based left query."""
         calendar = self._calendar_for(key)
         if calendar is not None:
-            last = calendar.previous_expected_open(int(before_ms), key.interval)
+            last = containing_expected_open_ms(
+                calendar,
+                int(before_ms) - 1,
+                key.interval,
+            )
             if last is not None:
                 first = last
                 for _ in range(max(0, int(limit) - 1)):

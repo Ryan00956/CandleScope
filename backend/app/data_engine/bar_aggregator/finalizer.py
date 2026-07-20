@@ -49,9 +49,9 @@ from .models import (
     BarStateChange,
     BarInput,
     BarInputSource,
+    MergeMode,
     FinalizeTrigger,
     FinalizerStrategy,
-    is_standard_interval,
 )
 from .time_bucket import TimeBucketEngine
 
@@ -79,6 +79,11 @@ class SourceCloseFinalizer:
         # Only trigger on input events (not timers)
         if trigger.trigger_type != "input":
             return False
+        if trigger.input is None or trigger.input.merge_mode not in {
+            MergeMode.SNAPSHOT,
+            MergeMode.INCREMENTAL,
+        }:
+            return False
         # The BarStateEngine sets last_close_received when is_closed=True
         return state.last_close_received
 
@@ -103,7 +108,11 @@ class CompositeCloseFinalizer:
             return False
 
         bar_input = trigger.input
-        if bar_input is None or not bar_input.is_closed:
+        if (
+            bar_input is None
+            or bar_input.merge_mode != MergeMode.COMPONENT
+            or not bar_input.is_closed
+        ):
             return False
 
         # Check if this input is the last component of the bucket
@@ -177,8 +186,7 @@ class BatchFinalizer:
 
         bar_input = trigger.input
 
-        # No time-bucket engine → simple mode (standard intervals):
-        # close immediately because each backfill bar *is* the bucket.
+        # Compatibility only; default chains always provide the timeline.
         if self._time_bucket is None:
             return True
 
@@ -364,22 +372,15 @@ class Finalizer:
 
     def _build_default_chain(self) -> None:
         """Build the default strategy chain based on config and interval type."""
-        is_standard = is_standard_interval(self._interval)
-
         # 1. Batch finalizer (always present, handles backfill)
-        # For custom intervals, pass the time_bucket so BatchFinalizer
-        # waits for the last component bar before closing.
-        if is_standard:
-            self._strategies.append(("batch", BatchFinalizer()))
-        else:
-            self._strategies.append(("batch", BatchFinalizer(self._time_bucket)))
+        self._strategies.append(("batch", BatchFinalizer(self._time_bucket)))
 
-        # 2. Source close (for standard intervals with exchange close signal)
-        if is_standard and self._cfg.use_source_close_signal:
+        # 2. Source close is gated by SNAPSHOT/INCREMENTAL input semantics.
+        if self._cfg.use_source_close_signal:
             self._strategies.append(("source_close", SourceCloseFinalizer()))
 
-        # 3. Composite close (for custom intervals)
-        if not is_standard and self._cfg.use_composite_close:
+        # 3. Composite close is gated by COMPONENT input semantics.
+        if self._cfg.use_composite_close:
             self._strategies.append((
                 "composite_close",
                 CompositeCloseFinalizer(self._time_bucket),
@@ -398,6 +399,6 @@ class Finalizer:
         logger.debug(
             "Built finalizer chain for %s (%s): %s",
             self._interval,
-            "standard" if is_standard else "custom",
+            "mode-gated",
             [name for name, _ in self._strategies],
         )

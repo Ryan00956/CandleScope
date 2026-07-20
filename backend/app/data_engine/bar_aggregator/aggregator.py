@@ -63,7 +63,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from typing import Any
+
+from app.data_engine.interval_policy import parse_interval_spec
+from app.data_engine.interval_resolution import IntervalResolver
 
 from .config import BarAggregatorConfig
 from .models import (
@@ -75,8 +79,8 @@ from .models import (
     BarEvent,
     BarEventType,
     FinalizeTrigger,
+    MergeMode,
     parse_interval_ms,
-    is_standard_interval,
 )
 from .router import EventRouter
 from .time_bucket import TimeBucketEngine, MonthlyBucketCalculator, WeeklyBucketCalculator
@@ -152,11 +156,15 @@ class BarAggregator:
       - Per-layer access for advanced customization
     """
 
-    def __init__(self, config: BarAggregatorConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: BarAggregatorConfig | None = None,
+        interval_resolver: IntervalResolver | None = None,
+    ) -> None:
         self._cfg = config or BarAggregatorConfig()
 
         # L1: Event Router
-        self._router = EventRouter(self._cfg)
+        self._router = EventRouter(self._cfg, interval_resolver=interval_resolver)
         self._router.set_on_bar_input(self._handle_bar_input)
 
         # L5: Publisher (shared across all intervals)
@@ -220,6 +228,9 @@ class BarAggregator:
         symbol = symbol.upper()
         exchange = exchange.lower().strip()
         market_type = market_type.lower().strip()
+        spec = parse_interval_spec(interval)
+        if spec is not None:
+            interval = spec.canonical
         interval_ms = parse_interval_ms(interval)
         if interval_ms is None:
             raise ValueError(f"Cannot parse interval: {interval!r}")
@@ -253,6 +264,9 @@ class BarAggregator:
         symbol = symbol.upper()
         exchange = exchange.lower().strip()
         market_type = market_type.lower().strip()
+        spec = parse_interval_spec(interval)
+        if spec is not None:
+            interval = spec.canonical
         self._router.unregister_target(symbol, interval, exchange=exchange, market_type=market_type)
         key = (exchange, market_type, symbol)
         if key in self._symbol_intervals:
@@ -418,6 +432,8 @@ class BarAggregator:
             )
 
         for component in components:
+            if component.merge_mode != MergeMode.COMPONENT:
+                component = replace(component, merge_mode=MergeMode.COMPONENT)
             await self.ingest_bar_input(
                 exchange,
                 market_type,
@@ -464,12 +480,24 @@ class BarAggregator:
         temp.publisher.on_bar_closed(_capture)
         temp.publisher.on_bar_amended(_capture)
         if source_interval is not None:
-            await temp.on_backfill_bars(
+            components = [
+                temp.router._convert_fetched_bar(
+                    bar,
+                    symbol,
+                    source_interval,
+                    exchange=exchange,
+                    market_type=market_type,
+                )
+                for bar in bars
+            ]
+            await temp.replay_components(
                 symbol,
-                source_interval,
-                bars,
+                target_interval,
+                [component for component in components if component is not None],
                 exchange=exchange,
                 market_type=market_type,
+                expire_existing=False,
+                emit_events=True,
             )
         else:
             for bar in bars:

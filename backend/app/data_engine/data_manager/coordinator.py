@@ -45,7 +45,12 @@ import time
 from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
 
 from app.core.executors import run_storage
-from app.data_engine.interval_policy import is_standard_interval
+from app.data_engine.interval_policy import parse_interval_spec
+from app.data_engine.interval_resolution import (
+    IntervalPurpose,
+    IntervalResolver,
+    IntervalRouteKind,
+)
 
 from ..ingestion.models import GapMarker, MarketEvent
 from .cache import BarCache
@@ -152,10 +157,12 @@ class StreamCoordinator:
         config: CoordinatorConfig | None = None,
         cache: BarCache | None = None,
         event_bus: DataEventBus | None = None,
+        interval_resolver: IntervalResolver | None = None,
     ) -> None:
         self._cfg = config or CoordinatorConfig()
         self._cache = cache
         self._bus = event_bus
+        self._interval_resolver = interval_resolver or IntervalResolver()
 
         # Active streams: SeriesKey → _StreamEntry
         self._streams: dict[SeriesKey, _StreamEntry] = {}
@@ -239,8 +246,18 @@ class StreamCoordinator:
         Returns:
             ``StreamInfo`` with the current stream status.
         """
-        market_type = self._normalize_market_type(market_type)
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        route = self._interval_resolver.resolve(
+            exchange=exchange,
+            market_type=self._normalize_market_type(market_type),
+            interval=interval,
+            purpose=IntervalPurpose.REALTIME,
+        )
+        key = SeriesKey(
+            symbol,
+            route.canonical_interval,
+            exchange=route.exchange,
+            market_type=route.market_type,
+        )
 
         # Already running?
         if key in self._streams:
@@ -261,25 +278,18 @@ class StreamCoordinator:
         if not self._cfg.auto_start_ingestion:
             return StreamInfo(key=key, status=StreamStatus.STOPPED)
 
-        # ── Non-standard interval: reuse base-interval stream ────
-        if not is_standard_interval(interval):
-            base_interval = self._cfg.base_interval  # typically "1m"
-            base_key = SeriesKey(symbol, base_interval, exchange=exchange, market_type=market_type)
-
-            # Ensure the base-interval ingestion stream is running
-            if base_key not in self._streams:
-                await self._start_stream(base_key)
-            else:
-                base_entry = self._streams[base_key]
-                if base_entry.info.status in (StreamStatus.ERROR, StreamStatus.STOPPED):
-                    logger.info(
-                        "Removing stale %s base stream %s for retry",
-                        base_entry.info.status.value, base_key,
-                    )
-                    self._streams.pop(base_key, None)
-                    await self._start_stream(base_key)
-                else:
-                    base_entry.touch()
+        # ── Derived interval: reuse its exchange-resolved native base ────
+        if route.kind is IntervalRouteKind.DERIVED:
+            base_spec = parse_interval_spec(route.base_interval or "")
+            if base_spec is None:  # guarded by resolver
+                raise ValueError(f"invalid resolved realtime base: {route.base_interval!r}")
+            base_info = await self.ensure_stream(
+                symbol,
+                base_spec.canonical,
+                exchange=route.exchange,
+                market_type=route.market_type,
+            )
+            base_key = base_info.key
 
             # Create a passive StreamEntry (no WS connection of its own)
             entry = _StreamEntry(key)
@@ -288,7 +298,7 @@ class StreamCoordinator:
             self._streams[key] = entry
 
             logger.info(
-                "Custom interval %s: aggregating from base stream %s",
+                "Derived interval %s: aggregating from base stream %s",
                 key, base_key,
             )
 
@@ -301,7 +311,10 @@ class StreamCoordinator:
 
             return entry.info
 
-        return await self._start_stream(key)
+        return await self._start_stream(
+            key,
+            protocol_interval=route.native_interval or key.interval,
+        )
 
     async def stop_stream(
         self,
@@ -606,7 +619,12 @@ class StreamCoordinator:
 
     # ── Internal: Stream Start ───────────────────────────────
 
-    async def _start_stream(self, key: SeriesKey) -> StreamInfo:
+    async def _start_stream(
+        self,
+        key: SeriesKey,
+        *,
+        protocol_interval: str | None = None,
+    ) -> StreamInfo:
         """Start a new ingestion pipeline for a series.
 
         Data flow:
@@ -645,7 +663,7 @@ class StreamCoordinator:
 
                 start_kwargs = {
                     "symbol": key.symbol,
-                    "interval": key.interval,
+                    "interval": protocol_interval or key.interval,
                     "on_market_event": on_market_event,
                     "exchange": key.exchange,
                     "market_type": key.market_type,

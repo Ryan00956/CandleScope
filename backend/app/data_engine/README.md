@@ -46,7 +46,8 @@ DataManager cache + EventBus
 | `data_manager` | Unified query/cache/event/stream/backfill coordination/price/subscription/maintenance facade | Exchange protocol details, hand-written backfill pipeline |
 | `backfill` | Historical detect/plan/fetch/reconcile/publish pipeline, `RepairReport`, `written_ranges` | API/WS management, direct DataManager cache mutation |
 | `storage` | SQLite K-line tables, gap ledger, sync/async adapters, range queries, gap scans | Business facade responsibilities |
-| `interval_policy.py` | Standard/custom interval parsing, bucket alignment, weekly/monthly helpers, fetch-plan helpers | Network or storage access |
+| `interval_policy.py` | Canonical interval identity and fixed/week/month timeline semantics | Exchange-native decisions, network, or storage access |
+| `interval_resolution.py` | Native/derived route and exact base selection by exchange, market, and history/realtime purpose | Bucket calculation or I/O |
 | `runtime.py` | Application composition root: construct, inject, start, and shut down Data Engine | Business query logic |
 
 ## Composition Root
@@ -123,10 +124,11 @@ storage upsert + cache merge + EventBus
 
 Important conventions:
 
-- Standard and custom intervals use the same `IntervalPolicy` and `BarAggregator` path.
+- Every interval shares the `IntervalSpec` timeline; only `IntervalResolver` owns exchange-native versus derived routing.
+- BarAggregator selects snapshot/component/price-only behavior from input `MergeMode`, not from the target interval's spelling.
 - `BarData.time` is seconds for the frontend; storage/internal timestamps are milliseconds.
 - Non-default exchange or non-spot market type is part of keys and topics, for example `okx:swap:BTC-USDT@1m`.
-- OKX `1m` realtime can fan out to larger standard intervals. Those updates use `MergeMode.PRICE_ONLY`, updating OHLC without accumulating volume/trades.
+- OKX `1m` realtime can fan out to larger resolver-native intervals that it tiles exactly. Those updates use `MergeMode.PRICE_ONLY`, updating OHLC without accumulating volume/trades.
 
 ## Historical Repair Path
 

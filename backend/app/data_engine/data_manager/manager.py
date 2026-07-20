@@ -85,7 +85,8 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
 from app.core.executors import run_storage
-from app.data_engine.interval_policy import is_custom_interval, parse_interval_ms
+from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_resolution import IntervalResolver
 from app.data_engine.market_data.models import MarketStreamKey
 
 from .aggregator_bridge import AggregatorBridge
@@ -188,6 +189,7 @@ class DataManager:
         self._cfg = config or DataManagerConfig()
         self._storage_gc_guard = threading.RLock()
         self._storage_gc_protection_epoch = 0
+        self.interval_resolver = IntervalResolver()
 
         # ── Core components ──────────────────────────────────
         self.cache = BarCache(self._cfg.cache)
@@ -200,10 +202,12 @@ class DataManager:
             config=self._cfg.coordinator,
             cache=self.cache,
             event_bus=self.event_bus,
+            interval_resolver=self.interval_resolver,
         )
         self.query_engine = QueryEngine(
             cache=self.cache,
             config=self._cfg.query,
+            interval_resolver=self.interval_resolver,
         )
 
         # ── State ────────────────────────────────────────────
@@ -231,7 +235,10 @@ class DataManager:
         self._backfill_suppression_lookup: Any | None = None
 
         # ── BarAggregator (L1–L5) ───────────────────────────
-        self.bar_aggregator = BarAggregator(BarAggregatorConfig())
+        self.bar_aggregator = BarAggregator(
+            BarAggregatorConfig(),
+            interval_resolver=self.interval_resolver,
+        )
         self.aggregator_bridge = AggregatorBridge(
             cache=self.cache,
             event_bus=self.event_bus,
@@ -245,13 +252,17 @@ class DataManager:
             base_interval=self._cfg.coordinator.base_interval,
             storage_provider=lambda: self.query_engine.storage,
             backfill_trigger_provider=lambda: self._backfill_trigger,
+            interval_resolver=self.interval_resolver,
         )
         self.retention = RetentionService(
             cache=self.cache,
             event_bus=self.event_bus,
             storage_provider=lambda: self.query_engine.storage,
         )
-        self.stream_policy = StreamEnsurePlanner(self._cfg.coordinator.base_interval)
+        self.stream_policy = StreamEnsurePlanner(
+            self._cfg.coordinator.base_interval,
+            interval_resolver=self.interval_resolver,
+        )
         self.daily_open = DailyOpenService(
             storage_provider=lambda: self.query_engine.storage,
             backfill_trigger_provider=lambda: self._backfill_trigger,
@@ -900,8 +911,7 @@ class DataManager:
                 },
             }
             if (
-                is_custom_interval(result.interval)
-                and result.interval != missing.interval
+                result.interval != missing.interval
                 and result.metadata.get("derived_from") == missing.interval
             ):
                 target = self.query_engine.custom_intervals.project_base_repair_to_target(

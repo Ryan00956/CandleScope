@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import replace
 from typing import Callable, Any
 
 from ..ingestion.metrics import LayerMetrics
@@ -45,13 +46,18 @@ from app.data_engine.interval_policy import (
     STANDARD_INTERVAL_MS,
     compute_bucket_start_ms,
     compute_month_bucket_ms,
-    is_standard_interval,
     is_weekly_interval,
     next_month_bucket,
     parse_interval_ms,
+    parse_interval_spec,
     parse_monthly_count,
 )
-from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.data_engine.interval_resolution import (
+    IntervalPurpose,
+    IntervalResolutionError,
+    IntervalResolver,
+    IntervalRouteKind,
+)
 from .config import BackfillConfig
 from .models import (
     GapInfo,
@@ -74,8 +80,13 @@ AlignmentFn = Callable[[int, int, int], int]  # (timestamp_ms, bucket_ms, epoch_
 class BackfillPlanner:
     """Converts gaps into an optimized, executable backfill plan."""
 
-    def __init__(self, config: BackfillConfig) -> None:
+    def __init__(
+        self,
+        config: BackfillConfig,
+        interval_resolver: IntervalResolver | None = None,
+    ) -> None:
         self._cfg = config
+        self._interval_resolver = interval_resolver or IntervalResolver()
         self._metrics = LayerMetrics("BackfillPlanner")
 
         # Pre-compute sorted standard intervals (descending by duration)
@@ -189,38 +200,60 @@ class BackfillPlanner:
         custom_intervals: list[str] = []
 
         for gap in gaps:
-            interval = gap.interval
-            interval_ms = parse_interval_ms(interval)
-            if interval_ms is None:
-                logger.warning("Cannot parse interval '%s', skipping gap", interval)
+            try:
+                route = self._interval_resolver.resolve(
+                    exchange=gap.exchange,
+                    market_type=gap.market_type,
+                    interval=gap.interval,
+                    purpose=IntervalPurpose.HISTORY,
+                )
+            except IntervalResolutionError as exc:
+                logger.warning("Cannot resolve interval '%s': %s", gap.interval, exc)
                 continue
-
-            native_intervals = self._native_intervals_for(
-                gap.exchange,
-                gap.market_type,
+            interval = route.canonical_interval
+            interval_ms = route.spec.nominal_ms
+            canonical_gap = replace(
+                gap,
+                interval=interval,
+                exchange=route.exchange,
+                market_type=route.market_type,
             )
-            can_fetch_target = (
-                interval in native_intervals
-                if native_intervals is not None
-                else is_standard_interval(interval)
-            )
-            if can_fetch_target:
+            if route.kind is IntervalRouteKind.NATIVE:
                 # Exchange-native interval — direct fetch.
-                tasks = self._plan_standard_gap(gap, interval_ms)
+                native_gap = replace(
+                    canonical_gap,
+                    interval=route.native_interval or interval,
+                )
+                tasks = self._plan_standard_gap(native_gap, interval_ms)
                 all_tasks.extend(tasks)
             else:
-                # Derived interval (including a globally standard interval the
-                # selected exchange does not expose) — fetch native components.
-                decomp = self._decompose_interval(
-                    interval,
-                    interval_ms,
-                    allowed_intervals=native_intervals,
+                base_spec = parse_interval_spec(route.base_interval or "")
+                if base_spec is None:  # guarded by resolver
+                    logger.error("Resolved route has invalid base: %s", route)
+                    continue
+                factor = (
+                    route.spec.count // base_spec.count
+                    if route.spec.alignment is base_spec.alignment
+                    and route.spec.alignment.value == "calendar_month"
+                    else max(1, route.spec.nominal_ms // base_spec.nominal_ms)
+                )
+                decomp = IntervalDecomposition(
+                    custom_interval=interval,
+                    custom_duration_ms=interval_ms,
+                    components=[IntervalComponent(
+                        interval=route.base_interval or base_spec.canonical,
+                        count=factor,
+                        duration_ms=base_spec.nominal_ms,
+                    )],
+                    is_standard=False,
+                    alignment_mode=AlignmentMode(self._cfg.custom_alignment_mode),
+                    alignment_epoch_ms=self._cfg.alignment_epoch_ms,
                 )
                 decompositions.append(decomp)
                 if interval not in custom_intervals:
                     custom_intervals.append(interval)
 
-                tasks = self._plan_custom_gap(gap, interval_ms, decomp)
+                tasks = self._plan_custom_gap(canonical_gap, interval_ms, decomp)
                 all_tasks.extend(tasks)
 
         # Deduplicate tasks (same symbol + interval + time range)
@@ -254,35 +287,6 @@ class BackfillPlanner:
         )
         return plan
 
-    @staticmethod
-    def _native_intervals_for(
-        exchange: str,
-        market_type: str,
-    ) -> set[str] | None:
-        """Resolve the exchange/market K-line intervals safe for REST history."""
-        try:
-            bootstrap_default_adapters()
-            capabilities = get_exchange_registry().get_capabilities(exchange)
-        except (KeyError, RuntimeError, ValueError):
-            return None
-
-        channel_resolver = getattr(capabilities, "channel_capability", None)
-        if callable(channel_resolver):
-            try:
-                channel = channel_resolver("kline", market_type)
-            except (TypeError, ValueError):
-                channel = None
-            params = getattr(channel, "params", None)
-            if isinstance(params, dict):
-                declared = params.get("interval")
-                if isinstance(declared, (list, tuple, set)) and declared:
-                    return {str(value) for value in declared}
-
-        declared = getattr(capabilities, "native_intervals", None)
-        if isinstance(declared, (list, tuple, set)) and declared:
-            return {str(value) for value in declared}
-        return None
-
     # ── Internal: Standard gap planning ──────────────────────
 
     def _plan_standard_gap(
@@ -291,19 +295,27 @@ class BackfillPlanner:
         """Create fetch tasks for a standard-interval gap."""
         tasks: list[BackfillTask] = []
         batch_size = self._cfg.fetch_batch_size
-        batch_ms = batch_size * interval_ms
-
-        cursor = gap.start_ms
+        spec = parse_interval_spec(gap.interval)
+        if spec is None:
+            return tasks
+        cursor = spec.floor_ms(gap.start_ms)
+        if cursor < gap.start_ms:
+            cursor = spec.next_ms(cursor)
         priority = self._gap_priority(gap)
 
         while cursor <= gap.end_ms:
-            batch_end = min(cursor + batch_ms - interval_ms, gap.end_ms)
-            estimated = max(1, (batch_end - cursor) // interval_ms + 1)
+            batch_start = cursor
+            batch_end = cursor
+            estimated = 0
+            while estimated < batch_size and cursor <= gap.end_ms:
+                batch_end = cursor
+                cursor = spec.next_ms(cursor)
+                estimated += 1
 
             task = BackfillTask(
                 symbol=gap.symbol,
                 interval=gap.interval,
-                start_ms=cursor,
+                start_ms=batch_start,
                 end_ms=batch_end,
                 priority=priority,
                 parent_gap=gap,
@@ -312,7 +324,6 @@ class BackfillPlanner:
                 market_type=gap.market_type,
             )
             tasks.append(task)
-            cursor = batch_end + interval_ms
 
         return tasks
 
@@ -350,27 +361,29 @@ class BackfillPlanner:
 
         # For each component, create fetch tasks
         for component in decomp.components:
-            comp_ms = component.duration_ms
             comp_interval = component.interval
             batch_size = self._cfg.fetch_batch_size
+            component_spec = parse_interval_spec(comp_interval)
+            if component_spec is None:
+                logger.error("Invalid resolved component interval: %s", comp_interval)
+                continue
 
-            # The entire aligned range needs this component's data
-            # But we fetch at the component's own granularity
-            total_comp_bars = max(
-                1,
-                ((aligned_end_exclusive - aligned_start) // comp_ms) * component.count,
-            )
-            batch_ms = batch_size * comp_ms
-
-            cursor = aligned_start
+            cursor = component_spec.floor_ms(aligned_start)
+            if cursor < aligned_start:
+                cursor = component_spec.next_ms(cursor)
             while cursor < aligned_end_exclusive:
-                batch_end = min(cursor + batch_ms - comp_ms, aligned_end_exclusive - comp_ms)
-                estimated = max(1, (batch_end - cursor) // comp_ms + 1)
+                batch_start = cursor
+                batch_end = cursor
+                estimated = 0
+                while estimated < batch_size and cursor < aligned_end_exclusive:
+                    batch_end = cursor
+                    cursor = component_spec.next_ms(cursor)
+                    estimated += 1
 
                 task = BackfillTask(
                     symbol=gap.symbol,
                     interval=comp_interval,
-                    start_ms=cursor,
+                    start_ms=batch_start,
                     end_ms=batch_end,
                     priority=priority,
                     parent_gap=gap,
@@ -380,7 +393,6 @@ class BackfillPlanner:
                     metadata={"custom_interval": gap.interval},
                 )
                 tasks.append(task)
-                cursor = batch_end + comp_ms
 
         return tasks
 

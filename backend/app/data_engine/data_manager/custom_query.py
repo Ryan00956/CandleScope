@@ -26,6 +26,7 @@ from app.data_engine.interval_policy import (
     row_is_closed,
 )
 from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
+from app.data_engine.interval_resolution import IntervalRoute
 from app.data_engine.history.calendar import (
     containing_expected_open_ms,
     expected_bucket_end_ms,
@@ -233,6 +234,23 @@ def _base_capacity_factor(
         int(nominal_factor),
         (maximum_month_bucket_ms + base_ms - 1) // base_ms,
     )
+
+
+def _resolved_base(
+    route: IntervalRoute | None,
+    *,
+    interval: str,
+    custom_seconds: int,
+) -> tuple[str, int]:
+    """Use the exchange-aware route, retaining a compatibility fallback."""
+    if route is None:
+        return find_best_base_interval(custom_seconds, interval=interval)
+    if route.base_interval is None:
+        raise ValueError(f"derived interval route has no base: {route}")
+    base_ms = parse_interval_ms(route.base_interval)
+    if base_ms is None or base_ms <= 0:
+        raise ValueError(f"invalid resolved base interval: {route.base_interval!r}")
+    return route.base_interval, max(1, route.spec.nominal_ms // base_ms)
 
 
 class CustomIntervalQueryService:
@@ -737,6 +755,7 @@ class CustomIntervalQueryService:
         exchange: str = "binance",
         market_type: str = "spot",
         auto_backfill: bool | None = None,
+        route: IntervalRoute | None = None,
     ) -> QueryResult:
         identity = (
             "range",
@@ -748,6 +767,7 @@ class CustomIntervalQueryService:
             end_ms,
             limit,
             auto_backfill,
+            route.base_interval if route is not None else None,
         )
         return self._run_singleflight(
             identity,
@@ -761,6 +781,7 @@ class CustomIntervalQueryService:
                 exchange=exchange,
                 market_type=market_type,
                 auto_backfill=auto_backfill,
+                route=route,
             ),
         )
 
@@ -776,6 +797,7 @@ class CustomIntervalQueryService:
         exchange: str = "binance",
         market_type: str = "spot",
         auto_backfill: bool | None = None,
+        route: IntervalRoute | None = None,
     ) -> QueryResult:
         """Serve custom intervals by aggregating a standard interval on read."""
         custom_seconds = parse_custom_interval(interval)
@@ -796,7 +818,11 @@ class CustomIntervalQueryService:
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
         calendar = self._calendar_for(key)
         effective_limit = min(limit or self._cfg.default_limit, self._cfg.max_limit)
-        base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
+        base_interval, factor = _resolved_base(
+            route,
+            interval=interval,
+            custom_seconds=custom_seconds,
+        )
         capacity_factor = _base_capacity_factor(interval, base_interval, factor)
         custom_ms = custom_seconds * 1000
         materialized_result = self._read_materialized_target(
@@ -1015,6 +1041,7 @@ class CustomIntervalQueryService:
         exchange: str = "binance",
         market_type: str = "spot",
         auto_backfill: bool | None = None,
+        route: IntervalRoute | None = None,
     ) -> QueryResult:
         identity = (
             "before",
@@ -1025,6 +1052,7 @@ class CustomIntervalQueryService:
             int(before_ms),
             int(limit),
             auto_backfill,
+            route.base_interval if route is not None else None,
         )
         return self._run_singleflight(
             identity,
@@ -1036,6 +1064,7 @@ class CustomIntervalQueryService:
                 exchange=exchange,
                 market_type=market_type,
                 auto_backfill=auto_backfill,
+                route=route,
             ),
         )
 
@@ -1048,6 +1077,7 @@ class CustomIntervalQueryService:
         exchange: str = "binance",
         market_type: str = "spot",
         auto_backfill: bool | None = None,
+        route: IntervalRoute | None = None,
     ) -> QueryResult:
         """Paginate custom intervals by rebuilding them from base bars."""
         started_at = time.monotonic()
@@ -1068,7 +1098,11 @@ class CustomIntervalQueryService:
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
         calendar = self._calendar_for(key)
         effective_limit = min(limit, self._cfg.max_limit)
-        base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
+        base_interval, factor = _resolved_base(
+            route,
+            interval=interval,
+            custom_seconds=custom_seconds,
+        )
         capacity_factor = _base_capacity_factor(interval, base_interval, factor)
         custom_ms = custom_seconds * 1000
         materialized_result = self._read_materialized_target_before(

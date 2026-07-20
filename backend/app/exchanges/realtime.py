@@ -3,7 +3,11 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 
-from app.data_engine.interval_policy import is_standard_interval, parse_interval_ms
+from app.data_engine.interval_policy import (
+    interval_tiles,
+    intervals_equivalent,
+    parse_interval_spec,
+)
 
 
 class RealtimeUpdateMode(str, enum.Enum):
@@ -24,19 +28,27 @@ class RealtimePolicy:
     def needs_base_stream(self, interval: str) -> bool:
         if self.update_mode != RealtimeUpdateMode.BASE_INTERVAL_FANOUT:
             return False
-        if interval == self.base_interval:
+        if intervals_equivalent(interval, self.base_interval):
             return False
-        if not is_standard_interval(interval):
-            return False
-        requested_ms = parse_interval_ms(interval) or 0
-        base_ms = parse_interval_ms(self.base_interval) or 0
-        return requested_ms > base_ms
+        target = parse_interval_spec(interval)
+        base = parse_interval_spec(self.base_interval)
+        return bool(
+            target is not None
+            and base is not None
+            and base.nominal_ms < target.nominal_ms
+            and interval_tiles(base, target)
+        )
 
     def should_fanout_realtime_base(self, source_interval: str, target_interval: str) -> bool:
         if self.update_mode != RealtimeUpdateMode.BASE_INTERVAL_FANOUT:
             return False
-        if source_interval != self.base_interval:
+        if not intervals_equivalent(source_interval, self.base_interval):
             return False
-        target_ms = parse_interval_ms(target_interval) or 0
-        base_ms = parse_interval_ms(self.base_interval) or 0
-        return target_ms > base_ms
+        target = parse_interval_spec(target_interval)
+        base = parse_interval_spec(self.base_interval)
+        return bool(
+            target is not None
+            and base is not None
+            and base.nominal_ms < target.nominal_ms
+            and interval_tiles(base, target)
+        )

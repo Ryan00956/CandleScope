@@ -4,7 +4,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
-from app.data_engine.interval_policy import is_standard_interval
+from app.data_engine.interval_policy import parse_interval_spec
+from app.data_engine.interval_resolution import (
+    IntervalPurpose,
+    IntervalResolver,
+    IntervalRouteKind,
+)
 
 from .models import SeriesKey
 
@@ -21,8 +26,13 @@ class StreamEnsurePlan:
 class StreamEnsurePlanner:
     """Decide aggregation targets and required ingestion streams."""
 
-    def __init__(self, base_interval: str = "1m") -> None:
+    def __init__(
+        self,
+        base_interval: str = "1m",
+        interval_resolver: IntervalResolver | None = None,
+    ) -> None:
         self._base_interval = base_interval
+        self._interval_resolver = interval_resolver or IntervalResolver()
 
     def plan(
         self,
@@ -32,30 +42,41 @@ class StreamEnsurePlanner:
         exchange: str = "binance",
         market_type: str = "spot",
     ) -> StreamEnsurePlan:
-        requested = SeriesKey(
-            symbol,
-            interval,
+        route = self._interval_resolver.resolve(
             exchange=exchange,
             market_type=market_type,
+            interval=interval,
+            purpose=IntervalPurpose.REALTIME,
+        )
+        requested = SeriesKey(
+            symbol,
+            route.canonical_interval,
+            exchange=route.exchange,
+            market_type=route.market_type,
         )
         targets = [requested]
         prerequisites: list[SeriesKey] = []
 
-        if not is_standard_interval(interval):
+        if route.kind is IntervalRouteKind.DERIVED:
+            base_spec = parse_interval_spec(route.base_interval or "")
+            if base_spec is None:  # guarded by resolver
+                raise ValueError(f"invalid resolved realtime base: {route.base_interval!r}")
             base = SeriesKey(
                 symbol,
-                self._base_interval,
-                exchange=exchange,
-                market_type=market_type,
+                base_spec.canonical,
+                exchange=route.exchange,
+                market_type=route.market_type,
             )
             targets.append(base)
+            prerequisites.append(base)
         elif self._needs_policy_base_stream(requested):
             policy = self._realtime_policy(requested.exchange)
+            base_spec = parse_interval_spec(policy.base_interval)
             base = SeriesKey(
                 symbol,
-                policy.base_interval,
-                exchange=exchange,
-                market_type=market_type,
+                base_spec.canonical if base_spec is not None else policy.base_interval,
+                exchange=route.exchange,
+                market_type=route.market_type,
             )
             targets.append(base)
             prerequisites.append(base)

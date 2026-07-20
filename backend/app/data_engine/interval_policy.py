@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import calendar
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Mapping, Optional, Sequence
 
 from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
@@ -140,53 +142,198 @@ _BASE_INTERVALS_ORDERED = [
     ("1w", 604800),
 ]
 _MULTI_RES_FACTOR_THRESHOLD = 20
+_MAX_INTERVAL_MS = (1 << 63) - 1
+_MAX_CALENDAR_MONTH_COUNT = 12_000
+
+
+class IntervalAlignment(str, Enum):
+    """Semantic alignment family for one interval."""
+
+    FIXED_EPOCH = "fixed_epoch"
+    WEEKLY_MONDAY = "weekly_monday"
+    CALENDAR_MONTH = "calendar_month"
+
+
+@dataclass(frozen=True, slots=True)
+class IntervalSpec:
+    """Canonical time semantics independent from exchange capabilities."""
+
+    requested: str
+    canonical: str
+    alignment: IntervalAlignment
+    nominal_ms: int
+    count: int
+    signature: tuple[str, int]
+
+    def floor_ms(self, timestamp_ms: int) -> int:
+        timestamp_ms = int(timestamp_ms)
+        if self.alignment is IntervalAlignment.CALENDAR_MONTH:
+            return _calendar_month_floor_ms(timestamp_ms, self.count)
+        anchor_ms = (
+            _WEEK_EPOCH_OFFSET_MS
+            if self.alignment is IntervalAlignment.WEEKLY_MONDAY
+            else 0
+        )
+        return (
+            ((timestamp_ms - anchor_ms) // self.nominal_ms) * self.nominal_ms
+            + anchor_ms
+        )
+
+    def next_ms(self, open_ms: int) -> int:
+        if self.alignment is IntervalAlignment.CALENDAR_MONTH:
+            return _shift_calendar_month_open_ms(int(open_ms), self.count)
+        return int(open_ms) + self.nominal_ms
+
+    def previous_ms(self, open_ms: int) -> int:
+        if self.alignment is IntervalAlignment.CALENDAR_MONTH:
+            return _shift_calendar_month_open_ms(int(open_ms), -self.count)
+        return int(open_ms) - self.nominal_ms
+
+    def is_successor(self, previous_ms: int, current_ms: int) -> bool:
+        return self.next_ms(int(previous_ms)) == int(current_ms)
+
+
+def _canonical_fixed_interval(value: int, unit: str) -> tuple[str, int, int]:
+    unit_ms = {
+        "s": 1_000,
+        "m": 60_000,
+        "h": 3_600_000,
+        "d": 86_400_000,
+    }
+    nominal_ms = value * unit_ms[unit]
+    for canonical_unit, width_ms in (
+        ("d", 86_400_000),
+        ("h", 3_600_000),
+        ("m", 60_000),
+        ("s", 1_000),
+    ):
+        if nominal_ms % width_ms == 0:
+            count = nominal_ms // width_ms
+            return f"{count}{canonical_unit}", count, nominal_ms
+    raise AssertionError("fixed interval must be divisible by one second")
+
+
+def parse_interval_spec(value: str) -> IntervalSpec | None:
+    """Parse and canonicalise interval time semantics.
+
+    Fixed-width aliases reduce only within the fixed epoch-aligned family.
+    Weekly and calendar-month spellings retain their distinct alignment, so
+    ``7d != 1w`` and ``30d != 1M`` even though their nominal widths match.
+    """
+    requested = str(value or "").strip()
+    match = _INTERVAL_RE.fullmatch(requested)
+    if match is None:
+        return None
+    raw_count = int(match.group(1))
+    unit = match.group(2)
+    if raw_count <= 0:
+        return None
+
+    if unit in {"s", "m", "h", "d"}:
+        unit_ms = {"s": 1_000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}
+        if raw_count > _MAX_INTERVAL_MS // unit_ms[unit]:
+            return None
+        canonical, count, nominal_ms = _canonical_fixed_interval(raw_count, unit)
+        alignment = IntervalAlignment.FIXED_EPOCH
+        signature = (alignment.value, nominal_ms)
+    elif unit == "w":
+        if raw_count > _MAX_INTERVAL_MS // (7 * 86_400_000):
+            return None
+        canonical = f"{raw_count}w"
+        count = raw_count
+        nominal_ms = raw_count * 7 * 86_400_000
+        alignment = IntervalAlignment.WEEKLY_MONDAY
+        signature = (alignment.value, count)
+    else:
+        if raw_count > _MAX_CALENDAR_MONTH_COUNT:
+            return None
+        canonical = f"{raw_count}M"
+        count = raw_count
+        nominal_ms = raw_count * 30 * 86_400_000
+        alignment = IntervalAlignment.CALENDAR_MONTH
+        signature = (alignment.value, count)
+
+    return IntervalSpec(
+        requested=requested,
+        canonical=canonical,
+        alignment=alignment,
+        nominal_ms=nominal_ms,
+        count=count,
+        signature=signature,
+    )
+
+
+def intervals_equivalent(left: str, right: str) -> bool:
+    left_spec = parse_interval_spec(left)
+    right_spec = parse_interval_spec(right)
+    return bool(
+        left_spec is not None
+        and right_spec is not None
+        and left_spec.signature == right_spec.signature
+    )
+
+
+def interval_tiles(source: IntervalSpec, target: IntervalSpec) -> bool:
+    """Return whether source buckets exactly tile target bucket boundaries."""
+    if source.alignment is not target.alignment:
+        # UTC fixed bars no wider than one day can tile Monday-aligned weeks
+        # and real calendar months exactly.  Multi-day fixed bars cannot: a
+        # 3d/7d epoch grid crosses week/month boundaries.
+        return bool(
+            source.alignment is IntervalAlignment.FIXED_EPOCH
+            and target.alignment in {
+                IntervalAlignment.WEEKLY_MONDAY,
+                IntervalAlignment.CALENDAR_MONTH,
+            }
+            and source.nominal_ms <= 86_400_000
+            and 86_400_000 % source.nominal_ms == 0
+        )
+    if source.alignment is IntervalAlignment.CALENDAR_MONTH:
+        return target.count % source.count == 0
+    return target.nominal_ms % source.nominal_ms == 0
 
 
 def parse_custom_interval(interval: str) -> int | None:
     """Parse an interval string into seconds."""
-    if interval in INTERVAL_SECONDS:
-        return INTERVAL_SECONDS[interval]
-    match = _INTERVAL_RE.match(str(interval or ""))
-    if not match:
-        return None
-    value, unit = int(match.group(1)), match.group(2)
-    if value <= 0:
-        return None
-    return value * _UNIT_SECONDS[unit]
+    spec = parse_interval_spec(interval)
+    return spec.nominal_ms // 1000 if spec is not None else None
 
 
 def parse_interval_ms(interval: str) -> int | None:
     """Parse an interval string into milliseconds."""
-    seconds = parse_custom_interval(interval)
-    return seconds * 1000 if seconds is not None else None
+    spec = parse_interval_spec(interval)
+    return spec.nominal_ms if spec is not None else None
 
 
 def is_standard_interval(interval: str) -> bool:
-    return interval in INTERVAL_SECONDS
+    spec = parse_interval_spec(interval)
+    return spec is not None and spec.canonical in INTERVAL_SECONDS
 
 
 def is_custom_interval(interval: str) -> bool:
-    return interval not in INTERVAL_SECONDS
+    return not is_standard_interval(interval)
 
 
 def is_ephemeral_interval(interval: str) -> bool:
-    return interval in EPHEMERAL_INTERVALS
+    spec = parse_interval_spec(interval)
+    return spec is not None and spec.canonical in EPHEMERAL_INTERVALS
 
 
 def is_weekly_interval(interval: str) -> bool:
-    return bool(_WEEKLY_RE.match(str(interval or "")))
+    spec = parse_interval_spec(interval)
+    return spec is not None and spec.alignment is IntervalAlignment.WEEKLY_MONDAY
 
 
 def is_monthly_interval(interval: str) -> bool:
-    return bool(_MONTHLY_RE.match(str(interval or "")))
+    spec = parse_interval_spec(interval)
+    return spec is not None and spec.alignment is IntervalAlignment.CALENDAR_MONTH
 
 
 def parse_monthly_count(interval: str) -> int | None:
-    match = _MONTHLY_RE.match(str(interval or ""))
-    if not match:
+    spec = parse_interval_spec(interval)
+    if spec is None or spec.alignment is not IntervalAlignment.CALENDAR_MONTH:
         return None
-    value = int(match.group(1))
-    return value if value > 0 else None
+    return spec.count
 
 
 def get_tier_for_interval(interval: str) -> str:
@@ -209,15 +356,9 @@ def compute_bucket_start(
     interval: Optional[str] = None,
 ) -> int:
     if interval is not None:
-        month_count = parse_monthly_count(interval)
-        if month_count is not None:
-            return compute_month_bucket(ts_seconds, month_count)
-    if interval is not None and is_weekly_interval(interval):
-        return (
-            ((ts_seconds - _WEEK_EPOCH_OFFSET_S) // bucket_width_seconds)
-            * bucket_width_seconds
-            + _WEEK_EPOCH_OFFSET_S
-        )
+        spec = parse_interval_spec(interval)
+        if spec is not None:
+            return spec.floor_ms(int(ts_seconds) * 1000) // 1000
     return (ts_seconds // bucket_width_seconds) * bucket_width_seconds
 
 
@@ -228,15 +369,9 @@ def compute_bucket_start_ms(
     interval: Optional[str] = None,
 ) -> int:
     if interval is not None:
-        month_count = parse_monthly_count(interval)
-        if month_count is not None:
-            return compute_month_bucket_ms(ts_ms, month_count)
-    if interval is not None and is_weekly_interval(interval):
-        return (
-            ((ts_ms - _WEEK_EPOCH_OFFSET_MS) // bucket_width_ms)
-            * bucket_width_ms
-            + _WEEK_EPOCH_OFFSET_MS
-        )
+        spec = parse_interval_spec(interval)
+        if spec is not None:
+            return spec.floor_ms(int(ts_ms))
     return (ts_ms // bucket_width_ms) * bucket_width_ms
 
 
@@ -248,9 +383,9 @@ def compute_bucket_end_ms(
 ) -> int:
     """Return the exclusive bucket end for a bucket start."""
     if interval is not None:
-        month_count = parse_monthly_count(interval)
-        if month_count is not None:
-            return next_month_bucket(bucket_start_ms // 1000, month_count) * 1000
+        spec = parse_interval_spec(interval)
+        if spec is not None:
+            return spec.next_ms(int(bucket_start_ms))
     return bucket_start_ms + bucket_width_ms
 
 
@@ -554,11 +689,34 @@ def find_optimal_fetch_plan(custom_seconds: int) -> dict:
     }
 
 
+_MONTH_ANCHOR_ORDINAL = 1970 * 12
+
+
+def _month_ordinal_to_datetime(ordinal: int) -> datetime:
+    year, zero_based_month = divmod(int(ordinal), 12)
+    return datetime(year, zero_based_month + 1, 1, tzinfo=timezone.utc)
+
+
+def _calendar_month_floor_ms(timestamp_ms: int, months: int) -> int:
+    if months <= 0:
+        raise ValueError(f"months must be positive, got {months}")
+    dt = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc)
+    ordinal = dt.year * 12 + (dt.month - 1)
+    bucket_ordinal = (
+        _MONTH_ANCHOR_ORDINAL
+        + ((ordinal - _MONTH_ANCHOR_ORDINAL) // months) * months
+    )
+    return int(_month_ordinal_to_datetime(bucket_ordinal).timestamp() * 1000)
+
+
+def _shift_calendar_month_open_ms(open_ms: int, months: int) -> int:
+    dt = datetime.fromtimestamp(int(open_ms) / 1000, tz=timezone.utc)
+    ordinal = dt.year * 12 + (dt.month - 1) + int(months)
+    return int(_month_ordinal_to_datetime(ordinal).timestamp() * 1000)
+
+
 def compute_month_bucket(ts_seconds: int, months: int = 1) -> int:
-    dt = datetime.fromtimestamp(ts_seconds, tz=timezone.utc)
-    month_index = ((dt.month - 1) // months) * months + 1
-    bucket = datetime(dt.year, month_index, 1, tzinfo=timezone.utc)
-    return int(bucket.timestamp())
+    return _calendar_month_floor_ms(int(ts_seconds) * 1000, months) // 1000
 
 
 def compute_month_bucket_ms(ts_ms: int, months: int = 1) -> int:
@@ -568,12 +726,20 @@ def compute_month_bucket_ms(ts_ms: int, months: int = 1) -> int:
 
 def next_month_bucket(bucket_start_seconds: int, months: int = 1) -> int:
     """Return the next calendar-month bucket start in seconds."""
-    dt = datetime.fromtimestamp(bucket_start_seconds, tz=timezone.utc)
-    dt = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    month = dt.month - 1 + months
-    year = dt.year + month // 12
-    month = month % 12 + 1
-    return int(datetime(year, month, 1, tzinfo=timezone.utc).timestamp())
+    spec = parse_interval_spec(f"{months}M")
+    if spec is None:
+        raise ValueError(f"months must be positive, got {months}")
+    canonical_open_ms = spec.floor_ms(int(bucket_start_seconds) * 1000)
+    return spec.next_ms(canonical_open_ms) // 1000
+
+
+def previous_month_bucket(bucket_start_seconds: int, months: int = 1) -> int:
+    """Return the previous anchored calendar-month bucket start in seconds."""
+    spec = parse_interval_spec(f"{months}M")
+    if spec is None:
+        raise ValueError(f"months must be positive, got {months}")
+    canonical_open_ms = spec.floor_ms(int(bucket_start_seconds) * 1000)
+    return spec.previous_ms(canonical_open_ms) // 1000
 
 
 def aggregate_rows_by_month(

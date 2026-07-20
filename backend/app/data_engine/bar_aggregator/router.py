@@ -31,6 +31,14 @@ from dataclasses import replace
 from typing import Callable, Awaitable, Any
 
 from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
+from app.data_engine.interval_policy import intervals_equivalent, parse_interval_spec
+from app.data_engine.interval_resolution import (
+    IntervalPurpose,
+    IntervalResolutionError,
+    IntervalResolver,
+    IntervalRoute,
+    IntervalRouteKind,
+)
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 
 from .config import BarAggregatorConfig
@@ -41,7 +49,6 @@ from .models import (
     MergeMode,
     BarInputAdapter,
     parse_interval_ms,
-    is_standard_interval,
 )
 
 logger = logging.getLogger("bar_aggregator.L1_Router")
@@ -62,8 +69,17 @@ class EventRouter:
     targets (e.g. 1m, 5m, 15m, 91m) simultaneously.
     """
 
-    def __init__(self, config: BarAggregatorConfig) -> None:
+    def __init__(
+        self,
+        config: BarAggregatorConfig,
+        interval_resolver: IntervalResolver | None = None,
+    ) -> None:
         self._cfg = config
+        self._interval_resolver = interval_resolver or IntervalResolver()
+        self._route_cache: dict[
+            tuple[str, str, str, IntervalPurpose],
+            IntervalRoute | IntervalResolutionError,
+        ] = {}
 
         # Registered targets: {(exchange, market_type, symbol, interval)} — the set of active pipelines
         self._targets: set[tuple[str, str, str, str]] = set()
@@ -96,12 +112,24 @@ class EventRouter:
             symbol:   Trading pair (e.g. "BTCUSDT")
             interval: Target interval (e.g. "1m", "91m")
         """
-        key = (exchange.lower().strip(), market_type.lower().strip(), symbol.upper(), interval)
+        spec = parse_interval_spec(interval)
+        canonical_interval = spec.canonical if spec is not None else interval
+        key = (
+            exchange.lower().strip(),
+            market_type.lower().strip(),
+            symbol.upper(),
+            canonical_interval,
+        )
         if key in self._targets:
             logger.debug("Target already registered: %s:%s:%s@%s", key[0], key[1], symbol, interval)
             return
 
         self._targets.add(key)
+        for purpose in (IntervalPurpose.HISTORY, IntervalPurpose.REALTIME):
+            try:
+                self._route_for(key[0], key[1], key[3], purpose)
+            except IntervalResolutionError:
+                pass
         logger.info("Registered target: %s:%s:%s@%s", key[0], key[1], symbol, interval)
 
     def unregister_target(
@@ -112,8 +140,16 @@ class EventRouter:
         market_type: str = "spot",
     ) -> None:
         """Remove a (symbol, interval) aggregation target."""
-        key = (exchange.lower().strip(), market_type.lower().strip(), symbol.upper(), interval)
+        spec = parse_interval_spec(interval)
+        key = (
+            exchange.lower().strip(),
+            market_type.lower().strip(),
+            symbol.upper(),
+            spec.canonical if spec is not None else interval,
+        )
         self._targets.discard(key)
+        for purpose in (IntervalPurpose.HISTORY, IntervalPurpose.REALTIME):
+            self._route_cache.pop((key[0], key[1], key[3], purpose), None)
         logger.info("Unregistered target: %s:%s:%s@%s", key[0], key[1], symbol, interval)
 
     def get_targets(self) -> list[tuple[str, str, str, str]]:
@@ -303,7 +339,7 @@ class EventRouter:
             merge_mode: MergeMode | None = None
 
             # Rule 1: Exact match (e.g. 1m to 1m, 5m to 5m, custom 91m to custom 91m)
-            if src == interval:
+            if src == interval or intervals_equivalent(src, interval):
                 should_route = True
                 merge_mode = MergeMode.SNAPSHOT
             
@@ -312,31 +348,38 @@ class EventRouter:
                 should_route = True
                 merge_mode = MergeMode.INCREMENTAL
                 
-            # Rule 3: Cross-interval mapping for Custom Intervals
-            elif not is_standard_interval(interval):
-                if bar_input.source == BarInputSource.REALTIME:
-                    # Realtime custom bars are built purely from 1m base by convention
-                    if src == "1m":
-                        should_route = True
-                        merge_mode = MergeMode.COMPONENT
-                elif bar_input.source == BarInputSource.BACKFILL:
-                    # Backfill custom bars accept cleanly decomposed components (standard intervals)
-                    tgt_ms = parse_interval_ms(interval) or 0
-                    src_ms = parse_interval_ms(src) or 0
-                    if is_standard_interval(src) and 0 < src_ms <= tgt_ms:
-                        should_route = True
-                        merge_mode = MergeMode.COMPONENT
+            # Rule 3: exchange-resolved derived targets accept only their
+            # exact native base, regardless of whether the target spelling is
+            # globally listed as a standard interval.
+            else:
+                purpose = (
+                    IntervalPurpose.HISTORY
+                    if bar_input.source == BarInputSource.BACKFILL
+                    else IntervalPurpose.REALTIME
+                )
+                try:
+                    route = self._route_for(exchange, market_type, interval, purpose)
+                except IntervalResolutionError as exc:
+                    logger.warning("Interval route unavailable for %s: %s", interval, exc)
+                    continue
+                if (
+                    route.kind is IntervalRouteKind.DERIVED
+                    and route.base_interval is not None
+                    and intervals_equivalent(src, route.base_interval)
+                ):
+                    should_route = True
+                    merge_mode = MergeMode.COMPONENT
 
             # Rule 4: exchange policy can fan out realtime base interval
             # updates to larger standard intervals when native large-interval
             # WS channels update too slowly for active charts.
-            elif (
-                is_standard_interval(interval)
+                elif (
+                route.kind is IntervalRouteKind.NATIVE
                 and bar_input.source == BarInputSource.REALTIME
                 and self._realtime_policy(exchange).should_fanout_realtime_base(src, interval)
-            ):
-                should_route = True
-                merge_mode = MergeMode.PRICE_ONLY
+                ):
+                    should_route = True
+                    merge_mode = MergeMode.PRICE_ONLY
 
             # Discard contaminated source intervals
             if not should_route:
@@ -359,6 +402,32 @@ class EventRouter:
     def _realtime_policy(exchange: str):
         bootstrap_default_adapters()
         return get_exchange_registry().get_plugin(exchange).realtime_policy()
+
+    def _route_for(
+        self,
+        exchange: str,
+        market_type: str,
+        interval: str,
+        purpose: IntervalPurpose,
+    ) -> IntervalRoute:
+        key = (exchange, market_type, interval, purpose)
+        cached = self._route_cache.get(key)
+        if isinstance(cached, IntervalResolutionError):
+            raise cached
+        if cached is not None:
+            return cached
+        try:
+            route = self._interval_resolver.resolve(
+                exchange=exchange,
+                market_type=market_type,
+                interval=interval,
+                purpose=purpose,
+            )
+        except IntervalResolutionError as exc:
+            self._route_cache[key] = exc
+            raise
+        self._route_cache[key] = route
+        return route
 
     # ── Internal: Stream Type Filter ─────────────────────────
 

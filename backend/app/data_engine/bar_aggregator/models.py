@@ -123,6 +123,10 @@ class BarInput:
 
     def __post_init__(self) -> None:
         self.symbol = self.symbol.upper().strip()
+        if self.source_interval != "tick":
+            spec = parse_interval_spec(self.source_interval)
+            if spec is not None:
+                self.source_interval = spec.canonical
         self.exchange = self.exchange.strip().lower()
         self.market_type = self.market_type.strip().lower()
         if self.merge_mode is not None and not isinstance(self.merge_mode, MergeMode):
@@ -482,4 +486,5 @@ from app.data_engine.interval_policy import (  # noqa: E402
     STANDARD_INTERVALS,
     is_standard_interval,
     parse_interval_ms,
+    parse_interval_spec,
 )

@@ -14,7 +14,7 @@ from app.api.v1.klines import (
 )
 from app.data_engine.data_manager import DataManager
 from app.data_engine.data_manager.models import BarData, MissingRange, QueryResult, QuerySource
-from app.data_engine.history import SessionCalendar
+from app.data_engine.history import AlwaysOpenCalendar, SessionCalendar
 
 
 def test_range_verifier_rejects_explicitly_unclosed_bar_inside_closed_range() -> None:
@@ -1050,6 +1050,77 @@ def test_cap_range_request_session_end_is_inclusive_without_looking_ahead() -> N
     assert capped["needed_limit"] == 2
     assert capped["truncated"] is True
     assert capped["next_end_ms"] == day_start_ms + 12 * 3_600_000 + 30 * 60_000
+
+
+def test_cap_range_request_canonicalises_arbitrary_custom_edge() -> None:
+    interval_ms = 47 * 60_000
+    end_ms = 1_753_009_640_000
+    containing_open_ms = (end_ms // interval_ms) * interval_ms
+
+    capped = klines_api._cap_range_request(
+        start_ms=containing_open_ms - interval_ms,
+        end_ms=end_ms,
+        interval="47m",
+        max_bars=2,
+        calendar=AlwaysOpenCalendar(),
+    )
+
+    assert capped["query_start_ms"] == containing_open_ms - interval_ms
+    assert capped["query_start_ms"] % 1000 == 0
+    assert capped["needed_limit"] == 2
+
+
+def test_query_endpoints_map_interval_capability_errors_to_client_error() -> None:
+    client = _client(DataManager())
+    common = {
+        "symbol": "BTCUSDT",
+        "interval": "2s",
+        "exchange": "binance",
+        "market_type": "futures",
+    }
+    cases = [
+        ("/api/v1/klines/latest", {**common, "limit": 1}),
+        ("/api/v1/klines/history", {**common, "days": 1, "max_wait_ms": 0}),
+        ("/api/v1/klines/range", {
+            **common,
+            "start_ms": 1_700_000_000_000,
+            "end_ms": 1_700_000_001_000,
+            "repair": "none",
+        }),
+        ("/api/v1/klines/history/before", {
+            **common,
+            "before": 1_700_000_000,
+            "bars": 1,
+            "max_wait_ms": 0,
+        }),
+    ]
+
+    for path, params in cases:
+        response = client.get(path, params=params)
+        assert response.status_code == 400, (path, response.text)
+        assert response.json()["detail"]["code"] == "no_exact_base"
+
+
+def test_resolve_endpoint_is_exchange_aware_and_canonical() -> None:
+    client = _client(DataManager())
+
+    okx = client.get(
+        "/api/v1/klines/resolve",
+        params={"interval": "8h", "exchange": "okx"},
+    ).json()
+    binance = client.get(
+        "/api/v1/klines/resolve",
+        params={"interval": "16h", "exchange": "binance"},
+    ).json()
+    alias = client.get(
+        "/api/v1/klines/resolve",
+        params={"interval": "60m", "exchange": "binance"},
+    ).json()
+
+    assert (okx["kind"], okx["base_interval"]) == ("derived", "4h")
+    assert (binance["kind"], binance["base_interval"]) == ("derived", "8h")
+    assert alias["canonical_interval"] == "1h"
+    assert alias["kind"] == "native"
 
 
 def test_latest_endpoint_does_not_trigger_backfill_when_storage_is_empty() -> None:

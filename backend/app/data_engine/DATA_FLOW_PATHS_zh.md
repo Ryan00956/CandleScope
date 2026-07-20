@@ -17,6 +17,23 @@
 广播；内部修复、审计、后台维护事件默认留在服务端或定向消费者，避免前端因
 无关 backfill/recompute 重新拉取几万根历史。
 
+## 周期语义与能力路由
+
+周期有两个彼此独立的维度，禁止再用“是否在全局标准列表”同时回答两者：
+
+1. `interval_policy.IntervalSpec` 是时间语义的唯一权威：规范化 identity、
+   fixed-epoch / Monday-week / calendar-month 对齐，以及 floor/next/previous。
+   因而 `60m == 1h`，但 `7d != 1w`、`30d != 1M`；任意 `nM` 都以
+   1970-01 为绝对月锚点，不按自然年重置。
+2. `interval_resolution.IntervalResolver` 是交易所能力路由的唯一权威：按
+   `(exchange, market_type, purpose=history|realtime)` 决定 target 是
+   `NATIVE` 还是 `DERIVED`，并为 derived target 选择能精确铺满它的 native base。
+
+例如 Binance `8h` 是 native，而 OKX `8h` 是从 `4h` 派生；两者的 `8h`
+时间轴完全相同。Query、stream、backfill 和 API `/resolve` 必须消费同一 route。
+BarAggregator 的合并与关闭由 `MergeMode`（`SNAPSHOT`、`COMPONENT`、
+`PRICE_ONLY` 等）决定，不能再由 target 名字是否“自定义”决定。
+
 ## 实时 K 线路径
 
 ```text
@@ -24,7 +41,7 @@ WS /stream/klines 或 /stream/klines_multi
   -> dm.ensure_stream(symbol, interval, exchange, market_type)
   -> StreamEnsurePlanner
      -> 在 BarAggregator 注册 aggregation targets
-     -> 为自定义周期选择 prerequisite base streams
+     -> 按 exchange-aware route 为 derived target 选择 prerequisite base streams
   -> StreamCoordinator.ensure_stream()
   -> ExchangeIngestionFactory.start(on_market_event, on_gap)
   -> MarketDataIngress.add_stream()
@@ -47,7 +64,7 @@ WS /stream/klines 或 /stream/klines_multi
 
 - `MarketEvent` 不直接修改 DataManager cache。
 - 实时 cache 修改发生在 `BarAggregator` 产出 `BarEvent` 后，由 `AggregatorBridge` 完成。
-- 自定义周期在 `StreamEnsurePlanner` 要求时复用 base interval 输入。
+- derived target 在 `StreamEnsurePlanner` 要求时复用 resolver 选出的 base interval 输入。
 - 非默认 `exchange` 和非 spot `market_type` 都属于 stream identity。
 - API K-line WebSocket 按订阅 identity 和 event audience 过滤，只给当前
   用户可见序列发送需要前端处理的事件。

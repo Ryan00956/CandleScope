@@ -14,6 +14,7 @@ from app.api.v1.stream_utils import (
     validate_ws_interval,
 )
 from app.data_engine.data_manager.models import DataEventType
+from app.data_engine.interval_policy import parse_interval_spec
 
 
 @dataclass(slots=True)
@@ -89,6 +90,9 @@ async def stream_single_kline(
     market_type: str = "spot",
 ) -> None:
     """Stream bars for a single interval using DataManager's EventBus."""
+    spec = parse_interval_spec(interval)
+    if spec is not None:
+        interval = spec.canonical
     consumer_id = f"ws:klines:{exchange}:{market_type}:{symbol}:{interval}:{id(websocket)}"
     try:
         await dm.ensure_stream(
@@ -281,7 +285,16 @@ async def stream_multi_kline(
                         break
                     continue
 
-                valid = [i for i in intervals if validate_ws_interval(i)]
+                valid: list[str] = []
+                seen_intervals: set[str] = set()
+                for raw_interval in intervals:
+                    if not validate_ws_interval(raw_interval):
+                        continue
+                    spec = parse_interval_spec(raw_interval)
+                    canonical = spec.canonical if spec is not None else raw_interval
+                    if canonical not in seen_intervals:
+                        seen_intervals.add(canonical)
+                        valid.append(canonical)
                 invalid = [i for i in intervals if not validate_ws_interval(i)]
 
                 if invalid:
@@ -299,38 +312,68 @@ async def stream_multi_kline(
                     continue
 
                 if action == "subscribe":
+                    subscribed_now: list[str] = []
+                    failed: list[dict[str, str]] = []
                     for iv in valid:
+                        if iv in active_intervals:
+                            subscribed_now.append(iv)
+                            continue
                         if iv not in active_intervals:
-                            await dm.ensure_stream(
-                                symbol,
-                                iv,
-                                exchange=exchange,
-                                market_type=market_type,
-                                focus_scope="websocket",
-                                consumer_id=consumer_id,
-                            )
-                            handle = dm.subscribe(
-                                callback=event_callback,
-                                symbol=symbol,
-                                interval=iv,
-                                exchange=exchange,
-                                market_type=market_type,
-                                event_types={
-                                    DataEventType.BAR_CREATED,
-                                    DataEventType.BAR_UPDATED,
-                                    DataEventType.BAR_CLOSED,
-                                    DataEventType.BAR_AMENDED,
-                                    DataEventType.BACKFILL_COMPLETED,
-                                },
-                            )
+                            try:
+                                await dm.ensure_stream(
+                                    symbol,
+                                    iv,
+                                    exchange=exchange,
+                                    market_type=market_type,
+                                    focus_scope="websocket",
+                                    consumer_id=consumer_id,
+                                )
+                                handle = dm.subscribe(
+                                    callback=event_callback,
+                                    symbol=symbol,
+                                    interval=iv,
+                                    exchange=exchange,
+                                    market_type=market_type,
+                                    event_types={
+                                        DataEventType.BAR_CREATED,
+                                        DataEventType.BAR_UPDATED,
+                                        DataEventType.BAR_CLOSED,
+                                        DataEventType.BAR_AMENDED,
+                                        DataEventType.BACKFILL_COMPLETED,
+                                    },
+                                )
+                            except Exception as exc:
+                                failed.append({"interval": iv, "error": str(exc)})
+                                release_stream = getattr(dm, "release_stream", None)
+                                if callable(release_stream):
+                                    try:
+                                        await release_stream(
+                                            symbol,
+                                            iv,
+                                            exchange=exchange,
+                                            market_type=market_type,
+                                            focus_scope="websocket",
+                                            consumer_id=consumer_id,
+                                        )
+                                    except Exception:
+                                        pass
+                                continue
                             subscriptions[iv] = handle
                             active_intervals.add(iv)
+                            subscribed_now.append(iv)
+
+                    if failed:
+                        await safe_send_json({
+                            "type": "warning",
+                            "detail": "Some intervals could not be subscribed",
+                            "failed": failed,
+                        })
 
                     await safe_send_json({
                         "type": "subscribed",
                         "exchange": exchange,
                         "symbol": symbol,
-                        "intervals": valid,
+                        "intervals": subscribed_now,
                         "market_type": market_type,
                     })
 

@@ -32,7 +32,6 @@ from .models import (
     BarStateChange,
     BarMergeStrategy,
     MergeMode,
-    is_standard_interval,
 )
 from .time_bucket import TimeBucketEngine
 
@@ -254,11 +253,11 @@ class BarStateEngine:
         self._time_bucket = time_bucket
         self._interval = interval
 
-        # Merge strategy (user-replaceable)
-        if is_standard_interval(interval):
-            self._merge_strategy = StandardOHLCVMerge()
-        else:
-            self._merge_strategy = ComponentSnapshotOHLCVMerge()
+        # Input semantics, not the target interval's global spelling, choose
+        # snapshot replacement versus component accumulation.
+        self._merge_strategy: BarMergeStrategy = StandardOHLCVMerge()
+        self._component_merge_strategy = ComponentSnapshotOHLCVMerge()
+        self._merge_strategy_overridden = False
 
         # Active (FORMING) bars: {(exchange, market_type, symbol, bucket_start_ms) → BarState}
         # Using OrderedDict to maintain insertion order for eviction
@@ -287,11 +286,19 @@ class BarStateEngine:
             engine.set_merge_strategy(HeikinAshiMerge())
         """
         self._merge_strategy = strategy
+        self._merge_strategy_overridden = True
         logger.info("Merge strategy changed to: %s", type(strategy).__name__)
 
     @property
     def merge_strategy(self) -> BarMergeStrategy:
         """Current merge strategy."""
+        return self._merge_strategy
+
+    def _strategy_for(self, bar_input: BarInput) -> BarMergeStrategy:
+        if self._merge_strategy_overridden:
+            return self._merge_strategy
+        if bar_input.merge_mode == MergeMode.COMPONENT:
+            return self._component_merge_strategy
         return self._merge_strategy
 
     # ── Public: Core Operation ───────────────────────────────
@@ -320,11 +327,12 @@ class BarStateEngine:
         exchange = exchange.strip().lower()
         market_type = market_type.strip().lower()
         key = (exchange, market_type, symbol, bucket_start_ms)
+        merge_strategy = self._strategy_for(bar_input)
 
         if key in self._active:
             # Existing active bar — merge
             state = self._active[key]
-            state = self._merge_strategy.apply(state, bar_input, is_new=False)
+            state = merge_strategy.apply(state, bar_input, is_new=False)
             self._active[key] = state
             # Move to end (most recently updated)
             self._active.move_to_end(key)
@@ -338,7 +346,7 @@ class BarStateEngine:
             # because backfill bars are complete final data and should replace
             # existing state rather than accumulate on top of it.
             if bar_input.source.value == "backfill":
-                state = self._merge_strategy.apply(old_state, bar_input, is_new=True)
+                state = merge_strategy.apply(old_state, bar_input, is_new=True)
                 state.status = BarStatus.CLOSED  # keep it closed
                 self._closed[key] = state
                 return state, BarStateChange.AMENDED
@@ -360,7 +368,7 @@ class BarStateEngine:
             close=0.0,
             volume=0.0,
         )
-        state = self._merge_strategy.apply(state, bar_input, is_new=True)
+        state = merge_strategy.apply(state, bar_input, is_new=True)
         self._active[key] = state
 
         # Evict oldest active bars if limit exceeded

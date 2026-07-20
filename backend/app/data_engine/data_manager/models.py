@@ -28,6 +28,7 @@ from app.data_engine.market_data.kline_metrics import (
     declared_enhanced_fields,
     serialize_kline_enhancements,
 )
+from app.data_engine.interval_policy import parse_interval_spec
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -55,7 +56,13 @@ class SeriesKey:
     def __post_init__(self) -> None:
         # Normalize symbol to uppercase
         object.__setattr__(self, "symbol", self.symbol.upper().strip())
-        object.__setattr__(self, "interval", self.interval.strip())
+        requested_interval = self.interval.strip()
+        interval_spec = parse_interval_spec(requested_interval)
+        object.__setattr__(
+            self,
+            "interval",
+            interval_spec.canonical if interval_spec is not None else requested_interval,
+        )
         object.__setattr__(self, "exchange", self.exchange.strip().lower())
         object.__setattr__(self, "market_type", self.market_type.strip().lower())
 

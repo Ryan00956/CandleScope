@@ -42,7 +42,8 @@ DataManager cache + EventBus
 | `data_manager` | 统一 query/cache/event/stream/backfill coordination/price/subscription/maintenance 门面 | 不直接实现交易所协议、不手写 backfill pipeline |
 | `backfill` | detect/plan/fetch/reconcile/publish 历史修复 pipeline，输出 `RepairReport` 和 `written_ranges` | 不管理 API/WS、不直接回灌 DataManager cache |
 | `storage` | SQLite K 线表、gap ledger、同步/异步 adapter、范围查询和缺口扫描 | 不作为业务数据门面暴露 |
-| `interval_policy.py` | 标准/自定义周期解析、bucket 对齐、周/月周期处理、fetch plan 辅助 | 不访问网络、不访问 storage |
+| `interval_policy.py` | 周期规范 identity 与 fixed/week/month timeline 语义 | 不判断交易所是否原生、不访问网络或 storage |
+| `interval_resolution.py` | 按 exchange/market/history-or-realtime 解析 native/derived route 和精确 base | 不计算 bucket、不执行 I/O |
 | `runtime.py` | 应用组合根：构造、注入、启动、关闭 Data Engine | 不承载业务查询逻辑 |
 
 ## 启动组合根
@@ -123,10 +124,11 @@ storage upsert + cache merge + EventBus
 
 要点：
 
-- 标准周期和自定义周期统一由 `IntervalPolicy` 和 `BarAggregator` 处理。
+- 所有周期共享 `IntervalSpec` timeline；交易所 native/derived 差异只由 `IntervalResolver` 处理。
+- BarAggregator 按输入 `MergeMode` 选择 snapshot/component/price-only 语义，不按周期名称分叉。
 - `BarData.time` 给前端使用，单位是秒；storage 和内部逻辑使用毫秒。
 - 非默认 exchange 或非 spot market 会进入 key/topic，例如 `okx:swap:BTC-USDT@1m`。
-- OKX `1m` realtime 可以 fan out 到更大标准周期；这类更新使用 `MergeMode.PRICE_ONLY`，只更新 OHLC，不累加 volume/trades。
+- OKX `1m` realtime 可以 fan out 到 resolver 判定为 native 且可精确铺满的更大周期；这类更新使用 `MergeMode.PRICE_ONLY`，只更新 OHLC，不累加 volume/trades。
 
 ## 历史缺口修复链路
 

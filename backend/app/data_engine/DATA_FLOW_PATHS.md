@@ -13,6 +13,27 @@
 | `DataEvent` | `DataManager` / `AggregatorBridge` / `BackfillCoordinator` | API WS streams, indicator bridge, subscribers | Public backend event bus message. |
 | `PriceSnapshot` | `DataManager.on_price_ticks()` | price REST/WS consumers | Lightweight watched-symbol price state, separate from OHLCV bars. |
 
+## Interval Semantics and Capability Routing
+
+Intervals have two independent dimensions. A global "standard interval" list
+must not be used to answer both:
+
+1. `interval_policy.IntervalSpec` is the sole owner of time semantics:
+   canonical identity, fixed-epoch / Monday-week / calendar-month alignment,
+   and floor/next/previous operations. Therefore `60m == 1h`, while
+   `7d != 1w` and `30d != 1M`. Every `nM` uses the absolute January 1970
+   month anchor instead of resetting at each year.
+2. `interval_resolution.IntervalResolver` is the sole owner of exchange
+   capability routing. For `(exchange, market_type, history|realtime)` it
+   chooses `NATIVE` or `DERIVED` and, for a derived target, one native base
+   interval that tiles it exactly.
+
+For example, Binance `8h` is native while OKX `8h` is derived from `4h`;
+both still share exactly the same `8h` timeline. Query, stream, backfill, and
+the `/resolve` API consume the same route. Bar merge/finalization behavior is
+selected by `MergeMode` (`SNAPSHOT`, `COMPONENT`, `PRICE_ONLY`, and so on),
+not by whether the target spelling appears in a global preset list.
+
 ## Realtime K-line Path
 
 ```text
@@ -20,7 +41,7 @@ WS /stream/klines or /stream/klines_multi
   -> dm.ensure_stream(symbol, interval, exchange, market_type)
   -> StreamEnsurePlanner
      -> aggregation targets registered in BarAggregator
-     -> prerequisite base streams selected for custom intervals
+     -> prerequisite base streams selected from the exchange-aware route
   -> StreamCoordinator.ensure_stream()
   -> ExchangeIngestionFactory.start(on_market_event, on_gap)
   -> MarketDataIngress.add_stream()
@@ -43,7 +64,7 @@ Rules:
 
 - `MarketEvent` does not mutate DataManager cache directly.
 - Realtime cache mutation happens through `AggregatorBridge` after `BarAggregator` emits a `BarEvent`.
-- Custom intervals reuse base interval input when `StreamEnsurePlanner` requires it.
+- Derived targets reuse the resolver-selected base interval when `StreamEnsurePlanner` requires it.
 - Non-default `exchange` and non-spot `market_type` are part of stream identity.
 
 ## Historical Repair Path

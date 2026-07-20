@@ -9,12 +9,12 @@ from zoneinfo import ZoneInfo
 
 from app.data_engine.history.models import TimeRange
 from app.data_engine.interval_policy import (
-    add_months,
     compute_bucket_end_ms,
     compute_bucket_start_ms,
     is_monthly_interval,
     is_weekly_interval,
     parse_interval_ms,
+    parse_interval_spec,
     parse_monthly_count,
 )
 
@@ -32,17 +32,17 @@ def _interval_width_ms(interval: str) -> int:
 
 
 def _next_bucket(open_ms: int, interval: str) -> int:
-    months = parse_monthly_count(interval)
-    if months is not None:
-        return add_months(open_ms // 1000, months) * 1000
-    return open_ms + _interval_width_ms(interval)
+    spec = parse_interval_spec(interval)
+    if spec is None:
+        raise ValueError(f"unsupported interval: {interval!r}")
+    return spec.next_ms(int(open_ms))
 
 
 def _previous_bucket(open_ms: int, interval: str) -> int:
-    months = parse_monthly_count(interval)
-    if months is not None:
-        return add_months(open_ms // 1000, -months) * 1000
-    return open_ms - _interval_width_ms(interval)
+    spec = parse_interval_spec(interval)
+    if spec is None:
+        raise ValueError(f"unsupported interval: {interval!r}")
+    return spec.previous_ms(int(open_ms))
 
 
 @runtime_checkable
@@ -421,10 +421,12 @@ class SessionCalendar:
         self, start_ms: int, end_ms: int, interval: str, width_ms: int
     ) -> tuple[int, ...]:
         if is_monthly_interval(interval):
-            months = parse_monthly_count(interval) or 1
+            spec = parse_interval_spec(interval)
+            if spec is None:  # pragma: no cover - validated by caller
+                return ()
             lookback_ms = max(
                 width_ms,
-                start_ms - add_months(start_ms // 1000, -months) * 1000,
+                start_ms - spec.previous_ms(spec.floor_ms(start_ms)),
             ) + (2 * _DAY_MS)
         else:
             lookback_ms = width_ms + (2 * _DAY_MS)

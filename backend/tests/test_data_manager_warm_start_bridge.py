@@ -224,6 +224,56 @@ def test_warm_start_custom_interval_replays_components_and_warms_cache() -> None
     asyncio.run(_run())
 
 
+def test_warm_start_exchange_derived_standard_uses_resolved_four_hour_base() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(update_throttle_ms=0))
+        agg.add_target("BTC-USDT", "8h", exchange="okx", market_type="spot")
+        bucket_start_ms = agg.compute_bucket("8h", 1_750_000_000_000)
+        assert bucket_start_ms is not None
+        fixed_now_ms = bucket_start_ms + 5 * 3_600_000
+        four_hours_ms = 4 * 3_600_000
+        rows = [
+            _row(bucket_start_ms, four_hours_ms, close=10),
+            _row(bucket_start_ms + four_hours_ms, four_hours_ms, close=20),
+        ]
+        storage = _Storage(rows=rows)
+        service = _service(
+            cache=BarCache(),
+            aggregator=agg,
+            storage=storage,
+            triggers=[],
+            base_interval="1m",
+        )
+
+        with patch(
+            "app.data_engine.data_manager.warm_start.time.time",
+            return_value=fixed_now_ms / 1000,
+        ):
+            await service.seed_if_needed(
+                "BTC-USDT",
+                "8h",
+                exchange="okx",
+                market_type="spot",
+                had_stream=True,
+            )
+
+        state = agg.get_bucket_state(
+            "BTC-USDT",
+            "8h",
+            bucket_start_ms,
+            exchange="okx",
+            market_type="spot",
+        )
+        assert storage.query_calls[0]["interval"] == "4h"
+        assert state is not None
+        assert state.open == 10
+        assert state.close == 21
+        assert state.volume == 300
+        assert state.tick_count == 2
+
+    asyncio.run(_run())
+
+
 def test_custom_sync_ignores_rows_from_previous_target_bucket() -> None:
     bucket_start = 45 * 60_000
     base_ms = 15 * 60_000

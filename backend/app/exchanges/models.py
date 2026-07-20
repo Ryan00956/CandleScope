@@ -336,6 +336,40 @@ class ExchangeCapabilities:
                 return item
         return None
 
+    def kline_intervals(
+        self,
+        market_type: str,
+        *,
+        history: bool = False,
+    ) -> tuple[str, ...]:
+        """Return purpose-aware native K-line intervals for one market.
+
+        Capability schema v2+ declares interval support on the concrete
+        K-line channel.  The exchange-wide ``native_intervals`` list is only a
+        compatibility fallback for schema-v1 documents that predate channel
+        capabilities.  This keeps callers from accidentally treating a
+        top-level superset (for example Binance spot ``1s``) as supported by a
+        narrower market/purpose channel.
+        """
+        capability = self.channel_capability(MarketChannel.KLINE, market_type)
+        if capability is None:
+            if self.capability_schema_version <= 1:
+                return _unique_strings(self.native_intervals)
+            return ()
+        if history and not capability.history:
+            return ()
+        if not history and not capability.realtime:
+            return ()
+
+        declared = capability.params.get("interval")
+        if isinstance(declared, str):
+            values = (declared,)
+        elif isinstance(declared, (list, tuple)):
+            values = tuple(declared)
+        else:
+            values = ()
+        return _unique_strings(values)
+
     def supports_channel(
         self,
         channel: MarketChannel | str,

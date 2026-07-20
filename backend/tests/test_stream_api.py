@@ -14,6 +14,11 @@ from app.data_engine.data_manager.models import (
     SeriesKey,
 )
 from app.data_engine.data_manager.subscriptions import SubscriptionTier
+from app.data_engine.interval_resolution import (
+    IntervalPurpose,
+    IntervalResolutionError,
+    IntervalResolutionErrorCode,
+)
 
 
 class _SingleStreamDataManager:
@@ -185,8 +190,15 @@ class _MultiStreamDataManager:
 class _PartiallyFailingMultiStreamDataManager(_MultiStreamDataManager):
     async def ensure_stream(self, symbol: str, interval: str, **kwargs) -> None:
         await super().ensure_stream(symbol, interval, **kwargs)
-        if interval == "7m":
-            raise ValueError("no exact realtime base")
+        if interval == "7s":
+            raise IntervalResolutionError(
+                IntervalResolutionErrorCode.NO_EXACT_BASE,
+                "No exact realtime base can reconstruct 7s",
+                exchange=kwargs["exchange"],
+                market_type=kwargs["market_type"],
+                interval=interval,
+                purpose=IntervalPurpose.REALTIME,
+            )
 
 
 class _PriceDataManager:
@@ -406,6 +418,9 @@ def test_kline_multi_ws_forwards_backfill_completed_event() -> None:
             "exchange": "binance",
             "symbol": "BTCUSDT",
             "intervals": ["1m"],
+            "requested_intervals": ["1m"],
+            "failed": [],
+            "active_intervals": ["1m"],
             "market_type": "spot",
         }
         message = ws.receive_json()
@@ -471,6 +486,7 @@ def test_kline_multi_ws_unsubscribe_releases_stream_consumer() -> None:
             "exchange": "binance",
             "symbol": "BTCUSDT",
             "intervals": ["1m"],
+            "active_intervals": [],
             "market_type": "spot",
         }
 
@@ -488,16 +504,39 @@ def test_kline_multi_ws_isolates_one_interval_ensure_failure() -> None:
     dm = _PartiallyFailingMultiStreamDataManager(emit_backfill=False)
     client = _stream_client(dm)
 
-    with client.websocket_connect("/api/v1/stream/klines_multi?symbol=BTCUSDT") as ws:
+    with client.websocket_connect(
+        "/api/v1/stream/klines_multi?symbol=BTCUSDT&market_type=futures"
+    ) as ws:
         assert ws.receive_json()["type"] == "connected"
-        ws.send_json({"action": "subscribe", "intervals": ["7m", "1m"]})
+        ws.send_json({
+            "action": "subscribe",
+            "intervals": ["7s", "1m"],
+            "request_id": "mixed-1",
+        })
         warning = ws.receive_json()
         subscribed = ws.receive_json()
 
     assert warning["type"] == "warning"
-    assert warning["failed"][0]["interval"] == "7m"
-    assert subscribed["type"] == "subscribed"
-    assert subscribed["intervals"] == ["1m"]
+    assert warning["failed"] == [{
+        "interval": "7s",
+        "error": "No exact realtime base can reconstruct 7s",
+    }]
+    expected_failure = [{
+        "interval": "7s",
+        "code": "no_exact_base",
+        "message": "No exact realtime base can reconstruct 7s",
+    }]
+    assert subscribed == {
+        "type": "subscribed",
+        "exchange": "binance",
+        "symbol": "BTCUSDT",
+        "intervals": ["1m"],
+        "requested_intervals": ["7s", "1m"],
+        "failed": expected_failure,
+        "active_intervals": ["1m"],
+        "market_type": "futures",
+        "request_id": "mixed-1",
+    }
     assert [call["interval"] for call in dm.subscribe_calls] == ["1m"]
 
 
@@ -513,6 +552,70 @@ def test_kline_multi_ws_dedupes_semantic_interval_aliases() -> None:
     assert subscribed["intervals"] == ["1h"]
     assert [call["interval"] for call in dm.ensure_stream_calls] == ["1h"]
     assert [call["interval"] for call in dm.subscribe_calls] == ["1h"]
+
+
+def test_kline_multi_ws_dynamic_ack_tracks_canonical_active_intervals() -> None:
+    dm = _MultiStreamDataManager(emit_backfill=False)
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines_multi?symbol=BTCUSDT") as ws:
+        assert ws.receive_json()["type"] == "connected"
+
+        ws.send_json({
+            "action": "subscribe",
+            "intervals": ["1m"],
+            "request_id": "subscribe-1",
+        })
+        assert ws.receive_json() == {
+            "type": "subscribed",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "intervals": ["1m"],
+            "requested_intervals": ["1m"],
+            "failed": [],
+            "active_intervals": ["1m"],
+            "market_type": "spot",
+            "request_id": "subscribe-1",
+        }
+
+        ws.send_json({
+            "action": "subscribe",
+            "intervals": ["60m", "1h", "5m"],
+            "request_id": "subscribe-2",
+        })
+        assert ws.receive_json() == {
+            "type": "subscribed",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "intervals": ["1h", "5m"],
+            "requested_intervals": ["1h", "5m"],
+            "failed": [],
+            "active_intervals": ["1h", "1m", "5m"],
+            "market_type": "spot",
+            "request_id": "subscribe-2",
+        }
+
+        ws.send_json({
+            "action": "unsubscribe",
+            "intervals": ["60m", "1h"],
+            "request_id": "unsubscribe-1",
+        })
+        assert ws.receive_json() == {
+            "type": "unsubscribed",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "intervals": ["1h"],
+            "active_intervals": ["1m", "5m"],
+            "market_type": "spot",
+            "request_id": "unsubscribe-1",
+        }
+        assert len(dm.unsubscribed) == 1
+
+    assert [call["interval"] for call in dm.ensure_stream_calls] == ["1m", "1h", "5m"]
+    assert [call["interval"] for call in dm.subscribe_calls] == ["1m", "1h", "5m"]
+    released = [call["interval"] for call in dm.release_stream_calls]
+    assert released[0] == "1h"
+    assert set(released[1:]) == {"1m", "5m"}
 
 
 def test_subscriptions_prices_returns_data_manager_price_snapshot() -> None:

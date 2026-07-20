@@ -15,6 +15,7 @@ from app.api.v1.stream_utils import (
 )
 from app.data_engine.data_manager.models import DataEventType
 from app.data_engine.interval_policy import parse_interval_spec
+from app.data_engine.interval_resolution import IntervalResolutionError
 
 
 @dataclass(slots=True)
@@ -72,6 +73,29 @@ class _KlineWsOutbox:
                 self._latest.pop(item.key, None)
             return item.message
         return item
+
+
+def _subscription_failure(interval: str, exc: Exception) -> dict[str, str]:
+    """Return the stable, client-facing shape for one rejected interval."""
+    if isinstance(exc, IntervalResolutionError):
+        detail = exc.to_dict()
+        return {
+            "interval": detail.get("interval") or interval,
+            "code": detail["code"],
+            "message": detail["message"],
+        }
+    return {
+        "interval": interval,
+        "code": "stream_subscription_failed",
+        "message": str(exc),
+    }
+
+
+def _with_request_id(payload: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
+    """Echo an optional request identifier without changing legacy messages."""
+    if "request_id" in message:
+        payload["request_id"] = message.get("request_id")
+    return payload
 
 
 def should_forward_browser_event(event) -> bool:
@@ -343,7 +367,7 @@ async def stream_multi_kline(
                                     },
                                 )
                             except Exception as exc:
-                                failed.append({"interval": iv, "error": str(exc)})
+                                failed.append(_subscription_failure(iv, exc))
                                 release_stream = getattr(dm, "release_stream", None)
                                 if callable(release_stream):
                                     try:
@@ -366,16 +390,25 @@ async def stream_multi_kline(
                         await safe_send_json({
                             "type": "warning",
                             "detail": "Some intervals could not be subscribed",
-                            "failed": failed,
+                            "failed": [
+                                {
+                                    "interval": failure["interval"],
+                                    "error": failure["message"],
+                                }
+                                for failure in failed
+                            ],
                         })
 
-                    await safe_send_json({
+                    await safe_send_json(_with_request_id({
                         "type": "subscribed",
                         "exchange": exchange,
                         "symbol": symbol,
                         "intervals": subscribed_now,
+                        "requested_intervals": valid,
+                        "failed": failed,
+                        "active_intervals": sorted(active_intervals),
                         "market_type": market_type,
-                    })
+                    }, msg))
 
                 elif action == "unsubscribe":
                     for iv in valid:
@@ -401,13 +434,14 @@ async def stream_multi_kline(
                                     )
                                 except Exception:
                                     pass
-                    await safe_send_json({
+                    await safe_send_json(_with_request_id({
                         "type": "unsubscribed",
                         "exchange": exchange,
                         "symbol": symbol,
                         "intervals": valid,
+                        "active_intervals": sorted(active_intervals),
                         "market_type": market_type,
-                    })
+                    }, msg))
 
                 else:
                     await safe_send_json({

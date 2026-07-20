@@ -15,6 +15,7 @@ from app.data_engine.bar_aggregator import (
     BarAggregatorConfig,
     BarEvent,
     BarEventType,
+    BarFinality,
     BarInput,
     BarInputSource,
     BarState,
@@ -1372,6 +1373,8 @@ def test_aggregator_bridge_persists_closed_bar_and_preserves_exchange() -> None:
             volume=10,
             exchange="okx",
             market_type="spot",
+            finality=BarFinality.AUTHORITATIVE,
+            close_reason="source_close",
         )
 
         await bridge.on_bar_event(BarEvent(BarEventType.CLOSED, state))
@@ -1379,6 +1382,7 @@ def test_aggregator_bridge_persists_closed_bar_and_preserves_exchange() -> None:
         key = SeriesKey("BTC-USDT", "1m", exchange="okx", market_type="spot")
         assert storage.calls[0]["exchange"] == "okx"
         assert storage.calls[0]["market_type"] == "spot"
+        assert storage.calls[0]["source"] == "data_manager_exchange_closed"
         assert cache.get_latest(key, 1)[0].close == 2
         assert marked == [key]
         await _wait_until(lambda: len(events) == 1)
@@ -1714,7 +1718,15 @@ def test_calendar_backed_two_month_before_expands_through_real_month_end() -> No
 
 def test_high_factor_custom_before_pages_base_rows_instead_of_reporting_capacity_gap() -> None:
     base_bars = [
-        BarData(time=index * 60, open=1, high=2, low=1, close=2, volume=1)
+        BarData(
+            time=index * 60,
+            open=1,
+            high=2,
+            low=1,
+            close=2,
+            volume=1,
+            source="backfill",
+        )
         for index in range(182)
     ]
     calls: list[tuple[int, int]] = []
@@ -1744,6 +1756,11 @@ def test_high_factor_custom_before_pages_base_rows_instead_of_reporting_capacity
             complete=True,
             retryable=False,
             terminal_reason=None if has_more else "source_exhausted",
+            metadata={
+                "all_rows_final": True,
+                "expected_closed_rows": len(page),
+                "untrusted_final_rows": 0,
+            },
         )
 
     service = CustomIntervalQueryService(
@@ -2145,6 +2162,60 @@ def test_bar_aggregator_aggregate_batch_is_isolated() -> None:
         assert states[0].low == 0.5
         assert states[0].close == 2.5
         assert states[0].volume == 6
+
+    asyncio.run(_run())
+
+
+def test_bar_aggregator_authoritative_batch_rejects_partial_component_coverage() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig())
+        only_last_component = [{
+            "open_time": 60_000,
+            "close_time": 119_999,
+            "open": 2,
+            "high": 3,
+            "low": 1,
+            "close": 2.5,
+            "volume": 4,
+        }]
+
+        diagnostic = await agg.aggregate_batch(
+            "BTCUSDT",
+            "2m",
+            "1m",
+            only_last_component,
+        )
+        durable = await agg.aggregate_batch(
+            "BTCUSDT",
+            "2m",
+            "1m",
+            only_last_component,
+            require_authoritative=True,
+        )
+        complete = await agg.aggregate_batch(
+            "BTCUSDT",
+            "2m",
+            "1m",
+            [
+                {
+                    "open_time": 0,
+                    "close_time": 59_999,
+                    "open": 1,
+                    "high": 2,
+                    "low": 0.5,
+                    "close": 1.5,
+                    "volume": 3,
+                },
+                only_last_component[0],
+            ],
+            require_authoritative=True,
+        )
+
+        assert len(diagnostic) == 1
+        assert diagnostic[0].finality == BarFinality.PROVISIONAL
+        assert durable == []
+        assert len(complete) == 1
+        assert complete[0].finality == BarFinality.AUTHORITATIVE
 
     asyncio.run(_run())
 

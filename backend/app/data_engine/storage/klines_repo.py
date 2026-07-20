@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from app.core.config import KLINES_DB_PATH
 from app.core.executors import run_storage
+from app.data_engine.kline_quality import source_rank_sql
 from app.data_engine.history.calendar import (
     AlwaysOpenCalendar,
     CalendarRegistry,
@@ -238,8 +239,10 @@ def upsert_klines(
     ]
 
     with _connect() as conn:
+        incoming_rank_sql = source_rank_sql("excluded.source")
+        stored_rank_sql = source_rank_sql("klines.source")
         conn.executemany(
-            """
+            f"""
             INSERT INTO klines (
                 exchange, market_type, symbol, interval, open_time,
                 close_time, open, high, low, close, volume, quote_volume,
@@ -259,6 +262,7 @@ def upsert_klines(
                 taker_buy_quote = excluded.taker_buy_quote,
                 source = excluded.source,
                 updated_at = excluded.updated_at
+            WHERE {incoming_rank_sql} >= {stored_rank_sql}
             """,
             payload,
         )

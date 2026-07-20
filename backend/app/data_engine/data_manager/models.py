@@ -28,6 +28,10 @@ from app.data_engine.market_data.kline_metrics import (
     declared_enhanced_fields,
     serialize_kline_enhancements,
 )
+from app.data_engine.kline_quality import (
+    kline_source_quality,
+    normalize_kline_source,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -101,6 +105,17 @@ class BarData:
     trades: int | None = None
     taker_buy_base: float | None = None
     taker_buy_quote: float | None = None
+    source: str = ""
+    quality_rank: int = field(init=False, repr=False)
+    quality: str = field(init=False, repr=False)
+    trusted_final: bool = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.source = normalize_kline_source(self.source)
+        resolved = kline_source_quality(self.source)
+        self.quality_rank = resolved.rank
+        self.quality = resolved.finality.value
+        self.trusted_final = bool(self.is_closed and resolved.trusted_final)
 
     def to_dict(self) -> dict:
         """Return the legacy lightweight-charts OHLCV shape."""
@@ -183,6 +198,7 @@ class BarData:
             trades=cls._optional_int(d.get("trades")),
             taker_buy_base=cls._optional_float(d.get("taker_buy_base")),
             taker_buy_quote=cls._optional_float(d.get("taker_buy_quote")),
+            source=d.get("source", ""),
         )
 
     @classmethod
@@ -217,6 +233,7 @@ class BarData:
             if "taker_buy_base" in fields else None,
             taker_buy_quote=cls._optional_float(row.get("taker_buy_quote"))
             if "taker_buy_quote" in fields else None,
+            source=row.get("source", ""),
         )
 
     @classmethod
@@ -226,6 +243,27 @@ class BarData:
             status = getattr(bar_state, "status", None)
             is_closed = getattr(status, "value", status) == "closed"
         fields = frozenset(getattr(bar_state, "enhanced_fields", ()) or ())
+        source = str(getattr(bar_state, "quality_source", "") or "")
+        if not source and bool(is_closed):
+            finality_is_explicit = hasattr(bar_state, "finality")
+            finality = getattr(bar_state, "finality", None)
+            finality_value = getattr(finality, "value", finality)
+            close_reason = str(getattr(bar_state, "close_reason", "") or "")
+            if (
+                not close_reason
+                and not finality_is_explicit
+                and bool(getattr(bar_state, "requires_authoritative_close", False))
+                and bool(getattr(bar_state, "last_close_received", False))
+            ):
+                close_reason = "source_close"
+                finality_value = "authoritative"
+            if finality_value == "authoritative":
+                source = {
+                    "source_close": "data_manager_exchange_closed",
+                    "composite_close": "data_manager_composite_closed",
+                    "batch": "backfill_rest_verified",
+                    "backfill_amendment": "data_manager_amended",
+                }.get(close_reason, "")
         return cls(
             time=bar_state.bucket_start_ms // 1000,
             open=round(bar_state.open, 8),
@@ -242,6 +280,7 @@ class BarData:
             if "taker_buy_base" in fields else None,
             taker_buy_quote=cls._optional_float(getattr(bar_state, "taker_buy_quote", None))
             if "taker_buy_quote" in fields else None,
+            source=source,
         )
 
     def with_closed_state(self, is_closed: bool) -> BarData:
@@ -258,6 +297,24 @@ class BarData:
             trades=self.trades,
             taker_buy_base=self.taker_buy_base,
             taker_buy_quote=self.taker_buy_quote,
+            source=self.source,
+        )
+
+    def with_source(self, source: str) -> BarData:
+        """Return a copy with identical values and newly resolved provenance."""
+        return BarData(
+            time=self.time,
+            open=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
+            is_closed=self.is_closed,
+            quote_volume=self.quote_volume,
+            trades=self.trades,
+            taker_buy_base=self.taker_buy_base,
+            taker_buy_quote=self.taker_buy_quote,
+            source=source,
         )
 
     @staticmethod

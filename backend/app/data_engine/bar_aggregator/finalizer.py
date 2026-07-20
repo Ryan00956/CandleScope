@@ -59,6 +59,24 @@ from .time_bucket import TimeBucketEngine
 logger = logging.getLogger("bar_aggregator.L4_Finalizer")
 
 
+def _has_complete_closed_component_coverage(state: BarState) -> bool:
+    """Prove that closed component snapshots cover the whole target bucket."""
+    ordered = sorted(
+        state.source_snapshots.values(),
+        key=lambda item: (int(item["open_time_ms"]), int(item["close_time_ms"])),
+    )
+    if not ordered or not all(bool(item.get("is_closed")) for item in ordered):
+        return False
+    if int(ordered[0]["open_time_ms"]) != state.bucket_start_ms:
+        return False
+    if int(ordered[-1]["close_time_ms"]) + 1 < state.bucket_end_ms:
+        return False
+    return all(
+        int(current["open_time_ms"]) == int(previous["close_time_ms"]) + 1
+        for previous, current in zip(ordered, ordered[1:])
+    )
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Built-in Finalization Strategies
 # ═══════════════════════════════════════════════════════════════
@@ -112,7 +130,7 @@ class CompositeCloseFinalizer:
             input_open_time_ms=bar_input.open_time_ms,
             input_close_time_ms=bar_input.close_time_ms,
             bucket_start_ms=state.bucket_start_ms,
-        )
+        ) and _has_complete_closed_component_coverage(state)
 
 
 class EventDrivenFinalizer:
@@ -196,7 +214,7 @@ class BatchFinalizer:
             input_open_time_ms=bar_input.open_time_ms,
             input_close_time_ms=bar_input.close_time_ms,
             bucket_start_ms=state.bucket_start_ms,
-        )
+        ) and _has_complete_closed_component_coverage(state)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -299,6 +317,12 @@ class Finalizer:
             return None
 
         for name, strategy in self._strategies:
+            # Backfill is a finite component set. Only BatchFinalizer may
+            # decide when that set proves a complete target bucket; letting an
+            # old timestamp fall through to time_based would seal the first
+            # component before the rest of the batch is applied.
+            if trigger.is_backfill and name != "batch":
+                continue
             try:
                 if strategy.should_close(state, trigger):
                     state.close_reason = name

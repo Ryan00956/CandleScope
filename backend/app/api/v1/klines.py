@@ -223,8 +223,6 @@ async def _poll_backfill_storage(
         if _backfill_request_ids(result)
         else None
     )
-    exact_wait_completed = False
-
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -238,7 +236,11 @@ async def _poll_backfill_storage(
                         timeout=wait_seconds,
                     )
                     if wait_task in done:
-                        exact_wait_completed = await wait_task
+                        # Completion only means that the exact request reached
+                        # a terminal coordinator state. Its storage result may
+                        # still be failed, partial, or untrusted, so the ready
+                        # predicate remains the publication boundary.
+                        await wait_task
                         wait_task = None
 
             # Always inspect storage after each bounded wait, including the
@@ -251,8 +253,7 @@ async def _poll_backfill_storage(
                 else bool(result.bars and not wait_through_partial_rows)
             )
             if (
-                exact_wait_completed
-                or time.monotonic() >= deadline
+                time.monotonic() >= deadline
                 or result_ready
             ):
                 return result
@@ -356,6 +357,8 @@ def _history_contract_payload(
 ) -> dict[str, Any]:
     """Serialize the additive terminal/pending history contract."""
     metadata = dict(getattr(result, "metadata", None) or {})
+    raw_all_rows_final = metadata.get("all_rows_final")
+    all_rows_final = bool(raw_all_rows_final) if raw_all_rows_final is not None else False
     payload = {
         "history_state": getattr(result, "history_state", "ready"),
         "complete": bool(getattr(result, "complete", False)),
@@ -366,6 +369,7 @@ def _history_contract_payload(
         "availability_revision": getattr(result, "availability_revision", None),
         "excluded_ranges": list(getattr(result, "excluded_ranges", ()) or ()),
         "retry_at_ms": metadata.get("backfill_retry_at_ms"),
+        "all_rows_final": all_rows_final,
     }
     observed_missing = (
         list(getattr(result, "missing_ranges", ()) or ())
@@ -376,7 +380,11 @@ def _history_contract_payload(
     # can find a gap that a count-based result alone cannot express.  A known
     # terminal edge may stop pagination farther left, but it cannot mark a
     # repairable hole inside the returned fetchable window as complete.
-    if verified_contiguous is False or bool(observed_missing):
+    if (
+        verified_contiguous is False
+        or bool(observed_missing)
+        or not all_rows_final
+    ):
         payload.update({
             "history_state": "pending",
             "complete": False,
@@ -384,11 +392,30 @@ def _history_contract_payload(
         })
     elif (
         verified_contiguous is True
+        and all_rows_final
         and payload["history_state"] == "ready"
         and not observed_missing
     ):
         payload.update({"complete": True, "retryable": False})
     return payload
+
+
+def _all_rows_final(result: Any) -> bool:
+    """Return the QueryEngine finality verdict without inferring from OHLCV."""
+    metadata = dict(getattr(result, "metadata", None) or {})
+    value = metadata.get("all_rows_final")
+    return bool(value) if value is not None else False
+
+
+def _history_page_finality_ready(result: Any) -> bool:
+    """Require proven final rows and no remaining repair work."""
+    return bool(
+        _all_rows_final(result)
+        and not getattr(result, "missing_ranges", None)
+        and not getattr(result, "has_tail_gap", False)
+        and getattr(result, "history_state", "pending") != "pending"
+        and not getattr(result, "retryable", False)
+    )
 
 
 def _cap_range_request(
@@ -1110,6 +1137,7 @@ async def get_latest_klines(
         "source": result.source.value,
         "fetched": result.total,
         "backfill_triggered": result.backfill_triggered,
+        **_history_contract_payload(result),
         "cache": result.metadata,
         "data": data,
         "base_interval": None,
@@ -1254,9 +1282,19 @@ async def get_klines_history(
                 timeout_seconds=max_wait_ms / 1000,
                 requery=_run_history_query,
                 wait_through_partial_rows=bool(result.bars or verification_only),
-                ready=lambda candidate: _verify_history_result(candidate)[1][
-                    "verified_contiguous"
-                ],
+                ready=lambda candidate: (
+                    (
+                        _verify_history_result(candidate)[1]["verified_contiguous"]
+                        and _all_rows_final(candidate)
+                    )
+                    or (
+                        not candidate.bars
+                        and _all_rows_final(candidate)
+                        and candidate.history_state == "exhausted"
+                        and candidate.complete
+                        and not candidate.retryable
+                    )
+                ),
             )
             data, verification = _verify_history_result(result)
     except Exception as exc:
@@ -1446,7 +1484,10 @@ async def get_klines_range(
         if (
             repair_mode == "wait"
             and wait_ms > 0
-            and not verification["verified_contiguous"]
+            and (
+                not verification["verified_contiguous"]
+                or not _all_rows_final(result)
+            )
             and result.backfill_triggered
         ):
             result = await _poll_backfill_storage(
@@ -1455,9 +1496,10 @@ async def get_klines_range(
                 timeout_seconds=wait_ms / 1000,
                 requery=_run_range_query,
                 wait_through_partial_rows=True,
-                ready=lambda candidate: _verify_range_result(candidate)[1][
-                    "verified_contiguous"
-                ],
+                ready=lambda candidate: (
+                    _verify_range_result(candidate)[1]["verified_contiguous"]
+                    and _all_rows_final(candidate)
+                ),
             )
             data, verification = _verify_range_result(result)
             backfill_triggered = backfill_triggered or bool(result.backfill_triggered)
@@ -1469,7 +1511,8 @@ async def get_klines_range(
         verification["missing_ranges"],
     )
     verified = verification["verified_contiguous"]
-    renderable = verified or not strict
+    all_rows_final = _all_rows_final(result)
+    renderable = (verified and all_rows_final) or not strict
     rendered_data = data if renderable else []
     return {
         "exchange": exchange,
@@ -1489,6 +1532,7 @@ async def get_klines_range(
         "has_tail_gap": result.has_tail_gap,
         "backfill_triggered": backfill_triggered,
         "verified_contiguous": verified,
+        "all_rows_final": all_rows_final,
         "renderable": renderable,
         "missing_ranges": missing_ranges,
         "expected_bars": verification["expected_bars"],
@@ -1565,6 +1609,7 @@ async def get_klines_before(
                 timeout_seconds=max_wait_ms / 1000,
                 requery=_run_before_query,
                 wait_through_partial_rows=bool(result.bars),
+                ready=_history_page_finality_ready,
             )
             # If the wait timed out before the backfill delivered bars, keep
             # has_more=True (data is still on the way) so the client retries

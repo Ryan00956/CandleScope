@@ -26,6 +26,7 @@ from app.data_engine.interval_policy import (
 )
 from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
 from app.data_engine.history.calendar import expected_bucket_end_ms
+from app.data_engine.kline_quality import source_rank
 
 from .cache import BarCache
 from .config import QueryConfig
@@ -388,8 +389,13 @@ class CustomIntervalQueryService:
                 exclusions_by_identity.setdefault(identity, dict(exclusion))
 
         missing_ranges = list(missing_by_identity.values())
+        all_rows_final = all(
+            result.metadata.get("all_rows_final") is True
+            for result in results
+        )
         pending = bool(
             missing_ranges
+            or not all_rows_final
             or any(result.retryable or result.history_state == "pending" for result in results)
         )
         if pending:
@@ -428,6 +434,15 @@ class CustomIntervalQueryService:
             missing_ranges=missing_ranges,
             metadata={
                 **newest.metadata,
+                "all_rows_final": all_rows_final,
+                "expected_closed_rows": sum(
+                    int(result.metadata.get("expected_closed_rows") or 0)
+                    for result in results
+                ),
+                "untrusted_final_rows": sum(
+                    int(result.metadata.get("untrusted_final_rows") or 0)
+                    for result in results
+                ),
                 "base_page_count": len(results),
             },
             history_state=history_state,
@@ -529,7 +544,12 @@ class CustomIntervalQueryService:
                 break
             next_cursor_ms = min(bar.time_ms for bar in page.bars)
             for bar in page.bars:
-                by_time[bar.time] = bar
+                existing = by_time.get(bar.time)
+                if existing is None or source_rank(bar.source) > source_rank(existing.source):
+                    # Pages are read newest-to-oldest. Preserve the newer page
+                    # on equal authority, but never let it mask a higher-grade
+                    # row from an overlapping older page.
+                    by_time[bar.time] = bar
             if next_cursor_ms >= cursor_ms:
                 logger.error(
                     "Custom base pagination made no progress for %s %s at %d",

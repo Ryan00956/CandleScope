@@ -715,6 +715,52 @@ def test_complete_custom_components_still_emit_closed() -> None:
     asyncio.run(_run())
 
 
+def test_last_custom_component_alone_cannot_claim_authoritative_close() -> None:
+    async def _exercise(source: BarInputSource) -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            finalize_timeout_ms=10**12,
+            update_throttle_ms=0,
+        ))
+        agg.add_target("BTC-USDT", "45m", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+        bucket_start_ms = agg.compute_bucket("45m", int(time.time() * 1000))
+        assert bucket_start_ms is not None
+
+        await agg.ingest_bar_input(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "45m",
+            _input(
+                bucket_start_ms + 1_800_000,
+                source_interval="15m",
+                close=12,
+                source=source,
+                is_closed=True,
+                merge_mode=MergeMode.COMPONENT,
+            ),
+        )
+
+        state = agg.get_bucket_state(
+            "BTC-USDT",
+            "45m",
+            bucket_start_ms,
+            exchange="okx",
+            market_type="spot",
+        )
+        assert state is not None
+        assert state.status == BarStatus.FORMING
+        assert state.finality == BarFinality.PROVISIONAL
+        assert [event.event_type for event in events].count(BarEventType.CLOSED) == 0
+
+    async def _run() -> None:
+        await _exercise(BarInputSource.REALTIME)
+        await _exercise(BarInputSource.BACKFILL)
+
+    asyncio.run(_run())
+
+
 def test_incomplete_custom_next_bucket_fallback_stays_provisional() -> None:
     async def _run() -> None:
         agg = BarAggregator(BarAggregatorConfig(

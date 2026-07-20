@@ -38,6 +38,7 @@ from app.data_engine.interval_policy import (
     parse_custom_interval,
     parse_interval_ms,
 )
+from app.data_engine.kline_quality import incoming_source_can_replace
 from app.data_engine.history import (
     BoundaryReason,
     ExchangeHistoryPolicyResolver,
@@ -197,7 +198,7 @@ class QueryEngine:
         allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
 
         if is_custom_interval(interval):
-            return self.custom_intervals.query_from_base(
+            result = self.custom_intervals.query_from_base(
                 symbol=symbol,
                 interval=interval,
                 start_ms=start_ms,
@@ -208,6 +209,8 @@ class QueryEngine:
                 market_type=market_type,
                 auto_backfill=auto_backfill,
             )
+            key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+            return self._apply_custom_finality_contract(result, key, end_ms=end_ms)
 
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
 
@@ -243,13 +246,17 @@ class QueryEngine:
         # expected durable history, so do not treat it as a storage/backfill
         # shortfall.  Keep the original end for reads; use the closed edge only
         # when judging history completeness.
+        now_ms = int(time.time() * 1000)
+        eligible_end_ms = self._latest_eligible_open_ms(
+            key,
+            now_ms=now_ms,
+            requested_end_ms=end_ms,
+        )
+        expected_closed_through_s = (
+            eligible_end_ms // 1000 if eligible_end_ms is not None else None
+        )
         closed_end_s = end_s
         if end_ms is not None:
-            eligible_end_ms = self._latest_eligible_open_ms(
-                key,
-                now_ms=int(time.time() * 1000),
-                requested_end_ms=end_ms,
-            )
             if eligible_end_ms is not None:
                 closed_end_s = min(end_s, eligible_end_ms // 1000)
 
@@ -266,6 +273,7 @@ class QueryEngine:
             effective_limit,
             interval=interval,
             key=key,
+            expected_closed_through_s=expected_closed_through_s,
         ):
             self._cache_hits += 1
             elapsed = time.monotonic() - t0
@@ -280,7 +288,7 @@ class QueryEngine:
                 has_more=self._cache.series_count(key) > len(cached),
                 cache_hit=True,
                 metadata={"elapsed_ms": round(elapsed * 1000, 2)},
-            ), planned)
+            ), planned, expected_closed_through_s=expected_closed_through_s)
 
         # ── Step 2: Try storage ──────────────────────────────
         storage_bars: list[BarData] = []
@@ -373,7 +381,23 @@ class QueryEngine:
                 backfill_triggered=backfill_triggered,
                 missing_ranges=missing_ranges,
                 metadata={"elapsed_ms": round(elapsed * 1000, 2)},
-            ), planned, boundary_reached=bool(planned and planned[0].terminal))
+            ), planned,
+                boundary_reached=bool(planned and planned[0].terminal),
+                expected_closed_through_s=expected_closed_through_s,
+            )
+
+        quality_range = self._trigger_untrusted_finality_backfill(
+            key,
+            merged,
+            expected_closed_through_s=expected_closed_through_s,
+            submit=allow_backfill,
+        )
+        if quality_range is not None:
+            missing_ranges.append(quality_range)
+            backfill_triggered = bool(
+                backfill_triggered
+                or (allow_backfill and self._backfill_trigger is not None)
+            )
 
         # ── Step 4: Check completeness & backfill ────────────
         tail_range: tuple[int, int] | None = None
@@ -386,6 +410,7 @@ class QueryEngine:
                 effective_limit,
                 interval=interval,
                 key=key,
+                expected_closed_through_s=expected_closed_through_s,
             )
         ):
             interval_secs = parse_custom_interval(key.interval) or 60
@@ -477,7 +502,7 @@ class QueryEngine:
             has_tail_gap=tail_gap,
             missing_ranges=missing_ranges,
             metadata={"elapsed_ms": round(elapsed * 1000, 2)},
-        ), planned)
+        ), planned, expected_closed_through_s=expected_closed_through_s)
 
     # ── Public: Convenience Methods ──────────────────────────
 
@@ -510,7 +535,7 @@ class QueryEngine:
         """Query bars strictly before a timestamp (for pagination)."""
         allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
         if is_custom_interval(interval):
-            return self.custom_intervals.query_before(
+            result = self.custom_intervals.query_before(
                 symbol,
                 interval,
                 before_ms,
@@ -518,6 +543,12 @@ class QueryEngine:
                 exchange=exchange,
                 market_type=market_type,
                 auto_backfill=auto_backfill,
+            )
+            key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+            return self._apply_custom_finality_contract(
+                result,
+                key,
+                end_ms=max(0, int(before_ms) - 1),
             )
 
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
@@ -530,6 +561,14 @@ class QueryEngine:
         )
         planned = self._plan_history_range(key, history_start_ms, history_end_ms)
         history_fetch_allowed = planned is None or planned[0].has_fetch_work
+        eligible_end_ms = self._latest_eligible_open_ms(
+            key,
+            now_ms=int(time.time() * 1000),
+            requested_end_ms=history_end_ms,
+        )
+        expected_closed_through_s = (
+            eligible_end_ms // 1000 if eligible_end_ms is not None else None
+        )
 
         # Ephemeral intervals are cache-only — skip storage and backfill
         if is_ephemeral_interval(interval):
@@ -546,7 +585,7 @@ class QueryEngine:
                 cache_hit=bool(cached),
                 backfill_triggered=False,
                 metadata={"ephemeral": True},
-            ), planned)
+            ), planned, expected_closed_through_s=expected_closed_through_s)
 
         # Try cache first
         cached = self._cache.get_before(key, before_s, effective_limit)
@@ -562,6 +601,10 @@ class QueryEngine:
                 cached,
                 history_end_ms=history_end_ms,
             ) is None
+            and self._all_expected_rows_final(
+                cached,
+                expected_closed_through_s=expected_closed_through_s,
+            )
         ):
             return self._apply_history_contract(QueryResult(
                 bars=cached,
@@ -573,7 +616,7 @@ class QueryEngine:
                 total=len(cached),
                 has_more=True,
                 cache_hit=True,
-            ), planned)
+            ), planned, expected_closed_through_s=expected_closed_through_s)
 
         # Fall back to storage
         storage_bars: list[BarData] = []
@@ -632,6 +675,23 @@ class QueryEngine:
                 merged = merged[-effective_limit:]
             backfill_triggered = bool(
                 allow_backfill and missing_ranges and self._backfill_trigger is not None
+            )
+
+        quality_range = self._trigger_untrusted_finality_backfill(
+            key,
+            merged,
+            expected_closed_through_s=expected_closed_through_s,
+            submit=allow_backfill and history_fetch_allowed,
+        )
+        if quality_range is not None:
+            missing_ranges.append(quality_range)
+            backfill_triggered = bool(
+                backfill_triggered
+                or (
+                    allow_backfill
+                    and history_fetch_allowed
+                    and self._backfill_trigger is not None
+                )
             )
 
         if len(merged) < effective_limit and history_fetch_allowed:
@@ -718,6 +778,7 @@ class QueryEngine:
             result,
             planned,
             boundary_reached=boundary_reached,
+            expected_closed_through_s=expected_closed_through_s,
         )
         if boundary_reached and result.bars:
             result.earliest_available_ms = result.bars[0].time_ms
@@ -915,6 +976,7 @@ class QueryEngine:
         planned: tuple[HistoryPlan, ResolvedHistoryContext] | None,
         *,
         boundary_reached: bool = False,
+        expected_closed_through_s: int | None = None,
     ) -> QueryResult:
         # Start from the observed continuity result.  Availability planning may
         # override this below (terminal edge, market closure, unknown source),
@@ -932,7 +994,10 @@ class QueryEngine:
             result.terminal_reason = None
         if planned is None:
             result.next_before_ms = result.bars[0].time_ms if result.has_more and result.bars else None
-            return result
+            return self._apply_finality_contract(
+                result,
+                expected_closed_through_s=expected_closed_through_s,
+            )
 
         plan, context = planned
         earliest_ms, lower_reason = self._lower_history_bound(context)
@@ -985,16 +1050,156 @@ class QueryEngine:
             result.retryable = False
             result.terminal_reason = None
         result.next_before_ms = result.bars[0].time_ms if result.has_more and result.bars else None
+        return self._apply_finality_contract(
+            result,
+            expected_closed_through_s=expected_closed_through_s,
+        )
+
+    @staticmethod
+    def _expected_closed_rows(
+        bars: list[BarData],
+        *,
+        expected_closed_through_s: int | None,
+    ) -> list[BarData]:
+        """Return rows whose buckets must already carry trusted finality.
+
+        A latest/history response may include the current forming tail.  It is
+        intentionally outside the closed edge and cannot make an otherwise
+        healthy page permanently pending.
+        """
+        if expected_closed_through_s is None:
+            return [bar for bar in bars if bar.is_closed]
+        return [bar for bar in bars if bar.time <= expected_closed_through_s]
+
+    @classmethod
+    def _untrusted_expected_rows(
+        cls,
+        bars: list[BarData],
+        *,
+        expected_closed_through_s: int | None,
+    ) -> list[BarData]:
+        return [
+            bar
+            for bar in cls._expected_closed_rows(
+                bars,
+                expected_closed_through_s=expected_closed_through_s,
+            )
+            if not bar.trusted_final
+        ]
+
+    @classmethod
+    def _all_expected_rows_final(
+        cls,
+        bars: list[BarData],
+        *,
+        expected_closed_through_s: int | None,
+    ) -> bool:
+        return not cls._untrusted_expected_rows(
+            bars,
+            expected_closed_through_s=expected_closed_through_s,
+        )
+
+    def _apply_finality_contract(
+        self,
+        result: QueryResult,
+        *,
+        expected_closed_through_s: int | None,
+    ) -> QueryResult:
+        expected = self._expected_closed_rows(
+            result.bars,
+            expected_closed_through_s=expected_closed_through_s,
+        )
+        untrusted = [bar for bar in expected if not bar.trusted_final]
+        result.metadata["all_rows_final"] = not untrusted
+        result.metadata["expected_closed_rows"] = len(expected)
+        result.metadata["untrusted_final_rows"] = len(untrusted)
+        if expected_closed_through_s is not None:
+            result.metadata["expected_closed_through_ms"] = (
+                int(expected_closed_through_s) * 1000
+            )
+        if untrusted:
+            result.metadata["untrusted_final_start_ms"] = untrusted[0].time_ms
+            result.metadata["untrusted_final_end_ms"] = untrusted[-1].time_ms
+            result.history_state = "pending"
+            result.complete = False
+            result.retryable = True
+            result.terminal_reason = None
+            result.has_more = True
         return result
+
+    def _apply_custom_finality_contract(
+        self,
+        result: QueryResult,
+        key: SeriesKey,
+        *,
+        end_ms: int | None,
+    ) -> QueryResult:
+        eligible_end_ms = self._latest_eligible_open_ms(
+            key,
+            now_ms=int(time.time() * 1000),
+            requested_end_ms=end_ms,
+        )
+        expected_closed_through_s = (
+            eligible_end_ms // 1000 if eligible_end_ms is not None else None
+        )
+
+        # The custom service intentionally emits legacy chart-shaped rows.  If
+        # every base component in the result was final, promote each completed
+        # derived bucket to the canonical aggregated source before caching it.
+        if result.metadata.get("all_rows_final") is True:
+            promoted: list[BarData] = []
+            changed = False
+            for bar in result.bars:
+                expected_closed = (
+                    bar.is_closed
+                    if expected_closed_through_s is None
+                    else bar.time <= expected_closed_through_s
+                )
+                if expected_closed and not bar.trusted_final:
+                    promoted.append(bar.with_source("backfill_aggregated"))
+                    changed = True
+                else:
+                    promoted.append(bar)
+            if changed:
+                result.bars = promoted
+                self._cache.bulk_load(key, promoted)
+
+        return self._apply_finality_contract(
+            result,
+            expected_closed_through_s=expected_closed_through_s,
+        )
+
+    def _trigger_untrusted_finality_backfill(
+        self,
+        key: SeriesKey,
+        bars: list[BarData],
+        *,
+        expected_closed_through_s: int | None,
+        submit: bool,
+    ) -> MissingRange | None:
+        untrusted = self._untrusted_expected_rows(
+            bars,
+            expected_closed_through_s=expected_closed_through_s,
+        )
+        if not untrusted:
+            return None
+        return self._trigger_backfill(
+            key,
+            untrusted[0].time_ms,
+            untrusted[-1].time_ms,
+            reason="query_untrusted_finality",
+            missing_bars=len(untrusted),
+            submit=submit,
+        )
 
     def _merge(
         self, a: list[BarData], b: list[BarData],
     ) -> list[BarData]:
         """Merge two sorted bar lists, deduplicating by time.
 
-        On conflict (same timestamp), cache data (``a``) wins because
-        it is typically more recent (from the live stream), while
-        storage data (``b``) may be stale backfill data.
+        On conflict (same timestamp), the higher-quality source wins.  Equal
+        ranks prefer ``b`` (the freshly-read storage row) so a stale cache
+        cannot hide a later revision from the same authority.
         """
         if not a:
             return list(b)
@@ -1002,10 +1207,14 @@ class QueryEngine:
             return list(a)
 
         combined: dict[int, BarData] = {}
-        for bar in b:
-            combined[bar.time] = bar  # storage first
         for bar in a:
-            combined[bar.time] = bar  # cache overwrites — cache wins
+            existing = combined.get(bar.time)
+            if existing is None or incoming_source_can_replace(existing.source, bar.source):
+                combined[bar.time] = bar
+        for bar in b:
+            existing = combined.get(bar.time)
+            if existing is None or incoming_source_can_replace(existing.source, bar.source):
+                combined[bar.time] = bar
         return sorted(combined.values(), key=lambda x: x.time)
 
     def _has_interior_gaps(
@@ -1333,7 +1542,7 @@ class QueryEngine:
 
         self._cache_hits += 1 if bars else 0
         elapsed = time.monotonic() - started_at
-        return QueryResult(
+        result = QueryResult(
             bars=bars,
             symbol=key.symbol,
             interval=key.interval,
@@ -1346,6 +1555,17 @@ class QueryEngine:
             backfill_triggered=False,
             metadata={"elapsed_ms": round(elapsed * 1000, 2), "ephemeral": True},
         )
+        eligible_end_ms = self._latest_eligible_open_ms(
+            key,
+            now_ms=int(time.time() * 1000),
+            requested_end_ms=(end_s * 1000 if end_s is not None else None),
+        )
+        return self._apply_finality_contract(
+            result,
+            expected_closed_through_s=(
+                eligible_end_ms // 1000 if eligible_end_ms is not None else None
+            ),
+        )
 
     def _is_complete(
         self,
@@ -1355,6 +1575,7 @@ class QueryEngine:
         limit: int,
         interval: str | None = None,
         key: SeriesKey | None = None,
+        expected_closed_through_s: int | None = None,
     ) -> bool:
         """Heuristic: does the cache result satisfy the query?
 
@@ -1363,6 +1584,12 @@ class QueryEngine:
         incomplete and we must fall through to storage.
         """
         if not bars:
+            return False
+
+        if not self._all_expected_rows_final(
+            bars,
+            expected_closed_through_s=expected_closed_through_s,
+        ):
             return False
 
         # Even if count is enough, check for interior gaps first

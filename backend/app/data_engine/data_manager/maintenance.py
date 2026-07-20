@@ -1673,5 +1673,6 @@ async def _aggregate_custom_rows(
         base_rows,
         exchange=exchange,
         market_type=market_type,
+        require_authoritative=True,
     )
     return [_normalize_storage_row(state.to_storage_dict()) for state in states]

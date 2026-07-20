@@ -70,6 +70,7 @@ from .models import (
     AlignmentMode,
     BarInput,
     BarInputSource,
+    BarFinality,
     BarState,
     BarStateChange,
     BarEvent,
@@ -472,8 +473,17 @@ class BarAggregator:
         bars: list[Any],
         exchange: str = "binance",
         market_type: str = "spot",
+        *,
+        require_authoritative: bool = False,
     ) -> list[BarState]:
-        """Aggregate a batch in an isolated aggregator instance."""
+        """Aggregate a batch in an isolated aggregator instance.
+
+        Persistence callers must set ``require_authoritative`` so a partial
+        historical component set cannot become durable merely because the
+        time-based fallback closed it. Diagnostic callers retain incomplete
+        active states, explicitly marked provisional, so capability masks and
+        gap evidence remain inspectable without becoming publishable data.
+        """
         temp = BarAggregator(self._cfg)
         temp.add_target(
             symbol,
@@ -484,6 +494,11 @@ class BarAggregator:
         rows_by_open_time: dict[int, BarState] = {}
 
         async def _capture(event: BarEvent) -> None:
+            if (
+                require_authoritative
+                and event.bar.finality != BarFinality.AUTHORITATIVE
+            ):
+                return
             rows_by_open_time[event.bar.bucket_start_ms] = event.bar
 
         temp.publisher.on_bar_closed(_capture)
@@ -512,6 +527,14 @@ class BarAggregator:
                     exchange=exchange,
                     market_type=market_type,
                 )
+        if not require_authoritative:
+            for state in temp.get_active_bars(
+                symbol,
+                target_interval,
+                exchange=exchange,
+                market_type=market_type,
+            ):
+                rows_by_open_time.setdefault(state.bucket_start_ms, state)
         return [rows_by_open_time[key] for key in sorted(rows_by_open_time)]
 
     # ── Public: Layer Access (advanced customization) ────────

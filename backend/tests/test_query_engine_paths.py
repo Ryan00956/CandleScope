@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 
 from app.data_engine.data_manager.cache import BarCache
 from app.data_engine.data_manager.config import QueryConfig
-from app.data_engine.data_manager.models import BarData, QuerySource, SeriesKey
+from app.data_engine.data_manager.custom_query import CustomIntervalQueryService
+from app.data_engine.data_manager.models import BarData, QueryResult, QuerySource, SeriesKey
 from app.data_engine.data_manager.query import QueryEngine
 from app.data_engine.history import SessionCalendar
 
@@ -17,6 +18,7 @@ def _bar(time_s: int, close: float = 1) -> BarData:
         low=close - 1,
         close=close,
         volume=close * 10,
+        source="backfill",
     )
 
 
@@ -28,6 +30,7 @@ def _row(open_time_ms: int, close: float = 1) -> dict:
         "low": close - 1,
         "close": close,
         "volume": close * 10,
+        "source": "backfill",
     }
 
 
@@ -351,6 +354,75 @@ def test_high_factor_custom_query_pages_fully_stored_base_without_false_backfill
     assert result.retryable is False
     assert result.has_more is False
     assert triggered == []
+
+
+def test_custom_base_pages_combine_finality_and_quality_fail_closed() -> None:
+    newest = QueryResult(
+        bars=[BarData(
+            time=60,
+            open=1,
+            high=1,
+            low=1,
+            close=1,
+            volume=1,
+            source="data_manager_closed",
+        )],
+        symbol="BTCUSDT",
+        interval="1m",
+        source=QuerySource.CACHE,
+        total=1,
+        has_more=True,
+        complete=True,
+        metadata={
+            "all_rows_final": False,
+            "expected_closed_rows": 1,
+            "untrusted_final_rows": 1,
+        },
+    )
+
+    def _older_page(*args, **kwargs) -> QueryResult:
+        return QueryResult(
+            bars=[_bar(0, close=3), _bar(60, close=2)],
+            symbol="BTCUSDT",
+            interval="1m",
+            source=QuerySource.STORAGE,
+            total=2,
+            has_more=False,
+            complete=True,
+            metadata={
+                "all_rows_final": True,
+                "expected_closed_rows": 2,
+                "untrusted_final_rows": 0,
+            },
+        )
+
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(max_limit=2),
+        base_query=lambda *args, **kwargs: newest,
+        base_query_before=_older_page,
+    )
+
+    result = service._page_base_history(
+        symbol="BTCUSDT",
+        interval="1m",
+        before_ms=120_000,
+        target_limit=2,
+        lower_bound_ms=None,
+        exchange="binance",
+        market_type="spot",
+        auto_backfill=False,
+        initial_result=newest,
+    )
+
+    assert [(bar.time, bar.close, bar.source) for bar in result.bars] == [
+        (0, 3, "backfill"),
+        (60, 2, "backfill"),
+    ]
+    assert result.metadata["all_rows_final"] is False
+    assert result.metadata["untrusted_final_rows"] == 1
+    assert result.history_state == "pending"
+    assert result.complete is False
 
 
 def test_query_before_keeps_has_more_when_backfill_is_deferred_to_facade() -> None:

@@ -41,6 +41,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.data_engine.kline_quality import incoming_source_can_replace
+
 from .config import CacheConfig
 from .models import BarData, SeriesKey
 
@@ -129,8 +131,10 @@ class BarSeries:
         evicted: list[BarData] = []
 
         if self._bars and self._bars[-1].time == bar.time:
-            # Update in-place
-            self._bars[-1] = bar
+            # Source quality is monotonic at a timestamp: a forming/ambiguous
+            # update must not regress an already verified final bar.
+            if incoming_source_can_replace(self._bars[-1].source, bar.source):
+                self._bars[-1] = bar
             return evicted
 
         if self._bars and bar.time < self._bars[-1].time:
@@ -160,8 +164,8 @@ class BarSeries:
         idx = bisect.bisect_left(self._time_index, bar.time)
 
         if idx < len(self._time_index) and self._time_index[idx] == bar.time:
-            # Replace existing
-            self._bars[idx] = bar
+            if incoming_source_can_replace(self._bars[idx].source, bar.source):
+                self._bars[idx] = bar
             return []
 
         return self._insert_sorted(bar)
@@ -182,15 +186,28 @@ class BarSeries:
         evicted: list[BarData] = []
 
         if not self._bars:
-            # Empty series — direct load
-            self._bars = list(bars)
-            self._time_index = [b.time for b in bars]
+            # Empty series — still collapse duplicate timestamps by quality.
+            selected: dict[int, BarData] = {}
+            for bar in bars:
+                existing = selected.get(bar.time)
+                if existing is None or incoming_source_can_replace(
+                    existing.source,
+                    bar.source,
+                ):
+                    selected[bar.time] = bar
+            self._bars = sorted(selected.values(), key=lambda item: item.time)
+            self._time_index = [b.time for b in self._bars]
         else:
             # Merge: combine both sorted lists
             merged: list[BarData] = []
             existing_map = {b.time: b for b in self._bars}
             for b in bars:
-                existing_map[b.time] = b  # new data wins on conflict
+                existing = existing_map.get(b.time)
+                if existing is None or incoming_source_can_replace(
+                    existing.source,
+                    b.source,
+                ):
+                    existing_map[b.time] = b
             merged = sorted(existing_map.values(), key=lambda b: b.time)
             self._bars = merged
             self._time_index = [b.time for b in merged]
@@ -275,7 +292,8 @@ class BarSeries:
         idx = bisect.bisect_left(self._time_index, bar.time)
 
         if idx < len(self._time_index) and self._time_index[idx] == bar.time:
-            self._bars[idx] = bar
+            if incoming_source_can_replace(self._bars[idx].source, bar.source):
+                self._bars[idx] = bar
             return []
 
         self._bars.insert(idx, bar)

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from app.core.executors import run_storage
 from app.data_engine.interval_policy import is_ephemeral_interval
 
-from ..bar_aggregator import BarEvent, BarEventType, BarState
+from ..bar_aggregator import BarEvent, BarEventType, BarFinality, BarState
 from .cache import BarCache
 from .event_bus import DataEventBus
 from .models import BarData, DataEvent, DataEventType, SeriesKey, StorageBackend
@@ -62,7 +62,25 @@ class AggregatorBridge:
             is_closed=dm_event_type in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED),
         )
 
-        await self._persist_bar_event(bar_state, dm_event_type)
+        storage_source = self._authoritative_storage_source(bar_state, dm_event_type)
+        if (
+            dm_event_type in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED)
+            and storage_source is None
+        ):
+            logger.warning(
+                "Dropped non-authoritative %s for %s@%s bucket=%d finality=%s reason=%s",
+                dm_event_type.value,
+                key.symbol,
+                key.interval,
+                bar_state.bucket_start_ms,
+                getattr(getattr(bar_state, "finality", None), "value", None),
+                getattr(bar_state, "close_reason", None),
+            )
+            return
+        if storage_source is not None and bar_data.source != storage_source:
+            bar_data = bar_data.with_source(storage_source)
+
+        await self._persist_bar_event(bar_state, dm_event_type, storage_source)
 
         if dm_event_type == DataEventType.BAR_CLOSED:
             self._cache.append(key, bar_data)
@@ -89,6 +107,7 @@ class AggregatorBridge:
         self,
         bar_state: BarState,
         event_type: DataEventType,
+        source: str | None,
     ) -> None:
         """Persist finalized or corrected bars so storage matches live state."""
         if is_ephemeral_interval(bar_state.interval):
@@ -98,15 +117,10 @@ class AggregatorBridge:
         if storage is None:
             return
 
-        if event_type not in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED):
+        if source is None:
             return
 
         row = bar_state.to_storage_dict()
-        source = (
-            "data_manager_amended"
-            if event_type == DataEventType.BAR_AMENDED
-            else "data_manager_closed"
-        )
         try:
             await run_storage(
                 storage.upsert_bars,
@@ -127,3 +141,22 @@ class AggregatorBridge:
                 exc,
                 exc_info=True,
             )
+
+    @staticmethod
+    def _authoritative_storage_source(
+        bar_state: BarState,
+        event_type: DataEventType,
+    ) -> str | None:
+        """Return durable provenance only for a proven final bar."""
+        if event_type not in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED):
+            return None
+        finality = getattr(bar_state, "finality", None)
+        if getattr(finality, "value", finality) != BarFinality.AUTHORITATIVE.value:
+            return None
+        if event_type == DataEventType.BAR_AMENDED:
+            return "data_manager_amended"
+        return {
+            "source_close": "data_manager_exchange_closed",
+            "composite_close": "data_manager_composite_closed",
+            "batch": "backfill_rest_verified",
+        }.get(str(getattr(bar_state, "close_reason", "") or ""))

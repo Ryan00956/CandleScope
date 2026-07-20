@@ -276,6 +276,7 @@ def test_query_engine_detects_an_exactly_one_bar_closed_daily_tail(monkeypatch) 
                 "low": 1,
                 "close": 2,
                 "volume": 10,
+                "source": "backfill",
             }]
             start_ms = kwargs.get("start_ms")
             end_ms = kwargs.get("end_ms")
@@ -333,6 +334,7 @@ def test_query_engine_does_not_treat_a_forming_daily_bucket_as_a_tail_gap(
                 "low": 1,
                 "close": 2,
                 "volume": 10,
+                "source": "backfill",
             }]
 
     triggered: list[tuple] = []

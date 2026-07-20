@@ -48,6 +48,7 @@ def _rows(start_ms: int, count: int, step_ms: int) -> list[dict]:
             "trades": idx + 1,
             "taker_buy_base": value / 2,
             "taker_buy_quote": value * 5,
+            "source": "backfill",
         })
     return rows
 

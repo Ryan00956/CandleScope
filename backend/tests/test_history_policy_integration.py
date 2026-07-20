@@ -79,7 +79,15 @@ def test_explicit_cache_coverage_uses_session_expected_edges() -> None:
     monday = _utc_ms("2026-07-20T09:30:00")
 
     assert engine._is_complete(
-        [BarData(time=friday // 1000, open=1, high=1, low=1, close=1, volume=1)],
+        [BarData(
+            time=friday // 1000,
+            open=1,
+            high=1,
+            low=1,
+            close=1,
+            volume=1,
+            source="backfill",
+        )],
         friday // 1000,
         sunday // 1000,
         1,
@@ -87,7 +95,15 @@ def test_explicit_cache_coverage_uses_session_expected_edges() -> None:
         key=key,
     )
     assert engine._is_complete(
-        [BarData(time=monday // 1000, open=1, high=1, low=1, close=1, volume=1)],
+        [BarData(
+            time=monday // 1000,
+            open=1,
+            high=1,
+            low=1,
+            close=1,
+            volume=1,
+            source="backfill",
+        )],
         saturday // 1000,
         monday // 1000,
         1,
@@ -240,6 +256,7 @@ def test_query_before_keeps_fetchable_gap_pending_at_confirmed_left_boundary() -
                     "low": 1,
                     "close": 1,
                     "volume": 1,
+                    "source": "backfill",
                 }
                 for open_time in (60_000, 180_000, 240_000)
             ]
@@ -308,6 +325,7 @@ def test_query_engine_does_not_report_weekend_as_interior_gap() -> None:
                     "low": 2,
                     "close": 2,
                     "volume": 1,
+                    "source": "backfill",
                 },
                 {
                     "open_time": friday,
@@ -316,6 +334,7 @@ def test_query_engine_does_not_report_weekend_as_interior_gap() -> None:
                     "low": 1,
                     "close": 1,
                     "volume": 1,
+                    "source": "backfill",
                 },
             ]
 
@@ -397,6 +416,7 @@ def test_query_before_does_not_repair_a_closed_weekend() -> None:
                     "low": 1,
                     "close": 1,
                     "volume": 1,
+                    "source": "backfill",
                 },
                 {
                     "open_time": monday,
@@ -405,6 +425,7 @@ def test_query_before_does_not_repair_a_closed_weekend() -> None:
                     "low": 2,
                     "close": 2,
                     "volume": 1,
+                    "source": "backfill",
                 },
             ]
 

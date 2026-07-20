@@ -99,7 +99,7 @@ export function buildChartDisplayState({
     live: "Live (WebSocket)",
     reconnecting: "Reconnecting...",
     disconnected: "Disconnected",
-    fallback: "Live (Polling fallback)",
+    fallback: "Polling fallback",
     mock: "Mock mode",
   }[wsStatus || ""] || "Unknown";
   const exchangeLabel = exchangeConfig.label || (

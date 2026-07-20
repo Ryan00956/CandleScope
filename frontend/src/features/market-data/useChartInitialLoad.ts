@@ -301,6 +301,7 @@ export function useChartInitialLoad({
       }
       const latest = historyResult.data[historyResult.data.length - 1];
       if (latest) updateLastPrice(latest, intv);
+      setError(null);
       setDataSource(historyResult.source || "unknown");
       setConnectionStatus(
         historyResult.source === "mock" || repairPending ? "loading" : "connected",
@@ -389,6 +390,8 @@ export function useChartInitialLoad({
         if (await retryInitialHistory()) return;
         if (!shownInitialData) {
           markPerf("chart.initialLoad.retry.timeout", { exchange: ex, marketType: mt, symbol: sym, interval: intv });
+          setError(new Error(`K-line history unavailable for ${sym}@${intv}`));
+          setConnectionStatus("disconnected");
           setLoading(false);
         }
       }, INITIAL_BACKFILL_TIMEOUT_MS);

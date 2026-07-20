@@ -300,8 +300,20 @@ export interface KlineStreamStatusMessage extends Record<string, unknown> {
   status?: string;
 }
 
+export interface KlineStreamIntervalFailure extends Record<string, unknown> {
+  interval: IntervalString;
+  code?: string;
+  message?: string;
+  error?: string;
+}
+
 export interface KlineStreamControlMessage extends Record<string, unknown> {
-  type: "subscribed" | "connected" | "warning" | "error";
+  type: "subscribed" | "unsubscribed" | "connected" | "warning" | "error";
+  request_id?: string;
+  requested_intervals?: IntervalString[];
+  intervals?: IntervalString[];
+  failed?: KlineStreamIntervalFailure[];
+  active_intervals?: IntervalString[];
 }
 
 export interface KlineStreamBackfillMessage extends BackfillCompletedMessage, Record<string, unknown> {

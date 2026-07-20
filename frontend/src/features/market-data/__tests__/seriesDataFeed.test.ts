@@ -111,6 +111,27 @@ class FakeSocket implements KlineStreamSocket {
   }
 }
 
+interface SentSubscriptionRequest {
+  action: string;
+  request_id: string;
+  intervals: string[];
+}
+
+function parseSentSubscriptionRequest(payload: string): SentSubscriptionRequest {
+  const value: unknown = JSON.parse(payload);
+  assert.ok(value && typeof value === "object" && !Array.isArray(value));
+  const record = value as Record<string, unknown>;
+  assert.equal(typeof record.action, "string");
+  assert.equal(typeof record.request_id, "string");
+  assert.ok(Array.isArray(record.intervals));
+  assert.ok(record.intervals.every((interval) => typeof interval === "string"));
+  return {
+    action: record.action,
+    request_id: record.request_id,
+    intervals: record.intervals,
+  } as SentSubscriptionRequest;
+}
+
 test("dedupes exact range requests", async () => {
   let calls = 0;
   let release: (() => void) | undefined;
@@ -2289,18 +2310,30 @@ test("subscribeBars syncs socket subscriptions and dispatches kline messages", (
   const activeSocket = mustBeDefined<FakeSocket>(socket);
   mustBeDefined(activeSocket.onopen)(partialMock<Event>({}));
   assert.equal(activeSocket.url, "ws://binance/spot/BTCUSDT");
-  assert.deepEqual(JSON.parse(mustBeDefined(activeSocket.sent[0])), {
+  const initialRequest = parseSentSubscriptionRequest(mustBeDefined(activeSocket.sent[0]));
+  assert.deepEqual(initialRequest, {
     action: "subscribe",
+    request_id: "kline-subscribe-1",
     intervals: ["1h", "1m"],
+  });
+  activeSocket.emit({
+    type: "subscribed",
+    request_id: initialRequest.request_id,
+    requested_intervals: ["1h", "1m"],
+    intervals: ["1h", "1m"],
+    failed: [],
+    active_intervals: ["1h", "1m"],
   });
 
   subscription.updateIntervals(["1m", "5m"]);
   assert.deepEqual(JSON.parse(mustBeDefined(activeSocket.sent[1])), {
     action: "subscribe",
+    request_id: "kline-subscribe-2",
     intervals: ["5m"],
   });
   assert.deepEqual(JSON.parse(mustBeDefined(activeSocket.sent[2])), {
     action: "unsubscribe",
+    request_id: "kline-unsubscribe-3",
     intervals: ["1h"],
   });
 
@@ -2317,6 +2350,98 @@ test("subscribeBars syncs socket subscriptions and dispatches kline messages", (
   assert.deepEqual(ticks, [{ interval: "1m", tick }]);
   subscription.close();
   assert.equal(activeSocket.closed, true);
+});
+
+test("subscribeBars applies mixed ACKs without retrying rejected custom intervals", () => {
+  let socket = null;
+  const controls: unknown[] = [];
+  const feed = new SeriesDataFeed({
+    api: {
+      getMultiStreamUrl: () => "ws://example.test/klines",
+    },
+  });
+
+  const subscription = feed.subscribeBars(
+    { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" },
+    {
+      intervals: ["1m", "7s"],
+      socketFactory: (url) => {
+        socket = new FakeSocket(url);
+        return socket;
+      },
+      onControlMessage: (message) => controls.push(message),
+    },
+  );
+
+  const activeSocket = mustBeDefined<FakeSocket>(socket);
+  mustBeDefined(activeSocket.onopen)(partialMock<Event>({}));
+  const request = parseSentSubscriptionRequest(mustBeDefined(activeSocket.sent[0]));
+  activeSocket.emit({
+    type: "subscribed",
+    request_id: request.request_id,
+    requested_intervals: ["1m", "7s"],
+    intervals: ["1m"],
+    failed: [{ interval: "7s", code: "unsupported", message: "not available" }],
+    active_intervals: ["1m"],
+  });
+
+  assert.equal(controls.length, 1);
+  assert.equal(activeSocket.sent.length, 1);
+  subscription.updateIntervals(["1m", "7s"]);
+  assert.equal(activeSocket.sent.length, 1);
+
+  subscription.updateIntervals(["7s"]);
+  assert.deepEqual(JSON.parse(mustBeDefined(activeSocket.sent[1])), {
+    action: "unsubscribe",
+    request_id: "kline-unsubscribe-2",
+    intervals: ["1m"],
+  });
+  activeSocket.emit({
+    type: "unsubscribed",
+    request_id: "kline-unsubscribe-2",
+    intervals: ["1m"],
+    active_intervals: [],
+  });
+  assert.equal(activeSocket.sent.length, 2);
+
+  mustBeDefined(activeSocket.onclose)(partialMock<CloseEvent>({}));
+  mustBeDefined(activeSocket.onopen)(partialMock<Event>({}));
+  assert.deepEqual(JSON.parse(mustBeDefined(activeSocket.sent[2])), {
+    action: "subscribe",
+    request_id: "kline-subscribe-3",
+    intervals: ["7s"],
+  });
+});
+
+test("subscribeBars canonicalizes semantic aliases before tracking ACK state", () => {
+  let socket = null;
+  const feed = new SeriesDataFeed({
+    api: { getMultiStreamUrl: () => "ws://example.test/klines" },
+  });
+  const subscription = feed.subscribeBars(
+    { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" },
+    {
+      intervals: ["60m"],
+      socketFactory: (url) => {
+        socket = new FakeSocket(url);
+        return socket;
+      },
+    },
+  );
+  const activeSocket = mustBeDefined<FakeSocket>(socket);
+  mustBeDefined(activeSocket.onopen)(partialMock<Event>({}));
+  const request = parseSentSubscriptionRequest(mustBeDefined(activeSocket.sent[0]));
+  assert.deepEqual(request.intervals, ["1h"]);
+  activeSocket.emit({
+    type: "subscribed",
+    request_id: request.request_id,
+    requested_intervals: ["60m"],
+    intervals: ["1h"],
+    failed: [],
+    active_intervals: ["1h"],
+  });
+  subscription.updateIntervals(["1h"]);
+  assert.equal(activeSocket.sent.length, 1);
 });
 
 test("subscribeBars diagnoses invalid WebSocket payloads without updating chart data", () => {

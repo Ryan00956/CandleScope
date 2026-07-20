@@ -89,7 +89,48 @@ const TARGET: FullCacheSocketTarget = {
   intervals: ["1s", "1m"],
 };
 
-test("socket manager reconnects with backoff while preserving subscription protection", () => {
+function sentMessages(socket: FakeSocket): Array<Record<string, unknown>> {
+  return socket.sent.map((message) => JSON.parse(message) as Record<string, unknown>);
+}
+
+function requestIdAt(socket: FakeSocket, index: number): string {
+  const requestId = mustBeDefined(sentMessages(socket)[index]).request_id;
+  if (typeof requestId !== "string") {
+    throw new TypeError("Expected a string request_id");
+  }
+  return requestId;
+}
+
+function emitSubscribed(
+  socket: FakeSocket,
+  requestId: string,
+  intervals: string[],
+  activeIntervals: string[] = intervals,
+  failed: unknown[] = [],
+): void {
+  socket.emitMessage(JSON.stringify({
+    type: "subscribed",
+    request_id: requestId,
+    requested_intervals: [...intervals, ...failed.flatMap((item) => (
+      item && typeof item === "object" && "interval" in item
+        ? [String((item as { interval: unknown }).interval)]
+        : []
+    ))],
+    intervals,
+    failed,
+    active_intervals: activeIntervals,
+  }));
+}
+
+function emitKline(socket: FakeSocket, interval: string, time = 1): void {
+  socket.emitMessage(JSON.stringify({
+    type: "kline",
+    interval,
+    data: { time, open: 1, high: 1, low: 1, close: 1, volume: 1 },
+  }));
+}
+
+test("socket manager waits for ACK and reconnects with backoff", () => {
   resetWatchlistFullCache();
   const sockets: FakeSocket[] = [];
   const timers = createFakeTimers();
@@ -107,25 +148,38 @@ test("socket manager reconnects with backoff while preserving subscription prote
   });
 
   manager.syncTargets([TARGET]);
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).status, "loading");
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).subscribed, false);
   const first = mustBeDefined(sockets[0]);
   first.emitOpen();
   assert.deepEqual(JSON.parse(mustBeDefined(first.sent[0])), {
     action: "subscribe",
     intervals: ["1s", "1m"],
+    request_id: "watchlist-1-1",
   });
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).status, "loading");
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).subscribed, false);
+
+  emitSubscribed(first, requestIdAt(first, 0), ["1s", "1m"]);
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).status, "warm");
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).subscribed, true);
+  emitKline(first, "1s");
   assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).status, "live");
 
   first.emitClose();
   const stale = mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s"));
   assert.equal(stale.status, "stale");
-  assert.equal(stale.subscribed, true);
+  assert.equal(stale.subscribed, false);
   assert.equal(timers.pending().length, 1);
   assert.equal(timers.pending()[0]?.delayMs, 1_000);
 
   timers.runNext();
   const second = mustBeDefined(sockets[1]);
   second.emitOpen();
-  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).status, "live");
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).status, "loading");
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).subscribed, false);
+  emitSubscribed(second, requestIdAt(second, 0), ["1s", "1m"]);
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).status, "warm");
   assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s")).subscribed, true);
 
   second.onerror?.();
@@ -136,11 +190,8 @@ test("socket manager reconnects with backoff while preserving subscription prote
   timers.runNext();
   const third = mustBeDefined(sockets[2]);
   third.emitOpen();
-  third.emitMessage(JSON.stringify({
-    type: "kline",
-    interval: "1m",
-    data: { time: 1, open: 1, high: 1, low: 1, close: 1, volume: 1 },
-  }));
+  emitSubscribed(third, requestIdAt(third, 0), ["1s", "1m"]);
+  emitKline(third, "1m");
   third.onerror?.();
   assert.equal(timers.pending()[0]?.delayMs, 1_000);
 
@@ -167,11 +218,14 @@ test("late events from an obsolete socket generation cannot stale the replacemen
   manager.syncTargets([TARGET]);
   const obsolete = mustBeDefined(sockets[0]);
   obsolete.emitOpen();
+  emitSubscribed(obsolete, requestIdAt(obsolete, 0), ["1s", "1m"]);
 
   manager.syncTargets([]);
   manager.syncTargets([TARGET]);
   const replacement = mustBeDefined(sockets[1]);
   replacement.emitOpen();
+  emitSubscribed(replacement, requestIdAt(replacement, 0), ["1s", "1m"]);
+  emitKline(replacement, "1m");
   assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1m")).status, "live");
 
   obsolete.emitClose();
@@ -193,18 +247,25 @@ test("socket manager unsubscribes intervals removed from a live target", () => {
 
   manager.syncTargets([TARGET]);
   socket.emitOpen();
+  emitSubscribed(socket, requestIdAt(socket, 0), ["1s", "1m"]);
   manager.syncTargets([{ ...TARGET, intervals: ["1m"] }]);
 
-  assert.deepEqual(socket.sent.map((message): unknown => JSON.parse(message) as unknown), [
-    { action: "subscribe", intervals: ["1s", "1m"] },
-    { action: "unsubscribe", intervals: ["1s"] },
+  assert.deepEqual(sentMessages(socket), [
+    { action: "subscribe", intervals: ["1s", "1m"], request_id: "watchlist-1-1" },
+    { action: "unsubscribe", intervals: ["1s"], request_id: "watchlist-1-2" },
   ]);
+  socket.emitMessage(JSON.stringify({
+    type: "unsubscribed",
+    request_id: requestIdAt(socket, 1),
+    intervals: ["1s"],
+    active_intervals: ["1m"],
+  }));
   const removed = mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s"));
   const retained = mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1m"));
   assert.equal(removed.subscribed, false);
   assert.equal(removed.status, "stale");
   assert.equal(retained.subscribed, true);
-  assert.equal(retained.status, "live");
+  assert.equal(retained.status, "warm");
 
   manager.dispose();
 });
@@ -218,12 +279,88 @@ test("socket manager subscribes only intervals added to a live target", () => {
 
   manager.syncTargets([{ ...TARGET, intervals: ["1m"] }]);
   socket.emitOpen();
+  emitSubscribed(socket, requestIdAt(socket, 0), ["1m"]);
   manager.syncTargets([{ ...TARGET, intervals: ["1m", "45m"] }]);
 
-  assert.deepEqual(socket.sent.map((message): unknown => JSON.parse(message) as unknown), [
-    { action: "subscribe", intervals: ["1m"] },
-    { action: "subscribe", intervals: ["45m"] },
+  assert.deepEqual(sentMessages(socket), [
+    { action: "subscribe", intervals: ["1m"], request_id: "watchlist-1-1" },
+    { action: "subscribe", intervals: ["45m"], request_id: "watchlist-1-2" },
   ]);
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "45m")).status, "loading");
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "45m")).subscribed, false);
+  emitSubscribed(socket, requestIdAt(socket, 1), ["45m"], ["1m", "45m"]);
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "45m")).status, "warm");
+  assert.equal(mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "45m")).subscribed, true);
+
+  manager.dispose();
+});
+
+test("socket manager keeps partial subscription failures out of live state", () => {
+  resetWatchlistFullCache();
+  const socket = new FakeSocket();
+  const target: FullCacheSocketTarget = {
+    ...TARGET,
+    symbolKey: "binance:futures:BTCUSDT",
+    marketType: "futures",
+    intervals: ["7s", "1m"],
+  };
+  const manager = createWatchlistFullCacheSocketManager({ createSocket: () => socket });
+
+  manager.syncTargets([target]);
+  socket.emitOpen();
+  assert.deepEqual(sentMessages(socket), [{
+    action: "subscribe",
+    intervals: ["7s", "1m"],
+    request_id: "watchlist-1-1",
+  }]);
+  socket.emitMessage(JSON.stringify({
+    type: "warning",
+    failed: [{ interval: "7s", error: "No exact realtime base interval" }],
+  }));
+  emitSubscribed(
+    socket,
+    requestIdAt(socket, 0),
+    ["1m"],
+    ["1m"],
+    [{ interval: "7s", code: "no_exact_base", message: "No exact realtime base interval" }],
+  );
+
+  const failed = mustBeDefined(getFullCacheEntry(target.symbolKey, "7s"));
+  const accepted = mustBeDefined(getFullCacheEntry(target.symbolKey, "1m"));
+  assert.equal(failed.status, "error");
+  assert.equal(failed.subscribed, false);
+  assert.match(failed.lastError || "", /no_exact_base/);
+  assert.equal(accepted.status, "warm");
+  assert.equal(accepted.subscribed, true);
+
+  emitKline(socket, "1m");
+  assert.equal(mustBeDefined(getFullCacheEntry(target.symbolKey, "1m")).status, "live");
+  manager.syncTargets([target]);
+  assert.equal(socket.sent.length, 1);
+
+  manager.dispose();
+});
+
+test("socket manager canonicalizes semantic aliases before subscribe and ACK", () => {
+  resetWatchlistFullCache();
+  const socket = new FakeSocket();
+  const target = { ...TARGET, intervals: ["60m", "1h"] };
+  const manager = createWatchlistFullCacheSocketManager({ createSocket: () => socket });
+
+  manager.syncTargets([target]);
+  socket.emitOpen();
+  assert.deepEqual(sentMessages(socket), [{
+    action: "subscribe",
+    intervals: ["1h"],
+    request_id: "watchlist-1-1",
+  }]);
+  emitSubscribed(socket, requestIdAt(socket, 0), ["60m"], ["60m"]);
+
+  const canonical = mustBeDefined(getFullCacheEntry(target.symbolKey, "1h"));
+  const alias = mustBeDefined(getFullCacheEntry(target.symbolKey, "60m"));
+  assert.equal(canonical.key, alias.key);
+  assert.equal(canonical.status, "warm");
+  assert.equal(canonical.subscribed, true);
 
   manager.dispose();
 });

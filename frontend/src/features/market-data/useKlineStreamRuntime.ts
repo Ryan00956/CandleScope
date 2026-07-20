@@ -1,12 +1,17 @@
 import { useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks.js";
-import { intervalsSemanticallyEquivalent, parseIntervalSeconds } from "../../utils/intervals.js";
+import {
+  canonicalizeIntervalValue,
+  intervalsSemanticallyEquivalent,
+  parseIntervalSeconds,
+} from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type {
   BackfillCompletedMessage,
   CommitChartData,
+  KlineStreamControlMessage,
   KlineStreamController,
   PatchCacheTick,
 } from "./klineContracts.js";
@@ -30,6 +35,104 @@ export type KlineWebSocketStatus =
   | "live"
   | "fallback"
   | "reconnecting";
+
+export interface KlineStreamAcknowledgementState {
+  activeIntervals: IntervalString[];
+  rejectedIntervals: IntervalString[];
+}
+
+function canonicalIntervals(intervals: readonly IntervalString[] = []): IntervalString[] {
+  const canonical: IntervalString[] = [];
+  const seen = new Set<IntervalString>();
+  intervals.forEach((interval) => {
+    const value = canonicalizeIntervalValue(interval) || String(interval || "").trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    canonical.push(value);
+  });
+  return canonical;
+}
+
+export function createKlineStreamAcknowledgementState(): KlineStreamAcknowledgementState {
+  return { activeIntervals: [], rejectedIntervals: [] };
+}
+
+export function reduceKlineStreamControlMessage(
+  previous: KlineStreamAcknowledgementState,
+  message: KlineStreamControlMessage,
+): KlineStreamAcknowledgementState {
+  const active = new Set(canonicalIntervals(previous.activeIntervals));
+  const rejected = new Set(canonicalIntervals(previous.rejectedIntervals));
+  const accepted = canonicalIntervals(message.intervals);
+  const requested = canonicalIntervals(message.requested_intervals);
+  const failed = canonicalIntervals(message.failed?.map((failure) => failure.interval));
+
+  if (message.active_intervals !== undefined) {
+    active.clear();
+    canonicalIntervals(message.active_intervals).forEach((interval) => active.add(interval));
+  } else if (message.type === "subscribed") {
+    accepted.forEach((interval) => active.add(interval));
+  } else if (message.type === "unsubscribed") {
+    accepted.forEach((interval) => active.delete(interval));
+  }
+
+  accepted.forEach((interval) => rejected.delete(interval));
+  failed.forEach((interval) => {
+    active.delete(interval);
+    rejected.add(interval);
+  });
+
+  if (message.type === "subscribed" && message.requested_intervals !== undefined) {
+    requested.forEach((interval) => {
+      if (!active.has(interval)) rejected.add(interval);
+    });
+  }
+
+  return {
+    activeIntervals: Array.from(active),
+    rejectedIntervals: Array.from(rejected),
+  };
+}
+
+export function acknowledgeKlineStreamInterval(
+  previous: KlineStreamAcknowledgementState,
+  interval: IntervalString,
+): KlineStreamAcknowledgementState {
+  const canonical = canonicalizeIntervalValue(interval) || String(interval || "").trim();
+  if (!canonical) return previous;
+  const active = new Set(canonicalIntervals(previous.activeIntervals));
+  const rejected = new Set(canonicalIntervals(previous.rejectedIntervals));
+  active.add(canonical);
+  rejected.delete(canonical);
+  return {
+    activeIntervals: Array.from(active),
+    rejectedIntervals: Array.from(rejected),
+  };
+}
+
+export function retainTrackedKlineStreamRejections(
+  previous: KlineStreamAcknowledgementState,
+  trackedIntervals: readonly IntervalString[],
+): KlineStreamAcknowledgementState {
+  const tracked = new Set(canonicalIntervals(trackedIntervals));
+  return {
+    activeIntervals: previous.activeIntervals,
+    rejectedIntervals: previous.rejectedIntervals.filter((interval) => tracked.has(interval)),
+  };
+}
+
+export function getKlineStreamIntervalStatus(
+  state: KlineStreamAcknowledgementState,
+  interval: IntervalString,
+): Extract<KlineWebSocketStatus, "connecting" | "live" | "fallback"> {
+  if (state.activeIntervals.some((candidate) => (
+    intervalsSemanticallyEquivalent(candidate, interval)
+  ))) return "live";
+  if (state.rejectedIntervals.some((candidate) => (
+    intervalsSemanticallyEquivalent(candidate, interval)
+  ))) return "fallback";
+  return "connecting";
+}
 
 export interface UseKlineStreamRuntimeOptions {
   symbol: SymbolCode;
@@ -69,6 +172,9 @@ export function useKlineStreamRuntime({
 }: UseKlineStreamRuntimeOptions): void {
   const subscriptionRef = useRef<KlineStreamController | null>(null);
   const trackedIntervalsRef = useRef(trackedIntervals);
+  const reconcileTrackedIntervalsRef = useRef<((
+    intervals: readonly IntervalString[],
+  ) => void) | null>(null);
 
   useEffect(() => {
     trackedIntervalsRef.current = trackedIntervals;
@@ -86,6 +192,7 @@ export function useKlineStreamRuntime({
     let pendingRepairPollingInFlight = false;
     let reconnectDelay = WS_RECONNECT_BASE_DELAY;
     let reconnectAttempts = 0;
+    let acknowledgementState = createKlineStreamAcknowledgementState();
 
     const stopPing = () => {
       if (pingTimer) {
@@ -101,9 +208,16 @@ export function useKlineStreamRuntime({
       }, WS_PING_INTERVAL);
     };
 
+    const stopPolling = () => {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    };
+
     const startPolling = () => {
+      if (pollInterval) return;
       recordPerfEvent("ws.kline.polling.start", { symbol, marketType, exchange });
-      if (pollInterval) clearInterval(pollInterval);
       pollInterval = setInterval(async () => {
         if (!active) return;
         if (pollingInFlight) return;
@@ -114,11 +228,27 @@ export function useKlineStreamRuntime({
             { exchange, marketType, symbol, interval: currentIntv },
             { limit: 2, source: "polling-latest", commit: "patch-active" },
           );
-          if (!active || result.stale || result.active === false || !result?.data?.length) return;
+          if (
+            !active
+            || !intervalsSemanticallyEquivalent(currentIntv, intervalRef.current)
+            || result.stale
+            || result.active === false
+            || !result?.data?.length
+          ) return;
 
           const latestTick = result.data[result.data.length - 1];
           if (latestTick) updateLastPrice(latestTick, currentIntv);
-          setWsStatus((prev) => (prev === "live" ? prev : "fallback"));
+          const acknowledgedStatus = getKlineStreamIntervalStatus(
+            acknowledgementState,
+            currentIntv,
+          );
+          setWsStatus((previous) => {
+            if (acknowledgedStatus === "live") return "live";
+            if (acknowledgedStatus === "fallback") return "fallback";
+            return previous === "connecting" || previous === "reconnecting"
+              ? previous
+              : "fallback";
+          });
         } catch (pollErr) {
           console.warn("Polling fallback failed:", pollErr);
         } finally {
@@ -126,6 +256,34 @@ export function useKlineStreamRuntime({
         }
       }, POLLING_INTERVAL_MS);
     };
+
+    const applyAcknowledgedStatus = () => {
+      const currentIntv = intervalRef.current;
+      const status = getKlineStreamIntervalStatus(acknowledgementState, currentIntv);
+      if (status === "live") {
+        stopPolling();
+        setWsStatus("live");
+        markPerfOnce("ws.kline.live", {
+          symbol,
+          marketType,
+          exchange,
+          interval: currentIntv,
+          source: "subscription-ack",
+        });
+        return;
+      }
+      startPolling();
+      setWsStatus(status);
+    };
+
+    const reconcileTrackedIntervals = (intervals: readonly IntervalString[]) => {
+      acknowledgementState = retainTrackedKlineStreamRejections(
+        acknowledgementState,
+        intervals,
+      );
+      applyAcknowledgedStatus();
+    };
+    reconcileTrackedIntervalsRef.current = reconcileTrackedIntervals;
 
     const scheduleReconnect = () => {
       if (reconnectTimer) {
@@ -167,25 +325,13 @@ export function useKlineStreamRuntime({
             onOpen: () => {
               if (!active) return;
               markPerfOnce("ws.kline.open", { symbol, marketType, exchange });
+              acknowledgementState = createKlineStreamAcknowledgementState();
 
               const isReconnection = reconnectAttempts > 0;
               reconnectDelay = WS_RECONNECT_BASE_DELAY;
               reconnectAttempts = 0;
 
-              setWsStatus("live");
-              markPerfOnce("ws.kline.live", {
-                symbol,
-                marketType,
-                exchange,
-                intervals: trackedIntervalsRef.current,
-                source: "socket-open",
-              });
-
-              if (pollInterval) {
-                clearInterval(pollInterval);
-                pollInterval = null;
-              }
-
+              setWsStatus("connecting");
               startPing();
 
               if (isReconnection) {
@@ -224,18 +370,29 @@ export function useKlineStreamRuntime({
             onStreamStatus: (msg) => {
               if (!active) return;
               if (intervalsSemanticallyEquivalent(msg.interval, intervalRef.current)) {
-                if (msg.status === "live") {
+                if (
+                  msg.status === "live"
+                  && getKlineStreamIntervalStatus(
+                    acknowledgementState,
+                    intervalRef.current,
+                  ) === "live"
+                ) {
+                  stopPolling();
                   setWsStatus("live");
-                  markPerfOnce("ws.kline.live", {
-                    symbol,
-                    marketType,
-                    exchange,
-                    interval: msg.interval,
-                    source: "stream-status",
-                  });
                 }
-                if (msg.status === "reconnecting") setWsStatus("reconnecting");
+                if (msg.status === "reconnecting") {
+                  startPolling();
+                  setWsStatus("reconnecting");
+                }
               }
+            },
+            onControlMessage: (message) => {
+              if (!active) return;
+              acknowledgementState = reduceKlineStreamControlMessage(
+                acknowledgementState,
+                message,
+              );
+              applyAcknowledgedStatus();
             },
             onBackfillCompleted: (msg) => {
               if (!active) return false;
@@ -245,11 +402,18 @@ export function useKlineStreamRuntime({
               if (!active) return;
               const currentIntv = intervalRef.current;
 
+              acknowledgementState = acknowledgeKlineStreamInterval(
+                acknowledgementState,
+                msgInterval,
+              );
+
               if (msgInterval === "1m" && tick.close != null) {
                 updateRealtimePrice(tick.close);
               }
 
               if (intervalsSemanticallyEquivalent(msgInterval, currentIntv)) {
+                stopPolling();
+                setWsStatus("live");
                 // The active interval shares one window store with the cache;
                 // commitPatchedChartData applies the tick and keeps React
                 // meta (barCount, coverage) in sync. Applying it twice via
@@ -270,6 +434,7 @@ export function useKlineStreamRuntime({
             },
             onClose: () => {
               if (!active) return;
+              acknowledgementState = createKlineStreamAcknowledgementState();
               stopPing();
               startPolling();
               scheduleReconnect();
@@ -313,7 +478,14 @@ export function useKlineStreamRuntime({
     }, HELD_WINDOW_GAP_SCAN_INTERVAL_MS);
 
     const initialFallbackTimer = setTimeout(() => {
-      if (active && !pollInterval && !subscription?.isOpen()) {
+      if (
+        active
+        && !pollInterval
+        && getKlineStreamIntervalStatus(
+          acknowledgementState,
+          intervalRef.current,
+        ) !== "live"
+      ) {
         startPolling();
       }
     }, WS_INITIAL_FALLBACK_DELAY);
@@ -326,7 +498,7 @@ export function useKlineStreamRuntime({
         reconnectTimer = null;
       }
       stopPing();
-      if (pollInterval) clearInterval(pollInterval);
+      stopPolling();
       if (pendingRepairInterval) clearInterval(pendingRepairInterval);
       if (heldWindowGapScanInterval) clearInterval(heldWindowGapScanInterval);
       if (subscription) {
@@ -334,6 +506,9 @@ export function useKlineStreamRuntime({
       }
       if (subscriptionRef.current === subscription) {
         subscriptionRef.current = null;
+      }
+      if (reconcileTrackedIntervalsRef.current === reconcileTrackedIntervals) {
+        reconcileTrackedIntervalsRef.current = null;
       }
     };
   }, [
@@ -352,6 +527,7 @@ export function useKlineStreamRuntime({
   ]);
 
   useEffect(() => {
+    reconcileTrackedIntervalsRef.current?.(trackedIntervals);
     subscriptionRef.current?.updateIntervals(trackedIntervals);
   }, [trackedIntervals]);
 

@@ -135,6 +135,8 @@ export function getKlineStreamIntervalStatus(
 }
 
 export interface UseKlineStreamRuntimeOptions {
+  enabled: boolean;
+  webSocketEnabled: boolean;
   symbol: SymbolCode;
   exchange: ExchangeId;
   marketType: MarketType;
@@ -156,6 +158,8 @@ export interface UseKlineStreamRuntimeOptions {
 }
 
 export function useKlineStreamRuntime({
+  enabled,
+  webSocketEnabled,
   symbol,
   exchange,
   marketType,
@@ -181,6 +185,10 @@ export function useKlineStreamRuntime({
   }, [trackedIntervals]);
 
   useEffect(() => {
+    if (!enabled) {
+      setWsStatus("idle");
+      return undefined;
+    }
     let active = true;
     let subscription: KlineStreamController | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -258,6 +266,11 @@ export function useKlineStreamRuntime({
     };
 
     const applyAcknowledgedStatus = () => {
+      if (!webSocketEnabled) {
+        startPolling();
+        setWsStatus("fallback");
+        return;
+      }
       const currentIntv = intervalRef.current;
       const status = getKlineStreamIntervalStatus(acknowledgementState, currentIntv);
       if (status === "live") {
@@ -309,7 +322,7 @@ export function useKlineStreamRuntime({
     };
 
     const connect = () => {
-      if (!active) return;
+      if (!active || !webSocketEnabled) return;
       setWsStatus("connecting");
 
       if (subscription) {
@@ -449,7 +462,12 @@ export function useKlineStreamRuntime({
       }
     };
 
-    connect();
+    if (webSocketEnabled) {
+      connect();
+    } else {
+      startPolling();
+      setWsStatus("fallback");
+    }
 
     // Query-triggered repairs are intentionally internal backend work and may
     // not emit a browser completion event. Poll only exact ranges already
@@ -477,7 +495,7 @@ export function useKlineStreamRuntime({
       });
     }, HELD_WINDOW_GAP_SCAN_INTERVAL_MS);
 
-    const initialFallbackTimer = setTimeout(() => {
+    const initialFallbackTimer = webSocketEnabled ? setTimeout(() => {
       if (
         active
         && !pollInterval
@@ -488,11 +506,11 @@ export function useKlineStreamRuntime({
       ) {
         startPolling();
       }
-    }, WS_INITIAL_FALLBACK_DELAY);
+    }, WS_INITIAL_FALLBACK_DELAY) : null;
 
     return () => {
       active = false;
-      clearTimeout(initialFallbackTimer);
+      if (initialFallbackTimer) clearTimeout(initialFallbackTimer);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -513,6 +531,7 @@ export function useKlineStreamRuntime({
     };
   }, [
     commitPatchedChartData,
+    enabled,
     exchange,
     getCacheRows,
     handleBackfillCompleted,
@@ -524,6 +543,7 @@ export function useKlineStreamRuntime({
     symbol,
     updateLastPrice,
     updateRealtimePrice,
+    webSocketEnabled,
   ]);
 
   useEffect(() => {
@@ -532,7 +552,7 @@ export function useKlineStreamRuntime({
   }, [trackedIntervals]);
 
   useEffect(() => {
-    if (typeof document === "undefined") return undefined;
+    if (!enabled || typeof document === "undefined") return undefined;
     let active = true;
     let hiddenAt: number | null = null;
 
@@ -587,5 +607,5 @@ export function useKlineStreamRuntime({
       active = false;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [exchange, intervalRef, marketType, seriesDataFeed, symbol, updateLastPrice]);
+  }, [enabled, exchange, intervalRef, marketType, seriesDataFeed, symbol, updateLastPrice]);
 }

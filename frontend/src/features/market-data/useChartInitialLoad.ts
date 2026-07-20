@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { markPerf, recordPerfEvent } from "../../runtime/performance/perfMarks.js";
 import type { IntervalString } from "../../utils/intervals.js";
@@ -44,6 +44,7 @@ export type LoadChartData = (
 ) => Promise<void>;
 
 export interface UseChartInitialLoadOptions {
+  enabled: boolean;
   exchange: ExchangeId;
   marketType: MarketType;
   getFromCache(symbol: SymbolCode, interval: IntervalString): KlineBar[];
@@ -66,6 +67,7 @@ export interface UseChartInitialLoadOptions {
 }
 
 export function useChartInitialLoad({
+  enabled,
   exchange,
   marketType,
   getFromCache,
@@ -88,12 +90,25 @@ export function useChartInitialLoad({
 }: UseChartInitialLoadOptions): LoadChartData {
   const abortRef = useRef<AbortController | null>(null);
 
+  useEffect(() => {
+    if (!enabled) {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      return undefined;
+    }
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, [enabled]);
+
   return useCallback(async (
     sym: SymbolCode,
     intv: IntervalString,
     mt: MarketType = marketType,
     ex: ExchangeId = exchange,
   ) => {
+    if (!enabled) return;
     markPerf("chart.initialLoad.start", { exchange: ex, marketType: mt, symbol: sym, interval: intv });
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
@@ -452,6 +467,7 @@ export function useChartInitialLoad({
     clearChartData,
     commitMergedChartData,
     commitPatchedChartData,
+    enabled,
     exchange,
     getFromCache,
     markChartDataTransition,

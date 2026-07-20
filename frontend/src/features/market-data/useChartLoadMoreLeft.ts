@@ -11,6 +11,7 @@ const LOAD_MORE_PAGE_SIZE = 500;
 export type LoadMoreLeft = (oldestLoadedTime?: EpochSeconds | null) => Promise<void>;
 
 export interface UseChartLoadMoreLeftOptions {
+  enabled: boolean;
   symbol: SymbolCode;
   exchange: ExchangeId;
   marketType: MarketType;
@@ -31,6 +32,7 @@ export interface ChartLoadMoreLeftRuntime {
 }
 
 export function useChartLoadMoreLeft({
+  enabled,
   symbol,
   exchange,
   marketType,
@@ -47,7 +49,7 @@ export function useChartLoadMoreLeft({
 
   const handleNeedMoreLeft = useCallback(
     async (oldestLoadedTime?: EpochSeconds | null) => {
-      if (loading || loadingMoreLeft || !hasMoreLeft || dataSource === "mock") return;
+      if (!enabled || loading || loadingMoreLeft || !hasMoreLeft || dataSource === "mock") return;
       if (oldestChartTime == null) return;
 
       const before = oldestLoadedTime || oldestChartTime;
@@ -98,6 +100,7 @@ export function useChartLoadMoreLeft({
     [
       commitMergedChartData,
       dataSource,
+      enabled,
       exchange,
       hasMoreLeft,
       interval,

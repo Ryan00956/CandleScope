@@ -22,6 +22,23 @@ test("prioritizeFullCacheIntervals puts current and common intervals first", () 
 });
 
 test("buildWatchlistFullCacheTargets includes only full subscriptions", () => {
+  const exchangeCatalog = buildExchangeCatalog([{
+    exchange: "binance",
+    name: "Binance",
+    capability_schema_version: 3,
+    markets: [{ market_type: "spot", product_type: "spot", label: "Spot" }],
+    native_intervals: ["1m", "1h"],
+    channels: [{
+      channel: "kline",
+      market_types: ["spot"],
+      history: true,
+      realtime: true,
+      params: { interval: ["1m", "1h"] },
+    }],
+    protocol_features: [],
+    limits: {},
+    known_limitations: [],
+  }]);
   const targets = buildWatchlistFullCacheTargets({
     watchlists: [
       {
@@ -36,7 +53,8 @@ test("buildWatchlistFullCacheTargets includes only full subscriptions", () => {
       "okx:spot:ETH-USDT": "price",
       "spot:BNBUSDT": "none",
     },
-    nativeIntervals: [{ value: "1m" }, { value: "1h" }],
+    exchangeCatalog,
+    exchangeCatalogStatus: "ready",
     customIntervalRecords: [{ value: "45m" }],
     currentSession: {
       exchange: "binance",
@@ -132,8 +150,8 @@ test("buildWatchlistFullSocketTargets ignores current interval priority", () => 
     subscriptionTiers: {
       "spot:BTCUSDT": "full",
     },
-    nativeIntervals: [{ value: "1m" }, { value: "1h" }],
     exchangeCatalog,
+    exchangeCatalogStatus: "ready",
     customIntervalRecords: [{ value: "45m" }],
   };
   const oneHourTargets = buildWatchlistFullCacheTargets({
@@ -219,6 +237,7 @@ test("full-cache REST and WebSocket targets honor history and realtime capabilit
       "split:futures:LIVE": "full",
     },
     exchangeCatalog,
+    exchangeCatalogStatus: "ready",
     customIntervalRecords: [{ value: "45m" }],
   };
 
@@ -239,4 +258,80 @@ test("full-cache REST and WebSocket targets honor history and realtime capabilit
     symbolKey: "split:futures:LIVE",
     intervals: ["5m", "45m"],
   }]);
+});
+
+test("watchlist full-cache targets fail closed until the target exchange is available", () => {
+  const okxCatalog = buildExchangeCatalog([{
+    exchange: "okx",
+    name: "OKX stale entry",
+    capability_schema_version: 3,
+    markets: [{ market_type: "spot", product_type: "spot", label: "Spot" }],
+    native_intervals: ["13m"],
+    channels: [{
+      channel: "kline",
+      market_types: ["spot"],
+      history: true,
+      realtime: true,
+      params: { interval: ["13m"] },
+    }],
+    protocol_features: [],
+    limits: {},
+    known_limitations: [],
+  }]);
+  const targetOptions: FullCacheTargetOptions = {
+    watchlists: [{
+      id: "default",
+      name: "Watchlist",
+      color: "#3b82f6",
+      symbols: ["okx:spot:ETH-USDT"],
+    }],
+    subscriptionTiers: { "okx:spot:ETH-USDT": "full" },
+    exchangeCatalog: okxCatalog,
+  };
+
+  assert.deepEqual(buildWatchlistFullCacheTargets({
+    ...targetOptions,
+    exchangeCatalogStatus: "loading",
+  }), []);
+  assert.deepEqual(buildWatchlistFullSocketTargets({
+    ...targetOptions,
+    exchangeCatalogStatus: "loading",
+  }), []);
+  assert.deepEqual(buildWatchlistFullCacheTargets({
+    ...targetOptions,
+    exchangeCatalog: {},
+    exchangeCatalogStatus: "ready",
+  }), []);
+  assert.deepEqual(buildWatchlistFullSocketTargets({
+    ...targetOptions,
+    exchangeCatalog: {},
+    exchangeCatalogStatus: "ready",
+  }), []);
+
+  const fallbackHistory = mustBeDefined(buildWatchlistFullCacheTargets({
+    ...targetOptions,
+    exchangeCatalogStatus: "fallback",
+  })[0]);
+  const fallbackRealtime = mustBeDefined(buildWatchlistFullSocketTargets({
+    ...targetOptions,
+    exchangeCatalogStatus: "fallback",
+  })[0]);
+  assert.equal(fallbackHistory.intervals.includes("1m"), true);
+  assert.equal(fallbackHistory.intervals.includes("13m"), false);
+  assert.equal(fallbackRealtime.intervals.includes("1m"), true);
+  assert.equal(fallbackRealtime.intervals.includes("13m"), false);
+
+  const unknownOptions: FullCacheTargetOptions = {
+    ...targetOptions,
+    watchlists: [{
+      id: "default",
+      name: "Watchlist",
+      color: "#3b82f6",
+      symbols: ["unknown:spot:TEST"],
+    }],
+    subscriptionTiers: { "unknown:spot:TEST": "full" },
+    exchangeCatalogStatus: "fallback",
+  };
+  assert.deepEqual(buildWatchlistFullCacheTargets(unknownOptions), []);
+  assert.deepEqual(buildWatchlistFullSocketTargets(unknownOptions), []);
 });

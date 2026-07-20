@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canIssueWatchlistFullSubscriptionRequest,
   parseWatchlistPriceTick,
   resolveWatchlistFullSubscriptionInputs,
 } from "../watchlistSubscriptionRuntime.js";
@@ -79,7 +80,7 @@ test("watchlist full subscriptions use each symbol's realtime market capability"
   }];
 
   assert.deepEqual(
-    resolveWatchlistFullSubscriptionInputs("spot:BTCUSDT", exchangeCatalog, custom),
+    resolveWatchlistFullSubscriptionInputs("spot:BTCUSDT", exchangeCatalog, custom, "ready"),
     {
       nativeIntervals: [
         { value: "1s", label: "1s", seconds: 1 },
@@ -89,7 +90,68 @@ test("watchlist full subscriptions use each symbol's realtime market capability"
     },
   );
   assert.deepEqual(
-    resolveWatchlistFullSubscriptionInputs("binance:futures:BTCUSDT", exchangeCatalog, custom),
+    resolveWatchlistFullSubscriptionInputs(
+      "binance:futures:BTCUSDT",
+      exchangeCatalog,
+      custom,
+      "ready",
+    ),
     { nativeIntervals: [], customIntervalRecords: [] },
   );
+});
+
+test("watchlist full subscription requests require explicit target realtime capability", () => {
+  const exchangeCatalog = buildExchangeCatalog([{
+    exchange: "binance",
+    name: "Binance stale entry",
+    capability_schema_version: 3,
+    markets: [{ market_type: "spot", product_type: "spot", label: "Spot" }],
+    native_intervals: ["13m"],
+    channels: [{
+      channel: "kline",
+      market_types: ["spot"],
+      history: true,
+      realtime: true,
+      params: { interval: ["13m"] },
+    }],
+    protocol_features: [],
+    limits: {},
+    known_limitations: [],
+  }]);
+
+  const loadingInputs = resolveWatchlistFullSubscriptionInputs(
+    "spot:BTCUSDT",
+    exchangeCatalog,
+    [],
+    "loading",
+  );
+  const missingReadyInputs = resolveWatchlistFullSubscriptionInputs(
+    "okx:spot:ETH-USDT",
+    exchangeCatalog,
+    [],
+    "ready",
+  );
+  assert.deepEqual(loadingInputs, { nativeIntervals: [], customIntervalRecords: [] });
+  assert.deepEqual(missingReadyInputs, { nativeIntervals: [], customIntervalRecords: [] });
+  assert.equal(canIssueWatchlistFullSubscriptionRequest(loadingInputs), false);
+  assert.equal(canIssueWatchlistFullSubscriptionRequest(missingReadyInputs), false);
+
+  const fallbackInputs = resolveWatchlistFullSubscriptionInputs(
+    "spot:BTCUSDT",
+    exchangeCatalog,
+    [],
+    "fallback",
+  );
+  assert.equal(canIssueWatchlistFullSubscriptionRequest(fallbackInputs), true);
+  assert.equal(fallbackInputs.nativeIntervals.some(({ value }) => value === "1m"), true);
+  assert.equal(fallbackInputs.nativeIntervals.some(({ value }) => value === "13m"), false);
+
+  const unknownFallbackInputs = resolveWatchlistFullSubscriptionInputs(
+    "unknown:spot:TEST",
+    exchangeCatalog,
+    [],
+    "fallback",
+  );
+  assert.deepEqual(unknownFallbackInputs, { nativeIntervals: [], customIntervalRecords: [] });
+  assert.equal(canIssueWatchlistFullSubscriptionRequest(unknownFallbackInputs), false);
 });

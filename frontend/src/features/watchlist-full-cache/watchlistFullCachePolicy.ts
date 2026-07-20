@@ -1,8 +1,5 @@
 import { getFullSubscriptionIntervals } from "../watchlist/watchlistSubscriptionPolicy.js";
-import {
-  getBaseWsIntervals,
-  getNativeIntervals,
-} from "../chart-session/exchangeCatalogRuntime.js";
+import { resolveWatchlistNativeIntervals } from "../watchlist/watchlistIntervalCapabilityPolicy.js";
 import { parseSymbolKey } from "../../utils/symbolKey.js";
 import type { IntervalCandidate, WatchlistGroup } from "../watchlist/watchlistTypes.js";
 import type { NativeIntervalPurpose } from "../chart-session/chartSessionTypes.js";
@@ -25,19 +22,16 @@ function getTargetNativeIntervals(
   exchange: string,
   marketType: string,
   purpose: NativeIntervalPurpose,
-  currentSession: FullCacheTargetOptions["currentSession"],
-  currentNativeIntervals: IntervalCandidate[],
   exchangeCatalog: FullCacheTargetOptions["exchangeCatalog"],
+  exchangeCatalogStatus: NonNullable<FullCacheTargetOptions["exchangeCatalogStatus"]>,
 ): IntervalCandidate[] {
-  if (
-    purpose === "history"
-    && exchange === (currentSession?.exchange || "binance")
-    && marketType === (currentSession?.marketType || "spot")
-  ) return currentNativeIntervals;
-  if (purpose === "realtime") {
-    return getBaseWsIntervals(exchange, exchangeCatalog || null, marketType);
-  }
-  return getNativeIntervals(exchange, exchangeCatalog || null, marketType, purpose);
+  return resolveWatchlistNativeIntervals({
+    exchange,
+    marketType,
+    purpose,
+    exchangeCatalog: exchangeCatalog || null,
+    exchangeCatalogStatus,
+  });
 }
 
 export function prioritizeFullCacheIntervals(
@@ -62,7 +56,7 @@ function buildWatchlistFullTargets({
   watchlists = [],
   subscriptionTiers = {},
   exchangeCatalog = null,
-  nativeIntervals = [],
+  exchangeCatalogStatus = "loading",
   customIntervalRecords = [],
   currentSession = {},
 }: FullCacheTargetOptions, purpose: NativeIntervalPurpose): FullCacheTarget[] {
@@ -74,9 +68,8 @@ function buildWatchlistFullTargets({
         parsed.exchange,
         parsed.marketType,
         purpose,
-        currentSession,
-        nativeIntervals,
         exchangeCatalog,
+        exchangeCatalogStatus,
       );
       const intervals = getFullSubscriptionIntervals({
         nativeIntervals: targetNativeIntervals,

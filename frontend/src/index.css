@@ -2274,6 +2274,18 @@ body {
   background: var(--bg-hover);
 }
 
+.interval-btn.unavailable,
+.interval-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.interval-btn.unavailable:hover,
+.interval-btn:disabled:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
 .interval-btn.active {
   color: var(--accent-blue);
   background: rgba(59, 130, 246, 0.1);
@@ -2758,7 +2770,7 @@ body {
 
 .interval-panel-row {
   display: grid;
-  grid-template-columns: 150px 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-height: 42px;
@@ -2766,8 +2778,27 @@ body {
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
-  cursor: pointer;
   transition: all 0.15s ease;
+}
+
+.interval-panel-select {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.interval-panel-select:disabled {
+  color: inherit;
+  cursor: not-allowed;
 }
 
 .interval-panel-row:hover,
@@ -2778,6 +2809,15 @@ body {
 .interval-panel-row.active {
   border-color: rgba(59, 130, 246, 0.35);
   background: rgba(59, 130, 246, 0.1);
+}
+
+.interval-panel-row.unavailable {
+  opacity: 0.62;
+}
+
+.interval-panel-row.unavailable:hover,
+.interval-panel-row.unavailable.highlighted {
+  background: rgba(239, 68, 68, 0.06);
 }
 
 .interval-panel-main {
@@ -2812,6 +2852,12 @@ body {
 .interval-panel-badge.active {
   color: var(--accent-blue);
   background: rgba(59, 130, 246, 0.14);
+}
+
+.interval-panel-badge.unavailable {
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.1);
 }
 
 .interval-panel-meta {
@@ -2887,6 +2933,11 @@ body {
   }
 
   .interval-panel-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .interval-panel-select {
     grid-template-columns: 1fr;
     align-items: stretch;
   }

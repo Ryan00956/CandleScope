@@ -205,6 +205,11 @@ export interface ChartSessionRuntime {
   status: {
     exchangeCatalogStatus: ExchangeCatalogStatus;
     exchangeLimitations: string[];
+    exchangeCapabilityAvailable: boolean;
+    historyIntervalAvailable: boolean;
+    realtimeIntervalAvailable: boolean;
+    marketDataReady: boolean;
+    webSocketReady: boolean;
   };
   events: {
     transitionToken: number;

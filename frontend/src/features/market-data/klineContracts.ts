@@ -185,6 +185,7 @@ export type PatchCacheTick = (
 
 export interface SeriesDataFeedConfig {
   api?: KlineApi | null;
+  canRequestSeries?: (series: Partial<MarketSeries>) => boolean;
   getActiveSeries?: () => MarketSeries | null;
   isActiveSeries?: (series: MarketSeries, activeSeries: MarketSeries | null) => boolean;
   mergeCacheData?: MergeCacheData;

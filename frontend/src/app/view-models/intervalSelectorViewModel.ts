@@ -3,6 +3,7 @@ import type { AppShellViewModelContext } from "../appShellContracts.js";
 
 export function buildIntervalSelectorViewModel({
   sessionActions,
+  sessionStatus,
   sessionView,
 }: AppShellViewModelContext): IntervalSelectorProps {
   const {
@@ -16,6 +17,8 @@ export function buildIntervalSelectorViewModel({
 
   return {
     interval,
+    capabilityReady: sessionStatus.exchangeCapabilityAvailable,
+    capabilityLoading: sessionStatus.exchangeCatalogStatus === "loading",
     nativeIntervals,
     intervalGroups,
     customIntervalRecords,

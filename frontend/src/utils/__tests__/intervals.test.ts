@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canResolveIntervalFromNativeValues,
   canonicalizeIntervalValue,
   getIntervalSemanticSpec,
   intervalSemanticSignature,
+  intervalTiles,
   intervalsSemanticallyEquivalent,
   normalizeIntervalValue,
   parseIntervalParts,
@@ -60,4 +62,25 @@ test("semantic parsing fails closed for unsafe widths and excessive calendar mon
   assert.equal(canonicalizeIntervalValue("12000M"), "12000M");
   assert.equal(parseIntervalParts("12001M"), null);
   assert.equal(canonicalizeIntervalValue("12001M"), "");
+});
+
+test("exact tiling preserves fixed, weekly, and calendar alignment semantics", () => {
+  assert.equal(intervalTiles("1m", "47m"), true);
+  assert.equal(intervalTiles("1m", "90s"), false);
+  assert.equal(intervalTiles("1d", "1w"), true);
+  assert.equal(intervalTiles("3d", "1w"), false);
+  assert.equal(intervalTiles("1d", "1M"), true);
+  assert.equal(intervalTiles("1w", "2w"), true);
+  assert.equal(intervalTiles("1w", "7d"), false);
+  assert.equal(intervalTiles("1M", "2M"), true);
+  assert.equal(intervalTiles("1M", "30d"), false);
+});
+
+test("purpose-specific native values fail closed when no exact base exists", () => {
+  assert.equal(canResolveIntervalFromNativeValues("7s", ["1m", "1h"]), false);
+  assert.equal(canResolveIntervalFromNativeValues("7s", ["1s", "1m"]), true);
+  assert.equal(canResolveIntervalFromNativeValues("60m", ["1h"]), true);
+  assert.equal(canResolveIntervalFromNativeValues("90s", ["1m"]), false);
+  assert.equal(canResolveIntervalFromNativeValues("2w", ["1d"]), true);
+  assert.equal(canResolveIntervalFromNativeValues("2M", ["1M"]), true);
 });

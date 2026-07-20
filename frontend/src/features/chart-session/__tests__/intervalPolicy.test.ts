@@ -5,6 +5,7 @@ import {
   getEffectiveCustomIntervalRecords,
   getFallbackIntervalAfterCustomClear,
   getFallbackIntervalAfterCustomRemove,
+  isExchangeIntervalCapabilityAvailable,
   resolveSupportedInterval,
 } from "../intervalPolicy.js";
 import type { CustomIntervalRecord } from "../chartSessionTypes.js";
@@ -14,6 +15,16 @@ const nativeIntervals = [
   { value: "1h", seconds: 3600 },
   { value: "1d", seconds: 86400 },
 ];
+
+test("exchange capability readiness distinguishes loading, explicit fallback, and ready-empty catalogs", () => {
+  assert.equal(isExchangeIntervalCapabilityAvailable("loading", {}, "binance", nativeIntervals), false);
+  assert.equal(isExchangeIntervalCapabilityAvailable("fallback", {}, "binance", nativeIntervals), true);
+  assert.equal(isExchangeIntervalCapabilityAvailable("fallback", {}, "unknown", []), false);
+  assert.equal(isExchangeIntervalCapabilityAvailable("ready", {}, "binance", nativeIntervals), false);
+  assert.equal(isExchangeIntervalCapabilityAvailable("ready", {
+    binance: {} as never,
+  }, "binance", nativeIntervals), true);
+});
 
 function customInterval(value: string, lastUsedAt: number): CustomIntervalRecord {
   return {
@@ -52,6 +63,22 @@ test("supported interval resolution preserves custom/native values and otherwise
     nativeIntervals,
     isNativeIntervalSupported: isNative,
   }), "1h");
+  assert.equal(resolveSupportedInterval({
+    exchange: "binance",
+    interval: "7s",
+    exchangeCatalog: {},
+    savedCustomIntervals: ["7s"],
+    nativeIntervals,
+    isNativeIntervalSupported: isNative,
+  }), "1h", "saved syntax alone must not bypass exact history capabilities");
+  assert.equal(resolveSupportedInterval({
+    exchange: "binance",
+    interval: "45m",
+    exchangeCatalog: {},
+    savedCustomIntervals: ["45m"],
+    nativeIntervals: [],
+    isNativeIntervalSupported: () => false,
+  }), "45m", "an unavailable market must not invent a native 1h route");
 });
 
 test("custom interval removal prefers recent custom then nearest native interval", () => {
@@ -59,6 +86,7 @@ test("custom interval removal prefers recent custom then nearest native interval
   assert.equal(getFallbackIntervalAfterCustomRemove({
     removedInterval: "30m",
     customIntervalRecords: [
+      customInterval("7s", 3),
       customInterval("20m", 1),
       customInterval("45m", 2),
     ],

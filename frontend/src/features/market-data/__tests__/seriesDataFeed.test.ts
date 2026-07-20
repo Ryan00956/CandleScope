@@ -75,6 +75,67 @@ function rows(times: number[]): KlineBar[] {
   return times.map((time) => ({ time: epochSeconds(time), close: time }));
 }
 
+test("data-plane predicate blocks every HTTP and WebSocket transport boundary", async () => {
+  let calls = 0;
+  const feed = new SeriesDataFeed({
+    canRequestSeries: () => false,
+    api: {
+      fetchKlinesHistory: async () => { calls += 1; return { data: rows([10]) }; },
+      fetchKlinesBefore: async () => { calls += 1; return { data: rows([10]) }; },
+      fetchKlinesRange: async () => { calls += 1; return { data: rows([10]) }; },
+      fetchLatestKlines: async () => { calls += 1; return { data: rows([10]) }; },
+      getMultiStreamUrl: () => { calls += 1; return "ws://disabled"; },
+    },
+  });
+
+  const history = await feed.getHistory(SERIES);
+  const before = await feed.getBefore(SERIES, { before: epochSeconds(20) });
+  const range = await feed.getRange(SERIES, { start: epochSeconds(1), end: epochSeconds(20) });
+  const latest = await feed.getLatest(SERIES);
+  const stream = feed.subscribeBars({
+    exchange: SERIES.exchange,
+    marketType: SERIES.marketType,
+    symbol: SERIES.symbol,
+  });
+
+  assert.equal(calls, 0);
+  for (const result of [history, before, range, latest]) {
+    assert.equal(result.reason, "data-plane-disabled");
+    assert.equal(result.stale, true);
+  }
+  assert.equal(stream.isOpen(), false);
+  assert.equal(stream.sendPing(), false);
+});
+
+test("range pagination re-checks the data-plane predicate before every page", async () => {
+  let allowed = true;
+  let calls = 0;
+  const feed = new SeriesDataFeed({
+    canRequestSeries: () => allowed,
+    api: {
+      fetchKlinesRange: async (_symbol, _interval, _start, end) => {
+        calls += 1;
+        allowed = false;
+        return {
+          data: rows([Number(end)]),
+          truncated: true,
+          next_end_ms: (Number(end) - 1) * 1_000,
+        };
+      },
+    },
+  });
+
+  const result = await feed.getRange(SERIES, {
+    start: epochSeconds(1),
+    end: epochSeconds(20),
+    maxPages: 3,
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.reason, "data-plane-disabled");
+  assert.equal(result.stale, true);
+});
+
 class FakeSocket implements KlineStreamSocket {
   static OPEN = 1;
   readonly OPEN = FakeSocket.OPEN;

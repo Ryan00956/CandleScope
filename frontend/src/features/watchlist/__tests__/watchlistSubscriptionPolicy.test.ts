@@ -77,6 +77,17 @@ test("buildWatchlistConsumerId uses a single local watchlist owner", () => {
   );
 });
 
+test("full subscriptions exclude custom intervals without an exact purpose-specific base", () => {
+  assert.deepEqual(getFullSubscriptionIntervals({
+    nativeIntervals: [{ value: "1m" }, { value: "1h" }],
+    customIntervalRecords: [{ value: "7s" }, { value: "47m" }, { value: "90s" }],
+  }), ["1m", "1h", "47m"]);
+  assert.deepEqual(getFullSubscriptionIntervals({
+    nativeIntervals: [{ value: "1s" }, { value: "1m" }],
+    customIntervalRecords: [{ value: "7s" }, { value: "90s" }],
+  }), ["1s", "1m", "7s", "90s"]);
+});
+
 test("full interval resync compares normalized sets and suppresses duplicate inflight work", () => {
   const observed = buildFullSubscriptionIntervalSignature(["1m", "1h"]);
   assert.equal(shouldResyncFullSubscriptionIntervals({

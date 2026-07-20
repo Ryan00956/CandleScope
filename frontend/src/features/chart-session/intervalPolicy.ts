@@ -1,4 +1,5 @@
 import {
+  canResolveIntervalFromNativeValues,
   canonicalizeIntervalValue,
   intervalSemanticSignature,
   intervalsSemanticallyEquivalent,
@@ -7,6 +8,7 @@ import {
 import type {
   CustomIntervalRecord,
   ExchangeCatalog,
+  ExchangeCatalogStatus,
   ExchangeConfig,
   ExchangeId,
   IntervalString,
@@ -14,6 +16,17 @@ import type {
   NativeInterval,
   NativeIntervalSupport,
 } from "./chartSessionTypes.js";
+
+export function isExchangeIntervalCapabilityAvailable(
+  status: ExchangeCatalogStatus,
+  exchangeCatalog: ExchangeCatalog | null,
+  exchange: ExchangeId,
+  nativeIntervals: readonly NativeInterval[],
+): boolean {
+  if (status === "loading") return false;
+  if (status === "fallback") return nativeIntervals.length > 0;
+  return Boolean(exchangeCatalog?.[String(exchange).toLowerCase()]);
+}
 
 export function getExchangeMarketTypes(exchangeConfig: ExchangeConfig): string[] {
   return exchangeConfig.markets
@@ -63,7 +76,16 @@ export function resolveSupportedInterval({
     return canonicalizeIntervalValue(interval) || interval;
   }
   const custom = savedCustomIntervals.find((item) => intervalsSemanticallyEquivalent(item, interval));
-  if (custom) return canonicalizeIntervalValue(custom) || custom;
+  if (
+    custom
+    && canResolveIntervalFromNativeValues(
+      custom,
+      nativeIntervals.map((item) => item.value),
+    )
+  ) return canonicalizeIntervalValue(custom) || custom;
+  if (nativeIntervals.length === 0) {
+    return canonicalizeIntervalValue(interval) || interval;
+  }
   return getFallbackNativeInterval(nativeIntervals, "1h");
 }
 
@@ -99,7 +121,13 @@ export function getFallbackIntervalAfterCustomRemove({
   )) return removedInterval;
 
   const recentCustom = customIntervalRecords
-    .filter((record) => !intervalsSemanticallyEquivalent(record.value, removedInterval))
+    .filter((record) => (
+      !intervalsSemanticallyEquivalent(record.value, removedInterval)
+      && canResolveIntervalFromNativeValues(
+        record.value,
+        nativeIntervals.map((item) => item.value),
+      )
+    ))
     .sort((left, right) => (right.lastUsedAt || 0) - (left.lastUsedAt || 0))[0];
   if (recentCustom) return recentCustom.value;
 

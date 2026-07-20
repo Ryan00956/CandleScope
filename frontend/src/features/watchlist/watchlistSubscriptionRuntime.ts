@@ -7,16 +7,14 @@ import {
   updateSubscriptionTier,
 } from "../../services/api.js";
 import type { SubscriptionListPayload, SubscriptionPayload } from "../../services/apiPayloadParsers.js";
-import {
-  getBaseWsIntervals,
-  getNativeIntervals,
-} from "../chart-session/exchangeCatalogRuntime.js";
 import type {
   CustomIntervalRecord,
   ExchangeCatalog,
+  ExchangeCatalogStatus,
   NativeInterval,
 } from "../chart-session/chartSessionTypes.js";
 import { parseSymbolKey } from "../../utils/symbolKey.js";
+import { resolveWatchlistNativeIntervals } from "./watchlistIntervalCapabilityPolicy.js";
 import {
   buildFullSubscriptionIntervalSignature,
   getFullSubscriptionResourceSummary,
@@ -42,6 +40,7 @@ const PRICE_WS_RECONNECT_MS = 3_000;
 
 export interface WatchlistSubscriptionContext {
   exchangeCatalog?: ExchangeCatalog | null;
+  exchangeCatalogStatus?: ExchangeCatalogStatus;
   customIntervalRecords?: CustomIntervalRecord[];
 }
 
@@ -105,23 +104,28 @@ export function resolveWatchlistFullSubscriptionInputs(
   symbol: string,
   exchangeCatalog: ExchangeCatalog | null,
   customIntervalRecords: CustomIntervalRecord[] = [],
+  exchangeCatalogStatus: ExchangeCatalogStatus = "loading",
 ): { nativeIntervals: NativeInterval[]; customIntervalRecords: CustomIntervalRecord[] } {
   const parsed = parseSymbolKey(symbol);
-  const websocketIntervals = new Set(getBaseWsIntervals(
-    parsed.exchange,
+  const resolvedNativeIntervals = resolveWatchlistNativeIntervals({
+    exchange: parsed.exchange,
+    marketType: parsed.marketType,
+    purpose: "realtime",
     exchangeCatalog,
-    parsed.marketType,
-  ));
-  const resolvedNativeIntervals = getNativeIntervals(
-    parsed.exchange,
-    exchangeCatalog,
-    parsed.marketType,
-    "realtime",
-  ).filter((item) => websocketIntervals.has(item.value));
+    exchangeCatalogStatus,
+  });
   return {
     nativeIntervals: resolvedNativeIntervals,
     customIntervalRecords: resolvedNativeIntervals.length > 0 ? customIntervalRecords : [],
   };
+}
+
+export function canIssueWatchlistFullSubscriptionRequest({
+  nativeIntervals,
+}: {
+  nativeIntervals: readonly NativeInterval[];
+}): boolean {
+  return nativeIntervals.length > 0;
 }
 
 export function useWatchlistSubscriptionRuntime({
@@ -139,6 +143,7 @@ export function useWatchlistSubscriptionRuntime({
   const fullIntervalSyncInFlightRef = useRef(new Map<string, string>());
   const {
     exchangeCatalog = null,
+    exchangeCatalogStatus = "loading",
     customIntervalRecords = [],
   } = subscriptionContext;
 
@@ -210,8 +215,9 @@ export function useWatchlistSubscriptionRuntime({
       symbol,
       exchangeCatalog,
       customIntervalRecords,
+      exchangeCatalogStatus,
     );
-  }, [customIntervalRecords, exchangeCatalog]);
+  }, [customIntervalRecords, exchangeCatalog, exchangeCatalogStatus]);
 
   const subscriptionResourceSummaries = useMemo(() => {
     const summaries: Record<string, ReturnType<typeof getFullSubscriptionResourceSummary>> = {};
@@ -224,12 +230,17 @@ export function useWatchlistSubscriptionRuntime({
 
   const handleTierChange = useCallback((symbol: string, tier: SubscriptionTier) => {
     const prevTier = subscriptionTiersRef.current[symbol] || "none";
+    const fullSubscriptionInputs = resolveFullSubscriptionInputs(symbol);
+    if (
+      tier === "full"
+      && !canIssueWatchlistFullSubscriptionRequest(fullSubscriptionInputs)
+    ) return;
     const lifecycleGeneration = lifecycleGenerationRef.current;
     const mutation = tierCoordinator.beginMutation(symbol, prevTier, tier);
     const options = getSubscriptionTierRequestOptions({
       symbol,
       tier,
-      ...resolveFullSubscriptionInputs(symbol),
+      ...fullSubscriptionInputs,
     });
     tierMutationInFlightRef.current.add(symbol);
     publishSubscriptionTiers({ ...subscriptionTiersRef.current, [symbol]: tier });
@@ -299,10 +310,12 @@ export function useWatchlistSubscriptionRuntime({
     for (const symbol of symbols) {
       const tier = subscriptionTiers[symbol] || "none";
       if (tier !== "full" || tierMutationInFlightRef.current.has(symbol)) continue;
+      const fullSubscriptionInputs = resolveFullSubscriptionInputs(symbol);
+      if (!canIssueWatchlistFullSubscriptionRequest(fullSubscriptionInputs)) continue;
       const options = getSubscriptionTierRequestOptions({
         symbol,
         tier,
-        ...resolveFullSubscriptionInputs(symbol),
+        ...fullSubscriptionInputs,
       });
       const desiredIntervals = options.intervals || [];
       const desiredSignature = buildFullSubscriptionIntervalSignature(desiredIntervals);

@@ -151,6 +151,59 @@ export function intervalsSemanticallyEquivalent(left: unknown, right: unknown): 
   return leftSignature !== "" && leftSignature === intervalSemanticSignature(right);
 }
 
+function intervalNominalSeconds(spec: IntervalSemanticSpec): number {
+  if (spec.widthSeconds != null) return spec.widthSeconds;
+  if (spec.weekCount != null) return spec.weekCount * INTERVAL_UNIT_SECONDS.w;
+  return (spec.monthCount || 0) * INTERVAL_UNIT_SECONDS.M;
+}
+
+/**
+ * Return whether complete source buckets exactly tile target boundaries.
+ *
+ * This mirrors the backend IntervalResolver's semantic rule: identities are
+ * alignment-aware, while fixed UTC bars no wider than one day may also build
+ * Monday-aligned weeks and calendar months. A syntactically valid custom
+ * interval is not necessarily derivable for a venue (for example 7s from a
+ * futures feed whose smallest native K-line is 1m).
+ */
+export function intervalTiles(source: unknown, target: unknown): boolean {
+  const sourceSpec = getIntervalSemanticSpec(source);
+  const targetSpec = getIntervalSemanticSpec(target);
+  if (!sourceSpec || !targetSpec) return false;
+
+  if (sourceSpec.alignment !== targetSpec.alignment) {
+    return sourceSpec.alignment === "fixed-epoch"
+      && (targetSpec.alignment === "weekly-monday" || targetSpec.alignment === "calendar-month")
+      && sourceSpec.widthSeconds != null
+      && sourceSpec.widthSeconds <= INTERVAL_UNIT_SECONDS.d
+      && INTERVAL_UNIT_SECONDS.d % sourceSpec.widthSeconds === 0;
+  }
+  if (sourceSpec.alignment === "calendar-month") {
+    return (targetSpec.monthCount || 0) % (sourceSpec.monthCount || 1) === 0;
+  }
+  if (sourceSpec.alignment === "weekly-monday") {
+    return (targetSpec.weekCount || 0) % (sourceSpec.weekCount || 1) === 0;
+  }
+  return (targetSpec.widthSeconds || 0) % (sourceSpec.widthSeconds || 1) === 0;
+}
+
+/** Resolve a target from the purpose-specific native values supplied by capabilities. */
+export function canResolveIntervalFromNativeValues(
+  target: unknown,
+  nativeValues: readonly unknown[],
+): boolean {
+  const targetSpec = getIntervalSemanticSpec(target);
+  if (!targetSpec) return false;
+  const targetNominalSeconds = intervalNominalSeconds(targetSpec);
+  return nativeValues.some((nativeValue) => {
+    if (intervalsSemanticallyEquivalent(nativeValue, target)) return true;
+    const sourceSpec = getIntervalSemanticSpec(nativeValue);
+    return sourceSpec != null
+      && intervalNominalSeconds(sourceSpec) < targetNominalSeconds
+      && intervalTiles(nativeValue, target);
+  });
+}
+
 export function getIntervalGroupLabel(seconds: number): string {
   if (seconds < 60) return "Seconds";
   if (seconds < 3600) return "Minutes";

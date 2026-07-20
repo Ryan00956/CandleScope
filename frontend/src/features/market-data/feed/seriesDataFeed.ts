@@ -530,6 +530,29 @@ function defaultIsActiveSeries(
 const noopMergeCacheData: MergeCacheData = () => undefined;
 const noopCommitChartData: CommitChartData = () => undefined;
 const noopPatchCacheTick: PatchCacheTick = () => undefined;
+const disabledStreamController: KlineStreamController = {
+  readyState: () => undefined,
+  isOpen: () => false,
+  send: () => false,
+  sendPing: () => false,
+  updateIntervals: () => undefined,
+  close: () => undefined,
+};
+
+function dataPlaneDisabledResult(): AppliedKlineResult {
+  return {
+    data: [],
+    rows: [],
+    committed: false,
+    stale: true,
+    active: false,
+    skipped: true,
+    reason: "data-plane-disabled",
+    retryable: false,
+    terminal_reason: "data_plane_disabled",
+  };
+}
+
 export class SeriesDataFeed {
   inflight: InflightRegistry;
   epochBySeries: Map<SeriesKey, number>;
@@ -548,6 +571,7 @@ export class SeriesDataFeed {
   gapPlannerNextAllowedAt: Map<SeriesKey, number>;
   excludedRangesBySeries: Map<SeriesKey, ExcludedRangeState>;
   api: KlineApi | null;
+  canRequestSeries: (series: Partial<MarketSeries>) => boolean;
   getActiveSeries: () => MarketSeries | null;
   isActiveSeries: (series: MarketSeries, activeSeries: MarketSeries | null) => boolean;
   mergeCacheData: MergeCacheData;
@@ -573,6 +597,7 @@ export class SeriesDataFeed {
     this.gapPlannerNextAllowedAt = new Map();
     this.excludedRangesBySeries = new Map();
     this.api = null;
+    this.canRequestSeries = () => true;
     this.getActiveSeries = () => null;
     this.isActiveSeries = defaultIsActiveSeries;
     this.mergeCacheData = noopMergeCacheData;
@@ -584,6 +609,7 @@ export class SeriesDataFeed {
 
   configure(config: SeriesDataFeedConfig = {}): void {
     this.api = config.api || this.api || null;
+    this.canRequestSeries = config.canRequestSeries || this.canRequestSeries || (() => true);
     this.getActiveSeries = config.getActiveSeries || this.getActiveSeries || (() => null);
     this.isActiveSeries = config.isActiveSeries || this.isActiveSeries || defaultIsActiveSeries;
     this.mergeCacheData = config.mergeCacheData || this.mergeCacheData || noopMergeCacheData;
@@ -627,6 +653,19 @@ export class SeriesDataFeed {
     }
     this.gapPlannerNextAllowedAt.delete(key);
     return next;
+  }
+
+  cancelSeriesRequests(series: MarketSeries): void {
+    const key = this.seriesKey(series);
+    this.beginEpoch(series);
+    const queue = this.backfillReloadQueues.get(key);
+    if (queue) {
+      for (const job of queue) {
+        for (const eventKey of job.eventKeys) this.backfillEventInFlight.delete(eventKey);
+      }
+      queue.splice(0, queue.length);
+      this.backfillReloadQueues.delete(key);
+    }
   }
 
   private bumpGapRepairGeneration(series: MarketSeries): number {
@@ -708,6 +747,7 @@ export class SeriesDataFeed {
     series: Pick<MarketSeries, "exchange" | "marketType" | "symbol">,
     options: KlineStreamOptions = {},
   ): KlineStreamController {
+    if (!this.isSeriesRequestAllowed(series)) return disabledStreamController;
     const api = this.resolveSyncApi();
     if (typeof api.getMultiStreamUrl !== "function") {
       throw new Error("SeriesDataFeed API adapter must provide getMultiStreamUrl for subscribeBars");
@@ -717,6 +757,15 @@ export class SeriesDataFeed {
       series,
       ...options,
     });
+  }
+
+  private isSeriesRequestAllowed(series: Partial<MarketSeries>): boolean {
+    try {
+      return this.canRequestSeries(series);
+    } catch (error) {
+      console.warn("Series data-plane predicate failed closed:", error);
+      return false;
+    }
   }
 
   isBeforePageCoolingDown(series: MarketSeries, now = Date.now()): boolean {
@@ -2055,6 +2104,7 @@ export class SeriesDataFeed {
       requestScope,
     }: GetHistoryOptions = {},
   ): Promise<AppliedKlineResult> {
+    if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
     const epoch = this.currentEpoch(series);
     const key = requestKeyFor("history", series, {
       countBack,
@@ -2064,7 +2114,9 @@ export class SeriesDataFeed {
       requestScope,
     });
     return this.inflight.run(key, async () => {
+      if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
+      if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const result = await api.fetchKlinesHistory(
         series.symbol,
         series.interval,
@@ -2096,6 +2148,7 @@ export class SeriesDataFeed {
       requestScope,
     }: GetBeforeOptions = {},
   ): Promise<AppliedKlineResult> {
+    if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
     const epoch = this.currentEpoch(series);
     const key = requestKeyFor("before", series, {
       before,
@@ -2105,7 +2158,9 @@ export class SeriesDataFeed {
       requestScope,
     });
     return this.inflight.run(key, async () => {
+      if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
+      if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const result = await api.fetchKlinesBefore(
         series.symbol,
         series.interval,
@@ -2148,6 +2203,7 @@ export class SeriesDataFeed {
     if (!range) {
       return { data: [], rows: [], skipped: true, reason: "invalid-range" };
     }
+    if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
 
     const epoch = this.currentEpoch(series);
     const key = requestKeyFor("range", series, {
@@ -2162,6 +2218,7 @@ export class SeriesDataFeed {
       requestScope,
     });
     return this.inflight.run(key, async () => {
+      if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
       const pages: AppliedKlineResult[] = [];
       const combinedByTime = new Map<EpochSeconds, KlineBar>();
@@ -2171,6 +2228,7 @@ export class SeriesDataFeed {
       let paginationStopReason: FeedResult["pagination_stop_reason"];
 
       for (let page = 0; page < pageLimit && pageEnd >= range.start; page += 1) {
+        if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
         throwIfAborted(signal);
         const result = await api.fetchKlinesRange(
           series.symbol,
@@ -2288,10 +2346,13 @@ export class SeriesDataFeed {
       commit = "patch-active",
     }: GetLatestOptions = {},
   ): Promise<AppliedKlineResult> {
+    if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
     const epoch = this.currentEpoch(series);
     const key = requestKeyFor("latest", series, { apiSource, epoch, limit, source });
     return this.inflight.run(key, async () => {
+      if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
+      if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const result = await api.fetchLatestKlines(
         series.symbol,
         series.interval,

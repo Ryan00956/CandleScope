@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  canResolveIntervalFromNativeValues,
   canonicalizeIntervalValue,
   formatIntervalDescription,
   formatSecondsCompact,
@@ -111,6 +112,9 @@ function createStatusForValue(
   value: unknown,
   nativeValueSet: Set<string>,
   customValueSet: Set<string>,
+  nativeValues: readonly IntervalString[],
+  capabilityReady: boolean,
+  capabilityLoading: boolean,
 ): IntervalStatus {
   const normalized = canonicalizeIntervalValue(value);
   const seconds = parseIntervalSeconds(normalized);
@@ -118,8 +122,21 @@ function createStatusForValue(
   if (!normalized || !seconds) {
     return { ok: false, kind: "invalid", text: "请输入大于 0 的数字，并选择 s/m/h/d/w/M 单位。" };
   }
+  if (capabilityLoading) {
+    return { ok: false, kind: "invalid", text: "交易所周期能力正在加载，请稍候。" };
+  }
+  if (!capabilityReady) {
+    return { ok: false, kind: "invalid", text: "当前交易所没有可用的历史 K 线能力。" };
+  }
   if (nativeValueSet.has(signature)) {
     return { ok: false, kind: "native", text: "这是交易所原生周期，可直接选择。" };
+  }
+  if (!canResolveIntervalFromNativeValues(normalized, nativeValues)) {
+    return {
+      ok: false,
+      kind: "invalid",
+      text: "当前市场没有可精确拼接该周期的历史 K 线基准周期。",
+    };
   }
   if (customValueSet.has(signature)) {
     return { ok: false, kind: "exists", text: "该自定义周期已添加，可直接选择。" };
@@ -129,6 +146,8 @@ function createStatusForValue(
 
 export interface IntervalSelectorProps {
   interval: IntervalString;
+  capabilityReady: boolean;
+  capabilityLoading: boolean;
   nativeIntervals: NativeInterval[];
   intervalGroups: GroupedAvailableIntervals;
   customIntervalRecords: CustomIntervalRecord[];
@@ -144,6 +163,8 @@ export interface IntervalSelectorProps {
 
 function IntervalSelector({
   interval,
+  capabilityReady,
+  capabilityLoading,
   nativeIntervals,
   intervalGroups,
   customIntervalRecords,
@@ -175,6 +196,10 @@ function IntervalSelector({
     () => new Set(savedCustomIntervals.map(intervalSemanticSignature)),
     [savedCustomIntervals],
   );
+  const nativeValues = useMemo(
+    () => nativeIntervals.map((item) => item.value),
+    [nativeIntervals],
+  );
   const effectiveCustomRecords = useMemo(
     () => getEffectiveCustomIntervalRecords(customIntervalRecords, nativeIntervals),
     [customIntervalRecords, nativeIntervals],
@@ -202,8 +227,8 @@ function IntervalSelector({
 
   const normalizedSearch = canonicalizeIntervalValue(search);
   const searchCreateStatus = useMemo(
-    () => createStatusForValue(search, nativeValueSet, customValueSet),
-    [customValueSet, nativeValueSet, search],
+    () => createStatusForValue(search, nativeValueSet, customValueSet, nativeValues, capabilityReady, capabilityLoading),
+    [capabilityLoading, capabilityReady, customValueSet, nativeValueSet, nativeValues, search],
   );
 
   const formValue = useMemo(() => {
@@ -212,9 +237,21 @@ function IntervalSelector({
     return `${numeric}${unit}`;
   }, [amount, unit]);
   const formStatus = useMemo(
-    () => createStatusForValue(formValue, nativeValueSet, customValueSet),
-    [customValueSet, formValue, nativeValueSet],
+    () => createStatusForValue(formValue, nativeValueSet, customValueSet, nativeValues, capabilityReady, capabilityLoading),
+    [capabilityLoading, capabilityReady, customValueSet, formValue, nativeValueSet, nativeValues],
   );
+
+  const isIntervalAvailable = useCallback((value: IntervalString): boolean => (
+    capabilityReady && canResolveIntervalFromNativeValues(value, nativeValues)
+  ), [capabilityReady, nativeValues]);
+
+  const unavailableMessage = useCallback((value: IntervalString): string => (
+    capabilityLoading
+      ? "交易所周期能力正在加载，请稍候。"
+      : capabilityReady
+        ? `当前市场没有可精确拼接 ${value} 的历史 K 线基准周期。`
+        : "当前交易所没有可用的历史 K 线能力。"
+  ), [capabilityLoading, capabilityReady]);
 
   const visibleItems = useMemo(() => {
     if (activeTab === "custom") {
@@ -245,9 +282,17 @@ function IntervalSelector({
     () => groupIntervalsByDuration(visibleItems),
     [visibleItems],
   );
-  const clampedHighlightIndex = visibleItems.length > 0
-    ? Math.min(highlightIndex, visibleItems.length - 1)
+  const visibleItemsInRenderOrder = useMemo(
+    () => visibleGroups.flatMap((group) => group.items),
+    [visibleGroups],
+  );
+  const clampedHighlightIndex = visibleItemsInRenderOrder.length > 0
+    ? Math.min(highlightIndex, visibleItemsInRenderOrder.length - 1)
     : 0;
+  const visibleAvailableCount = useMemo(
+    () => visibleItemsInRenderOrder.filter((item) => isIntervalAvailable(item.value)).length,
+    [isIntervalAvailable, visibleItemsInRenderOrder],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -266,15 +311,28 @@ function IntervalSelector({
   }, [open]);
 
   const selectInterval = useCallback((value: IntervalString) => {
-    onSelectInterval(canonicalizeIntervalValue(value) || value);
+    const normalized = canonicalizeIntervalValue(value) || value;
+    if (!isIntervalAvailable(normalized)) {
+      setInlineMessage({ type: "error", text: unavailableMessage(normalized) });
+      setOpen(true);
+      return;
+    }
+    onSelectInterval(normalized);
     setOpen(false);
     setSearch("");
     setInlineMessage(null);
-  }, [onSelectInterval]);
+  }, [isIntervalAvailable, onSelectInterval, unavailableMessage]);
 
   const createOrSelectInterval = useCallback((value: IntervalString) => {
     const normalized = canonicalizeIntervalValue(value);
-    const status = createStatusForValue(normalized, nativeValueSet, customValueSet);
+    const status = createStatusForValue(
+      normalized,
+      nativeValueSet,
+      customValueSet,
+      nativeValues,
+      capabilityReady,
+      capabilityLoading,
+    );
     if (status.kind === "native" || status.kind === "exists") {
       selectInterval(normalized);
       return;
@@ -292,7 +350,7 @@ function IntervalSelector({
     setInlineMessage({ type: "success", text: `${normalized} 已添加并切换` });
     setOpen(false);
     setSearch("");
-  }, [customValueSet, nativeValueSet, onCreateCustomInterval, selectInterval]);
+  }, [capabilityLoading, capabilityReady, customValueSet, nativeValueSet, nativeValues, onCreateCustomInterval, selectInterval]);
 
   const handleSearchKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
@@ -302,7 +360,7 @@ function IntervalSelector({
     }
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setHighlightIndex((prev) => Math.min(prev + 1, Math.max(visibleItems.length - 1, 0)));
+      setHighlightIndex((prev) => Math.min(prev + 1, Math.max(visibleItemsInRenderOrder.length - 1, 0)));
       return;
     }
     if (event.key === "ArrowUp") {
@@ -312,14 +370,14 @@ function IntervalSelector({
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      const highlighted = visibleItems[clampedHighlightIndex];
+      const highlighted = visibleItemsInRenderOrder[clampedHighlightIndex];
       if (highlighted) {
         selectInterval(highlighted.value);
         return;
       }
       if (normalizedSearch) createOrSelectInterval(normalizedSearch);
     }
-  }, [clampedHighlightIndex, createOrSelectInterval, normalizedSearch, selectInterval, visibleItems]);
+  }, [clampedHighlightIndex, createOrSelectInterval, normalizedSearch, selectInterval, visibleItemsInRenderOrder]);
 
   const handleRemove = useCallback((value: IntervalString) => {
     onRemoveCustomInterval(value);
@@ -331,19 +389,26 @@ function IntervalSelector({
     onClearCustomIntervals();
   }, [customIntervalRecords.length, onClearCustomIntervals]);
 
-  const renderIntervalButton = (item: IntervalItem, extraClass = ""): ReactNode => (
-    <button
-      key={item.value}
-      id={`interval-${item.value}`}
-      className={clsx("interval-btn", intervalsSemanticallyEquivalent(interval, item.value) && "active", item.isCustom && "custom-interval-btn", extraClass)}
-      onClick={() => selectInterval(item.value)}
-      title={item.isCustom ? `自定义周期：${formatIntervalDescription(item.value)}` : item.value}
-      type="button"
-    >
-      {item.isCustom && <span className="interval-custom-dot" />}
-      {item.label}
-    </button>
-  );
+  const renderIntervalButton = (item: IntervalItem, extraClass = ""): ReactNode => {
+    const available = isIntervalAvailable(item.value);
+    return (
+      <button
+        key={item.value}
+        id={`interval-${item.value}`}
+        className={clsx("interval-btn", intervalsSemanticallyEquivalent(interval, item.value) && "active", item.isCustom && "custom-interval-btn", !available && "unavailable", extraClass)}
+        onClick={() => selectInterval(item.value)}
+        title={!available
+          ? unavailableMessage(item.value)
+          : item.isCustom ? `自定义周期：${formatIntervalDescription(item.value)}` : item.value}
+        type="button"
+        disabled={!available}
+        aria-disabled={!available}
+      >
+        {item.isCustom && <span className="interval-custom-dot" />}
+        {item.label}
+      </button>
+    );
+  };
 
   const renderIntervalRow = (item: IntervalItem, index: number): ReactNode => {
     const seconds = item.seconds || parseIntervalSeconds(item.value) || 0;
@@ -351,34 +416,36 @@ function IntervalSelector({
       intervalsSemanticallyEquivalent(custom.value, item.value)
     ));
     const highlighted = index === clampedHighlightIndex;
+    const available = isIntervalAvailable(item.value);
     return (
       <div
         key={item.value}
-        className={clsx("interval-panel-row", intervalsSemanticallyEquivalent(interval, item.value) && "active", highlighted && "highlighted")}
-        onClick={() => selectInterval(item.value)}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            selectInterval(item.value);
-          }
-        }}
+        className={clsx("interval-panel-row", intervalsSemanticallyEquivalent(interval, item.value) && "active", highlighted && "highlighted", !available && "unavailable")}
       >
-        <div className="interval-panel-main">
-          <span className="interval-panel-value">{item.value}</span>
-          {item.isCustom && <span className="interval-panel-badge">自定义</span>}
-          {record?.pinned && <span className="interval-panel-badge pinned">置顶</span>}
-          {intervalsSemanticallyEquivalent(interval, item.value) && <span className="interval-panel-badge active">当前</span>}
-        </div>
-        <div className="interval-panel-meta">
-          <span>{formatIntervalDescription(item.value)}</span>
-          <span>{getIntervalGroupLabelZh(seconds)}</span>
-          <span>{formatSecondsCompact(seconds)}</span>
-          {record && record.usageCount > 0 && <span>使用 {record.usageCount}</span>}
-        </div>
+        <button
+          type="button"
+          className="interval-panel-select"
+          onClick={() => selectInterval(item.value)}
+          disabled={!available}
+          aria-disabled={!available}
+          title={!available ? unavailableMessage(item.value) : undefined}
+        >
+          <span className="interval-panel-main">
+            <span className="interval-panel-value">{item.value}</span>
+            {item.isCustom && <span className="interval-panel-badge">自定义</span>}
+            {record?.pinned && <span className="interval-panel-badge pinned">置顶</span>}
+            {intervalsSemanticallyEquivalent(interval, item.value) && <span className="interval-panel-badge active">当前</span>}
+            {!available && <span className="interval-panel-badge unavailable">当前市场不可用</span>}
+          </span>
+          <span className="interval-panel-meta">
+            <span>{formatIntervalDescription(item.value)}</span>
+            <span>{getIntervalGroupLabelZh(seconds)}</span>
+            <span>{formatSecondsCompact(seconds)}</span>
+            {record && record.usageCount > 0 && <span>使用 {record.usageCount}</span>}
+          </span>
+        </button>
         {item.isCustom && (
-          <div className="interval-row-actions" onClick={(event) => event.stopPropagation()}>
+          <div className="interval-row-actions">
             <button
               type="button"
               className={clsx("interval-row-action", record?.pinned && "active")}
@@ -516,6 +583,7 @@ function IntervalSelector({
                   type="button"
                   className="interval-create-btn"
                   onClick={() => createOrSelectInterval(formValue)}
+                  disabled={!formStatus.ok && formStatus.kind === "invalid"}
                 >
                   {formStatus.kind === "native" || formStatus.kind === "exists" ? "选择" : "添加并切换"}
                 </button>
@@ -527,11 +595,28 @@ function IntervalSelector({
 
               <div className="interval-presets">
                 <span>快捷：</span>
-                {QUICK_PRESETS.map((preset) => (
-                  <button key={preset} type="button" onClick={() => createOrSelectInterval(preset)}>
-                    {preset}
-                  </button>
-                ))}
+                {QUICK_PRESETS.map((preset) => {
+                  const status = createStatusForValue(
+                    preset,
+                    nativeValueSet,
+                    customValueSet,
+                    nativeValues,
+                    capabilityReady,
+                    capabilityLoading,
+                  );
+                  const disabled = status.kind === "invalid";
+                  return (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => createOrSelectInterval(preset)}
+                      disabled={disabled}
+                      title={disabled ? status.text : undefined}
+                    >
+                      {preset}
+                    </button>
+                  );
+                })}
               </div>
             </section>
 
@@ -558,7 +643,7 @@ function IntervalSelector({
                     {activeTab === "custom" ? "自定义周期" : activeTab === "all" ? "全部周期" : "常用周期"}
                   </div>
                   <div className="interval-section-desc">
-                    {visibleItems.length} 个可用周期，Enter 选择，高亮行可用方向键移动。
+                    {visibleAvailableCount} 个当前可用周期，{visibleItems.length} 个已显示；Enter 选择，高亮行可用方向键移动。
                   </div>
                 </div>
                 {activeTab === "custom" && effectiveCustomRecords.length > 0 && (

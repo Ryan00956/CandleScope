@@ -1,4 +1,7 @@
-import { canonicalizeIntervalValue } from "../../utils/intervals.js";
+import {
+  canResolveIntervalFromNativeValues,
+  canonicalizeIntervalValue,
+} from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import type {
   FullSubscriptionOptions,
@@ -14,17 +17,14 @@ export function getFullSubscriptionIntervals({
   nativeIntervals = [],
   customIntervalRecords = [],
 }: FullSubscriptionOptions = {}): IntervalString[] {
-  const seen = new Set<IntervalString>();
-  const intervals: IntervalString[] = [];
-
-  for (const item of [...nativeIntervals, ...customIntervalRecords]) {
-    const value = canonicalizeIntervalValue(intervalValue(item));
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    intervals.push(value);
-  }
-
-  return intervals;
+  const nativeValues = normalizedUniqueValues(nativeIntervals);
+  const nativeSet = new Set(nativeValues);
+  const customValues = normalizedUniqueValues(customIntervalRecords)
+    .filter((value) => (
+      !nativeSet.has(value)
+      && canResolveIntervalFromNativeValues(value, nativeValues)
+    ));
+  return [...nativeValues, ...customValues];
 }
 
 function normalizedUniqueValues(items: IntervalCandidate[] = []): IntervalString[] {
@@ -74,7 +74,10 @@ export function getFullSubscriptionResourceSummary({
   const nativeValues = normalizedUniqueValues(nativeIntervals);
   const nativeSet = new Set(nativeValues);
   const customValues = normalizedUniqueValues(customIntervalRecords)
-    .filter((value) => !nativeSet.has(value));
+    .filter((value) => (
+      !nativeSet.has(value)
+      && canResolveIntervalFromNativeValues(value, nativeValues)
+    ));
   const totalIntervals = nativeValues.length + customValues.length;
 
   return {

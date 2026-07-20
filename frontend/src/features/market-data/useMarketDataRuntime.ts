@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { intervalsSemanticallyEquivalent } from "../../utils/intervals.js";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  canResolveIntervalFromNativeValues,
+  intervalsSemanticallyEquivalent,
+} from "../../utils/intervals.js";
 import type { MutableRefObject } from "react";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import { resolveInitialRows as resolveWatchlistInitialRows } from "../watchlist-full-cache/watchlistFullCacheResolver.js";
@@ -24,7 +27,7 @@ import type {
   BackfillCompletedMessage,
   IndicatorRangeEvent,
 } from "./klineContracts.js";
-import type { KlineBar } from "./marketDataTypes.js";
+import type { KlineBar, MarketSeries } from "./marketDataTypes.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 
@@ -79,12 +82,19 @@ export function useMarketDataRuntime({
     trackedIntervals,
     prefetchIntervals,
     exchangeConfig,
+    nativeIntervals,
   } = session.view;
   const {
     handleVisibleRangeChange,
     updateVisibleRangeDataMeta,
   } = session.actions;
   const { intervalRef } = session.refs;
+  const {
+    exchangeCatalogStatus,
+    historyIntervalAvailable,
+    marketDataReady,
+    webSocketReady,
+  } = session.status;
   const lastSessionTransition = session.events?.lastTransition ?? null;
   const {
     indicatorRangeRequests,
@@ -127,8 +137,34 @@ export function useMarketDataRuntime({
   const [connectionStatus, setConnectionStatus] = useState("loading");
   const [dataSource, setDataSource] = useState<string | null>(null);
   const [wsStatus, setWsStatus] = useState<KlineWebSocketStatus>("idle");
+  const lastEnabledSeriesRef = useRef<MarketSeries | null>(null);
+  const nativeIntervalValues = useMemo(
+    () => nativeIntervals.map((item) => item.value),
+    [nativeIntervals],
+  );
+  const chartSeriesRequestGateRef = useRef({
+    exchange,
+    marketType,
+    symbol,
+    marketDataReady,
+    webSocketReady,
+    nativeIntervalValues,
+  });
 
-  const activeChartReady = chartData.length > 0 && chartDataMeta.status === "ready";
+  useLayoutEffect(() => {
+    chartSeriesRequestGateRef.current = {
+      exchange,
+      marketType,
+      symbol,
+      marketDataReady,
+      webSocketReady,
+      nativeIntervalValues,
+    };
+  }, [exchange, marketDataReady, marketType, nativeIntervalValues, symbol, webSocketReady]);
+
+  const activeChartReady = marketDataReady
+    && chartData.length > 0
+    && chartDataMeta.status === "ready";
 
   useEffect(() => {
     updateVisibleRangeDataMeta?.(chartDataMeta);
@@ -160,9 +196,27 @@ export function useMarketDataRuntime({
   }, [realtimePriceRef]);
 
   const seriesDataFeed = useMemo(() => new SeriesDataFeed(), []);
+  const canRequestChartSeries = useCallback((candidate: {
+    exchange?: ExchangeId;
+    marketType?: MarketType;
+    symbol?: SymbolCode;
+    interval?: IntervalString;
+  }): boolean => {
+    const gate = chartSeriesRequestGateRef.current;
+    if (!gate.marketDataReady) return false;
+    if (candidate.exchange != null && candidate.exchange !== gate.exchange) return false;
+    if (candidate.marketType != null && candidate.marketType !== gate.marketType) return false;
+    if (candidate.symbol != null && candidate.symbol !== gate.symbol) return false;
+    if (candidate.interval == null) return gate.webSocketReady;
+    return canResolveIntervalFromNativeValues(
+      candidate.interval,
+      gate.nativeIntervalValues,
+    );
+  }, []);
   useEffect(() => {
     seriesDataFeed.configure({
       api: defaultKlineApi,
+      canRequestSeries: canRequestChartSeries,
       getActiveSeries: () => ({
         exchange,
         marketType,
@@ -177,6 +231,7 @@ export function useMarketDataRuntime({
   }, [
     commitMergedChartData,
     commitPatchedChartData,
+    canRequestChartSeries,
     exchange,
     interval,
     marketType,
@@ -207,6 +262,7 @@ export function useMarketDataRuntime({
     setHasMoreLeft,
     handleNeedMoreLeft,
   } = useChartLoadMoreLeft({
+    enabled: marketDataReady,
     symbol,
     exchange,
     marketType,
@@ -225,6 +281,7 @@ export function useMarketDataRuntime({
   }, [chartDataMeta?.trimmedLeft, setHasMoreLeft]);
 
   const loadData = useChartInitialLoad({
+    enabled: marketDataReady,
     exchange,
     marketType,
     getFromCache,
@@ -290,6 +347,8 @@ export function useMarketDataRuntime({
   ]);
 
   useKlineStreamRuntime({
+    enabled: marketDataReady,
+    webSocketEnabled: webSocketReady,
     symbol,
     exchange,
     marketType,
@@ -313,7 +372,7 @@ export function useMarketDataRuntime({
     trackedIntervals: prefetchIntervals,
     hasCache,
     seriesDataFeed,
-    enabled: activeChartReady,
+    enabled: activeChartReady && marketDataReady,
   });
 
   const resetForSessionTransition = useSessionTransitionReset({
@@ -332,23 +391,68 @@ export function useMarketDataRuntime({
 
   useEffect(() => {
     resetForSessionTransition(lastSessionTransition);
+    const activeSeries = { exchange, marketType, symbol, interval };
+    if (marketDataReady) {
+      lastEnabledSeriesRef.current = activeSeries;
+    } else if (lastEnabledSeriesRef.current) {
+      seriesDataFeed.cancelSeriesRequests(lastEnabledSeriesRef.current);
+      lastEnabledSeriesRef.current = null;
+    }
+    if (exchangeCatalogStatus === "loading") {
+      pendingInitialHistoryRef.current = null;
+      const timer = setTimeout(() => {
+        setConnectionStatus("loading");
+        setDataSource(null);
+        setError(null);
+        setLoading(true);
+        setLoadingMoreLeft(false);
+        setHasMoreLeft(false);
+        setWsStatus("idle");
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+    if (!historyIntervalAvailable) {
+      pendingInitialHistoryRef.current = null;
+      const timer = setTimeout(() => {
+        clearChartData("history-capability-unavailable", symbol, interval);
+        setConnectionStatus("disconnected");
+        setDataSource(null);
+        setError(new Error(`当前 ${exchange}/${marketType} 没有可精确拼接 ${interval} 的历史 K 线基准周期`));
+        setLoading(false);
+        setLoadingMoreLeft(false);
+        setHasMoreLeft(false);
+        setWsStatus("idle");
+      }, 0);
+      return () => clearTimeout(timer);
+    }
     void loadData(symbol, interval, marketType, exchange);
+    return undefined;
   }, [
+    clearChartData,
     exchange,
+    exchangeCatalogStatus,
+    historyIntervalAvailable,
     interval,
     lastSessionTransition,
     loadData,
+    marketDataReady,
     marketType,
+    pendingInitialHistoryRef,
     resetForSessionTransition,
+    seriesDataFeed,
+    setHasMoreLeft,
+    setLoadingMoreLeft,
     symbol,
   ]);
 
   const retry = useCallback(() => {
+    if (!marketDataReady) return;
     void loadData(symbol, interval, marketType, exchange);
-  }, [exchange, interval, loadData, marketType, symbol]);
+  }, [exchange, interval, loadData, marketDataReady, marketType, symbol]);
 
   const handleMarketVisibleRangeChange = useCallback((range: unknown) => {
     handleVisibleRangeChange(range, chartDataMeta);
+    if (!marketDataReady) return;
     const series = { exchange, marketType, symbol, interval };
     const heldRows = getSeriesCacheRows(series);
     void seriesDataFeed.repairVisibleGaps(
@@ -363,6 +467,7 @@ export function useMarketDataRuntime({
     getSeriesCacheRows,
     handleVisibleRangeChange,
     interval,
+    marketDataReady,
     marketType,
     seriesDataFeed,
     symbol,
@@ -404,7 +509,7 @@ export function useMarketDataRuntime({
       hasMoreLeft,
       loadingMoreLeft,
       activeChartReady,
-      canLoadMoreLeft: hasMoreLeft && !loadingMoreLeft && !loading,
+      canLoadMoreLeft: marketDataReady && hasMoreLeft && !loadingMoreLeft && !loading,
       barCount: chartData.length,
       cacheDiagnostics: getCacheDiagnostics,
       trimCacheEntries,

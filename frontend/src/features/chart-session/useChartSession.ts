@@ -9,6 +9,7 @@ import {
   useExchangeCatalog,
 } from "./exchangeCatalogRuntime.js";
 import {
+  canResolveIntervalFromNativeValues,
   canonicalizeIntervalValue,
   intervalsSemanticallyEquivalent,
 } from "../../utils/intervals.js";
@@ -18,6 +19,7 @@ import {
   getExchangeMarketTypes,
   getFallbackIntervalAfterCustomClear,
   getFallbackIntervalAfterCustomRemove,
+  isExchangeIntervalCapabilityAvailable,
   resolveSupportedInterval,
 } from "./intervalPolicy.js";
 import {
@@ -42,6 +44,14 @@ import type {
   SymbolCode,
   UseChartSessionOptions,
 } from "./chartSessionTypes.js";
+
+function unavailableIntervalMessage(
+  exchange: ExchangeId,
+  marketType: MarketType,
+  interval: IntervalString,
+): string {
+  return `当前 ${exchange}/${marketType} 没有可精确拼接 ${interval} 的历史 K 线基准周期`;
+}
 
 export function useChartSession({
   chartSurfaceActions,
@@ -86,6 +96,21 @@ export function useChartSession({
     () => getNativeIntervals(exchange, exchangeCatalog, marketType, "history"),
     [exchange, exchangeCatalog, marketType],
   );
+  const nativeIntervalValues = useMemo(
+    () => nativeIntervals.map((item) => item.value),
+    [nativeIntervals],
+  );
+  const exchangeCapabilityAvailable = isExchangeIntervalCapabilityAvailable(
+    exchangeCatalogStatus,
+    exchangeCatalog,
+    exchange,
+    nativeIntervals,
+  );
+  const historyIntervalAvailable = useMemo(
+    () => exchangeCapabilityAvailable
+      && canResolveIntervalFromNativeValues(interval, nativeIntervalValues),
+    [exchangeCapabilityAvailable, interval, nativeIntervalValues],
+  );
   const intervalGroups = useMemo(
     () => buildSortedIntervals(savedCustomIntervals, exchange, exchangeCatalog, marketType),
     [exchange, exchangeCatalog, marketType, savedCustomIntervals],
@@ -94,17 +119,28 @@ export function useChartSession({
     () => getBaseWsIntervals(exchange, exchangeCatalog, marketType),
     [exchange, exchangeCatalog, marketType],
   );
+  const realtimeIntervalAvailable = useMemo(
+    () => exchangeCapabilityAvailable
+      && canResolveIntervalFromNativeValues(interval, baseWsIntervals),
+    [baseWsIntervals, exchangeCapabilityAvailable, interval],
+  );
+  const marketDataReady = exchangeCatalogStatus !== "loading" && historyIntervalAvailable;
+  const webSocketReady = marketDataReady && realtimeIntervalAvailable;
   const trackedIntervals = useMemo(
-    () => buildRealtimeTrackedIntervals(interval),
-    [interval],
+    () => webSocketReady
+      ? buildRealtimeTrackedIntervals(interval, baseWsIntervals)
+      : [],
+    [baseWsIntervals, interval, webSocketReady],
   );
   const prefetchIntervals = useMemo(
     () => Array.from(new Set([
       ...nativeIntervals.map((item) => item.value),
-      ...savedCustomIntervals,
-      interval,
+      ...savedCustomIntervals.filter((candidate) => (
+        canResolveIntervalFromNativeValues(candidate, nativeIntervalValues)
+      )),
+      ...(canResolveIntervalFromNativeValues(interval, nativeIntervalValues) ? [interval] : []),
     ])),
-    [interval, nativeIntervals, savedCustomIntervals],
+    [interval, nativeIntervalValues, nativeIntervals, savedCustomIntervals],
   );
   const trackedIntervalsRef = useRef(trackedIntervals);
   useEffect(() => {
@@ -244,38 +280,93 @@ export function useChartSession({
   const selectInterval = useCallback((nextInterval: IntervalString): void => {
     const canonicalInterval = canonicalizeIntervalValue(nextInterval);
     if (!canonicalInterval || intervalsSemanticallyEquivalent(canonicalInterval, interval)) return;
+    if (exchangeCatalogStatus === "loading") {
+      showIntervalNotice({ type: "info", text: "交易所周期能力正在加载，请稍候" });
+      return;
+    }
+    if (!canResolveIntervalFromNativeValues(canonicalInterval, nativeIntervalValues)) {
+      showIntervalNotice({
+        type: "error",
+        text: unavailableIntervalMessage(exchange, marketType, canonicalInterval),
+      });
+      return;
+    }
     saveCurrentVisibleRange();
     publishTransition(CHART_SESSION_TRANSITION_TYPES.INTERVAL_CHANGE, { interval: canonicalInterval });
     setInterval(canonicalInterval);
     markIntervalUsed(canonicalInterval);
     updateUserPref("lastInterval", canonicalInterval);
-  }, [interval, markIntervalUsed, publishTransition, saveCurrentVisibleRange]);
+  }, [exchange, exchangeCatalogStatus, interval, markIntervalUsed, marketType, nativeIntervalValues, publishTransition, saveCurrentVisibleRange, showIntervalNotice]);
 
   const selectMarketType = useCallback((nextMarketType: MarketType): void => {
     if (!nextMarketType || nextMarketType === marketType) return;
-    publishTransition(CHART_SESSION_TRANSITION_TYPES.MARKET_TYPE_CHANGE, { marketType: nextMarketType });
+    const nextNativeIntervals = getNativeIntervals(
+      exchange,
+      exchangeCatalog,
+      nextMarketType,
+      "history",
+    );
+    const nextInterval = resolveSupportedInterval({
+      exchange,
+      marketType: nextMarketType,
+      interval,
+      exchangeCatalog,
+      savedCustomIntervals,
+      nativeIntervals: nextNativeIntervals,
+      isNativeIntervalSupported,
+    });
+    publishTransition(CHART_SESSION_TRANSITION_TYPES.MARKET_TYPE_CHANGE, {
+      marketType: nextMarketType,
+      interval: nextInterval,
+    });
     setMarketType(nextMarketType);
+    setInterval(nextInterval);
     updateUserPref("lastMarketType", nextMarketType);
-  }, [marketType, publishTransition]);
+    updateUserPref("lastInterval", nextInterval);
+  }, [exchange, exchangeCatalog, interval, marketType, publishTransition, savedCustomIntervals]);
 
   useEffect(() => {
     if (exchangeCatalogStatus === "loading") return undefined;
     if (exchangeMarketTypes.length === 0 || exchangeMarketTypes.includes(marketType)) return undefined;
     const nextMarketType = exchangeMarketTypes[0] || "spot";
+    const nextNativeIntervals = getNativeIntervals(
+      exchange,
+      exchangeCatalog,
+      nextMarketType,
+      "history",
+    );
+    const nextInterval = resolveSupportedInterval({
+      exchange,
+      marketType: nextMarketType,
+      interval,
+      exchangeCatalog,
+      savedCustomIntervals,
+      nativeIntervals: nextNativeIntervals,
+      isNativeIntervalSupported,
+    });
     const timer = setTimeout(() => {
       publishTransition(CHART_SESSION_TRANSITION_TYPES.CAPABILITY_CORRECTION, {
         marketType: nextMarketType,
+        interval: nextInterval,
       });
       setMarketType(nextMarketType);
+      setInterval(nextInterval);
       updateUserPref("lastMarketType", nextMarketType);
+      updateUserPref("lastInterval", nextInterval);
     }, 0);
     return () => clearTimeout(timer);
-  }, [exchangeCatalogStatus, exchangeMarketTypes, marketType, publishTransition]);
+  }, [exchange, exchangeCatalog, exchangeCatalogStatus, exchangeMarketTypes, interval, marketType, publishTransition, savedCustomIntervals]);
 
   useEffect(() => {
     if (exchangeCatalogStatus === "loading") return undefined;
-    if (savedCustomIntervals.includes(interval)) return undefined;
     if (isNativeIntervalSupported(exchange, interval, exchangeCatalog, marketType, "history")) return undefined;
+    const savedCustom = savedCustomIntervals.some((candidate) => (
+      intervalsSemanticallyEquivalent(candidate, interval)
+    ));
+    if (
+      savedCustom
+      && canResolveIntervalFromNativeValues(interval, nativeIntervalValues)
+    ) return undefined;
     const nextInterval = resolveSupportedInterval({
       exchange,
       marketType,
@@ -285,6 +376,7 @@ export function useChartSession({
       nativeIntervals,
       isNativeIntervalSupported,
     });
+    if (intervalsSemanticallyEquivalent(nextInterval, interval)) return undefined;
     const timer = setTimeout(() => {
       publishTransition(CHART_SESSION_TRANSITION_TYPES.CAPABILITY_CORRECTION, {
         interval: nextInterval,
@@ -293,21 +385,30 @@ export function useChartSession({
       updateUserPref("lastInterval", nextInterval);
     }, 0);
     return () => clearTimeout(timer);
-  }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, marketType, nativeIntervals, publishTransition, savedCustomIntervals]);
+  }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, marketType, nativeIntervalValues, nativeIntervals, publishTransition, savedCustomIntervals]);
 
   const createCustomInterval = useCallback((
     nextInterval: IntervalString,
   ): CreateCustomIntervalResult => {
+    if (exchangeCatalogStatus === "loading") {
+      return { ok: false, message: "交易所周期能力正在加载，请稍候" };
+    }
     if (isNativeIntervalSupported(exchange, nextInterval, exchangeCatalog, marketType, "history")) {
       selectInterval(nextInterval);
       return { ok: true, added: false };
+    }
+    if (!canResolveIntervalFromNativeValues(nextInterval, nativeIntervalValues)) {
+      return {
+        ok: false,
+        message: unavailableIntervalMessage(exchange, marketType, nextInterval),
+      };
     }
     const result = addCustomInterval(nextInterval, { markUsed: true });
     if (!result.ok) return { ok: false, message: "周期格式无效" };
     selectInterval(result.value);
     showIntervalNotice({ type: "success", text: `${result.value} 已添加并切换` });
     return { ok: true, added: result.added };
-  }, [addCustomInterval, exchange, exchangeCatalog, marketType, selectInterval, showIntervalNotice]);
+  }, [addCustomInterval, exchange, exchangeCatalog, exchangeCatalogStatus, marketType, nativeIntervalValues, selectInterval, showIntervalNotice]);
 
   const removeCustomIntervalAction = useCallback((removedInterval: IntervalString): void => {
     const removed = removeCustomInterval(removedInterval);
@@ -395,6 +496,11 @@ export function useChartSession({
     status: {
       exchangeCatalogStatus,
       exchangeLimitations,
+      exchangeCapabilityAvailable,
+      historyIntervalAvailable,
+      realtimeIntervalAvailable,
+      marketDataReady,
+      webSocketReady,
     },
     events: {
       transitionToken: lastTransition?.id ?? 0,

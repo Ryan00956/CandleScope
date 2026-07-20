@@ -85,6 +85,7 @@ export default function App() {
   const watchlist = useWatchlistRuntime({
     subscriptionContext: {
       exchangeCatalog: chartSession.view.exchangeCatalog,
+      exchangeCatalogStatus: chartSession.status.exchangeCatalogStatus,
       customIntervalRecords: chartSession.view.customIntervalRecords,
     },
   });
@@ -108,10 +109,11 @@ export default function App() {
     sellColor: settings.downColor,
   });
   useWatchlistFullCacheRuntime({
+    enabled: chartSession.status.marketDataReady,
     watchlists: watchlist.view.watchlists,
     subscriptionTiers: watchlist.view.subscriptionTiers,
     exchangeCatalog: chartSession.view.exchangeCatalog,
-    nativeIntervals: chartSession.view.nativeIntervals,
+    exchangeCatalogStatus: chartSession.status.exchangeCatalogStatus,
     customIntervalRecords: chartSession.view.customIntervalRecords,
     currentSession: {
       symbol: chartSession.view.symbol,

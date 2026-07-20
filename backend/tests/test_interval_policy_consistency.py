@@ -16,6 +16,7 @@ from app.data_engine.data_manager.custom_query import (
 )
 from app.data_engine.data_manager.maintenance import _aggregate_custom_rows
 from app.data_engine.data_manager.models import BarData, QueryResult, QuerySource
+from app.data_engine.history import AlwaysOpenCalendar
 from app.data_engine.interval_policy import (
     aggregate_rows_by_month,
     compute_bucket_close_ms,
@@ -280,6 +281,57 @@ def test_custom_interval_aggregation_preserves_forming_state() -> None:
         months=1,
         source_interval_seconds=86_400,
     )[0]["is_closed"] is False
+
+
+def test_fixed_custom_fast_path_matches_generic_reference_exactly() -> None:
+    rows = _rows(0, 185, 60_000)
+    for index, row in enumerate(rows):
+        row["volume"] = round((index + 1) * 0.123456789, 10)
+        row["quote_volume"] = round((index + 1) * 1234.56789123, 10)
+        row["taker_buy_base"] = round(row["volume"] * 0.47, 10)
+        row["taker_buy_quote"] = round(row["quote_volume"] * 0.53, 10)
+        row["is_closed"] = True
+    rows[17]["quote_volume"] = None
+    rows[17]["taker_buy_quote"] = None
+    rows[-1]["is_closed"] = False
+    # QueryEngine is ordered, but preserve the public helper's old tolerance
+    # for callers that provide an inverted sequence.
+    rows = rows[::2] + rows[1::2]
+    bars = [
+        BarData.from_storage_row(
+            row,
+            exchange="binance",
+            market_type="spot",
+        )
+        for row in rows
+    ]
+    reference = [
+        BarData.from_dict(row)
+        for row in _aggregate_rows_to_interval(
+            [bar.to_aggregation_dict() for bar in bars],
+            37 * 60,
+            interval="37m",
+            source_interval="1m",
+            source_interval_seconds=60,
+        )
+    ]
+
+    fast = CustomIntervalQueryService._aggregate_read_only(
+        bars,
+        "37m",
+        37 * 60,
+        source_interval="1m",
+    )
+    always_open_fast = CustomIntervalQueryService._aggregate_read_only(
+        bars,
+        "37m",
+        37 * 60,
+        source_interval="1m",
+        calendar=AlwaysOpenCalendar(),
+    )
+
+    assert fast == reference
+    assert always_open_fast == reference
 
 
 def test_custom_query_bar_aggregator_preserves_forming_state() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from unittest.mock import patch
 
 from app.data_engine.backfill.config import BackfillConfig
 from app.data_engine.backfill.models import GapInfo, GapType
@@ -19,7 +20,8 @@ from app.data_engine.data_manager.coordinator import StreamCoordinator
 from app.data_engine.data_manager.models import SeriesKey
 from app.data_engine.data_manager.query import QueryEngine
 from app.data_engine.data_manager.stream_policy import StreamEnsurePlanner
-from app.data_engine.interval_policy import parse_interval_spec
+from app.data_engine.history import AlwaysOpenCalendar
+from app.data_engine.interval_policy import IntervalAlignment, parse_interval_spec
 from app.data_engine.interval_resolution import (
     IntervalPurpose,
     IntervalResolver,
@@ -146,6 +148,46 @@ def test_query_count_window_canonicalises_an_intra_bucket_exclusive_edge() -> No
 
     assert last == bucket_open
     assert first == spec.previous_ms(bucket_open)
+
+
+def test_fixed_count_window_is_computed_without_per_bucket_iteration() -> None:
+    class _FixedSpec:
+        alignment = IntervalAlignment.FIXED_EPOCH
+        nominal_ms = 60_000
+
+        @staticmethod
+        def floor_ms(timestamp_ms: int) -> int:
+            return timestamp_ms // 60_000 * 60_000
+
+        @staticmethod
+        def previous_ms(_open_ms: int) -> int:
+            raise AssertionError("fixed windows must not walk one bucket at a time")
+
+    engine = QueryEngine(
+        cache=BarCache(),
+        storage=_Storage({}),  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+    before_ms = 1_750_000_012_345
+    limit = 100_000
+    last = (before_ms - 1) // 60_000 * 60_000
+
+    for calendar in (None, AlwaysOpenCalendar()):
+        with (
+            patch.object(engine, "_calendar_for", return_value=calendar),
+            patch(
+                "app.data_engine.data_manager.query.parse_interval_spec",
+                return_value=_FixedSpec(),
+            ),
+        ):
+            first, actual_last = engine._before_window(
+                SeriesKey("BTCUSDT", "1m"),
+                before_ms,
+                limit,
+            )
+
+        assert actual_last == last
+        assert first == last - (limit - 1) * 60_000
 
 
 def test_stream_plan_uses_resolved_native_base_and_alias_identity() -> None:

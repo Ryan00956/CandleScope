@@ -11,6 +11,7 @@ from dataclasses import replace
 from typing import Any
 
 from app.data_engine.interval_policy import (
+    IntervalAlignment,
     aggregate_tail_is_closed,
     aggregate_rows_by_month,
     compute_bucket_end_ms,
@@ -22,12 +23,16 @@ from app.data_engine.interval_policy import (
     next_month_bucket,
     parse_custom_interval,
     parse_interval_ms,
+    parse_interval_spec,
     parse_monthly_count,
     row_is_closed,
 )
-from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
+from app.data_engine.market_data.kline_metrics import (
+    serialize_kline_enhancements,
+)
 from app.data_engine.interval_resolution import IntervalRoute
 from app.data_engine.history.calendar import (
+    AlwaysOpenCalendar,
     containing_expected_open_ms,
     expected_bucket_end_ms,
 )
@@ -212,6 +217,181 @@ def _sum_optional_field(
     if integer:
         return sum(int(value) for value in values)
     return round(sum(float(value) for value in values), 8)
+
+
+def _aggregate_fixed_bars_to_interval(
+    base_bars: list[BarData],
+    custom_interval_seconds: int,
+    *,
+    source_interval_seconds: int | None,
+) -> list[BarData]:
+    """Aggregate epoch-aligned ``BarData`` in one ordered pass.
+
+    ``_aggregate_rows_to_interval`` remains the canonical compatibility path
+    for calendar/session-aware callers.  Query results, however, are already
+    ``BarData`` and overwhelmingly use fixed-width epoch buckets.  Converting
+    those bars to dictionaries, grouping them into lists, sorting every list,
+    and then scanning each list once per output field was the dominant CPU
+    cost for cold custom-interval reads.
+
+    The fast path preserves the existing two-pass enhanced-field validation
+    and eight-decimal normalization boundary through a raw-field-only helper;
+    it does not calculate discarded order-flow ratios or allocate per-row
+    dictionaries.
+    """
+    if not base_bars:
+        return []
+
+    bars = base_bars
+    if any(
+        current.time < previous.time
+        for previous, current in zip(base_bars, base_bars[1:])
+    ):
+        # QueryEngine normally returns ordered bars, but callers and tests are
+        # not required to do so.  Keep the old order-independent contract and
+        # pay for sorting only when an inversion is actually present.
+        bars = sorted(base_bars, key=lambda bar: bar.time)
+
+    source_seconds = (
+        int(source_interval_seconds)
+        if source_interval_seconds is not None and source_interval_seconds > 0
+        else None
+    )
+    result: list[BarData] = []
+
+    bucket_start: int | None = None
+    first_time = 0
+    last_time = 0
+    last_is_closed = False
+    contiguous = True
+    open_value = 0.0
+    high_value = 0.0
+    low_value = 0.0
+    close_value = 0.0
+    volume_values: list[float] = []
+    quote_values: list[float] = []
+    trades_values: list[int] = []
+    taker_base_values: list[float] = []
+    taker_quote_values: list[float] = []
+    quote_complete = True
+    trades_complete = True
+    taker_base_complete = True
+    taker_quote_complete = True
+
+    def append_bucket() -> None:
+        if bucket_start is None:
+            return
+        bucket_end = bucket_start + custom_interval_seconds
+        reaches_bucket_end = bool(
+            source_seconds is not None
+            and last_time + source_seconds >= bucket_end
+        )
+        enhanced_complete = bool(
+            source_seconds is not None
+            and first_time == bucket_start
+            and contiguous
+            and (reaches_bucket_end or not last_is_closed)
+        )
+        result.append(BarData(
+            time=bucket_start,
+            open=open_value,
+            high=high_value,
+            low=low_value,
+            close=close_value,
+            volume=round(sum(volume_values), 8),
+            is_closed=bool(
+                enhanced_complete and last_is_closed and reaches_bucket_end
+            ),
+            quote_volume=(
+                round(sum(quote_values), 8)
+                if enhanced_complete and quote_complete
+                else None
+            ),
+            trades=(
+                sum(trades_values)
+                if enhanced_complete and trades_complete
+                else None
+            ),
+            taker_buy_base=(
+                round(sum(taker_base_values), 8)
+                if enhanced_complete and taker_base_complete
+                else None
+            ),
+            taker_buy_quote=(
+                round(sum(taker_quote_values), 8)
+                if enhanced_complete and taker_quote_complete
+                else None
+            ),
+        ))
+
+    for bar in bars:
+        (
+            row_time,
+            row_open,
+            row_high,
+            row_low,
+            row_close,
+            row_volume,
+            row_is_closed,
+            quote_volume,
+            trades,
+            taker_buy_base,
+            taker_buy_quote,
+        ) = bar.normalized_aggregation_values()
+        row_bucket = (
+            row_time // custom_interval_seconds
+        ) * custom_interval_seconds
+
+        if bucket_start != row_bucket:
+            append_bucket()
+            bucket_start = row_bucket
+            first_time = row_time
+            last_time = row_time
+            contiguous = True
+            open_value = row_open
+            high_value = row_high
+            low_value = row_low
+            volume_values = []
+            quote_values = []
+            trades_values = []
+            taker_base_values = []
+            taker_quote_values = []
+            quote_complete = True
+            trades_complete = True
+            taker_base_complete = True
+            taker_quote_complete = True
+        elif source_seconds is not None and row_time - last_time != source_seconds:
+            contiguous = False
+
+        high_value = max(high_value, row_high)
+        low_value = min(low_value, row_low)
+        close_value = row_close
+        volume_values.append(float(row_volume))
+        last_time = row_time
+        last_is_closed = row_is_closed
+
+        if quote_volume is None:
+            quote_complete = False
+        else:
+            quote_values.append(float(quote_volume))
+
+        if trades is None:
+            trades_complete = False
+        else:
+            trades_values.append(int(trades))
+
+        if taker_buy_base is None:
+            taker_base_complete = False
+        else:
+            taker_base_values.append(float(taker_buy_base))
+
+        if taker_buy_quote is None:
+            taker_quote_complete = False
+        else:
+            taker_quote_values.append(float(taker_buy_quote))
+
+    append_bucket()
+    return result
 
 
 def _base_capacity_factor(
@@ -1355,7 +1535,19 @@ class CustomIntervalQueryService:
             if source_interval_ms is not None
             else None
         )
+        interval_spec = parse_interval_spec(interval)
         month_count = parse_monthly_count(interval)
+        if (
+            (calendar is None or isinstance(calendar, AlwaysOpenCalendar))
+            and month_count is None
+            and interval_spec is not None
+            and interval_spec.alignment is IntervalAlignment.FIXED_EPOCH
+        ):
+            return _aggregate_fixed_bars_to_interval(
+                base_bars,
+                custom_seconds,
+                source_interval_seconds=source_interval_seconds,
+            )
         if month_count is not None and calendar is None:
             aggregated = aggregate_rows_by_month(
                 [bar.to_aggregation_dict() for bar in base_bars],

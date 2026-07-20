@@ -13,7 +13,11 @@ from app.data_engine.bar_aggregator.models import (
 from app.data_engine.data_manager.custom_query import _aggregate_rows_to_interval
 from app.data_engine.data_manager.models import BarData
 from app.data_engine.interval_policy import aggregate_rows_by_month
-from app.data_engine.market_data.kline_metrics import KLINE_ENHANCED_FIELDS
+from app.data_engine.market_data.kline_metrics import (
+    KLINE_ENHANCED_FIELDS,
+    normalize_kline_aggregation_fields,
+    serialize_kline_enhancements,
+)
 
 
 def _storage_row(exchange: str = "binance") -> dict:
@@ -56,6 +60,27 @@ def test_binance_storage_row_exposes_raw_and_derived_kline_metrics() -> None:
         "taker_buy_ratio_base": 0.6,
         "cvd_contribution_base": 2,
     }
+
+
+def test_storage_row_keeps_public_single_pass_precision_contract() -> None:
+    row = _storage_row()
+    row.update({
+        "volume": 100.000000004,
+        "taker_buy_base": 100.000000009,
+    })
+
+    bar = BarData.from_storage_row(row)
+    expected = serialize_kline_enhancements(
+        volume=row["volume"],
+        quote_volume=row["quote_volume"],
+        trades=row["trades"],
+        taker_buy_base=row["taker_buy_base"],
+        taker_buy_quote=row["taker_buy_quote"],
+    )
+
+    assert bar.taker_buy_base == row["taker_buy_base"]
+    assert bar.to_kline_dict()["taker_buy_base"] == expected["taker_buy_base"]
+    assert bar.normalized_aggregation_fields()[2] == 100.0
 
 
 def test_okx_placeholder_zeros_are_suppressed_by_capability() -> None:
@@ -151,6 +176,46 @@ def test_zero_volume_is_valid_but_ratio_is_undefined() -> None:
     assert payload["order_flow"] is not None
     assert payload["order_flow"]["volume_delta_base"] == 0
     assert payload["order_flow"]["taker_buy_ratio_base"] is None
+
+
+def test_aggregation_normalizer_matches_two_legacy_serializer_passes() -> None:
+    cases = [
+        (1.0, 10.0, 3, 0.4, 4.0),
+        (1.000000004, 10.000000004, 3, 1.000000005, 10.000000005),
+        (1.0, 0.000000004, 3, 0.5, 0.000000002),
+        (1.0, 0.0, 3, 0.5, 0.0),
+        (1.0, None, None, None, None),
+        (float("nan"), 1.0, 1, 0.0, 0.0),
+        (1.0, 1.0, 1, 2.0, 2.0),
+    ]
+    for volume, quote, trades, buy, buy_quote in cases:
+        first = serialize_kline_enhancements(
+            volume=volume,
+            quote_volume=quote,
+            trades=trades,
+            taker_buy_base=buy,
+            taker_buy_quote=buy_quote,
+        )
+        second = serialize_kline_enhancements(
+            volume=round(volume, 8),
+            quote_volume=first["quote_volume"],
+            trades=first["trades"],
+            taker_buy_base=first["taker_buy_base"],
+            taker_buy_quote=first["taker_buy_quote"],
+        )
+
+        assert normalize_kline_aggregation_fields(
+            volume=volume,
+            quote_volume=quote,
+            trades=trades,
+            taker_buy_base=buy,
+            taker_buy_quote=buy_quote,
+        ) == (
+            second["quote_volume"],
+            second["trades"],
+            second["taker_buy_base"],
+            second["taker_buy_quote"],
+        )
 
 
 def test_legacy_positive_volume_with_zero_quote_placeholders_fails_closed() -> None:

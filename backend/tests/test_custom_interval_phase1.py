@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from app.data_engine.backfill.config import BackfillConfig
 from app.data_engine.backfill.models import GapInfo, GapType
@@ -167,6 +168,42 @@ def test_identical_custom_derivations_singleflight_base_work() -> None:
     assert first_result.bars == second_result.bars
     assert first_result is not second_result
     assert first_result.metadata is not second_result.metadata
+
+
+def test_fixed_custom_aggregation_avoids_generic_row_materialization() -> None:
+    bars = [
+        BarData(
+            time=index * 60,
+            open=1,
+            high=2,
+            low=1,
+            close=2,
+            volume=1,
+            is_closed=True,
+        )
+        for index in range(37)
+    ]
+
+    with patch.object(
+        BarData,
+        "to_aggregation_dict",
+        side_effect=AssertionError(
+            "fixed-width fast path must not build row dictionaries"
+        ),
+    ):
+        results = [
+            CustomIntervalQueryService._aggregate_read_only(
+                bars,
+                "37m",
+                37 * 60,
+                source_interval="1m",
+                calendar=calendar,
+            )
+            for calendar in (None, AlwaysOpenCalendar())
+        ]
+
+    assert [len(result) for result in results] == [1, 1]
+    assert [result[0].volume for result in results] == [37, 37]
 
 
 def test_custom_base_pagination_is_hard_bounded_without_inventing_a_gap() -> None:

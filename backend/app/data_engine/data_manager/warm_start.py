@@ -58,6 +58,10 @@ class AggregatorWarmStartService:
         self._storage_provider = storage_provider
         self._backfill_trigger_provider = backfill_trigger_provider
         self._interval_resolver = interval_resolver or IntervalResolver()
+        self._tail_repair_buckets: dict[
+            tuple[str, str, str, str],
+            int,
+        ] = {}
 
     async def seed_if_needed(
         self,
@@ -335,13 +339,23 @@ class AggregatorWarmStartService:
             market_type,
             bucket_start_ms=bucket_start_ms,
             expire_existing=True,
-            emit_events=True,
+            emit_events=False,
         )
         if rebuilt_state is not None:
-            self._cache.upsert(
-                SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
-                BarData.from_bar_state(rebuilt_state),
+            key = SeriesKey(
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=market_type,
             )
+            rebuilt_bar = BarData.from_bar_state(rebuilt_state)
+            # Component replay is an internal reconstruction, not N live bar
+            # updates.  Publish one final snapshot; if no bridge is attached
+            # (notably in focused tests), warm the cache directly as fallback.
+            await self._bar_aggregator.publisher.emit_updated(rebuilt_state)
+            cached = self._cache.get_latest(key, 1)
+            if not cached or cached[-1] != rebuilt_bar:
+                self._cache.upsert(key, rebuilt_bar)
 
     @staticmethod
     def _custom_bucket_is_synced(
@@ -549,6 +563,18 @@ class AggregatorWarmStartService:
         """Force a recent custom-interval rebuild to overwrite stale rows."""
         interval_seconds = parse_custom_interval(interval) or 60
         now_ms = int(time.time() * 1000)
+        repair_bucket_ms = self._bar_aggregator.compute_bucket(interval, now_ms)
+        repair_key = (
+            exchange.strip().lower(),
+            self._normalize_market_type(market_type),
+            symbol.upper(),
+            interval,
+        )
+        if (
+            repair_bucket_ms is not None
+            and self._tail_repair_buckets.get(repair_key) == repair_bucket_ms
+        ):
+            return
 
         month_count = parse_monthly_count(interval)
         if month_count is not None:
@@ -561,7 +587,7 @@ class AggregatorWarmStartService:
         start_ms = max(0, now_ms - repair_window_ms)
 
         try:
-            self._call_backfill_trigger(
+            submitted = self._call_backfill_trigger(
                 symbol=symbol.upper(),
                 interval=interval,
                 start_ms=start_ms,
@@ -580,6 +606,13 @@ class AggregatorWarmStartService:
                     "had_stream": False,
                 },
             )
+            if submitted and repair_bucket_ms is not None:
+                self._tail_repair_buckets[repair_key] = repair_bucket_ms
+                if len(self._tail_repair_buckets) > 2_048:
+                    self._tail_repair_buckets.pop(
+                        next(iter(self._tail_repair_buckets)),
+                        None,
+                    )
         except Exception as exc:
             logger.warning(
                 "Failed to trigger custom tail repair for %s@%s: %s",
@@ -601,10 +634,10 @@ class AggregatorWarmStartService:
         reason: str,
         requester: str,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         trigger = self._backfill_trigger_provider()
         if trigger is None:
-            return
+            return False
         raw_kwargs = {
             "reason": reason,
             "priority": priority_for_reason(reason),
@@ -636,6 +669,7 @@ class AggregatorWarmStartService:
             pass
 
         trigger(symbol, interval, start_ms, end_ms, exchange, market_type, **kwargs)
+        return True
 
     @staticmethod
     def _warmup_reason(focus_scope: str, subscription_tier: str | None) -> str:

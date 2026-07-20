@@ -21,11 +21,13 @@ import math
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
+from typing import Any, Callable, Awaitable, Collection, Protocol, runtime_checkable
 
 from app.data_engine.market_data.kline_metrics import (
     KLINE_ENHANCED_FIELDS,
-    declared_enhanced_fields,
+    normalize_declared_kline_enhancements,
+    normalize_kline_aggregation_fields,
+    normalize_prevalidated_kline_aggregation_fields,
     serialize_kline_enhancements,
 )
 from app.data_engine.interval_policy import parse_interval_spec
@@ -108,6 +110,12 @@ class BarData:
     trades: int | None = None
     taker_buy_base: float | None = None
     taker_buy_quote: float | None = None
+    _prevalidated_aggregation_fields: tuple[
+        float | None,
+        int | None,
+        float | None,
+        float | None,
+    ] | None = field(default=None, init=False, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         """Return the legacy lightweight-charts OHLCV shape."""
@@ -133,6 +141,74 @@ class BarData:
         enhanced = self._enhanced_payload()
         payload.update({field: enhanced[field] for field in KLINE_ENHANCED_FIELDS})
         return payload
+
+    def normalized_aggregation_fields(
+        self,
+    ) -> tuple[float | None, int | None, float | None, float | None]:
+        """Return the exact twice-normalized fields used by custom bars."""
+        cached = self._prevalidated_aggregation_fields
+        if cached is not None:
+            if cached == (None, None, None, None):
+                return cached
+            return normalize_prevalidated_kline_aggregation_fields(
+                normalized_volume=round(self.volume, 8),
+                fields=cached,
+            )
+        return normalize_kline_aggregation_fields(
+            volume=self.volume,
+            quote_volume=self.quote_volume,
+            trades=self.trades,
+            taker_buy_base=self.taker_buy_base,
+            taker_buy_quote=self.taker_buy_quote,
+        )
+
+    def normalized_aggregation_values(
+        self,
+    ) -> tuple[
+        int,
+        float,
+        float,
+        float,
+        float,
+        float,
+        bool,
+        float | None,
+        int | None,
+        float | None,
+        float | None,
+    ]:
+        """Return one canonical source row without allocating a dictionary."""
+        cached = self._prevalidated_aggregation_fields
+        if cached is not None:
+            enhanced = (
+                cached
+                if cached == (None, None, None, None)
+                else normalize_prevalidated_kline_aggregation_fields(
+                    normalized_volume=self.volume,
+                    fields=cached,
+                )
+            )
+            return (
+                int(self.time),
+                self.open,
+                self.high,
+                self.low,
+                self.close,
+                self.volume,
+                bool(self.is_closed),
+                *enhanced,
+            )
+        enhanced = self.normalized_aggregation_fields()
+        return (
+            int(self.time),
+            round(self.open, 8),
+            round(self.high, 8),
+            round(self.low, 8),
+            round(self.close, 8),
+            round(self.volume, 8),
+            bool(self.is_closed),
+            *enhanced,
+        )
 
     @property
     def enhanced_fields(self) -> frozenset[str]:
@@ -199,16 +275,18 @@ class BarData:
         *,
         exchange: str | None = None,
         market_type: str | None = None,
+        declared_fields: Collection[str] | None = None,
     ) -> BarData:
         """Create from a storage/SQLite row dict (open_time in ms)."""
         resolved_exchange = str(exchange or row.get("exchange") or "")
         resolved_market_type = str(market_type or row.get("market_type") or "")
-        fields = declared_enhanced_fields(
+        normalized_fields = normalize_declared_kline_enhancements(
             resolved_exchange,
             resolved_market_type,
             row,
+            explicit_fields=declared_fields,
         )
-        return cls(
+        bar = cls(
             time=int(row["open_time"]) // 1000,
             open=round(float(row["open"]), 8),
             high=round(float(row["high"]), 8),
@@ -216,15 +294,17 @@ class BarData:
             close=round(float(row["close"]), 8),
             volume=round(float(row.get("volume", 0)), 8),
             is_closed=cls._coerce_is_closed(row.get("is_closed"), default=True),
-            quote_volume=cls._optional_float(row.get("quote_volume"))
-            if "quote_volume" in fields else None,
-            trades=cls._optional_int(row.get("trades"))
-            if "trades" in fields else None,
-            taker_buy_base=cls._optional_float(row.get("taker_buy_base"))
-            if "taker_buy_base" in fields else None,
-            taker_buy_quote=cls._optional_float(row.get("taker_buy_quote"))
-            if "taker_buy_quote" in fields else None,
+            quote_volume=float(row["quote_volume"])
+            if normalized_fields[0] is not None else None,
+            trades=int(row["trades"])
+            if normalized_fields[1] is not None else None,
+            taker_buy_base=float(row["taker_buy_base"])
+            if normalized_fields[2] is not None else None,
+            taker_buy_quote=float(row["taker_buy_quote"])
+            if normalized_fields[3] is not None else None,
         )
+        bar._prevalidated_aggregation_fields = normalized_fields
+        return bar
 
     @classmethod
     def from_bar_state(cls, bar_state: Any, is_closed: bool | None = None) -> BarData:
@@ -253,7 +333,7 @@ class BarData:
 
     def with_closed_state(self, is_closed: bool) -> BarData:
         """Return a copy with the same OHLCV values and explicit close state."""
-        return BarData(
+        bar = BarData(
             time=self.time,
             open=self.open,
             high=self.high,
@@ -266,6 +346,8 @@ class BarData:
             taker_buy_base=self.taker_buy_base,
             taker_buy_quote=self.taker_buy_quote,
         )
+        bar._prevalidated_aggregation_fields = self._prevalidated_aggregation_fields
+        return bar
 
     @staticmethod
     def _optional_float(value: Any) -> float | None:

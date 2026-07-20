@@ -284,6 +284,7 @@ export function useMarketDataRuntime({
     enabled: marketDataReady,
     exchange,
     marketType,
+    nativeIntervalValues,
     getFromCache,
     resolveInitialRows,
     seriesDataFeed,

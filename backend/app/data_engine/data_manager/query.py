@@ -30,19 +30,23 @@ import time
 from typing import Any, Callable
 
 from app.data_engine.interval_policy import (
+    IntervalAlignment,
     compute_bucket_end_ms,
     compute_bucket_start_ms,
     is_ephemeral_interval,
     latest_eligible_bar_open_ms,
     parse_custom_interval,
     parse_interval_ms,
+    parse_interval_spec,
 )
 from app.data_engine.interval_resolution import (
     IntervalPurpose,
     IntervalResolver,
     IntervalRouteKind,
 )
+from app.data_engine.market_data.kline_metrics import kline_available_fields
 from app.data_engine.history import (
+    AlwaysOpenCalendar,
     BoundaryReason,
     ExchangeHistoryPolicyResolver,
     HistoryAvailability,
@@ -336,14 +340,7 @@ class QueryEngine:
                     market_type=key.market_type,
                 )
                 rows.reverse()
-                storage_bars = [
-                    BarData.from_storage_row(
-                        row,
-                        exchange=key.exchange,
-                        market_type=key.market_type,
-                    )
-                    for row in rows
-                ]
+                storage_bars = self._storage_rows_to_bars(key, rows)
             except Exception as exc:
                 logger.error("Storage query failed: %s", exc, exc_info=True)
 
@@ -633,14 +630,7 @@ class QueryEngine:
                     exchange=key.exchange,
                     market_type=key.market_type,
                 )
-                storage_bars = [
-                    BarData.from_storage_row(
-                        row,
-                        exchange=key.exchange,
-                        market_type=key.market_type,
-                    )
-                    for row in rows
-                ]
+                storage_bars = self._storage_rows_to_bars(key, rows)
                 if storage_bars:
                     self._cache.bulk_load(key, storage_bars)
             except Exception as exc:
@@ -906,7 +896,7 @@ class QueryEngine:
     ) -> tuple[int, int]:
         """Return the expected-open window for a count-based left query."""
         calendar = self._calendar_for(key)
-        if calendar is not None:
+        if calendar is not None and not isinstance(calendar, AlwaysOpenCalendar):
             last = containing_expected_open_ms(
                 calendar,
                 int(before_ms) - 1,
@@ -920,6 +910,16 @@ class QueryEngine:
                         break
                     first = previous
                 return max(0, first), last
+        spec = parse_interval_spec(key.interval)
+        if spec is not None:
+            last = spec.floor_ms(int(before_ms) - 1)
+            count = max(0, int(limit) - 1)
+            if spec.alignment is not IntervalAlignment.CALENDAR_MONTH:
+                return max(0, last - count * spec.nominal_ms), last
+            first = last
+            for _ in range(count):
+                first = spec.previous_ms(first)
+            return max(0, first), last
         interval_ms = parse_interval_ms(key.interval)
         if interval_ms is None or interval_ms <= 0:
             interval_ms = (parse_custom_interval(key.interval) or 60) * 1000
@@ -1036,6 +1036,23 @@ class QueryEngine:
             result.terminal_reason = None
         result.next_before_ms = result.bars[0].time_ms if result.has_more and result.bars else None
         return result
+
+    @staticmethod
+    def _storage_rows_to_bars(
+        key: SeriesKey,
+        rows: list[dict[str, Any]],
+    ) -> list[BarData]:
+        """Convert one storage page with capability resolution amortized."""
+        declared_fields = kline_available_fields(key.exchange, key.market_type)
+        return [
+            BarData.from_storage_row(
+                row,
+                exchange=key.exchange,
+                market_type=key.market_type,
+                declared_fields=declared_fields,
+            )
+            for row in rows
+        ]
 
     def _merge(
         self, a: list[BarData], b: list[BarData],
@@ -1164,15 +1181,16 @@ class QueryEngine:
                         exchange=key.exchange,
                         market_type=key.market_type,
                     )
-                    fill_bars = [
-                        BarData.from_storage_row(
-                            row,
-                            exchange=key.exchange,
-                            market_type=key.market_type,
-                        )
-                        for row in rows
-                        if missing_start_ms <= int(row["open_time"]) <= missing_end_ms
-                    ]
+                    fill_bars = self._storage_rows_to_bars(
+                        key,
+                        [
+                            row
+                            for row in rows
+                            if missing_start_ms
+                            <= int(row["open_time"])
+                            <= missing_end_ms
+                        ],
+                    )
                     if fill_bars:
                         all_fill_bars.extend(fill_bars)
                         logger.info(
@@ -1301,15 +1319,14 @@ class QueryEngine:
                     exchange=key.exchange,
                     market_type=key.market_type,
                 )
-                fill_bars = [
-                    BarData.from_storage_row(
-                        row,
-                        exchange=key.exchange,
-                        market_type=key.market_type,
-                    )
-                    for row in rows
-                    if gap[0] <= int(row["open_time"]) <= gap[1]
-                ]
+                fill_bars = self._storage_rows_to_bars(
+                    key,
+                    [
+                        row
+                        for row in rows
+                        if gap[0] <= int(row["open_time"]) <= gap[1]
+                    ],
+                )
             except Exception as exc:
                 logger.error(
                     "Failed to fill before-page right gap [%d → %d] from storage: %s",

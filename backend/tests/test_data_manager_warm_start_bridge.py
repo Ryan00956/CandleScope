@@ -162,6 +162,12 @@ def test_warm_start_custom_interval_replays_components_and_warms_cache() -> None
         fixed_time = fixed_now_ms / 1000
         agg = BarAggregator(BarAggregatorConfig(update_throttle_ms=0))
         agg.add_target("BTC-USDT", "45m", exchange="okx", market_type="spot")
+        events: list[BarEvent] = []
+
+        async def _capture(event: BarEvent) -> None:
+            events.append(event)
+
+        agg.publisher.on_bar_event(_capture)
         bucket_start_ms = agg.compute_bucket("45m", fixed_now_ms)
         assert bucket_start_ms is not None
 
@@ -216,12 +222,59 @@ def test_warm_start_custom_interval_replays_components_and_warms_cache() -> None
         )
         assert cached and cached[0].close == state.close
         assert cached[0].quote_volume == state.quote_volume
+        assert [event.event_type for event in events] == [BarEventType.UPDATED]
         assert storage.query_calls[0]["interval"] == "15m"
         assert storage.query_calls[0]["exchange"] == "okx"
         assert storage.query_calls[0]["market_type"] == "spot"
         assert triggers == []
 
     asyncio.run(_run())
+
+
+def test_custom_tail_repair_is_coalesced_within_one_target_bucket() -> None:
+    agg = BarAggregator(BarAggregatorConfig(update_throttle_ms=0))
+    agg.add_target("BTC-USDT", "45m", exchange="okx", market_type="spot")
+    triggers: list[tuple] = []
+    service = _service(
+        cache=BarCache(),
+        aggregator=agg,
+        storage=_Storage(),
+        triggers=triggers,
+        base_interval="15m",
+    )
+    fixed_now_ms = 10 * 45 * 60_000 + 15 * 60_000
+
+    with patch(
+        "app.data_engine.data_manager.warm_start.time.time",
+        return_value=fixed_now_ms / 1000,
+    ):
+        service._trigger_custom_tail_repair(
+            "BTC-USDT",
+            "45m",
+            exchange="okx",
+            market_type="spot",
+        )
+        service._trigger_custom_tail_repair(
+            "BTC-USDT",
+            "45m",
+            exchange="okx",
+            market_type="spot",
+        )
+
+    assert len(triggers) == 1
+
+    with patch(
+        "app.data_engine.data_manager.warm_start.time.time",
+        return_value=(fixed_now_ms + 45 * 60_000) / 1000,
+    ):
+        service._trigger_custom_tail_repair(
+            "BTC-USDT",
+            "45m",
+            exchange="okx",
+            market_type="spot",
+        )
+
+    assert len(triggers) == 2
 
 
 def test_warm_start_exchange_derived_standard_uses_resolved_four_hour_base() -> None:

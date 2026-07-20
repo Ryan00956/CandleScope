@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { markPerf, recordPerfEvent } from "../../runtime/performance/perfMarks.js";
-import type { IntervalString } from "../../utils/intervals.js";
+import {
+  intervalsSemanticallyEquivalent,
+  type IntervalString,
+} from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type { InitialRowsResolution } from "../watchlist-full-cache/watchlistFullCacheTypes.js";
 import type { CommitChartData, FeedResult, PendingInitialSeries } from "./klineContracts.js";
@@ -47,6 +50,7 @@ export interface UseChartInitialLoadOptions {
   enabled: boolean;
   exchange: ExchangeId;
   marketType: MarketType;
+  nativeIntervalValues: readonly IntervalString[];
   getFromCache(symbol: SymbolCode, interval: IntervalString): KlineBar[];
   resolveInitialRows?: ResolveInitialRows | null;
   seriesDataFeed: SeriesDataFeed;
@@ -66,10 +70,20 @@ export interface UseChartInitialLoadOptions {
   setDataSource: Dispatch<SetStateAction<string | null>>;
 }
 
+export function shouldRequestInitialLatest(
+  interval: IntervalString,
+  nativeIntervalValues: readonly IntervalString[],
+): boolean {
+  return nativeIntervalValues.some((nativeInterval) => (
+    intervalsSemanticallyEquivalent(interval, nativeInterval)
+  ));
+}
+
 export function useChartInitialLoad({
   enabled,
   exchange,
   marketType,
+  nativeIntervalValues,
   getFromCache,
   resolveInitialRows,
   seriesDataFeed,
@@ -418,7 +432,6 @@ export function useChartInitialLoad({
       controller.signal.addEventListener("abort", abortListener, { once: true });
     }
 
-    markPerf("chart.initialLoad.latest.request", { exchange: ex, marketType: mt, symbol: sym, interval: intv, limit: 5 });
     markPerf("chart.initialLoad.history.request", {
       exchange: ex,
       marketType: mt,
@@ -427,8 +440,16 @@ export function useChartInitialLoad({
       countBack: INITIAL_HISTORY_COUNT_BACK,
     });
 
-    await Promise.all([
-      seriesDataFeed.getLatest(series, {
+    const initialRequests: Promise<unknown>[] = [];
+    if (shouldRequestInitialLatest(intv, nativeIntervalValues)) {
+      markPerf("chart.initialLoad.latest.request", {
+        exchange: ex,
+        marketType: mt,
+        symbol: sym,
+        interval: intv,
+        limit: 5,
+      });
+      initialRequests.push(seriesDataFeed.getLatest(series, {
         limit: 5,
         source: "initial-latest",
         signal: controller.signal,
@@ -441,8 +462,17 @@ export function useChartInitialLoad({
           });
           commitQuickResult(result);
         })
-        .catch(() => null),
-      seriesDataFeed.getBars(series, {
+        .catch(() => null));
+    } else {
+      markPerf("chart.initialLoad.latest.skipped", {
+        exchange: ex,
+        marketType: mt,
+        symbol: sym,
+        interval: intv,
+        reason: "derived-interval-history-owns-tail",
+      });
+    }
+    initialRequests.push(seriesDataFeed.getBars(series, {
         countBack: INITIAL_HISTORY_COUNT_BACK,
         source: "initial-history",
         signal: controller.signal,
@@ -456,8 +486,8 @@ export function useChartInitialLoad({
         })
         .catch(() => {
           if (!controller.signal.aborted) startInitialHistoryRetry();
-        }),
-    ]);
+        }));
+    await Promise.all(initialRequests);
 
     if (shownInitialData) {
       setLoading(false);
@@ -472,6 +502,7 @@ export function useChartInitialLoad({
     getFromCache,
     markChartDataTransition,
     marketType,
+    nativeIntervalValues,
     pendingInitialHistoryRef,
     replaceChartData,
     resolveInitialRows,

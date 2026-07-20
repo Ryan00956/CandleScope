@@ -605,11 +605,21 @@ def test_stream_policy_plans_okx_base_stream_without_facade_logic() -> None:
 
 def test_data_manager_stream_leases_reuse_upstream_until_last_consumer() -> None:
     async def _run() -> None:
+        active_during_physical_stop: list[bool] = []
+
         class _Handle:
             def __init__(self) -> None:
                 self.stopped = 0
 
             async def stop(self) -> None:
+                active_during_physical_stop.append(bool(
+                    dm.bar_aggregator.get_active_bars(
+                        "BTC-USDT",
+                        "1m",
+                        exchange="okx",
+                        market_type="spot",
+                    )
+                ))
                 self.stopped += 1
 
         class _Factory:
@@ -653,6 +663,37 @@ def test_data_manager_stream_leases_reuse_upstream_until_last_consumer() -> None
 
         key = ("okx", "spot", "BTC-USDT", "1m")
         assert factory.starts == [key]
+        closed_events = []
+
+        async def _capture_closed(event) -> None:
+            closed_events.append(event)
+
+        dm.bar_aggregator.publisher.on_bar_closed(_capture_closed)
+        bucket_start_ms = dm.bar_aggregator.compute_bucket(
+            "1m", int(time.time() * 1000),
+        )
+        assert bucket_start_ms is not None
+        await dm.bar_aggregator.ingest_bar_input(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1m",
+            BarInput(
+                symbol="BTC-USDT",
+                source_interval="1m",
+                exchange="okx",
+                market_type="spot",
+                open_time_ms=bucket_start_ms,
+                close_time_ms=bucket_start_ms + 59_999,
+                open=10,
+                high=11,
+                low=9,
+                close=10,
+                volume=1,
+                source=BarInputSource.REALTIME,
+                is_closed=False,
+            ),
+        )
 
         await dm.release_stream(
             "BTC-USDT",
@@ -667,6 +708,13 @@ def test_data_manager_stream_leases_reuse_upstream_until_last_consumer() -> None
             is not None
         )
         assert factory.handles[key].stopped == 0
+        assert dm.bar_aggregator.get_bucket_state(
+            "BTC-USDT",
+            "1m",
+            bucket_start_ms,
+            exchange="okx",
+            market_type="spot",
+        ) is not None
 
         await dm.release_stream(
             "BTC-USDT",
@@ -681,6 +729,15 @@ def test_data_manager_stream_leases_reuse_upstream_until_last_consumer() -> None
             dm.get_stream_info("BTC-USDT", "1m", exchange="okx", market_type="spot")
             is None
         )
+        assert dm.bar_aggregator.get_bucket_state(
+            "BTC-USDT",
+            "1m",
+            bucket_start_ms,
+            exchange="okx",
+            market_type="spot",
+        ) is None
+        assert active_during_physical_stop == [False]
+        assert closed_events == []
 
     asyncio.run(_run())
 

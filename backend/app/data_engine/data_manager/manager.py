@@ -1567,14 +1567,18 @@ class DataManager:
                 lease_keys,
                 consumer_id=stream_consumer,
             )
+            # Detach aggregation targets synchronously at the lease boundary.
+            # Waiting for physical stream teardown first leaves a window where
+            # a partial forming bar can hit its timeout and be emitted CLOSED.
             for key in empty_keys:
-                await self.coordinator.stop_stream(
+                self.bar_aggregator.remove_target(
                     key.symbol,
                     key.interval,
                     exchange=key.exchange,
                     market_type=key.market_type,
                 )
-                self.bar_aggregator.remove_target(
+            for key in empty_keys:
+                await self.coordinator.stop_stream(
                     key.symbol,
                     key.interval,
                     exchange=key.exchange,
@@ -1634,14 +1638,17 @@ class DataManager:
             consumer_id=consumer,
         )
 
+        # Drop exact forming targets before any awaited physical stop so the
+        # timeout loop cannot finalize detached partial snapshots meanwhile.
         for key in empty_keys:
-            await self.coordinator.stop_stream(
+            self.bar_aggregator.remove_target(
                 key.symbol,
                 key.interval,
                 exchange=key.exchange,
                 market_type=key.market_type,
             )
-            self.bar_aggregator.remove_target(
+        for key in empty_keys:
+            await self.coordinator.stop_stream(
                 key.symbol,
                 key.interval,
                 exchange=key.exchange,
@@ -1664,10 +1671,10 @@ class DataManager:
             )
             if removed is not None:
                 self._mark_storage_gc_protection_changed()
-        await self.coordinator.stop_stream(symbol, interval, exchange=exchange, market_type=market_type)
         self.bar_aggregator.remove_target(
             symbol, interval, exchange=exchange, market_type=market_type,
         )
+        await self.coordinator.stop_stream(symbol, interval, exchange=exchange, market_type=market_type)
 
     def _stream_consumer_id(
         self,

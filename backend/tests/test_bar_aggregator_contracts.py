@@ -6,8 +6,11 @@ import time
 from app.data_engine.bar_aggregator import (
     BarAggregator,
     BarAggregatorConfig,
+    BarEventType,
+    BarFinality,
     BarInput,
     BarInputSource,
+    BarStatus,
     EventRouter,
     MergeMode,
 )
@@ -84,6 +87,13 @@ def _market_event(exchange: str) -> MarketEvent:
             "is_closed": False,
         },
     )
+
+
+def _record_events(agg: BarAggregator, events: list) -> None:
+    async def _capture(event) -> None:
+        events.append(event)
+
+    agg.publisher.on_bar_event(_capture)
 
 
 def test_series_key_topic_and_subscription_matching_include_market_identity() -> None:
@@ -387,5 +397,455 @@ def test_standard_merge_respects_explicit_price_only_mode() -> None:
         assert state.volume == 70
         assert state.quote_volume == 700
         assert state.trades == 7
+
+    asyncio.run(_run())
+
+
+def test_unconfirmed_native_bar_expires_on_timeout_without_closed_event() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            finalize_timeout_ms=0,
+            update_throttle_ms=0,
+            emit_expired_events=True,
+        ))
+        agg.add_target("BTC-USDT", "1h", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+
+        await agg.ingest_bar_input(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1h",
+            _input(
+                0,
+                source_interval="1h",
+                close=10,
+                source=BarInputSource.REALTIME,
+                is_closed=False,
+                merge_mode=MergeMode.SNAPSHOT,
+            ),
+        )
+        state = agg.get_bucket_state(
+            "BTC-USDT", "1h", 0, exchange="okx", market_type="spot",
+        )
+        assert state is not None
+        assert state.requires_authoritative_close is True
+
+        await agg._check_timeouts()
+
+        assert agg.get_bucket_state(
+            "BTC-USDT", "1h", 0, exchange="okx", market_type="spot",
+        ) is None
+        assert state.status == BarStatus.EXPIRED
+        assert state.finality == BarFinality.PROVISIONAL
+        assert state.close_reason == "timeout_unconfirmed"
+        assert BarEventType.CLOSED not in [event.event_type for event in events]
+        assert BarEventType.EXPIRED in [event.event_type for event in events]
+
+    asyncio.run(_run())
+
+
+def test_next_bucket_expires_unconfirmed_native_bar_without_closed_event() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            finalize_timeout_ms=10**12,
+            update_throttle_ms=0,
+            emit_expired_events=True,
+        ))
+        agg.add_target("BTC-USDT", "1h", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+        bucket_start_ms = agg.compute_bucket("1h", int(time.time() * 1000))
+        assert bucket_start_ms is not None
+
+        for open_time_ms, close in (
+            (bucket_start_ms, 10),
+            (bucket_start_ms + 3_600_000, 11),
+        ):
+            await agg.ingest_bar_input(
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "1h",
+                _input(
+                    open_time_ms,
+                    source_interval="1h",
+                    close=close,
+                    source=BarInputSource.REALTIME,
+                    is_closed=False,
+                    merge_mode=MergeMode.SNAPSHOT,
+                ),
+            )
+
+        assert agg.get_bucket_state(
+            "BTC-USDT", "1h", bucket_start_ms, exchange="okx", market_type="spot",
+        ) is None
+        assert agg.get_bucket_state(
+            "BTC-USDT",
+            "1h",
+            bucket_start_ms + 3_600_000,
+            exchange="okx",
+            market_type="spot",
+        ) is not None
+        assert BarEventType.CLOSED not in [event.event_type for event in events]
+        assert BarEventType.EXPIRED in [event.event_type for event in events]
+
+    asyncio.run(_run())
+
+
+def test_shutdown_expires_unconfirmed_native_bar_without_closed_event() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            update_throttle_ms=0,
+            emit_expired_events=True,
+        ))
+        agg.add_target("BTC-USDT", "1h", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+
+        await agg.ingest_bar_input(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1h",
+            _input(
+                0,
+                source_interval="1h",
+                close=10,
+                source=BarInputSource.REALTIME,
+                is_closed=False,
+                merge_mode=MergeMode.SNAPSHOT,
+            ),
+        )
+        state = agg.get_bucket_state(
+            "BTC-USDT", "1h", 0, exchange="okx", market_type="spot",
+        )
+        assert state is not None
+
+        await agg.stop()
+
+        assert state.status == BarStatus.EXPIRED
+        assert BarEventType.CLOSED not in [event.event_type for event in events]
+        assert BarEventType.EXPIRED in [event.event_type for event in events]
+
+    asyncio.run(_run())
+
+
+def test_authoritative_native_close_still_emits_closed() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(update_throttle_ms=0))
+        agg.add_target("BTC-USDT", "1h", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+
+        await agg.ingest_bar_input(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1h",
+            _input(
+                0,
+                source_interval="1h",
+                close=10,
+                source=BarInputSource.REALTIME,
+                is_closed=True,
+                merge_mode=MergeMode.SNAPSHOT,
+            ),
+        )
+
+        assert agg.get_bucket_state(
+            "BTC-USDT", "1h", 0, exchange="okx", market_type="spot",
+        ) is None
+        recent = agg.get_recent_bars(
+            "BTC-USDT", "1h", exchange="okx", market_type="spot",
+        )
+        assert len(recent) == 1
+        assert recent[0].last_close_received is True
+        assert recent[0].finality == BarFinality.AUTHORITATIVE
+        assert recent[0].close_reason == "source_close"
+        assert [event.event_type for event in events].count(BarEventType.CLOSED) == 1
+
+    asyncio.run(_run())
+
+
+def test_legacy_source_close_flag_cannot_disable_native_finality_boundary() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            use_source_close_signal=False,
+            finalize_timeout_ms=0,
+            update_throttle_ms=0,
+            emit_expired_events=True,
+        ))
+        agg.add_target("BTC-USDT", "1h", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+
+        await agg.ingest_bar_input(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1h",
+            _input(
+                0,
+                source_interval="1h",
+                close=10,
+                source=BarInputSource.REALTIME,
+                is_closed=False,
+                merge_mode=MergeMode.SNAPSHOT,
+            ),
+        )
+        state = agg.get_bucket_state(
+            "BTC-USDT", "1h", 0, exchange="okx", market_type="spot",
+        )
+        assert state is not None
+        assert state.requires_authoritative_close is True
+
+        await agg._check_timeouts()
+
+        assert state.status == BarStatus.EXPIRED
+        assert BarEventType.CLOSED not in [event.event_type for event in events]
+
+        await agg.ingest_bar_input(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1h",
+            _input(
+                3_600_000,
+                source_interval="1h",
+                close=11,
+                source=BarInputSource.REALTIME,
+                is_closed=True,
+                merge_mode=MergeMode.SNAPSHOT,
+            ),
+        )
+        recent = agg.get_recent_bars(
+            "BTC-USDT", "1h", exchange="okx", market_type="spot",
+        )
+        assert len(recent) == 1
+        assert recent[0].finality == BarFinality.AUTHORITATIVE
+        assert recent[0].close_reason == "source_close"
+
+    asyncio.run(_run())
+
+
+def test_incremental_standard_bar_keeps_event_driven_close_compatibility() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            finalize_timeout_ms=10**12,
+            update_throttle_ms=0,
+        ))
+        agg.add_target("BTC-USDT", "1h", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+        bucket_start_ms = agg.compute_bucket("1h", int(time.time() * 1000))
+        assert bucket_start_ms is not None
+
+        for open_time_ms, close in (
+            (bucket_start_ms, 10),
+            (bucket_start_ms + 3_600_000, 11),
+        ):
+            await agg.ingest_bar_input(
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "1h",
+                _input(
+                    open_time_ms,
+                    source_interval="tick",
+                    close=close,
+                    source=BarInputSource.REALTIME,
+                    is_closed=False,
+                    merge_mode=MergeMode.INCREMENTAL,
+                ),
+            )
+
+        recent = agg.get_recent_bars(
+            "BTC-USDT", "1h", exchange="okx", market_type="spot",
+        )
+        assert len(recent) == 1
+        assert recent[0].bucket_start_ms == bucket_start_ms
+        assert recent[0].requires_authoritative_close is False
+        assert recent[0].finality == BarFinality.PROVISIONAL
+        assert recent[0].close_reason == "event_driven"
+        assert [event.event_type for event in events].count(BarEventType.CLOSED) == 1
+
+    asyncio.run(_run())
+
+
+def test_complete_custom_components_still_emit_closed() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            finalize_timeout_ms=10**12,
+            update_throttle_ms=0,
+        ))
+        agg.add_target("BTC-USDT", "45m", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+        bucket_start_ms = agg.compute_bucket("45m", int(time.time() * 1000))
+        assert bucket_start_ms is not None
+
+        for offset, close in ((0, 10), (900_000, 11), (1_800_000, 12)):
+            await agg.ingest_bar_input(
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "45m",
+                _input(
+                    bucket_start_ms + offset,
+                    source_interval="15m",
+                    close=close,
+                    source=BarInputSource.REALTIME,
+                    is_closed=True,
+                    merge_mode=MergeMode.COMPONENT,
+                ),
+            )
+
+        recent = agg.get_recent_bars(
+            "BTC-USDT", "45m", exchange="okx", market_type="spot",
+        )
+        assert len(recent) == 1
+        assert recent[0].close == 12
+        assert recent[0].tick_count == 3
+        assert recent[0].finality == BarFinality.AUTHORITATIVE
+        assert recent[0].close_reason == "composite_close"
+        assert [event.event_type for event in events].count(BarEventType.CLOSED) == 1
+
+    asyncio.run(_run())
+
+
+def test_incomplete_custom_next_bucket_fallback_stays_provisional() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            finalize_timeout_ms=10**12,
+            update_throttle_ms=0,
+        ))
+        agg.add_target("BTC-USDT", "45m", exchange="okx", market_type="spot")
+        bucket_start_ms = agg.compute_bucket("45m", int(time.time() * 1000))
+        assert bucket_start_ms is not None
+
+        for open_time_ms, close in (
+            (bucket_start_ms, 10),
+            (bucket_start_ms + 2_700_000, 11),
+        ):
+            await agg.ingest_bar_input(
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "45m",
+                _input(
+                    open_time_ms,
+                    source_interval="15m",
+                    close=close,
+                    source=BarInputSource.REALTIME,
+                    is_closed=True,
+                    merge_mode=MergeMode.COMPONENT,
+                ),
+            )
+
+        recent = agg.get_recent_bars(
+            "BTC-USDT", "45m", exchange="okx", market_type="spot",
+        )
+        assert len(recent) == 1
+        assert recent[0].bucket_start_ms == bucket_start_ms
+        assert recent[0].finality == BarFinality.PROVISIONAL
+        assert recent[0].close_reason == "event_driven"
+
+    asyncio.run(_run())
+
+
+def test_active_capacity_expires_unconfirmed_native_bar_without_closed_event() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            max_active_bars=1,
+            finalize_timeout_ms=10**12,
+            use_event_driven_close=False,
+            update_throttle_ms=0,
+            emit_expired_events=True,
+        ))
+        agg.add_target("BTC-USDT", "1h", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+
+        first = None
+        for open_time_ms, close in ((0, 10), (3_600_000, 11)):
+            await agg.ingest_bar_input(
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "1h",
+                _input(
+                    open_time_ms,
+                    source_interval="1h",
+                    close=close,
+                    source=BarInputSource.REALTIME,
+                    is_closed=False,
+                    merge_mode=MergeMode.SNAPSHOT,
+                ),
+            )
+            if open_time_ms == 0:
+                first = agg.get_bucket_state(
+                    "BTC-USDT", "1h", 0, exchange="okx", market_type="spot",
+                )
+
+        assert first is not None
+        assert first.status == BarStatus.EXPIRED
+        assert agg.get_recent_bars(
+            "BTC-USDT", "1h", exchange="okx", market_type="spot",
+        ) == []
+        assert BarEventType.CLOSED not in [event.event_type for event in events]
+        assert BarEventType.EXPIRED in [event.event_type for event in events]
+
+    asyncio.run(_run())
+
+
+def test_remove_target_discards_only_the_exact_forming_state() -> None:
+    async def _run() -> None:
+        agg = BarAggregator(BarAggregatorConfig(
+            finalize_timeout_ms=10**12,
+            update_throttle_ms=0,
+        ))
+        agg.add_target("BTC-USDT", "1h", exchange="okx", market_type="spot")
+        agg.add_target("BTC-USDT", "15m", exchange="okx", market_type="spot")
+        events = []
+        _record_events(agg, events)
+
+        await agg.ingest_bar_input(
+            "okx", "spot", "BTC-USDT", "1h",
+            _input(
+                0,
+                source_interval="1h",
+                close=10,
+                source=BarInputSource.REALTIME,
+                is_closed=False,
+                merge_mode=MergeMode.SNAPSHOT,
+            ),
+        )
+        await agg.ingest_bar_input(
+            "okx", "spot", "BTC-USDT", "15m",
+            _input(
+                0,
+                source_interval="15m",
+                close=11,
+                source=BarInputSource.REALTIME,
+                is_closed=False,
+                merge_mode=MergeMode.SNAPSHOT,
+            ),
+        )
+
+        agg.remove_target(
+            "BTC-USDT", "1h", exchange="okx", market_type="spot",
+        )
+
+        assert agg.get_bucket_state(
+            "BTC-USDT", "1h", 0, exchange="okx", market_type="spot",
+        ) is None
+        assert agg.get_bucket_state(
+            "BTC-USDT", "15m", 0, exchange="okx", market_type="spot",
+        ) is not None
+        assert ("okx", "spot", "BTC-USDT", "15m") in agg.get_targets()
+        assert ("okx", "spot", "BTC-USDT", "1h") not in agg.get_targets()
+        assert BarEventType.CLOSED not in [event.event_type for event in events]
 
     asyncio.run(_run())

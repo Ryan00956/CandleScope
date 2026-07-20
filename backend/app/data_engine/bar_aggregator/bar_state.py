@@ -27,6 +27,8 @@ from collections import OrderedDict
 from .config import BarAggregatorConfig
 from .models import (
     BarInput,
+    BarInputSource,
+    BarFinality,
     BarState,
     BarStatus,
     BarStateChange,
@@ -325,6 +327,7 @@ class BarStateEngine:
             # Existing active bar — merge
             state = self._active[key]
             state = self._merge_strategy.apply(state, bar_input, is_new=False)
+            self._mark_authoritative_close_policy(state, bar_input)
             self._active[key] = state
             # Move to end (most recently updated)
             self._active.move_to_end(key)
@@ -337,9 +340,12 @@ class BarStateEngine:
             # For backfill data, we overwrite (is_new=True) instead of merge,
             # because backfill bars are complete final data and should replace
             # existing state rather than accumulate on top of it.
-            if bar_input.source.value == "backfill":
+            if bar_input.source == BarInputSource.BACKFILL:
                 state = self._merge_strategy.apply(old_state, bar_input, is_new=True)
                 state.status = BarStatus.CLOSED  # keep it closed
+                if is_standard_interval(self._interval):
+                    state.finality = BarFinality.AUTHORITATIVE
+                    state.close_reason = "backfill_amendment"
                 self._closed[key] = state
                 return state, BarStateChange.AMENDED
             # Realtime data for an already-closed bar — ignore
@@ -361,12 +367,35 @@ class BarStateEngine:
             volume=0.0,
         )
         state = self._merge_strategy.apply(state, bar_input, is_new=True)
+        self._mark_authoritative_close_policy(state, bar_input)
         self._active[key] = state
 
         # Evict oldest active bars if limit exceeded
         self._enforce_active_limit(exchange, market_type, symbol)
 
         return state, BarStateChange.CREATED
+
+    def _mark_authoritative_close_policy(
+        self,
+        state: BarState,
+        bar_input: BarInput,
+    ) -> None:
+        """Mark cumulative standard bars as requiring explicit finality."""
+        if not is_standard_interval(self._interval):
+            return
+        merge_mode = bar_input.merge_mode
+        if merge_mode is None:
+            merge_mode = (
+                MergeMode.INCREMENTAL
+                if bar_input.source_interval == "tick"
+                else MergeMode.SNAPSHOT
+            )
+        # Native/cumulative kline snapshots are only final when their source
+        # explicitly confirms closure (for example Binance ``x=true``).
+        # Incremental trade-built bars intentionally retain the legacy
+        # next-bucket/timeout policy because they have no source-close flag.
+        if merge_mode in (MergeMode.SNAPSHOT, MergeMode.PRICE_ONLY):
+            state.requires_authoritative_close = True
 
     # ── Public: State Queries ────────────────────────────────
 
@@ -525,8 +554,9 @@ class BarStateEngine:
     def _enforce_active_limit(self, exchange: str, market_type: str, symbol: str) -> None:
         """Evict oldest active bars if over the limit.
 
-        Force-closed bars are appended to ``self.evicted_closed`` so the
-        aggregator can emit CLOSED events for them after processing.
+        Bars which require an explicit source-close confirmation are expired
+        rather than promoted to CLOSED.  Other bars retain the legacy
+        force-close behavior and are appended to ``self.evicted_closed``.
         """
         normalized_exchange = exchange.strip().lower()
         normalized_market = market_type.strip().lower()
@@ -538,11 +568,32 @@ class BarStateEngine:
             oldest_key = symbol_keys.pop(0)
             state = self._active.pop(oldest_key, None)
             if state:
+                if (
+                    state.requires_authoritative_close
+                    and not state.last_close_received
+                ):
+                    state.close_reason = "active_capacity_unconfirmed"
+                    state.finality = BarFinality.PROVISIONAL
+                    logger.warning(
+                        "Expiring unconfirmed active bar at capacity: "
+                        "%s:%s:%s@%s bucket=%d",
+                        normalized_exchange,
+                        normalized_market,
+                        symbol,
+                        self._interval,
+                        oldest_key[3],
+                    )
+                    state.status = BarStatus.EXPIRED
+                    state.updated_at_ms = int(time.time() * 1000)
+                    self.evicted_expired.append(state)
+                    continue
                 logger.warning(
                     "Force-closing oldest active bar: %s:%s:%s@%s bucket=%d",
                     normalized_exchange, normalized_market, symbol, self._interval, oldest_key[3],
                 )
                 state.status = BarStatus.CLOSED
+                state.close_reason = "active_capacity_fallback"
+                state.finality = BarFinality.PROVISIONAL
                 state.updated_at_ms = int(time.time() * 1000)
                 self._closed[oldest_key] = state
                 self.evicted_closed.append(state)

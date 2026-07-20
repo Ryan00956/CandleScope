@@ -112,8 +112,9 @@ class BarAggregatorConfig:
 
     # ── L4: Finalizer ────────────────────────────────────────
 
-    # For standard intervals, use the exchange's is_closed (x=true) signal
-    # as the primary close trigger.  Highly recommended for Binance klines.
+    # Legacy compatibility knob. Standard cumulative snapshots now always
+    # require the exchange's is_closed (x=true) signal before authoritative
+    # close; setting this false cannot weaken that persistence boundary.
     use_source_close_signal: bool = field(
         default_factory=lambda: _env_bool("BAR_AGG_USE_SOURCE_CLOSE", True),
     )

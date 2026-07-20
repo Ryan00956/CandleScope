@@ -108,8 +108,8 @@ Finalizer 会组合多个收盘信号：
 | `BAR_AGG_ALIGNMENT_EPOCH_MS` | 自定义对齐 epoch |
 | `BAR_AGG_MAX_ACTIVE_BARS` | 每个序列最多 forming buckets |
 | `BAR_AGG_MAX_CLOSED_BARS` | 内存保留的 recent closed bars |
-| `BAR_AGG_USE_SOURCE_CLOSE` | 使用交易所 close signal |
-| `BAR_AGG_FINALIZE_TIMEOUT_MS` | 强制收盘 timeout |
+| `BAR_AGG_USE_SOURCE_CLOSE` | 兼容旧配置；原生快照始终要求交易所 close signal |
+| `BAR_AGG_FINALIZE_TIMEOUT_MS` | fallback 截止时间；未确认原生快照到期后失效而非收盘 |
 | `BAR_AGG_USE_EVENT_DRIVEN_CLOSE` | 新 bucket 到达时关闭上一 bucket |
 | `BAR_AGG_USE_COMPOSITE_CLOSE` | 根据 component close 状态关闭自定义周期 |
 | `BAR_AGG_UPDATE_THROTTLE_MS` | `UPDATED` 事件节流 |

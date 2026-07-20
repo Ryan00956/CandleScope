@@ -56,6 +56,12 @@ class BarStatus(str, enum.Enum):
     EXPIRED = "expired"            # evicted from memory (too old)
 
 
+class BarFinality(str, enum.Enum):
+    """Whether a bar close is backed by an authoritative completion signal."""
+    PROVISIONAL = "provisional"
+    AUTHORITATIVE = "authoritative"
+
+
 class BarEventType(str, enum.Enum):
     """Types of bar lifecycle events emitted by the Publisher."""
     CREATED = "bar.created"        # new bucket started
@@ -203,6 +209,9 @@ class BarState:
     first_input_at_ms: int = 0     # open_time of the first input
     last_input_at_ms: int = 0      # open_time of the last input
     last_close_received: bool = False  # did we receive is_closed=True for the last component?
+    requires_authoritative_close: bool = False  # native snapshots must receive an explicit close
+    finality: BarFinality = BarFinality.PROVISIONAL
+    close_reason: str | None = None
     source_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
     status: BarStatus = BarStatus.FORMING
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
@@ -213,6 +222,8 @@ class BarState:
         self.exchange = self.exchange.strip().lower()
         self.market_type = self.market_type.strip().lower()
         self.enhanced_fields = frozenset(self.enhanced_fields)
+        if not isinstance(self.finality, BarFinality):
+            self.finality = BarFinality(str(self.finality))
 
     def to_dict(self) -> dict:
         return {
@@ -236,6 +247,9 @@ class BarState:
             "first_input_at_ms": self.first_input_at_ms,
             "last_input_at_ms": self.last_input_at_ms,
             "last_close_received": self.last_close_received,
+            "requires_authoritative_close": self.requires_authoritative_close,
+            "finality": self.finality.value,
+            "close_reason": self.close_reason,
             "status": self.status.value,
             "created_at_ms": self.created_at_ms,
             "updated_at_ms": self.updated_at_ms,

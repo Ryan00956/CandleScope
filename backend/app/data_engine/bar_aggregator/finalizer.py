@@ -46,6 +46,7 @@ from .models import (
     BarStatus,
     BarEvent,
     BarEventType,
+    BarFinality,
     BarStateChange,
     BarInput,
     BarInputSource,
@@ -124,6 +125,8 @@ class EventDrivenFinalizer:
     def should_close(self, state: BarState, trigger: FinalizeTrigger) -> bool:
         if trigger.trigger_type != "next_bucket":
             return False
+        if state.requires_authoritative_close and not state.last_close_received:
+            return False
         # The trigger carries the next bucket's start time
         if trigger.next_bucket_start is not None:
             return trigger.next_bucket_start > state.bucket_start_ms
@@ -145,6 +148,8 @@ class TimeBasedFinalizer:
         self._timeout_ms = timeout_ms
 
     def should_close(self, state: BarState, trigger: FinalizeTrigger) -> bool:
+        if state.requires_authoritative_close and not state.last_close_received:
+            return False
         # Works with both "timer" and "input" triggers
         now_ms = trigger.current_time_ms
         deadline = state.bucket_end_ms + self._timeout_ms
@@ -296,6 +301,12 @@ class Finalizer:
         for name, strategy in self._strategies:
             try:
                 if strategy.should_close(state, trigger):
+                    state.close_reason = name
+                    state.finality = (
+                        BarFinality.AUTHORITATIVE
+                        if name in {"batch", "source_close", "composite_close"}
+                        else BarFinality.PROVISIONAL
+                    )
                     logger.debug(
                         "Bar closed by '%s': %s@%s bucket=%d",
                         name, state.symbol, state.interval, state.bucket_start_ms,
@@ -325,15 +336,25 @@ class Finalizer:
         return self.check(state, trigger)
 
     def flush(self, state: BarState) -> BarEvent:
-        """Force-close a bar regardless of strategies.
+        """Finalize a bar during teardown without inventing source authority.
 
-        Used during shutdown or when a pipeline is being torn down.
+        Unconfirmed native snapshots become EXPIRED; all other bars preserve
+        the legacy forced-CLOSED behavior.
 
         Returns:
-            BarEvent(CLOSED)
+            BarEvent(CLOSED or EXPIRED)
         """
+        unconfirmed = self.requires_authoritative_close(state)
+        state.close_reason = (
+            "shutdown_unconfirmed" if unconfirmed else "shutdown_fallback"
+        )
+        state.finality = BarFinality.PROVISIONAL
         return BarEvent(
-            event_type=BarEventType.CLOSED,
+            event_type=(
+                BarEventType.EXPIRED
+                if unconfirmed
+                else BarEventType.CLOSED
+            ),
             bar=state,
         )
 
@@ -344,9 +365,40 @@ class Finalizer:
             states: List of active BarStates to close
 
         Returns:
-            List of BarEvent(CLOSED) for each bar
+            List of BarEvent(CLOSED or EXPIRED) for each bar
         """
         return [self.flush(s) for s in states if s.status == BarStatus.FORMING]
+
+    @staticmethod
+    def requires_authoritative_close(state: BarState) -> bool:
+        """Return whether a forming bar must fail closed without source confirmation."""
+        return (
+            state.status == BarStatus.FORMING
+            and state.requires_authoritative_close
+            and not state.last_close_received
+        )
+
+    def should_expire_unconfirmed(
+        self,
+        state: BarState,
+        trigger: FinalizeTrigger,
+    ) -> bool:
+        """Decide when an unconfirmed native snapshot must be discarded."""
+        if not self.requires_authoritative_close(state):
+            return False
+        if trigger.trigger_type == "flush":
+            return True
+        if trigger.trigger_type == "next_bucket":
+            return (
+                trigger.next_bucket_start is not None
+                and trigger.next_bucket_start > state.bucket_start_ms
+            )
+        if trigger.trigger_type == "timer":
+            return (
+                trigger.current_time_ms
+                >= state.bucket_end_ms + self._cfg.finalize_timeout_ms
+            )
+        return False
 
     # ── Public: Snapshot ─────────────────────────────────────
 
@@ -374,8 +426,11 @@ class Finalizer:
         else:
             self._strategies.append(("batch", BatchFinalizer(self._time_bucket)))
 
-        # 2. Source close (for standard intervals with exchange close signal)
-        if is_standard and self._cfg.use_source_close_signal:
+        # 2. Source close is a non-optional authority boundary for native
+        # cumulative snapshots.  The legacy config flag remains readable for
+        # compatibility, but disabling it must not restore timeout-based
+        # promotion of a partial exchange K-line.
+        if is_standard:
             self._strategies.append(("source_close", SourceCloseFinalizer()))
 
         # 3. Composite close (for custom intervals)

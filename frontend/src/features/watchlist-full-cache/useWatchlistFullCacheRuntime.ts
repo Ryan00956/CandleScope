@@ -1,29 +1,18 @@
 import { useEffect, useMemo, useRef } from "react";
-import { fetchLatestKlines } from "../../services/api.js";
-import type { TransportKlineBar } from "../../services/apiPayloadParsers.js";
 import { symbolKey } from "../../utils/symbolKey.js";
-import { toEpochSeconds } from "../market-data/marketDataTypes.js";
-import type { KlineBar } from "../market-data/marketDataTypes.js";
 import {
   buildFullCachePreloadJobs,
   buildWatchlistFullSocketTargets,
   buildWatchlistFullCacheTargets,
 } from "./watchlistFullCachePolicy.js";
-import {
-  markFullCacheError,
-  mergeFullCacheRows,
-  setFullCacheEntryStatus,
-  WATCHLIST_FULL_CACHE_MIN_RETAINED_BARS,
-} from "./watchlistFullCacheStore.js";
+import { createWatchlistFullCachePreloadManager } from "./watchlistFullCachePreloadManager.js";
 import { createWatchlistFullCacheSocketManager } from "./watchlistFullCacheSocketManager.js";
 import type {
   FullCacheTarget,
   FullCacheTargetOptions,
 } from "./watchlistFullCacheTypes.js";
 
-const PRELOAD_LIMIT = WATCHLIST_FULL_CACHE_MIN_RETAINED_BARS;
 const MAX_PRELOAD_JOBS = 16;
-const MAX_PRELOAD_CONCURRENCY = 2;
 
 export interface UseWatchlistFullCacheRuntimeOptions extends FullCacheTargetOptions {
   enabled?: boolean;
@@ -31,13 +20,6 @@ export interface UseWatchlistFullCacheRuntimeOptions extends FullCacheTargetOpti
 
 export interface WatchlistFullCacheRuntime {
   targets: FullCacheTarget[];
-}
-
-function normalizeHttpRows(rows: TransportKlineBar[]): KlineBar[] {
-  return rows.flatMap((row) => {
-    const time = toEpochSeconds(row.time);
-    return time == null ? [] : [{ ...row, time }];
-  });
 }
 
 export function useWatchlistFullCacheRuntime({
@@ -50,6 +32,9 @@ export function useWatchlistFullCacheRuntime({
   enabled = true,
 }: UseWatchlistFullCacheRuntimeOptions = {}): WatchlistFullCacheRuntime {
   const socketManagerRef = useRef<ReturnType<typeof createWatchlistFullCacheSocketManager> | null>(
+    null,
+  );
+  const preloadManagerRef = useRef<ReturnType<typeof createWatchlistFullCachePreloadManager> | null>(
     null,
   );
   const {
@@ -128,52 +113,39 @@ export function useWatchlistFullCacheRuntime({
   }, []);
 
   useEffect(() => {
+    const manager = createWatchlistFullCachePreloadManager();
+    preloadManagerRef.current = manager;
+    return () => {
+      manager.dispose();
+      if (preloadManagerRef.current === manager) preloadManagerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     socketManagerRef.current?.syncTargets(socketTargets, enabled);
   }, [enabled, socketTargets]);
 
-  useEffect(() => {
-    if (!enabled || targets.length === 0) return undefined;
-    const controller = new AbortController();
-    const jobs = buildFullCachePreloadJobs(targets, {
+  const preloadJobs = useMemo(
+    () => buildFullCachePreloadJobs(targets, {
       currentSymbolKey,
+      excludeSeries: {
+        symbolKey: currentSymbolKey,
+        ...(currentInterval === undefined ? {} : { interval: currentInterval }),
+      },
       maxJobs: MAX_PRELOAD_JOBS,
+    }),
+    [currentInterval, currentSymbolKey, targets],
+  );
+
+  useEffect(() => {
+    preloadManagerRef.current?.syncJobs(preloadJobs, {
+      enabled,
+      activeSeries: {
+        symbolKey: currentSymbolKey,
+        ...(currentInterval === undefined ? {} : { interval: currentInterval }),
+      },
     });
-    let index = 0;
-
-    async function runWorker(): Promise<void> {
-      while (!controller.signal.aborted && index < jobs.length) {
-        const job = jobs[index];
-        index += 1;
-        if (!job) continue;
-        setFullCacheEntryStatus(job.symbolKey, job.interval, "loading", { source: "latest" });
-        try {
-          const result = await fetchLatestKlines(
-            job.symbol,
-            job.interval,
-            PRELOAD_LIMIT,
-            job.marketType,
-            job.exchange,
-            "watchlist-full-cache",
-            { signal: controller.signal },
-          );
-          if (controller.signal.aborted) return;
-          mergeFullCacheRows(job.symbolKey, job.interval, normalizeHttpRows(result?.data || []), {
-            status: "warm",
-            source: typeof result?.source === "string" ? result.source : "latest",
-          });
-        } catch (error) {
-          if (!controller.signal.aborted) markFullCacheError(job.symbolKey, job.interval, error);
-        }
-      }
-    }
-
-    const workerCount = Math.min(MAX_PRELOAD_CONCURRENCY, jobs.length);
-    for (let workerIndex = 0; workerIndex < workerCount; workerIndex += 1) {
-      void runWorker();
-    }
-
-    return () => controller.abort();
-  }, [currentSymbolKey, enabled, targets]);
+  }, [currentInterval, currentSymbolKey, enabled, preloadJobs]);
 
   return {
     targets,

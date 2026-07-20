@@ -16,6 +16,7 @@ import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type { CommitChartData, PendingInitialSeries } from "./klineContracts.js";
 import type { EpochSeconds, KlineBar, SeriesKey } from "./marketDataTypes.js";
+import { resolvePatchedChartDataStatus } from "./chartDataRuntime.js";
 import { MAX_SERIES_BARS } from "./phase1WindowPolicy.js";
 import { WINDOW_DELTA_TYPES } from "./window/windowDeltas.js";
 import type { SeriesWindowStore } from "./window/seriesWindowStore.js";
@@ -909,6 +910,12 @@ export function useChartDataRuntime({
       if (delta.type === WINDOW_DELTA_TYPES.NOOP) return;
 
       const next = store.snapshot({ force: true });
+      const patchedStatus = resolvePatchedChartDataStatus(
+        source,
+        chartDataCommitMetaRef.current?.seriesKey === key
+          ? chartDataCommitMetaRef.current.status
+          : undefined,
+      );
       chartDataRef.current = next;
       setActiveSeriesStore(store);
       registerStoreResource(key, store, { symbol: sym, interval: intv, source });
@@ -923,11 +930,7 @@ export function useChartDataRuntime({
       });
       recordChartDataCommit(sym, intv, next, source, {
         incomingBars: ticks.length,
-        ...(source?.includes("latest")
-          ? { status: "provisional" }
-          : chartDataCommitMetaRef.current?.status === undefined
-            ? {}
-            : { status: chartDataCommitMetaRef.current.status }),
+        ...(patchedStatus === undefined ? {} : { status: patchedStatus }),
         seeded: false,
         ...(delta.originalBars === undefined ? {} : { originalBars: delta.originalBars }),
         ...(delta.trimmedLeft === undefined ? {} : { trimmedLeft: delta.trimmedLeft }),

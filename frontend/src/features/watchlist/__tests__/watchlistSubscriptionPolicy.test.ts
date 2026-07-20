@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildFullSubscriptionIntervalSignature,
   buildWatchlistConsumerId,
   getFullSubscriptionResourceSummary,
   getFullSubscriptionIntervals,
   getSubscriptionTierRequestOptions,
+  shouldResyncFullSubscriptionIntervals,
 } from "../watchlistSubscriptionPolicy.js";
 
 test("getFullSubscriptionIntervals combines native and custom intervals in stable order", () => {
@@ -73,4 +75,36 @@ test("buildWatchlistConsumerId uses a single local watchlist owner", () => {
     buildWatchlistConsumerId("spot:BTCUSDT"),
     "watchlist:global:spot:BTCUSDT",
   );
+});
+
+test("full interval resync compares normalized sets and suppresses duplicate inflight work", () => {
+  const observed = buildFullSubscriptionIntervalSignature(["1m", "1h"]);
+  assert.equal(shouldResyncFullSubscriptionIntervals({
+    tier: "full",
+    desiredIntervals: ["1h", "1m"],
+    observedSignature: observed,
+  }), false);
+  assert.equal(shouldResyncFullSubscriptionIntervals({
+    tier: "full",
+    desiredIntervals: ["1m", "1h", "45m"],
+    observedSignature: observed,
+  }), true);
+  const desired = buildFullSubscriptionIntervalSignature(["1m", "1h", "45m"]);
+  assert.equal(shouldResyncFullSubscriptionIntervals({
+    tier: "full",
+    desiredIntervals: ["1m", "1h", "45m"],
+    observedSignature: observed,
+    inFlightSignature: desired,
+  }), false);
+  assert.equal(shouldResyncFullSubscriptionIntervals({
+    tier: "full",
+    desiredIntervals: ["1m", "1h", "45m"],
+    observedSignature: observed,
+    inFlightSignature: buildFullSubscriptionIntervalSignature(["1m", "1h"]),
+  }), false, "a changed desired set waits for the current per-symbol PUT to settle");
+  assert.equal(shouldResyncFullSubscriptionIntervals({
+    tier: "price",
+    desiredIntervals: ["1m", "1h", "45m"],
+    observedSignature: observed,
+  }), false);
 });

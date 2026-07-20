@@ -107,6 +107,7 @@ export type HasMarketCache = (
 
 export interface UseChartBackgroundPrefetchOptions
   extends Pick<MarketSeries, "exchange" | "marketType" | "symbol"> {
+  activeInterval: IntervalString;
   trackedIntervals: readonly IntervalString[];
   hasCache: HasMarketCache;
   seriesDataFeed: SeriesDataFeed;

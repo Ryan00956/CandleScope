@@ -198,7 +198,6 @@ test("socket manager unsubscribes intervals removed from a live target", () => {
   assert.deepEqual(socket.sent.map((message): unknown => JSON.parse(message) as unknown), [
     { action: "subscribe", intervals: ["1s", "1m"] },
     { action: "unsubscribe", intervals: ["1s"] },
-    { action: "subscribe", intervals: ["1m"] },
   ]);
   const removed = mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1s"));
   const retained = mustBeDefined(getFullCacheEntry(TARGET.symbolKey, "1m"));
@@ -206,6 +205,25 @@ test("socket manager unsubscribes intervals removed from a live target", () => {
   assert.equal(removed.status, "stale");
   assert.equal(retained.subscribed, true);
   assert.equal(retained.status, "live");
+
+  manager.dispose();
+});
+
+test("socket manager subscribes only intervals added to a live target", () => {
+  resetWatchlistFullCache();
+  const socket = new FakeSocket();
+  const manager = createWatchlistFullCacheSocketManager({
+    createSocket: () => socket,
+  });
+
+  manager.syncTargets([{ ...TARGET, intervals: ["1m"] }]);
+  socket.emitOpen();
+  manager.syncTargets([{ ...TARGET, intervals: ["1m", "45m"] }]);
+
+  assert.deepEqual(socket.sent.map((message): unknown => JSON.parse(message) as unknown), [
+    { action: "subscribe", intervals: ["1m"] },
+    { action: "subscribe", intervals: ["45m"] },
+  ]);
 
   manager.dispose();
 });

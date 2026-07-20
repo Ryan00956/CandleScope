@@ -39,6 +39,28 @@ function normalizedUniqueValues(items: IntervalCandidate[] = []): IntervalString
   return values;
 }
 
+export function buildFullSubscriptionIntervalSignature(
+  intervals: IntervalCandidate[] = [],
+): string {
+  return normalizedUniqueValues(intervals).sort().join("|");
+}
+
+export function shouldResyncFullSubscriptionIntervals({
+  tier,
+  desiredIntervals = [],
+  observedSignature,
+  inFlightSignature,
+}: {
+  tier: string;
+  desiredIntervals?: IntervalCandidate[];
+  observedSignature?: string | undefined;
+  inFlightSignature?: string | undefined;
+}): boolean {
+  if (tier !== "full") return false;
+  const desiredSignature = buildFullSubscriptionIntervalSignature(desiredIntervals);
+  return observedSignature !== desiredSignature && inFlightSignature === undefined;
+}
+
 export function getFullSubscriptionResourceSummary({
   nativeIntervals = [],
   customIntervalRecords = [],

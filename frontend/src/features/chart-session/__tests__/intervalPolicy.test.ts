@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getEffectiveCustomIntervalRecords,
   getFallbackIntervalAfterCustomClear,
   getFallbackIntervalAfterCustomRemove,
   resolveSupportedInterval,
@@ -76,4 +77,28 @@ test("custom interval removal prefers recent custom then nearest native interval
     interval: "50m",
     nativeIntervals,
   }), "1h");
+});
+
+test("saved custom provenance is masked when the current exchange supports it natively", () => {
+  const records = [customInterval("8h", 2), customInterval("45m", 1)];
+  const nativeWithEightHours = [
+    ...nativeIntervals,
+    { value: "8h", seconds: 28_800 },
+  ];
+
+  assert.deepEqual(
+    getEffectiveCustomIntervalRecords(records, nativeWithEightHours).map((record) => record.value),
+    ["45m"],
+  );
+  assert.equal(getFallbackIntervalAfterCustomRemove({
+    removedInterval: "8h",
+    customIntervalRecords: records,
+    nativeIntervals: nativeWithEightHours,
+    exchange: "binance",
+    isNativeIntervalSupported: (_exchange, interval) => interval === "8h",
+  }), "8h");
+  assert.equal(getFallbackIntervalAfterCustomClear({
+    interval: "8h",
+    nativeIntervals: nativeWithEightHours,
+  }), "8h");
 });

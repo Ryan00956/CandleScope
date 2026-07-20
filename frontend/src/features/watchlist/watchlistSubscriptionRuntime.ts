@@ -15,8 +15,10 @@ import type {
 } from "../chart-session/chartSessionTypes.js";
 import { parseSymbolKey } from "../../utils/symbolKey.js";
 import {
+  buildFullSubscriptionIntervalSignature,
   getFullSubscriptionResourceSummary,
   getSubscriptionTierRequestOptions,
+  shouldResyncFullSubscriptionIntervals,
 } from "./watchlistSubscriptionPolicy.js";
 import { createWatchlistPriceStore } from "./watchlistPriceStore.js";
 import type {
@@ -103,11 +105,14 @@ export function useWatchlistSubscriptionRuntime({
   subscriptionContext = {},
 }: UseWatchlistSubscriptionRuntimeOptions): WatchlistSubscriptionRuntime {
   const [subscriptionTiers, setSubscriptionTiers] = useState<Record<string, SubscriptionTier>>({});
+  const [subscriptionIntervalSignatures, setSubscriptionIntervalSignatures] = useState<Record<string, string>>({});
   const [priceStoreController] = useState(createWatchlistPriceStore);
   const [tierCoordinator] = useState(() => new WatchlistTierMutationCoordinator());
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const subscriptionTiersRef = useRef(subscriptionTiers);
   const lifecycleGenerationRef = useRef(0);
+  const tierMutationInFlightRef = useRef(new Set<string>());
+  const fullIntervalSyncInFlightRef = useRef(new Map<string, string>());
   const {
     exchange = "binance",
     exchangeCatalog = null,
@@ -136,6 +141,22 @@ export function useWatchlistSubscriptionRuntime({
     setSubscriptionTiers(next as Record<string, SubscriptionTier>);
   }, []);
 
+  const publishSubscriptionIntervalSignature = useCallback((
+    symbol: string,
+    signature: string | null,
+  ) => {
+    setSubscriptionIntervalSignatures((current) => {
+      if (signature === null) {
+        if (!Object.prototype.hasOwnProperty.call(current, symbol)) return current;
+        const next = { ...current };
+        delete next[symbol];
+        return next;
+      }
+      if (current[symbol] === signature) return current;
+      return { ...current, [symbol]: signature };
+    });
+  }, []);
+
   const refreshSubscriptions = useCallback(async () => {
     const lifecycleGeneration = lifecycleGenerationRef.current;
     const refresh = tierCoordinator.beginRefresh();
@@ -146,9 +167,21 @@ export function useWatchlistSubscriptionRuntime({
         subscriptionTiersRef.current,
         buildTierMap(response.subscriptions),
       ));
+      for (const subscription of response.subscriptions) {
+        if (
+          tierMutationInFlightRef.current.has(subscription.symbol)
+          || fullIntervalSyncInFlightRef.current.has(subscription.symbol)
+        ) continue;
+        publishSubscriptionIntervalSignature(
+          subscription.symbol,
+          subscription.tier === "full"
+            ? buildFullSubscriptionIntervalSignature(subscription.intervals || [])
+            : null,
+        );
+      }
     }
     return response;
-  }, [publishSubscriptionTiers, tierCoordinator]);
+  }, [publishSubscriptionIntervalSignature, publishSubscriptionTiers, tierCoordinator]);
 
   const resolveNativeIntervals = useCallback((symbol: string) => {
     const parsed = parseSymbolKey(symbol);
@@ -178,6 +211,7 @@ export function useWatchlistSubscriptionRuntime({
       nativeIntervals: resolveNativeIntervals(symbol),
       customIntervalRecords,
     });
+    tierMutationInFlightRef.current.add(symbol);
     publishSubscriptionTiers({ ...subscriptionTiersRef.current, [symbol]: tier });
     updateSubscriptionTier(symbol, tier, options)
       .then((response) => {
@@ -188,6 +222,12 @@ export function useWatchlistSubscriptionRuntime({
           ...subscriptionTiersRef.current,
           [resolution.symbol]: resolution.tier,
         });
+        publishSubscriptionIntervalSignature(
+          resolution.symbol,
+          response.tier === "full"
+            ? buildFullSubscriptionIntervalSignature(response.intervals || options.intervals || [])
+            : null,
+        );
       })
       .catch((err) => {
         if (lifecycleGenerationRef.current !== lifecycleGeneration) return;
@@ -198,9 +238,13 @@ export function useWatchlistSubscriptionRuntime({
           ...subscriptionTiersRef.current,
           [resolution.symbol]: resolution.tier,
         });
+      })
+      .finally(() => {
+        tierMutationInFlightRef.current.delete(symbol);
       });
   }, [
     customIntervalRecords,
+    publishSubscriptionIntervalSignature,
     publishSubscriptionTiers,
     resolveNativeIntervals,
     tierCoordinator,
@@ -229,6 +273,62 @@ export function useWatchlistSubscriptionRuntime({
       if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
     };
   }, [refreshSubscriptions, watchlists]);
+
+  useEffect(() => {
+    const lifecycleGeneration = lifecycleGenerationRef.current;
+    const symbols = new Set(watchlists.flatMap((watchlist) => watchlist.symbols || []));
+    for (const symbol of symbols) {
+      const tier = subscriptionTiers[symbol] || "none";
+      if (tier !== "full" || tierMutationInFlightRef.current.has(symbol)) continue;
+      const options = getSubscriptionTierRequestOptions({
+        symbol,
+        tier,
+        nativeIntervals: resolveNativeIntervals(symbol),
+        customIntervalRecords,
+      });
+      const desiredIntervals = options.intervals || [];
+      const desiredSignature = buildFullSubscriptionIntervalSignature(desiredIntervals);
+      if (!shouldResyncFullSubscriptionIntervals({
+        tier,
+        desiredIntervals,
+        observedSignature: subscriptionIntervalSignatures[symbol],
+        inFlightSignature: fullIntervalSyncInFlightRef.current.get(symbol),
+      })) continue;
+
+      fullIntervalSyncInFlightRef.current.set(symbol, desiredSignature);
+      updateSubscriptionTier(symbol, "full", options)
+        .then((response) => {
+          if (lifecycleGenerationRef.current !== lifecycleGeneration) return;
+          if (response.tier !== "full") {
+            publishSubscriptionTiers({
+              ...subscriptionTiersRef.current,
+              [symbol]: response.tier,
+            });
+            publishSubscriptionIntervalSignature(symbol, null);
+            return;
+          }
+          publishSubscriptionIntervalSignature(symbol, desiredSignature);
+        })
+        .catch((error) => {
+          if (lifecycleGenerationRef.current === lifecycleGeneration) {
+            console.warn("Failed to resync full subscription intervals:", error);
+          }
+        })
+        .finally(() => {
+          if (fullIntervalSyncInFlightRef.current.get(symbol) === desiredSignature) {
+            fullIntervalSyncInFlightRef.current.delete(symbol);
+          }
+        });
+    }
+  }, [
+    customIntervalRecords,
+    publishSubscriptionIntervalSignature,
+    publishSubscriptionTiers,
+    resolveNativeIntervals,
+    subscriptionIntervalSignatures,
+    subscriptionTiers,
+    watchlists,
+  ]);
 
   useEffect(() => {
     const url = getPriceStreamUrl();

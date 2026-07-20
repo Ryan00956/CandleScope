@@ -81,6 +81,26 @@ test("buildFullCachePreloadJobs prioritizes current symbol and caps work", () =>
   );
 });
 
+test("buildFullCachePreloadJobs excludes the active series before applying the cap", () => {
+  const activeSymbolKey = "binance:futures:BTCUSDT";
+  const targets: FullCacheTarget[] = [{
+    symbolKey: activeSymbolKey,
+    symbol: "BTCUSDT",
+    exchange: "binance",
+    marketType: "futures",
+    intervals: ["45m", "1m", "5m", "15m"],
+    preloadIntervals: ["45m", "1m", "5m", "15m"],
+  }];
+
+  const jobs = buildFullCachePreloadJobs(targets, {
+    currentSymbolKey: activeSymbolKey,
+    excludeSeries: { symbolKey: activeSymbolKey, interval: "45m" },
+    maxJobs: 3,
+  });
+
+  assert.deepEqual(jobs.map((job) => job.interval), ["1m", "5m", "15m"]);
+});
+
 test("buildWatchlistFullSocketTargets ignores current interval priority", () => {
   const base: Omit<FullCacheTargetOptions, "currentSession"> = {
     watchlists: [

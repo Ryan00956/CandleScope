@@ -308,6 +308,7 @@ export function useMarketDataRuntime({
     symbol,
     exchange,
     marketType,
+    activeInterval: interval,
     trackedIntervals: prefetchIntervals,
     hasCache,
     seriesDataFeed,

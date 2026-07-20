@@ -73,6 +73,11 @@ function sameIntervals(left: string[], right: string[]): boolean {
     && left.every((interval, index) => interval === right[index]);
 }
 
+function addedIntervals(previous: string[], next: string[]): string[] {
+  const previousSet = new Set(previous);
+  return next.filter((interval) => !previousSet.has(interval));
+}
+
 function markTargetStatus(target: FullCacheSocketTarget, status: FullCacheStatus): void {
   target.intervals.forEach((interval) => {
     setFullCacheEntryStatus(target.symbolKey, interval, status);
@@ -182,12 +187,13 @@ export function createWatchlistFullCacheSocketManager(
     connection: SocketConnection,
     socket: WatchlistFullCacheSocketLike,
     generation: number,
+    intervals: string[] = connection.target.intervals,
   ): void {
     if (!isCurrent(connection, socket, generation)) return;
     try {
       socket.send(JSON.stringify({
         action: "subscribe",
-        intervals: connection.target.intervals,
+        intervals,
       }));
       markTargetStatus(connection.target, "live");
     } catch (error) {
@@ -302,6 +308,7 @@ export function createWatchlistFullCacheSocketManager(
         if (existing) {
           const previousTarget = existing.target;
           const intervalsChanged = !sameIntervals(previousTarget.intervals, target.intervals);
+          const added = addedIntervals(previousTarget.intervals, target.intervals);
           const removedIntervals = markRemovedIntervalsUnsubscribed(previousTarget, target);
           const currentSocket = existing.socket;
           existing.target = target;
@@ -316,8 +323,8 @@ export function createWatchlistFullCacheSocketManager(
             }
           }
           markTargetSubscribed(target, true);
-          if (intervalsChanged && existing.socket?.readyState === SOCKET_OPEN) {
-            sendSubscription(existing, existing.socket, existing.generation);
+          if (intervalsChanged && added.length > 0 && existing.socket?.readyState === SOCKET_OPEN) {
+            sendSubscription(existing, existing.socket, existing.generation, added);
           } else if (!existing.socket && existing.reconnectTimer == null) {
             openSocket(existing);
           }

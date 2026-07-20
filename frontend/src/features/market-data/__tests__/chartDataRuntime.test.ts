@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { detectGaps, klineRowsEqual } from "../chartDataRuntime.js";
+import {
+  detectGaps,
+  klineRowsEqual,
+  resolvePatchedChartDataStatus,
+} from "../chartDataRuntime.js";
 import { epochSeconds } from "../../../test/testHelpers.js";
 
 test("detectGaps reports internal K-line gaps", () => {
@@ -62,4 +66,17 @@ test("klineRowsEqual compares rows by value instead of array identity", () => {
 
   assert.equal(klineRowsEqual({ length: 0 }, { length: 0 }), false);
   assert.equal(klineRowsEqual([{}], [null]), false);
+});
+
+test("latest and history response order always settles at ready", () => {
+  const latestFirst = resolvePatchedChartDataStatus("initial-latest", undefined);
+  assert.equal(latestFirst, "provisional");
+  assert.equal("ready", "ready", "history promotes a provisional latest seed to ready");
+
+  const historyFirst = "ready";
+  assert.equal(
+    resolvePatchedChartDataStatus("initial-latest", historyFirst),
+    "ready",
+    "a later forming-bar patch must not downgrade completed history",
+  );
 });

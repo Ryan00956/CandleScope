@@ -21,6 +21,7 @@ import type {
   IntervalNotice,
   NativeInterval,
 } from "../features/chart-session/chartSessionTypes.js";
+import { getEffectiveCustomIntervalRecords } from "../features/chart-session/intervalPolicy.js";
 
 type IntervalTab = "common" | "custom" | "all";
 type IntervalStatusKind = "invalid" | "native" | "exists" | "new";
@@ -170,21 +171,25 @@ function IntervalSelector({
     () => new Set(savedCustomIntervals),
     [savedCustomIntervals],
   );
+  const effectiveCustomRecords = useMemo(
+    () => getEffectiveCustomIntervalRecords(customIntervalRecords, nativeIntervals),
+    [customIntervalRecords, nativeIntervals],
+  );
   const nativeGroups = useMemo(
     () => groupIntervalsByDuration(nativeIntervals.map((item) => ({ ...item, isCustom: false }))),
     [nativeIntervals],
   );
   const toolbarCustomRecords = useMemo(
-    () => buildToolbarCustomRecords(customIntervalRecords, interval),
-    [customIntervalRecords, interval],
+    () => buildToolbarCustomRecords(effectiveCustomRecords, interval),
+    [effectiveCustomRecords, interval],
   );
   const toolbarCustomGroups = useMemo(
     () => groupIntervalsByDuration(toolbarCustomRecords.map(buildItemFromRecord)),
     [toolbarCustomRecords],
   );
   const sortedCustomRecords = useMemo(
-    () => sortCustomRecords(customIntervalRecords),
-    [customIntervalRecords],
+    () => sortCustomRecords(effectiveCustomRecords),
+    [effectiveCustomRecords],
   );
   const allItems = useMemo(
     () => intervalGroups.flatMap((group) => group.items),
@@ -462,7 +467,7 @@ function IntervalSelector({
                 onClick={() => { setActiveTab(tab.key); setHighlightIndex(0); }}
               >
                 {tab.label}
-                {tab.key === "custom" && <span>{customIntervalRecords.length}</span>}
+                {tab.key === "custom" && <span>{effectiveCustomRecords.length}</span>}
               </button>
             ))}
           </div>
@@ -549,7 +554,7 @@ function IntervalSelector({
                     {visibleItems.length} 个可用周期，Enter 选择，高亮行可用方向键移动。
                   </div>
                 </div>
-                {activeTab === "custom" && customIntervalRecords.length > 0 && (
+                {activeTab === "custom" && effectiveCustomRecords.length > 0 && (
                   <button type="button" className="interval-clear-all" onClick={handleClear}>清空</button>
                 )}
               </div>

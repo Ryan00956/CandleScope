@@ -16,6 +16,18 @@ export interface DetectedGap {
   isTailGap?: true;
 }
 
+/**
+ * Latest/realtime data may seed an empty series provisionally, but it must not
+ * downgrade history that already established the current epoch as ready.
+ */
+export function resolvePatchedChartDataStatus(
+  source: string,
+  currentStatus: string | undefined,
+): string | undefined {
+  if (!source.includes("latest")) return currentStatus;
+  return currentStatus === "ready" ? "ready" : "provisional";
+}
+
 export function klineRowsEqual(
   a: unknown,
   b: unknown,

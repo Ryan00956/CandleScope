@@ -24,6 +24,14 @@ export function getFallbackNativeInterval(
     || preferredInterval;
 }
 
+export function getEffectiveCustomIntervalRecords(
+  customIntervalRecords: readonly CustomIntervalRecord[],
+  nativeIntervals: readonly NativeInterval[],
+): CustomIntervalRecord[] {
+  const nativeValues = new Set(nativeIntervals.map((item) => item.value));
+  return customIntervalRecords.filter((record) => !nativeValues.has(record.value));
+}
+
 export interface ResolveSupportedIntervalOptions {
   exchange: ExchangeId;
   interval: IntervalString;
@@ -41,8 +49,8 @@ export function resolveSupportedInterval({
   nativeIntervals,
   isNativeIntervalSupported,
 }: ResolveSupportedIntervalOptions): IntervalString {
-  if (savedCustomIntervals.includes(interval)) return interval;
   if (isNativeIntervalSupported(exchange, interval, exchangeCatalog)) return interval;
+  if (savedCustomIntervals.includes(interval)) return interval;
   return getFallbackNativeInterval(nativeIntervals, "1h");
 }
 
@@ -61,6 +69,8 @@ export function getFallbackIntervalAfterCustomRemove({
   exchange,
   isNativeIntervalSupported,
 }: CustomIntervalRemoveFallbackOptions): IntervalString {
+  if (isNativeIntervalSupported(exchange, removedInterval)) return removedInterval;
+
   const recentCustom = customIntervalRecords
     .filter((record) => record.value !== removedInterval)
     .sort((left, right) => (right.lastUsedAt || 0) - (left.lastUsedAt || 0))[0];
@@ -86,6 +96,7 @@ export function getFallbackIntervalAfterCustomClear({
   interval,
   nativeIntervals,
 }: CustomIntervalClearFallbackOptions): IntervalString {
+  if (nativeIntervals.some((item) => item.value === interval)) return interval;
   const currentSeconds = parseIntervalSeconds(interval);
   if (!currentSeconds) return "1h";
   return [...nativeIntervals]

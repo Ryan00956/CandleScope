@@ -106,8 +106,13 @@ export function buildWatchlistFullSocketTargets(
 
 export function buildFullCachePreloadJobs(targets: FullCacheTarget[], {
   currentSymbolKey = null,
+  excludeSeries = null,
   maxJobs = DEFAULT_MAX_PRELOAD_JOBS,
-}: { currentSymbolKey?: string | null; maxJobs?: number } = {}): FullCachePreloadJob[] {
+}: {
+  currentSymbolKey?: string | null;
+  excludeSeries?: { symbolKey?: string | null; interval?: string | null } | null;
+  maxJobs?: number;
+} = {}): FullCachePreloadJob[] {
   const sortedTargets = [...targets].sort((left, right) => {
     if (left.symbolKey === currentSymbolKey) return -1;
     if (right.symbolKey === currentSymbolKey) return 1;
@@ -116,6 +121,10 @@ export function buildFullCachePreloadJobs(targets: FullCacheTarget[], {
   const jobs: FullCachePreloadJob[] = [];
   for (const target of sortedTargets) {
     for (const interval of target.preloadIntervals) {
+      if (
+        excludeSeries?.symbolKey === target.symbolKey
+        && excludeSeries.interval === interval
+      ) continue;
       jobs.push({ ...target, interval });
       if (jobs.length >= maxJobs) return jobs;
     }

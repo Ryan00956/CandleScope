@@ -103,6 +103,32 @@ test("fills and paused state flush immediately", () => {
   assert.equal(scheduler.tasks.size, 0);
 });
 
+test("an HTTP journal refresh merges without dropping newer WebSocket entries", () => {
+  const store = new ReplayStore();
+  store.beginGeneration(1, { resetAuthoritativeState: true, connectionState: "connecting" });
+  store.applyAtomicSnapshot(1, parseReplaySessionResponse(replaySessionResponse()).snapshot);
+  store.applyEvent(1, parseReplayEvent({
+    type: "replay.journal",
+    protocol: "replay.v1",
+    session_id: "session-0001",
+    sequence: 1,
+    revision: 1,
+    virtual_time_ms: BASE_TIME_MS,
+    state_hash: `sha256:${"5".repeat(64)}`,
+    data_epoch: `sha256:${"c".repeat(64)}`,
+    data: { entry_id: "ws-note", virtual_time_ms: BASE_TIME_MS, text: "stream truth" },
+  }));
+
+  assert.equal(store.replaceJournal(1, [
+    { entry_id: "http-note", virtual_time_ms: BASE_TIME_MS, text: "HTTP history" },
+    { entry_id: "ws-note", virtual_time_ms: BASE_TIME_MS, text: "stale copy" },
+  ]), true);
+  assert.deepEqual(store.getSnapshot().journal, [
+    { entry_id: "http-note", virtual_time_ms: BASE_TIME_MS, text: "HTTP history" },
+    { entry_id: "ws-note", virtual_time_ms: BASE_TIME_MS, text: "stream truth" },
+  ]);
+});
+
 test("ended event releases stale local controller ownership immediately", () => {
   const store = new ReplayStore();
   store.beginGeneration(1, { resetAuthoritativeState: true, connectionState: "connecting" });

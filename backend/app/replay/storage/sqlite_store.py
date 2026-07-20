@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import sqlite3
@@ -47,12 +49,14 @@ class StoredCommand:
 class StoredCheckpoint:
     checkpoint_id: int
     session_id: str
+    mutation_id: int | None
     source_sequence: int
     command_log_offset: int
     event_sequence: int
     state_hash: str
     payload: bytes
     is_initial: bool
+    is_latest: bool
 
 
 class ReplaySQLiteStore:
@@ -204,6 +208,7 @@ class ReplaySQLiteStore:
                 state=state,
                 payload=checkpoint_bytes,
                 initial=True,
+                mutation_id=0,
                 now_ms=now,
             )
             self._replace_component_rows(
@@ -211,6 +216,24 @@ class ReplaySQLiteStore:
             )
 
         await self._write_async(write)
+
+    async def delete_session(self, session_id: str) -> bool:
+        """Compensate a create that persisted but was never service-registered.
+
+        Foreign-key cascades remove the immutable dataset and every derived replay
+        row in the same transaction.  Compensation remains available in sticky
+        degraded mode because retaining a caller-invisible partial session is less
+        safe than attempting the bounded delete.
+        """
+
+        def write(connection: sqlite3.Connection) -> bool:
+            cursor = connection.execute(
+                "DELETE FROM replay_session WHERE session_id = ?",
+                (session_id,),
+            )
+            return cursor.rowcount == 1
+
+        return await self._write_async(write, allow_degraded=True)
 
     async def commit_command(
         self,
@@ -271,7 +294,7 @@ class ReplaySQLiteStore:
                     now,
                 ),
             )
-            connection.execute(
+            mutation_cursor = connection.execute(
                 """
                 INSERT INTO replay_mutation_log(
                     session_id, kind, command_id, payload_json, state_hash, created_at_ms
@@ -285,6 +308,7 @@ class ReplaySQLiteStore:
                     now,
                 ),
             )
+            mutation_id = int(mutation_cursor.lastrowid)
             first_source_sequence = (
                 int(state["source_sequence"]) - len(source_events) + 1
             )
@@ -305,6 +329,7 @@ class ReplaySQLiteStore:
                     state=state,
                     payload=bytes(checkpoint),
                     initial=False,
+                    mutation_id=mutation_id,
                     now_ms=now,
                 )
             self._update_session(connection, session_id, state, now_ms=now)
@@ -332,25 +357,74 @@ class ReplaySQLiteStore:
         def write(connection: sqlite3.Connection) -> None:
             state = self._normalize_session_state(session_state)
             source_sequence = int(state["source_sequence"])
+            event_json = canonical_json(event_payload)
+            durable = connection.execute(
+                """
+                SELECT
+                    state, status_reason, revision, event_sequence,
+                    source_sequence, command_log_offset, state_hash, data_epoch,
+                    revealed, accepting, degraded_reason
+                FROM replay_session
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            if durable is None:
+                raise ReplayDomainError(
+                    ReplayErrorCode.SESSION_NOT_FOUND,
+                    "replay session does not exist",
+                    details={"session_id": session_id},
+                )
+            durable_source_sequence = int(durable["source_sequence"])
+            if durable_source_sequence == source_sequence:
+                existing = connection.execute(
+                    """
+                    SELECT event_json, result_sequence, state_hash
+                    FROM replay_source_event
+                    WHERE session_id = ? AND source_sequence = ?
+                    """,
+                    (session_id, source_sequence),
+                ).fetchone()
+                if existing is not None and self._durable_state_matches(
+                    durable,
+                    state,
+                ) and (
+                    existing["event_json"] == event_json
+                    and int(existing["result_sequence"])
+                    == int(state["event_sequence"])
+                    and existing["state_hash"] == state["state_hash"]
+                ):
+                    # The previous transaction committed in full but its caller
+                    # did not observe the result.  A retry must be a true no-op:
+                    # a duplicate mutation would poison contiguous recovery.
+                    return
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source retry conflicts with durable session state",
+                    details={"source_sequence": source_sequence},
+                )
+            if source_sequence != durable_source_sequence + 1:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source sequence is not contiguous with durable state",
+                    details={
+                        "expected": durable_source_sequence + 1,
+                        "actual": source_sequence,
+                    },
+                )
             existing = connection.execute(
                 """
-                SELECT event_json, state_hash FROM replay_source_event
+                SELECT event_json FROM replay_source_event
                 WHERE session_id = ? AND source_sequence = ?
                 """,
                 (session_id, source_sequence),
             ).fetchone()
-            event_json = canonical_json(event_payload)
-            if existing is not None:
-                if (
-                    existing["event_json"] != event_json
-                    or existing["state_hash"] != state["state_hash"]
-                ):
-                    raise ReplayDomainError(
-                        ReplayErrorCode.DATASET_MISMATCH,
-                        "durable source event conflicts with an existing sequence",
-                        details={"source_sequence": source_sequence},
-                    )
-                return
+            if existing is not None and existing["event_json"] != event_json:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source event conflicts with the immutable dataset",
+                    details={"source_sequence": source_sequence},
+                )
             self._insert_source_event(
                 connection,
                 session_id=session_id,
@@ -360,7 +434,7 @@ class ReplaySQLiteStore:
                 state_hash=str(state["state_hash"]),
                 now_ms=now,
             )
-            connection.execute(
+            mutation_cursor = connection.execute(
                 """
                 INSERT INTO replay_mutation_log(
                     session_id, kind, source_sequence, payload_json, state_hash, created_at_ms
@@ -368,6 +442,7 @@ class ReplaySQLiteStore:
                 """,
                 (session_id, source_sequence, event_json, state["state_hash"], now),
             )
+            mutation_id = int(mutation_cursor.lastrowid)
             if checkpoint is not None:
                 self._insert_checkpoint(
                     connection,
@@ -375,6 +450,7 @@ class ReplaySQLiteStore:
                     state=state,
                     payload=bytes(checkpoint),
                     initial=False,
+                    mutation_id=mutation_id,
                     now_ms=now,
                 )
             self._update_session(connection, session_id, state, now_ms=now)
@@ -398,20 +474,34 @@ class ReplaySQLiteStore:
 
         def write(connection: sqlite3.Connection) -> None:
             state = self._normalize_session_state(session_state)
-            connection.execute(
+            encoded_checkpoint = base64.b64encode(bytes(checkpoint)).decode("ascii")
+            durable_payload = {
+                "mutation": dict(payload),
+                "checkpoint_b64": encoded_checkpoint,
+                "checkpoint_sha256": _blob_sha256(bytes(checkpoint)),
+            }
+            mutation_cursor = connection.execute(
                 """
                 INSERT INTO replay_mutation_log(
                     session_id, kind, payload_json, state_hash, created_at_ms
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (session_id, kind, canonical_json(payload), state["state_hash"], now),
+                (
+                    session_id,
+                    kind,
+                    canonical_json(durable_payload),
+                    state["state_hash"],
+                    now,
+                ),
             )
+            mutation_id = int(mutation_cursor.lastrowid)
             self._insert_checkpoint(
                 connection,
                 session_id=session_id,
                 state=state,
                 payload=bytes(checkpoint),
                 initial=False,
+                mutation_id=mutation_id,
                 now_ms=now,
             )
             self._update_session(connection, session_id, state, now_ms=now)
@@ -497,6 +587,19 @@ class ReplaySQLiteStore:
         self, session_id: str
     ) -> tuple[StoredCheckpoint, ...]:
         def read(connection: sqlite3.Connection) -> tuple[StoredCheckpoint, ...]:
+            latest_row = connection.execute(
+                """
+                SELECT MAX(checkpoint_id) AS checkpoint_id
+                FROM replay_checkpoint
+                WHERE session_id = ? AND active = 1
+                """,
+                (session_id,),
+            ).fetchone()
+            latest_checkpoint_id = (
+                None
+                if latest_row is None or latest_row["checkpoint_id"] is None
+                else int(latest_row["checkpoint_id"])
+            )
             rows = connection.execute(
                 """
                 SELECT * FROM replay_checkpoint
@@ -515,12 +618,18 @@ class ReplaySQLiteStore:
                     StoredCheckpoint(
                         checkpoint_id=int(row["checkpoint_id"]),
                         session_id=row["session_id"],
+                        mutation_id=(
+                            None
+                            if row["mutation_id"] is None
+                            else int(row["mutation_id"])
+                        ),
                         source_sequence=int(row["source_sequence"]),
                         command_log_offset=int(row["command_log_offset"]),
                         event_sequence=int(row["event_sequence"]),
                         state_hash=row["state_hash"],
                         payload=payload,
                         is_initial=bool(row["is_initial"]),
+                        is_latest=int(row["checkpoint_id"]) == latest_checkpoint_id,
                     )
                 )
             return tuple(valid)
@@ -556,8 +665,7 @@ class ReplaySQLiteStore:
         self,
         session_id: str,
         *,
-        command_log_offset: int,
-        source_sequence: int,
+        mutation_id: int,
     ) -> tuple[dict[str, object], ...]:
         """Load ordered domain mutations after a checkpoint position."""
 
@@ -565,30 +673,24 @@ class ReplaySQLiteStore:
             rows = connection.execute(
                 """
                 SELECT
+                    mutation.mutation_id,
                     mutation.kind,
                     mutation.source_sequence,
+                    mutation.payload_json AS mutation_payload_json,
+                    mutation.state_hash AS mutation_state_hash,
                     command.command_json,
                     command.accepted,
                     command.log_offset,
-                    command.result_state_hash AS command_state_hash,
-                    source.event_json,
-                    source.state_hash AS source_state_hash
+                    command.result_state_hash AS command_state_hash
                 FROM replay_mutation_log AS mutation
                 LEFT JOIN replay_command_log AS command
                   ON command.session_id = mutation.session_id
                  AND command.command_id = mutation.command_id
-                LEFT JOIN replay_source_event AS source
-                  ON source.session_id = mutation.session_id
-                 AND source.source_sequence = mutation.source_sequence
                 WHERE mutation.session_id = ?
-                  AND (
-                    (mutation.kind = 'command' AND command.log_offset > ?)
-                    OR
-                    (mutation.kind = 'source_event' AND mutation.source_sequence > ?)
-                  )
+                  AND mutation.mutation_id > ?
                 ORDER BY mutation.mutation_id
                 """,
-                (session_id, command_log_offset, source_sequence),
+                (session_id, mutation_id),
             ).fetchall()
             mutations: list[dict[str, object]] = []
             for row in rows:
@@ -609,18 +711,55 @@ class ReplaySQLiteStore:
                         }
                     )
                     continue
-                event = _decode_json(row["event_json"])
-                if not isinstance(event, Mapping):
+                mutation_payload = _decode_json(row["mutation_payload_json"])
+                if row["kind"] == "source_event":
+                    if not isinstance(mutation_payload, Mapping):
+                        raise ReplayDomainError(
+                            ReplayErrorCode.DATASET_MISMATCH,
+                            "persisted replay source tail is invalid",
+                        )
+                    mutations.append(
+                        {
+                            "kind": "source_event",
+                            "source_sequence": int(row["source_sequence"]),
+                            "event": mutation_payload,
+                            "state_hash": row["mutation_state_hash"],
+                        }
+                    )
+                    continue
+                if not isinstance(mutation_payload, Mapping) or set(
+                    mutation_payload
+                ) != {"mutation", "checkpoint_b64", "checkpoint_sha256"}:
                     raise ReplayDomainError(
                         ReplayErrorCode.DATASET_MISMATCH,
-                        "persisted replay source tail is invalid",
+                        "persisted replay internal mutation is invalid",
+                    )
+                encoded = mutation_payload["checkpoint_b64"]
+                if not isinstance(encoded, str) or not isinstance(
+                    mutation_payload["checkpoint_sha256"], str
+                ):
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "persisted replay internal checkpoint is invalid",
+                    )
+                try:
+                    checkpoint = base64.b64decode(encoded, validate=True)
+                except (ValueError, binascii.Error) as exc:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "persisted replay internal checkpoint encoding is invalid",
+                    ) from exc
+                if _blob_sha256(checkpoint) != mutation_payload["checkpoint_sha256"]:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "persisted replay internal checkpoint checksum does not match",
                     )
                 mutations.append(
                     {
-                        "kind": "source_event",
-                        "source_sequence": int(row["source_sequence"]),
-                        "event": event,
-                        "state_hash": row["source_state_hash"],
+                        "kind": "internal_state",
+                        "mutation_kind": str(row["kind"]),
+                        "checkpoint": checkpoint,
+                        "state_hash": row["mutation_state_hash"],
                     }
                 )
             return tuple(mutations)
@@ -733,17 +872,20 @@ class ReplaySQLiteStore:
         state: Mapping[str, object],
         payload: bytes,
         initial: bool,
+        mutation_id: int,
         now_ms: int,
     ) -> int:
         cursor = connection.execute(
             """
             INSERT INTO replay_checkpoint(
-                session_id, source_sequence, command_log_offset, event_sequence,
-                state_hash, payload, payload_sha256, is_initial, active, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                session_id, mutation_id, source_sequence, command_log_offset,
+                event_sequence, state_hash, payload, payload_sha256, is_initial,
+                active, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
             """,
             (
                 session_id,
+                mutation_id,
                 state["source_sequence"],
                 state["command_log_offset"],
                 state["event_sequence"],
@@ -790,7 +932,11 @@ class ReplaySQLiteStore:
                 session_id, source_sequence, event_json, result_sequence,
                 state_hash, created_at_ms
             ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, source_sequence) DO NOTHING
+            ON CONFLICT(session_id, source_sequence) DO UPDATE SET
+                event_json = excluded.event_json,
+                result_sequence = excluded.result_sequence,
+                state_hash = excluded.state_hash,
+                created_at_ms = excluded.created_at_ms
             """,
             (
                 session_id,
@@ -841,6 +987,26 @@ class ReplaySQLiteStore:
                 "replay session does not exist",
                 details={"session_id": session_id},
             )
+
+    @staticmethod
+    def _durable_state_matches(
+        durable: sqlite3.Row,
+        candidate: Mapping[str, object],
+    ) -> bool:
+        return (
+            durable["state"] == candidate["state"]
+            and durable["status_reason"] == candidate["status_reason"]
+            and int(durable["revision"]) == candidate["revision"]
+            and int(durable["event_sequence"]) == candidate["event_sequence"]
+            and int(durable["source_sequence"]) == candidate["source_sequence"]
+            and int(durable["command_log_offset"])
+            == candidate["command_log_offset"]
+            and durable["state_hash"] == candidate["state_hash"]
+            and durable["data_epoch"] == candidate["data_epoch"]
+            and bool(durable["revealed"]) is candidate["revealed"]
+            and bool(durable["accepting"]) is candidate["accepting"]
+            and durable["degraded_reason"] == candidate["degraded_reason"]
+        )
 
     @staticmethod
     def _replace_component_rows(

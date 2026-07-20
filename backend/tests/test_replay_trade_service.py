@@ -7,6 +7,7 @@ import pytest
 
 from app.data_engine.storage.raw_trade_archive import ParquetRawAggTradeArchive
 from app.replay.constants import REPLAY_PROTOCOL, CommandType, SessionState
+from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import ReplayCommand
 from app.replay.service import ReplayService, SYNTHETIC_TIME_ANCHOR_MS
 from app.replay.storage import ReplaySQLiteStore
@@ -136,6 +137,57 @@ async def test_blind_trade_service_never_exposes_archive_paths_or_actual_time(
     assert str(TRADE_REPLAY_START_MS) not in serialized_step
     assert "date=2026-06-01" not in serialized_step
     assert stepped["cursor"]["last_trade_time_ms"] == SYNTHETIC_TIME_ANCHOR_MS + 1_000
+    assert stepped["cursor"]["last_agg_trade_id"] == 1
+    expected_hash = stepped["state_hash"]
+    await service.shutdown(step_timeout=0.2)
+
+    recovered_service = await _service(
+        tmp_path / "replay.db",
+        archive,
+        prefix="blind-trade-recovered",
+    )
+    recovered = await recovered_service.get_session(session_id)
+    assert recovered["snapshot"]["state_hash"] == expected_hash
+    assert recovered["snapshot"]["cursor"]["last_agg_trade_id"] == 1
+    await recovered_service.shutdown(step_timeout=0.2)
+
+
+async def test_blind_trade_parity_failure_redacts_actual_kline_times(
+    tmp_path: Path,
+) -> None:
+    archive = verified_trade_archive(tmp_path / "private-archive")
+    repository = trade_replay_repository()
+    for rows in repository.rows.values():
+        for row in rows:
+            if row["open_time"] == TRADE_REPLAY_START_MS:
+                for field in ("open", "high", "low", "close"):
+                    row[field] = 999
+                break
+    service = ReplayService(
+        settings=replay_settings(tmp_path / "parity.db"),
+        store=ReplaySQLiteStore(tmp_path / "parity.db", now_ms=lambda: TRADE_NOW_MS),
+        repository=repository,
+        raw_trade_archive=archive,
+        now_ms=lambda: TRADE_NOW_MS,
+        session_id_factory=SessionIdFactory("blind-parity"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+
+    with pytest.raises(ReplayDomainError) as failure:
+        await service.create_session(trade_replay_config(blind_mode=True))
+    assert failure.value.code is ReplayErrorCode.DATASET_MISMATCH
+    assert failure.value.message == "blind replay dataset validation failed"
+    assert failure.value.details == {"blind_redacted": True}
+    serialized_error = json.dumps(
+        {
+            "message": failure.value.message,
+            "details": dict(failure.value.details),
+        },
+        sort_keys=True,
+    )
+    assert str(TRADE_REPLAY_START_MS) not in serialized_error
+    assert "1000" not in serialized_error
     await service.shutdown(step_timeout=0.2)
 
 

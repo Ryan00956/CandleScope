@@ -68,21 +68,29 @@ export default function ReplayPageShell({ runtime, indicators, chartSurfaceRef }
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       handleReplayShortcut(event, (action) => {
-        if (!ownsController || runtime.store.connectionState !== "connected" || runtime.pendingCommand !== null) return;
+        if (!ownsController
+          || runtime.store.connectionState !== "connected"
+          || runtime.pendingCommand !== null
+          || runtime.forkPending) return false;
         if (action === "toggle-play" && runtime.store.state === "PLAYING") {
           void runtime.actions.submitCommand("pause", {}).catch(() => undefined);
+          return true;
         } else if (action === "toggle-play" && runtime.store.state === "PAUSED") {
           void runtime.actions.submitCommand("play", {}).catch(() => undefined);
+          return true;
         } else if (action === "step" && runtime.store.state === "PAUSED") {
           void runtime.actions.submitCommand("step", { count: 1 }).catch(() => undefined);
+          return true;
         } else if (action === "advance-window" && runtime.store.state === "PAUSED") {
           void runtime.actions.submitCommand("advance_by", { ms: 300_000 }).catch(() => undefined);
+          return true;
         }
+        return false;
       });
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [ownsController, runtime.actions, runtime.pendingCommand, runtime.store.connectionState, runtime.store.state]);
+  }, [ownsController, runtime.actions, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, runtime.store.state]);
 
   const chart = active && marketData.status.barCount > 0 ? (
     <SingleChartPanes

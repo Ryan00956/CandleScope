@@ -13,8 +13,12 @@ export interface ReplayShortcutEventLike {
 
 export function isReplayShortcutFocusTarget(target: EventTarget | null): boolean {
   if (typeof Element === "undefined" || !(target instanceof Element)) return false;
-  return target.matches("input, textarea, select, [contenteditable='true'], [role='textbox']")
-    || target.closest("input, textarea, select, [contenteditable='true'], [role='textbox'], .monaco-editor, [data-drawing-text-edit='true']") !== null;
+  const interactive = [
+    "button", "a", "input", "textarea", "select", "option", "summary",
+    "[contenteditable='true']", "[role='button']", "[role='link']", "[role='textbox']",
+    ".monaco-editor", "[data-drawing-text-edit='true']",
+  ].join(", ");
+  return target.matches(interactive) || target.closest(interactive) !== null;
 }
 
 export function replayShortcutAction(event: ReplayShortcutEventLike): ReplayShortcutAction | null {
@@ -27,11 +31,11 @@ export function replayShortcutAction(event: ReplayShortcutEventLike): ReplayShor
 
 export function handleReplayShortcut(
   event: ReplayShortcutEventLike,
-  onAction: (action: ReplayShortcutAction) => void,
+  onAction: (action: ReplayShortcutAction) => boolean,
 ): boolean {
   const action = replayShortcutAction(event);
   if (action === null) return false;
+  if (!onAction(action)) return false;
   event.preventDefault();
-  onAction(action);
   return true;
 }

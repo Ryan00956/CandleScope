@@ -10,7 +10,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, fields, is_dataclass
 from types import MappingProxyType
-from typing import Awaitable, Callable, Mapping, Protocol
+from typing import Awaitable, Callable, Mapping, Protocol, Sequence
 
 from .canonical import canonical_sha256
 from .checkpoints import CheckpointCodec, CheckpointError, CheckpointRing
@@ -44,6 +44,7 @@ ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION = "replay-actor-checkpoint-state.v2"
 SOURCE_CHAIN_SCHEMA_VERSION = "replay-source-chain.v1"
 MIN_TASK_EXIT_GRACE_SECONDS = 0.05
 MAX_JOURNAL_ENTRIES = 4_096
+COMMAND_EVENT_LOOP_YIELD_INTERVAL = 64
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -152,10 +153,19 @@ class ActorMutation:
 @dataclass(frozen=True, slots=True)
 class _ActorRollback:
     payload: Mapping[str, object]
+    source: ReplayMarketSource
     state: SessionState
     status_reason: str
     controller_client_id: str | None
     controller_deadline_wall: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SeekPlan:
+    target_time_ms: int
+    checkpoint_payload: Mapping[str, object]
+    checkpoint_source: ReplayMarketSource
+    replay_event_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,10 +195,10 @@ class ActorStreamSubscription:
     token: int
     initial_events: tuple[ReplayEvent, ...]
     reset: bool
-    queue: asyncio.Queue[ReplayEvent]
+    queue: asyncio.Queue[ProjectionBatch]
     overflow: asyncio.Event
 
-    async def next_event(self) -> ReplayEvent:
+    async def next_event(self) -> ProjectionBatch:
         if self.overflow.is_set():
             raise ReplayDomainError(
                 ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
@@ -219,6 +229,13 @@ class ActorStreamSubscription:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(event_task, overflow_task, return_exceptions=True)
+
+
+@dataclass(slots=True)
+class _SubscriberState:
+    queue: asyncio.Queue[ProjectionBatch]
+    overflow: asyncio.Event
+    next_sequence: int
 
 
 @dataclass(slots=True)
@@ -337,6 +354,7 @@ class ReplaySessionActor:
         max_command_records: int = 4_096,
         max_recent_checkpoints: int = 32,
         restore_checkpoint: bytes | None = None,
+        retained_checkpoints: Sequence[tuple[bytes, bool]] = (),
         monotonic: Callable[[], float] = time.monotonic,
         flush_hook: Callable[[], Awaitable[None]] | None = None,
         checkpoint_hook: Callable[[bytes], Awaitable[None]] | None = None,
@@ -359,6 +377,10 @@ class ReplaySessionActor:
             event_buffer_size,
             "event_buffer_size",
         )
+        # A command can never stage more source events than the already
+        # configured resumable-event budget.  This keeps reducer work,
+        # candidate projections, and rollback memory deterministically bounded.
+        self._max_atomic_command_source_events = self._event_buffer_size
         self._max_emit_fps = self._positive_int(max_emit_fps, "max_emit_fps")
         if (
             isinstance(controller_ttl_seconds, bool)
@@ -387,6 +409,10 @@ class ReplaySessionActor:
         self._restore_checkpoint = (
             bytes(restore_checkpoint) if restore_checkpoint else None
         )
+        self._retained_checkpoints = tuple(
+            (bytes(encoded), bool(is_initial))
+            for encoded, is_initial in retained_checkpoints
+        )
         self._reducer: ReplayReducer = reducer or NullReplayReducer()
         # Reducer snapshots are detached, immutable-by-contract component
         # states.  The actor is the sole reducer writer, so repeated state
@@ -404,7 +430,11 @@ class ReplaySessionActor:
         )
         self._command_history = CommandHistory(max_records=max_command_records)
         self._checkpoint_codec = CheckpointCodec()
-        self._checkpoints = CheckpointRing(max_recent=max_recent_checkpoints)
+        self._max_recent_checkpoints = self._positive_int(
+            max_recent_checkpoints,
+            "max_recent_checkpoints",
+        )
+        self._checkpoints = CheckpointRing(max_recent=self._max_recent_checkpoints)
 
         self._source = self._new_source()
         self._snapshot_ref = self._source.snapshot_ref()
@@ -441,10 +471,14 @@ class ReplaySessionActor:
         self._degraded_reason: str | None = None
         self._pending_events: list[tuple[ReplayEvent, bool]] | None = None
         self._pending_source_events: list[Mapping[str, object]] | None = None
-        self._subscribers: dict[
-            int, tuple[asyncio.Queue[ReplayEvent], asyncio.Event]
-        ] = {}
+        self._subscribers: dict[int, _SubscriberState] = {}
         self._next_subscriber_token = 1
+        # Transport cleanup has to remain actor-owned even when the bounded
+        # business mailbox is saturated.  These structures form a coalescing
+        # control inbox: at most one cleanup is retained per active subscriber,
+        # and only the actor task removes entries from ``_subscribers``.
+        self._unsubscribe_completions: dict[int, asyncio.Future[None]] = {}
+        self._deferred_unsubscribes: set[int] = set()
 
         self._command_ack_latency = _LatencyWindow()
         self._pause_latency = _LatencyWindow()
@@ -471,7 +505,11 @@ class ReplaySessionActor:
             "subscriber_overflows": 0,
             "subscriber_opens": 0,
             "subscriber_closes": 0,
+            "subscriber_cleanup_deferrals": 0,
             "component_snapshot_materializations": 0,
+            "command_source_event_limit": self._max_atomic_command_source_events,
+            "command_preflight_events": 0,
+            "command_resource_rejections": 0,
         }
 
     @property
@@ -598,18 +636,41 @@ class ReplaySessionActor:
             future=loop.create_future(),
         )
         self._offer_request(request)
-        return await request.future
+        try:
+            # Keep caller cancellation from cancelling the ownership future.
+            # If the actor already published a token, cancellation must enqueue
+            # its cleanup before it can escape this method.
+            return await asyncio.shield(request.future)
+        except asyncio.CancelledError:
+            if request.future.done():
+                if not request.future.cancelled():
+                    try:
+                        subscription = request.future.result()
+                    except BaseException:
+                        pass
+                    else:
+                        self._request_unsubscribe(subscription.token)
+            else:
+                # The synchronous mailbox handler observes this tombstone before
+                # allocating a subscriber token.
+                request.future.cancel()
+            raise
 
     async def unsubscribe(self, token: int) -> None:
+        completion = self.request_unsubscribe(token)
+        if completion is not None:
+            # The cleanup remains owned by the actor if this waiter is cancelled.
+            await asyncio.shield(completion)
+
+    def request_unsubscribe(self, token: int) -> asyncio.Future[None] | None:
+        """Synchronously transfer cleanup ownership to the actor control inbox."""
+
         if self._closed:
-            return
+            return None
         if self._task is None:
             raise RuntimeError("replay actor has not started")
         normalized = validate_counter(token, field_name="subscriber token")
-        loop = asyncio.get_running_loop()
-        request = _UnsubscribeRequest(normalized, loop.create_future())
-        self._offer_request(request)
-        await request.future
+        return self._request_unsubscribe(normalized)
 
     def current_snapshot(self) -> ActorSnapshot:
         if self._last_snapshot is not None:
@@ -732,6 +793,7 @@ class ReplaySessionActor:
             "status_reason": self._status_reason,
             "degraded_reason": self._degraded_reason,
             "subscribers": len(self._subscribers),
+            "pending_unsubscribes": len(self._unsubscribe_completions),
         }
 
     async def _run(self) -> None:
@@ -740,7 +802,9 @@ class ReplaySessionActor:
             self._accepting = True
             self._ready.set()
             while not self._exit_requested:
+                self._drain_deferred_unsubscribes()
                 await self._expire_controller_if_needed()
+                self._flush_due_projections()
                 request = self._take_ready_request()
                 if request is not None:
                     await self._handle_request(request)
@@ -763,12 +827,21 @@ class ReplaySessionActor:
                         await self._process_source_event(publish=True)
                         await asyncio.sleep(0)
                         continue
-                    timeout = delay if lease_delay is None else min(delay, lease_delay)
+                    timeout = self._minimum_timeout(
+                        delay,
+                        lease_delay,
+                        self._projection_flush_delay(),
+                    )
                     request = await self._wait_for_request(timeout)
                     if request is not None:
                         await self._handle_request(request)
                     continue
-                request = await self._wait_for_request(self._lease_delay())
+                request = await self._wait_for_request(
+                    self._minimum_timeout(
+                        self._lease_delay(),
+                        self._projection_flush_delay(),
+                    )
+                )
                 if request is not None:
                     await self._handle_request(request)
         except asyncio.CancelledError:
@@ -789,9 +862,22 @@ class ReplaySessionActor:
             self._accepting = False
             self._closing = False
             self._closed = True
-            for _queue, overflow in self._subscribers.values():
-                overflow.set()
+            self._drain_deferred_unsubscribes()
+            # Read-only requests do not require ``accepting`` and can therefore
+            # enter behind the shutdown barrier.  Once that barrier requests
+            # loop exit, no later mailbox item will be handled; fail the tail
+            # synchronously so callers cannot wait forever after a clean stop.
+            self._fail_pending(
+                RuntimeError("replay actor closed before queued request completed")
+            )
+            for subscriber in self._subscribers.values():
+                subscriber.overflow.set()
             self._subscribers.clear()
+            for completion in self._unsubscribe_completions.values():
+                if not completion.done():
+                    completion.set_result(None)
+            self._unsubscribe_completions.clear()
+            self._deferred_unsubscribes.clear()
             self._ready.set()
             self._last_snapshot = self._snapshot_value(materialize=False)
 
@@ -829,13 +915,7 @@ class ReplaySessionActor:
                     "replay checkpoint restore failed",
                     details={"reason": str(exc)},
                 ) from exc
-            self._checkpoints.add(
-                self._restore_checkpoint,
-                virtual_time_ms=self._clock.virtual_time_ms,
-                source_sequence=self._source.cursor().source_sequence,
-                state_hash=self._compute_state_hash(),
-                initial=True,
-            )
+            self._restore_checkpoint_ring()
             self._last_checkpoint_source_sequence = (
                 self._source.cursor().source_sequence
             )
@@ -856,7 +936,7 @@ class ReplaySessionActor:
                 )
             self._state = SessionState.PAUSED
             self._create_checkpoint(initial=True)
-        if self._source.exhausted():
+        if self._state is SessionState.ENDED or self._source.exhausted():
             self._state = SessionState.ENDED
         else:
             self._state = SessionState.PAUSED
@@ -880,6 +960,11 @@ class ReplaySessionActor:
                     )
                     expected_source = self._source.cursor().source_sequence + 1
                     continue
+                if kind == "internal_state":
+                    expected_command, expected_source = (
+                        self._recover_internal_state_mutation(record)
+                    )
+                    continue
                 expected_source = await self._recover_source_mutation(
                     record,
                     expected_source=expected_source,
@@ -896,9 +981,12 @@ class ReplaySessionActor:
         self._controller_client_id = None
         self._controller_deadline_wall = None
         self._clock.pause()
-        self._state = (
-            SessionState.ENDED if self._source.exhausted() else SessionState.PAUSED
-        )
+        if self._state is not SessionState.ENDED:
+            self._state = (
+                SessionState.ENDED
+                if self._source.exhausted()
+                else SessionState.PAUSED
+            )
         if self._compute_state_hash() != target.state_hash:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -909,6 +997,58 @@ class ReplaySessionActor:
                 },
             )
         self._status_reason = "recovered_after_restart"
+
+    def _recover_internal_state_mutation(
+        self,
+        record: Mapping[str, object],
+    ) -> tuple[int, int]:
+        if set(record) != {
+            "kind",
+            "mutation_kind",
+            "checkpoint",
+            "state_hash",
+        }:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted replay internal mutation fields are incompatible",
+            )
+        mutation_kind = record["mutation_kind"]
+        checkpoint = record["checkpoint"]
+        if not isinstance(mutation_kind, str) or not mutation_kind:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted replay internal mutation kind is invalid",
+            )
+        if not isinstance(checkpoint, bytes):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted replay internal checkpoint is invalid",
+            )
+        try:
+            payload = self._checkpoint_codec.decode(checkpoint)
+            if not self._checkpoint_matches_actor(payload):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "persisted replay internal checkpoint identity changed",
+                )
+            self._restore_payload(payload, restore_public_position=True)
+        except (CheckpointError, TypeError, ValueError, KeyError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted replay internal checkpoint restore failed",
+            ) from exc
+        expected_state_hash = self._require_digest(
+            record["state_hash"], "internal mutation state_hash"
+        )
+        if self._compute_state_hash() != expected_state_hash:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted replay internal mutation state hash does not match",
+            )
+        return (
+            self._command_log_offset + 1,
+            self._source.cursor().source_sequence + 1,
+        )
 
     async def _recover_command_mutation(
         self,
@@ -951,7 +1091,7 @@ class ReplaySessionActor:
                     ReplayErrorCode.DATASET_MISMATCH,
                     "recovered replay command revision does not match",
                 )
-            self._begin_candidate()
+            self._begin_candidate(capture_source_events=False)
             try:
                 await self._execute_command(command, parse_command(command))
             finally:
@@ -1077,7 +1217,7 @@ class ReplaySessionActor:
                 self._command_history.ensure_capacity()
                 capacity_reserved = True
                 rollback = self._capture_rollback()
-                self._begin_candidate()
+                self._begin_candidate(capture_source_events=False)
                 parsed = parse_command(command)
                 if command.expected_revision != self._revision:
                     raise ReplayDomainError(
@@ -1107,7 +1247,11 @@ class ReplaySessionActor:
                             error=exc,
                             checkpoint=None,
                         )
-                    except BaseException as persistence_exc:
+                    except asyncio.CancelledError:
+                        if rollback is not None:
+                            self._restore_rollback(rollback, force_paused=True)
+                        raise
+                    except Exception as persistence_exc:
                         if rollback is not None:
                             self._restore_rollback(rollback, force_paused=True)
                         degraded = self._enter_persistence_degraded(persistence_exc)
@@ -1135,7 +1279,11 @@ class ReplaySessionActor:
                     checkpoint=checkpoint,
                     component_state=component_state,
                 )
-            except BaseException as exc:
+            except asyncio.CancelledError:
+                assert rollback is not None
+                self._restore_rollback(rollback, force_paused=True)
+                raise
+            except Exception as exc:
                 assert rollback is not None
                 self._restore_rollback(rollback, force_paused=True)
                 degraded = self._enter_persistence_degraded(exc)
@@ -1146,10 +1294,17 @@ class ReplaySessionActor:
             self._metrics["commands_accepted"] = (
                 int(self._metrics["commands_accepted"] or 0) + 1
             )
-            if self._checkpoint_due():
+            # A successful SEEK establishes a new checkpoint cadence origin.
+            # Its persisted checkpoint must enter the in-memory ring even when
+            # the rewound cursor is below the previous high-water marks.
+            if command.type is CommandType.SEEK_TO or self._checkpoint_due():
                 self._record_checkpoint(checkpoint, initial=False)
             if not request.future.done():
                 request.future.set_result(result)
+        except asyncio.CancelledError:
+            if not request.future.done():
+                request.future.cancel()
+            raise
         except BaseException as exc:
             if not request.future.done():
                 request.future.set_exception(exc)
@@ -1237,12 +1392,14 @@ class ReplaySessionActor:
         if command_type is CommandType.STEP:
             self._require_state(SessionState.PAUSED, command_type)
             count = int(parsed.values["count"])
-            self._preflight_event_count(count)
+            await self._preflight_event_count(count)
             self._revision += 1
             consumed = 0
             for _ in range(count):
                 await self._process_source_event(publish=True, checkpoint=False)
                 consumed += 1
+                if consumed % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                    await asyncio.sleep(0)
             if self._state is not SessionState.ENDED:
                 self._emit_status("step_complete", mandatory=True)
             return self._command_result(command.command_id, {"consumed": consumed})
@@ -1255,12 +1412,20 @@ class ReplaySessionActor:
                     ReplayErrorCode.INVALID_STATE_TRANSITION,
                     "advance target exceeds timestamp range",
                 )
+            expected_count = await self._preflight_advance_target(target)
             self._revision += 1
             consumed = await self._advance_to(
                 target,
                 publish=True,
                 checkpoint=False,
+                max_events=expected_count,
             )
+            if consumed != expected_count:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source changed after advance preflight",
+                    details={"expected": expected_count, "actual": consumed},
+                )
             if self._state is not SessionState.ENDED:
                 self._emit_status("advance_complete", mandatory=True)
             return self._command_result(
@@ -1275,9 +1440,10 @@ class ReplaySessionActor:
                     "seek requires fork or reset after trading state changes",
                 )
             target = int(parsed.values["virtual_time_ms"])
-            await self._seek_to(target)
+            plan = await self._preflight_seek_target(target)
+            await self._seek_to(plan)
             self._revision += 1
-            self._emit_status("seek_complete", mandatory=True)
+            self._emit_reset_snapshot("seek_complete", mandatory=True)
             return self._command_result(
                 command.command_id,
                 {"target_virtual_time_ms": target},
@@ -1378,7 +1544,18 @@ class ReplaySessionActor:
                 request.future.set_exception(exc)
 
     def _handle_subscribe_request(self, request: _SubscribeRequest) -> None:
+        # A caller can disconnect while this request waits behind one atomic
+        # domain event.  Never allocate an actor-owned token that no caller can
+        # receive and later release.
+        if request.future.cancelled():
+            return
         try:
+            # Close any pre-handoff projection range before capturing the
+            # subscriber's snapshot/catch-up floor.  Reusing a range that
+            # started before the snapshot would replay old bar appends/ticks.
+            self._publish_projection_batches(
+                self._coalescer.flush(wall_time=self._read_wall())
+            )
             replay = (
                 None
                 if request.after_sequence is None
@@ -1409,11 +1586,15 @@ class ReplaySessionActor:
                 initial_events = replay
             token = self._next_subscriber_token
             self._next_subscriber_token += 1
-            queue: asyncio.Queue[ReplayEvent] = asyncio.Queue(
+            queue: asyncio.Queue[ProjectionBatch] = asyncio.Queue(
                 maxsize=request.max_pending
             )
             overflow = asyncio.Event()
-            self._subscribers[token] = (queue, overflow)
+            self._subscribers[token] = _SubscriberState(
+                queue=queue,
+                overflow=overflow,
+                next_sequence=self._sequence + 1,
+            )
             self._metrics["subscriber_opens"] = (
                 int(self._metrics["subscriber_opens"] or 0) + 1
             )
@@ -1431,16 +1612,65 @@ class ReplaySessionActor:
                 request.future.set_exception(exc)
 
     def _handle_unsubscribe_request(self, request: _UnsubscribeRequest) -> None:
-        if self._subscribers.pop(request.token, None) is not None:
+        self._complete_unsubscribe(request.token)
+
+    def _request_unsubscribe(self, token: int) -> asyncio.Future[None] | None:
+        """Transfer subscriber cleanup ownership to the actor without overflow.
+
+        The regular mailbox remains strictly bounded.  If it is full, one
+        coalesced control record is retained for the active token; a full
+        business queue guarantees the actor will wake and drain this record.
+        """
+
+        existing = self._unsubscribe_completions.get(token)
+        if existing is not None:
+            return existing
+        if self._closed or token not in self._subscribers:
+            return None
+        loop = asyncio.get_running_loop()
+        completion: asyncio.Future[None] = loop.create_future()
+        self._unsubscribe_completions[token] = completion
+        request = _UnsubscribeRequest(token, completion)
+        try:
+            self._queue.put_nowait(request)
+        except asyncio.QueueFull:
+            self._deferred_unsubscribes.add(token)
+            self._metrics["subscriber_cleanup_deferrals"] = (
+                int(self._metrics["subscriber_cleanup_deferrals"] or 0) + 1
+            )
+        else:
+            self._record_queue_high_water()
+        return completion
+
+    def _drain_deferred_unsubscribes(self) -> None:
+        for token in tuple(self._deferred_unsubscribes):
+            self._complete_unsubscribe(token)
+
+    def _complete_unsubscribe(self, token: int) -> None:
+        self._deferred_unsubscribes.discard(token)
+        if self._subscribers.pop(token, None) is not None:
             self._metrics["subscriber_closes"] = (
                 int(self._metrics["subscriber_closes"] or 0) + 1
             )
-        if not request.future.done():
-            request.future.set_result(None)
+        completion = self._unsubscribe_completions.pop(token, None)
+        if completion is not None and not completion.done():
+            completion.set_result(None)
 
     async def _handle_shutdown_request(self, request: _ShutdownRequest) -> None:
         errors: list[str] = []
-        rollback = self._capture_rollback()
+        try:
+            rollback = self._capture_rollback()
+        except BaseException as exc:
+            self._state = SessionState.ERROR
+            self._metrics["shutdown_failures"] = (
+                int(self._metrics["shutdown_failures"] or 0) + 1
+            )
+            self._metrics["last_shutdown_error"] = str(exc)[:500]
+            self._last_snapshot = self._snapshot_value(materialize=False)
+            self._exit_requested = True
+            if not request.future.done():
+                request.future.set_exception(exc)
+            return
         self._begin_candidate()
         if self._state is SessionState.PLAYING:
             self._pause_clock()
@@ -1519,7 +1749,9 @@ class ReplaySessionActor:
                 request.future.set_exception(error)
         elif not request.future.done():
             request.future.set_result(None)
-        self._store_projection_batches(self._coalescer.flush())
+        self._publish_projection_batches(
+            self._coalescer.flush(wall_time=self._read_wall())
+        )
         self._last_snapshot = self._snapshot_value(materialize=False)
         self._exit_requested = True
 
@@ -1563,7 +1795,11 @@ class ReplaySessionActor:
                 component_state=component_state,
                 state_hash=state_hash,
             )
-        except BaseException as exc:
+        except asyncio.CancelledError:
+            assert rollback is not None
+            self._restore_rollback(rollback, force_paused=True)
+            raise
+        except Exception as exc:
             assert rollback is not None
             self._restore_rollback(rollback, force_paused=True)
             self._enter_persistence_degraded(exc)
@@ -1652,7 +1888,7 @@ class ReplaySessionActor:
                     "source_event": self._event_payload(event),
                     "projection": dict(projection),
                 },
-                mandatory=False,
+                mandatory=self._projection_requires_immediate_delivery(projection),
                 state_hash=state_hash,
             )
             if self._state is SessionState.ENDED:
@@ -1667,12 +1903,25 @@ class ReplaySessionActor:
                 )
         return component_state, state_hash
 
+    @staticmethod
+    def _projection_requires_immediate_delivery(
+        projection: Mapping[str, object],
+    ) -> bool:
+        """Never coalesce trade/account mutations that users must observe."""
+
+        for field_name in ("orders", "fills", "warnings"):
+            value = projection.get(field_name)
+            if isinstance(value, (list, tuple)) and value:
+                return True
+        return False
+
     async def _advance_to(
         self,
         target_time_ms: int,
         *,
         publish: bool,
         checkpoint: bool = True,
+        max_events: int | None = None,
     ) -> int:
         target = validate_timestamp_ms(target_time_ms, field_name="target_time_ms")
         if target < self._clock.virtual_time_ms:
@@ -1685,74 +1934,76 @@ class ReplaySessionActor:
             event_time = self._event_time_ms(event)
             if event_time > target:
                 break
+            if max_events is not None and consumed >= max_events:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "advance exceeded its preflight source-event boundary",
+                    details={"limit": max_events},
+                )
             await self._process_source_event(
                 publish=publish,
                 checkpoint=checkpoint,
             )
             consumed += 1
+            if consumed % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                await asyncio.sleep(0)
         if self._state is not SessionState.ENDED:
             self._clock.advance_to(target)
         return consumed
 
-    async def _seek_to(self, target_time_ms: int) -> None:
-        target = validate_timestamp_ms(target_time_ms, field_name="target_time_ms")
-        if target < self._initial_virtual_time_ms:
-            raise ReplayDomainError(
-                ReplayErrorCode.INVALID_STATE_TRANSITION,
-                "seek target precedes replay start",
-            )
-        self._validate_seek_target(target)
-        selected = self._checkpoints.select_valid(
-            self._checkpoint_codec,
-            target_virtual_time_ms=target,
-            validator=self._checkpoint_matches_actor,
-        )
-        rollback_payload = self._checkpoint_payload()
-        public_revision = self._revision
-        public_sequence = self._sequence
+    async def _seek_to(self, plan: _SeekPlan) -> None:
+        target = plan.target_time_ms
+        # SEEK rewinds only market-derived state. Journal/reveal effects are
+        # accepted session commands, so their ordered domain-command position
+        # must remain monotonic across a view rebuild. The checkpoint hash is
+        # first validated in its original historical state, then these durable
+        # session-level effects are overlaid before replaying market events.
+        session_domain_command_position = self._domain_command_position
+        session_journal_entries = [dict(entry) for entry in self._journal_entries]
+        session_revealed = self._revealed
+        session_speed = self._clock.speed
         public_command_log_offset = self._command_log_offset
-        try:
-            self._restore_payload(selected.payload, restore_public_position=False)
-            self._revision = public_revision
-            self._sequence = public_sequence
-            self._command_log_offset = public_command_log_offset
-            while (event := self._source.peek()) is not None:
-                if self._event_time_ms(event) > target:
-                    break
-                await self._process_source_event(publish=False, checkpoint=False)
-                self._metrics["events_replayed_for_seek"] = (
-                    int(self._metrics["events_replayed_for_seek"] or 0) + 1
-                )
-            if self._source.exhausted():
-                self._state = SessionState.ENDED
-            else:
-                self._state = SessionState.PAUSED
-                self._clock.advance_to(target)
-        except BaseException:
-            self._restore_payload(rollback_payload, restore_public_position=False)
-            self._revision = public_revision
-            self._sequence = public_sequence
-            self._command_log_offset = public_command_log_offset
-            raise
-
-    def _validate_seek_target(self, target: int) -> None:
-        source = self._new_source()
-        previous_time = self._initial_virtual_time_ms
-        last_time: int | None = None
-        while (event := source.next()) is not None:
-            event_time = self._event_time_ms(event)
-            if event_time < previous_time:
+        self._restore_payload(
+            plan.checkpoint_payload,
+            restore_public_position=False,
+            source_override=plan.checkpoint_source,
+        )
+        self._domain_command_position = session_domain_command_position
+        self._journal_entries = session_journal_entries
+        self._revealed = session_revealed
+        self._clock.set_speed(session_speed)
+        self._command_log_offset = public_command_log_offset
+        consumed = 0
+        while consumed < plan.replay_event_count:
+            event = self._source.peek()
+            if event is None or self._event_time_ms(event) > target:
                 raise ReplayDomainError(
                     ReplayErrorCode.DATASET_MISMATCH,
-                    "source order changed during seek validation",
+                    "seek source changed after preflight",
+                    details={
+                        "expected": plan.replay_event_count,
+                        "actual": consumed,
+                    },
                 )
-            previous_time = event_time
-            last_time = event_time
-        if last_time is None or target > last_time:
-            raise ReplayDomainError(
-                ReplayErrorCode.INVALID_STATE_TRANSITION,
-                "seek target exceeds replay horizon",
+            await self._process_source_event(publish=False, checkpoint=False)
+            consumed += 1
+            self._metrics["events_replayed_for_seek"] = (
+                int(self._metrics["events_replayed_for_seek"] or 0) + 1
             )
+            if consumed % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                await asyncio.sleep(0)
+        next_event = self._source.peek()
+        if next_event is not None and self._event_time_ms(next_event) <= target:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "seek exceeded its preflight source-event boundary",
+                details={"limit": plan.replay_event_count},
+            )
+        if self._source.exhausted():
+            self._state = SessionState.ENDED
+        else:
+            self._state = SessionState.PAUSED
+            self._clock.advance_to(target)
 
     async def _mark_ended(
         self,
@@ -1833,7 +2084,10 @@ class ReplaySessionActor:
                 checkpoint=checkpoint,
                 component_state=component_state,
             )
-        except BaseException as exc:
+        except asyncio.CancelledError:
+            self._restore_rollback(rollback, force_paused=True)
+            raise
+        except Exception as exc:
             self._restore_rollback(rollback, force_paused=True)
             self._enter_persistence_degraded(exc)
 
@@ -1873,33 +2127,352 @@ class ReplaySessionActor:
             details={"state": self._state.value, "command": command_type.value},
         )
 
-    def _preflight_event_count(self, count: int) -> None:
-        source, _ = self._source_at_sequence(
-            self._source.cursor().source_sequence,
-            expected_chain=self._event_chain_hash,
-        )
-        for _ in range(count):
+    async def _preflight_event_count(self, count: int) -> None:
+        self._enforce_command_source_event_limit(count)
+        source = self._fork_current_source()
+        for index in range(count):
             if source.next() is None:
                 raise ReplayDomainError(
                     ReplayErrorCode.SESSION_ENDED,
                     "step count exceeds remaining source events",
                     details={"count": count},
                 )
+            self._metrics["command_preflight_events"] = (
+                int(self._metrics["command_preflight_events"] or 0) + 1
+            )
+            if (index + 1) % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                await asyncio.sleep(0)
+
+    async def _preflight_advance_target(self, target_time_ms: int) -> int:
+        source = self._fork_current_source()
+        count = 0
+        while (event := source.peek()) is not None:
+            if self._event_time_ms(event) > target_time_ms:
+                break
+            if count >= self._max_atomic_command_source_events:
+                self._reject_command_resource_limit(
+                    requested=count + 1,
+                    operation="advance_by",
+                )
+            consumed = source.next()
+            if consumed != event:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source changed during advance preflight",
+                )
+            count += 1
+            self._metrics["command_preflight_events"] = (
+                int(self._metrics["command_preflight_events"] or 0) + 1
+            )
+            if count % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                await asyncio.sleep(0)
+        return count
+
+    async def _preflight_seek_target(self, target_time_ms: int) -> _SeekPlan:
+        target = validate_timestamp_ms(target_time_ms, field_name="target_time_ms")
+        if target < self._initial_virtual_time_ms:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "seek target precedes replay start",
+            )
+        future_journal_times = [
+            int(entry["virtual_time_ms"])
+            for entry in self._journal_entries
+            if int(entry["virtual_time_ms"]) > target
+        ]
+        if future_journal_times:
+            raise ReplayDomainError(
+                ReplayErrorCode.SEEK_REQUIRES_FORK_OR_RESET,
+                "seek target precedes a durable journal entry",
+                details={
+                    "target_virtual_time_ms": target,
+                    "earliest_blocking_journal_time_ms": min(future_journal_times),
+                    "blocking_journal_entries": len(future_journal_times),
+                },
+            )
+
+        positioning_events = 0
+        if target >= self._clock.virtual_time_ms:
+            # Forward and identity seeks can start from the exact current
+            # candidate. This avoids recounting the consumed prefix; any
+            # still-unconsumed events at the same timestamp remain in budget.
+            checkpoint_payload = self._checkpoint_payload()
+            checkpoint_source = self._fork_current_source()
+        else:
+            selected = self._checkpoints.select_valid(
+                self._checkpoint_codec,
+                target_virtual_time_ms=target,
+                validator=self._checkpoint_matches_actor,
+            )
+            checkpoint_payload = selected.payload
+            checkpoint_source, positioning_events = (
+                await self._source_for_seek_checkpoint(selected.payload)
+            )
+
+        scan_source = self._fork_source(checkpoint_source)
+        previous_time = scan_source.cursor().last_event_time_ms
+        if previous_time is None:
+            previous_time = self._initial_virtual_time_ms
+        replay_events = 0
+        total_events = positioning_events
+        while (event := scan_source.peek()) is not None:
+            event_time = self._event_time_ms(event)
+            if event_time < previous_time:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "source order changed during seek preflight",
+                )
+            if event_time > target:
+                break
+            if total_events >= self._max_atomic_command_source_events:
+                self._reject_command_resource_limit(
+                    requested=total_events + 1,
+                    operation="seek_to",
+                )
+            consumed = scan_source.next()
+            if consumed != event:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source changed during seek preflight",
+                )
+            previous_time = event_time
+            replay_events += 1
+            total_events += 1
+            self._metrics["command_preflight_events"] = (
+                int(self._metrics["command_preflight_events"] or 0) + 1
+            )
+            if total_events % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                await asyncio.sleep(0)
+
+        if scan_source.exhausted():
+            last_time = scan_source.cursor().last_event_time_ms
+            if last_time is None or target > last_time:
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "seek target exceeds replay horizon",
+                )
+        return _SeekPlan(
+            target_time_ms=target,
+            checkpoint_payload=checkpoint_payload,
+            checkpoint_source=checkpoint_source,
+            replay_event_count=replay_events,
+        )
+
+    async def _source_for_seek_checkpoint(
+        self,
+        payload: Mapping[str, object],
+    ) -> tuple[ReplayMarketSource, int]:
+        source_sequence = validate_counter(
+            payload.get("source_sequence"),
+            field_name="seek checkpoint source_sequence",
+        )
+        raw_cursor = payload.get("source_cursor")
+        if not isinstance(raw_cursor, Mapping) or set(raw_cursor) != {
+            "source_sequence",
+            "last_event_time_ms",
+            "last_base_bar_open_ms",
+            "at_end",
+        }:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "seek checkpoint source cursor is incompatible",
+            )
+        cursor_sequence = validate_counter(
+            raw_cursor["source_sequence"],
+            field_name="seek checkpoint cursor source_sequence",
+        )
+        if cursor_sequence != source_sequence:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "seek checkpoint source cursor is inconsistent",
+            )
+        raw_last_time = raw_cursor["last_event_time_ms"]
+        last_time = (
+            None
+            if raw_last_time is None
+            else validate_timestamp_ms(
+                raw_last_time,
+                field_name="seek checkpoint last_event_time_ms",
+            )
+        )
+        raw_last_base = raw_cursor["last_base_bar_open_ms"]
+        last_base = (
+            None
+            if raw_last_base is None
+            else validate_timestamp_ms(
+                raw_last_base,
+                field_name="seek checkpoint last_base_bar_open_ms",
+            )
+        )
+        at_end = raw_cursor["at_end"]
+        if not isinstance(at_end, bool):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "seek checkpoint at_end flag is invalid",
+            )
+        expected_cursor = {
+            "source_sequence": source_sequence,
+            "last_event_time_ms": last_time,
+            "last_base_bar_open_ms": last_base,
+            "at_end": at_end,
+        }
+        expected_chain = self._require_digest(
+            payload.get("event_chain_hash"),
+            "seek checkpoint event_chain_hash",
+        )
+
+        fast_position = getattr(self._source, "fork_at_sequence", None)
+        if callable(fast_position):
+            try:
+                source = fast_position(
+                    source_sequence,
+                    last_event_time_ms=last_time,
+                )
+            except ReplayDomainError:
+                raise
+            except Exception as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source rejected the seek checkpoint cursor",
+                ) from exc
+            self._validate_positioned_source(source, expected_cursor)
+            return source, 0
+
+        source = self._new_source()
+        chain = self._initial_chain_hash()
+        previous_time = self._initial_virtual_time_ms
+        for index in range(source_sequence):
+            if index >= self._max_atomic_command_source_events:
+                self._reject_command_resource_limit(
+                    requested=index + 1,
+                    operation="seek_to",
+                )
+            event = source.next()
+            if event is None:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "seek checkpoint source cursor exceeds immutable data",
+                )
+            event_time = self._event_time_ms(event)
+            if event_time < previous_time:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "source order changed while positioning seek checkpoint",
+                )
+            previous_time = event_time
+            chain = self._next_chain_hash(chain, event, index + 1)
+            self._metrics["command_preflight_events"] = (
+                int(self._metrics["command_preflight_events"] or 0) + 1
+            )
+            if (index + 1) % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                await asyncio.sleep(0)
+        if chain != expected_chain:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "seek checkpoint source chain changed",
+            )
+        self._validate_positioned_source(source, expected_cursor)
+        return source, source_sequence
+
+    def _validate_positioned_source(
+        self,
+        source: ReplayMarketSource,
+        expected_cursor: Mapping[str, object],
+    ) -> None:
+        if source is self._source:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "seek checkpoint source is not isolated",
+            )
+        if canonical_sha256(source.snapshot_ref()) != self._snapshot_ref_hash:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "seek checkpoint source changed immutable identity",
+            )
+        actual = source.cursor()
+        if {
+            "source_sequence": actual.source_sequence,
+            "last_event_time_ms": actual.last_event_time_ms,
+            "last_base_bar_open_ms": actual.last_base_bar_open_ms,
+            "at_end": actual.at_end,
+        } != dict(expected_cursor):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "seek checkpoint source does not match its durable cursor",
+            )
+
+    def _enforce_command_source_event_limit(self, count: int) -> None:
+        if count > self._max_atomic_command_source_events:
+            self._reject_command_resource_limit(
+                requested=count,
+                operation="step",
+            )
+
+    def _reject_command_resource_limit(
+        self,
+        *,
+        requested: int,
+        operation: str,
+    ) -> None:
+        self._metrics["command_resource_rejections"] = (
+            int(self._metrics["command_resource_rejections"] or 0) + 1
+        )
+        raise ReplayDomainError(
+            ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
+            "replay command source-event budget exceeded",
+            details={
+                "operation": operation,
+                "requested_at_least": requested,
+                "limit": self._max_atomic_command_source_events,
+            },
+        )
+
+    def _fork_current_source(self) -> ReplayMarketSource:
+        # Fork the already pinned source cursor.  Reopening the factory here
+        # can revalidate a large Parquet manifest on every STEP and defeats the
+        # incremental actor boundary.
+        return self._fork_source(self._source)
+
+    def _fork_source(self, original: ReplayMarketSource) -> ReplayMarketSource:
+        fork = getattr(original, "fork", None)
+        if not callable(fork):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "replay source does not provide an isolated cursor fork",
+            )
+        source = fork()
+        if source is original:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "replay source cannot provide an isolated cursor fork",
+            )
+        if canonical_sha256(source.snapshot_ref()) != self._snapshot_ref_hash:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "forked replay source changed immutable identity",
+            )
+        if source.cursor() != original.cursor():
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "forked replay source did not preserve the current cursor",
+            )
+        return source
 
     def _capture_rollback(self) -> _ActorRollback:
         return _ActorRollback(
             payload=self._checkpoint_payload(),
+            source=self._fork_current_source(),
             state=self._state,
             status_reason=self._status_reason,
             controller_client_id=self._controller_client_id,
             controller_deadline_wall=self._controller_deadline_wall,
         )
 
-    def _begin_candidate(self) -> None:
+    def _begin_candidate(self, *, capture_source_events: bool = True) -> None:
         if self._pending_events is not None or self._pending_source_events is not None:
             raise RuntimeError("nested replay actor mutation candidate")
         self._pending_events = []
-        self._pending_source_events = []
+        self._pending_source_events = [] if capture_source_events else None
 
     def _restore_rollback(
         self,
@@ -1909,7 +2482,11 @@ class ReplaySessionActor:
     ) -> None:
         self._pending_events = None
         self._pending_source_events = None
-        self._restore_payload(rollback.payload, restore_public_position=False)
+        self._restore_payload(
+            rollback.payload,
+            restore_public_position=False,
+            source_override=rollback.source,
+        )
         self._revision = int(rollback.payload["revision"])
         self._sequence = int(rollback.payload["event_sequence"])
         self._status_reason = rollback.status_reason
@@ -1999,7 +2576,10 @@ class ReplaySessionActor:
         self._metrics["persistence_failures"] = (
             int(self._metrics["persistence_failures"] or 0) + 1
         )
-        if isinstance(error, ReplayDomainError):
+        if self.config.blind_mode:
+            reason = "blind replay persistence failed"
+            details: dict[str, object] = {"blind_redacted": True}
+        elif isinstance(error, ReplayDomainError):
             reason = error.message
             details = dict(error.details)
         else:
@@ -2050,6 +2630,82 @@ class ReplaySessionActor:
         self._metrics["checkpoint_bytes"] = int(
             self._metrics["checkpoint_bytes"] or 0
         ) + len(encoded)
+
+    def _restore_checkpoint_ring(self) -> None:
+        selected = self._restore_checkpoint
+        assert selected is not None
+        candidates = list(reversed(self._retained_checkpoints))
+        if all(encoded != selected for encoded, _is_initial in candidates):
+            candidates.append((selected, False))
+
+        valid: list[tuple[bytes, bool, int, int, str]] = []
+        seen: set[bytes] = set()
+        for encoded, marked_initial in candidates:
+            if encoded in seen:
+                continue
+            seen.add(encoded)
+            try:
+                payload = self._checkpoint_codec.decode(encoded)
+                if not self._checkpoint_matches_actor(payload):
+                    continue
+                virtual_time_ms = validate_timestamp_ms(
+                    payload["virtual_time_ms"],
+                    field_name="retained checkpoint virtual_time_ms",
+                )
+                source_sequence = validate_counter(
+                    payload["source_sequence"],
+                    field_name="retained checkpoint source_sequence",
+                )
+                state_hash = self._require_digest(
+                    payload["state_hash"],
+                    "retained checkpoint state_hash",
+                )
+            except (CheckpointError, ReplayDomainError, TypeError, ValueError, KeyError):
+                continue
+            valid.append(
+                (
+                    encoded,
+                    marked_initial,
+                    virtual_time_ms,
+                    source_sequence,
+                    state_hash,
+                )
+            )
+
+        initial_index = next(
+            (index for index, item in enumerate(valid) if item[1]),
+            None,
+        )
+        if initial_index is None:
+            initial_index = next(
+                (index for index, item in enumerate(valid) if item[0] == selected),
+                None,
+            )
+        if initial_index is None:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "restored replay checkpoint is absent from the retained ring",
+            )
+
+        self._checkpoints = CheckpointRing(max_recent=self._max_recent_checkpoints)
+        initial = valid[initial_index]
+        self._checkpoints.add(
+            initial[0],
+            virtual_time_ms=initial[2],
+            source_sequence=initial[3],
+            state_hash=initial[4],
+            initial=True,
+        )
+        for index, item in enumerate(valid):
+            if index == initial_index:
+                continue
+            self._checkpoints.add(
+                item[0],
+                virtual_time_ms=item[2],
+                source_sequence=item[3],
+                state_hash=item[4],
+                initial=False,
+            )
 
     def _checkpoint_due(self) -> bool:
         cursor = self._source.cursor()
@@ -2115,6 +2771,7 @@ class ReplaySessionActor:
         payload: Mapping[str, object],
         *,
         restore_public_position: bool,
+        source_override: ReplayMarketSource | None = None,
     ) -> None:
         required = {
             "schema_version",
@@ -2200,10 +2857,19 @@ class ReplaySessionActor:
             payload["event_chain_hash"],
             "event_chain_hash",
         )
-        source, chain = self._source_at_sequence(
-            source_sequence,
-            expected_chain=expected_chain,
-        )
+        if source_override is None:
+            source, chain = self._source_at_sequence(
+                source_sequence,
+                expected_chain=expected_chain,
+            )
+        else:
+            source = source_override
+            chain = expected_chain
+            if canonical_sha256(source.snapshot_ref()) != self._snapshot_ref_hash:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "rollback source changed immutable identity",
+                )
         if chain != expected_chain:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -2266,6 +2932,14 @@ class ReplaySessionActor:
             payload["virtual_time_ms"],
             field_name="virtual_time_ms",
         )
+        if any(
+            int(entry["virtual_time_ms"]) > virtual_time
+            for entry in journal_entries
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "checkpoint journal contains an entry from the future",
+            )
         if (
             actual_source_cursor.last_event_time_ms is not None
             and actual_source_cursor.last_event_time_ms > virtual_time
@@ -2486,6 +3160,37 @@ class ReplaySessionActor:
             mandatory=mandatory,
         )
 
+    def _emit_reset_snapshot(self, reason: str, *, mandatory: bool) -> None:
+        """Publish one sequenced snapshot that atomically replaces client state.
+
+        SEEK may move the source cursor and rendered bars backward.  A status
+        frame cannot communicate that replacement and leaves future bars in a
+        connected client.  Build the snapshot only after reserving its domain
+        sequence so the envelope and nested snapshot describe one exact state.
+        """
+
+        self._status_reason = reason
+        self._sequence += 1
+        snapshot = self._public_snapshot_value()
+        state_hash = snapshot["state_hash"]
+        if not isinstance(state_hash, str):
+            raise TypeError("public replay snapshot state_hash must be a string")
+        event = ReplayEvent(
+            type=ReplayEventType.SNAPSHOT,
+            protocol=REPLAY_PROTOCOL,
+            session_id=self.session_id,
+            sequence=self._sequence,
+            revision=self._revision,
+            virtual_time_ms=self._clock.virtual_time_ms,
+            state_hash=state_hash,
+            data_epoch=self._data_epoch,
+            data={"reset": True, "snapshot": snapshot},
+        )
+        if self._pending_events is not None:
+            self._pending_events.append((event, mandatory))
+            return
+        self._publish_event(event, mandatory=mandatory)
+
     def _emit(
         self,
         event_type: ReplayEventType,
@@ -2518,20 +3223,40 @@ class ReplaySessionActor:
             wall_time=self._read_wall(),
             mandatory=mandatory,
         )
+        self._publish_projection_batches(batches)
+
+    def _publish_projection_batches(
+        self,
+        batches: tuple[ProjectionBatch, ...],
+    ) -> None:
         self._store_projection_batches(batches)
-        for token, (queue, overflow) in tuple(self._subscribers.items()):
-            try:
-                queue.put_nowait(event)
-                self._metrics["subscriber_high_water"] = max(
-                    int(self._metrics["subscriber_high_water"] or 0),
-                    queue.qsize(),
-                )
-            except asyncio.QueueFull:
-                overflow.set()
-                self._subscribers.pop(token, None)
-                self._metrics["subscriber_overflows"] = (
-                    int(self._metrics["subscriber_overflows"] or 0) + 1
-                )
+        for batch in batches:
+            for token, subscriber in tuple(self._subscribers.items()):
+                if batch.sequence_to < subscriber.next_sequence:
+                    continue
+                if batch.sequence_from != subscriber.next_sequence:
+                    self._overflow_subscriber(token, subscriber)
+                    continue
+                try:
+                    subscriber.queue.put_nowait(batch)
+                    subscriber.next_sequence = batch.sequence_to + 1
+                    self._metrics["subscriber_high_water"] = max(
+                        int(self._metrics["subscriber_high_water"] or 0),
+                        subscriber.queue.qsize(),
+                    )
+                except asyncio.QueueFull:
+                    self._overflow_subscriber(token, subscriber)
+
+    def _overflow_subscriber(
+        self,
+        token: int,
+        subscriber: _SubscriberState,
+    ) -> None:
+        subscriber.overflow.set()
+        self._subscribers.pop(token, None)
+        self._metrics["subscriber_overflows"] = (
+            int(self._metrics["subscriber_overflows"] or 0) + 1
+        )
 
     def _store_projection_batches(self, batches: tuple[ProjectionBatch, ...]) -> None:
         for batch in batches:
@@ -2590,6 +3315,7 @@ class ReplaySessionActor:
         source = self._source_factory()
         for method_name in (
             "snapshot_ref",
+            "fork",
             "peek",
             "next",
             "advance_until",
@@ -2732,6 +3458,19 @@ class ReplaySessionActor:
             return None
         return max(0.0, self._controller_deadline_wall - self._read_wall())
 
+    def _projection_flush_delay(self) -> float | None:
+        return self._coalescer.next_flush_delay(wall_time=self._read_wall())
+
+    def _flush_due_projections(self) -> None:
+        self._publish_projection_batches(
+            self._coalescer.flush_due(wall_time=self._read_wall())
+        )
+
+    @staticmethod
+    def _minimum_timeout(*values: float | None) -> float | None:
+        available = [value for value in values if value is not None]
+        return None if not available else min(available)
+
     def _ensure_accepting(self) -> None:
         if self._task is None or not self._accepting or self._closing or self._closed:
             raise ReplayDomainError(
@@ -2767,6 +3506,12 @@ class ReplaySessionActor:
                 request = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
+            if isinstance(request, _UnsubscribeRequest):
+                # Actor finalization clears every subscriber, so queued cleanup
+                # succeeds even when ordinary request futures fail closed.
+                self._complete_unsubscribe(request.token)
+                self._queue.task_done()
+                continue
             future = request.future
             if not future.done():
                 future.set_exception(error)

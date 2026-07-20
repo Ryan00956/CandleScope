@@ -137,6 +137,61 @@ async def test_newer_schema_fails_closed_without_mutating_version(
         )
 
 
+async def test_delete_session_compensation_cascades_even_when_store_is_degraded(
+    tmp_path: Path,
+) -> None:
+    store = await _created_store(tmp_path / "delete-compensation.db")
+    try:
+        store._degraded_reason = "H:\\private\\replay.db @ 1700000123456"
+        assert await store.delete_session("session-1") is True
+        assert await store.delete_session("session-1") is False
+        with sqlite3.connect(store.path) as connection:
+            counts = {
+                table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[
+                    0
+                ]
+                for table in (
+                    "replay_session",
+                    "replay_dataset_ref",
+                    "replay_checkpoint",
+                )
+            }
+        assert counts == {
+            "replay_session": 0,
+            "replay_dataset_ref": 0,
+            "replay_checkpoint": 0,
+        }
+    finally:
+        await store.close()
+
+
+async def test_v1_migration_keeps_legacy_checkpoint_watermark_ambiguous(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-v1.db"
+    store = await _created_store(path)
+    await store.close()
+
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE replay_checkpoint DROP COLUMN mutation_id")
+        connection.execute(
+            "UPDATE replay_schema_version SET version = 1 WHERE singleton = 1"
+        )
+
+    migrated = ReplaySQLiteStore(path, now_ms=lambda: 1_800_000_000_000)
+    try:
+        checkpoints = await migrated.load_valid_checkpoints("session-1")
+        assert len(checkpoints) == 1
+        assert checkpoints[0].mutation_id is None
+        assert checkpoints[0].is_latest is True
+        with sqlite3.connect(path) as connection:
+            assert connection.execute(
+                "SELECT version FROM replay_schema_version WHERE singleton = 1"
+            ).fetchone()[0] == REPLAY_SCHEMA_VERSION
+    finally:
+        await migrated.close()
+
+
 async def test_command_is_one_transaction_and_same_payload_is_idempotent(
     tmp_path: Path,
 ) -> None:
@@ -277,7 +332,7 @@ async def test_failed_component_projection_rolls_back_entire_command_transaction
         await store.close()
 
 
-async def test_source_event_and_optional_checkpoint_commit_atomically(
+async def test_source_event_commit_is_atomic_and_exact_retry_is_a_noop(
     tmp_path: Path,
 ) -> None:
     store = await _created_store(tmp_path / "replay.db")
@@ -299,7 +354,100 @@ async def test_source_event_and_optional_checkpoint_commit_atomically(
         tail = await store.source_events_after("session-1", 0)
         assert len(tail) == 1
         assert tail[0]["event"] == event
+        recovery_tail = await store.recovery_mutations_after(
+            "session-1",
+            mutation_id=0,
+        )
+        assert [item["source_sequence"] for item in recovery_tail] == [1]
+        assert [item["event"] for item in recovery_tail] == [event]
         assert len(await store.load_valid_checkpoints("session-1")) == 1
+    finally:
+        await store.close()
+
+
+async def test_source_event_retry_conflict_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    store = await _created_store(tmp_path / "replay.db")
+    event = {"open_time_ms": 1_700_000_000_000, "close": "101"}
+    state = _state(source_sequence=1, event_sequence=2)
+    try:
+        await store.commit_source_event(
+            session_id="session-1",
+            source_event=event,
+            session_state=state,
+            checkpoint=None,
+        )
+        with pytest.raises(ReplayDomainError) as captured:
+            await store.commit_source_event(
+                session_id="session-1",
+                source_event={**event, "close": "999"},
+                session_state=state,
+                checkpoint=None,
+            )
+        assert captured.value.code is ReplayErrorCode.DATASET_MISMATCH
+        recovery_tail = await store.recovery_mutations_after(
+            "session-1",
+            mutation_id=0,
+        )
+        assert len(recovery_tail) == 1
+        assert recovery_tail[0]["event"] == event
+    finally:
+        await store.close()
+
+
+async def test_source_sequence_can_be_reused_after_durable_seek(
+    tmp_path: Path,
+) -> None:
+    store = await _created_store(tmp_path / "replay.db")
+    event = {"open_time_ms": 1_700_000_000_000, "close": "101"}
+    first_state = _state(source_sequence=1, event_sequence=2)
+    seek_state = _state(
+        source_sequence=0,
+        event_sequence=3,
+        revision=1,
+        command_log_offset=1,
+    )
+    replayed_state = _state(
+        source_sequence=1,
+        event_sequence=4,
+        revision=1,
+        command_log_offset=1,
+    )
+    try:
+        await store.commit_source_event(
+            session_id="session-1",
+            source_event=event,
+            session_state=first_state,
+            checkpoint=None,
+        )
+        await store.commit_state(
+            session_id="session-1",
+            kind="seek",
+            payload={"target_source_sequence": 0},
+            session_state=seek_state,
+            checkpoint=b"seek-checkpoint",
+        )
+        await store.commit_source_event(
+            session_id="session-1",
+            source_event=event,
+            session_state=replayed_state,
+            checkpoint=None,
+        )
+        recovery_tail = await store.recovery_mutations_after(
+            "session-1",
+            mutation_id=0,
+        )
+        assert [item["kind"] for item in recovery_tail] == [
+            "source_event",
+            "internal_state",
+            "source_event",
+        ]
+        assert [
+            item["source_sequence"]
+            for item in recovery_tail
+            if item["kind"] == "source_event"
+        ] == [1, 1]
     finally:
         await store.close()
 
@@ -360,6 +508,21 @@ async def test_corrupt_latest_checkpoint_falls_back_and_dataset_checksum_fails_c
                 WHERE checkpoint_id = (SELECT MAX(checkpoint_id) FROM replay_checkpoint)
                 """
             )
+        recovery_tail = await store.recovery_mutations_after(
+            "session-1",
+            mutation_id=0,
+        )
+        assert recovery_tail == (
+            {
+                "kind": "internal_state",
+                "mutation_kind": "checkpoint",
+                "checkpoint": b"checkpoint-latest",
+                "state_hash": _state(
+                    source_sequence=1,
+                    event_sequence=2,
+                )["state_hash"],
+            },
+        )
         checkpoints = await store.load_valid_checkpoints("session-1")
         assert len(checkpoints) == 1
         assert checkpoints[0].is_initial is True

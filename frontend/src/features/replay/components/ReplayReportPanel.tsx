@@ -50,7 +50,7 @@ export default function ReplayReportPanel({ runtime }: { readonly runtime: Repla
               <button
                 type="button"
                 data-replay-action="reveal-history"
-                disabled={!ownsController || runtime.pendingCommand !== null}
+                disabled={!ownsController || runtime.pendingCommand !== null || runtime.forkPending}
                 title={ownsController ? "揭示真实训练区间" : "先获取 controller lease"}
                 onClick={() => void runtime.actions.submitCommand("reveal_history", {}).then(() => runtime.actions.loadReport()).catch(() => undefined)}
               >揭示真实区间</button>

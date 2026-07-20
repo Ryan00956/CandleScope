@@ -58,6 +58,19 @@ export interface ReplayStoreSnapshot {
   readonly transientRevision: number;
 }
 
+export interface ReplayStoreAuthoritySnapshot {
+  readonly generation: number;
+  readonly connectionState: ReplayConnectionState;
+  readonly hasAuthoritativeSnapshot: boolean;
+  readonly sessionId: string | null;
+  readonly state: ReplaySessionState | null;
+  readonly revision: number;
+  readonly sequence: number;
+  readonly sourceSequence: number;
+  readonly virtualTimeMs: number | null;
+  readonly stateHash: ReplayDigest | null;
+}
+
 export interface ReplayStoreScheduler {
   setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
   clearTimeout(handle: ReturnType<typeof setTimeout>): void;
@@ -135,6 +148,19 @@ export class ReplayStore {
 
   getSnapshot = (): ReplayStoreSnapshot => this.snapshot;
 
+  getAuthoritySnapshot = (): ReplayStoreAuthoritySnapshot => ({
+    generation: this.generation,
+    connectionState: this.connectionState,
+    hasAuthoritativeSnapshot: this.hasAuthoritativeSnapshot,
+    sessionId: this.sessionId,
+    state: this.state,
+    revision: this.revision,
+    sequence: this.sequence,
+    sourceSequence: this.sourceSequence,
+    virtualTimeMs: this.virtualTimeMs,
+    stateHash: this.stateHash,
+  });
+
   beginGeneration(generation: number, options: BeginReplayGenerationOptions): void {
     if (!Number.isSafeInteger(generation) || generation <= this.generation) return;
     this.generation = generation;
@@ -185,18 +211,11 @@ export class ReplayStore {
 
   applyEvent(generation: number, event: ReplayParsedEvent): boolean {
     if (generation !== this.generation || !this.hasAuthoritativeSnapshot) return false;
-    this.sessionId = event.session_id;
-    this.revision = event.revision;
-    this.sequence = event.sequence;
-    this.virtualTimeMs = event.virtual_time_ms;
-    this.stateHash = event.state_hash;
-    this.dataEpoch = event.data_epoch;
-
     let mandatory = false;
     if (event.type === "replay.delta") {
       const data = event.data as { source_sequence: number; projection: ReplayProjection };
-      this.sourceSequence = data.source_sequence;
       this.applyProjection(data.projection, event.virtual_time_ms);
+      this.sourceSequence = data.source_sequence;
       mandatory = data.projection.fills.length > 0;
     } else if (event.type === "replay.order") {
       const projection = projectionFromEvent(event);
@@ -229,6 +248,16 @@ export class ReplayStore {
       mandatory = true;
     }
 
+    // Commit envelope authority only after every projection operation has
+    // succeeded. A chart conversion or series invariant failure must leave the
+    // store cursor aligned with the stream controller so resync can reset both.
+    this.sessionId = event.session_id;
+    this.revision = event.revision;
+    this.sequence = event.sequence;
+    this.virtualTimeMs = event.virtual_time_ms;
+    this.stateHash = event.state_hash;
+    this.dataEpoch = event.data_epoch;
+
     if (mandatory) this.flushNow();
     else this.scheduleUiFlush();
     return true;
@@ -248,8 +277,21 @@ export class ReplayStore {
   }
 
   replaceJournal(generation: number, entries: readonly ReplayJournalEntry[]): boolean {
-    if (generation !== this.generation || !this.hasAuthoritativeSnapshot) return false;
-    this.journal = [...entries];
+    const authoritativeVirtualTimeMs = this.virtualTimeMs;
+    if (
+      generation !== this.generation
+      || !this.hasAuthoritativeSnapshot
+      || authoritativeVirtualTimeMs === null
+      || entries.some((entry) => entry.virtual_time_ms > authoritativeVirtualTimeMs)
+    ) return false;
+    const merged = new Map(entries.map((entry) => [entry.entry_id, entry]));
+    // The HTTP response can be older than an already-applied WebSocket
+    // replay.journal event. Keep the stream-authoritative entry on conflicts
+    // and never drop entries that arrived while the request was in flight.
+    for (const entry of this.journal) merged.set(entry.entry_id, entry);
+    this.journal = [...merged.values()].sort((left, right) => (
+      left.virtual_time_ms - right.virtual_time_ms || left.entry_id.localeCompare(right.entry_id)
+    ));
     this.flushNow();
     return true;
   }

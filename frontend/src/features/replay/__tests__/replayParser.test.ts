@@ -19,6 +19,7 @@ import {
   enabledAggTradeCapabilities,
   enabledCapabilities,
   replayBar,
+  replayDeltaEvent,
   replayDigest,
   replayReport,
   replaySessionResponse,
@@ -88,6 +89,30 @@ test("aggregate-trade blind payloads reject archive paths and unrevealed actual 
   assert.throws(() => parseReplayEvent(future), /unrevealed source event/);
 });
 
+test("bar source events reject reversed and future public times", () => {
+  const reversed = structuredClone(replayDeltaEvent());
+  reversed.data.source_event.close_time_ms = reversed.data.source_event.open_time_ms - 1;
+  assert.throws(() => parseReplayEvent(reversed), /source bar close precedes open/);
+
+  const future = structuredClone(replayDeltaEvent());
+  future.data.source_event.open_time_ms = future.virtual_time_ms + 1;
+  future.data.source_event.close_time_ms = future.virtual_time_ms + 60_000;
+  assert.throws(() => parseReplayEvent(future), /unrevealed source event/);
+});
+
+test("order events cannot smuggle a source bar update", () => {
+  const projection = structuredClone(replayDeltaEvent().data.projection);
+  const forged: Record<string, unknown> = {
+    ...replayDeltaEvent(),
+    type: "replay.order",
+    data: { command_type: "place_order", projection },
+  };
+  assert.throws(() => parseReplayEvent(forged), /order event cannot carry a bar update/);
+
+  Object.assign(projection, { bar_update: null });
+  assert.equal(parseReplayEvent(forged).type, "replay.order");
+});
+
 test("session and atomic snapshot parsers bind protocol, session, counters, hashes, and epoch", () => {
   const response = parseReplaySessionResponse(replaySessionResponse());
   const event = parseReplayEvent(replaySnapshotEvent());
@@ -108,6 +133,26 @@ test("strict parser rejects unknown fields and mismatched atomic envelope counte
     () => parseReplayEvent(event),
     /snapshot counters do not match envelope/,
   );
+});
+
+test("coalesced replay event ranges are complete and bound to the outer sequence", () => {
+  const ranged = replayDeltaEvent({ sequence: 3, sourceSequence: 3 });
+  Object.assign(ranged, { sequence_from: 1, sequence_to: 3 });
+  const parsed = parseReplayEvent(ranged);
+  assert.equal(parsed.sequence_from, 1);
+  assert.equal(parsed.sequence_to, 3);
+
+  const partial = replayDeltaEvent({ sequence: 3, sourceSequence: 3 });
+  Object.assign(partial, { sequence_from: 1 });
+  assert.throws(() => parseReplayEvent(partial), /sequence range is partial/);
+
+  const mismatched = replayDeltaEvent({ sequence: 3, sourceSequence: 3 });
+  Object.assign(mismatched, { sequence_from: 1, sequence_to: 2 });
+  assert.throws(() => parseReplayEvent(mismatched), /does not end at envelope sequence/);
+
+  const mandatory = replaySnapshotEvent({ sequence: 3, sourceSequence: 3 });
+  Object.assign(mandatory, { sequence_from: 1, sequence_to: 3 });
+  assert.throws(() => parseReplayEvent(mandatory), /only replay.delta/);
 });
 
 test("Decimal parser only accepts canonical plain finite strings", () => {
@@ -206,6 +251,12 @@ test("blind catalog entries cannot smuggle source fingerprint or bounds", () => 
     }],
   };
   assert.equal(parseReplayCatalog(blind).entries[0]?.bounds, null);
+  const withBounds = structuredClone(blind);
+  Object.assign(withBounds.entries[0]!, { bounds: { earliest_open_ms: BASE_TIME_MS } });
+  assert.throws(() => parseReplayCatalog(withBounds), /blind catalog bounds must be null/);
+  const withRanges = structuredClone(blind);
+  Object.assign(withRanges.entries[0]!, { eligible_ranges: [{ start_ms: BASE_TIME_MS }] });
+  assert.throws(() => parseReplayCatalog(withRanges), /blind catalog ranges must be empty/);
   const entry = blind.entries[0];
   assert.ok(entry);
   Object.assign(entry, { source_fingerprint: replayDigest("a") });

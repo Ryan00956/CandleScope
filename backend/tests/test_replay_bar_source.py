@@ -52,6 +52,19 @@ def test_bar_source_next_and_advance_until_consume_exact_base_bar_units() -> Non
     assert source.cursor().at_end is True
 
 
+def test_bar_source_positions_checkpoint_cursor_without_scanning_prefix() -> None:
+    snapshot = make_bar_snapshot(replay_count=4)
+    source = BarReplaySource(snapshot)
+    positioned = source.fork_at_sequence(
+        2,
+        last_event_time_ms=snapshot.replay_rows[1].close_time_ms,
+    )
+
+    assert positioned.cursor().source_sequence == 2
+    assert positioned.peek() == snapshot.replay_rows[2]
+    assert source.cursor().source_sequence == 0
+
+
 @pytest.mark.parametrize("fault", ["duplicate", "gap", "forming", "boundary"])
 def test_bar_source_revalidates_snapshot_order_close_and_replay_boundary(
     fault: str,

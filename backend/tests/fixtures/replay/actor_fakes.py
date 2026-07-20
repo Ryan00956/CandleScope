@@ -38,6 +38,32 @@ class FixtureSource:
     def snapshot_ref(self) -> FixtureSnapshotRef:
         return FixtureSnapshotRef(self._data_epoch)
 
+    def fork(self) -> FixtureSource:
+        forked = FixtureSource(self._events, data_epoch=self._data_epoch)
+        forked._index = self._index
+        return forked
+
+    def fork_at_sequence(
+        self,
+        source_sequence: int,
+        *,
+        last_event_time_ms: int | None,
+    ) -> FixtureSource:
+        if isinstance(source_sequence, bool) or not isinstance(source_sequence, int):
+            raise TypeError("source_sequence must be an integer")
+        if source_sequence < 0 or source_sequence > len(self._events):
+            raise ValueError("source_sequence exceeds fixture events")
+        expected_last_time = (
+            None
+            if source_sequence == 0
+            else self._events[source_sequence - 1].event_time_ms
+        )
+        if last_event_time_ms != expected_last_time:
+            raise ValueError("fixture checkpoint time does not match its sequence")
+        forked = self.fork()
+        forked._index = source_sequence
+        return forked
+
     def peek(self) -> FixtureEvent | None:
         if self._index >= len(self._events):
             return None

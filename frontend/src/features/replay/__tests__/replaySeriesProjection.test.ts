@@ -29,6 +29,25 @@ test("atomic snapshot maps to one SeriesWindowStore replace", () => {
   assert.match(String(store.seriesKey), /source=replay/);
 });
 
+test("atomic snapshots reject duplicate or reordered bars before the series store can normalize them", () => {
+  for (const bars of [
+    [replayBar(BASE_TIME_MS), replayBar(BASE_TIME_MS)],
+    [replayBar(BASE_TIME_MS + 60_000), replayBar(BASE_TIME_MS)],
+  ]) {
+    const response = replaySessionResponse({ virtualTimeMs: BASE_TIME_MS + 119_999 });
+    const builder = response.snapshot.components.bar_builder;
+    builder.closed_bars = bars;
+    builder.closed_count = bars.length;
+    const snapshot = parseReplaySessionResponse(response).snapshot;
+    const store = new SeriesWindowStore();
+    assert.throws(
+      () => replaceReplaySeriesFromSnapshot(store, snapshot),
+      /snapshot bars are not strictly increasing/,
+    );
+    assert.equal(store.barCount, 0);
+  }
+});
+
 test("append and tick use existing delta hot paths without copying the full series", () => {
   const snapshot = parseReplaySessionResponse(replaySessionResponse()).snapshot;
   const store = new SeriesWindowStore();
@@ -93,6 +112,96 @@ test("aggregate-trade public snapshot and batched updates reuse the same series 
   assert.equal(result.type, "tick");
   assert.equal(store.barCount, 2);
   assert.equal(store.last()?.close, 102);
+});
+
+test("a later unrepresentable batch row cannot leave the shared series half-applied", () => {
+  const snapshot = parseReplaySessionResponse(replaySessionResponse()).snapshot;
+  const store = new SeriesWindowStore();
+  replaceReplaySeriesFromSnapshot(store, snapshot);
+  const original = store.snapshot().map((row) => ({ ...row }));
+  const appended = parseReplayDisplayBar(replayBar(BASE_TIME_MS + 60_000, "101"));
+  const invalid = parseReplayDisplayBar({
+    ...replayBar(BASE_TIME_MS + 60_000, "101"),
+    close: "9".repeat(400),
+  });
+
+  assert.throws(() => applyReplayBarUpdate(store, {
+    action: "batch",
+    updates: [
+      {
+        action: "append",
+        bar: appended,
+        source_sequence: 1,
+        base_open_time_ms: BASE_TIME_MS + 60_000,
+        gap_policy: "reject",
+        synthetic_policy: "reject",
+      },
+      {
+        action: "tick",
+        bar: invalid,
+        source_sequence: 1,
+        base_open_time_ms: BASE_TIME_MS + 60_000,
+        gap_policy: "reject",
+        synthetic_policy: "reject",
+      },
+    ],
+  }, BASE_TIME_MS + 119_999), /cannot be represented/);
+  assert.deepEqual(store.snapshot(), original);
+});
+
+test("a forged tick cannot rewrite an already revealed historical bar", () => {
+  const snapshot = parseReplaySessionResponse(replaySessionResponse()).snapshot;
+  const store = new SeriesWindowStore();
+  replaceReplaySeriesFromSnapshot(store, snapshot);
+  applyReplayBarUpdate(store, {
+    action: "append",
+    bar: parseReplayDisplayBar(replayBar(BASE_TIME_MS + 60_000, "101")),
+    source_sequence: 1,
+    base_open_time_ms: BASE_TIME_MS + 60_000,
+    gap_policy: "reject",
+    synthetic_policy: "reject",
+  }, BASE_TIME_MS + 119_999);
+  const original = store.snapshot().map((row) => ({ ...row }));
+
+  assert.throws(() => applyReplayBarUpdate(store, {
+    action: "tick",
+    bar: parseReplayDisplayBar(replayBar(BASE_TIME_MS, "999")),
+    source_sequence: 2,
+    base_open_time_ms: BASE_TIME_MS + 60_000,
+    gap_policy: "reject",
+    synthetic_policy: "reject",
+  }, BASE_TIME_MS + 119_999), /does not target the revealed series tail/);
+  assert.deepEqual(store.snapshot(), original);
+});
+
+test("semantic batch validation is atomic and rejects backward source order", () => {
+  const snapshot = parseReplaySessionResponse(replaySessionResponse()).snapshot;
+  const store = new SeriesWindowStore();
+  replaceReplaySeriesFromSnapshot(store, snapshot);
+  const original = store.snapshot().map((row) => ({ ...row }));
+
+  assert.throws(() => applyReplayBarUpdate(store, {
+    action: "batch",
+    updates: [
+      {
+        action: "append",
+        bar: parseReplayDisplayBar(replayBar(BASE_TIME_MS + 60_000, "101")),
+        source_sequence: 2,
+        base_open_time_ms: BASE_TIME_MS + 60_000,
+        gap_policy: "reject",
+        synthetic_policy: "reject",
+      },
+      {
+        action: "tick",
+        bar: parseReplayDisplayBar(replayBar(BASE_TIME_MS + 60_000, "102")),
+        source_sequence: 1,
+        base_open_time_ms: BASE_TIME_MS + 60_000,
+        gap_policy: "reject",
+        synthetic_policy: "reject",
+      },
+    ],
+  }, BASE_TIME_MS + 119_999), /source sequence moved backward/);
+  assert.deepEqual(store.snapshot(), original);
 });
 
 test("chart conversion fails closed when a valid Decimal exceeds Number capacity", () => {

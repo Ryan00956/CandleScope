@@ -80,6 +80,22 @@ class ReplayTrade:
             raise ValueError("mapped replay trade time cannot be negative")
         return replace(self, trade_time_ms=value)
 
+    def with_public_identity(
+        self,
+        *,
+        agg_trade_id: int,
+        first_trade_id: int,
+        last_trade_id: int,
+    ) -> "ReplayTrade":
+        """Return a value with deterministic session-public trade identifiers."""
+
+        return replace(
+            self,
+            agg_trade_id=agg_trade_id,
+            first_trade_id=first_trade_id,
+            last_trade_id=last_trade_id,
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "exchange": self.exchange,
@@ -275,7 +291,10 @@ class PagedReplayTradeReader:
                 ReplayErrorCode.DATA_GAP,
                 "aggregate-trade archive ended before the expected last ID",
             )
-        if not page.exhausted and last_id == self.dataset_ref.expected_last_agg_trade_id:
+        if (
+            not page.exhausted
+            and last_id == self.dataset_ref.expected_last_agg_trade_id
+        ):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
                 "aggregate-trade archive continued past the frozen last ID",

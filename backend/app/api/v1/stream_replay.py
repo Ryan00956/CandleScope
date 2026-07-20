@@ -16,6 +16,9 @@ from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import ReplayEvent, validate_identifier
 
 
+_STREAM_CLEANUP_TIMEOUT_SECONDS = 1.0
+
+
 async def stream_replay_session(
     websocket: WebSocket,
     *,
@@ -52,16 +55,21 @@ async def stream_replay_session(
         await _reject(websocket, exc, close_code=close_code)
         return
 
-    await websocket.accept()
-    sender = asyncio.create_task(
-        _send_events(websocket, subscription),
-        name=f"replay-ws-send-{normalized_session}",
-    )
-    receiver = asyncio.create_task(
-        _receive_heartbeats(websocket, service, normalized_session),
-        name=f"replay-ws-receive-{normalized_session}",
-    )
+    sender: asyncio.Task[None] | None = None
+    receiver: asyncio.Task[None] | None = None
     try:
+        # Subscription precedes accept to preserve the atomic handoff.  Keep
+        # accept inside this cleanup boundary so a transport failure cannot
+        # leak the actor-side subscriber.
+        await websocket.accept()
+        sender = asyncio.create_task(
+            _send_events(websocket, subscription),
+            name=f"replay-ws-send-{normalized_session}",
+        )
+        receiver = asyncio.create_task(
+            _receive_heartbeats(websocket, service, normalized_session),
+            name=f"replay-ws-receive-{normalized_session}",
+        )
         done, pending = await asyncio.wait(
             {sender, receiver},
             return_when=asyncio.FIRST_COMPLETED,
@@ -92,13 +100,61 @@ async def stream_replay_session(
     except (WebSocketDisconnect, RuntimeError, asyncio.TimeoutError):
         return
     finally:
-        for task in (sender, receiver):
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(sender, receiver, return_exceptions=True)
+        tasks = tuple(task for task in (sender, receiver) if task is not None)
+        unsubscribe_completion: asyncio.Future[None] | None = None
         if actor is not None and subscription is not None:
             with suppress(Exception):
-                await actor.unsubscribe(subscription.token)
+                # Transfer token ownership before the first cleanup await.  A
+                # second transport cancellation can no longer strand it even if
+                # sender/receiver teardown consumes the whole bounded wait.
+                unsubscribe_completion = actor.request_unsubscribe(
+                    subscription.token
+                )
+        cleanup = asyncio.create_task(
+            _cleanup_stream_resources(tasks, unsubscribe_completion),
+            name=f"replay-ws-cleanup-{session_id}",
+        )
+        with suppress(Exception):
+            await _await_task_uninterruptibly(cleanup)
+
+
+async def _cleanup_stream_resources(
+    tasks: tuple[asyncio.Task[None], ...],
+    unsubscribe_completion: asyncio.Future[None] | None,
+) -> None:
+    """Bound transport teardown after actor cleanup ownership is transferred."""
+
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    try:
+        async with asyncio.timeout(_STREAM_CLEANUP_TIMEOUT_SECONDS):
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            if unsubscribe_completion is not None:
+                await asyncio.shield(unsubscribe_completion)
+    except TimeoutError:
+        # Sender/receiver tasks were already cancelled, and the actor-owned
+        # unsubscribe control record remains live independently of this waiter.
+        return
+
+
+async def _await_task_uninterruptibly(cleanup: asyncio.Task[None]) -> None:
+    """Bounded cleanup wins over repeated outer cancellation, then propagates it."""
+
+    pending_cancellation: asyncio.CancelledError | None = None
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as exc:
+            pending_cancellation = exc
+    if pending_cancellation is not None:
+        # Retrieve a possible cleanup exception without replacing transport
+        # cancellation; actor finalization independently clears subscribers.
+        with suppress(asyncio.CancelledError, Exception):
+            cleanup.result()
+        raise pending_cancellation
+    await cleanup
 
 
 async def _send_events(
@@ -108,8 +164,8 @@ async def _send_events(
     for event in subscription.initial_events:
         await send_json_with_timeout(websocket, event.to_dict())
     while True:
-        event = await subscription.next_event()
-        await send_json_with_timeout(websocket, event.to_dict())
+        batch = await subscription.next_event()
+        await send_json_with_timeout(websocket, batch.to_wire_dict())
 
 
 async def _receive_heartbeats(websocket: WebSocket, service, session_id: str) -> None:

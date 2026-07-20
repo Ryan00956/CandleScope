@@ -12,7 +12,12 @@ from app.replay.actor import ReplaySessionActor
 from app.replay.broker.execution import apply_position_fill
 from app.replay.broker.ledger import LedgerBook
 from app.replay.broker.models import OrderSide, Position
-from app.replay.constants import REPLAY_PROTOCOL, CommandType, SessionState
+from app.replay.constants import (
+    REPLAY_PROTOCOL,
+    CommandType,
+    ReplayEventType,
+    SessionState,
+)
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import ReplayCommand
 from app.replay.sources.bar_source import BarReplaySource
@@ -177,6 +182,119 @@ def _market_payload(client_order_id: str) -> dict[str, object]:
         "limit_price": None,
         "stop_price": None,
     }
+
+
+def test_broker_commands_use_the_complete_projection_contract() -> None:
+    broker = make_broker(display_interval="1m")
+    place = broker.apply_command(
+        CommandType.PLACE_ORDER,
+        _market_payload("projection-entry"),
+        command_id="projection-place",
+        source_sequence=0,
+        virtual_time_ms=0,
+    )
+    broker.apply_bar(bar(0, 100))
+    close = broker.apply_command(
+        CommandType.CLOSE_POSITION,
+        {"quantity": None},
+        command_id="projection-close",
+        source_sequence=1,
+        virtual_time_ms=1,
+    )
+    resting = broker.apply_command(
+        CommandType.PLACE_ORDER,
+        {
+            **_market_payload("projection-resting"),
+            "order_type": "LIMIT",
+            "limit_price": "90",
+        },
+        command_id="projection-limit",
+        source_sequence=1,
+        virtual_time_ms=1,
+    )
+    resting_order_id = str(resting["orders"][0]["order_id"])
+    cancel = broker.apply_command(
+        CommandType.CANCEL_ORDER,
+        {"order_id": resting_order_id},
+        command_id="projection-cancel",
+        source_sequence=1,
+        virtual_time_ms=1,
+    )
+
+    for projection in (place, close, resting, cancel):
+        assert set(projection) == {
+            "bar_update",
+            "orders",
+            "fills",
+            "warnings",
+            "position",
+            "account",
+        }
+        assert projection["bar_update"] is None
+        assert len(projection["orders"]) == 1
+        assert projection["fills"] == []
+        assert projection["warnings"] == []
+
+
+@_async_test
+async def test_backward_seek_streams_an_atomic_bar_reset_snapshot() -> None:
+    actor, _, dataset = _broker_actor(
+        reducer=make_broker(display_interval="1m")
+    )
+    await actor.start()
+    await actor.submit(
+        _actor_command("seek-acquire", CommandType.ACQUIRE_CONTROLLER, 0)
+    )
+    await actor.submit(
+        _actor_command("seek-step-four", CommandType.STEP, 1, {"count": 4})
+    )
+    before = await actor.public_snapshot()
+    before_builder = before["components"]["bar_builder"]
+    assert before["cursor"]["source_sequence"] == 4
+    assert len(before_builder["closed_bars"]) == 4
+
+    subscription = await actor.subscribe(
+        after_sequence=int(before["sequence"]),
+        max_pending=8,
+    )
+    assert subscription.reset is True
+    assert subscription.initial_events[0].sequence == before["sequence"]
+
+    target = dataset.replay_rows[1].close_time_ms
+    sought = await actor.submit(
+        _actor_command(
+            "seek-back-two",
+            CommandType.SEEK_TO,
+            2,
+            {"virtual_time_ms": target},
+        )
+    )
+    reset_batch = await asyncio.wait_for(subscription.next_event(), timeout=0.2)
+    reset_event = reset_batch.latest_event
+    assert reset_batch.mandatory is True
+    assert reset_batch.sequence_from == reset_batch.sequence_to == sought.sequence
+    assert reset_event.type is ReplayEventType.SNAPSHOT
+    assert reset_event.sequence == int(before["sequence"]) + 1
+    assert reset_event.revision == int(before["revision"]) + 1
+    assert reset_event.data["reset"] is True
+
+    snapshot = reset_event.data["snapshot"]
+    assert snapshot["sequence"] == reset_event.sequence
+    assert snapshot["revision"] == reset_event.revision
+    assert snapshot["state"] == SessionState.PAUSED.value
+    assert snapshot["status_reason"] == "seek_complete"
+    assert snapshot["cursor"]["source_sequence"] == 2
+    assert snapshot["cursor"]["virtual_time_ms"] == target
+    builder = snapshot["components"]["bar_builder"]
+    assert len(builder["closed_bars"]) == 2
+    assert builder["last_base_open_ms"] == dataset.replay_rows[1].open_time_ms
+
+    stepped = await actor.submit(
+        _actor_command("seek-step-next", CommandType.STEP, 3, {"count": 1})
+    )
+    assert stepped.cursor.source_sequence == 3
+    await actor.unsubscribe(subscription.token)
+    await actor.shutdown()
 
 
 async def _wait_ended(actor: ReplaySessionActor) -> None:

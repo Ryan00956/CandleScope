@@ -31,6 +31,45 @@ class BarReplaySource:
     def snapshot_ref(self) -> BarDatasetRef:
         return self._snapshot.snapshot_ref()
 
+    def fork(self) -> BarReplaySource:
+        """Return an O(1) isolated cursor over the same immutable snapshot."""
+
+        forked = object.__new__(BarReplaySource)
+        forked._snapshot = self._snapshot
+        forked._warmup_rows = self._warmup_rows
+        forked._rows = self._rows
+        forked._index = self._index
+        return forked
+
+    def fork_at_sequence(
+        self,
+        source_sequence: int,
+        *,
+        last_event_time_ms: int | None,
+    ) -> BarReplaySource:
+        """Position an isolated cursor without replaying an immutable BAR prefix."""
+
+        if isinstance(source_sequence, bool) or not isinstance(source_sequence, int):
+            raise TypeError("source_sequence must be an integer")
+        if source_sequence < 0 or source_sequence > len(self._rows):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "BAR checkpoint source sequence exceeds the frozen dataset",
+            )
+        expected_last_time = (
+            None
+            if source_sequence == 0
+            else self._rows[source_sequence - 1].close_time_ms
+        )
+        if last_event_time_ms != expected_last_time:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "BAR checkpoint source time does not match its sequence",
+            )
+        forked = self.fork()
+        forked._index = source_sequence
+        return forked
+
     def peek(self) -> ReplayBar | None:
         if self._index >= len(self._rows):
             return None

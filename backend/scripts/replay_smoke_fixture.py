@@ -126,7 +126,8 @@ def main() -> None:
                 status_code=404, detail="fixture replay session not found"
             )
         overflow_signals = [
-            overflow for _queue, overflow in tuple(handle.actor._subscribers.values())
+            subscriber.overflow
+            for subscriber in tuple(handle.actor._subscribers.values())
         ]
         if not overflow_signals:
             raise HTTPException(

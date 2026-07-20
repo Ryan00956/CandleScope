@@ -32,8 +32,15 @@ export default function ReplayRightRail({ runtime, indicatorStatus }: ReplayRigh
   const store = runtime.store;
   const config = store.sessionConfig;
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
-  const commandReady = ownsController && store.connectionState === "connected" && runtime.pendingCommand === null && store.state !== "ENDED";
+  const commandReady = ownsController
+    && store.connectionState === "connected"
+    && runtime.pendingCommand === null
+    && !runtime.forkPending
+    && store.state !== "ENDED";
   const openOrders = useMemo(() => store.orders.filter((order) => !TERMINAL_ORDER_STATES.has(order.status)), [store.orders]);
+  // Reports fill the active-session closed-trade gap between atomic snapshots.
+  // The lifecycle invalidates them on every reset generation and only accepts
+  // responses bound to the current generation.
   const closedTrades = runtime.report?.report.closed_trades ?? store.closedTrades;
   const recentFills = useMemo(() => recentReplayActivity(store.fills), [store.fills]);
   const recentClosedTrades = useMemo(() => recentReplayActivity(closedTrades), [closedTrades]);
@@ -148,7 +155,7 @@ export default function ReplayRightRail({ runtime, indicatorStatus }: ReplayRigh
         <textarea value={journalText} maxLength={4000} placeholder="记录当前判断；内容绑定虚拟时间。" onChange={(event) => setJournalText(event.target.value)} />
         <button
           type="button"
-          disabled={!ownsController || !journalText.trim() || runtime.pendingCommand !== null}
+          disabled={!ownsController || !journalText.trim() || runtime.pendingCommand !== null || runtime.forkPending}
           onClick={() => {
             const text = journalText.trim();
             setJournalText("");

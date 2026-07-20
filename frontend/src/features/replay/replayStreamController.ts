@@ -1,4 +1,5 @@
 import {
+  assertReplayEventCausality,
   parseReplayErrorEnvelope,
   parseReplayEvent,
   ReplayPayloadParseError,
@@ -125,6 +126,8 @@ export class ReplayStreamController {
   private lastSequence: number | null = null;
   private lastRevision: number | null = null;
   private lastVirtualTimeMs: number | null = null;
+  private lastSourceSequence: number | null = null;
+  private lastStateHash: ReplayDigest | null = null;
   private dataEpoch: ReplayDigest | undefined;
   private state: ReplayStreamState = "idle";
 
@@ -188,6 +191,8 @@ export class ReplayStreamController {
       lastSequence: this.lastSequence,
       lastRevision: this.lastRevision,
       lastVirtualTimeMs: this.lastVirtualTimeMs,
+      lastSourceSequence: this.lastSourceSequence,
+      lastStateHash: this.lastStateHash,
       dataEpoch: this.dataEpoch ?? null,
       heartbeatScheduled: this.heartbeatTimer !== null,
     };
@@ -201,9 +206,16 @@ export class ReplayStreamController {
     const resetAuthoritativeState = reason !== "reconnect";
     if (resetAuthoritativeState) {
       this.hasAuthoritativeState = false;
+    }
+    // Initial construction has the HTTP validation snapshot as its external
+    // floor. Later resync generations must retain the last accepted stream
+    // authority so a stale same-session snapshot cannot roll counters back.
+    if (reason === "initial") {
       this.lastSequence = null;
       this.lastRevision = null;
       this.lastVirtualTimeMs = null;
+      this.lastSourceSequence = null;
+      this.lastStateHash = null;
     }
     this.options.onGeneration?.({ generation, reason, resetAuthoritativeState });
     this.setState(reason === "resync" ? "resyncing" : reason === "reconnect" ? "reconnecting" : "connecting", generation);
@@ -244,11 +256,16 @@ export class ReplayStreamController {
       if (this.stopped) return;
       const nextReason = this.pendingReason ?? "reconnect";
       this.pendingReason = null;
+      this.setState(nextReason === "resync" ? "resyncing" : "reconnecting", generation);
       this.scheduleConnect(nextReason);
     };
   }
 
   private handleMessage(raw: unknown, generation: number, socket: ReplayStreamSocket): void {
+    // WebSocket close is asynchronous. Once a resync has started, messages
+    // already queued by the old transport must not repair or advance the
+    // generation that was just declared causally unsafe.
+    if (!this.isCurrent(generation, socket) || this.pendingReason !== null) return;
     if (typeof raw !== "string") {
       this.protocolFault("replay WebSocket message is not text", generation, socket);
       return;
@@ -293,14 +310,59 @@ export class ReplayStreamController {
     }
     if (event.type === "replay.snapshot") {
       const snapshot = (event.data as { snapshot: ReplaySessionSnapshot }).snapshot;
+      const lastSequence = this.lastSequence;
+      const lastRevision = this.lastRevision;
+      const lastVirtualTimeMs = this.lastVirtualTimeMs;
+      const lastSourceSequence = this.lastSourceSequence;
+      const hasAuthorityFloor = lastSequence !== null
+        && lastRevision !== null
+        && lastVirtualTimeMs !== null
+        && lastSourceSequence !== null;
+      const isIntentionalSeekReset = hasAuthorityFloor
+        && snapshot.status_reason === "seek_complete"
+        && snapshot.state === "PAUSED"
+        && snapshot.sequence === lastSequence + 1
+        && snapshot.revision === lastRevision + 1;
+      if (hasAuthorityFloor
+        && ((snapshot.sequence < lastSequence)
+          || (snapshot.revision < lastRevision)
+          || (!isIntentionalSeekReset
+            && ((snapshot.cursor.virtual_time_ms < lastVirtualTimeMs)
+              || (snapshot.cursor.source_sequence < lastSourceSequence))))) {
+        this.protocolFault("atomic replay snapshot moved authoritative state backward", generation, socket);
+        return;
+      }
+      if (!isIntentionalSeekReset
+        && hasAuthorityFloor
+        && this.lastSequence !== null
+        && this.lastSourceSequence !== null) {
+        const transportAdvance = snapshot.sequence - this.lastSequence;
+        const sourceAdvance = snapshot.cursor.source_sequence - this.lastSourceSequence;
+        const sameSequenceChanged = transportAdvance === 0
+          && ((this.lastRevision !== null && snapshot.revision !== this.lastRevision)
+            || (this.lastVirtualTimeMs !== null && snapshot.cursor.virtual_time_ms !== this.lastVirtualTimeMs)
+            || sourceAdvance !== 0
+            || (this.lastStateHash !== null && snapshot.state_hash !== this.lastStateHash));
+        if (sameSequenceChanged || sourceAdvance > transportAdvance) {
+          this.protocolFault("atomic replay snapshot crossed its causal sequence boundary", generation, socket);
+          return;
+        }
+      }
+      try {
+        this.options.onSnapshot?.(snapshot, generation);
+      } catch (error) {
+        this.protocolFault("replay snapshot projection failed", generation, socket, error);
+        return;
+      }
       this.dataEpoch = snapshot.data_epoch;
       this.lastSequence = snapshot.sequence;
       this.lastRevision = snapshot.revision;
       this.lastVirtualTimeMs = snapshot.cursor.virtual_time_ms;
+      this.lastSourceSequence = snapshot.cursor.source_sequence;
+      this.lastStateHash = snapshot.state_hash;
       this.hasAuthoritativeState = true;
       this.reconnectAttempt = 0;
       this.consecutiveProtocolFaults = 0;
-      this.options.onSnapshot?.(snapshot, generation);
       this.markTransportReady(generation, socket);
       return;
     }
@@ -308,8 +370,10 @@ export class ReplayStreamController {
       this.protocolFault("incremental replay event arrived before an atomic snapshot", generation, socket);
       return;
     }
-    if (event.sequence !== this.lastSequence + 1) {
-      this.protocolFault(`replay sequence gap: expected ${this.lastSequence + 1}, got ${event.sequence}`, generation, socket);
+    const sequenceFrom = event.sequence_from ?? event.sequence;
+    const sequenceTo = event.sequence_to ?? event.sequence;
+    if (sequenceFrom !== this.lastSequence + 1 || sequenceTo !== event.sequence) {
+      this.protocolFault(`replay sequence gap: expected range from ${this.lastSequence + 1}, got ${sequenceFrom}-${sequenceTo}`, generation, socket);
       return;
     }
     if (this.lastRevision !== null && event.revision < this.lastRevision) {
@@ -320,12 +384,32 @@ export class ReplayStreamController {
       this.protocolFault("replay virtual time moved backward", generation, socket);
       return;
     }
+    if (this.lastSourceSequence === null) {
+      this.protocolFault("replay source cursor is unavailable", generation, socket);
+      return;
+    }
+    try {
+      assertReplayEventCausality(event, this.lastSourceSequence);
+    } catch (error) {
+      const message = error instanceof ReplayPayloadParseError ? error.message : "replay event violates causal sequence";
+      this.protocolFault(message, generation, socket, error);
+      return;
+    }
+    try {
+      this.options.onEvent?.(event, generation);
+    } catch (error) {
+      this.protocolFault("replay event projection failed", generation, socket, error);
+      return;
+    }
     this.lastSequence = event.sequence;
     this.lastRevision = event.revision;
     this.lastVirtualTimeMs = event.virtual_time_ms;
+    this.lastStateHash = event.state_hash;
+    if (event.type === "replay.delta") {
+      this.lastSourceSequence = (event.data as { readonly source_sequence: number }).source_sequence;
+    }
     this.reconnectAttempt = 0;
     this.consecutiveProtocolFaults = 0;
-    this.options.onEvent?.(event, generation);
     this.markTransportReady(generation, socket);
   }
 
@@ -344,10 +428,15 @@ export class ReplayStreamController {
 
   private beginResync(): void {
     if (this.stopped) return;
+    this.cancelReconnect();
     this.cancelHeartbeat();
     this.pendingReason = "resync";
+    this.setState("resyncing", this.generation);
     const socket = this.socket;
     if (socket) {
+      // Disable old-transport delivery immediately; the close handshake may
+      // complete after additional MessageEvents have already been queued.
+      socket.onmessage = null;
       try { socket.close(1012, "replay resync"); } catch { /* close callback will recover */ }
       this.timers.setTimeout(() => {
         if (!this.stopped && this.pendingReason === "resync" && this.socket === socket) {
@@ -426,7 +515,7 @@ export class ReplayStreamController {
   }
 
   private markTransportReady(generation: number, socket: ReplayStreamSocket): void {
-    if (!this.isCurrent(generation, socket)) return;
+    if (!this.isCurrent(generation, socket) || this.pendingReason !== null) return;
     if (this.state !== "connected") this.setState("connected", generation);
     this.scheduleHeartbeat(generation, socket);
   }

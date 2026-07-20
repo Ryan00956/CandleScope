@@ -700,11 +700,18 @@ class ConservativeBarBroker:
                 ReplayErrorCode.INVALID_STATE_TRANSITION,
                 f"broker does not support command {normalized.value}",
             )
-        return {
-            "order": order.to_dict(),
-            "position": self._position.to_dict(),
-            "account": self._account.to_dict(),
-        }
+        # Command projections intentionally share the exact shape used by
+        # source-event projections.  A command does not advance a market bar
+        # or create a fill/warning immediately, but consumers must not need a
+        # second, command-specific parser for replay.order frames.
+        return BrokerEventResult(
+            bar_update=None,
+            orders=(order,),
+            fills=(),
+            warnings=(),
+            position=self._position,
+            account=self._account,
+        ).to_dict()
 
     def end_session(
         self,

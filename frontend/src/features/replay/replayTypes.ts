@@ -163,6 +163,8 @@ export interface ReplayEventEnvelope {
   readonly protocol: typeof REPLAY_PROTOCOL;
   readonly session_id: string;
   readonly sequence: ReplaySequence;
+  readonly sequence_from?: ReplaySequence;
+  readonly sequence_to?: ReplaySequence;
   readonly revision: ReplayRevision;
   readonly virtual_time_ms: ReplayTimestampMs;
   readonly state_hash: `sha256:${string}`;
@@ -544,7 +546,7 @@ export interface ReplayCommandTimelineEntry {
   readonly submitted_revision: ReplayRevision;
   readonly acknowledged_revision: ReplayRevision | null;
   readonly submitted_at_ms: number;
-  readonly status: "pending" | "acknowledged" | "rejected";
+  readonly status: "pending" | "acknowledged" | "rejected" | "unknown";
   readonly error_code: string | null;
 }
 

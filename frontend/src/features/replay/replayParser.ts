@@ -304,7 +304,7 @@ function parseSourceBar(value: unknown, path: string): ReplaySourceBar {
     "open_time_ms", "close_time_ms", "open", "high", "low", "close", "volume",
     "quote_volume", "trades", "taker_buy_base", "taker_buy_quote", "source",
   ], path);
-  return {
+  const parsed: ReplaySourceBar = {
     open_time_ms: timestamp(source.open_time_ms, `${path}.open_time_ms`),
     close_time_ms: timestamp(source.close_time_ms, `${path}.close_time_ms`),
     open: parseReplayDecimal(source.open, `${path}.open`),
@@ -318,6 +318,8 @@ function parseSourceBar(value: unknown, path: string): ReplaySourceBar {
     taker_buy_quote: nullableDecimal(source.taker_buy_quote, `${path}.taker_buy_quote`),
     source: string(source.source, `${path}.source`),
   };
+  if (parsed.close_time_ms < parsed.open_time_ms) fail(path, "source bar close precedes open");
+  return parsed;
 }
 
 function parseSourceTrade(value: unknown, path: string): ReplaySourceTrade {
@@ -713,17 +715,47 @@ function publicBuilderBars(builder: ReplayAnyBarBuilderSnapshot): readonly Repla
     : [...builder.closed_bars, ...(builder.active_bar ? [builder.active_bar] : [])];
 }
 
+type ReplayCausalArtifacts = Pick<
+  ReplayBrokerSnapshot | ReplayBrokerReport,
+  "orders" | "fills" | "closed_trades" | "warnings"
+>;
+
+export function assertReplayArtifactCausality(
+  artifacts: ReplayCausalArtifacts,
+  sourceSequence: number,
+  path = "$",
+  publicTime?: number,
+): void {
+  for (const [index, order] of artifacts.orders.entries()) {
+    if (publicTime !== undefined && order.created_time_ms > publicTime) {
+      fail(`${path}.orders[${index}]`, "contains future order");
+    }
+    assertCausalSequence(order.accepted_source_sequence, sourceSequence, `${path}.orders[${index}].accepted_source_sequence`);
+  }
+  for (const [index, fill] of artifacts.fills.entries()) {
+    if (publicTime !== undefined && fill.event_time_ms > publicTime) {
+      fail(`${path}.fills[${index}]`, "contains future fill");
+    }
+    assertCausalSequence(fill.source_sequence, sourceSequence, `${path}.fills[${index}].source_sequence`);
+  }
+  for (const [index, trade] of artifacts.closed_trades.entries()) {
+    assertCausalSequence(trade.source_sequence, sourceSequence, `${path}.closed_trades[${index}].source_sequence`);
+  }
+  for (const [index, warning] of artifacts.warnings.entries()) {
+    assertCausalSequence(warning.source_sequence, sourceSequence, `${path}.warnings[${index}].source_sequence`);
+  }
+}
+
 function assertNoFutureSnapshot(snapshot: ReplaySessionSnapshot, path: string): void {
   const publicTime = snapshot.cursor.virtual_time_ms;
+  const sourceSequence = snapshot.cursor.source_sequence;
   const builder = snapshot.components.bar_builder;
   for (const [index, bar] of publicBuilderBars(builder).entries()) {
     if (bar.open_time_ms > publicTime || bar.last_base_open_ms > publicTime) {
       fail(`${path}.components.bar_builder.public_bars[${index}]`, "contains unrevealed bar time");
     }
   }
-  for (const [index, fill] of snapshot.components.fills.entries()) {
-    if (fill.event_time_ms > publicTime) fail(`${path}.components.fills[${index}]`, "contains future fill");
-  }
+  assertReplayArtifactCausality(snapshot.components, sourceSequence, `${path}.components`, publicTime);
   for (const [index, entry] of snapshot.journal.entries()) {
     if (entry.virtual_time_ms > publicTime) fail(`${path}.journal[${index}]`, "contains future journal entry");
   }
@@ -891,6 +923,10 @@ function parseCatalogEntry(value: unknown, path: string, blind: boolean): Replay
   exact(source, keys, path);
   const identitySource = record(source.identity, `${path}.identity`);
   exact(identitySource, ["exchange", "market_type", "symbol"], `${path}.identity`);
+  const bounds = source.bounds === null ? null : jsonRecord(source.bounds, `${path}.bounds`);
+  const eligibleRanges = array(source.eligible_ranges, `${path}.eligible_ranges`, jsonRecord);
+  if (blind && bounds !== null) fail(`${path}.bounds`, "blind catalog bounds must be null");
+  if (blind && eligibleRanges.length !== 0) fail(`${path}.eligible_ranges`, "blind catalog ranges must be empty");
   return {
     identity: {
       exchange: identifier(identitySource.exchange, `${path}.identity.exchange`),
@@ -901,9 +937,9 @@ function parseCatalogEntry(value: unknown, path: string, blind: boolean): Replay
     selected_base_interval: source.selected_base_interval === null
       ? null
       : identifier(source.selected_base_interval, `${path}.selected_base_interval`),
-    bounds: source.bounds === null ? null : jsonRecord(source.bounds, `${path}.bounds`),
+    bounds,
     ...(!blind ? { gap_summary: jsonRecord(source.gap_summary, `${path}.gap_summary`) } : {}),
-    eligible_ranges: array(source.eligible_ranges, `${path}.eligible_ranges`, jsonRecord),
+    eligible_ranges: eligibleRanges,
     eligible_window_count: integer(source.eligible_window_count, `${path}.eligible_window_count`),
     quality: source.quality === null ? null : enumeration(source.quality, REPLAY_DATA_FIDELITIES, `${path}.quality`),
     ...(!blind ? { source_fingerprint: digest(source.source_fingerprint, `${path}.source_fingerprint`) } : {}),
@@ -982,6 +1018,73 @@ function assertProjectionTime(projection: ReplayProjection, virtualTime: number,
   for (const [index, fill] of projection.fills.entries()) {
     if (fill.event_time_ms > virtualTime) fail(`${path}.fills[${index}]`, "contains future fill");
   }
+  for (const [index, order] of projection.orders.entries()) {
+    if (order.created_time_ms > virtualTime) fail(`${path}.orders[${index}]`, "contains future order");
+  }
+}
+
+function assertCausalSequence(sequence: number, ceiling: number, path: string): void {
+  if (sequence > ceiling) fail(path, `causal source sequence ${sequence} exceeds revealed cursor ${ceiling}`);
+}
+
+function assertProjectionCausality(projection: ReplayProjection, ceiling: number, path: string): void {
+  const updates = projection.bar_update === null
+    ? []
+    : projection.bar_update.action === "batch"
+      ? projection.bar_update.updates
+      : [projection.bar_update];
+  for (const [index, update] of updates.entries()) {
+    assertCausalSequence(update.source_sequence, ceiling, `${path}.bar_update.updates[${index}].source_sequence`);
+  }
+  for (const [index, order] of projection.orders.entries()) {
+    assertCausalSequence(order.accepted_source_sequence, ceiling, `${path}.orders[${index}].accepted_source_sequence`);
+  }
+  for (const [index, fill] of projection.fills.entries()) {
+    assertCausalSequence(fill.source_sequence, ceiling, `${path}.fills[${index}].source_sequence`);
+  }
+  for (const [index, warning] of projection.warnings.entries()) {
+    assertCausalSequence(warning.source_sequence, ceiling, `${path}.warnings[${index}].source_sequence`);
+  }
+}
+
+function assertProjectionAdvances(projection: ReplayProjection, floor: number, path: string): void {
+  const updates = projection.bar_update === null
+    ? []
+    : projection.bar_update.action === "batch"
+      ? projection.bar_update.updates
+      : [projection.bar_update];
+  for (const [index, update] of updates.entries()) {
+    if (update.source_sequence <= floor) {
+      fail(`${path}.bar_update.updates[${index}].source_sequence`, "delta projection did not advance beyond the previous source cursor");
+    }
+  }
+  for (const [index, fill] of projection.fills.entries()) {
+    if (fill.source_sequence <= floor) {
+      fail(`${path}.fills[${index}].source_sequence`, "delta fill did not advance beyond the previous source cursor");
+    }
+  }
+  for (const [index, warning] of projection.warnings.entries()) {
+    if (warning.source_sequence <= floor) {
+      fail(`${path}.warnings[${index}].source_sequence`, "delta warning did not advance beyond the previous source cursor");
+    }
+  }
+}
+
+export function assertReplayEventCausality(event: ReplayParsedEvent, currentSourceSequence: number): void {
+  if (event.type === "replay.delta") {
+    const data = event.data as { readonly source_sequence: number; readonly projection: ReplayProjection };
+    const sequenceFrom = event.sequence_from ?? event.sequence;
+    const sequenceTo = event.sequence_to ?? event.sequence;
+    const expectedSourceSequence = currentSourceSequence + (sequenceTo - sequenceFrom + 1);
+    if (data.source_sequence !== expectedSourceSequence) {
+      fail("$.data.source_sequence", `expected causal source sequence ${expectedSourceSequence}, got ${data.source_sequence}`);
+    }
+    assertProjectionCausality(data.projection, data.source_sequence, "$.data.projection");
+    assertProjectionAdvances(data.projection, currentSourceSequence, "$.data.projection");
+    return;
+  }
+  const projection = (event.data as { readonly projection?: ReplayProjection }).projection;
+  if (projection !== undefined) assertProjectionCausality(projection, currentSourceSequence, "$.data.projection");
 }
 
 function parseEventData(type: string, value: unknown, path: string, virtualTime: number) {
@@ -1008,10 +1111,16 @@ function parseEventData(type: string, value: unknown, path: string, virtualTime:
         ? sourceEvent.trade_time_ms
         : sourceEvent.close_time_ms;
       if (eventTime > virtualTime) fail(`${path}.source_event`, "contains unrevealed source event");
+      if (!("trade_time_ms" in sourceEvent)
+        && (sourceEvent.open_time_ms > virtualTime || sourceEvent.close_time_ms > virtualTime)) {
+        fail(`${path}.source_event`, "contains unrevealed source bar time");
+      }
       const projection = parseReplayProjection(source.projection, `${path}.projection`);
       assertProjectionTime(projection, virtualTime, `${path}.projection`);
+      const sourceSequence = integer(source.source_sequence, `${path}.source_sequence`);
+      assertProjectionCausality(projection, sourceSequence, `${path}.projection`);
       return {
-        source_sequence: integer(source.source_sequence, `${path}.source_sequence`),
+        source_sequence: sourceSequence,
         source_event: sourceEvent,
         projection,
       };
@@ -1019,6 +1128,9 @@ function parseEventData(type: string, value: unknown, path: string, virtualTime:
     case "replay.order": {
       exact(source, ["command_type", "projection"], path);
       const projection = parseReplayProjection(source.projection, `${path}.projection`);
+      if (projection.bar_update !== null) {
+        fail(`${path}.projection.bar_update`, "order event cannot carry a bar update");
+      }
       assertProjectionTime(projection, virtualTime, `${path}.projection`);
       return {
         command_type: enumeration(source.command_type, REPLAY_COMMAND_TYPES, `${path}.command_type`) as ReplayCommandType,
@@ -1048,11 +1160,28 @@ function parseEventData(type: string, value: unknown, path: string, virtualTime:
 
 export function parseReplayEvent(value: unknown, path = "$"): ReplayParsedEvent {
   const source = record(value, path);
-  exact(source, ["type", "protocol", "session_id", "sequence", "revision", "virtual_time_ms", "state_hash", "data_epoch", "data"], path);
+  const hasSequenceFrom = Object.hasOwn(source, "sequence_from");
+  const hasSequenceTo = Object.hasOwn(source, "sequence_to");
+  if (hasSequenceFrom !== hasSequenceTo) fail(path, "coalesced sequence range is partial");
+  exact(source, [
+    "type", "protocol", "session_id", "sequence", "revision", "virtual_time_ms", "state_hash", "data_epoch", "data",
+    ...(hasSequenceFrom ? ["sequence_from", "sequence_to"] : []),
+  ], path);
   const type = enumeration(source.type, REPLAY_EVENT_TYPES, `${path}.type`);
+  if (hasSequenceFrom && type !== "replay.delta") {
+    fail(path, "only replay.delta may carry a coalesced sequence range");
+  }
   if (source.protocol !== REPLAY_PROTOCOL) fail(`${path}.protocol`, `expected ${REPLAY_PROTOCOL}`);
   const sessionId = identifier(source.session_id, `${path}.session_id`);
   const sequence = integer(source.sequence, `${path}.sequence`) as ReplaySequence;
+  const sequenceFrom = hasSequenceFrom
+    ? integer(source.sequence_from, `${path}.sequence_from`) as ReplaySequence
+    : sequence;
+  const sequenceTo = hasSequenceTo
+    ? integer(source.sequence_to, `${path}.sequence_to`) as ReplaySequence
+    : sequence;
+  if (sequenceFrom > sequenceTo) fail(path, "coalesced sequence range is reversed");
+  if (sequenceTo !== sequence) fail(path, "coalesced sequence range does not end at envelope sequence");
   const revision = integer(source.revision, `${path}.revision`);
   const virtualTime = timestamp(source.virtual_time_ms, `${path}.virtual_time_ms`);
   const stateHash = digest(source.state_hash, `${path}.state_hash`);
@@ -1069,6 +1198,7 @@ export function parseReplayEvent(value: unknown, path = "$"): ReplayParsedEvent 
     protocol: REPLAY_PROTOCOL,
     session_id: sessionId,
     sequence,
+    ...(hasSequenceFrom ? { sequence_from: sequenceFrom, sequence_to: sequenceTo } : {}),
     revision,
     virtual_time_ms: virtualTime,
     state_hash: stateHash,

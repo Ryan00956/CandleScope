@@ -5,6 +5,7 @@ import { defaultReplayApi, ReplayApiError } from "./replayApi.js";
 import type { ReplayApiClient } from "./replayApi.js";
 import type { ReplayCatalogQuery } from "./replayApi.js";
 import type { ReplayJournalResponse, ReplayReportResponse } from "./replayParser.js";
+import { assertReplayArtifactCausality } from "./replayParser.js";
 import { ReplayStore } from "./replayStore.js";
 import type { ReplayConnectionState, ReplayStoreError, ReplayStoreSnapshot } from "./replayStore.js";
 import { ReplayStreamController, ReplayStreamError } from "./replayStreamController.js";
@@ -39,6 +40,24 @@ export interface ReplayRuntimeError {
   readonly details?: Readonly<Record<string, unknown>>;
 }
 
+interface ReplayStreamAckTarget {
+  readonly commandId: string;
+  readonly sessionId: string;
+  readonly sequence: number;
+  readonly revision: number;
+  readonly state: ReplaySessionSnapshot["state"];
+  readonly stateHash: ReplaySessionSnapshot["state_hash"];
+  readonly virtualTimeMs: number;
+  readonly sourceSequence: number;
+}
+
+interface ReplayCommandRecoveryTarget {
+  readonly command: ReplayCommandEnvelope;
+  readonly sessionId: string;
+  readonly generationFloor: number;
+  readonly retryAfterGeneration: boolean;
+}
+
 export type ReplayRuntimeOperation = "catalog" | "create" | "fork" | "command" | "report" | "journal" | null;
 
 export interface ReplayRuntimeSnapshot {
@@ -49,6 +68,10 @@ export interface ReplayRuntimeSnapshot {
   readonly sessionId: string | null;
   readonly clientInstanceId: string;
   readonly operation: ReplayRuntimeOperation;
+  readonly forkPending: boolean;
+  readonly commandRecoveryPending: boolean;
+  readonly commandRecoveryInFlight: boolean;
+  readonly commandRecoveryReady: boolean;
   readonly pendingCommand: ReplayCommandEnvelope | null;
   readonly commandError: ReplayRuntimeError | null;
   readonly commandTimeline: readonly ReplayCommandTimelineEntry[];
@@ -98,6 +121,35 @@ function runtimeError(error: unknown): ReplayRuntimeError {
   return { code: "REPLAY_RUNTIME_ERROR", message: "Unknown replay runtime failure" };
 }
 
+function isDefinitiveCommandRejection(error: unknown): boolean {
+  return error instanceof ReplayApiError
+    && error.status !== null
+    && error.status >= 400
+    && error.status < 500
+    && error.code !== "REPLAY_TRANSPORT_ERROR"
+    && error.code !== "REPLAY_PROTOCOL_ERROR";
+}
+
+function assertCommandAcknowledgement(
+  sessionId: string,
+  command: ReplayCommandEnvelope,
+  result: ReplayCommandResult,
+): void {
+  if (result.session_id !== sessionId) {
+    throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "command response session identity changed", { fatal: false });
+  }
+  if (result.command_id !== command.command_id) {
+    throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "command response command identity changed", { fatal: false });
+  }
+  if (result.revision !== command.expected_revision + 1) {
+    throw new ReplayStreamError(
+      "REPLAY_PROTOCOL_ERROR",
+      "command response revision did not acknowledge the request",
+      { fatal: false },
+    );
+  }
+}
+
 let fallbackIdentityCounter = 0;
 
 function randomIdentity(prefix: string): string {
@@ -120,6 +172,44 @@ function connectionState(state: ReplayStreamState): ReplayConnectionState {
   return state;
 }
 
+function assertInitialStreamAuthorityFloor(
+  validation: ReplaySessionSnapshot,
+  snapshot: ReplaySessionSnapshot,
+): void {
+  const sequenceAdvance = snapshot.sequence - validation.sequence;
+  const revisionAdvance = snapshot.revision - validation.revision;
+  const sourceAdvance = snapshot.cursor.source_sequence - validation.cursor.source_sequence;
+  const intentionalSeek = snapshot.status_reason === "seek_complete"
+    && snapshot.state === "PAUSED"
+    && sequenceAdvance > 0
+    && revisionAdvance > 0;
+  const sameConfig = JSON.stringify(snapshot.config) === JSON.stringify(validation.config);
+  const samePublicOrigin = snapshot.components.bar_builder.replay_start_ms
+    === validation.components.bar_builder.replay_start_ms;
+  if (!sameConfig || !samePublicOrigin) {
+    throw new ReplayStreamError(
+      "REPLAY_PROTOCOL_ERROR",
+      "first replay stream snapshot changed immutable session identity",
+      { fatal: false },
+    );
+  }
+  if (sequenceAdvance < 0
+    || revisionAdvance < 0
+    || revisionAdvance > sequenceAdvance
+    || (!intentionalSeek && sourceAdvance < 0)
+    || (!intentionalSeek && sourceAdvance > sequenceAdvance)
+    || (!intentionalSeek
+      && snapshot.cursor.virtual_time_ms < validation.cursor.virtual_time_ms)
+    || (validation.revealed && !snapshot.revealed)
+    || (validation.state === "ENDED" && snapshot.state !== "ENDED")) {
+    throw new ReplayStreamError(
+      "REPLAY_PROTOCOL_ERROR",
+      "first replay stream snapshot predates HTTP validation authority",
+      { fatal: false },
+    );
+  }
+}
+
 export class ReplayRuntimeLifecycle {
   readonly store: ReplayStore;
   private readonly entry: ReplayEntry;
@@ -136,16 +226,24 @@ export class ReplayRuntimeLifecycle {
   private error: ReplayRuntimeError | null = null;
   private sessionId: string | null = null;
   private operation: ReplayRuntimeOperation = null;
+  private forkPending = false;
   private pendingCommand: ReplayCommandEnvelope | null = null;
+  private awaitingStreamAck: ReplayStreamAckTarget | null = null;
+  private commandRecoveryTarget: ReplayCommandRecoveryTarget | null = null;
+  private commandRecoveryRequest: Promise<ReplayCommandResult> | null = null;
   private commandError: ReplayRuntimeError | null = null;
   private commandTimeline: ReplayCommandTimelineEntry[] = [];
   private report: ReplayReportResponse | null = null;
   private reportError: ReplayRuntimeError | null = null;
   private reportRequest: Promise<ReplayReportResponse> | null = null;
   private reportRefreshQueued = false;
+  private createRequest: Promise<string> | null = null;
+  private forkRequest: Promise<string> | null = null;
   private stream: ReplayStreamBoundary | null = null;
   private abortController: AbortController | null = null;
   private runToken = 0;
+  private streamToken = 0;
+  private catalogRequestToken = 0;
   private started = false;
   private disposed = false;
   private acquireAfterSnapshot = false;
@@ -187,7 +285,7 @@ export class ReplayRuntimeLifecycle {
 
   restart(): void {
     if (this.disposed) return;
-    this.stopCurrentRun();
+    this.stopCurrentRun(true);
     this.started = true;
     this.error = null;
     void this.run();
@@ -206,26 +304,47 @@ export class ReplayRuntimeLifecycle {
     const catalogApi = this.api.catalog;
     if (!catalogApi) throw new Error("replay catalog API is unavailable");
     if (this.disposed) throw new Error("replay runtime is stopped");
+    const token = this.runToken;
+    const requestToken = this.catalogRequestToken + 1;
+    this.catalogRequestToken = requestToken;
     this.operation = "catalog";
     this.error = null;
     this.publish();
     try {
       const catalog = await catalogApi.call(this.api, query, this.abortController?.signal);
-      if (this.disposed) throw new Error("replay runtime is stopped");
+      if (!this.isCurrent(token)) {
+        throw new Error("replay runtime changed while loading the catalog");
+      }
+      if (requestToken !== this.catalogRequestToken) return catalog;
       this.catalog = catalog;
       return catalog;
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) {
+      if (this.isCurrent(token)
+        && requestToken === this.catalogRequestToken
+        && !(error instanceof DOMException && error.name === "AbortError")) {
         this.error = runtimeError(error);
       }
       throw error;
     } finally {
-      this.operation = null;
-      this.publish();
+      if (this.isCurrent(token) && requestToken === this.catalogRequestToken) {
+        if (this.operation === "catalog") this.operation = null;
+        this.publish();
+      }
     }
   }
 
-  async createSession(config: ReplaySessionConfig): Promise<string> {
+  createSession(config: ReplaySessionConfig): Promise<string> {
+    if (this.createRequest !== null) return this.createRequest;
+    const request = this.performCreateSession(config);
+    this.createRequest = request;
+    void request.then(
+      () => this.completeCreateRequest(request),
+      () => this.completeCreateRequest(request),
+    );
+    return request;
+  }
+
+  private async performCreateSession(config: ReplaySessionConfig): Promise<string> {
     const createApi = this.api.createSession;
     if (!createApi) throw new Error("replay session creation API is unavailable");
     if (this.phase !== "CONFIGURING") throw new Error("replay runtime is not configuring a session");
@@ -235,7 +354,12 @@ export class ReplayRuntimeLifecycle {
     const token = this.runToken;
     try {
       const response = await createApi.call(this.api, config, this.abortController?.signal);
-      if (!this.isCurrent(token)) throw new Error("replay runtime changed while creating a session");
+      if (!this.isCurrent(token) || this.sessionId !== null || this.phase !== "CONFIGURING") {
+        throw new Error("replay runtime changed while creating a session");
+      }
+      if (response.snapshot.session_id !== response.session_id) {
+        throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "create response session identity is inconsistent", { fatal: false });
+      }
       this.replaceSessionUrl(response.session_id);
       this.acquireAfterSnapshot = true;
       this.connectValidatedSession(response.snapshot, token);
@@ -254,7 +378,23 @@ export class ReplayRuntimeLifecycle {
     }
   }
 
-  async forkSession(): Promise<string> {
+  private completeCreateRequest(request: Promise<string>): void {
+    if (this.createRequest === request) this.createRequest = null;
+  }
+
+  forkSession(): Promise<string> {
+    if (this.forkRequest !== null) return this.forkRequest;
+    this.forkPending = true;
+    const request = this.performForkSession();
+    this.forkRequest = request;
+    void request.then(
+      () => this.completeForkRequest(request),
+      () => this.completeForkRequest(request),
+    );
+    return request;
+  }
+
+  private async performForkSession(): Promise<string> {
     const forkApi = this.api.forkSession;
     const sessionId = this.sessionId;
     if (!forkApi || !sessionId) throw new Error("replay fork API is unavailable");
@@ -264,7 +404,15 @@ export class ReplayRuntimeLifecycle {
     const token = this.runToken;
     try {
       const response = await forkApi.call(this.api, sessionId, this.abortController?.signal);
-      if (!this.isCurrent(token)) throw new Error("replay runtime changed while forking a session");
+      if (!this.isCurrent(token) || this.sessionId !== sessionId) {
+        throw new Error("replay runtime changed while forking a session");
+      }
+      if (response.session_id === sessionId
+        || response.snapshot.session_id !== response.session_id
+        || response.forked !== true
+        || response.forked_from_session_id !== sessionId) {
+        throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "fork response is not bound to its parent session", { fatal: false });
+      }
       this.replaceSessionUrl(response.session_id);
       this.acquireAfterSnapshot = true;
       this.connectValidatedSession(response.snapshot, token);
@@ -274,10 +422,18 @@ export class ReplayRuntimeLifecycle {
       throw error;
     } finally {
       if (this.isCurrent(token)) {
-        this.operation = null;
         this.publish();
       }
     }
+  }
+
+  private completeForkRequest(request: Promise<string>): void {
+    if (this.forkRequest !== request) return;
+    this.forkRequest = null;
+    this.forkPending = false;
+    if (this.operation === "fork") this.operation = null;
+    this.publish();
+    this.drainQueuedReportRefresh();
   }
 
   async submitCommand(
@@ -289,10 +445,15 @@ export class ReplayRuntimeLifecycle {
     if (!commandApi || !sessionId || this.phase !== "ACTIVE") {
       throw new Error("replay session is not command-ready");
     }
+    if (this.forkRequest !== null) throw new Error("wait for the pending replay fork");
     if (this.pendingCommand !== null) throw new Error("another replay command is pending");
     if (this.store.getSnapshot().connectionState !== "connected") {
       throw new Error("replay stream must reconnect before commands are accepted");
     }
+    if (this.store.getSnapshot().sessionId !== sessionId) {
+      throw new Error("replay session identity is not authoritative");
+    }
+    const token = this.runToken;
     const submittedRevision = Math.max(this.store.getSnapshot().revision, this.commandRevisionFloor);
     const command: ReplayCommandEnvelope = {
       protocol: "replay.v1",
@@ -319,28 +480,176 @@ export class ReplayRuntimeLifecycle {
     this.publish();
     try {
       const result = await commandApi.call(this.api, sessionId, command, this.abortController?.signal);
+      if (!this.isCurrent(token) || this.sessionId !== sessionId) {
+        throw new Error("replay runtime changed while submitting a command");
+      }
+      assertCommandAcknowledgement(sessionId, command, result);
       this.commandRevisionFloor = Math.max(this.commandRevisionFloor, result.revision);
       this.commandTimeline = this.commandTimeline.map((entry) => entry.command_id === command.command_id
         ? { ...entry, status: "acknowledged", acknowledged_revision: result.revision }
         : entry);
-      if (type === "reveal_history") void this.loadReport().catch(() => undefined);
+      this.awaitingStreamAck = {
+        commandId: command.command_id,
+        sessionId,
+        sequence: result.sequence,
+        revision: result.revision,
+        state: result.state,
+        stateHash: result.state_hash,
+        virtualTimeMs: result.cursor.virtual_time_ms,
+        sourceSequence: result.cursor.source_sequence,
+      };
+      this.completePendingCommandFromStream();
       return result;
     } catch (error) {
-      const view = runtimeError(error);
-      this.commandError = view;
-      this.commandTimeline = this.commandTimeline.map((entry) => entry.command_id === command.command_id
-        ? { ...entry, status: "rejected", error_code: view.code }
-        : entry);
-      if (view.code === "REVISION_CONFLICT") this.stream?.requestResync("command revision conflict");
+      if (this.isCurrent(token) && this.sessionId === sessionId) {
+        const view = runtimeError(error);
+        if (isDefinitiveCommandRejection(error)) {
+          this.commandError = view;
+          this.commandTimeline = this.commandTimeline.map((entry) => entry.command_id === command.command_id
+            ? { ...entry, status: "rejected", error_code: view.code }
+            : entry);
+          if (view.code === "REVISION_CONFLICT") this.stream?.requestResync("command revision conflict");
+        } else {
+          this.commandError = {
+            ...view,
+            details: {
+              ...(view.details ?? {}),
+              outcome: "unknown",
+              needs_resync: true,
+            },
+          };
+          this.commandTimeline = this.commandTimeline.map((entry) => entry.command_id === command.command_id
+            ? { ...entry, status: "unknown", error_code: view.code }
+            : entry);
+          this.commandRecoveryTarget = {
+            command,
+            sessionId,
+            generationFloor: this.store.getSnapshot().generation,
+            retryAfterGeneration: true,
+          };
+          this.stream?.requestResync("command outcome is unknown after HTTP acknowledgement loss");
+        }
+      }
       throw error;
     } finally {
-      if (this.pendingCommand?.command_id === command.command_id) this.pendingCommand = null;
-      this.operation = null;
-      this.publish();
+      if (this.isCurrent(token) && this.sessionId === sessionId) {
+        if (this.awaitingStreamAck?.commandId !== command.command_id
+          && this.commandRecoveryTarget?.command.command_id !== command.command_id) {
+          if (this.pendingCommand?.command_id === command.command_id) this.pendingCommand = null;
+          if (this.operation === "command") this.operation = null;
+        } else {
+          this.completePendingCommandFromStream();
+        }
+        this.publish();
+      }
     }
   }
 
+  retryPendingCommandRecovery(): Promise<ReplayCommandResult> {
+    if (this.commandRecoveryRequest !== null) return this.commandRecoveryRequest;
+    const target = this.commandRecoveryTarget;
+    const authority = this.store.getAuthoritySnapshot();
+    if (target === null || this.pendingCommand?.command_id !== target.command.command_id) {
+      return Promise.reject(new Error("no replay command is awaiting idempotent reconciliation"));
+    }
+    if (authority.sessionId !== target.sessionId
+      || authority.connectionState !== "connected"
+      || authority.generation <= target.generationFloor) {
+      return Promise.reject(new Error("wait for a newer authoritative replay snapshot before reconciliation"));
+    }
+    const request = this.performCommandRecovery(target);
+    this.commandRecoveryRequest = request;
+    void request.then(
+      () => this.completeCommandRecoveryRequest(request),
+      () => this.completeCommandRecoveryRequest(request),
+    );
+    this.publish();
+    return request;
+  }
+
+  private async performCommandRecovery(target: ReplayCommandRecoveryTarget): Promise<ReplayCommandResult> {
+    const commandApi = this.api.command;
+    const token = this.runToken;
+    const { command, sessionId } = target;
+    if (!commandApi) throw new Error("replay command API is unavailable");
+    try {
+      const result = await commandApi.call(this.api, sessionId, command, this.abortController?.signal);
+      if (!this.isCurrent(token)
+        || this.sessionId !== sessionId
+        || this.commandRecoveryTarget?.command.command_id !== command.command_id) {
+        throw new Error("replay runtime changed while reconciling a command");
+      }
+      assertCommandAcknowledgement(sessionId, command, result);
+      this.commandRevisionFloor = Math.max(this.commandRevisionFloor, result.revision);
+      this.commandTimeline = this.commandTimeline.map((entry) => entry.command_id === command.command_id
+        ? {
+            ...entry,
+            status: "acknowledged",
+            acknowledged_revision: result.revision,
+            error_code: null,
+          }
+        : entry);
+      this.awaitingStreamAck = {
+        commandId: command.command_id,
+        sessionId,
+        sequence: result.sequence,
+        revision: result.revision,
+        state: result.state,
+        stateHash: result.state_hash,
+        virtualTimeMs: result.cursor.virtual_time_ms,
+        sourceSequence: result.cursor.source_sequence,
+      };
+      this.commandRecoveryTarget = null;
+      this.commandError = null;
+      this.completePendingCommandFromStream();
+      return result;
+    } catch (error) {
+      if (this.isCurrent(token)
+        && this.sessionId === sessionId
+        && this.pendingCommand?.command_id === command.command_id) {
+        const view = runtimeError(error);
+        if (isDefinitiveCommandRejection(error)) {
+          this.commandRecoveryTarget = null;
+          this.commandError = view;
+          this.commandTimeline = this.commandTimeline.map((entry) => entry.command_id === command.command_id
+            ? { ...entry, status: "rejected", error_code: view.code }
+            : entry);
+          this.pendingCommand = null;
+          if (this.operation === "command") this.operation = null;
+          if (view.code === "REVISION_CONFLICT") this.stream?.requestResync("command revision conflict");
+        } else {
+          this.commandError = {
+            ...view,
+            details: {
+              ...(view.details ?? {}),
+              outcome: "unknown",
+              needs_resync: true,
+            },
+          };
+          this.commandTimeline = this.commandTimeline.map((entry) => entry.command_id === command.command_id
+            ? { ...entry, status: "unknown", error_code: view.code }
+            : entry);
+          this.commandRecoveryTarget = {
+            command,
+            sessionId,
+            generationFloor: this.store.getAuthoritySnapshot().generation,
+            retryAfterGeneration: false,
+          };
+          this.stream?.requestResync("idempotent command reconciliation outcome is unknown");
+        }
+      }
+      throw error;
+    }
+  }
+
+  private completeCommandRecoveryRequest(request: Promise<ReplayCommandResult>): void {
+    if (this.commandRecoveryRequest !== request) return;
+    this.commandRecoveryRequest = null;
+    this.publish();
+  }
+
   loadReport(): Promise<ReplayReportResponse> {
+    if (this.forkPending) return Promise.reject(new Error("wait for the pending replay fork"));
     if (this.reportRequest !== null) return this.reportRequest;
     const request = this.performLoadReport();
     this.reportRequest = request;
@@ -356,18 +665,67 @@ export class ReplayRuntimeLifecycle {
     const sessionId = this.sessionId;
     if (!reportApi || !sessionId) throw new Error("replay report API is unavailable");
     const token = this.runToken;
+    const generation = this.store.getSnapshot().generation;
     this.operation = "report";
     this.reportError = null;
     this.publish();
     try {
       const report = await reportApi.call(this.api, sessionId, this.abortController?.signal);
-      if (this.isCurrent(token) && this.sessionId === sessionId) this.report = report;
+      if (!this.isCurrent(token) || this.sessionId !== sessionId) {
+        throw new Error("replay runtime changed while loading the report");
+      }
+      const snapshot = this.store.getSnapshot();
+      if (snapshot.generation !== generation || snapshot.sessionId !== sessionId) {
+        throw new Error("replay stream generation changed while loading the report");
+      }
+      if (report.session_id !== sessionId) {
+        this.stream?.requestResync("report response session identity changed");
+        throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "report response session identity changed", { fatal: false });
+      }
+      const hasActualHistory = Object.hasOwn(report, "actual_history");
+      if (report.revealed !== snapshot.revealed || hasActualHistory !== snapshot.revealed) {
+        if (!this.reportRefreshQueued) {
+          this.stream?.requestResync("report reveal state disagrees with the authoritative replay state");
+        }
+        throw new ReplayStreamError(
+          "REPLAY_PROTOCOL_ERROR",
+          "report reveal state disagrees with the authoritative replay state",
+          { fatal: false },
+        );
+      }
+      const authoritativeEnded = snapshot.state === "ENDED";
+      if (report.report.ended !== authoritativeEnded) {
+        if (!this.reportRefreshQueued) {
+          this.stream?.requestResync("report ended state disagrees with the authoritative replay state");
+        }
+        throw new ReplayStreamError(
+          "REPLAY_PROTOCOL_ERROR",
+          "report ended state disagrees with the authoritative replay state",
+          { fatal: false },
+        );
+      }
+      try {
+        assertReplayArtifactCausality(
+          report.report,
+          snapshot.sourceSequence,
+          "$.report",
+          snapshot.virtualTimeMs ?? undefined,
+        );
+      } catch (error) {
+        this.stream?.requestResync("report crossed the authoritative replay cursor");
+        throw error;
+      }
+      this.report = report;
       return report;
     } catch (error) {
-      if (this.isCurrent(token) && this.sessionId === sessionId) this.reportError = runtimeError(error);
+      if (this.isCurrent(token)
+        && this.sessionId === sessionId
+        && this.store.getSnapshot().generation === generation) {
+        this.reportError = runtimeError(error);
+      }
       throw error;
     } finally {
-      if (this.isCurrent(token) && this.sessionId === sessionId) {
+      if (this.isCurrent(token) && this.sessionId === sessionId && this.operation === "report") {
         this.operation = null;
         this.publish();
       }
@@ -377,17 +735,24 @@ export class ReplayRuntimeLifecycle {
   private completeReportRequest(request: Promise<ReplayReportResponse>): void {
     if (this.reportRequest !== request) return;
     this.reportRequest = null;
-    if (!this.reportRefreshQueued || this.disposed) return;
-    this.reportRefreshQueued = false;
-    void this.loadReport().catch(() => undefined);
+    this.drainQueuedReportRefresh();
   }
 
-  private refreshReportAfterFill(): void {
+  private queueReportRefresh(): void {
     if (!this.api.report || !this.sessionId || this.disposed) return;
-    if (this.reportRequest !== null) {
+    if (this.reportRequest !== null || this.forkPending) {
       this.reportRefreshQueued = true;
       return;
     }
+    void this.loadReport().catch(() => undefined);
+  }
+
+  private drainQueuedReportRefresh(): void {
+    if (!this.reportRefreshQueued
+      || this.disposed
+      || this.forkPending
+      || this.reportRequest !== null) return;
+    this.reportRefreshQueued = false;
     void this.loadReport().catch(() => undefined);
   }
 
@@ -395,15 +760,45 @@ export class ReplayRuntimeLifecycle {
     const journalApi = this.api.journal;
     const sessionId = this.sessionId;
     if (!journalApi || !sessionId) throw new Error("replay journal API is unavailable");
+    const token = this.runToken;
+    const generation = this.store.getSnapshot().generation;
     this.operation = "journal";
     this.publish();
     try {
       const journal = await journalApi.call(this.api, sessionId, this.abortController?.signal);
-      this.store.replaceJournal(this.store.getSnapshot().generation, journal.entries);
+      if (!this.isCurrent(token) || this.sessionId !== sessionId) {
+        throw new Error("replay runtime changed while loading the journal");
+      }
+      if (journal.session_id !== sessionId) {
+        this.stream?.requestResync("journal response session identity changed");
+        throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "journal response session identity changed", { fatal: false });
+      }
+      const snapshot = this.store.getSnapshot();
+      if (snapshot.generation !== generation || snapshot.sessionId !== sessionId) {
+        throw new Error("replay stream generation changed while loading the journal");
+      }
+      const authoritativeVirtualTimeMs = snapshot.virtualTimeMs;
+      if (
+        authoritativeVirtualTimeMs === null
+        || journal.entries.some((entry) => entry.virtual_time_ms > authoritativeVirtualTimeMs)
+      ) {
+        this.stream?.requestResync("journal crossed the authoritative replay time");
+        throw new ReplayStreamError(
+          "REPLAY_PROTOCOL_ERROR",
+          "journal crossed the authoritative replay time",
+          { fatal: false },
+        );
+      }
+      if (!this.store.replaceJournal(generation, journal.entries)) {
+        this.stream?.requestResync("journal store generation rejected the response");
+        throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "journal store generation rejected the response", { fatal: false });
+      }
       return journal;
     } finally {
-      this.operation = null;
-      this.publish();
+      if (this.isCurrent(token) && this.sessionId === sessionId && this.operation === "journal") {
+        this.operation = null;
+        this.publish();
+      }
     }
   }
 
@@ -443,20 +838,37 @@ export class ReplayRuntimeLifecycle {
         });
         return;
       }
-      if (this.entry.kind === "configure") {
+      const currentSessionId = this.sessionId ?? (this.entry.kind === "session" ? this.entry.sessionId : null);
+      if (currentSessionId === null) {
         this.phase = "CONFIGURING";
         this.publish();
-        if (this.api.catalog) await this.loadCatalog();
+        if (this.api.catalog) {
+          const request = this.loadCatalog();
+          // loadCatalog increments its token synchronously before the first
+          // await. A later user refresh owns the configuration surface; a
+          // late rejection from this bootstrap request must not turn that
+          // newer state into a runtime-wide ERROR.
+          const requestToken = this.catalogRequestToken;
+          try {
+            await request;
+          } catch (error) {
+            if (!this.isCurrent(token) || requestToken !== this.catalogRequestToken) return;
+            throw error;
+          }
+        }
         return;
       }
 
-      this.sessionId = this.entry.sessionId;
+      this.sessionId = currentSessionId;
       this.phase = "VALIDATING_SESSION";
       this.publish();
       // This HTTP snapshot is validation only. It is deliberately never
       // published; the WebSocket atomic snapshot is the first chart truth.
-      const response = await this.api.getSession(this.entry.sessionId, abortController.signal);
+      const response = await this.api.getSession(currentSessionId, abortController.signal);
       if (!this.isCurrent(token)) return;
+      if (response.session_id !== currentSessionId || response.snapshot.session_id !== currentSessionId) {
+        throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "session response identity changed", { fatal: true });
+      }
       this.acquireAfterSnapshot = response.snapshot.controller_client_id === null;
       this.connectValidatedSession(response.snapshot, token);
     } catch (error) {
@@ -466,6 +878,10 @@ export class ReplayRuntimeLifecycle {
   }
 
   private connectValidatedSession(validationSnapshot: ReplaySessionSnapshot, token: number): void {
+    const preservePendingCommand = this.pendingCommand !== null
+      && this.sessionId === validationSnapshot.session_id
+      && (this.awaitingStreamAck?.sessionId === validationSnapshot.session_id
+        || this.commandRecoveryTarget?.sessionId === validationSnapshot.session_id);
     this.stream?.stop();
     this.stream = null;
     this.sessionId = validationSnapshot.session_id;
@@ -473,19 +889,44 @@ export class ReplayRuntimeLifecycle {
     this.reportError = null;
     this.reportRequest = null;
     this.reportRefreshQueued = false;
-    this.commandError = null;
-    this.commandTimeline = [];
+    if (!preservePendingCommand) {
+      this.pendingCommand = null;
+      this.commandError = null;
+      this.commandTimeline = [];
+      this.awaitingStreamAck = null;
+      this.commandRecoveryTarget = null;
+    } else if (this.commandRecoveryTarget !== null) {
+      this.commandRecoveryTarget = {
+        ...this.commandRecoveryTarget,
+        generationFloor: this.store.getAuthoritySnapshot().generation,
+        retryAfterGeneration: true,
+      };
+      this.operation = "command";
+    }
+    this.commandRecoveryRequest = null;
     this.commandRevisionFloor = validationSnapshot.revision;
     this.phase = "CONNECTING_SESSION";
     this.publish();
-    this.stream = this.createStream(validationSnapshot, token);
+    const streamToken = this.streamToken + 1;
+    this.streamToken = streamToken;
+    this.stream = this.createStream(validationSnapshot, token, streamToken);
     this.stream.start();
   }
 
-  private createStream(validationSnapshot: ReplaySessionSnapshot, token: number): ReplayStreamBoundary {
+  private createStream(
+    validationSnapshot: ReplaySessionSnapshot,
+    token: number,
+    streamToken: number,
+  ): ReplayStreamBoundary {
+    let initialAuthorityFloor: ReplaySessionSnapshot | null = validationSnapshot;
     const generationMap = new Map<number, number>();
     const mappedGeneration = (localGeneration: number): number | null => (
       generationMap.get(localGeneration) ?? null
+    );
+    const isCurrentStream = (): boolean => (
+      this.isCurrent(token)
+      && this.streamToken === streamToken
+      && this.sessionId === validationSnapshot.session_id
     );
     return this.streamFactory({
       sessionId: validationSnapshot.session_id,
@@ -496,24 +937,41 @@ export class ReplayRuntimeLifecycle {
         return snapshot.controllerClientId === this.clientInstanceId && snapshot.state !== "ENDED";
       },
       onGeneration: ({ generation, reason, resetAuthoritativeState }) => {
-        if (!this.isCurrent(token)) return;
+        if (!isCurrentStream()) return;
         const globalGeneration = this.store.getSnapshot().generation + 1;
         generationMap.set(generation, globalGeneration);
+        if (resetAuthoritativeState) {
+          this.report = null;
+          this.reportError = null;
+          this.reportRefreshQueued = false;
+        }
         this.store.beginGeneration(globalGeneration, {
           resetAuthoritativeState,
           connectionState: reason === "resync" ? "resyncing" : reason === "reconnect" ? "reconnecting" : "connecting",
         });
       },
       onState: (state, generation) => {
-        if (!this.isCurrent(token)) return;
+        if (!isCurrentStream()) return;
         const globalGeneration = mappedGeneration(generation);
         if (globalGeneration !== null) this.store.setConnectionState(globalGeneration, connectionState(state));
       },
       onSnapshot: (snapshot, generation) => {
         const globalGeneration = mappedGeneration(generation);
-        if (!this.isCurrent(token)
-          || globalGeneration === null
-          || !this.store.applyAtomicSnapshot(globalGeneration, snapshot)) return;
+        if (!isCurrentStream() || globalGeneration === null) return;
+        if (initialAuthorityFloor !== null) {
+          assertInitialStreamAuthorityFloor(initialAuthorityFloor, snapshot);
+        }
+        if (!this.store.applyAtomicSnapshot(globalGeneration, snapshot)) {
+          throw new Error("replay store rejected the atomic snapshot generation");
+        }
+        initialAuthorityFloor = null;
+        // Reports are point-in-time artifacts. The atomic snapshot is the
+        // current broker authority, so an artifact from an older generation
+        // must never cover its orders/trades while a fresh report is loading.
+        this.report = null;
+        this.reportError = null;
+        this.maybeRetryUncertainCommand(globalGeneration);
+        this.completePendingCommandFromStream();
         this.phase = "ACTIVE";
         this.commandRevisionFloor = Math.max(this.commandRevisionFloor, snapshot.revision);
         this.error = null;
@@ -522,24 +980,37 @@ export class ReplayRuntimeLifecycle {
           this.acquireAfterSnapshot = false;
           void this.submitCommand("acquire_controller", {}).catch(() => undefined);
         }
-        if (snapshot.state === "ENDED") void this.loadReport().catch(() => undefined);
+        if (snapshot.state === "ENDED") {
+          if (this.reportRequest !== null) this.reportRefreshQueued = true;
+          else void this.loadReport().catch(() => undefined);
+        }
       },
       onEvent: (event, generation) => {
-        if (!this.isCurrent(token)) return;
+        if (!isCurrentStream()) return;
         const globalGeneration = mappedGeneration(generation);
         if (globalGeneration === null) return;
+        if (!this.store.applyEvent(globalGeneration, event)) {
+          throw new Error("replay store rejected the authoritative event generation");
+        }
+        if (this.completePendingCommandFromStream()) this.publish();
         this.store.clearError(globalGeneration);
-        this.store.applyEvent(globalGeneration, event);
         this.commandRevisionFloor = Math.max(this.commandRevisionFloor, event.revision);
         if (event.type === "replay.ended") {
-          void this.loadReport().catch(() => undefined);
+          this.queueReportRefresh();
         } else {
-          const projection = (event.data as { readonly projection?: { readonly fills?: readonly unknown[] } }).projection;
-          if ((projection?.fills?.length ?? 0) > 0) this.refreshReportAfterFill();
+          const data = event.data as {
+            readonly reason?: string;
+            readonly projection?: { readonly fills?: readonly unknown[] };
+          };
+          if (event.type === "replay.status" && data.reason === "history_revealed") {
+            this.queueReportRefresh();
+          } else if ((data.projection?.fills?.length ?? 0) > 0) {
+            this.queueReportRefresh();
+          }
         }
       },
       onError: (error, generation) => {
-        if (!this.isCurrent(token)) return;
+        if (!isCurrentStream()) return;
         const globalGeneration = mappedGeneration(generation);
         if (globalGeneration === null) return;
         const view = runtimeError(error);
@@ -555,17 +1026,91 @@ export class ReplayRuntimeLifecycle {
     this.publish();
   }
 
-  private stopCurrentRun(): void {
+  private stopCurrentRun(preservePendingCommand = false): void {
+    const pendingSessionId = this.sessionId;
+    const pendingCommand = this.pendingCommand;
+    if (preservePendingCommand
+      && pendingCommand !== null
+      && pendingSessionId !== null
+      && this.awaitingStreamAck === null
+      && this.commandRecoveryTarget === null) {
+      const view: ReplayRuntimeError = {
+        code: "REPLAY_COMMAND_OUTCOME_UNKNOWN",
+        message: "replay runtime restarted before the command outcome was acknowledged",
+        details: { outcome: "unknown", needs_resync: true },
+      };
+      this.commandError = view;
+      this.commandTimeline = this.commandTimeline.map((entry) => entry.command_id === pendingCommand.command_id
+        ? { ...entry, status: "unknown", error_code: view.code }
+        : entry);
+      this.commandRecoveryTarget = {
+        command: pendingCommand,
+        sessionId: pendingSessionId,
+        generationFloor: this.store.getAuthoritySnapshot().generation,
+        retryAfterGeneration: true,
+      };
+    } else if (preservePendingCommand && this.commandRecoveryTarget !== null) {
+      this.commandRecoveryTarget = {
+        ...this.commandRecoveryTarget,
+        generationFloor: this.store.getAuthoritySnapshot().generation,
+        retryAfterGeneration: true,
+      };
+    }
     this.runToken += 1;
+    this.streamToken += 1;
     this.started = false;
     this.abortController?.abort();
     this.abortController = null;
     this.stream?.stop();
     this.stream = null;
+    if (!preservePendingCommand) {
+      this.pendingCommand = null;
+      this.awaitingStreamAck = null;
+      this.commandRecoveryTarget = null;
+    }
+    this.commandRecoveryRequest = null;
+    this.createRequest = null;
+    this.forkRequest = null;
+    this.forkPending = false;
+    this.operation = preservePendingCommand && this.pendingCommand !== null ? "command" : null;
   }
 
   private isCurrent(token: number): boolean {
     return !this.disposed && token === this.runToken;
+  }
+
+  private completePendingCommandFromStream(): boolean {
+    const target = this.awaitingStreamAck;
+    if (target === null) return false;
+    const authoritative = this.store.getAuthoritySnapshot();
+    if (authoritative.sessionId !== target.sessionId
+      || authoritative.sequence < target.sequence
+      || authoritative.revision < target.revision) return false;
+    if (authoritative.sequence === target.sequence) {
+      const matches = authoritative.revision === target.revision
+        && authoritative.state === target.state
+        && authoritative.stateHash === target.stateHash
+        && authoritative.virtualTimeMs === target.virtualTimeMs
+        && authoritative.sourceSequence === target.sourceSequence;
+      if (!matches) {
+        this.stream?.requestResync("command acknowledgement disagrees with stream authority");
+        return false;
+      }
+    }
+    this.awaitingStreamAck = null;
+    if (this.pendingCommand?.command_id === target.commandId) this.pendingCommand = null;
+    if (this.operation === "command") this.operation = null;
+    return true;
+  }
+
+  private maybeRetryUncertainCommand(generation: number): void {
+    const target = this.commandRecoveryTarget;
+    if (target === null
+      || !target.retryAfterGeneration
+      || generation <= target.generationFloor
+      || this.commandRecoveryRequest !== null) return;
+    this.commandRecoveryTarget = { ...target, retryAfterGeneration: false };
+    void this.retryPendingCommandRecovery().catch(() => undefined);
   }
 
   private publish(): void {
@@ -582,6 +1127,13 @@ export class ReplayRuntimeLifecycle {
       sessionId: this.sessionId,
       clientInstanceId: this.clientInstanceId,
       operation: this.operation,
+      forkPending: this.forkPending,
+      commandRecoveryPending: this.commandRecoveryTarget !== null,
+      commandRecoveryInFlight: this.commandRecoveryRequest !== null,
+      commandRecoveryReady: this.commandRecoveryTarget !== null
+        && this.commandRecoveryRequest === null
+        && this.store.getAuthoritySnapshot().connectionState === "connected"
+        && this.store.getAuthoritySnapshot().generation > this.commandRecoveryTarget.generationFloor,
       pendingCommand: this.pendingCommand,
       commandError: this.commandError,
       commandTimeline: this.commandTimeline,
@@ -698,6 +1250,7 @@ export interface ReplayRuntime extends ReplayRuntimeSnapshot {
     createSession(config: ReplaySessionConfig): Promise<string>;
     forkSession(): Promise<string>;
     submitCommand(type: ReplayCommandType, payload?: Readonly<Record<string, ReplayJson>>): Promise<ReplayCommandResult>;
+    retryPendingCommandRecovery(): Promise<ReplayCommandResult>;
     acquireController(takeover?: boolean): Promise<ReplayCommandResult>;
     loadReport(): Promise<ReplayReportResponse>;
     refreshJournal(): Promise<ReplayJournalResponse>;
@@ -778,6 +1331,7 @@ export function useReplayRuntime(
       submitCommand: (type: ReplayCommandType, payload?: Readonly<Record<string, ReplayJson>>) => (
         lifecycle.submitCommand(type, payload)
       ),
+      retryPendingCommandRecovery: () => lifecycle.retryPendingCommandRecovery(),
       acquireController: (takeover = false) => lifecycle.submitCommand("acquire_controller", { takeover }),
       loadReport: () => lifecycle.loadReport(),
       refreshJournal: () => lifecycle.refreshJournal(),

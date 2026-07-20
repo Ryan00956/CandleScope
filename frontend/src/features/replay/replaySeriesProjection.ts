@@ -84,8 +84,20 @@ export function replaceReplaySeriesFromSnapshot(
   const bars = isTradeBuilder(builder)
     ? builder.public_projection.bars
     : [...builder.closed_bars, ...(builder.active_bar ? [builder.active_bar] : [])];
-  for (const bar of bars) assertRevealed(bar, snapshot.cursor.virtual_time_ms);
+  let previousOpenTimeMs: number | null = null;
+  for (const bar of bars) {
+    assertRevealed(bar, snapshot.cursor.virtual_time_ms);
+    if (previousOpenTimeMs !== null && bar.open_time_ms <= previousOpenTimeMs) {
+      throw new ReplaySeriesProjectionError("replay snapshot bars are not strictly increasing");
+    }
+    previousOpenTimeMs = bar.open_time_ms;
+  }
   const rows = bars.map(replayDisplayBarToKline);
+  for (let index = 1; index < rows.length; index += 1) {
+    if (rows[index]!.time <= rows[index - 1]!.time) {
+      throw new ReplaySeriesProjectionError("replay snapshot chart times are not strictly increasing");
+    }
+  }
   store.seriesKey = asSeriesKey(buildReplayDatasetKey(snapshot));
   store.intervalSeconds = (
     isTradeBuilder(builder) ? builder.bar_builder.display_interval_ms : builder.display_interval_ms
@@ -104,25 +116,75 @@ export function applyReplayBarUpdate(
   update: ReplayBarProjectionUpdate,
   publicTimeMs: number,
 ): WindowDelta {
-  if (update.action === "batch") {
-    let last: WindowDelta | null = null;
-    for (const item of update.updates) last = applySingleReplayBarUpdate(store, item, publicTimeMs);
-    if (last === null) throw new ReplaySeriesProjectionError("replay update batch is empty");
-    return last;
-  }
-  return applySingleReplayBarUpdate(store, update, publicTimeMs);
+  const updates = update.action === "batch" ? update.updates : [update];
+  const planned = planReplayBarUpdates(store, updates, publicTimeMs);
+  let last: WindowDelta | null = null;
+  for (const item of planned) last = applyPlannedReplayBarUpdate(store, item);
+  if (last === null) throw new ReplaySeriesProjectionError("replay update batch is empty");
+  return last;
 }
 
-function applySingleReplayBarUpdate(
+interface PlannedReplayBarUpdate {
+  readonly update: ReplayBarUpdate;
+  readonly row: KlineBar;
+}
+
+function sameKlineBar(left: KlineBar, right: KlineBar): boolean {
+  const leftRecord = left as Readonly<Record<string, unknown>>;
+  const rightRecord = right as Readonly<Record<string, unknown>>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key) => Object.hasOwn(rightRecord, key) && Object.is(leftRecord[key], rightRecord[key]));
+}
+
+function planReplayBarUpdates(
   store: SeriesWindowStore,
-  update: ReplayBarUpdate,
+  updates: readonly ReplayBarUpdate[],
   publicTimeMs: number,
-): WindowDelta {
-  assertRevealed(update.bar, publicTimeMs);
-  if (update.base_open_time_ms > publicTimeMs) {
-    throw new ReplaySeriesProjectionError("replay source update exceeds the public cursor");
+): readonly PlannedReplayBarUpdate[] {
+  if (updates.length === 0) throw new ReplaySeriesProjectionError("replay update batch is empty");
+  const planned: PlannedReplayBarUpdate[] = [];
+  let simulatedTail = store.last();
+  let previousSourceSequence: number | null = null;
+  let previousBaseOpenTimeMs: number | null = null;
+  for (const update of updates) {
+    assertRevealed(update.bar, publicTimeMs);
+    if (update.base_open_time_ms > publicTimeMs) {
+      throw new ReplaySeriesProjectionError("replay source update exceeds the public cursor");
+    }
+    if (previousSourceSequence !== null && update.source_sequence < previousSourceSequence) {
+      throw new ReplaySeriesProjectionError("replay update batch source sequence moved backward");
+    }
+    if (previousBaseOpenTimeMs !== null && update.base_open_time_ms < previousBaseOpenTimeMs) {
+      throw new ReplaySeriesProjectionError("replay update batch base time moved backward");
+    }
+    const row = replayDisplayBarToKline(update.bar);
+    if (update.action === "append") {
+      if (simulatedTail !== null && row.time <= simulatedTail.time) {
+        throw new ReplaySeriesProjectionError("replay append does not extend the revealed series tail");
+      }
+    } else {
+      if (simulatedTail === null || row.time !== simulatedTail.time) {
+        throw new ReplaySeriesProjectionError("replay tick does not target the revealed series tail");
+      }
+      if (sameKlineBar(simulatedTail, row)) {
+        throw new ReplaySeriesProjectionError("replay tick does not change the revealed series tail");
+      }
+    }
+    simulatedTail = row;
+    previousSourceSequence = update.source_sequence;
+    previousBaseOpenTimeMs = update.base_open_time_ms;
+    planned.push({ update, row });
   }
-  const row = replayDisplayBarToKline(update.bar);
+  return planned;
+}
+
+function applyPlannedReplayBarUpdate(
+  store: SeriesWindowStore,
+  planned: PlannedReplayBarUpdate,
+): WindowDelta {
+  const { update, row } = planned;
   const meta = {
     source: `replay-${update.action}`,
     sourceSequence: update.source_sequence,
@@ -132,7 +194,7 @@ function applySingleReplayBarUpdate(
     return store.isEmpty() ? store.replace([row], meta) : store.applyRange([row], meta);
   }
   const delta = store.applyTick(row, meta);
-  if (delta.type === WINDOW_DELTA_TYPES.NOOP) {
+  if (delta.type !== WINDOW_DELTA_TYPES.TICK) {
     throw new ReplaySeriesProjectionError("replay tick does not target the revealed series tail");
   }
   return delta;

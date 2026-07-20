@@ -18,7 +18,8 @@ export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
   const tradeTape = config?.source_kind === "agg_trade";
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
   const pending = runtime.pendingCommand?.type ?? null;
-  const disabled = pending !== null || store.connectionState !== "connected" || !ownsController;
+  const forkPending = runtime.forkPending;
+  const disabled = pending !== null || forkPending || store.connectionState !== "connected" || !ownsController;
   const progress = replayProgress(store);
   const publicTime = formatReplayPublicTime(store.virtualTimeMs, {
     blindMode: config?.blind_mode ?? true,
@@ -42,7 +43,7 @@ export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
           <button
             type="button"
             data-replay-action="takeover-controller"
-            disabled={pending !== null || store.connectionState !== "connected"}
+            disabled={pending !== null || forkPending || store.connectionState !== "connected"}
             onClick={() => void runtime.actions.acquireController(store.controllerClientId !== null).catch(() => undefined)}
           >
             {store.controllerClientId ? "接管控制权" : "获取控制权"}
@@ -53,12 +54,21 @@ export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
         <div className="replay-command-error" role="alert" data-replay-command-error={runtime.commandError?.code ?? store.error?.code}>
           <strong>{runtime.commandError?.code ?? store.error?.code}</strong>
           <span>{runtime.commandError?.message ?? store.error?.message}</span>
+          {(runtime.commandError?.details?.needs_resync === true) && <span>命令结果未知；已请求服务端原子 resync，状态收敛前不会接受下一条命令。</span>}
           {(runtime.commandError?.code === "REVISION_CONFLICT") && <span>已请求服务端原子 resync，请等待状态收敛。</span>}
+          {runtime.commandRecoveryPending && (
+            <button
+              type="button"
+              data-replay-action="reconcile-command"
+              disabled={!runtime.commandRecoveryReady || runtime.commandRecoveryInFlight}
+              onClick={() => void runtime.actions.retryPendingCommandRecovery().catch(() => undefined)}
+            >{runtime.commandRecoveryInFlight ? "正在用同一 command_id 对账…" : "用同一 command_id 重试对账"}</button>
+          )}
         </div>
       )}
       <div className="replay-control-bar">
         <button type="button" data-replay-action="end" disabled={disabled || store.state === "ENDED"} onClick={() => setShowEnd(true)}>结束</button>
-        <button type="button" data-replay-action="fork" disabled={pending !== null} onClick={() => void runtime.actions.forkSession().catch(() => undefined)}>Fork</button>
+        <button type="button" data-replay-action="fork" disabled={pending !== null || forkPending} onClick={() => void runtime.actions.forkSession().catch(() => undefined)}>Fork</button>
         <button type="button" data-replay-action="step" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("step", { count: 1 })}>
           {pending === "step" ? "单步中…" : "单步 →"}
         </button>

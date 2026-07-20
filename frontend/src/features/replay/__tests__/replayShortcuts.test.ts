@@ -44,10 +44,39 @@ test("modifiers, repeats and editable focus never steal keyboard input", () => {
   }
 });
 
+test("buttons, links and their descendants retain native keyboard activation", () => {
+  const previousElement = Object.getOwnPropertyDescriptor(globalThis, "Element");
+  class FakeElement {
+    constructor(private readonly interactive: boolean) {}
+    matches() { return this.interactive; }
+    closest() { return this.interactive ? this : null; }
+  }
+  Object.defineProperty(globalThis, "Element", { configurable: true, value: FakeElement });
+  try {
+    for (const target of [new FakeElement(true), new FakeElement(true)]) {
+      const source = event(" ", { target: target as unknown as EventTarget });
+      assert.equal(handleReplayShortcut(source, () => true), false);
+      assert.equal(source.prevented, false);
+    }
+  } finally {
+    if (previousElement) Object.defineProperty(globalThis, "Element", previousElement);
+    else Reflect.deleteProperty(globalThis, "Element");
+  }
+});
+
 test("handled shortcuts prevent browser defaults exactly once", () => {
   const source = event("ArrowRight");
   const actions: string[] = [];
-  assert.equal(handleReplayShortcut(source, (action) => actions.push(action)), true);
+  assert.equal(handleReplayShortcut(source, (action) => {
+    actions.push(action);
+    return true;
+  }), true);
   assert.equal(source.prevented, true);
   assert.deepEqual(actions, ["step"]);
+});
+
+test("recognized shortcuts do not prevent defaults when runtime state rejects the action", () => {
+  const source = event("ArrowRight");
+  assert.equal(handleReplayShortcut(source, () => false), false);
+  assert.equal(source.prevented, false);
 });

@@ -55,6 +55,8 @@ class ReplayAPIRoute(APIRoute):
 
         async def handler(request: Request) -> Response:
             try:
+                if request.method in {"POST", "PUT", "PATCH"}:
+                    await enforce_replay_request_limit(request)
                 return await original(request)
             except ReplayDomainError as exc:
                 return JSONResponse(
@@ -198,6 +200,23 @@ class ReplayCommandPayload(_StrictModel):
 
 
 async def enforce_replay_request_limit(request: Request) -> None:
+    _validate_declared_replay_length(request)
+    cached = getattr(request, "_body", None)
+    if cached is not None:
+        if len(cached) > MAX_REPLAY_REQUEST_BYTES:
+            raise _request_too_large()
+        return
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > MAX_REPLAY_REQUEST_BYTES:
+            raise _request_too_large()
+        chunks.append(chunk)
+    request._body = b"".join(chunks)
+
+
+def _validate_declared_replay_length(request: Request) -> None:
     raw_length = request.headers.get("content-length")
     if raw_length is None:
         return
@@ -209,11 +228,15 @@ async def enforce_replay_request_limit(request: Request) -> None:
             "replay request Content-Length is invalid",
         ) from exc
     if length < 0 or length > MAX_REPLAY_REQUEST_BYTES:
-        raise ReplayDomainError(
-            ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
-            "replay request body exceeds the bounded size limit",
-            details={"limit_bytes": MAX_REPLAY_REQUEST_BYTES},
-        )
+        raise _request_too_large()
+
+
+def _request_too_large() -> ReplayDomainError:
+    return ReplayDomainError(
+        ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
+        "replay request body exceeds the bounded size limit",
+        details={"limit_bytes": MAX_REPLAY_REQUEST_BYTES},
+    )
 
 
 def replay_service_from_state(state: object) -> ReplayService:

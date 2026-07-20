@@ -5,10 +5,10 @@ from __future__ import annotations
 import sqlite3
 
 
-REPLAY_SCHEMA_VERSION = 1
+REPLAY_SCHEMA_VERSION = 2
 
 
-SCHEMA_V1 = """
+SCHEMA_V2 = """
 CREATE TABLE IF NOT EXISTS replay_session (
     session_id TEXT PRIMARY KEY,
     config_json TEXT NOT NULL,
@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS replay_source_event (
 CREATE TABLE IF NOT EXISTS replay_checkpoint (
     checkpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES replay_session(session_id) ON DELETE CASCADE,
+    mutation_id INTEGER CHECK (mutation_id IS NULL OR mutation_id >= 0),
     source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
     command_log_offset INTEGER NOT NULL CHECK (command_log_offset >= 0),
     event_sequence INTEGER NOT NULL CHECK (event_sequence >= 0),
@@ -166,13 +167,27 @@ def migrate_replay_schema(connection: sqlite3.Connection, *, now_ms: int) -> Non
         )
     if current == REPLAY_SCHEMA_VERSION:
         return
-    if current != 0:
+    if current == 0:
+        for statement in SCHEMA_V2.split(";"):
+            sql = statement.strip()
+            if sql:
+                connection.execute(sql)
+    elif current == 1:
+        connection.execute(
+            "ALTER TABLE replay_checkpoint "
+            "ADD COLUMN mutation_id INTEGER "
+            "CHECK (mutation_id IS NULL OR mutation_id >= 0)"
+        )
+        # V1 did not persist a cross-table mutation watermark.  It cannot be
+        # reconstructed from state_hash/timestamps: controller, speed, and
+        # status-only mutations can share both values (and the configured
+        # clock may return the same millisecond for every transaction).  NULL
+        # therefore explicitly marks a legacy checkpoint.  Recovery may use
+        # only the latest intact legacy checkpoint when it exactly represents
+        # the durable session row; older/corrupt fallbacks fail closed instead
+        # of silently skipping an ambiguous mutation tail.
+    else:
         raise RuntimeError(f"no replay schema migration path from version {current}")
-
-    for statement in SCHEMA_V1.split(";"):
-        sql = statement.strip()
-        if sql:
-            connection.execute(sql)
     connection.execute(
         """
         INSERT INTO replay_schema_version(singleton, version, applied_at_ms)

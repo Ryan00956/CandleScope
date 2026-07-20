@@ -160,6 +160,40 @@ async def test_request_size_limit_and_openapi_examples_are_frozen() -> None:
     assert oversized.status_code == 413
     assert oversized.json()["error"]["code"] == "SCAN_LIMIT_EXCEEDED"
 
+    oversized_body = json.dumps(
+        {
+            **_command(),
+            "payload": {"padding": "x" * MAX_REPLAY_REQUEST_BYTES},
+        }
+    )
+    lying_length = await _request(
+        app,
+        "POST",
+        "/api/v1/replay/sessions/session-1/commands",
+        headers={
+            "content-type": "application/json",
+            "content-length": "1",
+        },
+        content=oversized_body,
+    )
+    assert lying_length.status_code == 413
+    assert lying_length.json()["error"]["code"] == "SCAN_LIMIT_EXCEEDED"
+
+    async def chunked_body():
+        encoded = oversized_body.encode("utf-8")
+        for offset in range(0, len(encoded), 4_096):
+            yield encoded[offset : offset + 4_096]
+
+    chunked = await _request(
+        app,
+        "POST",
+        "/api/v1/replay/sessions/session-1/commands",
+        headers={"content-type": "application/json"},
+        content=chunked_body(),
+    )
+    assert chunked.status_code == 413
+    assert chunked.json()["error"]["code"] == "SCAN_LIMIT_EXCEEDED"
+
     schema = app.openapi()
     paths = schema["paths"]
     assert {
@@ -205,6 +239,71 @@ async def test_api_blind_snapshot_contains_only_synthetic_time_and_no_paths(
     assert str(tmp_path) not in serialized
     assert payload["snapshot"]["cursor"]["virtual_time_ms"] == SYNTHETIC_TIME_ANCHOR_MS
     await service.shutdown(step_timeout=0.2)
+
+
+async def test_blind_api_redacts_unexpected_data_dependency_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "blind-unexpected-errors.db"
+    service = ReplayService(
+        settings=replay_settings(path),
+        store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
+        repository=replay_repository(),
+        now_ms=lambda: NOW_MS,
+        session_id_factory=SessionIdFactory("blind-unexpected"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    sentinel = "H:\\secret\\bars.db @ 1700000123456"
+    original_build = service._catalog.build
+
+    def broken_catalog(*args, **kwargs):
+        raise ValueError(sentinel)
+
+    monkeypatch.setattr(service._catalog, "build", broken_catalog)
+    try:
+        catalog = await _request(
+            _app(service),
+            "GET",
+            "/api/v1/replay/catalog",
+            params={
+                "warmup_bars": 2,
+                "horizon_ms": 5 * INTERVAL_MS,
+                "quality_mode": "exact",
+                "blind_mode": "true",
+            },
+        )
+        assert catalog.status_code == 422
+        assert catalog.json()["error"] == {
+            "code": "DATASET_INCOMPLETE",
+            "message": "blind replay dataset validation failed",
+            "details": {"blind_redacted": True},
+        }
+        assert sentinel not in catalog.text
+
+        monkeypatch.setattr(service._catalog, "build", original_build)
+
+        def broken_materialization(*args, **kwargs):
+            raise TypeError(sentinel)
+
+        monkeypatch.setattr(service._dataset_builder, "create", broken_materialization)
+        created = await _request(
+            _app(service),
+            "POST",
+            "/api/v1/replay/sessions",
+            json=replay_config_payload(blind_mode=True),
+        )
+        assert created.status_code == 422
+        assert created.json()["error"] == {
+            "code": "DATASET_INCOMPLETE",
+            "message": "blind replay dataset validation failed",
+            "details": {"blind_redacted": True},
+        }
+        assert sentinel not in created.text
+        assert service.diagnostics()["pending_session_reservations"] == 0
+    finally:
+        await service.shutdown(step_timeout=0.2)
 
 
 async def test_debug_snapshot_adds_redacted_replay_diagnostics(

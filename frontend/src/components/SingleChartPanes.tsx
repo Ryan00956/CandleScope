@@ -2842,6 +2842,17 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     if (plotRect && (localY < plotRect.y || localY > plotRect.y + plotRect.height)) return;
     event.preventDefault();
     event.stopPropagation();
+    try {
+      const chart = chartRef.current;
+      const mainPaneIndex = resolveMainPaneIndex(
+        chart,
+        mainSeriesRef.current,
+        materializedMainPaneIndexRef.current,
+      );
+      materializedMainPaneIndexRef.current = mainPaneIndex;
+      const autoScale = chart?.priceScale("right", mainPaneIndex).options().autoScale;
+      if (typeof autoScale === "boolean") setIsAutoScale(autoScale);
+    } catch { /* */ }
     const margin = PRICE_SCALE_CONTEXT_MENU_MARGIN;
     const maxX = Math.max(rect.left + margin, rect.right - PRICE_SCALE_CONTEXT_MENU_WIDTH - margin);
     const maxY = Math.max(rect.top + margin, rect.bottom - PRICE_SCALE_CONTEXT_MENU_HEIGHT - margin);

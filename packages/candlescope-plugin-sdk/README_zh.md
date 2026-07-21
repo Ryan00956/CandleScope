@@ -52,6 +52,20 @@ shutdown()  # 可选资源清理，默认空实现
 错误映射和 stdout 保护。精确 wire 契约见
 [docs/protocol-v1.md](docs/protocol-v1.md)。
 
+## 打包给 CandleScope
+
+Phase 3 不要求社区作者维护 CandleScope 私有适配层。为插件及全部运行时依赖构建
+wheel，复制并修改
+[`examples/hello-runtime.manifest.json`](examples/hello-runtime.manifest.json)，再使用
+CandleScope 的 `scripts/candlescope_plugin.py build` 生成 `.cspkg`。安装器会为每个
+bundle 建独立 venv，离线安装 wheel，并用 manifest 中的固定 analyze/execute 结果
+探针完成 descriptor 和行为校验。
+
+完整格式、SHA-256 发布和安装/回滚流程见
+[`backend/app/plugin_runtime/INSTALLER_zh.md`](../../backend/app/plugin_runtime/INSTALLER_zh.md)。
+插件不能导入 `app.*` 或依赖 CandleScope 源码快照；Host 适配只发生在公开 SDK
+协议和 Render IR 上。
+
 ## 开发门禁
 
 ```powershell

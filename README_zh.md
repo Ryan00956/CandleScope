@@ -284,12 +284,15 @@ Pyne 支持 `safe`、`research`、`unsafe` security modes。默认使用 process
 OHLCV 批量输入、结构化诊断，以及第一版由 CandleScope 拥有的 line-series
 Render IR；仓库同时提供可执行的 Hello Runtime 和固定 wire transcript。
 
-Plugin platform Phase 2 已加入通用
+Plugin platform Phase 2/3 已加入通用
 [`app.plugin_runtime`](backend/app/plugin_runtime/README_zh.md) Host/Supervisor：
 它可以从显式 activation registry 启动并监督外部 sidecar，并提供严格握手、超时、
-消息上限、重启熔断和健康汇总。默认 registry 为空，现有 Indicator/Pyne HTTP、
-range 和 WebSocket 路由仍未接入 sidecar；隔离 bundle 安装与
-`legacy/shadow/sidecar` 路由分别属于 Phase 3 和 Phase 4。
+消息上限、重启熔断和健康汇总。Phase 3 同时提供确定性 `.cspkg`、调用者固定的
+SHA-256、每 bundle 独立 venv、离线 wheel 安装、结果探针、原子激活和逐插件回滚；
+社区发布流程见
+[`INSTALLER_zh.md`](backend/app/plugin_runtime/INSTALLER_zh.md)。默认 registry 为空，
+现有 Indicator/Pyne HTTP、range 和 WebSocket 路由仍未接入 sidecar；
+`legacy/shadow/sidecar` 路由属于 Phase 4。
 
 ## API 文档
 

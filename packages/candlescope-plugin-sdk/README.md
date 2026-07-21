@@ -25,7 +25,7 @@ candlescope.script-runtime/1
 Realtime sessions, host data callbacks, secrets, trading actions, arbitrary
 frontend JavaScript, and marketplace packaging are intentionally outside v1.
 Process separation is a transport and dependency boundary, not a complete
-security sandbox; the future CandleScope host remains responsible for resource
+security sandbox; the CandleScope Host remains responsible for resource
 limits, process termination, permissions, and trust policy.
 
 ## Minimal runtime
@@ -87,6 +87,23 @@ The installed package also includes a working `candlescope-hello-runtime`
 command. It accepts the tiny source `plot(close)` and returns one line series.
 
 See [docs/protocol-v1.md](docs/protocol-v1.md) for the wire contract.
+
+## Package for CandleScope
+
+Phase 3 does not require community authors to maintain a private CandleScope
+adapter. Build wheels for the plugin and every runtime dependency, copy and
+edit
+[`examples/hello-runtime.manifest.json`](examples/hello-runtime.manifest.json),
+then use CandleScope's `scripts/candlescope_plugin.py build` command to create a
+`.cspkg`. The installer creates one isolated venv per bundle, installs wheels
+offline, and validates the descriptor plus deterministic analyze/execute
+results from the manifest probe.
+
+See
+[`backend/app/plugin_runtime/INSTALLER.md`](../../backend/app/plugin_runtime/INSTALLER.md)
+for the format, SHA-256 release workflow, install, and rollback model. Plugins
+must not import `app.*` or depend on a CandleScope source snapshot; integration
+stays on the public SDK protocol and Render IR.
 
 ## Development checks
 

@@ -21,7 +21,7 @@ v1 的核心边界是：
 | Phase 0：冻结兼容基线 | 已完成 | HTTP compute、HTTP range/history、WebSocket realtime 黑盒 golden |
 | Phase 1：Plugin SDK v1 | 已完成 | Python 3.11+ 基线、独立 SDK、协议模型、Hello Runtime、契约测试 |
 | Phase 2：通用 Host/Supervisor | 已完成 | 注册表、生命周期、RPC、宿主服务、诊断 |
-| Phase 3：隔离安装器 v2 | 未开始 | `.cspkg`、独立 venv、校验、探测、原子激活与回滚 |
+| Phase 3：隔离安装器 v2 | 已完成 | `.cspkg`、独立 venv、校验、探测、原子激活与回滚 |
 | Phase 4：通用 Indicator Service | 未开始 | `legacy/shadow/sidecar` 路由与传输迁移 |
 | Phase 5：Pyne 插件发行 | 未开始 | Pyne host facade 与 `candlescope-plugin-pyne` |
 | Phase 6：Pyne 切换与源码快照删除 | 未开始 | shadow、cutover、独立删除提交 |
@@ -277,6 +277,122 @@ sidecar 并中止应用启动。FastAPI 后续 DataEngine 启动若抛出 fatal 
 - Phase 2 测试退出后没有残留 fake/Hello Python sidecar；
 - `git diff --check` 通过，Phase 0 compatibility 测试文件没有 diff；
 - 生产 Indicator 目录没有 `plugin_runtime` 引用，尚未发生 sidecar cutover。
+
+## Phase 3：隔离 Bundle 安装器
+
+### 交付边界
+
+Phase 3 新增严格 `.cspkg`、本地管理 CLI、每 bundle 独立 venv、离线 wheel 安装、
+协议结果探针、原子 activation registry 写入和逐 runtime 精确回滚。安装器仍属于通用
+Host，不导入 Pyne、Pine Compatibility 或 Indicator 私有模块。
+
+现有 Indicator/Pyne HTTP、range 和 WebSocket 执行路径保持不变。Phase 3 激活的
+runtime 已可由 Phase 2 Host 启动，但 production route 只有在 Phase 4 引入
+`legacy/shadow/sidecar` 后才会选择它。
+
+### `.cspkg` schema v1
+
+Archive 只能包含一个 `manifest.json` 和 manifest 明确列出的 wheel。Manifest 冻结：
+
+- plugin ID、显示名、精确 version、主 Python package 和
+  `candlescope.script-runtime/1`；
+- Python 范围和可用 `python -I -u -m <module>` 启动的 sidecar module；
+- 每个 wheel 的 archive path、package、精确 version、size 和 SHA-256；
+- 一个小型确定性 analyze/execute probe，以及两个 typed result canonical SHA-256。
+
+Builder 可以从省略 wheel size/hash 的 template 生成确定性 ZIP。验证拒绝未知字段、
+重复 JSON key、NaN/Infinity、绝对/父级/反斜杠/平台危险路径、大小写冲突、symlink、
+加密或不支持压缩、未声明 entry、大小上限、wheel hash 漂移，以及
+`METADATA/WHEEL/RECORD`、package/version 或 Wheel-Version 不一致。
+
+安装必须由调用者提供外层 bundle 的预期 SHA-256；`inspect` 只用于显示本地 bytes 的
+摘要，不能替代可信 release/lock。v1 CLI 不下载 URL，也不把 bundle 和摘要同时从
+未知来源自动发现。
+
+### 隔离安装与 probe
+
+安装器使用宿主明确选择的 Python 创建 `venv`，但从不修改 backend interpreter。
+全部依赖必须作为 bundle wheel 一次提供，安装命令固定为 `--isolated --no-index
+--no-deps --only-binary=:all:`，环境同时清除 `PYTHONPATH/PYTHONHOME` 和外部 pip
+配置；随后运行 `pip check`，并用 `importlib.metadata` 校验所有 distribution 的
+精确 version。
+
+安装器通过通用 `RuntimeSupervisor` 完成 handshake/describe、analyze 和
+executeBatch。Descriptor 必须精确匹配 manifest 的 ID/package/version，两个结果还要
+匹配 manifest 固定 hash。Probe 失败不会写 activation registry。
+
+### 原子 activation 与回滚
+
+完整 bundle SHA-256 的 64 位 hex 是确定性 `installationId`，安装目录为：
+
+```text
+installs/<runtime-id>/<installation-id>/
+```
+
+安装先在 `staging` 完成，probe 后原子重命名；目录不会原地覆盖或升级。安装器使用
+跨进程文件锁串行化写操作。每次真正切换会生成独立 `activationId`，先原子记录
+`before/after` history，再以同目录临时文件、flush、fsync 和 `os.replace` 替换
+`runtime-registry.json`；registry replacement 是唯一 activation commit point。
+
+相同 bundle 与相同 lifecycle policy 重复安装会重新校验现有环境并保持 activation
+不变。升级保留旧安装。Rollback 只接受当前 managed activation，验证 history 的
+`after` 与当前 registry 完全相等，再探测精确 `before` 目标并只替换该 runtime；其他
+managed 或手写 registry 条目保持不变。Rollback 不删除安装目录，可以继续沿历史链
+回退。
+
+应用不会热加载 registry；install/rollback 返回 `restartRequired=true`。旧安装和
+quarantine 的显式可达性 GC 不属于 Phase 3，安装器不会静默删除它们。
+
+### 社区开发入口
+
+CLI `backend/scripts/candlescope_plugin.py` 提供：
+
+- `build --manifest --wheel --output`；
+- `inspect <bundle>`；
+- `install <bundle> --sha256 <trusted digest>`；
+- `check <runtime-id>`、`list`、`rollback <runtime-id>`；
+- 全局 `--root`、`--registry`、`--python` 和 `--json`。
+
+双语完整说明位于 `backend/app/plugin_runtime/INSTALLER.md` 和
+`INSTALLER_zh.md`；SDK 提供可直接复制的 Hello manifest template。
+
+### 安全边界
+
+- 外层 SHA-256 是完整性 pin，不是发布者身份认证；
+- wheel-only/offline 阻止静默联网和 source build，但 runtime probe 会执行插件代码；
+- venv/sidecar 是依赖、协议和故障边界，不是恶意插件沙箱；
+- v1 仍无签名、透明日志、权限声明、网络隔离、secrets 或前端 JavaScript；
+- registry、receipt 或已有 venv 损坏时 fail closed，不覆盖同 identity 安装。
+
+### 阶段门禁
+
+- 确定性 bundle 构建、外层/内层 SHA、严格 archive/wheel 负例；
+- 真实 Hello wheel 在独立 venv 中离线安装并由 Host 完成协议和结果 probe；
+- 相同 bundle 快速重复安装不新建 venv/activation；
+- v1 -> v2 activation 后精确 rollback，且其他 registry entry 不变；
+- 错误 hash、错误 probe 和损坏已有安装不改变 registry；
+- Phase 0 transport golden、Phase 2 Host、SDK 和 backend 全量继续通过；
+- Ruff、format、compileall、diff check 通过且没有残留 sidecar/测试 venv。
+
+### 2026-07-21 验证证据
+
+- `.cspkg` builder、manifest/archive/wheel 审计、TOCTOU 和 CLI inspect：
+  `14 passed in 0.40s`；
+- 独立 venv、离线安装、环境隔离、probe、幂等、升级、history tamper、原子失败和
+  rollback：`10 passed in 50.36s`；
+- Phase 2 Host/Supervisor、managed registry、生命周期和架构门禁：
+  `46 passed, 4 warnings in 3.65s`；
+- Phase 0 HTTP/range/WebSocket golden：`3 passed in 1.30s`；
+- Indicator/Pyne 定向回归（包含 Phase 0）：`118 passed in 12.68s`；
+- Phase 1 SDK：`26 passed`，Ruff、format、compileall、隔离 sdist/wheel build 和
+  wheel package smoke 通过；Hello manifest template 已进入 SDK sdist；
+- backend 全量：`1909 passed, 4 warnings in 130.99s`；4 条 warning 仍为既有
+  FastAPI `on_event` 弃用提示；
+- Host/installer/测试的 Ruff、format check 与 `python -m compileall -q app tests
+  scripts/candlescope_plugin.py` 通过；`git diff --check` 通过；
+- 真实 SDK wheel 通过 CLI `build` 和 `inspect` 得到一致 bundle SHA-256；
+- 测试退出后 worktree 内没有残留 sidecar、venv、staging 或 `.part`；
+- 生产 Indicator 目录仍无 `plugin_runtime` 引用，Phase 4 cutover 尚未发生。
 
 ## 后续阶段不可越过的顺序
 

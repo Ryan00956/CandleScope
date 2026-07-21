@@ -11,7 +11,7 @@
 - Market data runtime: `app/data_engine/runtime.py`
 - Exchange registry/plugins: `app/exchanges`
 - Indicator engine and Pyne runtime: `app/indicator`
-- Generic script-runtime Host/Supervisor: `app/plugin_runtime`
+- Generic script-runtime Host/Supervisor/Installer: `app/plugin_runtime`
 - SQLite K-line storage: `app/data_engine/storage`
 
 ## Quick Start
@@ -66,9 +66,10 @@ curl http://127.0.0.1:18080/debug/snapshot
 
 Shutdown stops the lag monitor and IndicatorEngine, reclaims plugin sidecars,
 and then shuts down the Data Engine runtime. See
-[`app/plugin_runtime/README.md`](app/plugin_runtime/README.md) for host
-configuration, rollback, and security boundaries. Phase 2 does not route the
-existing Indicator/Pyne path to sidecars.
+[`app/plugin_runtime/README.md`](app/plugin_runtime/README.md) and the
+[`installer guide`](app/plugin_runtime/INSTALLER.md) for host configuration,
+`.cspkg` installation, rollback, and security boundaries. Phase 3 does not
+route the existing Indicator/Pyne path to sidecars.
 
 ## API Overview
 

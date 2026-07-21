@@ -10,10 +10,13 @@ from app.plugin_runtime.bootstrap import build_runtime_host_from_environment
 from app.plugin_runtime.errors import PluginRegistryError
 from app.plugin_runtime.registry import (
     DEFAULT_MAX_STDERR_BYTES,
+    ManagedRuntimeIdentity,
     RUNTIME_REGISTRY_SCHEMA_VERSION,
     RuntimeProcessSpec,
     RuntimeRegistry,
     load_runtime_registry,
+    runtime_registry_from_wire,
+    runtime_registry_to_wire,
 )
 
 
@@ -163,6 +166,69 @@ def test_process_spec_rejects_invalid_direct_construction() -> None:
             expected_version="1.0.0",
             executable=Path(sys.executable).resolve(),
         )
+
+
+def test_managed_activation_identity_round_trips_without_changing_manual_entries(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "runtime-registry.json"
+    entry = _plugin_entry(
+        managed={
+            "installationId": "b" * 64,
+            "activationId": "0123456789abcdef0123456789abcdef",
+            "bundleSha256": "sha256:" + ("a" * 64),
+        }
+    )
+    _write_registry(registry_path, [entry])
+
+    registry = load_runtime_registry(registry_path)
+    managed = registry.plugins[0].managed
+    assert managed == ManagedRuntimeIdentity(
+        installation_id="b" * 64,
+        activation_id="0123456789abcdef0123456789abcdef",
+        bundle_sha256="sha256:" + ("a" * 64),
+    )
+    wire = runtime_registry_to_wire(registry)
+    assert runtime_registry_from_wire(wire).plugins == registry.plugins
+
+    manual = runtime_registry_from_wire(
+        {
+            "schemaVersion": 1,
+            "plugins": [_plugin_entry()],
+        }
+    )
+    assert "managed" not in runtime_registry_to_wire(manual)["plugins"][0]
+
+
+@pytest.mark.parametrize(
+    "managed",
+    [
+        {
+            "installationId": "INVALID ID",
+            "activationId": "0" * 32,
+            "bundleSha256": "sha256:" + ("a" * 64),
+        },
+        {
+            "installationId": "b" * 64,
+            "activationId": "not-a-uuid",
+            "bundleSha256": "sha256:" + ("a" * 64),
+        },
+        {
+            "installationId": "b" * 64,
+            "activationId": "0" * 32,
+            "bundleSha256": "a" * 64,
+        },
+    ],
+)
+def test_managed_activation_identity_is_strict(
+    tmp_path: Path,
+    managed: dict[str, str],
+) -> None:
+    registry_path = tmp_path / "runtime-registry.json"
+    _write_registry(registry_path, [_plugin_entry(managed=managed)])
+
+    with pytest.raises(PluginRegistryError, match=r"managed\."):
+        load_runtime_registry(registry_path)
 
 
 def test_environment_bootstrap_supports_empty_default_and_hard_disable(

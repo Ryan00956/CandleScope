@@ -11,7 +11,7 @@
 - 行情数据 runtime：`app/data_engine/runtime.py`
 - 交易所 registry/plugins：`app/exchanges`
 - 指标引擎和 Pyne runtime：`app/indicator`
-- 通用脚本 runtime Host/Supervisor：`app/plugin_runtime`
+- 通用脚本 runtime Host/Supervisor/Installer：`app/plugin_runtime`
 - SQLite K 线存储：`app/data_engine/storage`
 
 ## 快速启动
@@ -64,8 +64,9 @@ curl http://127.0.0.1:18080/debug/snapshot
 7. 将 IndicatorEngine 桥接到 DataManager events。
 
 关闭时先停止 lag monitor 和 IndicatorEngine，再回收插件 sidecar，最后关闭 Data
-Engine runtime。Host 配置、回滚和安全边界见
-[`app/plugin_runtime/README_zh.md`](app/plugin_runtime/README_zh.md)。Phase 2
+Engine runtime。Host 配置、`.cspkg` 安装、回滚和安全边界见
+[`app/plugin_runtime/README_zh.md`](app/plugin_runtime/README_zh.md) 与
+[`app/plugin_runtime/INSTALLER_zh.md`](app/plugin_runtime/INSTALLER_zh.md)。Phase 3
 尚未把现有 Indicator/Pyne 执行路由切换到 sidecar。
 
 ## API 总览

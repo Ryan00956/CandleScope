@@ -44,11 +44,33 @@ def test_backend_installs_the_shared_sdk_contract_from_the_monorepo() -> None:
     assert requirements[0] == "-e ../packages/candlescope-plugin-sdk"
 
 
-def test_main_has_no_indicator_sidecar_cutover_in_phase_2() -> None:
+def test_main_has_no_indicator_sidecar_cutover_in_phase_3() -> None:
     production_indicator_files = [
         *BACKEND_ROOT.joinpath("app", "indicator").rglob("*.py"),
         *BACKEND_ROOT.joinpath("app", "api", "v1").glob("*indicator*.py"),
     ]
     for path in production_indicator_files:
         source = path.read_text(encoding="utf-8")
-        assert "plugin_runtime" not in source, f"unexpected Phase 2 routing in {path}"
+        assert "plugin_runtime" not in source, f"unexpected Phase 3 routing in {path}"
+
+
+def test_installer_is_offline_wheel_only_and_never_mutates_backend_python() -> None:
+    installer = (HOST_ROOT / "installer.py").read_text(encoding="utf-8")
+    bundle = (HOST_ROOT / "bundle.py").read_text(encoding="utf-8")
+    combined = installer + bundle
+
+    for forbidden in (
+        "urllib",
+        "requests",
+        "httpx",
+        "pip wheel",
+        "setup.py",
+        "build_sdist",
+    ):
+        assert forbidden not in combined
+    assert '"--no-index"' in installer
+    assert '"--no-deps"' in installer
+    assert '"--only-binary=:all:"' in installer
+    assert '"--isolated"' in installer
+    assert '"-m",\n                "venv"' in installer
+    assert "runtime-registry.json" not in bundle

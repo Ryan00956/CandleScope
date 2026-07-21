@@ -32,6 +32,9 @@ DEFAULT_RESTART_WINDOW_SECONDS = 60.0
 
 _PLUGIN_ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 _PACKAGE_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$")
+_INSTALLATION_ID = re.compile(r"^[0-9a-f]{64}$")
+_ACTIVATION_ID = re.compile(r"^[0-9a-f]{32}$")
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _reject_json_constant(value: str) -> None:
@@ -95,6 +98,36 @@ def _number(value: Any, label: str, *, minimum: float, maximum: float) -> float:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedRuntimeIdentity:
+    """Installer-owned identity used for exact check and plugin-level rollback."""
+
+    installation_id: str
+    activation_id: str
+    bundle_sha256: str
+
+    def __post_init__(self) -> None:
+        if not _INSTALLATION_ID.fullmatch(self.installation_id):
+            raise PluginRegistryError(
+                "managed.installationId must be 64 lowercase hex digits"
+            )
+        if not _ACTIVATION_ID.fullmatch(self.activation_id):
+            raise PluginRegistryError(
+                "managed.activationId must be 32 lowercase hex digits"
+            )
+        if not _SHA256.fullmatch(self.bundle_sha256):
+            raise PluginRegistryError(
+                "managed.bundleSha256 must use sha256:<64 lowercase hex>"
+            )
+
+    def to_wire(self) -> dict[str, str]:
+        return {
+            "installationId": self.installation_id,
+            "activationId": self.activation_id,
+            "bundleSha256": self.bundle_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeProcessSpec:
     """Resolved, immutable launch and supervision policy for one runtime."""
 
@@ -114,6 +147,7 @@ class RuntimeProcessSpec:
     max_stderr_bytes: int = DEFAULT_MAX_STDERR_BYTES
     max_restart_attempts: int = DEFAULT_MAX_RESTARTS
     restart_window_seconds: float = DEFAULT_RESTART_WINDOW_SECONDS
+    managed: ManagedRuntimeIdentity | None = None
 
     def __post_init__(self) -> None:
         if not _PLUGIN_ID.fullmatch(self.runtime_id):
@@ -214,6 +248,12 @@ class RuntimeProcessSpec:
             minimum=1.0,
             maximum=3600.0,
         )
+        if self.managed is not None and not isinstance(
+            self.managed, ManagedRuntimeIdentity
+        ):
+            raise PluginRegistryError(
+                f"runtime {self.runtime_id}.managed must be a ManagedRuntimeIdentity"
+            )
 
     @property
     def command(self) -> tuple[str, ...]:
@@ -277,6 +317,32 @@ def _parse_launch(value: Any, label: str) -> tuple[Path, tuple[str, ...], Path |
     return executable, arguments, working_directory
 
 
+def _parse_managed(value: Any, label: str) -> ManagedRuntimeIdentity:
+    managed = _mapping(value, label)
+    _only_keys(
+        managed,
+        {"installationId", "activationId", "bundleSha256"},
+        label,
+    )
+    return ManagedRuntimeIdentity(
+        installation_id=_string(
+            managed.get("installationId"),
+            f"{label}.installationId",
+            max_length=128,
+        ),
+        activation_id=_string(
+            managed.get("activationId"),
+            f"{label}.activationId",
+            max_length=32,
+        ),
+        bundle_sha256=_string(
+            managed.get("bundleSha256"),
+            f"{label}.bundleSha256",
+            max_length=71,
+        ),
+    )
+
+
 def _parse_plugin(value: Any, index: int) -> RuntimeProcessSpec:
     label = f"runtime registry.plugins[{index}]"
     plugin = _mapping(value, label)
@@ -293,6 +359,7 @@ def _parse_plugin(value: Any, index: int) -> RuntimeProcessSpec:
             "timeouts",
             "limits",
             "restart",
+            "managed",
         },
         label,
     )
@@ -370,7 +437,88 @@ def _parse_plugin(value: Any, index: int) -> RuntimeProcessSpec:
             minimum=1.0,
             maximum=3600.0,
         ),
+        managed=(
+            _parse_managed(plugin["managed"], f"{label}.managed")
+            if plugin.get("managed") is not None
+            else None
+        ),
     )
+
+
+def runtime_process_spec_to_wire(spec: RuntimeProcessSpec) -> dict[str, Any]:
+    if not isinstance(spec, RuntimeProcessSpec):
+        raise PluginRegistryError("runtime registry value is not a RuntimeProcessSpec")
+    return {
+        "id": spec.runtime_id,
+        "package": spec.expected_package,
+        "version": spec.expected_version,
+        "enabled": spec.enabled,
+        "autoStart": spec.auto_start,
+        "required": spec.required,
+        "launch": {
+            "executable": str(spec.executable),
+            "args": list(spec.arguments),
+            **(
+                {"workingDirectory": str(spec.working_directory)}
+                if spec.working_directory is not None
+                else {}
+            ),
+        },
+        "timeouts": {
+            "startupSeconds": spec.startup_timeout_seconds,
+            "requestSeconds": spec.request_timeout_seconds,
+            "shutdownSeconds": spec.shutdown_timeout_seconds,
+        },
+        "limits": {
+            "maxMessageBytes": spec.max_message_bytes,
+            "maxStderrBytes": spec.max_stderr_bytes,
+        },
+        "restart": {
+            "maxAttempts": spec.max_restart_attempts,
+            "windowSeconds": spec.restart_window_seconds,
+        },
+        **({"managed": spec.managed.to_wire()} if spec.managed is not None else {}),
+    }
+
+
+def runtime_registry_to_wire(registry: RuntimeRegistry) -> dict[str, Any]:
+    if not isinstance(registry, RuntimeRegistry):
+        raise PluginRegistryError("value is not a RuntimeRegistry")
+    return {
+        "schemaVersion": RUNTIME_REGISTRY_SCHEMA_VERSION,
+        "plugins": [
+            runtime_process_spec_to_wire(plugin) for plugin in registry.plugins
+        ],
+    }
+
+
+def runtime_registry_from_wire(
+    value: Any,
+    *,
+    source: Path | None = None,
+) -> RuntimeRegistry:
+    registry = _mapping(value, "runtime registry")
+    _only_keys(registry, {"schemaVersion", "plugins"}, "runtime registry")
+    schema_version = registry.get("schemaVersion")
+    if (
+        isinstance(schema_version, bool)
+        or schema_version != RUNTIME_REGISTRY_SCHEMA_VERSION
+    ):
+        raise PluginRegistryError(
+            "unsupported runtime registry schema; "
+            f"expected {RUNTIME_REGISTRY_SCHEMA_VERSION}"
+        )
+    raw_plugins = registry.get("plugins")
+    if isinstance(raw_plugins, (str, bytes)) or not isinstance(raw_plugins, Sequence):
+        raise PluginRegistryError("runtime registry.plugins must be an array")
+    if len(raw_plugins) > MAX_REGISTERED_RUNTIMES:
+        raise PluginRegistryError(
+            f"runtime registry exceeds {MAX_REGISTERED_RUNTIMES} plugins"
+        )
+    plugins = tuple(
+        _parse_plugin(plugin, index) for index, plugin in enumerate(raw_plugins)
+    )
+    return RuntimeRegistry(plugins=plugins, source=source)
 
 
 def load_runtime_registry(
@@ -412,25 +560,4 @@ def load_runtime_registry(
             f"runtime registry is not valid UTF-8 JSON: {exc}"
         ) from exc
 
-    registry = _mapping(root, "runtime registry")
-    _only_keys(registry, {"schemaVersion", "plugins"}, "runtime registry")
-    schema_version = registry.get("schemaVersion")
-    if (
-        isinstance(schema_version, bool)
-        or schema_version != RUNTIME_REGISTRY_SCHEMA_VERSION
-    ):
-        raise PluginRegistryError(
-            "unsupported runtime registry schema; "
-            f"expected {RUNTIME_REGISTRY_SCHEMA_VERSION}"
-        )
-    raw_plugins = registry.get("plugins")
-    if isinstance(raw_plugins, (str, bytes)) or not isinstance(raw_plugins, Sequence):
-        raise PluginRegistryError("runtime registry.plugins must be an array")
-    if len(raw_plugins) > MAX_REGISTERED_RUNTIMES:
-        raise PluginRegistryError(
-            f"runtime registry exceeds {MAX_REGISTERED_RUNTIMES} plugins"
-        )
-    plugins = tuple(
-        _parse_plugin(value, index) for index, value in enumerate(raw_plugins)
-    )
-    return RuntimeRegistry(plugins=plugins, source=registry_path)
+    return runtime_registry_from_wire(root, source=registry_path)

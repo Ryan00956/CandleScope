@@ -48,3 +48,39 @@ class PluginRemoteError(PluginHostError):
 
 class PluginTransportError(PluginHostError):
     """A fatal process or wire failure that invalidates the session."""
+
+
+class PluginBundleError(PluginHostError):
+    """A .cspkg archive or its manifest failed strict verification."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        runtime_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code="PLUGIN_BUNDLE_INVALID",
+            message=message,
+            runtime_id=runtime_id,
+            details=details or {},
+        )
+
+
+class PluginInstallerError(PluginHostError):
+    """A verified bundle could not be installed, checked, or rolled back."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        runtime_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code="PLUGIN_INSTALLER_FAILED",
+            message=message,
+            runtime_id=runtime_id,
+            details=details or {},
+        )

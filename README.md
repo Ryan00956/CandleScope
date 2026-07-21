@@ -417,13 +417,17 @@ feature negotiation, typed batch OHLCV input, diagnostics, and the first
 CandleScope-owned line-series Render IR. A runnable Hello Runtime and a frozen
 wire transcript are included.
 
-Plugin platform Phase 2 now includes the generic
+Plugin platform Phases 2 and 3 now include the generic
 [`app.plugin_runtime`](backend/app/plugin_runtime/README.md) Host/Supervisor.
-It can launch and supervise explicitly activated sidecars with strict
-handshake, timeout, message-limit, restart-circuit, and health behavior. The
-default registry is empty and existing Indicator/Pyne HTTP, range, and
-WebSocket paths do not route to sidecars yet. Isolated bundle installation and
-`legacy/shadow/sidecar` routing belong to Phases 3 and 4 respectively.
+It launches and supervises explicitly activated sidecars with strict
+handshake, timeout, message-limit, restart-circuit, and health behavior. Phase
+3 also provides deterministic `.cspkg` bundles, caller-pinned SHA-256, one
+isolated venv per bundle, offline wheel install, result probes, atomic
+activation, and per-runtime rollback; see the
+[`installer guide`](backend/app/plugin_runtime/INSTALLER.md). The default
+registry is empty and existing Indicator/Pyne HTTP, range, and WebSocket paths
+do not route to sidecars yet; `legacy/shadow/sidecar` routing belongs to Phase
+4.
 
 ## API Documentation
 

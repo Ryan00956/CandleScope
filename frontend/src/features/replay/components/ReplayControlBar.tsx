@@ -10,9 +10,10 @@ const SPEEDS: readonly ReplaySpeed[] = [1, 5, 15, 30, 60, 120, 300, 600, "MAX"];
 export interface ReplayControlBarProps {
   readonly runtime: ReplayRuntime;
   readonly viewer?: ReplayViewerRuntime;
+  readonly publicTimeLabel?: string | undefined;
 }
 
-export default function ReplayControlBar({ runtime, viewer }: ReplayControlBarProps) {
+export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: ReplayControlBarProps) {
   const [showEnd, setShowEnd] = useState(false);
   const [openOrderDisposition, setOpenOrderDisposition] = useState<"expire" | "cancel" | "preserve">("expire");
   const [positionDisposition, setPositionDisposition] = useState<"keep" | "mark_close">("keep");
@@ -32,10 +33,11 @@ export default function ReplayControlBar({ runtime, viewer }: ReplayControlBarPr
     ? Math.min(1, Math.max(0, phase3Ratio / 1_000_000))
     : domainProgress;
   const baseIntervalMs = Math.max(1, (parseIntervalSeconds(config?.base_interval ?? "1m") ?? 60) * 1_000);
-  const publicTime = formatReplayPublicTime(store.virtualTimeMs, {
+  const fallbackPublicTime = formatReplayPublicTime(store.virtualTimeMs, {
     blindMode: config?.blind_mode ?? true,
     originMs: store.replayStartMs,
   });
+  const publicTime = publicTimeLabel ?? fallbackPublicTime;
   const command = (type: Parameters<ReplayRuntime["actions"]["submitCommand"]>[0], payload: Parameters<ReplayRuntime["actions"]["submitCommand"]>[1] = {}) => {
     void runtime.actions.submitCommand(type, payload).catch(() => undefined);
   };

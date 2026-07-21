@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
 
@@ -10,12 +11,14 @@ from .canonical import canonical_sha256
 from .clock import validate_speed
 from .constants import CommandType, SessionState
 from .errors import ReplayDomainError, ReplayErrorCode
+from .internal_commands import InternalCommandType
 from .models import ReplayCommand, ReplayCursor, validate_counter, validate_timestamp_ms
 
 
 MAX_STEP_COUNT = 100_000
 MAX_ADVANCE_MS = 30 * 86_400_000
 MAX_JOURNAL_NOTE_CHARS = 4_000
+MAX_POLICY_REASON_CHARS = 500
 
 
 def _exact_keys(payload: Mapping[str, object], expected: set[str]) -> None:
@@ -57,7 +60,7 @@ def _positive_bounded_int(
 
 @dataclass(frozen=True, slots=True)
 class ParsedCommand:
-    type: CommandType
+    type: CommandType | InternalCommandType
     values: Mapping[str, object]
 
     def __post_init__(self) -> None:
@@ -204,6 +207,65 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
     if command_type is CommandType.REVEAL_HISTORY:
         _exact_keys(payload, set())
         return ParsedCommand(command_type, {})
+    if command_type is InternalCommandType.REVEAL_HISTORY_AUTHORIZED:
+        if not payload:
+            return ParsedCommand(command_type, {"reason": "user reveal"})
+        _exact_keys(payload, {"reason"})
+        reason = payload["reason"]
+        if not isinstance(reason, str):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "reveal reason must be a string",
+            )
+        normalized_reason = reason.strip()
+        if not normalized_reason or len(normalized_reason) > MAX_POLICY_REASON_CHARS:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                f"reveal reason must contain 1-{MAX_POLICY_REASON_CHARS} characters",
+            )
+        return ParsedCommand(command_type, {"reason": normalized_reason})
+    if command_type is InternalCommandType.ADJUST_CAPITAL:
+        _exact_keys(payload, {"kind", "amount", "reason"})
+        kind = payload["kind"]
+        amount = payload["amount"]
+        reason = payload["reason"]
+        if kind not in {"deposit", "withdraw"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "capital adjustment kind is unsupported",
+            )
+        if not isinstance(amount, str):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "capital adjustment amount must be a Decimal string",
+            )
+        try:
+            number = Decimal(amount)
+        except InvalidOperation as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "capital adjustment amount is invalid",
+            ) from exc
+        if not number.is_finite() or number <= 0 or format(number, "f") != amount:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "capital adjustment amount must be a positive canonical Decimal string",
+            )
+        if not isinstance(reason, str):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "capital adjustment reason must be a string",
+            )
+        normalized_reason = reason.strip()
+        if not normalized_reason or len(normalized_reason) > MAX_POLICY_REASON_CHARS:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                f"capital adjustment reason must contain 1-{MAX_POLICY_REASON_CHARS} characters",
+            )
+        return ParsedCommand(
+            command_type,
+            {"kind": kind, "amount": amount, "reason": normalized_reason},
+        )
     if command_type is CommandType.END_SESSION:
         if not payload:
             return ParsedCommand(

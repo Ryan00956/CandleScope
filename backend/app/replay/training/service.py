@@ -7,6 +7,7 @@ import hashlib
 import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from app.replay.constants import (
@@ -19,12 +20,14 @@ from app.replay.constants import (
     StartPolicy,
 )
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
+from app.replay.internal_commands import InternalCommandType
 from app.replay.models import (
     MAX_TIMESTAMP_MS,
     FeeModel,
     ReplayCommand,
     ReplaySessionConfig,
     SlippageModel,
+    normalize_decimal_string,
     validate_identifier,
 )
 
@@ -38,11 +41,13 @@ from .control import (
 )
 from .history import build_history_page
 from .models import (
+    IntegrityMode,
     ReplaySource,
     ReplayV2CommandType,
     StartMode,
     TimeDisclosurePolicy,
     TrainingRunCreateRequest,
+    validate_v2_counter,
 )
 from .storage import TrainingRunStore
 
@@ -96,6 +101,129 @@ class TrainingRunService:
             self._identifier(session_id, field_name="session_id")
         )
         return (await self.store.get_viewer_state(run_id)).to_dict()
+
+    async def integrity(self, run_id: str) -> dict[str, object]:
+        return await self.store.integrity(self._identifier(run_id, field_name="run_id"))
+
+    async def equity(
+        self,
+        run_id: str,
+        *,
+        resolution: str = "AUTO",
+        limit: int = 1_000,
+    ) -> dict[str, object]:
+        return await self.store.equity(
+            self._identifier(run_id, field_name="run_id"),
+            resolution=resolution,
+            limit=limit,
+        )
+
+    async def journal(self, run_id: str) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        binding = await self.store.run_binding(normalized)
+        journal = await self.replay_service.journal(
+            str(binding["adapter_session_id"])
+        )
+        return {
+            "protocol": "replay.v2",
+            "run_id": normalized,
+            "entries": journal["entries"],
+            "integrity": await self.store.integrity(normalized),
+        }
+
+    async def report(self, run_id: str) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        binding = await self.store.run_binding(normalized)
+        report = await self.replay_service.report(
+            str(binding["adapter_session_id"])
+        )
+        return {
+            "protocol": "replay.v2",
+            "run_id": normalized,
+            "data_fidelity": report["data_fidelity"],
+            "execution_fidelity": report["execution_fidelity"],
+            "revealed": report["revealed"],
+            "report": report["report"],
+            "integrity": await self.store.integrity(normalized),
+            **(
+                {"actual_history": report["actual_history"]}
+                if report.get("revealed") and "actual_history" in report
+                else {}
+            ),
+        }
+
+    async def start_review(
+        self,
+        run_id: str,
+        *,
+        event_id: str | None,
+    ) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        normalized_event = (
+            None
+            if event_id is None
+            else self._identifier(event_id, field_name="event_id")
+        )
+        return await self.store.start_review(
+            run_id=normalized,
+            review_id=self._identifier(
+                f"review-{uuid.uuid4().hex}",
+                field_name="review_id",
+            ),
+            event_id=normalized_event,
+        )
+
+    async def fork_run(
+        self,
+        run_id: str,
+        *,
+        event_id: str,
+    ) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        normalized_event = self._identifier(event_id, field_name="event_id")
+        event = await self.store.checkpoint_for_event(normalized, normalized_event)
+        checkpoint_id = validate_v2_counter(
+            event["checkpoint_id"],
+            field_name="review checkpoint_id",
+        )
+        child_run_id = self._identifier(self._run_id_factory(), field_name="run_id")
+        extension_factory = self.store.fork_run_writer(
+            child_run_id=child_run_id,
+            parent_run_id=normalized,
+            parent_event_id=normalized_event,
+            parent_checkpoint_id=checkpoint_id,
+        )
+        try:
+            forked = await self.replay_service.fork_session_at_checkpoint(
+                str(event["adapter_session_id"]),
+                checkpoint_id=checkpoint_id,
+                extension_factory=extension_factory,
+            )
+        except ReplayDomainError as exc:
+            raise TrainingRunError(
+                "REVIEW_FORK_FAILED",
+                "review event could not be forked exactly",
+                status_code=409,
+                details={"reason": exc.code.value},
+            ) from exc
+        snapshot = forked["snapshot"]
+        if not isinstance(snapshot, Mapping) or snapshot.get("state_hash") != event["state_hash"]:
+            raise TrainingRunError(
+                "REVIEW_FORK_MISMATCH",
+                "forked run state does not match the selected review event",
+                status_code=409,
+            )
+        card = await self.store.get_run(child_run_id)
+        return {
+            "protocol": "replay.v2",
+            "parent_run_id": normalized,
+            "parent_event_id": normalized_event,
+            "run": {
+                **card,
+                "dataset_epoch": event["dataset_epoch"],
+                "state_hash": snapshot["state_hash"],
+            },
+        }
 
     async def create_run(
         self, request: TrainingRunCreateRequest
@@ -295,6 +423,82 @@ class TrainingRunService:
             )
             return result
         session = await self.replay_service.get_session(session_id)
+        if command.type is ReplayV2CommandType.RECORD_VIEW_ACTION:
+            snapshot = self._assert_expected_cursor(command, session)
+            payload = self._exact_payload(
+                command.payload,
+                {"event_type", "semantic_key", "value"},
+            )
+            event_type = self._identifier(
+                payload["event_type"],
+                field_name="view event_type",
+            )
+            semantic_key = self._identifier(
+                payload["semantic_key"],
+                field_name="view semantic_key",
+            )
+            value = payload["value"]
+            if not isinstance(value, Mapping):
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "view action value must be an object",
+                    status_code=422,
+                )
+            cursor = snapshot["cursor"]
+            if not isinstance(cursor, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "adapter cursor is invalid",
+                    status_code=503,
+                )
+            view_action = await self.store.record_view_action(
+                run_id=normalized_run,
+                command_id=command.command_id,
+                event_type=event_type,
+                semantic_key=semantic_key,
+                value=value,
+                public_time_ms=int(cursor["virtual_time_ms"]),
+                source_sequence=int(cursor["source_sequence"]),
+            )
+            viewer = await self.store.get_viewer_state(normalized_run)
+            return {
+                "protocol": "replay.v2",
+                "run_id": normalized_run,
+                "session_id": session_id,
+                "command_id": command.command_id,
+                "revision": snapshot["revision"],
+                "sequence": snapshot["sequence"],
+                "state": snapshot["state"],
+                "state_hash": snapshot["state_hash"],
+                "cursor": cursor,
+                "viewer_state": viewer.to_dict(),
+                "data": {
+                    "view_action": view_action,
+                    "domain_hash_unchanged": True,
+                },
+            }
+        if command.type in {
+            ReplayV2CommandType.DEPOSIT,
+            ReplayV2CommandType.WITHDRAW,
+            ReplayV2CommandType.CHANGE_FEE_POLICY,
+            ReplayV2CommandType.CHANGE_LEVERAGE_CAP,
+            ReplayV2CommandType.CHANGE_FUNDING_POLICY,
+            ReplayV2CommandType.REVEAL_TIME,
+        }:
+            snapshot = self._assert_expected_cursor(command, session)
+            result = await self._execute_policy_command(
+                command=command,
+                binding=binding,
+                snapshot=snapshot,
+                session_id=session_id,
+            )
+            await self.store.save_command_result(
+                run_id=normalized_run,
+                command_id=command.command_id,
+                command=command_payload,
+                result=result,
+            )
+            return result
         if command.type is ReplayV2CommandType.SET_DISPLAY_INTERVAL:
             # ViewerState is outside the domain hash and cursor. A display
             # switch submitted while an advance is running must not be rejected
@@ -376,6 +580,172 @@ class TrainingRunService:
             result=result,
         )
         return result
+
+    async def _execute_policy_command(
+        self,
+        *,
+        command: ReplayV2Command,
+        binding: Mapping[str, object],
+        snapshot: Mapping[str, object],
+        session_id: str,
+    ) -> dict[str, object]:
+        command_value = command.type.value
+        integrity_mode = IntegrityMode(str(binding["integrity_mode"]))
+        allowed_payload = binding["allowed_mutations"]
+        if not isinstance(allowed_payload, (list, tuple)) or any(
+            not isinstance(item, str) for item in allowed_payload
+        ):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training mutation allowlist is invalid",
+                status_code=503,
+            )
+        allowed = {str(item) for item in allowed_payload}
+        if integrity_mode is IntegrityMode.CHALLENGE:
+            if command.type is not ReplayV2CommandType.REVEAL_TIME:
+                raise TrainingRunError(
+                    "INTEGRITY_POLICY_REJECTED",
+                    "CHALLENGE integrity mode rejects policy mutations",
+                    status_code=409,
+                    details={"command": command_value},
+                )
+            if snapshot["state"] != "ENDED":
+                raise TrainingRunError(
+                    "INTEGRITY_POLICY_REJECTED",
+                    "CHALLENGE time reveal is available only after the run ended",
+                    status_code=409,
+                )
+        elif integrity_mode is IntegrityMode.PRACTICE and command_value not in allowed:
+            raise TrainingRunError(
+                "INTEGRITY_POLICY_REJECTED",
+                "PRACTICE mutation is not in the creation-time allowlist",
+                status_code=409,
+                details={"command": command_value},
+            )
+        if command.type in {
+            ReplayV2CommandType.CHANGE_FEE_POLICY,
+            ReplayV2CommandType.CHANGE_LEVERAGE_CAP,
+            ReplayV2CommandType.CHANGE_FUNDING_POLICY,
+        }:
+            raise TrainingRunError(
+                "REPLAY_POLICY_UNSUPPORTED",
+                "the v1 execution adapter cannot revise this rule without changing historical semantics",
+                status_code=409,
+                details={
+                    "command": command_value,
+                    "atomic": True,
+                    "applied": False,
+                },
+            )
+        if command.type is ReplayV2CommandType.REVEAL_TIME:
+            if bool(binding["revealed"]):
+                raise TrainingRunError(
+                    "TIME_ALREADY_REVEALED",
+                    "training time disclosure is already irreversible",
+                    status_code=409,
+                )
+            if set(command.payload) not in (set(), {"reason"}):
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "reveal_time accepts only an optional reason",
+                    status_code=422,
+                )
+            reason = command.payload.get("reason", "user reveal")
+            if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 500:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "reveal reason must contain 1-500 characters",
+                    status_code=422,
+                )
+            v1_type = InternalCommandType.REVEAL_HISTORY_AUTHORIZED
+            v1_payload: dict[str, object] = {"reason": reason.strip()}
+        else:
+            payload = self._exact_payload(command.payload, {"amount", "reason"})
+            amount = payload["amount"]
+            reason = payload["reason"]
+            if not isinstance(amount, str) or not isinstance(reason, str):
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "capital mutation requires Decimal amount and reason strings",
+                    status_code=422,
+                )
+            try:
+                normalized_amount = normalize_decimal_string(
+                    amount,
+                    field_name="capital amount",
+                )
+            except (TypeError, ValueError) as exc:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "capital amount is invalid",
+                    status_code=422,
+                ) from exc
+            if normalized_amount != amount or Decimal(amount) <= 0:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "capital amount must be a positive canonical Decimal string",
+                    status_code=422,
+                )
+            normalized_reason = reason.strip()
+            if not normalized_reason or len(normalized_reason) > 500:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "capital mutation reason must contain 1-500 characters",
+                    status_code=422,
+                )
+            v1_type = InternalCommandType.ADJUST_CAPITAL
+            v1_payload = {
+                "kind": command_value,
+                "amount": normalized_amount,
+                "reason": normalized_reason,
+            }
+        v1_command = ReplayCommand(
+            protocol=REPLAY_PROTOCOL,
+            command_id=command.command_id,
+            client_instance_id=command.client_instance_id,
+            expected_revision=command.expected_revision,
+            type=v1_type,
+            payload=v1_payload,
+        )
+        try:
+            adapter_result = await self.replay_service.command(
+                session_id,
+                v1_command,
+                _training_internal=True,
+            )
+        except ReplayDomainError as exc:
+            raise TrainingRunError(
+                exc.code.value,
+                exc.message,
+                status_code=exc.http_status,
+                details=exc.details,
+            ) from exc
+        viewer = await self.store.get_viewer_state(command.run_id)
+        adapter_data = adapter_result["data"]
+        if not isinstance(adapter_data, Mapping):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "adapter command data is invalid",
+                status_code=503,
+            )
+        return {
+            "protocol": "replay.v2",
+            "run_id": command.run_id,
+            "session_id": session_id,
+            "command_id": command.command_id,
+            "revision": adapter_result["revision"],
+            "sequence": adapter_result["sequence"],
+            "state": adapter_result["state"],
+            "state_hash": adapter_result["state_hash"],
+            "cursor": adapter_result["cursor"],
+            "viewer_state": viewer.to_dict(),
+            "data": {
+                **dict(adapter_data),
+                "integrity_mode": integrity_mode.value,
+                "policy_command": command_value,
+                "adapter_command": v1_type.value,
+            },
+        }
 
     async def get_advance_progress(
         self,

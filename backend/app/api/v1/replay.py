@@ -294,6 +294,7 @@ class TrainingRunCreatePayload(_StrictModel):
     margin_mode: MarginMode
     funding_mode: Literal["OFF"]
     allow_rule_changes: bool
+    allowed_mutations: list[str] = Field(default_factory=list, max_length=6)
 
 
 class TrainingRunMigrationPayload(_StrictModel):
@@ -316,6 +317,14 @@ class ReplayV2CommandPayload(_StrictModel):
     expected_cursor: TrainingCursorPayload
     type: str = Field(min_length=1, max_length=64)
     payload: dict[str, object]
+
+
+class ReplayReviewPayload(_StrictModel):
+    event_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ReplayForkPayload(_StrictModel):
+    event_id: str = Field(min_length=1, max_length=128)
 
 
 async def enforce_replay_request_limit(request: Request) -> None:
@@ -554,6 +563,75 @@ async def command_replay_v2_run(
 ) -> dict[str, object]:
     command = ReplayV2Command.from_dict(payload.model_dump(mode="json"))
     return await _training_service(request).command(run_id, command)
+
+
+@router.get("/runs/{run_id}/integrity")
+async def replay_v2_training_integrity(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).integrity(run_id)
+
+
+@router.get("/runs/{run_id}/equity")
+async def replay_v2_training_equity(
+    request: Request,
+    run_id: str,
+    resolution: str = Query(default="AUTO", min_length=1, max_length=16),
+    limit: int = Query(default=1_000, ge=1, le=5_000),
+) -> dict[str, object]:
+    return await _training_service(request).equity(
+        run_id,
+        resolution=resolution,
+        limit=limit,
+    )
+
+
+@router.get("/runs/{run_id}/journal")
+async def replay_v2_training_journal(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).journal(run_id)
+
+
+@router.get("/runs/{run_id}/report")
+async def replay_v2_training_report(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).report(run_id)
+
+
+@router.post(
+    "/runs/{run_id}/review",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def review_replay_v2_run(
+    request: Request,
+    run_id: str,
+    payload: ReplayReviewPayload,
+) -> dict[str, object]:
+    return await _training_service(request).start_review(
+        run_id,
+        event_id=payload.event_id,
+    )
+
+
+@router.post(
+    "/runs/{run_id}/fork",
+    status_code=201,
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def fork_replay_v2_run(
+    request: Request,
+    run_id: str,
+    payload: ReplayForkPayload,
+) -> dict[str, object]:
+    return await _training_service(request).fork_run(
+        run_id,
+        event_id=payload.event_id,
+    )
 
 
 @router.get("/runs/{run_id}")

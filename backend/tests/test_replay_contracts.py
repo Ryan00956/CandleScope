@@ -90,6 +90,26 @@ def test_protocol_literals_and_enums_are_frozen_and_round_trip() -> None:
         assert all(enum_type(member.value) is member for member in enum_type)
 
 
+@pytest.mark.parametrize(
+    "command_type",
+    ("_training_adjust_capital", "_training_reveal_history"),
+)
+def test_replay_v1_transport_rejects_training_internal_command_types(
+    command_type: str,
+) -> None:
+    with pytest.raises(ValueError, match="command type"):
+        ReplayCommand.from_dict(
+            {
+                "protocol": "replay.v1",
+                "command_id": "internal-boundary",
+                "client_instance_id": "contract-test",
+                "expected_revision": 0,
+                "type": command_type,
+                "payload": {},
+            }
+        )
+
+
 @pytest.mark.parametrize("value", ["", "  ", "has space", "slash/value", "x" * 129])
 def test_identifier_validation_rejects_unsafe_or_ambiguous_values(value: str) -> None:
     with pytest.raises((TypeError, ValueError)):

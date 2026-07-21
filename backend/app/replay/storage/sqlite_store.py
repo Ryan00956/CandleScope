@@ -25,6 +25,19 @@ SessionSummaryWriter = Callable[
     [sqlite3.Connection, str, Mapping[str, object], Mapping[str, object], int],
     None,
 ]
+SessionMutationWriter = Callable[
+    [
+        sqlite3.Connection,
+        str,
+        Mapping[str, object],
+        bool,
+        Mapping[str, object] | None,
+        Mapping[str, object],
+        Mapping[str, object],
+        int,
+    ],
+    None,
+]
 
 
 def _blob_sha256(value: bytes) -> str:
@@ -93,6 +106,7 @@ class ReplaySQLiteStore:
         self._closed = False
         self._degraded_reason: str | None = None
         self._session_summary_writer: SessionSummaryWriter | None = None
+        self._session_mutation_writer: SessionMutationWriter | None = None
         self._metrics = {
             "transactions": 0,
             "transaction_failures": 0,
@@ -344,6 +358,16 @@ class ReplaySQLiteStore:
             self._update_session(connection, session_id, state, now_ms=now)
             self._replace_component_rows(
                 connection, session_id, component_state or {}, now_ms=now
+            )
+            self._write_session_mutation(
+                connection,
+                session_id,
+                command_payload,
+                accepted,
+                result,
+                state,
+                component_state or {},
+                now_ms=now,
             )
             self._write_session_summary(
                 connection,
@@ -827,6 +851,16 @@ class ReplaySQLiteStore:
             raise RuntimeError("replay session summary writer is already registered")
         self._session_summary_writer = writer
 
+    def register_session_mutation_writer(self, writer: SessionMutationWriter) -> None:
+        """Register one additive command projection in the v1 transaction."""
+
+        if (
+            self._session_mutation_writer is not None
+            and self._session_mutation_writer != writer
+        ):
+            raise RuntimeError("replay session mutation writer is already registered")
+        self._session_mutation_writer = writer
+
     async def run_extension_write(self, operation):
         """Run a trusted additive-schema write under the replay transaction lock."""
 
@@ -923,6 +957,32 @@ class ReplaySQLiteStore:
         writer = self._session_summary_writer
         if writer is not None:
             writer(connection, session_id, state, component_state, now_ms)
+
+    def _write_session_mutation(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        command: Mapping[str, object],
+        accepted: bool,
+        result: Mapping[str, object] | None,
+        state: Mapping[str, object],
+        component_state: Mapping[str, object],
+        *,
+        now_ms: int,
+    ) -> None:
+        writer = self._session_mutation_writer
+        if writer is None:
+            return
+        writer(
+            connection,
+            session_id,
+            command,
+            accepted,
+            result,
+            state,
+            component_state,
+            now_ms,
+        )
 
     def _insert_checkpoint(
         self,

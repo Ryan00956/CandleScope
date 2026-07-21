@@ -1,5 +1,9 @@
 import type { ReplayCatalogEntry } from "../replayTypes.js";
 import type { TrainingRunDraft } from "../trainingHubModel.js";
+import {
+  REPLAY_POLICY_MUTATIONS,
+  type ReplayPolicyMutation,
+} from "../replayIntegrityModel.js";
 import type {
   ReplayV2RunState,
   ReplayV2SourceKind,
@@ -53,6 +57,12 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
     );
   }
   const busy = runtime.operation === "create";
+  const toggleMutation = (mutation: ReplayPolicyMutation, checked: boolean) => {
+    const next = checked
+      ? [...draft.allowedMutations, mutation]
+      : draft.allowedMutations.filter((item) => item !== mutation);
+    patchDraft(runtime, { allowedMutations: [...new Set(next)] });
+  };
   return (
     <section className="training-hub-create" aria-label="新建训练配置">
       <header>
@@ -117,18 +127,44 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           </select>
         </label>
         {draft.startMode === "MANUAL" && (
-          <label>
-            请求开始时间（ms）
-            <input
-              type="number"
-              min={0}
-              value={draft.requestedStartMs ?? ""}
-              onChange={(event) => patchDraft(runtime, {
-                requestedStartMs: event.target.value === "" ? null : Number(event.target.value),
-              })}
-            />
-          </label>
+          <>
+            <label>
+              请求开始时间（ms）
+              <input
+                type="number"
+                min={0}
+                value={draft.requestedStartMs ?? ""}
+                onChange={(event) => patchDraft(runtime, {
+                  requestedStartMs: event.target.value === "" ? null : Number(event.target.value),
+                })}
+              />
+            </label>
+            <p className="training-hub-field-warning" role="note">
+              手动起点属于已知时间；即使隐藏显示，也不会获得严格 Challenge 结果标签。
+            </p>
+          </>
         )}
+        <label>
+          完整性模式
+          <select
+            value={draft.integrityMode}
+            onChange={(event) => {
+              const integrityMode = event.target.value as TrainingRunDraft["integrityMode"];
+              patchDraft(runtime, {
+                integrityMode,
+                allowedMutations: integrityMode === "CHALLENGE"
+                  ? []
+                  : integrityMode === "SANDBOX"
+                    ? REPLAY_POLICY_MUTATIONS
+                    : ["deposit", "withdraw"],
+              });
+            }}
+          >
+            <option value="CHALLENGE">Challenge · 全部规则锁定</option>
+            <option value="PRACTICE">Practice · 显式白名单</option>
+            <option value="SANDBOX">Sandbox · 全部变更可审计</option>
+          </select>
+        </label>
         <label>
           时间披露
           <select
@@ -137,8 +173,13 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               timeDisclosurePolicy: event.target.value as TrainingRunDraft["timeDisclosurePolicy"],
             })}
           >
-            <option value="HIDE_ALL">HIDE_ALL · 盲化挑战</option>
             <option value="NONE">NONE · 显示历史时间</option>
+            <option value="HIDE_YEAR">HIDE_YEAR · 隐藏年份</option>
+            <option value="HIDE_MONTH">HIDE_MONTH · 隐藏年月</option>
+            <option value="HIDE_DAY">HIDE_DAY · 相对日期</option>
+            <option value="HIDE_HOUR">HIDE_HOUR · 相对小时</option>
+            <option value="HIDE_MINUTE">HIDE_MINUTE · 相对分钟</option>
+            <option value="HIDE_ALL">HIDE_ALL · 完全相对时间</option>
           </select>
         </label>
         <label>
@@ -205,13 +246,27 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           />
         </label>
       </div>
-      <div className="training-hub-capability-boundary" aria-label="Phase 1 能力边界">
+      <fieldset className="training-hub-mutation-policy" disabled={draft.integrityMode !== "PRACTICE" || busy}>
+        <legend>Practice 可审计变更白名单</legend>
+        {REPLAY_POLICY_MUTATIONS.map((mutation) => (
+          <label key={mutation}>
+            <input
+              type="checkbox"
+              checked={draft.allowedMutations.includes(mutation)}
+              onChange={(event) => toggleMutation(mutation, event.target.checked)}
+            />
+            {mutation}
+          </label>
+        ))}
+        <p>入金、出金和不可逆时间揭示已接通；费率、杠杆上限与资金费策略当前命令会明确拒绝。</p>
+      </fieldset>
+      <div className="training-hub-capability-boundary" aria-label="Phase 4 能力边界">
         <h3>本阶段明确不可用</h3>
         <ul>
           <li><strong>多商品</strong> — {evaluation.unsupported.multi_symbol}</li>
           <li><strong>资金费</strong> — {evaluation.unsupported.funding}</li>
           <li><strong>历史盘口</strong> — {evaluation.unsupported.historical_l2}</li>
-          <li><strong>规则修改</strong> — {evaluation.unsupported.rule_changes}</li>
+          <li><strong>动态规则</strong> — {evaluation.unsupported.rule_changes}</li>
           <li><strong>逐仓保证金</strong> — {evaluation.unsupported.isolated_margin}</li>
         </ul>
       </div>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -275,6 +276,85 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
         assert malformed.status_code == 422
         assert malformed.json()["protocol"] == "replay.v2"
         assert malformed.json()["error"]["code"] == "TRAINING_RUN_INVALID"
+    finally:
+        await service.shutdown(step_timeout=0.2)
+
+
+async def test_phase4_http_boundaries_expose_only_public_time_and_exact_review_fork(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "phase4-api.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        run = created.json()["run"]
+        run_id = run["run_id"]
+        actual_start = START_MS + 4 * INTERVAL_MS
+
+        integrity = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run_id}/integrity",
+        )
+        assert integrity.status_code == 200
+        integrity_payload = integrity.json()
+        assert integrity_payload["start_time_known"] is True
+        assert integrity_payload["strict_eligible"] is False
+        assert integrity_payload["public_time"]["policy"] == "HIDE_ALL"
+        assert str(actual_start) not in json.dumps(integrity_payload)
+
+        equity = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run_id}/equity",
+            params={"resolution": "AUTO", "limit": 100},
+        )
+        assert equity.status_code == 200
+        assert equity.json()["bounded"] is True
+        assert equity.json()["samples"][0]["public_time"]["policy"] == "HIDE_ALL"
+        assert str(actual_start) not in equity.text
+
+        journal = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run_id}/journal",
+        )
+        report = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run_id}/report",
+        )
+        assert journal.status_code == report.status_code == 200
+        assert "actual_history" not in report.json()
+        assert str(actual_start) not in journal.text
+        assert str(actual_start) not in report.text
+
+        review = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run_id}/review",
+            json={"event_id": None},
+        )
+        assert review.status_code == 200
+        reviewed = review.json()
+        assert reviewed["read_only"] is True
+        assert str(actual_start) not in review.text
+
+        forked = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run_id}/fork",
+            json={"event_id": reviewed["selected_event_id"]},
+        )
+        assert forked.status_code == 201
+        assert forked.json()["run"]["dataset_epoch"] == reviewed["dataset_epoch"]
+        assert forked.json()["run"]["state_hash"] == reviewed["selected_state_hash"]
     finally:
         await service.shutdown(step_timeout=0.2)
 

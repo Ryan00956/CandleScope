@@ -698,12 +698,20 @@ export interface TrainingRunCreatePayload {
   readonly maker_fee_bps: string;
   readonly taker_fee_bps: string;
   readonly market_slippage_bps: string;
-  readonly integrity_mode: "CHALLENGE";
-  readonly time_disclosure_policy: "NONE" | "HIDE_ALL";
+  readonly integrity_mode: ReplayV2IntegrityMode;
+  readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
   readonly book_mode: "OFF";
   readonly margin_mode: "CROSS";
   readonly funding_mode: "OFF";
-  readonly allow_rule_changes: false;
+  readonly allow_rule_changes: boolean;
+  readonly allowed_mutations: readonly Extract<ReplayV2CommandType,
+    | "deposit"
+    | "withdraw"
+    | "change_fee_policy"
+    | "change_leverage_cap"
+    | "change_funding_policy"
+    | "reveal_time"
+  >[];
 }
 
 function displayString(value: unknown, fieldName: string, maxLength = 256): string {

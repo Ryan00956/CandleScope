@@ -183,13 +183,18 @@ def build_account(
     realized_pnl: str,
     fees_paid: str,
     reserved_margin: str,
+    cash_balance: str | None = None,
 ) -> Account:
     realized = Decimal(realized_pnl)
     fees = Decimal(fees_paid)
     reserved = Decimal(reserved_margin)
     with localcontext() as context:
         context.prec = 60
-        cash = Decimal(config.initial_equity) + realized - fees
+        cash = (
+            Decimal(config.initial_equity) + realized - fees
+            if cash_balance is None
+            else Decimal(cash_balance)
+        )
         equity = cash + Decimal(position.unrealized_pnl)
         margin_used = quote_round_up(
             Decimal(position.notional) / Decimal(config.limits.max_leverage),

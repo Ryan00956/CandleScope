@@ -11,12 +11,14 @@ from app.replay.canonical import canonical_json, canonical_sha256
 from app.replay.storage.sqlite_store import ReplaySQLiteStore
 
 from .errors import TrainingRunError
+from .disclosure import project_public_time
 from .models import (
     CapabilityKind,
     CapabilityState,
     REPLAY_V2_PROTOCOL,
     TrainingRunCreateRequest,
     ViewerState,
+    validate_v2_counter,
 )
 from .schema import TRAINING_SCHEMA_ID, migrate_training_schema
 
@@ -25,6 +27,13 @@ _LIST_LIMIT_MAX = 100
 _COMPATIBILITY_FILTERS = {"READY", "LEGACY_ADAPTER", "LEGACY_V1", "UNAVAILABLE"}
 _STATES = {"PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"}
 _SOURCES = {"BAR", "AGG_TRADE"}
+_VIEW_EVENT_LIMIT = 2_048
+_EQUITY_RESOLUTIONS: tuple[tuple[str, int, int], ...] = (
+    ("EVENT", 0, 2_048),
+    ("1M", 60_000, 4_096),
+    ("15M", 900_000, 2_048),
+    ("1H", 3_600_000, 2_048),
+)
 
 
 _CARD_CTE = """
@@ -59,7 +68,11 @@ WITH cards AS (
         EXISTS(
             SELECT 1 FROM replay_report AS report
             WHERE report.session_id = r.adapter_session_id
-        ) AS report_available
+        ) AS report_available,
+        EXISTS(
+            SELECT 1 FROM replay_equity_sample AS sample
+            WHERE sample.run_id = r.run_id
+        ) AS review_available
     FROM replay_training_run AS r
     JOIN replay_session AS s ON s.session_id = r.adapter_session_id
 
@@ -92,7 +105,8 @@ WITH cards AS (
         EXISTS(
             SELECT 1 FROM replay_report AS report
             WHERE report.session_id = s.session_id
-        ) AS report_available
+        ) AS report_available,
+        0 AS review_available
     FROM replay_session AS s
     WHERE NOT EXISTS(
         SELECT 1 FROM replay_training_run AS r
@@ -200,6 +214,7 @@ class TrainingRunStore:
             lambda connection: migrate_training_schema(connection, now_ms=now)
         )
         self.base_store.register_session_summary_writer(self._sync_session_summary)
+        self.base_store.register_session_mutation_writer(self._sync_session_mutation)
 
     def initial_run_writer(
         self,
@@ -302,8 +317,343 @@ class TrainingRunStore:
                 dataset_epoch=str(session_state["data_epoch"]),
                 now_ms=now_ms,
             )
+            start_time_known = request.start_mode.value == "MANUAL"
+            strict_eligible = (
+                request.integrity_mode.value == "CHALLENGE"
+                and not start_time_known
+                and request.time_disclosure_policy.value != "NONE"
+            )
+            result_label = self._result_label(
+                integrity_mode=request.integrity_mode.value,
+                start_time_known=start_time_known,
+                strict_eligible=strict_eligible,
+                revealed=False,
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_training_integrity(
+                    run_id, strict_eligible, start_time_known, revealed,
+                    allowed_mutations_json, result_label, updated_at_ms
+                ) VALUES (?, ?, ?, 0, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    int(strict_eligible),
+                    int(start_time_known),
+                    canonical_json(list(request.allowed_mutations)),
+                    result_label,
+                    now_ms,
+                ),
+            )
+            public_time = self._public_time(
+                connection,
+                session_id=adapter_session_id,
+                policy=request.time_disclosure_policy.value,
+                revealed=False,
+                public_time_ms=int(cursor["virtual_time_ms"]),
+                sequence=validate_v2_counter(
+                    session_state["source_sequence"],
+                    field_name="session source_sequence",
+                ),
+            )
+            state_hash = str(session_state["state_hash"])
+            connection.execute(
+                """
+                INSERT INTO replay_run_action_event(
+                    run_id, action_sequence, event_id, command_id, event_type,
+                    rule_revision, public_time_json, old_value_json,
+                    new_value_json, reason, state_hash_before,
+                    state_hash_after, created_at_ms
+                ) VALUES (?, 1, 'action-00000001', NULL, 'CREATE_RUN', 1,
+                          ?, '{}', ?, 'atomic create', NULL, ?, ?)
+                """,
+                (
+                    run_id,
+                    canonical_json(public_time),
+                    canonical_json(
+                        {
+                            "integrity_mode": request.integrity_mode.value,
+                            "time_disclosure_policy": request.time_disclosure_policy.value,
+                            "result_label": result_label,
+                        }
+                    ),
+                    state_hash,
+                    now_ms,
+                ),
+            )
+            self._upsert_equity_samples(
+                connection,
+                run_id=run_id,
+                session_id=adapter_session_id,
+                policy=request.time_disclosure_policy.value,
+                revealed=False,
+                state=session_state,
+                component_state=component_state,
+                now_ms=now_ms,
+            )
 
         return write
+
+    def fork_run_writer(
+        self,
+        *,
+        child_run_id: str,
+        parent_run_id: str,
+        parent_event_id: str,
+        parent_checkpoint_id: int,
+    ) -> Callable[..., object]:
+        """Build the v2 metadata half of an exact checkpoint fork."""
+
+        def write(
+            connection: sqlite3.Connection,
+            now_ms: int,
+            *,
+            session_id: str,
+            session_state: Mapping[str, object],
+            component_state: Mapping[str, object],
+        ) -> None:
+            parent = connection.execute(
+                """
+                SELECT r.*, i.strict_eligible, i.start_time_known, i.revealed,
+                       i.allowed_mutations_json, i.result_label,
+                       rule.rule_json, rule.rule_hash
+                FROM replay_training_run AS r
+                JOIN replay_training_integrity AS i USING(run_id)
+                JOIN replay_training_rule AS rule
+                  ON rule.run_id = r.run_id
+                 AND rule.revision = r.active_rule_revision
+                WHERE r.run_id = ?
+                """,
+                (parent_run_id,),
+            ).fetchone()
+            if parent is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "parent training run does not exist",
+                    status_code=404,
+                )
+            checkpoint = connection.execute(
+                """
+                SELECT state_hash FROM replay_checkpoint
+                WHERE checkpoint_id = ? AND session_id = ? AND active = 1
+                """,
+                (parent_checkpoint_id, parent["adapter_session_id"]),
+            ).fetchone()
+            if checkpoint is None or str(checkpoint["state_hash"]) != str(
+                session_state["state_hash"]
+            ):
+                raise TrainingRunError(
+                    "REVIEW_FORK_MISMATCH",
+                    "fork checkpoint state hash changed",
+                    status_code=409,
+                )
+            cursor = session_state.get("cursor")
+            account = component_state.get("account")
+            if not isinstance(cursor, Mapping) or not isinstance(account, Mapping):
+                raise TypeError("forked training snapshot is invalid")
+            self._insert_run(
+                connection,
+                {
+                    "run_id": child_run_id,
+                    "adapter_session_id": session_id,
+                    "parent_legacy_session_id": parent["parent_legacy_session_id"],
+                    "name": _safe_name(
+                        f"{parent['name']} · Fork"[:80],
+                        fallback=f"Fork {child_run_id[-8:]}",
+                    ),
+                    "state": str(session_state["state"]),
+                    "source_kind": str(parent["source_kind"]),
+                    "start_mode": str(parent["start_mode"]),
+                    "integrity_mode": str(parent["integrity_mode"]),
+                    "time_disclosure_policy": str(parent["time_disclosure_policy"]),
+                    "book_mode": str(parent["book_mode"]),
+                    "margin_mode": str(parent["margin_mode"]),
+                    "funding_mode": str(parent["funding_mode"]),
+                    "allow_rule_changes": int(parent["allow_rule_changes"]),
+                    "exchange": str(parent["exchange"]),
+                    "market_type": str(parent["market_type"]),
+                    "last_symbol": str(parent["last_symbol"]),
+                    "settlement_asset": str(parent["settlement_asset"]),
+                    "base_interval": str(parent["base_interval"]),
+                    "display_interval": str(parent["display_interval"]),
+                    "initial_equity": str(parent["initial_equity"]),
+                    "current_equity": str(account["equity"]),
+                    "summary_revision": validate_v2_counter(
+                        session_state["revision"], field_name="fork revision"
+                    ),
+                    "revision": validate_v2_counter(
+                        session_state["revision"], field_name="fork revision"
+                    ),
+                    "source_sequence": validate_v2_counter(
+                        session_state["source_sequence"],
+                        field_name="fork source_sequence",
+                    ),
+                    "virtual_time_ms": int(cursor["virtual_time_ms"]),
+                    "catalog_epoch": str(parent["catalog_epoch"]),
+                    "dataset_epoch": str(parent["dataset_epoch"]),
+                    "compatibility": "READY",
+                    "now_ms": now_ms,
+                },
+            )
+            self._insert_track(
+                connection,
+                run_id=child_run_id,
+                adapter_session_id=session_id,
+                source_kind=str(parent["source_kind"]),
+                exchange=str(parent["exchange"]),
+                market_type=str(parent["market_type"]),
+                symbol=str(parent["last_symbol"]),
+                dataset_epoch=str(parent["dataset_epoch"]),
+                cursor={
+                    **cursor,
+                    "revision": validate_v2_counter(
+                        session_state["revision"], field_name="fork revision"
+                    ),
+                },
+                now_ms=now_ms,
+            )
+            parent_view = connection.execute(
+                "SELECT * FROM replay_training_viewer_state WHERE run_id = ?",
+                (parent_run_id,),
+            ).fetchone()
+            self._insert_viewer_state(
+                connection,
+                ViewerState(
+                    run_id=child_run_id,
+                    selected_track_id="track-1",
+                    display_interval=(
+                        str(parent["display_interval"])
+                        if parent_view is None
+                        else str(parent_view["display_interval"])
+                    ),
+                    chart_type=(
+                        "candles" if parent_view is None else str(parent_view["chart_type"])
+                    ),
+                    visible_range=None,
+                    pane_layout={},
+                    rail_layout={},
+                    semantic_view_revision=0,
+                ),
+                now_ms=now_ms,
+            )
+            rule = json.loads(str(parent["rule_json"]))
+            self._insert_rule(
+                connection,
+                run_id=child_run_id,
+                rule=rule,
+                now_ms=now_ms,
+            )
+            self._insert_initial_action(
+                connection,
+                run_id=child_run_id,
+                action_type="FORK_FROM_REVIEW",
+                action={
+                    "schema": "replay.training.action.v2",
+                    "parent_run_id": parent_run_id,
+                    "parent_event_id": parent_event_id,
+                    "parent_checkpoint_id": parent_checkpoint_id,
+                },
+                now_ms=now_ms,
+            )
+            self._insert_pin(
+                connection,
+                run_id=child_run_id,
+                adapter_session_id=session_id,
+                dataset_epoch=str(parent["dataset_epoch"]),
+                now_ms=now_ms,
+            )
+            result_label = f"{parent['integrity_mode']}_FORKED_REVIEW"
+            connection.execute(
+                """
+                INSERT INTO replay_training_integrity(
+                    run_id, strict_eligible, start_time_known, revealed,
+                    allowed_mutations_json, result_label, updated_at_ms
+                ) VALUES (?, 0, ?, ?, ?, ?, ?)
+                """,
+                (
+                    child_run_id,
+                    int(parent["start_time_known"]),
+                    int(parent["revealed"]),
+                    str(parent["allowed_mutations_json"]),
+                    result_label,
+                    now_ms,
+                ),
+            )
+            public_time = self._public_time(
+                connection,
+                session_id=session_id,
+                policy=str(parent["time_disclosure_policy"]),
+                revealed=bool(parent["revealed"]),
+                public_time_ms=int(cursor["virtual_time_ms"]),
+                sequence=validate_v2_counter(
+                    session_state["source_sequence"],
+                    field_name="fork source_sequence",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_run_action_event(
+                    run_id, action_sequence, event_id, command_id, event_type,
+                    rule_revision, public_time_json, old_value_json,
+                    new_value_json, reason, state_hash_before,
+                    state_hash_after, created_at_ms
+                ) VALUES (?, 1, 'action-00000001', NULL, 'FORK_FROM_REVIEW', 1,
+                          ?, ?, ?, 'continue from review event', ?, ?, ?)
+                """,
+                (
+                    child_run_id,
+                    canonical_json(public_time),
+                    canonical_json(
+                        {"parent_run_id": parent_run_id, "parent_event_id": parent_event_id}
+                    ),
+                    canonical_json({"result_label": result_label}),
+                    session_state["state_hash"],
+                    session_state["state_hash"],
+                    now_ms,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_run_lineage(
+                    child_run_id, parent_run_id, parent_event_id,
+                    parent_checkpoint_id, dataset_epoch, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    child_run_id,
+                    parent_run_id,
+                    parent_event_id,
+                    parent_checkpoint_id,
+                    parent["dataset_epoch"],
+                    now_ms,
+                ),
+            )
+            self._upsert_equity_samples(
+                connection,
+                run_id=child_run_id,
+                session_id=session_id,
+                policy=str(parent["time_disclosure_policy"]),
+                revealed=bool(parent["revealed"]),
+                state=session_state,
+                component_state=component_state,
+                now_ms=now_ms,
+            )
+
+        def factory(
+            *,
+            session_id: str,
+            session_state: Mapping[str, object],
+            component_state: Mapping[str, object],
+        ) -> Callable[[sqlite3.Connection, int], None]:
+            return lambda connection, now_ms: write(
+                connection,
+                now_ms,
+                session_id=session_id,
+                session_state=session_state,
+                component_state=component_state,
+            )
+
+        return factory
 
     async def list_runs(
         self,
@@ -556,9 +906,14 @@ class TrainingRunStore:
             return connection.execute(
                 """
                 SELECT r.run_id, r.adapter_session_id, r.source_kind,
-                       r.base_interval, r.compatibility, s.config_json
+                       r.base_interval, r.compatibility, s.config_json,
+                       r.integrity_mode, r.time_disclosure_policy,
+                       r.allow_rule_changes, r.active_rule_revision,
+                       i.allowed_mutations_json, i.revealed,
+                       i.strict_eligible, i.start_time_known, i.result_label
                 FROM replay_training_run AS r
                 JOIN replay_session AS s ON s.session_id = r.adapter_session_id
+                JOIN replay_training_integrity AS i USING(run_id)
                 WHERE r.run_id = ?
                 """,
                 (run_id,),
@@ -578,6 +933,520 @@ class TrainingRunStore:
             "base_interval": str(row["base_interval"]),
             "compatibility": str(row["compatibility"]),
             "adapter_config": json.loads(str(row["config_json"])),
+            "integrity_mode": str(row["integrity_mode"]),
+            "time_disclosure_policy": str(row["time_disclosure_policy"]),
+            "allow_rule_changes": bool(row["allow_rule_changes"]),
+            "allowed_mutations": tuple(
+                json.loads(str(row["allowed_mutations_json"]))
+            ),
+            "revealed": bool(row["revealed"]),
+            "strict_eligible": bool(row["strict_eligible"]),
+            "start_time_known": bool(row["start_time_known"]),
+            "result_label": str(row["result_label"]),
+            "active_rule_revision": int(row["active_rule_revision"]),
+        }
+
+    async def integrity(self, run_id: str) -> dict[str, object]:
+        def read(connection: sqlite3.Connection) -> dict[str, object] | None:
+            row = connection.execute(
+                """
+                SELECT r.run_id, r.adapter_session_id, r.integrity_mode,
+                       r.time_disclosure_policy, r.active_rule_revision,
+                       r.virtual_time_ms, r.source_sequence,
+                       i.strict_eligible, i.start_time_known, i.revealed,
+                       i.allowed_mutations_json, i.result_label,
+                       rule.rule_hash, rule.rule_json
+                FROM replay_training_run AS r
+                JOIN replay_training_integrity AS i USING(run_id)
+                JOIN replay_training_rule AS rule
+                  ON rule.run_id = r.run_id
+                 AND rule.revision = r.active_rule_revision
+                WHERE r.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            actions = connection.execute(
+                """
+                SELECT * FROM replay_run_action_event
+                WHERE run_id = ? AND event_type != 'CREATE_RUN'
+                ORDER BY action_sequence
+                """,
+                (run_id,),
+            ).fetchall()
+            public_time = self._public_time(
+                connection,
+                session_id=str(row["adapter_session_id"]),
+                policy=str(row["time_disclosure_policy"]),
+                revealed=bool(row["revealed"]),
+                public_time_ms=int(row["virtual_time_ms"]),
+                sequence=int(row["source_sequence"]),
+            )
+            return {
+                "protocol": REPLAY_V2_PROTOCOL,
+                "run_id": str(row["run_id"]),
+                "integrity_mode": str(row["integrity_mode"]),
+                "configured_time_disclosure_policy": str(
+                    row["time_disclosure_policy"]
+                ),
+                "effective_time_disclosure_policy": (
+                    "NONE" if bool(row["revealed"]) else str(row["time_disclosure_policy"])
+                ),
+                "strict_eligible": bool(row["strict_eligible"]),
+                "start_time_known": bool(row["start_time_known"]),
+                "revealed": bool(row["revealed"]),
+                "allowed_mutations": json.loads(str(row["allowed_mutations_json"])),
+                "result_label": str(row["result_label"]),
+                "active_rule_revision": int(row["active_rule_revision"]),
+                "active_rule_hash": str(row["rule_hash"]),
+                "active_rule": json.loads(str(row["rule_json"])),
+                "public_time": public_time,
+                "mutations": [self._action_from_row(action) for action in actions],
+            }
+
+        result = await self.base_store.run_extension_read(read)
+        if result is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training integrity record does not exist",
+                status_code=404,
+            )
+        return result
+
+    async def equity(
+        self,
+        run_id: str,
+        *,
+        resolution: str,
+        limit: int,
+    ) -> dict[str, object]:
+        if resolution not in {"AUTO", "EVENT", "1M", "15M", "1H"}:
+            raise TrainingRunError(
+                "TRAINING_RUN_INVALID",
+                "equity resolution is unsupported",
+                status_code=422,
+            )
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 5_000:
+            raise TrainingRunError(
+                "TRAINING_RUN_INVALID",
+                "equity limit must be between 1 and 5000",
+                status_code=422,
+            )
+
+        def read(connection: sqlite3.Connection) -> dict[str, object] | None:
+            run = connection.execute(
+                "SELECT run_id FROM replay_training_run WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                return None
+            selected = resolution
+            if selected == "AUTO":
+                selected = "1H"
+                for candidate in ("EVENT", "1M", "15M", "1H"):
+                    count = connection.execute(
+                        """
+                        SELECT COUNT(*) FROM replay_equity_sample
+                        WHERE run_id = ? AND resolution = ?
+                        """,
+                        (run_id, candidate),
+                    ).fetchone()[0]
+                    if int(count) <= limit:
+                        selected = candidate
+                        break
+            rows = connection.execute(
+                """
+                SELECT * FROM replay_equity_sample
+                WHERE run_id = ? AND resolution = ?
+                ORDER BY bucket_id DESC LIMIT ?
+                """,
+                (run_id, selected, limit),
+            ).fetchall()
+            samples = [
+                {
+                    "source_sequence": int(row["source_sequence"]),
+                    "revision": int(row["revision"]),
+                    "public_time": json.loads(str(row["public_time_json"])),
+                    "equity": str(row["equity"]),
+                    "cash_balance": str(row["cash_balance"]),
+                    "unrealized_pnl": str(row["unrealized_pnl"]),
+                    "ledger_tail_hash": str(row["ledger_tail_hash"]),
+                    "state_hash": str(row["state_hash"]),
+                }
+                for row in reversed(rows)
+            ]
+            return {
+                "protocol": REPLAY_V2_PROTOCOL,
+                "run_id": run_id,
+                "resolution": selected,
+                "samples": samples,
+                "bounded": True,
+                "limits": {
+                    item[0]: item[2] for item in _EQUITY_RESOLUTIONS
+                },
+            }
+
+        result = await self.base_store.run_extension_read(read)
+        if result is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training run does not exist",
+                status_code=404,
+            )
+        return result
+
+    async def record_view_action(
+        self,
+        *,
+        run_id: str,
+        command_id: str,
+        event_type: str,
+        semantic_key: str,
+        value: Mapping[str, object],
+        public_time_ms: int,
+        source_sequence: int,
+    ) -> dict[str, object]:
+        value_json = canonical_json(value)
+
+        def write(connection: sqlite3.Connection) -> dict[str, object]:
+            run = connection.execute(
+                """
+                SELECT r.adapter_session_id, r.time_disclosure_policy,
+                       COALESCE(i.revealed, 0) AS revealed
+                FROM replay_training_run AS r
+                LEFT JOIN replay_training_integrity AS i USING(run_id)
+                WHERE r.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training run does not exist",
+                    status_code=404,
+                )
+            existing_command = connection.execute(
+                """
+                SELECT * FROM replay_run_view_event
+                WHERE run_id = ? AND command_id = ?
+                """,
+                (run_id, command_id),
+            ).fetchone()
+            if existing_command is not None:
+                return self._view_action_from_row(existing_command, coalesced=True)
+            public_time = self._public_time(
+                connection,
+                session_id=str(run["adapter_session_id"]),
+                policy=str(run["time_disclosure_policy"]),
+                revealed=bool(run["revealed"]),
+                public_time_ms=public_time_ms,
+                sequence=source_sequence,
+            )
+            existing = connection.execute(
+                """
+                SELECT * FROM replay_run_view_event
+                WHERE run_id = ? AND semantic_key = ?
+                """,
+                (run_id, semantic_key),
+            ).fetchone()
+            now_ms = self.base_store._validated_now_ms()
+            if existing is not None:
+                connection.execute(
+                    """
+                    UPDATE replay_run_view_event
+                    SET command_id = ?, event_type = ?, value_json = ?,
+                        sample_count = sample_count + 1,
+                        last_public_time_json = ?, updated_at_ms = ?
+                    WHERE run_id = ? AND semantic_key = ?
+                    """,
+                    (
+                        command_id,
+                        event_type,
+                        value_json,
+                        canonical_json(public_time),
+                        now_ms,
+                        run_id,
+                        semantic_key,
+                    ),
+                )
+                row = connection.execute(
+                    """
+                    SELECT * FROM replay_run_view_event
+                    WHERE run_id = ? AND semantic_key = ?
+                    """,
+                    (run_id, semantic_key),
+                ).fetchone()
+                return self._view_action_from_row(row, coalesced=True)
+            count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM replay_run_view_event WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            if count >= _VIEW_EVENT_LIMIT:
+                connection.execute(
+                    """
+                    DELETE FROM replay_run_view_event WHERE rowid = (
+                        SELECT rowid FROM replay_run_view_event
+                        WHERE run_id = ? ORDER BY updated_at_ms, view_sequence LIMIT 1
+                    )
+                    """,
+                    (run_id,),
+                )
+            next_sequence = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(MAX(view_sequence), 0) + 1
+                    FROM replay_run_view_event WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            encoded_time = canonical_json(public_time)
+            connection.execute(
+                """
+                INSERT INTO replay_run_view_event(
+                    run_id, view_sequence, command_id, event_type,
+                    semantic_key, value_json, sample_count,
+                    first_public_time_json, last_public_time_json,
+                    created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    next_sequence,
+                    command_id,
+                    event_type,
+                    semantic_key,
+                    value_json,
+                    encoded_time,
+                    encoded_time,
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM replay_run_view_event
+                WHERE run_id = ? AND semantic_key = ?
+                """,
+                (run_id, semantic_key),
+            ).fetchone()
+            return self._view_action_from_row(row, coalesced=False)
+
+        return await self.base_store.run_extension_write(write)
+
+    async def start_review(
+        self,
+        *,
+        run_id: str,
+        review_id: str,
+        event_id: str | None,
+    ) -> dict[str, object]:
+        def write(connection: sqlite3.Connection) -> dict[str, object]:
+            run = connection.execute(
+                """
+                SELECT r.adapter_session_id, r.time_disclosure_policy,
+                       r.virtual_time_ms, r.source_sequence,
+                       r.dataset_epoch,
+                       COALESCE(i.revealed, 0) AS revealed,
+                       s.state_hash
+                FROM replay_training_run AS r
+                JOIN replay_session AS s ON s.session_id = r.adapter_session_id
+                LEFT JOIN replay_training_integrity AS i USING(run_id)
+                WHERE r.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training run does not exist",
+                    status_code=404,
+                )
+            checkpoints = connection.execute(
+                """
+                SELECT cp.checkpoint_id, cp.source_sequence,
+                       cp.event_sequence, cp.state_hash,
+                       mutation.kind AS mutation_kind,
+                       command.command_json, command.cursor_json
+                FROM replay_checkpoint AS cp
+                LEFT JOIN replay_mutation_log AS mutation
+                  ON mutation.mutation_id = cp.mutation_id
+                LEFT JOIN replay_command_log AS command
+                  ON command.session_id = cp.session_id
+                 AND command.command_id = mutation.command_id
+                WHERE cp.session_id = ? AND cp.active = 1
+                ORDER BY cp.checkpoint_id
+                """,
+                (run["adapter_session_id"],),
+            ).fetchall()
+            if not checkpoints:
+                raise TrainingRunError(
+                    "REVIEW_UNAVAILABLE",
+                    "training run has no durable review checkpoint",
+                    status_code=409,
+                )
+            events: list[dict[str, object]] = []
+            for checkpoint in checkpoints:
+                checkpoint_event_id = f"checkpoint-{int(checkpoint['checkpoint_id'])}"
+                raw_cursor = checkpoint["cursor_json"]
+                if raw_cursor is None:
+                    public_ms = int(run["virtual_time_ms"])
+                else:
+                    decoded_cursor = json.loads(str(raw_cursor))
+                    public_ms = int(decoded_cursor["virtual_time_ms"])
+                raw_command = checkpoint["command_json"]
+                command_type = "INITIAL_CHECKPOINT"
+                if raw_command is not None:
+                    decoded_command = json.loads(str(raw_command))
+                    command_type = str(decoded_command.get("type", "COMMAND"))
+                    command_payload = decoded_command.get("payload")
+                    if command_type == "_training_adjust_capital":
+                        if not isinstance(command_payload, Mapping):
+                            raise TrainingRunError(
+                                "TRAINING_RUN_STORAGE_DEGRADED",
+                                "capital review checkpoint payload is invalid",
+                                status_code=503,
+                            )
+                        capital_kind = command_payload.get("kind")
+                        if capital_kind not in {"deposit", "withdraw"}:
+                            raise TrainingRunError(
+                                "TRAINING_RUN_STORAGE_DEGRADED",
+                                "capital review checkpoint kind is invalid",
+                                status_code=503,
+                            )
+                        command_type = str(capital_kind).upper()
+                    elif command_type == "_training_reveal_history":
+                        command_type = "REVEAL_TIME"
+                events.append(
+                    {
+                        "event_id": checkpoint_event_id,
+                        "event_type": command_type,
+                        "checkpoint_id": int(checkpoint["checkpoint_id"]),
+                        "source_sequence": int(checkpoint["source_sequence"]),
+                        "event_sequence": int(checkpoint["event_sequence"]),
+                        "state_hash": str(checkpoint["state_hash"]),
+                        "public_time": self._public_time(
+                            connection,
+                            session_id=str(run["adapter_session_id"]),
+                            policy=str(run["time_disclosure_policy"]),
+                            revealed=bool(run["revealed"]),
+                            public_time_ms=public_ms,
+                            sequence=int(checkpoint["source_sequence"]),
+                        ),
+                    }
+                )
+            selected: dict[str, object] | None = events[-1]
+            if event_id is not None:
+                selected = next(
+                    (item for item in events if item["event_id"] == event_id),
+                    None,
+                )
+            if selected is None:
+                raise TrainingRunError(
+                    "REVIEW_EVENT_NOT_FOUND",
+                    "review event is not backed by an active checkpoint",
+                    status_code=404,
+                )
+            original_cursor = {
+                "virtual_time_ms": int(run["virtual_time_ms"]),
+                "source_sequence": int(run["source_sequence"]),
+            }
+            now_ms = self.base_store._validated_now_ms()
+            connection.execute(
+                """
+                INSERT INTO replay_review_session(
+                    review_id, run_id, event_id, checkpoint_id,
+                    selected_state_hash, original_state_hash,
+                    original_cursor_json, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_id,
+                    run_id,
+                    selected["event_id"],
+                    selected["checkpoint_id"],
+                    selected["state_hash"],
+                    run["state_hash"],
+                    canonical_json(original_cursor),
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            return {
+                "protocol": REPLAY_V2_PROTOCOL,
+                "review_id": review_id,
+                "run_id": run_id,
+                "read_only": True,
+                "selected_event_id": selected["event_id"],
+                "selected_state_hash": selected["state_hash"],
+                "original_state_hash": str(run["state_hash"]),
+                "original_cursor": original_cursor,
+                "dataset_epoch": str(run["dataset_epoch"]),
+                "events": events,
+                "jump_targets": [
+                    {
+                        "event_id": item["event_id"],
+                        "event_type": item["event_type"],
+                    }
+                    for item in events
+                ],
+            }
+
+        return await self.base_store.run_extension_write(write)
+
+    async def checkpoint_for_event(
+        self,
+        run_id: str,
+        event_id: str,
+    ) -> dict[str, object]:
+        if not event_id.startswith("checkpoint-"):
+            raise TrainingRunError(
+                "REVIEW_EVENT_NOT_FOUND",
+                "review event is invalid",
+                status_code=404,
+            )
+        try:
+            checkpoint_id = int(event_id.removeprefix("checkpoint-"))
+        except ValueError as exc:
+            raise TrainingRunError(
+                "REVIEW_EVENT_NOT_FOUND",
+                "review event is invalid",
+                status_code=404,
+            ) from exc
+
+        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            return connection.execute(
+                """
+                SELECT r.*, cp.checkpoint_id, cp.state_hash AS checkpoint_state_hash,
+                       cp.source_sequence AS checkpoint_source_sequence,
+                       cp.event_sequence AS checkpoint_event_sequence
+                FROM replay_training_run AS r
+                JOIN replay_checkpoint AS cp
+                  ON cp.session_id = r.adapter_session_id
+                WHERE r.run_id = ? AND cp.checkpoint_id = ? AND cp.active = 1
+                """,
+                (run_id, checkpoint_id),
+            ).fetchone()
+
+        row = await self.base_store.run_extension_read(read)
+        if row is None:
+            raise TrainingRunError(
+                "REVIEW_EVENT_NOT_FOUND",
+                "review event is not backed by an active checkpoint",
+                status_code=404,
+            )
+        return {
+            "run_id": run_id,
+            "adapter_session_id": str(row["adapter_session_id"]),
+            "event_id": event_id,
+            "checkpoint_id": checkpoint_id,
+            "state_hash": str(row["checkpoint_state_hash"]),
+            "source_sequence": int(row["checkpoint_source_sequence"]),
+            "event_sequence": int(row["checkpoint_event_sequence"]),
+            "dataset_epoch": str(row["dataset_epoch"]),
         }
 
     async def get_viewer_state(self, run_id: str) -> ViewerState:
@@ -1021,6 +1890,48 @@ class TrainingRunStore:
         )
 
     @staticmethod
+    def _action_from_row(row: Mapping[str, object]) -> dict[str, object]:
+        return {
+            "action_sequence": validate_v2_counter(
+                row["action_sequence"], field_name="action_sequence"
+            ),
+            "event_id": str(row["event_id"]),
+            "command_id": row["command_id"],
+            "event_type": str(row["event_type"]),
+            "rule_revision": validate_v2_counter(
+                row["rule_revision"], field_name="rule_revision"
+            ),
+            "public_time": json.loads(str(row["public_time_json"])),
+            "old_value": json.loads(str(row["old_value_json"])),
+            "new_value": json.loads(str(row["new_value_json"])),
+            "reason": str(row["reason"]),
+            "state_hash_before": row["state_hash_before"],
+            "state_hash_after": str(row["state_hash_after"]),
+        }
+
+    @staticmethod
+    def _view_action_from_row(
+        row: Mapping[str, object],
+        *,
+        coalesced: bool,
+    ) -> dict[str, object]:
+        return {
+            "view_sequence": validate_v2_counter(
+                row["view_sequence"], field_name="view_sequence"
+            ),
+            "command_id": str(row["command_id"]),
+            "event_type": str(row["event_type"]),
+            "semantic_key": str(row["semantic_key"]),
+            "value": json.loads(str(row["value_json"])),
+            "sample_count": validate_v2_counter(
+                row["sample_count"], field_name="sample_count"
+            ),
+            "first_public_time": json.loads(str(row["first_public_time_json"])),
+            "last_public_time": json.loads(str(row["last_public_time_json"])),
+            "coalesced": coalesced,
+        }
+
+    @staticmethod
     def _insert_rule(
         connection: sqlite3.Connection,
         *,
@@ -1125,11 +2036,11 @@ class TrainingRunStore:
             "parent_legacy_session_id": row["parent_legacy_session_id"],
             "status": status,
             "report_available": bool(row["report_available"]),
-            "review_available": False,
+            "review_available": bool(row["review_available"]),
         }
 
-    @staticmethod
     def _sync_session_summary(
+        self,
         connection: sqlite3.Connection,
         session_id: str,
         state: Mapping[str, object],
@@ -1195,6 +2106,311 @@ class TrainingRunStore:
                 session_id,
             ),
         )
+
+        run = connection.execute(
+            """
+            SELECT r.run_id, r.time_disclosure_policy,
+                   COALESCE(i.revealed, 0) AS revealed
+            FROM replay_training_run AS r
+            LEFT JOIN replay_training_integrity AS i USING(run_id)
+            WHERE r.adapter_session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if run is not None:
+            self._upsert_equity_samples(
+                connection,
+                run_id=str(run["run_id"]),
+                session_id=session_id,
+                policy=str(run["time_disclosure_policy"]),
+                revealed=bool(run["revealed"]),
+                state=state,
+                component_state=component_state,
+                now_ms=now_ms,
+            )
+
+    def _sync_session_mutation(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        command: Mapping[str, object],
+        accepted: bool,
+        result: Mapping[str, object] | None,
+        state: Mapping[str, object],
+        component_state: Mapping[str, object],
+        now_ms: int,
+    ) -> None:
+        if not accepted:
+            return
+        command_type = command.get("type")
+        if command_type not in {
+            "_training_adjust_capital",
+            "_training_reveal_history",
+        }:
+            return
+        run = connection.execute(
+            """
+            SELECT r.run_id, r.integrity_mode, r.time_disclosure_policy,
+                   r.active_rule_revision, r.current_equity,
+                   i.start_time_known, i.strict_eligible, i.revealed
+            FROM replay_training_run AS r
+            JOIN replay_training_integrity AS i USING(run_id)
+            WHERE r.adapter_session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if run is None:
+            return
+        payload = command.get("payload")
+        if not isinstance(payload, Mapping):
+            raise TypeError("training policy command payload must be an object")
+        cursor = state.get("cursor")
+        if not isinstance(cursor, Mapping):
+            raise TypeError("training policy command cursor must be an object")
+        command_id = str(command["command_id"])
+        sequence_row = connection.execute(
+            """
+            SELECT COALESCE(MAX(action_sequence), 0) + 1 AS next_sequence
+            FROM replay_run_action_event WHERE run_id = ?
+            """,
+            (run["run_id"],),
+        ).fetchone()
+        action_sequence = int(sequence_row["next_sequence"])
+        previous = connection.execute(
+            """
+            SELECT state_hash_after FROM replay_run_action_event
+            WHERE run_id = ? ORDER BY action_sequence DESC LIMIT 1
+            """,
+            (run["run_id"],),
+        ).fetchone()
+        state_hash_after = str(state["state_hash"])
+        revealed = bool(run["revealed"])
+        old_value: dict[str, object]
+        new_value: dict[str, object]
+        if command_type == "_training_adjust_capital":
+            account = component_state.get("account")
+            if not isinstance(account, Mapping) or not isinstance(
+                account.get("equity"), str
+            ):
+                raise TypeError("capital adjustment account projection is missing")
+            kind = str(payload.get("kind", ""))
+            if kind not in {"deposit", "withdraw"}:
+                raise TypeError("capital adjustment kind is invalid")
+            event_type = kind.upper()
+            old_value = {"equity": str(run["current_equity"])}
+            new_value = {"equity": str(account["equity"])}
+            reason = str(payload.get("reason", ""))
+        else:
+            event_type = "REVEAL_TIME"
+            old_value = {
+                "revealed": revealed,
+                "time_disclosure_policy": str(run["time_disclosure_policy"]),
+            }
+            revealed = True
+            new_value = {"revealed": True, "time_disclosure_policy": "NONE"}
+            reason = str(payload.get("reason", "user reveal"))
+            result_label = self._result_label(
+                integrity_mode=str(run["integrity_mode"]),
+                start_time_known=bool(run["start_time_known"]),
+                strict_eligible=False,
+                revealed=True,
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_integrity
+                SET strict_eligible = 0, revealed = 1,
+                    result_label = ?, updated_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (result_label, now_ms, run["run_id"]),
+            )
+        public_time = self._public_time(
+            connection,
+            session_id=session_id,
+            policy=str(run["time_disclosure_policy"]),
+            revealed=revealed,
+            public_time_ms=int(cursor["virtual_time_ms"]),
+            sequence=validate_v2_counter(
+                state["source_sequence"], field_name="source_sequence"
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_run_action_event(
+                run_id, action_sequence, event_id, command_id, event_type,
+                rule_revision, public_time_json, old_value_json,
+                new_value_json, reason, state_hash_before,
+                state_hash_after, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run["run_id"],
+                action_sequence,
+                f"action-{action_sequence:08d}",
+                command_id,
+                event_type,
+                int(run["active_rule_revision"]),
+                canonical_json(public_time),
+                canonical_json(old_value),
+                canonical_json(new_value),
+                reason,
+                None if previous is None else str(previous["state_hash_after"]),
+                state_hash_after,
+                now_ms,
+            ),
+        )
+
+    @staticmethod
+    def _result_label(
+        *,
+        integrity_mode: str,
+        start_time_known: bool,
+        strict_eligible: bool,
+        revealed: bool,
+    ) -> str:
+        if integrity_mode == "SANDBOX":
+            return "SANDBOX_REVEALED" if revealed else "SANDBOX"
+        if integrity_mode == "PRACTICE":
+            return "PRACTICE_REVEALED" if revealed else "PRACTICE"
+        if revealed:
+            return "CHALLENGE_REVEALED"
+        if start_time_known:
+            return "START_TIME_KNOWN"
+        if strict_eligible:
+            return "STRICT_CHALLENGE"
+        return "CHALLENGE_VISIBLE_TIME"
+
+    @staticmethod
+    def _public_time(
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        policy: str,
+        revealed: bool,
+        public_time_ms: int,
+        sequence: int,
+    ) -> dict[str, object]:
+        dataset = connection.execute(
+            """
+            SELECT actual_replay_start_ms, synthetic_origin_ms
+            FROM replay_dataset_ref WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if dataset is None:
+            raise TypeError("training dataset time binding is missing")
+        actual_origin = int(dataset["actual_replay_start_ms"])
+        synthetic_origin = dataset["synthetic_origin_ms"]
+        effective_policy = "NONE" if revealed else policy
+        if policy == "NONE":
+            actual_time = public_time_ms
+            public_origin = actual_origin
+        else:
+            if synthetic_origin is None:
+                raise TypeError("hidden training synthetic origin is missing")
+            public_origin = int(synthetic_origin)
+            actual_time = actual_origin + public_time_ms - public_origin
+        return dict(
+            project_public_time(
+                actual_time_ms=actual_time,
+                public_time_ms=(actual_time if effective_policy == "NONE" else public_time_ms),
+                actual_origin_ms=actual_origin,
+                public_origin_ms=(actual_origin if effective_policy == "NONE" else public_origin),
+                policy=effective_policy,
+                sequence=sequence,
+            )
+        )
+
+    @classmethod
+    def _upsert_equity_samples(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        session_id: str,
+        policy: str,
+        revealed: bool,
+        state: Mapping[str, object],
+        component_state: Mapping[str, object],
+        now_ms: int,
+    ) -> None:
+        cursor = state.get("cursor")
+        account = component_state.get("account")
+        ledger = component_state.get("ledger")
+        if (
+            not isinstance(cursor, Mapping)
+            or not isinstance(account, Mapping)
+            or not isinstance(ledger, Mapping)
+        ):
+            return
+        required_account = ("equity", "cash_balance", "unrealized_pnl")
+        if any(not isinstance(account.get(key), str) for key in required_account):
+            return
+        ledger_hash = ledger.get("tail_hash")
+        if not isinstance(ledger_hash, str):
+            return
+        public_ms = int(cursor["virtual_time_ms"])
+        source_sequence = validate_v2_counter(
+            state["source_sequence"], field_name="source_sequence"
+        )
+        public_time = cls._public_time(
+            connection,
+            session_id=session_id,
+            policy=policy,
+            revealed=revealed,
+            public_time_ms=public_ms,
+            sequence=source_sequence,
+        )
+        for resolution, bucket_ms, limit in _EQUITY_RESOLUTIONS:
+            bucket_id = source_sequence if bucket_ms == 0 else public_ms // bucket_ms
+            connection.execute(
+                """
+                INSERT INTO replay_equity_sample(
+                    run_id, resolution, bucket_id, source_sequence, revision,
+                    public_time_json, equity, cash_balance, unrealized_pnl,
+                    ledger_tail_hash, state_hash, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, resolution, bucket_id) DO UPDATE SET
+                    source_sequence = excluded.source_sequence,
+                    revision = excluded.revision,
+                    public_time_json = excluded.public_time_json,
+                    equity = excluded.equity,
+                    cash_balance = excluded.cash_balance,
+                    unrealized_pnl = excluded.unrealized_pnl,
+                    ledger_tail_hash = excluded.ledger_tail_hash,
+                    state_hash = excluded.state_hash,
+                    updated_at_ms = excluded.updated_at_ms
+                """,
+                (
+                    run_id,
+                    resolution,
+                    bucket_id,
+                    source_sequence,
+                    validate_v2_counter(
+                        state["revision"], field_name="revision"
+                    ),
+                    canonical_json(public_time),
+                    account["equity"],
+                    account["cash_balance"],
+                    account["unrealized_pnl"],
+                    ledger_hash,
+                    state["state_hash"],
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            connection.execute(
+                """
+                DELETE FROM replay_equity_sample
+                WHERE rowid IN (
+                    SELECT rowid FROM replay_equity_sample
+                    WHERE run_id = ? AND resolution = ?
+                    ORDER BY bucket_id DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (run_id, resolution, limit),
+            )
 
 
 __all__ = ["TrainingRunStore"]

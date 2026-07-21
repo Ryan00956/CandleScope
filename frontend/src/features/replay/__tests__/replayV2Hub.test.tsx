@@ -271,7 +271,7 @@ test("create refreshes catalog epoch with the edited warmup and horizon before P
   assert.equal(submittedEpoch, refreshedEpoch);
 });
 
-test("create model covers frozen fields and disables unsupported Phase 1 promises", () => {
+test("create model covers frozen fields and exposes the Phase 4 integrity boundary", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const catalog = blindCatalog();
   const draft = createTrainingRunDraft(catalog);
@@ -281,7 +281,7 @@ test("create model covers frozen fields and disables unsupported Phase 1 promise
     multi_symbol: "Phase 5 尚未实现",
     funding: "Phase 6 尚未实现；当前只能 OFF",
     historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF",
-    rule_changes: "Phase 6 尚未实现；当前规则锁定",
+    rule_changes: "Phase 4 仅支持入金、出金与不可逆时间揭示；费率、杠杆和资金费变更仍拒绝",
     isolated_margin: "Phase 6 尚未实现；当前只允许 CROSS",
   });
   const request = buildTrainingRunCreateRequest(draft, evaluation, catalog);
@@ -293,6 +293,7 @@ test("create model covers frozen fields and disables unsupported Phase 1 promise
   assert.equal(request.book_mode, "OFF");
   assert.equal(request.margin_mode, "CROSS");
   assert.equal(request.allow_rule_changes, false);
+  assert.deepEqual(request.allowed_mutations, []);
 });
 
 test("hub markup exposes saves, native actions, filters and explicit unavailable capability reasons", () => {
@@ -333,6 +334,9 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /继续训练/);
   assert.match(html, /新建训练/);
   assert.match(html, /资金费.*Phase 6/);
+  assert.match(html, /完整性模式/);
+  assert.match(html, /HIDE_MINUTE/);
+  assert.match(html, /Practice 可审计变更白名单/);
   assert.match(html, /历史盘口.*Phase 9/);
   assert.match(html, /多商品.*Phase 5/);
   assert.doesNotMatch(html, /1710000000000|dataset_epoch|snapshot_blob/);

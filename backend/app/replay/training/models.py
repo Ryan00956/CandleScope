@@ -168,6 +168,16 @@ class ReplayV2EventType(_StringEnum):
     RESYNC_REQUIRED = "RESYNC_REQUIRED"
 
 
+POLICY_MUTATION_VALUES: tuple[str, ...] = (
+    ReplayV2CommandType.DEPOSIT.value,
+    ReplayV2CommandType.WITHDRAW.value,
+    ReplayV2CommandType.CHANGE_FEE_POLICY.value,
+    ReplayV2CommandType.CHANGE_LEVERAGE_CAP.value,
+    ReplayV2CommandType.CHANGE_FUNDING_POLICY.value,
+    ReplayV2CommandType.REVEAL_TIME.value,
+)
+
+
 _ENUM_TYPES: tuple[tuple[str, type[_StringEnum]], ...] = (
     ("run_state", RunState),
     ("track_state", TrackState),
@@ -677,7 +687,7 @@ def validate_track_source(
 
 @dataclass(frozen=True, slots=True)
 class TrainingRunCreateRequest:
-    """Strict Phase 1 create contract mapped to one replay.v1 adapter session."""
+    """Replay training create contract mapped to one replay.v1 adapter session."""
 
     protocol: str
     catalog_epoch: str
@@ -705,6 +715,7 @@ class TrainingRunCreateRequest:
     margin_mode: MarginMode
     funding_mode: str
     allow_rule_changes: bool
+    allowed_mutations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.protocol != REPLAY_V2_PROTOCOL:
@@ -791,28 +802,42 @@ class TrainingRunCreateRequest:
                     getattr(self, field_name), field_name=field_name
                 ),
             )
-        if self.integrity_mode is not IntegrityMode.CHALLENGE:
-            raise ValueError("Phase 1 supports only CHALLENGE integrity mode")
-        if self.time_disclosure_policy not in {
-            TimeDisclosurePolicy.NONE,
-            TimeDisclosurePolicy.HIDE_ALL,
-        }:
-            raise ValueError("Phase 1 supports only NONE or HIDE_ALL disclosure")
+        raw_allowed = self.allowed_mutations
+        if not isinstance(raw_allowed, (tuple, list)) or any(
+            not isinstance(value, str) for value in raw_allowed
+        ):
+            raise TypeError("allowed_mutations must be an array of strings")
+        allowed = tuple(raw_allowed)
+        if len(set(allowed)) != len(allowed):
+            raise ValueError("allowed_mutations must be unique")
+        unsupported = set(allowed) - set(POLICY_MUTATION_VALUES)
+        if unsupported:
+            raise ValueError(
+                f"unsupported allowed mutation(s): {', '.join(sorted(unsupported))}"
+            )
+        if self.integrity_mode is IntegrityMode.CHALLENGE:
+            if allowed or self.allow_rule_changes:
+                raise ValueError("CHALLENGE integrity mode locks all policy mutations")
+        elif self.integrity_mode is IntegrityMode.PRACTICE:
+            if self.allow_rule_changes is not bool(allowed):
+                raise ValueError(
+                    "PRACTICE allow_rule_changes must match allowed_mutations"
+                )
+        else:
+            allowed = POLICY_MUTATION_VALUES
+            object.__setattr__(self, "allow_rule_changes", True)
+        object.__setattr__(self, "allowed_mutations", allowed)
         if self.book_mode is not BookMode.OFF:
-            raise ValueError("Phase 1 historical book mode must remain OFF")
+            raise ValueError("historical book mode must remain OFF")
         if self.margin_mode is not MarginMode.CROSS:
-            raise ValueError("Phase 1 supports only CROSS margin mode")
+            raise ValueError("the v1 training adapter supports only CROSS margin mode")
         if self.funding_mode != "OFF":
-            raise ValueError("Phase 1 funding mode must remain OFF")
-        if self.allow_rule_changes is not False:
-            raise ValueError("Phase 1 rules must remain locked")
+            raise ValueError("the v1 training adapter requires funding mode OFF")
 
     @classmethod
     def from_dict(cls, value: object) -> "TrainingRunCreateRequest":
         payload = expect_mapping(value, field_name="training run create")
-        expect_exact_keys(
-            payload,
-            {
+        required = {
                 "protocol",
                 "catalog_epoch",
                 "name",
@@ -839,9 +864,19 @@ class TrainingRunCreateRequest:
                 "margin_mode",
                 "funding_mode",
                 "allow_rule_changes",
-            },
-        )
-        return cls(**payload)  # type: ignore[arg-type]
+        }
+        missing = required - set(payload)
+        unknown = set(payload) - required - {"allowed_mutations"}
+        if missing:
+            raise ValueError(f"missing field(s): {', '.join(sorted(missing))}")
+        if unknown:
+            raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
+        normalized = dict(payload)
+        raw_allowed = normalized.get("allowed_mutations", ())
+        if not isinstance(raw_allowed, (list, tuple)):
+            raise TypeError("allowed_mutations must be an array")
+        normalized["allowed_mutations"] = tuple(raw_allowed)
+        return cls(**normalized)  # type: ignore[arg-type]
 
     def to_dict(self, *, redact_hidden_start: bool = False) -> dict[str, object]:
         hidden = self.time_disclosure_policy is not TimeDisclosurePolicy.NONE
@@ -874,6 +909,7 @@ class TrainingRunCreateRequest:
             "margin_mode": self.margin_mode.value,
             "funding_mode": self.funding_mode,
             "allow_rule_changes": self.allow_rule_changes,
+            "allowed_mutations": list(self.allowed_mutations),
         }
 
 
@@ -894,6 +930,7 @@ __all__ = [
     "ReplayV2CommandType",
     "ReplayV2EventType",
     "RunState",
+    "POLICY_MUTATION_VALUES",
     "SCHEMA_MIGRATION_CONTRACT",
     "StartMode",
     "SubscriptionTier",

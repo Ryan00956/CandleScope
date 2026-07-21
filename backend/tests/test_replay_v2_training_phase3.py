@@ -18,6 +18,7 @@ from app.replay.training.models import (
     TrainingRunCreateRequest,
     ViewerState,
 )
+from app.replay.training.schema import TRAINING_SCHEMA_VERSION
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
@@ -279,7 +280,7 @@ async def test_schema_v1_upgrade_backfills_viewer_state_without_touching_v1(
             ).fetchone() == (REPLAY_SCHEMA_VERSION,)
             assert connection.execute(
                 "SELECT version FROM replay_training_schema_version WHERE singleton = 1"
-            ).fetchone() == (2,)
+                ).fetchone() == (TRAINING_SCHEMA_VERSION,)
             assert connection.execute(
                 "SELECT event_type FROM replay_training_viewer_event WHERE run_id = ?",
                 (run_id,),

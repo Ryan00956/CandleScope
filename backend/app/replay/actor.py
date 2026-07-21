@@ -25,6 +25,7 @@ from .constants import (
     SessionState,
 )
 from .errors import ReplayDomainError, ReplayErrorCode
+from .internal_commands import InternalCommandType
 from .events import ReplayEventBuffer
 from .models import (
     MAX_TIMESTAMP_MS,
@@ -1135,7 +1136,7 @@ class ReplaySessionActor:
                 ReplayErrorCode.DATASET_MISMATCH,
                 "persisted replay command tail is invalid",
             )
-        command = ReplayCommand.from_dict(command_payload)
+        command = ReplayCommand.from_persisted_dict(command_payload)
         if accepted:
             if command.expected_revision != self._revision:
                 raise ReplayDomainError(
@@ -1384,6 +1385,7 @@ class ReplaySessionActor:
             CommandType.ACQUIRE_CONTROLLER,
             CommandType.ADD_JOURNAL_NOTE,
             CommandType.REVEAL_HISTORY,
+            InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
         }:
             raise ReplayDomainError(
                 ReplayErrorCode.SESSION_ENDED,
@@ -1511,6 +1513,7 @@ class ReplaySessionActor:
             CommandType.PLACE_ORDER,
             CommandType.CANCEL_ORDER,
             CommandType.CLOSE_POSITION,
+            InternalCommandType.ADJUST_CAPITAL,
         }:
             if self._state not in {SessionState.PAUSED, SessionState.PLAYING}:
                 self._invalid_transition(command_type)
@@ -1560,8 +1563,18 @@ class ReplaySessionActor:
             self._domain_command_position += 1
             self._emit(ReplayEventType.JOURNAL, entry, mandatory=True)
             return self._command_result(command.command_id, {"journal_entry": entry})
-        if command_type is CommandType.REVEAL_HISTORY:
-            self._require_state(SessionState.ENDED, command_type)
+        if command_type in {
+            CommandType.REVEAL_HISTORY,
+            InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
+        }:
+            if command_type is CommandType.REVEAL_HISTORY:
+                self._require_state(SessionState.ENDED, command_type)
+            elif self._state not in {
+                SessionState.PAUSED,
+                SessionState.PLAYING,
+                SessionState.ENDED,
+            }:
+                self._invalid_transition(command_type)
             if self._revealed:
                 raise ReplayDomainError(
                     ReplayErrorCode.INVALID_STATE_TRANSITION,
@@ -2175,11 +2188,18 @@ class ReplaySessionActor:
                 details={"controller_client_id": self._controller_client_id},
             )
 
-    def _require_state(self, required: SessionState, command_type: CommandType) -> None:
+    def _require_state(
+        self,
+        required: SessionState,
+        command_type: CommandType | InternalCommandType,
+    ) -> None:
         if self._state is not required:
             self._invalid_transition(command_type)
 
-    def _invalid_transition(self, command_type: CommandType) -> None:
+    def _invalid_transition(
+        self,
+        command_type: CommandType | InternalCommandType,
+    ) -> None:
         raise ReplayDomainError(
             ReplayErrorCode.INVALID_STATE_TRANSITION,
             f"command {command_type.value} is invalid while session is {self._state.value}",

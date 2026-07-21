@@ -10,6 +10,7 @@ from ..bars.builder import ReplayBarBuilder
 from ..bars.trade_builder import TradeReplayBarBuilder
 from ..canonical import canonical_sha256
 from ..constants import CommandType
+from ..internal_commands import InternalCommandType
 from ..dataset import ReplayBar
 from ..errors import ReplayDomainError, ReplayErrorCode
 from ..models import validate_counter, validate_identifier
@@ -395,6 +396,65 @@ class ConservativeBarBroker:
             created_time_ms=created_time_ms,
         )
 
+    def adjust_capital(
+        self,
+        *,
+        kind: str,
+        amount: str,
+        source_sequence: int,
+        event_time_ms: int,
+    ) -> BrokerEventResult:
+        """Atomically post an audited external-capital ledger transaction."""
+
+        if bool(getattr(self, "_ended", False)):
+            raise ReplayDomainError(
+                ReplayErrorCode.SESSION_ENDED,
+                "broker session has ended",
+            )
+        normalized_amount = canonical_decimal(
+            amount,
+            field_name="capital adjustment amount",
+            positive=True,
+        )
+        if kind not in {"deposit", "withdraw"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "capital adjustment kind is unsupported",
+            )
+        working = self._working_state()
+        ledger = self._ledger_for_write(working)
+        current_account = self._account_from(ledger, working.position)
+        if kind == "withdraw" and Decimal(normalized_amount) > Decimal(
+            current_account.available_equity
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.RISK_LIMIT_EXCEEDED,
+                "withdrawal exceeds available equity",
+            )
+        signed = normalized_amount if kind == "deposit" else f"-{normalized_amount}"
+        counter = f"-{normalized_amount}" if kind == "deposit" else normalized_amount
+        ledger.post(
+            kind=LedgerKind.DEPOSIT if kind == "deposit" else LedgerKind.WITHDRAW,
+            source_sequence=source_sequence,
+            event_time_ms=event_time_ms,
+            postings=(
+                (LedgerAccount.CASH, signed),
+                (LedgerAccount.EXTERNAL_CAPITAL, counter),
+            ),
+        )
+        account = self._account_from(ledger, working.position)
+        self._commit_working(working, account=account)
+        self._has_trading_activity = True
+        self._record_equity(account)
+        return BrokerEventResult(
+            bar_update=None,
+            orders=(),
+            fills=(),
+            warnings=(),
+            position=working.position,
+            account=account,
+        )
+
     def apply_bar(self, bar: ReplayBar) -> BrokerEventResult:
         if self._ended:
             raise ReplayDomainError(
@@ -633,18 +693,33 @@ class ConservativeBarBroker:
 
     def apply_command(
         self,
-        command_type: CommandType | str,
+        command_type: CommandType | InternalCommandType | str,
         values: Mapping[str, object],
         *,
         command_id: str,
         source_sequence: int,
         virtual_time_ms: int,
     ) -> Mapping[str, object]:
-        normalized = (
-            command_type
-            if isinstance(command_type, CommandType)
-            else CommandType(command_type)
-        )
+        if isinstance(command_type, (CommandType, InternalCommandType)):
+            normalized = command_type
+        else:
+            try:
+                normalized = CommandType(command_type)
+            except ValueError:
+                normalized = InternalCommandType(command_type)
+        if normalized is InternalCommandType.ADJUST_CAPITAL:
+            if set(values) != {"kind", "amount", "reason"}:
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "capital adjustment payload is invalid",
+                )
+            del command_id
+            return self.adjust_capital(
+                kind=str(values["kind"]),
+                amount=str(values["amount"]),
+                source_sequence=source_sequence,
+                event_time_ms=virtual_time_ms,
+            ).to_dict()
         if normalized is CommandType.PLACE_ORDER:
             try:
                 request = OrderRequest.from_mapping(values)
@@ -1149,7 +1224,11 @@ class ConservativeBarBroker:
                 ended, bool
             ):
                 raise TypeError("broker state flags must be booleans")
-            if has_trading_activity != bool(order_list):
+            has_capital_activity = any(
+                entry.kind in {LedgerKind.DEPOSIT, LedgerKind.WITHDRAW}
+                for entry in ledger.entries
+            )
+            if has_trading_activity != bool(order_list or has_capital_activity):
                 raise ValueError("broker trading activity flag is inconsistent")
             equity_peak = canonical_decimal(
                 payload["equity_peak"],
@@ -1695,6 +1774,7 @@ class ConservativeBarBroker:
             realized_pnl=realized,
             fees_paid=fees,
             reserved_margin=reserved,
+            cash_balance=ledger.account_total(LedgerAccount.CASH),
         )
 
     def _resolve_command_sequence(self, value: int | None) -> int:
@@ -1731,11 +1811,7 @@ class ConservativeBarBroker:
                 ),
                 Decimal(0),
             )
-            expected_cash = (
-                Decimal(self.config.initial_equity)
-                + Decimal(account.realized_pnl)
-                - Decimal(account.fees_paid)
-            )
+            expected_cash = Decimal(ledger.account_total(LedgerAccount.CASH))
         if reserved_orders != Decimal(account.reserved_margin):
             raise AssertionError("reserved margin does not match open orders")
         if Decimal(account.cash_balance) != expected_cash:

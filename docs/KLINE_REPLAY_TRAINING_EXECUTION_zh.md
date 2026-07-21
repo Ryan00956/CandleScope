@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_3_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅、Phase 2 共用市场工作区，以及 Phase 3 ViewerState、固定周期投影和 BAR/AGG_TRADE 推进语义均已完成。Phase 4 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
+状态：`PHASE_4_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅、Phase 2 共用市场工作区、Phase 3 ViewerState/固定周期投影/BAR/AGG_TRADE 推进语义，以及 Phase 4 时间披露/完整性审计/权益曲线/只读 Review/Fork 均已完成。Phase 5 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -1457,4 +1457,39 @@ Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_E
 Rollback: feature-flag v1 fallback、旧 build v1 rollback drill 与 Phase 3 单提交 tree revert 均 PASS；反向应用提交后 tree 与父提交 284364ff192a1493d9ac1d953f235f4234257d5f 完全一致。
 Known limitations: Phase 4 的七档时间披露、训练完整性 mutation/action/equity、Review/Fork 尚未实现；Phase 3 仍为单主轨。多轨、funding、历史 L2/book-assisted 和此前明确关闭的能力继续 fail closed，不以近似值替代；全仓 Ruff/mypy 既有基线仍待独立治理。
 Decision: PASS；停止在 Phase 3，不进入 Phase 4。
+```
+
+### Phase 4 执行记录
+
+```text
+Phase: 4 - audited time disclosure, integrity, equity, and Review/Fork
+Date: 2026-07-21
+Commit: 本 Phase 独立提交，提交号以 Git 历史为准
+Parent commit: a3930294bd3f2f6a9b4410aecdc7594e8ee17bb8
+Executor: Codex
+Scope: 实现 7 档服务端时间披露、CHALLENGE/PRACTICE/SANDBOX、creation-time mutation allowlist、入金/出金/不可逆揭示审计、有界多分辨率权益曲线、语义化视图动作采样，以及只读 Review/事件跳转/精确 checkpoint Fork；保留 v1 精确 fallback，未进入 Phase 5 多商品。
+Files changed: backend additive schema、公开时间投影、训练完整性/store/service/API、v1 actor 原子扩展边界、broker 外部资本 ledger、测试；frontend 创建合同、严格解析/API/runtime、权益/审计/Review/Fork 面板、服务端公开时间标签、测试/CSS；本执行记录与 Phase 4 浏览器证据。
+Schema/protocol changes: replay.training 物理 schema additive 升至 3，新增 integrity、run action、bounded view action、equity sample、review session 和 run lineage 表；replay.training.v1 线协议标识保持不变。replay.v1 CommandType 冻结集合不变，两个训练 actor 命令位于非传输 InternalCommandType，v1 HTTP/JSON 载荷明确拒绝内部字面量。
+Commands run:
+  backend targeted: .\.venv\Scripts\python.exe -m pytest tests\test_replay_contracts.py tests\test_replay_v2_contracts.py tests\test_replay_v2_training_phase4.py tests\test_replay_v2_training_api.py -q
+  backend full: .\.venv\Scripts\python.exe -m pytest tests -q
+  backend lint: .\.venv\Scripts\python.exe -m ruff check <Phase 4 Python scope>
+  backend baseline audits: .\.venv\Scripts\python.exe -m ruff check app tests scripts；D:\anaconda\Scripts\mypy.exe app，并在父提交临时 worktree 同机对照
+  frontend: npm test；npm run check:architecture；npm run typecheck；npm run lint；npm run build
+  browser: Playwright CLI against isolated fixture :18104 and Vite :15204
+  rollback: node scripts/replay-rollback-drill.mjs --out <temporary evidence path>
+  commit rollback: detached worktree + git revert --no-commit <Phase 4 commit> + git write-tree 与父提交 tree 比对
+  repository/database: git diff --check；SQLite PRAGMA quick_check/foreign_key_check
+Targeted tests: backend v1/v2 contracts、Phase 4 与 API 共 107 passed；另含 Phase 3 回归的扩大集合 121 passed；Phase 4 Python scope Ruff 0 violations。前端 replay 定向测试 168 passed。
+Global tests: backend 1914 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2380 passed；architecture/typecheck/ESLint/Vite production build 全部通过。
+Global baseline audits: 全仓 Ruff 与父提交同为 36 个既有违规；同一 D:\anaconda mypy 环境下父提交与 Phase 4 均为 528 个既有错误。实现过程中识别并消除了本阶段一度新增的 24 个 mypy 错误，没有把新增类型债务归入历史基线。
+Time-disclosure evidence: NONE/HIDE_YEAR/HIDE_MONTH/HIDE_DAY/HIDE_HOUR/HIDE_MINUTE/HIDE_ALL 的真实浏览器 HTTP 矩阵在 integrity/equity/journal/report 四个表面全部 200、标签逐项匹配且隐藏 token 扫描为 0。HIDE_ALL 深度流程中，DOM、URL、localStorage、sessionStorage 与公开 API 未出现真实历史毫秒或日期；主面板和控制坞均使用服务端标签 D+1 T+00:00:00。manual hidden start 固定标 START_TIME_KNOWN/strict_eligible=false。
+Integrity/ledger evidence: CHALLENGE mutation 拒绝、PRACTICE creation allowlist、SANDBOX 标记、入金/出金与不可逆揭示均由同一 v1 command SQLite 事务提交。故障注入在训练审计投影后抛错，session revision/hash、command log、ledger、action 与 equity 全部回到事务前。入金浏览器证据为 equity 10000 -> 10100；权益 sample 与 ledger/state hash 对齐。新增重启恢复合同覆盖内部资金命令不会扩张 replay.v1 公共 CommandType；真实浏览器在优雅重启后恢复 equity=10100、state_hash=sha256:b3c0ff5a3cba517088f8b3ebd0728d5b8a3a75438b4b8573358d3b4347b63ddc、ledger tail=sha256:4716de5c4d22858e2e7ecfc6f8d14541fa79cd9e724fe11af4751a6eedb6f1ad，degraded_reason=null。动态 fee、leverage cap 与 funding revision 明确返回 REPLAY_POLICY_UNSUPPORTED/applied=false，不伪装成功。
+Performance/bounds evidence: 前端 100,000 次可视范围手势采样为 1 条语义命令；后端 10,000 条同 key 动作合并为 1 行且 sample_count=10000。view/action/equity 均有硬上限；权益 EVENT/1M/15M/1H 分辨率上限分别为 2048/4096/2048/2048。隔离浏览器 DB quick_check=ok、foreign_key_check 空。
+Review/Fork evidence: Review 事件只呈现公开 DEPOSIT/REVEAL_TIME 名称，不泄露内部 actor 命令；只读跳转与 fork 前后原 run cursor=946684800000、revision=2、state_hash=sha256:73a1e1aa70d02e30295418f61fa957cd08802e3964a3fb0a56fde9e3e2eefe99 保持不变。所选 checkpoint 与 child state_hash 均为 sha256:04725707b6fdf52193c72e2fe9528af2bf12ba2937711890f79754f13811a069，dataset_epoch 均为 sha256:86f95dd8f34cc525efa59da494ab71c9a8f76367f8b8488243ab0a7dc864d278。最终当前代码重启流程再次从公开 DEPOSIT checkpoint 创建 child，父子 state_hash 均为 sha256:b3c0ff5a3cba517088f8b3ebd0728d5b8a3a75438b4b8573358d3b4347b63ddc，dataset_epoch 完全一致，原 run 只增加控制器 revision 而领域 hash 不变。
+Browser noise: 产品运行时错误为 0；开发服务仅有缺失 favicon.ico 的 404 与两个既有 slider-vertical CSS 警告。浏览器 QA 直接发现 Review 暴露内部命令名，修复为公开审计事件后再完成成功 Review/Fork。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0；关闭 v2 不删除 integrity/action/equity/review/lineage 数据，旧 build 可忽略 additive schema，已揭示 Run 不会被重新标 strict。
+Rollback: feature-flag v1 fallback、旧 build v1 rollback drill 与 Phase 4 单提交 tree revert 均 PASS；反向应用提交后 tree 与父提交 a3930294bd3f2f6a9b4410aecdc7594e8ee17bb8 完全一致。
+Known limitations: Phase 4 仍为单主轨；Phase 5 多商品、Phase 6 funding/isolated margin、Phase 9 可选历史 L2/book-assisted 尚未实现。动态 fee/leverage/funding rule revision 继续 fail closed；全仓 Ruff/mypy 既有基线待独立治理。
+Decision: PASS；停止在 Phase 4，不进入 Phase 5。
 ```

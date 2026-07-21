@@ -7,16 +7,17 @@ import type { ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 export interface ReplayBottomControlDockProps {
   readonly runtime: ReplayRuntime;
   readonly viewer: ReplayViewerRuntime;
+  readonly publicTimeLabel?: string | undefined;
 }
 
-function ReplayBottomControlDock({ runtime, viewer }: ReplayBottomControlDockProps) {
+function ReplayBottomControlDock({ runtime, viewer, publicTimeLabel }: ReplayBottomControlDockProps) {
   return (
     <div
       className="replay-bottom-control-dock"
       data-replay-control-location="bottom"
       aria-label="回放底部控制坞"
     >
-      <ReplayControlBar runtime={runtime} viewer={viewer} />
+      <ReplayControlBar runtime={runtime} viewer={viewer} publicTimeLabel={publicTimeLabel} />
     </div>
   );
 }

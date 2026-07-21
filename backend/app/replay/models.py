@@ -20,6 +20,7 @@ from .constants import (
     SourceKind,
     StartPolicy,
 )
+from .internal_commands import InternalCommandType
 
 
 MAX_TIMESTAMP_MS = 253_402_300_799_999
@@ -460,7 +461,7 @@ class ReplayCommand:
     command_id: str
     client_instance_id: str
     expected_revision: int
-    type: CommandType
+    type: CommandType | InternalCommandType
     payload: Mapping[str, object]
 
     def __post_init__(self) -> None:
@@ -487,11 +488,14 @@ class ReplayCommand:
                 field_name="expected_revision",
             ),
         )
-        object.__setattr__(
-            self,
-            "type",
-            _coerce_enum(CommandType, self.type, field_name="command type"),
-        )
+        command_type = self.type
+        if not isinstance(command_type, InternalCommandType):
+            command_type = _coerce_enum(
+                CommandType,
+                command_type,
+                field_name="command type",
+            )
+        object.__setattr__(self, "type", command_type)
         if not isinstance(self.payload, Mapping):
             raise TypeError("payload must be an object")
         object.__setattr__(
@@ -513,13 +517,47 @@ class ReplayCommand:
                 "payload",
             },
         )
+        command_type = payload["type"]
+        if isinstance(command_type, InternalCommandType):
+            raise ValueError("internal command type is not part of replay.v1")
         return cls(
             protocol=payload["protocol"],  # type: ignore[arg-type]
             command_id=payload["command_id"],  # type: ignore[arg-type]
             client_instance_id=payload["client_instance_id"],  # type: ignore[arg-type]
             expected_revision=payload["expected_revision"],  # type: ignore[arg-type]
-            type=payload["type"],  # type: ignore[arg-type]
+            type=command_type,  # type: ignore[arg-type]
             payload=payload["payload"],  # type: ignore[arg-type]
+        )
+
+    @classmethod
+    def from_persisted_dict(cls, payload: Mapping[str, object]) -> "ReplayCommand":
+        """Restore a trusted command tail, including training-only commands."""
+
+        command_type = payload.get("type")
+        try:
+            internal_type = InternalCommandType(command_type)
+        except (TypeError, ValueError):
+            return cls.from_dict(payload)
+        trusted_payload = dict(payload)
+        trusted_payload["type"] = internal_type
+        _expect_exact_keys(
+            trusted_payload,
+            {
+                "protocol",
+                "command_id",
+                "client_instance_id",
+                "expected_revision",
+                "type",
+                "payload",
+            },
+        )
+        return cls(
+            protocol=trusted_payload["protocol"],  # type: ignore[arg-type]
+            command_id=trusted_payload["command_id"],  # type: ignore[arg-type]
+            client_instance_id=trusted_payload["client_instance_id"],  # type: ignore[arg-type]
+            expected_revision=trusted_payload["expected_revision"],  # type: ignore[arg-type]
+            type=internal_type,
+            payload=trusted_payload["payload"],  # type: ignore[arg-type]
         )
 
     def to_dict(self) -> dict[str, object]:

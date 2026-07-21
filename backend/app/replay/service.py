@@ -56,6 +56,7 @@ from .dataset import (
     remap_bar_snapshot_time,
 )
 from .errors import ReplayDomainError, ReplayErrorCode
+from .internal_commands import InternalCommandType
 from .models import ReplayCommand, ReplayCursor, ReplaySessionConfig
 from .sources.bar_source import BarReplaySource
 from .sources.trade_reader import PagedReplayTradeReader
@@ -463,7 +464,17 @@ class ReplayService:
         self,
         session_id: str,
         command: ReplayCommand,
+        *,
+        _training_internal: bool = False,
     ) -> dict[str, object]:
+        if command.type in {
+            InternalCommandType.ADJUST_CAPITAL,
+            InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
+        } and not _training_internal:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "internal training command is unavailable on replay.v1",
+            )
         async with self._lease_handle(session_id) as handle:
             try:
                 existing = await self.store.get_command(
@@ -479,9 +490,10 @@ class ReplayService:
                     result = await handle.actor.submit(command)
                 self._metrics["commands"] = int(self._metrics["commands"] or 0) + 1
                 payload = self._command_result_payload(result)
-                if command.type is CommandType.REVEAL_HISTORY and result.data.get(
-                    "revealed"
-                ):
+                if command.type in {
+                    CommandType.REVEAL_HISTORY,
+                    InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
+                } and result.data.get("revealed"):
                     payload["data"] = {
                         **dict(payload["data"]),  # type: ignore[arg-type]
                         "actual_history": self._actual_history(handle),
@@ -528,6 +540,60 @@ class ReplayService:
                     self._release_session_capacity_reservation()
                 self._metrics["forks"] = int(self._metrics["forks"] or 0) + 1
                 result["forked_from_session_id"] = session_id
+                return result
+        except ReplayDomainError as exc:
+            if blind_mode:
+                raise self._blind_safe_dataset_error(True, exc) from exc
+            raise
+        except Exception as exc:
+            if blind_mode:
+                raise self._blind_unexpected_dataset_error() from exc
+            raise
+
+    async def fork_session_at_checkpoint(
+        self,
+        session_id: str,
+        *,
+        checkpoint_id: int,
+        extension_factory: Callable[..., object],
+    ) -> dict[str, object]:
+        """Create an isolated session from one exact durable checkpoint."""
+
+        blind_mode = False
+        try:
+            async with self._lease_handle(session_id) as source:
+                blind_mode = source.config.blind_mode
+                checkpoints = await self.store.load_valid_checkpoints(session_id)
+                checkpoint = next(
+                    (
+                        candidate
+                        for candidate in checkpoints
+                        if candidate.checkpoint_id == checkpoint_id
+                    ),
+                    None,
+                )
+                if checkpoint is None:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "review checkpoint is unavailable",
+                    )
+                await self._reserve_session_capacity(blind_mode=blind_mode)
+                try:
+                    result = await self._create_from_dataset(
+                        config=source.config,
+                        actual_dataset=source.actual_dataset,
+                        restore_checkpoint=checkpoint.payload,
+                        forked=True,
+                        synthetic_origin_ms=source.synthetic_origin_ms,
+                        broker_config=source.broker_config,
+                        trade_dataset_ref=source.trade_dataset_ref,
+                        extension_factory=extension_factory,
+                    )
+                finally:
+                    self._release_session_capacity_reservation()
+                self._metrics["forks"] = int(self._metrics["forks"] or 0) + 1
+                result["forked_from_session_id"] = session_id
+                result["forked_from_checkpoint_id"] = checkpoint_id
                 return result
         except ReplayDomainError as exc:
             if blind_mode:

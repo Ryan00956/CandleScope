@@ -97,6 +97,7 @@ class LedgerAccount(_StringEnum):
     FEE_EXPENSE = "FEE_EXPENSE"
     AVAILABLE_MARGIN = "AVAILABLE_MARGIN"
     RESERVED_MARGIN = "RESERVED_MARGIN"
+    EXTERNAL_CAPITAL = "EXTERNAL_CAPITAL"
 
 
 class LedgerKind(_StringEnum):
@@ -105,6 +106,8 @@ class LedgerKind(_StringEnum):
     RELEASE_MARGIN = "RELEASE_MARGIN"
     REALIZED_PNL = "REALIZED_PNL"
     FEE = "FEE"
+    DEPOSIT = "DEPOSIT"
+    WITHDRAW = "WITHDRAW"
 
 
 _ORDER_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {

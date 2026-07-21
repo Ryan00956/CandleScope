@@ -3,7 +3,7 @@ import MarketChartWorkspace from "../../app/MarketChartWorkspace.js";
 import MarketPageFrame from "../../app/MarketPageFrame.js";
 import MarketStatusBar from "../../app/MarketStatusBar.js";
 import MarketTopBarFrame from "../../app/MarketTopBarFrame.js";
-import type { ChartSurfaceActions, ChartSurfaceHandle } from "../../chart-adapter/useChartSurfaceRuntime.js";
+import type { ChartSurfaceActions, ChartSurfaceHandle, ChartSurfaceVisibleRange } from "../../chart-adapter/useChartSurfaceRuntime.js";
 import type { RefObject } from "react";
 import DrawingToolbar from "../../components/DrawingToolbar.js";
 import IntervalSelector from "../../components/IntervalSelector.js";
@@ -14,7 +14,7 @@ import { useChartSettingsRuntime } from "../settings/chartAppearanceSettings.js"
 import { groupIntervalsByDuration, parseIntervalSeconds } from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import ReplayBottomControlDock from "./components/ReplayBottomControlDock.js";
-import ReplayReportPanel from "./components/ReplayReportPanel.js";
+import ReplayIntegrityReviewPanel from "./components/ReplayIntegrityReviewPanel.js";
 import ReplayRightMarketRail from "./components/ReplayRightMarketRail.js";
 import ReplaySessionDialog from "./components/ReplaySessionDialog.js";
 import { buildReplayCapabilityModel } from "./replayCapabilityModel.js";
@@ -23,6 +23,7 @@ import { handleReplayShortcut } from "./replayShortcuts.js";
 import { returnToTrainingHub } from "./trainingHubNavigation.js";
 import { formatReplayPublicTime, replayOwnsController } from "./replayUiModel.js";
 import { useReplayHistoryRuntime } from "./useReplayHistoryRuntime.js";
+import { useReplayIntegrityRuntime } from "./useReplayIntegrityRuntime.js";
 import type { ReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 import type { ReplayViewerRuntime } from "./useReplayViewerRuntime.js";
@@ -90,15 +91,17 @@ export default function ReplayTrainingPageShell({
   const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
   const drawings = useDrawingRuntime({ chartSurfaceActions, session: null });
   const history = useReplayHistoryRuntime(runtime);
+  const integrityRuntime = useReplayIntegrityRuntime(runtime, viewer);
   const workspace = useReplayWorkspacePreferences(runtime.store.sessionId ?? "pending");
   const config = runtime.store.sessionConfig;
   const active = runtime.phase === "ACTIVE" && config !== null && runtime.store.hasAuthoritativeSnapshot;
   const ownsController = replayOwnsController(runtime.store, runtime.clientInstanceId);
   const capabilities = useMemo(() => buildReplayCapabilityModel(config?.source_kind ?? "BAR"), [config?.source_kind]);
-  const publicTime = formatReplayPublicTime(runtime.store.virtualTimeMs, {
+  const fallbackPublicTime = formatReplayPublicTime(runtime.store.virtualTimeMs, {
     blindMode: config?.blind_mode ?? true,
     originMs: runtime.store.replayStartMs,
   });
+  const publicTime = integrityRuntime.integrity?.public_time.label ?? fallbackPublicTime;
   const formatChartTime = useCallback((timeSeconds: number) => formatReplayPublicTime(timeSeconds * 1_000, {
     blindMode: config?.blind_mode ?? true,
     originMs: runtime.store.replayStartMs,
@@ -115,6 +118,17 @@ export default function ReplayTrainingPageShell({
       setReturningToHub(false);
     }
   }, [returningToHub, runtime.store.sessionId]);
+  const handleVisibleRangeChange = useCallback((range: ChartSurfaceVisibleRange) => {
+    runtime.marketData.actions.onVisibleRangeChange(range);
+    const value: Record<string, number> = {};
+    if (range.logical !== undefined) {
+      value.from_logical_ppm = Math.round(range.logical.from * 1_000_000);
+      value.to_logical_ppm = Math.round(range.logical.to * 1_000_000);
+    }
+    if (range.barSpacing !== undefined) value.bar_spacing_ppm = Math.round(range.barSpacing * 1_000_000);
+    if (range.rightOffset !== undefined) value.right_offset_ppm = Math.round(range.rightOffset * 1_000_000);
+    integrityRuntime.actions.offerViewAction("VISIBLE_RANGE", "main-chart-range", value);
+  }, [integrityRuntime.actions, runtime.marketData.actions]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -220,7 +234,7 @@ export default function ReplayTrainingPageShell({
       timeFormatter={formatChartTime}
       tickMarkFormatter={formatChartTime}
       dataMeta={viewerDataMeta}
-      onVisibleRangeChange={runtime.marketData.actions.onVisibleRangeChange}
+      onVisibleRangeChange={handleVisibleRangeChange}
       drawingTool={drawings.view.drawingTool}
       onDrawingToolChange={drawings.actions.setDrawingTool}
       penColor={drawings.view.penColor}
@@ -358,7 +372,7 @@ export default function ReplayTrainingPageShell({
           ) : null}
         />
       )}
-      featureSurfaces={active ? <><ReplayReportPanel runtime={runtime} /><ReplayBottomControlDock runtime={runtime} viewer={viewer} /></> : null}
+      featureSurfaces={active ? <><ReplayIntegrityReviewPanel runtime={runtime} integrityRuntime={integrityRuntime} /><ReplayBottomControlDock runtime={runtime} viewer={viewer} publicTimeLabel={publicTime} /></> : null}
       statusBar={(
         <MarketStatusBar
           source="replay"
@@ -376,6 +390,9 @@ export default function ReplayTrainingPageShell({
             "data-replay-history-epoch": history.historyEpoch ?? "",
             "data-replay-view-interval": interval,
             "data-replay-view-revision": viewer.viewerState?.semantic_view_revision ?? "",
+            "data-replay-time-disclosure-policy": integrityRuntime.integrity?.effective_time_disclosure_policy ?? "",
+            "data-replay-result-label": integrityRuntime.integrity?.result_label ?? "",
+            "data-replay-review-read-only": integrityRuntime.review?.read_only === true ? "true" : "false",
           }}
           left={<>
             <span><span className={`status-dot ${runtime.store.connectionState === "connected" ? "connected" : "loading"}`} />K 线回放 · REPLAY</span>

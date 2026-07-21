@@ -9,6 +9,20 @@ import {
   parseReplayV2CommandResult,
   parseReplayViewerStateResponse,
 } from "./replayV2Types.js";
+import {
+  parseReplayEquityResponse,
+  parseReplayIntegrityResponse,
+  parseReplayReviewForkResponse,
+  parseReplayReviewResponse,
+  parseReplayTrainingReportResponse,
+} from "./replayIntegrityModel.js";
+import type {
+  ReplayEquityResponse,
+  ReplayIntegrityResponse,
+  ReplayReviewForkResponse,
+  ReplayReviewResponse,
+  ReplayTrainingReportResponse,
+} from "./replayIntegrityModel.js";
 import type {
   ReplayAdvanceProgressResponse,
   ReplayV2Command,
@@ -61,6 +75,13 @@ function safeSegment(value: string, fieldName: string): string {
     throw new ReplayV2ApiError("REPLAY_V2_PROTOCOL_ERROR", `${fieldName} is invalid`);
   }
   return encodeURIComponent(value);
+}
+
+function safeIdentifier(value: string, fieldName: string): string {
+  if (!SAFE_ID.test(value)) {
+    throw new ReplayV2ApiError("REPLAY_V2_PROTOCOL_ERROR", `${fieldName} is invalid`);
+  }
+  return value;
 }
 
 function parseErrorEnvelope(value: unknown): {
@@ -216,6 +237,71 @@ export class ReplayV2ApiClient {
     return this.request(
       `/runs/${safeSegment(runId, "run id")}/advances/${safeSegment(commandId, "command id")}`,
       parseReplayAdvanceProgressResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  integrityRun(runId: string, signal?: AbortSignal): Promise<ReplayIntegrityResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/integrity`,
+      parseReplayIntegrityResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  equityRun(
+    runId: string,
+    resolution: "AUTO" | "EVENT" | "1M" | "15M" | "1H" = "AUTO",
+    limit = 1_000,
+    signal?: AbortSignal,
+  ): Promise<ReplayEquityResponse> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5_000) {
+      throw new ReplayV2ApiError("REPLAY_V2_PROTOCOL_ERROR", "equity limit is invalid");
+    }
+    const params = new URLSearchParams({ resolution, limit: String(limit) });
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/equity?${params.toString()}`,
+      parseReplayEquityResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  reviewRun(
+    runId: string,
+    eventId: string | null = null,
+    signal?: AbortSignal,
+  ): Promise<ReplayReviewResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/review`,
+      parseReplayReviewResponse,
+      {
+        method: "POST",
+        body: JSON.stringify({ event_id: eventId }),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  forkRun(
+    runId: string,
+    eventId: string,
+    signal?: AbortSignal,
+  ): Promise<ReplayReviewForkResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/fork`,
+      parseReplayReviewForkResponse,
+      {
+        method: "POST",
+        body: JSON.stringify({ event_id: safeIdentifier(eventId, "event id") }),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  reportRun(runId: string, signal?: AbortSignal): Promise<ReplayTrainingReportResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/report`,
+      parseReplayTrainingReportResponse,
       signal ? { signal } : {},
     );
   }

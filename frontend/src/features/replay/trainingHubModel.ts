@@ -1,9 +1,15 @@
 import type { ReplayCapabilities, ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
 import type {
+  ReplayV2IntegrityMode,
   ReplayV2SourceKind,
   ReplayV2StartMode,
+  ReplayV2TimeDisclosurePolicy,
   TrainingRunCreatePayload,
 } from "./replayV2Types.js";
+import {
+  REPLAY_POLICY_MUTATIONS,
+  type ReplayPolicyMutation,
+} from "./replayIntegrityModel.js";
 
 const POSITIVE_DECIMAL = /^(?:[1-9]\d*)(?:\.\d*[1-9])?$/;
 const NON_NEGATIVE_DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/;
@@ -27,14 +33,16 @@ export interface TrainingRunDraft {
   readonly makerFeeBps: string;
   readonly takerFeeBps: string;
   readonly marketSlippageBps: string;
-  readonly timeDisclosurePolicy: "NONE" | "HIDE_ALL";
+  readonly integrityMode: ReplayV2IntegrityMode;
+  readonly timeDisclosurePolicy: ReplayV2TimeDisclosurePolicy;
+  readonly allowedMutations: readonly ReplayPolicyMutation[];
 }
 
 export interface TrainingHubUnsupportedCapabilities {
   readonly multi_symbol: "Phase 5 尚未实现";
   readonly funding: "Phase 6 尚未实现；当前只能 OFF";
   readonly historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF";
-  readonly rule_changes: "Phase 6 尚未实现；当前规则锁定";
+  readonly rule_changes: "Phase 4 仅支持入金、出金与不可逆时间揭示；费率、杠杆和资金费变更仍拒绝";
   readonly isolated_margin: "Phase 6 尚未实现；当前只允许 CROSS";
 }
 
@@ -49,7 +57,7 @@ export const PHASE_1_UNSUPPORTED: TrainingHubUnsupportedCapabilities = Object.fr
   multi_symbol: "Phase 5 尚未实现",
   funding: "Phase 6 尚未实现；当前只能 OFF",
   historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF",
-  rule_changes: "Phase 6 尚未实现；当前规则锁定",
+  rule_changes: "Phase 4 仅支持入金、出金与不可逆时间揭示；费率、杠杆和资金费变更仍拒绝",
   isolated_margin: "Phase 6 尚未实现；当前只允许 CROSS",
 });
 
@@ -81,7 +89,9 @@ export function createTrainingRunDraft(catalog: ReplayCatalog): TrainingRunDraft
     makerFeeBps: "2",
     takerFeeBps: "5",
     marketSlippageBps: "1",
+    integrityMode: "CHALLENGE",
     timeDisclosurePolicy: catalog.blind_mode ? "HIDE_ALL" : "NONE",
+    allowedMutations: [],
   };
 }
 
@@ -148,8 +158,18 @@ export function evaluateTrainingRunDraft(
   ] as const) {
     if (!NON_NEGATIVE_DECIMAL.test(value)) errors.push(`${label}必须是非负规范十进制字符串`);
   }
-  if (draft.timeDisclosurePolicy === "HIDE_ALL" && !catalog.blind_mode) {
+  if (draft.timeDisclosurePolicy !== "NONE" && !catalog.blind_mode) {
     errors.push("隐藏时间训练必须使用盲化能力目录");
+  }
+  if (new Set(draft.allowedMutations).size !== draft.allowedMutations.length
+    || draft.allowedMutations.some((item) => !REPLAY_POLICY_MUTATIONS.includes(item))) {
+    errors.push("规则变更白名单包含重复或未知项");
+  }
+  if (draft.integrityMode === "CHALLENGE" && draft.allowedMutations.length > 0) {
+    errors.push("Challenge 模式必须锁定全部规则变更");
+  }
+  if (draft.integrityMode === "PRACTICE" && draft.allowedMutations.length === 0) {
+    errors.push("Practice 模式必须显式选择至少一项可审计变更");
   }
   return {
     canSubmit: errors.length === 0,
@@ -188,11 +208,14 @@ export function buildTrainingRunCreateRequest(
     maker_fee_bps: draft.makerFeeBps,
     taker_fee_bps: draft.takerFeeBps,
     market_slippage_bps: draft.marketSlippageBps,
-    integrity_mode: "CHALLENGE",
+    integrity_mode: draft.integrityMode,
     time_disclosure_policy: draft.timeDisclosurePolicy,
     book_mode: "OFF",
     margin_mode: "CROSS",
     funding_mode: "OFF",
-    allow_rule_changes: false,
+    allow_rule_changes: draft.integrityMode !== "CHALLENGE",
+    allowed_mutations: draft.integrityMode === "SANDBOX"
+      ? REPLAY_POLICY_MUTATIONS
+      : draft.allowedMutations,
   };
 }

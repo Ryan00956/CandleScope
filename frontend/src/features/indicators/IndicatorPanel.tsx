@@ -12,6 +12,7 @@ import IndicatorEditor from "./IndicatorEditor";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import type { CatalogIndicator } from "./useIndicatorCatalogRuntime.js";
 import type {
+  CustomIndicatorRecord,
   IndicatorDefinition,
   IndicatorParameterSchema,
   IndicatorParams,
@@ -118,7 +119,7 @@ interface CustomIndicatorDraft extends IndicatorDefinition {
   name: string;
   script: string;
   params: IndicatorParams;
-  securityMode: string;
+  securityMode?: string;
   kind: "script";
 }
 
@@ -131,7 +132,7 @@ export interface IndicatorPanelProps {
   onRemoveIndicator(indicatorId: string): void;
   onToggleVisibility(indicatorId: string): void;
   onUpdateParams(indicatorId: string, params: IndicatorParams): void;
-  onUpdateScript(indicatorId: string, script: string): void;
+  onUpdateScript(indicatorId: string, script: string, language?: string): void;
   computing: boolean;
   realtimeMode?: "enabled" | "degraded" | "historical-only";
   onRecompute?: (force?: boolean) => void;
@@ -462,7 +463,6 @@ plot(ma, "MA", color=line_color)
     isPreset: false,
     is_builtin: false,
     category: updated.category || "custom",
-    securityMode: updated.securityMode || "safe",
   }), []);
 
   const handleForkBuiltin = useCallback((indicator: IndicatorEditorValue) => {
@@ -482,7 +482,7 @@ plot(ma, "MA", color=line_color)
   const handleEditorPreview = useCallback((updated: IndicatorEditorValue) => {
     const active = updated.id ? activeIndicators.find((i) => i.id === updated.id) : null;
     if (updated.id && active && !active.isPreset && !active.engineName) {
-      onUpdateScript(updated.id, updated.script);
+      onUpdateScript(updated.id, updated.script, updated.language);
       if (updated.params) onUpdateParams(updated.id, updated.params);
       setEditingIndicator((prev) => prev ? { ...prev, ...updated } : updated);
     } else {
@@ -502,17 +502,27 @@ plot(ma, "MA", color=line_color)
       const persisted = await saveCustomIndicator({
         id: indicatorToSave.id,
         kind: "script",
+        ...(indicatorToSave.language ? { language: indicatorToSave.language } : {}),
         name: indicatorToSave.name,
         script: indicatorToSave.script,
         description: indicatorToSave.description || "",
         params: indicatorToSave.params || {},
         paramSchema: indicatorToSave.paramSchema || [],
         renderHints: { paneTarget: indicatorToSave.paneTarget || "sub" },
-        securityMode: indicatorToSave.securityMode || "safe",
+        ...(indicatorToSave.securityMode
+          ? { securityMode: indicatorToSave.securityMode }
+          : {}),
       });
+      const {
+        securityMode: persistedSecurityModeValue,
+        ...persistedFields
+      }: CustomIndicatorRecord = persisted;
+      const persistedLanguage = persisted.language || indicatorToSave.language;
+      const persistedSecurityMode = persistedSecurityModeValue || indicatorToSave.securityMode;
       saved = toCustomDraft({
-        ...persisted,
-        securityMode: persisted.securityMode || indicatorToSave.securityMode || "safe",
+        ...persistedFields,
+        ...(persistedLanguage ? { language: persistedLanguage } : {}),
+        ...(persistedSecurityMode ? { securityMode: persistedSecurityMode } : {}),
       });
     } catch (err) {
       console.error("Failed to save custom indicator:", err);
@@ -520,17 +530,20 @@ plot(ma, "MA", color=line_color)
 
     if (!shouldFork && activeIndicators.some((i) => i.id === saved.id)) {
       // Update existing — these already trigger pendingForceCompute in the indicators runtime
-      onUpdateScript(saved.id, saved.script);
+      onUpdateScript(saved.id, saved.script, saved.language);
       if (saved.params) onUpdateParams(saved.id, saved.params);
     } else {
       // Add new — addIndicator already triggers pendingForceCompute
+      const savedLanguage = saved.language || indicatorToSave.language;
+      const savedSecurityMode = saved.securityMode || indicatorToSave.securityMode;
       onAddIndicator({
         ...saved,
         kind: "script",
         engineName: null,
         category: "custom",
         paneTarget: renderHintPaneTarget(saved.renderHints) || indicatorToSave.paneTarget || "sub",
-        securityMode: saved.securityMode || indicatorToSave.securityMode || "safe",
+        ...(savedLanguage ? { language: savedLanguage } : {}),
+        ...(savedSecurityMode ? { securityMode: savedSecurityMode } : {}),
         isPreset: false,
       });
     }
@@ -619,7 +632,7 @@ plot(ma, "MA", color=line_color)
 
         {tab === "editor" && editingIndicator ? (
           <IndicatorEditor
-            key={`${editingIndicator.id || "new"}:${isBuiltinIndicator(editingIndicator) ? "builtin" : "script"}`}
+            key={`${editingIndicator.id || "new"}:${isBuiltinIndicator(editingIndicator) ? "builtin" : editingIndicator.language || "descriptor-default"}`}
             indicator={editingIndicator}
             onSave={handleEditorSave}
             onBack={handleEditorBack}

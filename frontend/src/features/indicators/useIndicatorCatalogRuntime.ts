@@ -20,7 +20,7 @@ export type CatalogCustomIndicator = CustomIndicatorRecord
     is_builtin: false;
     isPreset: false;
     paneTarget: string;
-    securityMode: string;
+    securityMode?: string;
   };
 
 export type CatalogIndicator = IndicatorPreset | CatalogCustomIndicator | IndicatorDefinition;
@@ -34,13 +34,18 @@ function renderPaneTarget(value: Record<string, unknown> | undefined): string | 
 function normalizeCustomIndicator(
   item: CustomIndicatorRecord & Partial<Pick<IndicatorDefinition, "category" | "paneTarget">>,
 ): CatalogCustomIndicator {
+  const { securityMode, ...fields } = item;
   return {
-    ...item,
+    ...fields,
     category: item.category || "custom",
     is_builtin: false,
     isPreset: false,
     paneTarget: renderPaneTarget(item.renderHints) || item.paneTarget || "sub",
-    securityMode: item.securityMode || "safe",
+    ...((item.language === undefined || item.language === "pyne")
+      ? { securityMode: securityMode || "safe" }
+      : securityMode
+        ? { securityMode }
+        : {}),
   };
 }
 
@@ -50,11 +55,12 @@ function buildCustomIndicatorForChart(preset: CatalogCustomIndicator): Indicator
     name: preset.name,
     engineName: null,
     script: preset.script,
+    ...(preset.language ? { language: preset.language } : {}),
     params: preset.params || {},
     description: preset.description || "",
     category: preset.category || "custom",
     paneTarget: preset.paneTarget || renderPaneTarget(preset.renderHints) || "sub",
-    securityMode: preset.securityMode || "safe",
+    ...(preset.securityMode ? { securityMode: preset.securityMode } : {}),
     kind: "script",
     isPreset: false,
   };
@@ -147,7 +153,9 @@ export function useIndicatorCatalogRuntime({
       ...fallback,
       ...saved,
       paneTarget: renderPaneTarget(saved.renderHints) || fallback.paneTarget || "sub",
-      securityMode: saved.securityMode || fallback.securityMode || "safe",
+      ...((saved.securityMode || fallback.securityMode)
+        ? { securityMode: saved.securityMode || fallback.securityMode }
+        : {}),
     });
     setCustomIndicators((prev) => {
       const index = prev.findIndex((candidate) => candidate.id === item.id);

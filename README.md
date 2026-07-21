@@ -429,7 +429,10 @@ activation, and per-runtime rollback; see the
 Indicator HTTP, range, batch, and WebSocket execution through explicit runtime
 routing. Phase 6 defaults Pyne to the managed `candlescope.pyne` sidecar and
 fails closed when it is unavailable.
-Phase 5 adds the independently buildable
+Phase 7 adds descriptor-driven language discovery at
+`GET /api/v1/indicators/runtimes`; the editor accepts arbitrary routed
+community language IDs and uses a plaintext fallback without loading
+plugin-provided frontend code. Phase 5 adds the independently buildable
 [`candlescope-plugin-pyne`](packages/candlescope-plugin-pyne/README.md), with a
 release lock for the SDK, Pyne Runtime RC wheel, and NumPy version, plus a real
 offline `.cspkg` installation and protocol probe gate. The 0.2.0 bridge covers

@@ -54,6 +54,22 @@ on legacy flat fields.
   output updates.
 - `indicatorPaneProjection.js` maps active indicator lines into main overlays and
   sub panes as a pure projection.
+- `scriptRuntimeCatalog.ts` resolves descriptor-declared languages, runtimes,
+  and safe editor hints without a closed runtime-ID union.
+
+## Script Runtime Discovery
+
+`IndicatorEditor` loads `GET /api/v1/indicators/runtimes` and validates the
+schema before enabling run, save, or fork actions. The language selector is
+generated from routed descriptors. Unknown community languages use Monaco's
+plaintext mode; Pyne completion, theme, and security controls remain optional
+host enhancements rather than a plugin whitelist.
+
+Plugins may advertise `meta.ui.languages.<language-id>.monacoLanguage` and
+`starterSource` strings. These are data-only hints and never load plugin-owned
+JavaScript, CSS, or React code. The chosen language is part of HTTP/range/WS
+requests, custom-indicator persistence, result-cache identity, and stream
+configuration identity.
 
 ## Allowed Dependencies
 

@@ -37,6 +37,7 @@ from .runtime_routes import (
 
 MAX_RECENT_ROUTE_RESULTS = 64
 DEFAULT_MAX_PENDING_SHADOW_TASKS = 64
+INDICATOR_RUNTIME_CATALOG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,7 @@ class IndicatorRuntimeService:
         self.max_pending_shadow_tasks = int(max_pending_shadow_tasks)
         self._start_lock = asyncio.Lock()
         self._started = False
+        self._runtime_descriptors: dict[str, RuntimeDescriptor] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._pending_shadow = 0
         self._lock = threading.Lock()
@@ -278,6 +280,7 @@ class IndicatorRuntimeService:
                         f"runtime {route.runtime_id!r} is missing required Indicator "
                         f"features: {', '.join(missing_features)}"
                     )
+            self._runtime_descriptors = descriptors
             self._started = True
 
     async def stop(self) -> None:
@@ -293,6 +296,74 @@ class IndicatorRuntimeService:
         tasks = tuple(self._background_tasks)
         if tasks:
             await asyncio.gather(*tasks)
+
+    async def public_catalog(self) -> dict[str, Any]:
+        """Describe routed script languages without exposing host internals.
+
+        The runtime descriptor is already the plugin's public handshake contract.
+        This projection adds only host-owned routing state; it never includes
+        registry paths, commands, process identifiers, stderr, or failure details.
+        """
+        try:
+            await self.start()
+        except PluginHostError as exc:
+            raise IndicatorRuntimeRoutesError(
+                "script runtime catalog is unavailable"
+            ) from exc
+        runtimes: dict[str, dict[str, Any]] = {}
+        languages: list[dict[str, Any]] = []
+
+        for route in self.routes.routes:
+            if route.mode == ROUTE_MODE_LEGACY:
+                languages.append(
+                    {
+                        "id": route.language,
+                        "name": route.language,
+                        "extensions": [],
+                        "aliases": [],
+                        "runtimeId": None,
+                        "routeMode": route.mode,
+                        "available": route.language in self.legacy_languages,
+                        "features": [],
+                    }
+                )
+                continue
+
+            if self.host is None or route.runtime_id is None:
+                raise IndicatorRuntimeRoutesError(
+                    f"route for {route.language!r} requires an enabled plugin host"
+                )
+            descriptor = self._runtime_descriptors.get(route.runtime_id)
+            if descriptor is None:
+                raise IndicatorRuntimeRoutesError(
+                    f"runtime {route.runtime_id!r} was not validated at startup"
+                )
+            language = next(
+                (item for item in descriptor.languages if item.id == route.language),
+                None,
+            )
+            if language is None:
+                raise IndicatorRuntimeRoutesError(
+                    f"runtime {route.runtime_id!r} does not declare language "
+                    f"{route.language!r}"
+                )
+            runtimes.setdefault(descriptor.id, descriptor.to_wire())
+            languages.append(
+                {
+                    **language.to_wire(),
+                    "runtimeId": descriptor.id,
+                    "routeMode": route.mode,
+                    "available": True,
+                    "features": list(descriptor.features),
+                }
+            )
+
+        return {
+            "schemaVersion": INDICATOR_RUNTIME_CATALOG_SCHEMA_VERSION,
+            "defaultLanguage": "pyne",
+            "languages": languages,
+            "runtimes": list(runtimes.values()),
+        }
 
     def route_for(self, language: str) -> IndicatorRuntimeRoute:
         return self.routes.for_language(language)
@@ -631,6 +702,7 @@ __all__ = [
     "IndicatorRuntimeRequest",
     "IndicatorRuntimeService",
     "IndicatorRuntimeUnavailableError",
+    "INDICATOR_RUNTIME_CATALOG_SCHEMA_VERSION",
     "build_unbound_indicator_runtime_service",
     "build_indicator_runtime_service_from_environment",
     "removed_in_process_runtime",

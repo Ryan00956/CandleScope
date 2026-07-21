@@ -5,11 +5,44 @@ export type IndicatorSecurityMode = "safe" | "research" | "unsafe";
 export type IndicatorKind = "builtin" | "script" | "custom" | "pyne";
 export type IndicatorSeriesType = "line" | "histogram" | string;
 
+export interface ScriptRuntimeDescriptor {
+  id: string;
+  name: string;
+  version: string;
+  package: string;
+  languages: ScriptLanguageIdentity[];
+  features: string[];
+  requiredHostFeatures: string[];
+  meta: Record<string, unknown>;
+}
+
+export interface ScriptLanguageIdentity {
+  id: string;
+  name: string;
+  extensions: string[];
+  aliases: string[];
+}
+
+export interface ScriptLanguageDescriptor extends ScriptLanguageIdentity {
+  runtimeId: string | null;
+  routeMode: string;
+  available: boolean;
+  features: string[];
+}
+
+export interface ScriptRuntimeCatalog {
+  schemaVersion: number;
+  defaultLanguage: string;
+  languages: ScriptLanguageDescriptor[];
+  runtimes: ScriptRuntimeDescriptor[];
+}
+
 export interface IndicatorDefinition {
   id: string;
   name?: string;
   engineName?: string | null;
   script?: string;
+  language?: string;
   params?: IndicatorParams;
   securityMode?: IndicatorSecurityMode | string;
   visible?: boolean;
@@ -338,6 +371,7 @@ export interface DeferredRightCatchupPlan {
 export interface IndicatorRangeRequest {
   clientId: string;
   kind?: IndicatorKind | string;
+  language?: string;
   securityMode?: IndicatorSecurityMode | string;
   name?: string;
   customId?: string;
@@ -365,6 +399,7 @@ export interface IndicatorRangeBatchResponse {
 
 export interface IndicatorComputeRequest {
   mode?: string;
+  language?: string;
   securityMode?: string;
   name?: string;
   script?: string;
@@ -380,6 +415,7 @@ export interface IndicatorPreset extends IndicatorDefinition {
   name: string;
   engineName: string;
   script: string;
+  language?: string;
   params: IndicatorParams;
   description: string;
   category: string;
@@ -409,6 +445,7 @@ export interface CustomIndicatorRecord {
   name: string;
   description: string;
   script: string;
+  language?: string;
   params: IndicatorParams;
   paramSchema: IndicatorParameterSchema[];
   renderHints: Record<string, unknown>;
@@ -547,6 +584,7 @@ export interface IndicatorSubscribeMessage {
   name?: string;
   customId?: string;
   script?: string;
+  language?: string;
   securityMode?: string;
   resumeFrom?: number;
   serverEpoch?: string;

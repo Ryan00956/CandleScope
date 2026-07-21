@@ -30,6 +30,11 @@ selects `pyne=sidecar,candlescope.pyne`; startup fails closed until that
 managed runtime is installed and active. See
 [Indicator Runtime Routing](../indicator/RUNTIME_ROUTING.md).
 
+Phase 7 adds `GET /api/v1/indicators/runtimes`, a frontend-safe projection of
+the already validated routes and public runtime descriptors. It exposes no
+registry path, launch command, PID, stderr, or host failure detail. Community
+language IDs therefore require no CandleScope frontend adapter.
+
 ## Activation registry v1
 
 The default registry is stored under user data:

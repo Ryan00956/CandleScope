@@ -162,7 +162,10 @@ export function useIndicatorComputeController({
               request.securityMode = indicator.securityMode;
             }
             if (builtin) request.name = getBuiltinIndicatorName(indicator);
-            if (indicator.script !== undefined) request.script = indicator.script;
+            if (indicator.script !== undefined) {
+              request.script = indicator.script;
+              if (indicator.language !== undefined) request.language = indicator.language;
+            }
             const result = await computeIndicator(request);
             return { id: indicator.id, result, visible: Boolean(indicator.visible) };
           } catch (err) {

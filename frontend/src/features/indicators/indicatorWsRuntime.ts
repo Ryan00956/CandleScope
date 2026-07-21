@@ -56,6 +56,7 @@ export function buildIndicatorWsSignature(
         getBuiltinIndicatorName(indicator),
         isBuiltinIndicator(indicator) ? "builtin" : "script",
         stringSignature(indicator.script || ""),
+        indicator.language || "",
         indicator.securityMode || "",
         JSON.stringify(indicator.params || {}),
       ].join(":"),
@@ -105,6 +106,7 @@ export function buildHostedSubscriptionMessage(
   } else {
     message.customId = indicator.id;
     if (indicator.script !== undefined) message.script = indicator.script;
+    if (indicator.language !== undefined) message.language = indicator.language;
     if (indicator.securityMode !== undefined) {
       message.securityMode = indicator.securityMode;
     }
@@ -141,6 +143,7 @@ export function buildHostedSubscriptionSignature(
     symbol: message.symbol,
     interval: message.interval,
     name: message.name || "",
+    language: message.language || "",
     scriptHash: stringSignature(message.script || ""),
     securityMode: message.securityMode || "",
     params: message.params || {},

@@ -4,6 +4,7 @@ Indicator API — powered by the new Indicator Engine.
 Endpoints:
   GET  /indicators/registry           → list all registered indicator specs
   GET  /indicators/registry/{name}    → get single indicator spec
+  GET  /indicators/runtimes           → list routed script runtime descriptors
   POST /indicators/compute            → compute indicator on provided bars (new engine)
 
   # Preset-compatible endpoints (for frontend IndicatorPanel)
@@ -178,6 +179,22 @@ async def list_indicators():
     """Return all registered indicator specifications."""
     specs = registry.list_specs()
     return [s.to_dict() for s in specs]
+
+
+@router.get("/runtimes")
+async def list_script_runtimes(request: Request):
+    """Return the public descriptors for currently routed script languages."""
+    service = _resolve_indicator_runtime_service(request)
+    try:
+        return await service.public_catalog()
+    except IndicatorRuntimeRoutesError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "INDICATOR_RUNTIME_CATALOG_UNAVAILABLE",
+                "message": str(exc),
+            },
+        ) from exc
 
 
 @router.get("/registry/{name}")

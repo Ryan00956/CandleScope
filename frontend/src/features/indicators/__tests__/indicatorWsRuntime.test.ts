@@ -118,6 +118,25 @@ test("subscription resume metadata is sent only when a cached checkpoint exists"
   assert.equal(warm.correctionRevision, "7");
 });
 
+test("script subscriptions forward arbitrary descriptor language ids", () => {
+  const message = buildHostedSubscriptionMessage({
+    id: "community-1",
+    name: "Community Script",
+    script: "plot(close)",
+    language: "community-lang",
+    params: {},
+  }, {
+    chartDataLength: 100,
+    exchange: "binance",
+    interval: "1m",
+    marketType: "spot",
+    symbol: "BTCUSDT",
+  });
+
+  assert.equal(message.kind, "script");
+  assert.equal(message.language, "community-lang");
+});
+
 test("indicator.subscribed dispatches revision and resume acknowledgement", () => {
   const calls: Array<{ indicatorId: string; payload: unknown }> = [];
   const onSubscribed: NonNullable<WsHandlers["onSubscribed"]> = (indicatorId, payload) => {

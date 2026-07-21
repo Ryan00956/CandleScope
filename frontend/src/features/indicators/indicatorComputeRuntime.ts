@@ -36,7 +36,7 @@ export function buildCandleColorKey(candleUpColor?: string, candleDownColor?: st
 export function buildIndicatorMutationSignature(indicators: IndicatorDefinition[] = []): string {
   return indicators
     .map((indicator) => (
-      `${indicator.id}:${stringSignature(indicator.script || "")}:${JSON.stringify(indicator.params || {})}`
+      `${indicator.id}:${indicator.language || ""}:${stringSignature(indicator.script || "")}:${JSON.stringify(indicator.params || {})}`
     ))
     .join("|");
 }

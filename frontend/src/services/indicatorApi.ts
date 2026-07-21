@@ -24,6 +24,7 @@ import {
   parseIndicatorRegistryList,
   parseIndicatorRegistrySpec,
   parsePyneSecurityPolicy,
+  parseScriptRuntimeCatalog,
 } from "../features/indicators/indicatorContracts.js";
 import type {
   CustomIndicatorRecord,
@@ -36,6 +37,7 @@ import type {
   IndicatorRangeRequest,
   IndicatorRegistrySpec,
   PyneSecurityPolicy,
+  ScriptRuntimeCatalog,
 } from "../features/indicators/indicatorTypes.js";
 
 interface IndicatorRequestOptions extends RequestInit {
@@ -107,6 +109,15 @@ export async function fetchRegistrySpec(
   return parseIndicatorRegistrySpec(payload);
 }
 
+/** Discover the script languages currently routed through ready runtime plugins. */
+export async function fetchScriptRuntimes(
+  signal?: AbortSignal,
+): Promise<ScriptRuntimeCatalog> {
+  return parseScriptRuntimeCatalog(
+    await request(`${API_BASE}/indicators/runtimes`, indicatorSignalOptions(signal)),
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  Compute endpoint
 // ═══════════════════════════════════════════════════════════════
@@ -135,6 +146,7 @@ export async function fetchRegistrySpec(
  */
 export async function computeIndicator({
   mode,
+  language,
   securityMode,
   name,
   script,
@@ -149,6 +161,9 @@ export async function computeIndicator({
 
   if (mode) {
     body.mode = mode;
+  }
+  if (language) {
+    body.language = language;
   }
   if (securityMode) {
     body.securityMode = securityMode;
@@ -185,6 +200,7 @@ export async function computeIndicator({
 export async function computeIndicatorRange({
   clientId,
   kind,
+  language,
   securityMode,
   name,
   customId,
@@ -207,6 +223,7 @@ export async function computeIndicatorRange({
     body: JSON.stringify({
       clientId,
       kind,
+      language,
       exchange,
       marketType,
       symbol,
@@ -263,6 +280,7 @@ export async function fetchCustomIndicators(): Promise<
 export async function saveCustomIndicator({
   id,
   kind,
+  language,
   name,
   script,
   description,
@@ -279,6 +297,7 @@ export async function saveCustomIndicator({
       schemaVersion: schemaVersion || 1,
       id,
       kind: kind || "script",
+      language,
       name,
       script,
       description,

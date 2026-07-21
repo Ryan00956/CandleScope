@@ -24,8 +24,8 @@ v1 的核心边界是：
 | Phase 3：隔离安装器 v2 | 已完成 | `.cspkg`、独立 venv、校验、探测、原子激活与回滚 |
 | Phase 4：通用 Indicator Service | 已完成 | `legacy/shadow/sidecar` 路由与传输迁移 |
 | Phase 5：Pyne 插件发行 | 已完成（release-ready） | Pyne host facade、发行锁与 `candlescope-plugin-pyne` |
-| Phase 6：Pyne 切换与源码快照删除 | 进行中（cutover 已完成） | 完整 Render IR、shadow、默认 sidecar；删除等待可信 Release asset |
-| Phase 7：描述符驱动前端 | 未开始 | 运行时/语言/能力描述符，无硬编码运行时联合类型 |
+| Phase 6：Pyne 切换与源码快照删除 | 已完成 | 完整 Render IR、默认 sidecar、可信开发 Release、首启 bootstrap 与源码快照删除 |
+| Phase 7：描述符驱动前端 | 已完成 | 运行时/语言/能力描述符，无硬编码运行时联合类型 |
 | Phase 8：Pine Compatibility 插件 | 未开始 | 修复发行来源、桥接插件、shadow、cutover |
 
 ## Phase 0：冻结现有公开行为
@@ -443,7 +443,7 @@ stderr，也不公开本地路由文件路径。插件 style 也不能覆盖宿�
 
 - SDK/Render IR v1 当前只承诺 line series；marker、hline、fill、背景、K 线着色、signal
   以及真正有状态的 realtime session 仍需后续能力协商；
-- 前端仍默认 Pyne，描述符驱动语言发现属于 Phase 7；
+- Phase 4 完成时前端仍默认 Pyne，描述符驱动语言发现留给 Phase 7；
 - Pyne 桥接发行包尚未进入本阶段，默认路由仍为 legacy；
 - `packages/pyne-runtime` 源码快照没有删除。删除只能在 Phase 5 发行、Phase 6 shadow
   与 cutover 达标后作为独立提交执行。
@@ -613,12 +613,13 @@ compatibility golden
   -> Pyne bridge release
   -> Pyne shadow + cutover
   -> delete vendored Pyne snapshot
+  -> descriptor-driven frontend
   -> Pine Compatibility bridge + cutover
 ```
 
 不能先删除源码快照再补兼容层，也不能让插件直接依赖 CandleScope 私有 Python 包。每次 runtime cutover 和旧实现删除必须是两个独立提交，以便快速回滚。
 
-## Phase 7：公开开发包、首启 bootstrap 与源码快照退出
+## Phase 6 收尾：公开开发包、首启 bootstrap 与源码快照退出
 
 ### 可信开发发布
 
@@ -657,7 +658,7 @@ GitHub Release URL、文件名、平台、大小和外层 SHA-256。
 
 ### 源码退出
 
-Phase 7 作为 Phase 6 之后的独立变更删除：
+Phase 6 的独立源码退出提交删除：
 
 - `packages/pyne-runtime` 的 286 个受版本控制文件；
 - `backend/app/indicator/pyne` 的 16 个 in-process facade 文件；
@@ -683,3 +684,60 @@ bootstrap：首次结果为
 测试使用该隔离安装中的 Pyne engine 运行，结果为 `20 passed`。删除快照后的 backend
 全量回归为 `1923 passed, 4 warnings in 128.80s`；4 条 warning 仍是既有 FastAPI
 `on_event` 弃用提示。
+
+## Phase 7：描述符驱动前端
+
+### 公开发现契约
+
+新增 `GET /api/v1/indicators/runtimes`，公开 schema v1 的
+`schemaVersion`、`defaultLanguage`、`languages` 和 `runtimes`。目录只由启动时已验证的
+`indicator-runtime-routes.json` 与 runtime `describe` descriptor 投影产生；不会把 registry
+路径、启动命令、PID、stderr 或宿主失败细节暴露给前端。每种 routed language 同时带有
+runtime ID、route mode、可用状态和 descriptor features，runtime 项保持 SDK 的公开
+identity、language、feature 与 JSON-only metadata。
+
+`pyne` 仍是省略 `language` 时的兼容默认值，但它不再是前端封闭联合类型。前端会严格
+校验目录 schema、重复 ID、route/runtime 引用和 runtime 的 language 声明；目录无效或
+不可用时编辑器 fail closed，不会猜测一个 runtime。
+
+### 前端与传输闭环
+
+指标编辑器从公开目录动态生成语言选择器、runtime 名称和版本。任意社区 language ID
+都可进入同一工作流；未知语言默认使用 Monaco `plaintext`。Pyne 的补全、主题与
+security mode 作为可选的宿主增强保留，不构成 runtime ID 白名单。
+
+插件可以在 `RuntimeDescriptor.meta.ui.languages.<language-id>` 下提供
+`monacoLanguage` 和 `starterSource` 字符串作为安全展示提示。宿主可以忽略这些提示，
+且该约定不允许插件注入或执行 JavaScript、CSS、React component 或其他前端代码。
+
+所选 `language` 会贯穿：
+
+- one-shot compute、range、range batch；
+- Indicator WebSocket subscribe 与 reconnect identity；
+- 自定义指标保存、读取、编辑和重新运行；
+- result cache、singleflight 与 stream configuration identity。
+
+因此两个 runtime 即使脚本内容和市场上下文相同，也不会跨 language 复用结果或继承旧
+订阅。旧的 Pyne 自定义指标没有 `language` 字段时仍按 `pyne` 读取。
+
+### 阶段边界与门禁
+
+本阶段不发行或切换 Pine Compatibility runtime，也不把未发布的 realtime ABI 候选写入
+产品能力；它只交付通用发现与前端消费闭环。Phase 8 才负责 Pine Compatibility 插件的
+发行来源、桥接、shadow 与 cutover。
+
+完成前必须通过 backend 全量、frontend tests/typecheck/lint/build、SDK tests/build、
+compileall 和 `git diff --check`，并以带任意社区 language ID 的契约测试证明前端没有
+封闭 runtime 联合类型。
+
+2026-07-21 最终验证：
+
+- backend 全量：`1926 passed, 4 warnings in 118.08s`；4 条 warning 仍为既有 FastAPI
+  `on_event` 弃用提示；
+- backend 本阶段 4 个 Python 文件的 Ruff check/format check 与 `compileall` 通过；
+- frontend `npm run check` 全绿：architecture allowlist 为 0，typecheck、全仓 ESLint、
+  `2331 passed` 和 Vite production build（455 modules）通过；
+- Plugin SDK：Ruff check/format check、`30 passed`、sdist/wheel build 与仅包含当前
+  `candlescope_plugin_sdk-0.2.0-py3-none-any.whl` 的干净临时目录 package smoke 通过；
+- `git diff --check` 通过；全仓 backend Ruff 仍报告 34 个本阶段未修改文件中的既有
+  finding，因此没有在 Phase 7 越界修改 Data Engine、Exchange 或旧 Indicator internals。

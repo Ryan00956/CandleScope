@@ -24,6 +24,10 @@ HTTP compute、range/batch 与 Indicator WebSocket 脚本流量现在共用通�
 `pyne=sidecar,candlescope.pyne`；仅启用 Host 但未安装该 runtime 会让启动 fail closed。
 详见 [Indicator Runtime 路由](../indicator/RUNTIME_ROUTING_zh.md)。
 
+Phase 7 新增 `GET /api/v1/indicators/runtimes`，把已验证 routes 与公开 runtime
+descriptors 投影为前端安全目录；它不暴露 registry 路径、启动命令、PID、stderr 或宿主
+失败细节。社区 language ID 因此不再需要 CandleScope 前端适配层。
+
 ## Activation registry v1
 
 默认 registry 是用户数据目录中的：

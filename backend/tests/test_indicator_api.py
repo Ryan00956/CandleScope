@@ -156,6 +156,28 @@ async def test_pyne_security_policy_endpoint() -> None:
     assert policy["boundary"] == "sidecar"
 
 
+@pytest.mark.anyio
+async def test_runtime_catalog_endpoint_returns_service_projection(monkeypatch) -> None:
+    expected = {
+        "schemaVersion": 1,
+        "defaultLanguage": "pyne",
+        "languages": [],
+        "runtimes": [],
+    }
+
+    class _CatalogService:
+        async def public_catalog(self):
+            return expected
+
+    monkeypatch.setattr(
+        indicators_api,
+        "_resolve_indicator_runtime_service",
+        lambda _request: _CatalogService(),
+    )
+
+    assert await indicators_api.list_script_runtimes(object()) is expected
+
+
 def test_indicator_diagnostics_snapshot_reports_runtime_state(tmp_path) -> None:
     store = CustomIndicatorStore(tmp_path / "custom_indicators.json")
     store.upsert(

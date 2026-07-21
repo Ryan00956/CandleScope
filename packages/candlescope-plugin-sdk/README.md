@@ -94,6 +94,27 @@ if __name__ == "__main__":
 The installed package also includes a working `candlescope-hello-runtime`
 command. It accepts the tiny source `plot(close)` and returns one line series.
 
+The frontend discovers languages from the runtime descriptor; it does not use
+a closed runtime-ID union. A plugin may optionally advertise safe editor hints
+under `RuntimeDescriptor.meta.ui.languages.<language-id>`:
+
+```python
+meta={
+    "ui": {
+        "languages": {
+            "my": {
+                "monacoLanguage": "plaintext",
+                "starterSource": "plot(close)\n",
+            }
+        }
+    }
+}
+```
+
+These fields select a built-in Monaco grammar and initial text only. Plugins
+cannot inject frontend JavaScript, components, themes, or network resources;
+unknown or missing hints safely fall back to a plain-text editor.
+
 See [docs/protocol-v1.md](docs/protocol-v1.md) for the wire contract.
 
 ## Package for CandleScope

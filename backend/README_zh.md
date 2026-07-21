@@ -78,7 +78,7 @@ Engine runtime。Host 配置、`.cspkg` 安装、回滚和安全边界见
 | K 线 | `GET /klines/`, `/latest`, `/history`, `/range`, `/history/before`, `/resolve`, `/storage/meta`, `/continuity`, `DELETE /klines/storage` |
 | 高级行情 | `GET /market/snapshot`, `GET /market/history` |
 | Streams | `WS /stream/klines`, `WS /stream/klines_multi`, `WS /stream/indicators`, `WS /stream/prices`, `WS /stream/market` |
-| Indicators | `GET /indicators/registry`, presets, custom CRUD, Pyne security, diagnostics, `POST /indicators/compute` |
+| Indicators | `GET /indicators/registry`, runtime discovery, presets, custom CRUD, Pyne security, diagnostics, `POST /indicators/compute` |
 | Exchanges | `GET /exchanges/`, `GET /exchanges/diagnostics`, `GET /exchanges/{exchange}/capabilities` |
 | Symbols | `GET /symbols/exchange-info`, `POST /symbols/exchange-info/refresh` |
 | Settings | proxy get/update/test、storage repair、gap scan、storage health、cache limits |

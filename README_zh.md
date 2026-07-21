@@ -293,7 +293,9 @@ SHA-256、每 bundle 独立 venv、离线 wheel 安装、结果探针、原子�
 社区发布流程见
 [`INSTALLER_zh.md`](backend/app/plugin_runtime/INSTALLER_zh.md)。Phase 4 已把 Indicator
 HTTP、range、batch 和 WebSocket 统一接入 runtime 路由；Phase 6 缺省已切换为
-`pyne=sidecar,candlescope.pyne`。Phase 5 新增独立可构建的
+`pyne=sidecar,candlescope.pyne`。Phase 7 新增
+`GET /api/v1/indicators/runtimes` 描述符发现；编辑器接受任意已路由的社区 language ID，
+未知语言使用 plaintext fallback，且不加载插件提供的前端代码。Phase 5 新增独立可构建的
 [`candlescope-plugin-pyne`](packages/candlescope-plugin-pyne/README_zh.md)，通过发行锁固定
 SDK、Pyne Runtime RC wheel 与 NumPy 版本，并已通过真实 `.cspkg` 离线安装和协议探针。
 0.2.0 bridge 通过可协商的结构化 Render IR 覆盖 marker、hline、fill 等输出并通过冻结

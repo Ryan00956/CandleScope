@@ -4,8 +4,10 @@ import { createServer, type ViteDevServer } from "vite";
 import type * as IndicatorApiModule from "../indicatorApi.js";
 
 let server: ViteDevServer;
+let computeIndicator: typeof IndicatorApiModule.computeIndicator;
 let computeIndicatorRange: typeof IndicatorApiModule.computeIndicatorRange;
 let computeIndicatorRangeBatch: typeof IndicatorApiModule.computeIndicatorRangeBatch;
+let fetchScriptRuntimes: typeof IndicatorApiModule.fetchScriptRuntimes;
 
 test.before(async () => {
   server = await createServer({
@@ -16,7 +18,12 @@ test.before(async () => {
   const module = await server.ssrLoadModule(
     "/src/services/indicatorApi.js",
   ) as typeof IndicatorApiModule;
-  ({ computeIndicatorRange, computeIndicatorRangeBatch } = module);
+  ({
+    computeIndicator,
+    computeIndicatorRange,
+    computeIndicatorRangeBatch,
+    fetchScriptRuntimes,
+  } = module);
 });
 
 test.after(async () => {
@@ -46,6 +53,7 @@ test("range preserves a typed HTTP 202 payload and forwards AbortSignal", async 
     marketType: "spot",
     symbol: "BTCUSDT",
     interval: "1m",
+    language: "community-lang",
     name: "VOL",
     start: 100,
     end: 200,
@@ -54,6 +62,78 @@ test("range preserves a typed HTTP 202 payload and forwards AbortSignal", async 
   assert.equal(payload.code, "INDICATOR_RANGE_NOT_READY");
   assert.equal(payload.__httpStatus, 202);
   assert.equal(capturedOptions?.signal, controller.signal);
+  const body = capturedOptions?.body;
+  if (typeof body !== "string") throw new Error("Expected serialized request body");
+  const serialized = JSON.parse(body) as unknown;
+  assert.equal(
+    (serialized as { language?: unknown }).language,
+    "community-lang",
+  );
+});
+
+test("runtime discovery parses descriptor-declared community languages", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    schemaVersion: 1,
+    defaultLanguage: "community-lang",
+    languages: [{
+      id: "community-lang",
+      name: "Community Lang",
+      extensions: [".community"],
+      aliases: ["community"],
+      runtimeId: "community.runtime",
+      routeMode: "sidecar",
+      available: true,
+      features: ["batch-execution/1"],
+    }],
+    runtimes: [{
+      id: "community.runtime",
+      name: "Community Runtime",
+      version: "1.0.0",
+      package: "community-runtime",
+      languages: [{
+        id: "community-lang",
+        name: "Community Lang",
+        extensions: [".community"],
+        aliases: ["community"],
+      }],
+      features: ["batch-execution/1"],
+      requiredHostFeatures: ["batch-execution/1"],
+      meta: {},
+    }],
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+
+  const catalog = await fetchScriptRuntimes();
+
+  assert.equal(catalog.defaultLanguage, "community-lang");
+  assert.equal(catalog.languages[0]?.id, "community-lang");
+  assert.equal(catalog.runtimes[0]?.package, "community-runtime");
+});
+
+test("compute forwards an arbitrary descriptor language id", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let capturedBody: unknown;
+  globalThis.fetch = async (_url, options) => {
+    capturedBody = typeof options?.body === "string" ? JSON.parse(options.body) : null;
+    return new Response(JSON.stringify({ ok: true, lines: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  await computeIndicator({
+    mode: "script",
+    language: "community-lang",
+    script: "plot(close)",
+    ohlcv: [],
+  });
+
+  assert.equal((capturedBody as Record<string, unknown>).language, "community-lang");
 });
 
 test("batch serializes requests while keeping signal in fetch options", async (context) => {

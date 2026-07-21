@@ -235,7 +235,7 @@ export interface IndicatorRuntime {
     requestIndicatorRange: RequestIndicatorRange;
     toggleVisibility(indicatorId: string): void;
     updateIndicatorParams(indicatorId: string, params: IndicatorParams): void;
-    updateIndicatorScript(indicatorId: string, script: string): void;
+    updateIndicatorScript(indicatorId: string, script: string, language?: string): void;
   };
   status: {
     computing: boolean;
@@ -472,6 +472,7 @@ function buildHostedCatchupSignature({
       indicator.id,
       indicator.engineName || "",
       stringSignature(indicator.script || ""),
+      indicator.language || "",
       indicator.securityMode || "",
       JSON.stringify(indicator.params || {}),
     ].join(":"))
@@ -1302,6 +1303,9 @@ export function useIndicatorRuntime(
             rangeRequest.customId = message.customId;
           }
           if (message.script !== undefined) rangeRequest.script = message.script;
+          if (message.language !== undefined) {
+            rangeRequest.language = message.language;
+          }
           if (message.securityMode !== undefined) {
             rangeRequest.securityMode = message.securityMode;
           }

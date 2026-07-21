@@ -23,6 +23,10 @@ import type {
   IndicatorUnifiedSeries,
   IndicatorValuePoint,
   PyneSecurityPolicy,
+  ScriptLanguageDescriptor,
+  ScriptLanguageIdentity,
+  ScriptRuntimeCatalog,
+  ScriptRuntimeDescriptor,
 } from "./indicatorTypes.js";
 
 export class IndicatorPayloadError extends TypeError {
@@ -141,6 +145,123 @@ function parseOptionalArray<T>(
   return expectIndicatorArray(value, path).map((item, index) =>
     parser(item, `${path}[${index}]`),
   );
+}
+
+function parseScriptLanguageIdentity(
+  value: unknown,
+  path: string,
+): ScriptLanguageIdentity {
+  const record = expectIndicatorRecord(value, path);
+  return {
+    id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
+    name: expectIndicatorNonEmptyString(record.name, `${path}.name`),
+    extensions: indicatorStringArray(record.extensions, `${path}.extensions`),
+    aliases: indicatorStringArray(record.aliases, `${path}.aliases`),
+  };
+}
+
+function parseScriptRuntimeDescriptor(
+  value: unknown,
+  path: string,
+): ScriptRuntimeDescriptor {
+  const record = expectIndicatorRecord(value, path);
+  const languages = expectIndicatorArray(record.languages, `${path}.languages`).map(
+    (item, index) =>
+      parseScriptLanguageIdentity(item, `${path}.languages[${index}]`),
+  );
+  if (languages.length === 0) {
+    throw new IndicatorPayloadError(`${path}.languages`, "expected at least one language");
+  }
+  if (new Set(languages.map((item) => item.id)).size !== languages.length) {
+    throw new IndicatorPayloadError(`${path}.languages`, "duplicate language id");
+  }
+  return {
+    id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
+    name: expectIndicatorNonEmptyString(record.name, `${path}.name`),
+    version: expectIndicatorNonEmptyString(record.version, `${path}.version`),
+    package: expectIndicatorNonEmptyString(record.package, `${path}.package`),
+    languages,
+    features: indicatorStringArray(record.features, `${path}.features`),
+    requiredHostFeatures: indicatorStringArray(
+      record.requiredHostFeatures,
+      `${path}.requiredHostFeatures`,
+    ),
+    meta: expectIndicatorRecord(record.meta, `${path}.meta`),
+  };
+}
+
+function parseScriptLanguageDescriptor(
+  value: unknown,
+  path: string,
+): ScriptLanguageDescriptor {
+  const record = expectIndicatorRecord(value, path);
+  const identity = parseScriptLanguageIdentity(record, path);
+  const runtimeId = record.runtimeId === null
+    ? null
+    : expectIndicatorNonEmptyString(record.runtimeId, `${path}.runtimeId`);
+  return {
+    ...identity,
+    runtimeId,
+    routeMode: expectIndicatorNonEmptyString(record.routeMode, `${path}.routeMode`),
+    available: expectIndicatorBoolean(record.available, `${path}.available`),
+    features: indicatorStringArray(record.features, `${path}.features`),
+  };
+}
+
+export function parseScriptRuntimeCatalog(
+  value: unknown,
+  path = "indicator.runtimes",
+): ScriptRuntimeCatalog {
+  const record = expectIndicatorRecord(value, path);
+  const schemaVersion = expectIndicatorPositiveInteger(
+    record.schemaVersion,
+    `${path}.schemaVersion`,
+  );
+  if (schemaVersion !== 1) {
+    throw new IndicatorPayloadError(`${path}.schemaVersion`, "expected 1");
+  }
+  const runtimes = expectIndicatorArray(record.runtimes, `${path}.runtimes`).map(
+    (item, index) =>
+      parseScriptRuntimeDescriptor(item, `${path}.runtimes[${index}]`),
+  );
+  const languages = expectIndicatorArray(record.languages, `${path}.languages`).map(
+    (item, index) =>
+      parseScriptLanguageDescriptor(item, `${path}.languages[${index}]`),
+  );
+  const defaultLanguage = expectIndicatorNonEmptyString(
+    record.defaultLanguage,
+    `${path}.defaultLanguage`,
+  );
+  if (!languages.some((language) => language.id === defaultLanguage)) {
+    throw new IndicatorPayloadError(
+      `${path}.defaultLanguage`,
+      "expected a routed language id",
+    );
+  }
+  if (new Set(languages.map((item) => item.id)).size !== languages.length) {
+    throw new IndicatorPayloadError(`${path}.languages`, "duplicate language id");
+  }
+  if (new Set(runtimes.map((item) => item.id)).size !== runtimes.length) {
+    throw new IndicatorPayloadError(`${path}.runtimes`, "duplicate runtime id");
+  }
+  const runtimeById = new Map(runtimes.map((item) => [item.id, item]));
+  for (const language of languages) {
+    if (language.runtimeId === null) continue;
+    const runtime = runtimeById.get(language.runtimeId);
+    if (!runtime) {
+      throw new IndicatorPayloadError(
+        `${path}.languages`,
+        `unknown runtime id ${language.runtimeId}`,
+      );
+    }
+    if (!runtime.languages.some((declared) => declared.id === language.id)) {
+      throw new IndicatorPayloadError(
+        `${path}.languages`,
+        `runtime ${language.runtimeId} does not declare ${language.id}`,
+      );
+    }
+  }
+  return { schemaVersion, defaultLanguage, languages, runtimes };
 }
 
 function parseIndicatorValuePoint(
@@ -1014,6 +1135,7 @@ export function parseCustomIndicatorRecord(
   const normalizedSecurityMode = securityMode === null
     ? null
     : optionalIndicatorString(securityMode, `${path}.securityMode`);
+  const language = optionalIndicatorString(record.language, `${path}.language`);
   const createdAt = optionalIndicatorFiniteNumber(
     record.createdAt ?? record.created_at,
     `${path}.createdAt`,
@@ -1025,6 +1147,7 @@ export function parseCustomIndicatorRecord(
   if (normalizedSecurityMode !== undefined) {
     customIndicator.securityMode = normalizedSecurityMode;
   }
+  if (language !== undefined) customIndicator.language = language;
   if (createdAt !== undefined) customIndicator.createdAt = createdAt;
   if (updatedAt !== undefined) customIndicator.updatedAt = updatedAt;
   return customIndicator;

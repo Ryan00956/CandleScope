@@ -45,7 +45,7 @@ export interface ActiveIndicatorStore {
   removeIndicator(indicatorId: string): void;
   toggleVisibility(indicatorId: string): void;
   updateIndicatorParams(indicatorId: string, newParams: IndicatorParams): void;
-  updateIndicatorScript(indicatorId: string, newScript: string): void;
+  updateIndicatorScript(indicatorId: string, newScript: string, language?: string): void;
 }
 
 export function useActiveIndicatorStore({
@@ -126,11 +126,19 @@ export function useActiveIndicatorStore({
     onRequireCompute?.();
   }, [onRequireCompute]);
 
-  const updateIndicatorScript = useCallback((indicatorId: string, newScript: string) => {
+  const updateIndicatorScript = useCallback((
+    indicatorId: string,
+    newScript: string,
+    language?: string,
+  ) => {
     setActiveIndicators((prev) =>
       prev.map((indicator) =>
         indicator.id === indicatorId
-          ? { ...indicator, script: newScript }
+          ? {
+              ...indicator,
+              script: newScript,
+              ...(language ? { language } : {}),
+            }
           : indicator
       )
     );

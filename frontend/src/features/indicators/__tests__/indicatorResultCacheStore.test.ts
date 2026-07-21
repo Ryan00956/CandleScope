@@ -112,6 +112,18 @@ test("indicator result cache canonicalizes fixed-duration aliases", () => {
   );
 });
 
+test("script cache identity is isolated by descriptor language", () => {
+  const script = { id: "script-1", script: "plot(close)", params: {} };
+
+  assert.notEqual(
+    buildIndicatorResultCacheKey({ ...script, language: "pyne" }, baseContext),
+    buildIndicatorResultCacheKey(
+      { ...script, language: "community-lang" },
+      baseContext,
+    ),
+  );
+});
+
 test("cache hydration identity changes on re-add but ignores runtime line updates", () => {
   const absent = buildIndicatorCacheHydrationSignature([], baseContext);
   const added = buildIndicatorCacheHydrationSignature([maIndicator], baseContext);

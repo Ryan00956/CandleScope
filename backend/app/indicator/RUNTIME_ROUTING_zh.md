@@ -47,8 +47,51 @@ Phase 4 把 CandleScope 稳定的 Indicator 传输接到通用脚本 runtime Hos
 
 现有客户端不传 `language`，因此仍然是 `pyne`。API/WS 客户端可以显式传入另一种
 已配置的语言 ID，让社区 runtime 无需 CandleScope 私有适配层即可使用 `sidecar`。
-Phase 4 只有 `pyne` 具备 legacy adapter，所以其他语言必须使用 `sidecar`；前端根据
-descriptor 自动发现语言仍属于 Phase 7。
+Phase 4 只有 `pyne` 具备 legacy adapter，所以其他语言必须使用 `sidecar`。Phase 7 起，
+前端从公开目录发现这些语言，不再维护封闭的 runtime ID 联合类型。
+
+## 公开 runtime 目录
+
+`GET /api/v1/indicators/runtimes` 把启动时已验证的 routes 和 runtime descriptors 投影为
+版本化公开目录：
+
+```json
+{
+  "schemaVersion": 1,
+  "defaultLanguage": "pyne",
+  "languages": [
+    {
+      "id": "pyne",
+      "name": "Pyne",
+      "extensions": [".pyne"],
+      "aliases": ["pyne"],
+      "runtimeId": "candlescope.pyne",
+      "routeMode": "sidecar",
+      "available": true,
+      "features": ["batch-execution/1", "render.line-series/1"]
+    }
+  ],
+  "runtimes": [
+    {
+      "id": "candlescope.pyne",
+      "name": "CandleScope Pyne Runtime",
+      "version": "0.2.0",
+      "package": "candlescope-plugin-pyne",
+      "languages": [
+        {"id": "pyne", "name": "Pyne", "extensions": [".pyne"], "aliases": ["pyne"]}
+      ],
+      "features": ["batch-execution/1", "render.line-series/1"],
+      "requiredHostFeatures": [],
+      "meta": {}
+    }
+  ]
+}
+```
+
+响应会在 `runtimes` 中包含每个被引用的 SDK 公开 runtime descriptor，但绝不包含
+registry 路径、进程命令、PID、stderr 或宿主失败细节。Runtime metadata 只能是 JSON
+数据；可选的 `meta.ui.languages.<language-id>` 约定可以提供 `monacoLanguage` 和
+`starterSource` 字符串，不能注入前端代码。未知语言使用宿主的 plaintext editor fallback。
 
 ## 三种模式的语义
 
@@ -72,6 +115,7 @@ Indicator 请求前 fail closed。
 
 同一个 `IndicatorRuntimeService` 同时服务：
 
+- `GET /api/v1/indicators/runtimes`，供前端按 descriptor 发现语言；
 - `POST /api/v1/indicators/compute`；
 - `POST /api/v1/indicators/range`；
 - `POST /api/v1/indicators/range/batch`；

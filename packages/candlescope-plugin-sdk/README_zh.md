@@ -45,6 +45,25 @@ candlescope-hello-runtime
 它只接受 `plot(close)`，并返回一个 close line series。完整实现位于
 `candlescope_plugin_sdk.examples.hello_runtime`，可作为新 runtime 的最小模板。
 
+前端从 runtime descriptor 动态发现语言，不使用封闭的 runtime ID 联合类型。插件可在
+`RuntimeDescriptor.meta.ui.languages.<language-id>` 下提供安全的 editor hints：
+
+```python
+meta={
+    "ui": {
+        "languages": {
+            "my": {
+                "monacoLanguage": "plaintext",
+                "starterSource": "plot(close)\n",
+            }
+        }
+    }
+}
+```
+
+这只是可选的 JSON 展示 metadata；宿主可以忽略，且绝不会因此加载插件提供的
+JavaScript、CSS 或 component。未知语言仍可使用宿主的 plaintext editor fallback。
+
 社区插件应继承 `BaseRuntimePlugin` 并实现：
 
 ```python

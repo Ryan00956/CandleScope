@@ -41,6 +41,12 @@ intersection as `negotiatedFeatures`.
 Returns the runtime ID, display name, package/version, language descriptors,
 supported features, required host features, and JSON-compatible metadata.
 
+The optional metadata convention `ui.languages.<language-id>` may contain
+`monacoLanguage` and `starterSource` strings for descriptor-driven editor
+discovery. It is presentation metadata rather than a negotiated protocol
+feature: hosts may ignore it, and it never grants permission to load or execute
+plugin-provided frontend code.
+
 ### analyze
 
 Accepts `source`, `context`, and optional `options`. It returns `ok`,

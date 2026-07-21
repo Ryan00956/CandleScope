@@ -99,6 +99,14 @@ test("semantic indicator and market context changes invalidate the old wire iden
         securityMode: "strict",
       }),
     },
+    {
+      indicator: hostedIndicator({
+        engineName: null,
+        kind: "script",
+        script: "plot(close)",
+        language: "community-lang",
+      }),
+    },
     { context: { ...context, symbol: "ETHUSDT" } },
     { context: { ...context, interval: "4h" } },
   ];

@@ -75,11 +75,14 @@ class _Host:
     result: ExecuteBatchResult = field(default_factory=_result)
     gate: asyncio.Event | None = None
     error: Exception | None = None
+    descriptor_error: Exception | None = None
     requests: list[tuple[str, ExecuteBatchRequest]] = field(default_factory=list)
     cancelled: int = 0
 
     async def descriptor(self, runtime_id: str) -> RuntimeDescriptor:
         assert runtime_id == "pyne.runtime"
+        if self.descriptor_error is not None:
+            raise self.descriptor_error
         return self.runtime_descriptor
 
     async def execute_batch(
@@ -420,6 +423,112 @@ async def test_route_descriptor_mismatch_fails_before_execution(
     )
     with pytest.raises(IndicatorRuntimeRoutesError, match=message):
         await service.start()
+
+
+@pytest.mark.anyio
+async def test_public_catalog_is_descriptor_and_route_driven() -> None:
+    descriptor = RuntimeDescriptor(
+        id="pyne.runtime",
+        name="Community Multi Runtime",
+        version="1.2.3",
+        package="community-multi-runtime",
+        languages=(
+            LanguageDescriptor(
+                id="pyne",
+                name="Pyne",
+                extensions=(".pyne",),
+                aliases=("pyne",),
+            ),
+            LanguageDescriptor(
+                id="community-lang",
+                name="Community Lang",
+                extensions=(".community",),
+                aliases=("community",),
+            ),
+        ),
+        features=(
+            FEATURE_BATCH_EXECUTION_V1,
+            FEATURE_RENDER_LINE_SERIES_V1,
+        ),
+        required_host_features=(FEATURE_BATCH_EXECUTION_V1,),
+        meta={"ui": {"languages": {"community-lang": {"monacoLanguage": "plaintext"}}}},
+    )
+    routes = IndicatorRuntimeRoutes(
+        (
+            IndicatorRuntimeRoute(
+                language="pyne",
+                mode="sidecar",
+                runtime_id="pyne.runtime",
+            ),
+            IndicatorRuntimeRoute(
+                language="community-lang",
+                mode="sidecar",
+                runtime_id="pyne.runtime",
+            ),
+        )
+    )
+    service = IndicatorRuntimeService(routes, host=_Host(runtime_descriptor=descriptor))
+
+    catalog = await service.public_catalog()
+
+    assert catalog == {
+        "schemaVersion": 1,
+        "defaultLanguage": "pyne",
+        "languages": [
+            {
+                "id": "pyne",
+                "name": "Pyne",
+                "extensions": [".pyne"],
+                "aliases": ["pyne"],
+                "runtimeId": "pyne.runtime",
+                "routeMode": "sidecar",
+                "available": True,
+                "features": [
+                    FEATURE_BATCH_EXECUTION_V1,
+                    FEATURE_RENDER_LINE_SERIES_V1,
+                ],
+            },
+            {
+                "id": "community-lang",
+                "name": "Community Lang",
+                "extensions": [".community"],
+                "aliases": ["community"],
+                "runtimeId": "pyne.runtime",
+                "routeMode": "sidecar",
+                "available": True,
+                "features": [
+                    FEATURE_BATCH_EXECUTION_V1,
+                    FEATURE_RENDER_LINE_SERIES_V1,
+                ],
+            },
+        ],
+        "runtimes": [descriptor.to_wire()],
+    }
+    assert "source" not in str(catalog)
+    assert "command" not in str(catalog)
+    assert "pid" not in str(catalog)
+
+
+@pytest.mark.anyio
+async def test_public_catalog_sanitizes_plugin_host_start_failure() -> None:
+    service = IndicatorRuntimeService(
+        _routes("sidecar"),
+        host=_Host(
+            descriptor_error=PluginTransportError(
+                code="PLUGIN_PROCESS_EXITED",
+                message="private stderr and executable path",
+                runtime_id="pyne.runtime",
+            )
+        ),
+    )
+
+    with pytest.raises(
+        IndicatorRuntimeRoutesError,
+        match="script runtime catalog is unavailable",
+    ) as captured:
+        await service.public_catalog()
+
+    assert "private stderr" not in str(captured.value)
 
 
 @pytest.mark.anyio

@@ -55,7 +55,53 @@ Existing clients omit `language` and therefore remain `pyne`. API/WS clients
 may explicitly send another configured language ID, allowing a community
 runtime to use `sidecar` without a CandleScope-private adapter. Phase 4 has a
 legacy adapter only for `pyne`, so every other language must use `sidecar`.
-Descriptor-driven language discovery in the frontend remains Phase 7.
+Since Phase 7, the frontend discovers these languages from the public catalog
+instead of a closed runtime-ID union.
+
+## Public runtime catalog
+
+`GET /api/v1/indicators/runtimes` projects the startup-validated routes and
+runtime descriptors into a versioned public catalog:
+
+```json
+{
+  "schemaVersion": 1,
+  "defaultLanguage": "pyne",
+  "languages": [
+    {
+      "id": "pyne",
+      "name": "Pyne",
+      "extensions": [".pyne"],
+      "aliases": ["pyne"],
+      "runtimeId": "candlescope.pyne",
+      "routeMode": "sidecar",
+      "available": true,
+      "features": ["batch-execution/1", "render.line-series/1"]
+    }
+  ],
+  "runtimes": [
+    {
+      "id": "candlescope.pyne",
+      "name": "CandleScope Pyne Runtime",
+      "version": "0.2.0",
+      "package": "candlescope-plugin-pyne",
+      "languages": [
+        {"id": "pyne", "name": "Pyne", "extensions": [".pyne"], "aliases": ["pyne"]}
+      ],
+      "features": ["batch-execution/1", "render.line-series/1"],
+      "requiredHostFeatures": [],
+      "meta": {}
+    }
+  ]
+}
+```
+
+The response includes each referenced public SDK runtime descriptor under
+`runtimes`. It never includes registry paths, process commands, PIDs, stderr, or
+host failure details. Runtime metadata is JSON data only. The optional
+`meta.ui.languages.<language-id>` convention may provide `monacoLanguage` and
+`starterSource` strings; it cannot inject frontend code. Unknown languages use
+the host's plaintext editor fallback.
 
 ## Route semantics
 
@@ -83,6 +129,7 @@ Indicator request is accepted.
 
 One `IndicatorRuntimeService` is shared by:
 
+- `GET /api/v1/indicators/runtimes` for descriptor-driven discovery;
 - `POST /api/v1/indicators/compute`;
 - `POST /api/v1/indicators/range`;
 - `POST /api/v1/indicators/range/batch`;

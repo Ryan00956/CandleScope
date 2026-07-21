@@ -159,6 +159,7 @@ function indicatorIdentity(
       indicator.name ||
       "",
     stringSignature(indicator.script || ""),
+    indicator.language || "",
     indicator.securityMode || "",
     stableJson(computeParams || {}),
   ].join("|");

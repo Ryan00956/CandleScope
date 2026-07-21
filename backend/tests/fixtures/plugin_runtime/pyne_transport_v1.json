@@ -1,0 +1,173 @@
+{
+  "schemaVersion": "candlescope.pyne-transport-baseline.v1",
+  "description": "Frozen public CandleScope transport behavior before Pyne is moved behind the plugin host.",
+  "serverEpoch": "plugin-baseline-epoch",
+  "script": "indicator(\"Plugin Baseline\", overlay=false)\nplot(close * 2, title=\"Double Close\", color=\"#22c55e\", linewidth=2)\nhline(210, \"Threshold\", color=\"#f59e0b\")\nmarker(close > open, text=\"UP\", location=location.top, color=\"#3b82f6\")\n",
+  "bars": [
+    {
+      "time": 1700000000,
+      "open": 100,
+      "high": 102,
+      "low": 99,
+      "close": 101,
+      "volume": 10
+    },
+    {
+      "time": 1700000060,
+      "open": 101,
+      "high": 103,
+      "low": 100,
+      "close": 102,
+      "volume": 11
+    },
+    {
+      "time": 1700000120,
+      "open": 102,
+      "high": 104,
+      "low": 101,
+      "close": 103,
+      "volume": 12
+    },
+    {
+      "time": 1700000180,
+      "open": 103,
+      "high": 105,
+      "low": 102,
+      "close": 104,
+      "volume": 13
+    },
+    {
+      "time": 1700000240,
+      "open": 104,
+      "high": 106,
+      "low": 103,
+      "close": 105,
+      "volume": 14
+    }
+  ],
+  "httpCompute": {
+    "path": "/api/v1/indicators/compute",
+    "request": {
+      "mode": "script",
+      "exchange": "binance",
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "market_type": "spot",
+      "params": {},
+      "securityMode": "safe"
+    },
+    "expected": {
+      "statusCode": 200,
+      "canonicalSha256": "sha256:b2467295cc14ec0e772e97fce195f236739cecb260e967190d73af305ab6f7ee",
+      "topLevelKeys": [
+        "annotations",
+        "error",
+        "fills",
+        "hlines",
+        "lines",
+        "markers",
+        "meta",
+        "ok",
+        "outputSchemaVersion",
+        "paneLayout",
+        "result",
+        "schemaVersion",
+        "scriptHash",
+        "series"
+      ]
+    }
+  },
+  "httpRange": {
+    "path": "/api/v1/indicators/range",
+    "request": {
+      "clientId": "baseline-script-1",
+      "kind": "script",
+      "exchange": "binance",
+      "marketType": "spot",
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "name": "Plugin Baseline",
+      "securityMode": "safe",
+      "params": {},
+      "start": 1700000060,
+      "end": 1700000180,
+      "reason": "plugin-compat-baseline"
+    },
+    "expected": {
+      "statusCode": 200,
+      "canonicalSha256": "sha256:ba66866f0330d62f1121c3a5ff77d6339d786df796672c9795e78a293c1ebb26",
+      "topLevelKeys": [
+        "annotations",
+        "barTime",
+        "cacheHit",
+        "clientId",
+        "dataRevision",
+        "error",
+        "exchange",
+        "fills",
+        "hlines",
+        "indicatorId",
+        "interval",
+        "kind",
+        "lines",
+        "markers",
+        "market_type",
+        "meta",
+        "name",
+        "ok",
+        "outputSchemaVersion",
+        "paneLayout",
+        "params",
+        "range",
+        "reason",
+        "result",
+        "schemaVersion",
+        "scriptHash",
+        "series",
+        "symbol",
+        "targetBars",
+        "type",
+        "warmupBars"
+      ]
+    }
+  },
+  "websocket": {
+    "path": "/api/v1/stream/indicators",
+    "subscribe": {
+      "action": "subscribe",
+      "clientId": "baseline-ws-1",
+      "kind": "script",
+      "exchange": "binance",
+      "marketType": "spot",
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "displayName": "Plugin Baseline",
+      "securityMode": "safe",
+      "historyLimit": 5
+    },
+    "unsubscribe": {
+      "action": "unsubscribe",
+      "clientId": "baseline-ws-1"
+    },
+    "expected": {
+      "canonicalSha256": "sha256:6326a43822000618fe2feddcfe9b28b5a02e3663be106ef1dabfa511f6e418f2",
+      "frameTypes": [
+        "connected",
+        "indicator.subscribed",
+        "indicator.patch",
+        "indicator.unsubscribed"
+      ],
+      "frameSha256": [
+        "sha256:df369e2203f7e024232f8a04490897e05e77b358132bb844419ccff337b31c7e",
+        "sha256:dc0068285a37a92af782315f3af429c0333eb80dfefc7cbb4870de3f3bd6988b",
+        "sha256:0a1d8332dfcec3737a5e502b57f86acd8deea2db6932fea7c2fa9d1b59fe732d",
+        "sha256:ca2a81e21872b4f2354d3c3aee10a246a5b58a95a6ca3d4def1100ed7cecd8e5"
+      ]
+    }
+  },
+  "identity": {
+    "scriptHash": "5eda0d7ae01afd377973096468a0b291bc5d048a3a0d49875e173eaf3208e1b3",
+    "rangeIndicatorId": "pyne:binance:spot:BTCUSDT:1m:5eda0d7ae01a:baseline-script-1",
+    "websocketIndicatorId": "pyne:binance:spot:BTCUSDT:1m:5eda0d7ae01a:baseline-ws-1"
+  }
+}

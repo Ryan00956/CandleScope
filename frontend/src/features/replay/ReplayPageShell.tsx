@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { RefObject } from "react";
 import MarketPageFrame from "../../app/MarketPageFrame.js";
 import MarketWorkspaceFrame from "../../app/MarketWorkspaceFrame.js";
@@ -8,7 +8,10 @@ import ReplayControlBar from "./components/ReplayControlBar.js";
 import ReplayReportPanel from "./components/ReplayReportPanel.js";
 import ReplayRightRail from "./components/ReplayRightRail.js";
 import ReplaySessionDialog from "./components/ReplaySessionDialog.js";
+import { defaultReplayV2Api } from "./replayV2Api.js";
+import { REPLAY_PRODUCT_V2_ENABLED } from "./replayV2Types.js";
 import { handleReplayShortcut } from "./replayShortcuts.js";
+import { returnToTrainingHub } from "./trainingHubNavigation.js";
 import { formatReplayPublicTime, replayOwnsController } from "./replayUiModel.js";
 import type { ReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
@@ -52,6 +55,8 @@ function ReplayStatePanel({ runtime }: { readonly runtime: ReplayRuntime }) {
 }
 
 export default function ReplayPageShell({ runtime, indicators, chartSurfaceRef }: ReplayPageShellProps) {
+  const [returningToHub, setReturningToHub] = useState(false);
+  const [returnToHubError, setReturnToHubError] = useState<string | null>(null);
   const { marketData } = runtime;
   const config = runtime.store.sessionConfig;
   const active = runtime.phase === "ACTIVE" && config !== null && runtime.store.hasAuthoritativeSnapshot;
@@ -64,6 +69,18 @@ export default function ReplayPageShell({ runtime, indicators, chartSurfaceRef }
     blindMode: config?.blind_mode ?? true,
     originMs: runtime.store.replayStartMs,
   }), [config?.blind_mode, runtime.store.replayStartMs]);
+  const returnToHub = useCallback(async () => {
+    const sessionId = runtime.store.sessionId;
+    if (sessionId === null || returningToHub) return;
+    setReturningToHub(true);
+    setReturnToHubError(null);
+    try {
+      await returnToTrainingHub(sessionId, defaultReplayV2Api);
+    } catch (error) {
+      setReturnToHubError(error instanceof Error ? error.message : "返回存档大厅失败");
+      setReturningToHub(false);
+    }
+  }, [returningToHub, runtime.store.sessionId]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -132,6 +149,17 @@ export default function ReplayPageShell({ runtime, indicators, chartSurfaceRef }
             </button>
           )}
           {lastPrice && <div className="replay-ohlcv"><strong>{lastPrice.close}</strong><span>O {lastPrice.open}</span><span>H {lastPrice.high}</span><span>L {lastPrice.low}</span><span>V {lastPrice.volume}</span></div>}
+          {REPLAY_PRODUCT_V2_ENABLED && active && runtime.store.sessionId !== null && (
+            <button
+              className="replay-return-hub"
+              type="button"
+              disabled={returningToHub}
+              title={returnToHubError ?? "先由服务端暂停并写入 checkpoint，再返回训练存档大厅"}
+              onClick={() => void returnToHub()}
+            >
+              {returningToHub ? "正在保存…" : "存档大厅"}
+            </button>
+          )}
           <a className="replay-live-link" href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
         </header>
       )}

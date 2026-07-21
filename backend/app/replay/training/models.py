@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -19,6 +20,7 @@ from app.replay.models import (
 REPLAY_V2_PROTOCOL = "replay.v2"
 REPLAY_V2_SCHEMA_VERSION = "replay.contract.v2.phase0"
 MAX_V2_COUNTER = (1 << 53) - 1
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class _StringEnum(str, Enum):
@@ -255,6 +257,15 @@ def validate_positive_decimal(value: object, *, field_name: str) -> str:
         raise ValueError(f"{field_name} must be a canonical Decimal string")
     if Decimal(normalized) <= 0:
         raise ValueError(f"{field_name} must be positive")
+    return normalized
+
+
+def validate_non_negative_decimal(value: object, *, field_name: str) -> str:
+    normalized = normalize_decimal_string(value, field_name=field_name)
+    if normalized != value:
+        raise ValueError(f"{field_name} must be a canonical Decimal string")
+    if Decimal(normalized) < 0:
+        raise ValueError(f"{field_name} cannot be negative")
     return normalized
 
 
@@ -572,6 +583,208 @@ def validate_track_source(
         raise ValueError("track source_kind must match TrainingRun source_kind")
 
 
+@dataclass(frozen=True, slots=True)
+class TrainingRunCreateRequest:
+    """Strict Phase 1 create contract mapped to one replay.v1 adapter session."""
+
+    protocol: str
+    catalog_epoch: str
+    name: str | None
+    source_kind: ReplaySource
+    start_mode: StartMode
+    exchange: str
+    market_type: str
+    symbol: str
+    settlement_asset: str
+    base_interval: str
+    display_interval: str
+    requested_start_ms: int | None
+    warmup_bars: int
+    forward_cache_ms: int
+    random_seed: int
+    initial_equity: str
+    max_leverage: str
+    maker_fee_bps: str
+    taker_fee_bps: str
+    market_slippage_bps: str
+    integrity_mode: IntegrityMode
+    time_disclosure_policy: TimeDisclosurePolicy
+    book_mode: BookMode
+    margin_mode: MarginMode
+    funding_mode: str
+    allow_rule_changes: bool
+
+    def __post_init__(self) -> None:
+        if self.protocol != REPLAY_V2_PROTOCOL:
+            raise ValueError(f"protocol must be {REPLAY_V2_PROTOCOL}")
+        if not isinstance(self.catalog_epoch, str) or not _DIGEST.fullmatch(
+            self.catalog_epoch
+        ):
+            raise ValueError("catalog_epoch must be a sha256 digest")
+        if self.name is not None:
+            if not isinstance(self.name, str):
+                raise TypeError("name must be a string or null")
+            name = self.name.strip()
+            if not name or len(name) > 80 or any(ord(char) < 32 for char in name):
+                raise ValueError("name must contain 1-80 display-safe characters")
+            object.__setattr__(self, "name", name)
+        for field_name, enum_type in (
+            ("source_kind", ReplaySource),
+            ("start_mode", StartMode),
+            ("integrity_mode", IntegrityMode),
+            ("time_disclosure_policy", TimeDisclosurePolicy),
+            ("book_mode", BookMode),
+            ("margin_mode", MarginMode),
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                coerce_enum(enum_type, getattr(self, field_name), field_name=field_name),
+            )
+        for field_name in (
+            "exchange",
+            "market_type",
+            "symbol",
+            "settlement_asset",
+            "base_interval",
+            "display_interval",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                validate_identifier(getattr(self, field_name), field_name=field_name),
+            )
+        if self.requested_start_ms is not None:
+            object.__setattr__(
+                self,
+                "requested_start_ms",
+                validate_timestamp_ms(
+                    self.requested_start_ms,
+                    field_name="requested_start_ms",
+                ),
+            )
+        if self.start_mode is StartMode.MANUAL and self.requested_start_ms is None:
+            raise ValueError("MANUAL start requires requested_start_ms")
+        if self.start_mode is StartMode.RANDOM and self.requested_start_ms is not None:
+            raise ValueError("RANDOM start cannot include requested_start_ms")
+        warmup = validate_v2_counter(self.warmup_bars, field_name="warmup_bars")
+        forward_cache = validate_v2_counter(
+            self.forward_cache_ms, field_name="forward_cache_ms"
+        )
+        random_seed = validate_v2_counter(self.random_seed, field_name="random_seed")
+        if warmup < 1:
+            raise ValueError("warmup_bars must be positive")
+        if forward_cache < 1:
+            raise ValueError("forward_cache_ms must be positive")
+        object.__setattr__(self, "warmup_bars", warmup)
+        object.__setattr__(self, "forward_cache_ms", forward_cache)
+        object.__setattr__(self, "random_seed", random_seed)
+        for field_name in ("initial_equity", "max_leverage"):
+            object.__setattr__(
+                self,
+                field_name,
+                validate_positive_decimal(
+                    getattr(self, field_name), field_name=field_name
+                ),
+            )
+        for field_name in (
+            "maker_fee_bps",
+            "taker_fee_bps",
+            "market_slippage_bps",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                validate_non_negative_decimal(
+                    getattr(self, field_name), field_name=field_name
+                ),
+            )
+        if self.integrity_mode is not IntegrityMode.CHALLENGE:
+            raise ValueError("Phase 1 supports only CHALLENGE integrity mode")
+        if self.time_disclosure_policy not in {
+            TimeDisclosurePolicy.NONE,
+            TimeDisclosurePolicy.HIDE_ALL,
+        }:
+            raise ValueError("Phase 1 supports only NONE or HIDE_ALL disclosure")
+        if self.book_mode is not BookMode.OFF:
+            raise ValueError("Phase 1 historical book mode must remain OFF")
+        if self.margin_mode is not MarginMode.CROSS:
+            raise ValueError("Phase 1 supports only CROSS margin mode")
+        if self.funding_mode != "OFF":
+            raise ValueError("Phase 1 funding mode must remain OFF")
+        if self.allow_rule_changes is not False:
+            raise ValueError("Phase 1 rules must remain locked")
+
+    @classmethod
+    def from_dict(cls, value: object) -> "TrainingRunCreateRequest":
+        payload = expect_mapping(value, field_name="training run create")
+        expect_exact_keys(
+            payload,
+            {
+                "protocol",
+                "catalog_epoch",
+                "name",
+                "source_kind",
+                "start_mode",
+                "exchange",
+                "market_type",
+                "symbol",
+                "settlement_asset",
+                "base_interval",
+                "display_interval",
+                "requested_start_ms",
+                "warmup_bars",
+                "forward_cache_ms",
+                "random_seed",
+                "initial_equity",
+                "max_leverage",
+                "maker_fee_bps",
+                "taker_fee_bps",
+                "market_slippage_bps",
+                "integrity_mode",
+                "time_disclosure_policy",
+                "book_mode",
+                "margin_mode",
+                "funding_mode",
+                "allow_rule_changes",
+            },
+        )
+        return cls(**payload)  # type: ignore[arg-type]
+
+    def to_dict(self, *, redact_hidden_start: bool = False) -> dict[str, object]:
+        hidden = self.time_disclosure_policy is not TimeDisclosurePolicy.NONE
+        return {
+            "protocol": self.protocol,
+            "catalog_epoch": self.catalog_epoch,
+            "name": self.name,
+            "source_kind": self.source_kind.value,
+            "start_mode": self.start_mode.value,
+            "exchange": self.exchange,
+            "market_type": self.market_type,
+            "symbol": self.symbol,
+            "settlement_asset": self.settlement_asset,
+            "base_interval": self.base_interval,
+            "display_interval": self.display_interval,
+            "requested_start_ms": (
+                None if redact_hidden_start and hidden else self.requested_start_ms
+            ),
+            "warmup_bars": self.warmup_bars,
+            "forward_cache_ms": self.forward_cache_ms,
+            "random_seed": self.random_seed,
+            "initial_equity": self.initial_equity,
+            "max_leverage": self.max_leverage,
+            "maker_fee_bps": self.maker_fee_bps,
+            "taker_fee_bps": self.taker_fee_bps,
+            "market_slippage_bps": self.market_slippage_bps,
+            "integrity_mode": self.integrity_mode.value,
+            "time_disclosure_policy": self.time_disclosure_policy.value,
+            "book_mode": self.book_mode.value,
+            "margin_mode": self.margin_mode.value,
+            "funding_mode": self.funding_mode,
+            "allow_rule_changes": self.allow_rule_changes,
+        }
+
+
 __all__ = [
     "BookMode",
     "CapabilityKind",
@@ -595,6 +808,7 @@ __all__ = [
     "TimeDisclosurePolicy",
     "TrackState",
     "TrainingCursor",
+    "TrainingRunCreateRequest",
     "TrainingRunContract",
     "ensure_time_disclosure_not_weakened",
     "validate_track_source",

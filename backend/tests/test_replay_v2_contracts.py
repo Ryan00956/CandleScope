@@ -57,13 +57,17 @@ def test_replay_v2_golden_matches_python_enum_and_schema_registry() -> None:
     assert golden["schema_migration_contract"] == SCHEMA_MIGRATION_CONTRACT
 
 
-def test_replay_v2_phase0_package_contains_no_runtime_or_persistence_owner() -> None:
+def test_replay_v2_phase1_package_keeps_runtime_and_storage_inside_training() -> None:
     training_root = ROOT / "backend" / "app" / "replay" / "training"
     assert {path.name for path in training_root.glob("*.py")} == {
         "__init__.py",
-        "models.py",
         "commands.py",
+        "errors.py",
         "events.py",
+        "models.py",
+        "schema.py",
+        "service.py",
+        "storage.py",
     }
 
 
@@ -214,7 +218,7 @@ async def test_replay_v2_phase0_http_paths_fail_closed_by_default() -> None:
 
 
 @pytest.mark.anyio
-async def test_replay_v2_phase0_flag_cannot_open_an_unimplemented_runtime(
+async def test_replay_v2_enabled_flag_without_started_runtime_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -231,8 +235,8 @@ async def test_replay_v2_phase0_flag_cannot_open_an_unimplemented_runtime(
         response = await client.get("/api/v1/replay/runs")
     assert response.status_code == 503
     assert response.json()["error"] == {
-        "code": "REPLAY_PRODUCT_V2_PHASE_0_ONLY",
-        "message": "Replay training v2 runtime is not available in Phase 0",
+        "code": "REPLAY_PRODUCT_V2_UNAVAILABLE",
+        "message": "Replay training v2 runtime is unavailable",
         "details": {},
     }
 

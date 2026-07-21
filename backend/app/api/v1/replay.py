@@ -30,7 +30,18 @@ from app.replay.models import (
     validate_identifier,
 )
 from app.replay.service import ReplayService
-from app.replay.training.models import REPLAY_V2_PROTOCOL
+from app.replay.training.errors import TrainingRunError
+from app.replay.training.models import (
+    REPLAY_V2_PROTOCOL,
+    BookMode,
+    IntegrityMode,
+    MarginMode,
+    ReplaySource,
+    StartMode,
+    TimeDisclosurePolicy,
+    TrainingRunCreateRequest,
+)
+from app.replay.training.service import TrainingRunService
 
 
 MAX_REPLAY_REQUEST_BYTES = 64 * 1024
@@ -50,8 +61,8 @@ def replay_error_payload(error: ReplayDomainError) -> dict[str, object]:
 
 def replay_v2_unavailable_payload() -> dict[str, object]:
     if REPLAY_SETTINGS.product_v2_available:
-        code = "REPLAY_PRODUCT_V2_PHASE_0_ONLY"
-        message = "Replay training v2 runtime is not available in Phase 0"
+        code = "REPLAY_PRODUCT_V2_UNAVAILABLE"
+        message = "Replay training v2 runtime is unavailable"
     else:
         code = "REPLAY_PRODUCT_V2_DISABLED"
         message = "Replay training v2 is disabled"
@@ -62,7 +73,7 @@ def replay_v2_unavailable_payload() -> dict[str, object]:
 
 
 class ReplayAPIRoute(APIRoute):
-    """Keep validation and domain failures on one replay.v1 wire contract."""
+    """Keep v1 and v2 validation failures on their respective wire contracts."""
 
     def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
         original = super().get_route_handler()
@@ -72,7 +83,23 @@ class ReplayAPIRoute(APIRoute):
                 if request.method in {"POST", "PUT", "PATCH"}:
                     await enforce_replay_request_limit(request)
                 return await original(request)
+            except TrainingRunError as exc:
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content=exc.to_payload(),
+                )
             except ReplayDomainError as exc:
+                if _is_training_run_request(request):
+                    error = TrainingRunError(
+                        "TRAINING_RUN_INVALID",
+                        "training run request is invalid",
+                        status_code=exc.http_status,
+                        details={"reason": exc.code.value},
+                    )
+                    return JSONResponse(
+                        status_code=error.status_code,
+                        content=error.to_payload(),
+                    )
                 return JSONResponse(
                     status_code=exc.http_status,
                     content=replay_error_payload(exc),
@@ -86,6 +113,17 @@ class ReplayAPIRoute(APIRoute):
                     }
                     for item in exc.errors()
                 ]
+                if _is_training_run_request(request):
+                    error = TrainingRunError(
+                        "TRAINING_RUN_INVALID",
+                        "training run request validation failed",
+                        status_code=422,
+                        details={"validation": details},
+                    )
+                    return JSONResponse(
+                        status_code=error.status_code,
+                        content=error.to_payload(),
+                    )
                 error = ReplayDomainError(
                     ReplayErrorCode.INVALID_STATE_TRANSITION,
                     "replay request validation failed",
@@ -96,6 +134,17 @@ class ReplayAPIRoute(APIRoute):
                     content=replay_error_payload(error),
                 )
             except (TypeError, ValueError) as exc:
+                if _is_training_run_request(request):
+                    error = TrainingRunError(
+                        "TRAINING_RUN_INVALID",
+                        "training run request is invalid",
+                        status_code=422,
+                        details={"reason": str(exc)},
+                    )
+                    return JSONResponse(
+                        status_code=error.status_code,
+                        content=error.to_payload(),
+                    )
                 error = ReplayDomainError(
                     ReplayErrorCode.INVALID_STATE_TRANSITION,
                     "replay request is invalid",
@@ -107,6 +156,10 @@ class ReplayAPIRoute(APIRoute):
                 )
 
         return handler
+
+
+def _is_training_run_request(request: Request) -> bool:
+    return "/replay/runs" in request.url.path
 
 
 router = APIRouter(
@@ -213,6 +266,40 @@ class ReplayCommandPayload(_StrictModel):
     payload: dict[str, object]
 
 
+class TrainingRunCreatePayload(_StrictModel):
+    protocol: Literal["replay.v2"]
+    catalog_epoch: str = Field(min_length=71, max_length=71)
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    source_kind: ReplaySource
+    start_mode: StartMode
+    exchange: str = Field(min_length=1, max_length=128)
+    market_type: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=128)
+    settlement_asset: str = Field(min_length=1, max_length=128)
+    base_interval: str = Field(min_length=1, max_length=128)
+    display_interval: str = Field(min_length=1, max_length=128)
+    requested_start_ms: int | None = Field(default=None, ge=0, le=MAX_TIMESTAMP_MS)
+    warmup_bars: int = Field(ge=1, le=REPLAY_SETTINGS.max_warmup_bars)
+    forward_cache_ms: int = Field(ge=1, le=_MAX_HORIZON_MS)
+    random_seed: int = Field(ge=0, le=MAX_RANDOM_SEED)
+    initial_equity: str = Field(min_length=1, max_length=128)
+    max_leverage: str = Field(min_length=1, max_length=128)
+    maker_fee_bps: str = Field(min_length=1, max_length=128)
+    taker_fee_bps: str = Field(min_length=1, max_length=128)
+    market_slippage_bps: str = Field(min_length=1, max_length=128)
+    integrity_mode: IntegrityMode
+    time_disclosure_policy: TimeDisclosurePolicy
+    book_mode: BookMode
+    margin_mode: MarginMode
+    funding_mode: Literal["OFF"]
+    allow_rule_changes: bool
+
+
+class TrainingRunMigrationPayload(_StrictModel):
+    protocol: Literal["replay.v2"]
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+
+
 async def enforce_replay_request_limit(request: Request) -> None:
     _validate_declared_replay_length(request)
     cached = getattr(request, "_body", None)
@@ -309,23 +396,89 @@ async def replay_capabilities(request: Request) -> dict[str, object]:
     }
 
 
-def _replay_v2_runs_phase0_response() -> JSONResponse:
-    """Reserve the v2 boundary while Phase 0 keeps every product flow closed."""
-
-    return JSONResponse(status_code=503, content=replay_v2_unavailable_payload())
+def _training_service(request: Request) -> TrainingRunService:
+    replay_service = getattr(request.app.state, "replay_service", None)
+    training = getattr(replay_service, "training", None)
+    if training is not None:
+        return training
+    raise TrainingRunError(
+        (
+            "REPLAY_PRODUCT_V2_UNAVAILABLE"
+            if REPLAY_SETTINGS.product_v2_available
+            else "REPLAY_PRODUCT_V2_DISABLED"
+        ),
+        (
+            "Replay training v2 runtime is unavailable"
+            if REPLAY_SETTINGS.product_v2_available
+            else "Replay training v2 is disabled"
+        ),
+        status_code=503,
+    )
 
 
 @router.get("/runs")
-async def list_replay_v2_runs_phase0_guard() -> JSONResponse:
-    return _replay_v2_runs_phase0_response()
+async def list_replay_v2_runs(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, min_length=1, max_length=1024),
+    state: str | None = Query(default=None, min_length=1, max_length=32),
+    source_kind: str | None = Query(default=None, min_length=1, max_length=32),
+    compatibility: str | None = Query(default=None, min_length=1, max_length=32),
+) -> dict[str, object]:
+    return await _training_service(request).list_runs(
+        limit=limit,
+        cursor=cursor,
+        state=state,
+        source_kind=source_kind,
+        compatibility=compatibility,
+    )
 
 
 @router.post(
     "/runs",
-    dependencies=[Depends(enforce_replay_request_limit)],
+    status_code=201,
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
 )
-async def create_replay_v2_run_phase0_guard() -> JSONResponse:
-    return _replay_v2_runs_phase0_response()
+async def create_replay_v2_run(
+    request: Request,
+    payload: TrainingRunCreatePayload,
+) -> dict[str, object]:
+    create_request = TrainingRunCreateRequest.from_dict(
+        payload.model_dump(mode="json")
+    )
+    return await _training_service(request).create_run(create_request)
+
+
+@router.post(
+    "/runs/session/{session_id}/return-to-hub",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def return_replay_v2_run_to_hub(
+    request: Request,
+    session_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).return_to_hub_by_session(session_id)
+
+
+@router.post(
+    "/runs/{legacy_session_id}/migrate",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def migrate_legacy_replay_v2_run(
+    request: Request,
+    legacy_session_id: str,
+    payload: TrainingRunMigrationPayload,
+) -> Response:
+    result = await _training_service(request).migrate_legacy(
+        legacy_session_id,
+        name=payload.name,
+    )
+    return JSONResponse(status_code=201 if result["created"] else 200, content=result)
+
+
+@router.get("/runs/{run_id}")
+async def get_replay_v2_run(request: Request, run_id: str) -> dict[str, object]:
+    return await _training_service(request).get_run(run_id)
 
 
 @router.get("/catalog")
@@ -396,6 +549,8 @@ __all__ = [
     "MAX_REPLAY_REQUEST_BYTES",
     "ReplayCommandPayload",
     "ReplaySessionCreatePayload",
+    "TrainingRunCreatePayload",
+    "TrainingRunMigrationPayload",
     "replay_error_payload",
     "replay_v2_unavailable_payload",
     "replay_service_from_state",

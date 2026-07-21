@@ -135,10 +135,10 @@ test("replay.v2 frontend flag is strict, default-off and direct URL remains clos
   );
 });
 
-test("Phase 0 production composition roots do not import a v2 product runtime", () => {
+test("Phase 1 production composition keeps v2 default-off at the replay-only root", () => {
   const replayMain = readFileSync(new URL("../../../replay-main.tsx", import.meta.url), "utf8");
   const replayApp = readFileSync(new URL("../ReplayApp.tsx", import.meta.url), "utf8");
-  for (const source of [replayMain, replayApp]) {
-    assert.doesNotMatch(source, /replayV2|REPLAY_PRODUCT_V2|VITE_REPLAY_PRODUCT_V2/);
-  }
+  assert.doesNotMatch(replayMain, /replayV2|REPLAY_PRODUCT_V2|VITE_REPLAY_PRODUCT_V2/);
+  assert.match(replayApp, /REPLAY_PRODUCT_V2_ENABLED/);
+  assert.match(replayApp, /resolveReplayProduct\(REPLAY_PRODUCT_V2_ENABLED, entry\)/);
 });

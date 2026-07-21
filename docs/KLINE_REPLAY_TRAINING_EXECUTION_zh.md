@@ -1,12 +1,14 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_0_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约、默认关闭开关、架构护栏和回滚证据已经完成，Phase 1 尚未开始，Replay v1/v2 均保持默认关闭。
+状态：`PHASE_1_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界与 Phase 1 TrainingRun 存储、训练大厅、v1 兼容适配和回滚证据已经完成。Phase 2 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
 分支：`codex/kline-replay-training`
 
 Phase 0 父提交：`2346dba32c0ce9e35dd6941bc4445366da4362a7`（2026-07-21）
+
+Phase 1 父提交：`bb253d0982c36776452c2b1e0a0cf3f1b211162f`（2026-07-21）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -1358,4 +1360,38 @@ Runtime rollback: 两端 v2 开关仓库默认值为 0；后端父开关关闭�
 Commit rollback: 在父提交 detached worktree 中打开本 Phase 创建的 v1 sentinel DB，quick_check=ok，sentinel preserved；再次执行 v1 migration 后数据库 SHA-256 前后均为 12da6779e1ba5144448ef8c62f758dbad5e45ddc915ebdd27503b796bcfdcd81。
 Known limitations: v2 Hub/runtime/storage/训练流程尚未实现（设计如此，Phase 1 未开始）；历史 L2/BOOK 保持关闭；全仓 Ruff 仍有上述 36 个既有违规。
 Decision: PASS；停止在 Phase 0，不进入 Phase 1。
+```
+
+### Phase 1 执行记录
+
+```text
+Phase: 1 - TrainingRun storage, archive list, and Training Hub
+Date: 2026-07-21
+Commit: 本 Phase 独立提交，提交号以 Git 历史为准
+Parent commit: bb253d0982c36776452c2b1e0a0cf3f1b211162f
+Executor: Codex
+Scope: 新增 additive replay.training.v1 schema、TrainingRun/track/rule/action/pin 存储、轻量分页存档 API、v1 原子创建适配、LEGACY_V1 兼容迁移、训练大厅和存档返回检查点；未进入 Phase 2 工作台壳层。
+Files changed: backend replay training schema/model/store/service/API/tests/rollback script；frontend Hub API/type/model/lifecycle/components/navigation/tests/CSS/README；本执行记录与 Phase 1 证据。
+Schema/protocol changes: 新建独立 replay.training.v1 版本表和 replay_training_* 表；不改写 replay.v1 schema、JSON payload 或既有 session hash。创建 TrainingRun 与 v1 session 在同一 SQLite 事务提交，失败整体回滚。
+Commands run:
+  backend targeted: .\.venv\Scripts\python.exe -m pytest -q tests/test_replay_v2_contracts.py tests/test_replay_v2_training_phase1.py tests/test_replay_v2_training_api.py
+  backend full: .\.venv\Scripts\python.exe -m pytest -q
+  backend scoped lint: .\.venv\Scripts\python.exe -m ruff check <Phase 1 Python scope>
+  backend global lint audit: .\.venv\Scripts\python.exe -m ruff check app tests scripts
+  frontend: npm run check
+  rollback: .\.venv\Scripts\python.exe scripts\verify_replay_v2_phase1_rollback.py --parent bb253d0982c36776452c2b1e0a0cf3f1b211162f
+  browser: Playwright CLI against isolated fixture :18089 and Vite :15189
+  repository: git diff --check
+Targeted tests: backend Phase 0/1 replay.v2 scope 41 passed；Phase 1 Python scope Ruff 0 violations。
+Global tests: backend 1874 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2354 passed，architecture/typecheck/ESLint/Vite production build 全部通过。
+Global Ruff: app tests scripts 仍为父提交既有的 36 个违规，均不在 Phase 1 新增或修改文件中；没有降低规则或把新增违规归入历史基线。
+Storage/list evidence: 2,000 条存档分页、筛选与 cursor 测试通过；列表查询只投影轻量摘要，不读取 replay_dataset_ref/blob；blind/HIDE_ALL 卡片不返回真实历史时间。
+Atomicity/catalog evidence: v1 session 与 TrainingRun 扩展写入同事务；故障注入无半成品行。提交前按当前 warmup/前向窗口刷新目录 epoch；目录继续漂移时返回 CATALOG_EPOCH_MISMATCH。浏览器显示显式“重新校验能力目录”恢复动作并保留草稿，重新校验后才能创建。
+Legacy evidence: 未迁移 replay.v1 session 以 LEGACY_V1 卡片出现；迁移保持 v1 config/hash 不变并幂等，旧存档不被静默改写。
+Browser evidence: 无 opener 的 replay.html 直达大厅；首屏网络只有 GET /api/v1/replay/runs?limit=50；能力/目录只在新建流程按需加载，提交前目录预检由前端回归测试覆盖。真实创建后使用 opaque session URL，刷新保持 PAUSED；“存档大厅”先由服务端 checkpoint/release 再导航；卡片恢复为 PAUSED/READY，且可继续同一 session。未请求 live K 线、盘口或实时订阅端点。
+Browser noise: 开发服务器仅有既有 slider-vertical CSS 警告和缺失 favicon.ico 的 404；训练大厅产品请求无错误。
+Runtime defaults: 前端 VITE_REPLAY_PRODUCT_V2_ENABLED=0；后端 replay 与 v2 双开关默认关闭。v2 关闭时维持精确 v1 组合；旧代码可忽略新增表。
+Commit rollback: detached 父提交打开 Phase 1 数据库并再次执行 v1 migration，quick_check=ok；数据库文件 SHA-256 前后均为 a4d0a2efbfdaeafb22ffe6290147a138835b392a8ae5ef147d61f3556897a504。v1 逻辑 hash 前后均为 68d9cdc774c97a42d3cae51e30c3cc23a7183a74c5031cd7965b83a6ad4ba332（2 rows）；training 逻辑 hash 前后均为 88f71014757abfe08eec9bd2d14d4b1776863be78f3594fa0dabf96d012ffa0e（6 rows）；父提交不存在 training schema 模块。
+Known limitations: Phase 1 的具体训练仍经 v1 单轨适配器运行；多商品、funding、历史 L2/book-assisted、规则变更和 isolated margin 分别等待后续 Phase，当前均显式关闭且不近似实现；全仓 Ruff 仍有上述 36 个既有违规。
+Decision: PASS；停止在 Phase 1，不进入 Phase 2。
 ```

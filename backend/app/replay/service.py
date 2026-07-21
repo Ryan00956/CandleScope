@@ -61,6 +61,7 @@ from .sources.bar_source import BarReplaySource
 from .sources.trade_reader import PagedReplayTradeReader
 from .sources.trade_source import TradeReplaySource
 from .storage.sqlite_store import ReplaySQLiteStore, StoredCheckpoint, StoredCommand
+from .training.service import TrainingRunService
 
 
 SYNTHETIC_TIME_ANCHOR_MS = 946_684_800_000
@@ -110,6 +111,7 @@ class ReplayService:
         raw_trade_archive: RawAggTradeArchive | None = None,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1_000),
         session_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+        training_run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
         native_intervals: Callable[[ReplaySeriesIdentity], Sequence[str]] | None = None,
     ) -> None:
         if not settings.enabled:
@@ -122,6 +124,14 @@ class ReplayService:
         self._raw_trade_archive = raw_trade_archive or DisabledRawAggTradeArchive()
         self._now_ms = now_ms
         self._session_id_factory = session_id_factory
+        self.training = (
+            TrainingRunService(
+                replay_service=self,
+                run_id_factory=training_run_id_factory,
+            )
+            if settings.product_v2_available
+            else None
+        )
         self._native_intervals = native_intervals or self._all_local_intervals
         self._catalog = ReplayCatalog(
             self._repository,  # type: ignore[arg-type]
@@ -169,6 +179,7 @@ class ReplayService:
             "sessions_evicted": 0,
             "ended_sessions_evicted": 0,
             "idle_sessions_evicted": 0,
+            "hub_sessions_evicted": 0,
             "reaper_failures": 0,
             "last_reaper_error": None,
             "recovery_failures": 0,
@@ -182,6 +193,8 @@ class ReplayService:
     async def start(self) -> None:
         """Recover non-ended sessions without ever resuming PLAYING."""
 
+        if self.training is not None:
+            await self.training.start()
         records = await self.store.load_recoverable_sessions()
         for index, record in enumerate(records):
             if len(self._sessions) >= self.settings.max_active_sessions:
@@ -319,7 +332,13 @@ class ReplayService:
             "entries": entries,
         }
 
-    async def create_session(self, config: ReplaySessionConfig) -> dict[str, object]:
+    async def create_session(
+        self,
+        config: ReplaySessionConfig,
+        *,
+        _expected_catalog_epoch: str | None = None,
+        _extension_factory: Callable[..., object] | None = None,
+    ) -> dict[str, object]:
         if not isinstance(config, ReplaySessionConfig):
             raise TypeError("config must be ReplaySessionConfig")
         self._ensure_available(blind_mode=config.blind_mode)
@@ -349,6 +368,15 @@ class ReplayService:
                     horizon_ms=config.horizon_ms,
                     quality_mode=config.quality_mode,
                 )
+                if (
+                    _expected_catalog_epoch is not None
+                    and catalog.catalog_epoch != _expected_catalog_epoch
+                ):
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "replay catalog changed after capability validation",
+                        details={"reason": "CATALOG_EPOCH_MISMATCH"},
+                    )
             except ReplayDomainError as exc:
                 raise self._blind_safe_dataset_error(config, exc) from exc
             identity = ReplaySeriesIdentity(
@@ -396,6 +424,7 @@ class ReplayService:
                 trade_dataset_ref=trade_dataset_ref,
                 restore_checkpoint=None,
                 forked=False,
+                extension_factory=_extension_factory,
             )
         except ReplayDomainError as exc:
             if config.blind_mode:
@@ -558,6 +587,30 @@ class ReplayService:
         async with self._lease_handle(session_id) as handle:
             await handle.actor.heartbeat(client_instance_id)
 
+    async def release_session_to_hub(self, session_id: str) -> None:
+        """Pause, checkpoint and evict one adapter before the Hub becomes visible."""
+
+        self._ensure_accepting()
+        if session_id not in self._sessions:
+            await self.get_session(session_id)
+        async with self._prune_lock:
+            async with self._lifecycle_lock:
+                handle = self._sessions.get(session_id)
+                if handle is None:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.SESSION_NOT_FOUND,
+                        "replay session does not exist",
+                        details={"session_id": session_id},
+                    )
+                if handle.evicting or handle.in_flight != 0:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.REVISION_CONFLICT,
+                        "replay session is busy",
+                    )
+                handle.evicting = True
+                handle.eviction_complete.clear()
+            await self._evict_claimed_handle(session_id, handle, reason="hub")
+
     async def shutdown(self, *, step_timeout: float = 5.0) -> None:
         async with self._shutdown_lock:
             if self._closed:
@@ -654,6 +707,7 @@ class ReplayService:
             },
             "catalog": self._catalog.diagnostics(),
             "dataset_pins": dict(self._datasets.diagnostics()),
+            "training_product_v2": self.training is not None,
             "persistence": persistence,
         }
 
@@ -737,6 +791,7 @@ class ReplayService:
         forked: bool,
         synthetic_origin_ms: int | None = None,
         broker_config: BrokerConfig | None = None,
+        extension_factory: Callable[..., object] | None = None,
     ) -> dict[str, object]:
         session_id = self._session_id_factory()
         if (
@@ -803,6 +858,15 @@ class ReplayService:
                 actual_dataset,
                 trade_dataset_ref,
             )
+            extension_write = None
+            if extension_factory is not None:
+                extension_write = extension_factory(
+                    session_id=session_id,
+                    session_state=durable_state,
+                    component_state=snapshot["components"],
+                )
+                if not callable(extension_write):
+                    raise TypeError("replay persistence extension must be callable")
             persist_task = asyncio.create_task(
                 self.store.create_session(
                     session_id=session_id,
@@ -816,6 +880,7 @@ class ReplayService:
                     synthetic_origin_ms=origin,
                     initial_checkpoint=initial_checkpoint,
                     component_state=snapshot["components"],  # type: ignore[arg-type]
+                    extension_write=extension_write,  # type: ignore[arg-type]
                 ),
                 name=f"replay-create-persist-{session_id}",
             )
@@ -1571,7 +1636,11 @@ class ReplayService:
                     metric = (
                         "ended_sessions_evicted"
                         if reason == "ended"
-                        else "idle_sessions_evicted"
+                        else (
+                            "hub_sessions_evicted"
+                            if reason == "hub"
+                            else "idle_sessions_evicted"
+                        )
                     )
                     self._metrics[metric] = int(self._metrics[metric] or 0) + 1
                 handle.eviction_complete.set()

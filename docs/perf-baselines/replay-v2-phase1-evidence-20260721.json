@@ -1,0 +1,102 @@
+{
+  "schema": "replay.v2.phase1.evidence.v1",
+  "captured_at": "2026-07-21",
+  "branch": "codex/kline-replay-training",
+  "parent_head": "bb253d0982c36776452c2b1e0a0cf3f1b211162f",
+  "phase": 1,
+  "decision": "PASS",
+  "next_phase_started": false,
+  "repository_defaults": {
+    "replay_enabled": false,
+    "replay_product_v2_enabled": false,
+    "vite_replay_product_v2_enabled": false
+  },
+  "verification": {
+    "backend_targeted": {
+      "result": "PASS",
+      "passed": 41
+    },
+    "backend_full": {
+      "result": "PASS",
+      "passed": 1874,
+      "warnings": 4,
+      "warning_scope": "pre-existing FastAPI on_event deprecations"
+    },
+    "frontend_full": {
+      "result": "PASS",
+      "passed": 2354,
+      "architecture": "PASS",
+      "typecheck": "PASS",
+      "eslint": "PASS",
+      "production_build": "PASS"
+    },
+    "ruff_phase1_scope": {
+      "result": "PASS",
+      "violations": 0
+    },
+    "ruff_repository_audit": {
+      "result": "BASELINE_ONLY",
+      "violations": 36,
+      "phase1_violations": 0
+    },
+    "git_diff_check": "PASS"
+  },
+  "storage": {
+    "schema_version": "replay.training.v1",
+    "migration_policy": "ADDITIVE_ONLY",
+    "legacy_v1_schema_modified": false,
+    "atomic_v1_and_training_run_create": true,
+    "failure_injection_rollback": "PASS",
+    "lightweight_list_rows_tested": 2000,
+    "list_reads_dataset_ref_or_blob": false,
+    "blind_card_real_time_leak": false,
+    "legacy_config_hash_preserved": true
+  },
+  "browser": {
+    "direct_url": "http://127.0.0.1:15189/replay.html",
+    "window_opener_is_null": true,
+    "hub_bootstrap_non_static_requests": [
+      "GET /api/v1/replay/runs?limit=50 -> 200"
+    ],
+    "capabilities_and_catalog_loaded_on_create_only": true,
+    "catalog_refreshed_for_edited_create_inputs": true,
+    "catalog_drift_revalidation_preserves_draft": true,
+    "catalog_epoch_drift_failed_closed": true,
+    "catalog_epoch_revalidation_recovered": true,
+    "opaque_session_create_restore_refresh": "PASS",
+    "return_to_hub_checkpoint_before_navigation": "PASS",
+    "resume_same_session": "PASS",
+    "live_market_requests": 0,
+    "product_request_errors_on_final_hub_load": 0,
+    "development_only_noise": [
+      "two existing slider-vertical CSS warnings",
+      "favicon.ico 404"
+    ],
+    "screenshot": {
+      "path": "output/playwright/replay-v2-phase1-hub.png",
+      "bytes": 155374,
+      "sha256": "e2281bb65afd0e76600b2956b3b84de09c606a307df025c1535384b531729df8"
+    }
+  },
+  "rollback": {
+    "result": "PASS",
+    "parent_head": "bb253d0982c36776452c2b1e0a0cf3f1b211162f",
+    "old_build_training_module_present": false,
+    "sqlite_quick_check": "ok",
+    "database_file_sha256_before": "a4d0a2efbfdaeafb22ffe6290147a138835b392a8ae5ef147d61f3556897a504",
+    "database_file_sha256_after": "a4d0a2efbfdaeafb22ffe6290147a138835b392a8ae5ef147d61f3556897a504",
+    "v1_logical_sha256_before": "68d9cdc774c97a42d3cae51e30c3cc23a7183a74c5031cd7965b83a6ad4ba332",
+    "v1_logical_sha256_after": "68d9cdc774c97a42d3cae51e30c3cc23a7183a74c5031cd7965b83a6ad4ba332",
+    "v1_rows_before": 2,
+    "v1_rows_after": 2,
+    "training_logical_sha256_before": "88f71014757abfe08eec9bd2d14d4b1776863be78f3594fa0dabf96d012ffa0e",
+    "training_logical_sha256_after": "88f71014757abfe08eec9bd2d14d4b1776863be78f3594fa0dabf96d012ffa0e",
+    "training_rows_before": 6,
+    "training_rows_after": 6
+  },
+  "known_limitations": [
+    "Concrete training sessions still use the proven v1 single-track adapter.",
+    "Multi-symbol, funding, historical L2/book-assisted integrity, rule changes, and isolated margin remain explicitly unavailable.",
+    "Phase 2 has not started."
+  ]
+}

@@ -451,6 +451,252 @@ export function parseReplayV2Event(
   };
 }
 
+export type TrainingRunKind = "V2" | "LEGACY_V1";
+export type TrainingRunCompatibility = "READY" | "LEGACY_ADAPTER" | "LEGACY_V1" | "UNAVAILABLE";
+export type TrainingRunResumeAction = "OPEN_ADAPTER" | "OPEN_V1" | "UNAVAILABLE";
+export type TrainingRunEquityStatus = "CURRENT" | "STALE" | "UNAVAILABLE";
+
+export interface TrainingRunCard {
+  readonly run_id: string;
+  readonly kind: TrainingRunKind;
+  readonly name: string;
+  readonly state: ReplayV2RunState;
+  readonly source_kind: ReplayV2SourceKind;
+  readonly integrity_mode: ReplayV2IntegrityMode | null;
+  readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
+  readonly last_symbol: string;
+  readonly subscribed_track_count: number;
+  readonly progress: { readonly source_sequence: number };
+  readonly equity: string | null;
+  readonly equity_status: TrainingRunEquityStatus;
+  readonly settlement_asset: string;
+  readonly updated_at_ms: number;
+  readonly compatibility: TrainingRunCompatibility;
+  readonly resume_action: TrainingRunResumeAction;
+  readonly adapter_session_id: string;
+  readonly parent_legacy_session_id: string | null;
+  readonly status: { readonly code: string; readonly message: string };
+  readonly report_available: boolean;
+  readonly review_available: boolean;
+}
+
+export interface TrainingRunListResponse {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly schema_version: "replay.training.v1";
+  readonly items: readonly TrainingRunCard[];
+  readonly next_cursor: string | null;
+}
+
+export interface TrainingRunMutationResponse {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly created: boolean;
+  readonly migrated: boolean;
+  readonly run: TrainingRunCard;
+}
+
+export interface TrainingRunReturnResponse {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly run_id: string;
+  readonly state: "PAUSED";
+  readonly checkpointed: boolean;
+  readonly released: boolean;
+}
+
+export interface TrainingRunCreatePayload {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly catalog_epoch: string;
+  readonly name: string | null;
+  readonly source_kind: ReplayV2SourceKind;
+  readonly start_mode: ReplayV2StartMode;
+  readonly exchange: string;
+  readonly market_type: string;
+  readonly symbol: string;
+  readonly settlement_asset: string;
+  readonly base_interval: string;
+  readonly display_interval: string;
+  readonly requested_start_ms: number | null;
+  readonly warmup_bars: number;
+  readonly forward_cache_ms: number;
+  readonly random_seed: number;
+  readonly initial_equity: string;
+  readonly max_leverage: string;
+  readonly maker_fee_bps: string;
+  readonly taker_fee_bps: string;
+  readonly market_slippage_bps: string;
+  readonly integrity_mode: "CHALLENGE";
+  readonly time_disclosure_policy: "NONE" | "HIDE_ALL";
+  readonly book_mode: "OFF";
+  readonly margin_mode: "CROSS";
+  readonly funding_mode: "OFF";
+  readonly allow_rule_changes: false;
+}
+
+function displayString(value: unknown, fieldName: string, maxLength = 256): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > maxLength) {
+    throw new TypeError(`${fieldName} must be a non-empty bounded string`);
+  }
+  return value;
+}
+
+function boolValue(value: unknown, fieldName: string): boolean {
+  if (typeof value !== "boolean") throw new TypeError(`${fieldName} must be boolean`);
+  return value;
+}
+
+function nullableIdentifier(value: unknown, fieldName: string): string | null {
+  return value === null ? null : identifier(value, fieldName);
+}
+
+function nullableCanonicalDecimal(value: unknown, fieldName: string): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || !POSITIVE_CANONICAL_DECIMAL.test(value)) {
+    throw new TypeError(`${fieldName} must be a canonical Decimal string or null`);
+  }
+  return value;
+}
+
+function parseTrainingRunCard(value: unknown, fieldName: string): TrainingRunCard {
+  const card = exactObject(value, fieldName, [
+    "run_id",
+    "kind",
+    "name",
+    "state",
+    "source_kind",
+    "integrity_mode",
+    "time_disclosure_policy",
+    "last_symbol",
+    "subscribed_track_count",
+    "progress",
+    "equity",
+    "equity_status",
+    "settlement_asset",
+    "updated_at_ms",
+    "compatibility",
+    "resume_action",
+    "adapter_session_id",
+    "parent_legacy_session_id",
+    "status",
+    "report_available",
+    "review_available",
+  ]);
+  const kind = enumValue(card.kind, enumValues("V2", "LEGACY_V1"), `${fieldName}.kind`);
+  const integrityMode = card.integrity_mode === null
+    ? null
+    : enumValue(card.integrity_mode, REPLAY_V2_ENUMS.integrity_mode, `${fieldName}.integrity_mode`);
+  if ((kind === "V2") !== (integrityMode !== null)) {
+    throw new TypeError(`${fieldName}.integrity_mode does not match run kind`);
+  }
+  const progress = exactObject(card.progress, `${fieldName}.progress`, ["source_sequence"]);
+  const status = exactObject(card.status, `${fieldName}.status`, ["code", "message"]);
+  return {
+    run_id: identifier(card.run_id, `${fieldName}.run_id`),
+    kind,
+    name: displayString(card.name, `${fieldName}.name`),
+    state: enumValue(card.state, REPLAY_V2_ENUMS.run_state, `${fieldName}.state`),
+    source_kind: enumValue(card.source_kind, REPLAY_V2_ENUMS.source_kind, `${fieldName}.source_kind`),
+    integrity_mode: integrityMode,
+    time_disclosure_policy: enumValue(
+      card.time_disclosure_policy,
+      REPLAY_V2_ENUMS.time_disclosure_policy,
+      `${fieldName}.time_disclosure_policy`,
+    ),
+    last_symbol: identifier(card.last_symbol, `${fieldName}.last_symbol`),
+    subscribed_track_count: counter(card.subscribed_track_count, `${fieldName}.subscribed_track_count`),
+    progress: { source_sequence: counter(progress.source_sequence, `${fieldName}.progress.source_sequence`) },
+    equity: nullableCanonicalDecimal(card.equity, `${fieldName}.equity`),
+    equity_status: enumValue(
+      card.equity_status,
+      enumValues("CURRENT", "STALE", "UNAVAILABLE"),
+      `${fieldName}.equity_status`,
+    ),
+    settlement_asset: identifier(card.settlement_asset, `${fieldName}.settlement_asset`),
+    updated_at_ms: timestamp(card.updated_at_ms, `${fieldName}.updated_at_ms`),
+    compatibility: enumValue(
+      card.compatibility,
+      enumValues("READY", "LEGACY_ADAPTER", "LEGACY_V1", "UNAVAILABLE"),
+      `${fieldName}.compatibility`,
+    ),
+    resume_action: enumValue(
+      card.resume_action,
+      enumValues("OPEN_ADAPTER", "OPEN_V1", "UNAVAILABLE"),
+      `${fieldName}.resume_action`,
+    ),
+    adapter_session_id: identifier(card.adapter_session_id, `${fieldName}.adapter_session_id`),
+    parent_legacy_session_id: nullableIdentifier(
+      card.parent_legacy_session_id,
+      `${fieldName}.parent_legacy_session_id`,
+    ),
+    status: {
+      code: identifier(status.code, `${fieldName}.status.code`),
+      message: displayString(status.message, `${fieldName}.status.message`, 512),
+    },
+    report_available: boolValue(card.report_available, `${fieldName}.report_available`),
+    review_available: boolValue(card.review_available, `${fieldName}.review_available`),
+  };
+}
+
+export function parseTrainingRunListResponse(value: unknown): TrainingRunListResponse {
+  const payload = exactObject(value, "run list", [
+    "protocol",
+    "schema_version",
+    "items",
+    "next_cursor",
+  ]);
+  if (payload.protocol !== REPLAY_V2_PROTOCOL) {
+    throw new TypeError(`protocol must be ${REPLAY_V2_PROTOCOL}`);
+  }
+  if (payload.schema_version !== "replay.training.v1") {
+    throw new TypeError("run list schema_version is unsupported");
+  }
+  if (!Array.isArray(payload.items)) throw new TypeError("run list items must be an array");
+  const nextCursor = payload.next_cursor;
+  if (nextCursor !== null && (
+    typeof nextCursor !== "string"
+    || !/^[A-Za-z0-9_-]{1,1024}$/.test(nextCursor)
+  )) {
+    throw new TypeError("run list next_cursor is invalid");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    schema_version: "replay.training.v1",
+    items: payload.items.map((item, index) => parseTrainingRunCard(item, `run list.items[${index}]`)),
+    next_cursor: nextCursor,
+  };
+}
+
+export function parseTrainingRunMutationResponse(value: unknown): TrainingRunMutationResponse {
+  const payload = exactObject(value, "run mutation", ["protocol", "created", "migrated", "run"]);
+  if (payload.protocol !== REPLAY_V2_PROTOCOL) {
+    throw new TypeError(`protocol must be ${REPLAY_V2_PROTOCOL}`);
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    created: boolValue(payload.created, "run mutation.created"),
+    migrated: boolValue(payload.migrated, "run mutation.migrated"),
+    run: parseTrainingRunCard(payload.run, "run mutation.run"),
+  };
+}
+
+export function parseTrainingRunReturnResponse(value: unknown): TrainingRunReturnResponse {
+  const payload = exactObject(value, "return to Hub", [
+    "protocol",
+    "run_id",
+    "state",
+    "checkpointed",
+    "released",
+  ]);
+  if (payload.protocol !== REPLAY_V2_PROTOCOL || payload.state !== "PAUSED") {
+    throw new TypeError("return-to-Hub response is unsupported");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    run_id: identifier(payload.run_id, "return to Hub.run_id"),
+    state: "PAUSED",
+    checkpointed: boolValue(payload.checkpointed, "return to Hub.checkpointed"),
+    released: boolValue(payload.released, "return to Hub.released"),
+  };
+}
+
 const replayV2EnvironmentFlag: unknown = (import.meta as {
   readonly env?: { readonly VITE_REPLAY_PRODUCT_V2_ENABLED?: unknown };
 }).env?.VITE_REPLAY_PRODUCT_V2_ENABLED;

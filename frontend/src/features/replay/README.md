@@ -1,14 +1,23 @@
 # Replay feature boundary
 
 Replay is a server-authoritative historical market runtime. It is not a source
-toggle inside the live application. The feature is disabled by default until a
-later phase wires the dedicated entry and backend capability.
+toggle inside the live application. Both replay product flags remain disabled
+by default while the phase-gated v2 workbench is built and verified.
 
-Phase 0 also defines `replay.v2` in `replayV2Types.ts`, cross-checked against the
-backend canonical golden. `VITE_REPLAY_PRODUCT_V2_ENABLED=0` is the default and
-the v2 module is not imported by either composition root, so it creates no UI,
-network request, socket, store, or background task. Direct `?product=v2` access
-continues to fail closed until a later product phase owns the route.
+Phase 1 adds the replay v2 Training Hub and an additive TrainingRun persistence
+layer. With `VITE_REPLAY_PRODUCT_V2_ENABLED=1`, a direct `replay.html` configure
+entry opens the Hub; opaque `?session=<id>` entries continue through the proven
+v1 runtime adapter. Hub bootstrap performs only the bounded lightweight
+`GET /api/v1/replay/runs` request. Capabilities and the source catalog are
+loaded on demand when the create wizard opens; the catalog epoch is refreshed
+against the edited warmup/forward-window inputs immediately before create.
+Historical datasets are not loaded until a concrete training session is entered.
+
+With the repository-default `VITE_REPLAY_PRODUCT_V2_ENABLED=0`, composition is
+still exactly v1. The backend additionally requires both replay flags before
+serving v2 routes. Multi-symbol runs, funding, historical L2/book-assisted
+integrity, rule changes, and isolated-margin mode remain visibly unavailable
+until their owning phases; the UI must not approximate them.
 
 ## Composition roots
 

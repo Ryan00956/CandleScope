@@ -20,6 +20,11 @@ from .schema import REPLAY_SCHEMA_VERSION, migrate_replay_schema
 
 
 _BUSY_MARKERS = ("database is locked", "database table is locked", "database is busy")
+ExtensionWriter = Callable[[sqlite3.Connection, int], None]
+SessionSummaryWriter = Callable[
+    [sqlite3.Connection, str, Mapping[str, object], Mapping[str, object], int],
+    None,
+]
 
 
 def _blob_sha256(value: bytes) -> str:
@@ -87,6 +92,7 @@ class ReplaySQLiteStore:
         self._async_lock = asyncio.Lock()
         self._closed = False
         self._degraded_reason: str | None = None
+        self._session_summary_writer: SessionSummaryWriter | None = None
         self._metrics = {
             "transactions": 0,
             "transaction_failures": 0,
@@ -148,6 +154,7 @@ class ReplaySQLiteStore:
         synthetic_origin_ms: int | None,
         initial_checkpoint: bytes,
         component_state: Mapping[str, object] | None = None,
+        extension_write: ExtensionWriter | None = None,
     ) -> None:
         now = self._validated_now_ms()
         dataset_bytes = bytes(dataset_blob)
@@ -214,6 +221,8 @@ class ReplaySQLiteStore:
             self._replace_component_rows(
                 connection, session_id, component_state or {}, now_ms=now
             )
+            if extension_write is not None:
+                extension_write(connection, now)
 
         await self._write_async(write)
 
@@ -336,6 +345,13 @@ class ReplaySQLiteStore:
             self._replace_component_rows(
                 connection, session_id, component_state or {}, now_ms=now
             )
+            self._write_session_summary(
+                connection,
+                session_id,
+                state,
+                component_state or {},
+                now_ms=now,
+            )
             row = self._load_command_row(connection, session_id, command_id)
             assert row is not None
             return row
@@ -457,6 +473,13 @@ class ReplaySQLiteStore:
             self._replace_component_rows(
                 connection, session_id, component_state or {}, now_ms=now
             )
+            self._write_session_summary(
+                connection,
+                session_id,
+                state,
+                component_state or {},
+                now_ms=now,
+            )
 
         await self._write_async(write)
 
@@ -507,6 +530,13 @@ class ReplaySQLiteStore:
             self._update_session(connection, session_id, state, now_ms=now)
             self._replace_component_rows(
                 connection, session_id, component_state or {}, now_ms=now
+            )
+            self._write_session_summary(
+                connection,
+                session_id,
+                state,
+                component_state or {},
+                now_ms=now,
             )
 
         await self._write_async(write)
@@ -790,6 +820,23 @@ class ReplaySQLiteStore:
                 return
             await asyncio.to_thread(self._close_sync)
 
+    def register_session_summary_writer(self, writer: SessionSummaryWriter) -> None:
+        """Register one additive schema projection inside v1 mutations."""
+
+        if self._session_summary_writer is not None and self._session_summary_writer != writer:
+            raise RuntimeError("replay session summary writer is already registered")
+        self._session_summary_writer = writer
+
+    async def run_extension_write(self, operation):
+        """Run a trusted additive-schema write under the replay transaction lock."""
+
+        return await self._write_async(operation)
+
+    async def run_extension_read(self, operation):
+        """Run a trusted additive-schema read under the replay connection lock."""
+
+        return await self._read_async(operation)
+
     def diagnostics(self) -> dict[str, object]:
         return {
             **self._metrics,
@@ -863,6 +910,19 @@ class ReplaySQLiteStore:
         with self._thread_lock:
             self._ensure_open()
             return operation(self._connection)
+
+    def _write_session_summary(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        state: Mapping[str, object],
+        component_state: Mapping[str, object],
+        *,
+        now_ms: int,
+    ) -> None:
+        writer = self._session_summary_writer
+        if writer is not None:
+            writer(connection, session_id, state, component_state, now_ms)
 
     def _insert_checkpoint(
         self,

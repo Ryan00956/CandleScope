@@ -21,7 +21,7 @@ def _write(path: Path, value: object) -> Path:
     return path
 
 
-def test_missing_default_routes_cut_pyne_over_to_the_managed_sidecar(
+def test_missing_default_routes_cut_both_first_party_languages_to_sidecars(
     tmp_path: Path,
 ) -> None:
     routes = load_indicator_runtime_routes_from_environment(
@@ -31,6 +31,8 @@ def test_missing_default_routes_cut_pyne_over_to_the_managed_sidecar(
     assert routes.source is None
     assert routes.for_language("pyne").mode == "sidecar"
     assert routes.for_language("pyne").runtime_id == "candlescope.pyne"
+    assert routes.for_language("pine").mode == "sidecar"
+    assert routes.for_language("pine").runtime_id == "candlescope.pine-compat"
     assert routes.to_wire() == {
         "schemaVersion": 1,
         "routes": [
@@ -38,7 +40,12 @@ def test_missing_default_routes_cut_pyne_over_to_the_managed_sidecar(
                 "language": "pyne",
                 "mode": "sidecar",
                 "runtimeId": "candlescope.pyne",
-            }
+            },
+            {
+                "language": "pine",
+                "mode": "sidecar",
+                "runtimeId": "candlescope.pine-compat",
+            },
         ],
     }
     assert (

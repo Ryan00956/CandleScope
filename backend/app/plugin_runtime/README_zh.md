@@ -20,13 +20,18 @@ Phase 2～4 的边界：
 - descriptor 和固定结果探针通过后，原子激活并保留逐插件回滚链。
 
 HTTP compute、range/batch 与 Indicator WebSocket 脚本流量现在共用通用
-`legacy/shadow/sidecar` 路由。Phase 6 起默认路由文件不存在时为
-`pyne=sidecar,candlescope.pyne`；仅启用 Host 但未安装该 runtime 会让启动 fail closed。
+`legacy/shadow/sidecar` 路由。Phase 8 起默认路由文件不存在时同时启用
+`pyne=sidecar,candlescope.pyne` 与 `pine=sidecar,candlescope.pine-compat`；任一托管
+runtime 未安装都会让启动 fail closed。
 详见 [Indicator Runtime 路由](../indicator/RUNTIME_ROUTING_zh.md)。
 
 Phase 7 新增 `GET /api/v1/indicators/runtimes`，把已验证 routes 与公开 runtime
 descriptors 投影为前端安全目录；它不暴露 registry 路径、启动命令、PID、stderr 或宿主
 失败细节。社区 language ID 因此不再需要 CandleScope 前端适配层。
+
+Phase 8 把产品层 bootstrap 扩展为多个 first-party runtime：所有待安装 bundle 会在
+第一次 registry 变更前全部完成校验，再按 runtime ID 确定顺序安装；社区 activation
+与安装契约没有变化。
 
 ## Activation registry v1
 
@@ -85,11 +90,12 @@ Registry 是解析完成后的激活状态，不是下载清单。Phase 3 的 `.
 
 CandleScope 的产品策略层与通用 Host 保持分离：构造 Host 之前，
 `app.first_party_plugin_bootstrap` 可以把
-`app/official-plugin-releases.json` 固定的官方 runtime 落为本地文件，再调用同一个
+`app/official-plugin-releases.json` 固定的官方 runtimes 落为本地文件，再调用同一个
 安装器。它不会选择社区插件，也拒绝覆盖同 ID 的 unmanaged activation。可用
 `CANDLESCOPE_OFFICIAL_PLUGIN_BOOTSTRAP=0` 关闭这项官方策略；离线首启可设置
-`CANDLESCOPE_OFFICIAL_PLUGIN_BUNDLE=<path>`，但该文件仍必须匹配固定摘要。Host 和
-安装器本身仍完全无网络逻辑。
+`CANDLESCOPE_OFFICIAL_PLUGIN_BUNDLE=<path>`；单 runtime 时 path 是文件，多 runtime
+时是包含固定文件名的目录，每个文件都必须匹配固定摘要。Host 和安装器本身仍完全无
+网络逻辑。
 
 安装器生成的条目还包含 `managed.installationId`、`managed.activationId` 和
 `managed.bundleSha256`。这些字段把 registry 条目绑定到不可变安装目录及其精确

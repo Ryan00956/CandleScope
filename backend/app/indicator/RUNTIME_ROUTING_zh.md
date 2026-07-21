@@ -19,9 +19,11 @@ Phase 4 把 CandleScope 稳定的 Indicator 传输接到通用脚本 runtime Hos
 - Linux：`$XDG_DATA_HOME/candlescope/plugins/indicator-runtime-routes.json`，未设置
   时为 `~/.local/share/candlescope/plugins/indicator-runtime-routes.json`。
 
-可用 `CANDLESCOPE_INDICATOR_RUNTIME_ROUTES` 指定其他文件。Phase 6 起，默认文件
-不存在等价于内置的 `pyne=sidecar,candlescope.pyne`；如果插件尚未安装并激活，应用
-会在启动时 fail closed。显式指定的文件缺失或非法同样会让应用启动失败。
+可用 `CANDLESCOPE_INDICATOR_RUNTIME_ROUTES` 指定其他文件。Phase 8 起，默认文件
+不存在等价于两条托管路由：`pyne=sidecar,candlescope.pyne` 与
+`pine=sidecar,candlescope.pine-compat`；任一 required 插件未安装并激活，应用都会在
+启动时 fail closed。显式路由文件仍是按语言回滚的入口；文件缺失或非法同样会让应用
+启动失败。
 
 ```json
 {
@@ -130,8 +132,9 @@ Host 负责构造 market context 与 OHLCV 输入；插件输出由 CandleScope 
 Render IR v1 的基础能力仍是 line series；`render.histogram-series/1` 与
 `render.structured-output/1` 以可协商方式增加 histogram、marker、hline、fill、背景、
 K 线着色、signal、strategy report 和 drawing objects。Pyne 0.2.0 bridge 已通过这两项
-能力重建 Phase 0 冻结 payload。真正有状态的 realtime session 仍不在协议 v1 内；
-sidecar 对确认 bars 使用 batch 执行。
+能力重建 Phase 0 冻结 payload；Pine Compatibility 0.2.0 bridge 使用同一公开 IR 映射
+受支持的 plot 子集，对无法忠实映射的能力 fail closed。真正有状态的 realtime session
+仍不在协议 v1 内；当前公开 Pine release 只执行闭合 K 线 batch。
 
 ## 安全上线顺序
 

@@ -7,10 +7,11 @@ plugin author publishes one deterministic bundle. CandleScope gives each
 bundle its own virtual environment and only atomically activates it after the
 typed runtime probe passes.
 
-Since Phase 6, a missing Indicator route file selects the managed
-`candlescope.pyne` sidecar. The application fails closed at startup when that
-runtime is not active; an explicit route file can still select `legacy` or
-`shadow` during the source-removal rollback window.
+Since Phase 8, a missing Indicator route file selects the managed
+`candlescope.pyne` and `candlescope.pine-compat` sidecars. The application
+fails closed at startup when either required runtime is not active; an
+explicit route file can narrow or replace those routes for rollback and
+development testing.
 
 ## Release workflow
 
@@ -58,12 +59,12 @@ The installer accepts local artifacts only. A release lock, downloader, or
 marketplace must first materialize a digest-pinned file and then call this same
 installation path.
 
-The built-in Pyne route demonstrates that composition without changing the
-community contract. CandleScope's product bootstrap owns a pinned GitHub
-prerelease URL, platform, byte size, and outer SHA-256; it downloads only that
-asset, commits it to a local cache after verification, then calls this
-installer with `enabled/autoStart/required=true`. Matching activations are
-checked and reused. An unmanaged activation is never overwritten.
+The built-in Pyne and Pine routes demonstrate that composition without changing
+the community contract. CandleScope's product bootstrap owns pinned GitHub
+prerelease URLs, platforms, byte sizes, and outer SHA-256 values. It verifies
+all pending assets before calling this installer in deterministic runtime-ID
+order with `enabled/autoStart/required=true`. Matching activations are checked
+and reused. An unmanaged activation is never overwritten.
 
 ## Manifest v1
 

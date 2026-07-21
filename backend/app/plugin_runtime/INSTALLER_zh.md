@@ -6,9 +6,9 @@ Phase 3 提供可发布的 `.cspkg` 格式和本地管理 CLI。它解决插件�
 激活状态反复手工对齐的问题：插件作者发布一个确定的 bundle，CandleScope 为每个
 bundle 创建独立 venv，协议探针通过后才原子激活。
 
-Phase 6 起，Indicator 路由文件不存在时会选择托管的 `candlescope.pyne` sidecar；该
-runtime 未激活时应用启动 fail closed。在源码删除前的回滚窗口中，显式路由文件仍可选择
-`legacy` 或 `shadow`。
+Phase 8 起，Indicator 路由文件不存在时会同时选择托管的 `candlescope.pyne` 与
+`candlescope.pine-compat` sidecar；任一 required runtime 未激活时应用启动 fail closed。
+显式路由文件仍可在开发测试或回滚时缩小、替换默认路由。
 
 ## 最短发布流程
 
@@ -52,10 +52,11 @@ enabled、按需启动。
 安装命令只接受本地文件，不负责下载。外部 release lock、下载缓存或 marketplace
 必须先把已固定摘要的 artifact 落到本地，再调用同一安装入口。
 
-内置 Pyne route 展示了这种组合方式，但没有改变社区契约：CandleScope 产品
-bootstrap 单独持有固定的 GitHub prerelease URL、平台、字节数和外层 SHA-256，只下载
-该资产；校验后先原子写入本地缓存，再以 `enabled/autoStart/required=true` 调用本
-安装器。匹配的 activation 会被复查并复用，unmanaged activation 永远不会被覆盖。
+内置 Pyne/Pine routes 展示了这种组合方式，但没有改变社区契约：CandleScope 产品
+bootstrap 单独持有固定的 GitHub prerelease URL、平台、字节数和外层 SHA-256；所有
+待安装资产会先全部通过校验，再按 runtime ID 确定顺序以
+`enabled/autoStart/required=true` 调用本安装器。匹配的 activation 会被复查并复用，
+unmanaged activation 永远不会被覆盖。
 
 ## Manifest schema v1
 

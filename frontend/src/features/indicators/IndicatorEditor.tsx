@@ -11,6 +11,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
+import {
+  configurePineHostCapabilities,
+  registerPineLanguageSupport,
+} from "../../editor/pineLanguage";
 import { registerPyneLanguageSupport } from "../../editor/pyneLanguage";
 import { registerPyneTheme, getPyneEditorOptions } from "../../editor/pyneTheme";
 import { fetchScriptRuntimes } from "../../services/indicatorApi.js";
@@ -29,6 +33,14 @@ import type {
 
 /** Track whether Pyne providers have been registered globally */
 let pyneRegistered = false;
+/** Track whether Pine providers have been registered globally */
+let pineRegistered = false;
+
+function optionalRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
 
 export interface IndicatorEditorSource extends Omit<IndicatorDefinition, "id"> {
   id: string | null;
@@ -99,6 +111,10 @@ export default function IndicatorEditor({
     [runtimeCatalog, selectedLanguage],
   );
   const languageReady = Boolean(selectedLanguage?.available && editorProfile);
+  const pineHostCapabilities = useMemo(
+    () => optionalRecord(selectedRuntime?.meta.hostCapabilities),
+    [selectedRuntime],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -113,6 +129,12 @@ export default function IndicatorEditor({
     });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (editorProfile?.pineEnhancements) {
+      configurePineHostCapabilities(pineHostCapabilities);
+    }
+  }, [editorProfile?.pineEnhancements, pineHostCapabilities]);
 
   const handlePreview = useCallback(() => {
     if (readOnly || !selectedLanguage || !editorProfile) return;
@@ -193,6 +215,10 @@ export default function IndicatorEditor({
    */
   const handleBeforeMount = useCallback((monaco: typeof Monaco) => {
     registerPyneTheme(monaco);
+    if (!pineRegistered) {
+      registerPineLanguageSupport(monaco);
+      pineRegistered = true;
+    }
   }, []);
 
   /**
@@ -376,6 +402,8 @@ export default function IndicatorEditor({
           <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
             {editorProfile?.pyneEnhancements
               ? <>输入 <code>ta.</code> <code>input.</code> <code>color.</code> 触发自动补全 · </>
+              : editorProfile?.pineEnhancements
+                ? <>Pine v5/v6 · closed bars only · 输入 <code>ta.</code> <code>timeframe.</code> 触发补全 · </>
               : "使用插件描述符声明的语言模式 · "}
             <kbd style={{ background: 'var(--bg-tertiary)', padding: '1px 5px', borderRadius: '3px', fontSize: '10px', border: '1px solid var(--border-color)' }}>Ctrl+Enter</kbd> 运行
           </span>
@@ -393,9 +421,13 @@ export default function IndicatorEditor({
         <div className="indicator-editor-monaco" style={{ flex: 1, minHeight: 0, border: "1px solid rgba(255, 255, 255, 0.1)", borderRadius: "10px", overflow: "hidden", boxShadow: "0 8px 32px rgba(0, 0, 0, 0.2), inset 0 2px 4px rgba(0, 0, 0, 0.2)" }}>
           <Editor
             height="100%"
-            {...(editorProfile?.pyneEnhancements
-              ? { path: "candlescope-indicator.pyne" }
-              : {})}
+            {...(
+              editorProfile?.pyneEnhancements
+                ? { path: "candlescope-indicator.pyne" }
+                : editorProfile?.pineEnhancements
+                  ? { path: "candlescope-indicator.pine" }
+                  : {}
+            )}
             language={editorProfile?.monacoLanguage || "plaintext"}
             theme={editorProfile?.theme || "vs-dark"}
             value={script}
@@ -434,6 +466,8 @@ export default function IndicatorEditor({
           <span style={{ color: 'var(--text-muted)' }}>
             {editorProfile?.pyneEnhancements
               ? <>💡 Pyne API: <code>ta.sma()</code> <code>ta.ema()</code> <code>ta.rsi()</code> <code>plot()</code> <code>input.int()</code></>
+              : editorProfile?.pineEnhancements
+                ? <>💡 Pine v5/v6 closed-bar API: <code>ta.sma()</code> <code>plot()</code> <code>plotshape()</code> <code>input.int()</code></>
               : `💡 ${selectedLanguage?.name || "社区语言"} 由 ${selectedRuntime?.name || "已路由插件"} 执行`}
           </span>
         )}

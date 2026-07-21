@@ -42,6 +42,7 @@ OFFICIAL_PLUGIN_DOWNLOAD_TIMEOUT_ENV = "CANDLESCOPE_PLUGIN_DOWNLOAD_TIMEOUT_SECO
 DEFAULT_RELEASE_LOCK_PATH = Path(__file__).with_name("official-plugin-releases.json")
 MAX_RELEASE_LOCK_BYTES = 64 * 1024
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+FIRST_PARTY_RUNTIME_IDS = frozenset({"candlescope.pyne", "candlescope.pine-compat"})
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RUNTIME_ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
@@ -81,6 +82,36 @@ class OfficialPluginRelease:
 
 
 @dataclass(frozen=True, slots=True)
+class FirstPartyPluginBootstrapItemResult:
+    status: str
+    runtime_id: str
+    version: str
+    bundle_sha256: str
+    registry_path: Path | None = None
+    installation_path: Path | None = None
+    changed: bool = False
+    downloaded: bool = False
+    reason: str | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "runtimeId": self.runtime_id,
+            "version": self.version,
+            "bundleSha256": self.bundle_sha256,
+            "changed": self.changed,
+            "downloaded": self.downloaded,
+            **({"registryPath": str(self.registry_path)} if self.registry_path else {}),
+            **(
+                {"installationPath": str(self.installation_path)}
+                if self.installation_path
+                else {}
+            ),
+            **({"reason": self.reason} if self.reason else {}),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class FirstPartyPluginBootstrapResult:
     status: str
     runtime_id: str | None = None
@@ -91,23 +122,39 @@ class FirstPartyPluginBootstrapResult:
     changed: bool = False
     downloaded: bool = False
     reason: str | None = None
+    plugins: tuple[FirstPartyPluginBootstrapItemResult, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "status": self.status,
             "changed": self.changed,
             "downloaded": self.downloaded,
-            **({"runtimeId": self.runtime_id} if self.runtime_id else {}),
-            **({"version": self.version} if self.version else {}),
-            **({"bundleSha256": self.bundle_sha256} if self.bundle_sha256 else {}),
-            **({"registryPath": str(self.registry_path)} if self.registry_path else {}),
-            **(
-                {"installationPath": str(self.installation_path)}
-                if self.installation_path
-                else {}
-            ),
-            **({"reason": self.reason} if self.reason else {}),
         }
+        if self.plugins:
+            payload["plugins"] = [item.to_wire() for item in self.plugins]
+            payload["count"] = len(self.plugins)
+        else:
+            payload.update(
+                {
+                    **({"runtimeId": self.runtime_id} if self.runtime_id else {}),
+                    **({"version": self.version} if self.version else {}),
+                    **(
+                        {"bundleSha256": self.bundle_sha256}
+                        if self.bundle_sha256
+                        else {}
+                    ),
+                    **(
+                        {"installationPath": str(self.installation_path)}
+                        if self.installation_path
+                        else {}
+                    ),
+                }
+            )
+        if self.registry_path:
+            payload["registryPath"] = str(self.registry_path)
+        if self.reason:
+            payload["reason"] = self.reason
+        return payload
 
 
 def _reject_json_constant(value: str) -> None:
@@ -448,6 +495,14 @@ def ensure_first_party_plugins_from_environment(
         release.runtime_id: release
         for release in load_official_plugin_releases(release_lock_path)
     }
+    missing_first_party = sorted(
+        (required_runtime_ids & FIRST_PARTY_RUNTIME_IDS) - set(releases)
+    )
+    if missing_first_party:
+        raise FirstPartyPluginBootstrapError(
+            "official release lock is missing routed first-party runtimes: "
+            + ", ".join(missing_first_party)
+        )
     selected = [
         releases[runtime_id]
         for runtime_id in sorted(required_runtime_ids)
@@ -457,12 +512,8 @@ def ensure_first_party_plugins_from_environment(
         return FirstPartyPluginBootstrapResult(
             status="skipped", reason="no-official-runtime-route"
         )
-    if len(selected) != 1:
-        raise FirstPartyPluginBootstrapError(
-            "this bootstrap revision supports exactly one routed official runtime"
-        )
-    release = selected[0]
-    _assert_platform(release)
+    for release in selected:
+        _assert_platform(release)
 
     registry_path = _registry_path(env)
     installer = installer_factory(
@@ -470,51 +521,66 @@ def ensure_first_party_plugins_from_environment(
         host_name=host_name,
         host_version=host_version,
     )
-    current = {item["runtimeId"]: item for item in installer.list_plugins()}.get(
-        release.runtime_id
-    )
-    if current is not None and not bool(current.get("managed")):
-        raise FirstPartyPluginBootstrapError(
-            "refusing to replace an unmanaged runtime activation",
-            runtime_id=release.runtime_id,
-        )
-    if (
-        current is not None
-        and current.get("version") == release.version
-        and current.get("bundleSha256") == release.sha256
-        and current.get("enabled") is True
-        and current.get("autoStart") is True
-        and current.get("required") is True
-    ):
-        checked = installer.check(release.runtime_id)
-        return FirstPartyPluginBootstrapResult(
-            status="ready",
-            runtime_id=release.runtime_id,
-            version=release.version,
-            bundle_sha256=release.sha256,
-            registry_path=registry_path,
-            changed=False,
-            downloaded=False,
-            reason=f"checked:{checked.activation_id}",
-        )
-
-    override = env.get(OFFICIAL_PLUGIN_BUNDLE_ENV)
-    downloaded = False
-    if override is not None:
-        if not override.strip():
+    current_by_runtime = {item["runtimeId"]: item for item in installer.list_plugins()}
+    results: dict[str, FirstPartyPluginBootstrapItemResult] = {}
+    pending: list[OfficialPluginRelease] = []
+    for release in selected:
+        current = current_by_runtime.get(release.runtime_id)
+        if current is not None and not bool(current.get("managed")):
             raise FirstPartyPluginBootstrapError(
-                f"{OFFICIAL_PLUGIN_BUNDLE_ENV} must not be empty",
+                "refusing to replace an unmanaged runtime activation",
                 runtime_id=release.runtime_id,
             )
-        bundle_path = _verified_local_bundle(
-            Path(override).expanduser().resolve(strict=False), release
-        )
-    else:
+        if (
+            current is not None
+            and current.get("version") == release.version
+            and current.get("bundleSha256") == release.sha256
+            and current.get("enabled") is True
+            and current.get("autoStart") is True
+            and current.get("required") is True
+        ):
+            checked = installer.check(release.runtime_id)
+            results[release.runtime_id] = FirstPartyPluginBootstrapItemResult(
+                status="ready",
+                runtime_id=release.runtime_id,
+                version=release.version,
+                bundle_sha256=release.sha256,
+                registry_path=registry_path,
+                reason=f"checked:{checked.activation_id}",
+            )
+        else:
+            pending.append(release)
+
+    resolved_bundles: dict[str, tuple[Path, bool]] = {}
+    override = env.get(OFFICIAL_PLUGIN_BUNDLE_ENV)
+    if pending and override is not None:
+        if not override.strip():
+            raise FirstPartyPluginBootstrapError(
+                f"{OFFICIAL_PLUGIN_BUNDLE_ENV} must not be empty"
+            )
+        override_path = Path(override).expanduser().resolve(strict=False)
+        if len(selected) == 1:
+            release = pending[0]
+            resolved_bundles[release.runtime_id] = (
+                _verified_local_bundle(override_path, release),
+                False,
+            )
+        else:
+            if not override_path.is_dir():
+                raise FirstPartyPluginBootstrapError(
+                    f"{OFFICIAL_PLUGIN_BUNDLE_ENV} must name a directory when "
+                    "multiple official runtimes are routed"
+                )
+            for release in pending:
+                resolved_bundles[release.runtime_id] = (
+                    _verified_local_bundle(override_path / release.filename, release),
+                    False,
+                )
+    elif pending:
         cache_override = env.get(OFFICIAL_PLUGIN_DOWNLOAD_CACHE_ENV)
         if cache_override is not None and not cache_override.strip():
             raise FirstPartyPluginBootstrapError(
-                f"{OFFICIAL_PLUGIN_DOWNLOAD_CACHE_ENV} must not be empty",
-                runtime_id=release.runtime_id,
+                f"{OFFICIAL_PLUGIN_DOWNLOAD_CACHE_ENV} must not be empty"
             )
         cache_directory = (
             Path(cache_override).expanduser()
@@ -526,44 +592,75 @@ def ensure_first_party_plugins_from_environment(
             timeout_seconds = float(raw_timeout)
         except ValueError as exc:
             raise FirstPartyPluginBootstrapError(
-                f"{OFFICIAL_PLUGIN_DOWNLOAD_TIMEOUT_ENV} must be a number",
-                runtime_id=release.runtime_id,
+                f"{OFFICIAL_PLUGIN_DOWNLOAD_TIMEOUT_ENV} must be a number"
             ) from exc
         if not (0.1 <= timeout_seconds <= 300.0):
             raise FirstPartyPluginBootstrapError(
-                f"{OFFICIAL_PLUGIN_DOWNLOAD_TIMEOUT_ENV} must be between 0.1 and 300",
-                runtime_id=release.runtime_id,
+                f"{OFFICIAL_PLUGIN_DOWNLOAD_TIMEOUT_ENV} must be between 0.1 and 300"
             )
-        bundle_path, downloaded = download_official_plugin_bundle(
-            release,
-            cache_directory,
-            timeout_seconds=timeout_seconds,
-            opener=opener,
+        for release in pending:
+            resolved_bundles[release.runtime_id] = download_official_plugin_bundle(
+                release,
+                cache_directory,
+                timeout_seconds=timeout_seconds,
+                opener=opener,
+            )
+
+    # Every pending bundle is downloaded and verified before the first registry
+    # mutation. Installation is then deterministic in runtime-id order.
+    for release in pending:
+        bundle_path, downloaded = resolved_bundles[release.runtime_id]
+        installed = installer.install(
+            bundle_path,
+            expected_sha256=release.sha256,
+            enabled=True,
+            auto_start=True,
+            required=True,
+        )
+        results[release.runtime_id] = FirstPartyPluginBootstrapItemResult(
+            status="installed" if installed.changed else "ready",
+            runtime_id=release.runtime_id,
+            version=release.version,
+            bundle_sha256=release.sha256,
+            registry_path=registry_path,
+            installation_path=installed.installation_path,
+            changed=installed.changed,
+            downloaded=downloaded,
+            reason=("activated" if installed.changed else "reused-installation"),
         )
 
-    installed = installer.install(
-        bundle_path,
-        expected_sha256=release.sha256,
-        enabled=True,
-        auto_start=True,
-        required=True,
-    )
+    ordered = tuple(results[release.runtime_id] for release in selected)
+    if len(ordered) == 1:
+        item = ordered[0]
+        return FirstPartyPluginBootstrapResult(
+            status=item.status,
+            runtime_id=item.runtime_id,
+            version=item.version,
+            bundle_sha256=item.bundle_sha256,
+            registry_path=item.registry_path,
+            installation_path=item.installation_path,
+            changed=item.changed,
+            downloaded=item.downloaded,
+            reason=item.reason,
+        )
+    changed = any(item.changed for item in ordered)
+    downloaded = any(item.downloaded for item in ordered)
     return FirstPartyPluginBootstrapResult(
-        status="installed" if installed.changed else "ready",
-        runtime_id=release.runtime_id,
-        version=release.version,
-        bundle_sha256=release.sha256,
+        status="installed" if changed else "ready",
         registry_path=registry_path,
-        installation_path=installed.installation_path,
-        changed=installed.changed,
+        changed=changed,
         downloaded=downloaded,
-        reason=("activated" if installed.changed else "reused-installation"),
+        reason=(
+            "official-runtimes-activated" if changed else "official-runtimes-checked"
+        ),
+        plugins=ordered,
     )
 
 
 __all__ = [
     "DEFAULT_RELEASE_LOCK_PATH",
     "FirstPartyPluginBootstrapError",
+    "FirstPartyPluginBootstrapItemResult",
     "FirstPartyPluginBootstrapResult",
     "OfficialPluginRelease",
     "download_official_plugin_bundle",

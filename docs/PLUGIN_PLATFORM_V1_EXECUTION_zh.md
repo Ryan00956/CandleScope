@@ -26,7 +26,7 @@ v1 的核心边界是：
 | Phase 5：Pyne 插件发行 | 已完成（release-ready） | Pyne host facade、发行锁与 `candlescope-plugin-pyne` |
 | Phase 6：Pyne 切换与源码快照删除 | 已完成 | 完整 Render IR、默认 sidecar、可信开发 Release、首启 bootstrap 与源码快照删除 |
 | Phase 7：描述符驱动前端 | 已完成 | 运行时/语言/能力描述符，无硬编码运行时联合类型 |
-| Phase 8：Pine Compatibility 插件 | 未开始 | 修复发行来源、桥接插件、shadow、cutover |
+| Phase 8：Pine Compatibility 插件 | 已完成（development prerelease） | 公开 v0.2.0 发行锁、独立 bridge、冻结 shadow、双插件 bootstrap 与 sidecar cutover |
 
 ## Phase 0：冻结现有公开行为
 
@@ -741,3 +741,108 @@ compileall 和 `git diff --check`，并以带任意社区 language ID 的契约�
   `candlescope_plugin_sdk-0.2.0-py3-none-any.whl` 的干净临时目录 package smoke 通过；
 - `git diff --check` 通过；全仓 backend Ruff 仍报告 34 个本阶段未修改文件中的既有
   finding，因此没有在 Phase 7 越界修改 Data Engine、Exchange 或旧 Indicator internals。
+
+## Phase 8：Pine Compatibility 插件与 cutover
+
+### 公开发行边界
+
+2026-07-21 重新查询 `Ryan00956/pine-compat-runtime` 的 GitHub Releases 后，稳定公开
+发行仍只有 `v0.2.0`；没有把本地或未发布的 `v0.2.1` realtime ABI 候选写进产品能力。
+宿主精确固定：
+
+- release tag：`v0.2.0`，tag commit
+  `cec39d807a469ebae199f30bc67a91d7081a3b9f`；
+- release manifest：
+  `sha256:3fce2cf4aa78ea54b3be805c5417466d9014445c50004317932d044b00f23deb`；
+- Windows wheel：`pine_compat_runtime-0.2.0-cp310-abi3-win_amd64.whl`，
+  `2961677` bytes，
+  `sha256:4f38c25a92261a8594d346c858c43f2a675afaac789bb1f75458c8a568c43c3e`；
+- analysis/runtime/render schema 分别为 `5/8/1`，公开 API 只有
+  `analyze_script` 与 `run_script`，不存在 `create_realtime_session`。
+
+因此 Phase 8 的产品契约明确为闭合 K 线 batch；forming bar、增量/realtime session、
+strategy、`request.*`、import/library 和不能忠实映射的原生对象全部 fail closed。
+
+### 独立 bridge 与冻结 shadow
+
+新增 `packages/candlescope-plugin-pine-compat`，runtime ID 为
+`candlescope.pine-compat`，包版本 `0.2.0`。生产依赖只有公开
+`candlescope-plugin-sdk==0.2.0` 与 `pine-compat-runtime==0.2.0`；包内没有 Pine 引擎
+源码快照，不导入 `app.*`，descriptor 明确返回 `sourceSnapshot=false`、
+`closedBarsOnly=true` 与宿主实际提供的 chart symbol/timeframe fields。
+
+Bridge 把公开引擎结果映射为 SDK Render IR，覆盖 line、histogram/columns、受支持的
+plotshape 子集、hline、fill、bgcolor、barcolor 与 alert。通用 CandleScope serializer
+同时补齐 histogram 的稳定 ID、linewidth、line style 与 per-bar color，不加入任何
+Pine runtime 私有分支。
+
+当前 plugin-platform 分支在 Phase 6 已删除进程内脚本 facade，因此不存在可继续承载
+Pine live shadow 的 legacy 执行路径。Phase 8 没有伪造在线 shadow 窗口，而是从旧适配层
+在同一个公开 v0.2.0 wheel 上冻结 line、histogram、shape、input 四类输出 fixture，桥接
+测试逐字段对比该 fixture；此外再用真实 `.cspkg` 安装探针与 Host 端到端执行作为 cutover
+门禁。若未来公开 realtime ABI，需要在新的协议版本中重新建立 live shadow，不能扩写
+本阶段的 v1 声明。
+
+### 发行、首启与默认路由
+
+确定性 bundle 已作为 development prerelease 发布：
+
+- release：
+  `candlescope-plugin-pine-compat-v0.2.0-dev.1`；
+- asset：`candlescope-pine-compat-0.2.0-cp312-win_amd64.cspkg`，
+  `2997572` bytes；
+- outer digest：
+  `sha256:f14094a6243485d198814464d359ae05711b6cbec34adb7030998caad2c1a378`；
+- URL：<https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pine-compat-v0.2.0-dev.1>。
+
+`official-plugin-releases.json` 同时固定 Pyne 与 Pine 两个开发资产。产品 bootstrap 先下载
+并校验全部待安装 bundle，再按 runtime ID 顺序调用通用 installer；任一 bundle 失败时
+不会先写入另一半 activation。默认路由文件不存在时现在选择：
+
+```text
+pyne=sidecar,candlescope.pyne
+pine=sidecar,candlescope.pine-compat
+```
+
+前端继续从公开 descriptor 发现语言。Pine 的 Monaco tokenizer、starter source 与补全由
+宿主静态实现；补全只展示 descriptor 声明的 `syminfo.*`/`timeframe.*`，不加载插件代码，
+也不会提示未托管的 `timeframe.in_seconds()`、`strategy` 或 `plotarrow`。编辑器明确展示
+“Pine v5/v6 · closed bars only”。
+
+在全新的临时 `LOCALAPPDATA` 中，第一次默认启动真实下载并安装两个 pinned bundle，返回
+`status=installed, count=2, changed=true, downloaded=true`；第二次启动对两个 activation
+逐个执行 `check`，返回 `status=ready, changed=false, downloaded=false`。真实 Host 目录
+随后同时返回 `candlescope.pyne`/`candlescope.pine-compat` 与 `pyne`/`pine`，Pine descriptor
+报告 `engineVersion=0.2.0`、`closedBarsOnly=true`；执行 `plot(close * 2)` 的三点结果为
+`[202.0, 204.0, 206.0]`。
+
+### 回滚边界
+
+本阶段只在 `codex/plugin-platform-v1` worktree/branch 上开发与发布，不合并 `main`，也不
+创建 PR。开发测试期回滚 Pine 时，先显式配置只包含
+`pyne=sidecar,candlescope.pyne` 的 route 文件，再对
+`candlescope.pine-compat` 执行 installer rollback；这样产品 bootstrap 不会重新选择 Pine，
+且 Pyne 流量与社区插件契约不受影响。发布资产保持 prerelease；回滚不需要删除 Release，
+也不能静默回退到已删除的进程内实现。
+
+### 最终门禁记录
+
+2026-07-21 最终验证：
+
+- backend 全量：`1930 passed, 4 warnings in 145.47s`；4 条 warning 仍是既有 FastAPI
+  `on_event` 弃用提示；
+- frontend `npm run check` 全绿：architecture allowlist 为 0，typecheck、全仓 ESLint、
+  `2334 passed` 与 Vite production build（456 modules）通过；
+- Plugin SDK：Ruff check/format check、`30 passed`、wheel/sdist build 通过；
+- Pine bridge：Ruff check、冻结 shadow/发行/架构/runtime 的 `11 passed` 与 wheel build
+  通过；真实 dev.1 `.cspkg` 的首次安装、重复 `check`、双 descriptor 与执行探针通过；
+- `compileall`、本次改动 Python 文件 Ruff/format check、`git diff --check` 通过；
+- GitHub 复核确认 prerelease tag 指向
+  `68c60445449c6302279cdab492c41f2c1ce9d467`，远端 asset 的 size/digest 与官方发行锁
+  一致。
+
+额外对已发布 bridge 源码执行 `ruff format --check` 时，formatter 会机械重排
+`build_bundle.py`、`runtime.py` 与 `test_runtime.py`。这些文件的 Ruff 规则、测试、构建和
+真实 artifact 门禁均通过；本阶段没有为了纯格式变更改写已锁定 dev.1 的源码对应关系。
+若需要统一 formatter 输出，应以新的 dev.2 asset、摘要与 release lock 独立发布，不能
+在 dev.1 名下静默替换字节。

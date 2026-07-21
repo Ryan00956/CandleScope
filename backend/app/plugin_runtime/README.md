@@ -25,15 +25,21 @@ Phases 2 through 4 own:
   deterministic result probes pass.
 
 HTTP compute, range/batch, and Indicator WebSocket script traffic now share the
-generic `legacy/shadow/sidecar` router. Since Phase 6, a missing route file
-selects `pyne=sidecar,candlescope.pyne`; startup fails closed until that
-managed runtime is installed and active. See
+generic `legacy/shadow/sidecar` router. Since Phase 8, a missing route file
+selects both `pyne=sidecar,candlescope.pyne` and
+`pine=sidecar,candlescope.pine-compat`; startup fails closed until both managed
+runtimes are installed and active. See
 [Indicator Runtime Routing](../indicator/RUNTIME_ROUTING.md).
 
 Phase 7 adds `GET /api/v1/indicators/runtimes`, a frontend-safe projection of
 the already validated routes and public runtime descriptors. It exposes no
 registry path, launch command, PID, stderr, or host failure detail. Community
 language IDs therefore require no CandleScope frontend adapter.
+
+Phase 8 extends the product bootstrap to multiple pinned first-party runtimes.
+It verifies every pending bundle before the first registry mutation, then
+installs in deterministic runtime-ID order. Community activation and install
+contracts remain unchanged.
 
 ## Activation registry v1
 
@@ -95,12 +101,14 @@ development, but unmanaged entries cannot use the installer's exact
 
 CandleScope's product layer is intentionally separate: before constructing
 this generic Host, `app.first_party_plugin_bootstrap` may materialize the exact
-official runtime pinned in `app/official-plugin-releases.json` and invoke the
+official runtimes pinned in `app/official-plugin-releases.json` and invoke the
 same local installer. It never selects community plugins, and it refuses to
 replace an unmanaged activation with the same ID. Set
 `CANDLESCOPE_OFFICIAL_PLUGIN_BOOTSTRAP=0` to disable this first-party policy or
 `CANDLESCOPE_OFFICIAL_PLUGIN_BUNDLE=<path>` for a digest-identical offline
-first run. The Host and installer themselves remain network-free.
+first run. The path is a file for one routed official runtime and a directory
+containing the pinned filenames for multiple runtimes. The Host and installer
+themselves remain network-free.
 
 Installer-created entries also carry `managed.installationId`,
 `managed.activationId`, and `managed.bundleSha256`, binding activation state to

@@ -9,6 +9,7 @@ export interface ScriptEditorProfile {
   theme: string;
   starterSource: string;
   pyneEnhancements: boolean;
+  pineEnhancements: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -61,12 +62,14 @@ export function resolveScriptEditorProfile(
   const runtime = runtimeForScriptLanguage(catalog, language);
   const advertised = descriptorUiProfile(runtime, language.id);
   const pyneEnhancements = language.id === "pyne";
+  const pineEnhancements = language.id === "pine";
   return {
     monacoLanguage:
       optionalString(advertised?.monacoLanguage)
-      ?? (pyneEnhancements ? "python" : "plaintext"),
+      ?? (pyneEnhancements ? "python" : pineEnhancements ? "pine" : "plaintext"),
     theme: pyneEnhancements ? "pyne-dark" : "vs-dark",
     starterSource: optionalString(advertised?.starterSource) ?? "",
     pyneEnhancements,
+    pineEnhancements,
   };
 }

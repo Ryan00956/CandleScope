@@ -22,6 +22,16 @@ const payload = {
       features: ["batch-execution/1"],
     },
     {
+      id: "pine",
+      name: "Pine Script",
+      extensions: [".pine"],
+      aliases: ["pine", "pinescript"],
+      runtimeId: "candlescope.pine-compat",
+      routeMode: "sidecar",
+      available: true,
+      features: ["batch-execution/1"],
+    },
+    {
       id: "community-lang",
       name: "Community Lang",
       extensions: [".community"],
@@ -44,6 +54,39 @@ const payload = {
       features: ["batch-execution/1"],
       requiredHostFeatures: ["batch-execution/1"],
       meta: {},
+    },
+    {
+      id: "candlescope.pine-compat",
+      name: "Pine Compatibility Runtime",
+      version: "0.2.0",
+      package: "candlescope-plugin-pine-compat",
+      languages: [
+        {
+          id: "pine",
+          name: "Pine Script",
+          extensions: [".pine"],
+          aliases: ["pine", "pinescript"],
+        },
+      ],
+      features: ["batch-execution/1"],
+      requiredHostFeatures: ["batch-execution/1"],
+      meta: {
+        closedBarsOnly: true,
+        hostCapabilities: {
+          chartContext: {
+            symbolFeatures: ["syminfo.tickerid"],
+            timeframeFeatures: ["timeframe.period"],
+          },
+        },
+        ui: {
+          languages: {
+            pine: {
+              monacoLanguage: "pine",
+              starterSource: "//@version=6\nindicator(\"My Indicator\")",
+            },
+          },
+        },
+      },
     },
     {
       id: "community.runtime",
@@ -86,6 +129,20 @@ test("runtime catalog accepts arbitrary descriptor-declared language ids", () =>
     theme: "vs-dark",
     starterSource: "plot(close)",
     pyneEnhancements: false,
+    pineEnhancements: false,
+  });
+});
+
+test("runtime catalog enables the safe Pine editor from its descriptor", () => {
+  const catalog = parseScriptRuntimeCatalog(payload);
+  const language = resolveAvailableScriptLanguage(catalog, "pine");
+
+  assert.deepEqual(resolveScriptEditorProfile(catalog, language!), {
+    monacoLanguage: "pine",
+    theme: "vs-dark",
+    starterSource: "//@version=6\nindicator(\"My Indicator\")",
+    pyneEnhancements: false,
+    pineEnhancements: true,
   });
 });
 

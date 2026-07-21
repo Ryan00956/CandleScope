@@ -187,3 +187,47 @@ def test_empty_structured_collections_preserve_a_meta_only_legacy_result() -> No
     )
 
     assert serialize_plugin_runtime_result(plugin) == serialize_pyne_result(legacy)
+
+
+def test_structured_histogram_preserves_identity_width_and_per_bar_color() -> None:
+    color_data = [{"time": 1700000000, "color": "#ef4444"}]
+    result = ExecuteBatchResult(
+        ok=True,
+        output=RenderOutput(
+            collections=RenderCollections(
+                histograms=(
+                    {
+                        "id": "pine-plot-7",
+                        "title": "Momentum",
+                        "color_up": "#22c55e",
+                        "pane": "separate",
+                        "linewidth": 4,
+                        "linestyle": "dotted",
+                        "colorData": color_data,
+                        "per_bar_color": True,
+                        "data": [{"time": 1700000000, "value": 2.5}],
+                    },
+                ),
+            ),
+        ),
+    )
+
+    payload = serialize_plugin_runtime_result(result)
+
+    assert payload["lines"] == [
+        {
+            "id": "pine-plot-7",
+            "name": "Momentum",
+            "color": "#22c55e",
+            "type": "histogram",
+            "pane": "separate",
+            "lineWidth": 4,
+            "lineStyle": 1,
+            "colorData": color_data,
+            "per_bar_color": True,
+            "data": [{"time": 1700000000, "value": 2.5}],
+        }
+    ]
+    assert payload["series"][0]["localId"] == "pine-plot-7"
+    assert payload["series"][0]["style"]["lineWidth"] == 4
+    assert payload["series"][0]["style"]["colorData"] == color_data

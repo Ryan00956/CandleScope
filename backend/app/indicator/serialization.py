@@ -400,17 +400,24 @@ def _flat_lines_from_render_collections(
             line["per_bar_color"] = True
         lines.append(line)
     for item in collections.get("histograms") or []:
-        lines.append(
-            {
-                "name": item.get("title", ""),
-                "color": item.get("color_up", "#26a69a"),
-                "type": "histogram",
-                "pane": item.get("pane", "separate"),
-                "lineWidth": 2,
-                "lineStyle": 0,
-                "data": item.get("data", []),
-            }
-        )
+        line = {
+            "name": item.get("title", ""),
+            "color": item.get("color_up", "#26a69a"),
+            "type": "histogram",
+            "pane": item.get("pane", "separate"),
+            "lineWidth": item.get("linewidth", 2),
+            "lineStyle": _legacy_line_style(
+                item.get("linestyle", item.get("style", "solid"))
+            ),
+            "data": item.get("data", []),
+        }
+        if "id" in item:
+            line["id"] = item["id"]
+        if item.get("colorData"):
+            line["colorData"] = item["colorData"]
+        if item.get("per_bar_color"):
+            line["per_bar_color"] = True
+        lines.append(line)
     return lines
 
 

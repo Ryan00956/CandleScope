@@ -137,8 +137,8 @@ class IndicatorRuntimeRoutes:
         return cls((IndicatorRuntimeRoute("pyne", ROUTE_MODE_LEGACY),))
 
     @classmethod
-    def pyne_sidecar_default(cls) -> "IndicatorRuntimeRoutes":
-        """Phase 6 default: Pyne is an installed plugin, never an in-process fallback."""
+    def first_party_sidecar_default(cls) -> "IndicatorRuntimeRoutes":
+        """Phase 8 default: both first-party languages are managed plugins."""
         return cls(
             (
                 IndicatorRuntimeRoute(
@@ -146,8 +146,18 @@ class IndicatorRuntimeRoutes:
                     ROUTE_MODE_SIDECAR,
                     "candlescope.pyne",
                 ),
+                IndicatorRuntimeRoute(
+                    "pine",
+                    ROUTE_MODE_SIDECAR,
+                    "candlescope.pine-compat",
+                ),
             )
         )
+
+    @classmethod
+    def pyne_sidecar_default(cls) -> "IndicatorRuntimeRoutes":
+        """Backward-compatible name for the Phase 8 first-party default."""
+        return cls.first_party_sidecar_default()
 
     def for_language(self, language: str) -> IndicatorRuntimeRoute:
         normalized = _identifier(language, "language")
@@ -182,7 +192,7 @@ def load_indicator_runtime_routes(
     route_path = Path(path).expanduser().resolve(strict=False)
     if not route_path.exists():
         if allow_missing:
-            return IndicatorRuntimeRoutes.pyne_sidecar_default()
+            return IndicatorRuntimeRoutes.first_party_sidecar_default()
         raise IndicatorRuntimeRoutesError(
             f"Indicator runtime routes file does not exist: {route_path}"
         )

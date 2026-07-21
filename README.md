@@ -408,6 +408,7 @@ Documentation:
 
 - [Indicator Engine](backend/app/indicator/README.md)
 - [Pyne Runtime plugin](packages/candlescope-plugin-pyne/README.md)
+- [Pine Compatibility plugin](packages/candlescope-plugin-pine-compat/README.md)
 
 ## Plugin SDK (Developer Preview)
 
@@ -427,8 +428,9 @@ isolated venv per bundle, offline wheel install, result probes, atomic
 activation, and per-runtime rollback; see the
 [`installer guide`](backend/app/plugin_runtime/INSTALLER.md). Phase 4 routes
 Indicator HTTP, range, batch, and WebSocket execution through explicit runtime
-routing. Phase 6 defaults Pyne to the managed `candlescope.pyne` sidecar and
-fails closed when it is unavailable.
+routing. Phase 8 defaults both Pyne and Pine to the managed
+`candlescope.pyne` and `candlescope.pine-compat` sidecars and fails closed when
+either required runtime is unavailable.
 Phase 7 adds descriptor-driven language discovery at
 `GET /api/v1/indicators/runtimes`; the editor accepts arbitrary routed
 community language IDs and uses a plaintext fallback without loading
@@ -443,6 +445,15 @@ published as
 The product bootstrap pins its URL, size, platform, and outer SHA-256, while the
 generic community installer remains local-artifact-only. CandleScope no longer
 contains `packages/pyne-runtime` or an in-process Pyne facade.
+
+Phase 8 adds the independently buildable
+[`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README.md).
+It pins the public `pine-compat-runtime` v0.2.0 Release wheel, contains no Pine
+engine source snapshot or private CandleScope imports, and advertises only its
+closed-bar batch contract. The development bundle is published as
+[`candlescope-plugin-pine-compat-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pine-compat-v0.2.0-dev.1).
+Unsupported realtime, strategy, `request.*`, import, and native-object features
+remain fail-closed.
 
 ## API Documentation
 

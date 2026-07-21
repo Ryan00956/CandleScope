@@ -276,6 +276,8 @@ Pyne 支持 `safe`、`research`、`unsafe` security modes，并在由公共 side
 - [Indicator Engine 中文](backend/app/indicator/README_zh.md)
 - [Pyne Runtime 插件](packages/candlescope-plugin-pyne/README.md)
 - [Pyne Runtime 插件中文](packages/candlescope-plugin-pyne/README_zh.md)
+- [Pine Compatibility 插件](packages/candlescope-plugin-pine-compat/README.md)
+- [Pine Compatibility 插件中文](packages/candlescope-plugin-pine-compat/README_zh.md)
 
 ## Plugin SDK（开发者预览）
 
@@ -292,8 +294,9 @@ Plugin platform Phase 2/3 已加入通用
 SHA-256、每 bundle 独立 venv、离线 wheel 安装、结果探针、原子激活和逐插件回滚；
 社区发布流程见
 [`INSTALLER_zh.md`](backend/app/plugin_runtime/INSTALLER_zh.md)。Phase 4 已把 Indicator
-HTTP、range、batch 和 WebSocket 统一接入 runtime 路由；Phase 6 缺省已切换为
-`pyne=sidecar,candlescope.pyne`。Phase 7 新增
+HTTP、range、batch 和 WebSocket 统一接入 runtime 路由；Phase 8 缺省同时切换为
+`pyne=sidecar,candlescope.pyne` 与 `pine=sidecar,candlescope.pine-compat`，任一 required
+runtime 不可用都会 fail closed。Phase 7 新增
 `GET /api/v1/indicators/runtimes` 描述符发现；编辑器接受任意已路由的社区 language ID，
 未知语言使用 plaintext fallback，且不加载插件提供的前端代码。Phase 5 新增独立可构建的
 [`candlescope-plugin-pyne`](packages/candlescope-plugin-pyne/README_zh.md)，通过发行锁固定
@@ -304,6 +307,14 @@ golden。可信开发包已发布为
 产品 bootstrap 固定其 URL、大小、平台和外层 SHA-256，通用社区安装器仍只接受本地
 artifact。CandleScope 已删除 `packages/pyne-runtime` 和 in-process Pyne facade。完整执行记录见
 [`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
+
+Phase 8 新增独立可构建的
+[`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README_zh.md)：
+它固定公开 `pine-compat-runtime` v0.2.0 Release wheel，不包含 Pine 引擎源码快照，也不
+导入 CandleScope 私有模块，只声明闭合 K 线 batch 能力。开发 bundle 已发布为
+[`candlescope-plugin-pine-compat-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pine-compat-v0.2.0-dev.1)；
+realtime、strategy、`request.*`、import 和原生对象等未公开或无法忠实映射的能力继续
+fail closed。
 
 ## API 文档
 

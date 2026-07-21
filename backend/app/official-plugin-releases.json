@@ -15,6 +15,21 @@
         "implementation": "CPython",
         "pythonVersion": "3.12"
       }
+    },
+    {
+      "runtimeId": "candlescope.pine-compat",
+      "package": "candlescope-plugin-pine-compat",
+      "version": "0.2.0",
+      "filename": "candlescope-pine-compat-0.2.0-cp312-win_amd64.cspkg",
+      "url": "https://github.com/Ryan00956/CandleScope/releases/download/candlescope-plugin-pine-compat-v0.2.0-dev.1/candlescope-pine-compat-0.2.0-cp312-win_amd64.cspkg",
+      "sha256": "sha256:f14094a6243485d198814464d359ae05711b6cbec34adb7030998caad2c1a378",
+      "size": 2997572,
+      "platform": {
+        "system": "Windows",
+        "machine": "AMD64",
+        "implementation": "CPython",
+        "pythonVersion": "3.12"
+      }
     }
   ]
 }

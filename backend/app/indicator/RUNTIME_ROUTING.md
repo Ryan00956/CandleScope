@@ -22,11 +22,13 @@ The default route path is beside the activation registry:
 - Linux: `$XDG_DATA_HOME/candlescope/plugins/indicator-runtime-routes.json`, or
   `~/.local/share/candlescope/plugins/indicator-runtime-routes.json`.
 
-Override it with `CANDLESCOPE_INDICATOR_RUNTIME_ROUTES`. Since Phase 6, an
-absent default file selects the built-in
-`pyne=sidecar,candlescope.pyne` route. If that plugin is not installed and
-active, application startup fails closed. An explicitly selected missing or
-invalid file also fails startup.
+Override it with `CANDLESCOPE_INDICATOR_RUNTIME_ROUTES`. Since Phase 8, an
+absent default file selects both managed first-party routes:
+`pyne=sidecar,candlescope.pyne` and
+`pine=sidecar,candlescope.pine-compat`. If either required plugin is not
+installed and active, application startup fails closed. An explicitly selected
+missing or invalid file also fails startup and remains the per-language
+rollback mechanism.
 
 ```json
 {
@@ -146,8 +148,10 @@ Line series remain the base Render IR v1 feature. Negotiated
 `render.histogram-series/1` and `render.structured-output/1` add histograms,
 markers, horizontal lines, fills, backgrounds, bar colors, signals, strategy
 reports, and drawing objects. The Pyne 0.2.0 bridge uses those features to
-rebuild the frozen Phase 0 payloads. True stateful realtime sessions remain
-outside protocol v1; the sidecar executes batches over confirmed bars.
+rebuild the frozen Phase 0 payloads. The Pine Compatibility 0.2.0 bridge uses
+the same public IR for its supported plot subset and fails closed on unmapped
+features. True stateful realtime sessions remain outside protocol v1; the
+public Pine release executes closed-bar batches only.
 
 ## Safe rollout
 

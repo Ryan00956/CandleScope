@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "source": "pine-interpreter adapter at public pine-compat-runtime v0.2.0",
+  "context": {
+    "exchange": "binance",
+    "marketType": "spot",
+    "symbol": "BTCUSDT",
+    "interval": "1m"
+  },
+  "bars": [
+    {"time": 1700000000, "open": 100, "high": 102, "low": 99, "close": 101, "volume": 10, "isClosed": true},
+    {"time": 1700000060, "open": 101, "high": 103, "low": 100, "close": 102, "volume": 11, "isClosed": true},
+    {"time": 1700000120, "open": 102, "high": 104, "low": 101, "close": 103, "volume": 12, "isClosed": true},
+    {"time": 1700000180, "open": 103, "high": 105, "low": 102, "close": 104, "volume": 13, "isClosed": true},
+    {"time": 1700000240, "open": 104, "high": 106, "low": 103, "close": 105, "volume": 14, "isClosed": true}
+  ],
+  "cases": [
+    {
+      "id": "line",
+      "source": "//@version=5\nindicator(\"Phase 8 line\", overlay=true)\nplot(close, \"Close\", color=color.blue, linewidth=2)",
+      "params": {},
+      "expected": {
+        "series": [{"id": "pine-plot-1", "title": "Close", "type": "line", "pane": "main", "color": "#2196f3", "values": [101.0, 102.0, 103.0, 104.0, 105.0]}],
+        "markers": [],
+        "inputs": []
+      }
+    },
+    {
+      "id": "histogram",
+      "source": "//@version=5\nindicator(\"Phase 8 hist\")\nplot(close-open, \"Body\", style=plot.style_histogram, color=color.orange)",
+      "params": {},
+      "expected": {
+        "series": [{"id": "pine-plot-1", "title": "Body", "type": "histogram", "pane": "separate", "color": "#ff9800", "values": [1.0, 1.0, 1.0, 1.0, 1.0]}],
+        "markers": [],
+        "inputs": []
+      }
+    },
+    {
+      "id": "shape",
+      "source": "//@version=5\nindicator(\"Phase 8 shape\", overlay=true)\nplotshape(close > open, title=\"Up\", style=shape.triangleup, location=location.belowbar, color=color.green)",
+      "params": {},
+      "expected": {
+        "series": [],
+        "markers": [{"id": "pine-plotshape-1", "title": "Up", "pane": "main", "shape": "arrowUp", "position": "below", "color": "#4caf50", "times": [1700000000, 1700000060, 1700000120, 1700000180, 1700000240]}],
+        "inputs": []
+      }
+    },
+    {
+      "id": "input",
+      "source": "//@version=5\nindicator(\"Phase 8 input\")\nlength=input.int(2, \"Length\", minval=1)\nplot(ta.sma(close,length), \"SMA\")",
+      "params": {"1": 3},
+      "expected": {
+        "series": [{"id": "pine-plot-2", "title": "SMA", "type": "line", "pane": "separate", "color": "#2962ff", "values": [102.0, 103.0, 104.0]}],
+        "markers": [],
+        "inputs": [{"id": "1", "type": "int", "title": "Length", "current": 3}]
+      }
+    }
+  ]
+}

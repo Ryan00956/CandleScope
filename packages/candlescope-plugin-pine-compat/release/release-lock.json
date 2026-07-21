@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "releaseStatus": "development",
+  "plugin": {
+    "id": "candlescope.pine-compat",
+    "package": "candlescope-plugin-pine-compat",
+    "version": "0.2.0"
+  },
+  "python": {
+    "requires": ">=3.11,<3.14",
+    "module": "candlescope_plugin_pine_compat"
+  },
+  "wheels": {
+    "candlescope-plugin-pine-compat": {
+      "version": "0.2.0",
+      "source": "local-release-build"
+    },
+    "candlescope-plugin-sdk": {
+      "version": "0.2.0",
+      "source": "local-release-build"
+    },
+    "pine-compat-runtime": {
+      "version": "0.2.0",
+      "source": "github-release",
+      "releaseTag": "v0.2.0",
+      "releaseCommit": "cec39d807a469ebae199f30bc67a91d7081a3b9f",
+      "manifestUrl": "https://github.com/Ryan00956/pine-compat-runtime/releases/download/v0.2.0/manifest.json",
+      "manifestSha256": "sha256:3fce2cf4aa78ea54b3be805c5417466d9014445c50004317932d044b00f23deb",
+      "releaseUrl": "https://github.com/Ryan00956/pine-compat-runtime/releases/download/v0.2.0/pine_compat_runtime-0.2.0-cp310-abi3-win_amd64.whl",
+      "sha256": "sha256:4f38c25a92261a8594d346c858c43f2a675afaac789bb1f75458c8a568c43c3e",
+      "size": 2961677
+    }
+  },
+  "probe": {
+    "source": "//@version=5\nindicator(\"CSPKG Pine Probe\", overlay=false)\nplot(close * 2, \"Close x2\", color=color.green)\n",
+    "context": {
+      "exchange": "binance",
+      "marketType": "spot",
+      "symbol": "BTCUSDT",
+      "interval": "1m"
+    },
+    "bars": [
+      {
+        "time": 1700000000,
+        "open": 100,
+        "high": 102,
+        "low": 99,
+        "close": 101,
+        "volume": 10,
+        "isClosed": true
+      },
+      {
+        "time": 1700000060,
+        "open": 101,
+        "high": 103,
+        "low": 100,
+        "close": 102,
+        "volume": 11,
+        "isClosed": true
+      }
+    ],
+    "params": {},
+    "options": {},
+    "analysisSha256": "sha256:56a4ed095c7d30a9dd7fb3d79e5f99e713bc93e8ffe1eb0c71a1c94ae3d0d84c",
+    "executionSha256": "sha256:1bad2157e16caedc980bd3bb9f029ef0bf8b656f9b1ace9dcaddc3801c20bfed"
+  }
+}

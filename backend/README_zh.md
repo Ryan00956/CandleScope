@@ -15,6 +15,9 @@
 
 ## 快速启动
 
+CandleScope 要求 Python 3.11 或更高版本。不受支持的解释器会在 FastAPI
+应用启动前直接报错，不会带着不兼容的运行时继续启动。
+
 ```bash
 cd backend
 python -m pip install -r requirements.txt

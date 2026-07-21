@@ -19,7 +19,7 @@ v1 的核心边界是：
 | 阶段 | 状态 | 交付物 |
 | --- | --- | --- |
 | Phase 0：冻结兼容基线 | 已完成 | HTTP compute、HTTP range/history、WebSocket realtime 黑盒 golden |
-| Phase 1：Plugin SDK v1 | 未开始 | 独立 SDK、协议模型、Hello Runtime、契约测试 |
+| Phase 1：Plugin SDK v1 | 进行中 | Python 3.11+ 基线、独立 SDK、协议模型、Hello Runtime、契约测试 |
 | Phase 2：通用 Host/Supervisor | 未开始 | 注册表、生命周期、RPC、宿主服务、诊断 |
 | Phase 3：隔离安装器 v2 | 未开始 | `.cspkg`、独立 venv、校验、探测、原子激活与回滚 |
 | Phase 4：通用 Indicator Service | 未开始 | `legacy/shadow/sidecar` 路由与传输迁移 |
@@ -105,14 +105,20 @@ git diff --check
 - `git diff --check` 通过；
 - 变更仅包含测试、golden fixture 与本文，没有生产代码变化。
 
-### Phase 1 前置决策
+### Phase 1 Python 基线决策
 
-`pyne-runtime` 当前要求 Python 3.11+，而 CandleScope 文档仍允许 Python 3.10+。Phase 1 开始前必须明确选择并落实其一：
+`pyne-runtime` 要求 Python 3.11+，因此 CandleScope 从 Phase 1 起统一要求
+Python 3.11+，不在 plugin platform v1 中实现独立解释器下载器。
 
-1. 将 CandleScope 最低 Python 版本统一提升到 3.11；或
-2. 由插件平台额外管理独立 Python 解释器。
+根目录和 backend 双语 README 是用户可见声明；`app.python_runtime` 是机器可
+校验的权威门禁。Python 3.10 及更低版本会在 FastAPI 应用导入前 fail fast。
 
-首选方案是统一提升到 Python 3.11，避免 v1 同时承担解释器下载、验证和安全更新。Phase 0 不修改该版本要求。
+2026-07-21 验证：
+
+- Python runtime contract：`3 passed in 0.01s`；
+- 本机 Python 3.10 实际导入 `app`：按预期以非零状态拒绝，并报告检测到 3.10；
+- backend 全量：`1839 passed, 4 warnings in 100.16s`；
+- 4 条 warning 仍是既有 FastAPI `on_event` 弃用提示。
 
 ## 后续阶段不可越过的顺序
 

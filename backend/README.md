@@ -15,6 +15,9 @@
 
 ## Quick Start
 
+CandleScope requires Python 3.11 or newer. Unsupported interpreters fail fast
+before the FastAPI application starts.
+
 ```bash
 cd backend
 python -m pip install -r requirements.txt

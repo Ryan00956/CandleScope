@@ -5,7 +5,7 @@
 Lightweight trading chart software built with FastAPI, React, Vite, and Lightweight Charts. CandleScope supports Binance and OKX market data, spot and perpetual market types, a modular Data Engine, exchange-aware symbol metadata, realtime WebSocket streams, built-in indicators, and Pine-style Python scripting through Pyne.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python" />
+  <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python" />
   <img src="https://img.shields.io/badge/Node.js-20+-green?logo=node.js" />
   <img src="https://img.shields.io/badge/React-19+-61DAFB?logo=react" />
   <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi" />
@@ -31,7 +31,7 @@ Lightweight trading chart software built with FastAPI, React, Vite, and Lightwei
 
 Requirements:
 
-- Python 3.10+
+- Python 3.11+
 - Node.js 20+
 - npm 10+
 

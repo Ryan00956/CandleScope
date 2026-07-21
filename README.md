@@ -21,6 +21,7 @@ Lightweight trading chart software built with FastAPI, React, Vite, and Lightwei
 - [Backend](#backend)
 - [Frontend](#frontend)
 - [Indicators And Pyne](#indicators-and-pyne)
+- [Plugin SDK (Developer Preview)](#plugin-sdk-developer-preview)
 - [API Documentation](#api-documentation)
 - [Project Structure](#project-structure)
 - [Development Checks](#development-checks)
@@ -407,6 +408,19 @@ Documentation:
 - [Indicator Engine](backend/app/indicator/README.md)
 - [Pyne Runtime](backend/app/indicator/pyne/README.md)
 
+## Plugin SDK (Developer Preview)
+
+Community runtime authors can build against the dependency-free
+[`candlescope-plugin-sdk`](packages/candlescope-plugin-sdk/README.md). It
+defines the versioned `candlescope.script-runtime/1` JSON-RPC sidecar contract,
+feature negotiation, typed batch OHLCV input, diagnostics, and the first
+CandleScope-owned line-series Render IR. A runnable Hello Runtime and a frozen
+wire transcript are included.
+
+This is the protocol SDK from plugin platform Phase 1. CandleScope does not yet
+load external runtime sidecars in production; host supervision, isolated bundle
+installation, and `legacy/shadow/sidecar` routing belong to later phases.
+
 ## API Documentation
 
 The API reference is maintained separately:
@@ -459,6 +473,9 @@ CandleScope/
 │   │       ├── indicators/
 │   │       └── pyne/
 │   └── tests/
+├── packages/
+│   ├── candlescope-plugin-sdk/
+│   └── pyne-runtime/
 └── frontend/
     ├── package.json
     └── src/

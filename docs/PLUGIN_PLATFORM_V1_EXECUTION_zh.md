@@ -19,7 +19,7 @@ v1 的核心边界是：
 | 阶段 | 状态 | 交付物 |
 | --- | --- | --- |
 | Phase 0：冻结兼容基线 | 已完成 | HTTP compute、HTTP range/history、WebSocket realtime 黑盒 golden |
-| Phase 1：Plugin SDK v1 | 进行中 | Python 3.11+ 基线、独立 SDK、协议模型、Hello Runtime、契约测试 |
+| Phase 1：Plugin SDK v1 | 已完成 | Python 3.11+ 基线、独立 SDK、协议模型、Hello Runtime、契约测试 |
 | Phase 2：通用 Host/Supervisor | 未开始 | 注册表、生命周期、RPC、宿主服务、诊断 |
 | Phase 3：隔离安装器 v2 | 未开始 | `.cspkg`、独立 venv、校验、探测、原子激活与回滚 |
 | Phase 4：通用 Indicator Service | 未开始 | `legacy/shadow/sidecar` 路由与传输迁移 |
@@ -119,6 +119,65 @@ Python 3.11+，不在 plugin platform v1 中实现独立解释器下载器。
 - 本机 Python 3.10 实际导入 `app`：按预期以非零状态拒绝，并报告检测到 3.10；
 - backend 全量：`1839 passed, 4 warnings in 100.16s`；
 - 4 条 warning 仍是既有 FastAPI `on_event` 弃用提示。
+
+## Phase 1：Plugin SDK v1
+
+### 交付边界
+
+新增独立可构建包 `packages/candlescope-plugin-sdk`。该包没有运行时第三方依赖，
+不导入 CandleScope backend、Pyne Runtime 或 Pine Compatibility Runtime；插件
+实现因此只能依赖公开协议，不能偷用宿主私有模块。
+
+Phase 1 冻结：
+
+- 协议 ID：`candlescope.script-runtime/1`；
+- Render IR ID：`candlescope.render/1`；
+- UTF-8 JSON-RPC 2.0 JSON Lines stdin/stdout transport；
+- 必需方法：`handshake`、`describe`、`analyze`、`executeBatch`、`shutdown`；
+- 能力：`source-analysis/1`、`batch-execution/1`、
+  `render.line-series/1`；
+- 类型化 runtime/language descriptor、chart context、OHLCV bar、diagnostic、
+  analysis、batch execution 和 line series 模型；
+- 请求 ID 必需、16 MiB 默认消息上限、重复 key/NaN/Infinity 拒绝、未知方法和
+  未协商能力 fail closed；
+- 插件未预期异常只进入 stderr，JSON-RPC 客户端只收到稳定内部错误；
+- 非 JSON 输出不会污染 stdout，而会转换为 `PLUGIN_RESULT_NOT_JSON`。
+
+### Hello Runtime
+
+随 SDK wheel 安装的 `candlescope-hello-runtime` 是最小可运行插件。它只接受
+`plot(close)`，分析成功后把每根 K 线 close 转为一个 ID 为 `close` 的主图
+line series。它不是 mock transport：测试会构建 wheel、装进全新临时 venv，
+再通过真实 console entry point 完成五方法会话。
+
+固定 transcript 位于
+`packages/candlescope-plugin-sdk/tests/fixtures/hello_transcript_v1.json`，完整响应
+序列 canonical SHA-256 为：
+
+```text
+sha256:70b698c7dfb96de660a7986d4f387f1f222cf72ee71149e2009a6d5d4dddf09c
+```
+
+### 验证证据
+
+- SDK 契约、负例、Hello Runtime、架构与 transcript：`26 passed`；
+- `python -m ruff check .` 通过；
+- `python -m ruff format --check .` 通过；
+- `python -m compileall -q src tests scripts` 通过；
+- 标准隔离构建成功生成 sdist 与 `py3-none-any` wheel；
+- wheel metadata 为 `Requires-Python: >=3.11`，无默认 `Requires-Dist`；
+- sdist 包含协议文档、golden fixture 和离线 package smoke；
+- wheel 在干净 Python 3.12 与 Python 3.13 venv 中使用
+  `pip --no-index --no-deps` 安装成功；
+- 两个 venv 均通过真实 `candlescope-hello-runtime` 五帧 transcript smoke；
+- Phase 0 的 HTTP/range/WebSocket Pyne golden 继续作为未来 host cutover 门禁。
+
+### 明确不包含
+
+Phase 1 不接入 CandleScope 生产路由，不启动或监督外部进程，不定义 `.cspkg`
+安装/激活格式，不提供 realtime session、host data callback、secrets、交易动作、
+任意前端 JavaScript 或 marketplace。sidecar 是依赖与传输边界，不被宣称为完整
+安全沙箱；资源、权限、信任和终止策略由 Phase 2 host/supervisor 负责。
 
 ## 后续阶段不可越过的顺序
 

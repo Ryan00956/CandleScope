@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "candlescope-plugin-sdk"
+version = "0.1.0"
+description = "Typed protocol SDK for CandleScope script runtime plugins."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-only"
+authors = [
+  { name = "CandleScope contributors" }
+]
+keywords = ["candlescope", "plugin", "indicators", "json-rpc", "sidecar"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Ryan00956/CandleScope"
+Repository = "https://github.com/Ryan00956/CandleScope"
+Documentation = "https://github.com/Ryan00956/CandleScope/tree/main/packages/candlescope-plugin-sdk/docs"
+Issues = "https://github.com/Ryan00956/CandleScope/issues"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1",
+  "hatchling>=1.25",
+  "pytest>=7",
+  "ruff>=0.5",
+  "twine>=5",
+]
+
+[project.scripts]
+candlescope-hello-runtime = "candlescope_plugin_sdk.examples.hello_runtime:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/candlescope_plugin_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -21,6 +21,7 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻
 - [后端](#后端)
 - [前端](#前端)
 - [指标和 Pyne](#指标和-pyne)
+- [Plugin SDK（开发者预览）](#plugin-sdk开发者预览)
 - [API 文档](#api-文档)
 - [项目结构](#项目结构)
 - [开发检查](#开发检查)
@@ -275,6 +276,18 @@ Pyne 支持 `safe`、`research`、`unsafe` security modes。默认使用 process
 - [Pyne Runtime](backend/app/indicator/pyne/README.md)
 - [Pyne Runtime 中文](backend/app/indicator/pyne/README_zh.md)
 
+## Plugin SDK（开发者预览）
+
+社区 runtime 开发者可以直接使用零运行时依赖的
+[`candlescope-plugin-sdk`](packages/candlescope-plugin-sdk/README_zh.md)。它冻结了
+版本化的 `candlescope.script-runtime/1` JSON-RPC sidecar 契约、能力协商、类型化
+OHLCV 批量输入、结构化诊断，以及第一版由 CandleScope 拥有的 line-series
+Render IR；仓库同时提供可执行的 Hello Runtime 和固定 wire transcript。
+
+这是 plugin platform Phase 1 的协议 SDK。CandleScope 生产路径当前还不会加载
+外部 runtime sidecar；进程监督、隔离 bundle 安装和
+`legacy/shadow/sidecar` 路由属于后续阶段。
+
 ## API 文档
 
 API 参考独立维护：
@@ -327,6 +340,9 @@ CandleScope/
 │   │       ├── indicators/
 │   │       └── pyne/
 │   └── tests/
+├── packages/
+│   ├── candlescope-plugin-sdk/
+│   └── pyne-runtime/
 └── frontend/
     ├── package.json
     └── src/

@@ -23,6 +23,8 @@ HTTP / WS APIs
         ├── one-shot compute
         ├── custom indicator CRUD
         └── realtime indicator stream
+
+Script requests → IndicatorRuntimeService → legacy / shadow / sidecar
 ```
 
 ## Main Files
@@ -37,9 +39,12 @@ HTTP / WS APIs
 | [data_manager_bridge.py](data_manager_bridge.py) | Connects DataManager bar events to IndicatorEngine |
 | [custom_store.py](custom_store.py) | Local JSON store for user scripts |
 | [serialization.py](serialization.py) | Normalized frontend payloads for built-in and Pyne results |
+| [runtime_routes.py](runtime_routes.py) | Strict per-language `legacy/shadow/sidecar` route table |
+| [runtime_service.py](runtime_service.py) | Shared script execution, shadow comparison, and sidecar dispatch |
+| [RUNTIME_ROUTING.md](RUNTIME_ROUTING.md) | Operator and community-plugin rollout contract |
 | [errors.py](errors.py) | Structured error payload helpers |
 | [indicators](indicators/) | Built-in indicator implementations |
-| [pyne](pyne/) | Pine-style Python runtime |
+| [pyne](pyne/) | Current legacy Pyne facade, retained until the plugin cutover gate |
 
 ## Built-In Indicators
 

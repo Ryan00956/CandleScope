@@ -180,7 +180,16 @@ async def indicator_stream(websocket: WebSocket) -> None:
         await websocket.close(code=1013)
         return
 
-    await stream_indicators(websocket, dm, indicator_engine)
+    await stream_indicators(
+        websocket,
+        dm,
+        indicator_engine,
+        runtime_service=getattr(
+            websocket.app.state,
+            "indicator_runtime_service",
+            None,
+        ),
+    )
 
 
 @router.websocket("/market")

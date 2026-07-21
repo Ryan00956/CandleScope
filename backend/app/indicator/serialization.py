@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from candlescope_plugin_sdk import ExecuteBatchResult
+
 from app.indicator.errors import error_detail
 
 
@@ -308,6 +310,150 @@ def serialize_pyne_result(result: Any, *, lines_on_error: bool = True) -> dict[s
     if result.meta:
         payload["meta"] = result.meta
 
+    return payload
+
+
+def serialize_plugin_runtime_result(result: ExecuteBatchResult) -> dict[str, Any]:
+    """Translate public Render IR into CandleScope's stable Indicator envelope.
+
+    The adapter depends only on the SDK model. Runtime-specific packages never
+    import CandleScope serializers or transport modules.
+    """
+    if not result.ok or result.output is None:
+        diagnostic = next(
+            (
+                item
+                for item in result.diagnostics
+                if item.severity == "error"
+            ),
+            None,
+        )
+        code = diagnostic.code if diagnostic is not None else "RUNTIME_EXECUTION_FAILED"
+        message = (
+            diagnostic.message
+            if diagnostic is not None
+            else "Script runtime execution failed."
+        )
+        payload = build_error_payload(
+            code,
+            message,
+            line=(diagnostic.span or {}).get("line") if diagnostic else None,
+            column=(diagnostic.span or {}).get("column") if diagnostic else None,
+            hint=diagnostic.hint if diagnostic else None,
+        )
+        payload.update(build_unified_output(lines=[]))
+        return payload
+
+    lines: list[dict[str, Any]] = []
+    for item in result.output.series:
+        style = dict(item.style)
+        lines.append({
+            "id": item.id,
+            "outputName": item.id,
+            "name": item.title,
+            "title": item.title,
+            "type": "line",
+            "pane": item.pane,
+            "scale": item.scale,
+            "data": [point.to_wire() for point in item.points],
+            "color": style.pop("color", "#f59e0b"),
+            "lineWidth": style.pop("lineWidth", 2),
+            "lineStyle": style.pop("lineStyle", 0),
+            "zIndex": style.pop("zIndex", 10),
+            **(
+                {"colorData": style["colorData"]}
+                if style.get("colorData")
+                else {}
+            ),
+        })
+    payload: dict[str, Any] = {
+        "schemaVersion": INDICATOR_PAYLOAD_SCHEMA_VERSION,
+        "ok": True,
+        "error": None,
+        "lines": lines,
+        "result": result.output.to_wire(),
+    }
+    payload.update(build_unified_output(lines=lines))
+    meta = {**result.output.meta, **result.meta}
+    if meta:
+        payload["meta"] = meta
+    return payload
+
+
+def build_script_runtime_snapshot_payload(
+    *,
+    client_id: str,
+    indicator_id: str,
+    exchange: str,
+    symbol: str,
+    interval: str,
+    market_type: str,
+    name: str,
+    params: dict[str, Any],
+    payload: dict[str, Any],
+    bar_time: int = 0,
+    script_hash: str | None = None,
+) -> dict[str, Any]:
+    """Wrap an already-adapted script result for range and WS transports."""
+    execution = dict(payload)
+    execution.update(build_unified_output(
+        indicator_id=indicator_id,
+        lines=execution.get("lines") or [],
+        markers=execution.get("markers") or [],
+        hlines=execution.get("hlines") or [],
+        bgcolors=execution.get("bgcolors") or [],
+        fills=execution.get("legacyFills") or execution.get("fills") or [],
+        barcolors=execution.get("barcolors") or [],
+        signals=execution.get("signals") or [],
+    ))
+    return {
+        "type": "indicator.snapshot",
+        "kind": "script",
+        "clientId": client_id,
+        "indicatorId": indicator_id,
+        "exchange": exchange,
+        "symbol": symbol,
+        "interval": interval,
+        "market_type": market_type,
+        "name": name,
+        "params": params,
+        **({"scriptHash": script_hash} if script_hash else {}),
+        "barTime": bar_time,
+        **execution,
+    }
+
+
+def rebind_indicator_payload_identity(
+    payload: dict[str, Any],
+    indicator_id: str,
+) -> dict[str, Any]:
+    """Re-scope a cached script payload for the requesting client identity."""
+    old_id = str(payload.get("indicatorId") or "")
+    if not indicator_id or old_id == indicator_id:
+        return payload
+
+    def _scoped(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        if old_id and value.startswith(f"{old_id}:"):
+            return f"{indicator_id}:{value[len(old_id) + 1:]}"
+        return value
+
+    payload["indicatorId"] = indicator_id
+    for key in ("series", "annotations", "fills"):
+        for item in payload.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            item["indicatorId"] = indicator_id
+            item["id"] = _scoped(item.get("id"))
+            if isinstance(item.get("seriesIds"), list):
+                item["seriesIds"] = [_scoped(value) for value in item["seriesIds"]]
+    for pane in payload.get("paneLayout") or []:
+        if not isinstance(pane, dict):
+            continue
+        for key in ("seriesIds", "annotationIds"):
+            if isinstance(pane.get(key), list):
+                pane[key] = [_scoped(value) for value in pane[key]]
     return payload
 
 

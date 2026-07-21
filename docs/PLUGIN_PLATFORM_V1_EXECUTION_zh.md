@@ -22,7 +22,7 @@ v1 的核心边界是：
 | Phase 1：Plugin SDK v1 | 已完成 | Python 3.11+ 基线、独立 SDK、协议模型、Hello Runtime、契约测试 |
 | Phase 2：通用 Host/Supervisor | 已完成 | 注册表、生命周期、RPC、宿主服务、诊断 |
 | Phase 3：隔离安装器 v2 | 已完成 | `.cspkg`、独立 venv、校验、探测、原子激活与回滚 |
-| Phase 4：通用 Indicator Service | 未开始 | `legacy/shadow/sidecar` 路由与传输迁移 |
+| Phase 4：通用 Indicator Service | 已完成 | `legacy/shadow/sidecar` 路由与传输迁移 |
 | Phase 5：Pyne 插件发行 | 未开始 | Pyne host facade 与 `candlescope-plugin-pyne` |
 | Phase 6：Pyne 切换与源码快照删除 | 未开始 | shadow、cutover、独立删除提交 |
 | Phase 7：描述符驱动前端 | 未开始 | 运行时/语言/能力描述符，无硬编码运行时联合类型 |
@@ -392,7 +392,76 @@ CLI `backend/scripts/candlescope_plugin.py` 提供：
   scripts/candlescope_plugin.py` 通过；`git diff --check` 通过；
 - 真实 SDK wheel 通过 CLI `build` 和 `inspect` 得到一致 bundle SHA-256；
 - 测试退出后 worktree 内没有残留 sidecar、venv、staging 或 `.part`；
-- 生产 Indicator 目录仍无 `plugin_runtime` 引用，Phase 4 cutover 尚未发生。
+- Phase 3 提交时生产 Indicator 目录仍无 `plugin_runtime` 引用，Phase 4 尚未开始。
+
+## Phase 4：通用 Indicator Service
+
+### 交付边界
+
+Phase 4 引入由 CandleScope 拥有的 `IndicatorRuntimeService`，将公开传输与具体 runtime
+包解耦。应用启动时分别读取 activation registry 与
+`indicator-runtime-routes.json`：前者回答“哪个版本已激活”，后者回答“某种语言的流量
+发给谁”。两个 schema 不混用，缺少默认路由文件时精确保持 `pyne=legacy`；显式指定但
+缺失、损坏、含未知字段或重复语言的路由文件会 fail closed。
+
+每种语言只能显式选择一种模式：
+
+| 模式 | 用户响应 | Runtime 行为 | 故障语义 |
+| --- | --- | --- | --- |
+| `legacy` | 现有进程内 payload | 不调用插件 Host | 保持冻结行为 |
+| `shadow` | 完全原样返回 legacy payload | 并行调用 sidecar 并异步比较 | 只记诊断，不改变响应 |
+| `sidecar` | CandleScope 适配后的稳定 payload | 插件是唯一执行者 | 返回宿主定义的不可用错误，绝不静默回退 |
+
+非 legacy 路由会在启动时校验 runtime descriptor：目标语言、`batch-execution/1` 和
+`render.line-series/1` 必须全部声明。当前只有 `pyne` 存在 legacy adapter；社区语言可
+通过请求或已保存 custom indicator 的 `language` 字段选择，但只能配置为 `sidecar`，
+不允许伪造没有实现的 legacy/shadow 路径。
+
+### 传输与隔离语义
+
+同一个 Service 已接入：
+
+- `POST /api/v1/indicators/compute`；
+- `POST /api/v1/indicators/range`；
+- `POST /api/v1/indicators/range/batch`；
+- `WS /api/v1/stream/indicators` 的脚本订阅与实时 patch。
+
+CandleScope 继续拥有 market context、OHLCV 查询、HTTP/WS envelope、range cache 与
+Render IR 适配；插件只接收 SDK `ExecuteBatchRequest`，不能导入或重定义私有传输模块。
+HTTP、range 与普通 WS snapshot 的 shadow 两侧使用同一次查询得到的 bars，range batch
+仍只查询一次共享 K 线。sidecar Host 故障不会写入 range cache；缓存命中会把
+`indicatorId`、series、annotation、fill 与 pane 引用重新绑定到本次 client identity，
+且脚本缓存 identity 包含 language，不会跨语言复用或 singleflight 合并。
+
+Shadow 不阻塞 legacy 响应，每进程最多保留 64 个待完成比较；满载时仅执行 legacy，并
+通过 `shadowSkipped`、`pendingShadow` 和 `maxPendingShadow` 暴露降采样。诊断只保存
+hash、不同的顶层字段、runtime/transport、状态与计数，不保存源码、bars、参数、命令或
+stderr，也不公开本地路由文件路径。插件 style 也不能覆盖宿主拥有的 series
+`id/data/type` 字段。
+
+### 明确保留的迁移缺口
+
+- SDK/Render IR v1 当前只承诺 line series；marker、hline、fill、背景、K 线着色、signal
+  以及真正有状态的 realtime session 仍需后续能力协商；
+- 前端仍默认 Pyne，描述符驱动语言发现属于 Phase 7；
+- Pyne 桥接发行包尚未进入本阶段，默认路由仍为 legacy；
+- `packages/pyne-runtime` 源码快照没有删除。删除只能在 Phase 5 发行、Phase 6 shadow
+  与 cutover 达标后作为独立提交执行。
+
+### 2026-07-21 验证证据
+
+- Phase 4 路由、Service、HTTP/range/batch/WS、生命周期与架构聚焦测试：
+  `44 passed, 4 warnings in 4.60s`；
+- Phase 0 HTTP/range/WebSocket 冻结 golden：`3 passed in 1.96s`，fixture 未改动；
+- Indicator/Pyne 定向回归（包含 Phase 0 与 Phase 4）：`150 passed in 28.29s`；
+- Phase 2 Host/Supervisor、registry、生命周期与兼容门禁：
+  `50 passed, 4 warnings in 4.97s`；
+- Phase 3 bundle/installer、独立 venv、升级与 rollback：`24 passed in 71.33s`；
+- Phase 1 SDK：`26 passed`，Ruff、format check 与 compileall 通过；
+- backend 全量：`1942 passed, 4 warnings in 137.07s`；4 条 warning 仍为既有
+  FastAPI `on_event` 弃用提示；
+- 所有变更 Python 文件 Ruff check、新文件 format check、backend compileall 与
+  `git diff --check` 通过；测试退出后无残留 sidecar、测试 venv、staging 或 `.part`。
 
 ## 后续阶段不可越过的顺序
 

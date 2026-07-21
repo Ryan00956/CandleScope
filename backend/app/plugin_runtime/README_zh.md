@@ -4,9 +4,9 @@
 
 `app.plugin_runtime` 是 CandleScope 拥有的通用脚本 runtime sidecar 宿主。它只
 依赖公开的 `candlescope-plugin-sdk` 协议模型，不导入 Pyne 或 Pine Compatibility
-实现，也不参与现有 Indicator 路由选择。
+实现。通用 Indicator 路由层只使用这个 Host，不会把 CandleScope 私有接口交给插件。
 
-Phase 2/3 的边界：
+Phase 2～4 的边界：
 
 - 读取严格、版本化的 runtime activation registry；
 - 使用绝对可执行路径和 argv 直接启动进程，永不经过 shell；
@@ -19,8 +19,9 @@ Phase 2/3 的边界：
 - 每个 bundle 建立独立 venv，只离线安装 bundle 内 wheel；
 - descriptor 和固定结果探针通过后，原子激活并保留逐插件回滚链。
 
-现有 `/api/v1/indicators/*` 和 WebSocket 仍使用 legacy Pyne 路径。Phase 4 才会
-增加 `legacy/shadow/sidecar` 路由，因此仅启用 Host 不会改变指标结果。
+HTTP compute、range/batch 与 Indicator WebSocket 脚本流量现在共用通用
+`legacy/shadow/sidecar` 路由。默认路由文件不存在时仍为 `pyne=legacy`，所以仅启用
+Host 不会改变结果。详见 [Indicator Runtime 路由](../indicator/RUNTIME_ROUTING_zh.md)。
 
 ## Activation registry v1
 

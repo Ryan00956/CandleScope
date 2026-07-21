@@ -52,9 +52,17 @@ from app.indicator.engine import indicator_code_hash
 from app.indicator.types import IndicatorKey
 from app.indicator.pyne.security import PyneSecurityPolicy
 from app.indicator.range_result_service import IndicatorRangeResultService
+from app.indicator.runtime_service import (
+    IndicatorRuntimeRequest,
+    IndicatorRuntimeService,
+    IndicatorRuntimeUnavailableError,
+)
+from app.indicator.runtime_routes import IndicatorRuntimeRoutesError
 from app.indicator.serialization import (
     build_error_payload,
+    rebind_indicator_payload_identity,
     serialize_indicator_result,
+    serialize_plugin_runtime_result,
     serialize_pyne_result,
 )
 
@@ -63,6 +71,7 @@ router = APIRouter(prefix="/indicators", tags=["indicators"])
 # Module-level singletons
 _engine = create_engine()
 _custom_store = CustomIndicatorStore()
+_legacy_indicator_runtime_service = IndicatorRuntimeService.legacy_only()
 
 
 # ── Pydantic models ──────────────────────────────────────────
@@ -76,6 +85,7 @@ class ComputeRequest(BaseModel):
     """
     name: str | None = Field(None, description="Indicator name (e.g. 'MA', 'MACD')")
     mode: str | None = Field(None, description="'builtin' for engine mode or 'script' for Pyne mode")
+    language: str | None = Field(None, description="Script language id; defaults to 'pyne'")
     params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
     exchange: str = Field("binance", description="Exchange context")
     symbol: str = Field("UNKNOWN", description="Symbol for context")
@@ -92,6 +102,7 @@ class CustomIndicatorPayload(BaseModel):
     schemaVersion: int = Field(1, description="Custom indicator schema version")
     id: str | None = Field(None, description="Stable custom indicator id")
     kind: str = Field("script", description="'script' or 'custom'")
+    language: str | None = Field(None, description="Script language id; defaults to 'pyne'")
     name: str = Field(..., description="Display name")
     description: str = Field("", description="Description")
     script: str = Field(..., description="Pyne/Python script")
@@ -106,6 +117,7 @@ class IndicatorRangeRequest(BaseModel):
 
     clientId: str = Field(..., description="Frontend indicator client id")
     kind: str | None = Field(None, description="'builtin', 'script', 'custom', or 'pyne'")
+    language: str | None = Field(None, description="Script language id; defaults to 'pyne'")
     exchange: str = Field("binance", description="Exchange context")
     marketType: str | None = Field(None, description="Camel-case market type context")
     market_type: str | None = Field(None, description="Snake-case market type context")
@@ -396,6 +408,7 @@ def _build_diagnostics_snapshot(
     engine: IndicatorEngine,
     store: CustomIndicatorStore,
     range_service: IndicatorRangeResultService | None = None,
+    runtime_service: IndicatorRuntimeService | None = None,
 ) -> dict[str, Any]:
     """Build a compact, stable diagnostics payload for support/debugging."""
     custom_error = None
@@ -444,6 +457,9 @@ def _build_diagnostics_snapshot(
         },
         "executors": executors_snapshot(),
         "rangeCache": range_service.snapshot() if range_service is not None else None,
+        "scriptRuntimeRouting": (
+            runtime_service.snapshot() if runtime_service is not None else None
+        ),
     }
 
 
@@ -454,6 +470,11 @@ async def get_indicator_diagnostics(request: Request):
         engine=_resolve_runtime_engine(request),
         store=_custom_store,
         range_service=getattr(request.app.state, "indicator_range_service", None),
+        runtime_service=getattr(
+            request.app.state,
+            "indicator_runtime_service",
+            None,
+        ),
     )
 
 
@@ -489,6 +510,20 @@ def _resolve_backfill_coordinator(request: Request) -> Any | None:
     return getattr(request.app.state, "backfill_coordinator", None)
 
 
+def _resolve_indicator_runtime_service(
+    request: Request | None,
+) -> IndicatorRuntimeService:
+    if request is not None:
+        service = getattr(
+            request.app.state,
+            "indicator_runtime_service",
+            None,
+        )
+        if isinstance(service, IndicatorRuntimeService):
+            return service
+    return _legacy_indicator_runtime_service
+
+
 def _resolve_range_market_type(req: IndicatorRangeRequest) -> str:
     return _normalize_market_type(str(req.market_type or req.marketType or "spot"))
 
@@ -511,6 +546,8 @@ def _resolve_range_script(req: IndicatorRangeRequest) -> tuple[str, str, str | N
             req.params.update(record["params"])
         if security_mode is None:
             security_mode = record.get("securityMode")
+        if req.language is None:
+            req.language = str(record.get("language") or "pyne")
     return script, name, security_mode
 
 
@@ -534,18 +571,26 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
     is_script = kind in {"script", "custom", "pyne"} or bool(custom_id) or (script and not indicator_name)
     if is_script:
         script, display_name, security_mode = _resolve_range_script(req)
+        language = (
+            "pyne"
+            if req.language is None
+            else str(req.language).strip().lower()
+        )
+        if not language:
+            raise ValueError("Script language must not be empty.")
         if not script.strip():
             raise ValueError("Pyne script is required.")
         digest = script_hash(script)
         meta = {
             "kind": "script",
+            "language": language,
             "exchange": exchange,
             "symbol": symbol,
             "interval": interval,
             "market_type": market_type,
             "name": display_name,
             "customId": custom_id or None,
-            "indicatorId": f"pyne:{exchange}:{market_type}:{symbol}:{interval}:{short_script_hash(script)}:{req.clientId}",
+            "indicatorId": f"{language}:{exchange}:{market_type}:{symbol}:{interval}:{short_script_hash(script)}:{req.clientId}",
             "scriptHash": digest,
             "script": script,
             "params": params,
@@ -652,6 +697,7 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
                 end_s=end_s,
                 reason=req.reason or "range",
                 backfill_coordinator=backfill_coordinator,
+                runtime_service=_resolve_indicator_runtime_service(request),
             )
 
         snapshot, cache_hit, data_revision = await range_service.get_or_compute(
@@ -677,6 +723,10 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
             start_s=max(start_s, available_start),
             end_s=min(end_s, available_end),
         )
+        rebind_indicator_payload_identity(
+            payload,
+            str(meta.get("indicatorId") or ""),
+        )
         payload["clientId"] = client_id
         payload["dataRevision"] = data_revision
         meta_payload = payload.get("meta")
@@ -685,6 +735,22 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
             payload["meta"] = meta_payload
         meta_payload["dataRevision"] = data_revision
         payload["cacheHit"] = cache_hit
+    except IndicatorRuntimeUnavailableError as exc:
+        payload = build_error_payload(
+            exc.failure.public_code,
+            str(exc),
+            hint="脚本 runtime 插件当前不可用；sidecar 模式不会静默回退到 legacy。",
+        )
+        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+        return payload
+    except IndicatorRuntimeRoutesError as exc:
+        payload = build_error_payload(
+            "INDICATOR_LANGUAGE_UNAVAILABLE",
+            str(exc),
+            hint="请安装支持该语言的 runtime，并在 Indicator route 文件中显式配置。",
+        )
+        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+        return payload
     except IndicatorRangeEmptyError as exc:
         payload = build_error_payload(
             "INDICATOR_RANGE_EMPTY",
@@ -761,7 +827,19 @@ def _batch_range_error_payload(
     start_s: int,
     end_s: int,
 ) -> dict[str, Any]:
-    if isinstance(exc, IndicatorRangeEmptyError):
+    if isinstance(exc, IndicatorRuntimeUnavailableError):
+        payload = build_error_payload(
+            exc.failure.public_code,
+            str(exc),
+            hint="脚本 runtime 插件当前不可用；sidecar 模式不会静默回退到 legacy。",
+        )
+    elif isinstance(exc, IndicatorRuntimeRoutesError):
+        payload = build_error_payload(
+            "INDICATOR_LANGUAGE_UNAVAILABLE",
+            str(exc),
+            hint="请安装支持该语言的 runtime，并在 Indicator route 文件中显式配置。",
+        )
+    elif isinstance(exc, IndicatorRangeEmptyError):
         payload = build_error_payload(
             "INDICATOR_RANGE_EMPTY",
             str(exc),
@@ -885,6 +963,7 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
         jobs=jobs,
         range_service=range_service,
         backfill_coordinator=backfill_coordinator,
+        runtime_service=_resolve_indicator_runtime_service(request),
     )
     results = []
     for job, value in zip(jobs, computed, strict=True):
@@ -908,7 +987,7 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
 # ═══════════════════════════════════════════════════════════════
 
 @router.post("/compute")
-async def compute(req: ComputeRequest):
+async def compute(req: ComputeRequest, request: Request = None):
     """Compute an indicator on the provided OHLCV data.
 
     Supports two modes:
@@ -936,7 +1015,10 @@ async def compute(req: ComputeRequest):
                 "Script mode requires 'script'",
                 hint="请提交 Pyne 脚本文本，或切换到 builtin 模式。",
             )
-        return await _compute_script(req)
+        return await _compute_script(
+            req,
+            runtime_service=_resolve_indicator_runtime_service(request),
+        )
 
     if mode == "builtin":
         if not indicator_name and req.script and req.script.startswith(_ENGINE_SCRIPT_MARKER):
@@ -960,7 +1042,10 @@ async def compute(req: ComputeRequest):
     if use_engine and indicator_name:
         return await _compute_engine(indicator_name, req)
     if req.script:
-        return await _compute_script(req)
+        return await _compute_script(
+            req,
+            runtime_service=_resolve_indicator_runtime_service(request),
+        )
     return build_error_payload(
         "INDICATOR_REQUEST_EMPTY",
         "Provide either 'name' or 'script'",
@@ -1031,14 +1116,30 @@ async def _compute_engine(name: str, req: ComputeRequest) -> dict:
     return serialize_indicator_result(result)
 
 
-async def _compute_script(req: ComputeRequest) -> dict:
+async def _compute_script(
+    req: ComputeRequest,
+    *,
+    runtime_service: IndicatorRuntimeService | None = None,
+) -> dict:
     """Compute using Pyne runtime (with full legacy backward compatibility).
 
     The Pyne runtime provides a rich Pine-style namespace including
     ta.*, input.*, plot(), color.*, math.*, crossover(), etc.
     Legacy scripts using add_line() continue to work unchanged.
     """
-    try:
+    service = runtime_service or _legacy_indicator_runtime_service
+    language = (
+        "pyne"
+        if req.language is None
+        else str(req.language).strip().lower()
+    )
+    if not language:
+        return build_error_payload(
+            "INDICATOR_LANGUAGE_REQUIRED",
+            "Script language must not be empty.",
+        )
+
+    async def _legacy() -> dict[str, Any]:
         result = await _run_indicator_http_compute(
             execute_pyne_script,
             executor_kind="pyne",
@@ -1047,14 +1148,45 @@ async def _compute_script(req: ComputeRequest) -> dict:
             params=req.params or {},
             security_mode=req.securityMode,
         )
+        return serialize_pyne_result(result)
+
+    runtime_request = IndicatorRuntimeRequest(
+        language=language,
+        source=req.script or "",
+        exchange=req.exchange,
+        market_type=req.market_type,
+        symbol=req.symbol,
+        interval=req.interval,
+        bars=tuple(req.ohlcv),
+        params=req.params or {},
+        options={
+            **(
+                {"securityMode": req.securityMode}
+                if req.securityMode is not None
+                else {}
+            ),
+        },
+        transport="http.compute",
+    )
+    try:
+        payload = await service.execute(
+            runtime_request,
+            legacy=_legacy,
+            adapt_sidecar=serialize_plugin_runtime_result,
+        )
     except asyncio.TimeoutError:
         return build_error_payload(
             "PYNE_TIMEOUT",
             f"Pyne script exceeded {config.INDICATOR_HTTP_TIMEOUT_SECONDS:g}s HTTP timeout",
             hint="脚本执行超时，请减少循环、缩小窗口，或调整 INDICATOR_HTTP_TIMEOUT_SECONDS。",
         )
+    except IndicatorRuntimeRoutesError as exc:
+        return build_error_payload(
+            "INDICATOR_LANGUAGE_UNAVAILABLE",
+            str(exc),
+            hint="请安装支持该语言的 runtime，并在 Indicator route 文件中显式配置。",
+        )
 
-    payload = serialize_pyne_result(result)
     payload["scriptHash"] = script_hash(req.script or "")
     return payload
 

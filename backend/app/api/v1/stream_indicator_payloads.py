@@ -25,12 +25,23 @@ from app.indicator.pyne import (
 from app.indicator.pyne.executor import execute_pyne_script
 from app.indicator.pyne.security import PyneSecurityError, PyneTimeoutError
 from app.indicator.script_identity import script_hash
+from app.indicator.runtime_service import (
+    IndicatorRuntimeFailure,
+    IndicatorRuntimeRequest,
+    IndicatorRuntimeService,
+    IndicatorRuntimeUnavailableError,
+)
+from app.indicator.runtime_routes import ROUTE_MODE_LEGACY
 from app.indicator.serialization import (
+    build_error_payload,
     build_indicator_snapshot_payload,
     build_pyne_snapshot_payload,
+    build_script_runtime_snapshot_payload,
+    serialize_plugin_runtime_result,
 )
 
 _pyne_incremental_sessions = PyneIncrementalSessionManager()
+_legacy_indicator_runtime_service = IndicatorRuntimeService.legacy_only()
 
 
 class IndicatorRangeEmptyError(RuntimeError):
@@ -305,6 +316,7 @@ async def compute_indicator_range_payload_async(
     reason: str = "range",
     backfill_coordinator: Any | None = None,
     backfill_wait_seconds: float | None = None,
+    runtime_service: IndicatorRuntimeService | None = None,
 ) -> dict[str, Any]:
     interval_ms = parse_interval_ms(meta["interval"])
     if interval_ms is None or interval_ms <= 0:
@@ -313,11 +325,15 @@ async def compute_indicator_range_payload_async(
     target_bars = ((end_s - start_s) // interval_s) + 1
     if meta.get("kind") == "script":
         params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
-        warmup_bars = _indicator_warmup_bars("PYNE", params)
+        language = str(meta.get("language") or "pyne")
+        warmup_bars = _indicator_warmup_bars(language.upper(), params)
         max_pyne_bars = max(int(config.PYNE_MAX_BARS), 1)
         estimated_compute_bars = target_bars + warmup_bars
         if estimated_compute_bars > max_pyne_bars:
-            raise ValueError(f"Too many Pyne bars: {estimated_compute_bars} > {config.PYNE_MAX_BARS}")
+            label = "Pyne" if language == "pyne" else f"{language} runtime"
+            raise ValueError(
+                f"Too many {label} bars: {estimated_compute_bars} > {config.PYNE_MAX_BARS}"
+            )
         bars = await _query_indicator_compute_bars_async(
             dm,
             meta,
@@ -327,15 +343,39 @@ async def compute_indicator_range_payload_async(
             backfill_coordinator=backfill_coordinator,
             wait_seconds=backfill_wait_seconds,
         )
-        return await run_pyne_wait(
-            _compute_pyne_range_patch_from_bars,
-            client_id,
+        service = runtime_service or _legacy_indicator_runtime_service
+
+        async def _legacy() -> dict[str, Any]:
+            return await run_pyne_wait(
+                _compute_pyne_range_patch_from_bars,
+                client_id,
+                meta,
+                start_s,
+                end_s,
+                bars,
+                reason,
+                target_bars,
+            )
+
+        request = _script_runtime_request(
             meta,
-            start_s,
-            end_s,
             bars,
-            reason,
-            target_bars,
+            transport="http.range",
+        )
+        return await service.execute(
+            request,
+            legacy=_legacy,
+            adapt_sidecar=lambda result: _compute_plugin_range_patch_from_bars(
+                client_id,
+                meta,
+                start_s,
+                end_s,
+                bars,
+                result,
+                reason=reason,
+                target_bars=target_bars,
+            ),
+            adapt_failure=_raise_plugin_runtime_failure,
         )
     name = str(meta.get("name") or "").upper()
     params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
@@ -665,13 +705,28 @@ def _compute_pyne_snapshot_message(
     if meta.get("scriptMode") == "incremental" and not bar_time:
         return _compute_incremental_pyne_snapshot_message(client_id, dm, meta)
 
+    seed_bars = _query_pyne_snapshot_bars(dm, meta, bar_time=bar_time)
+    ohlcv = [bar.to_dict() for bar in seed_bars]
+    return _compute_pyne_snapshot_message_from_ohlcv(
+        client_id,
+        meta,
+        ohlcv,
+        bar_time=bar_time,
+    )
+
+
+def _query_pyne_snapshot_bars(
+    dm: Any,
+    meta: dict[str, Any],
+    *,
+    bar_time: int = 0,
+) -> list[Any]:
     history_limit = int(meta["historyLimit"])
     if bar_time:
         history_limit = min(
             max(history_limit, 1),
             max(int(config.PYNE_TICK_RECOMPUTE_MAX_BARS), 1),
         )
-
     query_result = dm.query_latest(
         meta["symbol"],
         meta["interval"],
@@ -679,8 +734,20 @@ def _compute_pyne_snapshot_message(
         exchange=meta["exchange"],
         market_type=meta["market_type"],
     )
-    seed_bars = confirmed_indicator_seed_bars(query_result.bars) if not bar_time else query_result.bars
-    ohlcv = [bar.to_dict() for bar in seed_bars]
+    return (
+        confirmed_indicator_seed_bars(query_result.bars)
+        if not bar_time
+        else list(query_result.bars)
+    )
+
+
+def _compute_pyne_snapshot_message_from_ohlcv(
+    client_id: str,
+    meta: dict[str, Any],
+    ohlcv: list[dict[str, Any]],
+    *,
+    bar_time: int = 0,
+) -> dict[str, Any]:
     result = execute_pyne_script(
         script=meta["script"],
         ohlcv=ohlcv,
@@ -831,6 +898,26 @@ def _compute_incremental_pyne_snapshot_message(
     dm,
     meta: dict,
 ) -> dict:
+    query_result = dm.query_latest(
+        meta["symbol"],
+        meta["interval"],
+        limit=meta["historyLimit"],
+        exchange=meta["exchange"],
+        market_type=meta["market_type"],
+    )
+    ohlcv = [bar.to_dict() for bar in confirmed_indicator_seed_bars(query_result.bars)]
+    return _compute_incremental_pyne_snapshot_message_from_ohlcv(
+        client_id,
+        meta,
+        ohlcv,
+    )
+
+
+def _compute_incremental_pyne_snapshot_message_from_ohlcv(
+    client_id: str,
+    meta: dict[str, Any],
+    ohlcv: list[dict[str, Any]],
+) -> dict[str, Any]:
     shared = meta.get("pyneSharedSession")
     if not isinstance(shared, SharedPyneIncrementalSession):
         session = meta.get("pyneSession")
@@ -844,14 +931,6 @@ def _compute_incremental_pyne_snapshot_message(
         )
         meta["pyneSession"] = session
 
-    query_result = dm.query_latest(
-        meta["symbol"],
-        meta["interval"],
-        limit=meta["historyLimit"],
-        exchange=meta["exchange"],
-        market_type=meta["market_type"],
-    )
-    ohlcv = [bar.to_dict() for bar in confirmed_indicator_seed_bars(query_result.bars)]
     try:
         if isinstance(shared, SharedPyneIncrementalSession):
             interval_ms = parse_interval_ms(meta["interval"])
@@ -984,19 +1063,248 @@ def _compute_pyne_range_patch_from_bars(
     return patch
 
 
+def _script_runtime_request(
+    meta: dict[str, Any],
+    bars: list[Any],
+    *,
+    transport: str,
+) -> IndicatorRuntimeRequest:
+    return IndicatorRuntimeRequest(
+        language=str(meta.get("language") or "pyne"),
+        source=str(meta.get("script") or ""),
+        exchange=str(meta["exchange"]),
+        market_type=str(meta["market_type"]),
+        symbol=str(meta["symbol"]),
+        interval=str(meta["interval"]),
+        bars=tuple(bars),
+        params=(
+            dict(meta["params"])
+            if isinstance(meta.get("params"), dict)
+            else {}
+        ),
+        options={
+            **(
+                {"securityMode": meta.get("securityMode")}
+                if meta.get("securityMode") is not None
+                else {}
+            ),
+        },
+        transport=transport,
+    )
+
+
+def _plugin_runtime_failure_payload(
+    failure: IndicatorRuntimeFailure,
+) -> dict[str, Any]:
+    return build_error_payload(
+        failure.public_code,
+        f"Script runtime {failure.runtime_id!r} is unavailable.",
+        hint="请检查插件激活和健康状态；sidecar 模式不会静默回退到 legacy。",
+    )
+
+
+def _build_plugin_snapshot_from_payload(
+    client_id: str,
+    meta: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    bar_time: int = 0,
+) -> dict[str, Any]:
+    return build_script_runtime_snapshot_payload(
+        client_id=client_id,
+        indicator_id=(
+            meta.get("indicatorId")
+            or f"runtime:{meta['exchange']}:{meta['market_type']}:"
+            f"{meta['symbol']}:{meta['interval']}:{client_id}"
+        ),
+        exchange=meta["exchange"],
+        symbol=meta["symbol"],
+        interval=meta["interval"],
+        market_type=meta["market_type"],
+        name=meta["name"],
+        params=(
+            meta.get("params")
+            if isinstance(meta.get("params"), dict)
+            else {}
+        ),
+        payload=payload,
+        bar_time=bar_time,
+        script_hash=meta.get("scriptHash"),
+    )
+
+
+def _compute_plugin_range_patch_from_bars(
+    client_id: str,
+    meta: dict[str, Any],
+    start_s: int,
+    end_s: int,
+    bars: list[Any],
+    result: Any,
+    *,
+    reason: str = "load_range",
+    target_bars: int | None = None,
+) -> dict[str, Any]:
+    payload = _build_plugin_snapshot_from_payload(
+        client_id,
+        meta,
+        serialize_plugin_runtime_result(result),
+    )
+    range_start_s, range_end_s = _confirmed_target_range(bars, start_s, end_s)
+    patch = _replace_range_from_snapshot(
+        payload,
+        reason=reason,
+        start_s=range_start_s,
+        end_s=range_end_s,
+    )
+    params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+    language = str(meta.get("language") or "pyne")
+    patch["warmupBars"] = _indicator_warmup_bars(language.upper(), params)
+    if target_bars is not None:
+        patch["targetBars"] = target_bars
+    return patch
+
+
+def _raise_plugin_runtime_failure(
+    failure: IndicatorRuntimeFailure,
+) -> dict[str, Any]:
+    raise IndicatorRuntimeUnavailableError(failure)
+
+
+def _plugin_snapshot_or_patch_from_result(
+    client_id: str,
+    meta: dict[str, Any],
+    bars: list[Any],
+    result: Any,
+    *,
+    bar_time: int = 0,
+    reason: str = "bar_update",
+) -> dict[str, Any]:
+    payload = _build_plugin_snapshot_from_payload(
+        client_id,
+        meta,
+        serialize_plugin_runtime_result(result),
+        bar_time=bar_time,
+    )
+    return _finish_plugin_snapshot_or_patch(
+        payload,
+        bars,
+        bar_time=bar_time,
+        reason=reason,
+    )
+
+
+def _plugin_snapshot_or_patch_from_failure(
+    client_id: str,
+    meta: dict[str, Any],
+    bars: list[Any],
+    failure: IndicatorRuntimeFailure,
+    *,
+    bar_time: int = 0,
+    reason: str = "bar_update",
+) -> dict[str, Any]:
+    payload = _build_plugin_snapshot_from_payload(
+        client_id,
+        meta,
+        _plugin_runtime_failure_payload(failure),
+        bar_time=bar_time,
+    )
+    return _finish_plugin_snapshot_or_patch(
+        payload,
+        bars,
+        bar_time=bar_time,
+        reason=reason,
+    )
+
+
+def _finish_plugin_snapshot_or_patch(
+    payload: dict[str, Any],
+    bars: list[Any],
+    *,
+    bar_time: int,
+    reason: str,
+) -> dict[str, Any]:
+    if bar_time:
+        return _patch_from_snapshot(
+            payload,
+            reason=reason,
+            start_s=int(bar_time),
+            end_s=int(bar_time),
+        )
+    times = [
+        int(bar.get("time") if isinstance(bar, dict) else bar.time)
+        for bar in bars
+    ]
+    if times:
+        payload["range"] = {"start": min(times), "end": max(times)}
+    return payload
+
+
 async def _compute_pyne_snapshot_message_async(
     client_id: str,
     dm,
     meta: dict,
     bar_time: int = 0,
+    runtime_service: IndicatorRuntimeService | None = None,
 ) -> dict:
     """Compute a Pyne snapshot off the event loop."""
-    return await run_pyne_wait(
-        _compute_pyne_snapshot_message,
-        client_id,
+    service = runtime_service or _legacy_indicator_runtime_service
+    language = str(meta.get("language") or "pyne")
+    if service.route_for(language).mode == ROUTE_MODE_LEGACY:
+        return await run_pyne_wait(
+            _compute_pyne_snapshot_message,
+            client_id,
+            dm,
+            meta,
+            bar_time,
+        )
+
+    bars = await run_pyne_wait(
+        _query_pyne_snapshot_bars,
         dm,
         meta,
-        bar_time,
+        bar_time=bar_time,
+    )
+    ohlcv = [bar.to_dict() for bar in bars]
+
+    async def _legacy() -> dict[str, Any]:
+        if meta.get("scriptMode") == "incremental" and not bar_time:
+            return await run_pyne_wait(
+                _compute_incremental_pyne_snapshot_message_from_ohlcv,
+                client_id,
+                meta,
+                ohlcv,
+            )
+        return await run_pyne_wait(
+            _compute_pyne_snapshot_message_from_ohlcv,
+            client_id,
+            meta,
+            ohlcv,
+            bar_time=bar_time,
+        )
+
+    return await service.execute(
+        _script_runtime_request(
+            meta,
+            bars,
+            transport="websocket.snapshot",
+        ),
+        legacy=_legacy,
+        adapt_sidecar=lambda result: _plugin_snapshot_or_patch_from_result(
+            client_id,
+            meta,
+            bars,
+            result,
+            bar_time=bar_time,
+            reason="bar_update",
+        ),
+        adapt_failure=lambda failure: _plugin_snapshot_or_patch_from_failure(
+            client_id,
+            meta,
+            bars,
+            failure,
+            bar_time=bar_time,
+            reason="bar_update",
+        ),
     )
 
 
@@ -1006,13 +1314,63 @@ async def _compute_incremental_pyne_bar_message_async(
     bar: dict[str, Any],
     *,
     preview: bool,
+    dm: Any | None = None,
+    runtime_service: IndicatorRuntimeService | None = None,
 ) -> dict:
-    return await run_pyne_wait(
-        _compute_incremental_pyne_bar_message,
-        client_id,
+    service = runtime_service or _legacy_indicator_runtime_service
+    language = str(meta.get("language") or "pyne")
+    if service.route_for(language).mode == ROUTE_MODE_LEGACY:
+        return await run_pyne_wait(
+            _compute_incremental_pyne_bar_message,
+            client_id,
+            meta,
+            bar,
+            preview=preview,
+        )
+    if dm is None:
+        raise RuntimeError("DataManager is required for shadow sidecar comparison")
+
+    bar_time = int(bar.get("time") or 0)
+    bars = await run_pyne_wait(
+        _query_pyne_snapshot_bars,
+        dm,
         meta,
-        bar,
-        preview=preview,
+        bar_time=bar_time,
+    )
+
+    async def _legacy() -> dict[str, Any]:
+        return await run_pyne_wait(
+            _compute_incremental_pyne_bar_message,
+            client_id,
+            meta,
+            bar,
+            preview=preview,
+        )
+
+    reason = "bar_update" if preview else "bar_closed"
+    return await service.execute(
+        _script_runtime_request(
+            meta,
+            bars,
+            transport="websocket.incremental",
+        ),
+        legacy=_legacy,
+        adapt_sidecar=lambda result: _plugin_snapshot_or_patch_from_result(
+            client_id,
+            meta,
+            bars,
+            result,
+            bar_time=bar_time,
+            reason=reason,
+        ),
+        adapt_failure=lambda failure: _plugin_snapshot_or_patch_from_failure(
+            client_id,
+            meta,
+            bars,
+            failure,
+            bar_time=bar_time,
+            reason=reason,
+        ),
     )
 
 

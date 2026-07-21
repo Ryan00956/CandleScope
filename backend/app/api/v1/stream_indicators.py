@@ -29,6 +29,7 @@ from app.data_engine.interval_resolution import IntervalResolutionError
 from app.indicator import registry as indicator_registry
 from app.indicator.events import IndicatorEvent
 from app.indicator.resume import plan_indicator_resume
+from app.indicator.runtime_routes import IndicatorRuntimeRoutesError
 from app.indicator.serialization import (
     build_indicator_snapshot_payload,
     build_ws_error_payload,
@@ -79,20 +80,32 @@ def _indicator_stream_failure(
         detail = exc.to_dict()
         code = str(detail.get("code") or "INDICATOR_STREAM_SUBSCRIPTION_FAILED")
         message = str(detail.get("message") or exc)
+        hint = "实时指标订阅不可用；前端应停止该订阅，并通过 HTTP 历史接口补齐已收盘指标值。"
+    elif isinstance(exc, IndicatorRuntimeRoutesError):
+        code = "INDICATOR_LANGUAGE_UNAVAILABLE"
+        message = str(exc)
+        hint = "请安装支持该语言的 runtime，并在 Indicator route 文件中显式配置。"
     else:
         code = "INDICATOR_STREAM_SUBSCRIPTION_FAILED"
         message = f"Realtime indicator stream is unavailable for interval {interval}."
+        hint = "实时指标订阅不可用；前端应停止该订阅，并通过 HTTP 历史接口补齐已收盘指标值。"
     return _indicator_subscription_failure(
         client_id=client_id,
         requested_interval=requested_interval,
         interval=interval,
         code=code,
         message=message,
-        hint="实时指标订阅不可用；前端应停止该订阅，并通过 HTTP 历史接口补齐已收盘指标值。",
+        hint=hint,
     )
 
 
-async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
+async def stream_indicators(
+    websocket: WebSocket,
+    dm,
+    indicator_engine,
+    *,
+    runtime_service=None,
+) -> None:
     """Handle a multi-indicator WS connection."""
     queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=max(int(config.INDICATOR_WS_QUEUE_SIZE), 1))
     subscribed: dict[str, Any] = {}
@@ -213,6 +226,7 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
                     seed_query_cache=seed_query_cache,
                     send_json=_safe_send_json,
                     msg=msg,
+                    runtime_service=runtime_service,
                 )
             elif action == "unsubscribe":
                 client_id = str(msg.get("clientId") or "").strip()
@@ -280,6 +294,7 @@ async def _handle_indicator_subscribe(
     seed_query_cache: dict[tuple[str, str, str, str, int], dict[str, Any]],
     send_json,
     msg: dict,
+    runtime_service=None,
 ) -> None:
     client_id = str(msg.get("clientId") or "").strip()
     symbol = str(msg.get("symbol") or "BTCUSDT").upper().strip()
@@ -292,6 +307,11 @@ async def _handle_indicator_subscribe(
     history_limit = int(msg.get("historyLimit") or 500)
     history_limit = min(max(history_limit, 1), max(int(config.PYNE_MAX_BARS), 1))
     kind = str(msg.get("kind") or "").strip().lower()
+    language = (
+        str(msg.get("language")).strip().lower()
+        if msg.get("language") is not None
+        else None
+    )
     script = msg.get("script") if isinstance(msg.get("script"), str) else ""
     custom_id = str(
         msg.get("customId")
@@ -373,6 +393,7 @@ async def _handle_indicator_subscribe(
                 exchange=exchange,
                 market_type=market_type,
                 name=str(msg.get("displayName") or msg.get("name") or client_id),
+                language=language,
                 custom_id=custom_id,
                 script=script,
                 params=params,
@@ -399,6 +420,7 @@ async def _handle_indicator_subscribe(
                     if msg.get("correctionRevision") is not None
                     else msg.get("correction_revision")
                 ),
+                runtime_service=runtime_service,
             )
         except Exception as exc:
             had_meta = client_id in client_meta

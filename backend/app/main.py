@@ -209,21 +209,34 @@ async def startup_event() -> None:
     if LIQUIDATION_ROLLUP_BACKEND == "sqlite":
         init_liquidation_storage(LIQUIDATION_DB_PATH)
 
-    # 2. Load resolved runtime-plugin activation state. An absent default
-    # registry is an empty registry; an explicitly configured invalid registry
-    # fails closed. No Indicator route uses this host until Phase 4.
+    # 2. Load resolved runtime-plugin activation state and the independent
+    # language routing table. Missing defaults mean an empty Host plus the
+    # built-in pyne=legacy route. Explicit invalid configuration fails closed.
     from app.plugin_runtime import build_runtime_host_from_environment
+    from app.indicator.runtime_service import (
+        build_indicator_runtime_service_from_environment,
+    )
 
+    plugin_runtime_host = None
     try:
         plugin_runtime_host = build_runtime_host_from_environment(
             host_name=APP_NAME,
             host_version=APP_VERSION,
         )
         await plugin_runtime_host.start()
+        indicator_runtime_service = (
+            build_indicator_runtime_service_from_environment(
+                host=plugin_runtime_host,
+            )
+        )
+        await indicator_runtime_service.start()
     except BaseException:
+        if plugin_runtime_host is not None:
+            await plugin_runtime_host.stop()
         await lag_monitor.stop()
         raise
     app.state.plugin_runtime_host = plugin_runtime_host
+    app.state.indicator_runtime_service = indicator_runtime_service
     plugin_summary = plugin_runtime_host.health_summary()
     print(
         "[startup] Runtime plugin host "
@@ -246,6 +259,7 @@ async def startup_event() -> None:
     try:
         await _init_data_manager()
     except BaseException:
+        await indicator_runtime_service.stop()
         await plugin_runtime_host.stop()
         await lag_monitor.stop()
         raise
@@ -278,6 +292,21 @@ async def shutdown_event() -> None:
             print("[shutdown] AlertRuntime shut down ✓")
         except Exception as exc:
             print(f"[shutdown] AlertRuntime shutdown error: {exc}")
+
+    indicator_runtime_service = getattr(
+        app.state,
+        "indicator_runtime_service",
+        None,
+    )
+    if indicator_runtime_service is not None:
+        try:
+            await indicator_runtime_service.stop()
+        except Exception as exc:
+            logger.warning(
+                "Indicator runtime routing shutdown error: %s",
+                exc,
+                exc_info=True,
+            )
 
     plugin_runtime_host = getattr(app.state, "plugin_runtime_host", None)
     if plugin_runtime_host is not None:
@@ -318,6 +347,18 @@ async def health_check() -> dict:
     plugin_runtime_host = getattr(app.state, "plugin_runtime_host", None)
     if plugin_runtime_host is not None:
         result["plugin_runtimes"] = plugin_runtime_host.health_summary()
+    indicator_runtime_service = getattr(
+        app.state,
+        "indicator_runtime_service",
+        None,
+    )
+    if indicator_runtime_service is not None:
+        routing = indicator_runtime_service.snapshot()
+        result["indicator_runtime_routing"] = {
+            "started": routing["started"],
+            "routes": routing["routes"],
+            "counts": routing["counts"],
+        }
     if dm is not None:
         try:
             result["data_manager"] = dm.health_snapshot()

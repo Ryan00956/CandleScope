@@ -23,6 +23,8 @@ HTTP / WS APIs
         ├── one-shot compute
         ├── custom indicator CRUD
         └── realtime indicator stream
+
+脚本请求 → IndicatorRuntimeService → legacy / shadow / sidecar
 ```
 
 ## 主要文件
@@ -37,9 +39,12 @@ HTTP / WS APIs
 | [data_manager_bridge.py](data_manager_bridge.py) | 将 DataManager bar events 接入 IndicatorEngine |
 | [custom_store.py](custom_store.py) | 用户脚本本地 JSON 存储 |
 | [serialization.py](serialization.py) | 内置和 Pyne 结果的前端标准 payload |
+| [runtime_routes.py](runtime_routes.py) | 严格的逐语言 `legacy/shadow/sidecar` 路由表 |
+| [runtime_service.py](runtime_service.py) | 统一脚本执行、shadow 对比与 sidecar 分发 |
+| [RUNTIME_ROUTING_zh.md](RUNTIME_ROUTING_zh.md) | 运维与社区插件上线契约 |
 | [errors.py](errors.py) | 结构化错误 payload 辅助 |
 | [indicators](indicators/) | 内置指标实现 |
-| [pyne](pyne/) | Pine 风格 Python runtime |
+| [pyne](pyne/) | 当前 legacy Pyne facade，在插件切换门禁前保留 |
 
 ## 内置指标
 

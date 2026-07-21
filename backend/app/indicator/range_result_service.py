@@ -118,7 +118,7 @@ class IndicatorRangeResultService:
         if meta.get("kind") != "script" and meta.get("indicatorId"):
             return str(meta["indicatorId"])
         params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
-        raw = json.dumps({
+        identity = {
             "series": cls.series_key_from_meta(meta),
             "kind": meta.get("kind") or "builtin",
             "name": str(meta.get("name") or "").upper().strip(),
@@ -126,7 +126,10 @@ class IndicatorRangeResultService:
             "codeHash": meta.get("codeHash") or "",
             "params": params,
             "securityMode": meta.get("securityMode") or "",
-        }, sort_keys=True, separators=(",", ":"), default=str)
+        }
+        if meta.get("kind") == "script":
+            identity["language"] = str(meta.get("language") or "pyne").lower().strip()
+        raw = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
         return f"range:{hashlib.sha256(raw.encode()).hexdigest()}"
 
     def revision_token_for_meta(self, meta: dict[str, Any]) -> str:

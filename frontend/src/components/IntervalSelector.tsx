@@ -159,6 +159,7 @@ export interface IntervalSelectorProps {
   onTogglePinCustomInterval(interval: IntervalString): unknown;
   onClearCustomIntervals(): void;
   intervalNotice: IntervalNotice | null;
+  readOnlyReason?: string | null;
 }
 
 function IntervalSelector({
@@ -176,6 +177,7 @@ function IntervalSelector({
   onTogglePinCustomInterval,
   onClearCustomIntervals,
   intervalNotice,
+  readOnlyReason = null,
 }: IntervalSelectorProps) {
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<IntervalTab>("common");
@@ -397,12 +399,12 @@ function IntervalSelector({
         id={`interval-${item.value}`}
         className={clsx("interval-btn", intervalsSemanticallyEquivalent(interval, item.value) && "active", item.isCustom && "custom-interval-btn", !available && "unavailable", extraClass)}
         onClick={() => selectInterval(item.value)}
-        title={!available
+        title={readOnlyReason ?? (!available
           ? unavailableMessage(item.value)
-          : item.isCustom ? `自定义周期：${formatIntervalDescription(item.value)}` : item.value}
+          : item.isCustom ? `自定义周期：${formatIntervalDescription(item.value)}` : item.value)}
         type="button"
-        disabled={!available}
-        aria-disabled={!available}
+        disabled={!available || readOnlyReason !== null}
+        aria-disabled={!available || readOnlyReason !== null}
       >
         {item.isCustom && <span className="interval-custom-dot" />}
         {item.label}
@@ -469,7 +471,12 @@ function IntervalSelector({
   };
 
   return (
-    <div className="interval-toolbar-wrap" ref={rootRef}>
+    <div
+      className="interval-toolbar-wrap"
+      ref={rootRef}
+      data-readonly={readOnlyReason === null ? "false" : "true"}
+      title={readOnlyReason ?? undefined}
+    >
       <nav className="toolbar" id="toolbar" aria-label="时间周期工具栏">
         {nativeGroups.map((group, gi) => (
           <div key={group.label} className="toolbar-group-wrap">
@@ -494,9 +501,10 @@ function IntervalSelector({
           type="button"
           className={clsx("interval-more-btn", open && "active")}
           onClick={() => setOpen((prev) => !prev)}
+          disabled={readOnlyReason !== null}
           aria-expanded={open}
           aria-haspopup="dialog"
-          title="打开周期选择与自定义周期管理"
+          title={readOnlyReason ?? "打开周期选择与自定义周期管理"}
         >
           <span className="interval-more-label">周期</span>
           <span className="interval-more-value">{interval}</span>

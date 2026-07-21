@@ -460,6 +460,28 @@ async def return_replay_v2_run_to_hub(
     return await _training_service(request).return_to_hub_by_session(session_id)
 
 
+@router.get("/runs/session/{session_id}/history")
+async def replay_v2_training_history(
+    request: Request,
+    session_id: str,
+    track_id: str = Query(min_length=1, max_length=128),
+    before_ms: int = Query(ge=0, le=MAX_TIMESTAMP_MS),
+    revealed_boundary_ms: int = Query(ge=0, le=MAX_TIMESTAMP_MS),
+    limit: int = Query(default=500, ge=1, le=1_000),
+    data_epoch: str = Query(min_length=71, max_length=71),
+    history_epoch: str | None = Query(default=None, min_length=71, max_length=71),
+) -> dict[str, object]:
+    return await _training_service(request).history_page(
+        session_id,
+        track_id=track_id,
+        before_ms=before_ms,
+        revealed_boundary_ms=revealed_boundary_ms,
+        limit=limit,
+        data_epoch=data_epoch,
+        history_epoch=history_epoch,
+    )
+
+
 @router.post(
     "/runs/{legacy_session_id}/migrate",
     dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],

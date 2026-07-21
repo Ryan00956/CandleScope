@@ -522,6 +522,77 @@ class TrainingRunStore:
             )
         return run_id
 
+    async def history_binding(
+        self,
+        *,
+        session_id: str,
+        track_id: str,
+    ) -> dict[str, object]:
+        """Read the immutable source binding and latest durable public cursor.
+
+        This deliberately reads only replay-owned SQLite tables. Historical
+        pages must never fall through to the active market-data repository.
+        """
+
+        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            return connection.execute(
+                """
+                SELECT
+                    r.run_id,
+                    r.adapter_session_id,
+                    r.base_interval,
+                    r.display_interval,
+                    r.time_disclosure_policy,
+                    r.dataset_epoch AS run_dataset_epoch,
+                    t.track_id,
+                    t.exchange,
+                    t.market_type,
+                    t.symbol,
+                    t.source_kind,
+                    t.dataset_epoch AS track_dataset_epoch,
+                    t.virtual_time_ms,
+                    t.source_sequence,
+                    t.revision,
+                    s.config_json,
+                    s.data_epoch AS session_data_epoch,
+                    s.degraded_reason
+                FROM replay_training_run AS r
+                JOIN replay_training_track AS t
+                  ON t.run_id = r.run_id AND t.adapter_session_id = r.adapter_session_id
+                JOIN replay_session AS s ON s.session_id = r.adapter_session_id
+                WHERE r.adapter_session_id = ? AND t.track_id = ?
+                """,
+                (session_id, track_id),
+            ).fetchone()
+
+        row = await self.base_store.run_extension_read(read)
+        if row is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training history track does not exist",
+                status_code=404,
+            )
+        return {
+            "run_id": str(row["run_id"]),
+            "session_id": str(row["adapter_session_id"]),
+            "track_id": str(row["track_id"]),
+            "exchange": str(row["exchange"]),
+            "market_type": str(row["market_type"]),
+            "symbol": str(row["symbol"]),
+            "source_kind": str(row["source_kind"]),
+            "base_interval": str(row["base_interval"]),
+            "display_interval": str(row["display_interval"]),
+            "time_disclosure_policy": str(row["time_disclosure_policy"]),
+            "run_dataset_epoch": str(row["run_dataset_epoch"]),
+            "track_dataset_epoch": str(row["track_dataset_epoch"]),
+            "session_data_epoch": str(row["session_data_epoch"]),
+            "virtual_time_ms": int(row["virtual_time_ms"]),
+            "source_sequence": int(row["source_sequence"]),
+            "revision": int(row["revision"]),
+            "config": json.loads(str(row["config_json"])),
+            "degraded_reason": row["degraded_reason"],
+        }
+
     @staticmethod
     def _insert_run(connection: sqlite3.Connection, values: Mapping[str, object]) -> None:
         connection.execute(

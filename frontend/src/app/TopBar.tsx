@@ -18,6 +18,7 @@ import type { SymbolSearchProps } from "../features/symbol-search/SymbolSearch.j
 import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
 import type { ReplayEntryCapabilityView } from "../features/replay/useReplayEntryCapability.js";
 import { useAdvancedMarketSummary } from "../features/advanced-market-data/useAdvancedMarketSnapshots.js";
+import MarketTopBarFrame from "./MarketTopBarFrame.js";
 
 export interface TopBarSymbolSearchModel extends Omit<SymbolSearchProps, "onSelect"> {
   onSelectSymbol: SymbolSearchProps["onSelect"];
@@ -84,13 +85,10 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
     : `${advancedSummary.basis >= 0 ? "+" : "-"}${formatPrice(Math.abs(advancedSummary.basis))}`;
 
   return (
-    <header className="top-bar" id="top-bar">
-      <div className="logo">
-        <div className="logo-icon">📈</div>
-        <span className="logo-text">CandleScope</span>
-      </div>
-
-      {replayEntry.state === "enabled" && (
+    <MarketTopBarFrame
+      source="live"
+      navigation={<>
+        {replayEntry.state === "enabled" && (
         <a
           className="replay-entry-link"
           data-replay-entry="enabled"
@@ -100,8 +98,8 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
         >
           K 线回放 ↗
         </a>
-      )}
-      {(replayEntry.state === "checking" || replayEntry.state === "disabled") && (
+        )}
+        {(replayEntry.state === "checking" || replayEntry.state === "disabled") && (
         <button
           className="replay-entry-link replay-entry-disabled"
           data-replay-entry={replayEntry.state}
@@ -111,9 +109,9 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
         >
           K 线回放 ↗
         </button>
-      )}
-
-      <SymbolSearch
+        )}
+      </>}
+      identity={<SymbolSearch
         currentSymbol={currentSymbol}
         onSelect={onSelectSymbol}
         {...(currentMarketType === undefined ? {} : { currentMarketType })}
@@ -121,9 +119,9 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
         {...(exchangeCatalog === undefined ? {} : { exchangeCatalog })}
         {...(watchlists === undefined ? {} : { watchlists })}
         {...(onAddToWatchlist === undefined ? {} : { onAddToWatchlist })}
-      />
-
-      <button
+      />}
+      controls={<>
+        <button
         className="settings-btn"
         onPointerEnter={loadSettingsModal}
         onMouseOver={loadSettingsModal}
@@ -143,9 +141,9 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
         }}
       >
         ⚙️
-      </button>
+        </button>
 
-      <button
+        <button
         className={`indicator-toggle-btn ${indicatorPanelOpen ? "active" : ""}`}
         onClick={onToggleIndicatorPanel}
         title="指标 (Indicators)"
@@ -154,17 +152,17 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
         {activeIndicatorCount > 0 && (
           <span className="indicator-badge">{activeIndicatorCount}</span>
         )}
-      </button>
+        </button>
 
-      <button
+        <button
         className={`indicator-toggle-btn alert-toggle-btn ${alertPanelOpen ? "active" : ""}`}
         onClick={onToggleAlertPanel}
         title="警报 (Alerts)"
       >
         🔔
-      </button>
-
-      {displayData && (
+        </button>
+      </>}
+      quote={displayData && (
         <div className="price-info">
           <span className={`current-price ${isUp ? "price-up" : "price-down"}`}>
             {formatPrice(displayData.close)}
@@ -174,8 +172,7 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
           </span>
         </div>
       )}
-
-      {advancedMarketData.summaryEnabled && (
+      marketMetrics={advancedMarketData.summaryEnabled && (
         <div
           className={`advanced-market-summary advanced-market-summary-${advancedSummary.connectionStatus}`}
           aria-label="Derivatives market summary"
@@ -199,8 +196,7 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
           </div>
         </div>
       )}
-
-      {displayData && (
+      ohlcv={displayData && (
         <div className="ohlcv-bar">
           <div className="ohlcv-item">
             <span className="ohlcv-label">O</span>
@@ -243,7 +239,7 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
           </div>
         </div>
       )}
-    </header>
+    />
   );
 }
 

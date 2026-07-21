@@ -10,6 +10,7 @@ import {
   resolveDrawingSurfaceChartTypeBoundary,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
+  resolveStableOptionalChartCollection,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
   shouldInvalidateDrawingFrameOnPointerRelease,
@@ -277,6 +278,15 @@ test("resolveDataTimeSet reuses one empty set until a series store exists", () =
     })),
     storeTimes,
   );
+});
+
+test("optional chart collections reuse one empty identity across internal renders", () => {
+  const first = resolveStableOptionalChartCollection<number>();
+  const second = resolveStableOptionalChartCollection<string>();
+  const supplied = [1, 2, 3];
+
+  assert.strictEqual(second, first);
+  assert.strictEqual(resolveStableOptionalChartCollection(supplied), supplied);
 });
 
 test("indicator reconciliation requires metadata and store ownership for the current dataset", () => {

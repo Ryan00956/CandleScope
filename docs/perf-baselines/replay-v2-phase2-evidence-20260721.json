@@ -1,0 +1,147 @@
+{
+  "schema": "replay.v2.phase2.evidence.v1",
+  "captured_at": "2026-07-21",
+  "branch": "codex/kline-replay-training",
+  "parent_head": "2962e2899f737960b9dbf72598f569ccfd6ac19f",
+  "phase": 2,
+  "decision": "PASS",
+  "next_phase_started": false,
+  "repository_defaults": {
+    "replay_enabled": false,
+    "replay_product_v2_enabled": false,
+    "vite_replay_entry_enabled": false,
+    "vite_replay_product_v2_enabled": false
+  },
+  "verification": {
+    "backend_targeted": {
+      "result": "PASS",
+      "passed": 40
+    },
+    "backend_full": {
+      "result": "PASS",
+      "passed": 1882,
+      "warnings": 4,
+      "warning_scope": "pre-existing FastAPI on_event deprecations"
+    },
+    "frontend_full": {
+      "result": "PASS",
+      "passed": 2366,
+      "architecture": "PASS",
+      "typecheck": "PASS",
+      "eslint": "PASS",
+      "production_build": "PASS"
+    },
+    "ruff_phase2_scope": {
+      "result": "PASS",
+      "violations": 0
+    },
+    "git_diff_check": "PASS"
+  },
+  "workspace": {
+    "shared_shell_slots": [
+      "top-bar",
+      "chart-workspace",
+      "right-market-rail",
+      "bottom-control-dock",
+      "status-bar"
+    ],
+    "live_and_replay_share_source_neutral_frames": true,
+    "v2_disabled_uses_exact_v1_shell": true,
+    "drawing_engine": "real SingleChartPanes drawing runtime",
+    "drawing_storage_scope": "run/session",
+    "live_drawing_key_reused": false,
+    "only_primary_track_full": true
+  },
+  "history": {
+    "schema_version": "replay.history.v1",
+    "source": "immutable TrainingRun dataset_ref",
+    "active_production_market_query": false,
+    "bar_and_agg_trade_frozen_bundle_tests": "PASS",
+    "non_empty_pagination_test": "PASS",
+    "in_flight_deduplication": "PASS",
+    "cancellation": "PASS",
+    "prepend_deduplication": "PASS",
+    "blind_timeline_real_time_leak": false,
+    "data_epoch_binding": "PASS",
+    "history_epoch_binding": "PASS",
+    "source_identity_drift": "FAIL_CLOSED",
+    "boundary_drift": "FAIL_CLOSED",
+    "no_lookahead": "PASS"
+  },
+  "browser": {
+    "direct_url": "http://127.0.0.1:15194/replay.html",
+    "viewport_geometry": {
+      "1280x800": {
+        "horizontal_page_overflow": false,
+        "rail_width": 350,
+        "workspace_bottom": 696,
+        "bottom_dock_top": 696,
+        "status_top": 776,
+        "overlap": false
+      },
+      "900x800": {
+        "horizontal_page_overflow": false,
+        "rail_width": 350,
+        "overlap": false
+      },
+      "760x800": {
+        "horizontal_page_overflow": false,
+        "rail_display": "none",
+        "overlap": false
+      }
+    },
+    "persisted_drawing_reload": "PASS",
+    "maximum_update_depth_errors_after_fix": 0,
+    "business_request_allowlist": [
+      "GET /api/v1/replay/capabilities",
+      "GET /api/v1/replay/sessions/{session_id}",
+      "POST /api/v1/replay/sessions/{session_id}/commands",
+      "GET /api/v1/replay/runs/session/{session_id}/history"
+    ],
+    "live_market_requests": 0,
+    "single_step": {
+      "before": {
+        "sequence": 0,
+        "revision": 1,
+        "cursor_ms": 946684800000,
+        "max_bar_close_ms": 946684740000
+      },
+      "after": {
+        "sequence": 1,
+        "revision": 2,
+        "cursor_ms": 946684859999,
+        "max_bar_close_ms": 946684800000,
+        "bar_closed": true
+      },
+      "max_bar_not_after_cursor": true
+    },
+    "development_only_noise": [
+      "two existing slider-vertical CSS warnings",
+      "favicon.ico 404",
+      "one StrictMode stale scene-registry warning only when restoring a legacy drawing document"
+    ],
+    "screenshot": {
+      "path": "output/playwright/replay-v2-phase2-workspace.png",
+      "bytes": 138812,
+      "sha256": "13c7e6801252054dbae1330cd8a55ffbd4de1e83eab3bb5f96c68a1b172987a2"
+    }
+  },
+  "rollback": {
+    "runtime_feature_flag_v1_fallback": "PASS",
+    "legacy_v1_rollback_drill": "PASS",
+    "legacy_baseline_head": "c9a1ddbfe316c68c91787b69c783baeeb0670a9f",
+    "legacy_acceptance_checks_passed": 13,
+    "feature_off_database_digest_stable": true,
+    "old_build_database_digest_stable": true,
+    "single_commit_revert_tree": "PASS",
+    "reverted_tree": "9b882d3f32528e96696be6de7a0b251770a3cd42",
+    "parent_tree": "9b882d3f32528e96696be6de7a0b251770a3cd42",
+    "expected_parent_head": "2962e2899f737960b9dbf72598f569ccfd6ac19f"
+  },
+  "known_limitations": [
+    "ViewerState and STEP_DISPLAY, STEP_EVENT, ADVANCE_BY, and ADVANCE_TO semantics remain Phase 3 work.",
+    "Only the primary track is FULL in Phase 2.",
+    "OI, liquidation, mark/index/basis, funding, order book, order flow, hosted/range/security, and historical L2/book-assisted capabilities remain explicitly unavailable instead of approximated.",
+    "Phase 3 has not started."
+  ]
+}

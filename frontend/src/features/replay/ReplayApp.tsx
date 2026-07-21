@@ -2,6 +2,7 @@ import { useChartSurfaceRuntime } from "../../chart-adapter/useChartSurfaceRunti
 import type { ReplayEntry } from "./replayEntry.js";
 import TrainingHubDialog from "./components/TrainingHubDialog.js";
 import ReplayPageShell from "./ReplayPageShell.js";
+import ReplayTrainingPageShell from "./ReplayTrainingPageShell.js";
 import { resolveReplayProduct } from "./replayProduct.js";
 import { REPLAY_PRODUCT_V2_ENABLED } from "./replayV2Types.js";
 import { useReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
@@ -24,9 +25,27 @@ function ReplayTrainingHubApp() {
   return <TrainingHubDialog runtime={runtime} />;
 }
 
+function ReplayTrainingWorkspaceApp({ entry }: ReplayAppProps) {
+  const replay = useReplayRuntime(entry);
+  const indicators = useReplayIndicatorRuntime(replay);
+  const chartSurface = useChartSurfaceRuntime();
+  return (
+    <ReplayTrainingPageShell
+      runtime={replay}
+      indicators={indicators}
+      chartSurfaceRef={chartSurface.ref}
+      chartSurfaceActions={chartSurface.actions}
+    />
+  );
+}
+
 /** Dedicated replay composition root. Both products remain replay-only. */
 export default function ReplayApp({ entry }: ReplayAppProps) {
-  return resolveReplayProduct(REPLAY_PRODUCT_V2_ENABLED, entry) === "hub"
-    ? <ReplayTrainingHubApp />
-    : <ReplayV1App entry={entry} />;
+  if (resolveReplayProduct(REPLAY_PRODUCT_V2_ENABLED, entry) === "hub") {
+    return <ReplayTrainingHubApp />;
+  }
+  if (REPLAY_PRODUCT_V2_ENABLED && entry.kind === "session") {
+    return <ReplayTrainingWorkspaceApp entry={entry} />;
+  }
+  return <ReplayV1App entry={entry} />;
 }

@@ -128,6 +128,7 @@ import {
   removedDrawingSubPaneScopeKeys,
   prepareDrawingSurfaceForSeriesReplacement,
   resolveDrawingSurfaceChartTypeBoundary,
+  resolveStableOptionalChartCollection,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
   shouldInvalidateDrawingFrameOnPointerRelease,
@@ -1179,14 +1180,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   positionSize = 1000,
   drawingSnapEnabled = true,
   onSelectedDrawingChange,
-  mainOverlayLines = [],
-  subPanes = [],
-  indicatorMarkers = [],
+  mainOverlayLines = resolveStableOptionalChartCollection<IndicatorLine>(),
+  subPanes = resolveStableOptionalChartCollection<IndicatorSubPane>(),
+  indicatorMarkers = resolveStableOptionalChartCollection<IndicatorMarker>(),
   externalMarkerSource = null,
-  indicatorFills = [],
-  indicatorHlines = [],
-  indicatorBgcolors = [],
-  indicatorBarcolors = [],
+  indicatorFills = resolveStableOptionalChartCollection<IndicatorFill>(),
+  indicatorHlines = resolveStableOptionalChartCollection<IndicatorHLine>(),
+  indicatorBgcolors = resolveStableOptionalChartCollection<IndicatorBgColor>(),
+  indicatorBarcolors = resolveStableOptionalChartCollection<IndicatorBarColor>(),
   onRemoveSubPane = null,
   invertScale = false,
   onInvertScaleChange,
@@ -3944,7 +3945,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   ) => {
     if (api) {
       drawingApisByPaneRef.current.set(paneId, api);
-      api.setHidden(drawingsHiddenRef.current);
+      // The host consumes `initialHidden` when it mounts, while later user
+      // changes flow through the chart-surface API. Replaying visibility here
+      // would turn API registration during an asynchronous document restore
+      // into a mutation request against a deliberately not-yet-ready scope.
       setRetainedDrawingPaneMountKeys((previous) => {
         if (previous.has(paneDrawingKey)) return previous;
         const next = new Set(previous);

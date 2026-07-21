@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import time
+from pathlib import Path
 
 
 # Keep every fixture row on an exact UTC 1m boundary. The replay catalog
@@ -17,6 +19,7 @@ import os
 FIXTURE_START_MS = 1_700_000_040_000
 FIXTURE_ROWS = 4_000
 INTERVAL_MS = 60_000
+LEGACY_LIVE_TAIL_ROWS = 10
 
 
 def _require_isolated_environment() -> None:
@@ -37,6 +40,72 @@ def _require_isolated_environment() -> None:
         raise RuntimeError("smoke fixture refuses public Binance upstream URLs")
 
 
+def _force_offline_upstreams() -> None:
+    """Remove the production fallback URLs before data-engine modules import them."""
+
+    from app.core import config
+
+    config.BINANCE_BASE_URLS[:] = [config.BINANCE_BASE_URL]
+    config.BINANCE_WS_URLS[:] = [config.BINANCE_WS_URL]
+    config.BINANCE_FUTURES_BASE_URLS[:] = [config.BINANCE_FUTURES_BASE_URL]
+    config.BINANCE_FUTURES_WS_URLS[:] = [config.BINANCE_FUTURES_WS_URL]
+    os.environ["INGESTION_HTTP_BASE_URLS"] = config.BINANCE_BASE_URL
+    os.environ["INGESTION_WS_BASE_URLS"] = config.BINANCE_WS_URL
+    os.environ["INGESTION_HTTP_BASE_URLS_FUTURES"] = (
+        config.BINANCE_FUTURES_BASE_URL
+    )
+    os.environ["INGESTION_WS_BASE_URLS_FUTURES"] = config.BINANCE_FUTURES_WS_URL
+    os.environ["INGESTION_PROXY_MODE"] = "none"
+
+
+def _fixture_row(*, index: int, open_time: int, price_origin: float = 30_000.0) -> dict[str, object]:
+    base = price_origin + (index % 80) * 2.0 + (index // 80) * 0.25
+    return {
+        "open_time": open_time,
+        "close_time": open_time + INTERVAL_MS - 1,
+        "open": base,
+        "high": base + 12.0,
+        "low": base - 12.0,
+        "close": base + (4.0 if index % 2 == 0 else -3.0),
+        "volume": 10.0 + index % 7,
+        "quote_volume": (10.0 + index % 7) * base,
+        "trades": 100 + index % 20,
+        "taker_buy_base": 5.0,
+        "taker_buy_quote": 5.0 * base,
+    }
+
+
+def _legacy_live_tail_rows(*, now_ms: int | None = None) -> list[dict[str, object]]:
+    """Build an opt-in, closed live tail for the pre-replay rollback build.
+
+    The fixed 4,000-row archive remains the only normal fixture dataset. Old
+    live builds reject that deliberately historical tail as stale, so the
+    rollback drill alone opts into these rows to prove its live chart path.
+    """
+
+    current_ms = int(time.time() * 1_000) if now_ms is None else now_ms
+    last_closed_open_ms = (current_ms // INTERVAL_MS - 1) * INTERVAL_MS
+    first_open_ms = last_closed_open_ms - (LEGACY_LIVE_TAIL_ROWS - 1) * INTERVAL_MS
+    return [
+        _fixture_row(index=index, open_time=first_open_ms + index * INTERVAL_MS, price_origin=31_000.0)
+        for index in range(LEGACY_LIVE_TAIL_ROWS)
+    ]
+
+
+def _legacy_live_tail_required(
+    *,
+    runtime_backend_root: Path | None = None,
+    fixture_backend_root: Path | None = None,
+) -> bool:
+    """Detect the rollback drill's cross-root legacy backend invocation."""
+
+    runtime_root = (runtime_backend_root or Path.cwd()).resolve()
+    fixture_root = (
+        fixture_backend_root or Path(__file__).resolve().parent.parent
+    ).resolve()
+    return runtime_root != fixture_root
+
+
 def _seed_klines() -> None:
     from app.data_engine.storage.klines_repo import init_klines_storage, upsert_klines
 
@@ -44,22 +113,9 @@ def _seed_klines() -> None:
     rows: list[dict[str, object]] = []
     for index in range(FIXTURE_ROWS):
         open_time = FIXTURE_START_MS + index * INTERVAL_MS
-        base = 30_000.0 + (index % 80) * 2.0 + (index // 80) * 0.25
-        rows.append(
-            {
-                "open_time": open_time,
-                "close_time": open_time + INTERVAL_MS - 1,
-                "open": base,
-                "high": base + 12.0,
-                "low": base - 12.0,
-                "close": base + (4.0 if index % 2 == 0 else -3.0),
-                "volume": 10.0 + index % 7,
-                "quote_volume": (10.0 + index % 7) * base,
-                "trades": 100 + index % 20,
-                "taker_buy_base": 5.0,
-                "taker_buy_quote": 5.0 * base,
-            }
-        )
+        rows.append(_fixture_row(index=index, open_time=open_time))
+    if _legacy_live_tail_required():
+        rows.extend(_legacy_live_tail_rows())
     inserted = upsert_klines(
         "BTCUSDT",
         "1m",
@@ -68,8 +124,8 @@ def _seed_klines() -> None:
         exchange="binance",
         market_type="spot",
     )
-    if inserted != FIXTURE_ROWS:
-        raise RuntimeError(f"expected {FIXTURE_ROWS} fixture rows, wrote {inserted}")
+    if inserted != len(rows):
+        raise RuntimeError(f"expected {len(rows)} fixture rows, wrote {inserted}")
 
 
 def main() -> None:
@@ -77,6 +133,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args()
     _require_isolated_environment()
+    _force_offline_upstreams()
     _seed_klines()
 
     import uvicorn

@@ -143,6 +143,63 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         await service.shutdown(step_timeout=0.2)
 
 
+async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Path) -> None:
+    service = await _service(tmp_path / "history-api.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        snapshot_response = await _request(
+            app,
+            "GET",
+            "/api/v1/replay/sessions/adapter-1",
+        )
+        snapshot = snapshot_response.json()["snapshot"]
+        boundary = snapshot["cursor"]["virtual_time_ms"]
+        page = await _request(
+            app,
+            "GET",
+            "/api/v1/replay/runs/session/adapter-1/history",
+            params={
+                "track_id": "track-1",
+                "before_ms": boundary + 1,
+                "revealed_boundary_ms": boundary,
+                "limit": 10,
+                "data_epoch": snapshot["data_epoch"],
+            },
+        )
+        assert page.status_code == 200
+        payload = page.json()
+        assert payload["schema_version"] == "replay.history.v1"
+        assert payload["session_id"] == "adapter-1"
+        assert payload["track_id"] == "track-1"
+        assert all(bar["close_time_ms"] <= boundary for bar in payload["bars"])
+
+        stale = await _request(
+            app,
+            "GET",
+            "/api/v1/replay/runs/session/adapter-1/history",
+            params={
+                "track_id": "track-1",
+                "before_ms": boundary + 1,
+                "revealed_boundary_ms": boundary,
+                "limit": 10,
+                "data_epoch": snapshot["data_epoch"],
+                "history_epoch": f"sha256:{'f' * 64}",
+            },
+        )
+        assert stale.status_code == 409
+        assert stale.json()["protocol"] == "replay.v2"
+        assert stale.json()["error"]["code"] == "HISTORY_EPOCH_MISMATCH"
+    finally:
+        await service.shutdown(step_timeout=0.2)
+
+
 async def test_v2_validation_and_catalog_drift_use_v2_error_envelopes(
     tmp_path: Path,
 ) -> None:

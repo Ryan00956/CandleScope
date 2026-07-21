@@ -10,7 +10,7 @@ import type { WatchlistSidebarProps } from "../features/watchlist/WatchlistSideb
 import type { OrderBookRuntime } from "../features/order-book/orderBookTypes.js";
 import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
 import { useAdvancedMarketPanes } from "../features/advanced-market-data/useAdvancedMarketPanes.js";
-import MarketWorkspaceFrame from "./MarketWorkspaceFrame.js";
+import MarketChartWorkspace from "./MarketChartWorkspace.js";
 import { useTradeFlowPanes } from "../features/trade-flow/useTradeFlowPanes.js";
 import type { TradeFlowRuntime } from "../features/trade-flow/tradeFlowTypes.js";
 
@@ -82,7 +82,7 @@ function ChartWorkspace({
   );
 
   return (
-    <MarketWorkspaceFrame
+    <MarketChartWorkspace
       toolbar={(
         <React.Suspense fallback={<div className="drawing-toolbar drawing-toolbar-loading" aria-hidden="true" />}>
           <DrawingToolbar {...drawingToolbar} />

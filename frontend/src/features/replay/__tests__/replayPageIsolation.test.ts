@@ -47,6 +47,9 @@ test("replay composition source has no live runtime value import", () => {
     "src/replay-main.tsx",
     "src/features/replay/ReplayApp.tsx",
     "src/features/replay/ReplayPageShell.tsx",
+    "src/features/replay/ReplayTrainingPageShell.tsx",
+    "src/features/replay/components/ReplayRightMarketRail.tsx",
+    "src/features/replay/useReplayHistoryRuntime.ts",
     "src/features/replay/useReplayRuntime.ts",
   ];
   const forbidden = [

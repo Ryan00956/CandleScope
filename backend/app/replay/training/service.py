@@ -24,6 +24,7 @@ from app.replay.models import (
 )
 
 from .errors import TrainingRunError
+from .history import build_history_page
 from .models import ReplaySource, StartMode, TimeDisclosurePolicy, TrainingRunCreateRequest
 from .storage import TrainingRunStore
 
@@ -182,6 +183,42 @@ class TrainingRunService:
             "checkpointed": True,
             "released": True,
         }
+
+    async def history_page(
+        self,
+        session_id: str,
+        *,
+        track_id: str,
+        before_ms: int,
+        revealed_boundary_ms: int,
+        limit: int,
+        data_epoch: str,
+        history_epoch: str | None,
+    ) -> dict[str, object]:
+        """Return one immutable page without touching the production repository."""
+
+        normalized_session = self._identifier(session_id, field_name="session_id")
+        normalized_track = self._identifier(track_id, field_name="track_id")
+        binding = await self.store.history_binding(
+            session_id=normalized_session,
+            track_id=normalized_track,
+        )
+        persisted = await self.replay_service.store.load_dataset(normalized_session)
+        if persisted is None:
+            raise TrainingRunError(
+                "HISTORY_SNAPSHOT_UNAVAILABLE",
+                "training history snapshot is unavailable",
+                status_code=503,
+            )
+        return build_history_page(
+            binding=binding,
+            persisted=persisted,
+            before_ms=before_ms,
+            revealed_boundary_ms=revealed_boundary_ms,
+            limit=limit,
+            data_epoch=data_epoch,
+            expected_history_epoch=history_epoch,
+        )
 
     @staticmethod
     def _adapter_config(request: TrainingRunCreateRequest) -> ReplaySessionConfig:

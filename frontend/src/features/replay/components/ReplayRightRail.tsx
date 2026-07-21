@@ -22,7 +22,7 @@ export interface ReplayRightRailProps {
   };
 }
 
-export default function ReplayRightRail({ runtime, indicatorStatus }: ReplayRightRailProps) {
+export function ReplayPaperTradingDock({ runtime, indicatorStatus }: ReplayRightRailProps) {
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
   const [orderType, setOrderType] = useState<"MARKET" | "LIMIT" | "STOP_MARKET" | "TAKE_PROFIT_MARKET">("MARKET");
   const [quantity, setQuantity] = useState("0.001");
@@ -52,7 +52,7 @@ export default function ReplayRightRail({ runtime, indicatorStatus }: ReplayRigh
   });
 
   return (
-    <aside className="replay-right-rail" aria-label="回放训练账户与纸面交易">
+    <>
       {warningCount > 0 && (
         <section className="replay-ambiguity-warning" role="alert" data-replay-warning-count={warningCount}>
           <strong>保守执行警告 · {warningCount}</strong>
@@ -171,6 +171,14 @@ export default function ReplayRightRail({ runtime, indicatorStatus }: ReplayRigh
         <p>SMA 20 · 仅 {indicatorStatus.sourceBarCount} 根已揭示 bars。</p>
         <p>Hosted / range / security 指标已禁用：回放页不会请求后端或未来窗口。</p>
       </section>
+    </>
+  );
+}
+
+export default function ReplayRightRail(props: ReplayRightRailProps) {
+  return (
+    <aside className="replay-right-rail" aria-label="回放训练账户与纸面交易">
+      <ReplayPaperTradingDock {...props} />
     </aside>
   );
 }

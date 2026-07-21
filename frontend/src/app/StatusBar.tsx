@@ -1,4 +1,5 @@
 import { memo } from "react";
+import MarketStatusBar from "./MarketStatusBar.js";
 
 export type ConnectionStatus = "connected" | "loading" | "disconnected" | string;
 
@@ -34,8 +35,10 @@ function StatusBar({ status }: StatusBarProps) {
   } = status;
 
   return (
-    <footer className="status-bar" id="status-bar">
-      <div className="status-left">
+    <MarketStatusBar
+      source="live"
+      connectionStatus={connectionStatus}
+      left={<>
         <span>
           <span className={`status-dot ${connectionStatus}`} />
           {connectionStatus === "connected" && `Connected to ${exchangeLabel}`}
@@ -58,13 +61,13 @@ function StatusBar({ status }: StatusBarProps) {
             {exchangeLimitations.length} exchange limitation{exchangeLimitations.length > 1 ? "s" : ""}
           </span>
         )}
-      </div>
-      <div className="status-right">
+      </>}
+      right={<>
         <span>{dataSource === "mock" ? "Demo Mode" : `${exchangeLabel} ${marketLabel}`}</span>
         <span>{wsStatusLabel}</span>
         <span>CandleScope v0.2.0</span>
-      </div>
-    </footer>
+      </>}
+    />
   );
 }
 

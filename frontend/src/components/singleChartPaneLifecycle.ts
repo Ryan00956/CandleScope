@@ -3,6 +3,16 @@ import type { ChartDataCommitMeta } from "../features/market-data/useChartDataRu
 import type { SeriesWindowStore } from "../features/market-data/window/seriesWindowStore.js";
 
 const EMPTY_DATA_TIME_SET: ReadonlySet<number> = new Set<number>();
+const EMPTY_OPTIONAL_CHART_COLLECTION: never[] = [];
+
+/**
+ * Optional pane inputs participate in several effect dependency graphs. Keep
+ * their absent value referentially stable so an internal state update cannot
+ * turn a missing collection into a new dependency on every render.
+ */
+export function resolveStableOptionalChartCollection<T>(items?: T[] | null): T[] {
+  return items ?? EMPTY_OPTIONAL_CHART_COLLECTION;
+}
 
 export function removedDrawingSubPaneScopeKeys({
   currentBase,

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import type { IndicatorLine } from "../indicators/indicatorTypes.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
@@ -47,9 +47,23 @@ export function buildReplaySmaLine(
 
 export function useReplayIndicatorRuntime(runtime: ReplayRuntime): ReplayIndicatorRuntime {
   const storeSnapshot = runtime.store;
+  const seriesStore = runtime.replayStore.seriesStore;
+  const subscribeSeries = useCallback((listener: () => void) => {
+    const unsubscribe = seriesStore.subscribe(listener);
+    return () => { unsubscribe(); };
+  }, [seriesStore]);
+  const getSeriesRevision = useCallback(() => Number(seriesStore.version), [seriesStore]);
+  const seriesRevision = useSyncExternalStore(
+    subscribeSeries,
+    getSeriesRevision,
+    getSeriesRevision,
+  );
   return useMemo(() => {
+    // Reading the external-store revision is the invalidation boundary for
+    // the ref-backed SeriesWindowStore snapshot below.
+    void seriesRevision;
     const cursorMs = storeSnapshot.virtualTimeMs;
-    const rows = runtime.replayStore.seriesStore.snapshot();
+    const rows = seriesStore.snapshot();
     const line = buildReplaySmaLine(rows, cursorMs);
     const sourceTimes = rows
       .map((row) => Number(row.time) * 1_000)
@@ -63,5 +77,5 @@ export function useReplayIndicatorRuntime(runtime: ReplayRuntime): ReplayIndicat
         disabledCapabilities: ["hosted", "range", "security"],
       },
     };
-  }, [runtime.replayStore, storeSnapshot]);
+  }, [seriesRevision, seriesStore, storeSnapshot]);
 }

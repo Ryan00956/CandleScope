@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_1_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界与 Phase 1 TrainingRun 存储、训练大厅、v1 兼容适配和回滚证据已经完成。Phase 2 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
+状态：`PHASE_2_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅，以及 Phase 2 共用市场工作区、run-scoped 绘图、能力占位和一致性快照历史加载均已完成。Phase 3 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -1394,4 +1394,32 @@ Runtime defaults: 前端 VITE_REPLAY_PRODUCT_V2_ENABLED=0；后端 replay 与 v2
 Commit rollback: detached 父提交打开 Phase 1 数据库并再次执行 v1 migration，quick_check=ok；数据库文件 SHA-256 前后均为 a4d0a2efbfdaeafb22ffe6290147a138835b392a8ae5ef147d61f3556897a504。v1 逻辑 hash 前后均为 68d9cdc774c97a42d3cae51e30c3cc23a7183a74c5031cd7965b83a6ad4ba332（2 rows）；training 逻辑 hash 前后均为 88f71014757abfe08eec9bd2d14d4b1776863be78f3594fa0dabf96d012ffa0e（6 rows）；父提交不存在 training schema 模块。
 Known limitations: Phase 1 的具体训练仍经 v1 单轨适配器运行；多商品、funding、历史 L2/book-assisted、规则变更和 isolated margin 分别等待后续 Phase，当前均显式关闭且不近似实现；全仓 Ruff 仍有上述 36 个既有违规。
 Decision: PASS；停止在 Phase 1，不进入 Phase 2。
+```
+
+### Phase 2 执行记录
+
+```text
+Phase: 2 - complete shared market workspace, capability surface, and replay history
+Date: 2026-07-21
+Commit: 本 Phase 独立提交，提交号以 Git 历史为准
+Parent commit: 2962e2899f737960b9dbf72598f569ccfd6ac19f
+Executor: Codex
+Scope: 抽取 live/replay 共用的 TopBar、ChartWorkspace、RightMarketRail 与 StatusBar 壳层；在 v2 路径组合完整绘图工具栏、真实图表 pane、右栏自选/能力/paper dock、底部控制坞和 replay-only history provider；保留 v1 精确 fallback，未进入 Phase 3 ViewerState 或新推进语义。
+Files changed: backend frozen-snapshot history codec/store/service/API/smoke isolation/tests；frontend source-neutral market shell、replay workspace/rail/dock/capability/history/preferences、run-scoped drawing lifecycle/tests/CSS；本执行记录、Phase 2 证据和浏览器截图。
+Schema/protocol changes: 新增 replay.history.v1 只读响应；页请求绑定 run/session/track、data epoch、history epoch、source identity 和 revealed boundary。数据只从 TrainingRun 已冻结 immutable dataset ref 解码，不查询活动生产行情库；不修改 replay.v1 payload 或现有数据库 schema。
+Commands run:
+  backend targeted: .\.venv\Scripts\python.exe -m pytest -q tests/test_replay_v2_contracts.py tests/test_replay_v2_training_api.py tests/test_replay_v2_training_history.py tests/test_replay_smoke_fixture.py
+  backend full: .\.venv\Scripts\python.exe -m pytest -q
+  backend lint: .\.venv\Scripts\python.exe -m ruff check <Phase 2 Python scope>
+  frontend: npm run check
+  rollback: node scripts/replay-rollback-drill.mjs --out <temporary evidence path>
+  commit rollback: detached worktree + git revert --no-commit <Phase 2 commit> + git write-tree 与父提交 tree 比对
+  repository: git diff --check
+Automated results: targeted backend 40 passed；full backend 1882 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2366 passed，architecture/typecheck/ESLint/production build 全绿；Phase 2 Ruff scope 0；git diff --check PASS。
+Browser evidence: 1600px 完整工作区截图已固化；1280/900/760px 均无页面横向溢出或 chart/rail/dock/status 重叠，760px 右栏按设计隐藏。真实 drawing engine 可画线并在同一 run reload 后恢复；localStorage key 绑定 run/session，未复用 live drawing key。普通 v2 页面请求仅出现 replay capabilities/session/commands/history；live market、klines、orderbook、liquidation 请求为 0。
+History/no-lookahead evidence: backend 覆盖非空分页、去重、BAR/AGG_TRADE frozen bundle、blind synthetic timeline、epoch/boundary/source drift fail-closed；frontend 覆盖 in-flight 去重、取消、prepend 去重和协议漂移拒绝。浏览器左拖触发 replay history endpoint；当前完整 warmup prefix 无更老页时稳定返回 has_more=false。单步前 seq=0/revision=1/cursor=946684800000/max_bar=946684740000，单步后 seq=1/revision=2/cursor=946684859999/max_bar=946684800000，始终 max_bar <= cursor。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0；v2 flag 关闭时继续渲染原 ReplayPageShell/ReplayRightRail 组合。
+Rollback: feature-flag v1 fallback、旧 build v1 rollback drill 与 Phase 2 单提交 tree revert 均 PASS；反向应用提交后 tree 与父提交 2962e2899f737960b9dbf72598f569ccfd6ac19f 完全一致。
+Known limitations: display_interval 仍属于当前 session identity，STEP_DISPLAY/STEP_EVENT/ADVANCE_BY 等 Phase 3 语义尚未实现；Phase 2 仅主商品 FULL。OI、爆仓、mark/index/basis、funding、订单簿、订单流、hosted/range/security 与历史 L2/book-assisted 均明确显示 unavailable/disabled，不以 0 或近似数据替代。
+Decision: PASS；停止在 Phase 2，不进入 Phase 3。
 ```

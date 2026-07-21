@@ -1,0 +1,354 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import MarketChartWorkspace from "../../app/MarketChartWorkspace.js";
+import MarketPageFrame from "../../app/MarketPageFrame.js";
+import MarketStatusBar from "../../app/MarketStatusBar.js";
+import MarketTopBarFrame from "../../app/MarketTopBarFrame.js";
+import type { ChartSurfaceActions, ChartSurfaceHandle } from "../../chart-adapter/useChartSurfaceRuntime.js";
+import type { RefObject } from "react";
+import DrawingToolbar from "../../components/DrawingToolbar.js";
+import IntervalSelector from "../../components/IntervalSelector.js";
+import SingleChartPanes from "../../components/SingleChartPanes.js";
+import { loadUserPrefs } from "../chart-session/chartSessionModel.js";
+import { useDrawingRuntime } from "../drawings/useDrawingRuntime.js";
+import { useChartSettingsRuntime } from "../settings/chartAppearanceSettings.js";
+import { groupIntervalsByDuration, parseIntervalSeconds } from "../../utils/intervals.js";
+import type { IntervalString } from "../../utils/intervals.js";
+import ReplayBottomControlDock from "./components/ReplayBottomControlDock.js";
+import ReplayReportPanel from "./components/ReplayReportPanel.js";
+import ReplayRightMarketRail from "./components/ReplayRightMarketRail.js";
+import ReplaySessionDialog from "./components/ReplaySessionDialog.js";
+import { buildReplayCapabilityModel } from "./replayCapabilityModel.js";
+import { defaultReplayV2Api } from "./replayV2Api.js";
+import { handleReplayShortcut } from "./replayShortcuts.js";
+import { returnToTrainingHub } from "./trainingHubNavigation.js";
+import { formatReplayPublicTime, replayOwnsController } from "./replayUiModel.js";
+import { useReplayHistoryRuntime } from "./useReplayHistoryRuntime.js";
+import type { ReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
+import type { ReplayRuntime } from "./useReplayRuntime.js";
+import { useReplayWorkspacePreferences } from "./replayWorkspacePreferences.js";
+
+
+export interface ReplayTrainingPageShellProps {
+  readonly runtime: ReplayRuntime;
+  readonly indicators: ReplayIndicatorRuntime;
+  readonly chartSurfaceRef: RefObject<ChartSurfaceHandle | null>;
+  readonly chartSurfaceActions: ChartSurfaceActions;
+}
+
+function ReplayStatePanel({ runtime }: { readonly runtime: ReplayRuntime }) {
+  if (runtime.phase === "CONFIGURING") return <ReplaySessionDialog runtime={runtime} />;
+  if (runtime.phase === "ERROR" || runtime.phase === "ENTRY_ERROR") {
+    return (
+      <div className="chart-area" data-replay-state="error" data-replay-error={runtime.error?.code ?? "REPLAY_RUNTIME_ERROR"}>
+        <div className="error-overlay">
+          <div className="error-icon">!</div>
+          <div className="error-message">
+            <strong>K 线回放不可用</strong><br />
+            {runtime.error?.code ?? "REPLAY_RUNTIME_ERROR"}: {runtime.error?.message ?? "Unknown replay error"}
+            <small>训练工作区 fail closed；不会回退到 live、mock 或缓存中的其他市场。</small>
+          </div>
+          {runtime.phase === "ERROR" && <button className="retry-btn" type="button" onClick={runtime.actions.retry}>重试回放能力</button>}
+        </div>
+      </div>
+    );
+  }
+  const labels: Readonly<Record<string, string>> = {
+    IDLE: "准备独立回放运行时…",
+    LOADING_CAPABILITIES: "正在加载回放能力…",
+    VALIDATING_SESSION: "正在校验服务端 session；HTTP snapshot 不会直接渲染…",
+    CONNECTING_SESSION: "等待首个原子 replay snapshot…",
+    STOPPED: "回放运行时已释放。",
+  };
+  return (
+    <div className="chart-area" data-replay-state="loading">
+      <div className="error-overlay">
+        <div className="replay-loading-spinner" />
+        <div className="error-message"><strong>K 线回放</strong><br />{labels[runtime.phase] ?? "正在恢复回放…"}<small>加载期间不渲染 live/mock bars。</small></div>
+      </div>
+    </div>
+  );
+}
+
+export default function ReplayTrainingPageShell({
+  runtime,
+  indicators,
+  chartSurfaceRef,
+  chartSurfaceActions,
+}: ReplayTrainingPageShellProps) {
+  const [returningToHub, setReturningToHub] = useState(false);
+  const [returnToHubError, setReturnToHubError] = useState<string | null>(null);
+  const [priceScale] = useState(() => {
+    const preferences = loadUserPrefs();
+    return {
+      invert: Boolean(preferences.invertScale),
+      mode: typeof preferences.priceScaleMode === "number" ? preferences.priceScaleMode : 0,
+    };
+  });
+  const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
+  const drawings = useDrawingRuntime({ chartSurfaceActions, session: null });
+  const history = useReplayHistoryRuntime(runtime);
+  const workspace = useReplayWorkspacePreferences(runtime.store.sessionId ?? "pending");
+  const config = runtime.store.sessionConfig;
+  const active = runtime.phase === "ACTIVE" && config !== null && runtime.store.hasAuthoritativeSnapshot;
+  const ownsController = replayOwnsController(runtime.store, runtime.clientInstanceId);
+  const capabilities = useMemo(() => buildReplayCapabilityModel(config?.source_kind ?? "BAR"), [config?.source_kind]);
+  const publicTime = formatReplayPublicTime(runtime.store.virtualTimeMs, {
+    blindMode: config?.blind_mode ?? true,
+    originMs: runtime.store.replayStartMs,
+  });
+  const formatChartTime = useCallback((timeSeconds: number) => formatReplayPublicTime(timeSeconds * 1_000, {
+    blindMode: config?.blind_mode ?? true,
+    originMs: runtime.store.replayStartMs,
+  }), [config?.blind_mode, runtime.store.replayStartMs]);
+  const returnToHub = useCallback(async () => {
+    const sessionId = runtime.store.sessionId;
+    if (sessionId === null || returningToHub) return;
+    setReturningToHub(true);
+    setReturnToHubError(null);
+    try {
+      await returnToTrainingHub(sessionId, defaultReplayV2Api);
+    } catch (cause) {
+      setReturnToHubError(cause instanceof Error ? cause.message : "返回存档大厅失败");
+      setReturningToHub(false);
+    }
+  }, [returningToHub, runtime.store.sessionId]);
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      handleReplayShortcut(event, (action) => {
+        if (!ownsController || runtime.store.connectionState !== "connected"
+          || runtime.pendingCommand !== null || runtime.forkPending) return false;
+        if (action === "toggle-play" && runtime.store.state === "PLAYING") {
+          void runtime.actions.submitCommand("pause", {}).catch(() => undefined);
+          return true;
+        }
+        if (action === "toggle-play" && runtime.store.state === "PAUSED") {
+          void runtime.actions.submitCommand("play", {}).catch(() => undefined);
+          return true;
+        }
+        if (action === "step" && runtime.store.state === "PAUSED") {
+          void runtime.actions.submitCommand("step", { count: 1 }).catch(() => undefined);
+          return true;
+        }
+        if (action === "advance-window" && runtime.store.state === "PAUSED") {
+          void runtime.actions.submitCommand("advance_by", { ms: 300_000 }).catch(() => undefined);
+          return true;
+        }
+        return false;
+      });
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, [ownsController, runtime.actions, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, runtime.store.state]);
+
+  const interval = (config?.display_interval ?? "1m") as IntervalString;
+  const seconds = parseIntervalSeconds(interval) ?? 60;
+  const nativeIntervals = useMemo(() => [{ value: interval, seconds, label: interval }], [interval, seconds]);
+  const intervalGroups = useMemo(() => groupIntervalsByDuration([
+    { value: interval, seconds, label: interval, isCustom: false },
+  ]), [interval, seconds]);
+  const last = runtime.store.lastPrice;
+  const isUp = Number(last?.close ?? 0) >= Number(last?.open ?? 0);
+  const chart = active && runtime.marketData.status.barCount > 0 && config !== null ? (
+    <SingleChartPanes
+      ref={chartSurfaceRef}
+      seriesStore={runtime.marketData.view.seriesStore}
+      symbol={config.symbol}
+      drawingKeyBase={`replay:${runtime.store.sessionId ?? "unknown"}`}
+      interval={interval}
+      loading={runtime.marketData.view.loading || history.loading}
+      onCrosshairMove={runtime.marketData.actions.onCrosshairMove}
+      onNeedMoreLeft={history.loadMoreLeft}
+      canLoadMoreLeft={history.hasMore}
+      datasetKey={String(runtime.marketData.view.meta.seriesKey ?? "replay-uninitialized")}
+      upColor={settings.upColor}
+      downColor={settings.downColor}
+      chartType={settings.chartType}
+      renkoBoxSizeMode={settings.renkoBoxSizeMode}
+      renkoAtrLength={settings.renkoAtrLength}
+      renkoBoxSize={settings.renkoBoxSize}
+      pointFigureBoxSizeMode={settings.pointFigureBoxSizeMode}
+      pointFigureAtrLength={settings.pointFigureAtrLength}
+      pointFigureBoxSize={settings.pointFigureBoxSize}
+      pointFigureReversalAmount={settings.pointFigureReversalAmount}
+      kagiReversalMode={settings.kagiReversalMode}
+      kagiAtrLength={settings.kagiAtrLength}
+      kagiReversalAmount={settings.kagiReversalAmount}
+      lineBreakNumberOfLines={settings.lineBreakNumberOfLines}
+      theme={resolvedTheme}
+      customBg={settings.customBg}
+      timezone={settings.timezone ?? "UTC"}
+      timeFormatter={formatChartTime}
+      tickMarkFormatter={formatChartTime}
+      dataMeta={runtime.marketData.view.meta}
+      onVisibleRangeChange={runtime.marketData.actions.onVisibleRangeChange}
+      drawingTool={drawings.view.drawingTool}
+      onDrawingToolChange={drawings.actions.setDrawingTool}
+      penColor={drawings.view.penColor}
+      penSize={drawings.view.penSize}
+      textFontSize={drawings.view.textFontSize}
+      textBold={drawings.view.textBold}
+      textItalic={drawings.view.textItalic}
+      fibLevels={drawings.view.fibLevels}
+      fibInverted={drawings.view.fibInverted}
+      positionSize={drawings.view.positionSize}
+      drawingSnapEnabled={drawings.view.drawingSnapEnabled}
+      onSelectedDrawingChange={drawings.actions.handleSelectedDrawingChange}
+      mainOverlayLines={[...indicators.mainOverlayLines]}
+      invertScale={priceScale.invert}
+      priceScaleMode={priceScale.mode}
+    />
+  ) : active ? (
+    <div className="chart-area" data-replay-state="empty"><div className="error-overlay"><div className="error-message"><strong>尚无已揭示 BAR</strong><br />服务端 snapshot 为空；不会使用 live/mock 数据填充。</div></div></div>
+  ) : <ReplayStatePanel runtime={runtime} />;
+
+  const drawingToolbar = (
+    <DrawingToolbar
+      activeTool={drawings.view.drawingTool}
+      onToolChange={drawings.actions.setDrawingTool}
+      penColor={drawings.view.penColor}
+      onPenColorChange={drawings.actions.setPenColor}
+      penSize={drawings.view.penSize}
+      onPenSizeChange={drawings.actions.setPenSize}
+      onClearAll={drawings.actions.handleClearDrawing}
+      drawingsHidden={drawings.view.drawingsHidden}
+      onToggleDrawingsHidden={drawings.actions.handleToggleDrawingsHidden}
+      drawingSnapEnabled={drawings.view.drawingSnapEnabled}
+      onDrawingSnapEnabledChange={drawings.actions.handleDrawingSnapEnabledChange}
+      textFontSize={drawings.view.textFontSize}
+      onTextFontSizeChange={drawings.actions.setTextFontSize}
+      textBold={drawings.view.textBold}
+      onTextBoldChange={drawings.actions.setTextBold}
+      textItalic={drawings.view.textItalic}
+      onTextItalicChange={drawings.actions.setTextItalic}
+      fibLevels={drawings.view.fibLevels}
+      onFibLevelsChange={drawings.actions.handleFibLevelsChange}
+      fibInverted={drawings.view.fibInverted}
+      onFibInvertedChange={drawings.actions.handleFibInvertedChange}
+      positionSize={drawings.view.positionSize}
+      onPositionSizeChange={drawings.actions.handlePositionSizeChange}
+      selectedDrawing={drawings.view.selectedDrawing}
+      onSelectedDrawingStyleChange={drawings.actions.handleSelectedDrawingStyleChange}
+      chartType={settings.chartType}
+      onChartTypeChange={(chartType) => setSettings((current) => ({ ...current, chartType }))}
+    />
+  );
+
+  return (
+    <MarketPageFrame
+      topBar={(
+        <MarketTopBarFrame
+          source="replay"
+          className="replay-top-bar"
+          brandIcon="◀"
+          brandText="CandleScope"
+          navigation={<span className="replay-mode-badge">REPLAY TRAINING</span>}
+          identity={config && (
+            <button className="replay-identity-readonly" type="button" title="活动 run 的来源身份不可变；请新建或 Fork。">
+              {config.exchange} · {config.market_type} · {config.symbol} · {config.display_interval}
+            </button>
+          )}
+          controls={<>
+            <button className="indicator-toggle-btn active" type="button" title="本地指标仅使用已揭示前缀">📊<span className="indicator-badge">{indicators.status.sourceBarCount}</span></button>
+            <button className="indicator-toggle-btn alert-toggle-btn" type="button" disabled title={capabilities.ALERTS.state}>🔔</button>
+          </>}
+          quote={last && (
+            <div className="price-info"><span className={`current-price ${isUp ? "price-up" : "price-down"}`}>{last.close}</span><span className="price-change">{isUp ? "▲" : "▼"} REPLAY</span></div>
+          )}
+          marketMetrics={(
+            <div className="advanced-market-summary advanced-market-summary-unsupported" aria-label="Replay derivatives capability summary">
+              {(["MARK_PRICE", "INDEX_PRICE", "BASIS"] as const).map((id) => (
+                <div className="advanced-market-chip" key={id} data-market-metric={id.toLowerCase()} data-capability-state={capabilities[id].state}>
+                  <span className="advanced-market-chip-label">{capabilities[id].label}</span>
+                  <span className="advanced-market-chip-value">--</span>
+                  <span className="advanced-market-chip-suffix">{capabilities[id].state}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          ohlcv={last && (
+            <div className="ohlcv-bar">
+              <div className="ohlcv-item"><span className="ohlcv-label">O</span><span className="ohlcv-value">{last.open}</span></div>
+              <div className="ohlcv-item"><span className="ohlcv-label">H</span><span className="ohlcv-value">{last.high}</span></div>
+              <div className="ohlcv-item"><span className="ohlcv-label">L</span><span className="ohlcv-value">{last.low}</span></div>
+              <div className="ohlcv-item"><span className="ohlcv-label">C</span><span className="ohlcv-value">{last.close}</span></div>
+              <div className="ohlcv-item"><span className="ohlcv-label">Vol</span><span className="ohlcv-value">{last.volume}</span></div>
+            </div>
+          )}
+          trailing={<>
+            {active && runtime.store.sessionId !== null && <button className="replay-return-hub" type="button" disabled={returningToHub} title={returnToHubError ?? "服务端暂停并写入 checkpoint 后返回存档大厅"} onClick={() => void returnToHub()}>{returningToHub ? "正在保存…" : "存档大厅"}</button>}
+            <a className="replay-live-link" href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
+          </>}
+        />
+      )}
+      intervalSelector={(
+        <IntervalSelector
+          interval={interval}
+          capabilityReady={config !== null}
+          capabilityLoading={config === null}
+          nativeIntervals={nativeIntervals}
+          intervalGroups={intervalGroups}
+          customIntervalRecords={[]}
+          savedCustomIntervals={[]}
+          onSelectInterval={() => undefined}
+          onCreateCustomInterval={() => ({ ok: false, message: "Phase 2 interval is read-only" })}
+          onRemoveCustomInterval={() => undefined}
+          onRestoreCustomInterval={() => undefined}
+          onTogglePinCustomInterval={() => null}
+          onClearCustomIntervals={() => undefined}
+          intervalNotice={{ type: "info", text: `服务端权威历史时间轴 · ${publicTime}` }}
+          readOnlyReason="Phase 2 固定使用 run 的 display interval；Phase 3 才开放重采样切换。"
+        />
+      )}
+      workspace={(
+        <MarketChartWorkspace
+          toolbar={drawingToolbar}
+          exportOverlay={null}
+          chart={chart}
+          rightRail={active ? (
+            <ReplayRightMarketRail
+              runtime={runtime}
+              indicators={indicators}
+              preferences={workspace.preferences}
+              actions={workspace.actions}
+              upColor={settings.upColor}
+              downColor={settings.downColor}
+            />
+          ) : null}
+        />
+      )}
+      featureSurfaces={active ? <><ReplayReportPanel runtime={runtime} /><ReplayBottomControlDock runtime={runtime} /></> : null}
+      statusBar={(
+        <MarketStatusBar
+          source="replay"
+          className="replay-status-bar"
+          connectionStatus={runtime.store.connectionState}
+          dataAttributes={{
+            "data-replay-session-state": runtime.store.state ?? "",
+            "data-replay-source-sequence": runtime.store.sourceSequence,
+            "data-replay-revision": runtime.store.revision,
+            "data-replay-state-hash": runtime.store.stateHash ?? "",
+            "data-replay-cursor-ms": runtime.store.virtualTimeMs ?? "",
+            "data-replay-max-bar-ms": runtime.replayStore.seriesStore.last()?.time === undefined ? "" : Number(runtime.replayStore.seriesStore.last()?.time) * 1_000,
+            "data-replay-last-bar-closed": String(runtime.store.lastPrice?.replayClosed ?? ""),
+            "data-replay-revealed": String(runtime.store.revealed),
+            "data-replay-history-epoch": history.historyEpoch ?? "",
+          }}
+          left={<>
+            <span><span className={`status-dot ${runtime.store.connectionState === "connected" ? "connected" : "loading"}`} />K 线回放 · REPLAY</span>
+            <span>{runtime.store.state ?? runtime.phase}</span>
+            <span>{runtime.marketData.status.barCount} bars</span>
+            {history.loading && <span>Loading older replay data…</span>}
+            {!history.hasMore && !history.loading && <span>No more frozen history</span>}
+            {history.error && <span className="replay-history-error">{history.error}</span>}
+          </>}
+          right={<>
+            <span>Controller: {ownsController ? "本页" : runtime.store.controllerClientId ? "其他页面" : "无"}</span>
+            <span>{config?.source_kind.toUpperCase() ?? "BAR"} · {config?.quality_mode.toUpperCase() ?? "EXACT"}</span>
+            <span>无 live feeds · replay.v2 shell / replay.v1 adapter</span>
+          </>}
+        />
+      )}
+    />
+  );
+}

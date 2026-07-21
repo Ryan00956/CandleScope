@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { clearDrawingScopeAuthoritatively } from "./drawingScopePersistence.js";
 import { useDrawingToolState } from "./drawingToolState.js";
 import { awaitControlledSeriesRebuildExportCapture } from "./export/controlledExportRollbackCheckpoint.js";
@@ -73,6 +73,13 @@ export interface DrawingRuntime {
   status: Record<string, never>;
 }
 
+export function shouldSynchronizeDrawingVisibility(
+  previous: boolean | null,
+  next: boolean,
+): boolean {
+  return previous === null ? next : previous !== next;
+}
+
 export function useDrawingRuntime({
   chartSurfaceActions,
   session,
@@ -85,6 +92,7 @@ export function useDrawingRuntime({
   const {
     setDrawingsHidden,
   } = toolState.actions;
+  const synchronizedDrawingsHiddenRef = useRef<boolean | null>(null);
 
   const handleClearDrawing = useCallback(() => {
     chartSurfaceActions?.clearAllDrawings?.();
@@ -99,6 +107,13 @@ export function useDrawingRuntime({
   }, [chartSurfaceActions]);
 
   useEffect(() => {
+    const previous = synchronizedDrawingsHiddenRef.current;
+    synchronizedDrawingsHiddenRef.current = view.drawingsHidden;
+    // A newly mounted chart host already receives `initialHidden`. Avoid
+    // converting the normal initial `false` into a mutation while a persisted
+    // drawing document is still restoring; only real visibility transitions
+    // (or an initially hidden surface) need the imperative API.
+    if (!shouldSynchronizeDrawingVisibility(previous, view.drawingsHidden)) return;
     chartSurfaceActions?.setDrawingsHidden?.(view.drawingsHidden);
   }, [chartSurfaceActions, view.drawingsHidden]);
 

@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "releaseStatus": "prerelease",
+  "plugin": {
+    "id": "candlescope.pyne",
+    "package": "candlescope-plugin-pyne",
+    "version": "0.1.0"
+  },
+  "python": {
+    "requires": ">=3.11,<3.14",
+    "module": "candlescope_plugin_pyne"
+  },
+  "wheels": {
+    "candlescope-plugin-pyne": {
+      "version": "0.1.0",
+      "source": "local-release-build"
+    },
+    "candlescope-plugin-sdk": {
+      "version": "0.1.0",
+      "source": "local-release-build"
+    },
+    "pyne-runtime": {
+      "version": "0.2.0rc1",
+      "source": "github-release",
+      "releaseUrl": "https://github.com/Ryan00956/pyne-runtime/releases/download/v0.2.0rc1/pyne_runtime-0.2.0rc1-py3-none-any.whl",
+      "sha256": "sha256:53597fd53150c7beecdfd57ecd1c4e5c5ebaa2edf2ae1006e0723ae41467e754"
+    },
+    "numpy": {
+      "version": "2.3.3",
+      "source": "pypi-wheel-for-target-platform"
+    }
+  },
+  "probe": {
+    "source": "indicator(\"CSPKG Probe\", overlay=false)\nplot(close * 2, title=\"Close x2\", color=\"#22c55e\", linewidth=2)\n",
+    "context": {
+      "exchange": "binance",
+      "marketType": "spot",
+      "symbol": "BTCUSDT",
+      "interval": "1m"
+    },
+    "bars": [
+      {
+        "time": 1700000000,
+        "open": 100,
+        "high": 102,
+        "low": 99,
+        "close": 101,
+        "volume": 10,
+        "isClosed": true
+      },
+      {
+        "time": 1700000060,
+        "open": 101,
+        "high": 103,
+        "low": 100,
+        "close": 102,
+        "volume": 11,
+        "isClosed": true
+      }
+    ],
+    "params": {},
+    "options": {},
+    "analysisSha256": "sha256:a8b9ec96529920fb061737898b6c71d6ab14b75f9813f20ab8747305d1715acd",
+    "executionSha256": "sha256:44669108c428b89cdcd7433e6545aa87fb804b5f675273f57e4a13fcf788dda5"
+  }
+}

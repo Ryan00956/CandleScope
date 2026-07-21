@@ -23,7 +23,7 @@ v1 的核心边界是：
 | Phase 2：通用 Host/Supervisor | 已完成 | 注册表、生命周期、RPC、宿主服务、诊断 |
 | Phase 3：隔离安装器 v2 | 已完成 | `.cspkg`、独立 venv、校验、探测、原子激活与回滚 |
 | Phase 4：通用 Indicator Service | 已完成 | `legacy/shadow/sidecar` 路由与传输迁移 |
-| Phase 5：Pyne 插件发行 | 未开始 | Pyne host facade 与 `candlescope-plugin-pyne` |
+| Phase 5：Pyne 插件发行 | 已完成（release-ready） | Pyne host facade、发行锁与 `candlescope-plugin-pyne` |
 | Phase 6：Pyne 切换与源码快照删除 | 未开始 | shadow、cutover、独立删除提交 |
 | Phase 7：描述符驱动前端 | 未开始 | 运行时/语言/能力描述符，无硬编码运行时联合类型 |
 | Phase 8：Pine Compatibility 插件 | 未开始 | 修复发行来源、桥接插件、shadow、cutover |
@@ -462,6 +462,81 @@ stderr，也不公开本地路由文件路径。插件 style 也不能覆盖宿�
   FastAPI `on_event` 弃用提示；
 - 所有变更 Python 文件 Ruff check、新文件 format check、backend compileall 与
   `git diff --check` 通过；测试退出后无残留 sidecar、测试 venv、staging 或 `.part`。
+
+## Phase 5：Pyne 插件发行
+
+### 独立发行边界
+
+新增独立可构建包 `packages/candlescope-plugin-pyne`，其 runtime ID 为
+`candlescope.pyne`。生产源码只导入 `candlescope-plugin-sdk` 与公开的
+`pyne_runtime` package，不导入 `app.*`、Indicator serializer、transport 或当前
+`packages/pyne-runtime` 快照，也不复制任何 Pyne 源文件。包 metadata 精确固定：
+
+- `candlescope-plugin-pyne==0.1.0`；
+- `candlescope-plugin-sdk==0.1.0`；
+- `pyne-runtime==0.2.0rc1`；
+- Python `>=3.11,<3.14`。
+
+桥接层从 SDK `MarketContext` 构造 Pyne 的 `syminfo` 与 `timeframe`，透传 params 和经过
+校验的 `securityMode`，并把 Pyne 的结构化 analysis/runtime 错误映射为 SDK
+`Diagnostic`。CandleScope sidecar 已经是宿主可超时、终止和重启的硬进程边界，因此桥内
+固定 `executor_mode="inline"`，避免 Windows 下再嵌套一层 multiprocessing worker；
+Pyne 自身资源上限仍由 `PyneSettings` 默认值约束。
+
+### 发行锁与 bundle
+
+`release/release-lock.json` 固定插件、SDK、引擎和 NumPy 版本，以及确定性的 analysis /
+execution probe。Pyne 引擎只接受 GitHub Release
+`v0.2.0rc1` 的 universal wheel，固定 SHA-256 为
+`sha256:53597fd53150c7beecdfd57ecd1c4e5c5ebaa2edf2ae1006e0723ae41467e754`；
+它仍明确标记为 prerelease，没有被文档提升为 stable。
+
+`scripts/build_bundle.py` 从 wheel 内的 `METADATA` 读取真实 package/version，只接受恰好
+四个 wheel（bridge、SDK、Pyne Runtime、目标平台 NumPy），并在进入通用 `.cspkg`
+builder 前核对 Pyne 官方 artifact hash。NumPy 固定为 `2.3.3`，因此 bundle 是目标
+Python ABI / OS 相关产物；外层 `.cspkg` hash 才是用户安装时必须从可信发布渠道取得的
+最终锁。
+
+真实 NumPy wheel 包含标准零字节 ZIP directory entries。Phase 3 审计器原先错误地拒绝
+此类合法 wheel，Phase 5 将规则收窄为：只在嵌套 wheel 中允许路径规范、零字节的目录
+entry；`.cspkg` 外层仍禁止 directory entry，且两层都继续拒绝路径穿越、大小写冲突、
+symlink、加密 entry 和不支持的压缩方式。
+
+### Render IR 覆盖与切换门禁
+
+桥接只把 Pyne line 输出转换为 `candlescope.render/1`，包括稳定/去重后的 series ID、
+点、pane、scale 和受控 style。它会把所有非空、非 `lines/meta` 的 Pyne 输出类型列在
+`output.meta.unsupportedOutputKinds`，但不把 runtime 私有对象夹带进公共协议。
+
+Phase 0 冻结脚本在真实已安装 sidecar 中得到与 legacy 一致的 `plot_1` 和
+`[202, 204, 206, 208, 210]`，同时明确报告 `hlines`、`markers` 尚不可传输。因此
+line parity 已建立，但完整 HTTP/range/WS golden 预期仍不相等；Phase 6 不能把这种已知
+缺口记成 shadow success。默认路由保持 `pyne=legacy`，当前源码快照未删除，也没有增加
+任何静默 fallback。
+
+### 2026-07-21 验证证据
+
+- bridge runtime、诊断、context、fail-closed output、架构和发行 builder 聚焦测试，连同
+  通用 bundle 回归：`34 passed in 0.51s`；
+- bridge 独立包：`18 passed in 0.23s`；SDK 独立回归：`26 passed in 0.07s`；
+- Phase 0 HTTP/range/WebSocket 冻结 golden：`3 passed in 1.08s`，fixture 未修改；
+- backend 全量：`1943 passed, 4 warnings in 120.79s`；4 条 warning 仍为既有 FastAPI
+  `on_event` 弃用提示；
+- 真实构建 `candlescope_plugin_pyne-0.1.0-py3-none-any.whl` 与
+  `candlescope_plugin_sdk-0.1.0-py3-none-any.whl`，下载并校验官方 Pyne wheel；当前
+  Windows CPython 3.12 NumPy wheel SHA-256 为
+  `sha256:497d7cad08e7092dba36e3d296fe4c97708c93daf26643a1ae4b03f6294d30eb`；
+- 候选 `.cspkg` 为 `13,004,213` bytes，SHA-256
+  `sha256:81a35b285ad6d2c98b9edf6d6ec568923b9691ab83e67f7c37a7e43081a0a9cc`；该值只记录本次
+  本地 release candidate，不冒充尚未发布的公开 Release asset；
+- 全新 managed root 完成离线 wheel install、`pip check`、descriptor、analysis 和
+  execution probe；随后 `check` 再次通过；重复 install 返回 `changed=false`、
+  `reusedInstallation=true` 且 activation ID 不变；
+- 已安装 wheel 的 descriptor 报告 `engineVersion=0.2.0rc1`、
+  `engineVersionVerified=true`，真实 Phase 0 fixture 的 line parity 与
+  `unsupportedOutputKinds=["hlines","markers"]` 断言通过；
+- 本阶段只生成临时二进制验证产物，不提交 wheel、`.cspkg`、managed venv 或 registry，
+  验证后已删除两个受限系统临时目录；不执行 GitHub push / Release 发布。
 
 ## 后续阶段不可越过的顺序
 

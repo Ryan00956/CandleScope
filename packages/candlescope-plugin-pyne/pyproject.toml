@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "candlescope-plugin-pyne"
+version = "0.1.0"
+description = "Pyne Runtime bridge for the CandleScope script runtime protocol."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "GPL-3.0-only"
+authors = [
+  { name = "CandleScope contributors" }
+]
+keywords = ["candlescope", "plugin", "indicators", "pyne", "sidecar"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Office/Business :: Financial",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = [
+  "candlescope-plugin-sdk==0.1.0",
+  "pyne-runtime==0.2.0rc1",
+]
+
+[project.urls]
+Homepage = "https://github.com/Ryan00956/CandleScope"
+Repository = "https://github.com/Ryan00956/CandleScope"
+Issues = "https://github.com/Ryan00956/CandleScope/issues"
+PyneRuntime = "https://github.com/Ryan00956/pyne-runtime"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1",
+  "hatchling>=1.25",
+  "pytest>=7",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+candlescope-pyne-runtime = "candlescope_plugin_pyne.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/candlescope_plugin_pyne"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [
+  ".",
+  "src",
+  "../candlescope-plugin-sdk/src",
+  "../pyne-runtime/src",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

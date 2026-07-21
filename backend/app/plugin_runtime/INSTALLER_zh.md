@@ -112,6 +112,10 @@ Builder 按 manifest 的 wheel basename 匹配 `--wheel` 参数，审计 wheel �
 JSON key、大小写冲突路径、绝对路径、`..`、symlink、加密 entry 和额外文件都会被
 拒绝。
 
+`.cspkg` 外层不允许 directory entry。嵌套的标准 wheel 可以包含路径规范且压缩/解压
+大小都为零的 directory entry（NumPy 等官方 wheel 会这样打包）；它们仍受路径、重复、
+大小写冲突、symlink、加密与总解压大小检查，不能借此放宽 bundle 边界。
+
 `plugin.package/version` 必须精确匹配一个主 wheel。`python.module` 必须能用下面的
 形式启动 JSON Lines sidecar：
 

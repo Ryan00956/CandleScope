@@ -565,6 +565,7 @@ def _validate_zip_infos(
     label: str,
     max_entries: int,
     max_total_size: int,
+    allow_directory_entries: bool = False,
 ) -> dict[str, zipfile.ZipInfo]:
     if not infos or len(infos) > max_entries:
         raise PluginBundleError(f"{label} contains an invalid number of entries")
@@ -572,9 +573,13 @@ def _validate_zip_infos(
     casefolded: set[str] = set()
     total_size = 0
     for info in infos:
-        path = _safe_archive_path(info.filename, label)
-        if info.is_dir() or info.filename.endswith("/"):
+        is_directory = info.is_dir() or info.filename.endswith("/")
+        archive_name = info.filename[:-1] if is_directory else info.filename
+        path = _safe_archive_path(archive_name, label)
+        if is_directory and not allow_directory_entries:
             raise PluginBundleError(f"{label} must not contain directory entries")
+        if is_directory and (info.file_size != 0 or info.compress_size != 0):
+            raise PluginBundleError(f"{label} contains a non-empty directory entry")
         if info.flag_bits & 0x1:
             raise PluginBundleError(f"{label} must not contain encrypted entries")
         if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
@@ -606,6 +611,7 @@ def _parse_wheel_metadata(
         label=f"wheel {declared.path!r}",
         max_entries=10_000,
         max_total_size=MAX_WHEEL_UNCOMPRESSED_BYTES,
+        allow_directory_entries=True,
     )
     metadata_paths = [name for name in by_name if name.endswith(".dist-info/METADATA")]
     wheel_paths = [name for name in by_name if name.endswith(".dist-info/WHEEL")]

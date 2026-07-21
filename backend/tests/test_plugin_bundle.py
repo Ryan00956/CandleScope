@@ -91,6 +91,40 @@ def test_builder_refuses_overwrite_and_wheel_metadata_drift(tmp_path: Path) -> N
         )
 
 
+def test_wheel_audit_accepts_standard_zero_byte_directory_entries(
+    tmp_path: Path,
+) -> None:
+    source = build_hello_wheel(tmp_path / "source")
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    wheel = wheelhouse / source.name
+    directory = zipfile.ZipInfo(
+        "candlescope_plugin_sdk/",
+        date_time=(1980, 1, 1, 0, 0, 0),
+    )
+    directory.compress_type = zipfile.ZIP_STORED
+    directory.create_system = 3
+    directory.external_attr = (stat.S_IFDIR | 0o755) << 16
+    with (
+        zipfile.ZipFile(source, "r") as source_archive,
+        zipfile.ZipFile(wheel, "w") as target_archive,
+    ):
+        target_archive.writestr(directory, b"")
+        for info in source_archive.infolist():
+            target_archive.writestr(info, source_archive.read(info))
+    manifest = hello_manifest(wheel)
+    manifest_path = tmp_path / "manifest-with-directory.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    bundle = build_plugin_bundle(
+        manifest_path,
+        (wheel,),
+        tmp_path / "directory-wheel.cspkg",
+    )
+
+    assert bundle.manifest.wheels[0].package == "candlescope-plugin-sdk"
+
+
 @pytest.mark.parametrize(
     ("unsafe_name", "symlink"),
     [
@@ -110,6 +144,16 @@ def test_bundle_rejects_unsafe_or_symlink_entries(
         archive.writestr(_zip_info(unsafe_name, symlink=symlink), b"target")
 
     with pytest.raises(PluginBundleError):
+        verify_plugin_bundle(path, expected_sha256=sha256_file(path))
+
+
+def test_outer_bundle_still_rejects_directory_entries(tmp_path: Path) -> None:
+    path = tmp_path / "directory-entry.cspkg"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(_zip_info(MANIFEST_PATH), b"{}")
+        archive.writestr(_zip_info("wheels/"), b"")
+
+    with pytest.raises(PluginBundleError, match="must not contain directory entries"):
         verify_plugin_bundle(path, expected_sha256=sha256_file(path))
 
 

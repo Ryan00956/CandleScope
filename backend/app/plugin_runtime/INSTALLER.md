@@ -73,6 +73,10 @@ The builder audits each wheel's `METADATA`, `WHEEL`, and `RECORD`, fills its
 actual size and digest, and writes a deterministic archive. Verification
 rejects duplicate JSON keys, case-conflicting or unsafe paths, symlinks,
 encrypted entries, extra files, size violations, and metadata drift.
+The outer `.cspkg` never permits directory entries. A nested standards-compliant
+wheel may contain canonical zero-byte directory entries, as official binary
+wheels such as NumPy commonly do; all path, conflict, symlink, encryption, and
+uncompressed-size checks still apply.
 
 The module must launch as:
 

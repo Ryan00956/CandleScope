@@ -31,7 +31,7 @@ def test_package_metadata_pins_only_public_runtime_contracts() -> None:
     assert project["version"] == candlescope_plugin_pyne.__version__
     assert project["requires-python"] == ">=3.11,<3.14"
     assert project["dependencies"] == [
-        "candlescope-plugin-sdk==0.1.0",
+        "candlescope-plugin-sdk==0.2.0",
         "pyne-runtime==0.2.0rc1",
     ]
     assert project["scripts"]["candlescope-pyne-runtime"].endswith(":main")
@@ -59,7 +59,7 @@ def test_release_lock_tracks_the_exact_external_engine_artifact() -> None:
     assert lock["plugin"] == {
         "id": "candlescope.pyne",
         "package": "candlescope-plugin-pyne",
-        "version": "0.1.0",
+        "version": "0.2.0",
     }
     pyne = lock["wheels"]["pyne-runtime"]
     assert pyne["version"] == "0.2.0rc1"

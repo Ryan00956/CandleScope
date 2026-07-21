@@ -12,12 +12,15 @@ from fastapi.testclient import TestClient
 
 from candlescope_plugin_sdk import (
     FEATURE_BATCH_EXECUTION_V1,
+    FEATURE_RENDER_HISTOGRAM_SERIES_V1,
     FEATURE_RENDER_LINE_SERIES_V1,
+    FEATURE_RENDER_STRUCTURED_OUTPUT_V1,
     ExecuteBatchRequest,
     ExecuteBatchResult,
     LanguageDescriptor,
     LinePoint,
     LineSeries,
+    RenderCollections,
     RenderOutput,
     RuntimeDescriptor,
 )
@@ -161,6 +164,107 @@ class _CloseRuntimeHost:
         )
 
 
+class _FrozenPyneHost(_CloseRuntimeHost):
+    async def descriptor(self, runtime_id: str) -> RuntimeDescriptor:
+        descriptor = await super().descriptor(runtime_id)
+        return RuntimeDescriptor(
+            id=descriptor.id,
+            name=descriptor.name,
+            version=descriptor.version,
+            package=descriptor.package,
+            languages=descriptor.languages,
+            features=(
+                FEATURE_BATCH_EXECUTION_V1,
+                FEATURE_RENDER_LINE_SERIES_V1,
+                FEATURE_RENDER_HISTOGRAM_SERIES_V1,
+                FEATURE_RENDER_STRUCTURED_OUTPUT_V1,
+            ),
+            required_host_features=(),
+        )
+
+    async def execute_batch(
+        self,
+        runtime_id: str,
+        request: ExecuteBatchRequest,
+    ) -> ExecuteBatchResult:
+        assert runtime_id == "test.pyne"
+        self.requests.append(request)
+        raw_points = [
+            {"time": bar.time, "value": bar.close * 2} for bar in request.bars
+        ]
+        marker_points = [
+            {
+                "time": bar.time,
+                "shape": "circle",
+                "color": "#3b82f6",
+                "text": "UP",
+                "position": "above",
+                "size": "normal",
+                "pane": "separate",
+            }
+            for bar in request.bars
+            if bar.close > bar.open
+        ]
+        output_meta = {"title": "Plugin Baseline", "overlay": False}
+        return ExecuteBatchResult(
+            ok=True,
+            output=RenderOutput(
+                series=(
+                    LineSeries(
+                        id="plot_1",
+                        title="Double Close",
+                        pane="separate",
+                        style={
+                            "color": "#22c55e",
+                            "lineWidth": 2,
+                            "lineStyle": 0,
+                        },
+                        points=tuple(
+                            LinePoint(time=point["time"], value=point["value"])
+                            for point in raw_points
+                        ),
+                    ),
+                ),
+                collections=RenderCollections(
+                    lines=(
+                        {
+                            "id": "plot_1",
+                            "title": "Double Close",
+                            "color": "#22c55e",
+                            "linewidth": 2,
+                            "style": "solid",
+                            "pane": "separate",
+                            "data": raw_points,
+                        },
+                    ),
+                    hlines=(
+                        {
+                            "price": 210.0,
+                            "title": "Threshold",
+                            "color": "#f59e0b",
+                            "linestyle": "dashed",
+                            "linewidth": 1,
+                            "pane": "separate",
+                        },
+                    ),
+                    markers=(
+                        {
+                            "shape": "circle",
+                            "text": "UP",
+                            "position": "above",
+                            "size": "normal",
+                            "color": "#3b82f6",
+                            "pane": "separate",
+                            "data": marker_points,
+                        },
+                    ),
+                ),
+                meta=output_meta,
+            ),
+            meta={**output_meta, "securityMode": "safe"},
+        )
+
+
 def _service(
     mode: str,
     *,
@@ -184,6 +288,23 @@ def _service(
         )
     service = IndicatorRuntimeService(
         IndicatorRuntimeRoutes(tuple(routes)),
+        host=host,
+    )
+    return service, host
+
+
+def _frozen_service(mode: str) -> tuple[IndicatorRuntimeService, _FrozenPyneHost]:
+    host = _FrozenPyneHost()
+    service = IndicatorRuntimeService(
+        IndicatorRuntimeRoutes(
+            (
+                IndicatorRuntimeRoute(
+                    language="pyne",
+                    mode=mode,
+                    runtime_id="test.pyne",
+                ),
+            )
+        ),
         host=host,
     )
     return service, host
@@ -483,11 +604,11 @@ def _canonical_sha256(value: Any) -> str:
 
 
 @pytest.mark.anyio
-async def test_shadow_keeps_frozen_http_compute_payload_exact(
+async def test_shadow_matches_the_frozen_http_compute_payload_exactly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = _fixture()
-    service, _ = _service("shadow")
+    service, _ = _frozen_service("shadow")
     monkeypatch.setattr(config, "PYNE_EXECUTOR_MODE", "inline")
     request = indicators_api.ComputeRequest.model_validate(
         {
@@ -509,4 +630,97 @@ async def test_shadow_keeps_frozen_http_compute_payload_exact(
     )
     snapshot = service.snapshot()
     assert snapshot["counts"]["shadow"] == 1
-    assert snapshot["counts"]["shadowMismatched"] == 1
+    assert snapshot["counts"]["shadowMatched"] == 1
+    assert snapshot["counts"]["shadowMismatched"] == 0
+    assert snapshot["recent"][-1]["status"] == "matched"
+
+
+def test_pyne_sidecar_http_compute_matches_the_phase0_golden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture()
+    service, _ = _frozen_service("sidecar")
+    monkeypatch.setattr(indicators_api, "execute_pyne_script", _forbid_legacy)
+    request = {
+        **fixture["httpCompute"]["request"],
+        "script": fixture["script"],
+        "ohlcv": fixture["bars"],
+    }
+    app = FastAPI()
+    app.include_router(indicators_api.router, prefix="/api/v1")
+    app.state.indicator_runtime_service = service
+
+    with TestClient(app) as client:
+        response = client.post(fixture["httpCompute"]["path"], json=request)
+
+    payload = response.json()
+    expected = fixture["httpCompute"]["expected"]
+    assert response.status_code == expected["statusCode"]
+    assert sorted(payload) == expected["topLevelKeys"]
+    assert _canonical_sha256(payload) == expected["canonicalSha256"]
+
+
+def test_pyne_sidecar_http_range_matches_the_phase0_golden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture()
+    service, _ = _frozen_service("sidecar")
+    monkeypatch.setattr(payload_api, "execute_pyne_script", _forbid_legacy)
+    request = {
+        **fixture["httpRange"]["request"],
+        "script": fixture["script"],
+    }
+    app = FastAPI()
+    app.include_router(indicators_api.router, prefix="/api/v1")
+    app.state.indicator_runtime_service = service
+    app.state.data_manager = _DataManager(_bars(fixture))
+    app.state.indicator_range_service = IndicatorRangeResultService(
+        server_epoch=fixture["serverEpoch"]
+    )
+
+    with TestClient(app) as client:
+        response = client.post(fixture["httpRange"]["path"], json=request)
+
+    payload = response.json()
+    expected = fixture["httpRange"]["expected"]
+    assert response.status_code == expected["statusCode"]
+    assert sorted(payload) == expected["topLevelKeys"]
+    assert _canonical_sha256(payload) == expected["canonicalSha256"]
+
+
+def test_pyne_sidecar_websocket_matches_the_phase0_golden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture()
+    service, _ = _frozen_service("sidecar")
+    monkeypatch.setattr(payload_api, "execute_pyne_script", _forbid_legacy)
+    monkeypatch.setattr(pyne_stream_api, "is_incremental_pyne_script", _forbid_legacy)
+    monkeypatch.setattr(config, "INDICATOR_WS_HEARTBEAT_SECONDS", 5.0)
+    subscribe = {
+        **fixture["websocket"]["subscribe"],
+        "script": fixture["script"],
+    }
+    app = FastAPI()
+    app.include_router(stream_api.router, prefix="/api/v1")
+    app.state.data_manager = _DataManager(_bars(fixture), emit_realtime=True)
+    app.state.indicator_runtime_service = service
+    engine = create_engine()
+    app.state.indicator_engine = engine
+    frames: list[dict[str, Any]] = []
+
+    try:
+        with TestClient(app) as client:
+            with client.websocket_connect(fixture["websocket"]["path"]) as websocket:
+                frames.append(websocket.receive_json())
+                websocket.send_json(subscribe)
+                frames.append(websocket.receive_json())
+                frames.append(websocket.receive_json())
+                websocket.send_json(fixture["websocket"]["unsubscribe"])
+                frames.append(websocket.receive_json())
+    finally:
+        engine.stop()
+
+    expected = fixture["websocket"]["expected"]
+    assert [frame["type"] for frame in frames] == expected["frameTypes"]
+    assert [_canonical_sha256(frame) for frame in frames] == expected["frameSha256"]
+    assert _canonical_sha256(frames) == expected["canonicalSha256"]

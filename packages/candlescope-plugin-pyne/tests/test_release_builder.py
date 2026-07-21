@@ -72,22 +72,22 @@ def _fake_wheel(directory: Path, package: str, version: str) -> Path:
 def _wheelhouse(tmp_path: Path) -> tuple[Path, ...]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     return (
-        _fake_wheel(tmp_path, "candlescope-plugin-pyne", "0.1.0"),
-        _fake_wheel(tmp_path, "candlescope-plugin-sdk", "0.1.0"),
+        _fake_wheel(tmp_path, "candlescope-plugin-pyne", "0.2.0"),
+        _fake_wheel(tmp_path, "candlescope-plugin-sdk", "0.2.0"),
         _fake_wheel(tmp_path, "pyne-runtime", "0.2.0rc1"),
         _fake_wheel(tmp_path, "numpy", "2.3.3"),
     )
 
 
 def test_wheel_metadata_is_read_from_the_archive_not_the_filename(tmp_path: Path) -> None:
-    wheel = _fake_wheel(tmp_path, "candlescope-plugin-pyne", "0.1.0")
+    wheel = _fake_wheel(tmp_path, "candlescope-plugin-pyne", "0.2.0")
     renamed = wheel.with_name("untrusted-name.whl")
     wheel.rename(renamed)
 
     record = inspect_wheel(renamed)
 
     assert record.package == "candlescope-plugin-pyne"
-    assert record.version == "0.1.0"
+    assert record.version == "0.2.0"
     assert record.sha256.startswith("sha256:")
 
 
@@ -108,14 +108,14 @@ def test_builder_generates_audited_platform_bundle_from_one_locked_wheel_set(
     lock["wheels"]["pyne-runtime"]["sha256"] = inspect_wheel(wheels[2]).sha256
     lock_path = tmp_path / "release-lock.json"
     lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
-    output = tmp_path / "candlescope-pyne-0.1.0.cspkg"
+    output = tmp_path / "candlescope-pyne-0.2.0.cspkg"
 
     bundle = build_locked_bundle(wheels, output, lock_path=lock_path)
 
     assert bundle.path == output.resolve()
     assert bundle.manifest.runtime_id == "candlescope.pyne"
     assert bundle.manifest.package == "candlescope-plugin-pyne"
-    assert bundle.manifest.version == "0.1.0"
+    assert bundle.manifest.version == "0.2.0"
     assert bundle.manifest.module == "candlescope_plugin_pyne"
     assert [wheel.package for wheel in bundle.manifest.wheels] == [
         "candlescope-plugin-pyne",

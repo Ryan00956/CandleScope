@@ -136,6 +136,19 @@ class IndicatorRuntimeRoutes:
     def legacy_default(cls) -> "IndicatorRuntimeRoutes":
         return cls((IndicatorRuntimeRoute("pyne", ROUTE_MODE_LEGACY),))
 
+    @classmethod
+    def pyne_sidecar_default(cls) -> "IndicatorRuntimeRoutes":
+        """Phase 6 default: Pyne is an installed plugin, never an in-process fallback."""
+        return cls(
+            (
+                IndicatorRuntimeRoute(
+                    "pyne",
+                    ROUTE_MODE_SIDECAR,
+                    "candlescope.pyne",
+                ),
+            )
+        )
+
     def for_language(self, language: str) -> IndicatorRuntimeRoute:
         normalized = _identifier(language, "language")
         for route in self.routes:
@@ -169,7 +182,7 @@ def load_indicator_runtime_routes(
     route_path = Path(path).expanduser().resolve(strict=False)
     if not route_path.exists():
         if allow_missing:
-            return IndicatorRuntimeRoutes.legacy_default()
+            return IndicatorRuntimeRoutes.pyne_sidecar_default()
         raise IndicatorRuntimeRoutesError(
             f"Indicator runtime routes file does not exist: {route_path}"
         )

@@ -7,9 +7,10 @@ plugin author publishes one deterministic bundle. CandleScope gives each
 bundle its own virtual environment and only atomically activates it after the
 typed runtime probe passes.
 
-Existing Indicator/Pyne routes remain on the legacy path. A successful install
-means the generic Host can launch the plugin; production routing moves in
-Phase 4.
+Since Phase 6, a missing Indicator route file selects the managed
+`candlescope.pyne` sidecar. The application fails closed at startup when that
+runtime is not active; an explicit route file can still select `legacy` or
+`shadow` during the source-removal rollback window.
 
 ## Release workflow
 
@@ -32,13 +33,13 @@ cd backend
 
 python scripts/candlescope_plugin.py build `
   --manifest ..\packages\candlescope-plugin-sdk\examples\hello-runtime.manifest.json `
-  --wheel C:\release\candlescope_plugin_sdk-0.1.0-py3-none-any.whl `
-  --output C:\release\hello-runtime-0.1.0.cspkg
+  --wheel C:\release\candlescope_plugin_sdk-0.2.0-py3-none-any.whl `
+  --output C:\release\hello-runtime-0.2.0.cspkg
 
-python scripts/candlescope_plugin.py inspect C:\release\hello-runtime-0.1.0.cspkg
+python scripts/candlescope_plugin.py inspect C:\release\hello-runtime-0.2.0.cspkg
 
 python scripts/candlescope_plugin.py install `
-  C:\release\hello-runtime-0.1.0.cspkg `
+  C:\release\hello-runtime-0.2.0.cspkg `
   --sha256 sha256:<64-hex digest from inspect>
 
 python scripts/candlescope_plugin.py check hello-runtime

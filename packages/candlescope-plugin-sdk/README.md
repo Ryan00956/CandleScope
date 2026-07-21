@@ -19,7 +19,8 @@ candlescope.script-runtime/1
 - Explicit feature negotiation before any runtime work.
 - Typed chart context and OHLCV batch input.
 - Structured diagnostics for source/runtime failures.
-- CandleScope-owned `candlescope.render/1` output with line series.
+- CandleScope-owned `candlescope.render/1` output. Line series are the base;
+  negotiated histogram and structured render collections are additive.
 - Protocol-only stdout: plugins must send logs to stderr.
 
 Realtime sessions, host data callbacks, secrets, trading actions, arbitrary
@@ -27,6 +28,13 @@ frontend JavaScript, and marketplace packaging are intentionally outside v1.
 Process separation is a transport and dependency boundary, not a complete
 security sandbox; the CandleScope Host remains responsible for resource
 limits, process termination, permissions, and trust policy.
+
+Plugins that need markers, horizontal lines, fills, backgrounds, bar colors,
+signals, strategy reports, or drawing objects use the public
+`render.structured-output/1` feature and `RenderCollections`. The collection
+names and JSON-only validation belong to the SDK, so community runtimes do not
+need a CandleScope-private serializer. See
+[`docs/protocol-v1.md`](docs/protocol-v1.md) for the complete list.
 
 ## Minimal runtime
 

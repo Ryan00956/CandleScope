@@ -88,9 +88,9 @@ def load_release_lock(path: Path = DEFAULT_LOCK_PATH) -> dict[str, Any]:
     if plugin != {
         "id": "candlescope.pyne",
         "package": "candlescope-plugin-pyne",
-        "version": "0.1.0",
+        "version": "0.2.0",
     }:
-        raise ReleaseLockError("release lock plugin identity is not the Phase 5 contract")
+        raise ReleaseLockError("release lock plugin identity is not the Phase 6 contract")
     if tuple(wheels) != EXPECTED_WHEEL_ORDER:
         raise ReleaseLockError(
             "release lock wheels must be ordered as bridge, SDK, Pyne Runtime, NumPy"

@@ -82,7 +82,7 @@ def run_smoke(*, dist_dir: Path, python: str) -> None:
             capture_output=True,
             text=True,
         )
-        if imported.stdout.strip() != "0.1.0 candlescope.script-runtime/1":
+        if imported.stdout.strip() != "0.2.0 candlescope.script-runtime/1":
             raise RuntimeError(f"unexpected installed import output: {imported.stdout!r}")
 
         completed = subprocess.run(

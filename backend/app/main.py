@@ -210,8 +210,8 @@ async def startup_event() -> None:
         init_liquidation_storage(LIQUIDATION_DB_PATH)
 
     # 2. Load resolved runtime-plugin activation state and the independent
-    # language routing table. Missing defaults mean an empty Host plus the
-    # built-in pyne=legacy route. Explicit invalid configuration fails closed.
+    # language routing table. Missing route configuration selects the managed
+    # candlescope.pyne sidecar; a missing activation fails closed at startup.
     from app.plugin_runtime import build_runtime_host_from_environment
     from app.indicator.runtime_service import (
         build_indicator_runtime_service_from_environment,
@@ -224,10 +224,8 @@ async def startup_event() -> None:
             host_version=APP_VERSION,
         )
         await plugin_runtime_host.start()
-        indicator_runtime_service = (
-            build_indicator_runtime_service_from_environment(
-                host=plugin_runtime_host,
-            )
+        indicator_runtime_service = build_indicator_runtime_service_from_environment(
+            host=plugin_runtime_host,
         )
         await indicator_runtime_service.start()
     except BaseException:

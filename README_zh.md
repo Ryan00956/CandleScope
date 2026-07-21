@@ -291,12 +291,12 @@ Plugin platform Phase 2/3 已加入通用
 SHA-256、每 bundle 独立 venv、离线 wheel 安装、结果探针、原子激活和逐插件回滚；
 社区发布流程见
 [`INSTALLER_zh.md`](backend/app/plugin_runtime/INSTALLER_zh.md)。Phase 4 已把 Indicator
-HTTP、range、batch 和 WebSocket 统一接入显式 `legacy/shadow/sidecar` 路由；缺省仍为
-`pyne=legacy`。Phase 5 新增独立可构建的
+HTTP、range、batch 和 WebSocket 统一接入显式 `legacy/shadow/sidecar` 路由；Phase 6
+缺省已切换为 `pyne=sidecar,candlescope.pyne`。Phase 5 新增独立可构建的
 [`candlescope-plugin-pyne`](packages/candlescope-plugin-pyne/README_zh.md)，通过发行锁固定
 SDK、Pyne Runtime RC wheel 与 NumPy 版本，并已通过真实 `.cspkg` 离线安装和协议探针。
-marker、hline、fill 等仍超出 line-only Render IR v1，所以默认切换与旧源码删除继续由
-Phase 6 独立门禁控制。完整执行记录见
+0.2.0 bridge 通过可协商的结构化 Render IR 覆盖 marker、hline、fill 等输出并通过冻结
+golden；旧源码删除仍等待可信 `.cspkg` Release asset 后作为独立提交执行。完整执行记录见
 [`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
 
 ## API 文档

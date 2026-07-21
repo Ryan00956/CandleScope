@@ -120,7 +120,7 @@ async def test_host_is_wire_compatible_with_the_real_sdk_hello_runtime() -> None
     spec = RuntimeProcessSpec(
         runtime_id="hello-runtime",
         expected_package="candlescope-plugin-sdk",
-        expected_version="0.1.0",
+        expected_version="0.2.0",
         executable=Path(sys.executable).resolve(),
         arguments=("-u", str(HELLO_SIDECAR)),
         working_directory=FIXTURE_DIRECTORY,

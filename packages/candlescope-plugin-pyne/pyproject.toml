@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "candlescope-plugin-pyne"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pyne Runtime bridge for the CandleScope script runtime protocol."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -25,7 +25,7 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dependencies = [
-  "candlescope-plugin-sdk==0.1.0",
+  "candlescope-plugin-sdk==0.2.0",
   "pyne-runtime==0.2.0rc1",
 ]
 

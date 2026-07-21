@@ -7,8 +7,8 @@ virtual environment through `candlescope.script-runtime/1`.
 
 ## Compatibility contract
 
-- Plugin: `candlescope-plugin-pyne==0.1.0`
-- SDK: `candlescope-plugin-sdk==0.1.0`
+- Plugin: `candlescope-plugin-pyne==0.2.0`
+- SDK: `candlescope-plugin-sdk==0.2.0`
 - Engine: `pyne-runtime==0.2.0rc1`
 - Python: `>=3.11,<3.14`
 - Runtime ID: `candlescope.pyne`
@@ -23,14 +23,16 @@ and restart the sidecar without creating a nested Pyne worker process.
 
 ## Render coverage
 
-Protocol v1 transports line series only. Pyne markers, horizontal lines, fills,
-backgrounds, bar colors, signals, and stateful realtime sessions are not claimed as
-compatible. When an execution produces unsupported output kinds, their names are
-reported in `output.meta.unsupportedOutputKinds`; their data is not smuggled through
-private fields.
+Version 0.2.0 maps Pyne's current public output through the negotiated
+`render.histogram-series/1` and `render.structured-output/1` features: lines,
+histograms, markers, horizontal lines, fills, backgrounds, bar colors, signals,
+legacy labels, strategy reports, and drawing objects. The bridge uses only the SDK's
+JSON-only `RenderCollections`; unknown collections fail closed and no Pyne Python
+object or CandleScope-private transport crosses the boundary.
 
-This is why installing this package does not by itself switch CandleScope from the
-legacy Pyne route. Shadow comparison and cutover are separate release gates.
+The Phase 0 HTTP compute, range, and WebSocket goldens can now be rebuilt exactly by
+the sidecar. True stateful realtime sessions remain outside protocol v1; the sidecar
+path performs batch execution over confirmed bars.
 
 ## Development
 
@@ -59,13 +61,13 @@ Invoke-WebRequest `
 python -m pip download --only-binary=:all: --no-deps `
   --dest $wheelhouse numpy==2.3.3
 
-$bridge = (Get-ChildItem "$wheelhouse\candlescope_plugin_pyne-0.1.0-*.whl").FullName
-$sdk = (Get-ChildItem "$wheelhouse\candlescope_plugin_sdk-0.1.0-*.whl").FullName
+$bridge = (Get-ChildItem "$wheelhouse\candlescope_plugin_pyne-0.2.0-*.whl").FullName
+$sdk = (Get-ChildItem "$wheelhouse\candlescope_plugin_sdk-0.2.0-*.whl").FullName
 $pyne = (Get-ChildItem "$wheelhouse\pyne_runtime-0.2.0rc1-*.whl").FullName
 $numpy = (Get-ChildItem "$wheelhouse\numpy-2.3.3-*.whl").FullName
 python scripts\build_bundle.py `
   --wheel $bridge --wheel $sdk --wheel $pyne --wheel $numpy `
-  --output C:\release\candlescope-pyne\candlescope-pyne-0.1.0.cspkg `
+  --output C:\release\candlescope-pyne\candlescope-pyne-0.2.0.cspkg `
   --json
 ```
 

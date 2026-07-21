@@ -10,12 +10,15 @@ from candlescope_plugin_sdk import (
     Diagnostic,
     ExecuteBatchResult,
     FEATURE_BATCH_EXECUTION_V1,
+    FEATURE_RENDER_HISTOGRAM_SERIES_V1,
     FEATURE_RENDER_LINE_SERIES_V1,
+    FEATURE_RENDER_STRUCTURED_OUTPUT_V1,
     LanguageDescriptor,
     LinePoint,
     LineSeries,
     MarketContext,
     ProtocolError,
+    RenderCollections,
     RenderOutput,
     RuntimeDescriptor,
 )
@@ -91,6 +94,71 @@ def test_render_output_round_trips_line_series() -> None:
 
     assert RenderOutput.from_wire(output.to_wire()) == output
     assert output.to_wire()["schema"] == "candlescope.render/1"
+    assert "collections" not in output.to_wire()
+
+
+def test_structured_render_collections_are_additive_and_json_only() -> None:
+    output = RenderOutput(
+        series=(
+            LineSeries(
+                id="volume",
+                title="Volume",
+                points=(LinePoint(1, 10, color="#22c55e"),),
+                series_type="histogram",
+            ),
+        ),
+        collections=RenderCollections(
+            histograms=(
+                {
+                    "title": "Volume",
+                    "color_up": "#22c55e",
+                    "color_down": "#ef4444",
+                    "pane": "separate",
+                    "data": [{"time": 1, "value": 10, "color": "#22c55e"}],
+                },
+            ),
+            markers=({"pane": "main", "data": [{"time": 1}]},),
+            objects={"labels": [{"id": "label_1", "pane": "main"}]},
+        ),
+    )
+    result = ExecuteBatchResult(
+        ok=True,
+        output=output,
+        inputs=({"id": "length", "type": "int", "default": 20},),
+    )
+
+    wire = result.to_wire()
+    assert wire["output"]["collections"].keys() == {
+        "histograms",
+        "markers",
+        "objects",
+    }
+    assert wire["output"]["series"][0]["type"] == "histogram"
+    assert wire["output"]["series"][0]["data"][0]["color"] == "#22c55e"
+    assert ExecuteBatchResult.from_wire(wire) == result
+
+
+def test_explicit_empty_structured_collections_survive_the_wire() -> None:
+    output = RenderOutput(collections=RenderCollections())
+
+    wire = output.to_wire()
+
+    assert wire["collections"] == {}
+    assert RenderOutput.from_wire(wire).collections == RenderCollections()
+
+
+def test_structured_render_collections_reject_private_or_non_json_data() -> None:
+    with pytest.raises(ProtocolError, match="unsupported fields"):
+        RenderCollections.from_wire({"runtimePrivate": []})
+    with pytest.raises(ProtocolError, match="JSON-compatible"):
+        RenderCollections(markers=({"bad": object()},))
+    with pytest.raises(ProtocolError, match="finite"):
+        RenderCollections(markers=({"bad": math.nan},))
+
+
+def test_new_render_features_are_stable_public_identifiers() -> None:
+    assert FEATURE_RENDER_HISTOGRAM_SERIES_V1 == "render.histogram-series/1"
+    assert FEATURE_RENDER_STRUCTURED_OUTPUT_V1 == "render.structured-output/1"
 
 
 def test_successful_batch_result_requires_render_output() -> None:

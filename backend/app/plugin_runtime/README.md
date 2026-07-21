@@ -25,8 +25,9 @@ Phases 2 through 4 own:
   deterministic result probes pass.
 
 HTTP compute, range/batch, and Indicator WebSocket script traffic now share the
-generic `legacy/shadow/sidecar` router. The missing-default route remains
-`pyne=legacy`, so enabling this Host alone does not change results. See
+generic `legacy/shadow/sidecar` router. Since Phase 6, a missing route file
+selects `pyne=sidecar,candlescope.pyne`; startup fails closed until that
+managed runtime is installed and active. See
 [Indicator Runtime Routing](../indicator/RUNTIME_ROUTING.md).
 
 ## Activation registry v1

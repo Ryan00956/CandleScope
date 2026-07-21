@@ -22,9 +22,11 @@ The default route path is beside the activation registry:
 - Linux: `$XDG_DATA_HOME/candlescope/plugins/indicator-runtime-routes.json`, or
   `~/.local/share/candlescope/plugins/indicator-runtime-routes.json`.
 
-Override it with `CANDLESCOPE_INDICATOR_RUNTIME_ROUTES`. An absent default file
-is equivalent to the built-in `pyne=legacy` route. An explicitly selected
-missing or invalid file fails application startup.
+Override it with `CANDLESCOPE_INDICATOR_RUNTIME_ROUTES`. Since Phase 6, an
+absent default file selects the built-in
+`pyne=sidecar,candlescope.pyne` route. If that plugin is not installed and
+active, application startup fails closed. An explicitly selected missing or
+invalid file also fails startup.
 
 ```json
 {
@@ -93,10 +95,12 @@ Cached payloads are re-scoped to the requesting `clientId`/`indicatorId`.
 Script cache identity includes the language, so different runtimes cannot share
 a result or singleflight merely because their source hashes match.
 
-Protocol v1 renders line series only. Marker, hline, fill, background, bar-color,
-signal, and richer realtime-session parity remain explicit migration gaps until
-the Render IR negotiates those features. Shadow diagnostics must reach the
-required parity gate before a runtime is moved to `sidecar`.
+Line series remain the base Render IR v1 feature. Negotiated
+`render.histogram-series/1` and `render.structured-output/1` add histograms,
+markers, horizontal lines, fills, backgrounds, bar colors, signals, strategy
+reports, and drawing objects. The Pyne 0.2.0 bridge uses those features to
+rebuild the frozen Phase 0 payloads. True stateful realtime sessions remain
+outside protocol v1; the sidecar executes batches over confirmed bars.
 
 ## Safe rollout
 
@@ -106,8 +110,9 @@ required parity gate before a runtime is moved to `sidecar`.
 4. Exercise compute, range/batch, and WebSocket traffic. Inspect
    `/api/v1/indicators/diagnostics` under `scriptRuntimeRouting`.
 5. Require the frozen compatibility goldens and an agreed shadow match window.
-6. Change the route to `sidecar`; keep the old implementation available for an
-   explicit route rollback.
+6. Change the route to `sidecar`; the Phase 6 built-in default has completed
+   this switch. Keep the old implementation available for an explicit route
+   rollback until the later source-deletion commit.
 7. Delete a vendored runtime snapshot only in a later, independent commit.
 
 Emergency rollback is a route-file edit back to `legacy` plus an application

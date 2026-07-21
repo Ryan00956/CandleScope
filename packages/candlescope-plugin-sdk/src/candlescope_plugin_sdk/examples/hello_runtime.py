@@ -42,7 +42,7 @@ class HelloRuntime(BaseRuntimePlugin):
         return RuntimeDescriptor(
             id="hello-runtime",
             name="Hello Runtime",
-            version="0.1.0",
+            version="0.2.0",
             package="candlescope-plugin-sdk",
             languages=(
                 LanguageDescriptor(

@@ -20,8 +20,9 @@ Phase 2～4 的边界：
 - descriptor 和固定结果探针通过后，原子激活并保留逐插件回滚链。
 
 HTTP compute、range/batch 与 Indicator WebSocket 脚本流量现在共用通用
-`legacy/shadow/sidecar` 路由。默认路由文件不存在时仍为 `pyne=legacy`，所以仅启用
-Host 不会改变结果。详见 [Indicator Runtime 路由](../indicator/RUNTIME_ROUTING_zh.md)。
+`legacy/shadow/sidecar` 路由。Phase 6 起默认路由文件不存在时为
+`pyne=sidecar,candlescope.pyne`；仅启用 Host 但未安装该 runtime 会让启动 fail closed。
+详见 [Indicator Runtime 路由](../indicator/RUNTIME_ROUTING_zh.md)。
 
 ## Activation registry v1
 

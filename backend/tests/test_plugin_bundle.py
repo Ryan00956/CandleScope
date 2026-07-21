@@ -217,7 +217,7 @@ def test_cli_inspect_emits_pinnable_compact_json(
 
 
 def test_documented_hello_manifest_template_builds(tmp_path: Path) -> None:
-    wheel = build_hello_wheel(tmp_path / "wheelhouse")
+    wheel = build_hello_wheel(tmp_path / "wheelhouse", version="0.2.0")
     manifest = (
         REPOSITORY_ROOT
         / "packages"

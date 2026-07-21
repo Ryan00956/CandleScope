@@ -6,8 +6,8 @@
 
 ## 兼容性锁
 
-- 插件：`candlescope-plugin-pyne==0.1.0`
-- SDK：`candlescope-plugin-sdk==0.1.0`
+- 插件：`candlescope-plugin-pyne==0.2.0`
+- SDK：`candlescope-plugin-sdk==0.2.0`
 - 引擎：`pyne-runtime==0.2.0rc1`
 - Python：`>=3.11,<3.14`
 - Runtime ID：`candlescope.pyne`
@@ -21,13 +21,15 @@ Pyne worker，Windows 下也不会引入额外 spawn 状态。
 
 ## Render IR 覆盖范围
 
-协议 v1 只承诺 line series。Pyne 的 marker、hline、fill、背景、K 线着色、signal 和
-真正有状态的 realtime session 尚未声明兼容。执行中如果出现这些输出，插件只在
-`output.meta.unsupportedOutputKinds` 中报告类型名，不会把私有结构塞进公共协议冒充
-兼容。
+0.2.0 通过 `render.histogram-series/1` 与 `render.structured-output/1` 完整映射
+Pyne 当前公开输出：line、histogram、marker、hline、fill、背景、K 线着色、signal、
+legacy label、strategy report 与 drawing objects。映射只使用 SDK 的 JSON-only
+`RenderCollections`，未知集合 fail closed，不夹带 Pyne Python 对象或 CandleScope
+私有 transport。
 
-所以“插件可以安装”不等于“可以切换默认路由”。Phase 5 只完成独立发行与安装门禁；
-shadow、cutover 与源码快照删除仍是后续独立阶段。
+Phase 0 的 HTTP compute、range 和 WebSocket golden 已能由 sidecar 原样重建。真正
+有状态的 realtime session 仍不属于协议 v1；sidecar 路径按每次已确认 bars 做 batch
+执行，不能宣称是 incremental session。
 
 ## 本地开发
 
@@ -58,14 +60,14 @@ Invoke-WebRequest `
 python -m pip download --only-binary=:all: --no-deps `
   --dest $wheelhouse numpy==2.3.3
 
-$bridge = (Get-ChildItem "$wheelhouse\candlescope_plugin_pyne-0.1.0-*.whl").FullName
-$sdk = (Get-ChildItem "$wheelhouse\candlescope_plugin_sdk-0.1.0-*.whl").FullName
+$bridge = (Get-ChildItem "$wheelhouse\candlescope_plugin_pyne-0.2.0-*.whl").FullName
+$sdk = (Get-ChildItem "$wheelhouse\candlescope_plugin_sdk-0.2.0-*.whl").FullName
 $pyne = (Get-ChildItem "$wheelhouse\pyne_runtime-0.2.0rc1-*.whl").FullName
 $numpy = (Get-ChildItem "$wheelhouse\numpy-2.3.3-*.whl").FullName
 
 python scripts\build_bundle.py `
   --wheel $bridge --wheel $sdk --wheel $pyne --wheel $numpy `
-  --output C:\release\candlescope-pyne\candlescope-pyne-0.1.0.cspkg `
+  --output C:\release\candlescope-pyne\candlescope-pyne-0.2.0.cspkg `
   --json
 ```
 

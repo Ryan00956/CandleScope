@@ -11,7 +11,9 @@ from typing import Any
 import pyne_runtime
 from candlescope_plugin_sdk import (
     FEATURE_BATCH_EXECUTION_V1,
+    FEATURE_RENDER_HISTOGRAM_SERIES_V1,
     FEATURE_RENDER_LINE_SERIES_V1,
+    FEATURE_RENDER_STRUCTURED_OUTPUT_V1,
     FEATURE_SOURCE_ANALYSIS_V1,
     AnalyzeRequest,
     AnalyzeResult,
@@ -22,6 +24,8 @@ from candlescope_plugin_sdk import (
     LanguageDescriptor,
     LinePoint,
     LineSeries,
+    ProtocolError,
+    RenderCollections,
     RenderOutput,
     RuntimeDescriptor,
 )
@@ -30,26 +34,12 @@ from candlescope_plugin_sdk import (
 RUNTIME_ID = "candlescope.pyne"
 PLUGIN_NAME = "Pyne Runtime"
 PLUGIN_PACKAGE = "candlescope-plugin-pyne"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.0"
 EXPECTED_PYNE_VERSION = "0.2.0rc1"
 UNKNOWN_SOURCE_VERSION = "0.0.0+unknown"
 
 _SECURITY_MODE_KEYS = ("securityMode", "security_mode")
 _SECURITY_MODES = frozenset({"safe", "research", "unsafe"})
-_UNSUPPORTED_OUTPUT_KINDS = frozenset(
-    {
-        "annotations",
-        "barcolors",
-        "bgcolors",
-        "boxes",
-        "fills",
-        "hlines",
-        "labels",
-        "markers",
-        "signals",
-        "tables",
-    }
-)
 _INVALID_IDENTIFIER = re.compile(r"[^a-z0-9._-]+")
 
 
@@ -86,10 +76,14 @@ def _descriptor() -> RuntimeDescriptor:
             FEATURE_SOURCE_ANALYSIS_V1,
             FEATURE_BATCH_EXECUTION_V1,
             FEATURE_RENDER_LINE_SERIES_V1,
+            FEATURE_RENDER_HISTOGRAM_SERIES_V1,
+            FEATURE_RENDER_STRUCTURED_OUTPUT_V1,
         ),
         required_host_features=(
             FEATURE_BATCH_EXECUTION_V1,
             FEATURE_RENDER_LINE_SERIES_V1,
+            FEATURE_RENDER_HISTOGRAM_SERIES_V1,
+            FEATURE_RENDER_STRUCTURED_OUTPUT_V1,
         ),
         meta={
             "engine": "pyne-runtime",
@@ -97,8 +91,21 @@ def _descriptor() -> RuntimeDescriptor:
             "expectedEngineVersion": EXPECTED_PYNE_VERSION,
             "engineVersionVerified": actual_engine_version == EXPECTED_PYNE_VERSION,
             "executorBoundary": "sidecar-inline",
-            "renderCoverage": ["lines"],
-            "unsupportedRenderKinds": sorted(_UNSUPPORTED_OUTPUT_KINDS),
+            "renderCoverage": [
+                "lines",
+                "histograms",
+                "markers",
+                "hlines",
+                "fills",
+                "bgcolors",
+                "labels",
+                "barcolors",
+                "signals",
+                "strategy",
+                "objects",
+                "object_events",
+            ],
+            "unsupportedRenderKinds": [],
         },
     )
 
@@ -244,7 +251,13 @@ def _line_series(value: Any, index: int, used: set[str]) -> LineSeries:
         if not isinstance(raw_point, Mapping):
             raise BridgeOutputError(f"Pyne line {index} point {point_index} must be an object")
         try:
-            points.append(LinePoint(time=raw_point.get("time"), value=raw_point.get("value")))
+            points.append(
+                LinePoint(
+                    time=raw_point.get("time"),
+                    value=raw_point.get("value"),
+                    color=raw_point.get("color"),
+                )
+            )
         except Exception as exc:
             raise BridgeOutputError(f"Pyne line {index} point {point_index} is invalid") from exc
     raw_id = value.get("id") or value.get("name") or value.get("title")
@@ -266,22 +279,34 @@ def _line_series(value: Any, index: int, used: set[str]) -> LineSeries:
         pane=pane,
         scale=scale,
         style=_line_style(value),
+        series_type=value.get("type", "line"),
     )
 
 
-def _unsupported_output_kinds(output: Any) -> list[str]:
+def _normalize_engine_output(result: Any) -> None:
+    """Match Pyne's public histogram normalization before protocol mapping."""
+    for line in getattr(result, "lines", None) or []:
+        if not isinstance(line, Mapping) or line.get("type") != "histogram":
+            continue
+        default_color = line.get("color")
+        for point in line.get("data") or []:
+            if isinstance(point, dict) and point.get("color") == default_color:
+                point.pop("color", None)
+
+
+def _render_collections(output: Any) -> RenderCollections | None:
+    if output is None:
+        return RenderCollections()
     if not isinstance(output, Mapping):
-        return []
-    return sorted(
-        key
-        for key, value in output.items()
-        if isinstance(key, str)
-        and key not in {"lines", "meta"}
-        and value not in (None, [], {}, False)
-    )
+        raise BridgeOutputError("Pyne result output must be an object")
+    collections = {
+        key: value for key, value in output.items() if key != "meta" and value not in (None, [], {})
+    }
+    return RenderCollections.from_wire(collections)
 
 
 def _render_output(result: Any) -> RenderOutput:
+    _normalize_engine_output(result)
     raw_lines = getattr(result, "lines", None)
     if isinstance(raw_lines, (str, bytes)) or not isinstance(raw_lines, Sequence):
         raise BridgeOutputError("Pyne result lines must be an array")
@@ -289,22 +314,19 @@ def _render_output(result: Any) -> RenderOutput:
     series = tuple(_line_series(line, index, used) for index, line in enumerate(raw_lines, 1))
     result_meta = getattr(result, "meta", None)
     pyne_output = getattr(result, "output", None)
-    meta: dict[str, Any] = {
-        "runtimeId": RUNTIME_ID,
-        "renderCoverage": ["lines"],
-        "unsupportedOutputKinds": _unsupported_output_kinds(pyne_output),
-    }
-    if isinstance(result_meta, Mapping):
-        title = result_meta.get("title")
-        overlay = result_meta.get("overlay")
-        security_mode = result_meta.get("securityMode")
-        if isinstance(title, str) and title:
-            meta["title"] = title
-        if isinstance(overlay, bool):
-            meta["overlay"] = overlay
-        if isinstance(security_mode, str) and security_mode:
-            meta["securityMode"] = security_mode
-    return RenderOutput(series=series, meta=meta)
+    output_meta = pyne_output.get("meta", {}) if isinstance(pyne_output, Mapping) else {}
+    if not isinstance(output_meta, Mapping):
+        raise BridgeOutputError("Pyne output meta must be an object")
+    if result_meta is not None and not isinstance(result_meta, Mapping):
+        raise BridgeOutputError("Pyne result meta must be an object")
+    collections = _render_collections(pyne_output)
+    if series and collections is not None and not (collections.lines or collections.histograms):
+        raise BridgeOutputError("Pyne output omitted structured line data for rendered series")
+    return RenderOutput(
+        series=series,
+        collections=collections,
+        meta=dict(output_meta),
+    )
 
 
 class PyneRuntimePlugin(BaseRuntimePlugin):
@@ -406,10 +428,34 @@ class PyneRuntimePlugin(BaseRuntimePlugin):
             )
         try:
             output = _render_output(result)
-        except (BridgeOutputError, TypeError, ValueError) as exc:
+        except (BridgeOutputError, ProtocolError, TypeError, ValueError) as exc:
             return _bridge_failure(
                 "PYNE_BRIDGE_OUTPUT_INVALID",
                 "Pyne returned output that cannot be represented by Render IR v1.",
                 hint=str(exc),
             )
-        return ExecuteBatchResult(ok=True, output=output)
+        raw_inputs = getattr(result, "param_schema", None) or []
+        if isinstance(raw_inputs, (str, bytes)) or not isinstance(raw_inputs, Sequence):
+            return _bridge_failure(
+                "PYNE_BRIDGE_OUTPUT_INVALID",
+                "Pyne returned an invalid parameter schema.",
+            )
+        result_meta = getattr(result, "meta", None) or {}
+        if not isinstance(result_meta, Mapping):
+            return _bridge_failure(
+                "PYNE_BRIDGE_OUTPUT_INVALID",
+                "Pyne returned invalid result metadata.",
+            )
+        try:
+            return ExecuteBatchResult(
+                ok=True,
+                output=output,
+                inputs=tuple(raw_inputs),
+                meta=dict(result_meta),
+            )
+        except (ProtocolError, TypeError, ValueError) as exc:
+            return _bridge_failure(
+                "PYNE_BRIDGE_OUTPUT_INVALID",
+                "Pyne returned output that cannot be represented by Render IR v1.",
+                hint=str(exc),
+            )

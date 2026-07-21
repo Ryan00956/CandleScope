@@ -64,11 +64,11 @@ def build_hello_wheel(directory: Path, *, version: str = "0.1.0") -> Path:
     for source in sorted(SDK_SOURCE.rglob("*.py")):
         relative = source.relative_to(SDK_SOURCE).as_posix()
         data = source.read_bytes()
-        if version != "0.1.0" and relative in {
+        if relative in {
             "__init__.py",
             "examples/hello_runtime.py",
         }:
-            data = data.replace(b'"0.1.0"', f'"{version}"'.encode("ascii"))
+            data = data.replace(b'"0.2.0"', f'"{version}"'.encode("ascii"))
         entries[f"candlescope_plugin_sdk/{relative}"] = data
 
     dist_info = f"candlescope_plugin_sdk-{version}.dist-info"

@@ -426,13 +426,15 @@ isolated venv per bundle, offline wheel install, result probes, atomic
 activation, and per-runtime rollback; see the
 [`installer guide`](backend/app/plugin_runtime/INSTALLER.md). Phase 4 routes
 Indicator HTTP, range, batch, and WebSocket execution through explicit
-`legacy/shadow/sidecar` policy while preserving `pyne=legacy` by default.
+`legacy/shadow/sidecar` policy. Phase 6 defaults Pyne to the managed
+`candlescope.pyne` sidecar and fails closed when it is not installed.
 Phase 5 adds the independently buildable
 [`candlescope-plugin-pyne`](packages/candlescope-plugin-pyne/README.md), with a
 release lock for the SDK, Pyne Runtime RC wheel, and NumPy version, plus a real
-offline `.cspkg` installation and protocol probe gate. Markers, horizontal
-lines, fills, and other output remain outside line-only Render IR v1, so Phase
-6 separately owns default cutover and removal of the old source snapshot.
+offline `.cspkg` installation and protocol probe gate. The 0.2.0 bridge covers
+markers, horizontal lines, fills, and other output through negotiated structured
+Render IR and passes the frozen goldens. The separate source-deletion commit
+remains blocked on publishing a trusted `.cspkg` Release asset.
 
 ## API Documentation
 

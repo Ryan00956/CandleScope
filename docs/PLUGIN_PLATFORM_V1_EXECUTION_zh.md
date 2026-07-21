@@ -24,7 +24,7 @@ v1 的核心边界是：
 | Phase 3：隔离安装器 v2 | 已完成 | `.cspkg`、独立 venv、校验、探测、原子激活与回滚 |
 | Phase 4：通用 Indicator Service | 已完成 | `legacy/shadow/sidecar` 路由与传输迁移 |
 | Phase 5：Pyne 插件发行 | 已完成（release-ready） | Pyne host facade、发行锁与 `candlescope-plugin-pyne` |
-| Phase 6：Pyne 切换与源码快照删除 | 未开始 | shadow、cutover、独立删除提交 |
+| Phase 6：Pyne 切换与源码快照删除 | 进行中（cutover 已完成） | 完整 Render IR、shadow、默认 sidecar；删除等待可信 Release asset |
 | Phase 7：描述符驱动前端 | 未开始 | 运行时/语言/能力描述符，无硬编码运行时联合类型 |
 | Phase 8：Pine Compatibility 插件 | 未开始 | 修复发行来源、桥接插件、shadow、cutover |
 
@@ -537,6 +537,68 @@ line parity 已建立，但完整 HTTP/range/WS golden 预期仍不相等；Phas
   `unsupportedOutputKinds=["hlines","markers"]` 断言通过；
 - 本阶段只生成临时二进制验证产物，不提交 wheel、`.cspkg`、managed venv 或 registry，
   验证后已删除两个受限系统临时目录；不执行 GitHub push / Release 发布。
+
+## Phase 6：Pyne shadow、cutover 与源码删除门禁
+
+### 可协商的完整公共输出
+
+SDK 升级为 `candlescope-plugin-sdk==0.2.0`，但协议 ID 与 Render schema 仍保持
+`candlescope.script-runtime/1` / `candlescope.render/1`。新增的
+`render.histogram-series/1` 与 `render.structured-output/1` 都是显式协商的附加能力；
+旧的 line-only 插件不发送 `collections` / `inputs`，wire 行为不变。
+
+公开 `RenderCollections` 只接受固定的宿主集合名：line、histogram、marker、hline、fill、
+背景、legacy label、K 线着色、signal、strategy、drawing objects 与 object events。集合
+内容必须是有限深度、有限数值的 JSON；未知集合、Python 私有对象、非字符串 key、NaN
+与 Infinity 都在进入 transport 前 fail closed。插件因此不需要导入 CandleScope 私有
+serializer，同时宿主仍拥有 HTTP/WS envelope、normalized series/annotation/fill 和 pane
+layout。
+
+`candlescope-plugin-pyne==0.2.0` 把 Pyne 公开 output、parameter schema 和 result metadata
+映射到上述协议。宿主从公共结构重建既有 `result`、extended legacy fields 与 normalized
+output；不是把 Pyne runtime 对象夹带在 `meta` 中。Phase 0 脚本的 legacy 与 sidecar
+adapter payload 已逐字段相等，marker 与 hline 不再是已知缺口。Histogram、fill/bgcolor/
+barcolor/signal、drawing objects 与 strategy 的补充样本也逐字段相等。
+只有 indicator metadata、没有任何 plot 的合法脚本也保留 `result` 形状，不会泄露
+Render schema 包装或制造 shadow mismatch。
+
+### Shadow 与默认切换
+
+真实 0.2.0 wheel 集合构建出的本地 Windows CPython 3.12 候选 `.cspkg` 为
+`13,006,218` bytes，SHA-256
+`sha256:a1812e0e2b43670e75858b5f57d59f71a403350360ea58bf2822efba7d34a216`。它在全新
+managed root 中完成离线安装、probe、`check` 与幂等重装；真实 supervisor shadow
+得到一次 `matched`、零 mismatch/sidecar error，legacy 与 sidecar hash 同为
+`sha256:50298c7df91a12241a8ce8bbc75402bcbbb1eb97fac52460ab6c1690020bc710`。
+
+HTTP compute、HTTP range 与 WebSocket sidecar 重放分别匹配 Phase 0 冻结 golden；默认
+路由在缺少显式 route 文件时已经从 `pyne=legacy` 切换为
+`pyne=sidecar,candlescope.pyne`。插件没有激活时启动 fail closed，不存在静默 legacy
+fallback；显式 route 文件仍可在源码删除提交前用于回滚。
+
+### 2026-07-21 验证证据
+
+- SDK 模型、wire、Hello Runtime 与 golden transcript：`30 passed`；最终 wheel 在干净
+  venv 中离线安装并通过真实 console sidecar package smoke；
+- Pyne bridge 的完整 Render IR、descriptor、options、架构与发行 builder：`20 passed`；
+- HTTP compute、HTTP range、WebSocket 与宿主 serializer 的 Phase 0 精确 parity：
+  `15 passed`；
+- backend 全量：`1950 passed, 4 warnings in 128.49s`；4 条 warning 仍为既有 FastAPI
+  `on_event` 弃用提示；
+- 最终本地 `.cspkg` 在全新 managed root 中安装并通过 probe/`check`；重复安装返回
+  `changed=false`、`reusedInstallation=true`，activation ID 不变；
+- 真实 Host descriptor 报告 `engineVersion=0.2.0rc1`、
+  `engineVersionVerified=true`、完整 Render coverage；shadow 为 `1 matched / 0 mismatch /
+  0 sidecar error`，默认 sidecar 与 legacy adapter 摘要均为
+  `sha256:50298c7df91a12241a8ce8bbc75402bcbbb1eb97fac52460ab6c1690020bc710`。
+
+### 当前硬门禁：尚无可信公开 bundle
+
+本次 `.cspkg` 仍只是本地候选。`Ryan00956/CandleScope` 当前没有可供用户取得的 GitHub
+Release asset，也没有已发布的外层 SHA-256；把本地临时摘要写成公开下载锁会伪造供应链
+信任。因此本阶段暂不删除 `packages/pyne-runtime`，也不把删除与 cutover 混在一个提交。
+必须先把 0.2.0 `.cspkg` 与其外层摘要作为同一可信 Release 发布，再用全新用户目录完成
+首次安装/启动验证，之后才能执行独立的源码快照删除提交。
 
 ## 后续阶段不可越过的顺序
 

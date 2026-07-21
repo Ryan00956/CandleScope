@@ -19,14 +19,20 @@ candlescope.script-runtime/1
 - 执行前显式协商能力，不支持的能力直接拒绝；
 - 类型化 chart context 和 OHLCV batch；
 - 源码与执行错误使用结构化 diagnostics；
-- 输出使用 CandleScope 拥有的 `candlescope.render/1`，首版只包含 line
-  series；
+- 输出使用 CandleScope 拥有的 `candlescope.render/1`；line series 是基础能力，
+  histogram 与结构化 render collections 通过附加能力协商；
 - stdout 只允许协议响应，日志必须写 stderr；
 - 默认单消息上限 16 MiB，重复 JSON key、NaN 和 Infinity 会被拒绝。
 
 Realtime session、宿主数据回调、secrets、交易动作、任意前端 JavaScript 和
 marketplace packaging 不属于 v1。sidecar 进程隔离是依赖与传输边界，不等同于
 完整安全沙箱；资源和权限策略由 CandleScope host 负责。
+
+需要 marker、hline、fill、背景、K 线着色、signal、strategy report 或 drawing
+objects 的插件声明 `render.structured-output/1`，并使用 SDK 的
+`RenderCollections`。集合名称和 JSON-only 校验属于公开协议，因此社区 runtime
+不需要再维护 CandleScope 私有 serializer。完整字段见
+[`docs/protocol-v1.md`](docs/protocol-v1.md)。
 
 ## 从 Hello Runtime 开始
 

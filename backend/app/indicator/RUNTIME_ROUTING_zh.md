@@ -19,8 +19,9 @@ Phase 4 把 CandleScope 稳定的 Indicator 传输接到通用脚本 runtime Hos
 - Linux：`$XDG_DATA_HOME/candlescope/plugins/indicator-runtime-routes.json`，未设置
   时为 `~/.local/share/candlescope/plugins/indicator-runtime-routes.json`。
 
-可用 `CANDLESCOPE_INDICATOR_RUNTIME_ROUTES` 指定其他文件。默认文件不存在等价于
-内置的 `pyne=legacy`；一旦显式指定，文件缺失或非法会让应用启动失败。
+可用 `CANDLESCOPE_INDICATOR_RUNTIME_ROUTES` 指定其他文件。Phase 6 起，默认文件
+不存在等价于内置的 `pyne=sidecar,candlescope.pyne`；如果插件尚未安装并激活，应用
+会在启动时 fail closed。显式指定的文件缺失或非法同样会让应用启动失败。
 
 ```json
 {
@@ -82,9 +83,11 @@ Host 负责构造 market context 与 OHLCV 输入；插件输出由 CandleScope 
 脚本缓存 identity 包含 language，因此不同 runtime 不会仅因源码 hash 相同就复用结果或
 合并 singleflight。
 
-协议 v1 目前只渲染 line series。Marker、hline、fill、背景、K 线着色、signal 和更丰富
-的 realtime session 仍是明确的迁移缺口，需要后续 Render IR 能力协商。只有 shadow
-诊断达到约定兼容门禁后，才能切换到 `sidecar`。
+Render IR v1 的基础能力仍是 line series；`render.histogram-series/1` 与
+`render.structured-output/1` 以可协商方式增加 histogram、marker、hline、fill、背景、
+K 线着色、signal、strategy report 和 drawing objects。Pyne 0.2.0 bridge 已通过这两项
+能力重建 Phase 0 冻结 payload。真正有状态的 realtime session 仍不在协议 v1 内；
+sidecar 对确认 bars 使用 batch 执行。
 
 ## 安全上线顺序
 
@@ -94,7 +97,8 @@ Host 负责构造 market context 与 OHLCV 输入；插件输出由 CandleScope 
 4. 覆盖 compute、range/batch 和 WebSocket 流量；在
    `/api/v1/indicators/diagnostics` 的 `scriptRuntimeRouting` 查看结果。
 5. 要求冻结的兼容 golden 全绿，并达到约定的 shadow 匹配窗口。
-6. 把路由改为 `sidecar`；保留旧实现，以便显式修改路由回滚。
+6. 把路由改为 `sidecar`；Phase 6 内置默认值已经完成此切换。保留旧实现，以便在源码
+   删除提交前显式修改路由回滚。
 7. 只有在之后的独立提交里才能删除 vendored runtime 源码快照。
 
 紧急回滚是把路由文件改回 `legacy` 并重启。`CANDLESCOPE_PLUGIN_HOST_ENABLED=0`

@@ -6,8 +6,9 @@ Phase 3 提供可发布的 `.cspkg` 格式和本地管理 CLI。它解决插件�
 激活状态反复手工对齐的问题：插件作者发布一个确定的 bundle，CandleScope 为每个
 bundle 创建独立 venv，协议探针通过后才原子激活。
 
-当前 Indicator/Pyne 路由仍是 legacy。安装成功代表插件已可由通用 Host 启动，
-不代表生产指标流已经切到 sidecar；该切换属于 Phase 4。
+Phase 6 起，Indicator 路由文件不存在时会选择托管的 `candlescope.pyne` sidecar；该
+runtime 未激活时应用启动 fail closed。在源码删除前的回滚窗口中，显式路由文件仍可选择
+`legacy` 或 `shadow`。
 
 ## 最短发布流程
 
@@ -27,14 +28,14 @@ cd backend
 
 python scripts/candlescope_plugin.py build `
   --manifest ..\packages\candlescope-plugin-sdk\examples\hello-runtime.manifest.json `
-  --wheel C:\release\candlescope_plugin_sdk-0.1.0-py3-none-any.whl `
-  --output C:\release\hello-runtime-0.1.0.cspkg
+  --wheel C:\release\candlescope_plugin_sdk-0.2.0-py3-none-any.whl `
+  --output C:\release\hello-runtime-0.2.0.cspkg
 
 python scripts/candlescope_plugin.py inspect `
-  C:\release\hello-runtime-0.1.0.cspkg
+  C:\release\hello-runtime-0.2.0.cspkg
 
 python scripts/candlescope_plugin.py install `
-  C:\release\hello-runtime-0.1.0.cspkg `
+  C:\release\hello-runtime-0.2.0.cspkg `
   --sha256 sha256:<inspect 输出的 64 位摘要>
 
 python scripts/candlescope_plugin.py check hello-runtime
@@ -74,9 +75,9 @@ enabled、按需启动。
       "version": "1.2.3"
     },
     {
-      "path": "wheels/candlescope_plugin_sdk-0.1.0-py3-none-any.whl",
+      "path": "wheels/candlescope_plugin_sdk-0.2.0-py3-none-any.whl",
       "package": "candlescope-plugin-sdk",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   ],
   "probe": {

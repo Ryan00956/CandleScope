@@ -3,7 +3,9 @@
 from .constants import (
     DEFAULT_MAX_MESSAGE_BYTES,
     FEATURE_BATCH_EXECUTION_V1,
+    FEATURE_RENDER_HISTOGRAM_SERIES_V1,
     FEATURE_RENDER_LINE_SERIES_V1,
+    FEATURE_RENDER_STRUCTURED_OUTPUT_V1,
     FEATURE_SOURCE_ANALYSIS_V1,
     JSONRPC_VERSION,
     KNOWN_FEATURES_V1,
@@ -25,6 +27,7 @@ from .models import (
     LinePoint,
     LineSeries,
     MarketContext,
+    RenderCollections,
     RenderOutput,
     RuntimeDescriptor,
 )
@@ -32,7 +35,7 @@ from .runtime import BaseRuntimePlugin, RuntimeDispatcher
 from .server import JsonLineRuntimeServer, serve_runtime
 
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AnalyzeRequest",
@@ -44,7 +47,9 @@ __all__ = [
     "ExecuteBatchRequest",
     "ExecuteBatchResult",
     "FEATURE_BATCH_EXECUTION_V1",
+    "FEATURE_RENDER_HISTOGRAM_SERIES_V1",
     "FEATURE_RENDER_LINE_SERIES_V1",
+    "FEATURE_RENDER_STRUCTURED_OUTPUT_V1",
     "FEATURE_SOURCE_ANALYSIS_V1",
     "HandshakeRequest",
     "HandshakeResult",
@@ -59,6 +64,7 @@ __all__ = [
     "ProtocolError",
     "RENDER_IR_V1",
     "REQUIRED_METHODS",
+    "RenderCollections",
     "RenderOutput",
     "RuntimeDescriptor",
     "RuntimeDispatcher",

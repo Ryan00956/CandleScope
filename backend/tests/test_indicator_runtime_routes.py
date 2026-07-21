@@ -8,7 +8,6 @@ import pytest
 from app.indicator.runtime_routes import (
     INDICATOR_RUNTIME_ROUTES_ENV,
     IndicatorRuntimeRoutesError,
-    ROUTE_MODE_LEGACY,
     default_indicator_runtime_routes_path,
     load_indicator_runtime_routes,
     load_indicator_runtime_routes_from_environment,
@@ -22,16 +21,25 @@ def _write(path: Path, value: object) -> Path:
     return path
 
 
-def test_missing_default_routes_keep_current_pyne_on_legacy(tmp_path: Path) -> None:
+def test_missing_default_routes_cut_pyne_over_to_the_managed_sidecar(
+    tmp_path: Path,
+) -> None:
     routes = load_indicator_runtime_routes_from_environment(
         {"LOCALAPPDATA": str(tmp_path)}
     )
 
     assert routes.source is None
-    assert routes.for_language("pyne").mode == ROUTE_MODE_LEGACY
+    assert routes.for_language("pyne").mode == "sidecar"
+    assert routes.for_language("pyne").runtime_id == "candlescope.pyne"
     assert routes.to_wire() == {
         "schemaVersion": 1,
-        "routes": [{"language": "pyne", "mode": "legacy"}],
+        "routes": [
+            {
+                "language": "pyne",
+                "mode": "sidecar",
+                "runtimeId": "candlescope.pyne",
+            }
+        ],
     }
     assert (
         default_indicator_runtime_routes_path({"LOCALAPPDATA": str(tmp_path)}).name

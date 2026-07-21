@@ -14,6 +14,21 @@ from .errors import invalid_params
 
 _IDENTIFIER_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 _SEVERITIES = frozenset({"error", "warning", "info"})
+_SERIES_TYPES = frozenset({"line", "histogram"})
+_RENDER_COLLECTION_FIELDS = (
+    "lines",
+    "histograms",
+    "markers",
+    "hlines",
+    "fills",
+    "bgcolors",
+    "labels",
+    "barcolors",
+    "signals",
+    "strategy",
+    "objects",
+    "object_events",
+)
 
 
 def _mapping(value: Any, field_name: str) -> Mapping[str, Any]:
@@ -81,6 +96,45 @@ def _number(value: Any, field_name: str) -> float:
     if not math.isfinite(number):
         raise invalid_params(f"{field_name} must be finite", field_name=field_name)
     return number
+
+
+def _json_value(value: Any, field_name: str, *, depth: int = 0) -> Any:
+    """Return a detached JSON value or fail before it reaches the wire."""
+    if depth > 32:
+        raise invalid_params(f"{field_name} exceeds the maximum nesting depth")
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise invalid_params(f"{field_name} numbers must be finite")
+        return value
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise invalid_params(f"{field_name} keys must be strings")
+        return {
+            key: _json_value(item, f"{field_name}.{key}", depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_json_value(item, f"{field_name}[]", depth=depth + 1) for item in value]
+    raise invalid_params(f"{field_name} must contain JSON-compatible values")
+
+
+def _json_records(value: Any, field_name: str) -> tuple[dict[str, Any], ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise invalid_params(f"{field_name} must be an array", field_name=field_name)
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        record = _json_value(item, f"{field_name}[{index}]")
+        if not isinstance(record, dict):
+            raise invalid_params(
+                f"{field_name}[{index}] must be an object",
+                field_name=field_name,
+            )
+        records.append(record)
+    return tuple(records)
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,19 +678,30 @@ class ExecuteBatchRequest:
 class LinePoint:
     time: int
     value: float | None
+    color: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "time", _integer(self.time, "point.time"))
         if self.value is not None:
             object.__setattr__(self, "value", _number(self.value, "point.value"))
+        if self.color is not None:
+            object.__setattr__(self, "color", _string(self.color, "point.color"))
 
     def to_wire(self) -> dict[str, Any]:
-        return {"time": self.time, "value": self.value}
+        return {
+            "time": self.time,
+            "value": self.value,
+            **({"color": self.color} if self.color is not None else {}),
+        }
 
     @classmethod
     def from_wire(cls, value: Any) -> "LinePoint":
         data = _mapping(value, "point")
-        return cls(time=data.get("time"), value=data.get("value"))
+        return cls(
+            time=data.get("time"),
+            value=data.get("value"),
+            color=data.get("color"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -647,6 +712,7 @@ class LineSeries:
     pane: str = "main"
     scale: str = "right"
     style: dict[str, Any] = field(default_factory=dict)
+    series_type: str = "line"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _identifier(self.id, "series.id"))
@@ -658,11 +724,18 @@ class LineSeries:
         object.__setattr__(self, "pane", _string(self.pane, "series.pane"))
         object.__setattr__(self, "scale", _string(self.scale, "series.scale"))
         object.__setattr__(self, "style", _plain_dict(self.style, "series.style"))
+        series_type = _string(self.series_type, "series.type")
+        if series_type not in _SERIES_TYPES:
+            raise invalid_params(
+                "series.type must be line or histogram",
+                field_name="series.type",
+            )
+        object.__setattr__(self, "series_type", series_type)
 
     def to_wire(self) -> dict[str, Any]:
         return {
             "id": self.id,
-            "type": "line",
+            "type": self.series_type,
             "title": self.title,
             "pane": self.pane,
             "scale": self.scale,
@@ -673,8 +746,11 @@ class LineSeries:
     @classmethod
     def from_wire(cls, value: Any) -> "LineSeries":
         data = _mapping(value, "series")
-        if data.get("type") != "line":
-            raise invalid_params("series.type must be line", field_name="series.type")
+        if data.get("type") not in _SERIES_TYPES:
+            raise invalid_params(
+                "series.type must be line or histogram",
+                field_name="series.type",
+            )
         points = data.get("data")
         if isinstance(points, (str, bytes)) or not isinstance(points, Sequence):
             raise invalid_params("series.data must be an array", field_name="series.data")
@@ -685,12 +761,88 @@ class LineSeries:
             pane=data.get("pane", "main"),
             scale=data.get("scale", "right"),
             style=_plain_dict(data.get("style", {}), "series.style"),
+            series_type=data.get("type"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RenderCollections:
+    """Standard, JSON-only structured render collections.
+
+    The field names belong to CandleScope's public Render IR. Runtime-private
+    Python objects and arbitrary collection names are deliberately rejected.
+    """
+
+    lines: tuple[dict[str, Any], ...] = ()
+    histograms: tuple[dict[str, Any], ...] = ()
+    markers: tuple[dict[str, Any], ...] = ()
+    hlines: tuple[dict[str, Any], ...] = ()
+    fills: tuple[dict[str, Any], ...] = ()
+    bgcolors: tuple[dict[str, Any], ...] = ()
+    labels: tuple[dict[str, Any], ...] = ()
+    barcolors: tuple[dict[str, Any], ...] = ()
+    signals: tuple[dict[str, Any], ...] = ()
+    strategy: dict[str, Any] | None = None
+    objects: dict[str, Any] | None = None
+    object_events: tuple[dict[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        for field_name in _RENDER_COLLECTION_FIELDS:
+            value = getattr(self, field_name)
+            if field_name in {"strategy", "objects"}:
+                if value is None:
+                    continue
+                normalized = _json_value(value, f"collections.{field_name}")
+                if not isinstance(normalized, dict):
+                    raise invalid_params(
+                        f"collections.{field_name} must be an object",
+                        field_name=f"collections.{field_name}",
+                    )
+            else:
+                normalized = _json_records(value, f"collections.{field_name}")
+            object.__setattr__(self, field_name, normalized)
+
+    @property
+    def is_empty(self) -> bool:
+        return all(
+            getattr(self, field_name) in ((), None, {}) for field_name in _RENDER_COLLECTION_FIELDS
+        )
+
+    def to_wire(self) -> dict[str, Any]:
+        output: dict[str, Any] = {}
+        for field_name in _RENDER_COLLECTION_FIELDS:
+            value = getattr(self, field_name)
+            if value in ((), None, {}):
+                continue
+            wire_name = "objectEvents" if field_name == "object_events" else field_name
+            output[wire_name] = (
+                [dict(item) for item in value]
+                if isinstance(value, tuple)
+                else _json_value(value, f"collections.{field_name}")
+            )
+        return output
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "RenderCollections":
+        data = _mapping(value, "collections")
+        normalized = dict(data)
+        if "objectEvents" in normalized:
+            if "object_events" in normalized:
+                raise invalid_params("collections contains duplicate object events")
+            normalized["object_events"] = normalized.pop("objectEvents")
+        unknown = sorted(set(normalized) - set(_RENDER_COLLECTION_FIELDS))
+        if unknown:
+            raise invalid_params(
+                "collections contains unsupported fields: " + ", ".join(unknown),
+                field_name="collections",
+            )
+        return cls(**normalized)
 
 
 @dataclass(frozen=True, slots=True)
 class RenderOutput:
     series: tuple[LineSeries, ...] = ()
+    collections: RenderCollections | None = None
     meta: dict[str, Any] = field(default_factory=dict)
     schema: str = RENDER_IR_V1
 
@@ -706,12 +858,15 @@ class RenderOutput:
         if len({item.id for item in series}) != len(series):
             raise invalid_params("output.series ids must be unique")
         object.__setattr__(self, "series", series)
+        if self.collections is not None and not isinstance(self.collections, RenderCollections):
+            raise invalid_params("output.collections is invalid")
         object.__setattr__(self, "meta", _plain_dict(self.meta, "output.meta"))
 
     def to_wire(self) -> dict[str, Any]:
         return {
             "schema": self.schema,
             "series": [item.to_wire() for item in self.series],
+            **({"collections": self.collections.to_wire()} if self.collections is not None else {}),
             "meta": dict(self.meta),
         }
 
@@ -724,6 +879,11 @@ class RenderOutput:
         return cls(
             schema=data.get("schema"),
             series=tuple(LineSeries.from_wire(item) for item in series),
+            collections=(
+                RenderCollections.from_wire(data["collections"])
+                if data.get("collections") is not None
+                else None
+            ),
             meta=_plain_dict(data.get("meta", {}), "output.meta"),
         )
 
@@ -733,6 +893,7 @@ class ExecuteBatchResult:
     ok: bool
     output: RenderOutput | None = None
     diagnostics: tuple[Diagnostic, ...] = ()
+    inputs: tuple[dict[str, Any], ...] = ()
     meta: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -750,6 +911,13 @@ class ExecuteBatchResult:
         if not self.ok and not any(item.severity == "error" for item in diagnostics):
             raise invalid_params("failed executeBatch result requires an error diagnostic")
         object.__setattr__(self, "diagnostics", diagnostics)
+        object.__setattr__(
+            self,
+            "inputs",
+            tuple(_json_value(item, "executeBatchResult.inputs[]") for item in self.inputs),
+        )
+        if not all(isinstance(item, dict) for item in self.inputs):
+            raise invalid_params("executeBatch result inputs must contain objects")
         object.__setattr__(self, "meta", _plain_dict(self.meta, "executeBatchResult.meta"))
 
     def to_wire(self) -> dict[str, Any]:
@@ -757,6 +925,7 @@ class ExecuteBatchResult:
             "ok": self.ok,
             "output": self.output.to_wire() if self.output is not None else None,
             "diagnostics": [item.to_wire() for item in self.diagnostics],
+            **({"inputs": [dict(item) for item in self.inputs]} if self.inputs else {}),
             "meta": dict(self.meta),
         }
 
@@ -770,5 +939,6 @@ class ExecuteBatchResult:
             ok=data["ok"],
             output=RenderOutput.from_wire(output) if output is not None else None,
             diagnostics=_diagnostics(data.get("diagnostics", [])),
+            inputs=tuple(_json_records(data.get("inputs", []), "executeBatchResult.inputs")),
             meta=_plain_dict(data.get("meta", {}), "executeBatchResult.meta"),
         )

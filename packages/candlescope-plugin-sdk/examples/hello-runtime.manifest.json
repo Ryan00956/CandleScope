@@ -3,7 +3,7 @@
   "plugin": {
     "id": "hello-runtime",
     "name": "Hello Runtime",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "package": "candlescope-plugin-sdk",
     "protocol": "candlescope.script-runtime/1"
   },
@@ -13,9 +13,9 @@
   },
   "wheels": [
     {
-      "path": "wheels/candlescope_plugin_sdk-0.1.0-py3-none-any.whl",
+      "path": "wheels/candlescope_plugin_sdk-0.2.0-py3-none-any.whl",
       "package": "candlescope-plugin-sdk",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   ],
   "probe": {

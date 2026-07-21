@@ -4,7 +4,7 @@
   "plugin": {
     "id": "candlescope.pyne",
     "package": "candlescope-plugin-pyne",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "python": {
     "requires": ">=3.11,<3.14",
@@ -12,11 +12,11 @@
   },
   "wheels": {
     "candlescope-plugin-pyne": {
-      "version": "0.1.0",
+      "version": "0.2.0",
       "source": "local-release-build"
     },
     "candlescope-plugin-sdk": {
-      "version": "0.1.0",
+      "version": "0.2.0",
       "source": "local-release-build"
     },
     "pyne-runtime": {
@@ -61,6 +61,6 @@
     "params": {},
     "options": {},
     "analysisSha256": "sha256:a8b9ec96529920fb061737898b6c71d6ab14b75f9813f20ab8747305d1715acd",
-    "executionSha256": "sha256:44669108c428b89cdcd7433e6545aa87fb804b5f675273f57e4a13fcf788dda5"
+    "executionSha256": "sha256:7ab1aa84bd83eaa9adcdfd5656a82c564191b4b9b6c284be4550d3984f32c5a0"
   }
 }

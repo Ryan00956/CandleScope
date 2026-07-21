@@ -417,9 +417,13 @@ feature negotiation, typed batch OHLCV input, diagnostics, and the first
 CandleScope-owned line-series Render IR. A runnable Hello Runtime and a frozen
 wire transcript are included.
 
-This is the protocol SDK from plugin platform Phase 1. CandleScope does not yet
-load external runtime sidecars in production; host supervision, isolated bundle
-installation, and `legacy/shadow/sidecar` routing belong to later phases.
+Plugin platform Phase 2 now includes the generic
+[`app.plugin_runtime`](backend/app/plugin_runtime/README.md) Host/Supervisor.
+It can launch and supervise explicitly activated sidecars with strict
+handshake, timeout, message-limit, restart-circuit, and health behavior. The
+default registry is empty and existing Indicator/Pyne HTTP, range, and
+WebSocket paths do not route to sidecars yet. Isolated bundle installation and
+`legacy/shadow/sidecar` routing belong to Phases 3 and 4 respectively.
 
 ## API Documentation
 
@@ -469,9 +473,10 @@ CandleScope/
 │   │   │   ├── data_manager/
 │   │   │   ├── backfill/
 │   │   │   └── storage/
-│   │   └── indicator/
-│   │       ├── indicators/
-│   │       └── pyne/
+│   │   ├── indicator/
+│   │   │   ├── indicators/
+│   │   │   └── pyne/
+│   │   └── plugin_runtime/
 │   └── tests/
 ├── packages/
 │   ├── candlescope-plugin-sdk/

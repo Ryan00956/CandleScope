@@ -20,7 +20,7 @@ v1 的核心边界是：
 | --- | --- | --- |
 | Phase 0：冻结兼容基线 | 已完成 | HTTP compute、HTTP range/history、WebSocket realtime 黑盒 golden |
 | Phase 1：Plugin SDK v1 | 已完成 | Python 3.11+ 基线、独立 SDK、协议模型、Hello Runtime、契约测试 |
-| Phase 2：通用 Host/Supervisor | 未开始 | 注册表、生命周期、RPC、宿主服务、诊断 |
+| Phase 2：通用 Host/Supervisor | 已完成 | 注册表、生命周期、RPC、宿主服务、诊断 |
 | Phase 3：隔离安装器 v2 | 未开始 | `.cspkg`、独立 venv、校验、探测、原子激活与回滚 |
 | Phase 4：通用 Indicator Service | 未开始 | `legacy/shadow/sidecar` 路由与传输迁移 |
 | Phase 5：Pyne 插件发行 | 未开始 | Pyne host facade 与 `candlescope-plugin-pyne` |
@@ -178,6 +178,105 @@ Phase 1 不接入 CandleScope 生产路由，不启动或监督外部进程，�
 安装/激活格式，不提供 realtime session、host data callback、secrets、交易动作、
 任意前端 JavaScript 或 marketplace。sidecar 是依赖与传输边界，不被宣称为完整
 安全沙箱；资源、权限、信任和终止策略由 Phase 2 host/supervisor 负责。
+
+## Phase 2：通用 Host/Supervisor
+
+### 交付边界
+
+新增 `backend/app/plugin_runtime`，作为与具体脚本语言无关的 sidecar 宿主内核。
+Host 直接依赖 Phase 1 的 `candlescope-plugin-sdk` 类型模型，因此 handshake、runtime
+descriptor、analysis、batch result 和 Render IR 不在 backend 复制第二套 schema。
+通用 Host 的架构门禁禁止导入 `app.indicator`、`pyne_runtime` 和 `pine_compat`。
+
+Phase 2 只把 Host 生命周期接入 FastAPI，不修改任何 Indicator/Pyne HTTP、range 或
+WebSocket 执行路径。默认 activation registry 不存在时等价于空 registry，不会启动
+sidecar；`CANDLESCOPE_PLUGIN_HOST_ENABLED=0` 可以完全绕过 registry 并关闭 Host。
+
+### Activation registry v1
+
+Registry schemaVersion 为 `1`，每项冻结：
+
+- runtime ID、预期 Python package 和精确 version；
+- 绝对 executable、argv 和可选绝对 working directory；
+- `enabled`、`autoStart`、`required` 生命周期策略；
+- startup/request/shutdown timeout；
+- 单消息和 stderr tail 上限；
+- restart max attempts 与时间窗。
+
+Parser 限制文件为 1 MiB、最多 128 个 runtime，拒绝重复 JSON key、NaN/Infinity、
+重复 ID、未知字段、相对 executable、NUL、非法范围和矛盾生命周期状态。Registry
+不接受 shell command、环境变量或 secrets。显式
+`CANDLESCOPE_RUNTIME_REGISTRY` 指向缺失或非法文件时 fail closed；只有未覆盖的默认
+用户数据路径允许不存在。
+
+Registry 是 Phase 3 安装器未来原子生成的“已解析激活状态”，不是下载或信任清单。
+Phase 2 手写 registry 仅用于本地开发，Host 不声称已经验证包来源或 artifact hash。
+
+### Supervisor 契约
+
+每个 runtime 由独立 `RuntimeSupervisor` 拥有：
+
+1. 使用 `create_subprocess_exec` 直接启动 absolute executable + argv，不经过 shell；
+2. 只继承 OS、临时目录、locale、证书和 PATH allowlist，宿主自定义变量不传入；
+3. 启动阶段依次调用 `handshake`、`describe`，两份 descriptor 必须一致；
+4. descriptor 的 ID、package、version 必须与 registry 精确相等；
+5. negotiated features 必须等于 runtime features 与 host features 的有序交集；
+6. 所有请求由 async lock 串行化，request ID 每代唯一；
+7. stdout 严格解析 UTF-8 JSON Lines，拒绝错 ID、重复 key、非有限数、未知顶层字段、
+   缺失换行和超大消息；
+8. SDK typed model 再验证 analyze/execute 结果，非法 Render IR 会终止会话；
+9. 合法 JSON-RPC error 不杀进程；transport/protocol/timeout/cancellation 会销毁会话；
+10. 后续请求可以在受限次数/时间窗内惰性重启，超过预算返回
+    `PLUGIN_RESTART_LIMIT`；
+11. shutdown 先调用协议方法，超时后 terminate/kill；POSIX 使用独立 process group；
+12. stderr 始终被 drain 且只保留有界 tail，`/health` 不公开 stderr、命令或路径。
+
+Sidecar 仍不是完整安全沙箱。Windows v1 保证主 sidecar 终止，但不宣称能够约束恶意
+后代进程；secrets、网络权限、宿主文件访问和 OS 级资源沙箱不在协议 v1 中。
+
+### Host Service 与应用生命周期
+
+`RuntimeHostService` 拥有注册表和全部 Supervisor。optional autostart 失败保留
+`degraded` 诊断但不阻止现有应用；required autostart 失败会停止本次已启动的其他
+sidecar 并中止应用启动。FastAPI 后续 DataEngine 启动若抛出 fatal error，也会立即
+回收已经启动的 sidecar，因为 startup 中断时不能依赖 shutdown hook 一定执行。
+
+`GET /health -> plugin_runtimes` 只包含 `status/configured/enabled/ready/failed`。
+内部 diagnostics 另外提供 generation、PID、计数器、协商能力、descriptor、最后错误
+和可显式请求的 stderr tail。
+
+### 阶段门禁
+
+- Host 对真实 SDK Hello Runtime 完成 handshake、describe、analyze、executeBatch 和
+  shutdown；
+- fault sidecar 覆盖启动崩溃、请求崩溃、超时、stdout 日志污染、重复 key、错 ID、
+  超大消息、非法 typed result、descriptor 漂移和 shutdown hang；
+- 验证合法 remote error 保持会话、非法 transport error 销毁会话；
+- 验证 stderr 有界、宿主自定义 secret 环境变量不继承、重启预算最终熔断；
+- 验证 required/optional 语义和 FastAPI startup failure 回收；
+- 架构测试证明 Host 没有导入具体 runtime，也没有提前接入 Indicator 路由；
+- Phase 0 公开 HTTP/range/WebSocket golden、backend 全量和 SDK 全量继续通过；
+- `ruff`、`compileall`、`git diff --check` 通过后才将本阶段改为已完成。
+
+完整配置和本地开发方法见
+`backend/app/plugin_runtime/README_zh.md`。
+
+### 2026-07-21 验证证据
+
+- Phase 2 registry/supervisor/service/lifecycle/architecture：`41 passed`；
+- 真实 SDK Hello Runtime 由 Host 完成五方法子进程会话；
+- Phase 1 SDK 全量：`26 passed`，Ruff、format check、compileall 通过；
+- Phase 0 HTTP/range/WebSocket golden：`3 passed`；
+- Indicator/Pyne 定向回归（包含 Phase 0）：`118 passed`；
+- backend 全量：`1880 passed, 4 warnings in 102.48s`；
+- 4 条 warning 仍是既有 FastAPI `on_event` 弃用提示；
+- `python -m compileall -q app tests` 通过；
+- Host 与新增测试的 `ruff check`、`ruff format --check` 通过；
+- 从 `backend` 目录执行的 requirements dry-run 能正确解析并构建本仓库
+  `candlescope-plugin-sdk==0.1.0` editable metadata；
+- Phase 2 测试退出后没有残留 fake/Hello Python sidecar；
+- `git diff --check` 通过，Phase 0 compatibility 测试文件没有 diff；
+- 生产 Indicator 目录没有 `plugin_runtime` 引用，尚未发生 sidecar cutover。
 
 ## 后续阶段不可越过的顺序
 

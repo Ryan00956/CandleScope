@@ -11,6 +11,7 @@
 - Market data runtime: `app/data_engine/runtime.py`
 - Exchange registry/plugins: `app/exchanges`
 - Indicator engine and Pyne runtime: `app/indicator`
+- Generic script-runtime Host/Supervisor: `app/plugin_runtime`
 - SQLite K-line storage: `app/data_engine/storage`
 
 ## Quick Start
@@ -56,12 +57,18 @@ curl http://127.0.0.1:18080/debug/snapshot
 
 1. Start the event-loop lag monitor.
 2. Initialize SQLite K-line storage.
-3. Refresh exchange symbol metadata on a best-effort basis.
-4. Start Data Engine through `start_data_engine()`.
-5. Attach stable runtime handles to `app.state`.
-6. Bridge IndicatorEngine to DataManager events.
+3. Load runtime activation state and start explicitly configured autostart
+   sidecars; an absent default registry means zero plugins.
+4. Refresh exchange symbol metadata on a best-effort basis.
+5. Start Data Engine through `start_data_engine()`.
+6. Attach stable runtime handles to `app.state`.
+7. Bridge IndicatorEngine to DataManager events.
 
-Shutdown stops the lag monitor, stops IndicatorEngine, and then shuts down the Data Engine runtime.
+Shutdown stops the lag monitor and IndicatorEngine, reclaims plugin sidecars,
+and then shuts down the Data Engine runtime. See
+[`app/plugin_runtime/README.md`](app/plugin_runtime/README.md) for host
+configuration, rollback, and security boundaries. Phase 2 does not route the
+existing Indicator/Pyne path to sidecars.
 
 ## API Overview
 

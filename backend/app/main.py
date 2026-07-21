@@ -3,15 +3,17 @@ CandleScope backend entrypoint.
 
 Startup sequence:
   1. Initialize SQLite storage (klines_repo).
-  2. Refresh exchange metadata on a best-effort basis.
-  3. Start the DataEngine runtime and attach its public handles to
+  2. Start the opt-in script-runtime plugin host from resolved activation state.
+  3. Refresh exchange metadata on a best-effort basis.
+  4. Start the DataEngine runtime and attach its public handles to
      ``app.state`` for API/WS endpoints.
-  4. Bridge the IndicatorEngine to DataManager events.
-  5. On shutdown, stop IndicatorEngine and the DataEngine runtime.
+  5. Bridge the IndicatorEngine to DataManager events.
+  6. On shutdown, stop IndicatorEngine, plugin sidecars, and DataEngine.
 
 When DataManager fails to initialize, the application can still expose
 health endpoints, but data APIs report explicit service-unavailable errors.
 """
+
 import logging
 
 # ── Monkey-patch: websockets recv_messages bug ──────────────────
@@ -75,10 +77,13 @@ from app.data_engine.storage import (
 
 logger = logging.getLogger("candlescope")
 
+APP_NAME = "CandleScope"
+APP_VERSION = "0.3.0"
+
 app = FastAPI(
     title="CandleScope API",
     description="Backend API for CandleScope",
-    version="0.3.0",
+    version=APP_VERSION,
 )
 
 app.add_middleware(
@@ -154,7 +159,9 @@ async def _init_data_manager() -> None:
 
         try:
             alert_facade = AlertFacade()
-            alert_runtime = AlertRuntimeEngine(facade=alert_facade, data_manager=runtime.data_manager)
+            alert_runtime = AlertRuntimeEngine(
+                facade=alert_facade, data_manager=runtime.data_manager
+            )
             app.state.alert_facade = alert_facade
             app.state.alert_runtime = alert_runtime
             await alert_runtime.start()
@@ -202,7 +209,29 @@ async def startup_event() -> None:
     if LIQUIDATION_ROLLUP_BACKEND == "sqlite":
         init_liquidation_storage(LIQUIDATION_DB_PATH)
 
-    # 2. Load exchange symbol info (non-blocking, best-effort)
+    # 2. Load resolved runtime-plugin activation state. An absent default
+    # registry is an empty registry; an explicitly configured invalid registry
+    # fails closed. No Indicator route uses this host until Phase 4.
+    from app.plugin_runtime import build_runtime_host_from_environment
+
+    try:
+        plugin_runtime_host = build_runtime_host_from_environment(
+            host_name=APP_NAME,
+            host_version=APP_VERSION,
+        )
+        await plugin_runtime_host.start()
+    except BaseException:
+        await lag_monitor.stop()
+        raise
+    app.state.plugin_runtime_host = plugin_runtime_host
+    plugin_summary = plugin_runtime_host.health_summary()
+    print(
+        "[startup] Runtime plugin host "
+        f"{plugin_summary['status']} "
+        f"({plugin_summary['ready']}/{plugin_summary['enabled']} ready)"
+    )
+
+    # 3. Load exchange symbol info (non-blocking, best-effort)
     try:
         from app.api.v1.symbols import refresh_exchange_metadata
 
@@ -211,8 +240,15 @@ async def startup_event() -> None:
     except Exception as exc:
         print(f"[startup] Exchange info load failed (non-critical): {exc}")
 
-    # 3. Initialize DataManager
-    await _init_data_manager()
+    # 4. Initialize DataManager. FastAPI does not guarantee that the shutdown
+    # event runs after a startup exception, so reclaim already-started sidecars
+    # before propagating a fatal DataEngine configuration failure.
+    try:
+        await _init_data_manager()
+    except BaseException:
+        await plugin_runtime_host.stop()
+        await lag_monitor.stop()
+        raise
 
 
 @app.on_event("shutdown")
@@ -243,6 +279,15 @@ async def shutdown_event() -> None:
         except Exception as exc:
             print(f"[shutdown] AlertRuntime shutdown error: {exc}")
 
+    plugin_runtime_host = getattr(app.state, "plugin_runtime_host", None)
+    if plugin_runtime_host is not None:
+        try:
+            await plugin_runtime_host.stop()
+            print("[shutdown] Runtime plugin host shut down ✓")
+        except Exception as exc:
+            logger.warning("Runtime plugin host shutdown error: %s", exc, exc_info=True)
+            print(f"[shutdown] Runtime plugin host shutdown error: {exc}")
+
     runtime = getattr(app.state, "data_engine_runtime", None)
     if runtime is not None:
         await runtime.shutdown(step_timeout=5)
@@ -260,7 +305,7 @@ async def root() -> dict:
     dm = getattr(app.state, "data_manager", None)
     return {
         "name": "CandleScope API",
-        "version": "0.3.0",
+        "version": APP_VERSION,
         "status": "running",
         "data_manager": "active" if dm is not None else "not_initialized",
     }
@@ -270,6 +315,9 @@ async def root() -> dict:
 async def health_check() -> dict:
     dm = getattr(app.state, "data_manager", None)
     result: dict = {"status": "ok"}
+    plugin_runtime_host = getattr(app.state, "plugin_runtime_host", None)
+    if plugin_runtime_host is not None:
+        result["plugin_runtimes"] = plugin_runtime_host.health_summary()
     if dm is not None:
         try:
             result["data_manager"] = dm.health_snapshot()
@@ -288,11 +336,15 @@ async def debug_snapshot() -> dict:
     """Full diagnostic snapshot of the DataManager (dev/debug only)."""
     dm = getattr(app.state, "data_manager", None)
     try:
-        snapshot = {"error": "DataManager not initialized"} if dm is None else dm.snapshot()
+        snapshot = (
+            {"error": "DataManager not initialized"} if dm is None else dm.snapshot()
+        )
         snapshot["executors"] = executors_snapshot()
         lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
         snapshot["runtime"] = {
-            "event_loop_lag": lag_monitor.snapshot() if lag_monitor is not None else None,
+            "event_loop_lag": lag_monitor.snapshot()
+            if lag_monitor is not None
+            else None,
             "websocket": ws_runtime_metrics.snapshot(),
         }
         replay_runtime = getattr(app.state, "replay_runtime", None)

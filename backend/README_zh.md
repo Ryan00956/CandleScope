@@ -11,6 +11,7 @@
 - 行情数据 runtime：`app/data_engine/runtime.py`
 - 交易所 registry/plugins：`app/exchanges`
 - 指标引擎和 Pyne runtime：`app/indicator`
+- 通用脚本 runtime Host/Supervisor：`app/plugin_runtime`
 - SQLite K 线存储：`app/data_engine/storage`
 
 ## 快速启动
@@ -55,12 +56,17 @@ curl http://127.0.0.1:18080/debug/snapshot
 
 1. 启动 event-loop lag 监控。
 2. 初始化 SQLite K 线 storage。
-3. best-effort 刷新交易所 symbol metadata。
-4. 通过 `start_data_engine()` 启动 Data Engine。
-5. 将稳定 runtime 句柄挂到 `app.state`。
-6. 将 IndicatorEngine 桥接到 DataManager events。
+3. 读取 runtime activation registry 并启动显式配置为 autostart 的 sidecar；默认
+   registry 不存在时是零插件。
+4. best-effort 刷新交易所 symbol metadata。
+5. 通过 `start_data_engine()` 启动 Data Engine。
+6. 将稳定 runtime 句柄挂到 `app.state`。
+7. 将 IndicatorEngine 桥接到 DataManager events。
 
-关闭时先停止 lag monitor，再停止 IndicatorEngine，最后关闭 Data Engine runtime。
+关闭时先停止 lag monitor 和 IndicatorEngine，再回收插件 sidecar，最后关闭 Data
+Engine runtime。Host 配置、回滚和安全边界见
+[`app/plugin_runtime/README_zh.md`](app/plugin_runtime/README_zh.md)。Phase 2
+尚未把现有 Indicator/Pyne 执行路由切换到 sidecar。
 
 ## API 总览
 

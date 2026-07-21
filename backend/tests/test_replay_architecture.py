@@ -68,9 +68,16 @@ def test_replay_import_guard_fails_closed_for_forbidden_fixture(tmp_path: Path) 
 
 
 def test_domain_models_and_errors_do_not_depend_on_transport_or_storage() -> None:
-    for file_name in ("models.py", "errors.py"):
-        domain_path = REPLAY_ROOT / file_name
+    domain_paths = (
+        REPLAY_ROOT / "models.py",
+        REPLAY_ROOT / "errors.py",
+        REPLAY_ROOT / "training" / "models.py",
+        REPLAY_ROOT / "training" / "commands.py",
+        REPLAY_ROOT / "training" / "events.py",
+    )
+    for domain_path in domain_paths:
+        assert domain_path.is_file(), domain_path
         imported_modules = {
             module.split(".", 1)[0] for module, _, _ in _imports(domain_path)
         }
-        assert imported_modules.isdisjoint(DOMAIN_FORBIDDEN_MODULES), file_name
+        assert imported_modules.isdisjoint(DOMAIN_FORBIDDEN_MODULES), domain_path.name

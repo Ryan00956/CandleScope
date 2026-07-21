@@ -1,0 +1,181 @@
+{
+  "protocol": "replay.v2",
+  "schema_version": "replay.contract.v2.phase0",
+  "enums": {
+    "run_state": ["PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"],
+    "track_state": ["DORMANT", "PREPARING", "READY", "DEGRADED", "ERROR"],
+    "source_kind": ["BAR", "AGG_TRADE"],
+    "start_mode": ["MANUAL", "RANDOM"],
+    "integrity_mode": ["CHALLENGE", "PRACTICE", "SANDBOX"],
+    "time_disclosure_policy": [
+      "NONE",
+      "HIDE_YEAR",
+      "HIDE_MONTH",
+      "HIDE_DAY",
+      "HIDE_HOUR",
+      "HIDE_MINUTE",
+      "HIDE_ALL"
+    ],
+    "subscription_tier": ["NONE", "WARM", "FULL"],
+    "capability_kind": [
+      "OHLCV",
+      "INDICATORS",
+      "AGG_TRADE_TAPE",
+      "ORDER_FLOW",
+      "OPEN_INTEREST",
+      "MARKET_LIQUIDATIONS",
+      "MARK_PRICE",
+      "INDEX_PRICE",
+      "BASIS",
+      "FUNDING",
+      "ORDER_BOOK",
+      "SIMULATED_LIQUIDATION"
+    ],
+    "capability_state": [
+      "AVAILABLE_EXACT",
+      "AVAILABLE_APPROX",
+      "UNSUPPORTED_NO_HISTORY",
+      "UNSUPPORTED_SOURCE_MODE",
+      "LOADING",
+      "DEGRADED"
+    ],
+    "fast_forward_plan": [
+      "CHECKPOINT_JUMP",
+      "AGGREGATE_SCAN",
+      "FULL_EVENT_SCAN",
+      "BLOCKED"
+    ],
+    "book_mode": ["OFF", "BOOK_ASSISTED_REQUIRED"],
+    "margin_mode": ["CROSS", "ISOLATED"],
+    "execution_model": ["TOUCH_OR_TAPE_V2"],
+    "command_type": [
+      "acquire_controller",
+      "heartbeat_controller",
+      "release_controller",
+      "takeover_controller",
+      "play",
+      "pause",
+      "set_speed",
+      "step_event",
+      "step_base",
+      "step_display",
+      "advance_by",
+      "advance_to",
+      "cancel_advance",
+      "select_track",
+      "set_display_interval",
+      "set_chart_type",
+      "record_view_action",
+      "add_track",
+      "set_subscription_tier",
+      "remove_unowned_track",
+      "place_order",
+      "cancel_order",
+      "close_position",
+      "allocate_isolated_margin",
+      "deposit",
+      "withdraw",
+      "change_fee_policy",
+      "change_leverage_cap",
+      "change_funding_policy",
+      "reveal_time",
+      "save",
+      "end",
+      "fork",
+      "start_review"
+    ],
+    "event_type": [
+      "RUN_SNAPSHOT",
+      "RUN_STATE_CHANGED",
+      "TRACK_PROJECTION",
+      "ACCOUNT_PROJECTION",
+      "AUDIT_EVENT",
+      "ADVANCE_PROGRESS",
+      "RESYNC_REQUIRED"
+    ]
+  },
+  "schema_migration_contract": {
+    "strategy": "ADDITIVE_ONLY",
+    "legacy_protocol": "replay.v1",
+    "legacy_json_rewrite": false,
+    "legacy_tables": [
+      "replay_session",
+      "replay_dataset_ref",
+      "replay_command_log",
+      "replay_source_event",
+      "replay_checkpoint",
+      "replay_mutation_log",
+      "replay_order",
+      "replay_fill",
+      "replay_ledger_entry",
+      "replay_journal_entry",
+      "replay_report"
+    ]
+  },
+  "sample_run": {
+    "protocol": "replay.v2",
+    "run_id": "run-01J00000000000000000000000",
+    "state": "PAUSED",
+    "source_kind": "BAR",
+    "start_mode": "RANDOM",
+    "book_mode": "OFF",
+    "integrity_mode": "CHALLENGE",
+    "time_disclosure_policy": "HIDE_DAY",
+    "initial_equity": "10000",
+    "active_rule_revision": 0,
+    "cursor": {
+      "virtual_time_ms": 1710000000000,
+      "source_sequence": 0,
+      "revision": 0
+    }
+  },
+  "sample_track": {
+    "run_id": "run-01J00000000000000000000000",
+    "track_id": "track-binance-linear-BTCUSDT",
+    "state": "READY",
+    "source_kind": "BAR",
+    "subscription_tier": "FULL",
+    "cursor": {
+      "virtual_time_ms": 1710000000000,
+      "source_sequence": 0,
+      "revision": 0
+    },
+    "forced_full_reasons": ["main_chart"],
+    "capabilities": {
+      "OHLCV": "AVAILABLE_EXACT",
+      "ORDER_BOOK": "UNSUPPORTED_SOURCE_MODE"
+    }
+  },
+  "sample_command": {
+    "protocol": "replay.v2",
+    "run_id": "run-01J00000000000000000000000",
+    "command_id": "cmd-01J00000000000000000000000",
+    "client_instance_id": "browser-tab-01",
+    "expected_revision": 0,
+    "expected_cursor": {
+      "virtual_time_ms": 1710000000000,
+      "source_sequence": 0,
+      "revision": 0
+    },
+    "type": "step_base",
+    "payload": {"count": 1}
+  },
+  "sample_event": {
+    "protocol": "replay.v2",
+    "run_id": "run-01J00000000000000000000000",
+    "sequence": 1,
+    "revision": 0,
+    "cursor": {
+      "virtual_time_ms": 1710000000000,
+      "source_sequence": 0,
+      "revision": 0
+    },
+    "type": "RUN_SNAPSHOT",
+    "time_disclosure_policy": "HIDE_DAY",
+    "capabilities": {
+      "OHLCV": "AVAILABLE_EXACT",
+      "ORDER_BOOK": "UNSUPPORTED_SOURCE_MODE"
+    },
+    "data": {"state": "PAUSED"}
+  }
+}

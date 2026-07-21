@@ -51,6 +51,13 @@ class ReplaySettings:
     event_subscriber_queue: int
     controller_ttl_seconds: int
     idle_ttl_seconds: int
+    product_v2_enabled: bool = False
+
+    @property
+    def product_v2_available(self) -> bool:
+        """The product switch is subordinate to the authoritative replay switch."""
+
+        return self.enabled and self.product_v2_enabled
 
 
 def _strict_replay_bool(environment: Mapping[str, str], name: str, default: str) -> bool:
@@ -121,6 +128,9 @@ def load_replay_settings(
         event_subscriber_queue=values["REPLAY_EVENT_SUBSCRIBER_QUEUE"],
         controller_ttl_seconds=values["REPLAY_CONTROLLER_TTL_SECONDS"],
         idle_ttl_seconds=values["REPLAY_IDLE_TTL_SECONDS"],
+        product_v2_enabled=_strict_replay_bool(
+            environment, "REPLAY_PRODUCT_V2_ENABLED", "0"
+        ),
     )
 
 # Server
@@ -141,6 +151,8 @@ REPLAY_SETTINGS = load_replay_settings(
     klines_db_path=KLINES_DB_PATH,
 )
 REPLAY_ENABLED = REPLAY_SETTINGS.enabled
+REPLAY_PRODUCT_V2_ENABLED = REPLAY_SETTINGS.product_v2_enabled
+REPLAY_PRODUCT_V2_AVAILABLE = REPLAY_SETTINGS.product_v2_available
 REPLAY_DB_PATH = REPLAY_SETTINGS.db_path
 REPLAY_MAX_ACTIVE_SESSIONS = REPLAY_SETTINGS.max_active_sessions
 REPLAY_COMMAND_QUEUE_SIZE = REPLAY_SETTINGS.command_queue_size

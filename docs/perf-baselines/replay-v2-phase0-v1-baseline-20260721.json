@@ -1,0 +1,73 @@
+{
+  "schema": "replay.v2.phase0.v1-baseline.v1",
+  "captured_at": "2026-07-21",
+  "baseline_head": "2346dba32c0ce9e35dd6941bc4445366da4362a7",
+  "v1_protocol": "replay.v1",
+  "hash_algorithm": "sha256",
+  "golden": [
+    {
+      "path": "backend/tests/fixtures/replay/canonical_v1.json",
+      "bytes": 1489,
+      "sha256": "bfc08a1509c9fa5b3409444fc2b92deed4e71489c714e06ffedaba6449bf330e"
+    },
+    {
+      "path": "backend/tests/fixtures/replay/catalog_case_v1.json",
+      "bytes": 657,
+      "sha256": "6f913210a2b957748ace51bb5c79314887fb9798db6516d17fa712971d1929a5"
+    },
+    {
+      "path": "backend/tests/fixtures/replay/actor_determinism_v1.json",
+      "bytes": 196,
+      "sha256": "32241e5c70d2d7e064b2758d2916cf862fff5536f9852ed625e15ed1bbc24444"
+    },
+    {
+      "path": "backend/tests/fixtures/replay/golden_bar_session_v1.json",
+      "bytes": 9542,
+      "sha256": "41a2961fcd3b2a0b24fea68549e836f6a33913786ce80e53e6c11dc11d362cff"
+    },
+    {
+      "path": "backend/tests/fixtures/replay/golden_agg_trade_session_v1.json",
+      "bytes": 9687,
+      "sha256": "bc14ec98145c5903ef00f6bd04585114723ba162a86afdde532c7c437aa28fe9"
+    }
+  ],
+  "performance": [
+    {
+      "path": "docs/perf-baselines/replay-failure-gates-20260718.json",
+      "bytes": 3560,
+      "sha256": "236176e56394944b501518586811fcc7ca4d2b01a02618ce249da0b83a6c33d1"
+    },
+    {
+      "path": "docs/perf-baselines/replay-v1-backend-20260718.json",
+      "bytes": 2283,
+      "sha256": "fa9366f85899b8ab320b12081b97e954fefa31b9a08650d62b0cde99c17c110a"
+    },
+    {
+      "path": "docs/perf-baselines/replay-v1-backend-verification-20260718.json",
+      "bytes": 2617,
+      "sha256": "d24a7102b924d06195832c0a801785859e103be824350c0a75c9b7f0c29587dd"
+    },
+    {
+      "path": "docs/perf-baselines/replay-v1-browser-soak-20260718.json",
+      "bytes": 2170110,
+      "sha256": "c23045084835848b0364eb49c4b0a74067a3adc07333f76c932e448e81a65b54"
+    }
+  ],
+  "rollback": [
+    {
+      "path": "docs/perf-baselines/replay-v1-rollback-drill-20260718.json",
+      "bytes": 8588,
+      "sha256": "24a82f8310238ce07d84bf86b25f42ecea76d10a21e2c90fd99645a0565c5c11"
+    },
+    {
+      "path": "frontend/scripts/replay-rollback-drill.mjs",
+      "bytes": 38324,
+      "sha256": "a6738ce2340b41673dabc763fff5a683716018149ac097995e19a732a9404774"
+    },
+    {
+      "path": "frontend/scripts/replay-rollback-drill.ps1",
+      "bytes": 631,
+      "sha256": "e7133e81db445d598bb56f64ee690d4f2665579604ade35fe5c3b056ff6cec2c"
+    }
+  ]
+}

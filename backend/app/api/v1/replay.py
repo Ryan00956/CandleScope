@@ -30,6 +30,7 @@ from app.replay.models import (
     validate_identifier,
 )
 from app.replay.service import ReplayService
+from app.replay.training.models import REPLAY_V2_PROTOCOL
 
 
 MAX_REPLAY_REQUEST_BYTES = 64 * 1024
@@ -44,6 +45,19 @@ def replay_error_payload(error: ReplayDomainError) -> dict[str, object]:
             "message": error.message,
             "details": dict(error.details),
         },
+    }
+
+
+def replay_v2_unavailable_payload() -> dict[str, object]:
+    if REPLAY_SETTINGS.product_v2_available:
+        code = "REPLAY_PRODUCT_V2_PHASE_0_ONLY"
+        message = "Replay training v2 runtime is not available in Phase 0"
+    else:
+        code = "REPLAY_PRODUCT_V2_DISABLED"
+        message = "Replay training v2 is disabled"
+    return {
+        "protocol": REPLAY_V2_PROTOCOL,
+        "error": {"code": code, "message": message, "details": {}},
     }
 
 
@@ -295,6 +309,25 @@ async def replay_capabilities(request: Request) -> dict[str, object]:
     }
 
 
+def _replay_v2_runs_phase0_response() -> JSONResponse:
+    """Reserve the v2 boundary while Phase 0 keeps every product flow closed."""
+
+    return JSONResponse(status_code=503, content=replay_v2_unavailable_payload())
+
+
+@router.get("/runs")
+async def list_replay_v2_runs_phase0_guard() -> JSONResponse:
+    return _replay_v2_runs_phase0_response()
+
+
+@router.post(
+    "/runs",
+    dependencies=[Depends(enforce_replay_request_limit)],
+)
+async def create_replay_v2_run_phase0_guard() -> JSONResponse:
+    return _replay_v2_runs_phase0_response()
+
+
 @router.get("/catalog")
 async def replay_catalog(
     request: Request,
@@ -364,6 +397,7 @@ __all__ = [
     "ReplayCommandPayload",
     "ReplaySessionCreatePayload",
     "replay_error_payload",
+    "replay_v2_unavailable_payload",
     "replay_service_from_state",
     "router",
 ]

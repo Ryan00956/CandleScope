@@ -428,12 +428,18 @@ test("ReplayApp rejects value imports from live and private trading runtimes", (
       import { useAdvancedMarketDataRuntime } from "../advanced-market-data/useAdvancedMarketDataRuntime.js";
       import { useLiquidationRuntime } from "../liquidations/useLiquidationRuntime.js";
       import { useWatchlistRuntime } from "../watchlist/useWatchlistRuntime.js";
+      import { useOrderBookRuntime } from "../order-book/useOrderBookRuntime.js";
+      import { useTradeFlowRuntime } from "../trade-flow/useTradeFlowRuntime.js";
+      import { subscribeKlines } from "../market-data/feed/klineStreamSubscription.js";
       import { submitSignedOrder } from "../../services/private-trading.js";
       export function ReplayApp() {
         void useMarketDataRuntime;
         void useAdvancedMarketDataRuntime;
         void useLiquidationRuntime;
         void useWatchlistRuntime;
+        void useOrderBookRuntime;
+        void useTradeFlowRuntime;
+        void subscribeKlines;
         void submitSignedOrder;
         return <main>Replay</main>;
       }
@@ -444,6 +450,9 @@ test("ReplayApp rejects value imports from live and private trading runtimes", (
   assert.deepEqual(
     result.violations.map(({ rule }) => rule),
     [
+      "replay-app-no-live-runtime-import",
+      "replay-app-no-live-runtime-import",
+      "replay-app-no-live-runtime-import",
       "replay-app-no-live-runtime-import",
       "replay-app-no-live-runtime-import",
       "replay-app-no-live-runtime-import",

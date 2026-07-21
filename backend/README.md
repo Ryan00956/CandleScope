@@ -91,6 +91,13 @@ Replay is disabled by default. `REPLAY_ENABLED=0` does not construct the
 creation. The disabled capability response remains stable so the independent
 frontend page can show `REPLAY_DISABLED` instead of falling back to live data.
 
+Replay training v2 has an additional subordinate switch,
+`REPLAY_PRODUCT_V2_ENABLED`. Phase 0 freezes only its `replay.v2` enums,
+strict envelopes, schema policy, and fail-closed transport boundary. Even when
+both switches are enabled in a Phase 0 build, v2 Run HTTP/WebSocket paths return
+`REPLAY_PRODUCT_V2_PHASE_0_ONLY`; they do not construct a v2 runtime or touch a
+replay database.
+
 When enabled, replay owns a separate SQLite database and a bounded runtime:
 
 ```text
@@ -112,6 +119,7 @@ projection windows all have explicit capacity limits.
 | Variable | Default | Meaning |
 |---|---:|---|
 | `REPLAY_ENABLED` | `0` | Authoritative backend feature/capability switch |
+| `REPLAY_PRODUCT_V2_ENABLED` | `0` | Subordinate v2 product switch; Phase 0 remains runtime-closed even when explicitly set |
 | `REPLAY_DB_PATH` | `<CANDLE_DATA_DIR>/replay.db` | Replay-only SQLite state; must differ from `KLINES_DB_PATH` |
 | `REPLAY_MAX_ACTIVE_SESSIONS` | `8` | Active pinned session limit |
 | `REPLAY_COMMAND_QUEUE_SIZE` | `256` | Per-actor bounded command mailbox |

@@ -310,12 +310,14 @@ function isForbiddenReplayLiveRuntimeTarget(target) {
     "src/features/advanced-market-data/",
     "src/features/order-book/",
     "src/features/full-order-book/",
+    "src/features/trade-flow/",
     "src/features/liquidation/",
     "src/features/liquidations/",
     "src/features/watchlist/",
     "src/features/watchlist-full-cache/",
     "src/features/alerts/",
-  ].some((prefix) => target.startsWith(prefix));
+  ].some((prefix) => target.startsWith(prefix))
+    || target === "src/features/market-data/feed/klineStreamSubscription";
 }
 
 function isForbiddenPrivateTradingTarget(target) {

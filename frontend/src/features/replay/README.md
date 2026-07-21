@@ -4,6 +4,12 @@ Replay is a server-authoritative historical market runtime. It is not a source
 toggle inside the live application. The feature is disabled by default until a
 later phase wires the dedicated entry and backend capability.
 
+Phase 0 also defines `replay.v2` in `replayV2Types.ts`, cross-checked against the
+backend canonical golden. `VITE_REPLAY_PRODUCT_V2_ENABLED=0` is the default and
+the v2 module is not imported by either composition root, so it creates no UI,
+network request, socket, store, or background task. Direct `?product=v2` access
+continues to fail closed until a later product phase owns the route.
+
 ## Composition roots
 
 The two browser documents have fixed, independent roots:
@@ -50,7 +56,7 @@ Components send intent through feature-local actions. They do not import
 Replay modules and `ReplayApp` must not value-import or mount:
 
 - `useMarketDataRuntime` or any live K-line REST/WebSocket runtime;
-- advanced market, order-book, full-order-book, liquidation, watchlist,
+- advanced market, order-book, full-order-book, trade-flow, liquidation, watchlist,
   watchlist full-cache, live alerts, or online indicator runtimes;
 - private trading, signed requests, credentials, API keys, or real-order adapters;
 - live stores, runtime singletons, subscription leases, BroadcastChannel, or

@@ -18,6 +18,7 @@ from app.api.v1.stream_liquidations import stream_liquidations
 from app.api.v1.stream_market import stream_market
 from app.api.v1.stream_full_order_book import stream_full_order_book
 from app.api.v1.stream_order_book import stream_order_book
+from app.api.v1.replay import replay_v2_unavailable_payload
 from app.api.v1.stream_replay import stream_replay_session
 from app.api.v1.stream_trade_flow import stream_trade_flow
 from app.api.v1.stream_utils import (
@@ -27,6 +28,8 @@ from app.api.v1.stream_utils import (
     validate_ws_interval as _validate_ws_interval,
 )
 from app.replay.models import MAX_COUNTER
+from app.replay.constants import REPLAY_PROTOCOL
+from app.replay.training.models import REPLAY_V2_PROTOCOL
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
@@ -45,6 +48,7 @@ def _get_indicator_engine(websocket: WebSocket):
 async def replay_stream(
     websocket: WebSocket,
     session_id: str,
+    protocol: str = Query(default=REPLAY_PROTOCOL, min_length=1, max_length=32),
     after_sequence: int | None = Query(default=None, ge=0, le=MAX_COUNTER),
     data_epoch: str | None = Query(
         default=None,
@@ -54,6 +58,26 @@ async def replay_stream(
     ),
 ) -> None:
     """Deliver an atomic replay snapshot/resume handoff and bounded live tail."""
+
+    if protocol != REPLAY_PROTOCOL:
+        await websocket.accept()
+        if protocol == REPLAY_V2_PROTOCOL:
+            await _send_json_with_timeout(websocket, replay_v2_unavailable_payload())
+            await websocket.close(code=1013, reason="replay v2 unavailable")
+        else:
+            await _send_json_with_timeout(
+                websocket,
+                {
+                    "protocol": REPLAY_PROTOCOL,
+                    "error": {
+                        "code": "INVALID_STATE_TRANSITION",
+                        "message": "unsupported replay protocol",
+                        "details": {"protocol": protocol},
+                    },
+                },
+            )
+            await websocket.close(code=1008, reason="unsupported replay protocol")
+        return
 
     await stream_replay_session(
         websocket,

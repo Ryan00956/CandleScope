@@ -2,14 +2,17 @@ import { useState } from "react";
 import { formatReplayPublicTime, replayOwnsController, replayProgress } from "../replayUiModel.js";
 import type { ReplaySpeed } from "../replayTypes.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
+import type { ReplayPhase3ControlType, ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
+import { parseIntervalSeconds } from "../../../utils/intervals.js";
 
 const SPEEDS: readonly ReplaySpeed[] = [1, 5, 15, 30, 60, 120, 300, 600, "MAX"];
 
 export interface ReplayControlBarProps {
   readonly runtime: ReplayRuntime;
+  readonly viewer?: ReplayViewerRuntime;
 }
 
-export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
+export default function ReplayControlBar({ runtime, viewer }: ReplayControlBarProps) {
   const [showEnd, setShowEnd] = useState(false);
   const [openOrderDisposition, setOpenOrderDisposition] = useState<"expire" | "cancel" | "preserve">("expire");
   const [positionDisposition, setPositionDisposition] = useState<"keep" | "mark_close">("keep");
@@ -18,15 +21,26 @@ export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
   const tradeTape = config?.source_kind === "agg_trade";
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
   const pending = runtime.pendingCommand?.type ?? null;
+  const phase3Pending = viewer?.controlPending?.type ?? null;
   const forkPending = runtime.forkPending;
-  const disabled = pending !== null || forkPending || store.connectionState !== "connected" || !ownsController;
-  const progress = replayProgress(store);
+  const disabled = pending !== null || phase3Pending !== null || forkPending
+    || store.connectionState !== "connected" || !ownsController
+    || (viewer !== undefined && (viewer.viewerState === null || viewer.viewerPending));
+  const domainProgress = replayProgress(store);
+  const phase3Ratio = viewer?.progress?.ratio_ppm;
+  const progress = typeof phase3Ratio === "number" && Number.isSafeInteger(phase3Ratio)
+    ? Math.min(1, Math.max(0, phase3Ratio / 1_000_000))
+    : domainProgress;
+  const baseIntervalMs = Math.max(1, (parseIntervalSeconds(config?.base_interval ?? "1m") ?? 60) * 1_000);
   const publicTime = formatReplayPublicTime(store.virtualTimeMs, {
     blindMode: config?.blind_mode ?? true,
     originMs: store.replayStartMs,
   });
   const command = (type: Parameters<ReplayRuntime["actions"]["submitCommand"]>[0], payload: Parameters<ReplayRuntime["actions"]["submitCommand"]>[1] = {}) => {
     void runtime.actions.submitCommand(type, payload).catch(() => undefined);
+  };
+  const phase3Command = (type: ReplayPhase3ControlType, payload: Readonly<Record<string, number>>) => {
+    if (viewer !== undefined) void viewer.actions.submitControl(type, payload).catch(() => undefined);
   };
 
   return (
@@ -68,10 +82,24 @@ export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
       )}
       <div className="replay-control-bar">
         <button type="button" data-replay-action="end" disabled={disabled || store.state === "ENDED"} onClick={() => setShowEnd(true)}>结束</button>
-        <button type="button" data-replay-action="fork" disabled={pending !== null || forkPending} onClick={() => void runtime.actions.forkSession().catch(() => undefined)}>Fork</button>
-        <button type="button" data-replay-action="step" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("step", { count: 1 })}>
-          {pending === "step" ? "单步中…" : "单步 →"}
-        </button>
+        <button type="button" data-replay-action="fork" disabled={pending !== null || phase3Pending !== null || viewer?.viewerPending === true || forkPending} onClick={() => void runtime.actions.forkSession().catch(() => undefined)}>Fork</button>
+        {viewer === undefined ? (
+          <button type="button" data-replay-action="step" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("step", { count: 1 })}>
+            {pending === "step" ? "单步中…" : "单步 →"}
+          </button>
+        ) : (<>
+          <button type="button" data-replay-action="step-display" disabled={disabled || store.state !== "PAUSED"} onClick={() => phase3Command("step_display", { count: 1 })}>
+            {phase3Pending === "step_display" ? "展示步进中…" : `下一展示 K (${viewer.viewerState?.display_interval ?? "--"}) →`}
+          </button>
+          <button type="button" data-replay-action="step-base" disabled={disabled || store.state !== "PAUSED"} onClick={() => phase3Command("step_base", { count: 1 })}>
+            {phase3Pending === "step_base" ? "基础步进中…" : `基础 K (${config?.base_interval ?? "--"})`}
+          </button>
+        </>)}
+        {viewer !== undefined && tradeTape && (
+          <button type="button" data-replay-action="step-event" disabled={disabled || store.state !== "PAUSED"} onClick={() => phase3Command("step_event", { count: 1 })}>
+            {phase3Pending === "step_event" ? "成交步进中…" : "下一成交"}
+          </button>
+        )}
         <button
           type="button"
           data-replay-action={store.state === "PLAYING" ? "pause" : "play"}
@@ -80,9 +108,23 @@ export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
         >
           {pending === "pause" ? "正在暂停…" : pending === "play" ? "正在播放…" : store.state === "PLAYING" ? "暂停 ‖" : "播放 ▶"}
         </button>
-        <button type="button" data-replay-action="advance" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("advance_by", { ms: 300_000 })}>
-          {pending === "advance_by" ? "推进中…" : "前进 5m ⇥"}
-        </button>
+        {viewer === undefined ? (
+          <button type="button" data-replay-action="advance" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("advance_by", { ms: 300_000 })}>
+            {pending === "advance_by" ? "推进中…" : "前进 5m ⇥"}
+          </button>
+        ) : (
+          <button type="button" data-replay-action="advance-by" disabled={disabled || store.state !== "PAUSED"} onClick={() => phase3Command("advance_by", { ms: baseIntervalMs * 5 })}>
+            {phase3Pending === "advance_by" ? "推进中…" : "前进 5 个基础 K ⇥"}
+          </button>
+        )}
+        {viewer !== undefined && (phase3Pending === "advance_by" || phase3Pending === "advance_to") && (
+          <button
+            type="button"
+            data-replay-action="cancel-advance"
+            disabled={store.connectionState !== "connected" || !ownsController}
+            onClick={() => void viewer.actions.cancelAdvance().catch(() => undefined)}
+          >取消推进</button>
+        )}
         <label className="replay-speed-control">
           速度
           <select
@@ -94,7 +136,11 @@ export default function ReplayControlBar({ runtime }: ReplayControlBarProps) {
             {SPEEDS.map((speed) => <option key={String(speed)} value={String(speed)}>{speed === "MAX" ? "MAX" : `${speed}×`}</option>)}
           </select>
         </label>
-        <div className="replay-progress" data-replay-progress={progress === null ? "unknown" : progress.toFixed(4)}>
+        <div
+          className="replay-progress"
+          data-replay-progress={progress === null ? "unknown" : progress.toFixed(4)}
+          data-replay-grain={phase3Pending ?? "idle"}
+        >
           <span>{publicTime}</span>
           <progress max={1} value={progress ?? 0} aria-label="回放进度" />
           <span>{progress === null ? "进度未知" : `${(progress * 100).toFixed(1)}%`}</span>

@@ -66,6 +66,22 @@ test("v2 session route is flag-gated and leaves the v1 shell as the rollback pat
   assert.match(composition, /entry\.kind === "session"/);
 });
 
+test("Phase 3 workspace projects ViewerState and exposes only source-valid replay grains", () => {
+  const workspace = source("src/features/replay/ReplayTrainingPageShell.tsx");
+  const composition = source("src/features/replay/ReplayApp.tsx");
+  const controls = source("src/features/replay/components/ReplayControlBar.tsx");
+  assert.match(composition, /useReplayViewerRuntime\(replay\)/);
+  assert.match(composition, /useReplayIndicatorRuntime\(replay, viewer\.seriesStore\)/);
+  assert.match(workspace, /seriesStore=\{viewer\.seriesStore\}/);
+  assert.match(workspace, /setDisplayInterval/);
+  assert.doesNotMatch(workspace, /Phase 2 interval is read-only|Phase 3 才开放重采样/);
+  assert.match(controls, /data-replay-action="step-display"/);
+  assert.match(controls, /data-replay-action="step-base"/);
+  assert.match(controls, /viewer !== undefined && tradeTape/);
+  assert.match(controls, /data-replay-action="step-event"/);
+  assert.match(controls, /data-replay-action="cancel-advance"/);
+});
+
 test("capability surface never renders unsupported history as numeric zero or stale precision", () => {
   const model = buildReplayCapabilityModel("BAR");
   assert.equal(model.OHLCV.state, "AVAILABLE_EXACT");

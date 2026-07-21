@@ -7,6 +7,7 @@ import { resolveReplayProduct } from "./replayProduct.js";
 import { REPLAY_PRODUCT_V2_ENABLED } from "./replayV2Types.js";
 import { useReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
 import { useReplayRuntime } from "./useReplayRuntime.js";
+import { useReplayViewerRuntime } from "./useReplayViewerRuntime.js";
 import { useTrainingHub } from "./useTrainingHub.js";
 
 export interface ReplayAppProps {
@@ -27,7 +28,8 @@ function ReplayTrainingHubApp() {
 
 function ReplayTrainingWorkspaceApp({ entry }: ReplayAppProps) {
   const replay = useReplayRuntime(entry);
-  const indicators = useReplayIndicatorRuntime(replay);
+  const viewer = useReplayViewerRuntime(replay);
+  const indicators = useReplayIndicatorRuntime(replay, viewer.seriesStore);
   const chartSurface = useChartSurfaceRuntime();
   return (
     <ReplayTrainingPageShell
@@ -35,6 +37,7 @@ function ReplayTrainingWorkspaceApp({ entry }: ReplayAppProps) {
       indicators={indicators}
       chartSurfaceRef={chartSurface.ref}
       chartSurfaceActions={chartSurface.actions}
+      viewer={viewer}
     />
   );
 }

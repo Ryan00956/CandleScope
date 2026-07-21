@@ -146,7 +146,7 @@ export interface ReplayV2MarketTrack {
   readonly capabilities: Readonly<Partial<Record<ReplayV2CapabilityKind, ReplayV2CapabilityState>>>;
 }
 
-type ReplayV2Json = null | string | boolean | number | readonly ReplayV2Json[] | {
+export type ReplayV2Json = null | string | boolean | number | readonly ReplayV2Json[] | {
   readonly [key: string]: ReplayV2Json;
 };
 
@@ -171,6 +171,52 @@ export interface ReplayV2Event {
   readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
   readonly capabilities: Readonly<Partial<Record<ReplayV2CapabilityKind, ReplayV2CapabilityState>>>;
   readonly data: Readonly<Record<string, ReplayV2Json>>;
+}
+
+export interface ReplayViewerState {
+  readonly run_id: string;
+  readonly selected_track_id: string;
+  readonly display_interval: string;
+  readonly chart_type: string;
+  readonly visible_range: Readonly<Record<string, ReplayV2Json>> | null;
+  readonly pane_layout: Readonly<Record<string, ReplayV2Json>>;
+  readonly rail_layout: Readonly<Record<string, ReplayV2Json>>;
+  readonly semantic_view_revision: number;
+}
+
+export interface ReplayViewerStateResponse {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly viewer_state: ReplayViewerState;
+}
+
+export interface ReplayV2ControlCursor {
+  readonly virtual_time_ms: number;
+  readonly source_sequence: number;
+  readonly last_base_bar_open_ms: number | null;
+  readonly last_trade_time_ms: number | null;
+  readonly last_agg_trade_id: number | null;
+  readonly at_end: boolean;
+}
+
+export interface ReplayV2CommandResult {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly run_id: string;
+  readonly session_id: string;
+  readonly command_id: string;
+  readonly revision: number;
+  readonly sequence: number;
+  readonly state: ReplayV2RunState;
+  readonly state_hash: `sha256:${string}`;
+  readonly cursor: ReplayV2ControlCursor;
+  readonly viewer_state: ReplayViewerState;
+  readonly data: Readonly<Record<string, ReplayV2Json>>;
+}
+
+export interface ReplayAdvanceProgressResponse {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly run_id: string;
+  readonly command_id: string;
+  readonly progress: Readonly<Record<string, ReplayV2Json>>;
 }
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -227,6 +273,21 @@ function timestamp(value: unknown, fieldName: string): number {
   const parsed = counter(value, fieldName);
   if (parsed > MAX_TIMESTAMP_MS) throw new TypeError(`${fieldName} is out of range`);
   return parsed;
+}
+
+function nullableCounter(value: unknown, fieldName: string): number | null {
+  return value === null ? null : counter(value, fieldName);
+}
+
+function nullableTimestamp(value: unknown, fieldName: string): number | null {
+  return value === null ? null : timestamp(value, fieldName);
+}
+
+function digest(value: unknown, fieldName: string): `sha256:${string}` {
+  if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value)) {
+    throw new TypeError(`${fieldName} must be a canonical SHA-256 digest`);
+  }
+  return value as `sha256:${string}`;
 }
 
 function positiveDecimal(value: unknown, fieldName: string): string {
@@ -388,6 +449,120 @@ export function parseReplayV2Command(value: unknown): ReplayV2Command {
     expected_cursor: expectedCursor,
     type: enumValue(command.type, REPLAY_V2_ENUMS.command_type, "command type"),
     payload: jsonObject(command.payload, "payload"),
+  };
+}
+
+export function parseReplayViewerState(value: unknown): ReplayViewerState {
+  const viewer = exactObject(value, "viewer_state", [
+    "run_id",
+    "selected_track_id",
+    "display_interval",
+    "chart_type",
+    "visible_range",
+    "pane_layout",
+    "rail_layout",
+    "semantic_view_revision",
+  ]);
+  return {
+    run_id: identifier(viewer.run_id, "viewer_state.run_id"),
+    selected_track_id: identifier(viewer.selected_track_id, "viewer_state.selected_track_id"),
+    display_interval: identifier(viewer.display_interval, "viewer_state.display_interval"),
+    chart_type: identifier(viewer.chart_type, "viewer_state.chart_type"),
+    visible_range: viewer.visible_range === null
+      ? null
+      : jsonObject(viewer.visible_range, "viewer_state.visible_range"),
+    pane_layout: jsonObject(viewer.pane_layout, "viewer_state.pane_layout"),
+    rail_layout: jsonObject(viewer.rail_layout, "viewer_state.rail_layout"),
+    semantic_view_revision: counter(
+      viewer.semantic_view_revision,
+      "viewer_state.semantic_view_revision",
+    ),
+  };
+}
+
+export function parseReplayViewerStateResponse(value: unknown): ReplayViewerStateResponse {
+  const response = exactObject(value, "viewer response", ["protocol", "viewer_state"]);
+  if (response.protocol !== REPLAY_V2_PROTOCOL) {
+    throw new TypeError(`protocol must be ${REPLAY_V2_PROTOCOL}`);
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    viewer_state: parseReplayViewerState(response.viewer_state),
+  };
+}
+
+function parseControlCursor(value: unknown): ReplayV2ControlCursor {
+  const cursor = exactObject(value, "command result.cursor", [
+    "virtual_time_ms",
+    "source_sequence",
+    "last_base_bar_open_ms",
+    "last_trade_time_ms",
+    "last_agg_trade_id",
+    "at_end",
+  ]);
+  return {
+    virtual_time_ms: timestamp(cursor.virtual_time_ms, "command result.cursor.virtual_time_ms"),
+    source_sequence: counter(cursor.source_sequence, "command result.cursor.source_sequence"),
+    last_base_bar_open_ms: nullableTimestamp(
+      cursor.last_base_bar_open_ms,
+      "command result.cursor.last_base_bar_open_ms",
+    ),
+    last_trade_time_ms: nullableTimestamp(
+      cursor.last_trade_time_ms,
+      "command result.cursor.last_trade_time_ms",
+    ),
+    last_agg_trade_id: nullableCounter(
+      cursor.last_agg_trade_id,
+      "command result.cursor.last_agg_trade_id",
+    ),
+    at_end: boolValue(cursor.at_end, "command result.cursor.at_end"),
+  };
+}
+
+export function parseReplayV2CommandResult(value: unknown): ReplayV2CommandResult {
+  const result = exactObject(value, "command result", [
+    "protocol",
+    "run_id",
+    "session_id",
+    "command_id",
+    "revision",
+    "sequence",
+    "state",
+    "state_hash",
+    "cursor",
+    "viewer_state",
+    "data",
+  ]);
+  if (result.protocol !== REPLAY_V2_PROTOCOL) {
+    throw new TypeError(`protocol must be ${REPLAY_V2_PROTOCOL}`);
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    run_id: identifier(result.run_id, "command result.run_id"),
+    session_id: identifier(result.session_id, "command result.session_id"),
+    command_id: identifier(result.command_id, "command result.command_id"),
+    revision: counter(result.revision, "command result.revision"),
+    sequence: counter(result.sequence, "command result.sequence"),
+    state: enumValue(result.state, REPLAY_V2_ENUMS.run_state, "command result.state"),
+    state_hash: digest(result.state_hash, "command result.state_hash"),
+    cursor: parseControlCursor(result.cursor),
+    viewer_state: parseReplayViewerState(result.viewer_state),
+    data: jsonObject(result.data, "command result.data"),
+  };
+}
+
+export function parseReplayAdvanceProgressResponse(value: unknown): ReplayAdvanceProgressResponse {
+  const response = exactObject(value, "advance progress", [
+    "protocol", "run_id", "command_id", "progress",
+  ]);
+  if (response.protocol !== REPLAY_V2_PROTOCOL) {
+    throw new TypeError(`protocol must be ${REPLAY_V2_PROTOCOL}`);
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    run_id: identifier(response.run_id, "advance progress.run_id"),
+    command_id: identifier(response.command_id, "advance progress.command_id"),
+    progress: jsonObject(response.progress, "advance progress.progress"),
   };
 }
 

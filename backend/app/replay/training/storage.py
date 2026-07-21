@@ -16,6 +16,7 @@ from .models import (
     CapabilityState,
     REPLAY_V2_PROTOCOL,
     TrainingRunCreateRequest,
+    ViewerState,
 )
 from .schema import TRAINING_SCHEMA_ID, migrate_training_schema
 
@@ -267,6 +268,20 @@ class TrainingRunStore:
                 cursor={**cursor, "revision": int(session_state["revision"])},
                 now_ms=now_ms,
             )
+            self._insert_viewer_state(
+                connection,
+                ViewerState(
+                    run_id=run_id,
+                    selected_track_id="track-1",
+                    display_interval=request.display_interval,
+                    chart_type="candles",
+                    visible_range=None,
+                    pane_layout={},
+                    rail_layout={},
+                    semantic_view_revision=0,
+                ),
+                now_ms=now_ms,
+            )
             self._insert_rule(connection, run_id=run_id, rule=rule, now_ms=now_ms)
             self._insert_initial_action(
                 connection,
@@ -476,6 +491,20 @@ class TrainingRunStore:
                 cursor=cursor,
                 now_ms=now_ms,
             )
+            self._insert_viewer_state(
+                connection,
+                ViewerState(
+                    run_id=run_id,
+                    selected_track_id="track-1",
+                    display_interval=str(config.get("display_interval") or "unknown"),
+                    chart_type="candles",
+                    visible_range=None,
+                    pane_layout={},
+                    rail_layout={},
+                    semantic_view_revision=0,
+                ),
+                now_ms=now_ms,
+            )
             self._insert_rule(connection, run_id=run_id, rule=rule, now_ms=now_ms)
             self._insert_initial_action(
                 connection,
@@ -521,6 +550,256 @@ class TrainingRunStore:
                 status_code=404,
             )
         return run_id
+
+    async def run_binding(self, run_id: str) -> dict[str, object]:
+        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            return connection.execute(
+                """
+                SELECT r.run_id, r.adapter_session_id, r.source_kind,
+                       r.base_interval, r.compatibility, s.config_json
+                FROM replay_training_run AS r
+                JOIN replay_session AS s ON s.session_id = r.adapter_session_id
+                WHERE r.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+
+        row = await self.base_store.run_extension_read(read)
+        if row is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training run does not exist",
+                status_code=404,
+            )
+        return {
+            "run_id": str(row["run_id"]),
+            "adapter_session_id": str(row["adapter_session_id"]),
+            "source_kind": str(row["source_kind"]),
+            "base_interval": str(row["base_interval"]),
+            "compatibility": str(row["compatibility"]),
+            "adapter_config": json.loads(str(row["config_json"])),
+        }
+
+    async def get_viewer_state(self, run_id: str) -> ViewerState:
+        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            return connection.execute(
+                """
+                SELECT * FROM replay_training_viewer_state WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+
+        row = await self.base_store.run_extension_read(read)
+        if row is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training viewer state does not exist",
+                status_code=404,
+            )
+        return self._viewer_from_row(row)
+
+    async def viewer_state_at_revision(
+        self,
+        run_id: str,
+        revision: int,
+    ) -> ViewerState:
+        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            return connection.execute(
+                """
+                SELECT viewer_state_json
+                FROM replay_training_viewer_event
+                WHERE run_id = ? AND semantic_view_revision = ?
+                """,
+                (run_id, revision),
+            ).fetchone()
+
+        row = await self.base_store.run_extension_read(read)
+        if row is None:
+            raise TrainingRunError(
+                "VIEWER_REVISION_CONFLICT",
+                "viewer revision is unavailable",
+                status_code=409,
+                details={"semantic_view_revision": revision},
+            )
+        return ViewerState.from_dict(json.loads(str(row["viewer_state_json"])))
+
+    async def set_display_interval(
+        self,
+        *,
+        run_id: str,
+        display_interval: str,
+        expected_revision: int,
+        command_id: str,
+        command: Mapping[str, object],
+    ) -> ViewerState:
+        request_json = canonical_json(command)
+
+        def write(connection: sqlite3.Connection) -> ViewerState:
+            replayed = connection.execute(
+                """
+                SELECT request_json, viewer_state_json
+                FROM replay_training_viewer_event
+                WHERE run_id = ? AND command_id = ?
+                """,
+                (run_id, command_id),
+            ).fetchone()
+            if replayed is not None:
+                if str(replayed["request_json"]) != request_json:
+                    raise TrainingRunError(
+                        "COMMAND_ID_REUSED",
+                        "command_id was reused with a different viewer command",
+                        status_code=409,
+                    )
+                return ViewerState.from_dict(
+                    json.loads(str(replayed["viewer_state_json"]))
+                )
+            row = connection.execute(
+                "SELECT * FROM replay_training_viewer_state WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training viewer state does not exist",
+                    status_code=404,
+                )
+            current = self._viewer_from_row(row)
+            if current.semantic_view_revision != expected_revision:
+                raise TrainingRunError(
+                    "VIEWER_REVISION_CONFLICT",
+                    "viewer state revision does not match",
+                    status_code=409,
+                    details={
+                        "expected": expected_revision,
+                        "actual": current.semantic_view_revision,
+                    },
+                )
+            updated = ViewerState(
+                run_id=current.run_id,
+                selected_track_id=current.selected_track_id,
+                display_interval=display_interval,
+                chart_type=current.chart_type,
+                visible_range=current.visible_range,
+                pane_layout=current.pane_layout,
+                rail_layout=current.rail_layout,
+                semantic_view_revision=current.semantic_view_revision + 1,
+            )
+            now_ms = self.base_store._validated_now_ms()
+            payload_json = canonical_json(updated.to_dict())
+            connection.execute(
+                """
+                UPDATE replay_training_viewer_state
+                SET display_interval = ?, semantic_view_revision = ?, updated_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (
+                    updated.display_interval,
+                    updated.semantic_view_revision,
+                    now_ms,
+                    run_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_training_viewer_event(
+                    run_id, semantic_view_revision, command_id, event_type,
+                    request_json, viewer_state_json, created_at_ms
+                ) VALUES (?, ?, ?, 'SET_DISPLAY_INTERVAL', ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    updated.semantic_view_revision,
+                    command_id,
+                    request_json,
+                    payload_json,
+                    now_ms,
+                ),
+            )
+            return updated
+
+        return await self.base_store.run_extension_write(write)
+
+    async def get_command_result(
+        self,
+        run_id: str,
+        command_id: str,
+        command: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            return connection.execute(
+                """
+                SELECT command_json, result_json
+                FROM replay_training_command
+                WHERE run_id = ? AND command_id = ?
+                """,
+                (run_id, command_id),
+            ).fetchone()
+
+        row = await self.base_store.run_extension_read(read)
+        if row is None:
+            return None
+        if str(row["command_json"]) != canonical_json(command):
+            raise TrainingRunError(
+                "COMMAND_ID_REUSED",
+                "command_id was reused with a different replay.v2 command",
+                status_code=409,
+            )
+        result = json.loads(str(row["result_json"]))
+        if not isinstance(result, dict):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "stored replay.v2 command result is invalid",
+                status_code=503,
+            )
+        return result
+
+    async def save_command_result(
+        self,
+        *,
+        run_id: str,
+        command_id: str,
+        command: Mapping[str, object],
+        result: Mapping[str, object],
+    ) -> None:
+        command_json = canonical_json(command)
+        result_json = canonical_json(result)
+
+        def write(connection: sqlite3.Connection) -> None:
+            existing = connection.execute(
+                """
+                SELECT command_json, result_json
+                FROM replay_training_command
+                WHERE run_id = ? AND command_id = ?
+                """,
+                (run_id, command_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["command_json"]) != command_json
+                    or str(existing["result_json"]) != result_json
+                ):
+                    raise TrainingRunError(
+                        "COMMAND_ID_REUSED",
+                        "command_id conflicts with a stored replay.v2 command",
+                        status_code=409,
+                    )
+                return
+            connection.execute(
+                """
+                INSERT INTO replay_training_command(
+                    run_id, command_id, command_json, result_json, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    command_id,
+                    command_json,
+                    result_json,
+                    self.base_store._validated_now_ms(),
+                ),
+            )
+
+        await self.base_store.run_extension_write(write)
 
     async def history_binding(
         self,
@@ -572,6 +851,20 @@ class TrainingRunStore:
                 "training history track does not exist",
                 status_code=404,
             )
+        adapter_config = json.loads(str(row["config_json"]))
+        if not isinstance(adapter_config, dict):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training adapter config is invalid",
+                status_code=503,
+            )
+        adapter_display_interval = adapter_config.get("display_interval")
+        if not isinstance(adapter_display_interval, str):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training adapter display interval is invalid",
+                status_code=503,
+            )
         return {
             "run_id": str(row["run_id"]),
             "session_id": str(row["adapter_session_id"]),
@@ -581,7 +874,9 @@ class TrainingRunStore:
             "symbol": str(row["symbol"]),
             "source_kind": str(row["source_kind"]),
             "base_interval": str(row["base_interval"]),
-            "display_interval": str(row["display_interval"]),
+            # Phase 3 keeps the adapter and frozen history at the base interval.
+            # Mutable display selection belongs exclusively to ViewerState.
+            "display_interval": adapter_display_interval,
             "time_disclosure_policy": str(row["time_disclosure_policy"]),
             "run_dataset_epoch": str(row["run_dataset_epoch"]),
             "track_dataset_epoch": str(row["track_dataset_epoch"]),
@@ -589,7 +884,7 @@ class TrainingRunStore:
             "virtual_time_ms": int(row["virtual_time_ms"]),
             "source_sequence": int(row["source_sequence"]),
             "revision": int(row["revision"]),
-            "config": json.loads(str(row["config_json"])),
+            "config": adapter_config,
             "degraded_reason": row["degraded_reason"],
         }
 
@@ -662,6 +957,67 @@ class TrainingRunStore:
                 now_ms,
                 now_ms,
             ),
+        )
+
+    @staticmethod
+    def _insert_viewer_state(
+        connection: sqlite3.Connection,
+        viewer: ViewerState,
+        *,
+        now_ms: int,
+    ) -> None:
+        payload = viewer.to_dict()
+        connection.execute(
+            """
+            INSERT INTO replay_training_viewer_state(
+                run_id, selected_track_id, display_interval, chart_type,
+                visible_range_json, pane_layout_json, rail_layout_json,
+                semantic_view_revision, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                viewer.run_id,
+                viewer.selected_track_id,
+                viewer.display_interval,
+                viewer.chart_type,
+                None
+                if viewer.visible_range is None
+                else canonical_json(viewer.visible_range),
+                canonical_json(viewer.pane_layout),
+                canonical_json(viewer.rail_layout),
+                viewer.semantic_view_revision,
+                now_ms,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_training_viewer_event(
+                run_id, semantic_view_revision, command_id, event_type,
+                request_json, viewer_state_json, created_at_ms
+            ) VALUES (?, ?, NULL, 'INITIAL_VIEWER_STATE', '{}', ?, ?)
+            """,
+            (
+                viewer.run_id,
+                viewer.semantic_view_revision,
+                canonical_json(payload),
+                now_ms,
+            ),
+        )
+
+    @staticmethod
+    def _viewer_from_row(row: Mapping[str, object]) -> ViewerState:
+        visible_raw = row["visible_range_json"]
+        return ViewerState(
+            run_id=str(row["run_id"]),
+            selected_track_id=str(row["selected_track_id"]),
+            display_interval=str(row["display_interval"]),
+            chart_type=str(row["chart_type"]),
+            visible_range=(
+                None if visible_raw is None else json.loads(str(visible_raw))
+            ),
+            pane_layout=json.loads(str(row["pane_layout_json"])),
+            rail_layout=json.loads(str(row["rail_layout_json"])),
+            semantic_view_revision=int(row["semantic_view_revision"]),
         )
 
     @staticmethod

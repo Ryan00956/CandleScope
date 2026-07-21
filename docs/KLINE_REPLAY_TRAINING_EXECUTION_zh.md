@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_2_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅，以及 Phase 2 共用市场工作区、run-scoped 绘图、能力占位和一致性快照历史加载均已完成。Phase 3 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
+状态：`PHASE_3_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅、Phase 2 共用市场工作区，以及 Phase 3 ViewerState、固定周期投影和 BAR/AGG_TRADE 推进语义均已完成。Phase 4 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -1422,4 +1422,39 @@ Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_E
 Rollback: feature-flag v1 fallback、旧 build v1 rollback drill 与 Phase 2 单提交 tree revert 均 PASS；反向应用提交后 tree 与父提交 2962e2899f737960b9dbf72598f569ccfd6ac19f 完全一致。
 Known limitations: display_interval 仍属于当前 session identity，STEP_DISPLAY/STEP_EVENT/ADVANCE_BY 等 Phase 3 语义尚未实现；Phase 2 仅主商品 FULL。OI、爆仓、mark/index/basis、funding、订单簿、订单流、hosted/range/security 与历史 L2/book-assisted 均明确显示 unavailable/disabled，不以 0 或近似数据替代。
 Decision: PASS；停止在 Phase 2，不进入 Phase 3。
+```
+
+### Phase 3 执行记录
+
+```text
+Phase: 3 - ViewerState, aligned projection, and BAR/AGG_TRADE controls
+Date: 2026-07-21
+Commit: 本 Phase 独立提交，提交号以 Git 历史为准
+Parent commit: 284364ff192a1493d9ac1d953f235f4234257d5f
+Executor: Codex
+Scope: 将可变 display interval 从不可变 session/run identity 解耦为 ViewerState；实现固定周期投影、STEP_DISPLAY/STEP_BASE/STEP_EVENT/ADVANCE_BY/ADVANCE_TO、可取消 progress 和 capability-aware bottom dock；保留 v1 精确 fallback，未进入 Phase 4 时间披露、完整性模式、动作日志或 ReviewMode。
+Files changed: backend ViewerState/schema/store/control adapter/source chunk planner/API/tests；frontend revealed-prefix projection/viewer runtime/API/type/control dock/tests；本执行记录、Phase 3 证据、浏览器截图和 Playwright 临时产物忽略规则。
+Schema/protocol changes: replay.training 物理 schema additive 升至 2，新增 viewer_state、viewer_event 和 training_command 表；replay.training.v1 线协议标识保持不变。旧 schema 迁移只补 ViewerState，不改 replay.v1 session/config/hash；history 仍绑定不可变 base interval，展示周期仅由 ViewerState 决定。
+Commands run:
+  backend targeted: .\.venv\Scripts\python.exe -m pytest -q tests/test_replay_v2_training_phase3.py tests/test_replay_v2_training_history.py tests/test_replay_v2_training_api.py tests/test_replay_v2_contracts.py
+  backend full: .\.venv\Scripts\python.exe -m pytest -q
+  backend lint: .\.venv\Scripts\python.exe -m ruff check <Phase 3 Python scope>
+  backend baseline audits: .\.venv\Scripts\python.exe -m ruff check app tests scripts；.\.venv\Scripts\python.exe -m mypy app
+  frontend: npm run check
+  browser: Playwright CLI against isolated fixture :18103 and Vite :15203
+  rollback: node scripts/replay-rollback-drill.mjs --out <temporary evidence path>
+  commit rollback: detached worktree + git revert --no-commit <Phase 3 commit> + git write-tree 与父提交 tree 比对
+  repository: git diff --check
+Targeted tests: backend Phase 3/history/API/contracts 52 passed；frontend Viewer projection/control/workspace 13 passed；Phase 3 Python scope Ruff 0 violations。
+Global tests: backend 1897 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2375 passed，architecture/typecheck/ESLint/Vite production build 全部通过。
+Global baseline audits: 全仓 Ruff 仍有父提交既有的 36 个违规；mypy app 仍有父提交依赖/类型基线的 528 个错误。两者均不在 Phase 3 改动文件引入，Phase 3 修改范围 Ruff 为 0。
+Viewer/projection evidence: base=1m 对 1m/5m/15m/1h 的 UTC 固定周期对齐、forming/closed 和首次 15m 收口均由 backend/frontend matrix 覆盖；calendar 或非整数倍周期 fail closed。display switch 从 revealed base prefix 重建，不读取未来 source，不消费事件，也不改变 cursor、domain revision 或 state hash。
+Control/equivalence evidence: BAR 的 STEP_DISPLAY 与逐 STEP_BASE 在 cursor/account/ledger/state hash 上等价，STEP_EVENT 明确拒绝；AGG_TRADE 覆盖 STEP_EVENT、STEP_BASE、STEP_DISPLAY、ADVANCE_BY 和任意 ADVANCE_TO。长推进按 32 个 source event 分块，在事件边界持久化 progress/cancel；取消只允许原 client instance。
+Race binding evidence: STEP_DISPLAY payload 绑定提交时的 display_interval=15m 与 viewer_revision=4。浏览器在命令 pending 时将 ViewerState 切到 1h/revision=5；推进仍按已绑定 15m 完成，reload 后 source_sequence 从 15 到 30，viewer 保持 1h，证明展示切换不重解释在途领域命令。
+Browser evidence: BAR blind run 在 1280x800 下无横向溢出或 chart/dock/status 重叠；BAR dock 不渲染 STEP_EVENT，可用控件均有明确 grain。1m->15m->1h->1m 切换不消费 source；15m STEP_DISPLAY 将 source_sequence 0->15，随后 5 个 base interval ADVANCE_BY 将 30->35。页面业务请求仅命中 replay API，live market 请求 0，console runtime error 0（仅两个既有 slider-vertical 开发警告）。
+No-lookahead/hash evidence: 图表和指标只读取已揭示 base prefix 的派生 SeriesWindowStore；展示切换前后 cursor/state hash 不变。最终隔离浏览器 session source_sequence=35、state_hash=sha256:06481569a64f231a9d810d35dc9791ba1f63f08aab0ca62349cbada26a868553、ViewerState=1h/revision=5。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0；v2 关闭时继续使用原 v1 commands 和 ReplayPageShell，旧 runtime 忽略 additive ViewerState 数据。
+Rollback: feature-flag v1 fallback、旧 build v1 rollback drill 与 Phase 3 单提交 tree revert 均 PASS；反向应用提交后 tree 与父提交 284364ff192a1493d9ac1d953f235f4234257d5f 完全一致。
+Known limitations: Phase 4 的七档时间披露、训练完整性 mutation/action/equity、Review/Fork 尚未实现；Phase 3 仍为单主轨。多轨、funding、历史 L2/book-assisted 和此前明确关闭的能力继续 fail closed，不以近似值替代；全仓 Ruff/mypy 既有基线仍待独立治理。
+Decision: PASS；停止在 Phase 3，不进入 Phase 4。
 ```

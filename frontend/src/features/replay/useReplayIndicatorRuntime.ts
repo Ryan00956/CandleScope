@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import type { IndicatorLine } from "../indicators/indicatorTypes.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
+import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 
 export interface ReplayIndicatorRuntime {
@@ -45,9 +46,12 @@ export function buildReplaySmaLine(
   };
 }
 
-export function useReplayIndicatorRuntime(runtime: ReplayRuntime): ReplayIndicatorRuntime {
+export function useReplayIndicatorRuntime(
+  runtime: ReplayRuntime,
+  projectedSeriesStore?: SeriesWindowStore,
+): ReplayIndicatorRuntime {
   const storeSnapshot = runtime.store;
-  const seriesStore = runtime.replayStore.seriesStore;
+  const seriesStore = projectedSeriesStore ?? runtime.replayStore.seriesStore;
   const subscribeSeries = useCallback((listener: () => void) => {
     const unsubscribe = seriesStore.subscribe(listener);
     return () => { unsubscribe(); };

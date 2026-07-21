@@ -25,6 +25,7 @@ import { formatReplayPublicTime, replayOwnsController } from "./replayUiModel.js
 import { useReplayHistoryRuntime } from "./useReplayHistoryRuntime.js";
 import type { ReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
+import type { ReplayViewerRuntime } from "./useReplayViewerRuntime.js";
 import { useReplayWorkspacePreferences } from "./replayWorkspacePreferences.js";
 
 
@@ -33,6 +34,7 @@ export interface ReplayTrainingPageShellProps {
   readonly indicators: ReplayIndicatorRuntime;
   readonly chartSurfaceRef: RefObject<ChartSurfaceHandle | null>;
   readonly chartSurfaceActions: ChartSurfaceActions;
+  readonly viewer: ReplayViewerRuntime;
 }
 
 function ReplayStatePanel({ runtime }: { readonly runtime: ReplayRuntime }) {
@@ -74,6 +76,7 @@ export default function ReplayTrainingPageShell({
   indicators,
   chartSurfaceRef,
   chartSurfaceActions,
+  viewer,
 }: ReplayTrainingPageShellProps) {
   const [returningToHub, setReturningToHub] = useState(false);
   const [returnToHubError, setReturnToHubError] = useState<string | null>(null);
@@ -117,7 +120,8 @@ export default function ReplayTrainingPageShell({
     const listener = (event: KeyboardEvent) => {
       handleReplayShortcut(event, (action) => {
         if (!ownsController || runtime.store.connectionState !== "connected"
-          || runtime.pendingCommand !== null || runtime.forkPending) return false;
+          || runtime.pendingCommand !== null || viewer.controlPending !== null
+          || viewer.viewerPending || runtime.forkPending) return false;
         if (action === "toggle-play" && runtime.store.state === "PLAYING") {
           void runtime.actions.submitCommand("pause", {}).catch(() => undefined);
           return true;
@@ -127,11 +131,12 @@ export default function ReplayTrainingPageShell({
           return true;
         }
         if (action === "step" && runtime.store.state === "PAUSED") {
-          void runtime.actions.submitCommand("step", { count: 1 }).catch(() => undefined);
+          void viewer.actions.submitControl("step_display", { count: 1 }).catch(() => undefined);
           return true;
         }
         if (action === "advance-window" && runtime.store.state === "PAUSED") {
-          void runtime.actions.submitCommand("advance_by", { ms: 300_000 }).catch(() => undefined);
+          const baseMs = (parseIntervalSeconds(config?.base_interval ?? "1m") ?? 60) * 1_000;
+          void viewer.actions.submitControl("advance_by", { ms: baseMs * 5 }).catch(() => undefined);
           return true;
         }
         return false;
@@ -139,28 +144,62 @@ export default function ReplayTrainingPageShell({
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [ownsController, runtime.actions, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, runtime.store.state]);
+  }, [config?.base_interval, ownsController, runtime.actions, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, runtime.store.state, viewer.actions, viewer.controlPending, viewer.viewerPending]);
 
-  const interval = (config?.display_interval ?? "1m") as IntervalString;
-  const seconds = parseIntervalSeconds(interval) ?? 60;
-  const nativeIntervals = useMemo(() => [{ value: interval, seconds, label: interval }], [interval, seconds]);
-  const intervalGroups = useMemo(() => groupIntervalsByDuration([
-    { value: interval, seconds, label: interval, isCustom: false },
-  ]), [interval, seconds]);
-  const last = runtime.store.lastPrice;
+  const interval = (viewer.viewerState?.display_interval ?? config?.base_interval ?? "1m") as IntervalString;
+  const displayIntervals = useMemo(() => {
+    const base = (config?.base_interval ?? "1m") as IntervalString;
+    const baseSeconds = parseIntervalSeconds(base);
+    const candidates = new Set<IntervalString>([base, "1m", "5m", "15m", "1h"] as IntervalString[]);
+    return [...candidates]
+      .map((value) => ({ value, seconds: parseIntervalSeconds(value) }))
+      .filter((item): item is { value: IntervalString; seconds: number } => (
+        baseSeconds !== null
+        && item.seconds !== null
+        && item.seconds >= baseSeconds
+        && item.seconds % baseSeconds === 0
+      ))
+      .sort((left, right) => left.seconds - right.seconds);
+  }, [config?.base_interval]);
+  const nativeIntervals = useMemo(() => displayIntervals.map(({ value, seconds }) => ({
+    value,
+    seconds,
+    label: value,
+  })), [displayIntervals]);
+  const intervalGroups = useMemo(() => groupIntervalsByDuration(displayIntervals.map(({ value, seconds }) => ({
+    value,
+    seconds,
+    label: value,
+    isCustom: false,
+  }))), [displayIntervals]);
+  const viewerLast = viewer.seriesStore.last();
+  const viewerFirst = viewer.seriesStore.first();
+  const viewerBarCount = viewer.seriesStore.barCount;
+  const viewerDataMeta = {
+    ...runtime.marketData.view.meta,
+    version: Number(viewer.seriesStore.version),
+    status: viewer.loading ? "loading" : "ready",
+    source: "replay-viewer-rebuild",
+    seriesKey: viewer.seriesStore.seriesKey,
+    interval,
+    bars: viewerBarCount,
+    firstTime: viewerFirst?.time ?? null,
+    lastTime: viewerLast?.time ?? null,
+  };
+  const last = viewerLast ?? runtime.store.lastPrice;
   const isUp = Number(last?.close ?? 0) >= Number(last?.open ?? 0);
-  const chart = active && runtime.marketData.status.barCount > 0 && config !== null ? (
+  const chart = active && viewerBarCount > 0 && config !== null ? (
     <SingleChartPanes
       ref={chartSurfaceRef}
-      seriesStore={runtime.marketData.view.seriesStore}
+      seriesStore={viewer.seriesStore}
       symbol={config.symbol}
       drawingKeyBase={`replay:${runtime.store.sessionId ?? "unknown"}`}
       interval={interval}
-      loading={runtime.marketData.view.loading || history.loading}
+      loading={runtime.marketData.view.loading || viewer.loading || history.loading}
       onCrosshairMove={runtime.marketData.actions.onCrosshairMove}
       onNeedMoreLeft={history.loadMoreLeft}
       canLoadMoreLeft={history.hasMore}
-      datasetKey={String(runtime.marketData.view.meta.seriesKey ?? "replay-uninitialized")}
+      datasetKey={String(viewer.seriesStore.seriesKey ?? "replay-viewer-uninitialized")}
       upColor={settings.upColor}
       downColor={settings.downColor}
       chartType={settings.chartType}
@@ -180,7 +219,7 @@ export default function ReplayTrainingPageShell({
       timezone={settings.timezone ?? "UTC"}
       timeFormatter={formatChartTime}
       tickMarkFormatter={formatChartTime}
-      dataMeta={runtime.marketData.view.meta}
+      dataMeta={viewerDataMeta}
       onVisibleRangeChange={runtime.marketData.actions.onVisibleRangeChange}
       drawingTool={drawings.view.drawingTool}
       onDrawingToolChange={drawings.actions.setDrawingTool}
@@ -245,7 +284,7 @@ export default function ReplayTrainingPageShell({
           navigation={<span className="replay-mode-badge">REPLAY TRAINING</span>}
           identity={config && (
             <button className="replay-identity-readonly" type="button" title="活动 run 的来源身份不可变；请新建或 Fork。">
-              {config.exchange} · {config.market_type} · {config.symbol} · {config.display_interval}
+              {config.exchange} · {config.market_type} · {config.symbol} · base {config.base_interval}
             </button>
           )}
           controls={<>
@@ -284,20 +323,22 @@ export default function ReplayTrainingPageShell({
       intervalSelector={(
         <IntervalSelector
           interval={interval}
-          capabilityReady={config !== null}
-          capabilityLoading={config === null}
+          capabilityReady={config !== null && viewer.viewerState !== null && !viewer.viewerPending}
+          capabilityLoading={config === null || viewer.loading || viewer.viewerPending}
           nativeIntervals={nativeIntervals}
           intervalGroups={intervalGroups}
           customIntervalRecords={[]}
           savedCustomIntervals={[]}
-          onSelectInterval={() => undefined}
-          onCreateCustomInterval={() => ({ ok: false, message: "Phase 2 interval is read-only" })}
+          onSelectInterval={(next) => { void viewer.actions.setDisplayInterval(next).catch(() => undefined); }}
+          onCreateCustomInterval={() => ({ ok: false, message: "Phase 3 仅开放可证明的固定周期倍数" })}
           onRemoveCustomInterval={() => undefined}
           onRestoreCustomInterval={() => undefined}
           onTogglePinCustomInterval={() => null}
           onClearCustomIntervals={() => undefined}
-          intervalNotice={{ type: "info", text: `服务端权威历史时间轴 · ${publicTime}` }}
-          readOnlyReason="Phase 2 固定使用 run 的 display interval；Phase 3 才开放重采样切换。"
+          intervalNotice={{
+            type: viewer.error ? "error" : "info",
+            text: viewer.error ?? `ViewerState r${viewer.viewerState?.semantic_view_revision ?? "--"} · ${publicTime}`,
+          }}
         />
       )}
       workspace={(
@@ -317,7 +358,7 @@ export default function ReplayTrainingPageShell({
           ) : null}
         />
       )}
-      featureSurfaces={active ? <><ReplayReportPanel runtime={runtime} /><ReplayBottomControlDock runtime={runtime} /></> : null}
+      featureSurfaces={active ? <><ReplayReportPanel runtime={runtime} /><ReplayBottomControlDock runtime={runtime} viewer={viewer} /></> : null}
       statusBar={(
         <MarketStatusBar
           source="replay"
@@ -329,15 +370,17 @@ export default function ReplayTrainingPageShell({
             "data-replay-revision": runtime.store.revision,
             "data-replay-state-hash": runtime.store.stateHash ?? "",
             "data-replay-cursor-ms": runtime.store.virtualTimeMs ?? "",
-            "data-replay-max-bar-ms": runtime.replayStore.seriesStore.last()?.time === undefined ? "" : Number(runtime.replayStore.seriesStore.last()?.time) * 1_000,
-            "data-replay-last-bar-closed": String(runtime.store.lastPrice?.replayClosed ?? ""),
+            "data-replay-max-bar-ms": viewerLast?.time === undefined ? "" : Number(viewerLast.time) * 1_000,
+            "data-replay-last-bar-closed": String(viewerLast?.replayClosed ?? ""),
             "data-replay-revealed": String(runtime.store.revealed),
             "data-replay-history-epoch": history.historyEpoch ?? "",
+            "data-replay-view-interval": interval,
+            "data-replay-view-revision": viewer.viewerState?.semantic_view_revision ?? "",
           }}
           left={<>
             <span><span className={`status-dot ${runtime.store.connectionState === "connected" ? "connected" : "loading"}`} />K 线回放 · REPLAY</span>
             <span>{runtime.store.state ?? runtime.phase}</span>
-            <span>{runtime.marketData.status.barCount} bars</span>
+            <span>{viewerBarCount} display bars</span>
             {history.loading && <span>Loading older replay data…</span>}
             {!history.hasMore && !history.loading && <span>No more frozen history</span>}
             {history.error && <span className="replay-history-error">{history.error}</span>}

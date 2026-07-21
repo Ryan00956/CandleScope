@@ -288,6 +288,13 @@ class _DurableStateRequest:
 
 
 @dataclass(slots=True)
+class _SourceChunkPlanRequest:
+    target_time_ms: int
+    max_events: int
+    future: asyncio.Future[dict[str, object]]
+
+
+@dataclass(slots=True)
 class _SubscribeRequest:
     after_sequence: int | None
     max_pending: int
@@ -314,6 +321,7 @@ _ActorRequest = (
     | _ReportRequest
     | _CheckpointRequest
     | _DurableStateRequest
+    | _SourceChunkPlanRequest
     | _SubscribeRequest
     | _UnsubscribeRequest
     | _ShutdownRequest
@@ -636,6 +644,27 @@ class ReplaySessionActor:
             raise RuntimeError("replay actor has not started")
         loop = asyncio.get_running_loop()
         request = _DurableStateRequest(loop.create_future())
+        self._offer_request(request)
+        return await request.future
+
+    async def source_chunk_plan(
+        self,
+        *,
+        target_time_ms: int,
+        max_events: int,
+    ) -> dict[str, object]:
+        """Plan one bounded immutable-source chunk from inside the mailbox."""
+
+        self._ensure_accepting()
+        target = validate_timestamp_ms(target_time_ms, field_name="target_time_ms")
+        maximum = self._positive_int(max_events, "max_events")
+        maximum = min(maximum, self._max_atomic_command_source_events)
+        loop = asyncio.get_running_loop()
+        request = _SourceChunkPlanRequest(
+            target_time_ms=target,
+            max_events=maximum,
+            future=loop.create_future(),
+        )
         self._offer_request(request)
         return await request.future
 
@@ -1208,6 +1237,14 @@ class ReplaySessionActor:
                 self._materialize_clock()
                 if not request.future.done():
                     request.future.set_result(self._durable_state())
+            elif isinstance(request, _SourceChunkPlanRequest):
+                if not request.future.done():
+                    request.future.set_result(
+                        self._source_chunk_plan(
+                            target_time_ms=request.target_time_ms,
+                            max_events=request.max_events,
+                        )
+                    )
             elif isinstance(request, _SubscribeRequest):
                 self._handle_subscribe_request(request)
             elif isinstance(request, _UnsubscribeRequest):
@@ -2164,6 +2201,39 @@ class ReplaySessionActor:
             )
             if (index + 1) % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
                 await asyncio.sleep(0)
+
+    def _source_chunk_plan(
+        self,
+        *,
+        target_time_ms: int,
+        max_events: int,
+    ) -> dict[str, object]:
+        source = self._fork_current_source()
+        count = 0
+        last_event_time_ms: int | None = None
+        while count < max_events and (event := source.peek()) is not None:
+            event_time = self._event_time_ms(event)
+            if event_time > target_time_ms:
+                break
+            if source.next() != event:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source changed during chunk planning",
+                )
+            count += 1
+            last_event_time_ms = event_time
+        next_event = source.peek()
+        return {
+            "revision": self._revision,
+            "cursor": self._cursor_dict(),
+            "event_count": count,
+            "last_event_time_ms": last_event_time_ms,
+            "has_more_before_target": (
+                next_event is not None
+                and self._event_time_ms(next_event) <= target_time_ms
+            ),
+            "max_events": max_events,
+        }
 
     async def _preflight_advance_target(self, target_time_ms: int) -> int:
         source = self._fork_current_source()

@@ -1,0 +1,180 @@
+{
+  "schema": "replay.v2.phase3.evidence.v1",
+  "captured_at": "2026-07-21",
+  "branch": "codex/kline-replay-training",
+  "parent_head": "284364ff192a1493d9ac1d953f235f4234257d5f",
+  "phase": 3,
+  "decision": "PASS",
+  "next_phase_started": false,
+  "repository_defaults": {
+    "replay_enabled": false,
+    "replay_product_v2_enabled": false,
+    "vite_replay_entry_enabled": false,
+    "vite_replay_product_v2_enabled": false
+  },
+  "verification": {
+    "backend_targeted": {
+      "result": "PASS",
+      "passed": 52
+    },
+    "backend_full": {
+      "result": "PASS",
+      "passed": 1897,
+      "warnings": 4,
+      "warning_scope": "pre-existing FastAPI on_event deprecations"
+    },
+    "frontend_targeted": {
+      "result": "PASS",
+      "passed": 13
+    },
+    "frontend_full": {
+      "result": "PASS",
+      "passed": 2375,
+      "architecture": "PASS",
+      "typecheck": "PASS",
+      "eslint": "PASS",
+      "production_build": "PASS"
+    },
+    "ruff_phase3_scope": {
+      "result": "PASS",
+      "violations": 0
+    },
+    "repository_baselines": {
+      "ruff_pre_existing_violations": 36,
+      "mypy_pre_existing_errors": 528,
+      "new_phase3_scope_ruff_violations": 0
+    },
+    "git_diff_check": "PASS"
+  },
+  "viewer_state": {
+    "outside_domain_identity": true,
+    "schema_migration": "additive replay.training physical schema 1 to 2",
+    "wire_protocol_id": "replay.training.v1",
+    "history_interval_binding": "immutable base interval",
+    "display_interval_binding": "ViewerState semantic_view_revision",
+    "supported_fixed_intervals": [
+      "1m",
+      "5m",
+      "15m",
+      "1h"
+    ],
+    "calendar_intervals": "FAIL_CLOSED",
+    "inexact_multiples": "FAIL_CLOSED",
+    "display_switch_consumes_source": false,
+    "display_switch_changes_domain_hash": false
+  },
+  "projection": {
+    "source": "revealed immutable base prefix",
+    "alignment": "UTC fixed-duration buckets",
+    "forming_and_closed_metadata": "PASS",
+    "first_15m_bucket_close": "PASS",
+    "chart_and_indicators_share_projected_store": true,
+    "future_source_reads": 0
+  },
+  "commands": {
+    "implemented": [
+      "STEP_DISPLAY",
+      "STEP_BASE",
+      "STEP_EVENT",
+      "ADVANCE_BY",
+      "ADVANCE_TO",
+      "CANCEL_ADVANCE"
+    ],
+    "bar_step_event": "REJECTED",
+    "agg_trade_grains": [
+      "event",
+      "base",
+      "display",
+      "arbitrary-time"
+    ],
+    "long_advance_chunk_events": 32,
+    "cancel_boundary": "source event",
+    "cancel_client_ownership": "ENFORCED",
+    "command_idempotency": "PERSISTED",
+    "payload_binds_display_interval_and_viewer_revision": true
+  },
+  "equivalence": {
+    "bar_step_display_vs_repeated_base": {
+      "cursor": "MATCH",
+      "account": "MATCH",
+      "ledger": "MATCH",
+      "state_hash": "MATCH"
+    },
+    "agg_trade_step_event": "PASS",
+    "agg_trade_step_base": "PASS",
+    "agg_trade_step_display": "PASS",
+    "agg_trade_advance_by": "PASS",
+    "agg_trade_advance_to": "PASS"
+  },
+  "browser": {
+    "fixture_backend_port": 18103,
+    "vite_port": 15203,
+    "viewport": "1280x800",
+    "horizontal_page_overflow": false,
+    "dock_top": 730,
+    "dock_bottom": 776,
+    "status_top": 776,
+    "layout_overlap": false,
+    "bar_step_event_control_count": 0,
+    "display_switch_sequence": [
+      "1m",
+      "15m",
+      "1h",
+      "1m"
+    ],
+    "switch_preserved_cursor_hash_sequence_revision": true,
+    "first_15m_step": {
+      "source_sequence_before": 0,
+      "source_sequence_after": 15,
+      "cursor_after_ms": 946685699999
+    },
+    "pending_command_race": {
+      "bound_display_interval": "15m",
+      "bound_viewer_revision": 4,
+      "viewer_switched_to": "1h",
+      "viewer_revision_after_switch": 5,
+      "source_sequence_before": 15,
+      "source_sequence_after": 30,
+      "result": "PASS"
+    },
+    "advance_five_base_intervals": {
+      "source_sequence_before": 30,
+      "source_sequence_after": 35
+    },
+    "final_state": {
+      "source_sequence": 35,
+      "state_hash": "sha256:06481569a64f231a9d810d35dc9791ba1f63f08aab0ca62349cbada26a868553",
+      "display_interval": "1h",
+      "viewer_revision": 5
+    },
+    "live_market_requests": 0,
+    "runtime_console_errors": 0,
+    "development_only_noise": [
+      "two existing slider-vertical CSS warnings"
+    ],
+    "screenshot": {
+      "path": "output/playwright/phase3-20260721/replay-v2-phase3-workspace.png",
+      "bytes": 97735,
+      "sha256": "de54c63ac872920be6da05a2b96e71de354f34955bb23bb1dad5b4a617df1571"
+    }
+  },
+  "rollback": {
+    "runtime_feature_flag_v1_fallback": "PASS",
+    "legacy_v1_rollback_drill": "PASS",
+    "legacy_baseline_head": "c9a1ddbfe316c68c91787b69c783baeeb0670a9f",
+    "legacy_acceptance_checks_passed": 13,
+    "feature_off_database_digest_stable": true,
+    "old_build_database_digest_stable": true,
+    "single_commit_revert_tree": "PASS",
+    "reverted_tree": "ddda608d88c46a2e8cfe550c5c51a6ef8f2e3df4",
+    "parent_tree": "ddda608d88c46a2e8cfe550c5c51a6ef8f2e3df4",
+    "expected_parent_head": "284364ff192a1493d9ac1d953f235f4234257d5f"
+  },
+  "known_limitations": [
+    "Phase 4 time disclosure, integrity mutations, action/equity persistence, and ReviewMode have not started.",
+    "Phase 3 remains a single-primary-track runtime; multi-track global clock work starts in Phase 5.",
+    "Funding, historical L2/book-assisted, and previously unavailable capabilities remain fail closed instead of approximated.",
+    "Repository-wide Ruff and mypy still have the recorded pre-existing baselines outside the Phase 3 change scope.",
+    "Phase 4 has not started."
+  ]
+}

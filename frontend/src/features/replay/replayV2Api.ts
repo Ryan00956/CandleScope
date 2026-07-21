@@ -5,8 +5,15 @@ import {
   parseTrainingRunListResponse,
   parseTrainingRunMutationResponse,
   parseTrainingRunReturnResponse,
+  parseReplayAdvanceProgressResponse,
+  parseReplayV2CommandResult,
+  parseReplayViewerStateResponse,
 } from "./replayV2Types.js";
 import type {
+  ReplayAdvanceProgressResponse,
+  ReplayV2Command,
+  ReplayV2CommandResult,
+  ReplayViewerStateResponse,
   TrainingRunCreatePayload,
   TrainingRunListResponse,
   TrainingRunMutationResponse,
@@ -174,6 +181,42 @@ export class ReplayV2ApiClient {
       `/runs/session/${safeSegment(sessionId, "session id")}/return-to-hub`,
       parseTrainingRunReturnResponse,
       { method: "POST", ...(signal ? { signal } : {}) },
+    );
+  }
+
+  viewerBySession(sessionId: string, signal?: AbortSignal): Promise<ReplayViewerStateResponse> {
+    return this.request(
+      `/runs/session/${safeSegment(sessionId, "session id")}/viewer`,
+      parseReplayViewerStateResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  commandRun(
+    runId: string,
+    command: ReplayV2Command,
+    signal?: AbortSignal,
+  ): Promise<ReplayV2CommandResult> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/commands`,
+      parseReplayV2CommandResult,
+      {
+        method: "POST",
+        body: JSON.stringify(command),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  advanceProgress(
+    runId: string,
+    commandId: string,
+    signal?: AbortSignal,
+  ): Promise<ReplayAdvanceProgressResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/advances/${safeSegment(commandId, "command id")}`,
+      parseReplayAdvanceProgressResponse,
+      signal ? { signal } : {},
     );
   }
 

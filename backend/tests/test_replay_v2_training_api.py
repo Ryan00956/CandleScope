@@ -200,6 +200,85 @@ async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Pa
         await service.shutdown(step_timeout=0.2)
 
 
+async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "phase3-api.db")
+    app = _app(service)
+    try:
+        create_payload = await _payload(service)
+        create_payload["display_interval"] = "15m"
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=create_payload,
+        )
+        run = created.json()["run"]
+        snapshot_response = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/sessions/{run['adapter_session_id']}",
+        )
+        before = snapshot_response.json()["snapshot"]
+        assert before["config"]["display_interval"] == "1m"
+
+        viewer = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/session/{run['adapter_session_id']}/viewer",
+        )
+        assert viewer.json()["viewer_state"]["display_interval"] == "15m"
+
+        command = {
+            "protocol": "replay.v2",
+            "run_id": run["run_id"],
+            "command_id": "phase3-api-viewer",
+            "client_instance_id": "phase3-api",
+            "expected_revision": before["revision"],
+            "expected_cursor": {
+                "virtual_time_ms": before["cursor"]["virtual_time_ms"],
+                "source_sequence": before["cursor"]["source_sequence"],
+                "revision": before["revision"],
+            },
+            "type": "set_display_interval",
+            "payload": {
+                "display_interval": "1h",
+                "expected_viewer_revision": 0,
+            },
+        }
+        changed = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run['run_id']}/commands",
+            json=command,
+        )
+        assert changed.status_code == 200
+        assert changed.json()["viewer_state"]["display_interval"] == "1h"
+        assert changed.json()["data"]["source_events_consumed"] == 0
+        after = (
+            await _request(
+                app,
+                "GET",
+                f"/api/v1/replay/sessions/{run['adapter_session_id']}",
+            )
+        ).json()["snapshot"]
+        assert after["cursor"] == before["cursor"]
+        assert after["state_hash"] == before["state_hash"]
+
+        malformed = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run['run_id']}/commands",
+            json={**command, "future_field": True},
+        )
+        assert malformed.status_code == 422
+        assert malformed.json()["protocol"] == "replay.v2"
+        assert malformed.json()["error"]["code"] == "TRAINING_RUN_INVALID"
+    finally:
+        await service.shutdown(step_timeout=0.2)
+
+
 async def test_v2_validation_and_catalog_drift_use_v2_error_envelopes(
     tmp_path: Path,
 ) -> None:

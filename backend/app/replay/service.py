@@ -444,6 +444,21 @@ class ReplayService:
         async with self._lease_handle(session_id) as handle:
             return await self._session_payload(handle)
 
+    async def plan_source_chunk(
+        self,
+        session_id: str,
+        *,
+        target_time_ms: int,
+        max_events: int,
+    ) -> dict[str, object]:
+        """Return one bounded, read-only source scan plan for replay.v2."""
+
+        async with self._lease_handle(session_id) as handle:
+            return await handle.actor.source_chunk_plan(
+                target_time_ms=target_time_ms,
+                max_events=max_events,
+            )
+
     async def command(
         self,
         session_id: str,

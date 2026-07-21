@@ -31,6 +31,7 @@ from app.replay.models import (
 )
 from app.replay.service import ReplayService
 from app.replay.training.errors import TrainingRunError
+from app.replay.training.commands import ReplayV2Command
 from app.replay.training.models import (
     REPLAY_V2_PROTOCOL,
     BookMode,
@@ -300,6 +301,23 @@ class TrainingRunMigrationPayload(_StrictModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
 
 
+class TrainingCursorPayload(_StrictModel):
+    virtual_time_ms: int = Field(ge=0, le=MAX_TIMESTAMP_MS)
+    source_sequence: int = Field(ge=0, le=MAX_COUNTER)
+    revision: int = Field(ge=0, le=MAX_COUNTER)
+
+
+class ReplayV2CommandPayload(_StrictModel):
+    protocol: Literal["replay.v2"]
+    run_id: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=128)
+    client_instance_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0, le=MAX_COUNTER)
+    expected_cursor: TrainingCursorPayload
+    type: str = Field(min_length=1, max_length=64)
+    payload: dict[str, object]
+
+
 async def enforce_replay_request_limit(request: Request) -> None:
     _validate_declared_replay_length(request)
     cached = getattr(request, "_body", None)
@@ -482,6 +500,15 @@ async def replay_v2_training_history(
     )
 
 
+@router.get("/runs/session/{session_id}/viewer")
+async def replay_v2_training_viewer_by_session(
+    request: Request,
+    session_id: str,
+) -> dict[str, object]:
+    viewer = await _training_service(request).get_viewer_state_by_session(session_id)
+    return {"protocol": REPLAY_V2_PROTOCOL, "viewer_state": viewer}
+
+
 @router.post(
     "/runs/{legacy_session_id}/migrate",
     dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
@@ -496,6 +523,37 @@ async def migrate_legacy_replay_v2_run(
         name=payload.name,
     )
     return JSONResponse(status_code=201 if result["created"] else 200, content=result)
+
+
+@router.get("/runs/{run_id}/viewer")
+async def replay_v2_training_viewer(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    viewer = await _training_service(request).get_viewer_state(run_id)
+    return {"protocol": REPLAY_V2_PROTOCOL, "viewer_state": viewer}
+
+
+@router.get("/runs/{run_id}/advances/{command_id}")
+async def replay_v2_advance_progress(
+    request: Request,
+    run_id: str,
+    command_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).get_advance_progress(run_id, command_id)
+
+
+@router.post(
+    "/runs/{run_id}/commands",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def command_replay_v2_run(
+    request: Request,
+    run_id: str,
+    payload: ReplayV2CommandPayload,
+) -> dict[str, object]:
+    command = ReplayV2Command.from_dict(payload.model_dump(mode="json"))
+    return await _training_service(request).command(run_id, command)
 
 
 @router.get("/runs/{run_id}")
@@ -570,6 +628,7 @@ async def replay_session_journal(
 __all__ = [
     "MAX_REPLAY_REQUEST_BYTES",
     "ReplayCommandPayload",
+    "ReplayV2CommandPayload",
     "ReplaySessionCreatePayload",
     "TrainingRunCreatePayload",
     "TrainingRunMigrationPayload",

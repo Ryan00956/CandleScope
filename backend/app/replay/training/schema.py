@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 
-TRAINING_SCHEMA_VERSION = 1
+TRAINING_SCHEMA_VERSION = 2
 TRAINING_SCHEMA_ID = "replay.training.v1"
 
 
@@ -111,6 +111,45 @@ CREATE TABLE IF NOT EXISTS replay_training_pin (
 """
 
 
+TRAINING_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS replay_training_viewer_state (
+    run_id TEXT PRIMARY KEY
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    selected_track_id TEXT NOT NULL,
+    display_interval TEXT NOT NULL,
+    chart_type TEXT NOT NULL,
+    visible_range_json TEXT,
+    pane_layout_json TEXT NOT NULL,
+    rail_layout_json TEXT NOT NULL,
+    semantic_view_revision INTEGER NOT NULL CHECK (semantic_view_revision >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_viewer_event (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    semantic_view_revision INTEGER NOT NULL CHECK (semantic_view_revision >= 0),
+    command_id TEXT,
+    event_type TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    viewer_state_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, semantic_view_revision),
+    UNIQUE (run_id, command_id)
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_command (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    command_id TEXT NOT NULL,
+    command_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, command_id)
+);
+"""
+
+
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
     """Create only v2-owned tables; never advance the replay.v1 schema row."""
 
@@ -134,12 +173,48 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         )
     if current == TRAINING_SCHEMA_VERSION:
         return
-    if current != 0:
+    if current == 0:
+        _execute_script(connection, TRAINING_SCHEMA_V1)
+        current = 1
+    if current == 1:
+        _execute_script(connection, TRAINING_SCHEMA_V2)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_training_viewer_state(
+                run_id, selected_track_id, display_interval, chart_type,
+                visible_range_json, pane_layout_json, rail_layout_json,
+                semantic_view_revision, updated_at_ms
+            )
+            SELECT run_id, 'track-1', display_interval, 'candles',
+                   NULL, '{}', '{}', 0, ?
+            FROM replay_training_run
+            """,
+            (now_ms,),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_training_viewer_event(
+                run_id, semantic_view_revision, command_id, event_type,
+                request_json, viewer_state_json, created_at_ms
+            )
+            SELECT run_id, 0, NULL, 'INITIAL_VIEWER_STATE', '{}',
+                   json_object(
+                       'run_id', run_id,
+                       'selected_track_id', 'track-1',
+                       'display_interval', display_interval,
+                       'chart_type', 'candles',
+                       'visible_range', NULL,
+                       'pane_layout', json('{}'),
+                       'rail_layout', json('{}'),
+                       'semantic_view_revision', 0
+                   ), ?
+            FROM replay_training_run
+            """,
+            (now_ms,),
+        )
+        current = 2
+    if current != TRAINING_SCHEMA_VERSION:
         raise RuntimeError(f"no replay training schema migration path from {current}")
-    for statement in TRAINING_SCHEMA_V1.split(";"):
-        sql = statement.strip()
-        if sql:
-            connection.execute(sql)
     connection.execute(
         """
         INSERT INTO replay_training_schema_version(singleton, version, applied_at_ms)
@@ -150,6 +225,13 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         """,
         (TRAINING_SCHEMA_VERSION, now_ms),
     )
+
+
+def _execute_script(connection: sqlite3.Connection, script: str) -> None:
+    for statement in script.split(";"):
+        sql = statement.strip()
+        if sql:
+            connection.execute(sql)
 
 
 __all__ = [

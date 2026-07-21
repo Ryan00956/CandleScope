@@ -385,6 +385,98 @@ class TrainingCursor:
 
 
 @dataclass(frozen=True, slots=True)
+class ViewerState:
+    """Mutable semantic view state kept outside the replay domain hash."""
+
+    run_id: str
+    selected_track_id: str
+    display_interval: str
+    chart_type: str
+    visible_range: Mapping[str, object] | None
+    pane_layout: Mapping[str, object]
+    rail_layout: Mapping[str, object]
+    semantic_view_revision: int
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "run_id",
+            "selected_track_id",
+            "display_interval",
+            "chart_type",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                validate_identifier(getattr(self, field_name), field_name=field_name),
+            )
+        if self.visible_range is not None:
+            visible = expect_mapping(self.visible_range, field_name="visible_range")
+            object.__setattr__(
+                self,
+                "visible_range",
+                freeze_json(visible, field_name="visible_range"),
+            )
+        for field_name in ("pane_layout", "rail_layout"):
+            layout = expect_mapping(getattr(self, field_name), field_name=field_name)
+            object.__setattr__(
+                self,
+                field_name,
+                freeze_json(layout, field_name=field_name),
+            )
+        object.__setattr__(
+            self,
+            "semantic_view_revision",
+            validate_v2_counter(
+                self.semantic_view_revision,
+                field_name="semantic_view_revision",
+            ),
+        )
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ViewerState":
+        payload = expect_mapping(value, field_name="viewer_state")
+        expect_exact_keys(
+            payload,
+            {
+                "run_id",
+                "selected_track_id",
+                "display_interval",
+                "chart_type",
+                "visible_range",
+                "pane_layout",
+                "rail_layout",
+                "semantic_view_revision",
+            },
+        )
+        return cls(
+            run_id=payload["run_id"],  # type: ignore[arg-type]
+            selected_track_id=payload["selected_track_id"],  # type: ignore[arg-type]
+            display_interval=payload["display_interval"],  # type: ignore[arg-type]
+            chart_type=payload["chart_type"],  # type: ignore[arg-type]
+            visible_range=(
+                None
+                if payload["visible_range"] is None
+                else expect_mapping(payload["visible_range"], field_name="visible_range")
+            ),
+            pane_layout=expect_mapping(payload["pane_layout"], field_name="pane_layout"),
+            rail_layout=expect_mapping(payload["rail_layout"], field_name="rail_layout"),
+            semantic_view_revision=payload["semantic_view_revision"],  # type: ignore[arg-type]
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "selected_track_id": self.selected_track_id,
+            "display_interval": self.display_interval,
+            "chart_type": self.chart_type,
+            "visible_range": thaw_json(self.visible_range),
+            "pane_layout": thaw_json(self.pane_layout),
+            "rail_layout": thaw_json(self.rail_layout),
+            "semantic_view_revision": self.semantic_view_revision,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingRunContract:
     protocol: str
     run_id: str
@@ -810,6 +902,7 @@ __all__ = [
     "TrainingCursor",
     "TrainingRunCreateRequest",
     "TrainingRunContract",
+    "ViewerState",
     "ensure_time_disclosure_not_weakened",
     "validate_track_source",
 ]

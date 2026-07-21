@@ -187,7 +187,7 @@ DataManager cache + EventBus
 | `app/data_engine/data_manager` | query/cache/events/streams/backfill/prices/maintenance 公共门面 |
 | `app/data_engine/backfill` | 历史 detect/plan/fetch/reconcile/report pipeline |
 | `app/data_engine/storage` | SQLite K 线仓库和 gap ledger |
-| `app/indicator` | 内置指标、Pyne runtime、指标实时流 |
+| `app/indicator` | 内置指标、sidecar runtime 路由、指标实时流 |
 
 ## 前端
 
@@ -267,14 +267,15 @@ p2 = plot(lower, "Lower", color=color.green)
 fill(p1, p2, color="rgba(59,130,246,0.08)")
 ```
 
-Pyne 支持 `safe`、`research`、`unsafe` security modes。默认使用 process executor，比 inline 执行更容易可靠地强制超时。
+Pyne 支持 `safe`、`research`、`unsafe` security modes，并在由公共 sidecar
+协议监督的隔离插件环境中运行。
 
 文档：
 
 - [Indicator Engine](backend/app/indicator/README.md)
 - [Indicator Engine 中文](backend/app/indicator/README_zh.md)
-- [Pyne Runtime](backend/app/indicator/pyne/README.md)
-- [Pyne Runtime 中文](backend/app/indicator/pyne/README_zh.md)
+- [Pyne Runtime 插件](packages/candlescope-plugin-pyne/README.md)
+- [Pyne Runtime 插件中文](packages/candlescope-plugin-pyne/README_zh.md)
 
 ## Plugin SDK（开发者预览）
 
@@ -291,12 +292,15 @@ Plugin platform Phase 2/3 已加入通用
 SHA-256、每 bundle 独立 venv、离线 wheel 安装、结果探针、原子激活和逐插件回滚；
 社区发布流程见
 [`INSTALLER_zh.md`](backend/app/plugin_runtime/INSTALLER_zh.md)。Phase 4 已把 Indicator
-HTTP、range、batch 和 WebSocket 统一接入显式 `legacy/shadow/sidecar` 路由；Phase 6
-缺省已切换为 `pyne=sidecar,candlescope.pyne`。Phase 5 新增独立可构建的
+HTTP、range、batch 和 WebSocket 统一接入 runtime 路由；Phase 6 缺省已切换为
+`pyne=sidecar,candlescope.pyne`。Phase 5 新增独立可构建的
 [`candlescope-plugin-pyne`](packages/candlescope-plugin-pyne/README_zh.md)，通过发行锁固定
 SDK、Pyne Runtime RC wheel 与 NumPy 版本，并已通过真实 `.cspkg` 离线安装和协议探针。
 0.2.0 bridge 通过可协商的结构化 Render IR 覆盖 marker、hline、fill 等输出并通过冻结
-golden；旧源码删除仍等待可信 `.cspkg` Release asset 后作为独立提交执行。完整执行记录见
+golden。可信开发包已发布为
+[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1)；
+产品 bootstrap 固定其 URL、大小、平台和外层 SHA-256，通用社区安装器仍只接受本地
+artifact。CandleScope 已删除 `packages/pyne-runtime` 和 in-process Pyne facade。完整执行记录见
 [`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
 
 ## API 文档
@@ -398,7 +402,7 @@ drawing toolbar 已加载，并打开懒加载的 symbol search 和 Settings 面
 - runtime proxy 设置默认持久化到 `backend/data/proxy_settings.json`。
 - Windows 下如果后端启动时打印状态符号导致编码错误，可设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1` 后再启动。
 - SQLite 数据是本地文件，并已被 git 忽略。
-- Pyne 脚本会按配置的 security mode 在后端本地执行。只对完全信任的脚本使用 `unsafe`。
+- Pyne 脚本会按配置的 security mode 在本地隔离 sidecar 中执行。只对完全信任的脚本使用 `unsafe`。
 - 本仓库使用 GNU GPL-3.0 许可证，见 [LICENSE](LICENSE)。
 
 ## 鸣谢

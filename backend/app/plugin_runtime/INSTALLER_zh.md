@@ -52,6 +52,11 @@ enabled、按需启动。
 安装命令只接受本地文件，不负责下载。外部 release lock、下载缓存或 marketplace
 必须先把已固定摘要的 artifact 落到本地，再调用同一安装入口。
 
+内置 Pyne route 展示了这种组合方式，但没有改变社区契约：CandleScope 产品
+bootstrap 单独持有固定的 GitHub prerelease URL、平台、字节数和外层 SHA-256，只下载
+该资产；校验后先原子写入本地缓存，再以 `enabled/autoStart/required=true` 调用本
+安装器。匹配的 activation 会被复查并复用，unmanaged activation 永远不会被覆盖。
+
 ## Manifest schema v1
 
 ```json

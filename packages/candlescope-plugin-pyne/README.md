@@ -17,6 +17,22 @@ The exact engine wheel is pinned by `release/release-lock.json`. A version misma
 fails during packaging, installation probes, or descriptor startup instead of being
 silently adapted.
 
+## Published development bundle
+
+The first public development bundle is
+[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1):
+
+- asset: `candlescope-pyne-0.2.0-cp312-win_amd64.cspkg`;
+- target: Windows AMD64, CPython 3.12;
+- size: `13,006,218` bytes;
+- SHA-256: `a1812e0e2b43670e75858b5f57d59f71a403350360ea58bf2822efba7d34a216`.
+
+The Python packages support a broader interpreter range, but that specific
+bundle contains a CPython 3.12 NumPy wheel and must not be installed on another
+ABI. CandleScope's first-party bootstrap pins all four fields above. Community
+installations can use the same public `.cspkg` installer with their own trusted
+release assets; the generic installer performs no network access.
+
 The plugin process is already the hard process boundary owned by CandleScope, so the
 bridge executes Pyne in `inline` mode inside that sidecar. Host timeouts can terminate
 and restart the sidecar without creating a nested Pyne worker process.

@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 BACKEND_ROOT = Path(__file__).parents[1]
+REPOSITORY_ROOT = BACKEND_ROOT.parent
 HOST_ROOT = BACKEND_ROOT / "app" / "plugin_runtime"
 
 
@@ -89,3 +90,22 @@ def test_installer_is_offline_wheel_only_and_never_mutates_backend_python() -> N
     assert '"--isolated"' in installer
     assert '"-m",\n                "venv"' in installer
     assert "runtime-registry.json" not in bundle
+
+
+def test_candlescope_contains_no_pyne_runtime_snapshot_or_in_process_facade() -> None:
+    assert not (REPOSITORY_ROOT / "packages" / "pyne-runtime").exists()
+    assert not (BACKEND_ROOT / "app" / "indicator" / "pyne").exists()
+
+    for root in (
+        BACKEND_ROOT / "app" / "api",
+        BACKEND_ROOT / "app" / "indicator",
+    ):
+        for path in root.rglob("*.py"):
+            imports = _imported_modules(path)
+            assert not any(
+                module == "pyne_runtime"
+                or module.startswith("pyne_runtime.")
+                or module == "app.indicator.pyne"
+                or module.startswith("app.indicator.pyne.")
+                for module in imports
+            ), f"{path} still imports an in-process Pyne runtime"

@@ -58,6 +58,13 @@ The installer accepts local artifacts only. A release lock, downloader, or
 marketplace must first materialize a digest-pinned file and then call this same
 installation path.
 
+The built-in Pyne route demonstrates that composition without changing the
+community contract. CandleScope's product bootstrap owns a pinned GitHub
+prerelease URL, platform, byte size, and outer SHA-256; it downloads only that
+asset, commits it to a local cache after verification, then calls this
+installer with `enabled/autoStart/required=true`. Matching activations are
+checked and reused. An unmanaged activation is never overwritten.
+
 ## Manifest v1
 
 The complete schema and a worked JSON example are in the

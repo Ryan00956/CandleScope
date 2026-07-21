@@ -14,6 +14,7 @@ When DataManager fails to initialize, the application can still expose
 health endpoints, but data APIs report explicit service-unavailable errors.
 """
 
+import asyncio
 import logging
 
 # ── Monkey-patch: websockets recv_messages bug ──────────────────
@@ -209,9 +210,12 @@ async def startup_event() -> None:
     if LIQUIDATION_ROLLUP_BACKEND == "sqlite":
         init_liquidation_storage(LIQUIDATION_DB_PATH)
 
-    # 2. Load resolved runtime-plugin activation state and the independent
-    # language routing table. Missing route configuration selects the managed
-    # candlescope.pyne sidecar; a missing activation fails closed at startup.
+    # 2. Ensure the exact first-party runtime pinned by this CandleScope build,
+    # then load resolved activation state and the independent language routing
+    # table. Community runtimes remain explicit local-installer operations.
+    from app.first_party_plugin_bootstrap import (
+        ensure_first_party_plugins_from_environment,
+    )
     from app.plugin_runtime import build_runtime_host_from_environment
     from app.indicator.runtime_service import (
         build_indicator_runtime_service_from_environment,
@@ -219,6 +223,12 @@ async def startup_event() -> None:
 
     plugin_runtime_host = None
     try:
+        first_party_bootstrap = await asyncio.to_thread(
+            ensure_first_party_plugins_from_environment,
+            host_name=APP_NAME,
+            host_version=APP_VERSION,
+        )
+        app.state.first_party_plugin_bootstrap = first_party_bootstrap.to_wire()
         plugin_runtime_host = build_runtime_host_from_environment(
             host_name=APP_NAME,
             host_version=APP_VERSION,
@@ -240,6 +250,15 @@ async def startup_event() -> None:
         "[startup] Runtime plugin host "
         f"{plugin_summary['status']} "
         f"({plugin_summary['ready']}/{plugin_summary['enabled']} ready)"
+    )
+    print(
+        "[startup] First-party plugin bootstrap "
+        f"{first_party_bootstrap.status}"
+        + (
+            f" ({first_party_bootstrap.runtime_id} {first_party_bootstrap.version})"
+            if first_party_bootstrap.runtime_id
+            else ""
+        )
     )
 
     # 3. Load exchange symbol info (non-blocking, best-effort)
@@ -345,6 +364,17 @@ async def health_check() -> dict:
     plugin_runtime_host = getattr(app.state, "plugin_runtime_host", None)
     if plugin_runtime_host is not None:
         result["plugin_runtimes"] = plugin_runtime_host.health_summary()
+    first_party_bootstrap = getattr(
+        app.state,
+        "first_party_plugin_bootstrap",
+        None,
+    )
+    if isinstance(first_party_bootstrap, dict):
+        result["first_party_plugin_bootstrap"] = {
+            key: first_party_bootstrap[key]
+            for key in ("status", "runtimeId", "version", "changed", "downloaded")
+            if key in first_party_bootstrap
+        }
     indicator_runtime_service = getattr(
         app.state,
         "indicator_runtime_service",

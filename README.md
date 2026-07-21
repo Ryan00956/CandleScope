@@ -321,7 +321,7 @@ Core backend modules:
 | `app/data_engine/backfill` | Historical detect/plan/fetch/reconcile/report pipeline behind the scheduler |
 | `app/data_engine/storage` | SQLite K-line repository and gap ledger |
 | `app/replay` | Deterministic replay actor, sources, paper broker, persistence, and reports |
-| `app/indicator` | Built-in indicators, Pyne runtime, indicator streaming |
+| `app/indicator` | Built-in indicators, sidecar runtime routing, indicator streaming |
 
 ## Frontend
 
@@ -401,12 +401,13 @@ p2 = plot(lower, "Lower", color=color.green)
 fill(p1, p2, color="rgba(59,130,246,0.08)")
 ```
 
-Pyne supports `safe`, `research`, and `unsafe` security modes. Process execution is the default so the backend can enforce timeouts more reliably than inline execution.
+Pyne supports `safe`, `research`, and `unsafe` security modes. It runs in an
+isolated plugin environment supervised through the public sidecar protocol.
 
 Documentation:
 
 - [Indicator Engine](backend/app/indicator/README.md)
-- [Pyne Runtime](backend/app/indicator/pyne/README.md)
+- [Pyne Runtime plugin](packages/candlescope-plugin-pyne/README.md)
 
 ## Plugin SDK (Developer Preview)
 
@@ -425,16 +426,20 @@ handshake, timeout, message-limit, restart-circuit, and health behavior. Phase
 isolated venv per bundle, offline wheel install, result probes, atomic
 activation, and per-runtime rollback; see the
 [`installer guide`](backend/app/plugin_runtime/INSTALLER.md). Phase 4 routes
-Indicator HTTP, range, batch, and WebSocket execution through explicit
-`legacy/shadow/sidecar` policy. Phase 6 defaults Pyne to the managed
-`candlescope.pyne` sidecar and fails closed when it is not installed.
+Indicator HTTP, range, batch, and WebSocket execution through explicit runtime
+routing. Phase 6 defaults Pyne to the managed `candlescope.pyne` sidecar and
+fails closed when it is unavailable.
 Phase 5 adds the independently buildable
 [`candlescope-plugin-pyne`](packages/candlescope-plugin-pyne/README.md), with a
 release lock for the SDK, Pyne Runtime RC wheel, and NumPy version, plus a real
 offline `.cspkg` installation and protocol probe gate. The 0.2.0 bridge covers
 markers, horizontal lines, fills, and other output through negotiated structured
-Render IR and passes the frozen goldens. The separate source-deletion commit
-remains blocked on publishing a trusted `.cspkg` Release asset.
+Render IR and passes the frozen goldens. The trusted development asset is now
+published as
+[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1).
+The product bootstrap pins its URL, size, platform, and outer SHA-256, while the
+generic community installer remains local-artifact-only. CandleScope no longer
+contains `packages/pyne-runtime` or an in-process Pyne facade.
 
 ## API Documentation
 
@@ -537,7 +542,7 @@ under `docs/perf-baselines/`.
 - Runtime proxy settings are persisted under `backend/data/proxy_settings.json` by default.
 - On Windows, if backend startup fails while printing status symbols, start it with `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`.
 - SQLite data is local and ignored by git.
-- Pyne scripts execute locally in the backend process/process pool according to the configured security mode. Only use `unsafe` for scripts you trust.
+- Pyne scripts execute locally in an isolated sidecar according to the configured security mode. Only use `unsafe` for scripts you trust.
 - This repository is licensed under GNU GPL-3.0. See [LICENSE](LICENSE).
 
 ## Acknowledgments

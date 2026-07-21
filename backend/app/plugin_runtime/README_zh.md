@@ -79,6 +79,14 @@ Registry 是解析完成后的激活状态，不是下载清单。Phase 3 的 `.
 入口。手工 registry 仍可用于本地开发，但属于 unmanaged 条目，不能使用安装器的
 精确 `check`/`rollback`。
 
+CandleScope 的产品策略层与通用 Host 保持分离：构造 Host 之前，
+`app.first_party_plugin_bootstrap` 可以把
+`app/official-plugin-releases.json` 固定的官方 runtime 落为本地文件，再调用同一个
+安装器。它不会选择社区插件，也拒绝覆盖同 ID 的 unmanaged activation。可用
+`CANDLESCOPE_OFFICIAL_PLUGIN_BOOTSTRAP=0` 关闭这项官方策略；离线首启可设置
+`CANDLESCOPE_OFFICIAL_PLUGIN_BUNDLE=<path>`，但该文件仍必须匹配固定摘要。Host 和
+安装器本身仍完全无网络逻辑。
+
 安装器生成的条目还包含 `managed.installationId`、`managed.activationId` 和
 `managed.bundleSha256`。这些字段把 registry 条目绑定到不可变安装目录及其精确
 activation history；手写条目无需添加它们。

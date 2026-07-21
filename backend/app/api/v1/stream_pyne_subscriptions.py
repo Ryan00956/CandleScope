@@ -1,23 +1,20 @@
 """Pyne/custom indicator WebSocket subscription orchestration."""
+
 from __future__ import annotations
 
 import asyncio
 from typing import Any
 
 from app.api.v1.stream_indicator_payloads import (
-    _compute_incremental_pyne_bar_message_async,
     _compute_pyne_snapshot_message_async,
-    _legacy_indicator_runtime_service,
     _patch_from_snapshot,
-    _pyne_incremental_session_key,
-    _pyne_incremental_sessions,
+    _unbound_indicator_runtime_service,
 )
 from app.core import config
 from app.api.v1.stream_utils import validate_ws_interval as _validate_ws_interval
 from app.data_engine.data_manager.models import DataEventType
 from app.data_engine.interval_policy import parse_interval_ms
 from app.indicator.custom_store import CustomIndicatorStore
-from app.indicator.pyne import PyneIncrementalSession, is_incremental_pyne_script
 from app.indicator.resume import plan_indicator_resume
 from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.serialization import build_ws_error_payload
@@ -57,60 +54,72 @@ async def handle_pyne_indicator_subscribe(
     client_correction_revision: int | str | None = None,
     runtime_service: IndicatorRuntimeService | None = None,
 ) -> None:
-    script_runtime_service = runtime_service or _legacy_indicator_runtime_service
+    script_runtime_service = runtime_service or _unbound_indicator_runtime_service
     if custom_id and not script.strip():
         try:
             record = _stream_custom_store.get(custom_id)
         except ValueError as exc:
-            await send_json(build_ws_error_payload(
-                "CUSTOM_INDICATOR_STORE_ERROR",
-                str(exc),
-                client_id=client_id,
-                hint="自定义指标存储文件无法读取，请检查本地 custom_indicators.json。",
-            ))
+            await send_json(
+                build_ws_error_payload(
+                    "CUSTOM_INDICATOR_STORE_ERROR",
+                    str(exc),
+                    client_id=client_id,
+                    hint="自定义指标存储文件无法读取，请检查本地 custom_indicators.json。",
+                )
+            )
             return
         if record is None:
-            await send_json(build_ws_error_payload(
-                "CUSTOM_INDICATOR_NOT_FOUND",
-                f"Custom indicator '{custom_id}' not found.",
-                client_id=client_id,
-                hint="请确认该自定义指标已经保存到后端。",
-            ))
+            await send_json(
+                build_ws_error_payload(
+                    "CUSTOM_INDICATOR_NOT_FOUND",
+                    f"Custom indicator '{custom_id}' not found.",
+                    client_id=client_id,
+                    hint="请确认该自定义指标已经保存到后端。",
+                )
+            )
             return
         script = str(record.get("script") or "")
         name = name or str(record.get("name") or custom_id)
         if not params:
-            params = record.get("params") if isinstance(record.get("params"), dict) else {}
+            params = (
+                record.get("params") if isinstance(record.get("params"), dict) else {}
+            )
         if security_mode is None:
             security_mode = record.get("securityMode")
         if language is None:
             language = str(record.get("language") or "pyne")
 
     if not script.strip():
-        await send_json(build_ws_error_payload(
-            "PYNE_SCRIPT_REQUIRED",
-            "Pyne script is required.",
-            client_id=client_id,
-            hint="script/custom/pyne 订阅需要传入脚本文本。",
-        ))
+        await send_json(
+            build_ws_error_payload(
+                "PYNE_SCRIPT_REQUIRED",
+                "Pyne script is required.",
+                client_id=client_id,
+                hint="script/custom/pyne 订阅需要传入脚本文本。",
+            )
+        )
         return
     if language is None:
         language = "pyne"
     language = str(language).strip().lower()
     if not language:
-        await send_json(build_ws_error_payload(
-            "INDICATOR_LANGUAGE_REQUIRED",
-            "Script language must not be empty.",
-            client_id=client_id,
-        ))
+        await send_json(
+            build_ws_error_payload(
+                "INDICATOR_LANGUAGE_REQUIRED",
+                "Script language must not be empty.",
+                client_id=client_id,
+            )
+        )
         return
     if not _validate_ws_interval(interval):
-        await send_json(build_ws_error_payload(
-            "INVALID_INTERVAL",
-            f"Unsupported interval: {interval}.",
-            client_id=client_id,
-            hint="请使用后端支持的原生或自定义周期。",
-        ))
+        await send_json(
+            build_ws_error_payload(
+                "INVALID_INTERVAL",
+                f"Unsupported interval: {interval}.",
+                client_id=client_id,
+                hint="请使用后端支持的原生或自定义周期。",
+            )
+        )
         return
     await script_runtime_service.start()
     script_runtime_service.route_for(language)
@@ -144,65 +153,10 @@ async def handle_pyne_indicator_subscribe(
         "historyLimit": history_limit,
         "streamConsumerId": stream_consumer_id,
     }
-    incremental_script = False
-    if language == "pyne" and script_runtime_service.uses_legacy(language):
-        try:
-            incremental_script = is_incremental_pyne_script(script)
-        except SyntaxError:
-            incremental_script = False
-    if incremental_script:
-        session_key = _pyne_incremental_session_key(
-            exchange=exchange,
-            market_type=market_type,
-            symbol=symbol,
-            interval=interval,
-            script=script,
-            params=params,
-            security_mode=security_mode,
-            history_limit=history_limit,
-        )
-        meta["scriptMode"] = "incremental"
-        meta["pyneSessionKey"] = session_key
-        meta["pyneSharedSession"] = _pyne_incremental_sessions.acquire(
-            session_key,
-            lambda: PyneIncrementalSession(
-                script=script,
-                params=params,
-                security_mode=security_mode,
-            ),
-        )
-        if isinstance(data_revision, dict) and (
-            data_revision.get("dirtyRange") or data_revision.get("historyInvalid")
-        ):
-            reset_once = getattr(_pyne_incremental_sessions, "reset_once", None)
-            if callable(reset_once):
-                reset_once(
-                    session_key,
-                    (
-                        "resume-revision",
-                        data_revision.get("serverEpoch"),
-                        data_revision.get("correctionRevision"),
-                    ),
-                    lambda: PyneIncrementalSession(
-                        script=script,
-                        params=params,
-                        security_mode=security_mode,
-                    ),
-                )
     client_meta[client_id] = meta
 
     seeded = False
     initial = None
-    if incremental_script:
-        initial = await _compute_pyne_snapshot_message_async(
-            client_id,
-            dm,
-            meta,
-            runtime_service=script_runtime_service,
-        )
-        seeded = initial.get("ok") is not False
-        if not seeded:
-            await send_json(initial)
 
     if seeded and range_service is not None and isinstance(initial, dict):
         coverage = initial.get("range")
@@ -238,7 +192,7 @@ async def handle_pyne_indicator_subscribe(
         "customId": custom_id or None,
         **({"language": language} if language != "pyne" else {}),
         "seeded": seeded,
-        "seedBars": min(max(int(history_limit), 1), max(int(config.PYNE_MAX_BARS), 1)) if incremental_script else 0,
+        "seedBars": 0,
     }
     resume_patch = None
     if range_service is not None and isinstance(data_revision, dict):
@@ -253,8 +207,6 @@ async def handle_pyne_indicator_subscribe(
             max_patch_bars=max(0, int(config.INDICATOR_WS_RESUME_MAX_BARS)),
             interval_seconds=(max(interval_ms // 1000, 1) if interval_ms else None),
         )
-        if incremental_script and not seeded:
-            resume_plan = type(resume_plan)("history_required", "pyne-seed-unavailable")
         subscribed_payload["dataRevision"] = data_revision
         subscribed_payload["resumeStatus"] = resume_plan.status
         subscribed_payload["resumeReason"] = resume_plan.reason
@@ -278,20 +230,13 @@ async def handle_pyne_indicator_subscribe(
             existing.cancel()
 
         async def _run() -> None:
-            if event.event_type in {DataEventType.BACKFILL_COMPLETED, DataEventType.BAR_AMENDED}:
+            if event.event_type in {
+                DataEventType.BACKFILL_COMPLETED,
+                DataEventType.BAR_AMENDED,
+            }:
                 dirty_range = _correction_range(event)
                 event_detail = event.detail if isinstance(event.detail, dict) else {}
                 request_id = str(event_detail.get("request_id") or "").strip()
-                reset_key = (
-                    f"backfill:{request_id}"
-                    if request_id
-                    else (
-                        event.event_type.value,
-                        dirty_range["start"],
-                        dirty_range["end"],
-                        getattr(event, "timestamp_ms", 0),
-                    )
-                )
                 correction_event_id = (
                     f"backfill:{request_id}"
                     if request_id
@@ -307,76 +252,41 @@ async def handle_pyne_indicator_subscribe(
                         end=dirty_range["end"],
                         event_id=correction_event_id,
                     )
-                if meta.get("scriptMode") == "incremental":
-                    reset_once = getattr(_pyne_incremental_sessions, "reset_once", None)
-                    if callable(reset_once):
-                        reset_once(
-                            str(meta.get("pyneSessionKey") or ""),
-                            reset_key,
-                            lambda: PyneIncrementalSession(
-                                script=meta["script"],
-                                params=meta.get("params") if isinstance(meta.get("params"), dict) else {},
-                                security_mode=meta.get("securityMode"),
-                            ),
-                        )
-                    refreshed = await _compute_pyne_snapshot_message_async(
-                        client_id,
-                        dm,
-                        meta,
-                        runtime_service=script_runtime_service,
-                    )
-                    coverage = refreshed.get("range") if isinstance(refreshed, dict) else None
-                    if (
-                        range_service is not None
-                        and refreshed.get("ok") is not False
-                        and isinstance(coverage, dict)
-                    ):
-                        range_service.put_payload(
-                            meta,
-                            refreshed,
-                            start=int(coverage["start"]),
-                            end=int(coverage["end"]),
-                        )
-                queue_message(queue, {
-                    "type": "indicator.recomputed",
-                    "clientId": client_id,
-                    "indicatorId": meta["indicatorId"],
-                    "exchange": exchange,
-                    "symbol": symbol,
-                    "interval": interval,
-                    "market_type": market_type,
-                    "reason": "backfill-recomputed",
-                    "range": dirty_range,
-                    "dirtyRange": dirty_range,
-                    **(
-                        {"dataRevision": correction_revision}
-                        if isinstance(correction_revision, dict)
-                        else {}
-                    ),
-                })
+                queue_message(
+                    queue,
+                    {
+                        "type": "indicator.recomputed",
+                        "clientId": client_id,
+                        "indicatorId": meta["indicatorId"],
+                        "exchange": exchange,
+                        "symbol": symbol,
+                        "interval": interval,
+                        "market_type": market_type,
+                        "reason": "backfill-recomputed",
+                        "range": dirty_range,
+                        "dirtyRange": dirty_range,
+                        **(
+                            {"dataRevision": correction_revision}
+                            if isinstance(correction_revision, dict)
+                            else {}
+                        ),
+                    },
+                )
                 return
-            if meta.get("scriptMode") == "incremental" and event.bar is not None:
-                msg = await _compute_incremental_pyne_bar_message_async(
-                    client_id,
-                    meta,
-                    event.bar.to_dict(),
-                    preview=event.event_type == DataEventType.BAR_UPDATED,
-                    dm=dm,
-                    runtime_service=script_runtime_service,
-                )
-            else:
-                msg = await _compute_pyne_snapshot_message_async(
-                    client_id,
-                    dm,
-                    meta,
-                    bar_time=event.bar.time if event.bar else 0,
-                    runtime_service=script_runtime_service,
-                )
+            msg = await _compute_pyne_snapshot_message_async(
+                client_id,
+                dm,
+                meta,
+                bar_time=event.bar.time if event.bar else 0,
+                runtime_service=script_runtime_service,
+            )
             if range_service is not None:
                 msg["dataRevision"] = range_service.data_revision_for_meta(meta)
             queue_message(queue, msg)
 
-        custom_tasks[client_id] = asyncio.create_task(_run(), name=f"pyne_indicator_{client_id}")
+        custom_tasks[client_id] = asyncio.create_task(
+            _run(), name=f"pyne_indicator_{client_id}"
+        )
 
     handle = dm.subscribe(
         callback=_on_data_event,

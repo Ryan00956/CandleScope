@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from app import main as main_module
+from app.first_party_plugin_bootstrap import FirstPartyPluginBootstrapResult
 from app.plugin_runtime import RuntimeHostService
 from app.plugin_runtime.registry import RuntimeRegistry
 
@@ -68,8 +69,14 @@ class _RoutingService:
     def snapshot(self) -> dict[str, Any]:
         return {
             "started": self.start_calls > 0 and not self.fail_start,
-            "routes": [{"language": "pyne", "mode": "legacy"}],
-            "counts": {"legacy": 0},
+            "routes": [
+                {
+                    "language": "pyne",
+                    "mode": "sidecar",
+                    "runtimeId": "candlescope.pyne",
+                }
+            ],
+            "counts": {"sidecar": 0},
         }
 
 
@@ -79,6 +86,7 @@ def _patch_startup_dependencies(
     routing: _RoutingService | None = None,
 ) -> _RoutingService:
     import app.plugin_runtime as plugin_runtime_module
+    import app.first_party_plugin_bootstrap as first_party_bootstrap_module
     import app.indicator.runtime_service as runtime_service_module
 
     routing = routing or _RoutingService()
@@ -88,6 +96,15 @@ def _patch_startup_dependencies(
     monkeypatch.setattr(main_module, "init_market_metrics_storage", lambda: None)
     monkeypatch.setattr(main_module, "init_trade_flow_storage", lambda _path: None)
     monkeypatch.setattr(main_module, "init_liquidation_storage", lambda _path: None)
+    monkeypatch.setattr(
+        first_party_bootstrap_module,
+        "ensure_first_party_plugins_from_environment",
+        lambda **_kwargs: FirstPartyPluginBootstrapResult(
+            status="ready",
+            runtime_id="candlescope.pyne",
+            version="0.2.0",
+        ),
+    )
     monkeypatch.setattr(
         plugin_runtime_module,
         "build_runtime_host_from_environment",
@@ -134,8 +151,19 @@ async def test_application_lifecycle_owns_plugin_host_and_health_summary(
             "ready",
             "failed",
         }
+        assert health["first_party_plugin_bootstrap"] == {
+            "status": "ready",
+            "runtimeId": "candlescope.pyne",
+            "version": "0.2.0",
+            "changed": False,
+            "downloaded": False,
+        }
         assert health["indicator_runtime_routing"]["routes"] == [
-            {"language": "pyne", "mode": "legacy"}
+            {
+                "language": "pyne",
+                "mode": "sidecar",
+                "runtimeId": "candlescope.pyne",
+            }
         ]
     finally:
         await main_module.shutdown_event()

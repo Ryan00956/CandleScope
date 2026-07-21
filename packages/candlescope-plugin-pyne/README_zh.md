@@ -15,6 +15,21 @@
 `release/release-lock.json` 固定官方 Pyne wheel 的 Release URL 与 SHA-256。版本、wheel
 内容、descriptor 或确定性 probe 任一不匹配都会 fail closed，不再靠手工同步适配层。
 
+## 已发布开发包
+
+第一份公开开发 bundle 为
+[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1)：
+
+- asset：`candlescope-pyne-0.2.0-cp312-win_amd64.cspkg`；
+- target：Windows AMD64、CPython 3.12；
+- 大小：`13,006,218` bytes；
+- SHA-256：`a1812e0e2b43670e75858b5f57d59f71a403350360ea58bf2822efba7d34a216`。
+
+Python package 本身支持更宽的解释器范围，但这一个 bundle 内含 CPython 3.12 的
+NumPy wheel，禁止安装到其他 ABI。CandleScope 官方 bootstrap 会同时固定上述四项；
+社区安装仍可使用同一公共 `.cspkg` 安装器与自己可信的 Release artifact，通用安装器
+不执行任何网络访问。
+
 插件 sidecar 本身已经是 CandleScope 管理的进程边界，因此桥内固定使用 Pyne
 `executor_mode="inline"`。宿主请求超时后可终止并重启整个 sidecar，不需要再嵌套一层
 Pyne worker，Windows 下也不会引入额外 spawn 状态。

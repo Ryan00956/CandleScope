@@ -592,7 +592,7 @@ fallback；显式 route 文件仍可在源码删除提交前用于回滚。
   0 sidecar error`，默认 sidecar 与 legacy adapter 摘要均为
   `sha256:50298c7df91a12241a8ce8bbc75402bcbbb1eb97fac52460ab6c1690020bc710`。
 
-### 当前硬门禁：尚无可信公开 bundle
+### Phase 6 当时的硬门禁：尚无可信公开 bundle（已解除）
 
 本次 `.cspkg` 仍只是本地候选。`Ryan00956/CandleScope` 当前没有可供用户取得的 GitHub
 Release asset，也没有已发布的外层 SHA-256；把本地临时摘要写成公开下载锁会伪造供应链
@@ -617,3 +617,69 @@ compatibility golden
 ```
 
 不能先删除源码快照再补兼容层，也不能让插件直接依赖 CandleScope 私有 Python 包。每次 runtime cutover 和旧实现删除必须是两个独立提交，以便快速回滚。
+
+## Phase 7：公开开发包、首启 bootstrap 与源码快照退出
+
+### 可信开发发布
+
+2026-07-21 已从 `codex/plugin-platform-v1` worktree 的 Phase 6 cutover commit
+`6803b8fe86a80aa27c33be380e903b974855959f` 直接发布公开 prerelease，未合并或移动
+`main`：
+
+- tag：`candlescope-plugin-pyne-v0.2.0-dev.1`；
+- Release：<https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1>；
+- asset：`candlescope-pyne-0.2.0-cp312-win_amd64.cspkg`；
+- 大小：`13,006,218` bytes；
+- 外层 SHA-256：
+  `sha256:a1812e0e2b43670e75858b5f57d59f71a403350360ea58bf2822efba7d34a216`；
+- 同一 Release 同时发布 `SHA256SUMS`。GitHub asset digest、公网重新下载后的字节数和
+  本地 SHA-256 三者一致。
+
+### 产品 bootstrap 与社区边界
+
+`backend/app/official-plugin-releases.json` 固定官方 runtime ID、package、version、
+GitHub Release URL、文件名、平台、大小和外层 SHA-256。
+`app.first_party_plugin_bootstrap` 在通用 Host 启动前执行：
+
+1. 只有当前语言 route 确实指向锁中的官方 runtime 才处理；
+2. 只支持锁声明的 Windows / AMD64 / CPython 3.12，其他平台明确失败；
+3. 已有完全匹配的 managed activation 时运行 `check` 并复用，不访问网络；
+4. 首次安装先把下载写入同目录唯一临时文件，严格校验固定大小和 SHA-256 后再
+   `os.replace` 到 cache；
+5. 最后调用原有 local-only `PluginInstaller`，以
+   `enabled=true/autoStart=true/required=true` 原子激活；
+6. 同 runtime ID 的 unmanaged activation 永不自动覆盖。
+
+这层产品策略没有进入 `app.plugin_runtime`。通用 Host、bundle verifier 和 installer
+仍然不含 downloader，社区作者继续使用公开 SDK、`.cspkg` 和本地 artifact 安装流程。
+离线首启可通过 `CANDLESCOPE_OFFICIAL_PLUGIN_BUNDLE` 指向摘要完全相同的文件；
+`CANDLESCOPE_OFFICIAL_PLUGIN_BOOTSTRAP=0` 只用于已经手工准备好兼容 activation 的环境。
+
+### 源码退出
+
+Phase 7 作为 Phase 6 之后的独立变更删除：
+
+- `packages/pyne-runtime` 的 286 个受版本控制文件；
+- `backend/app/indicator/pyne` 的 16 个 in-process facade 文件；
+- 只验证 Pyne 内部 incremental/cache/executor 语义的 CandleScope 测试；这些语义由
+  `pyne-runtime` 自身仓库和 `candlescope-plugin-pyne` 契约测试负责。
+
+HTTP compute、HTTP range/batch 和 WebSocket production transport 已不再导入或调用
+`pyne_runtime`。WebSocket 不在宿主内维护 `PyneIncrementalSession`，而是和其他社区
+runtime 一样通过公共 batch request 重算所需窗口。旧 metadata 清理函数只移除历史
+session key，不再持有 runtime 对象。显式 stale legacy/shadow route 会在产品 service
+启动时因为没有 in-process adapter 而 fail closed；回滚边界是独立 Git commit，而不是
+运行中静默回退。
+
+### 删除后真实验证
+
+在没有把 `pyne_runtime` 安装进 backend Python 的情况下，`import app.main` 成功；宿主
+定向门禁为 `94 passed`。随后在全新用户目录和空下载缓存中从 GitHub Release 走真实
+bootstrap：首次结果为
+`status=installed, changed=true, downloaded=true`，立即重复为
+`status=ready, changed=false, downloaded=false`；真实 Host descriptor 返回
+`candlescope.pyne==0.2.0`、`engineVersion=0.2.0rc1`、
+`engineVersionVerified=true`，执行 `plot(close * 2)` 得到 `[202.0, 204.0]`。插件自身
+测试使用该隔离安装中的 Pyne engine 运行，结果为 `20 passed`。删除快照后的 backend
+全量回归为 `1923 passed, 4 warnings in 128.80s`；4 条 warning 仍是既有 FastAPI
+`on_event` 弃用提示。

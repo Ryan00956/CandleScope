@@ -49,6 +49,17 @@ class _DataManager:
         return None
 
 
+class _ScriptRuntimeService:
+    """Minimal routed sidecar boundary; these tests exercise stream setup only."""
+
+    async def start(self) -> None:
+        return None
+
+    def route_for(self, language: str) -> SimpleNamespace:
+        assert language == "pyne"
+        return SimpleNamespace(mode="sidecar", runtime_id="test.pyne")
+
+
 @pytest.mark.parametrize(
     ("requested", "canonical"),
     [
@@ -100,9 +111,12 @@ def test_indicator_ws_canonicalizes_custom_intervals_before_subscription(
             seed_query_cache={},
             send_json=send_json,
             msg=message,
+            runtime_service=_ScriptRuntimeService(),
         )
 
-        acknowledgement = next(item for item in sent if item["type"] == "indicator.subscribed")
+        acknowledgement = next(
+            item for item in sent if item["type"] == "indicator.subscribed"
+        )
         assert acknowledgement["subscriptionStatus"] == "accepted"
         assert acknowledgement["requestedInterval"] == requested
         assert acknowledgement["canonicalInterval"] == canonical
@@ -158,6 +172,7 @@ def test_indicator_ws_stream_failure_is_a_terminal_failed_ack(kind: str) -> None
             seed_query_cache={},
             send_json=send_json,
             msg=message,
+            runtime_service=_ScriptRuntimeService(),
         )
 
         assert len(sent) == 1
@@ -168,7 +183,9 @@ def test_indicator_ws_stream_failure_is_a_terminal_failed_ack(kind: str) -> None
         assert acknowledgement["realtimeStatus"] == "unavailable"
         assert acknowledgement["requestedInterval"] == "60m"
         assert acknowledgement["canonicalInterval"] == "1h"
-        assert acknowledgement["failure"]["code"] == "INDICATOR_STREAM_SUBSCRIPTION_FAILED"
+        assert (
+            acknowledgement["failure"]["code"] == "INDICATOR_STREAM_SUBSCRIPTION_FAILED"
+        )
         assert subscribed == {}
         assert client_meta == {}
 

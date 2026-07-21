@@ -6,6 +6,7 @@ Provides endpoints for:
   * PUT  /settings/proxy       — update proxy configuration at runtime
   * POST /settings/proxy/test  — test proxy connectivity to all exchanges
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,8 +22,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.core.config import KLINES_DB_PATH
 from app.core.executors import run_storage
 from app.core.market import MarketType
-from app.core.config import load_proxy_settings, normalize_proxy_settings, save_proxy_settings
-from app.indicator.pyne.cache import pyne_cache
+from app.core.config import (
+    load_proxy_settings,
+    normalize_proxy_settings,
+    save_proxy_settings,
+)
 from app.exchanges.symbols import normalize_symbol
 from app.data_engine.storage.klines_repo import list_series_summaries
 from app.data_engine.data_manager.runtime_pressure import (
@@ -47,18 +51,21 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 class ProxyConfig(BaseModel):
     """Proxy configuration payload."""
-    mode: str = "system"          # "none" | "system" | "custom"
+
+    mode: str = "system"  # "none" | "system" | "custom"
     custom_proxy: str | None = None  # e.g. "http://127.0.0.1:7890"
 
 
 class ProxyTestRequest(BaseModel):
     """Request body for testing proxy connectivity."""
+
     mode: str = "system"
     custom_proxy: str | None = None
 
 
 class StorageMaintenanceRequest(BaseModel):
     """Optional scope for storage repair/gap scan operations."""
+
     symbols: list[str] = []
 
 
@@ -118,11 +125,14 @@ def _get_system_proxy() -> str | None:
 
     # Fallback: read from Windows registry / macOS scutil / etc.
     import sys
+
     if sys.platform == "win32":
         from urllib.request import getproxies_registry
+
         proxies = getproxies_registry()
     else:
         from urllib.request import getproxies
+
         proxies = getproxies()
     return proxies.get("https") or proxies.get("http") or None
 
@@ -226,10 +236,14 @@ def _storage_series_snapshot() -> dict:
         interval = str(item.get("interval") or "")
         market_key = f"{item.get('exchange', '')}:{item.get('market_type', '')}"
         rows = int(item.get("total_count", 0) or 0)
-        interval_bucket = by_interval.setdefault(interval, {"series_count": 0, "total_rows": 0})
+        interval_bucket = by_interval.setdefault(
+            interval, {"series_count": 0, "total_rows": 0}
+        )
         interval_bucket["series_count"] += 1
         interval_bucket["total_rows"] += rows
-        market_bucket = by_market.setdefault(market_key, {"series_count": 0, "total_rows": 0})
+        market_bucket = by_market.setdefault(
+            market_key, {"series_count": 0, "total_rows": 0}
+        )
         market_bucket["series_count"] += 1
         market_bucket["total_rows"] += rows
     return {
@@ -248,7 +262,6 @@ async def _build_cache_diagnostics(request: Request) -> dict:
         run_storage(_storage_file_snapshot),
         run_storage(_storage_series_snapshot),
     )
-    pyne_stats = pyne_cache.stats()
     runtime_pressure = (dm_snapshot or {}).get("runtimePressure") or {
         "disk": disk_pressure_snapshot(storage_files.get("path") or KLINES_DB_PATH),
     }
@@ -279,7 +292,12 @@ async def _build_cache_diagnostics(request: Request) -> dict:
             "watermarks": storage_watermarks,
         },
         "indicator": {
-            "pyne_cache": dict(pyne_stats) if isinstance(pyne_stats, dict) else {},
+            "pyne_cache": {
+                "size": 0,
+                "max_items": 0,
+                "scope": "sidecar",
+                "available_to_host": False,
+            },
         },
     }
 
@@ -333,7 +351,7 @@ async def update_proxy_settings(request: Request, body: ProxyConfig) -> dict:
         return {
             "status": "warning",
             "message": "IngestionConfig not available (DataManager not initialized). "
-                       "Settings saved to disk for next startup.",
+            "Settings saved to disk for next startup.",
             "mode": mode,
             "custom_proxy": custom_proxy or "",
         }
@@ -354,7 +372,8 @@ async def update_proxy_settings(request: Request, body: ProxyConfig) -> dict:
     effective = _resolve_proxy_url(mode, custom_proxy)
     logger.info(
         "Proxy settings updated: mode=%s, effective=%s",
-        mode, effective or "none",
+        mode,
+        effective or "none",
     )
 
     return {
@@ -559,7 +578,8 @@ async def storage_health(request: Request) -> dict:
     )
     engine_snapshot = (
         backfill_engine.snapshot()
-        if backfill_engine is not None and callable(getattr(backfill_engine, "snapshot", None))
+        if backfill_engine is not None
+        and callable(getattr(backfill_engine, "snapshot", None))
         else None
     )
     open_gaps = snapshot.get("gap_ledger_open") or []
@@ -585,7 +605,9 @@ async def cache_diagnostics(request: Request) -> dict:
         return await _build_cache_diagnostics(request)
     except Exception as exc:
         logger.exception("Cache diagnostics failed")
-        raise HTTPException(status_code=500, detail=f"Cache diagnostics failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Cache diagnostics failed: {exc}"
+        ) from exc
 
 
 class StoragePolicyRequest(BaseModel):
@@ -617,6 +639,7 @@ class CacheLimitsRequest(StoragePolicyRequest):
 
 class BackendMemoryGcRequest(BaseModel):
     """Optional policy overrides for backend memory GC."""
+
     cold_idle_seconds: int | None = Field(default=None, ge=0, le=30 * 24 * 60 * 60)
     max_total_bars: int | None = Field(default=None, ge=1, le=100_000_000)
     max_series: int | None = Field(default=None, ge=1, le=100_000)
@@ -644,17 +667,20 @@ class StorageGcRequest(StoragePolicyRequest):
 
 class StorageGcRunRequest(StoragePolicyRequest):
     """Confirmed request for SQLite storage GC execution."""
+
     confirm: bool = False
     batch_size: int = Field(default=1_000, ge=1, le=1_000)
 
 
 class StorageVacuumRequest(BaseModel):
     """Confirmed request for manual SQLite VACUUM."""
+
     confirm: bool = False
 
 
 class AutoGcRunRequest(BaseModel):
     """Optional conservative auto GC policy overrides."""
+
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
@@ -663,7 +689,9 @@ class AutoGcRunRequest(BaseModel):
     max_bytes_per_run: int | None = Field(default=None, ge=1, le=16 * 1024**3)
     max_entries_per_run: int | None = Field(default=None, ge=1, le=10_000)
     min_final_evict_score: float | None = Field(default=None, ge=0, le=1_000)
-    never_evict_accessed_within_ms: int | None = Field(default=None, ge=0, le=7 * 24 * 60 * 60 * 1000)
+    never_evict_accessed_within_ms: int | None = Field(
+        default=None, ge=0, le=7 * 24 * 60 * 60 * 1000
+    )
     storage_batch_size: int | None = Field(default=None, ge=1, le=1_000)
     sqlite_auto_vacuum: bool | None = None
 
@@ -683,6 +711,7 @@ class AutoGcRunRequest(BaseModel):
 
 class CacheAccessRecordRequest(BaseModel):
     """Frontend-origin cache access signal for behavior learning."""
+
     exchange: str = "binance"
     market_type: str | None = None
     marketType: str | None = None
@@ -700,8 +729,7 @@ async def record_cache_access(request: Request, body: CacheAccessRecordRequest) 
     """Record a lightweight frontend cache access signal."""
     if (
         body.occurred_at_ms is not None
-        and body.occurred_at_ms
-        > int(time.time() * 1000) + MAX_FUTURE_EVENT_SKEW_MS
+        and body.occurred_at_ms > int(time.time() * 1000) + MAX_FUTURE_EVENT_SKEW_MS
     ):
         raise HTTPException(
             status_code=422,
@@ -712,7 +740,9 @@ async def record_cache_access(request: Request, body: CacheAccessRecordRequest) 
         raise HTTPException(status_code=503, detail="DataManager 尚未初始化")
     record = getattr(dm, "record_cache_access", None)
     if not callable(record):
-        raise HTTPException(status_code=503, detail="DataManager 不支持 cache behavior learning")
+        raise HTTPException(
+            status_code=503, detail="DataManager 不支持 cache behavior learning"
+        )
     heat = await run_storage(
         record,
         body.symbol,
@@ -802,7 +832,9 @@ async def storage_gc_dry_run(
         return await async_plan(
             db_limits=(body.db_limits if body else None),
             sqlite_budget_bytes=(body.sqlite_budget_bytes if body else None),
-            storage_row_limits_enabled=(body.storage_row_limits_enabled if body else None),
+            storage_row_limits_enabled=(
+                body.storage_row_limits_enabled if body else None
+            ),
             file_snapshot=file_snapshot,
         )
     return await run_storage(
@@ -890,8 +922,10 @@ async def update_cache_limits(request: Request, body: CacheLimitsRequest) -> dic
 
     sqlite_budget_bytes = (
         body.sqlite_budget_bytes
-        if _model_field_was_set(body, "sqlite_budget_bytes") and body.sqlite_budget_bytes is not None
-        else 0 if _model_field_was_set(body, "sqlite_budget_bytes")
+        if _model_field_was_set(body, "sqlite_budget_bytes")
+        and body.sqlite_budget_bytes is not None
+        else 0
+        if _model_field_was_set(body, "sqlite_budget_bytes")
         else None
     )
     dm.update_retention_limits(

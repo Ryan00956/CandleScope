@@ -127,6 +127,14 @@ class IndicatorRuntimeUnavailableError(Exception):
         super().__init__(f"Script runtime {failure.runtime_id!r} is unavailable.")
 
 
+async def removed_in_process_runtime() -> dict[str, Any]:
+    """Fail closed if a stale legacy/shadow route reaches a deleted adapter."""
+    raise IndicatorRuntimeRoutesError(
+        "the in-process script runtime adapter has been removed; install and route "
+        "an isolated sidecar plugin instead"
+    )
+
+
 LegacyExecutor = Callable[[], Awaitable[dict[str, Any]]]
 SidecarAdapter = Callable[[ExecuteBatchResult], dict[str, Any]]
 FailureAdapter = Callable[[IndicatorRuntimeFailure], dict[str, Any]]
@@ -605,6 +613,16 @@ def build_indicator_runtime_service_from_environment(
     return IndicatorRuntimeService(
         load_indicator_runtime_routes_from_environment(environ),
         host=host,
+        legacy_languages=frozenset(),
+    )
+
+
+def build_unbound_indicator_runtime_service() -> IndicatorRuntimeService:
+    """Return a fail-closed fallback for direct calls outside app startup."""
+    return IndicatorRuntimeService(
+        IndicatorRuntimeRoutes.pyne_sidecar_default(),
+        host=None,
+        legacy_languages=frozenset(),
     )
 
 
@@ -613,5 +631,7 @@ __all__ = [
     "IndicatorRuntimeRequest",
     "IndicatorRuntimeService",
     "IndicatorRuntimeUnavailableError",
+    "build_unbound_indicator_runtime_service",
     "build_indicator_runtime_service_from_environment",
+    "removed_in_process_runtime",
 ]

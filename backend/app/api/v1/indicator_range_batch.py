@@ -1,4 +1,5 @@
 """Shared-bar execution for batched indicator history requests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,19 +9,21 @@ from typing import Any
 from app.api.v1.stream_indicator_payloads import (
     _compute_builtin_range_patch_from_bars,
     _compute_plugin_range_patch_from_bars,
-    _compute_pyne_range_patch_from_bars,
     _indicator_warmup_bars,
-    _legacy_indicator_runtime_service,
+    _unbound_indicator_runtime_service,
     _query_indicator_compute_bars_async,
     _replace_range_from_snapshot,
     _raise_plugin_runtime_failure,
     _script_runtime_request,
 )
 from app.core import config
-from app.core.executors import run_indicator, run_pyne_wait
+from app.core.executors import run_indicator
 from app.data_engine.interval_policy import parse_interval_ms
 from app.indicator.range_result_service import IndicatorRangeResultService
-from app.indicator.runtime_service import IndicatorRuntimeService
+from app.indicator.runtime_service import (
+    IndicatorRuntimeService,
+    removed_in_process_runtime,
+)
 from app.indicator.serialization import rebind_indicator_payload_identity
 
 
@@ -54,11 +57,12 @@ def _validate_jobs(jobs: list[IndicatorRangeBatchJob]) -> None:
     if not jobs:
         raise ValueError("Indicator range batch is empty")
     series = {
-        IndicatorRangeResultService.series_key_from_meta(job.meta)
-        for job in jobs
+        IndicatorRangeResultService.series_key_from_meta(job.meta) for job in jobs
     }
     if len(series) != 1:
-        raise ValueError("All indicator range batch items must use the same K-line series")
+        raise ValueError(
+            "All indicator range batch items must use the same K-line series"
+        )
     for job in jobs:
         target_bars = _job_target_bars(job)
         if target_bars > 50_000:
@@ -92,7 +96,7 @@ async def compute_indicator_range_batch_async(
     max_warmup = max(_job_warmup(job) for job in jobs)
     seed_meta = jobs[0].meta
     bars_tasks: dict[str, asyncio.Task[list[Any]]] = {}
-    script_runtime_service = runtime_service or _legacy_indicator_runtime_service
+    script_runtime_service = runtime_service or _unbound_indicator_runtime_service
 
     async def _shared_bars() -> list[Any]:
         revision_token = range_service.revision_token_for_meta(seed_meta)
@@ -119,36 +123,22 @@ async def compute_indicator_range_batch_async(
         async def _compute() -> dict[str, Any]:
             bars = await _shared_bars()
             if job.meta.get("kind") == "script":
-                async def _legacy() -> dict[str, Any]:
-                    return await run_pyne_wait(
-                        _compute_pyne_range_patch_from_bars,
-                        job.client_id,
-                        job.meta,
-                        job.start,
-                        job.end,
-                        bars,
-                        job.reason,
-                        target_bars,
-                    )
-
                 return await script_runtime_service.execute(
                     _script_runtime_request(
                         job.meta,
                         bars,
                         transport="http.range_batch",
                     ),
-                    legacy=_legacy,
-                    adapt_sidecar=lambda result: (
-                        _compute_plugin_range_patch_from_bars(
-                            job.client_id,
-                            job.meta,
-                            job.start,
-                            job.end,
-                            bars,
-                            result,
-                            reason=job.reason,
-                            target_bars=target_bars,
-                        )
+                    legacy=removed_in_process_runtime,
+                    adapt_sidecar=lambda result: _compute_plugin_range_patch_from_bars(
+                        job.client_id,
+                        job.meta,
+                        job.start,
+                        job.end,
+                        bars,
+                        result,
+                        reason=job.reason,
+                        target_bars=target_bars,
                     ),
                     adapt_failure=_raise_plugin_runtime_failure,
                 )
@@ -200,7 +190,9 @@ async def compute_indicator_range_batch_async(
         meta_payload["dataRevision"] = data_revision
         return payload
 
-    return list(await asyncio.gather(*(_one(job) for job in jobs), return_exceptions=True))
+    return list(
+        await asyncio.gather(*(_one(job) for job in jobs), return_exceptions=True)
+    )
 
 
 __all__ = ["IndicatorRangeBatchJob", "compute_indicator_range_batch_async"]

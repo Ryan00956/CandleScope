@@ -27,8 +27,6 @@ from candlescope_plugin_sdk import (
 
 from app.api.v1 import indicators as indicators_api
 from app.api.v1 import stream as stream_api
-from app.api.v1 import stream_indicator_payloads as payload_api
-from app.api.v1 import stream_pyne_subscriptions as pyne_stream_api
 from app.core import config
 from app.data_engine.data_manager.models import (
     BarData,
@@ -318,16 +316,11 @@ def _bars(fixture: dict[str, Any]) -> list[BarData]:
     return [BarData.from_dict(item).with_closed_state(True) for item in fixture["bars"]]
 
 
-def _forbid_legacy(*args: Any, **kwargs: Any) -> Any:
-    raise AssertionError("sidecar route must not execute legacy Pyne")
-
-
 def test_sidecar_routes_http_compute_without_legacy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = _fixture()
     service, host = _service("sidecar")
-    monkeypatch.setattr(indicators_api, "execute_pyne_script", _forbid_legacy)
     app = FastAPI()
     app.include_router(indicators_api.router, prefix="/api/v1")
     app.state.indicator_runtime_service = service
@@ -359,7 +352,6 @@ def test_community_language_can_use_sidecar_without_a_private_adapter(
 ) -> None:
     fixture = _fixture()
     service, host = _service("sidecar", language="community-lang")
-    monkeypatch.setattr(indicators_api, "execute_pyne_script", _forbid_legacy)
     app = FastAPI()
     app.include_router(indicators_api.router, prefix="/api/v1")
     app.state.indicator_runtime_service = service
@@ -442,7 +434,6 @@ def test_sidecar_routes_http_range_and_preserves_transport_envelope(
 ) -> None:
     fixture = _fixture()
     service, host = _service("sidecar")
-    monkeypatch.setattr(payload_api, "execute_pyne_script", _forbid_legacy)
     app = FastAPI()
     app.include_router(indicators_api.router, prefix="/api/v1")
     app.state.indicator_runtime_service = service
@@ -479,7 +470,6 @@ def test_sidecar_routes_range_batch_with_one_shared_bar_query(
 ) -> None:
     fixture = _fixture()
     service, host = _service("sidecar")
-    monkeypatch.setattr(payload_api, "execute_pyne_script", _forbid_legacy)
     app = FastAPI()
     app.include_router(indicators_api.router, prefix="/api/v1")
     dm = _DataManager(_bars(fixture))
@@ -527,7 +517,6 @@ def test_sidecar_range_host_failure_is_not_cached_or_fallbacked(
     fixture = _fixture()
     service, host = _service("sidecar")
     host.fail = True
-    monkeypatch.setattr(payload_api, "execute_pyne_script", _forbid_legacy)
     app = FastAPI()
     app.include_router(indicators_api.router, prefix="/api/v1")
     dm = _DataManager(_bars(fixture))
@@ -557,8 +546,6 @@ def test_sidecar_routes_websocket_realtime_without_legacy(
 ) -> None:
     fixture = _fixture()
     service, host = _service("sidecar")
-    monkeypatch.setattr(payload_api, "execute_pyne_script", _forbid_legacy)
-    monkeypatch.setattr(pyne_stream_api, "is_incremental_pyne_script", _forbid_legacy)
     monkeypatch.setattr(config, "INDICATOR_WS_HEARTBEAT_SECONDS", 5.0)
     app = FastAPI()
     app.include_router(stream_api.router, prefix="/api/v1")
@@ -603,44 +590,11 @@ def _canonical_sha256(value: Any) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-@pytest.mark.anyio
-async def test_shadow_matches_the_frozen_http_compute_payload_exactly(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fixture = _fixture()
-    service, _ = _frozen_service("shadow")
-    monkeypatch.setattr(config, "PYNE_EXECUTOR_MODE", "inline")
-    request = indicators_api.ComputeRequest.model_validate(
-        {
-            **fixture["httpCompute"]["request"],
-            "script": fixture["script"],
-            "ohlcv": fixture["bars"],
-        }
-    )
-
-    payload = await indicators_api._compute_script(
-        request,
-        runtime_service=service,
-    )
-    await service.drain_shadow()
-
-    assert (
-        _canonical_sha256(payload)
-        == fixture["httpCompute"]["expected"]["canonicalSha256"]
-    )
-    snapshot = service.snapshot()
-    assert snapshot["counts"]["shadow"] == 1
-    assert snapshot["counts"]["shadowMatched"] == 1
-    assert snapshot["counts"]["shadowMismatched"] == 0
-    assert snapshot["recent"][-1]["status"] == "matched"
-
-
 def test_pyne_sidecar_http_compute_matches_the_phase0_golden(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = _fixture()
     service, _ = _frozen_service("sidecar")
-    monkeypatch.setattr(indicators_api, "execute_pyne_script", _forbid_legacy)
     request = {
         **fixture["httpCompute"]["request"],
         "script": fixture["script"],
@@ -665,7 +619,6 @@ def test_pyne_sidecar_http_range_matches_the_phase0_golden(
 ) -> None:
     fixture = _fixture()
     service, _ = _frozen_service("sidecar")
-    monkeypatch.setattr(payload_api, "execute_pyne_script", _forbid_legacy)
     request = {
         **fixture["httpRange"]["request"],
         "script": fixture["script"],
@@ -693,8 +646,6 @@ def test_pyne_sidecar_websocket_matches_the_phase0_golden(
 ) -> None:
     fixture = _fixture()
     service, _ = _frozen_service("sidecar")
-    monkeypatch.setattr(payload_api, "execute_pyne_script", _forbid_legacy)
-    monkeypatch.setattr(pyne_stream_api, "is_incremental_pyne_script", _forbid_legacy)
     monkeypatch.setattr(config, "INDICATOR_WS_HEARTBEAT_SECONDS", 5.0)
     subscribe = {
         **fixture["websocket"]["subscribe"],

@@ -55,7 +55,6 @@ pythonpath = [
   ".",
   "src",
   "../candlescope-plugin-sdk/src",
-  "../pyne-runtime/src",
 ]
 
 [tool.ruff]

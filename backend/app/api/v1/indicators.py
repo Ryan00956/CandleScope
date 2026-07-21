@@ -10,6 +10,7 @@ Endpoints:
   GET  /indicators/presets            → list presets (maps to registry)
   GET  /indicators/presets/{id}       → get preset with script (maps to registry)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -37,25 +38,27 @@ from app.api.v1.stream_utils import (
     validate_ws_interval as _validate_interval_name,
 )
 from app.core import config
-from app.core.executors import executors_snapshot, run_indicator, run_pyne_wait, run_storage
+from app.core.executors import (
+    executors_snapshot,
+    run_indicator,
+    run_pyne_wait,
+    run_storage,
+)
 from app.core.runtime_metrics import ws_runtime_metrics
 from app.data_engine.data_manager.models import BarData
 from app.data_engine.interval_policy import parse_interval_spec
 from app.indicator import registry, IndicatorEngine, create_engine
 from app.indicator.custom_store import CustomIndicatorStore
-from app.indicator.pyne.cache import pyne_cache
-from app.indicator.pyne import is_incremental_pyne_script
-from app.indicator.pyne.executor import execute_pyne_script
-from app.indicator.pyne.external_runtime import RuntimeBackendSnapshot, cache_stats
 from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.engine import indicator_code_hash
 from app.indicator.types import IndicatorKey
-from app.indicator.pyne.security import PyneSecurityPolicy
 from app.indicator.range_result_service import IndicatorRangeResultService
 from app.indicator.runtime_service import (
     IndicatorRuntimeRequest,
     IndicatorRuntimeService,
     IndicatorRuntimeUnavailableError,
+    build_unbound_indicator_runtime_service,
+    removed_in_process_runtime,
 )
 from app.indicator.runtime_routes import IndicatorRuntimeRoutesError
 from app.indicator.serialization import (
@@ -63,7 +66,6 @@ from app.indicator.serialization import (
     rebind_indicator_payload_identity,
     serialize_indicator_result,
     serialize_plugin_runtime_result,
-    serialize_pyne_result,
 )
 
 router = APIRouter(prefix="/indicators", tags=["indicators"])
@@ -71,10 +73,11 @@ router = APIRouter(prefix="/indicators", tags=["indicators"])
 # Module-level singletons
 _engine = create_engine()
 _custom_store = CustomIndicatorStore()
-_legacy_indicator_runtime_service = IndicatorRuntimeService.legacy_only()
+_unbound_indicator_runtime_service = build_unbound_indicator_runtime_service()
 
 
 # ── Pydantic models ──────────────────────────────────────────
+
 
 class ComputeRequest(BaseModel):
     """Request body for indicator computation.
@@ -83,17 +86,28 @@ class ComputeRequest(BaseModel):
       1. Engine mode: provide ``name`` + ``params`` → uses the new engine
       2. Script mode: provide ``script`` + ``params`` → legacy Python exec
     """
+
     name: str | None = Field(None, description="Indicator name (e.g. 'MA', 'MACD')")
-    mode: str | None = Field(None, description="'builtin' for engine mode or 'script' for Pyne mode")
-    language: str | None = Field(None, description="Script language id; defaults to 'pyne'")
-    params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
+    mode: str | None = Field(
+        None, description="'builtin' for engine mode or 'script' for Pyne mode"
+    )
+    language: str | None = Field(
+        None, description="Script language id; defaults to 'pyne'"
+    )
+    params: dict[str, Any] = Field(
+        default_factory=dict, description="Indicator parameters"
+    )
     exchange: str = Field("binance", description="Exchange context")
     symbol: str = Field("UNKNOWN", description="Symbol for context")
     interval: str = Field("1m", description="Interval for context")
     market_type: str = Field("spot", description="Market type context")
-    ohlcv: list[dict[str, Any]] = Field(default_factory=list, description="OHLCV bar data array")
+    ohlcv: list[dict[str, Any]] = Field(
+        default_factory=list, description="OHLCV bar data array"
+    )
     script: str | None = Field(None, description="Legacy Python script (optional)")
-    securityMode: str | None = Field(None, description="'safe', 'research', or 'unsafe' for Pyne scripts")
+    securityMode: str | None = Field(
+        None, description="'safe', 'research', or 'unsafe' for Pyne scripts"
+    )
 
 
 class CustomIndicatorPayload(BaseModel):
@@ -102,13 +116,19 @@ class CustomIndicatorPayload(BaseModel):
     schemaVersion: int = Field(1, description="Custom indicator schema version")
     id: str | None = Field(None, description="Stable custom indicator id")
     kind: str = Field("script", description="'script' or 'custom'")
-    language: str | None = Field(None, description="Script language id; defaults to 'pyne'")
+    language: str | None = Field(
+        None, description="Script language id; defaults to 'pyne'"
+    )
     name: str = Field(..., description="Display name")
     description: str = Field("", description="Description")
     script: str = Field(..., description="Pyne/Python script")
     params: dict[str, Any] = Field(default_factory=dict, description="Default params")
-    paramSchema: list[dict[str, Any]] = Field(default_factory=list, description="Parameter schema")
-    renderHints: dict[str, Any] = Field(default_factory=dict, description="Optional rendering hints")
+    paramSchema: list[dict[str, Any]] = Field(
+        default_factory=list, description="Parameter schema"
+    )
+    renderHints: dict[str, Any] = Field(
+        default_factory=dict, description="Optional rendering hints"
+    )
     securityMode: str | None = Field(None, description="Preferred Pyne security mode")
 
 
@@ -116,8 +136,12 @@ class IndicatorRangeRequest(BaseModel):
     """HTTP request for server-side indicator history/range computation."""
 
     clientId: str = Field(..., description="Frontend indicator client id")
-    kind: str | None = Field(None, description="'builtin', 'script', 'custom', or 'pyne'")
-    language: str | None = Field(None, description="Script language id; defaults to 'pyne'")
+    kind: str | None = Field(
+        None, description="'builtin', 'script', 'custom', or 'pyne'"
+    )
+    language: str | None = Field(
+        None, description="Script language id; defaults to 'pyne'"
+    )
     exchange: str = Field("binance", description="Exchange context")
     marketType: str | None = Field(None, description="Camel-case market type context")
     market_type: str | None = Field(None, description="Snake-case market type context")
@@ -125,10 +149,14 @@ class IndicatorRangeRequest(BaseModel):
     interval: str = Field("1m", description="K-line interval")
     name: str | None = Field(None, description="Builtin indicator name or display name")
     customId: str | None = Field(None, description="Saved custom indicator id")
-    customIndicatorId: str | None = Field(None, description="Saved custom indicator id alias")
+    customIndicatorId: str | None = Field(
+        None, description="Saved custom indicator id alias"
+    )
     script: str | None = Field(None, description="Pyne/custom script")
     securityMode: str | None = Field(None, description="Pyne security mode")
-    params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
+    params: dict[str, Any] = Field(
+        default_factory=dict, description="Indicator parameters"
+    )
     start: int = Field(..., description="Inclusive range start, unix seconds")
     end: int = Field(..., description="Inclusive range end, unix seconds")
     reason: str = Field("range", description="Client reason for the range compute")
@@ -143,6 +171,7 @@ class IndicatorRangeBatchRequest(BaseModel):
 # ═══════════════════════════════════════════════════════════════
 #  Registry endpoints (new engine)
 # ═══════════════════════════════════════════════════════════════
+
 
 @router.get("/registry")
 async def list_indicators():
@@ -188,7 +217,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         ma = ta.sma(src, period)
         plot(ma, title=f"MA({period})", color=line_color, overlay=True)
     """),
-
     "EMA": textwrap.dedent("""\
         # __ENGINE__:EMA
         indicator("EMA", overlay=True)
@@ -200,7 +228,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         ema_line = ta.ema(src, period)
         plot(ema_line, title=f"EMA({period})", color=line_color, overlay=True)
     """),
-
     "BOLL": textwrap.dedent("""\
         # __ENGINE__:BOLL
         indicator("BOLL", overlay=True)
@@ -219,7 +246,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         lower_plot = plot(lower, title="BOLL Lower", color=lower_color, overlay=True)
         fill(upper_plot, lower_plot, color=fill_color, title="BOLL Band")
     """),
-
     "RSI": textwrap.dedent("""\
         # __ENGINE__:RSI
         indicator("RSI", overlay=False)
@@ -236,7 +262,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         hline(50, title="Middle", color=color.gray, pane="separate")
         hline(oversold, title="Oversold", color=color.green, pane="separate")
     """),
-
     "MACD": textwrap.dedent("""\
         # __ENGINE__:MACD
         indicator("MACD", overlay=False)
@@ -256,7 +281,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         bar(hist, title="MACD Hist", color_up=hist_up_color, color_down=hist_down_color, pane="separate")
         hline(0, title="Zero", color=color.gray, pane="separate")
     """),
-
     "ATR": textwrap.dedent("""\
         # __ENGINE__:ATR
         indicator("ATR", overlay=False)
@@ -267,7 +291,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         atr_line = ta.atr(period)
         plot(atr_line, title=f"ATR({period})", color=line_color, overlay=False, pane="separate")
     """),
-
     "VOL": textwrap.dedent("""\
         # __ENGINE__:VOL
         indicator("VOL", overlay=False)
@@ -354,6 +377,7 @@ async def get_preset(preset_id: str):
 #  Custom indicator CRUD
 # ═══════════════════════════════════════════════════════════════
 
+
 @router.get("/custom")
 async def list_custom_indicators():
     """List all user-saved custom indicators."""
@@ -367,7 +391,9 @@ async def list_custom_indicators():
 async def save_custom_indicator(payload: CustomIndicatorPayload):
     """Create or update a user-saved custom indicator."""
     try:
-        data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        data = (
+            payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        )
         return _custom_store.upsert(data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -381,14 +407,33 @@ async def delete_custom_indicator(indicator_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if not deleted:
-        raise HTTPException(status_code=404, detail=f"Custom indicator '{indicator_id}' not found")
+        raise HTTPException(
+            status_code=404, detail=f"Custom indicator '{indicator_id}' not found"
+        )
     return {"ok": True, "id": indicator_id}
 
 
 @router.get("/pyne/security")
 async def get_pyne_security_policy():
-    """Return the default Pyne security policy advertised to the UI."""
-    return PyneSecurityPolicy.from_config().to_public_dict()
+    """Return the host policy inherited by the isolated Pyne sidecar."""
+    return _pyne_security_policy()
+
+
+def _pyne_security_policy() -> dict[str, Any]:
+    return {
+        "mode": config.PYNE_SECURITY_MODE,
+        "allowedImports": list(config.PYNE_ALLOWED_IMPORTS),
+        "timeoutSeconds": config.PYNE_EXEC_TIMEOUT_SECONDS,
+        "maxBars": config.PYNE_MAX_BARS,
+        "maxOutputSeries": config.PYNE_MAX_OUTPUT_SERIES,
+        "maxOutputPoints": config.PYNE_MAX_OUTPUT_POINTS,
+        "maxArraySize": 100_000,
+        "maxMapSize": 100_000,
+        "maxMatrixCells": 100_000,
+        "maxCollectionDepth": 8,
+        "owner": "candlescope.pyne",
+        "boundary": "sidecar",
+    }
 
 
 def _resolve_runtime_engine(request: Request | None) -> IndicatorEngine:
@@ -418,7 +463,21 @@ def _build_diagnostics_snapshot(
     except ValueError as exc:
         custom_error = str(exc)
 
-    policy = PyneSecurityPolicy.from_config().to_public_dict()
+    policy = _pyne_security_policy()
+    runtime_snapshot = (
+        runtime_service.snapshot() if runtime_service is not None else None
+    )
+    runtime_routes = (
+        runtime_snapshot.get("routes", []) if isinstance(runtime_snapshot, dict) else []
+    )
+    pyne_route = next(
+        (
+            route
+            for route in runtime_routes
+            if isinstance(route, dict) and route.get("language") == "pyne"
+        ),
+        None,
+    )
 
     return {
         "ok": True,
@@ -435,19 +494,29 @@ def _build_diagnostics_snapshot(
             "error": custom_error,
         },
         "pyne": {
-            "runtimeBackend": RuntimeBackendSnapshot.current().to_dict(),
+            "runtimeBackend": {
+                "package": "candlescope-plugin-pyne",
+                "active": "sidecar",
+                "runtimeId": (
+                    pyne_route.get("runtimeId")
+                    if isinstance(pyne_route, dict)
+                    else "candlescope.pyne"
+                ),
+            },
             "security": policy,
             "executor": {
-                "mode": config.PYNE_EXECUTOR_MODE,
-                "timeoutSeconds": config.PYNE_EXEC_TIMEOUT_SECONDS,
-                "processGraceSeconds": config.PYNE_PROCESS_GRACE_SECONDS,
+                "mode": "sidecar",
+                "httpTimeoutSeconds": config.INDICATOR_HTTP_TIMEOUT_SECONDS,
             },
             "limits": {
                 "maxBars": config.PYNE_MAX_BARS,
                 "maxOutputSeries": config.PYNE_MAX_OUTPUT_SERIES,
                 "maxOutputPoints": config.PYNE_MAX_OUTPUT_POINTS,
             },
-            "cache": cache_stats() or pyne_cache.stats(),
+            "cache": {
+                "scope": "sidecar",
+                "availableToHost": False,
+            },
         },
         "websocket": {
             "maxSubscriptions": config.INDICATOR_WS_MAX_SUBSCRIPTIONS,
@@ -457,9 +526,7 @@ def _build_diagnostics_snapshot(
         },
         "executors": executors_snapshot(),
         "rangeCache": range_service.snapshot() if range_service is not None else None,
-        "scriptRuntimeRouting": (
-            runtime_service.snapshot() if runtime_service is not None else None
-        ),
+        "scriptRuntimeRouting": (runtime_snapshot),
     }
 
 
@@ -482,6 +549,7 @@ async def get_indicator_diagnostics(request: Request):
 #  HTTP range endpoint — chart history/backfill path
 # ═══════════════════════════════════════════════════════════════
 
+
 def _require_data_manager(request: Request):
     dm = getattr(request.app.state, "data_manager", None)
     if dm is None:
@@ -494,7 +562,9 @@ def _resolve_indicator_range_service(request: Request) -> IndicatorRangeResultSe
     if isinstance(service, IndicatorRangeResultService):
         return service
     revision_registry = getattr(request.app.state, "indicator_series_revisions", None)
-    service = IndicatorRangeResultService.from_config(revision_registry=revision_registry)
+    service = IndicatorRangeResultService.from_config(
+        revision_registry=revision_registry
+    )
     request.app.state.indicator_range_service = service
     engine = getattr(request.app.state, "indicator_engine", None)
     if isinstance(engine, IndicatorEngine):
@@ -521,7 +591,7 @@ def _resolve_indicator_runtime_service(
         )
         if isinstance(service, IndicatorRuntimeService):
             return service
-    return _legacy_indicator_runtime_service
+    return _unbound_indicator_runtime_service
 
 
 def _resolve_range_market_type(req: IndicatorRangeRequest) -> str:
@@ -557,7 +627,9 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
     symbol = req.symbol.upper().strip()
     requested_interval = req.interval.strip()
     interval_spec = parse_interval_spec(requested_interval)
-    interval = interval_spec.canonical if interval_spec is not None else requested_interval
+    interval = (
+        interval_spec.canonical if interval_spec is not None else requested_interval
+    )
     params = req.params if isinstance(req.params, dict) else {}
     kind = str(req.kind or "").strip().lower()
     script = req.script or ""
@@ -568,14 +640,14 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
     if interval_spec is None or not _validate_interval_name(requested_interval):
         raise ValueError(f"Unsupported interval: {requested_interval}.")
 
-    is_script = kind in {"script", "custom", "pyne"} or bool(custom_id) or (script and not indicator_name)
+    is_script = (
+        kind in {"script", "custom", "pyne"}
+        or bool(custom_id)
+        or (script and not indicator_name)
+    )
     if is_script:
         script, display_name, security_mode = _resolve_range_script(req)
-        language = (
-            "pyne"
-            if req.language is None
-            else str(req.language).strip().lower()
-        )
+        language = "pyne" if req.language is None else str(req.language).strip().lower()
         if not language:
             raise ValueError("Script language must not be empty.")
         if not script.strip():
@@ -596,16 +668,11 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
             "params": params,
             "securityMode": security_mode,
         }
-        try:
-            if is_incremental_pyne_script(script):
-                meta["scriptMode"] = "incremental"
-        except SyntaxError:
-            pass
         return meta
 
     if not indicator_name and script.startswith(_ENGINE_SCRIPT_MARKER):
         first_line = script.split("\n")[0]
-        indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
+        indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER) :].strip().upper()
     if not indicator_name:
         raise ValueError("Builtin indicator name is required.")
     if registry.get(indicator_name) is None:
@@ -688,6 +755,7 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
         )
 
     try:
+
         async def _compute_uncached() -> dict[str, Any]:
             return await compute_indicator_range_payload_async(
                 dm=dm,
@@ -763,8 +831,7 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
         )
         availability = {
             "history_state": (
-                exc.history_state
-                or ("exhausted" if not exc.retryable else "pending")
+                exc.history_state or ("exhausted" if not exc.retryable else "pending")
             ),
             "complete": not exc.retryable,
             "retryable": exc.retryable,
@@ -851,8 +918,7 @@ def _batch_range_error_payload(
         )
         availability = {
             "history_state": (
-                exc.history_state
-                or ("exhausted" if not exc.retryable else "pending")
+                exc.history_state or ("exhausted" if not exc.retryable else "pending")
             ),
             "complete": not exc.retryable,
             "retryable": exc.retryable,
@@ -924,19 +990,22 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
                 raise ValueError("clientId is required for every batch item")
             if start_s <= 0 or end_s <= 0 or start_s > end_s:
                 raise ValueError("every batch item requires positive start <= end")
-            jobs.append(IndicatorRangeBatchJob(
-                client_id=client_id,
-                meta=_build_range_meta(item),
-                start=start_s,
-                end=end_s,
-                reason=item.reason or "range",
-            ))
+            jobs.append(
+                IndicatorRangeBatchJob(
+                    client_id=client_id,
+                    meta=_build_range_meta(item),
+                    start=start_s,
+                    end=end_s,
+                    reason=item.reason or "range",
+                )
+            )
         series_keys = {
-            IndicatorRangeResultService.series_key_from_meta(job.meta)
-            for job in jobs
+            IndicatorRangeResultService.series_key_from_meta(job.meta) for job in jobs
         }
         if len(series_keys) != 1:
-            raise ValueError("all batch items must use the same exchange/market/symbol/interval")
+            raise ValueError(
+                "all batch items must use the same exchange/market/symbol/interval"
+            )
 
         first_meta = jobs[0].meta
         record_access = getattr(dm, "record_cache_access", None)
@@ -986,6 +1055,7 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
 #  Compute endpoint — unified
 # ═══════════════════════════════════════════════════════════════
 
+
 @router.post("/compute")
 async def compute(req: ComputeRequest, request: Request = None):
     """Compute an indicator on the provided OHLCV data.
@@ -1021,9 +1091,13 @@ async def compute(req: ComputeRequest, request: Request = None):
         )
 
     if mode == "builtin":
-        if not indicator_name and req.script and req.script.startswith(_ENGINE_SCRIPT_MARKER):
+        if (
+            not indicator_name
+            and req.script
+            and req.script.startswith(_ENGINE_SCRIPT_MARKER)
+        ):
             first_line = req.script.split("\n")[0]
-            indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
+            indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER) :].strip().upper()
         if not indicator_name:
             return build_error_payload(
                 "INDICATOR_NAME_REQUIRED",
@@ -1036,7 +1110,7 @@ async def compute(req: ComputeRequest, request: Request = None):
     use_engine = indicator_name is not None
     if not use_engine and req.script and req.script.startswith(_ENGINE_SCRIPT_MARKER):
         first_line = req.script.split("\n")[0]
-        indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
+        indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER) :].strip().upper()
         use_engine = True
 
     if use_engine and indicator_name:
@@ -1121,34 +1195,14 @@ async def _compute_script(
     *,
     runtime_service: IndicatorRuntimeService | None = None,
 ) -> dict:
-    """Compute using Pyne runtime (with full legacy backward compatibility).
-
-    The Pyne runtime provides a rich Pine-style namespace including
-    ta.*, input.*, plot(), color.*, math.*, crossover(), etc.
-    Legacy scripts using add_line() continue to work unchanged.
-    """
-    service = runtime_service or _legacy_indicator_runtime_service
-    language = (
-        "pyne"
-        if req.language is None
-        else str(req.language).strip().lower()
-    )
+    """Compute a script through its configured isolated runtime plugin."""
+    service = runtime_service or _unbound_indicator_runtime_service
+    language = "pyne" if req.language is None else str(req.language).strip().lower()
     if not language:
         return build_error_payload(
             "INDICATOR_LANGUAGE_REQUIRED",
             "Script language must not be empty.",
         )
-
-    async def _legacy() -> dict[str, Any]:
-        result = await _run_indicator_http_compute(
-            execute_pyne_script,
-            executor_kind="pyne",
-            script=req.script,
-            ohlcv=req.ohlcv,
-            params=req.params or {},
-            security_mode=req.securityMode,
-        )
-        return serialize_pyne_result(result)
 
     runtime_request = IndicatorRuntimeRequest(
         language=language,
@@ -1171,7 +1225,7 @@ async def _compute_script(
     try:
         payload = await service.execute(
             runtime_request,
-            legacy=_legacy,
+            legacy=removed_in_process_runtime,
             adapt_sidecar=serialize_plugin_runtime_result,
         )
     except asyncio.TimeoutError:
@@ -1191,7 +1245,9 @@ async def _compute_script(
     return payload
 
 
-async def _run_indicator_http_compute(func, *args, executor_kind: str = "indicator", **kwargs):
+async def _run_indicator_http_compute(
+    func, *args, executor_kind: str = "indicator", **kwargs
+):
     """Run heavy HTTP indicator work off the event loop with a hard wait cap."""
     runner = run_pyne_wait if executor_kind == "pyne" else run_indicator
     return await asyncio.wait_for(

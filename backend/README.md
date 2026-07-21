@@ -305,15 +305,20 @@ Long-lived plugin boundaries:
 Indicator docs:
 
 - [app/indicator](app/indicator/)
-- [app/indicator/pyne](app/indicator/pyne/)
+- [Runtime plugin host](app/plugin_runtime/README.md)
+- [Pyne sidecar bridge](../packages/candlescope-plugin-pyne/README.md)
 
 Built-ins include `MA`, `EMA`, `MACD`, `RSI`, `BOLL`, `ATR`, and `VOL`.
 
-Pyne scripts run through `execute_pyne_script()` with process execution by default. Security modes are `safe`, `research`, and `unsafe`.
+Pyne scripts run only through the isolated `candlescope.pyne` sidecar. Security
+modes are `safe`, `research`, and `unsafe`; the sidecar inherits the selected
+policy without importing Pyne into the backend process.
 
-The backend imports Pyne through `app.indicator.pyne`, backed by the bundled
-`packages/pyne-runtime` package in this repository. The backend loads that
-source tree automatically, so a normal backend install is enough:
+CandleScope contains neither a Pyne Runtime source snapshot nor an in-process
+Pyne facade. On the first supported Windows CPython 3.12 startup, the product
+bootstrap verifies and installs the exact prerelease `.cspkg` pinned in
+`app/official-plugin-releases.json`. Later startups rerun the managed
+environment probe without downloading again:
 
 ```powershell
 cd backend
@@ -321,20 +326,24 @@ python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
 ```
 
-Diagnostics expose the selected runtime package under
+Diagnostics expose the selected sidecar route under
 `/api/v1/indicators/diagnostics -> pyne.runtimeBackend`.
 
-If you want to test a newer external Pyne checkout temporarily, override the
-source path for that shell session:
+For an offline first run, provide the same digest-pinned bundle explicitly:
 
 ```powershell
-$env:CANDLESCOPE_PYNE_RUNTIME_SRC = "<path-to-pyne-runtime>\src"
+$env:CANDLESCOPE_OFFICIAL_PLUGIN_BUNDLE = "C:\release\candlescope-pyne-0.2.0-cp312-win_amd64.cspkg"
 ```
+
+Set `CANDLESCOPE_OFFICIAL_PLUGIN_BOOTSTRAP=0` only when a compatible runtime is
+already activated manually. Community runtimes continue to use the generic
+local-artifact installer and are never downloaded or overwritten by the
+first-party bootstrap.
 
 HTTP indicator compute is offloaded through dedicated executors:
 
 - Builtin indicator HTTP compute uses one-shot engine instances so it does not mutate the app-wide realtime `IndicatorEngine`.
-- Pyne HTTP and range snapshot paths use the Pyne wait executor around the process-based runtime.
+- Script HTTP, range, batch, and WebSocket paths send typed requests to the selected sidecar.
 - Both paths are guarded by `INDICATOR_HTTP_TIMEOUT_SECONDS`.
 
 ## Observability And Benchmarks

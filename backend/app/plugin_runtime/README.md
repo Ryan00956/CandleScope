@@ -88,6 +88,15 @@ guesses an entry point. Hand-written registries remain useful for local
 development, but unmanaged entries cannot use the installer's exact
 `check`/`rollback` operations.
 
+CandleScope's product layer is intentionally separate: before constructing
+this generic Host, `app.first_party_plugin_bootstrap` may materialize the exact
+official runtime pinned in `app/official-plugin-releases.json` and invoke the
+same local installer. It never selects community plugins, and it refuses to
+replace an unmanaged activation with the same ID. Set
+`CANDLESCOPE_OFFICIAL_PLUGIN_BOOTSTRAP=0` to disable this first-party policy or
+`CANDLESCOPE_OFFICIAL_PLUGIN_BUNDLE=<path>` for a digest-identical offline
+first run. The Host and installer themselves remain network-free.
+
 Installer-created entries also carry `managed.installationId`,
 `managed.activationId`, and `managed.bundleSha256`, binding activation state to
 an immutable install and exact history record. Manual entries omit them.

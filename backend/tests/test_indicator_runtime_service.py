@@ -28,6 +28,7 @@ from app.indicator.runtime_routes import (
 from app.indicator.runtime_service import (
     IndicatorRuntimeRequest,
     IndicatorRuntimeService,
+    build_indicator_runtime_service_from_environment,
 )
 from app.plugin_runtime.errors import PluginTransportError
 
@@ -440,3 +441,15 @@ async def test_language_without_legacy_adapter_must_use_sidecar() -> None:
 
     with pytest.raises(IndicatorRuntimeRoutesError, match="no legacy adapter"):
         await service.start()
+
+
+def test_product_runtime_service_exposes_no_in_process_language_adapter(
+    tmp_path: Path,
+) -> None:
+    service = build_indicator_runtime_service_from_environment(
+        host=_Host(),
+        environ={"LOCALAPPDATA": str(tmp_path)},
+    )
+
+    assert service.legacy_languages == frozenset()
+    assert service.route_for("pyne").mode == "sidecar"

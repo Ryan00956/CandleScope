@@ -1,6 +1,6 @@
 # Plugin Platform v2 核心产品组合根
 
-`app.plugin_core_v2` 是 Phase 5 的产品组合层。它把 Phase 2 的进程 Host、Phase 3 的
+`app.plugin_core_v2` 是 Phase 5–6 的产品组合层。它把 Phase 2 的进程 Host、Phase 3 的
 immutable installation/activation registry 和 Phase 4 的 Grant Store/capability broker
 组合成最小通用插件平台，同时保持业务数据库、Data Engine 和私有 Python 对象不可见。
 
@@ -13,7 +13,10 @@ immutable installation/activation registry 和 Phase 4 的 Grant Store/capabilit
 | `notification/1` | 只进入有界 Host notification projection；插件不能直接操作前端 |
 | `event-subscriber/1` | 只订阅版本化 public app event；每 subscriber 独立有界队列和 drop-oldest 计数 |
 | `job/1` | 静态 interval、single-flight、timeout、指数退避、手动触发和 disable/revoke 取消 |
+| `chart-layer/1` | Host 校验 marker-only `candlescope.render/1`、item/byte/text budget、revision 与 generation |
 | `storage.private` | publisher + plugin 命名空间的 KV/document/blob、逻辑配额、snapshot 和事务迁移 |
+| `market.*.read` | 只经 DataManager facade 返回 symbol、K 线、TradeFlow 与 partial order-book 公共 DTO |
+| `market.bars.subscribe` | 精确 series lease、有界队列、forming latest-coalesce、closed/amended 可靠投递与 resync |
 
 公共事件当前只有 `candlescope.app.ready/1`、`candlescope.app.stopping/1`、
 `candlescope.plugin.enabled/1` 和 `candlescope.plugin.disabled/1`。插件不能订阅
@@ -36,7 +39,7 @@ supervisor。disabled/staged 插件只经过静态 bundle/receipt/content/launch
 
 普通插件只因 command、event delivery 或 job execution 激活。`onStartup` 还必须同时出现在
 `CANDLESCOPE_PLUGIN_PLATFORM_V2_STARTUP_ALLOWLIST`。disable、uninstall、rollback 或 grant
-变化统一走 `reconcile_plugin()`：先撤销 handle、event、job、settings binding 和 supervisor，
+变化统一走 `reconcile_plugin()`：先释放 market subscription/layer，再撤销 handle、event、job、settings binding 和 supervisor，
 再读取新 registry；旧 generation 和迟到结果不能重新发布。
 
 环境 bootstrap 默认 `local-trusted`。把
@@ -74,11 +77,18 @@ KV/document/blob 写入在 SQLite transaction 内计算逻辑使用量，越 quo
 生成带 payload SHA-256 的原子 snapshot；迁移操作、版本更新或 quota 检查失败时数据库事务
 保留旧状态，显式 restore 同样是原子事务。
 
-## 尚未开放
+## Phase 6 边界
 
-Phase 5 只达到“最小通用插件平台”。市场数据 consumer、图表 Render IR layer、声明式前端、
-sandbox UI、网络/文件/HTTP gateway、数据提供器、secrets、账户、交易、签名 publisher 和
-Marketplace 都属于 Phase 6–12。没有对应 Host adapter 的 permission 仍然不可调用。
+Phase 6 已开放 scope 内的只读 live market consumer 与 Host-owned chart layer registry；live 与
+replay handle 强隔离，插件不能得到 DataManager/EventBus/SQLite。K 线批次当前复用有界控制面
+`eventBatch`，逐笔和订单簿只开放有界 read；专用 named-pipe/UDS data plane、MessagePack 和
+高频 trade/order-book subscribe 尚未宣称完成。
+
+声明式前端与 Plugin Manager、sandbox UI、网络/文件/HTTP gateway、数据提供器、secrets、
+账户、交易、签名 publisher 和 Marketplace 仍属于 Phase 7–12。没有对应 Host adapter 的
+permission 仍然不可调用。
 
 执行证据和回滚边界见
 [`docs/PLUGIN_PLATFORM_V2_PHASE5_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE5_zh.md)。
+Phase 6 市场数据、背压和参考扫描器证据见
+[`docs/PLUGIN_PLATFORM_V2_PHASE6_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE6_zh.md)。

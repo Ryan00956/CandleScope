@@ -163,6 +163,26 @@ def _iter_cached_symbols(
     return results
 
 
+def list_cached_symbols(
+    exchange: str = "",
+    market_type: str = "",
+    *,
+    include_inactive: bool = False,
+) -> tuple[list[dict[str, Any]], float]:
+    """Return a detached public symbol snapshot for non-HTTP consumers."""
+
+    return (
+        copy.deepcopy(
+            _iter_cached_symbols(
+                exchange=exchange,
+                market_type=market_type,
+                include_inactive=include_inactive,
+            )
+        ),
+        _cache_loaded_at,
+    )
+
+
 # ── API Endpoints ────────────────────────────────────────────
 
 
@@ -175,7 +195,7 @@ async def get_exchange_info(
 ) -> dict:
     """Return cached trading pair list with optional filtering."""
     bootstrap_default_adapters()
-    results = _iter_cached_symbols(exchange=exchange, market_type=market_type)
+    results, cached_at = list_cached_symbols(exchange=exchange, market_type=market_type)
 
     if quote_asset:
         qa = quote_asset.upper().strip()
@@ -190,7 +210,7 @@ async def get_exchange_info(
 
     return {
         "count": len(results),
-        "cached_at": _cache_loaded_at,
+        "cached_at": cached_at,
         "symbols": results,
     }
 

@@ -293,6 +293,118 @@ def test_bidirectional_host_call_correlates_and_resumes_original_invocation() ->
     )
 
 
+def test_host_call_completion_can_chain_another_bounded_host_call() -> None:
+    class ChainedPlugin(_HostCallingPlugin):
+        def complete_host_call(
+            self,
+            token: str,
+            response: RpcSuccess | RpcFailure,
+        ):
+            if token == "notify-1":
+                assert isinstance(response, RpcSuccess)
+                return HostCallInvocation(
+                    token="notify-2",
+                    call=HostCallRequest(
+                        capability_handle="cap-notify-1",
+                        method="notifications.show",
+                        params={"message": "second"},
+                        request_context=HostCallRequest.from_wire(
+                            {
+                                "capabilityHandle": "cap-notify-1",
+                                "method": "notifications.show",
+                                "params": {},
+                                "requestContext": {
+                                    "contributionId": "hello",
+                                    "userAction": True,
+                                    "generation": 1,
+                                    "traceId": "trace-chain",
+                                },
+                            }
+                        ).request_context,
+                    ),
+                )
+            assert token == "notify-2"
+            assert isinstance(response, RpcSuccess)
+            return {"completed": True, "second": response.result}
+
+    server = PlatformJsonLineServer(ChainedPlugin())
+    server.handle_message(_handshake(HOST_API_V1))
+    server.handle_message(_activate(CapabilityGrant("cap-notify-1", "notifications.show")))
+    first = server.handle_message(_invoke("invoke-chain", {}, trace_id="trace-chain"))[0]
+    second = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": first["id"],
+            "result": {"shown": 1},
+            "generation": 1,
+        }
+    )[0]
+    completed = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": second["id"],
+            "result": {"shown": 2},
+            "generation": 1,
+        }
+    )
+
+    assert second["method"] == "host.call"
+    assert second["id"] != first["id"]
+    assert completed[0]["id"] == "invoke-chain"
+    assert completed[0]["result"] == {
+        "completed": True,
+        "second": {"shown": 2},
+    }
+
+
+def test_chained_host_call_rejects_an_unknown_capability_handle() -> None:
+    class InvalidChainPlugin(_HostCallingPlugin):
+        def complete_host_call(
+            self,
+            token: str,
+            response: RpcSuccess | RpcFailure,
+        ):
+            return HostCallInvocation(
+                token="invalid-chain",
+                call=HostCallRequest(
+                    capability_handle="cap-not-granted",
+                    method="notifications.show",
+                    params={},
+                    request_context=HostCallRequest.from_wire(
+                        {
+                            "capabilityHandle": "cap-not-granted",
+                            "method": "notifications.show",
+                            "params": {},
+                            "requestContext": {
+                                "contributionId": "hello",
+                                "userAction": True,
+                                "generation": 1,
+                                "traceId": "trace-invalid-chain",
+                            },
+                        }
+                    ).request_context,
+                ),
+            )
+
+    server = PlatformJsonLineServer(InvalidChainPlugin())
+    server.handle_message(_handshake(HOST_API_V1))
+    server.handle_message(_activate(CapabilityGrant("cap-notify-1", "notifications.show")))
+    first = server.handle_message(
+        _invoke("invoke-invalid-chain", {}, trace_id="trace-invalid-chain")
+    )[0]
+    failed = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": first["id"],
+            "result": {"shown": True},
+            "generation": 1,
+        }
+    )
+
+    assert failed[0]["id"] == "invoke-invalid-chain"
+    assert failed[0]["error"]["data"]["code"] == "CAPABILITY_HANDLE_INVALID"
+
+
 def test_host_call_requires_a_granted_handle_and_late_response_fails_closed() -> None:
     server = PlatformJsonLineServer(_HostCallingPlugin())
     server.handle_message(_handshake(HOST_API_V1))

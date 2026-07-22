@@ -48,6 +48,7 @@ from app.data_engine.history import (
     expected_bucket_end_ms,
     latest_closed_expected_open_ms,
 )
+from app.data_engine.public_market_projection import public_bar_rows
 from app.data_engine.storage import DEFAULT_EXCHANGE, DEFAULT_MARKET_TYPE
 
 router = APIRouter(prefix="/klines", tags=["klines"])
@@ -151,14 +152,7 @@ def _resolve_interval(
 
 def _bars_to_dicts(bars: list) -> list[dict]:
     """Convert bars to the enhanced Kline API contract."""
-    return [
-        b.to_kline_dict()
-        if hasattr(b, "to_kline_dict")
-        else b.to_dict()
-        if hasattr(b, "to_dict")
-        else b
-        for b in bars
-    ]
+    return public_bar_rows(bars)
 
 
 def _query_http_exception(exc: Exception, prefix: str) -> HTTPException:

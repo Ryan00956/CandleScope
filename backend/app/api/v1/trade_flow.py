@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
+from app.data_engine.public_market_projection import (
+    project_trade_history_payload,
+    project_trade_recent_payload,
+    serialize_public_value,
+)
 
 
 router = APIRouter(prefix="/trade-flow", tags=["trade-flow"])
@@ -29,31 +33,7 @@ async def trade_flow_recent(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise _upstream_http_error("trade-flow recent", exc) from exc
-    data = [_serialize(item) for item in records]
-    ids = [int(item["agg_trade_id"]) for item in data]
-    missing_ranges = [
-        {"start_agg_trade_id": left + 1, "end_agg_trade_id": right - 1}
-        for left, right in zip(ids, ids[1:])
-        if right > left + 1
-    ]
-    continuity = bool(data) and all(
-        right == left + 1 for left, right in zip(ids, ids[1:])
-    )
-    return {
-        "type": "trade_flow.recent",
-        "protocol": "tradeflow.v1",
-        "key": key.to_dict(),
-        "count": len(data),
-        "data": data,
-        "cursor": {
-            "earliest_agg_trade_id": min(ids, default=None),
-            "latest_agg_trade_id": max(ids, default=None),
-        },
-        "continuity": continuity,
-        "resync_required": not continuity,
-        "missing_agg_trade_id_ranges": missing_ranges,
-        "bounded": True,
-    }
+    return project_trade_recent_payload(key, list(records))
 
 
 @router.get("/history")
@@ -87,25 +67,7 @@ async def trade_flow_history(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise _upstream_http_error("trade-flow history", exc) from exc
-    data = [_serialize(item) for item in rows]
-    times = [
-        int(item.get("bucket_start_ms", item.get("bucket_open_ms")))
-        for item in data
-    ]
-    return {
-        "type": "trade_flow.history",
-        "protocol": "tradeflow.v1",
-        "key": {**key.to_dict(), "params": {"period": "1m"}},
-        "count": len(data),
-        "data": data,
-        "has_more": len(data) >= limit,
-        "coverage": {
-            "earliest_ms": min(times, default=None),
-            "latest_ms": max(times, default=None),
-            "all_rows_complete": bool(data)
-            and all(bool(item.get("is_complete", False)) for item in data),
-        },
-    }
+    return project_trade_history_payload(key, list(rows), limit=limit)
 
 
 @router.get("/archive/coverage")
@@ -143,7 +105,7 @@ async def trade_flow_archive_coverage(
         "type": "trade_flow.archive_coverage",
         "protocol": "tradeflow.v1",
         "key": key.to_dict(),
-        "data": _serialize(coverage),
+        "data": serialize_public_value(coverage),
     }
 
 
@@ -166,17 +128,6 @@ def _key(exchange: str, market_type: str, symbol: str) -> MarketStreamKey:
         )
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-def _serialize(value: Any) -> dict[str, Any]:
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        return dict(to_dict())
-    if is_dataclass(value):
-        return asdict(value)
-    if isinstance(value, dict):
-        return dict(value)
-    raise TypeError(f"unsupported TradeFlow response value: {type(value).__name__}")
 
 
 def _upstream_http_error(operation: str, exc: Exception) -> HTTPException:

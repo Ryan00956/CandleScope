@@ -36,6 +36,7 @@ CapabilityLeaseHandler = Callable[
     [HostCallRequest, "CapabilityLease"],
     Awaitable[dict[str, Any]] | dict[str, Any],
 ]
+RevocationListener = Callable[[tuple["CapabilityLease", ...], str], None]
 
 
 def _fingerprint(handle: str) -> str:
@@ -109,6 +110,7 @@ class CapabilityHandleAuthority:
         self._leases: dict[str, CapabilityLease] = {}
         self._revoked: deque[str] = deque(maxlen=8_192)
         self._revoked_set: set[str] = set()
+        self._revocation_listeners: list[RevocationListener] = []
 
     @property
     def active_count(self) -> int:
@@ -126,10 +128,37 @@ class CapabilityHandleAuthority:
 
     def _purge_expired(self) -> None:
         now = self._clock()
+        expired: list[CapabilityLease] = []
         for fingerprint, lease in tuple(self._leases.items()):
             if lease.expires_monotonic <= now:
                 self._leases.pop(fingerprint, None)
                 self._remember_revoked(fingerprint)
+                expired.append(lease)
+        if expired:
+            self._notify_revocation(tuple(expired), "expired")
+
+    def add_revocation_listener(self, listener: RevocationListener) -> None:
+        """Observe lease invalidation so Host-owned resources can be reclaimed."""
+
+        if not callable(listener):
+            raise TypeError("revocation listener must be callable")
+        if listener not in self._revocation_listeners:
+            self._revocation_listeners.append(listener)
+
+    def remove_revocation_listener(self, listener: RevocationListener) -> None:
+        if listener in self._revocation_listeners:
+            self._revocation_listeners.remove(listener)
+
+    def _notify_revocation(
+        self, leases: tuple[CapabilityLease, ...], reason: str
+    ) -> None:
+        for listener in tuple(self._revocation_listeners):
+            try:
+                listener(leases, reason)
+            except Exception:
+                # Revocation is authoritative even when optional cleanup
+                # observers fail. Resource owners also retain shutdown sweeps.
+                continue
 
     @staticmethod
     def _manifest_requests(
@@ -339,6 +368,7 @@ class CapabilityHandleAuthority:
                 "grant-binding",
                 call.request_context.trace_id,
             )
+            self._notify_revocation((lease,), "grant-binding")
             self._audit_validation_denied(
                 call,
                 plugin_id=plugin_id,
@@ -391,6 +421,7 @@ class CapabilityHandleAuthority:
         if lease is None:
             return False
         self._audit_revoke((lease,), "handle", trace_id)
+        self._notify_revocation((lease,), "handle")
         return True
 
     def revoke_instance(
@@ -415,6 +446,7 @@ class CapabilityHandleAuthority:
             self._remember_revoked(lease.handle_fingerprint)
         if leases:
             self._audit_revoke(leases, "instance", trace_id)
+            self._notify_revocation(leases, "instance")
         return len(leases)
 
     def revoke_plugin(self, plugin_id: str, *, trace_id: str | None = None) -> int:
@@ -426,6 +458,7 @@ class CapabilityHandleAuthority:
             self._remember_revoked(lease.handle_fingerprint)
         if leases:
             self._audit_revoke(leases, "plugin", trace_id)
+            self._notify_revocation(leases, "plugin")
         return len(leases)
 
     def _audit_revoke(

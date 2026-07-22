@@ -253,7 +253,6 @@ async def startup_event() -> None:
         plugin_platform_v2_guard = build_management_guard_from_environment(
             platform=plugin_platform_v2,
         )
-        await plugin_platform_v2.start()
     except BaseException:
         if plugin_platform_v2 is not None:
             await plugin_platform_v2.stop()
@@ -295,6 +294,12 @@ async def startup_event() -> None:
     # before propagating a fatal DataEngine configuration failure.
     try:
         await _init_data_manager()
+        data_manager = getattr(app.state, "data_manager", None)
+        if data_manager is not None:
+            from app.plugin_market_v2 import DataManagerConsumerPort
+
+            plugin_platform_v2.bind_market_data(DataManagerConsumerPort(data_manager))
+        await plugin_platform_v2.start()
     except BaseException:
         await plugin_platform_v2.stop()
         await indicator_runtime_service.stop()

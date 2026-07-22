@@ -20,6 +20,7 @@ from app.plugin_installer_v2.registry import (
     load_activation_registry,
 )
 from app.plugin_platform import PluginManager
+from app.plugin_market_v2.runtime import PluginMarketRuntime
 from app.plugin_security_v2 import (
     AuditLog,
     CapabilityBroker,
@@ -131,6 +132,12 @@ class CorePluginPlatform:
             resolve_contribution=self.resolve_contribution,
         )
         self.adapters.register(self.broker)
+        self.market = PluginMarketRuntime(
+            broker=self.broker,
+            authority=self.authority,
+            resolve_contribution=self.resolve_contribution,
+            deliver=self._deliver_market_batch,
+        )
 
         self._registry = ActivationRegistry()
         self._records: dict[str, ActivationRecord] = {}
@@ -151,6 +158,7 @@ class CorePluginPlatform:
         async with self._reconcile_lock:
             if self._started:
                 return
+            self.market.start()
             await self._refresh_static_state()
             for record in self._registry.plugins:
                 if record.state == "active":
@@ -182,6 +190,7 @@ class CorePluginPlatform:
                 await asyncio.gather(maintenance, return_exceptions=True)
             await self.jobs.stop()
             await self.events.stop()
+            await self.market.stop()
             plugin_ids = set(self._records)
             plugin_ids.update(owner[0] for owner in self.manager.owner_keys())
             for plugin_id in sorted(plugin_ids):
@@ -573,6 +582,28 @@ class CorePluginPlatform:
         )
         await supervisor.event_batch(events, delivery)
 
+    async def _deliver_market_batch(
+        self,
+        plugin_id: str,
+        entrypoint_id: str,
+        generation: int,
+        events: tuple[dict[str, Any], ...],
+        delivery: dict[str, Any],
+    ) -> None:
+        supervisor = self.manager.supervisor(plugin_id, entrypoint_id)
+        if supervisor.state != "active" or supervisor.generation != generation:
+            raise core_error(
+                "PLUGIN_MARKET_STALE_GENERATION",
+                "market batch belongs to an inactive generation",
+                plugin_id=plugin_id,
+            )
+        await supervisor.event_batch(events, delivery)
+
+    def bind_market_data(self, port: Any) -> None:
+        """Bind the Host-owned DataManager adapter without exposing it to plugins."""
+
+        self.market.bind(port)
+
     def publish_event(self, event_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._started:
             return {
@@ -643,6 +674,7 @@ class CorePluginPlatform:
         async with self._reconcile_lock:
             await self.jobs.unregister_plugin(plugin_id)
             await self.events.unregister_plugin(plugin_id)
+            await self.market.clear_plugin(plugin_id, reason="plugin-reconcile")
             self.authority.revoke_plugin(plugin_id)
             self.settings.unbind_plugin(plugin_id)
             await self.manager.remove_plugin(plugin_id)
@@ -807,6 +839,7 @@ class CorePluginPlatform:
             "events": self.events.snapshot(),
             "jobs": self.jobs.snapshot(),
             "notifications": self.notifications.snapshot(),
+            "market": self.market.diagnostics(),
             "loadFailures": [
                 {
                     "pluginId": key,
@@ -828,6 +861,9 @@ class DisabledCorePluginPlatform:
         return None
 
     async def stop(self) -> None:
+        return None
+
+    def bind_market_data(self, port: Any) -> None:
         return None
 
     def publish_event(self, event_id: str, payload: dict[str, Any]) -> dict[str, Any]:

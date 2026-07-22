@@ -308,15 +308,17 @@ golden。可信开发包已发布为
 artifact。CandleScope 已删除 `packages/pyne-runtime` 和 in-process Pyne facade。完整执行记录见
 [`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
 
-独立演进的通用 Plugin Platform v2 已完成前五阶段，并达到“最小通用插件平台”：除 SDK、
+独立演进的通用 Plugin Platform v2 已完成前六阶段：除 SDK、
 业务无关 Host、Bundle/Installer、权限与 Windows OS 沙箱外，`app.plugin_core_v2` 已把 active
 registry 接入 opt-in 产品生命周期，提供 command/settings/notification/event/job、插件私有
 KV/document/blob、snapshot/migration、版本化公共事件、定时任务、公开安全 catalog 和受保护
-management API。Hello Command 与无 UI Scheduled Notification 已通过真实离线安装、grant、
-lazy activation、Host call 和 revoke 回收。feature flag 默认关闭，环境 bootstrap 继续只允许
-显式 local-trusted，publisher identity 也尚未签名；市场数据、图表/前端、网络、provider、交易
-和 Marketplace 均未开放。执行记录见
-[`PLUGIN_PLATFORM_V2_PHASE5_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE5_zh.md)。
+management API。Phase 6 新增受 scope 约束的 live symbol、K 线、TradeFlow、partial
+order-book 只读 Host call、有界 K 线订阅与 marker-only Render IR registry。Market Scanner
+参考插件已通过真实离线安装、grant、lazy activation、链式 Host call、storage、layer 和 revoke
+回收。feature flag 默认关闭，环境 bootstrap 继续只允许显式 local-trusted，publisher identity
+也尚未签名；Phase 7 才负责把已注册图层投影到原生图表，插件前端代码、网络、provider、账户、
+交易和 Marketplace 仍未开放。执行记录见
+[`PLUGIN_PLATFORM_V2_PHASE6_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE6_zh.md)。
 
 Phase 8 新增独立可构建的
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README_zh.md)：

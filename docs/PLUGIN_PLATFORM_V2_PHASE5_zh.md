@@ -22,9 +22,10 @@ Phase 5 把前四阶段的独立 SDK、Host、Installer 和安全控制面接成
 - 公开安全 catalog 与受 Phase 4 本地管理门保护的 lifecycle/permission/command/job/settings API；
 - SDK 自带 Hello Command 和无 UI Scheduled Notification 两个真实参考插件。
 
-据此，当前代码可以称为**最小通用插件平台**，不再只是“自定义指标 runtime”或孤立的
-sidecar 基础设施。“最小”很重要：Phase 6–12 的领域能力尚未实现，插件仍不能绕过 Host
-边界获得任意功能。
+据此，截至 Phase 5 的代码可以称为**最小通用插件平台**，不再只是“自定义指标 runtime”
+或孤立的 sidecar 基础设施。“最小”很重要：当时 Phase 6–12 的领域能力尚未实现，插件仍
+不能绕过 Host 边界获得任意功能。Phase 6 的后续只读 market/chart-layer 交付见
+[`PLUGIN_PLATFORM_V2_PHASE6_zh.md`](PLUGIN_PLATFORM_V2_PHASE6_zh.md)。
 
 ## 2. 产品组合根与零状态默认值
 

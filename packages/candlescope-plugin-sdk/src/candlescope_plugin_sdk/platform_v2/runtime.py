@@ -45,6 +45,7 @@ from .models import (
     HostCallRequest,
     InvokeRequest,
     PluginManifest,
+    RequestContext,
     RuntimeDescriptor,
 )
 from .rpc import RpcFailure, RpcFrame, RpcId, RpcRequest, RpcSuccess, failure_from_exception
@@ -119,7 +120,7 @@ class BasePlatformPlugin(ABC):
         self,
         token: str,
         response: RpcSuccess | RpcFailure,
-    ) -> dict[str, Any]:
+    ) -> InvocationOutcome:
         raise PlatformProtocolError(
             RPC_CONTRACT_VIOLATION,
             "HOST_CALL_COMPLETION_UNSUPPORTED",
@@ -141,6 +142,7 @@ class _PendingInvocation:
     request_id: RpcId
     generation: int
     token: str
+    request_context: RequestContext
     host_call_id: RpcId | None = None
 
 
@@ -406,6 +408,7 @@ class PlatformDispatcher:
                 request_id=request.id,
                 generation=request.generation,
                 token=outcome.token,
+                request_context=invocation.request_context,
             )
             return ()
         if isinstance(outcome, HostCallInvocation):
@@ -450,6 +453,7 @@ class PlatformDispatcher:
             request_id=request.id,
             generation=request.generation,
             token=outcome.token,
+            request_context=invocation.request_context,
             host_call_id=host_call_id,
         )
         self._pending[request.id] = pending
@@ -490,10 +494,40 @@ class PlatformDispatcher:
                 "host.call response belongs to a stale generation",
             )
         try:
-            result = normalize_json(
-                self._plugin.complete_host_call(pending.token, response),
-                path="invoke.result",
-            )
+            outcome = self._plugin.complete_host_call(pending.token, response)
+            if isinstance(outcome, HostCallInvocation):
+                if outcome.call.request_context != pending.request_context:
+                    raise PlatformProtocolError(
+                        RPC_CONTRACT_VIOLATION,
+                        "HOST_CALL_CONTEXT_MISMATCH",
+                        "chained host.call must retain the originating requestContext",
+                    )
+                if outcome.call.capability_handle not in self._capabilities:
+                    raise PlatformProtocolError(
+                        RPC_CAPABILITY_INVALID,
+                        "CAPABILITY_HANDLE_INVALID",
+                        "chained host.call used an unknown or revoked capability handle",
+                    )
+                self._host_calls.pop(response.id, None)
+                next_host_call_id = f"plugin:{self._highest_generation}:{self._next_host_call_id}"
+                self._next_host_call_id += 1
+                pending.token = outcome.token
+                pending.host_call_id = next_host_call_id
+                self._host_calls[next_host_call_id] = original_id
+                return (
+                    RpcRequest(
+                        id=next_host_call_id,
+                        method=METHOD_HOST_CALL,
+                        params=outcome.call.to_wire(),
+                        generation=pending.generation,
+                    ),
+                )
+            if isinstance(outcome, DeferredInvocation):
+                self._host_calls.pop(response.id, None)
+                pending.token = outcome.token
+                pending.host_call_id = None
+                return ()
+            result = normalize_json(outcome, path="invoke.result")
             if not isinstance(result, dict):
                 raise PlatformContractError(
                     "INVALID_CONTRACT",

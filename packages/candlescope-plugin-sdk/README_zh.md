@@ -21,8 +21,9 @@ candlescope.script-runtime/1
 通用平台协议为 `candlescope.plugin/2` 与 `candlescope.host-api/1`。完整契约见
 [`docs/protocol-v2.md`](docs/protocol-v2.md)，可运行参考见
 [`Hello Command`](examples/platform-v2/hello-command.manifest.json) 和
-[`Scheduled Notification`](examples/platform-v2/scheduled-notification.manifest.json)。CandleScope
-Phase 2–5 已提供生产 Host、Installer、权限/沙箱和 opt-in 核心产品组合根；SDK 本身仍不授予
+[`Scheduled Notification`](examples/platform-v2/scheduled-notification.manifest.json)，以及 wheel
+内的 `platform_v2.examples.market_scanner` 参考插件。CandleScope Phase 2–6 已提供生产
+Host、Installer、权限/沙箱和 opt-in 核心产品组合根；SDK 本身仍不授予
 任何 Host 能力，实际 capability、scope 和信任级别以安装目标为准。
 
 ## v1 已冻结能力
@@ -122,10 +123,14 @@ v2 格式不会自动迁移 v1 包；完整布局、固定 SHA-256、staged、�
 ```powershell
 candlescope-hello-command
 candlescope-scheduled-notification
+candlescope-market-scanner
 ```
 
 后者声明 `notification/1` 与 `job/1`，通过 `notifications.show` Host call 完成无 UI 定时
-通知。它只演示 Phase 5 已开放的能力；行情、图表、网络、文件、secrets 和交易仍不可用。
+通知。`candlescope-market-scanner` 演示 Phase 6 的链式 Host call、scope 内 live symbol/K 线
+读取、私有 document 存储和 marker-only `candlescope.render/1` 图层。插件仍不能获得
+`DataManager`、用 live handle 读取 replay、注入任意前端代码，网络、文件、secrets、账户和
+交易能力也仍不可用。
 
 ## 开发门禁
 
@@ -139,5 +144,5 @@ python scripts/package_smoke.py --dist-dir dist
 
 `package_smoke.py` 会把构建出的 wheel 离线安装到全新临时 venv，通过真实 console entry
 point 重放冻结的 v1 Hello Runtime 与 v2 Hello Command transcript，并确认 Scheduled
-Notification 的模块、manifest resource 和 console entry point 已被打包。发布前应在 Python
+Notification 与 Market Scanner 的模块、manifest resource 和 console entry point 已被打包。发布前应在 Python
 3.12 和 3.13 各运行一次。

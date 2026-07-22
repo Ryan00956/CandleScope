@@ -446,20 +446,23 @@ The product bootstrap pins its URL, size, platform, and outer SHA-256, while the
 generic community installer remains local-artifact-only. CandleScope no longer
 contains `packages/pyne-runtime` or an in-process Pyne facade.
 
-The separately evolving general Plugin Platform v2 has completed its first five
-phases and now meets the "minimum general plugin platform" milestone. In
+The separately evolving general Plugin Platform v2 has completed its first six
+phases. In
 addition to the SDK, business-neutral Host, Bundle/Installer, permissions, and
 Windows OS sandbox, `app.plugin_core_v2` connects the active registry to an
 opt-in product lifecycle. It provides command/settings/notification/event/job
 contributions, private KV/document/blob storage with snapshots and migrations,
 versioned public events, scheduled work, a safe public catalog, and protected
-management APIs. Hello Command and the no-UI Scheduled Notification reference
-have passed real offline install, grant, lazy activation, Host-call, and revoke
-reclamation tests. The feature flag remains off by default, environment
+management APIs. Phase 6 adds scope-bounded read-only live symbol, bar,
+TradeFlow, and partial order-book Host calls, bounded bar subscriptions, and a
+marker-only Render IR registry. The Market Scanner reference has passed real
+offline install, grant, lazy activation, chained Host-call, storage, layer, and
+revoke-reclamation tests. The feature flag remains off by default, environment
 bootstrap remains explicitly local-trusted, and publisher identities are not
-signed. Market data, chart/frontend extensions, network, providers, trading,
-and Marketplace distribution are not open. See the
-[`Phase 5 execution record`](docs/PLUGIN_PLATFORM_V2_PHASE5_zh.md).
+signed. Phase 7 still owns projection of registered layers into the native
+chart. Plugin frontend code, network, providers, accounts, trading, and
+Marketplace distribution are not open. See the
+[`Phase 6 execution record`](docs/PLUGIN_PLATFORM_V2_PHASE6_zh.md).
 
 Phase 8 adds the independently buildable
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README.md).

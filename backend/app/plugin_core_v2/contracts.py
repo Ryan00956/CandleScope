@@ -24,6 +24,7 @@ CORE_CONTRIBUTION_KINDS = frozenset(
         "notification/1",
         "event-subscriber/1",
         "job/1",
+        "chart-layer/1",
     }
 )
 
@@ -639,6 +640,53 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
                 contribution_id=item.id,
             ),
             "runOnStartup": config.get("runOnStartup", False),
+        }
+    elif item.kind == "chart-layer/1":
+        _exact_keys(
+            config,
+            allowed={"target", "zOrder", "maxItems", "maxBytes", "maxTextChars"},
+            label="chart layer configuration",
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+        target = config.get("target", "main-chart")
+        z_order = config.get("zOrder", "above-series")
+        if target != "main-chart" or z_order not in {
+            "above-series",
+            "below-series",
+        }:
+            _fail(
+                "chart layer target or zOrder is unsupported",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        config = {
+            "target": target,
+            "zOrder": z_order,
+            "maxItems": _bounded_int(
+                config.get("maxItems", 500),
+                minimum=1,
+                maximum=5_000,
+                label="maxItems",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            ),
+            "maxBytes": _bounded_int(
+                config.get("maxBytes", 128 * 1024),
+                minimum=1_024,
+                maximum=1024 * 1024,
+                label="maxBytes",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            ),
+            "maxTextChars": _bounded_int(
+                config.get("maxTextChars", 128),
+                minimum=1,
+                maximum=1_024,
+                label="maxTextChars",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            ),
         }
     else:
         raise AssertionError(

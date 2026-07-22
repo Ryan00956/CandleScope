@@ -2,12 +2,12 @@
 
 > 状态：执行中；Phase 0 已完成（`381dd02`），Phase 1 已完成（`d29ad4d`），Phase 2
 > 已完成（`d755f27`），Phase 3 已完成（`eb7316b`），Phase 4 已完成（`e20d7c4`），
-> Phase 5 已完成实现与技术验收（本阶段提交）。
+> Phase 5 已完成（`b77444a`），Phase 6 已完成实现与技术验收（本阶段提交）。
 >
 > 基线：`codex/plugin-platform-v1@400e520`，2026-07-22。
 >
-> 授权边界：本文只定义目标架构、实施顺序、质量门和回滚边界，不授权修改生产代码、
-> 发布安装包、迁移用户插件或开放 marketplace。
+> 原始方案授权边界：本文只定义目标架构、实施顺序、质量门和回滚边界；实际代码变更仍按
+> 用户后续逐阶段授权执行，不授权发布安装包、迁移用户插件或开放 marketplace。
 
 ## 1. 结论
 
@@ -731,8 +731,8 @@ frontend/src/features/plugins/
 | Phase 2：通用 Host 控制面 | 已完成（`d755f27`） | 双向 RPC、generation、通用 supervisor | 后端贡献点运行 |
 | Phase 3：Bundle/Installer v2 | 已完成（`eb7316b`） | 多 entrypoint/assets、staging、原子激活 | 可管理安装与回滚 |
 | Phase 4：权限与 OS 沙箱 | 已完成（`e20d7c4`） | Grant Store、Broker、隔离、审计 | 可开放受控 Host API |
-| Phase 5：核心后端扩展点 | 已完成（本阶段提交） | command/settings/storage/event/job | 最小通用插件平台 |
-| Phase 6：市场数据 consumer/图层 | 未开始 | read/subscribe、Render IR layer | 扫描器、研究、图表工具 |
+| Phase 5：核心后端扩展点 | 已完成（`b77444a`） | command/settings/storage/event/job | 最小通用插件平台 |
+| Phase 6：市场数据 consumer/图层 | 已完成（本阶段提交） | read/subscribe、Render IR layer | 扫描器、研究、图表工具 |
 | Phase 7：声明式前端 | 未开始 | catalog、manager、native slots | 无任意 JS 的产品 UI |
 | Phase 8：Sandbox UI | 未开始 | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
 | Phase 9：网络/文件/HTTP gateway | 未开始 | 受控外部交互与命名空间 API | 集成型插件 |
@@ -905,7 +905,7 @@ compatibility wrapper 可切回原 v1 supervisor；不改变 bundle/registry 格
 > 2026-07-22 已完成实现与技术验收。产品组合根、五类核心贡献点、私有 storage、event/job、
 > 公开 catalog、受保护 management API 和两个参考插件已交付；证据与保留边界见
 > [`PLUGIN_PLATFORM_V2_PHASE5_zh.md`](PLUGIN_PLATFORM_V2_PHASE5_zh.md)。产品 feature flag
-> 默认关闭，环境 bootstrap 仍只支持显式 `local-trusted`；Phase 6–12 能力未提前开放。
+> 默认关闭，环境 bootstrap 仍只支持显式 `local-trusted`；截至该阶段 Phase 6–12 能力未提前开放。
 
 ### 交付
 
@@ -927,11 +927,16 @@ compatibility wrapper 可切回原 v1 supervisor；不改变 bundle/registry 格
 
 ### 里程碑
 
-Phase 5 退出门已经达到，因此当前实现可称为“最小通用插件平台”。这不等于“完整平台”：
-市场数据、图表/前端、网络、provider、交易、签名和 Marketplace 仍必须按 Phase 6–12 的退出门
-逐阶段交付。
+Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插件平台”。这不等于“完整平台”；
+后续能力仍必须按 Phase 6–12 的退出门逐阶段交付。
 
 ## 22. Phase 6：市场数据 consumer 与图表图层
+
+> 2026-07-22 已完成实现与技术验收。受 scope 约束的 live symbol/K 线/TradeFlow/partial
+> order-book 只读 broker、有界 K 线订阅、marker-only `chart-layer/1` 和 Market Scanner
+> 参考插件已交付；证据与保留边界见
+> [`PLUGIN_PLATFORM_V2_PHASE6_zh.md`](PLUGIN_PLATFORM_V2_PHASE6_zh.md)。图层仅进入 Host
+> registry，Phase 7 前不会投影到原生图表；网络、provider、账户与交易仍未开放。
 
 ### 交付
 

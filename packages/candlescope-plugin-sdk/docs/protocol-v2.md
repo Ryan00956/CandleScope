@@ -5,10 +5,12 @@ CandleScope backend plugin entrypoints. It does not replace
 `candlescope.script-runtime/1` and it does not grant direct access to
 CandleScope internals.
 
-This document describes the Phase 1 SDK contract. A shipping CandleScope Host,
-bundle installer, permission broker, OS sandbox, frontend bridge, market-data
-provider, and trading broker belong to later independently gated phases. A
-Python process using this SDK is not thereby a security sandbox.
+This document describes the Phase 1 control contract plus additive contracts
+shipped through Phase 6. The CandleScope product now supplies the Host,
+installer, permission broker, core services, scoped read-only live market
+consumer, and marker-only chart-layer registry. Frontend bridges, market-data
+providers, and trading brokers remain independently gated. A Python process
+using this SDK is not thereby a security sandbox.
 
 ## Stable identifiers
 
@@ -203,9 +205,11 @@ without threads or an unbounded work queue.
 
 ### `eventBatch`
 
-Delivers one bounded list of public event DTOs plus delivery metadata. This is
-for low-rate control events, not order books, trades, files, or large history.
-Those require the separately negotiated bounded data plane in a later phase.
+Delivers one bounded list of public event DTOs plus delivery metadata. It is
+used for low-rate control events and Phase 6 bounded K-line batches. It is not
+an unbounded order-book, trade, file, or large-history transport. Dedicated
+named-pipe/UDS and optional binary codecs remain a later measured data-plane
+optimization, not a capability plugins may assume.
 
 ### `healthCheck`
 
@@ -273,10 +277,60 @@ correlation. A later response with the exact negotiated generation can still
 complete the original invocation; once cancelled or completed, the correlation
 cannot be reused.
 
+`complete_host_call()` may return another `HostCallInvocation`. This performs a
+sequential, bounded chain while retaining the original request context and
+generation; it does not create concurrent authority or bypass per-method rate,
+activation, response-size, and runtime in-flight budgets. Market Scanner uses
+this to read settings, symbols, each scoped series, private storage, and a chart
+layer without receiving any Host Python object.
+
 The SDK validates correlation and static ownership. The CandleScope Host must
 still validate that the opaque handle binds the exact plugin, publisher,
 installation digest, entrypoint, process instance, generation, permission
 scope, expiration, and rate policy.
+
+## Phase 6 market consumer and chart layer
+
+The public SDK exports strict request models and schema identifiers for:
+
+- `market.symbols.read`;
+- `market.bars.read`, `market.bars.subscribe`, `market.bars.cancel`, and
+  `market.bars.resume`;
+- `market.trades.read` and `market.order-book.read`;
+- `chart.layer.publish` with marker-only `candlescope.render/1`.
+
+Every market request carries an explicit context:
+
+```json
+{
+  "mode": "live",
+  "exchange": "binance",
+  "marketType": "spot"
+}
+```
+
+Live Host adapters reject `mode: replay` even if a malformed or over-broad
+grant tries to include it. Symbol, market, interval, history depth, item count,
+order-book depth, and concurrency are checked against the opaque lease before
+the DataManager adapter runs. Bar pages include explicit coverage,
+trusted-finality, source-quality, missing-range, pagination, and availability
+fields; no unknown provenance is promoted to verified continuity.
+`trustedFinal` is true only when both `allRowsFinal` and
+`verifiedContiguous` are explicitly true.
+
+Bar subscriptions bind one exact series and activation generation. Forming
+updates use latest-only coalescing. Closed and amended rows enter a reliable
+bounded queue; saturation emits `resyncRequired: true` and tears down the
+consumer lease instead of silently dropping final data. Successful batches use
+monotonic sequence numbers, retain a small bounded resume window, and otherwise
+require an explicit resync. Revocation, disable, crash, generation change, or
+Host stop releases both the DataManager event subscription and stream consumer
+lease.
+
+Render IR v1 accepts declarative markers only. The Host validates IDs, time,
+position, shape, hex color, optional price, text length, total items, encoded
+bytes, revision, layer contribution ownership, context, and generation. Phase
+7 owns native frontend consumption; Phase 6 does not load plugin JavaScript.
 
 ## Error behavior
 
@@ -296,16 +350,19 @@ private exception text on stdout.
 
 ## Reference implementation and boundaries
 
-Run the SDK example after installation:
+Run the SDK examples after installation:
 
 ```powershell
 candlescope-hello-command
+candlescope-market-scanner
 ```
 
-It contributes one permission-free `command/1`, supports activation, invocation,
+Hello Command contributes one permission-free `command/1`, supports activation, invocation,
 health, deferred cancellation, deactivation, and shutdown, and has a fixed
-transcript. It does not prove Host installation, product UI, OS sandboxing,
-market-data access, secrets, trading, or marketplace trust.
+transcript. Market Scanner is an integration reference for scoped read/storage/layer
+Host calls; the SDK executable alone still grants no capabilities. Neither
+example proves product UI, untrusted OS sandboxing, secrets, trading, or
+marketplace trust.
 
 The reference server is deliberately synchronous and bounded. Phase 2 owns the
 production Host supervisor, async concurrent reader/writer, process generation,

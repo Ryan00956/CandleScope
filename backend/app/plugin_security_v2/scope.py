@@ -14,10 +14,14 @@ from .errors import security_error
 _UPPER_BOUND_KEYS = frozenset(
     {
         "maxConcurrent",
+        "maxDepthLevels",
         "maxHistoryBars",
+        "maxItems",
         "maxNotional",
         "maxRequests",
         "maxRuntimeSeconds",
+        "maxSymbolsPerCall",
+        "maxTrades",
         "ratePerMinute",
         "storageBytes",
     }

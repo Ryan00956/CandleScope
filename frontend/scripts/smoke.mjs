@@ -14,6 +14,7 @@ import { runExportMatrix } from "./export-matrix.mjs";
 import {
   resolveShortSwitchStepTransition,
   summarizeShortSwitchIndicatorReadiness,
+  summarizeShortSwitchLongTasks,
 } from "./short-switch-readiness.mjs";
 import { runChartTypeMatrix } from "./chart-type-matrix.mjs";
 import {
@@ -1105,6 +1106,62 @@ async function markShortSwitchStepStart(cdp, phase, interval) {
   return Number(result.result?.value) || 0;
 }
 
+async function startShortSwitchLongTaskObserver(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const previous = window.__CANDLESCOPE_SHORT_SWITCH_LONG_TASKS__;
+      previous?.observer?.disconnect?.();
+      const state = {
+        supported: typeof PerformanceObserver === 'function',
+        entries: [],
+        observer: null,
+      };
+      if (state.supported) {
+        try {
+          state.observer = new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) {
+              state.entries.push({
+                startTime: Number(entry.startTime),
+                duration: Number(entry.duration),
+                name: String(entry.name || 'self'),
+                attribution: Array.from(entry.attribution || [], (attribution) => ({
+                  name: String(attribution?.name || ''),
+                  containerType: String(attribution?.containerType || ''),
+                  containerName: String(attribution?.containerName || ''),
+                  containerId: String(attribution?.containerId || ''),
+                  containerSrc: String(attribution?.containerSrc || ''),
+                })),
+              });
+            }
+          });
+          state.observer.observe({ type: 'longtask', buffered: false });
+        } catch {
+          state.supported = false;
+          state.observer = null;
+        }
+      }
+      window.__CANDLESCOPE_SHORT_SWITCH_LONG_TASKS__ = state;
+      return state.supported;
+    })()`,
+    returnByValue: true,
+  });
+  return result.result?.value === true;
+}
+
+async function stopShortSwitchLongTaskObserver(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const state = window.__CANDLESCOPE_SHORT_SWITCH_LONG_TASKS__;
+      state?.observer?.disconnect?.();
+      const entries = Array.isArray(state?.entries) ? state.entries.slice() : [];
+      delete window.__CANDLESCOPE_SHORT_SWITCH_LONG_TASKS__;
+      return entries;
+    })()`,
+    returnByValue: true,
+  });
+  return Array.isArray(result.result?.value) ? result.result.value : [];
+}
+
 async function clickInterval(cdp, interval) {
   const result = await cdp.send("Runtime.evaluate", {
     expression: `(() => {
@@ -1164,7 +1221,13 @@ async function waitForIntervalReady(cdp, interval, sincePerfMs, timeoutMs) {
   return { ready: false, elapsedMs: Date.now() - started, detail };
 }
 
-function buildShortSwitchReadinessOptions(interval, datasetKey, sincePerfMs, args) {
+function buildShortSwitchReadinessOptions(
+  interval,
+  datasetKey,
+  sincePerfMs,
+  args,
+  { enforceSubmissionBudget = false } = {},
+) {
   const expectedIndicatorIds = (args.overlayHeavy
     ? SMOKE_OVERLAY_HEAVY_INDICATORS
     : SMOKE_ACTIVE_INDICATORS)
@@ -1174,9 +1237,11 @@ function buildShortSwitchReadinessOptions(interval, datasetKey, sincePerfMs, arg
     : { ma: 1 };
   return {
     datasetKey,
+    ...(enforceSubmissionBudget ? { expectedMainSetDataCount: 1 } : {}),
     expectedIndicatorIds,
     expectedSeriesCounts,
     interval,
+    ...(enforceSubmissionBudget ? { maxSetDataPerSeries: 1 } : {}),
     sinceAtMs: sincePerfMs,
   };
 }
@@ -1227,6 +1292,7 @@ async function runShortSwitchStep(
     datasetKey,
     readinessSincePerfMs,
     args,
+    { enforceSubmissionBudget: phase.startsWith("short-switch-measured:") },
   );
   const indicatorBarrierWait = ready.ready
     ? await waitForShortSwitchIndicatorBarrier(cdp, readinessOptions, args)
@@ -1243,16 +1309,29 @@ async function runShortSwitchStep(
   );
   const indicatorBarrier = {
     ...indicatorBarrierWait,
-    ready: Boolean(indicatorBarrierWait.ready && finalBarrierDetail.indicatorDataReady),
+    ready: Boolean(
+      indicatorBarrierWait.ready
+      && finalBarrierDetail.indicatorDataReady
+      && finalBarrierDetail.protocolReady
+      && finalBarrierDetail.submissionReady
+    ),
     detail: finalBarrierDetail,
   };
   const indicatorDataReady = Boolean(finalBarrierDetail.indicatorDataReady);
+  const commitAtMs = Number(ready.detail?.commit?.atMs);
+  const lastSubmissionAtMs = Number(finalBarrierDetail.lastSubmissionAtMs);
+  const attributionEndPerfMs = Math.max(
+    sincePerfMs,
+    ...(Number.isFinite(commitAtMs) ? [commitAtMs] : []),
+    ...(Number.isFinite(lastSubmissionAtMs) ? [lastSubmissionAtMs] : []),
+  );
   return {
     phase,
     interval,
     startedAtMs,
     elapsedMs: Date.now() - startedAtMs,
     sincePerfMs,
+    attributionEndPerfMs,
     transitioned: transition.transitioned,
     primedFromInitial: transition.primedFromInitial,
     click,
@@ -1271,37 +1350,44 @@ async function runShortSwitchAcceptance(cdp, networkCapture, args) {
   }
 
   const steps = [];
-  steps.push(await runShortSwitchStep(
-    cdp,
-    networkCapture,
-    first,
-    `short-switch-warm:${first}`,
-    args,
-    { allowInitialPrime: true },
-  ));
-  steps.push(await runShortSwitchStep(
-    cdp,
-    networkCapture,
-    second,
-    `short-switch-warm:${second}`,
-    args,
-  ));
-  steps.push(await runShortSwitchStep(
-    cdp,
-    networkCapture,
-    first,
-    `short-switch-measured:${first}`,
-    args,
-  ));
-  steps.push(await runShortSwitchStep(
-    cdp,
-    networkCapture,
-    second,
-    `short-switch-measured:${second}`,
-    args,
-  ));
+  const longTaskSupported = await startShortSwitchLongTaskObserver(cdp);
+  let observedLongTasks = [];
+  try {
+    steps.push(await runShortSwitchStep(
+      cdp,
+      networkCapture,
+      first,
+      `short-switch-warm:${first}`,
+      args,
+      { allowInitialPrime: true },
+    ));
+    steps.push(await runShortSwitchStep(
+      cdp,
+      networkCapture,
+      second,
+      `short-switch-warm:${second}`,
+      args,
+    ));
+    steps.push(await runShortSwitchStep(
+      cdp,
+      networkCapture,
+      first,
+      `short-switch-measured:${first}`,
+      args,
+    ));
+    steps.push(await runShortSwitchStep(
+      cdp,
+      networkCapture,
+      second,
+      `short-switch-measured:${second}`,
+      args,
+    ));
+  } finally {
+    observedLongTasks = await stopShortSwitchLongTaskObserver(cdp);
+  }
 
   const measured = networkCapture.summary({ phasePrefix: "short-switch-measured:" });
+  const longTasks = summarizeShortSwitchLongTasks(observedLongTasks, steps);
   const maxIndicatorRequests = Math.max(0, args.shortSwitchMaxIndicatorRequests);
   const stepsReady = steps.every((step) => (
     step.click.ok
@@ -1316,11 +1402,20 @@ async function runShortSwitchAcceptance(cdp, networkCapture, args) {
     settleMs: args.shortSwitchSettleMs,
     steps,
     measured,
+    longTasks: {
+      supported: longTaskSupported,
+      ...longTasks,
+    },
     acceptance: {
       maxIndicatorRangeRequests: maxIndicatorRequests,
       actualIndicatorRangeRequests: measured.requestCount,
+      attributableLongTasksOver50Ms: longTasks.count,
+      longTaskInstrumentationSupported: longTaskSupported,
       stepsReady,
-      passed: stepsReady && measured.requestCount <= maxIndicatorRequests,
+      passed: stepsReady
+        && measured.requestCount <= maxIndicatorRequests
+        && longTaskSupported
+        && longTasks.count === 0,
     },
   };
 }

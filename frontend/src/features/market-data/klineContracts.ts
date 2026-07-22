@@ -175,6 +175,9 @@ export interface FeedCommitMeta {
   seedIfEmpty?: boolean;
   deferIndicatorWindow?: boolean;
   indicatorWindowOwner?: string;
+  historyComplete?: boolean;
+  historyRepairPending?: boolean;
+  historyValidatedCountBack?: number | null;
 }
 
 export interface FeedCacheMeta {

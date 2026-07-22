@@ -375,4 +375,42 @@ test("applyLineSeriesData trusts an explicit realtime tail hint without weakenin
     { trustedTrailingUpdate: true },
   ), "update");
   assert.deepEqual(calls, [["update", next[1]]]);
+  calls.length = 0;
+  assert.equal(applyLineSeriesData(
+    series,
+    next,
+    previous,
+    {},
+    null,
+    { preferSetData: true, trustedTrailingUpdate: true },
+  ), "update", "an owned realtime tail may update during the startup grace window");
+  assert.deepEqual(calls, [["update", next[1]]]);
+});
+
+test("applyLineSeriesData keeps a full reset when a trusted tail changes series shape", () => {
+  let setDataCalls = 0;
+  let updateCalls = 0;
+  const series = structuralMock<NonNullable<Parameters<typeof applyLineSeriesData>[0]>>({
+    setData: () => { setDataCalls += 1; },
+    update: () => { updateCalls += 1; },
+  });
+  const previous = [
+    { time: 1, value: 10 },
+    { time: 2, value: 11 },
+  ];
+  const next = [
+    { time: 1, value: 10 },
+    { time: 3, value: 12 },
+  ];
+
+  assert.equal(applyLineSeriesData(
+    series,
+    next,
+    previous,
+    {},
+    null,
+    { preferSetData: true, trustedTrailingUpdate: true },
+  ), "setData");
+  assert.equal(setDataCalls, 1);
+  assert.equal(updateCalls, 0);
 });

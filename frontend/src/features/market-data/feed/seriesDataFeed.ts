@@ -182,7 +182,7 @@ interface PendingGapRepair {
   nextPollAt: number;
   dormant: boolean;
   terminalReason?: string;
-  onResolved?: () => void;
+  onResolved?: (result: KlineFetchResult) => void;
   onTerminal?: (reason: string) => void;
 }
 
@@ -485,17 +485,17 @@ function mergeStructuredRanges<T extends HistoryExcludedRange | HistoryMissingRa
 }
 
 function combineResolvedCallbacks(
-  current: (() => void) | undefined,
-  next: (() => void) | undefined,
-): (() => void) | undefined {
+  current: ((result: KlineFetchResult) => void) | undefined,
+  next: ((result: KlineFetchResult) => void) | undefined,
+): ((result: KlineFetchResult) => void) | undefined {
   if (!current) return next;
   if (!next || next === current) return current;
   let called = false;
-  return () => {
+  return (result) => {
     if (called) return;
     called = true;
-    current();
-    next();
+    current(result);
+    next(result);
   };
 }
 
@@ -552,19 +552,89 @@ export function capContinuationRanges(
   return merged;
 }
 
+function hasExplicitResolvedRangeProof(result: KlineFetchResult | null | undefined): boolean {
+  return Boolean(
+    result
+    && result.complete === true
+    && result.retryable === false
+    && (result.history_state === "ready" || result.history_state === "exhausted")
+    && result.verified_contiguous === true
+    && result.all_rows_final === true
+    && result.has_tail_gap === false
+    && result.truncated === false
+    && Array.isArray(result.missing_ranges)
+    && result.missing_ranges.length === 0
+  );
+}
+
+function hasExplicitCappedParentRetainedRangeProof(result: KlineFetchResult): boolean {
+  // capContinuationRanges explicitly schedules the pagination continuation and
+  // every reported missing range. A tail-gap flag has no range of its own, so
+  // it cannot be discharged by the child callbacks. Likewise, an omitted
+  // missing_ranges field cannot prove that every retained-range defect was
+  // represented in the scheduled child set.
+  return result.all_rows_final === true
+    && result.has_tail_gap === false
+    && Array.isArray(result.missing_ranges);
+}
+
+export function aggregateResolvedGapRepairResult(
+  parentResult: KlineFetchResult,
+  parentRange: TimeRangeSec,
+  childResults: readonly KlineFetchResult[],
+): KlineFetchResult {
+  // The capped parent already owns the rows returned before pagination
+  // stopped. Child completion proves only the continuation/hole ranges. A
+  // full-window proof is valid only when the parent's retained rows were final
+  // and every child carries an explicit, terminal range proof.
+  const complete = hasExplicitCappedParentRetainedRangeProof(parentResult)
+    && childResults.length > 0
+    && childResults.every(hasExplicitResolvedRangeProof);
+  return {
+    data: [],
+    source: "gap-repair-aggregate",
+    start_ms: secondsToMilliseconds(parentRange.start),
+    end_ms: secondsToMilliseconds(parentRange.end),
+    history_state: complete ? "ready" : "pending",
+    complete,
+    retryable: !complete,
+    verified_contiguous: complete,
+    all_rows_final: complete,
+    has_tail_gap: !complete,
+    truncated: !complete,
+    missing_ranges: complete
+      ? []
+      : [{
+          start_ms: secondsToMilliseconds(parentRange.start),
+          end_ms: secondsToMilliseconds(parentRange.end),
+          reason: "aggregate_quality_unproven",
+        }],
+  };
+}
+
 function childResolutionCallbacks(
+  parentResult: KlineFetchResult,
+  parentRange: TimeRangeSec,
   count: number,
-  onResolved: (() => void) | undefined,
-): Array<(() => void) | undefined> {
-  if (!onResolved) return Array.from({ length: count }, () => undefined);
+  onAggregated: ((result: KlineFetchResult) => void) | undefined,
+): Array<((result: KlineFetchResult) => void) | undefined> {
+  if (!onAggregated) return Array.from({ length: count }, () => undefined);
   let remaining = count;
-  return Array.from({ length: count }, () => {
+  const results = new Array<KlineFetchResult | undefined>(count);
+  return Array.from({ length: count }, (_, index) => {
     let childResolved = false;
-    return () => {
+    return (result: KlineFetchResult) => {
       if (childResolved) return;
       childResolved = true;
+      results[index] = result;
       remaining -= 1;
-      if (remaining === 0) onResolved();
+      if (remaining === 0) {
+        onAggregated(aggregateResolvedGapRepairResult(
+          parentResult,
+          parentRange,
+          results.filter((item): item is KlineFetchResult => item != null),
+        ));
+      }
     };
   });
 }
@@ -1486,7 +1556,7 @@ export class SeriesDataFeed {
     range: TimeRangeSec,
     attempts?: number,
     dormant?: boolean,
-    onResolved?: () => void,
+    onResolved?: (result: KlineFetchResult) => void,
     terminalReason?: string | null,
     onTerminal?: (reason: string) => void,
   ): PendingGapRepair {
@@ -1566,7 +1636,7 @@ export class SeriesDataFeed {
       }
       if (!this.isGapRangeSatisfied(result, pending.range, series.interval)) continue;
       this.pendingGapRepairs.delete(repairKey);
-      pending.onResolved?.();
+      pending.onResolved?.(result);
     }
   }
 
@@ -1674,7 +1744,7 @@ export class SeriesDataFeed {
     result: KlineFetchResult,
     attempts: number,
     dormant: boolean,
-    onResolved?: () => void,
+    onResolved?: (result: KlineFetchResult) => void,
     onTerminal?: (reason: string) => void,
   ): void {
     const current = this.pendingGapRepairs.get(this.gapRepairKey(series, range));
@@ -1683,7 +1753,7 @@ export class SeriesDataFeed {
     const intervalTimeline = createIntervalTimeline(series.interval);
     if (intervalTimeline && this.isGapRangeSatisfied(result, range, series.interval)) {
       this.clearPendingGapRepair(series, range);
-      resolvedCallback?.();
+      resolvedCallback?.(result);
       return;
     }
     const terminalReason = result.retryable === false
@@ -1727,7 +1797,32 @@ export class SeriesDataFeed {
         || children[0]?.start !== range.start
         || children[0]?.end !== range.end;
       if (children.length > 0 && madeProgress) {
-        const callbacks = childResolutionCallbacks(children.length, resolvedCallback);
+        const callbacks = childResolutionCallbacks(
+          result,
+          range,
+          children.length,
+          resolvedCallback
+            ? (aggregateResult) => {
+                if (hasExplicitResolvedRangeProof(aggregateResult)) {
+                  resolvedCallback(aggregateResult);
+                  return;
+                }
+                // Child ranges can be individually usable while their combined
+                // quality metadata still fails to prove the original request.
+                // Restore the full parent as exact pending work instead of
+                // publishing a false settlement or silently abandoning retries.
+                this.updatePendingGapRepairFromResult(
+                  series,
+                  range,
+                  aggregateResult,
+                  attempts,
+                  dormant,
+                  resolvedCallback,
+                  terminalCallback,
+                );
+              }
+            : undefined,
+        );
         this.clearPendingGapRepair(series, range);
         children.forEach((child, index) => {
           this.trackPendingGapRepair(
@@ -1762,7 +1857,7 @@ export class SeriesDataFeed {
   trackPendingResultRepair(
     series: MarketSeries,
     result: KlineFetchResult,
-    onResolved?: () => void,
+    onResolved?: (result: KlineFetchResult) => void,
     onTerminal?: (reason: string) => void,
   ): TimeRangeSec | null {
     const rangeMs = numericResultRange(result) || rangeFromMissing(result);
@@ -2593,6 +2688,13 @@ export class SeriesDataFeed {
           page.verified_contiguous === true
           || (page.truncated && missingRanges(page).length === 0)
         ));
+      const combinedAllRowsFinal = pages.length > 0
+        && pages.every((page) => page.all_rows_final === true);
+      const combinedHasTailGap = pages.some((page) => page.has_tail_gap === true)
+        ? true
+        : pages.length > 0 && pages.every((page) => page.has_tail_gap === false)
+          ? false
+          : undefined;
       const verifiedContiguous = incompletePagination || combinedMissing.length > 0 || anyVerifiedFalse
         ? false
         : (allExplicitlyVerified ? true : finalResult?.verified_contiguous);
@@ -2605,6 +2707,8 @@ export class SeriesDataFeed {
         pageCount: pages.length,
         start_ms: secondsToMilliseconds(range.start),
         end_ms: secondsToMilliseconds(range.end),
+        all_rows_final: combinedAllRowsFinal,
+        ...(combinedHasTailGap === undefined ? {} : { has_tail_gap: combinedHasTailGap }),
         truncated: incompletePagination,
         ...(paginationStopReason === undefined ? {} : { pagination_stop_reason: paginationStopReason }),
         ...(combinedMissing.length === 0 ? {} : { missing_ranges: combinedMissing }),
@@ -2625,6 +2729,12 @@ export class SeriesDataFeed {
         ...(finalResult?.plan === undefined ? {} : { plan: finalResult.plan }),
         indicatorWindowOwner,
       };
+      if (combinedHasTailGap === undefined) {
+        // Do not inherit the final page's verdict when any earlier page was
+        // silent. Undefined remains compatible with legacy range responses,
+        // while the explicit capped-parent proof still fails closed.
+        delete combinedResult.has_tail_gap;
+      }
       const terminalPagination = paginationStopReason === "missing-cursor"
         || paginationStopReason === "stalled-cursor";
       if (

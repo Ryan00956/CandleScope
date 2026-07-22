@@ -68,12 +68,40 @@ export function resolveInitialRows({
   exchange?: string;
   getMemoryRows?: ((symbol: string, interval: string) => KlineBar[] | null | undefined) | null;
 } = {}): InitialRowsResolution | null {
+  const memoryRows = getMemoryRows?.(symbol, interval);
   const warm = resolveWatchlistWarmRows({
     symbol,
     interval,
     marketType,
     exchange,
   });
+  const memoryLastTime = Number(memoryRows?.at(-1)?.time);
+  const warmLastTime = Number(warm?.rows?.at(-1)?.time);
+  const warmCanSupersedeMemory = Boolean(
+    memoryRows?.length
+    && warm?.rows?.length
+    && !warm.needsRepair
+    && warm.rows.length > memoryRows.length
+    && Number.isFinite(memoryLastTime)
+    && Number.isFinite(warmLastTime)
+    && warmLastTime >= memoryLastTime
+  );
+
+  // The chart-owned window is the highest-fidelity hot-switch source. A
+  // watchlist entry is often only a short keepalive tail; replacing a complete
+  // chart window with that sparse tail makes A -> B -> A look like a cold load.
+  // Still allow a materially fuller watchlist window to seed/repair a sparse
+  // chart cache.
+  if (memoryRows?.length && !warmCanSupersedeMemory) {
+    return {
+      rows: memoryRows,
+      tier: "market-data-memory",
+      cacheState: "memory",
+      source: "memory-cache-hit",
+      needsRepair: false,
+    };
+  }
+
   if (warm) {
     recordFrontendCacheAccess({
       owner: "watchlist-full-cache",
@@ -91,7 +119,6 @@ export function resolveInitialRows({
     };
   }
 
-  const memoryRows = getMemoryRows?.(symbol, interval);
   if (memoryRows?.length) {
     return {
       rows: memoryRows,

@@ -356,3 +356,62 @@ test("stale initial settlement cannot republish after session cancellation", () 
   assert.deepEqual(commits, []);
   assert.equal(buffer.hasPending(oldSeriesKey), false);
 });
+
+test("settled history proof must cover the complete pending initial range", () => {
+  const commits: FeedCommitMeta[] = [];
+  const pendingInitial: PendingInitialSeries = {
+    exchange: "binance",
+    marketType: "futures",
+    symbol: "BTCUSDT",
+    interval: "3m",
+    countBack: 1_500,
+    indicatorWindowOwner: "initial-owner",
+    range: { start: 1_000 as never, end: 10_000 as never },
+  };
+  const complete = {
+    data: [],
+    history_state: "ready" as const,
+    complete: true,
+    retryable: false,
+    verified_contiguous: true,
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: false,
+    missing_ranges: [],
+  };
+  const commit: CommitChartData = (_symbol, _interval, _rows, meta) => {
+    commits.push(meta);
+  };
+
+  releasePendingInitialIndicatorWindow(
+    commit,
+    pendingInitial,
+    "initial-history-settled",
+    { ...complete, start_ms: 8_000, end_ms: 10_000 },
+  );
+  assert.deepEqual(commits.at(-1) && {
+    historyComplete: commits.at(-1)!.historyComplete,
+    historyRepairPending: commits.at(-1)!.historyRepairPending,
+    historyValidatedCountBack: commits.at(-1)!.historyValidatedCountBack,
+  }, {
+    historyComplete: false,
+    historyRepairPending: false,
+    historyValidatedCountBack: null,
+  });
+
+  releasePendingInitialIndicatorWindow(
+    commit,
+    pendingInitial,
+    "initial-history-settled",
+    { ...complete, start_ms: 1_000, end_ms: 10_000 },
+  );
+  assert.deepEqual(commits.at(-1) && {
+    historyComplete: commits.at(-1)!.historyComplete,
+    historyRepairPending: commits.at(-1)!.historyRepairPending,
+    historyValidatedCountBack: commits.at(-1)!.historyValidatedCountBack,
+  }, {
+    historyComplete: true,
+    historyRepairPending: false,
+    historyValidatedCountBack: 1_500,
+  });
+});

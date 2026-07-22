@@ -43,10 +43,29 @@ import type { MarketDataRuntimeContract } from "./marketDataRuntimeContract.js";
 import { getClientInstanceId } from "../../services/api.js";
 
 let chartDemandScopeSequence = 0;
+const chartDemandScopeRuntimeId = [
+  Date.now().toString(36),
+  Math.random().toString(36).slice(2, 10),
+].join("-");
+
+export function formatChartDemandScope(
+  clientInstanceId: string,
+  runtimeId: string,
+  sequence: number,
+): string {
+  return `chart:${clientInstanceId}:${runtimeId}:${sequence}`;
+}
 
 function createChartDemandScope(): string {
   chartDemandScopeSequence += 1;
-  return `chart:${getClientInstanceId()}:${chartDemandScopeSequence}`;
+  // Fast Refresh can reload this module while the API transport module keeps
+  // its client id. A per-module nonce prevents sequence 1 from reusing a
+  // backend scope whose demand generation has already advanced.
+  return formatChartDemandScope(
+    getClientInstanceId(),
+    chartDemandScopeRuntimeId,
+    chartDemandScopeSequence,
+  );
 }
 
 export function shouldCommitRightWindowRestore({
@@ -170,13 +189,13 @@ export function useMarketDataRuntime({
     getFromCache,
     getCache,
     hasCache,
-    clearCache,
     getCacheDiagnostics,
     trimCacheEntries,
     mergeCacheData,
     patchCacheTick,
+    activateCachedChartData,
+    detachActiveChartData,
     replaceChartData,
-    clearChartData,
     markChartDataTransition,
     commitMergedChartData,
     commitPatchedChartData,
@@ -392,8 +411,9 @@ export function useMarketDataRuntime({
     getFromCache,
     resolveInitialRows,
     seriesDataFeed,
+    activateCachedChartData,
+    detachActiveChartData,
     replaceChartData,
-    clearChartData,
     markChartDataTransition,
     commitMergedChartData,
     commitPatchedChartData,
@@ -643,7 +663,6 @@ export function useMarketDataRuntime({
   });
 
   const resetForSessionTransition = useSessionTransitionReset({
-    clearCache,
     interval,
     markChartDataTransition,
     realtimePriceRef,
@@ -656,7 +675,7 @@ export function useMarketDataRuntime({
     symbol,
   });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     backgroundPrefetchPriority.yieldToForeground();
     resetForSessionTransition(lastSessionTransition);
     const activeSeries = { exchange, marketType, symbol, interval };
@@ -686,6 +705,7 @@ export function useMarketDataRuntime({
     }
     if (exchangeCatalogStatus === "loading") {
       pendingInitialHistoryRef.current = null;
+      detachActiveChartData(symbol, interval, "exchange-catalog-loading");
       const timer = setTimeout(() => {
         setInitialHistoryPending(false);
         setConnectionStatus("loading");
@@ -700,9 +720,9 @@ export function useMarketDataRuntime({
     }
     if (!historyIntervalAvailable) {
       pendingInitialHistoryRef.current = null;
+      detachActiveChartData(symbol, interval, "history-capability-unavailable");
       const timer = setTimeout(() => {
         setInitialHistoryPending(false);
-        clearChartData("history-capability-unavailable", symbol, interval);
         setConnectionStatus("disconnected");
         setDataSource(null);
         setError(new Error(`当前 ${exchange}/${marketType} 没有可精确拼接 ${interval} 的历史 K 线基准周期`));
@@ -717,7 +737,7 @@ export function useMarketDataRuntime({
     return undefined;
   }, [
     backgroundPrefetchPriority,
-    clearChartData,
+    detachActiveChartData,
     exchange,
     exchangeCatalogStatus,
     historyIntervalAvailable,

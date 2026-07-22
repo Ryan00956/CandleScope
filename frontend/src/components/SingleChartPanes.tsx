@@ -78,6 +78,7 @@ import {
   applyLineSeriesData,
   buildAllowedTimeKeys,
   buildFillRenderEntries,
+  canUseTrailingSeriesUpdate,
 } from "../chart-adapter/chartSeriesData";
 import { normalizeMainChartType } from "../shared/mainChartTypes";
 import { parseIntervalSeconds } from "../utils/intervals";
@@ -122,6 +123,7 @@ import {
   buildVisibleRangeSnapshot,
   disposeChartPaneSurface,
   hasCurrentDatasetOwnership,
+  isIndicatorReconcileReady,
   isConfirmedMainPaneHorizontalPan,
   isMainPanePlotPointerStart,
   resolveIntervalTransitionReplayData,
@@ -137,6 +139,7 @@ import {
   shouldPublishUserViewportRange,
   shouldIssueHistoryTicketForWheel,
   shouldRequestRightWindowRestore,
+  shouldReplayIntervalTransitionSeries,
   shouldRestoreChartViewport,
 } from "./singleChartPaneLifecycle";
 import {
@@ -1271,6 +1274,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const drawingThemePaletteRef = useRef({ upColor, downColor });
   const drawingPriceProjectionKeyRef = useRef("");
   const projectionGenerationRef = useRef(0);
+  // Unlike renderedMainSeriesGenerationRef, this token advances only after a
+  // projection write has actually succeeded. Interval-transition fencing must
+  // never treat a failed setData recovery as ownership of the target dataset.
+  const committedProjectionGenerationRef = useRef(0);
   const projectionRenderContextRef = useRef<ProjectionRenderContext | null>(null);
   const mainSeriesTypeRef = useRef<MainChartType | null>(null);
   const mainSeriesReferenceRef = useRef<{ series: MainSeriesHandle | null; signature: string }>({ series: null, signature: "" });
@@ -1606,6 +1613,22 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     datasetKey,
     seriesStore,
   });
+  const [indicatorReadyDatasetKey, setIndicatorReadyDatasetKey] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    if (!indicatorDatasetOwned) {
+      setIndicatorReadyDatasetKey(null);
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      setIndicatorReadyDatasetKey(datasetKey || null);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [datasetKey, indicatorDatasetOwned, seriesStore]);
+  const indicatorReconcileReady = isIndicatorReconcileReady({
+    datasetKey,
+    datasetOwned: indicatorDatasetOwned,
+    readyDatasetKey: indicatorReadyDatasetKey,
+  });
   const mainSeriesRenderContext = useMemo(() => ({
     downColor,
     indicatorBarColorMap,
@@ -1794,7 +1817,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     paneCrosshairStore.clear();
   }, [datasetKey, interval, onCrosshairMove, paneCrosshairStore, symbol]);
 
-  const dataTimeSet = resolveDataTimeSet(seriesStore);
+  const dataTimeSet = resolveDataTimeSet(indicatorReconcileReady ? seriesStore : null);
   const derivedAuxiliaryIndex = useMemo(() => {
     if (!usesDerivedAxis) return EMPTY_DERIVED_AUXILIARY_INDEX;
     if (auxiliaryDisplayState.datasetKey !== datasetKey
@@ -1819,18 +1842,22 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         return pane ? [pane] : [];
       });
   }, [activePaneIds, subPanes]);
-  const sourcePaneDescriptors = useMemo(() => buildPaneDescriptors({
+  const sourcePaneDescriptors = useMemo(() => {
+    if (!indicatorReconcileReady) return [];
+    return buildPaneDescriptors({
+      dataTimeSet,
+      intervalSeconds: parseIntervalSeconds(interval),
+      mainOverlayLines,
+      paneOrder: activePaneIds,
+      subPanes: activeSubPanes,
+      indicatorMarkers,
+      indicatorFills,
+      indicatorHlines,
+      indicatorBgcolors,
+    });
+  }, [
     dataTimeSet,
-    intervalSeconds: parseIntervalSeconds(interval),
-    mainOverlayLines,
-    paneOrder: activePaneIds,
-    subPanes: activeSubPanes,
-    indicatorMarkers,
-    indicatorFills,
-    indicatorHlines,
-    indicatorBgcolors,
-  }), [
-    dataTimeSet,
+    indicatorReconcileReady,
     interval,
     mainOverlayLines,
     activePaneIds,
@@ -2756,9 +2783,32 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const scheduledMainSeries = mainSeriesRef.current;
     const fallbackMainData = renderedMainSeriesDataRef.current;
     const scheduledMainGeneration = renderedMainSeriesGenerationRef.current;
+    const scheduledProjectionGeneration = projectionGenerationRef.current;
+    const scheduledDatasetKey = datasetKeyRef.current;
+    const scheduledTargetPublicationPending = Boolean(
+      dataMeta?.optimistic === true
+      && dataMeta.targetSeriesKey === scheduledDatasetKey
+    );
     const frameId = requestAnimationFrame(() => {
       if (chartRef.current !== chart) return;
       try {
+        if (!shouldReplayIntervalTransitionSeries({
+          currentCommittedProjectionGeneration: committedProjectionGenerationRef.current,
+          currentProjectionGeneration: projectionGenerationRef.current,
+          currentSeries: mainSeriesRef.current,
+          currentSeriesKey: seriesStoreRef.current?.seriesKey ?? null,
+          scheduledDatasetKey,
+          scheduledProjectionGeneration,
+          scheduledSeries: scheduledMainSeries,
+          targetPublicationPending: scheduledTargetPublicationPending,
+        })) {
+          recordPerfEvent("chart.intervalTransition.reindexSkipped", {
+            datasetKey: scheduledDatasetKey,
+            paneId: "single-chart",
+            reason: "target-projection-committed",
+          });
+          return;
+        }
         const futureTimeAxisPoints = resyncSeriesTimeScaleIndexes(
           futureTimeAxisSeriesRef.current,
           futureTimeAxisDataRef.current,
@@ -2814,7 +2864,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }
     });
     return () => cancelAnimationFrame(frameId);
-  }, [chartAdapter, customBg, interval, notifyDrawingFrameInvalidation, theme, tickMarkFormatter, timeFormatter, timezone]);
+  }, [chartAdapter, customBg, dataMeta?.optimistic, dataMeta?.targetSeriesKey, interval, notifyDrawingFrameInvalidation, theme, tickMarkFormatter, timeFormatter, timezone]);
 
   useEffect(() => {
     const activeType = mainSeriesTypeRef.current || resolvedChartType;
@@ -2983,6 +3033,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       renderedMainSeriesGenerationRef.current += 1;
       publishDrawingProjectionStore(nextProjectionStore);
       projectionGenerationRef.current += 1;
+      committedProjectionGenerationRef.current = projectionGenerationRef.current;
       projectionRenderContextRef.current = mainSeriesRenderContext;
       syncSourceDataRefsFromStore({
         store: seriesStore,
@@ -3318,6 +3369,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         });
         renderedMainSeriesDataRef.current = renderResult.nextData;
         renderedMainSeriesGenerationRef.current += 1;
+        committedProjectionGenerationRef.current = generation;
         projectionRendered = true;
       } catch (error) {
         // The chart may be partially mutated when both an incremental write
@@ -3325,6 +3377,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         // rebuild from output index zero instead of compounding that state.
         renderedMainSeriesDataRef.current = null;
         renderedMainSeriesGenerationRef.current += 1;
+        committedProjectionGenerationRef.current = -1;
         recordPerfEvent("chart.candleSeries.renderError", {
           message: error instanceof Error ? error.message : String(error),
           paneId: "main",
@@ -3448,10 +3501,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           });
           renderedMainSeriesDataRef.current = renderResult.nextData;
           renderedMainSeriesGenerationRef.current += 1;
+          committedProjectionGenerationRef.current = generation;
           projectionRendered = true;
         } catch (error) {
           renderedMainSeriesDataRef.current = null;
           renderedMainSeriesGenerationRef.current += 1;
+          committedProjectionGenerationRef.current = -1;
           recordPerfEvent("chart.candleSeries.renderError", {
             message: error instanceof Error ? error.message : String(error),
             paneId: "main",
@@ -3548,7 +3603,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart || !indicatorDatasetOwned) return;
+    if (!chart || !indicatorDatasetOwned || !indicatorReconcileReady) return;
     const expectedPaneCount = Math.max(1, paneDescriptors.length);
     const paneCountBefore = chart.panes?.()?.length ?? 1;
     const paneStructureChanged = paneCountBefore !== expectedPaneCount;
@@ -3637,6 +3692,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
             crosshairMarkerVisible: showCrosshairDetails && !drawingEngineToolActive,
           }));
           if (!sameIndicatorSeriesData(existing.data, validData)) {
+            const trustedTrailingUpdate = !usesDerivedAxis && (
+              line.renderUpdate === "tail"
+              || (
+                line.indicatorId === "advanced-market-data"
+                && canUseTrailingSeriesUpdate(existing.data, validData)
+              )
+            );
             applyLineSeriesData(existing.series, validData, existing.data, {
               ...detail,
               path: "single-fast",
@@ -3645,7 +3707,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
                 createdAtMs: existing.createdAtMs,
                 usesDerivedAxis,
               }),
-              trustedTrailingUpdate: line.renderUpdate === "tail" && !usesDerivedAxis,
+              trustedTrailingUpdate,
             });
           }
           existing.key = key;
@@ -3742,7 +3804,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     })) {
       setSeriesReady((prev) => prev + 1);
     }
-  }, [datasetKey, desiredMainPaneIndex, drawingEngineToolActive, indicatorDatasetOwned, interval, materializeRuntimePaneLayout, paneDescriptors, seriesReady, showCrosshairDetails, usesDerivedAxis]);
+  }, [datasetKey, desiredMainPaneIndex, drawingEngineToolActive, indicatorDatasetOwned, indicatorReconcileReady, interval, materializeRuntimePaneLayout, paneDescriptors, seriesReady, showCrosshairDetails, usesDerivedAxis]);
 
   useEffect(() => {
     const chart = chartRef.current;

@@ -211,6 +211,40 @@ test("computed coverage is revision-aware and dirty invalidation keeps only the 
   );
 });
 
+test("warm indicator dependencies survive product switches and remain product-scoped", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  const ethContext = { ...baseContext, symbol: "ETHUSDT" };
+  registerBaseKline();
+  registerCacheResource("chart-data-cache", "binance-spot-ETHUSDT-1m", {
+    type: "kline",
+    dependencyKey: klineDependencyKey(ethContext),
+    bars: 100,
+  });
+  cacheIndicatorSnapshot(maIndicator, baseContext, {
+    lines: [{ outputName: "ma", data: [{ time: 10, value: 100 }] }],
+  });
+  cacheIndicatorSnapshot(maIndicator, ethContext, {
+    lines: [{ outputName: "ma", data: [{ time: 10, value: 200 }] }],
+  });
+
+  assert.deepEqual(
+    mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext)).normalized.lines[0]?.data,
+    [{ time: 10, value: 100 }],
+  );
+  assert.deepEqual(
+    mustBeDefined(getCachedIndicatorResult(maIndicator, ethContext)).normalized.lines[0]?.data,
+    [{ time: 10, value: 200 }],
+  );
+
+  unregisterCacheResource("chart-data-cache", "binance-spot-BTCUSDT-1m");
+  assert.equal(getCachedIndicatorResult(maIndicator, baseContext), null);
+  assert.deepEqual(
+    mustBeDefined(getCachedIndicatorResult(maIndicator, ethContext)).normalized.lines[0]?.data,
+    [{ time: 10, value: 200 }],
+  );
+});
+
 test("bounded correction rebases dirty-outside segments and leaves only the dirty hole", () => {
   resetIndicatorResultCache();
   resetCacheRegistry();

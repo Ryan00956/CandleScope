@@ -189,6 +189,18 @@ export function hasCurrentDatasetOwnership({
   );
 }
 
+export function isIndicatorReconcileReady({
+  datasetKey,
+  datasetOwned = false,
+  readyDatasetKey,
+}: {
+  datasetKey?: string | null;
+  datasetOwned?: boolean;
+  readyDatasetKey?: string | null;
+} = {}): boolean {
+  return Boolean(datasetOwned && datasetKey && readyDatasetKey === datasetKey);
+}
+
 export function resolveIntervalTransitionReplayData<TData, TSeries>({
   currentData,
   currentGeneration,
@@ -211,6 +223,35 @@ export function resolveIntervalTransitionReplayData<TData, TSeries>({
     return currentData;
   }
   return fallbackData;
+}
+
+export function shouldReplayIntervalTransitionSeries({
+  currentCommittedProjectionGeneration,
+  currentProjectionGeneration,
+  currentSeries,
+  currentSeriesKey,
+  scheduledDatasetKey,
+  scheduledProjectionGeneration,
+  scheduledSeries,
+  targetPublicationPending = false,
+}: {
+  currentCommittedProjectionGeneration: number;
+  currentProjectionGeneration: number;
+  currentSeries?: unknown;
+  currentSeriesKey?: string | null;
+  scheduledDatasetKey?: string | null;
+  scheduledProjectionGeneration: number;
+  scheduledSeries?: unknown;
+  targetPublicationPending?: boolean;
+}): boolean {
+  if (targetPublicationPending || currentSeries !== scheduledSeries) return false;
+  const targetProjectionCommitted = Boolean(
+    scheduledDatasetKey
+    && currentSeriesKey === scheduledDatasetKey
+    && currentCommittedProjectionGeneration === currentProjectionGeneration
+    && currentCommittedProjectionGeneration > scheduledProjectionGeneration
+  );
+  return !targetProjectionCommitted;
 }
 
 export function buildVisibleRangeSnapshot({

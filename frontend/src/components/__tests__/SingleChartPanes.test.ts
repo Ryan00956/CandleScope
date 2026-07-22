@@ -5,6 +5,7 @@ import {
   disposeChartPaneSurface,
   hasCurrentDatasetOwnership as hasCurrentDatasetOwnershipProduction,
   isConfirmedMainPaneHorizontalPan,
+  isIndicatorReconcileReady,
   isMainPanePlotPointerStart,
   removedDrawingSubPaneScopeKeys,
   prepareDrawingSurfaceForSeriesReplacement,
@@ -20,6 +21,7 @@ import {
   shouldPublishUserViewportRange,
   shouldRequestMoreLeft,
   shouldRequestRightWindowRestore,
+  shouldReplayIntervalTransitionSeries,
   shouldRestoreChartViewport as shouldRestoreChartViewportProduction,
 } from "../singleChartPaneLifecycle.js";
 import { structuralMock } from "../../test/testHelpers.js";
@@ -481,6 +483,80 @@ test("fitting a fresh chart does not auto-load left history before user interact
     rangeFrom: 21,
     userInteracted: true,
   }), false);
+});
+
+test("indicator reconciliation waits one owned task after dataset publication", () => {
+  const datasetKey = "binance-spot-BTCUSDT-5m";
+
+  assert.equal(isIndicatorReconcileReady({
+    datasetKey,
+    datasetOwned: true,
+    readyDatasetKey: null,
+  }), false);
+  assert.equal(isIndicatorReconcileReady({
+    datasetKey,
+    datasetOwned: false,
+    readyDatasetKey: datasetKey,
+  }), false);
+  assert.equal(isIndicatorReconcileReady({
+    datasetKey,
+    datasetOwned: true,
+    readyDatasetKey: "binance-spot-BTCUSDT-1m",
+  }), false);
+  assert.equal(isIndicatorReconcileReady({
+    datasetKey,
+    datasetOwned: true,
+    readyDatasetKey: datasetKey,
+  }), true);
+});
+
+test("interval replay yields when the target dataset projection has committed", () => {
+  const series = {};
+  const base = {
+    currentCommittedProjectionGeneration: 10,
+    currentProjectionGeneration: 10,
+    currentSeries: series,
+    currentSeriesKey: "binance-spot-BTCUSDT-3m",
+    scheduledDatasetKey: "binance-spot-BTCUSDT-3m",
+    scheduledProjectionGeneration: 10,
+    scheduledSeries: series,
+  };
+
+  assert.equal(shouldReplayIntervalTransitionSeries(base), true);
+  assert.equal(shouldReplayIntervalTransitionSeries({
+    ...base,
+    currentProjectionGeneration: 11,
+  }), true, "a failed target projection cannot claim a successful submission");
+  assert.equal(shouldReplayIntervalTransitionSeries({
+    ...base,
+    currentCommittedProjectionGeneration: 11,
+    currentProjectionGeneration: 11,
+  }), false, "the target projection already owns the full series submission");
+  assert.equal(shouldReplayIntervalTransitionSeries({
+    ...base,
+    currentCommittedProjectionGeneration: 11,
+    currentProjectionGeneration: 11,
+    currentSeriesKey: "binance-spot-BTCUSDT-1m",
+  }), true, "an old dataset render cannot claim ownership of the target interval");
+  assert.equal(shouldReplayIntervalTransitionSeries({
+    ...base,
+    currentCommittedProjectionGeneration: 11,
+    currentProjectionGeneration: 12,
+  }), true, "a newer failed projection invalidates the previous successful token");
+  assert.equal(shouldReplayIntervalTransitionSeries({
+    ...base,
+    currentCommittedProjectionGeneration: -1,
+    currentProjectionGeneration: 10,
+    scheduledProjectionGeneration: 9,
+  }), true, "a failed delta invalidates the successful token for the same generation");
+  assert.equal(shouldReplayIntervalTransitionSeries({
+    ...base,
+    currentSeries: {},
+  }), false, "a replacement series already received its complete snapshot");
+  assert.equal(shouldReplayIntervalTransitionSeries({
+    ...base,
+    targetPublicationPending: true,
+  }), false, "an optimistic target must not replay the old interval before warm publication");
 });
 
 test("left-edge demand survives the in-flight canLoad=false window", () => {

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   resolveShortSwitchStepTransition,
   summarizeShortSwitchIndicatorReadiness,
+  summarizeShortSwitchLongTasks,
 } from "./short-switch-readiness.mjs";
 
 const EXPECTED_IDS = ["ma", "vol", "boll", "rsi"];
@@ -13,6 +14,7 @@ const OPTIONS = {
   expectedIndicatorIds: EXPECTED_IDS,
   expectedSeriesCounts: EXPECTED_SERIES,
   interval: "1d",
+  maxSetDataPerSeries: 1,
   sinceAtMs: 100,
 };
 
@@ -33,15 +35,22 @@ function ack(indicatorId, atMs, wsGeneration = 1, resumeStatus = "up_to_date") {
   });
 }
 
-function data(indicatorId, line, atMs, interval = "1d") {
+function data(indicatorId, line, atMs, interval = "1d", points = 100) {
   return event("chart.indicatorSeries.setData", atMs, {
     datasetKey: `binance::spot::BTCUSDT::${interval}`,
     indicatorId,
     interval,
     line,
     paneId: indicatorId,
-    points: 100,
+    points,
     type: "line",
+  });
+}
+
+function mainData(atMs, points = 100) {
+  return event("chart.candleSeries.setData", atMs, {
+    paneId: "main",
+    points,
   });
 }
 
@@ -63,6 +72,8 @@ test("short-switch readiness requires current dataset data for every indicator",
   assert.equal(control.ready, true);
   assert.equal(control.protocolReady, true);
   assert.deepEqual(control.indicatorSeriesCounts, EXPECTED_SERIES);
+  assert.equal(control.submissionReady, true);
+  assert.equal(control.lastSubmissionAtMs, 125);
 
   const oldIntervalOnly = summarizeShortSwitchIndicatorReadiness({
     events: [
@@ -72,6 +83,13 @@ test("short-switch readiness requires current dataset data for every indicator",
     ],
   }, OPTIONS);
   assert.equal(oldIntervalOnly.ready, false);
+
+  const progressiveWithoutProtocol = summarizeShortSwitchIndicatorReadiness({
+    events: allData(),
+  }, OPTIONS);
+  assert.equal(progressiveWithoutProtocol.indicatorDataReady, true);
+  assert.equal(progressiveWithoutProtocol.protocolReady, false);
+  assert.equal(progressiveWithoutProtocol.ready, false);
   assert.equal(oldIntervalOnly.indicatorDataReady, false);
 
   const duplicateBollOnly = summarizeShortSwitchIndicatorReadiness({
@@ -83,6 +101,83 @@ test("short-switch readiness requires current dataset data for every indicator",
   }, OPTIONS);
   assert.equal(duplicateBollOnly.ready, false);
   assert.deepEqual(duplicateBollOnly.indicatorSeriesCounts, { ma: 0, vol: 0, boll: 1, rsi: 0 });
+
+  const duplicateAfterCoverage = summarizeShortSwitchIndicatorReadiness({
+    events: [
+      open(105),
+      ...EXPECTED_IDS.map((id, index) => ack(id, 110 + index)),
+      ...allData(),
+      data("boll", "upper", 130),
+    ],
+  }, OPTIONS);
+  assert.equal(duplicateAfterCoverage.ready, true);
+  assert.equal(duplicateAfterCoverage.indicatorDataReady, true);
+  assert.equal(duplicateAfterCoverage.indicatorFullSubmissionsReady, false);
+  assert.equal(duplicateAfterCoverage.submissionReady, false);
+  assert.equal(duplicateAfterCoverage.indicatorSetDataCounts["boll|boll|upper|line"], 2);
+});
+
+test("short-switch readiness enforces expected main setData counts of zero, one, and two", () => {
+  const baseEvents = [
+    open(105),
+    ...EXPECTED_IDS.map((id, index) => ack(id, 110 + index)),
+    ...allData(),
+  ];
+
+  const zeroExpected = summarizeShortSwitchIndicatorReadiness({
+    events: baseEvents,
+  }, { ...OPTIONS, expectedMainSetDataCount: 0 });
+  assert.equal(zeroExpected.mainSetDataCount, 0);
+  assert.equal(zeroExpected.mainSubmissionReady, true);
+  assert.equal(zeroExpected.submissionReady, true);
+
+  const zeroSubmissions = summarizeShortSwitchIndicatorReadiness({
+    events: baseEvents,
+  }, { ...OPTIONS, expectedMainSetDataCount: 1 });
+  assert.equal(zeroSubmissions.mainSetDataCount, 0);
+  assert.equal(zeroSubmissions.mainSubmissionReady, false);
+  assert.equal(zeroSubmissions.submissionReady, false);
+
+  const oneSubmission = summarizeShortSwitchIndicatorReadiness({
+    events: [...baseEvents, mainData(130)],
+  }, { ...OPTIONS, expectedMainSetDataCount: 1 });
+  assert.equal(oneSubmission.mainSetDataCount, 1);
+  assert.equal(oneSubmission.mainSubmissionReady, true);
+  assert.equal(oneSubmission.submissionReady, true);
+
+  const emptyThenFull = summarizeShortSwitchIndicatorReadiness({
+    events: [...baseEvents, mainData(129, 0), mainData(130)],
+  }, { ...OPTIONS, expectedMainSetDataCount: 1 });
+  assert.equal(emptyThenFull.mainSetDataCount, 2);
+  assert.equal(emptyThenFull.mainSubmissionReady, false);
+  assert.equal(emptyThenFull.submissionReady, false);
+
+  const twoExpected = summarizeShortSwitchIndicatorReadiness({
+    events: [...baseEvents, mainData(129, 0), mainData(130)],
+  }, { ...OPTIONS, expectedMainSetDataCount: 2 });
+  assert.equal(twoExpected.mainSetDataCount, 2);
+  assert.equal(twoExpected.mainSubmissionReady, true);
+  assert.equal(twoExpected.submissionReady, true);
+});
+
+test("short-switch readiness counts empty indicator setData before full coverage", () => {
+  const report = summarizeShortSwitchIndicatorReadiness({
+    events: [
+      open(105),
+      ...EXPECTED_IDS.map((id, index) => ack(id, 110 + index)),
+      data("ma", "ma", 119, "1d", 0),
+      ...allData(),
+    ],
+  }, OPTIONS);
+
+  assert.equal(report.ready, true);
+  assert.equal(report.indicatorDataReady, true);
+  assert.equal(report.indicatorSeriesCounts.ma, 1);
+  assert.equal(report.indicatorSeriesDataEventCount, 6);
+  assert.equal(report.indicatorSetDataEventCount, 7);
+  assert.equal(report.indicatorSetDataCounts["ma|ma|ma|line"], 2);
+  assert.equal(report.indicatorFullSubmissionsReady, false);
+  assert.equal(report.submissionReady, false);
 });
 
 test("short-switch readiness uses only ACKs from the latest step-local WS generation", () => {
@@ -97,7 +192,7 @@ test("short-switch readiness uses only ACKs from the latest step-local WS genera
       ...allData(),
     ],
   }, OPTIONS);
-  assert.equal(mixed.ready, true);
+  assert.equal(mixed.ready, false);
   assert.equal(mixed.protocolReady, false);
   assert.deepEqual(mixed.subscribedIndicatorIds, ["boll", "rsi"]);
 
@@ -125,7 +220,7 @@ test("short-switch readiness waits for a resume patch after a patch ACK", () => 
     ...allData(),
   ];
   const pending = summarizeShortSwitchIndicatorReadiness({ events }, OPTIONS);
-  assert.equal(pending.ready, true);
+  assert.equal(pending.ready, false);
   assert.equal(pending.protocolReady, false);
   assert.deepEqual(pending.pendingPatchIndicatorIds, ["ma"]);
 
@@ -155,4 +250,44 @@ test("only the first warm step may prime from an already-active interval", () =>
     clickOk: true,
     wasActive: true,
   }).readyEligible, false);
+});
+
+test("short-switch long-task attribution includes only measured tasks over 50ms", () => {
+  const summary = summarizeShortSwitchLongTasks([
+    { startTime: 90, duration: 80 },
+    { startTime: 120, duration: 50 },
+    { startTime: 140, duration: 51 },
+    { startTime: 250, duration: 75 },
+    { startTime: 420, duration: 60 },
+  ], [
+    { phase: "short-switch-warm:1m", sincePerfMs: 0, elapsedMs: 100 },
+    { phase: "short-switch-measured:1m", sincePerfMs: 100, elapsedMs: 100 },
+    { phase: "short-switch-measured:3m", sincePerfMs: 300, elapsedMs: 100 },
+  ]);
+
+  assert.equal(summary.count, 1);
+  assert.equal(summary.maxDurationMs, 51);
+  assert.deepEqual(summary.byPhase.map((phase) => ({
+    phase: phase.phase,
+    count: phase.count,
+  })), [
+    { phase: "short-switch-measured:1m", count: 1 },
+    { phase: "short-switch-measured:3m", count: 0 },
+  ]);
+});
+
+test("short-switch long-task attribution stops after the last target submission", () => {
+  const summary = summarizeShortSwitchLongTasks([
+    { startTime: 140, duration: 51 },
+    { startTime: 170, duration: 80 },
+  ], [{
+    phase: "short-switch-measured:1m",
+    sincePerfMs: 100,
+    attributionEndPerfMs: 160,
+    elapsedMs: 1_000,
+  }]);
+
+  assert.equal(summary.count, 1);
+  assert.equal(summary.byPhase[0].endMs, 160);
+  assert.deepEqual(summary.byPhase[0].tasks, [{ startTime: 140, duration: 51 }]);
 });

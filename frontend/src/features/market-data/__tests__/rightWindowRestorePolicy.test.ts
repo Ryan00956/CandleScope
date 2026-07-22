@@ -4,8 +4,24 @@ import test from "node:test";
 import {
   canRequestMoreLeftDuringRuntime,
   canRequestRightWindowRestoreDuringRuntime,
+  formatChartDemandScope,
   shouldCommitRightWindowRestore,
 } from "../useMarketDataRuntime.js";
+
+test("chart demand scopes cannot collide across fast-refresh runtimes", () => {
+  assert.equal(
+    formatChartDemandScope("client", "runtime-a", 1),
+    "chart:client:runtime-a:1",
+  );
+  assert.notEqual(
+    formatChartDemandScope("client", "runtime-a", 1),
+    formatChartDemandScope("client", "runtime-b", 1),
+  );
+  assert.notEqual(
+    formatChartDemandScope("client", "runtime-a", 1),
+    formatChartDemandScope("client", "runtime-a", 2),
+  );
+});
 
 test("right-window restore commits only for the owning session and epoch", () => {
   const owned = {

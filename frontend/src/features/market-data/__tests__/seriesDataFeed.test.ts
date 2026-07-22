@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  aggregateResolvedGapRepairResult,
   capContinuationRanges,
   countIntervalBarsInRange,
   projectContinuousRangeToInterval,
@@ -1968,6 +1969,7 @@ test("a capped initial verification finalizes only after every child range resol
   const feed = new SeriesDataFeed({ getActiveSeries: () => SERIES });
   const range = { start: epochSeconds(3_600), end: epochSeconds(32_400) };
   let resolved = 0;
+  let resolvedResult: FeedResult | null = null;
   const updatePending = (feed as unknown as {
     updatePendingGapRepairFromResult(
       series: typeof SERIES,
@@ -1975,13 +1977,15 @@ test("a capped initial verification finalizes only after every child range resol
       result: FeedResult,
       attempts: number,
       dormant: boolean,
-      onResolved?: () => void,
+      onResolved?: (result: FeedResult) => void,
     ): void;
   }).updatePendingGapRepairFromResult.bind(feed);
 
   updatePending(SERIES, range, {
     data: [],
     rows: [],
+    all_rows_final: true,
+    has_tail_gap: false,
     truncated: true,
     pagination_stop_reason: "cap",
     next_end_ms: 18_000_000,
@@ -1989,7 +1993,10 @@ test("a capped initial verification finalizes only after every child range resol
     retryable: true,
     verified_contiguous: false,
     missing_ranges: [{ start_ms: 28_800_000, end_ms: 28_800_000 }],
-  }, 1, false, () => { resolved += 1; });
+  }, 1, false, (result) => {
+    resolved += 1;
+    resolvedResult = result;
+  });
 
   updatePending(SERIES, {
     start: epochSeconds(3_600),
@@ -1997,25 +2004,218 @@ test("a capped initial verification finalizes only after every child range resol
   }, {
     data: rows([3_600, 18_000]),
     rows: rows([3_600, 18_000]),
+    history_state: "ready",
     complete: true,
     retryable: false,
     verified_contiguous: true,
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: false,
     missing_ranges: [],
   }, 2, false);
   assert.equal(resolved, 0);
 
-  updatePending(SERIES, {
-    start: epochSeconds(28_800),
-    end: epochSeconds(28_800),
-  }, {
+  const finalResult = {
     data: rows([28_800]),
     rows: rows([28_800]),
+    history_state: "ready" as const,
     complete: true,
     retryable: false,
     verified_contiguous: true,
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: false,
     missing_ranges: [],
-  }, 2, false);
+  };
+  updatePending(SERIES, {
+    start: epochSeconds(28_800),
+    end: epochSeconds(28_800),
+  }, finalResult, 2, false);
   assert.equal(resolved, 1);
+  assert.notStrictEqual(resolvedResult, finalResult);
+  const aggregateResult = mustBeDefined(resolvedResult as FeedResult | null);
+  assert.deepEqual({
+    source: aggregateResult.source,
+    start_ms: aggregateResult.start_ms,
+    end_ms: aggregateResult.end_ms,
+    history_state: aggregateResult.history_state,
+    complete: aggregateResult.complete,
+    retryable: aggregateResult.retryable,
+    verified_contiguous: aggregateResult.verified_contiguous,
+    all_rows_final: aggregateResult.all_rows_final,
+    has_tail_gap: aggregateResult.has_tail_gap,
+    truncated: aggregateResult.truncated,
+    missing_ranges: aggregateResult.missing_ranges,
+  }, {
+    source: "gap-repair-aggregate",
+    start_ms: 3_600_000,
+    end_ms: 32_400_000,
+    history_state: "ready",
+    complete: true,
+    retryable: false,
+    verified_contiguous: true,
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: false,
+    missing_ranges: [],
+  });
+});
+
+test("a capped repair aggregate fails closed when any child lacks finality proof", () => {
+  const result = aggregateResolvedGapRepairResult(
+    {
+      all_rows_final: true,
+      truncated: true,
+      complete: false,
+      retryable: true,
+    },
+    { start: epochSeconds(3_600), end: epochSeconds(32_400) },
+    [{
+      history_state: "ready",
+      complete: true,
+      retryable: false,
+      verified_contiguous: true,
+      has_tail_gap: false,
+      truncated: false,
+      missing_ranges: [],
+      // all_rows_final is deliberately absent.
+    }],
+  );
+
+  assert.equal(result.complete, false);
+  assert.equal(result.verified_contiguous, false);
+  assert.equal(result.all_rows_final, false);
+  assert.equal(result.history_state, "pending");
+  assert.equal(result.retryable, true);
+});
+
+test("a capped repair aggregate stays pending when the parent has an unscheduled tail gap", () => {
+  const result = aggregateResolvedGapRepairResult(
+    {
+      all_rows_final: true,
+      has_tail_gap: true,
+      truncated: true,
+      pagination_stop_reason: "cap",
+      next_end_ms: 18_000_000,
+      complete: false,
+      retryable: true,
+      verified_contiguous: false,
+      missing_ranges: [],
+    },
+    { start: epochSeconds(3_600), end: epochSeconds(32_400) },
+    [{
+      history_state: "ready",
+      complete: true,
+      retryable: false,
+      verified_contiguous: true,
+      all_rows_final: true,
+      has_tail_gap: false,
+      truncated: false,
+      missing_ranges: [],
+    }],
+  );
+
+  assert.equal(result.complete, false);
+  assert.equal(result.verified_contiguous, false);
+  assert.equal(result.all_rows_final, false);
+  assert.equal(result.has_tail_gap, true);
+  assert.equal(result.history_state, "pending");
+  assert.equal(result.retryable, true);
+  assert.deepEqual(result.missing_ranges, [{
+    start_ms: 3_600_000,
+    end_ms: 32_400_000,
+    reason: "aggregate_quality_unproven",
+  }]);
+});
+
+test("an incomplete capped aggregate restores the full parent repair before resolving", async () => {
+  const range = { start: epochSeconds(3_600), end: epochSeconds(32_400) };
+  const requests: Array<{ start: EpochSeconds; end: EpochSeconds }> = [];
+  let resolved = 0;
+  let settledResult: FeedResult | null = null;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesRange: async (_symbol, _interval, start, end) => {
+        requests.push({ start, end });
+        return {
+          data: rows([start, end]),
+          start_ms: start * 1_000,
+          end_ms: end * 1_000,
+          history_state: "ready",
+          complete: true,
+          retryable: false,
+          verified_contiguous: true,
+          all_rows_final: true,
+          has_tail_gap: false,
+          truncated: false,
+          missing_ranges: [],
+        };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+  const updatePending = (feed as unknown as {
+    updatePendingGapRepairFromResult(
+      series: typeof SERIES,
+      pendingRange: typeof range,
+      result: FeedResult,
+      attempts: number,
+      dormant: boolean,
+      onResolved?: (result: FeedResult) => void,
+    ): void;
+  }).updatePendingGapRepairFromResult.bind(feed);
+  const completeChild = {
+    data: rows([3_600, 18_000]),
+    rows: rows([3_600, 18_000]),
+    history_state: "ready" as const,
+    complete: true,
+    retryable: false,
+    verified_contiguous: true,
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: false,
+    missing_ranges: [],
+  };
+
+  updatePending(SERIES, range, {
+    data: [],
+    rows: [],
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: true,
+    pagination_stop_reason: "cap",
+    next_end_ms: 18_000_000,
+    complete: false,
+    retryable: true,
+    verified_contiguous: false,
+    missing_ranges: [{ start_ms: 28_800_000, end_ms: 28_800_000 }],
+  }, 1, false, (result) => {
+    resolved += 1;
+    settledResult = result;
+  });
+  updatePending(SERIES, {
+    start: epochSeconds(3_600),
+    end: epochSeconds(18_000),
+  }, completeChild, 2, false);
+  const incompleteChild: FeedResult = {
+    ...completeChild,
+    data: rows([28_800]),
+    rows: rows([28_800]),
+  };
+  delete incompleteChild.all_rows_final;
+  updatePending(SERIES, {
+    start: epochSeconds(28_800),
+    end: epochSeconds(28_800),
+  }, incompleteChild, 2, false);
+
+  assert.equal(resolved, 0, "an unproven aggregate must not publish resolved");
+  assert.equal(feed.pendingRepairCount(SERIES), 1, "the parent range remains exact pending work");
+  assert.equal(await feed.pollPendingRepairs(SERIES, { force: true, maxRequests: 1 }), 1);
+  assert.deepEqual(requests, [range]);
+  assert.equal(resolved, 1);
+  assert.equal(feed.pendingRepairCount(SERIES), 0);
+  assert.equal(mustBeDefined(settledResult as FeedResult | null).complete, true);
 });
 
 test("clearing a capped parent removes child repairs and rejects a late in-flight response", async () => {
@@ -3036,6 +3236,8 @@ test("getRange reports a resumable pagination cap", async () => {
     api: {
       fetchKlinesRange: async () => ({
         data: rows([900, 1_000]),
+        all_rows_final: true,
+        has_tail_gap: false,
         truncated: true,
         next_end_ms: 800_000,
         verified_contiguous: true,
@@ -3053,6 +3255,84 @@ test("getRange reports a resumable pagination cap", async () => {
   assert.equal(result.next_end_ms, 800_000);
   assert.equal(result.complete, false);
   assert.equal(result.retryable, true);
+  assert.equal(result.all_rows_final, true);
+  assert.equal(result.has_tail_gap, false);
+
+  const aggregate = aggregateResolvedGapRepairResult(
+    result,
+    { start: epochSeconds(100), end: epochSeconds(1_000) },
+    [{
+      data: rows([100, 800]),
+      history_state: "ready",
+      complete: true,
+      retryable: false,
+      verified_contiguous: true,
+      all_rows_final: true,
+      has_tail_gap: false,
+      truncated: false,
+      missing_ranges: [],
+    }],
+  );
+  assert.equal(aggregate.complete, true, "a fully final capped parent remains resolvable");
+});
+
+test("getRange preserves unsafe quality from every consumed capped page", async () => {
+  let calls = 0;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesRange: async (_symbol, _interval, _start, end) => {
+        calls += 1;
+        return {
+          data: rows([end]),
+          all_rows_final: calls !== 1,
+          has_tail_gap: calls === 1,
+          truncated: true,
+          next_end_ms: (end - 100) * 1_000,
+          history_state: "pending" as const,
+          complete: false,
+          retryable: true,
+          verified_contiguous: calls !== 1,
+          missing_ranges: [],
+        };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+
+  const result = await feed.getRange(SERIES, {
+    start: 100,
+    end: 1_000,
+    maxPages: 2,
+  });
+
+  assert.equal(result.pagination_stop_reason, "cap");
+  assert.deepEqual(result.pages?.map((page) => ({
+    allRowsFinal: page.all_rows_final,
+    hasTailGap: page.has_tail_gap,
+  })), [
+    { allRowsFinal: false, hasTailGap: true },
+    { allRowsFinal: true, hasTailGap: false },
+  ]);
+  assert.equal(result.all_rows_final, false);
+  assert.equal(result.has_tail_gap, true);
+
+  const aggregate = aggregateResolvedGapRepairResult(
+    result,
+    { start: epochSeconds(100), end: epochSeconds(1_000) },
+    [{
+      data: rows([100, 800]),
+      history_state: "ready",
+      complete: true,
+      retryable: false,
+      verified_contiguous: true,
+      all_rows_final: true,
+      has_tail_gap: false,
+      truncated: false,
+      missing_ranges: [],
+    }],
+  );
+  assert.equal(aggregate.complete, false, "an unsafe retained page must fail closed");
 });
 
 test("getRange exposes a stalled cursor as bounded non-retryable pagination", async () => {

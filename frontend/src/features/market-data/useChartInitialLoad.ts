@@ -7,8 +7,18 @@ import {
 } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type { InitialRowsResolution } from "../watchlist-full-cache/watchlistFullCacheTypes.js";
-import type { CommitChartData, FeedResult, PendingInitialSeries } from "./klineContracts.js";
-import type { KlineBar, TimeRangeSec } from "./marketDataTypes.js";
+import type {
+  CommitChartData,
+  FeedCommitMeta,
+  FeedResult,
+  KlineFetchResult,
+  PendingInitialSeries,
+} from "./klineContracts.js";
+import type {
+  CachedChartDataActivation,
+  KlineBar,
+  TimeRangeSec,
+} from "./marketDataTypes.js";
 import { numericRange } from "./rangeRuntime.js";
 import {
   isKlineResultRepairPending,
@@ -25,7 +35,7 @@ const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
 const INITIAL_BACKFILL_MAX_WAIT_MS = 60_000;
 const INITIAL_HISTORY_COUNT_BACK = 1_500;
 export const INITIAL_HISTORY_SOURCE_ROW_BUDGET = 20_000;
-const OPTIMISTIC_SWITCH_EMPTY_TIMEOUT_MS = 3_000;
+export const WARM_CACHE_REVALIDATE_TTL_MS = 60_000;
 
 type ResolveInitialRows = (
   symbol: SymbolCode,
@@ -40,6 +50,101 @@ type ReplaceChartData = (
   rows: KlineBar[],
   meta?: { cache?: boolean; source?: string },
 ) => void;
+
+type ActivateCachedChartData = (
+  symbol: SymbolCode,
+  interval: IntervalString,
+  meta?: { source?: string },
+) => CachedChartDataActivation | null;
+
+export function canUseWarmCacheWithoutImmediateRevalidation(
+  activation: Pick<
+    CachedChartDataActivation,
+    | "coverage"
+    | "historyComplete"
+    | "historyRepairPending"
+    | "historyValidatedCountBack"
+    | "lastTailUpdatedMs"
+    | "lastValidatedMs"
+    | "rightTruncated"
+    | "rows"
+  > | null | undefined,
+  requiredCountBack: number,
+  nowMs = Date.now(),
+): boolean {
+  if (!activation || !Array.isArray(activation.rows) || activation.rows.length === 0) return false;
+  if (!activation.historyComplete || activation.historyRepairPending) return false;
+  if (activation.rightTruncated || (activation.coverage?.gaps?.length || 0) > 0) return false;
+  const validatedCountBack = Number(activation.historyValidatedCountBack);
+  const targetCountBack = Number(requiredCountBack);
+  if (
+    !Number.isSafeInteger(validatedCountBack)
+    || !Number.isSafeInteger(targetCountBack)
+    || targetCountBack <= 0
+    || validatedCountBack < targetCountBack
+  ) return false;
+  const lastValidatedMs = activation.lastValidatedMs == null
+    ? Number.NEGATIVE_INFINITY
+    : Number(activation.lastValidatedMs);
+  const lastTailUpdatedMs = activation.lastTailUpdatedMs == null
+    ? Number.NEGATIVE_INFINITY
+    : Number(activation.lastTailUpdatedMs);
+  const freshnessMs = Math.max(
+    Number.isFinite(lastValidatedMs) ? lastValidatedMs : Number.NEGATIVE_INFINITY,
+    Number.isFinite(lastTailUpdatedMs) ? lastTailUpdatedMs : Number.NEGATIVE_INFINITY,
+  );
+  const currentMs = Number(nowMs);
+  if (!Number.isFinite(freshnessMs) || !Number.isFinite(currentMs)) return false;
+  const ageMs = currentMs - freshnessMs;
+  return ageMs >= 0 && ageMs <= WARM_CACHE_REVALIDATE_TTL_MS;
+}
+
+export function initialHistoryCacheProof(
+  result: KlineFetchResult | null | undefined,
+  validatedCountBack: number,
+): Pick<
+  FeedCommitMeta,
+  "historyComplete" | "historyRepairPending" | "historyValidatedCountBack"
+> {
+  const explicitlyComplete = Boolean(
+    result
+    && result.complete === true
+    && result.retryable === false
+    && (result.history_state === "ready" || result.history_state === "exhausted")
+    && result.verified_contiguous === true
+    && result.all_rows_final === true
+    && result.has_tail_gap === false
+    && result.truncated !== true
+    && Array.isArray(result.missing_ranges)
+    && result.missing_ranges.length === 0
+    && !isKlineResultRepairPending(result)
+  );
+  return {
+    historyComplete: explicitlyComplete,
+    historyRepairPending: !explicitlyComplete && isKlineResultRepairPending(result),
+    historyValidatedCountBack: explicitlyComplete
+      ? Math.max(0, Math.floor(Number(validatedCountBack) || 0))
+      : null,
+  };
+}
+
+export function canFinalizePendingInitialHistory(
+  pendingInitial: PendingInitialSeries,
+  result: KlineFetchResult | null | undefined,
+): boolean {
+  const pendingRange = pendingInitial.range;
+  const resultRange = numericRange(result?.start_ms, result?.end_ms);
+  if (
+    !pendingRange
+    || !resultRange
+    || resultRange.start > pendingRange.start
+    || resultRange.end < pendingRange.end
+  ) return false;
+  return initialHistoryCacheProof(
+    result,
+    Number(pendingInitial.countBack) || 0,
+  ).historyComplete === true;
+}
 
 export type LoadChartData = (
   symbol: SymbolCode,
@@ -56,8 +161,9 @@ export interface UseChartInitialLoadOptions {
   getFromCache(symbol: SymbolCode, interval: IntervalString): KlineBar[];
   resolveInitialRows?: ResolveInitialRows | null;
   seriesDataFeed: SeriesDataFeed;
+  activateCachedChartData: ActivateCachedChartData;
+  detachActiveChartData(symbol: SymbolCode, interval: IntervalString, source?: string): void;
   replaceChartData: ReplaceChartData;
-  clearChartData(source?: string, symbol?: SymbolCode, interval?: IntervalString): void;
   markChartDataTransition(symbol: SymbolCode, interval: IntervalString, reason: string): void;
   commitMergedChartData: CommitChartData;
   commitPatchedChartData: CommitChartData;
@@ -108,9 +214,32 @@ export function releasePendingInitialIndicatorWindow(
   commitMergedChartData: CommitChartData,
   pendingInitial: PendingInitialSeries,
   source: string,
+  settledResult?: KlineFetchResult | null,
 ): boolean {
   const owner = String(pendingInitial.indicatorWindowOwner || "").trim();
-  if (!owner) return false;
+  const settledProof = source === "initial-history-settled"
+    && canFinalizePendingInitialHistory(pendingInitial, settledResult)
+    ? initialHistoryCacheProof(settledResult, Number(pendingInitial.countBack) || 0)
+    : null;
+  const historyProof = source === "initial-history-settled"
+    ? settledProof?.historyComplete === true
+      ? settledProof
+      : {
+          // All tracked children may be gone while their combined quality
+          // proof is still incomplete. Release rendering ownership, but do not
+          // promote one child (or an unproven aggregate) to the full countBack.
+          historyComplete: false,
+          historyRepairPending: false,
+          historyValidatedCountBack: null,
+        }
+    : source === "initial-history-terminal"
+      ? {
+          historyComplete: false,
+          historyRepairPending: false,
+          historyValidatedCountBack: null,
+        }
+      : {};
+  if (!owner && Object.keys(historyProof).length === 0) return false;
   commitMergedChartData(
     pendingInitial.symbol,
     pendingInitial.interval,
@@ -118,10 +247,11 @@ export function releasePendingInitialIndicatorWindow(
     {
       source,
       deferIndicatorWindow: false,
-      indicatorWindowOwner: owner,
+      ...(owner ? { indicatorWindowOwner: owner } : {}),
+      ...historyProof,
     },
   );
-  return true;
+  return Boolean(owner);
 }
 
 export function useChartInitialLoad({
@@ -132,8 +262,9 @@ export function useChartInitialLoad({
   getFromCache,
   resolveInitialRows,
   seriesDataFeed,
+  activateCachedChartData,
+  detachActiveChartData,
   replaceChartData,
-  clearChartData,
   markChartDataTransition,
   commitMergedChartData,
   commitPatchedChartData,
@@ -184,24 +315,28 @@ export function useChartInitialLoad({
     const cached = initialRows.rows;
     const hasCacheHit = cached && cached.length > 0;
     let shownInitialData = false;
-    let fallbackClearTimer: ReturnType<typeof setTimeout> | null = null;
     let initialRetryStarted = false;
     let stopInitialHistoryRetry: (() => void) | null = null;
     let trackedInitialRepairRange: TimeRangeSec | null = null;
+    let warmActivation: CachedChartDataActivation | null = null;
     const markInitialDataShown = () => {
       shownInitialData = true;
-      if (fallbackClearTimer) {
-        clearTimeout(fallbackClearTimer);
-        fallbackClearTimer = null;
-      }
     };
 
     if (hasCacheHit) {
-      replaceChartData(sym, intv, cached, {
-        cache: initialRows.tier === "watchlist-full",
-        source: initialRows.source || "memory-cache-hit",
-      });
-      const cachedLatest = cached.at(-1);
+      warmActivation = initialRows.tier === "market-data-memory"
+        ? activateCachedChartData(sym, intv, {
+            source: initialRows.source || "memory-cache-hit",
+          })
+        : null;
+      const displayedRows = warmActivation?.rows || cached;
+      if (!warmActivation) {
+        replaceChartData(sym, intv, displayedRows, {
+          cache: initialRows.tier === "watchlist-full",
+          source: initialRows.source || "memory-cache-hit",
+        });
+      }
+      const cachedLatest = displayedRows.at(-1);
       if (cachedLatest) updateLastPrice(cachedLatest, intv);
       setConnectionStatus(initialRows.needsRepair ? "loading" : "connected");
       setDataSource(initialRows.source || "memory-cache-hit");
@@ -210,13 +345,10 @@ export function useChartInitialLoad({
       markInitialDataShown();
     } else {
       markChartDataTransition(sym, intv, "load-start-optimistic");
+      detachActiveChartData(sym, intv, "load-start-cold-detach");
       setLoading(true);
       setError(null);
       setConnectionStatus("loading");
-      fallbackClearTimer = setTimeout(() => {
-        if (controller.signal.aborted || shownInitialData) return;
-        clearChartData("load-start-timeout-clear", sym, intv);
-      }, OPTIMISTIC_SWITCH_EMPTY_TIMEOUT_MS);
     }
 
     setLoadingMoreLeft(false);
@@ -232,8 +364,22 @@ export function useChartInitialLoad({
       trackedInitialRepairRange = null;
       setInitialHistoryPending(false);
     }, { once: true });
+    if (canUseWarmCacheWithoutImmediateRevalidation(
+      warmActivation,
+      initialHistoryCountBack,
+    )) {
+      markPerf("chart.initialLoad.warmActivation", {
+        exchange: ex,
+        marketType: mt,
+        symbol: sym,
+        interval: intv,
+        bars: warmActivation?.rows.length || 0,
+        revision: warmActivation?.revision ?? null,
+      });
+      setInitialHistoryPending(false);
+      return;
+    }
     if (initialHistoryCountBack <= 0) {
-      if (fallbackClearTimer) clearTimeout(fallbackClearTimer);
       setInitialHistoryPending(false);
       setHasMoreLeft(false);
       setLoading(false);
@@ -293,13 +439,22 @@ export function useChartInitialLoad({
         };
         pendingInitialHistoryRef.current = pendingInitial;
         const previousTrackedRange = trackedInitialRepairRange;
-        const finalizePending = () => {
+        const finalizePending = (settledResult: KlineFetchResult) => {
           if (
             controller.signal.aborted
             || !seriesDataFeed.isCurrent(series, initialEpoch)
             || !seriesDataFeed.shouldCommitActive(series)
             || pendingInitialHistoryRef.current !== pendingInitial
           ) return;
+          if (!canFinalizePendingInitialHistory(pendingInitial, settledResult)) {
+            // A defensive fallback for any non-cap resolution path that emits
+            // a usable-but-unproven range. Keep the initial lifecycle pending
+            // and restore full-countBack retry ownership.
+            trackedInitialRepairRange = null;
+            setConnectionStatus("loading");
+            startInitialHistoryRetry();
+            return;
+          }
           pendingInitialHistoryRef.current = null;
           setInitialHistoryPending(false);
           trackedInitialRepairRange = null;
@@ -308,6 +463,7 @@ export function useChartInitialLoad({
             commitMergedChartData,
             pendingInitial,
             "initial-history-settled",
+            settledResult,
           );
           const repairedRows = getFromCache(sym, intv);
           const latest = repairedRows.at(-1);
@@ -383,7 +539,23 @@ export function useChartInitialLoad({
         stopBroadRetry: () => stopInitialHistoryRetry?.(),
       });
 
+      const historyProof = initialHistoryCacheProof(
+        historyResult,
+        initialHistoryCountBack,
+      );
+      const historyCommitMeta: FeedCommitMeta = {
+        source: "initial-history",
+        deferIndicatorWindow: repairPending && !terminalFailed,
+        ...(historyResult?.indicatorWindowOwner
+          ? { indicatorWindowOwner: historyResult.indicatorWindowOwner }
+          : {}),
+        ...historyProof,
+      };
+
       if (!historyResult?.data?.length) {
+        if (historyResult) {
+          commitMergedChartData(sym, intv, [], historyCommitMeta);
+        }
         recordPerfEvent("chart.initialLoad.history.empty", {
           exchange: ex,
           marketType: mt,
@@ -403,13 +575,11 @@ export function useChartInitialLoad({
         bars: historyResult.data.length,
       });
       if (!historyResult.committed) {
-        commitMergedChartData(sym, intv, historyResult.data, {
-          source: "initial-history",
-          deferIndicatorWindow: repairPending && !terminalFailed,
-          ...(historyResult.indicatorWindowOwner
-            ? { indicatorWindowOwner: historyResult.indicatorWindowOwner }
-            : {}),
-        });
+        commitMergedChartData(sym, intv, historyResult.data, historyCommitMeta);
+      } else {
+        // SeriesDataFeed already applied the rows. Persist the initial-history
+        // proof without mutating the store or forcing a second chart dataset.
+        commitMergedChartData(sym, intv, [], historyCommitMeta);
       }
       const latest = historyResult.data[historyResult.data.length - 1];
       if (latest) updateLastPrice(latest, intv);
@@ -511,7 +681,6 @@ export function useChartInitialLoad({
 
       abortListener = () => {
         stopRetrying();
-        if (fallbackClearTimer) clearTimeout(fallbackClearTimer);
       };
       controller.signal.addEventListener("abort", abortListener, { once: true });
     }
@@ -576,11 +745,11 @@ export function useChartInitialLoad({
     if (shownInitialData) {
       setLoading(false);
     }
-    if (shownInitialData && fallbackClearTimer) clearTimeout(fallbackClearTimer);
   }, [
-    clearChartData,
+    activateCachedChartData,
     commitMergedChartData,
     commitPatchedChartData,
+    detachActiveChartData,
     enabled,
     exchange,
     getFromCache,

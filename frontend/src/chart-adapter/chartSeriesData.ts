@@ -410,10 +410,10 @@ export function applyLineSeriesData(
       previousData[previousData.length - 1]?.time,
     )
   );
-  if (!preferSetData && (
+  if (
     (trustedTrailingUpdate && trailingShapeMatches)
-    || canUseTrailingSeriesUpdate(previousData, nextData)
-  )) {
+    || (!preferSetData && canUseTrailingSeriesUpdate(previousData, nextData))
+  ) {
     const start = Math.max(0, previousData.length - 1);
     for (let i = start; i < nextData.length; i += 1) {
       const point = nextData[i];

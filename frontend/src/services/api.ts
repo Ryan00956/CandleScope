@@ -136,6 +136,8 @@ export async function request(
     const rawDetail = isJsonRecord(errorData) ? errorData.detail : undefined;
     const detail = typeof rawDetail === "string"
       ? rawDetail
+      : isJsonRecord(rawDetail)
+        ? JSON.stringify(rawDetail)
       : `HTTP ${response.status}`;
     const code = isJsonRecord(rawDetail) && typeof rawDetail.code === "string"
       ? rawDetail.code

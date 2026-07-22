@@ -288,6 +288,44 @@ test("projection renderer preserves viewport through setData instead of popping"
   assert.deepEqual(viewportEvents, ["capture", ["apply", 1]]);
 });
 
+test("projection renderer updates an equal-time tail without rebuilding the viewport", () => {
+  const events: unknown[] = [];
+  const previousData = [
+    { time: 10, close: 1 },
+    { time: 20, close: 2 },
+    { time: 30, close: 3 },
+  ];
+  const insert = [
+    { time: 20, close: 2.5 },
+    { time: 30, close: 3.5 },
+  ];
+  const result = renderMainSeriesProjectionPatch({
+    preserveViewport: true,
+    previousDisplayRows: previousData,
+    series: {
+      pop: (count) => { events.push(["pop", count]); return []; },
+      setData: (data) => events.push(["setData", data]),
+      update: (point) => events.push(["update", point]),
+    },
+    patch: {
+      fromOutputIndex: 1,
+      deleteCount: 2,
+      insert,
+      previousLength: 3,
+      previousData,
+      nextLength: 3,
+    },
+  });
+
+  assert.equal(result.mode, "pop-update");
+  assert.deepEqual(events, [
+    ["pop", 2],
+    ["update", insert[0]],
+    ["update", insert[1]],
+  ]);
+  assert.deepEqual(result.nextData, [previousData[0], ...insert]);
+});
+
 test("projection renderer restores full data when pop throws", () => {
   const events: unknown[] = [];
   const nextData = [{ time: 10 }, { time: 20 }];

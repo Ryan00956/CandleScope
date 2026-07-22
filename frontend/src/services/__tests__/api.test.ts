@@ -213,6 +213,8 @@ test("request preserves structured backend error codes", async (context) => {
       assert.ok(error instanceof ApiError);
       assert.equal(error.status, 409);
       assert.equal(error.code, "stale_request_generation");
+      assert.match(error.detail, /"request_scope":"chart:test"/);
+      assert.match(error.detail, /"request_generation":3/);
       return true;
     },
   );

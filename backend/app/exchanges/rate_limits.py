@@ -159,6 +159,16 @@ class _Bucket:
     last_headers: dict[str, str] = field(default_factory=dict)
     deferred_requests: int = 0
     last_deferred_at_ms: int | None = None
+    cold_start_probe_pending: bool = False
+    recovery_probe_pending: bool = False
+    recovery_generation: int = 0
+    last_recovery_probe_at_ms: int | None = None
+    probe_kind: str | None = None
+    probe_lease_until: float = 0.0
+    probe_started_at_ms: int | None = None
+    probe_owner_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    last_probe_release_at_ms: int | None = None
+    last_probe_release_reason: str | None = None
     circuit_generation: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -188,6 +198,19 @@ class _Bucket:
             "last_headers": dict(self.last_headers),
             "deferred_requests": self.deferred_requests,
             "last_deferred_at_ms": self.last_deferred_at_ms,
+            "cold_start_probe_pending": self.cold_start_probe_pending,
+            "recovery_probe_pending": self.recovery_probe_pending,
+            "recovery_generation": self.recovery_generation,
+            "last_recovery_probe_at_ms": self.last_recovery_probe_at_ms,
+            "probe_in_flight": now < self.probe_lease_until,
+            "probe_kind": self.probe_kind,
+            "probe_lease_remaining_seconds": round(
+                max(0.0, self.probe_lease_until - now),
+                3,
+            ),
+            "probe_started_at_ms": self.probe_started_at_ms,
+            "last_probe_release_at_ms": self.last_probe_release_at_ms,
+            "last_probe_release_reason": self.last_probe_release_reason,
             "circuit_generation": self.circuit_generation,
         }
 
@@ -224,9 +247,22 @@ class _Circuit:
 class RateLimitManager:
     """Executes endpoint-aware exchange REST/backfill rate-limit rules."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        conservative_cold_start: bool = False,
+        probe_lease_seconds: float = 30.0,
+    ) -> None:
         self._buckets: dict[str, _Bucket] = {}
         self._circuits: dict[str, _Circuit] = {}
+        self._conservative_cold_start = bool(conservative_cold_start)
+        # Normal response accounting releases this lease immediately.  The
+        # bound is only a fail-safe for a cancelled caller that never records
+        # its physical response; production HTTP timeouts are shorter.
+        self._probe_lease_seconds = max(
+            0.01,
+            min(float(probe_lease_seconds), 300.0),
+        )
 
     async def inspect(
         self,
@@ -324,8 +360,34 @@ class RateLimitManager:
         body_code: str | None = None,
         retry_after: float | None = None,
         fallback_cooldown_seconds: float | None = None,
+        response_complete: bool = True,
+        response_unknown: bool = False,
     ) -> bool:
         bucket = self._bucket_for(rule)
+        now = time.monotonic()
+        if response_unknown:
+            # This is the completion half of a headers-only observation. Keep
+            # the previously recorded status/headers (including used-weight),
+            # but release an owned probe conservatively from zero because the
+            # body/connection outcome was not authoritative.
+            self._release_probe_for_response(
+                bucket,
+                now=now,
+                response_is_rate_limited=False,
+                response_is_unknown=True,
+            )
+            return False
+        response_is_rate_limited = (
+            status_code in {418, 429}
+            or body_code in {"-1003", "50011"}
+        )
+        if response_complete or response_is_rate_limited:
+            self._release_probe_for_response(
+                bucket,
+                now=now,
+                response_is_rate_limited=response_is_rate_limited,
+                response_is_unknown=status_code is None and body_code is None,
+            )
         normalized_headers = _normalize_headers(headers)
         bucket.last_status_code = status_code
         bucket.last_body_code = body_code
@@ -349,6 +411,15 @@ class RateLimitManager:
         if cooldown_seconds <= 0:
             return False
         bucket_extended = self.record_cooldown(rule, cooldown_seconds)
+        if bucket_extended and status_code != 418:
+            # A bucket-scoped warning (HTTP 429 or an exchange-equivalent
+            # body code) must not recover with every token accumulated during
+            # Retry-After.  Admit exactly one request-cost as a probe after the
+            # cooldown, then let the ordinary token bucket ramp the remainder.
+            # HTTP 418 retains the stricter exchange-wide circuit recovery
+            # below, which deliberately starts every bucket from zero.
+            bucket.recovery_probe_pending = True
+            bucket.recovery_generation += 1
         circuit_extended = False
         if status_code == 418:
             circuit_extended = self._record_global_circuit(
@@ -426,6 +497,34 @@ class RateLimitManager:
                     now_ms=now_ms,
                     circuit=circuit,
                 )
+            self._expire_probe_lease(bucket, now=now)
+            if now < bucket.probe_lease_until:
+                # A consuming cold-start/429 probe owns the matching bucket
+                # until its physical response is accounted.  Recheck quickly
+                # so waiters resume soon after ``record_response`` releases
+                # the lease instead of sleeping for its full fail-safe bound.
+                wait_seconds = min(
+                    max(0.001, bucket.probe_lease_until - now),
+                    0.05,
+                )
+                return self._deferred_admission(
+                    rule,
+                    bucket,
+                    cost=cost,
+                    reason="probe_in_flight",
+                    wait_seconds=wait_seconds,
+                    now=now,
+                    now_ms=now_ms,
+                    circuit=circuit,
+                )
+            if bucket.cold_start_probe_pending or bucket.recovery_probe_pending:
+                # ``inspect`` may observe that the recovery probe is ready,
+                # but only a consuming admission owns it.  Re-capping on each
+                # inspection prevents observers from refilling the bucket and
+                # turning one safe probe into either a process-restart burst
+                # or a post-cooldown burst.
+                bucket.tokens = min(bucket.tokens, float(cost))
+                bucket.updated_at = now
             if bucket.tokens < cost:
                 wait_seconds = (
                     max(0.001, (cost - bucket.tokens) / bucket.refill_per_second)
@@ -446,6 +545,18 @@ class RateLimitManager:
                 bucket.tokens -= cost
                 bucket.last_cost = cost
                 bucket.last_wait_seconds = 0.0
+                if bucket.cold_start_probe_pending or bucket.recovery_probe_pending:
+                    is_recovery_probe = bucket.recovery_probe_pending
+                    bucket.cold_start_probe_pending = False
+                    bucket.recovery_probe_pending = False
+                    bucket.probe_kind = (
+                        "recovery" if is_recovery_probe else "cold_start"
+                    )
+                    bucket.probe_lease_until = now + self._probe_lease_seconds
+                    bucket.probe_started_at_ms = now_ms
+                    bucket.probe_owner_task = self._current_task()
+                if bucket.probe_kind == "recovery":
+                    bucket.last_recovery_probe_at_ms = now_ms
             return RateLimitAdmission(
                 allowed=True,
                 bucket_key=rule.bucket_key,
@@ -459,6 +570,71 @@ class RateLimitManager:
                 body_code=bucket.last_body_code,
                 circuit_key=(circuit.key if circuit is not None else None),
             )
+
+    @staticmethod
+    def _current_task() -> asyncio.Task[Any] | None:
+        try:
+            return asyncio.current_task()
+        except RuntimeError:
+            return None
+
+    @staticmethod
+    def _clear_probe_lease(
+        bucket: _Bucket,
+        *,
+        now: float,
+        reason: str,
+        safe_ramp: bool,
+    ) -> None:
+        if bucket.probe_lease_until <= 0:
+            return
+        if safe_ramp:
+            # With no authoritative exchange response, assume no remaining
+            # budget.  This releases the exclusive lease without turning an
+            # ambiguous network failure into a burst.
+            bucket.tokens = 0.0
+            bucket.updated_at = now
+        bucket.probe_kind = None
+        bucket.probe_lease_until = 0.0
+        bucket.probe_owner_task = None
+        bucket.last_probe_release_at_ms = int(time.time() * 1000)
+        bucket.last_probe_release_reason = reason
+
+    def _expire_probe_lease(self, bucket: _Bucket, *, now: float) -> None:
+        if bucket.probe_lease_until <= 0 or now < bucket.probe_lease_until:
+            return
+        self._clear_probe_lease(
+            bucket,
+            now=now,
+            reason="lease_expired",
+            safe_ramp=True,
+        )
+
+    def _release_probe_for_response(
+        self,
+        bucket: _Bucket,
+        *,
+        now: float,
+        response_is_rate_limited: bool,
+        response_is_unknown: bool,
+    ) -> None:
+        self._expire_probe_lease(bucket, now=now)
+        if bucket.probe_lease_until <= 0:
+            return
+        owner = bucket.probe_owner_task
+        current = self._current_task()
+        if not response_is_rate_limited and owner is not None and current is not owner:
+            # A response from a request admitted before the 429 must not
+            # release the new recovery probe's lease.  A fresh rate-limit
+            # warning is authoritative for the whole matching bucket and may
+            # supersede the lease regardless of which request observed it.
+            return
+        self._clear_probe_lease(
+            bucket,
+            now=now,
+            reason=("unknown_response" if response_is_unknown else "response"),
+            safe_ramp=response_is_unknown,
+        )
 
     @staticmethod
     def _deferred_admission(
@@ -555,6 +731,7 @@ class RateLimitManager:
             refill_per_second=refill_per_second,
             tokens=initial_tokens,
             updated_at=now,
+            cold_start_probe_pending=self._conservative_cold_start,
             circuit_generation=circuit_generation,
         )
         self._buckets[rule.bucket_key] = bucket
@@ -580,7 +757,11 @@ def get_shared_rate_limit_manager() -> RateLimitManager:
         return RateLimitManager()
     manager = _LOOP_RATE_LIMIT_MANAGERS.get(loop)
     if manager is None:
-        manager = RateLimitManager()
+        # A new process/event loop has no knowledge of an exchange-side ban or
+        # the current accounting window.  Let the first contender spend only
+        # its own request cost, then ramp normally from zero instead of
+        # materializing every shared bucket at full capacity.
+        manager = RateLimitManager(conservative_cold_start=True)
         _LOOP_RATE_LIMIT_MANAGERS[loop] = manager
     return manager
 

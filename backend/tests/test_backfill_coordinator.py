@@ -15,6 +15,7 @@ from app.data_engine.data_manager.backfill_coordinator import (
     BackfillCoordinator,
     RepairOutcome,
     RepairRequest,
+    priority_for_reason,
 )
 from app.data_engine.history.models import HistoryDisposition
 from app.data_engine.storage.gap_ledger import GapLedger
@@ -1721,6 +1722,179 @@ def test_background_dispatch_uses_at_most_one_slot_while_foreground_runs() -> No
         engine.release.set()
         await asyncio.gather(background_one, background_two, foreground)
         assert coordinator.snapshot()["background_dispatches"] == 2
+
+    asyncio.run(_run())
+
+
+def test_pending_background_waits_while_foreground_is_active() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.foreground_started = asyncio.Event()
+                self.background_started = asyncio.Event()
+                self.release_foreground = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs["symbol"] == "BTCUSDT":
+                    self.foreground_started.set()
+                    await self.release_foreground.wait()
+                else:
+                    self.background_started.set()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=2,
+        )
+        foreground = asyncio.create_task(coordinator.request_and_wait(RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            reason="initial_history",
+            request_id="foreground-active",
+        )))
+        await engine.foreground_started.wait()
+        assert coordinator.has_foreground_work() is True
+
+        background = asyncio.create_task(coordinator.request_and_wait(RepairRequest(
+            symbol="ETHUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            reason="related_interval_warmup",
+            request_id="background-pending",
+        )))
+        await asyncio.sleep(0.02)
+        assert engine.background_started.is_set() is False
+        assert len(engine.calls) == 1
+
+        engine.release_foreground.set()
+        await asyncio.wait_for(engine.background_started.wait(), timeout=1.0)
+        await asyncio.gather(foreground, background)
+        assert coordinator.has_foreground_work() is False
+
+    asyncio.run(_run())
+
+
+def test_pending_background_waits_while_foreground_is_rate_deferred() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                self.btc_calls = 0
+
+            async def run(self, **kwargs):
+                symbol = kwargs["symbol"]
+                self.calls.append(symbol)
+                if symbol == "BTCUSDT":
+                    self.btc_calls += 1
+                    if self.btc_calls == 1:
+                        raise _quota_deferral(0.08)
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=2,
+            chunk_bars=1,
+        )
+        foreground_request = _request(0, 0, request_id="foreground-deferred")
+        foreground_request.market_type = "futures"
+        foreground = asyncio.create_task(
+            coordinator.request_and_wait(foreground_request)
+        )
+        await _wait_until(
+            lambda: coordinator.snapshot()["deferred_chunks"] == 1,
+        )
+        assert coordinator.has_foreground_work() is True
+
+        background_request = _request(0, 0, request_id="background-during-defer")
+        background_request.symbol = "ETHUSDT"
+        background_request.reason = "related_interval_warmup"
+        background_request.priority = priority_for_reason("related_interval_warmup")
+        background = asyncio.create_task(
+            coordinator.request_and_wait(background_request)
+        )
+        await asyncio.sleep(0.03)
+        assert engine.calls == ["BTCUSDT"]
+
+        await asyncio.wait_for(asyncio.gather(foreground, background), timeout=1.0)
+        assert engine.calls == ["BTCUSDT", "BTCUSDT", "ETHUSDT"]
+
+    asyncio.run(_run())
+
+
+def test_pending_background_waits_for_foreground_durable_finalization() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                self.background_started = asyncio.Event()
+
+            async def run(self, **kwargs):
+                symbol = kwargs["symbol"]
+                self.calls.append(symbol)
+                if symbol == "ETHUSDT":
+                    self.background_started.set()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=2,
+        )
+        finalize_started = asyncio.Event()
+        release_finalize = asyncio.Event()
+        original_finalize = coordinator._scheduler._finalize
+
+        async def _blocking_finalize(request, outcome):
+            if request.symbol == "BTCUSDT":
+                finalize_started.set()
+                await release_finalize.wait()
+            await original_finalize(request, outcome)
+
+        coordinator._scheduler._finalize = _blocking_finalize
+        foreground = asyncio.create_task(coordinator.request_and_wait(
+            _request(0, 0, request_id="foreground-finalizing"),
+        ))
+        await finalize_started.wait()
+        assert coordinator.has_foreground_work() is True
+
+        background_request = _request(0, 0, request_id="background-finalizing")
+        background_request.symbol = "ETHUSDT"
+        background_request.reason = "related_interval_warmup"
+        background_request.priority = priority_for_reason("related_interval_warmup")
+        background = asyncio.create_task(
+            coordinator.request_and_wait(background_request)
+        )
+        await asyncio.sleep(0.03)
+        assert engine.background_started.is_set() is False
+
+        release_finalize.set()
+        await asyncio.wait_for(engine.background_started.wait(), timeout=1.0)
+        await asyncio.gather(foreground, background)
 
     asyncio.run(_run())
 

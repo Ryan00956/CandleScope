@@ -93,6 +93,18 @@ class BinancePlugin(BuiltinExchangePlugin):
             },
             endpoint_rules=(
                 RateLimitRule(
+                    name="binance_spot_exchange_info",
+                    bucket_key="binance:spot:request_weight:ip",
+                    endpoint="/api/v3/exchangeInfo",
+                    market_types=("spot",),
+                    algorithm="header_weight",
+                    capacity=spot_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=lambda _request: 20,
+                    max_concurrency=spot_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
                     name="binance_spot_klines",
                     bucket_key="binance:spot:request_weight:ip",
                     endpoint="/api/v3/klines",
@@ -102,6 +114,18 @@ class BinancePlugin(BuiltinExchangePlugin):
                     refill_interval_seconds=60.0,
                     cost=lambda request: 2,
                     max_concurrency=spot_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
+                    name="binance_futures_exchange_info",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/exchangeInfo",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=lambda _request: 1,
+                    max_concurrency=futures_concurrency,
                     cooldown_seconds=backoff,
                 ),
                 RateLimitRule(

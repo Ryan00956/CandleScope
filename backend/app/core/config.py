@@ -333,6 +333,40 @@ BINANCE_FUTURES_WS_URLS = [
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "5"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RATE_LIMIT_SLEEP = int(os.getenv("RATE_LIMIT_SLEEP", "60"))
+SYMBOL_CATALOG_TTL_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_TTL_SECONDS", "300")),
+)
+SYMBOL_CATALOG_FAILURE_RETRY_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_FAILURE_RETRY_SECONDS", "30")),
+)
+SYMBOL_CATALOG_RETRY_JITTER_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_RETRY_JITTER_SECONDS", "1")),
+)
+SYMBOL_CATALOG_EMPTY_WAIT_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_EMPTY_WAIT_SECONDS", "1")),
+)
+SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS", "1")),
+)
+SYMBOL_CATALOG_FOREGROUND_RECHECK_SECONDS = max(
+    0.05,
+    float(os.getenv("SYMBOL_CATALOG_FOREGROUND_RECHECK_SECONDS", "0.25")),
+)
+SYMBOL_CATALOG_MIN_RETAIN_RATIO = min(
+    1.0,
+    max(0.0, float(os.getenv("SYMBOL_CATALOG_MIN_RETAIN_RATIO", "0.5"))),
+)
+SYMBOL_CATALOG_SNAPSHOT_PATH = Path(
+    os.getenv(
+        "SYMBOL_CATALOG_SNAPSHOT_PATH",
+        DATA_DIR / "symbol_catalog.v1.json",
+    )
+)
 
 # Pyne runtime safety. This is a local-first application, so advanced users can
 # opt into broader Python capability, but the default stays conservative.

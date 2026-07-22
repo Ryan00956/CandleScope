@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import aiohttp
 import pytest
 
 from app.data_engine.ingestion.config import IngestionConfig
@@ -85,6 +86,16 @@ class _BinanceRateLimitResponse(_FakeResponse):
         return '{"msg":"IP banned until retry time","code":-1003}'
 
 
+class _BinanceRateLimitBodyReadFailureResponse(_BinanceRateLimitResponse):
+    async def text(self) -> str:
+        raise aiohttp.ClientPayloadError("rate-limit response body reset")
+
+
+class _MalformedJsonResponse(_FakeResponse):
+    async def json(self) -> dict[str, Any]:
+        raise aiohttp.ClientPayloadError("HTTP 200 response body truncated")
+
+
 class _GatedBinanceRateLimitResponse(_BinanceRateLimitResponse):
     def __init__(self, entered: asyncio.Event, release: asyncio.Event) -> None:
         super().__init__(status=418)
@@ -102,6 +113,7 @@ class _CountingRateLimits:
         self.acquire_calls = 0
         self.inspect_calls = 0
         self.response_calls = 0
+        self.responses: list[dict[str, object]] = []
 
     async def acquire(self, rule: object, request: object) -> None:
         self.acquire_calls += 1
@@ -124,6 +136,7 @@ class _CountingRateLimits:
 
     def record_response(self, rule: object, **kwargs: object) -> bool:
         self.response_calls += 1
+        self.responses.append(dict(kwargs))
         return False
 
     def snapshot(self) -> dict[str, object]:
@@ -193,8 +206,58 @@ def test_http_fetch_accounts_for_each_physical_endpoint_attempt() -> None:
         assert len(rows) == 1
         return counter.acquire_calls, counter.response_calls
 
-    assert asyncio.run(run(preacquired=False)) == (2, 2)
-    assert asyncio.run(run(preacquired=True)) == (1, 2)
+    # A successful HTTP 200 has a headers-only accounting pass followed by a
+    # completed-body pass; the failed HTTP 500 is accounted once.
+    assert asyncio.run(run(preacquired=False)) == (2, 3)
+    assert asyncio.run(run(preacquired=True)) == (1, 3)
+
+
+def test_http_200_parse_failure_accounts_headers_before_normal_failover() -> None:
+    async def run() -> tuple[list[object], _SequenceSession, _CountingRateLimits]:
+        config = IngestionConfig(
+            http_base_urls_futures=["https://one.example", "https://two.example"],
+        )
+        transport = TransportLayer(config)
+        session = _SequenceSession([
+            _MalformedJsonResponse(
+                {},
+                headers={"X-MBX-USED-WEIGHT-1M": "777"},
+            ),
+            _FakeResponse({
+                "symbol": "BTCUSDT",
+                "markPrice": "101",
+                "indexPrice": "100",
+                "estimatedSettlePrice": "100.5",
+                "lastFundingRate": "0.0001",
+                "nextFundingTime": 1_700_028_800_000,
+                "time": 1_700_000_000_000,
+            }),
+        ])
+        counter = _CountingRateLimits()
+        transport._http_session = session  # type: ignore[assignment]
+        transport._rate_limits = counter  # type: ignore[assignment]
+        request = TransportRequest(
+            descriptor=StreamDescriptor(
+                symbol="BTCUSDT",
+                stream_type=StreamType.MARK_PRICE,
+                exchange="binance",
+                market_type="futures",
+            ),
+        )
+
+        rows = await transport.http_fetch(request)
+        return rows, session, counter
+
+    rows, session, counter = asyncio.run(run())
+    assert len(rows) == 1
+    assert session.calls == 2
+    assert counter.response_calls == 4
+    assert counter.responses[0]["status_code"] == 200
+    assert counter.responses[0]["headers"] == {
+        "X-MBX-USED-WEIGHT-1M": "777",
+    }
+    assert counter.responses[0]["response_complete"] is False
+    assert counter.responses[1] == {"response_unknown": True}
 
 
 def test_http_fetch_does_not_fail_over_binance_invalid_parameter() -> None:
@@ -295,6 +358,40 @@ def test_http_fetch_returns_typed_deferral_after_physical_418() -> None:
     assert deferred.retry_after_seconds >= 0.04
 
 
+@pytest.mark.parametrize("status_code", [418, 429])
+def test_rate_limit_body_read_failure_preserves_typed_deferral_without_failover(
+    status_code: int,
+) -> None:
+    async def run() -> tuple[RateLimitDeferred, int]:
+        config = IngestionConfig(
+            http_base_urls_futures=["https://one.example", "https://two.example"],
+        )
+        transport = TransportLayer(config)
+        session = _SequenceSession([
+            _BinanceRateLimitBodyReadFailureResponse(status=status_code),
+        ])
+        transport._http_session = session  # type: ignore[assignment]
+        request = TransportRequest(
+            descriptor=StreamDescriptor(
+                symbol="BTCUSDT",
+                stream_type=StreamType.MARK_PRICE,
+                exchange="binance",
+                market_type="futures",
+            ),
+            defer_on_rate_limit=True,
+        )
+
+        with pytest.raises(RateLimitDeferred) as caught:
+            await transport.http_fetch(request)
+        return caught.value, session.calls
+
+    deferred, calls = asyncio.run(run())
+    assert calls == 1
+    assert deferred.status_code == status_code
+    assert deferred.retry_after_seconds >= 0.04
+    assert deferred.reason == ("circuit_open" if status_code == 418 else "cooldown")
+
+
 def test_request_queued_behind_physical_418_rechecks_before_sending() -> None:
     async def run() -> tuple[list[object], int]:
         entered = asyncio.Event()
@@ -332,4 +429,11 @@ def test_request_queued_behind_physical_418_rechecks_before_sending() -> None:
     results, calls = asyncio.run(run())
     assert calls == 1
     assert all(isinstance(value, RateLimitDeferred) for value in results)
-    assert all(value.status_code == 418 for value in results)
+    # A conservative process-start bucket admits exactly one physical probe.
+    # Its follower may see the budget/probe lease before that response returns,
+    # or reach the semaphore recheck after the IP circuit opens.
+    assert any(value.status_code == 418 for value in results)
+    assert all(
+        value.reason in {"budget", "probe_in_flight", "circuit_open"}
+        for value in results
+    )

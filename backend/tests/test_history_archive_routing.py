@@ -32,11 +32,24 @@ from app.data_engine.ingestion.models import (
 )
 from app.exchanges.archive import ArchiveHttpResponse
 from app.exchanges.plugins.binance.archive import BinanceKlineArchiveProvider
-from app.exchanges.rate_limits import RateLimitAdmission, RateLimitDeferred
+from app.exchanges.rate_limits import (
+    RateLimitAdmission,
+    RateLimitDeferred,
+    RateLimitManager,
+)
 
 
 UTC = timezone.utc
 MINUTE_MS = 60_000
+
+
+@pytest.fixture(autouse=True)
+def _isolate_archive_routing_from_production_cold_start(monkeypatch) -> None:
+    """Keep archive-routing tests focused on source selection, not shared budgets."""
+    monkeypatch.setattr(
+        "app.data_engine.backfill.fetcher.get_shared_rate_limit_manager",
+        lambda: RateLimitManager(),
+    )
 
 
 def _ms(value: datetime) -> int:

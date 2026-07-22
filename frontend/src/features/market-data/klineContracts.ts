@@ -1,4 +1,5 @@
 import type { IntervalString } from "../../utils/intervals.js";
+import type { ForegroundPreloadGate } from "./foregroundPreloadGate.js";
 import type {
   EpochMilliseconds,
   EpochSeconds,
@@ -169,6 +170,7 @@ export interface KlineApi {
 
 export type FeedCommitMode = "active" | "always" | "patch-active" | "patch-cache" | "cache" | "none";
 export type FeedApplyMode = "range" | "tick";
+export type FeedRequestPriority = "foreground" | "preload";
 
 export interface FeedCommitMeta {
   source: string;
@@ -208,6 +210,7 @@ export type PatchCacheTick = (
 
 export interface SeriesDataFeedConfig {
   api?: KlineApi | null;
+  foregroundPreloadGate?: ForegroundPreloadGate | null;
   canRequestSeries?: (series: Partial<MarketSeries>) => boolean;
   getActiveSeries?: () => MarketSeries | null;
   isActiveSeries?: (series: MarketSeries, activeSeries: MarketSeries | null) => boolean;

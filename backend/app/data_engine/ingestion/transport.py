@@ -231,6 +231,8 @@ class TransportLayer:
             base = self._current_http_base(exchange, market_type, http_urls)
             url = f"{base}{spec.path}"
             acquired_here = False
+            response_headers_accounted = False
+            response_completed = False
             try:
                 needs_quota = not (quota_acquired and tried == 0)
                 if needs_quota:
@@ -271,21 +273,57 @@ class TransportLayer:
                 async with self._http_session.get(url, params=params, proxy=proxy) as resp:  # type: ignore[union-attr]
                     headers = {str(k): str(v) for k, v in resp.headers.items()}
                     if resp.status != 200:
-                        body = await resp.text()
-                        if resp.status == 400:
+                        body = ""
+                        body_error: Exception | None = None
+                        try:
+                            body = await resp.text()
+                        except Exception as exc:
+                            # Status and headers are already authoritative.  In
+                            # particular, a reset while reading a 418/429 body
+                            # must not erase Retry-After or turn one exchange
+                            # warning into failover traffic against every host.
+                            body_error = exc
+                        if resp.status == 400 and body_error is None:
                             logger.error(
                                 "HTTP 400 from %s — params=%r url=%s body=%s",
                                 base, params, resp.url, body[:300],
                             )
                         raise TransportError(
-                            f"HTTP {resp.status}: {body[:200]}",
+                            (
+                                f"HTTP {resp.status}: {body[:200]}"
+                                if body_error is None
+                                else (
+                                    f"HTTP {resp.status}: response body unavailable: "
+                                    f"{body_error}"
+                                )
+                            ),
                             status_code=resp.status,
                             retry_after=_parse_retry_after(resp.headers.get("Retry-After")),
                             headers=headers,
                             body_code=_extract_body_code(body),
                         )
+                    # Exchange quota headers are authoritative as soon as the
+                    # response head arrives.  Account them before consuming or
+                    # decoding the body so a truncated/malformed HTTP 200 does
+                    # not erase used-weight and invite an oversized failover.
+                    self._rate_limits.record_response(
+                        quota_rule,
+                        status_code=resp.status,
+                        headers=headers,
+                        response_complete=False,
+                    )
+                    response_headers_accounted = True
                     data = await resp.json()
                     body_code = _extract_body_code(data)
+                    self._rate_limits.record_response(
+                        quota_rule,
+                        status_code=resp.status,
+                        headers=headers,
+                        body_code=body_code,
+                        retry_after=_parse_retry_after(resp.headers.get("Retry-After")),
+                        fallback_cooldown_seconds=quota_rule.cooldown_seconds,
+                    )
+                    response_completed = True
                     if body_code not in (None, "0"):
                         raise TransportError(
                             f"Exchange error {body_code}: {str(data)[:200]}",
@@ -298,12 +336,6 @@ class TransportLayer:
                 self._metrics.inc("http_requests_ok")
                 self._metrics.mark("http_last_success_at")
                 self._last_http_base = base
-                self._rate_limits.record_response(
-                    quota_rule,
-                    status_code=200,
-                    headers=headers,
-                    body_code=body_code,
-                )
                 now_ms = int(time.time() * 1000)
 
                 rows = protocol.extract_http_rows(data, desc)
@@ -329,14 +361,24 @@ class TransportLayer:
                 raise
             except Exception as exc:
                 last_exc = exc
-                self._rate_limits.record_response(
-                    quota_rule,
-                    status_code=getattr(exc, "status_code", None),
-                    headers=getattr(exc, "headers", None),
-                    body_code=getattr(exc, "body_code", None),
-                    retry_after=getattr(exc, "retry_after", None),
-                    fallback_cooldown_seconds=quota_rule.cooldown_seconds,
-                )
+                # A successful response head may already have accounted the
+                # physical request before JSON/body parsing failed. Preserve
+                # that status/used-weight, but complete any strict probe as an
+                # unknown result so its next admission ramps safely from zero.
+                if response_headers_accounted and not response_completed:
+                    self._rate_limits.record_response(
+                        quota_rule,
+                        response_unknown=True,
+                    )
+                elif not response_completed:
+                    self._rate_limits.record_response(
+                        quota_rule,
+                        status_code=getattr(exc, "status_code", None),
+                        headers=getattr(exc, "headers", None),
+                        body_code=getattr(exc, "body_code", None),
+                        retry_after=getattr(exc, "retry_after", None),
+                        fallback_cooldown_seconds=quota_rule.cooldown_seconds,
+                    )
                 self._metrics.inc("http_requests_failed")
                 self._metrics.mark("http_last_error_at")
                 if isinstance(exc, TransportError):

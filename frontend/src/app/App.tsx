@@ -3,6 +3,7 @@ import { useChartSurfaceRuntime } from "../chart-adapter/useChartSurfaceRuntime"
 import { loadUserPrefs, updateUserPref } from "../features/chart-session/chartSessionModel";
 import { useChartSession } from "../features/chart-session/useChartSession";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime";
+import { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate";
 import { useAdvancedMarketDataRuntime } from "../features/advanced-market-data/useAdvancedMarketDataRuntime";
 import { useIndicatorRuntime } from "../features/indicators/useIndicatorRuntime";
 import { useCacheLimitsSync } from "../features/settings/cacheLimitSettingsRuntime";
@@ -31,6 +32,7 @@ export default function App() {
   const chartSurface = useChartSurfaceRuntime();
   const pageExportRef = useRef<HTMLDivElement | null>(null);
   const realtimePriceRef = useRef<number | null>(null);
+  const [foregroundPreloadGate] = useState(() => new ForegroundPreloadGate());
   const chartSession = useChartSession({
     chartSurfaceActions: chartSurface.actions,
   });
@@ -38,6 +40,7 @@ export default function App() {
   const marketData = useMarketDataRuntime({
     session: chartSession,
     realtimePriceRef,
+    foregroundPreloadGate,
   });
   const advancedMarketData = useAdvancedMarketDataRuntime({
     session: chartSession,
@@ -112,6 +115,7 @@ export default function App() {
   });
   useWatchlistFullCacheRuntime({
     enabled: chartSession.status.marketDataReady,
+    foregroundPreloadGate,
     watchlists: watchlist.view.watchlists,
     subscriptionTiers: watchlist.view.subscriptionTiers,
     exchangeCatalog: chartSession.view.exchangeCatalog,

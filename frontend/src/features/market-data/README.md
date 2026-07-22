@@ -33,6 +33,15 @@ Session switches are optimistic: old bars may remain rendered while `meta.status
 is `loading`; the first warm-cache or REST result swaps the active store, while a
 slow empty load may clear after the configured timeout.
 
+The app composition root owns one `ForegroundPreloadGate` and shares it with
+the active chart and the watchlist full-cache preloader. Physical
+`SeriesDataFeed` history/before/range/latest requests are foreground by default;
+speculative callers must opt in with `priority: "preload"` and hold a preload
+lease. Foreground requests and longer-lived chart busy owners synchronously
+abort speculative work, then require a complete quiet dwell before one globally
+serialized preload may resume. The watchlist full-cache transport remains the
+only direct K-line REST exception, and it participates in the same shared gate.
+
 ## Allowed Dependencies
 
 - May consume the chart session view/actions/refs passed by the app composition

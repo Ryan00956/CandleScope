@@ -3,10 +3,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import aiohttp
-
 from app.core.config import REQUEST_TIMEOUT, get_effective_proxy
 from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
+from app.exchanges.catalog_http import fetch_catalog_json
 from app.exchanges.models import (
     CRYPTO_24X7_CALENDAR_ID,
     ExchangeCapabilities,
@@ -308,32 +307,16 @@ class OkxExchangeAdapter:
         path: str,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        proxy = get_effective_proxy()
-        last_err: Exception | None = None
-        for base in OKX_REST_BASE_URLS:
-            url = f"{base}{path}"
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        url,
-                        params=params,
-                        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-                        proxy=proxy,
-                    ) as resp:
-                        if resp.status != 200:
-                            logger.warning("OKX public data %s returned HTTP %s", base, resp.status)
-                            continue
-                        payload = await resp.json()
-                        if str(payload.get("code", "0")) not in ("0", ""):
-                            logger.warning("OKX public data error from %s: %s", base, payload.get("msg"))
-                            continue
-                        data = payload.get("data")
-                        if isinstance(data, list):
-                            return data
-            except Exception as exc:
-                last_err = exc
-                logger.warning("OKX public data fetch failed from %s: %s", base, exc)
-
-        raise RuntimeError(
-            f"Failed to load OKX public data from all endpoints: {last_err}"
+        market_type = "futures" if str(params.get("instType", "")).upper() == "SWAP" else "spot"
+        payload = await fetch_catalog_json(
+            exchange=self.id,
+            market_type=market_type,
+            base_urls=OKX_REST_BASE_URLS,
+            path=path,
+            params=params,
+            timeout_seconds=REQUEST_TIMEOUT,
+            proxy=get_effective_proxy(),
         )
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise RuntimeError(f"Invalid OKX public data payload for {market_type}")
+        return payload["data"]

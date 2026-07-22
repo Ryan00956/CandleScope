@@ -11,11 +11,13 @@ import type {
   FullCacheTarget,
   FullCacheTargetOptions,
 } from "./watchlistFullCacheTypes.js";
+import type { ForegroundPreloadGate } from "../market-data/foregroundPreloadGate.js";
 
 const MAX_PRELOAD_JOBS = 16;
 
 export interface UseWatchlistFullCacheRuntimeOptions extends FullCacheTargetOptions {
   enabled?: boolean;
+  foregroundPreloadGate?: ForegroundPreloadGate;
 }
 
 export interface WatchlistFullCacheRuntime {
@@ -30,6 +32,7 @@ export function useWatchlistFullCacheRuntime({
   customIntervalRecords = [],
   currentSession = {},
   enabled = true,
+  foregroundPreloadGate,
 }: UseWatchlistFullCacheRuntimeOptions = {}): WatchlistFullCacheRuntime {
   const socketManagerRef = useRef<ReturnType<typeof createWatchlistFullCacheSocketManager> | null>(
     null,
@@ -113,13 +116,15 @@ export function useWatchlistFullCacheRuntime({
   }, []);
 
   useEffect(() => {
-    const manager = createWatchlistFullCachePreloadManager();
+    const manager = createWatchlistFullCachePreloadManager({
+      ...(foregroundPreloadGate ? { foregroundPreloadGate } : {}),
+    });
     preloadManagerRef.current = manager;
     return () => {
       manager.dispose();
       if (preloadManagerRef.current === manager) preloadManagerRef.current = null;
     };
-  }, []);
+  }, [foregroundPreloadGate]);
 
   useEffect(() => {
     socketManagerRef.current?.syncTargets(socketTargets, enabled);
@@ -145,7 +150,7 @@ export function useWatchlistFullCacheRuntime({
         ...(currentInterval === undefined ? {} : { interval: currentInterval }),
       },
     });
-  }, [currentInterval, currentSymbolKey, enabled, preloadJobs]);
+  }, [currentInterval, currentSymbolKey, enabled, foregroundPreloadGate, preloadJobs]);
 
   return {
     targets,

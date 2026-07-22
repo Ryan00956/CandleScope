@@ -140,7 +140,11 @@ The planner chooses the required source streams. For custom intervals, this can 
 - Splits large repairs into chunks; user-visible repairs run newest-first.
 - Runs different series concurrently while keeping the same
   `(exchange, market_type, symbol, interval)` serialized.
+- Admits no new background chunk while foreground work is active; one already
+  running background page may finish before the next scheduling boundary.
 - Maintains per-exchange/market token buckets for scheduler-level pacing.
+- Keeps rate-deferred foreground work visible to speculative producers, so a
+  `Retry-After` wait does not look like idle capacity.
 - Persists gap lifecycle in `GapLedger`.
 - Handles retry/cancel/shutdown.
 - Runs `BackfillEngine`.
@@ -157,18 +161,23 @@ Current demand mapping:
 | `/klines/history` | `initial_history` | 10 |
 | `/klines/range` | `visible_range_gap` | 20 |
 | `/klines/history/before` | `visible_load_more` | 20 |
-| foreground custom/base warm start | `visible_seed_gap` | 30 |
-| same-symbol interval warmup | `related_interval_warmup` | 40 |
-| ingestion tail gap | `tail_gap` | 50 |
-| `SubscriptionTier.FULL` warmup | `full_subscription_warmup` | 60 |
+| foreground custom/base warm start | `visible_seed_gap` | 25 |
+| ingestion tail gap | `tail_gap` | 25 |
+| `/klines/latest` if explicitly enabled | `latest_refresh` | 30 |
+| query repair family | `query_*` | 35 |
 | price stream daily open | `price_daily_open` | 70 |
-| `/klines/latest` if explicitly enabled | `latest_refresh` | 80 |
-| startup scan | `startup_gap_scan` | 120 |
-| background audit | `background_gap_audit` | 150 |
+| same-symbol interval warmup | `related_interval_warmup` | 100 |
+| `SubscriptionTier.FULL` warmup | `full_subscription_warmup` | 110 |
+| startup scan | `startup_gap_scan` | 140 |
+| background audit | `background_gap_audit` | 160 |
 
 `/klines/latest` is intentionally `auto_backfill=false` by default. On a cold
 symbol, first-screen loading is driven by `/klines/history`, and related
-intervals are submitted only as lower-priority warmup.
+intervals are submitted only as lower-priority warmup. Related-interval
+admission is debounced per demand scope, waits for a foreground-quiet dwell,
+and records successful exact target ranges in a bounded five-minute TTL
+registry. A newly closed target range bypasses the older entry; rejected or
+failed submissions never poison the TTL.
 
 ## Events
 

@@ -8,8 +8,13 @@ import {
   intervalsSemanticallyEquivalent,
 } from "../../utils/intervals.js";
 import { planTargetBarRequest, type TargetBarRequestPlan } from "./intervalRequestBudget.js";
+import {
+  FOREGROUND_PRELOAD_QUIET_DWELL_MS,
+  ForegroundPreloadGate,
+  type PreloadLease,
+} from "./foregroundPreloadGate.js";
 
-export const PREFETCH_IDLE_GRACE_MS = 30_000;
+export const PREFETCH_IDLE_GRACE_MS = FOREGROUND_PRELOAD_QUIET_DWELL_MS;
 export const PREFETCH_INTERVAL_GAP_MS = 5_000;
 export const PREFETCH_FAILURE_RETRY_BASE_MS = 5_000;
 export const PREFETCH_FAILURE_MAX_ATTEMPTS = 3;
@@ -17,52 +22,16 @@ const PREFETCH_BUSY_RECHECK_MS = 1_000;
 const PREFETCH_BAR_LIMIT = 500;
 export const PREFETCH_SOURCE_ROW_BUDGET = 10_000;
 
-export interface BackgroundPrefetchLease {
-  readonly controller: AbortController;
-  readonly generation: number;
-}
+export type BackgroundPrefetchLease = PreloadLease;
 
 /**
  * Synchronous arbitration between speculative warming and user-visible chart
  * work. React state will still disable the hook, but foreground callbacks use
  * this gate first so an active prefetch is aborted before their request starts.
  */
-export class ChartBackgroundPrefetchPriorityGate {
-  private activeLease: BackgroundPrefetchLease | null = null;
-  private blockedUntil = 0;
-  private generation = 0;
-
-  constructor(private readonly idleGraceMs = PREFETCH_IDLE_GRACE_MS) {}
-
-  yieldToForeground(now = Date.now()): void {
-    this.generation += 1;
-    this.blockedUntil = Math.max(this.blockedUntil, now + this.idleGraceMs);
-    this.activeLease?.controller.abort();
-    this.activeLease = null;
-  }
-
-  waitMs(now = Date.now()): number {
-    return Math.max(0, this.blockedUntil - now);
-  }
-
+export class ChartBackgroundPrefetchPriorityGate extends ForegroundPreloadGate {
   tryAcquire(now = Date.now()): BackgroundPrefetchLease | null {
-    if (this.activeLease || this.waitMs(now) > 0) return null;
-    const lease: BackgroundPrefetchLease = {
-      controller: new AbortController(),
-      generation: this.generation,
-    };
-    this.activeLease = lease;
-    return lease;
-  }
-
-  isCurrent(lease: BackgroundPrefetchLease): boolean {
-    return this.activeLease === lease
-      && lease.generation === this.generation
-      && !lease.controller.signal.aborted;
-  }
-
-  release(lease: BackgroundPrefetchLease): void {
-    if (this.activeLease === lease) this.activeLease = null;
+    return this.tryAcquirePreload(now);
   }
 }
 
@@ -231,7 +200,7 @@ export function useChartBackgroundPrefetch({
   priorityGate,
   isForegroundBusy,
 }: UseChartBackgroundPrefetchOptions & {
-  priorityGate?: ChartBackgroundPrefetchPriorityGate;
+  priorityGate?: ForegroundPreloadGate;
   isForegroundBusy?: () => boolean;
 }): void {
   const inFlightRef = useRef(new Set<string>());
@@ -274,7 +243,7 @@ export function useChartBackgroundPrefetch({
       }
       const priorityWaitMs = prefetchPriority.waitMs();
       if (priorityWaitMs > 0) {
-        schedule(priorityWaitMs);
+        schedule(Number.isFinite(priorityWaitMs) ? priorityWaitMs : PREFETCH_BUSY_RECHECK_MS);
         return;
       }
 
@@ -294,10 +263,13 @@ export function useChartBackgroundPrefetch({
         })) continue;
         const attemptClaim = attemptLedgerRef.current.claimInterval(canonicalInterval);
         if (!attemptClaim) continue;
-        const lease = prefetchPriority.tryAcquire();
+        const lease = prefetchPriority.tryAcquirePreload("chart-background-prefetch");
         if (!lease) {
           attemptLedgerRef.current.releaseInterval(attemptClaim);
-          schedule(Math.max(PREFETCH_BUSY_RECHECK_MS, prefetchPriority.waitMs()));
+          const waitMs = prefetchPriority.waitMs();
+          schedule(Number.isFinite(waitMs)
+            ? Math.max(PREFETCH_BUSY_RECHECK_MS, waitMs)
+            : PREFETCH_BUSY_RECHECK_MS);
           return;
         }
         const prefetchPlan = planBackgroundPrefetchRequest(
@@ -316,6 +288,7 @@ export function useChartBackgroundPrefetch({
               source: "background-prefetch",
               apiSource: "background-prefetch",
               commit: "cache",
+              priority: "preload",
               signal: lease.controller.signal,
             },
           );
@@ -343,7 +316,10 @@ export function useChartBackgroundPrefetch({
       }
     };
 
-    schedule(Math.max(PREFETCH_BUSY_RECHECK_MS, prefetchPriority.waitMs()));
+    const initialWaitMs = prefetchPriority.waitMs();
+    schedule(Number.isFinite(initialWaitMs)
+      ? Math.max(PREFETCH_BUSY_RECHECK_MS, initialWaitMs)
+      : PREFETCH_BUSY_RECHECK_MS);
     return () => {
       cancelled = true;
       if (timer != null) clearTimeout(timer);

@@ -26,6 +26,7 @@ import type { KlineBar } from "../marketDataTypes.js";
 import type { EpochSeconds } from "../marketDataTypes.js";
 import { toEpochMilliseconds } from "../marketDataTypes.js";
 import { epochSeconds, mustBeDefined, partialMock } from "../../../test/testHelpers.js";
+import { ForegroundPreloadGate } from "../foregroundPreloadGate.js";
 
 type TestFeedConfig = Omit<SeriesDataFeedConfig, "api"> & {
   api?: Partial<KlineApi> | null;
@@ -186,6 +187,148 @@ test("background tracked interval cache uses the same realtime row fence", async
   const result = await request;
   assert.equal(cached.close, 15);
   assert.equal(result.data[0]?.close, 15);
+});
+
+test("physical K-line transports default to foreground while explicit preload skips the foreground lease", async () => {
+  const gate = new ForegroundPreloadGate(0);
+  const observed: Array<{ kind: string; foreground: number; preload: string | null }> = [];
+  const observe = (kind: string) => {
+    const snapshot = gate.snapshot();
+    observed.push({
+      kind,
+      foreground: snapshot.activeForeground,
+      preload: snapshot.activePreloadOwner,
+    });
+  };
+  const feed = new SeriesDataFeed({
+    foregroundPreloadGate: gate,
+    api: {
+      fetchKlinesHistory: async () => {
+        observe("history");
+        return { data: rows([10]) };
+      },
+      fetchKlinesBefore: async () => {
+        observe("before");
+        return { data: rows([10]), has_more: false };
+      },
+      fetchKlinesRange: async () => {
+        observe("range");
+        return { data: rows([10]), has_more: false };
+      },
+      fetchLatestKlines: async () => {
+        observe("latest");
+        return { data: rows([10]) };
+      },
+    },
+  });
+
+  const displacedPreload = gate.tryAcquirePreload("displaced-preload");
+  assert.ok(displacedPreload);
+  await feed.getHistory(SERIES);
+  assert.equal(displacedPreload.controller.signal.aborted, true);
+  await feed.getBefore(SERIES, { before: epochSeconds(20) });
+  await feed.getRange(SERIES, { start: epochSeconds(1), end: epochSeconds(20) });
+  await feed.getLatest(SERIES);
+
+  const explicitPreload = gate.tryAcquirePreload("explicit-preload");
+  assert.ok(explicitPreload);
+  await feed.getLatest(SERIES, {
+    priority: "preload",
+    signal: explicitPreload.controller.signal,
+    source: "background-prefetch",
+  });
+  gate.release(explicitPreload);
+
+  assert.deepEqual(observed.slice(0, 4).map((entry) => [entry.kind, entry.foreground]), [
+    ["history", 1],
+    ["before", 1],
+    ["range", 1],
+    ["latest", 1],
+  ]);
+  assert.deepEqual(observed.at(-1), {
+    kind: "latest",
+    foreground: 0,
+    preload: "explicit-preload",
+  });
+  assert.equal(gate.snapshot().activeForeground, 0);
+  gate.dispose();
+});
+
+test("concurrent initial latest and history retain foreground ownership until both transports settle", async () => {
+  const gate = new ForegroundPreloadGate(0);
+  let resolveHistory!: (result: KlineFetchResult) => void;
+  let resolveLatest!: (result: KlineFetchResult) => void;
+  let calls = 0;
+  const feed = new SeriesDataFeed({
+    foregroundPreloadGate: gate,
+    api: {
+      fetchKlinesHistory: async () => {
+        calls += 1;
+        return new Promise((resolve) => { resolveHistory = resolve; });
+      },
+      fetchLatestKlines: async () => {
+        calls += 1;
+        return new Promise((resolve) => { resolveLatest = resolve; });
+      },
+    },
+  });
+
+  const history = feed.getHistory(SERIES, { source: "initial-history" });
+  const latest = feed.getLatest(SERIES, { source: "initial-latest" });
+  while (calls < 2) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(gate.snapshot().activeForeground, 2);
+  assert.equal(gate.tryAcquirePreload("blocked-preload"), null);
+
+  resolveLatest({ data: rows([20]) });
+  await latest;
+  assert.equal(gate.snapshot().activeForeground, 1);
+  assert.equal(gate.tryAcquirePreload("still-blocked"), null);
+
+  resolveHistory({ data: rows([10, 20]) });
+  await history;
+  assert.equal(gate.snapshot().activeForeground, 0);
+  const resumed = gate.tryAcquirePreload("resumed");
+  assert.ok(resumed);
+  gate.release(resumed);
+  gate.dispose();
+});
+
+test("a foreground preemption fences a late preload response before cache commit", async () => {
+  const gate = new ForegroundPreloadGate(0);
+  let resolveLatest!: (result: KlineFetchResult) => void;
+  let started!: () => void;
+  const transportStarted = new Promise<void>((resolve) => { started = resolve; });
+  const commits: KlineBar[][] = [];
+  const feed = new SeriesDataFeed({
+    foregroundPreloadGate: gate,
+    api: {
+      fetchLatestKlines: async () => {
+        started();
+        return new Promise((resolve) => { resolveLatest = resolve; });
+      },
+    },
+    mergeCacheData: (_symbol, _interval, incoming) => { commits.push(incoming); },
+  });
+  const preload = gate.tryAcquirePreload("late-preload");
+  assert.ok(preload);
+  const request = feed.getLatest(SERIES, {
+    commit: "cache",
+    priority: "preload",
+    signal: preload.controller.signal,
+    source: "background-prefetch",
+  });
+  await transportStarted;
+
+  const foreground = gate.enterForeground("initial-history");
+  assert.equal(preload.controller.signal.aborted, true);
+  resolveLatest({ data: rows([10]) });
+  await assert.rejects(request, (error: unknown) => (
+    error instanceof Error && error.name === "AbortError"
+  ));
+  assert.deepEqual(commits, []);
+
+  foreground.release();
+  gate.dispose();
 });
 
 test("snapshot commit mode reconciles rows without mutating active or cache windows", async () => {

@@ -135,6 +135,9 @@ planner 会选择需要的 source streams。对于自定义周期，可能会启
 
 - 去重 in-flight requests。
 - 合并兼容 ranges。
+- 大修复按 chunk 执行；前台工作 active 时不再启动新的后台 chunk，已经运行的
+  一个后台 page 可以执行到下一个调度边界。
+- 429/预算延迟中的前台 chunk 仍算作 foreground ownership，不能被误判为空闲窗口。
 - 在 `GapLedger` 持久化 gap lifecycle。
 - 处理 retry/cancel/shutdown。
 - 运行 `BackfillEngine`。
@@ -143,6 +146,25 @@ planner 会选择需要的 source streams。对于自定义周期，可能会启
 - 发出 `BACKFILL_COMPLETED` 或 `BACKFILL_FAILED`。
 
 API 和 settings 代码应通过 DataManager/coordinator 触发修复，不要直接调用 `BackfillEngine.run()`。
+
+当前 demand priority：
+
+| 来源 | Reason | Priority |
+|---|---|---:|
+| `/klines/history` | `initial_history` | 10 |
+| 可见区/向左加载 | `visible_range_gap` / `visible_load_more` | 20 |
+| 前台 base seed / tail gap | `visible_seed_gap` / `tail_gap` | 25 |
+| 显式 latest refresh | `latest_refresh` | 30 |
+| query repair family | `query_*` | 35 |
+| price daily open | `price_daily_open` | 70 |
+| 同商品相关周期预热 | `related_interval_warmup` | 100 |
+| Full subscription 预热 | `full_subscription_warmup` | 110 |
+| 启动扫描 | `startup_gap_scan` | 140 |
+| 后台审计 | `background_gap_audit` | 160 |
+
+相关周期预热按 demand scope debounce，必须等前台持续安静后才提交；成功接纳的
+精确 target range 写入有界的五分钟 TTL registry。新闭合的 target range 不会被旧
+TTL 挡住，提交失败或返回 false 也不会污染 TTL。
 
 ## Events
 

@@ -3,15 +3,16 @@ CandleScope backend entrypoint.
 
 Startup sequence:
   1. Initialize SQLite storage (klines_repo).
-  2. Refresh exchange metadata on a best-effort basis.
-  3. Start the DataEngine runtime and attach its public handles to
+  2. Start the DataEngine runtime and attach its public handles to
      ``app.state`` for API/WS endpoints.
+  3. Refresh exchange metadata asynchronously on a best-effort basis.
   4. Bridge the IndicatorEngine to DataManager events.
   5. On shutdown, stop IndicatorEngine and the DataEngine runtime.
 
 When DataManager fails to initialize, the application can still expose
 health endpoints, but data APIs report explicit service-unavailable errors.
 """
+import asyncio
 import logging
 
 # ── Monkey-patch: websockets recv_messages bug ──────────────────
@@ -61,6 +62,8 @@ from app.core.config import (
     EVENT_LOOP_LAG_INTERVAL_SECONDS,
     LIQUIDATION_DB_PATH,
     LIQUIDATION_ROLLUP_BACKEND,
+    SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS,
+    SYMBOL_CATALOG_FOREGROUND_RECHECK_SECONDS,
     TRADE_FLOW_DB_PATH,
     TRADE_FLOW_ROLLUP_BACKEND,
 )
@@ -202,22 +205,100 @@ async def startup_event() -> None:
     if LIQUIDATION_ROLLUP_BACKEND == "sqlite":
         init_liquidation_storage(LIQUIDATION_DB_PATH)
 
-    # 2. Load exchange symbol info (non-blocking, best-effort)
-    try:
-        from app.api.v1.symbols import refresh_exchange_metadata
+    # 2. Restore the validated local symbol snapshot before the API is opened.
+    # This is local disk I/O only; optional upstream catalog I/O remains
+    # asynchronous so it cannot hold core readiness hostage.
+    from app.api.v1.symbols import initialize_exchange_metadata_cache
 
-        counts = await refresh_exchange_metadata()
-        print(f"[startup] Exchange info loaded ✓ {counts}")
-    except Exception as exc:
-        print(f"[startup] Exchange info load failed (non-critical): {exc}")
+    restored_catalog = initialize_exchange_metadata_cache()
+    if restored_catalog:
+        logger.info("Restored last-known-good symbol catalog snapshot")
 
-    # 3. Initialize DataManager
+    # 3. Initialize the core runtime before any optional upstream catalog I/O.
     await _init_data_manager()
+
+    from app.api.v1.symbols import configure_exchange_metadata_foreground_probe
+
+    runtime = getattr(app.state, "data_engine_runtime", None)
+    configure_exchange_metadata_foreground_probe(
+        getattr(runtime, "backfill_coordinator", None)
+    )
+
+    # 4. Refresh exchange symbols in the background.  Product search can serve
+    # its last-known-good process cache while this best-effort task is pending.
+    _schedule_symbol_catalog_refresh()
+
+
+def _schedule_symbol_catalog_refresh() -> asyncio.Task[None]:
+    async def _refresh() -> None:
+        try:
+            from app.api.v1.symbols import refresh_exchange_metadata
+
+            await _wait_for_catalog_foreground_quiet()
+            counts = await refresh_exchange_metadata()
+            print(f"[startup] Exchange info loaded ✓ {counts}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Exchange info load failed (non-critical): %s",
+                exc,
+                exc_info=True,
+            )
+            print(f"[startup] Exchange info load failed (non-critical): {exc}")
+
+    task = asyncio.create_task(_refresh(), name="startup:symbol-catalog-refresh")
+    app.state.symbol_catalog_refresh_task = task
+    return task
+
+
+async def _wait_for_catalog_foreground_quiet() -> None:
+    dwell = SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS
+    if dwell > 0:
+        await asyncio.sleep(dwell)
+    runtime = getattr(app.state, "data_engine_runtime", None)
+    coordinator = getattr(runtime, "backfill_coordinator", None)
+    has_foreground_work = getattr(coordinator, "has_foreground_work", None)
+    foreground_idle_seconds = getattr(coordinator, "foreground_idle_seconds", None)
+    if not callable(has_foreground_work):
+        return
+    while True:
+        try:
+            busy = bool(has_foreground_work())
+            idle_for = (
+                float(foreground_idle_seconds())
+                if callable(foreground_idle_seconds)
+                else float("inf")
+            )
+        except Exception:
+            busy = True
+            idle_for = 0.0
+        if not busy and idle_for >= dwell:
+            return
+        await asyncio.sleep(SYMBOL_CATALOG_FOREGROUND_RECHECK_SECONDS)
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     """Application shutdown handler."""
+    symbol_catalog_task = getattr(app.state, "symbol_catalog_refresh_task", None)
+    if symbol_catalog_task is not None and not symbol_catalog_task.done():
+        symbol_catalog_task.cancel()
+        try:
+            await symbol_catalog_task
+        except asyncio.CancelledError:
+            pass
+    try:
+        from app.api.v1.symbols import (
+            cancel_exchange_metadata_refreshes,
+            configure_exchange_metadata_foreground_probe,
+        )
+
+        await cancel_exchange_metadata_refreshes()
+        configure_exchange_metadata_foreground_probe(None)
+    except Exception as exc:
+        logger.warning("Symbol catalog shutdown failed: %s", exc, exc_info=True)
+
     lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
     if lag_monitor is not None:
         await lag_monitor.stop()

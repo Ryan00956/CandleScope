@@ -669,6 +669,15 @@ class DataManager:
         self._started = False
         logger.info("DataManager shutting down...")
 
+        related_warmup_scheduler = getattr(
+            self,
+            "_related_interval_warmup_scheduler",
+            None,
+        )
+        cancel_related_warmup = getattr(related_warmup_scheduler, "cancel", None)
+        if callable(cancel_related_warmup):
+            cancel_related_warmup()
+
         # Stop TTL task
         if self._ttl_task is not None:
             self._ttl_task.cancel()

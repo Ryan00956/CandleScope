@@ -6,6 +6,7 @@ import type {
   CommitChartData,
   FeedApplyMode,
   FeedCommitMode,
+  FeedRequestPriority,
   FeedResult,
   HistoryExcludedRange,
   HistoryMissingRange,
@@ -18,6 +19,7 @@ import type {
   PendingBeforePage,
   SeriesDataFeedConfig,
 } from "../klineContracts.js";
+import type { ForegroundPreloadGate } from "../foregroundPreloadGate.js";
 import type {
   EpochSeconds,
   KlineBar,
@@ -90,6 +92,7 @@ interface GetBarsOptions {
   strict?: boolean;
   requestScope?: string;
   indicatorWindowOwner?: string;
+  priority?: FeedRequestPriority;
 }
 
 interface GetHistoryOptions {
@@ -100,6 +103,7 @@ interface GetHistoryOptions {
   commit?: FeedCommitMode;
   requestScope?: string;
   indicatorWindowOwner?: string;
+  priority?: FeedRequestPriority;
 }
 
 interface GetBeforeOptions {
@@ -111,6 +115,7 @@ interface GetBeforeOptions {
   requestScope?: string;
   maxWaitMs?: number;
   indicatorWindowOwner?: string;
+  priority?: FeedRequestPriority;
 }
 
 interface GetRangeOptions {
@@ -127,6 +132,7 @@ interface GetRangeOptions {
   maxPages?: number;
   requestScope?: string;
   indicatorWindowOwner?: string;
+  priority?: FeedRequestPriority;
 }
 
 interface GetLatestOptions {
@@ -135,6 +141,7 @@ interface GetLatestOptions {
   apiSource?: string;
   signal?: AbortSignal;
   commit?: FeedCommitMode;
+  priority?: FeedRequestPriority;
 }
 
 export interface KlineRequestDemand {
@@ -699,6 +706,7 @@ export class SeriesDataFeed {
   patchCacheTick: PatchCacheTick;
   private realtimeFenceBySeries: Map<SeriesKey, RealtimeFenceState>;
   private requestDemandBySeries: Map<SeriesKey, KlineRequestDemand>;
+  private foregroundPreloadGate: ForegroundPreloadGate | null;
 
   constructor(config: SeriesDataFeedConfig = {}) {
     this.inflight = new InflightRegistry();
@@ -727,11 +735,15 @@ export class SeriesDataFeed {
     this.patchCacheTick = noopPatchCacheTick;
     this.realtimeFenceBySeries = new Map();
     this.requestDemandBySeries = new Map();
+    this.foregroundPreloadGate = null;
     this.configure(config);
   }
 
   configure(config: SeriesDataFeedConfig = {}): void {
     this.api = config.api || this.api || null;
+    if (config.foregroundPreloadGate !== undefined) {
+      this.foregroundPreloadGate = config.foregroundPreloadGate;
+    }
     this.canRequestSeries = config.canRequestSeries || this.canRequestSeries || (() => true);
     this.getActiveSeries = config.getActiveSeries || this.getActiveSeries || (() => null);
     this.isActiveSeries = config.isActiveSeries || this.isActiveSeries || defaultIsActiveSeries;
@@ -761,6 +773,21 @@ export class SeriesDataFeed {
 
   beforePageKey(series: Partial<MarketSeries>): SeriesKey {
     return this.seriesKey(series);
+  }
+
+  private async runPhysicalTransport<TResult>(
+    priority: FeedRequestPriority,
+    owner: string,
+    request: () => Promise<TResult>,
+  ): Promise<TResult> {
+    const gate = this.foregroundPreloadGate;
+    if (!gate || priority === "preload") return request();
+    const lease = gate.enterForeground(owner);
+    try {
+      return await request();
+    } finally {
+      lease.release();
+    }
   }
 
   private indicatorWindowOwner(
@@ -2378,6 +2405,7 @@ export class SeriesDataFeed {
       strict = false,
       requestScope,
       indicatorWindowOwner,
+      priority = "foreground",
     }: GetBarsOptions = {},
   ): Promise<FeedResult> {
     const plan = planBarsFetch({
@@ -2401,6 +2429,7 @@ export class SeriesDataFeed {
         commit,
         ...(requestScope === undefined ? {} : { requestScope }),
         ...(indicatorWindowOwner === undefined ? {} : { indicatorWindowOwner }),
+        priority,
       });
       return { ...result, plan };
     }
@@ -2415,6 +2444,7 @@ export class SeriesDataFeed {
         ...(requestScope === undefined ? {} : { requestScope }),
         ...(maxWaitMs === undefined ? {} : { maxWaitMs }),
         ...(indicatorWindowOwner === undefined ? {} : { indicatorWindowOwner }),
+        priority,
       });
       return { ...result, plan };
     }
@@ -2427,6 +2457,7 @@ export class SeriesDataFeed {
       commit,
       ...(requestScope === undefined ? {} : { requestScope }),
       ...(indicatorWindowOwner === undefined ? {} : { indicatorWindowOwner }),
+      priority,
     });
     return { ...result, plan };
   }
@@ -2441,6 +2472,7 @@ export class SeriesDataFeed {
       commit = "active",
       requestScope,
       indicatorWindowOwner: requestedIndicatorWindowOwner,
+      priority = "foreground",
     }: GetHistoryOptions = {},
   ): Promise<AppliedKlineResult> {
     if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
@@ -2457,11 +2489,15 @@ export class SeriesDataFeed {
       days,
       epoch,
       source,
+      priority,
       requestScope,
       ...transportDemand,
     });
     const realtimeFence = this.beginRealtimeRequest(series);
-    return this.inflight.run(key, async () => {
+    return this.inflight.run(key, () => this.runPhysicalTransport(
+      priority,
+      `kline-history:${source}`,
+      async () => {
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
@@ -2477,6 +2513,7 @@ export class SeriesDataFeed {
           ...transportDemand,
         },
       );
+      throwIfAborted(signal);
       return this.applyResult(series, result, {
         epoch,
         source,
@@ -2485,7 +2522,8 @@ export class SeriesDataFeed {
         expectedRealtimeVersion: realtimeFence.version,
         indicatorWindowOwner,
       });
-    }).finally(() => {
+      },
+    )).finally(() => {
       this.endRealtimeRequest(realtimeFence);
     });
   }
@@ -2501,6 +2539,7 @@ export class SeriesDataFeed {
       requestScope,
       maxWaitMs,
       indicatorWindowOwner: requestedIndicatorWindowOwner,
+      priority = "foreground",
     }: GetBeforeOptions = {},
   ): Promise<AppliedKlineResult> {
     if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
@@ -2517,12 +2556,16 @@ export class SeriesDataFeed {
       bars,
       epoch,
       source,
+      priority,
       requestScope,
       maxWaitMs,
       ...transportDemand,
     });
     const realtimeFence = this.beginRealtimeRequest(series);
-    return this.inflight.run(key, async () => {
+    return this.inflight.run(key, () => this.runPhysicalTransport(
+      priority,
+      `kline-before:${source}`,
+      async () => {
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
@@ -2550,7 +2593,8 @@ export class SeriesDataFeed {
       });
       if (!applied.stale) this.updateBeforePageAvailability(series, before, applied);
       return applied;
-    }).finally(() => {
+      },
+    )).finally(() => {
       this.endRealtimeRequest(realtimeFence);
     });
   }
@@ -2571,6 +2615,7 @@ export class SeriesDataFeed {
       maxPages = 20,
       requestScope,
       indicatorWindowOwner: requestedIndicatorWindowOwner,
+      priority = "foreground",
     }: GetRangeOptions = {},
   ): Promise<FeedResult> {
     const range = normalizeRangeSec({ start, end, startSec, endSec });
@@ -2595,12 +2640,16 @@ export class SeriesDataFeed {
       waitMs,
       strict,
       source,
+      priority,
       maxPages,
       requestScope,
       ...transportDemand,
     });
     const realtimeFence = this.beginRealtimeRequest(series);
-    return this.inflight.run(key, async () => {
+    return this.inflight.run(key, () => this.runPhysicalTransport(
+      priority,
+      `kline-range:${source}`,
+      async () => {
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
       const pages: AppliedKlineResult[] = [];
@@ -2749,7 +2798,8 @@ export class SeriesDataFeed {
         });
       }
       return combinedResult;
-    }).finally(() => {
+      },
+    )).finally(() => {
       this.endRealtimeRequest(realtimeFence);
     });
   }
@@ -2762,13 +2812,17 @@ export class SeriesDataFeed {
       apiSource = "",
       signal,
       commit = "patch-active",
+      priority = "foreground",
     }: GetLatestOptions = {},
   ): Promise<AppliedKlineResult> {
     if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
     const epoch = this.currentEpoch(series);
-    const key = requestKeyFor("latest", series, { apiSource, epoch, limit, source });
+    const key = requestKeyFor("latest", series, { apiSource, epoch, limit, priority, source });
     const realtimeFence = this.beginRealtimeRequest(series);
-    return this.inflight.run(key, async () => {
+    return this.inflight.run(key, () => this.runPhysicalTransport(
+      priority,
+      `kline-latest:${source}`,
+      async () => {
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
       const api = await this.resolveApi();
       if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
@@ -2781,6 +2835,7 @@ export class SeriesDataFeed {
         apiSource,
         signal === undefined ? {} : { signal },
       );
+      throwIfAborted(signal);
       return this.applyResult(series, result, {
         epoch,
         source,
@@ -2788,7 +2843,8 @@ export class SeriesDataFeed {
         mode: "tick",
         expectedRealtimeVersion: realtimeFence.version,
       });
-    }).finally(() => {
+      },
+    )).finally(() => {
       this.endRealtimeRequest(realtimeFence);
     });
   }

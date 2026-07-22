@@ -13,6 +13,10 @@ import {
   hasChartForegroundWork,
   useChartBackgroundPrefetch,
 } from "./useChartBackgroundPrefetch.js";
+import type {
+  ForegroundLease,
+  ForegroundPreloadGate,
+} from "./foregroundPreloadGate.js";
 import { useChartDataRuntime } from "./useChartDataRuntime.js";
 import { buildChartDisplayState } from "./marketDataView.js";
 import type { MarketDisplayData } from "./marketDataView.js";
@@ -131,6 +135,7 @@ export function canRequestRightWindowRestoreDuringRuntime({
 export interface UseMarketDataRuntimeOptions {
   session: ChartSessionRuntime;
   realtimePriceRef: MutableRefObject<number | null>;
+  foregroundPreloadGate?: ForegroundPreloadGate;
 }
 
 export type MarketDataRuntime = MarketDataRuntimeContract;
@@ -138,6 +143,7 @@ export type MarketDataRuntime = MarketDataRuntimeContract;
 export function useMarketDataRuntime({
   session,
   realtimePriceRef,
+  foregroundPreloadGate,
 }: UseMarketDataRuntimeOptions): MarketDataRuntime {
   const {
     symbol,
@@ -167,11 +173,12 @@ export function useMarketDataRuntime({
     consumeIndicatorRangeRequest,
     publishIndicatorRangeRequest,
   } = useMarketDataEvents({ interval, sessionKey });
-  const backgroundPrefetchPriorityRef = useRef<ChartBackgroundPrefetchPriorityGate | null>(null);
-  if (backgroundPrefetchPriorityRef.current == null) {
-    backgroundPrefetchPriorityRef.current = new ChartBackgroundPrefetchPriorityGate();
+  const defaultForegroundPreloadGateRef = useRef<ChartBackgroundPrefetchPriorityGate | null>(null);
+  if (defaultForegroundPreloadGateRef.current == null) {
+    defaultForegroundPreloadGateRef.current = new ChartBackgroundPrefetchPriorityGate();
   }
-  const backgroundPrefetchPriority = backgroundPrefetchPriorityRef.current;
+  const backgroundPrefetchPriority = foregroundPreloadGate
+    || defaultForegroundPreloadGateRef.current;
   const publishIndicatorWindowRange = useCallback((meta: IndicatorWindowMeta) => {
     requestIndicatorRangeForWindowMeta((start, end, reason) => {
       if (!reason) return false;
@@ -335,6 +342,7 @@ export function useMarketDataRuntime({
   useEffect(() => {
     seriesDataFeed.configure({
       api: defaultKlineApi,
+      foregroundPreloadGate: backgroundPrefetchPriority,
       canRequestSeries: canRequestChartSeries,
       getActiveSeries: () => ({
         exchange,
@@ -348,6 +356,7 @@ export function useMarketDataRuntime({
       patchCacheTick,
     });
   }, [
+    backgroundPrefetchPriority,
     commitMergedChartData,
     commitPatchedChartData,
     canRequestChartSeries,
@@ -615,6 +624,11 @@ export function useMarketDataRuntime({
   });
 
   const foregroundIndicatorRequestCount = indicatorRangeRequests.length;
+  const foregroundBusyLeaseRef = useRef<{
+    gate: ForegroundPreloadGate;
+    lease: ForegroundLease;
+    sessionKey: string;
+  } | null>(null);
   const isForegroundBusyForPrefetch = useCallback(() => {
     const activeSeries = {
       exchange,
@@ -640,6 +654,47 @@ export function useMarketDataRuntime({
     seriesDataFeed,
     symbol,
   ]);
+  const foregroundBusyOwnerActive = hasChartForegroundWork({
+    activePagination: paginationState.phase === "loading" || paginationState.phase === "pending",
+    indicatorRequests: foregroundIndicatorRequestCount,
+    loading,
+    loadingMoreLeft,
+    pendingInitial: initialHistoryPending,
+    pendingRepairs: seriesDataFeed.pendingRepairCount({
+      exchange,
+      marketType,
+      symbol,
+      interval,
+    }),
+    restoringLatestWindow,
+  });
+  useLayoutEffect(() => {
+    const current = foregroundBusyLeaseRef.current;
+    if (
+      current
+      && (
+        current.gate !== backgroundPrefetchPriority
+        || current.sessionKey !== sessionKey
+        || !foregroundBusyOwnerActive
+      )
+    ) {
+      current.lease.release();
+      foregroundBusyLeaseRef.current = null;
+    }
+    if (foregroundBusyOwnerActive && foregroundBusyLeaseRef.current == null) {
+      foregroundBusyLeaseRef.current = {
+        gate: backgroundPrefetchPriority,
+        lease: backgroundPrefetchPriority.acquireBusy(`chart-runtime:${sessionKey}`),
+        sessionKey,
+      };
+    }
+  }, [backgroundPrefetchPriority, foregroundBusyOwnerActive, sessionKey]);
+  useLayoutEffect(() => () => {
+    const current = foregroundBusyLeaseRef.current;
+    if (current?.gate !== backgroundPrefetchPriority) return;
+    current.lease.release();
+    foregroundBusyLeaseRef.current = null;
+  }, [backgroundPrefetchPriority]);
 
   useChartBackgroundPrefetch({
     symbol,

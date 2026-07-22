@@ -543,6 +543,300 @@ def test_binance_429_cools_only_the_matching_budget_bucket() -> None:
     assert circuits == {}
 
 
+def test_429_recovery_admits_one_probe_without_releasing_a_full_bucket() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager()
+        request = HistoricalRequest(
+            exchange="binance",
+            market_type="futures",
+            endpoint="/fapi/v1/klines",
+            symbol="BTCUSDT",
+        )
+        rule = RateLimitRule(
+            name="binance_futures",
+            bucket_key="binance:futures:request_weight:ip",
+            capacity=100,
+            refill_interval_seconds=60,
+        )
+
+        manager.record_response(
+            rule,
+            status_code=429,
+            headers={"Retry-After": "0.02"},
+        )
+        during = await manager.inspect(rule, request)
+        await asyncio.sleep(0.05)
+        first = await manager.acquire_nowait(rule, request)
+        in_flight = manager.snapshot()[rule.bucket_key]
+        with pytest.raises(RateLimitDeferred) as caught:
+            await manager.acquire_nowait(rule, request)
+        manager.record_response(rule, status_code=200)
+        released = manager.snapshot()[rule.bucket_key]
+        return during, first, caught.value, in_flight, released
+
+    during, first, deferred, in_flight, released = asyncio.run(run())
+    assert during.allowed is False and during.reason == "cooldown"
+    assert first.cost == 1
+    assert deferred.reason == "probe_in_flight"
+    assert deferred.retry_after_seconds > 0
+    assert in_flight["recovery_probe_pending"] is False
+    assert in_flight["recovery_generation"] == 1
+    assert in_flight["last_recovery_probe_at_ms"] is not None
+    assert in_flight["probe_in_flight"] is True
+    assert in_flight["probe_kind"] == "recovery"
+    assert released["probe_in_flight"] is False
+    assert released["last_probe_release_reason"] == "response"
+
+
+def test_conservative_cold_start_admits_only_one_exact_request_cost() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager(conservative_cold_start=True)
+        request = HistoricalRequest(
+            exchange="binance",
+            market_type="spot",
+            endpoint="/api/v3/exchangeInfo",
+            symbol="*",
+        )
+        rule = RateLimitRule(
+            name="binance_spot_exchange_info",
+            bucket_key="binance:spot:request_weight:ip",
+            capacity=100,
+            refill_interval_seconds=60,
+            cost=lambda _request: 20,
+        )
+        inspected = await manager.inspect(rule, request)
+        first = await manager.acquire_nowait(rule, request)
+        with pytest.raises(RateLimitDeferred) as caught:
+            await manager.acquire_nowait(rule, request)
+        return inspected, first, caught.value, manager.snapshot()[rule.bucket_key]
+
+    inspected, first, deferred, snapshot = asyncio.run(run())
+    assert inspected.allowed is True
+    assert first.cost == 20
+    assert deferred.reason == "probe_in_flight"
+    assert snapshot["cold_start_probe_pending"] is False
+    assert snapshot["probe_in_flight"] is True
+    assert snapshot["probe_kind"] == "cold_start"
+    assert snapshot["tokens"] < 20
+
+
+def test_cold_start_probe_blocks_concurrent_request_until_unknown_response() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager(
+            conservative_cold_start=True,
+            probe_lease_seconds=1.0,
+        )
+        request = HistoricalRequest(
+            exchange="binance",
+            market_type="spot",
+            endpoint="/api/v3/exchangeInfo",
+            symbol="*",
+        )
+        rule = RateLimitRule(
+            name="binance_spot_exchange_info",
+            bucket_key="binance:spot:request_weight:ip",
+            capacity=100,
+            refill_interval_seconds=1,
+            cost=lambda _request: 20,
+        )
+        acquired = asyncio.Event()
+        finish_with_error = asyncio.Event()
+
+        async def physical_probe() -> None:
+            await manager.acquire_nowait(rule, request)
+            acquired.set()
+            await finish_with_error.wait()
+            manager.record_response(rule, status_code=None)
+
+        probe_task = asyncio.create_task(physical_probe())
+        await acquired.wait()
+        with pytest.raises(RateLimitDeferred) as caught:
+            await manager.acquire_nowait(rule, request)
+        blocked = manager.snapshot()[rule.bucket_key]
+        finish_with_error.set()
+        await probe_task
+        after_error = await manager.inspect(rule, request)
+        released = manager.snapshot()[rule.bucket_key]
+        return caught.value, blocked, after_error, released
+
+    deferred, blocked, after_error, released = asyncio.run(run())
+    assert deferred.reason == "probe_in_flight"
+    assert blocked["probe_in_flight"] is True
+    assert after_error.allowed is False and after_error.reason == "budget"
+    assert released["probe_in_flight"] is False
+    assert released["last_probe_release_reason"] == "unknown_response"
+    assert released["tokens"] < 20
+
+
+def test_429_probe_ignores_stale_response_and_waits_for_owner_response() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager(probe_lease_seconds=1.0)
+        request = HistoricalRequest(
+            exchange="okx",
+            market_type="spot",
+            endpoint="/api/v5/market/history-candles",
+            symbol="BTC-USDT",
+        )
+        rule = RateLimitRule(
+            name="okx_history",
+            bucket_key="okx:history-candles:ip",
+            capacity=20,
+            refill_interval_seconds=2,
+            cost=lambda _request: 2,
+        )
+        manager.record_response(
+            rule,
+            status_code=429,
+            headers={"Retry-After": "0.02"},
+        )
+        await asyncio.sleep(0.05)
+        acquired = asyncio.Event()
+        owner_can_finish = asyncio.Event()
+
+        async def physical_probe() -> None:
+            await manager.acquire_nowait(rule, request)
+            acquired.set()
+            await owner_can_finish.wait()
+            manager.record_response(rule, status_code=200)
+
+        probe_task = asyncio.create_task(physical_probe())
+        await acquired.wait()
+        with pytest.raises(RateLimitDeferred) as first_caught:
+            await manager.acquire_nowait(rule, request)
+
+        # Simulate an older pre-429 request returning in a different task. It
+        # must not release the newly admitted recovery probe.
+        manager.record_response(rule, status_code=200)
+        with pytest.raises(RateLimitDeferred) as stale_caught:
+            await manager.acquire_nowait(rule, request)
+        still_blocked = manager.snapshot()[rule.bucket_key]
+
+        owner_can_finish.set()
+        await probe_task
+        released = manager.snapshot()[rule.bucket_key]
+        return first_caught.value, stale_caught.value, still_blocked, released
+
+    first, stale, still_blocked, released = asyncio.run(run())
+    assert first.reason == "probe_in_flight"
+    assert stale.reason == "probe_in_flight"
+    assert still_blocked["probe_in_flight"] is True
+    assert released["probe_in_flight"] is False
+    assert released["last_probe_release_reason"] == "response"
+
+
+def test_probe_lease_expiry_releases_into_zero_token_ramp() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager(
+            conservative_cold_start=True,
+            probe_lease_seconds=0.01,
+        )
+        request = HistoricalRequest(
+            exchange="binance",
+            market_type="futures",
+            endpoint="/fapi/v1/klines",
+            symbol="BTCUSDT",
+        )
+        rule = RateLimitRule(
+            name="binance_futures",
+            bucket_key="binance:futures:request_weight:ip",
+            capacity=10,
+            refill_interval_seconds=1,
+        )
+        await manager.acquire_nowait(rule, request)
+        with pytest.raises(RateLimitDeferred) as in_flight:
+            await manager.acquire_nowait(rule, request)
+        await asyncio.sleep(0.03)
+        after_expiry = await manager.inspect(rule, request)
+        snapshot = manager.snapshot()[rule.bucket_key]
+        return in_flight.value, after_expiry, snapshot
+
+    in_flight, after_expiry, snapshot = asyncio.run(run())
+    assert in_flight.reason == "probe_in_flight"
+    assert after_expiry.allowed is False and after_expiry.reason == "budget"
+    assert snapshot["probe_in_flight"] is False
+    assert snapshot["last_probe_release_reason"] == "lease_expired"
+    assert snapshot["tokens"] == 0
+
+
+def test_headers_only_accounting_does_not_release_probe_lease() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager(conservative_cold_start=True)
+        request = HistoricalRequest(
+            exchange="binance",
+            market_type="spot",
+            endpoint="/api/v3/exchangeInfo",
+            symbol="*",
+        )
+        rule = RateLimitRule(
+            name="binance_spot_exchange_info",
+            bucket_key="binance:spot:request_weight:ip",
+            capacity=100,
+            refill_interval_seconds=60,
+            cost=lambda _request: 20,
+        )
+        await manager.acquire_nowait(rule, request)
+        manager.record_response(
+            rule,
+            status_code=200,
+            headers={"X-MBX-USED-WEIGHT-1M": "20"},
+            response_complete=False,
+        )
+        with pytest.raises(RateLimitDeferred) as caught:
+            await manager.acquire_nowait(rule, request)
+        manager.record_response(rule, response_unknown=True)
+        return caught.value, manager.snapshot()[rule.bucket_key]
+
+    deferred, snapshot = asyncio.run(run())
+    assert deferred.reason == "probe_in_flight"
+    assert snapshot["probe_in_flight"] is False
+    assert snapshot["last_probe_release_reason"] == "unknown_response"
+    assert snapshot["last_status_code"] == 200
+    assert snapshot["last_headers"] == {"x-mbx-used-weight-1m": "20"}
+    assert snapshot["tokens"] == 0
+
+
+def test_repeated_429_extends_cooldown_and_keeps_one_recovery_probe() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager()
+        request = HistoricalRequest(
+            exchange="okx",
+            market_type="spot",
+            endpoint="/api/v5/market/history-candles",
+            symbol="BTC-USDT",
+        )
+        rule = RateLimitRule(
+            name="okx_history",
+            bucket_key="okx:history-candles:ip",
+            capacity=20,
+            refill_interval_seconds=2,
+            cost=lambda _request: 2,
+        )
+        manager.record_response(
+            rule,
+            status_code=429,
+            headers={"Retry-After": "0.01"},
+        )
+        first_deadline = manager.snapshot()[rule.bucket_key]["cooldown_until"]
+        await asyncio.sleep(0.002)
+        manager.record_response(
+            rule,
+            status_code=429,
+            headers={"Retry-After": "0.02"},
+        )
+        extended = manager.snapshot()[rule.bucket_key]
+        await asyncio.sleep(0.04)
+        probe = await manager.acquire_nowait(rule, request)
+        with pytest.raises(RateLimitDeferred) as caught:
+            await manager.acquire_nowait(rule, request)
+        return first_deadline, extended, probe, caught.value
+
+    first_deadline, extended, probe, deferred = asyncio.run(run())
+    assert extended["cooldown_until"] > first_deadline
+    assert extended["recovery_generation"] == 2
+    assert probe.cost == 2
+    assert deferred.reason == "probe_in_flight"
+
+
 def test_bucket_created_after_418_recovery_cannot_restart_at_full_capacity() -> None:
     async def run() -> tuple:
         manager = RateLimitManager()
@@ -576,7 +870,7 @@ def test_bucket_created_after_418_recovery_cannot_restart_at_full_capacity() -> 
             body_code="-1003",
             headers={"Retry-After": "0.02"},
         )
-        await asyncio.sleep(0.025)
+        await asyncio.sleep(0.05)
 
         futures = await manager.inspect(futures_rule, futures_request)
         # This bucket did not exist when the 418 was recorded. It is created

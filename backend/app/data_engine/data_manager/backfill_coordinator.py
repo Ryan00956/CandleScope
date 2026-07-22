@@ -532,6 +532,9 @@ class _BackfillScheduler:
         self._shutdown = False
         self._drain_timer: asyncio.TimerHandle | None = None
         self._next_drain_at: float | None = None
+        self._last_foreground_activity_at = 0.0
+        self._active_foreground_chunks: set[str] = set()
+        self._active_background_chunks: set[str] = set()
 
         self.submitted = 0
         self.deduped = 0
@@ -556,6 +559,8 @@ class _BackfillScheduler:
             request.metadata["requires_trusted_finality"] = True
 
         self.submitted += 1
+        if not self._is_background(request):
+            self._last_foreground_activity_at = time.monotonic()
         series_key = request.series_key
         series = self._series.setdefault(series_key, _SeriesState())
 
@@ -702,6 +707,9 @@ class _BackfillScheduler:
                 ]
                 heapq.heapify(self._ready)
         for chunk_id in chunk_ids:
+            if chunk_id in self._tasks and not self._is_background(state.request):
+                self._active_background_chunks.discard(chunk_id)
+                self._active_foreground_chunks.add(chunk_id)
             chunk = self._chunks.get(chunk_id)
             if chunk is None:
                 continue
@@ -1300,7 +1308,7 @@ class _BackfillScheduler:
                     continue
                 if self._is_background(chunk.request) and (
                     self._running_background_count() >= 1
-                    or self._has_foreground_ready(skipped)
+                    or self._has_foreground_work(skipped)
                 ):
                     skipped.append(item)
                     continue
@@ -1331,7 +1339,16 @@ class _BackfillScheduler:
                 )
                 self._tasks[chunk.chunk_id] = task
                 if self._is_background(chunk.request):
+                    self._active_background_chunks.add(chunk.chunk_id)
                     self.background_dispatches += 1
+                else:
+                    self._active_foreground_chunks.add(chunk.chunk_id)
+                task.add_done_callback(
+                    lambda _task, chunk_id=chunk.chunk_id: (
+                        self._active_foreground_chunks.discard(chunk_id),
+                        self._active_background_chunks.discard(chunk_id),
+                    )
+                )
         finally:
             for item in skipped:
                 heapq.heappush(self._ready, item)
@@ -1350,29 +1367,42 @@ class _BackfillScheduler:
         return bool(reasons) and reasons.issubset(_BACKGROUND_BACKFILL_REASONS)
 
     def _running_background_count(self) -> int:
-        return sum(
-            1
-            for chunk_id in self._tasks
-            if (
-                (chunk := self._chunks.get(chunk_id)) is not None
-                and self._is_background(chunk.request)
-            )
-        )
+        return len(self._active_background_chunks)
 
-    def _has_foreground_ready(
+    def _has_foreground_active(self) -> bool:
+        return bool(self._active_foreground_chunks)
+
+    def _has_foreground_work(
         self,
         extra: Iterable[tuple[int, int, int, str]] = (),
     ) -> bool:
+        if self._has_foreground_active():
+            return True
         for item in (*self._ready, *tuple(extra)):
             chunk = self._chunks.get(item[3])
             if chunk is None or self._is_background(chunk.request):
-                continue
-            if chunk.eligible_at_monotonic > time.monotonic():
                 continue
             state = self._requests.get(chunk.parent_id)
             if state is not None and not state.stale and state.failed is None:
                 return True
         return False
+
+    def has_foreground_work(self) -> bool:
+        """Return whether unresolved user-visible work owns the scheduler.
+
+        Rate-deferred foreground chunks still count: speculative warmup must
+        not consume another exchange or worker budget merely because the
+        visible request is waiting for its exact Retry-After deadline.
+        """
+
+        return self._has_foreground_work()
+
+    def foreground_idle_seconds(self) -> float:
+        if self.has_foreground_work():
+            return 0.0
+        if self._last_foreground_activity_at <= 0:
+            return float("inf")
+        return max(0.0, time.monotonic() - self._last_foreground_activity_at)
 
     def _schedule_drain(self, delay: float) -> None:
         if self._shutdown:
@@ -1412,6 +1442,11 @@ class _BackfillScheduler:
         return max(0, int((self._next_drain_at - loop.time()) * 1000))
 
     async def _run_chunk(self, chunk: _FetchChunk) -> None:
+        foreground_chunk = not self._is_background(chunk.request)
+        if foreground_chunk:
+            self._active_foreground_chunks.add(chunk.chunk_id)
+        else:
+            self._active_background_chunks.add(chunk.chunk_id)
         try:
             try:
                 outcome = await self._execute(chunk.request)
@@ -1433,6 +1468,10 @@ class _BackfillScheduler:
                 )
             await self._finish_chunk(chunk, outcome)
         finally:
+            if foreground_chunk or not self._is_background(chunk.request):
+                self._last_foreground_activity_at = time.monotonic()
+            self._active_foreground_chunks.discard(chunk.chunk_id)
+            self._active_background_chunks.discard(chunk.chunk_id)
             self._tasks.pop(chunk.chunk_id, None)
             self._drain()
 
@@ -2277,6 +2316,16 @@ class BackfillCoordinator:
             return True
         current = self._scope_generations.get(normalized_scope)
         return current is None or int(generation) >= current
+
+    def has_foreground_work(self) -> bool:
+        """Expose scheduler foreground ownership to speculative producers."""
+
+        return self._scheduler.has_foreground_work()
+
+    def foreground_idle_seconds(self) -> float:
+        """Return continuous scheduler idle time since foreground ownership."""
+
+        return self._scheduler.foreground_idle_seconds()
 
     def _note_progress(
         self,

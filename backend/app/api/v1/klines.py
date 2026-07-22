@@ -42,6 +42,10 @@ from app.data_engine.interval_policy import (
     last_closed_bar_open_ms,
     parse_interval_ms,
 )
+from app.api.v1.related_warmup import (
+    RelatedIntervalWarmupScheduler,
+    RelatedWarmupSubmission,
+)
 from app.data_engine.history import (
     TradingCalendar,
     containing_expected_open_ms,
@@ -56,6 +60,10 @@ logger = logging.getLogger("api.klines")
 RELATED_WARMUP_INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
 MAX_RANGE_RESPONSE_BARS = 5_000
 RELATED_WARMUP_TARGET_BARS = 1_000
+RELATED_WARMUP_TTL_SECONDS = 5 * 60.0
+RELATED_WARMUP_DWELL_SECONDS = 1.0
+RELATED_WARMUP_BUSY_RECHECK_SECONDS = 0.25
+RELATED_WARMUP_REGISTRY_LIMIT = 512
 BACKFILL_REQUERY_MAX_SECONDS = 1.0
 BACKFILL_FINAL_REQUERY_GRACE_SECONDS = 0.5
 BACKFILL_CLEANUP_GRACE_SECONDS = 0.25
@@ -1484,14 +1492,16 @@ def _schedule_related_interval_warmup(
     demand_generation: int | None = None,
     demand_owner_id: str | None = None,
     defer_seconds: float = 0.0,
+    warmup_scheduler: RelatedIntervalWarmupScheduler | None = None,
 ) -> None:
     request_backfill = getattr(dm, "request_backfill", None)
     if request_backfill is None:
         return
 
     normalized_scope = str(demand_scope or "").strip() or None
+    delay = max(0.0, float(defer_seconds))
 
-    def _submit() -> None:
+    def _is_current() -> bool:
         if normalized_scope is not None and demand_generation is not None:
             is_current = getattr(
                 coordinator,
@@ -1502,7 +1512,27 @@ def _schedule_related_interval_warmup(
                 normalized_scope,
                 demand_generation,
             ):
-                return
+                return False
+        return True
+
+    def _foreground_busy() -> bool:
+        has_foreground_work = getattr(coordinator, "has_foreground_work", None)
+        return bool(
+            callable(has_foreground_work)
+            and has_foreground_work()
+        )
+
+    def _foreground_idle_seconds() -> float:
+        foreground_idle_seconds = getattr(coordinator, "foreground_idle_seconds", None)
+        if not callable(foreground_idle_seconds):
+            return float("inf")
+        return float(foreground_idle_seconds())
+
+    def _prepare() -> tuple[RelatedWarmupSubmission, ...]:
+        if not _is_current():
+            return ()
+
+        submissions: list[RelatedWarmupSubmission] = []
 
         for interval in _related_warmup_intervals(current_interval):
             try:
@@ -1552,35 +1582,101 @@ def _schedule_related_interval_warmup(
                         "demand_scope": normalized_scope,
                         "demand_generation": int(demand_generation),
                     })
-                _call_data_manager_method(
-                    request_backfill,
-                    symbol,
-                    interval,
-                    warmup_start_ms,
-                    warmup_end_ms,
-                    exchange,
-                    market_type,
-                    reason="related_interval_warmup",
-                    requester="klines_history_related",
-                    metadata=metadata,
-                )
+
+                def _submit_target(
+                    *,
+                    target_interval: str = interval,
+                    target_start_ms: int = warmup_start_ms,
+                    target_end_ms: int = warmup_end_ms,
+                    target_metadata: dict[str, Any] = metadata,
+                ) -> bool:
+                    try:
+                        result = _call_data_manager_method(
+                            request_backfill,
+                            symbol,
+                            target_interval,
+                            target_start_ms,
+                            target_end_ms,
+                            exchange,
+                            market_type,
+                            reason="related_interval_warmup",
+                            requester="klines_history_related",
+                            metadata=target_metadata,
+                        )
+                        return result is not False
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to submit related warmup for %s@%s: %s",
+                            symbol,
+                            target_interval,
+                            exc,
+                        )
+                        return False
+
+                submissions.append(RelatedWarmupSubmission(
+                    key=(
+                        exchange.strip().lower(),
+                        market_type.strip().lower(),
+                        symbol.strip().upper(),
+                        interval,
+                        warmup_start_ms,
+                        warmup_end_ms,
+                    ),
+                    submit=_submit_target,
+                ))
             except Exception as exc:
                 logger.warning(
-                    "Failed to schedule related warmup for %s@%s: %s",
+                    "Failed to plan related warmup for %s@%s: %s",
                     symbol,
                     interval,
                     exc,
                 )
+        return tuple(submissions)
 
-    delay = max(0.0, float(defer_seconds))
     if delay <= 0:
-        _submit()
+        for submission in _prepare():
+            submission.submit()
         return
     try:
-        asyncio.get_running_loop().call_later(delay, _submit)
+        asyncio.get_running_loop()
     except RuntimeError:
         # Direct synchronous callers retain the historical immediate behavior.
-        _submit()
+        for submission in _prepare():
+            submission.submit()
+        return
+
+    scheduler = warmup_scheduler
+    if scheduler is None:
+        scheduler = getattr(dm, "_related_interval_warmup_scheduler", None)
+    if not isinstance(scheduler, RelatedIntervalWarmupScheduler):
+        scheduler = RelatedIntervalWarmupScheduler(
+            ttl_seconds=RELATED_WARMUP_TTL_SECONDS,
+            dwell_seconds=RELATED_WARMUP_DWELL_SECONDS,
+            busy_recheck_seconds=RELATED_WARMUP_BUSY_RECHECK_SECONDS,
+            max_entries=RELATED_WARMUP_REGISTRY_LIMIT,
+        )
+        try:
+            setattr(dm, "_related_interval_warmup_scheduler", scheduler)
+        except Exception:
+            pass
+    scheduler.schedule(
+        (
+            normalized_scope or "unscoped",
+            exchange.strip().lower(),
+            market_type.strip().lower(),
+            symbol.strip().upper(),
+            current_interval,
+        ),
+        prepare=_prepare,
+        is_current=_is_current,
+        foreground_busy=_foreground_busy,
+        foreground_idle_seconds=(
+            _foreground_idle_seconds
+            if callable(getattr(coordinator, "foreground_idle_seconds", None))
+            else None
+        ),
+        dwell_seconds=delay,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1997,7 +2093,7 @@ async def get_klines_history(
             demand_scope=request_scope,
             demand_generation=request_generation,
             demand_owner_id=demand_owner_id,
-            defer_seconds=0.25,
+            defer_seconds=RELATED_WARMUP_DWELL_SECONDS,
         )
 
     missing_ranges = _merge_missing_ranges(

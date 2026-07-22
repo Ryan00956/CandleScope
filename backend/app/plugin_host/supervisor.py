@@ -40,6 +40,14 @@ from candlescope_plugin_sdk.platform_v2.constants import (
     METHOD_SHUTDOWN,
 )
 
+from app.plugin_security_v2.capabilities import (
+    CapabilityBroker,
+    CapabilityHandleAuthority,
+)
+from app.plugin_security_v2.errors import PlatformSecurityError
+from app.plugin_security_v2.grants import EffectiveGrant
+from app.plugin_security_v2.sandbox import SandboxPolicy
+
 from .errors import (
     PlatformHostError,
     PlatformHostRemoteError,
@@ -91,6 +99,8 @@ class EntrypointProcessSpec:
     max_host_calls: int = 8
     max_restart_attempts: int = 3
     restart_window_seconds: float = 60.0
+    sandbox_policy: SandboxPolicy | None = None
+    trust_level: str = "local-trusted"
 
     def __post_init__(self) -> None:
         if not isinstance(self.plugin_id, str) or not self.plugin_id:
@@ -130,6 +140,8 @@ class EntrypointProcessSpec:
             working_directory=self.working_directory,
             max_message_bytes=self.max_message_bytes,
             max_stderr_bytes=self.max_stderr_bytes,
+            sandbox_policy=self.sandbox_policy,
+            trust_level=self.trust_level,
         )
         if (
             isinstance(self.max_in_flight, bool)
@@ -152,6 +164,8 @@ class EntrypointProcessSpec:
             working_directory=self.working_directory,
             max_message_bytes=self.max_message_bytes,
             max_stderr_bytes=self.max_stderr_bytes,
+            sandbox_policy=self.sandbox_policy,
+            trust_level=self.trust_level,
         )
 
 
@@ -167,6 +181,8 @@ class EntrypointSupervisor:
         host_version: str,
         host_apis: tuple[str, ...] = (),
         host_call_handler: GrantedHostCallHandler | None = None,
+        capability_authority: CapabilityHandleAuthority | None = None,
+        capability_broker: CapabilityBroker | None = None,
     ) -> None:
         if not isinstance(manifest, PluginManifest):
             raise TypeError("manifest must be PluginManifest")
@@ -183,12 +199,25 @@ class EntrypointSupervisor:
             raise ValueError("host_apis must contain non-empty strings")
         if len(set(host_apis)) != len(host_apis):
             raise ValueError("host_apis must not contain duplicates")
+        if capability_broker is not None and capability_authority is None:
+            raise ValueError("capability_broker requires capability_authority")
+        if (
+            capability_broker is not None
+            and capability_broker.authority is not capability_authority
+        ):
+            raise ValueError("capability broker and authority do not match")
+        if capability_broker is not None and host_call_handler is not None:
+            raise ValueError(
+                "capability_broker and legacy host_call_handler are mutually exclusive"
+            )
         self.spec = spec
         self.manifest = manifest
         self.host_name = host_name
         self.host_version = host_version
         self.host_apis = tuple(host_apis)
         self._host_call_handler = host_call_handler
+        self._capability_authority = capability_authority
+        self._capability_broker = capability_broker
         self._state = STATE_STOPPED if spec.enabled else STATE_DISABLED
         self._lifecycle_lock = asyncio.Lock()
         self._transport: PlatformV2Transport | None = None
@@ -369,11 +398,7 @@ class EntrypointSupervisor:
                 "Host does not provide APIs required by the entrypoint",
                 details={"missingHostApis": missing_required},
             )
-        expected = tuple(
-            item
-            for item in declared_host_apis
-            if item in self.host_apis
-        )
+        expected = tuple(item for item in declared_host_apis if item in self.host_apis)
         if negotiated != expected:
             raise self._transport_error(
                 "PLUGIN_PLATFORM_HOST_API_NEGOTIATION_INVALID",
@@ -407,6 +432,9 @@ class EntrypointSupervisor:
     async def activate(
         self,
         capabilities: tuple[CapabilityGrant, ...] = (),
+        *,
+        effective_grants: tuple[EffectiveGrant, ...] = (),
+        capability_ttl_seconds: float | None = None,
     ) -> RuntimeDescriptor:
         async with self._lifecycle_lock:
             descriptor = await self._ensure_started_locked()
@@ -415,18 +443,61 @@ class EntrypointSupervisor:
                     "PLUGIN_PLATFORM_ACTIVATION_STATE_INVALID",
                     "entrypoint must be inactive before activation",
                 )
-            grants = tuple(capabilities)
-            self._validate_grants(descriptor, grants)
             self._highest_generation += 1
             generation = self._highest_generation
             instance_id = f"instance-{uuid4().hex}"
+            supplied_grants = tuple(capabilities)
+            effective = tuple(effective_grants)
+            if supplied_grants and effective:
+                raise self._request_error(
+                    "PLUGIN_PLATFORM_CAPABILITIES_INVALID",
+                    "raw and effective grants must not be mixed",
+                )
+            if self._capability_authority is not None:
+                if supplied_grants:
+                    raise self._request_error(
+                        "PLUGIN_PLATFORM_CAPABILITIES_INVALID",
+                        "raw capability handles cannot be injected when an authority is configured",
+                    )
+                try:
+                    grants = self._capability_authority.mint_grants(
+                        manifest=self.manifest,
+                        descriptor=descriptor,
+                        entrypoint_id=self.entrypoint_id,
+                        instance_id=instance_id,
+                        generation=generation,
+                        effective_grants=effective,
+                        ttl_seconds=capability_ttl_seconds,
+                    )
+                except PlatformSecurityError as exc:
+                    raise self._request_error(
+                        exc.code,
+                        exc.message,
+                        details=exc.details,
+                    ) from exc
+            else:
+                if effective:
+                    raise self._request_error(
+                        "PLUGIN_PLATFORM_CAPABILITIES_INVALID",
+                        "effective grants require a capability authority",
+                    )
+                grants = supplied_grants
+            try:
+                self._validate_grants(descriptor, grants)
+            except BaseException:
+                self._revoke_capabilities(instance_id, generation)
+                raise
             activation = ActivationRequest(instance_id, generation, grants)
-            result = await self._lifecycle_request_locked(
-                METHOD_ACTIVATE,
-                activation.to_wire(),
-                generation=generation,
-                timeout=self.spec.startup_timeout_seconds,
-            )
+            try:
+                result = await self._lifecycle_request_locked(
+                    METHOD_ACTIVATE,
+                    activation.to_wire(),
+                    generation=generation,
+                    timeout=self.spec.startup_timeout_seconds,
+                )
+            except BaseException:
+                self._revoke_capabilities(instance_id, generation)
+                raise
             expected = {
                 "ok": True,
                 "instanceId": instance_id,
@@ -437,10 +508,12 @@ class EntrypointSupervisor:
                     "PLUGIN_PLATFORM_ACTIVATION_INVALID",
                     "entrypoint returned an invalid activation result",
                 )
+                self._revoke_capabilities(instance_id, generation)
                 await self._fail_locked(error)
                 raise error
             transport = self._transport
             if transport is None:
+                self._revoke_capabilities(instance_id, generation)
                 raise self._transport_error(
                     "PLUGIN_PLATFORM_NOT_RUNNING",
                     "entrypoint transport disappeared during activation",
@@ -520,10 +593,10 @@ class EntrypointSupervisor:
 
     def _ensure_generation_current(self, generation: int) -> None:
         self._refresh_transport_failure()
-        if (
-            self._generation != generation
-            or self._state not in {STATE_ACTIVE, STATE_QUIESCING}
-        ):
+        if self._generation != generation or self._state not in {
+            STATE_ACTIVE,
+            STATE_QUIESCING,
+        }:
             raise self._state_error(
                 "PLUGIN_PLATFORM_STALE_GENERATION",
                 "request completed after its activation generation was revoked",
@@ -638,6 +711,7 @@ class EntrypointSupervisor:
             )
             await self._fail_locked(error)
             raise error
+        self._revoke_capabilities(self._instance_id, generation)
         self._generation = 0
         self._instance_id = None
         self._grants.clear()
@@ -653,9 +727,7 @@ class EntrypointSupervisor:
                 return
             try:
                 previous_state = self._state
-                shutdown_generation = (
-                    self._generation if self._generation > 0 else 0
-                )
+                shutdown_generation = self._generation if self._generation > 0 else 0
                 if previous_state in {STATE_ACTIVE, STATE_QUIESCING}:
                     with contextlib.suppress(PlatformHostError):
                         await self._deactivate_locked("Host is stopping")
@@ -693,14 +765,16 @@ class EntrypointSupervisor:
                 try:
                     await self._close_transport_locked()
                 finally:
+                    self._revoke_capabilities(
+                        self._instance_id,
+                        self._generation,
+                    )
                     self._descriptor = None
                     self._negotiated_host_apis = ()
                     self._generation = 0
                     self._instance_id = None
                     self._grants.clear()
-                    self._state = (
-                        STATE_STOPPED if self.spec.enabled else STATE_DISABLED
-                    )
+                    self._state = STATE_STOPPED if self.spec.enabled else STATE_DISABLED
 
     async def _handle_host_call(
         self,
@@ -730,12 +804,52 @@ class EntrypointSupervisor:
                 "CAPABILITY_HANDLE_INVALID",
                 "host.call used an unknown or revoked capability handle",
             )
+        if self._capability_authority is not None:
+            instance_id = self._instance_id
+            broker = self._capability_broker
+            if instance_id is None or broker is None:
+                raise self._request_error(
+                    "CAPABILITY_HANDLE_INVALID",
+                    "no capability broker is configured for this entrypoint",
+                )
+            try:
+                lease = self._capability_authority.validate(
+                    call,
+                    grant,
+                    plugin_id=self.plugin_id,
+                    entrypoint_id=self.entrypoint_id,
+                    instance_id=instance_id,
+                    generation=self._generation,
+                )
+                return await broker.handle(call, grant, lease)
+            except PlatformSecurityError as exc:
+                raise self._request_error(
+                    exc.code,
+                    exc.message,
+                    details=exc.details,
+                ) from exc
         if self._host_call_handler is None:
             raise self._request_error(
                 "CAPABILITY_HANDLE_INVALID",
                 "no capability broker is configured for this entrypoint",
             )
         return await self._host_call_handler(call, grant)
+
+    def _revoke_capabilities(
+        self,
+        instance_id: str | None,
+        generation: int,
+    ) -> None:
+        authority = self._capability_authority
+        if authority is None or instance_id is None or generation < 1:
+            return
+        with contextlib.suppress(PlatformSecurityError):
+            authority.revoke_instance(
+                self.plugin_id,
+                self.entrypoint_id,
+                instance_id,
+                generation,
+            )
 
     def _active_snapshot(self) -> tuple[int, RuntimeDescriptor]:
         self._refresh_transport_failure()
@@ -852,6 +966,7 @@ class EntrypointSupervisor:
         self._state = STATE_FAILED
         self._record_failure(error)
         await self._close_transport_locked()
+        self._revoke_capabilities(self._instance_id, self._generation)
         self._generation = 0
         self._instance_id = None
         self._grants.clear()
@@ -880,6 +995,7 @@ class EntrypointSupervisor:
         if self._state not in {STATE_FAILED, STATE_STOPPED, STATE_DISABLED}:
             self._state = STATE_FAILED
             self._record_failure(transport.fatal_error)
+            self._revoke_capabilities(self._instance_id, self._generation)
             self._generation = 0
             self._instance_id = None
             self._grants.clear()

@@ -131,10 +131,6 @@ class ActivationRecord:
             raise PlatformInstallerError(
                 "activation state/enabled fields are inconsistent"
             )
-        if self.state == "staged" and not self.required_permissions:
-            raise PlatformInstallerError(
-                "staged activation must declare required permissions"
-            )
         if len(set(self.required_permissions)) != len(self.required_permissions):
             raise PlatformInstallerError(
                 "activation requiredPermissions contains duplicates"

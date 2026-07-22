@@ -447,16 +447,18 @@ generic community installer remains local-artifact-only. CandleScope no longer
 contains `packages/pyne-runtime` or an in-process Pyne facade.
 
 The separately evolving general Plugin Platform v2 has completed its SDK,
-business-neutral Host, and Bundle/Installer foundation phases. The explicit
-`candlescope-plugin v2` namespace supports multiple backend entrypoints,
-static assets, schemas, probes, a CycloneDX SBOM, content-addressed venvs, an
-independent `platform-registry-v2.json`, staged state, enable/disable, and
-atomic rollback. It never reads or overwrites the script-runtime v1 registry.
-The v2 registry is not consumed during default product startup and plugins
-with required permissions cannot be enabled yet. Until the Phase 4 Grant
-Store and OS sandbox land, this path is restricted to first-party-pinned or
-local-trusted plugins. See the
-[`Phase 3 execution record`](docs/PLUGIN_PLATFORM_V2_PHASE3_zh.md).
+business-neutral Host, Bundle/Installer, and permission plus Windows OS
+sandbox foundation phases. The explicit `candlescope-plugin v2` namespace now
+manages a separate Grant Store, permission diffs, grant/deny/revoke decisions,
+scopes, hash-chained audit events, and fail-closed staging. The Host uses
+generation-bound opaque capabilities, rate/message quotas, and optional
+AppContainer/Job Object/ACL isolation. Native adversarial probes cover direct
+file/network access, child processes, memory, CPU, disk, and stderr. The v2
+registry and protected management router are still not consumed during
+default product startup, and publisher identities are not signed, so the
+default path remains first-party-pinned/local-trusted rather than a
+Marketplace. See the
+[`Phase 4 execution record`](docs/PLUGIN_PLATFORM_V2_PHASE4_zh.md).
 
 Phase 8 adds the independently buildable
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README.md).

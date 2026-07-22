@@ -7,6 +7,7 @@ import pytest
 
 import app.plugin_installer_v2.installer as installer_module
 from app.plugin_installer_v2.bundle import build_platform_bundle
+from app.plugin_installer_v2.cli import main as installer_cli_main
 from app.plugin_installer_v2.errors import PlatformBundleError, PlatformInstallerError
 from app.plugin_installer_v2.installer import PlatformPluginInstaller
 from app.plugin_installer_v2.registry import load_activation_registry
@@ -160,8 +161,9 @@ def test_failed_second_entrypoint_never_creates_partial_activation(
     )
 
 
-def test_required_permissions_remain_staged_until_grant_store_exists(
+def test_required_permissions_remain_staged_until_explicit_grant(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     fixture = build_hello_platform_bundle(tmp_path / "bundle", required_permission=True)
     installer = PlatformPluginInstaller(root=tmp_path / "managed")
@@ -177,9 +179,49 @@ def test_required_permissions_remain_staged_until_grant_store_exists(
     assert receipt["probe"]["entrypoints"][0]["mode"] == "described"
     assert receipt["probe"]["semanticProbes"] == []
     registry_before = installer.registry_path.read_bytes()
-    with pytest.raises(PlatformInstallerError, match="Phase 4 permission grants"):
+    with pytest.raises(PlatformInstallerError, match="not fully resolved"):
         installer.enable(installed.plugin_id)
     assert installer.registry_path.read_bytes() == registry_before
+    assert (
+        installer_cli_main(
+            [
+                "--root",
+                str(installer.root),
+                "--json",
+                "permissions",
+                installed.plugin_id,
+            ]
+        )
+        == 0
+    )
+    permissions = json.loads(capsys.readouterr().out)
+    assert permissions["grants"][0]["permissions"][0]["decision"] == "pending"
+    assert (
+        installer_cli_main(
+            [
+                "--root",
+                str(installer.root),
+                "--json",
+                "grant",
+                installed.plugin_id,
+                "market.bars.read",
+                "--scope-json",
+                '{"symbols":["BTCUSDT"]}',
+            ]
+        )
+        == 0
+    )
+    granted = json.loads(capsys.readouterr().out)["permissionChange"]
+    assert granted["activationReady"] is True
+    assert granted["activationState"] == "staged"
+    assert installer.enable(installed.plugin_id).state == "active"
+    revoked = installer.revoke_permission(
+        installed.plugin_id,
+        "market.bars.read",
+    )
+    assert revoked.activation_ready is False
+    assert revoked.activation_state == "staged"
+    assert revoked.state_changed is True
 
 
 def test_semantic_transcript_drift_fails_before_activation(tmp_path: Path) -> None:
@@ -203,6 +245,56 @@ def test_semantic_transcript_drift_fails_before_activation(tmp_path: Path) -> No
             enabled=True,
         )
     assert not installer.registry_path.exists()
+
+
+def test_permission_expansion_and_rollback_both_remain_staged_until_confirmed(
+    tmp_path: Path,
+) -> None:
+    initial = build_hello_platform_bundle(
+        tmp_path / "initial",
+        version="0.1.0",
+        required_permission=True,
+    )
+    expanded = build_hello_platform_bundle(
+        tmp_path / "expanded",
+        version="0.2.0",
+        required_permission=True,
+        required_symbols=("BTCUSDT", "ETHUSDT"),
+    )
+    installer = PlatformPluginInstaller(root=tmp_path / "managed")
+    first = installer.install(
+        initial.bundle.path,
+        expected_sha256=initial.bundle.sha256,
+        enabled=True,
+    )
+    installer.grant_permission(
+        first.plugin_id,
+        "market.bars.read",
+        scope={"symbols": ["BTCUSDT"]},
+    )
+    assert installer.enable(first.plugin_id).state == "active"
+
+    upgrade = installer.install(
+        expanded.bundle.path,
+        expected_sha256=expanded.bundle.sha256,
+        enabled=True,
+    )
+    assert upgrade.state == "staged"
+    assert upgrade.activation_ready is False
+    assert upgrade.permission_diff["requiresConfirmation"] is True
+    assert (
+        installer.permission_summary(first.plugin_id)[0]["permissions"][0]["decision"]
+        == "pending"
+    )
+
+    rolled_back = installer.rollback(first.plugin_id)
+    assert rolled_back.to_activation_id != first.activation_id
+    restored = load_activation_registry(installer.registry_path).by_id()[
+        first.plugin_id
+    ]
+    assert restored.version == "0.1.0"
+    assert restored.state == "staged"
+    assert restored.enabled is False
 
 
 def test_pinned_hash_failure_has_no_store_side_effects_and_legacy_path_is_refused(

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.plugin_security_v2.sandbox import SandboxPolicy, prepare_sandbox_launch
+
 from .framing import AsyncJsonLineConnection
 
 
@@ -34,6 +36,7 @@ _SAFE_ENVIRONMENT_KEYS = frozenset(
         "WINDIR",
     }
 )
+_TRUST_LEVELS = frozenset({"first-party-pinned", "local-trusted", "untrusted"})
 
 
 def plugin_environment(executable_directory: str) -> dict[str, str]:
@@ -65,6 +68,8 @@ class SidecarProcessSpec:
     working_directory: Path | None = None
     max_message_bytes: int = 1024 * 1024
     max_stderr_bytes: int = 64 * 1024
+    sandbox_policy: SandboxPolicy | None = None
+    trust_level: str = "local-trusted"
 
     def __post_init__(self) -> None:
         if (
@@ -98,6 +103,17 @@ class SidecarProcessSpec:
         object.__setattr__(self, "executable", executable)
         object.__setattr__(self, "working_directory", working_directory)
         object.__setattr__(self, "arguments", arguments)
+        if self.sandbox_policy is not None and not isinstance(
+            self.sandbox_policy, SandboxPolicy
+        ):
+            raise ValueError("sandbox_policy must be a SandboxPolicy")
+        if (
+            not isinstance(self.trust_level, str)
+            or self.trust_level not in _TRUST_LEVELS
+        ):
+            raise ValueError("trust_level is unsupported")
+        if self.trust_level == "untrusted" and self.sandbox_policy is None:
+            raise ValueError("untrusted sidecars require an OS sandbox policy")
 
     @property
     def command(self) -> tuple[str, ...]:
@@ -118,19 +134,31 @@ async def launch_sidecar_process(
     spec: SidecarProcessSpec,
 ) -> asyncio.subprocess.Process:
     validate_launch_target(spec)
+    command = spec.command
+    working_directory = spec.working_directory or spec.executable.parent
+    environment = plugin_environment(str(spec.executable.parent))
+    if spec.sandbox_policy is not None:
+        prepared = prepare_sandbox_launch(
+            spec.sandbox_policy,
+            command,
+            working_directory,
+        )
+        command = prepared.command
+        working_directory = prepared.working_directory
+        environment = prepared.environment
     process_kwargs: dict[str, Any] = {
         "stdin": asyncio.subprocess.PIPE,
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
-        "cwd": str(spec.working_directory or spec.executable.parent),
-        "env": plugin_environment(str(spec.executable.parent)),
+        "cwd": str(working_directory),
+        "env": environment,
         "limit": spec.max_message_bytes + 1,
     }
     if os.name == "nt":
         process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         process_kwargs["start_new_session"] = True
-    return await asyncio.create_subprocess_exec(*spec.command, **process_kwargs)
+    return await asyncio.create_subprocess_exec(*command, **process_kwargs)
 
 
 def signal_process(process: asyncio.subprocess.Process, *, force: bool) -> None:
@@ -154,16 +182,24 @@ class ManagedSidecarProcess:
         self.connection: AsyncJsonLineConnection | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_tail = bytearray()
+        self._stderr_total = 0
+        self._stderr_overflow = False
         self._terminate_lock = asyncio.Lock()
 
     @property
     def stderr_tail(self) -> str:
         return self._stderr_tail.decode("utf-8", errors="replace")
 
+    @property
+    def stderr_overflow(self) -> bool:
+        return self._stderr_overflow
+
     async def start(self) -> asyncio.subprocess.Process:
         if self.process is not None and self.process.returncode is None:
             raise RuntimeError("sidecar process is already running")
         self._stderr_tail.clear()
+        self._stderr_total = 0
+        self._stderr_overflow = False
         process = await launch_sidecar_process(self.spec)
         if process.stdin is None or process.stdout is None:
             signal_process(process, force=True)
@@ -187,10 +223,17 @@ class ManagedSidecarProcess:
             chunk = await process.stderr.read(4096)
             if not chunk:
                 return
+            self._stderr_total += len(chunk)
             self._stderr_tail.extend(chunk)
             overflow = len(self._stderr_tail) - self.spec.max_stderr_bytes
             if overflow > 0:
                 del self._stderr_tail[:overflow]
+            if (
+                self._stderr_total > self.spec.max_stderr_bytes
+                and not self._stderr_overflow
+            ):
+                self._stderr_overflow = True
+                signal_process(process, force=True)
 
     async def terminate(self) -> None:
         async with self._terminate_lock:

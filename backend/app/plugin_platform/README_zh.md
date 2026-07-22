@@ -19,12 +19,15 @@
 
 ## 当前边界
 
-这是 Phase 2 的 opt-in 内存切片，不是产品插件注册表：
+这是仍未接入产品默认 lifecycle 的 opt-in 内存编排层：
 
 - 不读取或写入 v1/v2 bundle activation registry；
 - 不接入 FastAPI、`app.main` 或默认启动路径；
-- 不持久化 enabled/disabled、grant 或 contribution 状态；
-- 不提供安装、升级、回滚、权限 UI、市场数据、文件、网络、secrets、前端或交易扩展点。
+- enabled/disabled、grant 和安装状态分别由 Phase 3 registry 与 Phase 4 Grant Store 所有，
+  manager 本身不复制持久化状态；
+- activation 可接收经 Grant Store 解析的 `EffectiveGrant`，raw handle 由 Host authority mint；
+- 不提供权限 UI、市场数据、文件、网络、secrets、前端或交易扩展点。
 
-Phase 3 才会设计 Bundle/Installer v2 和原子 activation registry。当前代码不能绕过该阶段
-直接成为默认产品路径。
+Phase 3/4 已提供 Bundle/Installer、Grant Store、capability 和可选 Windows OS 沙箱，但产品
+组合根、真实核心贡献点和默认启动接线属于 Phase 5。当前代码不能绕过该阶段直接成为默认
+产品路径。

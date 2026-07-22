@@ -91,6 +91,7 @@ def _supervisor(
         ("max_host_calls", True),
         ("request_timeout_seconds", float("nan")),
         ("restart_window_seconds", float("inf")),
+        ("trust_level", "internet-trusted"),
     ],
 )
 def test_entrypoint_process_limits_reject_ambiguous_runtime_values(
@@ -106,6 +107,16 @@ def test_entrypoint_process_limits_reject_ambiguous_runtime_values(
     }
     with pytest.raises(ValueError):
         EntrypointProcessSpec(**values)
+
+
+def test_untrusted_entrypoint_requires_an_os_sandbox_policy() -> None:
+    with pytest.raises(ValueError, match="OS sandbox"):
+        EntrypointProcessSpec(
+            plugin_id="candlescope.hello-command",
+            entrypoint_id="main",
+            executable=Path(sys.executable).resolve(),
+            trust_level="untrusted",
+        )
 
 
 @pytest.mark.anyio
@@ -134,9 +145,7 @@ async def test_startup_process_and_wire_faults_fail_closed(
 
 
 @pytest.mark.anyio
-async def test_host_rejects_a_runtime_that_accepts_missing_required_host_apis() -> (
-    None
-):
+async def test_host_rejects_a_runtime_that_accepts_missing_required_host_apis() -> None:
     supervisor = _supervisor(
         "accept-missing-host-api",
         manifest=_host_call_manifest(),
@@ -757,13 +766,13 @@ async def test_stderr_is_bounded_and_ambient_secrets_do_not_cross_process_bounda
 
     stderr_probe = _supervisor("stderr-flood", max_stderr_bytes=1024)
     try:
-        await stderr_probe.activate()
-        await asyncio.sleep(0.05)
+        with pytest.raises(PlatformHostTransportError):
+            await stderr_probe.activate()
         snapshot = stderr_probe.snapshot(include_stderr=True)
-        stderr_tail = snapshot["transport"]["stderrTail"]
+        stderr_tail = snapshot["stderrTail"]
         assert len(stderr_tail.encode("utf-8")) <= 1024
         assert set(stderr_tail) <= {"S"}
-        assert "stderrTail" not in stderr_probe.snapshot()["transport"]
+        assert "stderrTail" not in stderr_probe.snapshot()
     finally:
         await stderr_probe.stop()
 
@@ -826,9 +835,7 @@ async def test_required_failure_rolls_back_started_entries_and_optional_failure_
 
 
 @pytest.mark.anyio
-async def test_optional_activation_configuration_failure_closes_idle_sidecar() -> (
-    None
-):
+async def test_optional_activation_configuration_failure_closes_idle_sidecar() -> None:
     manifest = _host_call_manifest()
     supervisor = _supervisor(
         "host-call",

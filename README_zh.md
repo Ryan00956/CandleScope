@@ -308,13 +308,14 @@ golden。可信开发包已发布为
 artifact。CandleScope 已删除 `packages/pyne-runtime` 和 in-process Pyne facade。完整执行记录见
 [`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
 
-独立演进的通用 Plugin Platform v2 已完成 SDK、业务无关 Host 和 Bundle/Installer 三个
-基础阶段。显式 `candlescope-plugin v2` 命令支持多 backend entrypoint、静态 assets、schema、
-probe、CycloneDX SBOM、content-addressed venv、独立 `platform-registry-v2.json`、staged、
-启停和原子 rollback；它不会读取或覆盖上述脚本 runtime 的 v1 registry。当前 v2 registry
-尚未接入产品默认启动，required permission 也不能 enable；在 Phase 4 OS 沙箱与 Grant Store
-完成前，只能用于 first-party-pinned/local-trusted 插件。执行与格式记录见
-[`PLUGIN_PLATFORM_V2_PHASE3_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE3_zh.md)。
+独立演进的通用 Plugin Platform v2 已完成 SDK、业务无关 Host、Bundle/Installer，以及
+权限与 Windows OS 沙箱四个基础阶段。显式 `candlescope-plugin v2` 命令现支持独立 Grant
+Store、permission diff、grant/deny/revoke、scope、哈希链审计和安全 staging；Host 通过代际
+opaque capability、速率/消息配额与 AppContainer/Job Object/ACL 隔离受控 sidecar。真实恶意
+探针已证明用户文件、direct network、fork、内存、CPU、磁盘和 stderr 边界。当前 v2 registry
+和受保护 management router 仍未接入产品默认启动，publisher identity 也尚未签名，因此默认
+路径继续只用于 first-party-pinned/local-trusted 插件，不开放 Marketplace。执行记录见
+[`PLUGIN_PLATFORM_V2_PHASE4_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE4_zh.md)。
 
 Phase 8 新增独立可构建的
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README_zh.md)：

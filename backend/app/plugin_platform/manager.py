@@ -8,6 +8,8 @@ from typing import Any
 
 from candlescope_plugin_sdk.platform_v2 import CapabilityGrant
 
+from app.plugin_security_v2.grants import EffectiveGrant
+
 from app.plugin_host import (
     EntrypointSupervisor,
     PlatformHostError,
@@ -92,6 +94,7 @@ class PluginManager:
         entrypoint_id: str,
         *,
         capabilities: tuple[CapabilityGrant, ...] | None = None,
+        effective_grants: tuple[EffectiveGrant, ...] | None = None,
     ) -> None:
         async with self._lifecycle_lock:
             supervisor = self._supervisor((plugin_id, entrypoint_id))
@@ -100,8 +103,14 @@ class PluginManager:
                 if capabilities is not None
                 else self._activation_capabilities.get(supervisor.owner_key, ())
             )
+            if capabilities is not None and effective_grants is not None:
+                raise ValueError("capabilities and effective_grants must not be mixed")
             try:
-                await self._activate_supervisor(supervisor, tuple(selected))
+                await self._activate_supervisor(
+                    supervisor,
+                    tuple(selected),
+                    effective_grants=tuple(effective_grants or ()),
+                )
             except PlatformHostError as exc:
                 self._activation_failures[supervisor.owner_key] = exc.to_dict()
                 await supervisor.stop()
@@ -112,8 +121,13 @@ class PluginManager:
         self,
         supervisor: EntrypointSupervisor,
         capabilities: tuple[CapabilityGrant, ...],
+        *,
+        effective_grants: tuple[EffectiveGrant, ...] = (),
     ) -> None:
-        descriptor = await supervisor.activate(capabilities)
+        descriptor = await supervisor.activate(
+            capabilities,
+            effective_grants=effective_grants,
+        )
         try:
             self.contributions.replace_owner(
                 plugin_id=supervisor.plugin_id,
@@ -216,9 +230,7 @@ class PluginManager:
             owner: supervisor.snapshot()
             for owner, supervisor in self._supervisors.items()
         }
-        enabled = {
-            owner: item for owner, item in snapshots.items() if item["enabled"]
-        }
+        enabled = {owner: item for owner, item in snapshots.items() if item["enabled"]}
         active = sum(item["state"] == "active" for item in enabled.values())
         failed = sum(
             item["state"] == "failed" or owner in self._activation_failures

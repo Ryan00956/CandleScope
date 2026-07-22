@@ -7,6 +7,9 @@
 > 边界：本阶段只交付 Bundle/Installer/activation v2。没有把 v2 registry 接入产品默认
 > 启动，没有授予 Host API、加载 web assets、开放网络/文件/secrets/交易，也没有把插件视为
 > 不受信任代码安全运行。上述能力继续由 Phase 4 及后续阶段负责。
+>
+> 本文保留 Phase 3 时点语义；Phase 4 已完成，后续状态见
+> [`PLUGIN_PLATFORM_V2_PHASE4_zh.md`](PLUGIN_PLATFORM_V2_PHASE4_zh.md)。
 
 ## 1. 验收结论
 

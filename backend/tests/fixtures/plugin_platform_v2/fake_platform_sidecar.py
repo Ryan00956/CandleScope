@@ -17,6 +17,7 @@ sys.path.insert(0, str(SDK_SOURCE))
 from candlescope_plugin_sdk.platform_v2 import (  # noqa: E402
     CONTROL_TRANSPORT_V1,
     PLUGIN_PROTOCOL_V2,
+    ActivationRequest,
     BasePlatformPlugin,
     HostCallInvocation,
     HostCallRequest,
@@ -54,6 +55,7 @@ def host_call_manifest() -> PluginManifest:
 class HostCallingPlugin(BasePlatformPlugin):
     def __init__(self) -> None:
         self._manifest = host_call_manifest()
+        self._capability_handle = "cap-notify"
 
     def manifest(self) -> PluginManifest:
         return self._manifest
@@ -61,11 +63,16 @@ class HostCallingPlugin(BasePlatformPlugin):
     def describe(self) -> RuntimeDescriptor:
         return descriptor_from_manifest(self._manifest, entrypoint_id="main")
 
+    def activate(self, request: ActivationRequest) -> None:
+        for capability in request.capabilities:
+            if capability.permission_id == "notifications.show":
+                self._capability_handle = capability.handle
+
     def invoke(self, request: InvokeRequest) -> HostCallInvocation:
         return HostCallInvocation(
             token=f"notify:{request.request_context.trace_id}",
             call=HostCallRequest(
-                capability_handle="cap-notify",
+                capability_handle=self._capability_handle,
                 method="notifications.show",
                 params={"message": "Hello from the sidecar"},
                 request_context=request.request_context,
@@ -177,11 +184,7 @@ def main() -> int:
                 ),
                 1,
             ).to_wire()
-        if (
-            method == "invoke"
-            and MODE == "late-success-after-deactivate"
-            and responses
-        ):
+        if method == "invoke" and MODE == "late-success-after-deactivate" and responses:
             delayed_invoke_response = responses.pop(0)
         for response in responses:
             print(canonical_dumps(response), flush=True)

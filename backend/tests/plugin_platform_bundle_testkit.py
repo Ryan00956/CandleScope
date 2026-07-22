@@ -128,6 +128,7 @@ def hello_platform_manifest(
     version: str = "0.1.0",
     bad_second_entrypoint: bool = False,
     required_permission: bool = False,
+    required_symbols: tuple[str, ...] = ("BTCUSDT",),
 ) -> dict[str, Any]:
     manifest = json.loads(EXAMPLE_MANIFEST.read_text(encoding="utf-8"))
     manifest["plugin"]["version"] = version
@@ -142,7 +143,10 @@ def hello_platform_manifest(
         )
     if required_permission:
         manifest["permissions"]["required"] = [
-            {"id": "market.bars.read", "scope": {"symbols": ["BTCUSDT"]}}
+            {
+                "id": "market.bars.read",
+                "scope": {"symbols": list(required_symbols)},
+            }
         ]
         manifest["probes"] = []
     return manifest
@@ -170,6 +174,7 @@ def build_hello_platform_bundle(
     version: str = "0.1.0",
     bad_second_entrypoint: bool = False,
     required_permission: bool = False,
+    required_symbols: tuple[str, ...] = ("BTCUSDT",),
     operating_systems: tuple[str, ...] = ("linux", "macos", "windows"),
     architectures: tuple[str, ...] = ("arm64", "x86_64"),
 ) -> PlatformBundleFixture:
@@ -178,6 +183,7 @@ def build_hello_platform_bundle(
         version=version,
         bad_second_entrypoint=bad_second_entrypoint,
         required_permission=required_permission,
+        required_symbols=required_symbols,
     )
     transcript = _transcript_for_manifest(manifest) if manifest["probes"] else None
     source = directory / "source"

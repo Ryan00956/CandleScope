@@ -22,6 +22,9 @@ from candlescope_plugin_sdk.platform_v2 import (
     loads_strict,
 )
 
+from app.plugin_security_v2 import AuditLog, GrantStore
+from app.plugin_security_v2.grants import GrantMutationResult, PermissionDiff
+
 from .bundle import (
     DEFAULT_HOST_VERSION,
     ContentRecord,
@@ -462,6 +465,9 @@ class InstallResult:
     reused_installation: bool
     installation_path: Path
     registry_path: Path
+    permission_diff: dict[str, Any]
+    grant_store_revision: int
+    activation_ready: bool
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -475,6 +481,9 @@ class InstallResult:
             "reusedInstallation": self.reused_installation,
             "installationPath": str(self.installation_path),
             "registryPath": str(self.registry_path),
+            "permissionDiff": dict(self.permission_diff),
+            "grantStoreRevision": self.grant_store_revision,
+            "activationReady": self.activation_ready,
         }
 
 
@@ -536,6 +545,26 @@ class StateChangeResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PermissionChangeResult:
+    mutation: GrantMutationResult
+    activation_state: str
+    activation_id: str
+    activation_ready: bool
+    state_changed: bool
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "grant": self.mutation.to_wire(),
+            "activationState": self.activation_state,
+            "activationId": self.activation_id,
+            "activationReady": self.activation_ready,
+            "stateChanged": self.state_changed,
+            "restartRequired": self.state_changed
+            or (self.mutation.changed and self.activation_state == "active"),
+        }
+
+
 class PlatformPluginInstaller:
     """Own v2 installs without reading or writing the legacy registry."""
 
@@ -547,6 +576,8 @@ class PlatformPluginInstaller:
         python_executable: Path | str | None = None,
         host_version: str = DEFAULT_HOST_VERSION,
         lock_timeout_seconds: float = DEFAULT_INSTALL_LOCK_TIMEOUT_SECONDS,
+        audit_log: AuditLog | None = None,
+        grant_store: GrantStore | None = None,
     ) -> None:
         self.root = Path(root or _default_root()).expanduser().resolve(strict=False)
         self.registry_path = (
@@ -569,6 +600,19 @@ class PlatformPluginInstaller:
             raise PlatformInstallerError("installer lock timeout must be positive")
         self.host_version = host_version.strip()
         self.lock_timeout_seconds = float(lock_timeout_seconds)
+        if grant_store is not None:
+            if audit_log is not None and grant_store.audit_log is not audit_log:
+                raise PlatformInstallerError(
+                    "injected Grant Store and audit log must share one audit owner"
+                )
+            self.grant_store = grant_store
+            self.audit_log = grant_store.audit_log
+        else:
+            self.audit_log = audit_log or AuditLog(self.root / "audit-v2" / "events")
+            self.grant_store = GrantStore(
+                self.root / "platform-grants-v2.json",
+                audit_log=self.audit_log,
+            )
 
     @property
     def installs_directory(self) -> Path:
@@ -978,9 +1022,12 @@ class PlatformPluginInstaller:
         installation: Path,
         *,
         enabled: bool,
+        activation_ready: bool,
     ) -> ActivationRecord:
         required = tuple(item.id for item in bundle.manifest.permissions.required)
-        state = "staged" if required else ("active" if enabled else "disabled")
+        state = (
+            "staged" if not activation_ready else ("active" if enabled else "disabled")
+        )
         return ActivationRecord(
             plugin_id=bundle.manifest.plugin.id,
             name=bundle.manifest.plugin.name,
@@ -1074,8 +1121,28 @@ class PlatformPluginInstaller:
                 self._verify_installation(final_path)
             else:
                 self._create_installation(bundle, final_path)
+            permission_diff = self.grant_store.permission_diff(
+                bundle.manifest,
+                bundle_sha256=bundle.sha256,
+                manifest_sha256=bundle.manifest_sha256,
+            )
+            grant_reconciliation = self.grant_store.reconcile(
+                bundle.manifest,
+                bundle_sha256=bundle.sha256,
+                manifest_sha256=bundle.manifest_sha256,
+            )
+            activation_ready = self.grant_store.activation_ready(
+                bundle.manifest,
+                bundle_sha256=bundle.sha256,
+                manifest_sha256=bundle.manifest_sha256,
+            )
             current = registry.by_id().get(plugin_id)
-            candidate = self._new_record(bundle, final_path, enabled=enabled)
+            candidate = self._new_record(
+                bundle,
+                final_path,
+                enabled=enabled,
+                activation_ready=activation_ready,
+            )
             if current is not None and self._same_activation_intent(current, candidate):
                 return InstallResult(
                     plugin_id,
@@ -1088,6 +1155,9 @@ class PlatformPluginInstaller:
                     True,
                     final_path,
                     self.registry_path,
+                    permission_diff.to_wire(),
+                    grant_reconciliation.store_revision,
+                    activation_ready,
                 )
             self._commit_registry_change(registry, plugin_id, current, candidate)
             return InstallResult(
@@ -1101,7 +1171,174 @@ class PlatformPluginInstaller:
                 reused,
                 final_path,
                 self.registry_path,
+                permission_diff.to_wire(),
+                grant_reconciliation.store_revision,
+                activation_ready,
             )
+
+    @staticmethod
+    def _grant_arguments(bundle: VerifiedPlatformBundle) -> dict[str, str]:
+        return {
+            "bundle_sha256": bundle.sha256,
+            "manifest_sha256": bundle.manifest_sha256,
+        }
+
+    def _current_bundle(
+        self,
+        registry: ActivationRegistry,
+        plugin_id: str,
+    ) -> tuple[ActivationRecord, VerifiedPlatformBundle]:
+        record = registry.by_id().get(plugin_id)
+        if record is None:
+            raise PlatformInstallerError(
+                "plugin is not present in v2 activation registry"
+            )
+        installation = self._installation_path(plugin_id, record.installation_id)
+        bundle, _receipt, _probe = self._verify_installation(
+            installation, expected_record=record
+        )
+        return record, bundle
+
+    def permission_summary(
+        self, plugin_id: str | None = None
+    ) -> tuple[dict[str, Any], ...]:
+        return self.grant_store.summary(plugin_id)
+
+    def preview_permission_diff(
+        self,
+        bundle_path: Path | str,
+        *,
+        expected_sha256: str,
+    ) -> PermissionDiff:
+        bundle = verify_platform_bundle(
+            bundle_path,
+            expected_sha256=expected_sha256,
+            host_version=self.host_version,
+        )
+        return self.grant_store.permission_diff(
+            bundle.manifest,
+            **self._grant_arguments(bundle),
+        )
+
+    def permission_diff(self, plugin_id: str) -> PermissionDiff:
+        with _installation_lock(self.lock_path, self.lock_timeout_seconds):
+            registry = load_activation_registry(self.registry_path)
+            _record, bundle = self._current_bundle(registry, plugin_id)
+            return self.grant_store.permission_diff(
+                bundle.manifest,
+                **self._grant_arguments(bundle),
+            )
+
+    def _change_permission(
+        self,
+        plugin_id: str,
+        permission_id: str,
+        *,
+        decision: str,
+        scope: dict[str, Any] | None = None,
+        source: str,
+        trace_id: str | None = None,
+    ) -> PermissionChangeResult:
+        with _installation_lock(self.lock_path, self.lock_timeout_seconds):
+            registry = load_activation_registry(self.registry_path)
+            current, bundle = self._current_bundle(registry, plugin_id)
+            arguments: dict[str, Any] = {
+                **self._grant_arguments(bundle),
+                "permission_id": permission_id,
+                "source": source,
+                "trace_id": trace_id,
+            }
+            if decision == "granted":
+                mutation = self.grant_store.grant(
+                    bundle.manifest,
+                    scope=scope,
+                    **arguments,
+                )
+            elif decision == "denied":
+                mutation = self.grant_store.deny(bundle.manifest, **arguments)
+            elif decision == "revoked":
+                mutation = self.grant_store.revoke(bundle.manifest, **arguments)
+            else:
+                raise PlatformInstallerError("permission decision is invalid")
+            activation_ready = self.grant_store.activation_ready(
+                bundle.manifest,
+                **self._grant_arguments(bundle),
+            )
+            replacement = current
+            state_changed = False
+            if current.state == "active" and not activation_ready:
+                replacement = replace(
+                    current,
+                    activation_id=f"activation-{uuid.uuid4().hex}",
+                    activated_at=_utc_now(),
+                    state="staged",
+                    enabled=False,
+                    restart_required=True,
+                )
+                self._commit_registry_change(
+                    registry,
+                    plugin_id,
+                    current,
+                    replacement,
+                )
+                state_changed = True
+            return PermissionChangeResult(
+                mutation,
+                replacement.state,
+                replacement.activation_id,
+                activation_ready,
+                state_changed,
+            )
+
+    def grant_permission(
+        self,
+        plugin_id: str,
+        permission_id: str,
+        *,
+        scope: dict[str, Any] | None = None,
+        source: str = "cli",
+        trace_id: str | None = None,
+    ) -> PermissionChangeResult:
+        return self._change_permission(
+            plugin_id,
+            permission_id,
+            decision="granted",
+            scope=scope,
+            source=source,
+            trace_id=trace_id,
+        )
+
+    def deny_permission(
+        self,
+        plugin_id: str,
+        permission_id: str,
+        *,
+        source: str = "cli",
+        trace_id: str | None = None,
+    ) -> PermissionChangeResult:
+        return self._change_permission(
+            plugin_id,
+            permission_id,
+            decision="denied",
+            source=source,
+            trace_id=trace_id,
+        )
+
+    def revoke_permission(
+        self,
+        plugin_id: str,
+        permission_id: str,
+        *,
+        source: str = "cli",
+        trace_id: str | None = None,
+    ) -> PermissionChangeResult:
+        return self._change_permission(
+            plugin_id,
+            permission_id,
+            decision="revoked",
+            source=source,
+            trace_id=trace_id,
+        )
 
     def check(self, plugin_id: str) -> CheckResult:
         with _installation_lock(self.lock_path, self.lock_timeout_seconds):
@@ -1131,17 +1368,23 @@ class PlatformPluginInstaller:
     def _change_state(self, plugin_id: str, target_state: str) -> StateChangeResult:
         with _installation_lock(self.lock_path, self.lock_timeout_seconds):
             registry = load_activation_registry(self.registry_path)
-            current = registry.by_id().get(plugin_id)
-            if current is None:
-                raise PlatformInstallerError(
-                    "plugin is not present in v2 activation registry"
+            current, bundle = self._current_bundle(registry, plugin_id)
+            if target_state == "active":
+                self.grant_store.reconcile(
+                    bundle.manifest,
+                    **self._grant_arguments(bundle),
                 )
-            if target_state == "active" and current.required_permissions:
-                raise PlatformInstallerError(
-                    "plugin remains staged until Phase 4 permission grants are implemented",
-                    plugin_id=plugin_id,
-                    details={"requiredPermissions": list(current.required_permissions)},
-                )
+                if not self.grant_store.activation_ready(
+                    bundle.manifest,
+                    **self._grant_arguments(bundle),
+                ):
+                    raise PlatformInstallerError(
+                        "plugin permissions are not fully resolved for activation",
+                        plugin_id=plugin_id,
+                        details={
+                            "grants": list(self.grant_store.summary(plugin_id)),
+                        },
+                    )
             if current.state == target_state:
                 return StateChangeResult(
                     plugin_id,
@@ -1150,8 +1393,6 @@ class PlatformPluginInstaller:
                     current.activation_id,
                     False,
                 )
-            installation = self._installation_path(plugin_id, current.installation_id)
-            self._verify_installation(installation, expected_record=current)
             replacement = replace(
                 current,
                 activation_id=f"activation-{uuid.uuid4().hex}",
@@ -1233,13 +1474,31 @@ class PlatformPluginInstaller:
                 else None
             )
             probe: dict[str, Any] | None = None
+            security_adjusted = False
             if target is not None:
                 installation = self._installation_path(
                     plugin_id, target.installation_id
                 )
-                _bundle, _receipt, probe = self._verify_installation(
+                target_bundle, _receipt, probe = self._verify_installation(
                     installation, expected_record=target
                 )
+                self.grant_store.reconcile(
+                    target_bundle.manifest,
+                    **self._grant_arguments(target_bundle),
+                )
+                if target.state == "active" and not self.grant_store.activation_ready(
+                    target_bundle.manifest,
+                    **self._grant_arguments(target_bundle),
+                ):
+                    target = replace(
+                        target,
+                        activation_id=f"activation-{uuid.uuid4().hex}",
+                        activated_at=_utc_now(),
+                        state="staged",
+                        enabled=False,
+                        restart_required=True,
+                    )
+                    security_adjusted = True
             rollback_id = f"rollback-{uuid.uuid4().hex}"
             audit = {
                 "schemaVersion": HISTORY_SCHEMA_VERSION,
@@ -1255,8 +1514,16 @@ class PlatformPluginInstaller:
                 audit,
                 replace_existing=False,
             )
-            updated = registry.replace(plugin_id, target)
-            _atomic_write_json(self.registry_path, updated.to_wire())
+            if security_adjusted:
+                self._commit_registry_change(
+                    registry,
+                    plugin_id,
+                    current,
+                    target,
+                )
+            else:
+                updated = registry.replace(plugin_id, target)
+                _atomic_write_json(self.registry_path, updated.to_wire())
             return RollbackResult(
                 plugin_id,
                 current.activation_id,

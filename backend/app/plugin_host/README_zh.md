@@ -9,7 +9,7 @@ sidecar 的进程、JSONL 传输、请求关联、生命周期、generation 和�
 | 模块 | 唯一职责 |
 | --- | --- |
 | `framing.py` | 严格 UTF-8 JSONL、重复 key/非有限数拒绝、消息大小上限、单 reader 与串行 writer |
-| `process.py` | 无 shell 启动、最小环境变量、bounded stderr、进程组终止 |
+| `process.py` | 无 shell 启动、最小环境变量、stderr 熔断、可选 AppContainer/Job 启动 |
 | `transport.py` | `candlescope.plugin/2` 双向 RPC、pending 关联、取消、重入、并发上限 |
 | `supervisor.py` | handshake/describe/activate 生命周期、generation、health、重启窗口和熔断 |
 | `errors.py` | 可观测且稳定的 Host 错误结构 |
@@ -17,9 +17,9 @@ sidecar 的进程、JSONL 传输、请求关联、生命周期、generation 和�
 依赖方向固定为：
 
 ```text
-public SDK <- plugin_host <- plugin_platform
-                    ^
-                    └─ plugin_runtime v1 compatibility wrapper
+public SDK <- plugin_security_v2 <- plugin_host <- plugin_platform
+                                      ^
+                                      └─ plugin_runtime v1 compatibility wrapper
 ```
 
 `plugin_host` 不得反向导入 `app.plugin_platform`、`app.plugin_runtime` 或业务模块。现有
@@ -56,21 +56,28 @@ session fail closed。插件复用 Host call ID 或超过并发 Host call 上限
 插件发起的 `host.call` 还必须同时满足：
 
 - 请求属于当前 active generation 和已声明 contribution；
-- capability handle 存在、属于当前 activation 且尚未撤销；
+- capability handle 存在，属于当前 activation/bundle/grant confirmation 且尚未撤销；
+- permission、scope、用户动作、速率、次数和消息字节均在 Host policy 内；
 - Host 显式配置了对应 broker handler。
 
-Phase 2 只实现这些校验和 broker 接口，没有开放任何真实 Host API。
-broker 若在 generation 被撤销后才返回，结果会被丢弃，不会跨 generation 回传 capability
-数据。
+Phase 4 的 authority 只在 descriptor 和 generation 已确定后 mint opaque handle，审计只保存
+fingerprint。Grant Store 的 confirmation 发生变化、deactivate、stop、fatal transport 或 activation
+失败都会使 lease 失效。broker 若在 generation 被撤销后才返回，结果会被丢弃，不会跨
+generation 回传 capability 数据。当前仍未注册任何真实 network/file/secrets/trading handler。
 
 ## 进程边界
 
 sidecar 使用 `asyncio.create_subprocess_exec` 启动，不经过 shell。子进程只继承白名单环境，
-不会隐式继承 `PYTHONPATH` 或常见 secret/token/password 变量；stderr 只保留有界尾部，
-session 关闭后仍可通过显式 diagnostics 读取最后尾部。
+不会隐式继承 `PYTHONPATH` 或常见 secret/token/password 变量；stderr 只保留有界尾部，累计
+超过上限会熔断 sidecar。
 
-这不是 OS 沙箱。Phase 2 尚未提供 restricted token、Job Object 配额、网络隔离、文件 ACL
-或资源配额；因此不能运行不受信任插件。那些能力属于 Phase 4 及之后的独立安全门。
+`trust_level="untrusted"` 必须同时提供 Windows `SandboxPolicy`，否则 spec 构造即失败。沙箱
+child 在 AppContainer 中挂起创建，先加入带 memory/CPU/process/kill-on-close 限制的 Job，再
+恢复运行；安装/runtime ACL 只读、private/temp 可写，且默认没有网络 capability。真实原生
+探针与限制见
+[`PLUGIN_PLATFORM_V2_PHASE4_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE4_zh.md)。默认产品
+尚未消费 v2 registry，普通 venv bundle 仍按 `local-trusted` 处理，不能把“支持 SandboxPolicy”
+误报成 Marketplace 已开放。
 
 ## 验证入口
 

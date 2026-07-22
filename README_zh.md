@@ -308,6 +308,14 @@ golden。可信开发包已发布为
 artifact。CandleScope 已删除 `packages/pyne-runtime` 和 in-process Pyne facade。完整执行记录见
 [`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
 
+独立演进的通用 Plugin Platform v2 已完成 SDK、业务无关 Host 和 Bundle/Installer 三个
+基础阶段。显式 `candlescope-plugin v2` 命令支持多 backend entrypoint、静态 assets、schema、
+probe、CycloneDX SBOM、content-addressed venv、独立 `platform-registry-v2.json`、staged、
+启停和原子 rollback；它不会读取或覆盖上述脚本 runtime 的 v1 registry。当前 v2 registry
+尚未接入产品默认启动，required permission 也不能 enable；在 Phase 4 OS 沙箱与 Grant Store
+完成前，只能用于 first-party-pinned/local-trusted 插件。执行与格式记录见
+[`PLUGIN_PLATFORM_V2_PHASE3_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE3_zh.md)。
+
 Phase 8 新增独立可构建的
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README_zh.md)：
 它固定公开 `pine-compat-runtime` v0.2.0 Release wheel，不包含 Pine 引擎源码快照，也不

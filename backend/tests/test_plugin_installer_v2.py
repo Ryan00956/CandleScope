@@ -1,0 +1,222 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+import app.plugin_installer_v2.installer as installer_module
+from app.plugin_installer_v2.bundle import build_platform_bundle
+from app.plugin_installer_v2.errors import PlatformBundleError, PlatformInstallerError
+from app.plugin_installer_v2.installer import PlatformPluginInstaller
+from app.plugin_installer_v2.registry import load_activation_registry
+from tests.plugin_platform_bundle_testkit import build_hello_platform_bundle
+
+
+def test_install_quick_repeat_upgrade_and_power_safe_rollback(tmp_path: Path) -> None:
+    first_bundle = build_hello_platform_bundle(tmp_path / "bundle-v1", version="0.1.0")
+    second_bundle = build_hello_platform_bundle(tmp_path / "bundle-v2", version="0.2.0")
+    root = tmp_path / "managed"
+    root.mkdir()
+    legacy_registry = root / "runtime-registry.json"
+    legacy_bytes = b'{"schemaVersion":1,"plugins":[]}\n'
+    legacy_registry.write_bytes(legacy_bytes)
+    installer = PlatformPluginInstaller(root=root)
+
+    first = installer.install(
+        first_bundle.bundle.path,
+        expected_sha256=first_bundle.bundle.sha256,
+        enabled=True,
+    )
+    assert first.changed is True
+    assert first.reused_installation is False
+    assert first.state == "active"
+    assert first.installation_path.is_dir()
+    assert installer.registry_path.name == "platform-registry-v2.json"
+    assert legacy_registry.read_bytes() == legacy_bytes
+    receipt = json.loads(
+        (first.installation_path / "receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt["probe"]["entrypoints"][0]["mode"] == "activated"
+    assert receipt["probe"]["entrypoints"][0]["descriptorSha256"].startswith("sha256:")
+    assert receipt["probe"]["semanticProbes"] == [
+        {
+            "id": "hello-transcript",
+            "entrypointId": "main",
+            "sha256": first_bundle.manifest["probes"][0]["sha256"],
+        }
+    ]
+
+    registry_before_repeat = installer.registry_path.read_bytes()
+    venv_marker = first.installation_path / "venv" / "pyvenv.cfg"
+    marker_before_repeat = venv_marker.stat().st_mtime_ns
+    repeated = installer.install(
+        first_bundle.bundle.path,
+        expected_sha256=first_bundle.bundle.sha256,
+        enabled=True,
+    )
+    assert repeated.changed is False
+    assert repeated.reused_installation is True
+    assert repeated.activation_id == first.activation_id
+    assert installer.registry_path.read_bytes() == registry_before_repeat
+    assert venv_marker.stat().st_mtime_ns == marker_before_repeat
+
+    original_replace = installer_module._replace_file
+
+    def fail_registry_replace(source: Path, destination: Path) -> None:
+        if destination == installer.registry_path:
+            raise OSError("simulated power loss before registry replace")
+        original_replace(source, destination)
+
+    installer_module._replace_file = fail_registry_replace
+    try:
+        with pytest.raises(PlatformInstallerError, match="atomically write"):
+            installer.install(
+                second_bundle.bundle.path,
+                expected_sha256=second_bundle.bundle.sha256,
+                enabled=True,
+            )
+    finally:
+        installer_module._replace_file = original_replace
+    assert installer.registry_path.read_bytes() == registry_before_repeat
+    assert load_activation_registry(installer.registry_path).by_id()[
+        first.plugin_id
+    ].version == ("0.1.0")
+
+    upgraded = installer.install(
+        second_bundle.bundle.path,
+        expected_sha256=second_bundle.bundle.sha256,
+        enabled=True,
+    )
+    assert upgraded.changed is True
+    assert upgraded.reused_installation is True
+    assert upgraded.activation_id != first.activation_id
+    assert (
+        load_activation_registry(installer.registry_path)
+        .by_id()[first.plugin_id]
+        .version
+        == "0.2.0"
+    )
+    registry_before_power_loss = installer.registry_path.read_bytes()
+    installer_module._replace_file = fail_registry_replace
+    try:
+        with pytest.raises(PlatformInstallerError, match="atomically write"):
+            installer.rollback(first.plugin_id)
+    finally:
+        installer_module._replace_file = original_replace
+    assert installer.registry_path.read_bytes() == registry_before_power_loss
+    assert (
+        load_activation_registry(installer.registry_path)
+        .by_id()[first.plugin_id]
+        .version
+        == "0.2.0"
+    )
+
+    rolled_back = installer.rollback(first.plugin_id)
+    assert rolled_back.from_activation_id == upgraded.activation_id
+    assert rolled_back.to_activation_id == first.activation_id
+    assert rolled_back.removed is False
+    active = load_activation_registry(installer.registry_path).by_id()[first.plugin_id]
+    assert active.version == "0.1.0"
+    assert (
+        installer.check(first.plugin_id).probe["entrypoints"][0]["mode"] == "activated"
+    )
+
+    disabled = installer.disable(first.plugin_id)
+    assert disabled.state == "disabled"
+    assert installer.enable(first.plugin_id).state == "active"
+    removed = installer.uninstall(first.plugin_id)
+    assert removed.state is None
+    assert removed.installation_retained is True
+    assert first.installation_path.is_dir()
+    assert (
+        first.plugin_id not in load_activation_registry(installer.registry_path).by_id()
+    )
+    assert legacy_registry.read_bytes() == legacy_bytes
+
+
+def test_failed_second_entrypoint_never_creates_partial_activation(
+    tmp_path: Path,
+) -> None:
+    fixture = build_hello_platform_bundle(
+        tmp_path / "bundle", bad_second_entrypoint=True
+    )
+    installer = PlatformPluginInstaller(root=tmp_path / "managed")
+
+    with pytest.raises(
+        PlatformInstallerError, match="fresh-process platform Host probe"
+    ):
+        installer.install(
+            fixture.bundle.path,
+            expected_sha256=fixture.bundle.sha256,
+            enabled=True,
+        )
+    assert not installer.registry_path.exists()
+    assert not installer._installation_path(
+        fixture.bundle.manifest.plugin.id, fixture.bundle.installation_id
+    ).exists()
+    assert not installer.staging_directory.exists() or not any(
+        installer.staging_directory.iterdir()
+    )
+
+
+def test_required_permissions_remain_staged_until_grant_store_exists(
+    tmp_path: Path,
+) -> None:
+    fixture = build_hello_platform_bundle(tmp_path / "bundle", required_permission=True)
+    installer = PlatformPluginInstaller(root=tmp_path / "managed")
+    installed = installer.install(
+        fixture.bundle.path,
+        expected_sha256=fixture.bundle.sha256,
+        enabled=True,
+    )
+
+    assert installed.state == "staged"
+    assert installed.enabled is False
+    receipt = json.loads((installed.installation_path / "receipt.json").read_text())
+    assert receipt["probe"]["entrypoints"][0]["mode"] == "described"
+    assert receipt["probe"]["semanticProbes"] == []
+    registry_before = installer.registry_path.read_bytes()
+    with pytest.raises(PlatformInstallerError, match="Phase 4 permission grants"):
+        installer.enable(installed.plugin_id)
+    assert installer.registry_path.read_bytes() == registry_before
+
+
+def test_semantic_transcript_drift_fails_before_activation(tmp_path: Path) -> None:
+    fixture = build_hello_platform_bundle(tmp_path / "bundle")
+    transcript_path = fixture.source_directory / "probes" / "hello-transcript.json"
+    transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+    invoke = next(item for item in transcript["requests"] if item["id"] == "invoke-1")
+    invoke["params"]["input"]["name"] = "Drifted behavior"
+    transcript_path.write_text(json.dumps(transcript), encoding="utf-8")
+    drifted = build_platform_bundle(
+        fixture.source_directory, tmp_path / "drifted.cspkg"
+    )
+    installer = PlatformPluginInstaller(root=tmp_path / "managed")
+
+    with pytest.raises(
+        PlatformInstallerError, match="fresh-process platform Host probe"
+    ):
+        installer.install(
+            drifted.path,
+            expected_sha256=drifted.sha256,
+            enabled=True,
+        )
+    assert not installer.registry_path.exists()
+
+
+def test_pinned_hash_failure_has_no_store_side_effects_and_legacy_path_is_refused(
+    tmp_path: Path,
+) -> None:
+    fixture = build_hello_platform_bundle(tmp_path / "bundle")
+    root = tmp_path / "managed"
+    installer = PlatformPluginInstaller(root=root)
+
+    with pytest.raises(PlatformBundleError, match="SHA-256 mismatch"):
+        installer.install(fixture.bundle.path, expected_sha256="0" * 64)
+    assert not root.exists()
+    with pytest.raises(PlatformInstallerError, match="legacy"):
+        PlatformPluginInstaller(
+            root=root,
+            registry_path=root / "runtime-registry.json",
+        )

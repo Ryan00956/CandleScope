@@ -102,6 +102,19 @@ bundle 建独立 venv，离线安装 wheel，并用 manifest 中的固定 analyz
 插件不能导入 `app.*` 或依赖 CandleScope 源码快照；Host 适配只发生在公开 SDK
 协议和 Render IR 上。
 
+通用 `candlescope.plugin/2` 插件使用显式 v2 包入口。准备含 `manifest.json`、`wheels/`、
+`probes/` 和 `sbom/cyclonedx.json` 的目录，然后运行：
+
+```powershell
+python backend\scripts\candlescope_plugin.py v2 --json build `
+  C:\path\to\plugin-source C:\path\to\plugin.cspkg
+python backend\scripts\candlescope_plugin.py v2 --json inspect `
+  C:\path\to\plugin.cspkg
+```
+
+v2 格式不会自动迁移 v1 包；完整布局、固定 SHA-256、staged、安装与回滚契约见
+[`PLUGIN_PLATFORM_V2_PHASE3_zh.md`](../../docs/PLUGIN_PLATFORM_V2_PHASE3_zh.md)。
+
 ## 开发门禁
 
 ```powershell

@@ -149,6 +149,22 @@ for the format, SHA-256 release workflow, install, and rollback model. Plugins
 must not import `app.*` or depend on a CandleScope source snapshot; integration
 stays on the public SDK protocol and Render IR.
 
+General `candlescope.plugin/2` plugins use the explicit v2 package namespace.
+Prepare a directory containing `manifest.json`, `wheels/`, `probes/`, and
+`sbom/cyclonedx.json`, then run:
+
+```powershell
+python backend\scripts\candlescope_plugin.py v2 --json build `
+  C:\path\to\plugin-source C:\path\to\plugin.cspkg
+python backend\scripts\candlescope_plugin.py v2 --json inspect `
+  C:\path\to\plugin.cspkg
+```
+
+The v2 parser never guesses a migration from a v1 bundle. See the
+[`Plugin Platform v2 Phase 3 record`](../../docs/PLUGIN_PLATFORM_V2_PHASE3_zh.md)
+for the layout, pinned SHA-256, staged state, installation, and rollback
+contracts.
+
 ## Development checks
 
 ```powershell

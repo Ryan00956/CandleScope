@@ -1,7 +1,7 @@
 # CandleScope 通用插件平台 v2 执行方案
 
 > 状态：执行中；Phase 0 已完成（`381dd02`），Phase 1 已完成（`d29ad4d`），Phase 2
-> 已完成实现与技术验收（本阶段提交）。
+> 已完成（`d755f27`），Phase 3 已完成实现与技术验收（本阶段提交）。
 >
 > 基线：`codex/plugin-platform-v1@400e520`，2026-07-22。
 >
@@ -727,8 +727,8 @@ frontend/src/features/plugins/
 | --- | --- | --- | --- |
 | Phase 0：冻结基线与威胁模型 | 已完成（`381dd02`） | v1 golden、性能基线、攻击面、参考场景 | 可安全动工 |
 | Phase 1：SDK/manifest v2 | 已完成（`d29ad4d`） | 通用模型、协议文档、Hello Command | 社区可编译契约 |
-| Phase 2：通用 Host 控制面 | 已完成（本阶段提交） | 双向 RPC、generation、通用 supervisor | 后端贡献点运行 |
-| Phase 3：Bundle/Installer v2 | 未开始 | 多 entrypoint/assets、staging、原子激活 | 可管理安装与回滚 |
+| Phase 2：通用 Host 控制面 | 已完成（`d755f27`） | 双向 RPC、generation、通用 supervisor | 后端贡献点运行 |
+| Phase 3：Bundle/Installer v2 | 已完成（本阶段提交） | 多 entrypoint/assets、staging、原子激活 | 可管理安装与回滚 |
 | Phase 4：权限与 OS 沙箱 | 未开始 | Grant Store、Broker、隔离、审计 | 可开放受控 Host API |
 | Phase 5：核心后端扩展点 | 未开始 | command/settings/storage/event/job | 最小通用插件平台 |
 | Phase 6：市场数据 consumer/图层 | 未开始 | read/subscribe、Render IR layer | 扫描器、研究、图表工具 |
@@ -808,7 +808,7 @@ wire bytes 不变。
 
 > 2026-07-22 已完成实现与技术验收，并随本阶段独立提交交付。进程/传输内核、内存
 > Plugin Manager、真实 Hello Command probe、故障矩阵、完整回归和未交付边界见
-> `PLUGIN_PLATFORM_V2_PHASE2_zh.md`。Phase 3 尚未开始。
+> `PLUGIN_PLATFORM_V2_PHASE2_zh.md`。
 
 ### 范围
 
@@ -838,6 +838,9 @@ secrets 或 UI。
 compatibility wrapper 可切回原 v1 supervisor；不改变 bundle/registry 格式。
 
 ## 19. Phase 3：Bundle、Installer 与 activation v2
+
+> 2026-07-22 已完成实现与技术验收。格式、安装事务、新进程 probe、故障注入、
+> CLI、回滚和仍未交付的安全边界见 `PLUGIN_PLATFORM_V2_PHASE3_zh.md`。
 
 ### 交付
 

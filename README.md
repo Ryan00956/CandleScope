@@ -446,6 +446,18 @@ The product bootstrap pins its URL, size, platform, and outer SHA-256, while the
 generic community installer remains local-artifact-only. CandleScope no longer
 contains `packages/pyne-runtime` or an in-process Pyne facade.
 
+The separately evolving general Plugin Platform v2 has completed its SDK,
+business-neutral Host, and Bundle/Installer foundation phases. The explicit
+`candlescope-plugin v2` namespace supports multiple backend entrypoints,
+static assets, schemas, probes, a CycloneDX SBOM, content-addressed venvs, an
+independent `platform-registry-v2.json`, staged state, enable/disable, and
+atomic rollback. It never reads or overwrites the script-runtime v1 registry.
+The v2 registry is not consumed during default product startup and plugins
+with required permissions cannot be enabled yet. Until the Phase 4 Grant
+Store and OS sandbox land, this path is restricted to first-party-pinned or
+local-trusted plugins. See the
+[`Phase 3 execution record`](docs/PLUGIN_PLATFORM_V2_PHASE3_zh.md).
+
 Phase 8 adds the independently buildable
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README.md).
 It pins the public `pine-compat-runtime` v0.2.0 Release wheel, contains no Pine

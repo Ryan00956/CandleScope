@@ -20,6 +20,7 @@ const RAIL_TABS = [
   ["positions", "持仓"],
   ["orders", "订单"],
   ["fills", "成交"],
+  ["book", "盘口"],
   ["flow", "订单流"],
   ["risk", "账户与风险"],
   ["notes", "记录"],
@@ -82,6 +83,7 @@ export function ReplayPaperTradingDock({ runtime, viewer, indicatorStatus }: Rep
   const contract = contractPortfolio(portfolio);
   const selectedTrackId = viewer?.viewerState?.selected_track_id ?? "track-1";
   const selectedTrack = viewer?.marketTracks?.tracks.find((item) => item.track_id === selectedTrackId);
+  const historicalBook = selectedTrack?.historical_book ?? null;
   const tradeFlow = useReplayTradeFlow({
     runId: viewer?.viewerState?.run_id ?? null,
     trackId: selectedTrackId,
@@ -126,7 +128,9 @@ export function ReplayPaperTradingDock({ runtime, viewer, indicatorStatus }: Rep
           <strong>{portfolio?.equity ?? store.account?.equity ?? "--"} {settlementAsset}</strong>
         </div>
         <span data-account-status={contract?.status ?? "ACTIVE"}>{contract?.status ?? "ACTIVE"}</span>
-        {contract !== null && <em>不含盘口排队</em>}
+        {contract !== null && (
+          <em>{historicalBook?.mode === "BOOK_ASSISTED_REQUIRED" ? "BOOK_ASSISTED · " : ""}不含盘口排队</em>
+        )}
       </header>
 
       <nav className="replay-rail-tabs" aria-label="训练账户视图">
@@ -254,6 +258,63 @@ export function ReplayPaperTradingDock({ runtime, viewer, indicatorStatus }: Rep
               </article>
             );
           })}
+        </section>
+      )}
+
+      {activeTab === "book" && (
+        <section
+          className="replay-rail-section replay-historical-book"
+          data-replay-panel="historical-book"
+          data-replay-book-status={historicalBook?.status ?? "OFF"}
+        >
+          <h2>历史 L2 · {selectedTrack?.symbol ?? "--"}</h2>
+          {historicalBook === null || historicalBook.status === "OFF" ? (
+            <div className="replay-capability-boundary" role="status">
+              <strong>OFF · TOUCH_OR_TAPE_V2</strong>
+              <p>本 Run 未开启历史盘口；执行明确不含盘口排队。</p>
+            </div>
+          ) : historicalBook.status !== "READY" ? (
+            <div className="replay-capability-boundary" role="alert">
+              <strong>{historicalBook.status} · 已清空旧盘口</strong>
+              <p>{historicalBook.message}</p>
+              <p>整个 BOOK_ASSISTED Run 保持暂停，不会静默退回 Touch/Tape 继续成交。</p>
+              {viewer !== undefined && (
+                <button
+                  type="button"
+                  data-replay-action="resync-historical-book"
+                  disabled={viewer.viewerPending || viewer.marketTracks?.global_clock.state !== "PAUSED"}
+                  onClick={() => void viewer.actions.resyncHistoricalBook().catch(() => undefined)}
+                >重新校验并 resync</button>
+              )}
+            </div>
+          ) : (
+            <>
+              <dl className="replay-metrics-grid">
+                <div><dt>Update ID</dt><dd>{historicalBook.last_update_id}</dd></div>
+                <div><dt>As of</dt><dd>{historicalBook.as_of_virtual_time_ms === null ? "--" : time(historicalBook.as_of_virtual_time_ms)}</dd></div>
+              </dl>
+              <small>AVAILABLE_EXACT · {historicalBook.execution_fidelity}</small>
+              <small>Queue exact：否；该盘口只在连续性通过时显示。</small>
+              <div className="replay-book-columns">
+                <div>
+                  <h3>Bids</h3>
+                  {historicalBook.bids.map(([levelPrice, levelQuantity]) => (
+                    <span key={`bid:${levelPrice}`} data-book-side="bid">
+                      <strong>{levelPrice}</strong><small>{levelQuantity}</small>
+                    </span>
+                  ))}
+                </div>
+                <div>
+                  <h3>Asks</h3>
+                  {historicalBook.asks.map(([levelPrice, levelQuantity]) => (
+                    <span key={`ask:${levelPrice}`} data-book-side="ask">
+                      <strong>{levelPrice}</strong><small>{levelQuantity}</small>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
         </section>
       )}
 

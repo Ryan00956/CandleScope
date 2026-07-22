@@ -250,6 +250,30 @@ export class ReplayV2ApiClient {
     );
   }
 
+  async resyncHistoricalBook(runId: string, signal?: AbortSignal): Promise<void> {
+    await this.request(
+      `/runs/${safeSegment(runId, "run id")}/historical-book/resync`,
+      (value) => {
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          throw new TypeError("historical book resync response must be an object");
+        }
+        const response = value as Record<string, unknown>;
+        if (Object.keys(response).sort().join(",")
+          !== "fallback_applied,protocol,resynced_track_count,run_id,tracks"
+          || response.protocol !== "replay.historical-book.resync.v1"
+          || response.run_id !== runId
+          || !Number.isSafeInteger(response.resynced_track_count)
+          || (response.resynced_track_count as number) < 1
+          || response.fallback_applied !== false
+          || !Array.isArray(response.tracks)) {
+          throw new TypeError("historical book resync response is incompatible");
+        }
+        return undefined;
+      },
+      { method: "POST", ...(signal ? { signal } : {}) },
+    );
+  }
+
   tradeFlowRun(
     runId: string,
     query: {

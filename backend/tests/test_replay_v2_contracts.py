@@ -68,6 +68,7 @@ def test_replay_v2_phase8_package_keeps_optimization_inside_training() -> None:
         "errors.py",
         "events.py",
         "fast_forward.py",
+        "historical_book.py",
         "history.py",
         "models.py",
         "multitrack.py",

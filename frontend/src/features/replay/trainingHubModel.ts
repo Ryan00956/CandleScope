@@ -1,5 +1,6 @@
 import type { ReplayCapabilities, ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
 import type {
+  ReplayV2BookMode,
   ReplayV2IntegrityMode,
   ReplayV2FundingMode,
   ReplayV2MarginMode,
@@ -8,6 +9,7 @@ import type {
   ReplayV2TimeDisclosurePolicy,
   TrainingRunCreatePayload,
 } from "./replayV2Types.js";
+import type { ReplaySegmentPreparePlan } from "./replaySegmentTypes.js";
 import {
   REPLAY_POLICY_MUTATIONS,
   type ReplayPolicyMutation,
@@ -40,6 +42,7 @@ export interface TrainingRunDraft {
   readonly fundingMode: ReplayV2FundingMode;
   readonly fixedFundingRate: string;
   readonly fundingIntervalMs: number;
+  readonly bookMode: ReplayV2BookMode;
   readonly integrityMode: ReplayV2IntegrityMode;
   readonly timeDisclosurePolicy: ReplayV2TimeDisclosurePolicy;
   readonly allowedMutations: readonly ReplayPolicyMutation[];
@@ -47,7 +50,7 @@ export interface TrainingRunDraft {
 
 export interface TrainingHubUnsupportedCapabilities {
   readonly funding: "HISTORICAL_EXACT 缺少对齐的历史 funding 与 mark，创建时 fail closed";
-  readonly historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF";
+  readonly historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队";
   readonly rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更";
   readonly isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金";
 }
@@ -61,7 +64,7 @@ export interface TrainingRunDraftEvaluation {
 
 export const PHASE_6_BOUNDARIES: TrainingHubUnsupportedCapabilities = Object.freeze({
   funding: "HISTORICAL_EXACT 缺少对齐的历史 funding 与 mark，创建时 fail closed",
-  historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF",
+  historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队",
   rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
   isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
 });
@@ -98,6 +101,7 @@ export function createTrainingRunDraft(catalog: ReplayCatalog): TrainingRunDraft
     fundingMode: "OFF",
     fixedFundingRate: "0.0001",
     fundingIntervalMs: 28_800_000,
+    bookMode: "OFF",
     integrityMode: "CHALLENGE",
     timeDisclosurePolicy: catalog.blind_mode ? "HIDE_ALL" : "NONE",
     allowedMutations: [],
@@ -119,6 +123,7 @@ export function evaluateTrainingRunDraft(
   draft: TrainingRunDraft,
   capabilities: ReplayCapabilities,
   catalog: ReplayCatalog,
+  segmentPlan: ReplaySegmentPreparePlan | null = null,
 ): TrainingRunDraftEvaluation {
   const errors: string[] = [];
   const entry = matchingEntry(draft, catalog);
@@ -140,6 +145,14 @@ export function evaluateTrainingRunDraft(
   }
   if (draft.startMode === "RANDOM" && draft.requestedStartMs !== null) {
     errors.push("随机开始不能携带真实开始时间");
+  }
+  if (draft.bookMode === "BOOK_ASSISTED_REQUIRED") {
+    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
+      errors.push("历史盘口必须使用明确的手动开始时间");
+    }
+    if (segmentPlan?.historical_book.capability_state !== "AVAILABLE_EXACT") {
+      errors.push("历史盘口尚未取得连续、可 pin 的 exact L2 能力证明");
+    }
   }
   if (draft.warmupBars < 1 || draft.warmupBars > capabilities.limits.max_warmup_bars) {
     errors.push("预热 BAR 数超出服务端限制");
@@ -234,7 +247,7 @@ export function buildTrainingRunCreateRequest(
     market_slippage_bps: draft.marketSlippageBps,
     integrity_mode: draft.integrityMode,
     time_disclosure_policy: draft.timeDisclosurePolicy,
-    book_mode: "OFF",
+    book_mode: draft.bookMode,
     margin_mode: draft.marginMode,
     funding_mode: draft.fundingMode,
     fixed_funding_rate: draft.fundingMode === "SANDBOX_FIXED"

@@ -131,7 +131,7 @@ Replay v1 explicitly does **not** support:
 - `L2_BOOK`: no historical order-book queue position or book-assisted fill fidelity.
 - `EXCHANGE_FUTURES_EXACT`: no historical funding, maintenance-margin tiers, liquidation/ADL, or exact exchange account semantics.
 
-Replay v2 remains separately opt-in. Through Phase 8 it adds explainable
+Replay v2 remains separately opt-in. Phase 8 adds explainable
 `CHECKPOINT_JUMP` / `AGGREGATE_SCAN` / `FULL_EVENT_SCAN` / `BLOCKED` planning,
 bounded source-page scans, cancellable committed chunks, and a replay-isolated
 aggregate-trade Tape/CVD panel. `AGGREGATE_SCAN` still applies every source event
@@ -140,13 +140,43 @@ intermediate state materialization and coalesces delivery before an exact reset.
 Any active order, position, funding, risk, book, or multi-track dependency uses
 `FULL_EVENT_SCAN`. BAR runs report Tape/order flow as
 `UNSUPPORTED_SOURCE_MODE`, and aggregate trades are never labeled raw fills.
-The optimization flag defaults to off:
+
+Phase 9 adds an optional, replay-owned historical L2 archive for Binance USD-M.
+It accepts only an operator-captured SQLite snapshot plus ordered diff-depth
+stream that passes schema, range, checksum, snapshot bridge, resident-depth,
+and `U/u/pu` continuity validation. A `BOOK_ASSISTED_REQUIRED` run pins that
+exact object; a gap clears every displayed book, pauses the run, and requires
+explicit revalidation/resync. The execution model remains `TOUCH_OR_TAPE_V2`
+and reports `BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE`: L2 is an exact
+continuity capability, not proof of queue position or maker-fill priority.
+
+The optimization and historical-book flags both default to off:
 
 ```text
 REPLAY_PRODUCT_V2_ENABLED=0
 VITE_REPLAY_PRODUCT_V2_ENABLED=0
 REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0
+REPLAY_HISTORICAL_BOOK_ENABLED=0
+REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES=1099511627776
 ```
+
+No production L2 dataset is bundled or claimed. Before enabling the feature,
+an operator must retain the trusted capture outside replay-owned storage and
+formally import it. The importer copies the checksum-identical object into the
+managed archive and keeps the external path only for verified rehydration:
+
+```powershell
+Set-Location backend
+.\.venv\Scripts\python.exe scripts\import_replay_historical_book.py `
+  --replay-db .\data\replay-dev\replay-v2.db `
+  --archive D:\trusted-replay-captures\BTCUSDT-book.sqlite3 `
+  --archive-root .\data\replay-dev\replay-historical-books `
+  --trusted-origin OPERATOR_VERIFIED_CAPTURE
+```
+
+Storage GC remains explicit dry-run/run, never automatically reclaims an
+active pin, and rehydrates only when the retained trusted source still matches
+the frozen checksum.
 
 ### Prepare Isolated Data
 

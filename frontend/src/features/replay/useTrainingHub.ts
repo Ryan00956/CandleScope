@@ -21,7 +21,7 @@ import type {
 } from "./replayV2Types.js";
 
 export type TrainingHubPhase = "IDLE" | "LOADING" | "READY" | "ERROR" | "STOPPED";
-export type TrainingHubOperation = "list" | "create-context" | "create" | "migrate" | null;
+export type TrainingHubOperation = "list" | "create-context" | "plan" | "create" | "migrate" | null;
 
 export interface TrainingHubFilters {
   readonly state: ReplayV2RunState | null;
@@ -97,6 +97,19 @@ function defaultNavigateToSession(sessionId: string): void {
   window.location.assign(`/replay.html?session=${encodeURIComponent(sessionId)}`);
 }
 
+function samePlanInputs(left: TrainingRunDraft, right: TrainingRunDraft): boolean {
+  return left.sourceKind === right.sourceKind
+    && left.startMode === right.startMode
+    && left.exchange === right.exchange
+    && left.marketType === right.marketType
+    && left.symbol === right.symbol
+    && left.baseInterval === right.baseInterval
+    && left.displayInterval === right.displayInterval
+    && left.requestedStartMs === right.requestedStartMs
+    && left.warmupBars === right.warmupBars
+    && left.forwardCacheMs === right.forwardCacheMs;
+}
+
 export class TrainingHubLifecycle {
   private readonly api: TrainingHubApiBoundary;
   private readonly navigateToSession: (sessionId: string) => void;
@@ -167,7 +180,12 @@ export class TrainingHubLifecycle {
     this.error = null;
     if (!forceReload && this.capabilities !== null && this.catalog !== null) {
       this.draft ??= createTrainingRunDraft(this.catalog);
-      this.evaluation = evaluateTrainingRunDraft(this.draft, this.capabilities, this.catalog);
+      this.evaluation = evaluateTrainingRunDraft(
+        this.draft,
+        this.capabilities,
+        this.catalog,
+        this.segmentPlan,
+      );
       this.publish();
       return;
     }
@@ -197,10 +215,15 @@ export class TrainingHubLifecycle {
       this.evaluation = evaluateTrainingRunDraft(this.draft, capabilities, catalog);
       this.segmentPlan = await this.loadSegmentPlan(
         this.draft,
-        this.evaluation,
         catalog,
       );
       if (!this.accept(token)) return;
+      this.evaluation = evaluateTrainingRunDraft(
+        this.draft,
+        capabilities,
+        catalog,
+        this.segmentPlan,
+      );
       this.operation = null;
       this.publish();
     } catch (error) {
@@ -216,17 +239,53 @@ export class TrainingHubLifecycle {
 
   setDraft(draft: TrainingRunDraft): void {
     if (this.disposed) return;
+    const keepPlan = this.draft !== null && samePlanInputs(this.draft, draft);
     this.draft = draft;
+    if (!keepPlan) this.segmentPlan = null;
     this.evaluation = this.capabilities !== null && this.catalog !== null
-      ? evaluateTrainingRunDraft(draft, this.capabilities, this.catalog)
+      ? evaluateTrainingRunDraft(
+        draft,
+        this.capabilities,
+        this.catalog,
+        this.segmentPlan,
+      )
       : null;
-    this.segmentPlan = null;
     this.publish();
+  }
+
+  async refreshCreatePlan(): Promise<void> {
+    if (this.disposed || this.capabilities === null || this.catalog === null || this.draft === null) {
+      return;
+    }
+    this.operation = "plan";
+    this.error = null;
+    this.publish();
+    const token = ++this.requestToken;
+    try {
+      const plan = await this.loadSegmentPlan(this.draft, this.catalog);
+      if (!this.accept(token)) return;
+      this.segmentPlan = plan;
+      this.evaluation = evaluateTrainingRunDraft(
+        this.draft,
+        this.capabilities,
+        this.catalog,
+        plan,
+      );
+      this.operation = null;
+      this.publish();
+    } catch (error) {
+      this.fail(token, error);
+    }
   }
 
   async createRun(draft: TrainingRunDraft): Promise<void> {
     if (this.disposed || this.capabilities === null || this.catalog === null) return;
-    let evaluation = evaluateTrainingRunDraft(draft, this.capabilities, this.catalog);
+    let evaluation = evaluateTrainingRunDraft(
+      draft,
+      this.capabilities,
+      this.catalog,
+      this.segmentPlan,
+    );
     this.draft = draft;
     this.evaluation = evaluation;
     if (!evaluation.canSubmit) {
@@ -246,7 +305,12 @@ export class TrainingHubLifecycle {
         blindMode: draft.timeDisclosurePolicy !== "NONE",
       }, this.abortController.signal);
       if (!this.accept(token)) return;
-      evaluation = evaluateTrainingRunDraft(draft, this.capabilities, catalog);
+      evaluation = evaluateTrainingRunDraft(
+        draft,
+        this.capabilities,
+        catalog,
+        this.segmentPlan,
+      );
       this.catalog = catalog;
       this.evaluation = evaluation;
       if (!evaluation.canSubmit) {
@@ -255,8 +319,21 @@ export class TrainingHubLifecycle {
         this.publish();
         return;
       }
-      this.segmentPlan = await this.loadSegmentPlan(draft, evaluation, catalog);
+      this.segmentPlan = await this.loadSegmentPlan(draft, catalog);
       if (!this.accept(token)) return;
+      evaluation = evaluateTrainingRunDraft(
+        draft,
+        this.capabilities,
+        catalog,
+        this.segmentPlan,
+      );
+      this.evaluation = evaluation;
+      if (!evaluation.canSubmit) {
+        this.operation = null;
+        this.error = { code: "TRAINING_RUN_INVALID", message: evaluation.errors.join("；") };
+        this.publish();
+        return;
+      }
       const result = await this.api.createRun(
         buildTrainingRunCreateRequest(draft, evaluation, catalog),
         this.abortController.signal,
@@ -340,12 +417,23 @@ export class TrainingHubLifecycle {
 
   private async loadSegmentPlan(
     draft: TrainingRunDraft,
-    evaluation: TrainingRunDraftEvaluation,
     catalog: ReplayCatalog,
   ): Promise<ReplaySegmentPreparePlan | null> {
-    if (!evaluation.canSubmit || this.api.segmentPlan === undefined) return null;
+    if (this.api.segmentPlan === undefined || this.capabilities === null) return null;
+    const planningDraft: TrainingRunDraft = { ...draft, bookMode: "OFF" };
+    const planningEvaluation = evaluateTrainingRunDraft(
+      planningDraft,
+      this.capabilities,
+      catalog,
+    );
+    if (!planningEvaluation.canSubmit) return null;
+    const payload = buildTrainingRunCreateRequest(
+      planningDraft,
+      planningEvaluation,
+      catalog,
+    );
     return this.api.segmentPlan(
-      buildTrainingRunCreateRequest(draft, evaluation, catalog),
+      { ...payload, book_mode: draft.bookMode },
       this.abortController.signal,
     );
   }
@@ -393,6 +481,7 @@ export interface TrainingHubRuntime extends TrainingHubSnapshot {
     openCreate(): void | Promise<void>;
     closeCreate(): void;
     setDraft(draft: TrainingRunDraft): void;
+    refreshCreatePlan(): void | Promise<void>;
     createRun(draft: TrainingRunDraft): void | Promise<void>;
     migrateLegacy(sessionId: string, name?: string | null): void | Promise<void>;
     continueRun(card: TrainingRunCard): void;
@@ -441,6 +530,7 @@ export function useTrainingHub(
       openCreate: () => lifecycle.openCreate(),
       closeCreate: () => lifecycle.closeCreate(),
       setDraft: (draft: TrainingRunDraft) => lifecycle.setDraft(draft),
+      refreshCreatePlan: () => lifecycle.refreshCreatePlan(),
       createRun: (draft: TrainingRunDraft) => lifecycle.createRun(draft),
       migrateLegacy: (sessionId: string, name: string | null = null) => (
         lifecycle.migrateLegacy(sessionId, name)

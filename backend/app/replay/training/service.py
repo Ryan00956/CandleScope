@@ -42,8 +42,10 @@ from .control import (
     validate_bar_duration_ms,
 )
 from .history import build_history_page
+from .historical_book import HistoricalBookArchiveManager, HistoricalBookProjection
 from .fast_forward import FastForwardContext, FastForwardDecision, FastForwardPlanner
 from .models import (
+    BookMode,
     FastForwardPlan,
     FundingMode,
     IntegrityMode,
@@ -113,6 +115,13 @@ class TrainingRunService:
             ),
             auto_gc_enabled=replay_service.settings.replay_segment_auto_gc_enabled,
         )
+        self.historical_books = HistoricalBookArchiveManager(
+            replay_service.store,
+            enabled=replay_service.settings.replay_historical_book_enabled,
+            max_archive_bytes=(
+                replay_service.settings.replay_historical_book_max_archive_bytes
+            ),
+        )
         self._run_id_factory = run_id_factory
         self._fast_forward_planner = FastForwardPlanner()
         self._trade_flow_adapter = ReplayTradeFlowAdapter()
@@ -122,6 +131,7 @@ class TrainingRunService:
     async def start(self) -> None:
         await self.store.start()
         await self.segments.start()
+        await self.historical_books.start()
 
     async def shutdown(self) -> None:
         """Stop server-owned ordered playback before replay.v1 actors close."""
@@ -161,7 +171,11 @@ class TrainingRunService:
     ) -> dict[str, object]:
         if not isinstance(request, TrainingRunCreateRequest):
             raise TypeError("request must be TrainingRunCreateRequest")
-        return await self.segments.plan_for_request(request)
+        plan = await self.segments.plan_for_request(request)
+        return {
+            **plan,
+            "historical_book": await self.historical_books.plan_for_request(request),
+        }
 
     async def list_data_segments(
         self, *, run_id: str | None = None
@@ -179,6 +193,93 @@ class TrainingRunService:
             run_id=normalized,
             redact_ranges=redact,
         )
+
+    async def list_historical_book_archives(self) -> dict[str, object]:
+        return await self.historical_books.list_archives()
+
+    async def historical_book_gc_plan(
+        self, *, target_reclaim_bytes: int, max_archives: int
+    ) -> dict[str, object]:
+        return await self.historical_books.gc_plan(
+            target_reclaim_bytes=target_reclaim_bytes,
+            max_archives=max_archives,
+        )
+
+    async def historical_book_gc_run(
+        self,
+        *,
+        plan_hash: str,
+        target_reclaim_bytes: int,
+        max_archives: int,
+    ) -> dict[str, object]:
+        return await self.historical_books.gc_run(
+            plan_hash=plan_hash,
+            target_reclaim_bytes=target_reclaim_bytes,
+            max_archives=max_archives,
+        )
+
+    async def rehydrate_historical_book_archive(
+        self, archive_id: str
+    ) -> dict[str, object]:
+        normalized = self._identifier(archive_id, field_name="archive_id")
+        return await self.historical_books.rehydrate_archive(normalized)
+
+    async def resync_historical_book(self, run_id: str) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        binding = await self.store.run_binding(normalized)
+        if str(binding.get("book_mode")) != BookMode.BOOK_ASSISTED_REQUIRED.value:
+            raise TrainingRunError(
+                "HISTORICAL_BOOK_NOT_REQUIRED",
+                "the TrainingRun does not use BOOK_ASSISTED_REQUIRED",
+                status_code=409,
+            )
+        actor = self._run_actors.setdefault(normalized, TrainingRunActor(normalized))
+        if actor.playback_is_active():
+            raise TrainingRunError(
+                "HISTORICAL_BOOK_RESYNC_REQUIRES_PAUSE",
+                "pause ordered playback before historical book resync",
+                status_code=409,
+            )
+        session = await self.replay_service.get_session(
+            str(binding["adapter_session_id"])
+        )
+        snapshot = self._snapshot(session)
+        if snapshot.get("state") != "PAUSED":
+            raise TrainingRunError(
+                "HISTORICAL_BOOK_RESYNC_REQUIRES_PAUSE",
+                "all FULL tracks must be paused before historical book resync",
+                status_code=409,
+            )
+        cursor = _stored_mapping(snapshot.get("cursor"), field_name="adapter cursor")
+        virtual_time_ms = _stored_counter(
+            cursor.get("virtual_time_ms"), field_name="virtual_time_ms"
+        )
+        projection = await self.store.get_market_tracks(normalized)
+        raw_tracks = projection.get("tracks")
+        if not isinstance(raw_tracks, list):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "market tracks projection is invalid",
+                status_code=503,
+            )
+        tracks = [
+            cast(Mapping[str, object], track)
+            for track in raw_tracks
+            if isinstance(track, Mapping)
+        ]
+        prepared = await self.historical_books.resync_run(
+            run_id=normalized,
+            tracks=tracks,
+            actual_time_ms=self._actual_event_time_ms(binding, virtual_time_ms),
+            virtual_time_ms=virtual_time_ms,
+        )
+        return {
+            "protocol": "replay.historical-book.resync.v1",
+            "run_id": normalized,
+            "resynced_track_count": len(prepared),
+            "fallback_applied": False,
+            "tracks": (await self.store.get_market_tracks(normalized))["tracks"],
+        }
 
     async def data_segment_gc_plan(
         self, *, target_reclaim_bytes: int, max_segments: int
@@ -562,7 +663,7 @@ class TrainingRunService:
     async def create_run(self, request: TrainingRunCreateRequest) -> dict[str, object]:
         if not isinstance(request, TrainingRunCreateRequest):
             raise TypeError("request must be TrainingRunCreateRequest")
-        compatible_step_interval_ms(
+        base_interval_ms = compatible_step_interval_ms(
             base_interval=request.base_interval,
             step_interval=request.display_interval,
         )
@@ -576,6 +677,28 @@ class TrainingRunService:
                     "historical_mark": "UNSUPPORTED_NO_HISTORY",
                     "fallback_applied": False,
                 },
+            )
+        historical_book_binding = None
+        if request.book_mode is BookMode.BOOK_ASSISTED_REQUIRED:
+            if request.start_mode is not StartMode.MANUAL or request.requested_start_ms is None:
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_MANUAL_START_REQUIRED",
+                    "BOOK_ASSISTED_REQUIRED currently requires an exact manual start",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            historical_book_binding = await self.historical_books.prepare_binding(
+                exchange=request.exchange,
+                market_type=request.market_type,
+                symbol=request.symbol,
+                range_start_ms=request.requested_start_ms,
+                range_end_ms=(
+                    request.requested_start_ms
+                    + request.forward_cache_ms
+                    + base_interval_ms
+                ),
+                actual_time_ms=request.requested_start_ms,
+                virtual_time_ms=request.requested_start_ms,
             )
         run_id = self._identifier(self._run_id_factory(), field_name="run_id")
         config = self._adapter_config(request)
@@ -591,6 +714,19 @@ class TrainingRunService:
             actual_replay_start_ms: int,
             actual_replay_end_ms: int,
         ):
+            bound_book = historical_book_binding
+            if bound_book is not None:
+                cursor = session_state.get("cursor")
+                if not isinstance(cursor, Mapping):
+                    raise TypeError("training adapter cursor must be an object")
+                bound_book = replace(
+                    bound_book,
+                    projection=replace(
+                        bound_book.projection,
+                        actual_time_ms=actual_replay_start_ms,
+                        virtual_time_ms=int(cursor["virtual_time_ms"]),
+                    ),
+                )
             return self.store.initial_run_writer(
                 run_id=run_id,
                 request=request,
@@ -602,6 +738,7 @@ class TrainingRunService:
                 dataset_blob=dataset_blob,
                 actual_replay_start_ms=actual_replay_start_ms,
                 actual_replay_end_ms=actual_replay_end_ms,
+                historical_book_binding=bound_book,
             )
 
         try:
@@ -810,6 +947,23 @@ class TrainingRunService:
 
         binding = await self.store.run_binding(normalized_run)
         if binding["compatibility"] != "READY":
+            if (
+                str(binding.get("book_mode", "OFF"))
+                == BookMode.BOOK_ASSISTED_REQUIRED.value
+            ):
+                raise TrainingRunError(
+                    (
+                        "HISTORICAL_BOOK_CAPABILITY_UNAVAILABLE"
+                        if self.historical_books.enabled
+                        else "HISTORICAL_BOOK_DISABLED"
+                    ),
+                    "book-assisted execution capability is unavailable; the Run remains paused",
+                    status_code=409,
+                    details={
+                        "compatibility": binding["compatibility"],
+                        "fallback_applied": False,
+                    },
+                )
             raise TrainingRunError(
                 "REPLAY_CONTROL_UNAVAILABLE",
                 "Phase 3 controls require a base-interval v2 adapter",
@@ -853,6 +1007,11 @@ class TrainingRunService:
             ReplayV2CommandType.CLOSE_POSITION,
         }:
             snapshot = self._assert_expected_cursor(command, session)
+            await self._guard_historical_book_current(
+                run_id=normalized_run,
+                binding=binding,
+                snapshot=snapshot,
+            )
             result = await self._execute_market_trade_command(
                 command=command,
                 binding=binding,
@@ -1067,6 +1226,20 @@ class TrainingRunService:
             for track in all_tracks
             if track.get("subscription_tier") == "FULL"
         ]
+        if command.type in {
+            ReplayV2CommandType.PLAY,
+            ReplayV2CommandType.STEP_EVENT,
+            ReplayV2CommandType.STEP_BASE,
+            ReplayV2CommandType.STEP_DISPLAY,
+            ReplayV2CommandType.ADVANCE_BY,
+            ReplayV2CommandType.ADVANCE_TO,
+        }:
+            await self._guard_historical_book_current(
+                run_id=normalized_run,
+                binding=binding,
+                snapshot=snapshot,
+                tracks=full_tracks,
+            )
         contract_clock = binding.get("account_model") == "TOUCH_OR_TAPE_V2"
         contract_ordered_types = {
             ReplayV2CommandType.PLAY,
@@ -1193,6 +1366,16 @@ class TrainingRunService:
             if liquidation_count
             else adapter_result
         )
+        if command.type in {
+            ReplayV2CommandType.STEP_EVENT,
+            ReplayV2CommandType.STEP_BASE,
+            ReplayV2CommandType.STEP_DISPLAY,
+        }:
+            await self._guard_historical_book_current(
+                run_id=normalized_run,
+                binding=binding,
+                snapshot=authoritative,
+            )
         viewer = await self.store.get_viewer_state(normalized_run)
         result = {
             "protocol": "replay.v2",
@@ -1266,6 +1449,32 @@ class TrainingRunService:
                 market_type=market_type,
                 settlement_asset=settlement_asset,
             )
+            target_virtual_time_ms = self._cursor_time(selected_snapshot)
+            if (
+                str(binding.get("book_mode", "OFF"))
+                == BookMode.BOOK_ASSISTED_REQUIRED.value
+                and tier is SubscriptionTier.FULL
+            ):
+                # Prove exact L2 coverage before reserving the track. A failed
+                # capability check must not leave a phantom FULL track behind.
+                await self.historical_books.prepare_binding(
+                    exchange=exchange,
+                    market_type=market_type,
+                    symbol=symbol,
+                    range_start_ms=_stored_counter(
+                        binding["actual_replay_start_ms"],
+                        field_name="actual_replay_start_ms",
+                    ),
+                    range_end_ms=_stored_counter(
+                        binding["actual_replay_end_ms"],
+                        field_name="actual_replay_end_ms",
+                    ),
+                    actual_time_ms=self._actual_event_time_ms(
+                        binding,
+                        target_virtual_time_ms,
+                    ),
+                    virtual_time_ms=target_virtual_time_ms,
+                )
             track = await self.store.reserve_market_track(
                 run_id=command.run_id,
                 exchange=exchange,
@@ -1282,9 +1491,14 @@ class TrainingRunService:
                         binding=binding,
                         track=track,
                         requested_tier=tier,
-                        target_virtual_time_ms=self._cursor_time(selected_snapshot),
+                        target_virtual_time_ms=target_virtual_time_ms,
                     )
                 except TrainingRunError:
+                    if track.get("adapter_session_id") is None:
+                        await self.store.remove_market_track(
+                            command.run_id,
+                            str(track["track_id"]),
+                        )
                     raise
                 except Exception as exc:
                     await self.store.mark_market_track_error(
@@ -1336,6 +1550,7 @@ class TrainingRunService:
 
         if command.type is ReplayV2CommandType.SET_SUBSCRIPTION_TIER:
             recovered = False
+            tier_book_binding = None
             try:
                 tier = SubscriptionTier(str(payload["subscription_tier"]))
             except ValueError as exc:
@@ -1354,6 +1569,31 @@ class TrainingRunService:
                         target_virtual_time_ms=self._cursor_time(selected_snapshot),
                     )
                 elif tier is SubscriptionTier.FULL:
+                    if (
+                        str(binding.get("book_mode", "OFF"))
+                        == BookMode.BOOK_ASSISTED_REQUIRED.value
+                        and track.get("subscription_tier")
+                        != SubscriptionTier.FULL.value
+                    ):
+                        target_virtual_time_ms = self._cursor_time(selected_snapshot)
+                        tier_book_binding = await self.historical_books.prepare_binding(
+                            exchange=str(track["exchange"]),
+                            market_type=str(track["market_type"]),
+                            symbol=str(track["symbol"]),
+                            range_start_ms=_stored_counter(
+                                binding["actual_replay_start_ms"],
+                                field_name="actual_replay_start_ms",
+                            ),
+                            range_end_ms=_stored_counter(
+                                binding["actual_replay_end_ms"],
+                                field_name="actual_replay_end_ms",
+                            ),
+                            actual_time_ms=self._actual_event_time_ms(
+                                binding,
+                                target_virtual_time_ms,
+                            ),
+                            virtual_time_ms=target_virtual_time_ms,
+                        )
                     await self._activate_existing_track(
                         command=command,
                         track=track,
@@ -1382,6 +1622,7 @@ class TrainingRunService:
                 run_id=command.run_id,
                 track_id=track_id,
                 subscription_tier=tier.value,
+                historical_book_binding=tier_book_binding,
             )
             if tier is not SubscriptionTier.FULL and track["adapter_session_id"]:
                 await self.replay_service.release_session_to_hub(
@@ -1486,10 +1727,35 @@ class TrainingRunService:
             ),
             display_interval=base_config.base_interval,
         )
+        historical_book_binding = None
+        if (
+            str(binding.get("book_mode")) == BookMode.BOOK_ASSISTED_REQUIRED.value
+            and requested_tier is SubscriptionTier.FULL
+        ):
+            actual_time_ms = self._actual_event_time_ms(
+                binding,
+                target_virtual_time_ms,
+            )
+            historical_book_binding = await self.historical_books.prepare_binding(
+                exchange=str(track["exchange"]),
+                market_type=str(track["market_type"]),
+                symbol=str(track["symbol"]),
+                range_start_ms=_stored_counter(
+                    binding["actual_replay_start_ms"],
+                    field_name="actual_replay_start_ms",
+                ),
+                range_end_ms=_stored_counter(
+                    binding["actual_replay_end_ms"],
+                    field_name="actual_replay_end_ms",
+                ),
+                actual_time_ms=actual_time_ms,
+                virtual_time_ms=target_virtual_time_ms,
+            )
         extension_factory = self.store.attach_market_track_writer(
             run_id=command.run_id,
             track_id=str(track["track_id"]),
             requested_tier=requested_tier.value,
+            historical_book_binding=historical_book_binding,
         )
         try:
             created = await self.replay_service.create_session(
@@ -2297,9 +2563,9 @@ class TrainingRunService:
                         for track in projection_tracks
                         if isinstance(track, Mapping)
                     )
-                    if len(tracks) < 2:
+                    if len(tracks) < 1:
                         terminal_reason = (
-                            "ORDERED_PLAYBACK_REQUIRES_MULTIPLE_FULL_TRACKS"
+                            "ORDERED_PLAYBACK_REQUIRES_A_FULL_TRACK"
                         )
                         break
                     selected_session_id = str(binding["adapter_session_id"])
@@ -2400,9 +2666,13 @@ class TrainingRunService:
         except asyncio.CancelledError:
             terminal_reason = terminal_reason or "PLAYBACK_CANCELLED"
         except (ReplayDomainError, TrainingRunError) as exc:
-            terminal_state = "ERROR"
             terminal_reason = (
                 exc.code.value if isinstance(exc, ReplayDomainError) else exc.code
+            )
+            terminal_state = (
+                "PAUSED"
+                if terminal_reason.startswith("HISTORICAL_BOOK_")
+                else "ERROR"
             )
         except Exception as exc:  # pragma: no cover - defensive task boundary
             terminal_state = "ERROR"
@@ -2584,6 +2854,17 @@ class TrainingRunService:
         target_virtual_time_ms: int,
         job: dict[str, object] | None = None,
     ) -> tuple[StableMarketEvent, ...]:
+        prepared_book: tuple[tuple[str, HistoricalBookProjection], ...] = ()
+        if str(binding.get("book_mode", "OFF")) == BookMode.BOOK_ASSISTED_REQUIRED.value:
+            prepared_book = await self.historical_books.prepare_run_projection(
+                run_id=command.run_id,
+                tracks=tracks,
+                actual_time_ms=self._actual_event_time_ms(
+                    binding,
+                    target_virtual_time_ms,
+                ),
+                virtual_time_ms=target_virtual_time_ms,
+            )
         all_events: list[StableMarketEvent] = []
         for _wave_index in range(10_000):
             if job is not None:
@@ -2643,6 +2924,11 @@ class TrainingRunService:
                 )
             current = next(iter(times))
             if current >= target_virtual_time_ms:
+                if prepared_book:
+                    await self.historical_books.commit_run_projection(
+                        run_id=command.run_id,
+                        prepared=prepared_book,
+                    )
                 if job is not None:
                     job["status"] = "COMPLETED"
                     job["current_virtual_time_ms"] = current
@@ -2761,6 +3047,46 @@ class TrainingRunService:
             )
             + virtual_time_ms
             - _stored_counter(synthetic_origin, field_name="synthetic_origin_ms")
+        )
+
+    async def _guard_historical_book_current(
+        self,
+        *,
+        run_id: str,
+        binding: Mapping[str, object],
+        snapshot: Mapping[str, object],
+        tracks: list[Mapping[str, object]] | None = None,
+    ) -> None:
+        if str(binding.get("book_mode", "OFF")) != BookMode.BOOK_ASSISTED_REQUIRED.value:
+            return
+        cursor = _stored_mapping(snapshot.get("cursor"), field_name="adapter cursor")
+        virtual_time_ms = _stored_counter(
+            cursor.get("virtual_time_ms"), field_name="virtual_time_ms"
+        )
+        if tracks is None:
+            projection = await self.store.get_market_tracks(run_id)
+            values = projection.get("tracks")
+            if not isinstance(values, list):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market tracks projection is invalid",
+                    status_code=503,
+                )
+            tracks = [
+                cast(Mapping[str, object], track)
+                for track in values
+                if isinstance(track, Mapping)
+                and track.get("subscription_tier") == "FULL"
+            ]
+        prepared = await self.historical_books.prepare_run_projection(
+            run_id=run_id,
+            tracks=tracks,
+            actual_time_ms=self._actual_event_time_ms(binding, virtual_time_ms),
+            virtual_time_ms=virtual_time_ms,
+        )
+        await self.historical_books.commit_run_projection(
+            run_id=run_id,
+            prepared=prepared,
         )
 
     async def _next_global_event_time(
@@ -3542,6 +3868,33 @@ class TrainingRunService:
                 "advance target must be ahead of the current cursor",
                 status_code=422,
             )
+        binding = await self.store.run_binding(command.run_id)
+        prepared_book: tuple[tuple[str, HistoricalBookProjection], ...] = ()
+        full_tracks: list[Mapping[str, object]] = []
+        if str(binding.get("book_mode", "OFF")) == BookMode.BOOK_ASSISTED_REQUIRED.value:
+            track_projection = await self.store.get_market_tracks(command.run_id)
+            raw_tracks = track_projection.get("tracks")
+            if not isinstance(raw_tracks, list):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market tracks projection is invalid",
+                    status_code=503,
+                )
+            full_tracks = [
+                cast(Mapping[str, object], track)
+                for track in raw_tracks
+                if isinstance(track, Mapping)
+                and track.get("subscription_tier") == "FULL"
+            ]
+            prepared_book = await self.historical_books.prepare_run_projection(
+                run_id=command.run_id,
+                tracks=full_tracks,
+                actual_time_ms=self._actual_event_time_ms(
+                    binding,
+                    target_virtual_time_ms,
+                ),
+                virtual_time_ms=target_virtual_time_ms,
+            )
         cancel = asyncio.Event()
         job: dict[str, object] = {
             "cancel": cancel,
@@ -3694,6 +4047,24 @@ class TrainingRunService:
             final_cursor = _stored_mapping(
                 final.get("cursor"), field_name="adapter cursor"
             )
+            if prepared_book:
+                final_virtual_time = _stored_counter(
+                    final_cursor.get("virtual_time_ms"), field_name="virtual_time_ms"
+                )
+                if final_virtual_time != target_virtual_time_ms:
+                    prepared_book = await self.historical_books.prepare_run_projection(
+                        run_id=command.run_id,
+                        tracks=full_tracks,
+                        actual_time_ms=self._actual_event_time_ms(
+                            binding,
+                            final_virtual_time,
+                        ),
+                        virtual_time_ms=final_virtual_time,
+                    )
+                await self.historical_books.commit_run_projection(
+                    run_id=command.run_id,
+                    prepared=prepared_book,
+                )
             viewer = await self.store.get_viewer_state(command.run_id)
             resolved_plan = dict(plan)
             equivalence = resolved_plan.get("equivalence")

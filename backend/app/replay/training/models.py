@@ -837,8 +837,6 @@ class TrainingRunCreateRequest:
             allowed = POLICY_MUTATION_VALUES
             object.__setattr__(self, "allow_rule_changes", True)
         object.__setattr__(self, "allowed_mutations", allowed)
-        if self.book_mode is not BookMode.OFF:
-            raise ValueError("historical book mode must remain OFF")
         if self.funding_mode is FundingMode.SANDBOX_FIXED:
             if self.integrity_mode is not IntegrityMode.SANDBOX:
                 raise ValueError("SANDBOX_FIXED funding requires SANDBOX integrity mode")

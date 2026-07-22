@@ -101,6 +101,23 @@ test("capability surface never renders unsupported history as numeric zero or st
   assert.equal(tape.ORDER_FLOW.state, "AVAILABLE_APPROX");
   assert.match(tape.AGG_TRADE_TAPE.detail, /不是交易所 raw fills/);
   assert.match(tape.ORDER_FLOW.detail, /buyer-maker/);
+
+  const book = buildReplayCapabilityModel("AGG_TRADE", {
+    mode: "BOOK_ASSISTED_REQUIRED",
+    capability_state: "AVAILABLE_EXACT",
+    status: "READY",
+    execution_fidelity: "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE",
+    queue_exact: false,
+    as_of_virtual_time_ms: 1_700_000_000_000,
+    last_update_id: 42,
+    bids: [["99", "1"]],
+    asks: [["101", "1"]],
+    book_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    message: "连续历史 L2 已验证",
+  });
+  assert.equal(book.ORDER_BOOK.state, "AVAILABLE_EXACT");
+  assert.equal(book.ORDER_BOOK.value, "EXACT_L2");
+  assert.match(book.ORDER_BOOK.detail, /不含真实盘口排队/);
 });
 
 test("Phase 8 workspace exposes explainable plans and fail-closed aggregate trade flow", () => {

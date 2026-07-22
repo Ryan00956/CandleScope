@@ -92,6 +92,20 @@ function segmentPlanResponse(overrides: Record<string, unknown> = {}) {
     download_worker_enabled: false,
     auto_gc_enabled: false,
     failure_policy: "QUARANTINE_AND_FAIL_CLOSED",
+    historical_book: {
+      feature_enabled: false,
+      requested_mode: "OFF",
+      capability_state: "UNSUPPORTED_NO_HISTORY",
+      reason: "FEATURE_DISABLED",
+      source: "BINANCE_USDM_DIFF_DEPTH_CAPTURE_V1",
+      snapshot_and_ordered_deltas: false,
+      continuity_contract: "SNAPSHOT_BRIDGE_AND_U_u_pu",
+      pinnable: false,
+      queue_exact: false,
+      execution_fidelity: "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE",
+      ready_archive_bytes: 0,
+      max_archive_bytes: 1_099_511_627_776,
+    },
     ...overrides,
   };
 }
@@ -391,7 +405,7 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(evaluation.canSubmit, true);
   assert.deepEqual(evaluation.unsupported, {
     funding: "HISTORICAL_EXACT 缺少对齐的历史 funding 与 mark，创建时 fail closed",
-    historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF",
+    historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队",
     rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
     isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
   });
@@ -438,6 +452,43 @@ test("Phase 6 create model enables isolated Sandbox funding but rejects historic
   assert.match(exact.errors.join("\n"), /历史 funding.*mark|funding.*mark/);
 });
 
+test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan", () => {
+  const capabilities = parseReplayCapabilities(enabledCapabilities());
+  const catalog = blindCatalog();
+  const draft = {
+    ...createTrainingRunDraft(catalog),
+    startMode: "MANUAL" as const,
+    requestedStartMs: 1_710_000_000_000,
+    bookMode: "BOOK_ASSISTED_REQUIRED" as const,
+  };
+  const unavailable = evaluateTrainingRunDraft(draft, capabilities, catalog);
+  assert.equal(unavailable.canSubmit, false);
+  assert.match(unavailable.errors.join("\n"), /exact L2/);
+  const exactBook = {
+    feature_enabled: true,
+    requested_mode: "BOOK_ASSISTED_REQUIRED",
+    capability_state: "AVAILABLE_EXACT",
+    reason: "VERIFIED_BINANCE_USDM_DIFF_DEPTH",
+    source: "BINANCE_USDM_DIFF_DEPTH_CAPTURE_V1",
+    snapshot_and_ordered_deltas: true,
+    continuity_contract: "SNAPSHOT_BRIDGE_AND_U_u_pu",
+    pinnable: true,
+    queue_exact: false,
+    execution_fidelity: "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE",
+    ready_archive_bytes: 1_024,
+    max_archive_bytes: 1_099_511_627_776,
+  };
+  const plan = parseReplaySegmentPreparePlan(segmentPlanResponse({
+    historical_book: exactBook,
+  }));
+  const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog, plan);
+  assert.equal(evaluation.canSubmit, true);
+  assert.equal(
+    buildTrainingRunCreateRequest(draft, evaluation, catalog).book_mode,
+    "BOOK_ASSISTED_REQUIRED",
+  );
+});
+
 test("hub markup exposes saves, native actions, filters and explicit unavailable capability reasons", () => {
   const catalog = blindCatalog();
   const draft = createTrainingRunDraft(catalog);
@@ -465,6 +516,7 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
       openCreate() {},
       closeCreate() {},
       setDraft() {},
+      refreshCreatePlan() {},
       createRun() {},
       migrateLegacy() {},
       continueRun() {},
@@ -480,7 +532,8 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /完整性模式/);
   assert.match(html, /HIDE_MINUTE/);
   assert.match(html, /Practice 可审计变更白名单/);
-  assert.match(html, /历史盘口.*Phase 9/);
+  assert.match(html, /历史盘口.*连续、可 pin/);
+  assert.match(html, /Phase 9 历史 L2/);
   assert.match(html, /Phase 6 合约账户已启用/);
   assert.match(html, /Phase 7 按需数据段/);
   assert.match(html, /SNAPSHOT_LOCAL_BAR_RANGE/);

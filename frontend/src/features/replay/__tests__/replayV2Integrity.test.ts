@@ -190,6 +190,7 @@ test("create contract exposes all seven policies and explicit integrity allowlis
     fundingMode: "OFF" as const,
     fixedFundingRate: "0.0001",
     fundingIntervalMs: 28_800_000,
+    bookMode: "OFF" as const,
     integrityMode: "PRACTICE" as const,
     timeDisclosurePolicy: "HIDE_MINUTE" as const,
     allowedMutations: ["deposit", "withdraw"] as const,

@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_8_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0–7 既有门禁保持通过，Phase 8 的四态快进规划、无路径依赖精确扫描/投影合并、路径依赖 full scan、进度/取消、AGG_TRADE Tape/CVD 与 BAR fail-closed 能力边界已实现，并通过全量测试、等价性、1M 资源、真实浏览器、SQLite 与回滚门禁。Phase 9 尚未开始；Replay v1/v2、segment 下载 worker、自动 GC 与快进优化的仓库默认开关均保持关闭。
+状态：`PHASE_9_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0–8 既有门禁保持通过，Phase 9 已实现 Binance USD-M snapshot + ordered diff-depth 的独立受管历史 L2、严格 schema/checksum/range/`U/u/pu` 连续性校验、Run pin、显式 GC/rehydration、BOOK_ASSISTED 创建门禁、盘口投影、断链立即清空/暂停与显式 resync。账户执行内核仍为 `TOUCH_OR_TAPE_V2`，只声明 `BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE`，不声称真实盘口排队。代码、合成 verified fixture、100k 基准、真实浏览器、SQLite、默认关闭重启和提交回滚门禁均通过；尚未接入或宣称生产历史 L2 数据。Phase 10 尚未开始，仓库全部 replay/worker/GC/优化/L2 开关继续默认关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -15,6 +15,8 @@ Phase 5 父提交：`c6921c9f7f813adabd452e162719baf20d700fb8`（2026-07-21）
 Phase 7 父提交：`463bd0ba679d6e10baa0f0958231e96220590ee7`（2026-07-22）
 
 Phase 8 父提交：`41d6fc1049493b1ccaec5c8deb8a64b788277d14`（2026-07-22）
+
+Phase 9 父提交：`ad233cfe5abe49565ffd5852b540a78453498a64`（2026-07-22）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -144,7 +146,8 @@ backend/data/replay-dev/replay_segments/
 | `VITE_REPLAY_ENTRY_ENABLED` | `0` | live 页入口显示 |
 | `VITE_REPLAY_PRODUCT_V2_ENABLED` | `0` | replay document 选择 v2 hub/workspace |
 | `RAW_AGG_TRADE_ARCHIVE_ENABLED` | `0` | 成交 archive 能力 |
-| `REPLAY_HISTORICAL_BOOK_ENABLED` | `0` | 可选历史 L2，Phase 9 前不存在 |
+| `REPLAY_HISTORICAL_BOOK_ENABLED` | `0` | Phase 9 可选 verified Binance USD-M 历史 L2；关闭时既有 BOOK Run 明确暂停/降级，不回退成交模型 |
+| `REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES` | `1099511627776` | 受管历史盘口对象总预算，默认 1 TiB；可收紧不可超过冻结上限，回收只允许显式 dry-run/run 且活动 pin 受保护 |
 | `REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED` | `0` | 外部 segment 下载生产者开关；Phase 7 不自动启动远程下载 |
 | `REPLAY_SEGMENT_AUTO_GC_ENABLED` | `0` | segment 自动 GC 调度开关；Phase 7 只开放显式 dry-run/run |
 | `REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED` | `0` | Phase 8 无账户路径依赖时的有界扫描、状态物化与投影合并；关闭后统一走 `FULL_EVENT_SCAN` |
@@ -1651,4 +1654,42 @@ Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_E
 Rollback: 干净 Phase 8 提交上执行 feature-flag/v1 old-build drill PASS；baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f 的 replay route 为 404，graceful shutdown 状态为 shutdown_pause，同一次演练内关闭开关和旧 build 运行前后的 replay DB 聚合 SHA-256 均保持完全一致。Phase 8 整提交反向应用后的 tree 为 59c32929972255a17b1a840afff1406e44757fa0，与父提交 41d6fc1049493b1ccaec5c8deb8a64b788277d14 的 tree 完全一致；最终证据路径为 output/playwright/phase8-final-20260722/phase8-rollback.json。
 Known limitations: CHECKPOINT_JUMP 的 exact identity/hash 分支已冻结并有 planner golden，但当前服务尚不主动提供前向 checkpoint candidate，不能把它宣传成已命中的运行时加速。多 FULL 轨因全局排序继续 FULL_EVENT_SCAN。AGG Tape 只在 aggregate-record fidelity 精确，主动方/CVD 是 buyer-maker 推断；BAR 不提供逐笔订单流。Phase 9 历史 L2、queue model 与 BOOK_ASSISTED 未开始。
 Decision: PASS；停止在 Phase 8，不进入 Phase 9。
+```
+
+### Phase 9 执行记录
+
+```text
+Phase: 9 - verified historical L2 archive and continuity-gated book assistance
+Date: 2026-07-22
+Commit: 本 Phase 独立提交，提交号以 Git 历史为准
+Parent commit: ad233cfe5abe49565ffd5852b540a78453498a64
+Executor: Codex
+Scope: 新增与 live latest-wins 订单簿完全隔离的 replay-owned 历史 L2 路径。首个且唯一 adapter 固定为 Binance USD-M operator capture：一个完整 snapshot 加有序 diff-depth；导入前严格校验 schema、来源合同 URL、exchange/market/symbol/range/dataset epoch、文件 SHA-256、唯一 snapshot、snapshot bridge、ordinal/time 单调、U/u/pu 连续性、非负 Decimal、每帧与最终驻留深度。受信原件必须位于受管目录外，校验后复制到 replay-owned objects；Run create 在同一事务 pin exact checksum/range/generation，并提供 inventory、显式 GC dry-run/run、pin 保护、同 checksum rehydration 与审计。MarketTrack 暴露 AVAILABLE_EXACT/DEGRADED L2 projection；gap/对象漂移/开关关闭会清空所有旧盘口、把整个 BOOK_ASSISTED Run 暂停并要求显式 resync，不会静默退回 touch/tape 继续成交。
+Execution boundary: Run 通过 book_mode=BOOK_ASSISTED_REQUIRED 声明连续历史 L2 是执行能力前置条件，但账户/成交内核继续使用 TOUCH_OR_TAPE_V2。报告 fidelity 固定为 BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE，queue_exact=false；当前 L2 用于精确盘口投影、连续性门禁与报告区分，不把揭示价触及时的 taker 或后续触价 maker 冒充交易所真实 queue position/partial queue fill。
+Source contract: https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/websocket-market-streams/How-to-manage-a-local-order-book-correctly
+Files changed: backend 新增 historical_book manager、schema v7、配置/CLI import/100k benchmark/offline smoke fixture、training service/storage/API/model 集成与 Phase 9 回归；frontend 新增创建计划严格 parser/门禁、动态 ORDER_BOOK capability、盘口页、queue/fidelity 标签、resync 与命令失败后先清空再权威刷新；README、本执行记录。未复用 live P3A full-order-book 状态，未修改 replay.v1 公共协议或成交模型。
+Schema/protocol changes: replay.training schema 由 v6 additive 升级到 v7；新增 replay_historical_book_archive/ref/projection/event/gc_audit。冻结 replay.historical-book.archive.v1、replay.historical-book.binance-usdm.v1、replay.historical-book.gc.v1 与 BINANCE_USDM_DIFF_DEPTH_CAPTURE_V1。新增 inventory、GC dry-run/run、rehydrate、run resync API；未知字段、不可验证来源、覆盖不足、checksum/identity/sequence/depth 漂移全部 fail closed。
+Storage budget: REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES 默认与冻结上限均为 1099511627776（1 TiB），部署可收紧。没有后台自动 L2 下载或自动 L2 GC；只有显式 dry-run/run，活动 archive ref 永不成为候选，可信外部原件校验失败时也不回收受管对象。投影只返回每侧前 20 档；内部按 archive max_depth_levels 保存完整 book，forward cache 最多 32 tracks，backward seek 强制重建，archive generation/checksum 变化、gap、GC、rehydrate、resync 都失效缓存。
+Commands run:
+  backend targeted: python -m pytest -q tests/test_replay_v2_training_phase9.py tests/test_replay_smoke_fixture.py
+  backend phase matrix: python -m pytest -q tests/test_replay_v2_training_phase{1,3,4,5,6,7,8,9}.py tests/test_replay_smoke_fixture.py
+  backend full: python -m pytest -q tests
+  backend static: python -m compileall -q <Phase 9 Python scope>；python -m ruff check <Phase 9 Python scope>
+  backend baseline audits: python -m ruff check .；D:\anaconda\python.exe -m mypy app；父提交 detached worktree 同机对照
+  benchmark: python scripts/benchmark_replay_historical_book.py --frames 100000 --out ../output/playwright/phase9-final-20260722/phase9-historical-book-100k.json
+  frontend full: npm run check
+  browser: Playwright CLI wrapper against isolated offline verified-book fixture :18110 and Vite :15210
+  feature-off restart: copied验收库 + REPLAY_HISTORICAL_BOOK_ENABLED=0 on :18111，在线与 graceful shutdown 后双重查询
+  repository/database: git diff --check；SQLite PRAGMA quick_check/foreign_key_check；归档 pu gap、hash、WAL/SHM 与端口检查
+  commit rollback: detached worktree + git revert --no-commit <Phase 9 commit> + git write-tree，与父 tree f0696eae35883574a059421e32308ec0712688ab 比对
+Targeted tests: Phase 9 + smoke 19 passed；Phase 1–9 + smoke 119 passed。覆盖默认关闭仍可建普通 Run、exact archive import/pin/projection/report、单 FULL 盘口轨的 ordered PLAY/PAUSE、全深度预算、forward cache/backward rebuild、断序全 Run 清空、可信源 resync、multi-track fail closed、BAR/OFF 保持无盘口、显式 GC pin 保护/回收/rehydration/audit、关闭开关重启与关机后持久化一致性、严格 HTTP plan/create/inventory/GC/resync 合同。
+Global tests: backend 1997 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2394 passed；architecture/typecheck/ESLint/Vite production build 全部通过。Phase 9 Python scope Ruff 0 violations、compileall PASS、git diff --check PASS。
+Global baseline audits: 全仓 Ruff 与父提交同为 36 个既有违规。父提交 mypy 为 520 errors/108 files/266 source files，Phase 9 为 520 errors/108 files/267 source files；新增 historical_book 模块单独为 0 issues，新增类型债务为 0。
+Performance evidence: 100,000 deltas + 1 snapshot，archive 9,752,576 B。full verify 23.183698 s、verified import 23.261565 s、初始 snapshot projection 0.029562 s、冷端点重建 23.613435 s、同端点缓存重复 0.003329 s；Python heap 峰值 2,210,886 B。frame count/final sequence/import identity/book uncrossed/deterministic repeat/queue_exact=false/heap budget 全通过，deterministic evidence hash=sha256:3d67fb5f90d8c68f31c862753f9adef2b647770e6c85e29512e06c7834032b21；benchmark JSON SHA-256=67e1d61ac959d20cd30bd666909c9a08586511463b6caf211117ee4084b46822。当前只冻结正确性与 512 MiB heap 上限，未冻结墙钟性能阈值。
+Browser/API evidence: 创建页在精确 plan 前禁用 BOOK，verified fixture 计划返回 AVAILABLE_EXACT、VERIFIED_BINANCE_USDM_DIFF_DEPTH、pinnable=true、queue_exact=false 后才允许创建。实际 Run 5ceab8aa0b3743a4b9951a1e1d9ccef1 显示 ORDER_BOOK AVAILABLE_EXACT、BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE、Queue exact 否与真实 bid/ask。两次主动篡改受管 delta 后命令均 409；第二次证明无需 reload 就立即显示 CLEARED、旧买卖盘消失、Run 暂停，随后两次 resync 均 200 并恢复 exact，继续推进基础 K 为 200。console 只有该预期 409 resource error 与两个既有 slider-vertical warning；一个 tab 生命周期 trade-flow abort 随即重试 200；动态请求全部在 127.0.0.1。截图和请求证据位于 output/playwright/phase9-final-20260722。
+Database evidence: 正常 fixture 优雅关停后 training schema_version=7，replay.db/klines.db/cache_behavior.sqlite 全部 quick_check=ok、foreign_key_check 空，WAL/SHM 不存在，:18110/:15210 无监听。受管 archive 与目录外可信源均为 425,984 B、SHA-256=cc4bb32aa64485dec437fb05acddc1186586c56a5a2c1ee50f968faee122c705；1 snapshot + 4000 deltas、pu gaps=0、1 active ref、最终 READY。replay.db 2,609,152 B，SHA-256=584b578f46e05a69a25bf9706e221b8859cab3ace97cc465d799d4030a82d98c。fixture 所有 upstream 固定到拒绝连接的 127.0.0.1:9。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0、RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_HISTORICAL_BOOK_ENABLED=0、REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0、REPLAY_SEGMENT_AUTO_GC_ENABLED=0、REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0。默认最大历史盘口预算为 1 TiB，但关闭开关时不导入、不投影，也不自动删除既有对象。
+Rollback: 在正常验收库副本上以 REPLAY_HISTORICAL_BOOK_ENABLED=0 真实重启：v1 core BAR/AGG_TRADE capability 仍 available；既有 BOOK Run 为 PAUSED/UNAVAILABLE，track 为 DEGRADED，projection 为 DISABLED 且 bids/asks=[]，写入 FEATURE_DISABLED，fallback_applied=false；优雅关停后该 fail-closed 状态仍持久，quick_check=ok、foreign_key_check 空、WAL/SHM 无残留、:18111 无监听。最终提交级反向应用门禁以父 tree f0696eae35883574a059421e32308ec0712688ab 为唯一接受值；最终机器证据位于 output/playwright/phase9-final-20260722/phase9-evidence.json。
+Known limitations: 仓库没有生产 Binance 历史 L2 capture、下载器或官方归档可供上线，本阶段只验证 schema/导入/运行合同和合成 verified fixture；生产启用前必须由 operator 提供真实连续捕获并通过同一 importer。BOOK_ASSISTED 不含 queue model，不改善或冒充真实 maker queue fill。100k 冷校验/导入/重建约各 23 s，尚未冻结墙钟 SLO；超大生产范围应先做分段/index/checkpoint 性能设计。自动 L2 GC/下载未上线。Phase 10 发布收口、迁移矩阵、生产观察与显式启用决策尚未开始。
+Decision: PASS；停止在 Phase 9，不进入 Phase 10。
 ```

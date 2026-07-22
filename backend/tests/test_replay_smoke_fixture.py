@@ -4,13 +4,16 @@ import os
 from pathlib import Path
 
 from app.core import config
+from app.replay.training.historical_book import verify_historical_book_archive
 from scripts.replay_smoke_fixture import (
     FIXTURE_SYMBOLS,
+    HISTORICAL_BOOK_FIXTURE_MINUTES,
     INTERVAL_MS,
     LEGACY_LIVE_TAIL_ROWS,
     _force_offline_upstreams,
     _legacy_live_tail_rows,
     _legacy_live_tail_required,
+    _seed_historical_book_source,
 )
 
 
@@ -106,3 +109,21 @@ def test_legacy_live_tail_is_limited_to_cross_root_rollback_invocation(
         runtime_backend_root=legacy_root,
         fixture_backend_root=current_root,
     )
+
+
+def test_phase9_smoke_fixture_builds_verified_opt_in_historical_book(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REPLAY_HISTORICAL_BOOK_ENABLED", "1")
+    monkeypatch.setenv("REPLAY_SMOKE_BOOK_SOURCE_DIR", str(tmp_path / "trusted"))
+
+    source = _seed_historical_book_source()
+    descriptor = verify_historical_book_archive(
+        source,
+        trusted_origin="REPLAY_SMOKE_FIXTURE",
+    )
+
+    assert descriptor.symbol == "BTCUSDT"
+    assert descriptor.snapshot_count == 1
+    assert descriptor.delta_count == HISTORICAL_BOOK_FIXTURE_MINUTES

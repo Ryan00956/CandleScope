@@ -21,6 +21,22 @@ function viewerState() {
   };
 }
 
+function bookOff() {
+  return {
+    mode: "OFF",
+    capability_state: "UNSUPPORTED_NO_HISTORY",
+    status: "OFF",
+    execution_fidelity: "NO_BOOK_TOUCH_OR_TAPE_APPROX",
+    queue_exact: false,
+    as_of_virtual_time_ms: null,
+    last_update_id: null,
+    bids: [],
+    asks: [],
+    book_hash: null,
+    message: "历史盘口模式未启用",
+  };
+}
+
 function marketTracksResponse() {
   return {
     protocol: "replay.v2",
@@ -56,6 +72,7 @@ function marketTracksResponse() {
         open_order_count: 0,
         degraded_reason: null,
         account: { equity: "10000" },
+        historical_book: bookOff(),
       },
       {
         run_id: "run-1",
@@ -77,6 +94,7 @@ function marketTracksResponse() {
         open_order_count: 0,
         degraded_reason: null,
         account: { equity: "10000" },
+        historical_book: bookOff(),
       },
     ],
     portfolio: {
@@ -188,6 +206,41 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
     ...payload,
     portfolio: { ...payload.portfolio, account_model: "TOUCH_OR_TAPE_V2" },
   }), /unknown|unsupported/);
+});
+
+test("Phase 9 historical book parser accepts only exact visible or visibly cleared states", () => {
+  const payload = marketTracksResponse();
+  const ready = {
+    mode: "BOOK_ASSISTED_REQUIRED",
+    capability_state: "AVAILABLE_EXACT",
+    status: "READY",
+    execution_fidelity: "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE",
+    queue_exact: false,
+    as_of_virtual_time_ms: 1_710_000_239_999,
+    last_update_id: 42,
+    bids: [["104", "3"]],
+    asks: [["105", "2"]],
+    book_hash: `sha256:${"c".repeat(64)}`,
+    message: "连续历史 L2 已验证；成交仍不声明真实排队位置",
+  };
+  const parsed = parseReplayMarketTracksResponse({
+    ...payload,
+    tracks: payload.tracks.map((track, index) => ({
+      ...track,
+      historical_book: index === 1 ? ready : bookOff(),
+    })),
+  });
+  assert.equal(parsed.tracks[1]?.historical_book.status, "READY");
+  assert.equal(parsed.tracks[1]?.historical_book.queue_exact, false);
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    tracks: payload.tracks.map((track, index) => ({
+      ...track,
+      historical_book: index === 1
+        ? { ...ready, status: "CLEARED", bids: [["104", "3"]], book_hash: null }
+        : bookOff(),
+    })),
+  }), /visibly cleared|non-ready/);
 });
 
 test("Phase 5 API reads tracks by replay session without touching live subscription routes", async () => {

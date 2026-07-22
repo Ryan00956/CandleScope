@@ -341,6 +341,17 @@ class ReplaySegmentGcRunPayload(ReplaySegmentGcPlanPayload):
     confirm: Literal[True]
 
 
+class ReplayHistoricalBookGcPlanPayload(_StrictModel):
+    protocol: Literal["replay.historical-book.gc.v1"]
+    target_reclaim_bytes: int = Field(ge=1, le=1_000_000_000_000)
+    max_archives: int = Field(default=100, ge=1, le=10_000)
+
+
+class ReplayHistoricalBookGcRunPayload(ReplayHistoricalBookGcPlanPayload):
+    plan_hash: str = Field(min_length=71, max_length=71)
+    confirm: Literal[True]
+
+
 async def enforce_replay_request_limit(request: Request) -> None:
     _validate_declared_replay_length(request)
     cached = getattr(request, "_body", None)
@@ -509,6 +520,53 @@ async def list_replay_v2_data_segments(request: Request) -> dict[str, object]:
     return await _training_service(request).list_data_segments()
 
 
+@router.get("/runs/historical-books")
+async def list_replay_v2_historical_books(request: Request) -> dict[str, object]:
+    return await _training_service(request).list_historical_book_archives()
+
+
+@router.post(
+    "/runs/historical-books/gc/dry-run",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def dry_run_replay_v2_historical_book_gc(
+    request: Request,
+    payload: ReplayHistoricalBookGcPlanPayload,
+) -> dict[str, object]:
+    return await _training_service(request).historical_book_gc_plan(
+        target_reclaim_bytes=payload.target_reclaim_bytes,
+        max_archives=payload.max_archives,
+    )
+
+
+@router.post(
+    "/runs/historical-books/gc/run",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def run_replay_v2_historical_book_gc(
+    request: Request,
+    payload: ReplayHistoricalBookGcRunPayload,
+) -> dict[str, object]:
+    return await _training_service(request).historical_book_gc_run(
+        plan_hash=payload.plan_hash,
+        target_reclaim_bytes=payload.target_reclaim_bytes,
+        max_archives=payload.max_archives,
+    )
+
+
+@router.post(
+    "/runs/historical-books/{archive_id}/rehydrate",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def rehydrate_replay_v2_historical_book(
+    request: Request,
+    archive_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).rehydrate_historical_book_archive(
+        archive_id
+    )
+
+
 @router.post(
     "/runs/data-segments/gc/dry-run",
     dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
@@ -652,6 +710,17 @@ async def replay_v2_training_data_segments(
     run_id: str,
 ) -> dict[str, object]:
     return await _training_service(request).list_data_segments(run_id=run_id)
+
+
+@router.post(
+    "/runs/{run_id}/historical-book/resync",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def resync_replay_v2_historical_book(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).resync_historical_book(run_id)
 
 
 @router.get("/runs/{run_id}/tracks")

@@ -117,6 +117,7 @@ export type ReplayV2CommandType = EnumValue<typeof REPLAY_V2_ENUMS.command_type>
 export type ReplayV2EventType = EnumValue<typeof REPLAY_V2_ENUMS.event_type>;
 export type ReplayV2MarginMode = EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
 export type ReplayV2FundingMode = EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
+export type ReplayV2BookMode = EnumValue<typeof REPLAY_V2_ENUMS.book_mode>;
 
 export interface ReplayV2Cursor {
   readonly virtual_time_ms: number;
@@ -169,6 +170,23 @@ export interface ReplayTrainingMarketTrack {
   readonly open_order_count: number;
   readonly degraded_reason: string | null;
   readonly account: Readonly<Record<string, ReplayV2Json>>;
+  readonly historical_book: ReplayHistoricalBookProjection;
+}
+
+export interface ReplayHistoricalBookProjection {
+  readonly mode: ReplayV2BookMode;
+  readonly capability_state: ReplayV2CapabilityState;
+  readonly status: "OFF" | "READY" | "CLEARED" | "DISABLED";
+  readonly execution_fidelity:
+    | "NO_BOOK_TOUCH_OR_TAPE_APPROX"
+    | "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE";
+  readonly queue_exact: false;
+  readonly as_of_virtual_time_ms: number | null;
+  readonly last_update_id: number | null;
+  readonly bids: readonly (readonly [string, string])[];
+  readonly asks: readonly (readonly [string, string])[];
+  readonly book_hash: `sha256:${string}` | null;
+  readonly message: string;
 }
 
 export interface ReplayTrainingPortfolioV1 {
@@ -191,7 +209,9 @@ export interface ReplayTrainingContractPortfolio {
   readonly schema_version: "replay.training.portfolio.v2";
   readonly account_model: "TOUCH_OR_TAPE_V2";
   readonly execution_model: "TOUCH_OR_TAPE_V2";
-  readonly execution_fidelity: "NO_BOOK_TOUCH_OR_TAPE_APPROX";
+  readonly execution_fidelity:
+    | "NO_BOOK_TOUCH_OR_TAPE_APPROX"
+    | "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE";
   readonly settlement_account_shared: boolean;
   readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
   readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
@@ -563,6 +583,7 @@ function parseReplayTrainingMarketTrack(value: unknown): ReplayTrainingMarketTra
     "open_order_count",
     "degraded_reason",
     "account",
+    "historical_book",
   ]);
   const tier = enumValue(
     track.subscription_tier,
@@ -626,6 +647,86 @@ function parseReplayTrainingMarketTrack(value: unknown): ReplayTrainingMarketTra
     open_order_count: counter(track.open_order_count, "market track.open_order_count"),
     degraded_reason: degradedReason,
     account: jsonObject(track.account, "market track.account"),
+    historical_book: parseHistoricalBookProjection(track.historical_book),
+  };
+}
+
+function parseHistoricalBookProjection(value: unknown): ReplayHistoricalBookProjection {
+  const book = exactObject(value, "market track.historical_book", [
+    "mode",
+    "capability_state",
+    "status",
+    "execution_fidelity",
+    "queue_exact",
+    "as_of_virtual_time_ms",
+    "last_update_id",
+    "bids",
+    "asks",
+    "book_hash",
+    "message",
+  ]);
+  const mode = enumValue(book.mode, REPLAY_V2_ENUMS.book_mode, "historical book.mode");
+  const capabilityState = enumValue(
+    book.capability_state,
+    REPLAY_V2_ENUMS.capability_state,
+    "historical book.capability_state",
+  );
+  if (!["OFF", "READY", "CLEARED", "DISABLED"].includes(String(book.status))) {
+    throw new TypeError("historical book.status is unsupported");
+  }
+  if (book.execution_fidelity !== "NO_BOOK_TOUCH_OR_TAPE_APPROX"
+    && book.execution_fidelity !== "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE") {
+    throw new TypeError("historical book execution fidelity is unsupported");
+  }
+  if (book.queue_exact !== false || !Array.isArray(book.bids) || !Array.isArray(book.asks)) {
+    throw new TypeError("historical book queue/level contract is unsupported");
+  }
+  const levels = (items: readonly unknown[], field: string) => items.map((item, index) => {
+    if (!Array.isArray(item) || item.length !== 2) {
+      throw new TypeError(`${field}[${index}] must be [price, quantity]`);
+    }
+    return [
+      positiveDecimal(item[0], `${field}[${index}].price`),
+      positiveDecimal(item[1], `${field}[${index}].quantity`),
+    ] as const;
+  });
+  const bids = levels(book.bids, "historical book.bids");
+  const asks = levels(book.asks, "historical book.asks");
+  const asOf = book.as_of_virtual_time_ms === null
+    ? null
+    : timestamp(book.as_of_virtual_time_ms, "historical book.as_of_virtual_time_ms");
+  const lastUpdateId = book.last_update_id === null
+    ? null
+    : counter(book.last_update_id, "historical book.last_update_id");
+  const bookHash = book.book_hash === null ? null : digest(book.book_hash, "historical book.book_hash");
+  if (typeof book.message !== "string" || book.message.length > 500) {
+    throw new TypeError("historical book.message is invalid");
+  }
+  if (book.status === "READY") {
+    if (mode !== "BOOK_ASSISTED_REQUIRED"
+      || capabilityState !== "AVAILABLE_EXACT"
+      || asOf === null
+      || lastUpdateId === null
+      || bookHash === null
+      || bids.length === 0
+      || asks.length === 0) {
+      throw new TypeError("READY historical book projection is incomplete");
+    }
+  } else if (bids.length > 0 || asks.length > 0 || bookHash !== null) {
+    throw new TypeError("non-ready historical book must be visibly cleared");
+  }
+  return {
+    mode,
+    capability_state: capabilityState,
+    status: book.status as ReplayHistoricalBookProjection["status"],
+    execution_fidelity: book.execution_fidelity,
+    queue_exact: false,
+    as_of_virtual_time_ms: asOf,
+    last_update_id: lastUpdateId,
+    bids,
+    asks,
+    book_hash: bookHash,
+    message: book.message,
   };
 }
 
@@ -672,7 +773,8 @@ function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
     if (
       portfolio.account_model !== "TOUCH_OR_TAPE_V2"
       || portfolio.execution_model !== "TOUCH_OR_TAPE_V2"
-      || portfolio.execution_fidelity !== "NO_BOOK_TOUCH_OR_TAPE_APPROX"
+      || (portfolio.execution_fidelity !== "NO_BOOK_TOUCH_OR_TAPE_APPROX"
+        && portfolio.execution_fidelity !== "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE")
       || typeof portfolio.settlement_account_shared !== "boolean"
       || !["ACTIVE", "LIQUIDATING", "BANKRUPT"].includes(String(portfolio.status))
     ) {
@@ -726,7 +828,7 @@ function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
       schema_version: "replay.training.portfolio.v2",
       account_model: "TOUCH_OR_TAPE_V2",
       execution_model: "TOUCH_OR_TAPE_V2",
-      execution_fidelity: "NO_BOOK_TOUCH_OR_TAPE_APPROX",
+      execution_fidelity: portfolio.execution_fidelity,
       settlement_account_shared: portfolio.settlement_account_shared,
       margin_mode: enumValue(portfolio.margin_mode, REPLAY_V2_ENUMS.margin_mode, "portfolio.margin_mode"),
       funding_mode: enumValue(portfolio.funding_mode, REPLAY_V2_ENUMS.funding_mode, "portfolio.funding_mode"),
@@ -1175,7 +1277,7 @@ export interface TrainingRunCreatePayload {
   readonly market_slippage_bps: string;
   readonly integrity_mode: ReplayV2IntegrityMode;
   readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
-  readonly book_mode: "OFF";
+  readonly book_mode: ReplayV2BookMode;
   readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
   readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
   readonly fixed_funding_rate: string | null;

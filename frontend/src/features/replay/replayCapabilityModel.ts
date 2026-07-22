@@ -1,3 +1,5 @@
+import type { ReplayHistoricalBookProjection } from "./replayV2Types.js";
+
 export type ReplayCapabilityState =
   | "AVAILABLE_EXACT"
   | "AVAILABLE_APPROX"
@@ -41,8 +43,25 @@ function item(
   return { label, state, value, detail };
 }
 
-export function buildReplayCapabilityModel(sourceKind: "BAR" | "AGG_TRADE" | "bar" | "agg_trade"): ReplayCapabilityModel {
+export function buildReplayCapabilityModel(
+  sourceKind: "BAR" | "AGG_TRADE" | "bar" | "agg_trade",
+  historicalBook: ReplayHistoricalBookProjection | null = null,
+): ReplayCapabilityModel {
   const tape = sourceKind === "AGG_TRADE" || sourceKind === "agg_trade";
+  const orderBook = historicalBook?.status === "READY"
+    ? item(
+      "Order book",
+      "AVAILABLE_EXACT",
+      "连续历史 L2 已校验并固定；不含真实盘口排队",
+      "EXACT_L2",
+    )
+    : historicalBook !== null && historicalBook.status !== "OFF"
+      ? item(
+        "Order book",
+        "DEGRADED",
+        "连续性不可用；旧盘口已清空且 BOOK_ASSISTED Run 保持暂停",
+      )
+      : item("Order book", "UNSUPPORTED_NO_HISTORY", "未绑定历史盘口快照与增量");
   return {
     OHLCV: item("OHLCV", "AVAILABLE_EXACT", "冻结快照；仅已揭示前缀", "EXACT"),
     INDICATORS: item("Local indicators", "AVAILABLE_EXACT", "仅以已揭示 bars 本地计算", "LOCAL"),
@@ -59,7 +78,7 @@ export function buildReplayCapabilityModel(sourceKind: "BAR" | "AGG_TRADE" | "ba
     BASIS: item("Basis", "UNSUPPORTED_NO_HISTORY", "缺少 mark/index 同步历史"),
     FUNDING: item("Funding", "UNSUPPORTED_NO_HISTORY", "未绑定交易所历史 funding/mark；Sandbox 固定资金费只属于近似账户模拟"),
     MARKET_LIQUIDATION: item("Market liquidations", "UNSUPPORTED_NO_HISTORY", "未绑定市场爆仓归档"),
-    ORDER_BOOK: item("Order book", "UNSUPPORTED_NO_HISTORY", "未绑定历史盘口快照与增量"),
+    ORDER_BOOK: orderBook,
     HOSTED_INDICATORS: item("Hosted indicators", "UNSUPPORTED_NO_PROVIDER", "range/security provider 未启用"),
     ALERTS: item("Alerts", "UNSUPPORTED_NO_PROVIDER", "回放告警 provider 未启用"),
   };

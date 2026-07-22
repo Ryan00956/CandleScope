@@ -1,6 +1,26 @@
 import type { ReplayV2SourceKind, TrainingRunCreatePayload } from "./replayV2Types.js";
 
 
+export interface ReplayHistoricalBookCapabilityPlan {
+  readonly feature_enabled: boolean;
+  readonly requested_mode: "OFF" | "BOOK_ASSISTED_REQUIRED";
+  readonly capability_state:
+    | "AVAILABLE_EXACT"
+    | "UNSUPPORTED_NO_HISTORY"
+    | "UNSUPPORTED_SOURCE_MODE"
+    | "DEGRADED";
+  readonly reason: string;
+  readonly source: "BINANCE_USDM_DIFF_DEPTH_CAPTURE_V1";
+  readonly snapshot_and_ordered_deltas: boolean;
+  readonly continuity_contract: "SNAPSHOT_BRIDGE_AND_U_u_pu";
+  readonly pinnable: boolean;
+  readonly queue_exact: false;
+  readonly execution_fidelity: "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE";
+  readonly ready_archive_bytes: number;
+  readonly max_archive_bytes: number;
+}
+
+
 export interface ReplaySegmentPreparePlan {
   readonly protocol: "replay.data.prepare.v1";
   readonly state: "PREPARE_ON_CREATE";
@@ -21,6 +41,7 @@ export interface ReplaySegmentPreparePlan {
   readonly download_worker_enabled: boolean;
   readonly auto_gc_enabled: boolean;
   readonly failure_policy: "QUARANTINE_AND_FAIL_CLOSED";
+  readonly historical_book: ReplayHistoricalBookCapabilityPlan;
 }
 
 export interface ReplaySegmentPlanApi {
@@ -81,6 +102,7 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     "download_worker_enabled",
     "auto_gc_enabled",
     "failure_policy",
+    "historical_book",
   ]);
   const identity = exactObject(payload.identity, "segment prepare plan.identity", [
     "exchange",
@@ -88,6 +110,24 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     "symbol",
     "base_interval",
   ]);
+  const historicalBook = exactObject(
+    payload.historical_book,
+    "segment prepare plan.historical_book",
+    [
+      "feature_enabled",
+      "requested_mode",
+      "capability_state",
+      "reason",
+      "source",
+      "snapshot_and_ordered_deltas",
+      "continuity_contract",
+      "pinnable",
+      "queue_exact",
+      "execution_fidelity",
+      "ready_archive_bytes",
+      "max_archive_bytes",
+    ],
+  );
   if (payload.protocol !== "replay.data.prepare.v1" || payload.state !== "PREPARE_ON_CREATE") {
     throw new TypeError("segment prepare plan protocol is unsupported");
   }
@@ -104,6 +144,31 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     || typeof payload.auto_gc_enabled !== "boolean"
     || payload.failure_policy !== "QUARANTINE_AND_FAIL_CLOSED") {
     throw new TypeError("segment prepare plan safety contract is unsupported");
+  }
+  if (typeof historicalBook.feature_enabled !== "boolean"
+    || (historicalBook.requested_mode !== "OFF"
+      && historicalBook.requested_mode !== "BOOK_ASSISTED_REQUIRED")
+    || ![
+      "AVAILABLE_EXACT",
+      "UNSUPPORTED_NO_HISTORY",
+      "UNSUPPORTED_SOURCE_MODE",
+      "DEGRADED",
+    ].includes(String(historicalBook.capability_state))
+    || historicalBook.source !== "BINANCE_USDM_DIFF_DEPTH_CAPTURE_V1"
+    || typeof historicalBook.snapshot_and_ordered_deltas !== "boolean"
+    || historicalBook.continuity_contract !== "SNAPSHOT_BRIDGE_AND_U_u_pu"
+    || typeof historicalBook.pinnable !== "boolean"
+    || historicalBook.queue_exact !== false
+    || historicalBook.execution_fidelity !== "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE") {
+    throw new TypeError("historical book capability plan is unsupported");
+  }
+  const bookCapability = historicalBook.capability_state as (
+    ReplayHistoricalBookCapabilityPlan["capability_state"]
+  );
+  const exact = bookCapability === "AVAILABLE_EXACT";
+  if (historicalBook.snapshot_and_ordered_deltas !== exact
+    || historicalBook.pinnable !== exact) {
+    throw new TypeError("historical book exact capability proof is inconsistent");
   }
   return {
     protocol: "replay.data.prepare.v1",
@@ -125,5 +190,25 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     download_worker_enabled: payload.download_worker_enabled,
     auto_gc_enabled: payload.auto_gc_enabled,
     failure_policy: "QUARANTINE_AND_FAIL_CLOSED",
+    historical_book: {
+      feature_enabled: historicalBook.feature_enabled,
+      requested_mode: historicalBook.requested_mode,
+      capability_state: bookCapability,
+      reason: displayString(historicalBook.reason, "historical book.reason"),
+      source: "BINANCE_USDM_DIFF_DEPTH_CAPTURE_V1",
+      snapshot_and_ordered_deltas: historicalBook.snapshot_and_ordered_deltas,
+      continuity_contract: "SNAPSHOT_BRIDGE_AND_U_u_pu",
+      pinnable: historicalBook.pinnable,
+      queue_exact: false,
+      execution_fidelity: "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE",
+      ready_archive_bytes: count(
+        historicalBook.ready_archive_bytes,
+        "historical book.ready_archive_bytes",
+      ),
+      max_archive_bytes: count(
+        historicalBook.max_archive_bytes,
+        "historical book.max_archive_bytes",
+      ),
+    },
   };
 }

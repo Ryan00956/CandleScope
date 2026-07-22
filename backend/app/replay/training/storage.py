@@ -14,6 +14,11 @@ from app.replay.broker.models import decimal_to_string
 from app.replay.storage.sqlite_store import ReplaySQLiteStore
 
 from .errors import TrainingRunError
+from .historical_book import (
+    BOOK_EXECUTION_FIDELITY,
+    PreparedHistoricalBookBinding,
+    bind_historical_book_archive,
+)
 from .disclosure import project_public_time
 from .account import (
     CONFIGURED_FEE_FIDELITY,
@@ -266,6 +271,7 @@ class TrainingRunStore:
         dataset_blob: Mapping[str, object],
         actual_replay_start_ms: int,
         actual_replay_end_ms: int,
+        historical_book_binding: PreparedHistoricalBookBinding | None = None,
     ) -> Callable[[sqlite3.Connection, int], None]:
         def write(connection: sqlite3.Connection, now_ms: int) -> None:
             cursor = session_state.get("cursor")
@@ -381,6 +387,18 @@ class TrainingRunStore:
                 actual_replay_end_ms=actual_replay_end_ms,
                 now_ms=now_ms,
             )
+            if request.book_mode.value == "BOOK_ASSISTED_REQUIRED":
+                if historical_book_binding is None:
+                    raise TypeError("book-assisted run is missing its verified L2 binding")
+                bind_historical_book_archive(
+                    connection,
+                    run_id=run_id,
+                    track_id="track-1",
+                    binding=historical_book_binding,
+                    bound_range_start_ms=actual_replay_start_ms,
+                    bound_range_end_ms=actual_replay_end_ms,
+                    now_ms=now_ms,
+                )
             start_time_known = request.start_mode.value == "MANUAL"
             strict_eligible = (
                 request.integrity_mode.value == "CHALLENGE"
@@ -1844,10 +1862,15 @@ class TrainingRunStore:
     async def get_market_tracks(self, run_id: str) -> dict[str, object]:
         def read(
             connection: sqlite3.Connection,
-        ) -> tuple[sqlite3.Row, tuple[sqlite3.Row, ...], dict[str, object]] | None:
+            ) -> tuple[
+                sqlite3.Row,
+                tuple[sqlite3.Row, ...],
+                dict[str, object],
+                dict[str, sqlite3.Row],
+            ] | None:
             run = connection.execute(
                 """
-                SELECT r.run_id, r.initial_equity, r.source_kind,
+                SELECT r.run_id, r.initial_equity, r.source_kind, r.book_mode,
                        viewer.*
                 FROM replay_training_run AS r
                 JOIN replay_training_viewer_state AS viewer USING(run_id)
@@ -1868,13 +1891,29 @@ class TrainingRunStore:
                 ).fetchall()
             )
             track_payloads = [self._market_track_from_row(row) for row in rows]
+            book_rows = {
+                str(row["track_id"]): row
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_historical_book_projection
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchall()
+            }
+            for track in track_payloads:
+                track["historical_book"] = self._historical_book_projection(
+                    book_rows.get(str(track["track_id"])),
+                    book_mode=str(run["book_mode"]),
+                    subscription_tier=str(track["subscription_tier"]),
+                )
             portfolio = self._contract_portfolio_projection(
                 connection,
                 run_id=run_id,
                 initial_equity=str(run["initial_equity"]),
                 tracks=track_payloads,
             )
-            return run, rows, portfolio
+            return run, rows, portfolio, book_rows
 
         result = await self.base_store.run_extension_read(read)
         if result is None:
@@ -1883,8 +1922,14 @@ class TrainingRunStore:
                 "training run does not exist",
                 status_code=404,
             )
-        run, rows, portfolio = result
+        run, rows, portfolio, book_rows = result
         tracks = [self._market_track_from_row(row) for row in rows]
+        for track in tracks:
+            track["historical_book"] = self._historical_book_projection(
+                book_rows.get(str(track["track_id"])),
+                book_mode=str(run["book_mode"]),
+                subscription_tier=str(track["subscription_tier"]),
+            )
         viewer = self._viewer_from_row(run)
         return {
             "protocol": REPLAY_V2_PROTOCOL,
@@ -1900,23 +1945,47 @@ class TrainingRunStore:
         run_id: str,
         track_id: str,
     ) -> dict[str, object]:
-        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
-            return connection.execute(
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[sqlite3.Row, sqlite3.Row | None, str] | None:
+            row = connection.execute(
                 """
                 SELECT * FROM replay_training_market_track
                 WHERE run_id = ? AND track_id = ?
                 """,
                 (run_id, track_id),
             ).fetchone()
+            if row is None:
+                return None
+            projection = connection.execute(
+                """
+                SELECT * FROM replay_historical_book_projection
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+            run = connection.execute(
+                "SELECT book_mode FROM replay_training_run WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            assert run is not None
+            return row, projection, str(run["book_mode"])
 
-        row = await self.base_store.run_extension_read(read)
-        if row is None:
+        result = await self.base_store.run_extension_read(read)
+        if result is None:
             raise TrainingRunError(
                 "MARKET_TRACK_NOT_FOUND",
                 "training market track does not exist",
                 status_code=404,
             )
-        return self._market_track_from_row(row)
+        row, projection, book_mode = result
+        track = self._market_track_from_row(row)
+        track["historical_book"] = self._historical_book_projection(
+            projection,
+            book_mode=book_mode,
+            subscription_tier=str(track["subscription_tier"]),
+        )
+        return track
 
     async def allocate_isolated_margin(
         self,
@@ -2519,6 +2588,7 @@ class TrainingRunStore:
         run_id: str,
         track_id: str,
         requested_tier: str,
+        historical_book_binding: PreparedHistoricalBookBinding | None = None,
     ) -> Callable[..., Callable[[sqlite3.Connection, int], None]]:
         def extension_factory(
             *,
@@ -2617,6 +2687,28 @@ class TrainingRunStore:
                     actual_replay_end_ms=actual_replay_end_ms,
                     now_ms=now_ms,
                 )
+                run = connection.execute(
+                    "SELECT book_mode FROM replay_training_run WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if (
+                    run is not None
+                    and run["book_mode"] == "BOOK_ASSISTED_REQUIRED"
+                    and requested_tier == "FULL"
+                ):
+                    if historical_book_binding is None:
+                        raise TypeError(
+                            "book-assisted track is missing its verified L2 binding"
+                        )
+                    bind_historical_book_archive(
+                        connection,
+                        run_id=run_id,
+                        track_id=track_id,
+                        binding=historical_book_binding,
+                        bound_range_start_ms=actual_replay_start_ms,
+                        bound_range_end_ms=actual_replay_end_ms,
+                        now_ms=now_ms,
+                    )
                 self._insert_contract_track_rule(
                     connection,
                     run_id=run_id,
@@ -2682,6 +2774,7 @@ class TrainingRunStore:
         run_id: str,
         track_id: str,
         subscription_tier: str,
+        historical_book_binding: PreparedHistoricalBookBinding | None = None,
     ) -> dict[str, object]:
         def write(connection: sqlite3.Connection) -> sqlite3.Row:
             row = connection.execute(
@@ -2717,6 +2810,83 @@ class TrainingRunStore:
                     "market track must prepare a frozen adapter before activation",
                     status_code=409,
                 )
+            now_ms = self.base_store._validated_now_ms()
+            run = connection.execute(
+                """
+                SELECT r.book_mode,
+                       dataset.actual_replay_start_ms,
+                       dataset.actual_replay_end_ms
+                FROM replay_training_run AS r
+                JOIN replay_dataset_ref AS dataset
+                  ON dataset.session_id = r.adapter_session_id
+                WHERE r.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training run does not exist",
+                    status_code=404,
+                )
+            if run["book_mode"] == "BOOK_ASSISTED_REQUIRED":
+                if subscription_tier == "FULL":
+                    active = connection.execute(
+                        """
+                        SELECT 1 FROM replay_historical_book_ref
+                        WHERE run_id = ? AND track_id = ? AND active = 1
+                        LIMIT 1
+                        """,
+                        (run_id, track_id),
+                    ).fetchone()
+                    if historical_book_binding is not None:
+                        bind_historical_book_archive(
+                            connection,
+                            run_id=run_id,
+                            track_id=track_id,
+                            binding=historical_book_binding,
+                            bound_range_start_ms=int(run["actual_replay_start_ms"]),
+                            bound_range_end_ms=int(run["actual_replay_end_ms"]),
+                            now_ms=now_ms,
+                        )
+                    elif active is None:
+                        raise TrainingRunError(
+                            "HISTORICAL_BOOK_BINDING_MISSING",
+                            "FULL book-assisted track requires a pinned L2 archive",
+                            status_code=409,
+                        )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE replay_historical_book_ref
+                        SET active = 0, released_at_ms = ?
+                        WHERE run_id = ? AND track_id = ? AND active = 1
+                        """,
+                        (now_ms, run_id, track_id),
+                    )
+                    connection.execute(
+                        """
+                        DELETE FROM replay_historical_book_projection
+                        WHERE run_id = ? AND track_id = ?
+                        """,
+                        (run_id, track_id),
+                    )
+                    for table in (
+                        "replay_training_track",
+                        "replay_training_market_track",
+                    ):
+                        connection.execute(
+                            f"""
+                            UPDATE {table}
+                            SET capabilities_json = json_set(
+                                capabilities_json,
+                                '$.ORDER_BOOK',
+                                'UNSUPPORTED_NO_HISTORY'
+                            ), updated_at_ms = ?
+                            WHERE run_id = ? AND track_id = ?
+                            """,
+                            (now_ms, run_id, track_id),
+                        )
             state = "DORMANT" if subscription_tier == "NONE" else "READY"
             connection.execute(
                 """
@@ -2727,7 +2897,7 @@ class TrainingRunStore:
                 (
                     subscription_tier,
                     state,
-                    self.base_store._validated_now_ms(),
+                    now_ms,
                     run_id,
                     track_id,
                 ),
@@ -3251,6 +3421,76 @@ class TrainingRunStore:
             )
         return sorted(set(decoded))
 
+    @staticmethod
+    def _historical_book_projection(
+        row: Mapping[str, object] | None,
+        *,
+        book_mode: str,
+        subscription_tier: str,
+    ) -> dict[str, object]:
+        if row is None:
+            required = (
+                book_mode == "BOOK_ASSISTED_REQUIRED"
+                and subscription_tier == "FULL"
+            )
+            return {
+                "mode": book_mode,
+                "capability_state": (
+                    CapabilityState.DEGRADED.value
+                    if required
+                    else CapabilityState.UNSUPPORTED_NO_HISTORY.value
+                ),
+                "status": "CLEARED" if required else "OFF",
+                "execution_fidelity": (
+                    BOOK_EXECUTION_FIDELITY
+                    if book_mode == "BOOK_ASSISTED_REQUIRED"
+                    else "NO_BOOK_TOUCH_OR_TAPE_APPROX"
+                ),
+                "queue_exact": False,
+                "as_of_virtual_time_ms": None,
+                "last_update_id": None,
+                "bids": [],
+                "asks": [],
+                "book_hash": None,
+                "message": (
+                    "缺少已 pin 的连续历史 L2；Run 必须保持暂停"
+                    if required
+                    else (
+                        "该轨道不是 FULL；未激活历史盘口投影"
+                        if book_mode == "BOOK_ASSISTED_REQUIRED"
+                        else "历史盘口模式未启用"
+                    )
+                ),
+            }
+        try:
+            bids = json.loads(str(row["bids_json"]))
+            asks = json.loads(str(row["asks_json"]))
+        except json.JSONDecodeError as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "historical book projection JSON is invalid",
+                status_code=503,
+            ) from exc
+        if not isinstance(bids, list) or not isinstance(asks, list):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "historical book projection levels are invalid",
+                status_code=503,
+            )
+        return {
+            "mode": book_mode,
+            "capability_state": str(row["capability_state"]),
+            "status": str(row["status"]),
+            "execution_fidelity": str(row["execution_fidelity"]),
+            "queue_exact": bool(row["queue_exact"]),
+            "as_of_virtual_time_ms": row["as_of_virtual_ms"],
+            "last_update_id": row["last_update_id"],
+            "bids": bids,
+            "asks": asks,
+            "book_hash": row["book_hash"],
+            "message": str(row["message"]),
+        }
+
     @classmethod
     def _market_track_from_row(
         cls,
@@ -3428,6 +3668,21 @@ class TrainingRunStore:
                 initial_equity=initial_equity,
                 tracks=tracks,
             )
+        run_contract = connection.execute(
+            "SELECT book_mode FROM replay_training_run WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if run_contract is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training run execution contract is missing",
+                status_code=503,
+            )
+        execution_fidelity = (
+            BOOK_EXECUTION_FIDELITY
+            if run_contract["book_mode"] == "BOOK_ASSISTED_REQUIRED"
+            else "NO_BOOK_TOUCH_OR_TAPE_APPROX"
+        )
         base = cls._portfolio_projection(
             initial_equity=initial_equity,
             tracks=tracks,
@@ -3651,7 +3906,7 @@ class TrainingRunStore:
             "schema_version": CONTRACT_ACCOUNT_SCHEMA_VERSION,
             "account_model": CONTRACT_ACCOUNT_MODEL,
             "execution_model": "TOUCH_OR_TAPE_V2",
-            "execution_fidelity": "NO_BOOK_TOUCH_OR_TAPE_APPROX",
+            "execution_fidelity": execution_fidelity,
             "settlement_account_shared": str(account["margin_mode"]) == "CROSS",
             "margin_mode": str(account["margin_mode"]),
             "funding_mode": str(account["funding_mode"]),
@@ -5619,11 +5874,28 @@ class TrainingRunStore:
         connection.execute(
             """
             UPDATE replay_training_market_track
-            SET state = ?, subscription_tier = ?, virtual_time_ms = ?,
+            SET state = CASE
+                    WHEN EXISTS(
+                        SELECT 1
+                        FROM replay_historical_book_projection AS book
+                        WHERE book.run_id = replay_training_market_track.run_id
+                          AND book.track_id = replay_training_market_track.track_id
+                          AND book.status IN ('CLEARED', 'DISABLED')
+                    ) THEN 'DEGRADED'
+                    ELSE ?
+                END,
+                subscription_tier = ?, virtual_time_ms = ?,
                 source_sequence = ?, revision = ?, forced_full_reasons_json = ?,
                 public_price = ?, position_json = ?, account_json = ?,
                 open_orders_json = ?, degraded_reason = CASE
                     WHEN ? = 'ERROR' THEN COALESCE(degraded_reason, 'ADAPTER_ERROR')
+                    WHEN EXISTS(
+                        SELECT 1
+                        FROM replay_historical_book_projection AS book
+                        WHERE book.run_id = replay_training_market_track.run_id
+                          AND book.track_id = replay_training_market_track.track_id
+                          AND book.status IN ('CLEARED', 'DISABLED')
+                    ) THEN COALESCE(degraded_reason, 'HISTORICAL_BOOK_UNAVAILABLE')
                     ELSE NULL END,
                 updated_at_ms = ?
             WHERE adapter_session_id = ?

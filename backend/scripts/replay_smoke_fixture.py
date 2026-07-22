@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import sqlite3
 import time
+from contextlib import closing
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -24,6 +27,7 @@ INTERVAL_MS = 60_000
 LEGACY_LIVE_TAIL_ROWS = 10
 AGG_TRADE_FIXTURE_MINUTES = 1_600
 AGG_TRADE_ROWS_PER_MINUTE = 2
+HISTORICAL_BOOK_FIXTURE_MINUTES = FIXTURE_ROWS
 FIXTURE_SYMBOLS: tuple[tuple[str, float], ...] = (
     ("BTCUSDT", 30_000.0),
     ("ETHUSDT", 2_000.0),
@@ -257,15 +261,183 @@ def _seed_agg_trades() -> int:
     return imported
 
 
+def _seed_historical_book_source() -> Path:
+    """Create an opt-in trusted L2 capture outside replay-owned storage."""
+
+    if os.environ.get("REPLAY_HISTORICAL_BOOK_ENABLED") != "1":
+        raise RuntimeError(
+            "--historical-book requires REPLAY_HISTORICAL_BOOK_ENABLED=1"
+        )
+    source_root = os.environ.get("REPLAY_SMOKE_BOOK_SOURCE_DIR", "").strip()
+    if not source_root:
+        raise RuntimeError(
+            "--historical-book requires REPLAY_SMOKE_BOOK_SOURCE_DIR"
+        )
+
+    from app.replay.training.historical_book import (
+        ARCHIVE_PROTOCOL,
+        ARCHIVE_SCHEMA_VERSION,
+        ARCHIVE_SOURCE_CONTRACT_URL,
+    )
+
+    root = Path(source_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "BTCUSDT-binance-usdm-diff-depth.sqlite3"
+    if path.exists():
+        path.unlink()
+    dataset_epoch = "sha256:" + sha256(
+        b"replay-smoke-historical-book:BTCUSDT:v1"
+    ).hexdigest()
+    def compact(levels: list[list[str]]) -> str:
+        return json.dumps(levels, separators=(",", ":"))
+    with closing(sqlite3.connect(path)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE archive_meta (
+                singleton INTEGER PRIMARY KEY,
+                protocol TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                market_type TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                range_start_ms INTEGER NOT NULL,
+                range_end_ms INTEGER NOT NULL,
+                dataset_epoch TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_contract_url TEXT NOT NULL,
+                max_depth_levels INTEGER NOT NULL
+            );
+            CREATE TABLE book_frame (
+                ordinal INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                event_time_ms INTEGER NOT NULL,
+                transaction_time_ms INTEGER NOT NULL,
+                first_update_id INTEGER,
+                final_update_id INTEGER NOT NULL,
+                previous_final_update_id INTEGER,
+                bids_json TEXT NOT NULL,
+                asks_json TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO archive_meta VALUES (
+                1, ?, ?, 'binance', 'futures', 'BTCUSDT', ?, ?, ?,
+                'BINANCE_USDM_DIFF_DEPTH_CAPTURE', ?, 1000
+            )
+            """,
+            (
+                ARCHIVE_PROTOCOL,
+                ARCHIVE_SCHEMA_VERSION,
+                FIXTURE_START_MS,
+                FIXTURE_START_MS + HISTORICAL_BOOK_FIXTURE_MINUTES * INTERVAL_MS,
+                dataset_epoch,
+                ARCHIVE_SOURCE_CONTRACT_URL,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO book_frame VALUES (
+                0, 'SNAPSHOT', ?, ?, NULL, 1000000, NULL, ?, ?
+            )
+            """,
+            (
+                FIXTURE_START_MS,
+                FIXTURE_START_MS,
+                compact([["29999", "20"], ["29998", "30"]]),
+                compact([["30001", "20"], ["30002", "30"]]),
+            ),
+        )
+        previous_u = 1_000_000
+        for minute in range(1, HISTORICAL_BOOK_FIXTURE_MINUTES + 1):
+            final_u = previous_u + 1
+            previous_bid = 29_998 + minute
+            next_bid = 29_999 + minute
+            previous_ask = 30_000 + minute
+            next_ask = 30_001 + minute
+            event_time_ms = FIXTURE_START_MS + minute * INTERVAL_MS
+            connection.execute(
+                """
+                INSERT INTO book_frame VALUES (
+                    ?, 'DELTA', ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    minute,
+                    event_time_ms,
+                    event_time_ms,
+                    previous_u if minute == 1 else final_u,
+                    final_u,
+                    previous_u,
+                    compact(
+                        [[str(previous_bid), "0"], [str(next_bid), "20"]]
+                    ),
+                    compact(
+                        [[str(previous_ask), "0"], [str(next_ask), "20"]]
+                    ),
+                ),
+            )
+            previous_u = final_u
+        connection.commit()
+    return path
+
+
+def _seed_historical_book_futures_bars() -> int:
+    """Extend the opt-in USD-M BAR catalog without inventing aggTrade rows."""
+
+    from app.data_engine.storage.klines_repo import upsert_klines
+
+    bars: list[dict[str, object]] = []
+    for minute in range(HISTORICAL_BOOK_FIXTURE_MINUTES + 3):
+        open_time = FIXTURE_START_MS + minute * INTERVAL_MS
+        price = 30_000 + minute % 120
+        bars.append(
+            {
+                "open_time": open_time,
+                "close_time": open_time + INTERVAL_MS - 1,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 3,
+                "quote_volume": price * 3,
+                "trades": AGG_TRADE_ROWS_PER_MINUTE,
+                "taker_buy_base": 2,
+                "taker_buy_quote": price * 2,
+            }
+        )
+    written = upsert_klines(
+        "BTCUSDT",
+        "1m",
+        bars,
+        source="replay-smoke-book-fixture",
+        exchange="binance",
+        market_type="futures",
+    )
+    if written not in {0, len(bars)}:
+        raise RuntimeError(
+            f"expected 0 or {len(bars)} historical-book BAR rows, wrote {written}"
+        )
+    return len(bars)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--agg-trades", action="store_true")
+    parser.add_argument("--historical-book", action="store_true")
     args = parser.parse_args()
     _require_isolated_environment()
     _force_offline_upstreams()
     _seed_klines()
     agg_trade_rows = _seed_agg_trades() if args.agg_trades else 0
+    historical_book_bar_rows = (
+        _seed_historical_book_futures_bars() if args.historical_book else 0
+    )
+    historical_book_source = (
+        _seed_historical_book_source() if args.historical_book else None
+    )
 
     import uvicorn
     from app.api.v1 import symbols as symbols_api
@@ -280,6 +452,23 @@ def main() -> None:
     from app.main import app
 
     server_holder: dict[str, uvicorn.Server] = {}
+    historical_book_archive: dict[str, object] | None = None
+
+    @app.on_event("startup")
+    async def import_replay_smoke_historical_book() -> None:
+        nonlocal historical_book_archive
+        if historical_book_source is None:
+            return
+        service = getattr(app.state, "replay_service", None)
+        training = getattr(service, "training", None)
+        if training is None:
+            raise RuntimeError(
+                "historical-book smoke fixture requires replay training runtime"
+            )
+        historical_book_archive = await training.historical_books.import_archive(
+            historical_book_source,
+            trusted_origin="REPLAY_SMOKE_FIXTURE",
+        )
 
     @app.get("/__replay_smoke__/fixture")
     async def replay_smoke_fixture_status() -> dict[str, object]:
@@ -289,6 +478,8 @@ def main() -> None:
             "fixture_rows": FIXTURE_ROWS,
             "fixture_symbols": [symbol for symbol, _price in FIXTURE_SYMBOLS],
             "agg_trade_rows": agg_trade_rows,
+            "historical_book_bar_rows": historical_book_bar_rows,
+            "historical_book": historical_book_archive,
         }
 
     @app.get("/__replay_smoke__/diagnostics")

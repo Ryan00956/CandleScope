@@ -31,6 +31,7 @@ _REPLAY_BUDGETS: dict[str, int] = {
     "REPLAY_EVENT_SUBSCRIBER_QUEUE": 256,
     "REPLAY_CONTROLLER_TTL_SECONDS": 10,
     "REPLAY_IDLE_TTL_SECONDS": 3_600,
+    "REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES": 1_099_511_627_776,
 }
 
 
@@ -55,6 +56,8 @@ class ReplaySettings:
     replay_segment_download_worker_enabled: bool = False
     replay_segment_auto_gc_enabled: bool = False
     replay_fast_forward_optimization_enabled: bool = False
+    replay_historical_book_enabled: bool = False
+    replay_historical_book_max_archive_bytes: int = 1_099_511_627_776
 
     @property
     def product_v2_available(self) -> bool:
@@ -143,6 +146,12 @@ def load_replay_settings(
         replay_fast_forward_optimization_enabled=_strict_replay_bool(
             environment, "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED", "0"
         ),
+        replay_historical_book_enabled=_strict_replay_bool(
+            environment, "REPLAY_HISTORICAL_BOOK_ENABLED", "0"
+        ),
+        replay_historical_book_max_archive_bytes=values[
+            "REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES"
+        ],
     )
 
 # Server
@@ -171,6 +180,10 @@ REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED = (
 REPLAY_SEGMENT_AUTO_GC_ENABLED = REPLAY_SETTINGS.replay_segment_auto_gc_enabled
 REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED = (
     REPLAY_SETTINGS.replay_fast_forward_optimization_enabled
+)
+REPLAY_HISTORICAL_BOOK_ENABLED = REPLAY_SETTINGS.replay_historical_book_enabled
+REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES = (
+    REPLAY_SETTINGS.replay_historical_book_max_archive_bytes
 )
 REPLAY_DB_PATH = REPLAY_SETTINGS.db_path
 REPLAY_MAX_ACTIVE_SESSIONS = REPLAY_SETTINGS.max_active_sessions

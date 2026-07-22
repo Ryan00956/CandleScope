@@ -68,6 +68,7 @@ export interface ReplayViewerRuntime {
       type: ReplayPhase5TradeType,
       payload: Readonly<Record<string, ReplayV2Json>>,
     ): Promise<ReplayV2CommandResult>;
+    resyncHistoricalBook(): Promise<void>;
     reload(): void;
   };
 }
@@ -143,6 +144,22 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       : current);
     return response;
   }, []);
+
+  const failClosedAndRefreshMarketTracks = useCallback(async (
+    runId: string,
+  ): Promise<void> => {
+    // A rejected command may already have paused the Run and cleared a
+    // continuity-gated projection server-side. Remove every local track
+    // projection before attempting the authoritative refresh so a second
+    // network failure cannot leave stale L2 or fills visible.
+    setMarketTracks(null);
+    try {
+      await refreshMarketTracks(runId);
+    } catch {
+      // The original command error remains the user-facing failure. Keeping
+      // marketTracks null is the deliberate fail-closed state.
+    }
+  }, [refreshMarketTracks]);
 
   useEffect(() => {
     if (marketTracks?.global_clock.state !== "PLAYING") return;
@@ -259,12 +276,13 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       await refreshMarketTracks(command.run_id);
       return result;
     } catch (cause) {
+      await failClosedAndRefreshMarketTracks(command.run_id);
       setError(cause instanceof Error ? cause.message : "回放控制失败");
       throw cause;
     } finally {
       setControlPending((current) => current?.command_id === command.command_id ? null : current);
     }
-  }, [buildCommand, refreshMarketTracks]);
+  }, [buildCommand, failClosedAndRefreshMarketTracks, refreshMarketTracks]);
 
   const setDisplayInterval = useCallback(async (interval: string): Promise<ReplayV2CommandResult> => {
     const viewer = viewerRef.current;
@@ -287,12 +305,13 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
         : current);
       return result;
     } catch (cause) {
+      await failClosedAndRefreshMarketTracks(command.run_id);
       setError(cause instanceof Error ? cause.message : "展示周期切换失败");
       throw cause;
     } finally {
       setViewerPending(false);
     }
-  }, [buildCommand]);
+  }, [buildCommand, failClosedAndRefreshMarketTracks]);
 
   const cancelAdvance = useCallback(async (): Promise<ReplayV2CommandResult> => {
     const active = controlRef.current;
@@ -329,12 +348,13 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       await refreshMarketTracks(command.run_id);
       return result;
     } catch (cause) {
+      await failClosedAndRefreshMarketTracks(command.run_id);
       setError(cause instanceof Error ? cause.message : "MarketTrack 操作失败");
       throw cause;
     } finally {
       setViewerPending(false);
     }
-  }, [buildCommand, refreshMarketTracks]);
+  }, [buildCommand, failClosedAndRefreshMarketTracks, refreshMarketTracks]);
 
   const selectTrack = useCallback(async (trackId: string): Promise<ReplayV2CommandResult> => {
     const viewer = viewerRef.current;
@@ -408,12 +428,31 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       await refreshMarketTracks(command.run_id);
       return result;
     } catch (cause) {
+      await failClosedAndRefreshMarketTracks(command.run_id);
       setError(cause instanceof Error ? cause.message : "组合纸面交易失败");
       throw cause;
     } finally {
       setViewerPending(false);
     }
-  }, [buildCommand, refreshMarketTracks]);
+  }, [buildCommand, failClosedAndRefreshMarketTracks, refreshMarketTracks]);
+
+  const resyncHistoricalBook = useCallback(async (): Promise<void> => {
+    const runId = viewerRef.current?.run_id;
+    if (runId === undefined) throw new Error("ViewerState is unavailable");
+    if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    setViewerPending(true);
+    setError(null);
+    try {
+      await defaultReplayV2Api.resyncHistoricalBook(runId);
+      await refreshMarketTracks(runId);
+    } catch (cause) {
+      await failClosedAndRefreshMarketTracks(runId);
+      setError(cause instanceof Error ? cause.message : "历史盘口 resync 失败");
+      throw cause;
+    } finally {
+      setViewerPending(false);
+    }
+  }, [failClosedAndRefreshMarketTracks, refreshMarketTracks]);
 
   return {
     viewerState,
@@ -432,6 +471,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       setSubscriptionTier,
       addAndSelectTrack,
       submitTrade,
+      resyncHistoricalBook,
       reload: () => setReloadRevision((value) => value + 1),
     },
   };

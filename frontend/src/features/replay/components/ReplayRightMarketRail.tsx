@@ -29,9 +29,14 @@ function ReplayRightMarketRail({
   upColor,
   downColor,
 }: ReplayRightMarketRailProps) {
+  const selectedTrackId = viewer.viewerState?.selected_track_id ?? null;
+  const selectedTrack = viewer.marketTracks?.tracks.find(
+    (track) => track.track_id === selectedTrackId,
+  ) ?? null;
   const capabilities = useMemo(() => buildReplayCapabilityModel(
     runtime.store.sessionConfig?.source_kind ?? "BAR",
-  ), [runtime.store.sessionConfig?.source_kind]);
+    selectedTrack?.historical_book ?? null,
+  ), [runtime.store.sessionConfig?.source_kind, selectedTrack?.historical_book]);
   const renderDock = useCallback((height: number) => (
     <section
       className={`replay-market-dock ${preferences.dockCollapsed ? "collapsed" : ""}`}

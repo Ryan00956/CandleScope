@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 
-TRAINING_SCHEMA_VERSION = 6
+TRAINING_SCHEMA_VERSION = 7
 TRAINING_SCHEMA_ID = "replay.training.v1"
 
 
@@ -592,6 +592,132 @@ ON replay_data_gc_audit(created_at_ms DESC, audit_id DESC);
 """
 
 
+TRAINING_SCHEMA_V7 = """
+CREATE TABLE IF NOT EXISTS replay_historical_book_archive (
+    archive_id TEXT PRIMARY KEY,
+    identity_key TEXT NOT NULL UNIQUE,
+    protocol TEXT NOT NULL
+        CHECK (protocol = 'replay.historical-book.archive.v1'),
+    adapter_kind TEXT NOT NULL
+        CHECK (adapter_kind = 'BINANCE_USDM_DIFF_DEPTH_CAPTURE_V1'),
+    exchange TEXT NOT NULL CHECK (exchange = 'binance'),
+    market_type TEXT NOT NULL CHECK (market_type = 'futures'),
+    symbol TEXT NOT NULL,
+    range_start_ms INTEGER NOT NULL CHECK (range_start_ms >= 0),
+    range_end_ms INTEGER NOT NULL CHECK (range_end_ms >= range_start_ms),
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.historical-book.binance-usdm.v1'),
+    dataset_epoch TEXT NOT NULL,
+    checksum_sha256 TEXT NOT NULL,
+    snapshot_count INTEGER NOT NULL CHECK (snapshot_count = 1),
+    delta_count INTEGER NOT NULL CHECK (delta_count >= 0),
+    max_depth_levels INTEGER NOT NULL CHECK (max_depth_levels BETWEEN 1 AND 5000),
+    coverage_state TEXT NOT NULL CHECK (coverage_state = 'EXACT'),
+    continuity_state TEXT NOT NULL CHECK (continuity_state = 'CONTIGUOUS'),
+    health TEXT NOT NULL
+        CHECK (health IN ('READY', 'QUARANTINED', 'EVICTED', 'ERROR')),
+    local_path TEXT,
+    trusted_source_path TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+    trusted_origin TEXT NOT NULL,
+    source_contract_url TEXT NOT NULL,
+    quarantine_reason TEXT,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    last_used_at_ms INTEGER NOT NULL CHECK (last_used_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_historical_book_lookup
+ON replay_historical_book_archive(
+    exchange, market_type, symbol, health, range_start_ms, range_end_ms
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_historical_book_lru
+ON replay_historical_book_archive(health, last_used_at_ms, archive_id);
+
+CREATE TABLE IF NOT EXISTS replay_historical_book_ref (
+    archive_id TEXT NOT NULL
+        REFERENCES replay_historical_book_archive(archive_id) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    binding_generation INTEGER NOT NULL CHECK (binding_generation >= 1),
+    bound_range_start_ms INTEGER NOT NULL CHECK (bound_range_start_ms >= 0),
+    bound_range_end_ms INTEGER NOT NULL
+        CHECK (bound_range_end_ms >= bound_range_start_ms),
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    released_at_ms INTEGER
+        CHECK (released_at_ms IS NULL OR released_at_ms >= created_at_ms),
+    PRIMARY KEY (archive_id, run_id, track_id, binding_generation),
+    FOREIGN KEY (run_id, track_id)
+        REFERENCES replay_training_market_track(run_id, track_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_historical_book_ref_run
+ON replay_historical_book_ref(run_id, track_id, active, binding_generation DESC);
+
+CREATE TABLE IF NOT EXISTS replay_historical_book_projection (
+    run_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    archive_id TEXT NOT NULL
+        REFERENCES replay_historical_book_archive(archive_id) ON DELETE RESTRICT,
+    capability_state TEXT NOT NULL
+        CHECK (capability_state IN ('AVAILABLE_EXACT', 'DEGRADED')),
+    status TEXT NOT NULL CHECK (status IN ('READY', 'CLEARED', 'DISABLED')),
+    execution_fidelity TEXT NOT NULL
+        CHECK (execution_fidelity = 'BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE'),
+    queue_exact INTEGER NOT NULL CHECK (queue_exact = 0),
+    as_of_actual_ms INTEGER CHECK (as_of_actual_ms IS NULL OR as_of_actual_ms >= 0),
+    as_of_virtual_ms INTEGER CHECK (as_of_virtual_ms IS NULL OR as_of_virtual_ms >= 0),
+    last_update_id INTEGER CHECK (last_update_id IS NULL OR last_update_id >= 0),
+    bids_json TEXT NOT NULL,
+    asks_json TEXT NOT NULL,
+    book_hash TEXT,
+    message TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id),
+    FOREIGN KEY (run_id, track_id)
+        REFERENCES replay_training_market_track(run_id, track_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_historical_book_event (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    archive_id TEXT
+        REFERENCES replay_historical_book_archive(archive_id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL
+        CHECK (event_type IN ('BOUND', 'READY', 'GAP', 'CLEARED', 'RESYNC', 'FEATURE_DISABLED')),
+    at_virtual_time_ms INTEGER CHECK (at_virtual_time_ms IS NULL OR at_virtual_time_ms >= 0),
+    expected_previous_u INTEGER CHECK (expected_previous_u IS NULL OR expected_previous_u >= 0),
+    observed_pu INTEGER CHECK (observed_pu IS NULL OR observed_pu >= 0),
+    reason TEXT,
+    details_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    FOREIGN KEY (run_id, track_id)
+        REFERENCES replay_training_market_track(run_id, track_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_historical_book_event_run
+ON replay_historical_book_event(run_id, track_id, event_id);
+
+CREATE TABLE IF NOT EXISTS replay_historical_book_gc_audit (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL CHECK (action IN ('DRY_RUN', 'RUN', 'REHYDRATE')),
+    plan_hash TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_historical_book_gc_audit_created
+ON replay_historical_book_gc_audit(created_at_ms DESC, audit_id DESC);
+"""
+
+
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
     """Create only v2-owned tables; never advance the replay.v1 schema row."""
 
@@ -723,6 +849,9 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     if current == 5:
         _execute_script(connection, TRAINING_SCHEMA_V6)
         current = 6
+    if current == 6:
+        _execute_script(connection, TRAINING_SCHEMA_V7)
+        current = 7
     if current != TRAINING_SCHEMA_VERSION:
         raise RuntimeError(f"no replay training schema migration path from {current}")
     connection.execute(

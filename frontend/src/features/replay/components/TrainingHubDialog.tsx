@@ -62,7 +62,9 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
       </section>
     );
   }
-  const busy = runtime.operation === "create";
+  const busy = runtime.operation === "create" || runtime.operation === "plan";
+  const historicalBook = runtime.segmentPlan?.historical_book ?? null;
+  const historicalBookExact = historicalBook?.capability_state === "AVAILABLE_EXACT";
   const toggleMutation = (mutation: ReplayPolicyMutation, checked: boolean) => {
     const next = checked
       ? [...draft.allowedMutations, mutation]
@@ -256,6 +258,21 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             </option>
           </select>
         </label>
+        <label>
+          历史盘口
+          <select
+            value={draft.bookMode}
+            onChange={(event) => patchDraft(runtime, {
+              bookMode: event.target.value as TrainingRunDraft["bookMode"],
+            })}
+          >
+            <option value="OFF">OFF · Touch/Tape</option>
+            <option value="BOOK_ASSISTED_REQUIRED" disabled={!historicalBookExact}>
+              BOOK_ASSISTED_REQUIRED · 连续历史 L2
+            </option>
+          </select>
+          <small>只有服务端证明 snapshot + ordered deltas 连续且可 pin 时可选；始终不声明 queue-exact。</small>
+        </label>
         {draft.fundingMode === "SANDBOX_FIXED" && (
           <>
             <label>
@@ -336,8 +353,29 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             <li><strong>自动 GC</strong> — {runtime.segmentPlan.auto_gc_enabled ? "显式启用" : "默认关闭"}</li>
           </ul>
         )}
+        <h3>Phase 9 历史 L2</h3>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void runtime.actions.refreshCreatePlan()}
+        >
+          {runtime.operation === "plan" ? "正在校验…" : "按当前参数校验盘口能力"}
+        </button>
+        {historicalBook === null ? (
+          <p>尚无当前参数的服务端校验结果；BOOK_ASSISTED 保持 fail closed。</p>
+        ) : (
+          <ul data-historical-book-capability={historicalBook.capability_state}>
+            <li><strong>能力</strong> — {historicalBook.capability_state} · {historicalBook.reason}</li>
+            <li><strong>来源</strong> — Binance USD-M snapshot + ordered diff-depth</li>
+            <li><strong>连续性</strong> — {historicalBook.continuity_contract}</li>
+            <li><strong>可固定</strong> — {historicalBook.pinnable ? "是" : "否"}</li>
+            <li><strong>本地 READY</strong> — {formatBytes(historicalBook.ready_archive_bytes)}</li>
+            <li><strong>执行 fidelity</strong> — {historicalBook.execution_fidelity}</li>
+            <li><strong>Queue exact</strong> — 否</li>
+          </ul>
+        )}
         <h3>Phase 6 合约账户已启用</h3>
-        <p>新 Run 固定使用 TOUCH_OR_TAPE_V2；当前已揭示参考价立即 taker，后续触价挂单 maker，并持续标注“不含盘口排队”。</p>
+        <p>Run 仍固定使用 TOUCH_OR_TAPE_V2；BOOK_ASSISTED 只增加连续 L2 能力门禁与报告区分，当前已揭示参考价立即 taker，后续触价挂单 maker，并持续标注“不含盘口排队”。</p>
         <h3>能力与 fidelity 边界</h3>
         <ul>
           <li><strong>资金费</strong> — {evaluation.unsupported.funding}</li>

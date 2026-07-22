@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import os
-import signal
-import subprocess
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -35,6 +32,13 @@ from candlescope_plugin_sdk.constants import (
     METHOD_SHUTDOWN,
 )
 
+from app.plugin_host.framing import JsonLineError, compact_json_bytes, strict_json_loads
+from app.plugin_host.process import (
+    SidecarProcessSpec,
+    launch_sidecar_process,
+    signal_process,
+)
+
 from .errors import (
     PluginHostError,
     PluginRemoteError,
@@ -53,64 +57,9 @@ STATE_FAILED = "failed"
 
 _T = TypeVar("_T")
 
-_SAFE_ENVIRONMENT_KEYS = frozenset(
-    {
-        "APPDATA",
-        "COMSPEC",
-        "HOME",
-        "LANG",
-        "LC_ALL",
-        "LOCALAPPDATA",
-        "PATH",
-        "PATHEXT",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "USERPROFILE",
-        "WINDIR",
-    }
-)
-
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"non-standard JSON constant is not allowed: {value}")
-
-
-def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
-
-
-def _plugin_environment(executable_directory: str) -> dict[str, str]:
-    """Return a small inherited environment without ambient application secrets."""
-
-    environment = {
-        key.upper(): value
-        for key, value in os.environ.items()
-        if key.upper() in _SAFE_ENVIRONMENT_KEYS
-    }
-    inherited_path = environment.get("PATH", "")
-    environment["PATH"] = (
-        executable_directory
-        if not inherited_path
-        else executable_directory + os.pathsep + inherited_path
-    )
-    environment["PYTHONIOENCODING"] = "utf-8"
-    environment["PYTHONUTF8"] = "1"
-    environment["PYTHONUNBUFFERED"] = "1"
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    return environment
 
 
 class RuntimeSupervisor:
@@ -227,22 +176,7 @@ class RuntimeSupervisor:
 
         try:
             self._validate_launch_target()
-            process_kwargs: dict[str, Any] = {
-                "stdin": asyncio.subprocess.PIPE,
-                "stdout": asyncio.subprocess.PIPE,
-                "stderr": asyncio.subprocess.PIPE,
-                "cwd": str(self.spec.working_directory or self.spec.executable.parent),
-                "env": _plugin_environment(str(self.spec.executable.parent)),
-                "limit": self.spec.max_message_bytes + 1,
-            }
-            if os.name == "nt":
-                process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-            else:
-                process_kwargs["start_new_session"] = True
-            self._process = await asyncio.create_subprocess_exec(
-                *self.spec.command,
-                **process_kwargs,
-            )
+            self._process = await launch_sidecar_process(self._process_spec())
             self._start_count += 1
             self._started_at = _utc_now()
             self._stderr_task = asyncio.create_task(
@@ -358,6 +292,16 @@ class RuntimeSupervisor:
                 message="runtime working directory does not exist",
                 runtime_id=self.runtime_id,
             )
+
+    def _process_spec(self) -> SidecarProcessSpec:
+        return SidecarProcessSpec(
+            identity=self.runtime_id,
+            executable=self.spec.executable,
+            arguments=self.spec.arguments,
+            working_directory=self.spec.working_directory,
+            max_message_bytes=self.spec.max_message_bytes,
+            max_stderr_bytes=self.spec.max_stderr_bytes,
+        )
 
     def _validate_handshake(self, handshake: HandshakeResult) -> None:
         descriptor = handshake.runtime
@@ -491,25 +435,23 @@ class RuntimeSupervisor:
             "params": params,
         }
         try:
-            encoded = json.dumps(
+            encoded = compact_json_bytes(
                 request,
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exc:
+                max_message_bytes=self.spec.max_message_bytes,
+            )
+        except JsonLineError as exc:
+            if exc.code == "MESSAGE_TOO_LARGE":
+                raise PluginRequestError(
+                    code="PLUGIN_REQUEST_TOO_LARGE",
+                    message="runtime request exceeds the configured message limit",
+                    runtime_id=self.runtime_id,
+                    details={"maxMessageBytes": self.spec.max_message_bytes},
+                ) from exc
             raise PluginRequestError(
                 code="PLUGIN_REQUEST_NOT_JSON",
-                message=f"runtime request is not JSON-compatible: {exc}",
+                message="runtime request is not JSON-compatible",
                 runtime_id=self.runtime_id,
             ) from exc
-        if len(encoded) > self.spec.max_message_bytes:
-            raise PluginRequestError(
-                code="PLUGIN_REQUEST_TOO_LARGE",
-                message="runtime request exceeds the configured message limit",
-                runtime_id=self.runtime_id,
-                details={"maxMessageBytes": self.spec.max_message_bytes},
-            )
 
         self._request_count += 1
         self._last_request_at = _utc_now()
@@ -558,12 +500,11 @@ class RuntimeSupervisor:
                 details={"maxMessageBytes": self.spec.max_message_bytes},
             )
         try:
-            response = json.loads(
-                message.decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                object_pairs_hook=_unique_json_object,
+            response = strict_json_loads(
+                message,
+                max_message_bytes=self.spec.max_message_bytes,
             )
-        except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        except JsonLineError as exc:
             raise PluginTransportError(
                 code="PLUGIN_RESPONSE_INVALID_JSON",
                 message="runtime response is not strict UTF-8 JSON",
@@ -758,15 +699,7 @@ class RuntimeSupervisor:
 
     @staticmethod
     def _signal_process(process: asyncio.subprocess.Process, *, force: bool) -> None:
-        if process.returncode is not None:
-            return
-        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            if os.name != "nt":
-                os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
-            elif force:
-                process.kill()
-            else:
-                process.terminate()
+        signal_process(process, force=force)
 
     async def _stop_locked(self) -> None:
         process = self._process

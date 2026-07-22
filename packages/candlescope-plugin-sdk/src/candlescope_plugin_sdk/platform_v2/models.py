@@ -960,6 +960,15 @@ class HandshakeRequest:
             _string_tuple(self.transports, "handshake.transports", allow_empty=False),
         )
 
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "protocols": list(self.protocols),
+            "host": {"name": self.host_name, "version": self.host_version},
+            "entrypointId": self.entrypoint_id,
+            "hostApis": list(self.host_apis),
+            "transports": list(self.transports),
+        }
+
     @classmethod
     def from_wire(cls, value: Any) -> "HandshakeRequest":
         data = _mapping(
@@ -1004,6 +1013,13 @@ class ActivationRequest:
             raise contract_error("activate capability permissions must be unique")
         object.__setattr__(self, "capabilities", capabilities)
 
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "instanceId": self.instance_id,
+            "generation": self.generation,
+            "capabilities": [item.to_wire() for item in self.capabilities],
+        }
+
     @classmethod
     def from_wire(cls, value: Any) -> "ActivationRequest":
         data = _mapping(
@@ -1036,6 +1052,13 @@ class InvokeRequest:
             raise contract_error("invoke.requestContext is invalid")
         if self.request_context.contribution_id != self.contribution_id:
             raise contract_error("invoke contribution does not match requestContext")
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "contributionId": self.contribution_id,
+            "input": dict(self.input),
+            "requestContext": self.request_context.to_wire(),
+        }
 
     @classmethod
     def from_wire(cls, value: Any) -> "InvokeRequest":

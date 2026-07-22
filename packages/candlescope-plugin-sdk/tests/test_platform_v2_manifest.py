@@ -9,12 +9,17 @@ import jsonschema
 import pytest
 
 from candlescope_plugin_sdk.platform_v2 import (
+    ActivationRequest,
+    CapabilityGrant,
     ContributionDescriptor,
+    HandshakeRequest,
+    InvokeRequest,
     PermissionRequest,
     PermissionSet,
     PlatformContractError,
     PluginManifest,
     RuntimeDescriptor,
+    RequestContext,
     canonical_sha256,
     descriptor_from_manifest,
     manifest_schema,
@@ -169,3 +174,38 @@ def test_runtime_descriptor_cannot_add_manifest_contributions_or_permissions() -
 def hello_manifest_descriptor() -> RuntimeDescriptor:
     manifest = hello_manifest()
     return descriptor_from_manifest(manifest, entrypoint_id="main")
+
+
+def test_host_request_models_have_strict_round_trip_wire_encoders() -> None:
+    handshake = HandshakeRequest(
+        protocols=("candlescope.plugin/2",),
+        host_name="CandleScope",
+        host_version="0.4.0",
+        entrypoint_id="main",
+        host_apis=("candlescope.host-api/1",),
+        transports=("jsonl/1",),
+    )
+    activation = ActivationRequest(
+        instance_id="instance-1",
+        generation=1,
+        capabilities=(
+            CapabilityGrant(
+                handle="cap-1",
+                permission_id="notifications.show",
+            ),
+        ),
+    )
+    invocation = InvokeRequest(
+        contribution_id="hello",
+        input={"name": "CandleScope"},
+        request_context=RequestContext(
+            contribution_id="hello",
+            user_action=True,
+            generation=1,
+            trace_id="trace-round-trip",
+        ),
+    )
+
+    assert HandshakeRequest.from_wire(handshake.to_wire()) == handshake
+    assert ActivationRequest.from_wire(activation.to_wire()) == activation
+    assert InvokeRequest.from_wire(invocation.to_wire()) == invocation

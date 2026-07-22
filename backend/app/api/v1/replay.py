@@ -662,6 +662,34 @@ async def replay_v2_training_tracks(
     return await _training_service(request).get_market_tracks(run_id)
 
 
+@router.get("/runs/{run_id}/fast-forward-plan")
+async def replay_v2_fast_forward_plan(
+    request: Request,
+    run_id: str,
+    target_virtual_time_ms: int = Query(ge=0, le=MAX_TIMESTAMP_MS),
+) -> dict[str, object]:
+    return await _training_service(request).get_fast_forward_plan(
+        run_id,
+        target_virtual_time_ms=target_virtual_time_ms,
+    )
+
+
+@router.get("/runs/{run_id}/trade-flow")
+async def replay_v2_trade_flow_page(
+    request: Request,
+    run_id: str,
+    track_id: str | None = Query(default=None, min_length=1, max_length=128),
+    after_sequence: int | None = Query(default=None, ge=0, le=MAX_COUNTER),
+    limit: int = Query(default=200, ge=1, le=1_000),
+) -> dict[str, object]:
+    return await _training_service(request).trade_flow_page(
+        run_id,
+        track_id=track_id,
+        after_sequence=after_sequence,
+        limit=limit,
+    )
+
+
 @router.get("/runs/{run_id}/advances/{command_id}")
 async def replay_v2_advance_progress(
     request: Request,

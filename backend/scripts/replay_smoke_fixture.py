@@ -11,6 +11,8 @@ import argparse
 import asyncio
 import os
 import time
+from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 
 
@@ -20,6 +22,8 @@ FIXTURE_START_MS = 1_700_000_040_000
 FIXTURE_ROWS = 4_000
 INTERVAL_MS = 60_000
 LEGACY_LIVE_TAIL_ROWS = 10
+AGG_TRADE_FIXTURE_MINUTES = 1_600
+AGG_TRADE_ROWS_PER_MINUTE = 2
 FIXTURE_SYMBOLS: tuple[tuple[str, float], ...] = (
     ("BTCUSDT", 30_000.0),
     ("ETHUSDT", 2_000.0),
@@ -145,13 +149,123 @@ def _seed_klines() -> None:
             )
 
 
+def _seed_agg_trades() -> int:
+    """Seed an opt-in verified futures tape without enabling any upstream I/O."""
+
+    from app.data_engine.storage.klines_repo import upsert_klines
+    from app.data_engine.storage.raw_trade_archive import (
+        ParquetRawAggTradeArchive,
+        VerifiedRawAggTradeDay,
+    )
+
+    archive_root = os.environ.get("RAW_AGG_TRADE_ARCHIVE_DIR", "").strip()
+    if not archive_root:
+        raise RuntimeError("--agg-trades requires RAW_AGG_TRADE_ARCHIVE_DIR")
+    if os.environ.get("RAW_AGG_TRADE_ARCHIVE_ENABLED") != "1":
+        raise RuntimeError("--agg-trades requires RAW_AGG_TRADE_ARCHIVE_ENABLED=1")
+
+    bars: list[dict[str, object]] = []
+    for minute in range(AGG_TRADE_FIXTURE_MINUTES + 3):
+        open_time = FIXTURE_START_MS + minute * INTERVAL_MS
+        price = 30_000 + minute % 120
+        bars.append(
+            {
+                "open_time": open_time,
+                "close_time": open_time + INTERVAL_MS - 1,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 3,
+                "quote_volume": price * 3,
+                "trades": AGG_TRADE_ROWS_PER_MINUTE,
+                "taker_buy_base": 2,
+                "taker_buy_quote": price * 2,
+            }
+        )
+    inserted = upsert_klines(
+        "BTCUSDT",
+        "1m",
+        bars,
+        source="replay-smoke-agg-fixture",
+        exchange="binance",
+        market_type="futures",
+    )
+    if inserted != len(bars):
+        raise RuntimeError(
+            f"expected {len(bars)} futures BAR rows, wrote {inserted}"
+        )
+
+    first_agg_trade_id = 8_000_000
+    rows_by_date: dict[str, list[dict[str, object]]] = {}
+    for minute in range(AGG_TRADE_FIXTURE_MINUTES):
+        price = 30_000 + minute % 120
+        for within in range(AGG_TRADE_ROWS_PER_MINUTE):
+            index = minute * AGG_TRADE_ROWS_PER_MINUTE + within
+            timestamp = FIXTURE_START_MS + minute * INTERVAL_MS + 1_000 + within
+            date = datetime.fromtimestamp(timestamp / 1_000, tz=UTC).date().isoformat()
+            quantity = 1 + within
+            rows_by_date.setdefault(date, []).append(
+                {
+                    "exchange": "binance",
+                    "market_type": "futures",
+                    "symbol": "BTCUSDT",
+                    "agg_trade_id": first_agg_trade_id + index,
+                    "first_trade_id": first_agg_trade_id * 10 + index,
+                    "last_trade_id": first_agg_trade_id * 10 + index,
+                    "price": price,
+                    "quantity": quantity,
+                    "quote_quantity": price * quantity,
+                    "trade_time_ms": timestamp,
+                    "event_time_ms": timestamp,
+                    "received_at_ms": timestamp,
+                    "is_buyer_maker": within == 0,
+                    "source": "replay_smoke_verified_fixture",
+                }
+            )
+
+    archive = ParquetRawAggTradeArchive(
+        Path(archive_root),
+        max_rows_per_file=10_000,
+        max_scan_rows=100_000,
+        max_physical_scan_rows=100_000,
+    )
+    imported = 0
+    for date, rows in sorted(rows_by_date.items()):
+        metadata = VerifiedRawAggTradeDay(
+            exchange="binance",
+            market_type="futures",
+            symbol="BTCUSDT",
+            date=date,
+            source_url=f"fixture://replay-smoke/{date}/BTCUSDT",
+            source_file=f"BTCUSDT-{date}.fixture",
+            source_checksum_sha256=sha256(
+                f"replay-smoke:{date}:{len(rows)}".encode("utf-8")
+            ).hexdigest(),
+            row_count=len(rows),
+            first_agg_trade_id=int(rows[0]["agg_trade_id"]),
+            last_agg_trade_id=int(rows[-1]["agg_trade_id"]),
+            first_trade_time_ms=int(rows[0]["trade_time_ms"]),
+            last_trade_time_ms=int(rows[-1]["trade_time_ms"]),
+        )
+        written = archive.import_verified_day(rows, metadata)
+        if written not in {0, len(rows)}:
+            raise RuntimeError(
+                f"expected 0 or {len(rows)} verified rows, wrote {written}"
+            )
+        imported += len(rows)
+    return imported
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--agg-trades", action="store_true")
     args = parser.parse_args()
     _require_isolated_environment()
     _force_offline_upstreams()
     _seed_klines()
+    agg_trade_rows = _seed_agg_trades() if args.agg_trades else 0
 
     import uvicorn
     from app.api.v1 import symbols as symbols_api
@@ -174,6 +288,7 @@ def main() -> None:
             "fixture_start_ms": FIXTURE_START_MS,
             "fixture_rows": FIXTURE_ROWS,
             "fixture_symbols": [symbol for symbol, _price in FIXTURE_SYMBOLS],
+            "agg_trade_rows": agg_trade_rows,
         }
 
     @app.get("/__replay_smoke__/diagnostics")

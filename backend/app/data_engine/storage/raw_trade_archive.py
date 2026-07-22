@@ -1205,10 +1205,18 @@ class ParquetRawAggTradeArchive:
                 bounds=bounds,
             )
             bounds = (
-                dataset_ref.start_time_ms,
-                dataset_ref.end_time_ms,
-                dataset_ref.expected_first_agg_trade_id,
-                dataset_ref.expected_last_agg_trade_id,
+                dataset_ref.start_time_ms if bounds[0] is None else bounds[0],
+                dataset_ref.end_time_ms if bounds[1] is None else bounds[1],
+                (
+                    dataset_ref.expected_first_agg_trade_id
+                    if bounds[2] is None
+                    else bounds[2]
+                ),
+                (
+                    dataset_ref.expected_last_agg_trade_id
+                    if bounds[3] is None
+                    else bounds[3]
+                ),
             )
             manifests = [
                 self._file_manifest_from_object(item) for item in dataset_ref.objects
@@ -1808,14 +1816,23 @@ class ParquetRawAggTradeArchive:
             dataset_ref.symbol,
         ):
             raise ValueError("raw aggTrade dataset identity does not match request")
-        expected = (
+        frozen = (
             dataset_ref.start_time_ms,
             dataset_ref.end_time_ms,
             dataset_ref.expected_first_agg_trade_id,
             dataset_ref.expected_last_agg_trade_id,
         )
-        if any(value is not None and value != expected[index] for index, value in enumerate(bounds)):
-            raise ValueError("raw aggTrade dataset bounds do not match request")
+        allowed = (
+            (frozen[0], frozen[1]),
+            (frozen[0], frozen[1]),
+            (frozen[2], frozen[3]),
+            (frozen[2], frozen[3]),
+        )
+        if any(
+            value is not None and not allowed[index][0] <= value <= allowed[index][1]
+            for index, value in enumerate(bounds)
+        ):
+            raise ValueError("raw aggTrade request escapes frozen dataset bounds")
 
     @staticmethod
     def _normalize_scan_bounds(

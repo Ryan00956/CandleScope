@@ -2,6 +2,10 @@ import { ReplayApiClient } from "./replayApi.js";
 import type { ReplayApiClientOptions, ReplayCatalogQuery } from "./replayApi.js";
 import type { ReplayCapabilities, ReplayCatalog } from "./replayTypes.js";
 import {
+  parseReplayTradeFlowPage,
+  type ReplayTradeFlowPage,
+} from "./replayTradeFlow.js";
+import {
   parseReplaySegmentPreparePlan,
   type ReplaySegmentPreparePlan,
 } from "./replaySegmentTypes.js";
@@ -242,6 +246,39 @@ export class ReplayV2ApiClient {
     return this.request(
       `/runs/${safeSegment(runId, "run id")}/tracks`,
       parseReplayMarketTracksResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  tradeFlowRun(
+    runId: string,
+    query: {
+      readonly trackId?: string;
+      readonly afterSequence?: number;
+      readonly limit?: number;
+    } = {},
+    signal?: AbortSignal,
+  ): Promise<ReplayTradeFlowPage> {
+    const params = new URLSearchParams();
+    if (query.trackId !== undefined) {
+      params.set("track_id", safeIdentifier(query.trackId, "track id"));
+    }
+    if (query.afterSequence !== undefined) {
+      if (!Number.isSafeInteger(query.afterSequence) || query.afterSequence < 0) {
+        throw new ReplayV2ApiError("REPLAY_V2_PROTOCOL_ERROR", "after sequence is invalid");
+      }
+      params.set("after_sequence", String(query.afterSequence));
+    }
+    if (query.limit !== undefined) {
+      if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 1_000) {
+        throw new ReplayV2ApiError("REPLAY_V2_PROTOCOL_ERROR", "trade-flow limit is invalid");
+      }
+      params.set("limit", String(query.limit));
+    }
+    const suffix = params.size === 0 ? "" : `?${params.toString()}`;
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/trade-flow${suffix}`,
+      parseReplayTradeFlowPage,
       signal ? { signal } : {},
     );
   }

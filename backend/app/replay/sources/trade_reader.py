@@ -144,6 +144,16 @@ class ReplayTradePage:
     data_epoch: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReplayTradeSequencePage:
+    trades: tuple[ReplayTrade, ...]
+    after_sequence: int
+    next_sequence: int
+    revealed_sequence: int
+    has_more: bool
+    data_epoch: str
+
+
 class PagedReplayTradeReader:
     """Validate every bounded archive page against one exact data epoch."""
 
@@ -324,6 +334,96 @@ class PagedReplayTradeReader:
         for page in self.iter_pages():
             yield from page.trades
 
+    def read_sequence_page(
+        self,
+        *,
+        after_sequence: int,
+        revealed_sequence: int,
+        limit: int,
+    ) -> ReplayTradeSequencePage:
+        """Read one exact bounded slice from the already revealed prefix."""
+
+        row_count = self.dataset_ref.row_count
+        for field_name, value in (
+            ("after_sequence", after_sequence),
+            ("revealed_sequence", revealed_sequence),
+            ("limit", limit),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{field_name} must be an integer")
+        if not 0 <= after_sequence <= revealed_sequence <= row_count:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "aggregate-trade revealed sequence bounds are invalid",
+            )
+        if limit < 1 or limit > self.page_rows:
+            raise ValueError(f"limit must be between 1 and {self.page_rows}")
+        if after_sequence == revealed_sequence:
+            return ReplayTradeSequencePage(
+                trades=(),
+                after_sequence=after_sequence,
+                next_sequence=after_sequence,
+                revealed_sequence=revealed_sequence,
+                has_more=False,
+                data_epoch=self.data_epoch,
+            )
+        first_id = self.dataset_ref.expected_first_agg_trade_id + after_sequence
+        last_id = self.dataset_ref.expected_first_agg_trade_id + revealed_sequence - 1
+        expected_rows = min(limit, revealed_sequence - after_sequence)
+        try:
+            page = self.archive.scan_page(
+                exchange=self.dataset_ref.exchange,
+                market_type=self.dataset_ref.market_type,
+                symbol=self.dataset_ref.symbol,
+                start_time_ms=self.dataset_ref.start_time_ms,
+                end_time_ms=self.dataset_ref.end_time_ms,
+                start_agg_trade_id=first_id,
+                end_agg_trade_id=last_id,
+                limit=expected_rows,
+                dataset_ref=self.dataset_ref,
+            )
+        except ReplayDomainError:
+            raise
+        except Exception as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.ARCHIVE_DEGRADED,
+                "aggregate-trade revealed page read failed",
+            ) from exc
+        if page.data_epoch != self.data_epoch:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "aggregate-trade revealed page data epoch changed",
+            )
+        trades = tuple(ReplayTrade.from_archive_row(row) for row in page.rows)
+        if len(trades) != expected_rows:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATA_GAP,
+                "aggregate-trade revealed page is incomplete",
+                details={"expected_rows": expected_rows, "actual_rows": len(trades)},
+            )
+        for index, trade in enumerate(trades):
+            expected_id = first_id + index
+            if (
+                trade.agg_trade_id != expected_id
+                or trade.exchange != self.dataset_ref.exchange
+                or trade.market_type != self.dataset_ref.market_type
+                or trade.symbol != self.dataset_ref.symbol
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATA_GAP,
+                    "aggregate-trade revealed page lost stable continuity",
+                    details={"expected_agg_trade_id": expected_id},
+                )
+        next_sequence = after_sequence + len(trades)
+        return ReplayTradeSequencePage(
+            trades=trades,
+            after_sequence=after_sequence,
+            next_sequence=next_sequence,
+            revealed_sequence=revealed_sequence,
+            has_more=next_sequence < revealed_sequence,
+            data_epoch=self.data_epoch,
+        )
+
 
 def _canonical_decimal(value: object, field_name: str) -> str:
     try:
@@ -342,4 +442,5 @@ __all__ = [
     "PagedReplayTradeReader",
     "ReplayTrade",
     "ReplayTradePage",
+    "ReplayTradeSequencePage",
 ]

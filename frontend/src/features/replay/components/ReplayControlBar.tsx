@@ -8,6 +8,34 @@ import { parseIntervalSeconds } from "../../../utils/intervals.js";
 
 const SPEEDS: readonly ReplaySpeed[] = [1, 5, 15, 30, 60, 120, 300, 600, "MAX"];
 
+function fastForwardPlan(value: ReplayV2Json | undefined): {
+  readonly mode: string;
+  readonly explanation: string;
+  readonly reasons: readonly string[];
+  readonly equivalence: string;
+} | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const plan = value as Readonly<Record<string, ReplayV2Json>>;
+  const mode = typeof plan.plan === "string"
+    ? plan.plan
+    : typeof plan.mode === "string" ? plan.mode : null;
+  if (mode === null) return null;
+  const explanation = typeof plan.explanation === "string" ? plan.explanation : "";
+  const reasons = Array.isArray(plan.reason_codes)
+    ? plan.reason_codes.filter((reason): reason is string => typeof reason === "string")
+    : [];
+  const equivalenceValue = plan.equivalence;
+  const equivalenceObject = equivalenceValue !== null
+    && typeof equivalenceValue === "object"
+    && !Array.isArray(equivalenceValue)
+    ? equivalenceValue as Readonly<Record<string, ReplayV2Json>>
+    : null;
+  const equivalence = typeof equivalenceObject?.status === "string"
+    ? equivalenceObject.status
+    : "UNKNOWN";
+  return { mode, explanation, reasons, equivalence };
+}
+
 export interface ReplayControlBarProps {
   readonly runtime: ReplayRuntime;
   readonly viewer?: ReplayViewerRuntime;
@@ -36,6 +64,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
     || (viewer !== undefined && (viewer.viewerState === null || viewer.viewerPending));
   const domainProgress = replayProgress(store);
   const phase3Ratio = viewer?.progress?.ratio_ppm;
+  const visiblePlan = fastForwardPlan(viewer?.progress?.plan);
   const progress = typeof phase3Ratio === "number" && Number.isSafeInteger(phase3Ratio)
     ? Math.min(1, Math.max(0, phase3Ratio / 1_000_000))
     : domainProgress;
@@ -192,6 +221,19 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             : "NO_BOOK_QUEUE"}</span>
         </div>
       </div>
+
+      {visiblePlan !== null && (
+        <div
+          className="replay-fast-forward-plan"
+          data-replay-fast-forward-plan={visiblePlan.mode}
+          data-replay-equivalence={visiblePlan.equivalence}
+        >
+          <strong>{visiblePlan.mode}</strong>
+          <span>{visiblePlan.explanation}</span>
+          {visiblePlan.reasons.length > 0 && <code>{visiblePlan.reasons.join(" · ")}</code>}
+          <em>equivalence: {visiblePlan.equivalence}</em>
+        </div>
+      )}
 
       {showEnd && (
         <div className="replay-modal-backdrop" role="presentation">

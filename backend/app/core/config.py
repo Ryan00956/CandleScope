@@ -54,6 +54,7 @@ class ReplaySettings:
     product_v2_enabled: bool = False
     replay_segment_download_worker_enabled: bool = False
     replay_segment_auto_gc_enabled: bool = False
+    replay_fast_forward_optimization_enabled: bool = False
 
     @property
     def product_v2_available(self) -> bool:
@@ -139,6 +140,9 @@ def load_replay_settings(
         replay_segment_auto_gc_enabled=_strict_replay_bool(
             environment, "REPLAY_SEGMENT_AUTO_GC_ENABLED", "0"
         ),
+        replay_fast_forward_optimization_enabled=_strict_replay_bool(
+            environment, "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED", "0"
+        ),
     )
 
 # Server
@@ -165,6 +169,9 @@ REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED = (
     REPLAY_SETTINGS.replay_segment_download_worker_enabled
 )
 REPLAY_SEGMENT_AUTO_GC_ENABLED = REPLAY_SETTINGS.replay_segment_auto_gc_enabled
+REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED = (
+    REPLAY_SETTINGS.replay_fast_forward_optimization_enabled
+)
 REPLAY_DB_PATH = REPLAY_SETTINGS.db_path
 REPLAY_MAX_ACTIVE_SESSIONS = REPLAY_SETTINGS.max_active_sessions
 REPLAY_COMMAND_QUEUE_SIZE = REPLAY_SETTINGS.command_queue_size

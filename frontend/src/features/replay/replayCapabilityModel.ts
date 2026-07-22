@@ -2,7 +2,7 @@ export type ReplayCapabilityState =
   | "AVAILABLE_EXACT"
   | "AVAILABLE_APPROX"
   | "UNSUPPORTED_NO_HISTORY"
-  | "UNSUPPORTED_SOURCE"
+  | "UNSUPPORTED_SOURCE_MODE"
   | "UNSUPPORTED_NO_PROVIDER"
   | "LOADING"
   | "DEGRADED";
@@ -48,11 +48,11 @@ export function buildReplayCapabilityModel(sourceKind: "BAR" | "AGG_TRADE" | "ba
     INDICATORS: item("Local indicators", "AVAILABLE_EXACT", "仅以已揭示 bars 本地计算", "LOCAL"),
     SIMULATED_LIQUIDATION: item("Paper liquidation", "AVAILABLE_APPROX", "训练经纪商合成结果", "APPROX"),
     AGG_TRADE_TAPE: tape
-      ? item("Agg trade tape", "AVAILABLE_EXACT", "冻结逐笔归档", "EXACT")
-      : item("Agg trade tape", "UNSUPPORTED_SOURCE", "BAR run 不含逐笔源"),
+      ? item("Agg trade tape", "AVAILABLE_EXACT", "冻结聚合成交归档；不是交易所 raw fills", "EXACT_AGGREGATE")
+      : item("Agg trade tape", "UNSUPPORTED_SOURCE_MODE", "BAR run 不含聚合成交源"),
     ORDER_FLOW: tape
-      ? item("Order flow", "AVAILABLE_APPROX", "由已揭示逐笔聚合", "APPROX")
-      : item("Order flow", "UNSUPPORTED_SOURCE", "BAR run 无法精确重建主动方向"),
+      ? item("Order flow", "AVAILABLE_APPROX", "主动方由 buyer-maker 推断；保持聚合成交 fidelity", "APPROX_AGGRESSOR")
+      : item("Order flow", "UNSUPPORTED_SOURCE_MODE", "BAR run 无法重建聚合成交主动方向"),
     OPEN_INTEREST: item("Open interest", "UNSUPPORTED_NO_HISTORY", "冻结 run 未绑定 OI 历史"),
     MARK_PRICE: item("Mark", "UNSUPPORTED_NO_HISTORY", "冻结 run 未绑定 mark 历史"),
     INDEX_PRICE: item("Index", "UNSUPPORTED_NO_HISTORY", "冻结 run 未绑定 index 历史"),

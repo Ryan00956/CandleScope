@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_7_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0–6 既有门禁保持通过，Phase 7 的统一数据段注册表、本地 BAR/raw aggTrade adapter、prepare/quarantine/cancel/single-flight、pin/rehydration manifest、显式 GC dry-run/run 与 Hub 按需 prepare plan 已实现，并通过代码、全量测试、性能、真实浏览器、旧构建与整提交回滚门禁。Phase 8 尚未开始，Replay v1/v2、segment 下载 worker 与自动 GC 的仓库默认开关均保持关闭。
+状态：`PHASE_8_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0–7 既有门禁保持通过，Phase 8 的四态快进规划、无路径依赖精确扫描/投影合并、路径依赖 full scan、进度/取消、AGG_TRADE Tape/CVD 与 BAR fail-closed 能力边界已实现，并通过全量测试、等价性、1M 资源、真实浏览器、SQLite 与回滚门禁。Phase 9 尚未开始；Replay v1/v2、segment 下载 worker、自动 GC 与快进优化的仓库默认开关均保持关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -13,6 +13,8 @@ Phase 1 父提交：`bb253d0982c36776452c2b1e0a0cf3f1b211162f`（2026-07-21）
 Phase 5 父提交：`c6921c9f7f813adabd452e162719baf20d700fb8`（2026-07-21）
 
 Phase 7 父提交：`463bd0ba679d6e10baa0f0958231e96220590ee7`（2026-07-22）
+
+Phase 8 父提交：`41d6fc1049493b1ccaec5c8deb8a64b788277d14`（2026-07-22）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -145,6 +147,7 @@ backend/data/replay-dev/replay_segments/
 | `REPLAY_HISTORICAL_BOOK_ENABLED` | `0` | 可选历史 L2，Phase 9 前不存在 |
 | `REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED` | `0` | 外部 segment 下载生产者开关；Phase 7 不自动启动远程下载 |
 | `REPLAY_SEGMENT_AUTO_GC_ENABLED` | `0` | segment 自动 GC 调度开关；Phase 7 只开放显式 dry-run/run |
+| `REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED` | `0` | Phase 8 无账户路径依赖时的有界扫描、状态物化与投影合并；关闭后统一走 `FULL_EVENT_SCAN` |
 
 前端开关从来不是安全边界。v2 直接 URL、API、WS 和后台任务都必须由后端 capability 拒绝。
 
@@ -191,6 +194,7 @@ $env:RAW_AGG_TRADE_ARCHIVE_ENABLED = '0'
 $env:REPLAY_HISTORICAL_BOOK_ENABLED = '0'
 $env:REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED = '0'
 $env:REPLAY_SEGMENT_AUTO_GC_ENABLED = '0'
+$env:REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED = '0'
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18082
 ```
 
@@ -1609,4 +1613,42 @@ Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_E
 Rollback: 干净 Phase 7 提交上执行 feature-flag/v1 old-build drill PASS；baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f 的 replay route 为 404，graceful shutdown 状态为 shutdown_pause，演练内旧 build 运行前后 replay DB SHA-256 均为 817de9be0579bbf414de1294b60ca47fd69d3af058952c226cef7effe451dd28。Phase 7 整提交反向应用后的 tree 为 c8cf7e1ed82a665005a66597949306eee8fa45ab，与父提交 463bd0ba679d6e10baa0f0958231e96220590ee7 的 tree 完全一致。
 Known limitations: 当前 BAR 与 raw aggTrade 都是已有本地不可变数据的 adapter；外部 producer/prepare job/rehydration seam 已验证，但没有声称通用 HTTP/S3 下载策略或自动调度已经上线。自动 GC 不运行，只有显式 dry-run/run 管理 API；存储预算策略仍需部署方决定。Phase 8 fast-forward/成交订单流与 Phase 9 历史 L2/book-assisted 尚未实现。
 Decision: PASS；停止在 Phase 7，不进入 Phase 8。
+```
+
+### Phase 8 执行记录
+
+```text
+Phase: 8 - proven fast-forward planning, bounded exact scans, and aggregate trade flow
+Date: 2026-07-22
+Commit: 本 Phase 独立提交，提交号以 Git 历史为准
+Parent commit: 41d6fc1049493b1ccaec5c8deb8a64b788277d14
+Executor: Codex
+Scope: 新增 FastForwardPlanner 的 CHECKPOINT_JUMP/AGGREGATE_SCAN/FULL_EVENT_SCAN/BLOCKED 四态解释合同。无订单、持仓、funding、risk、book 或多轨依赖时，AGGREGATE_SCAN 仍逐个应用不可变 source event 与 reducer/event-chain，只省略中间重复状态物化并合并普通投影，尾部逐事件发布后发精确 reset；存在路径依赖统一走 FULL_EVENT_SCAN。新增有界 chunk/page、进度/取消/提交边界、短期 terminal progress 读取，以及 replay-only AGG trade Tape/Window CVD；BAR 明确 UNSUPPORTED_SOURCE_MODE。Phase 9 历史 L2/book-assisted 未进入。
+Files changed: backend planner、受信内部快进命令、actor 精确扫描/恢复、training service/API、raw trade revealed page、trade-flow adapter、配置/benchmark/offline browser fixture 与 Phase 8 回归；frontend 严格 trade-flow parser/hook/API、订单流页签、能力标签、快进计划展示、测试/CSS/README；本执行记录。replay.v1 公共命令 enum、schema v6 与历史 L2 路径均未改写。
+Schema/protocol changes: SQLite schema 仍为 replay.training v6，无迁移。新增 replay.fast-forward.plan.v1、replay.fast-forward.equivalence.v1 与 replay.trade-flow.v1 响应；FAST_FORWARD_EMPTY_ACCOUNT 只允许 training 内部调用，不进入 public replay.v1/v2 command enum。新增 GET /runs/{run_id}/fast-forward-plan 与 /trade-flow；未知字段、cursor/epoch/gap/Decimal 全部 fail closed。
+Commands run:
+  backend targeted: python -m pytest -q tests/test_replay_v2_training_phase8.py tests/test_replay_recovery.py::<two recovery cases>
+  backend expanded: python -m pytest -q <Phase 5 + Phase 8>；python -m pytest -q <actor core + Phase 8>
+  backend full: python -m pytest -q
+  backend static: python -m compileall -q app scripts；python -m ruff check <Phase 8 Python scope>
+  backend baseline audits: python -m ruff check .；python -m mypy app，并在父提交 detached worktree 同机对照
+  benchmark equivalence: python scripts/benchmark_replay_fast_forward.py --trades 10000 --span-days 7 --page-rows 5000 --chunk-events 4096 --tail-events 32
+  benchmark 1 day: python scripts/benchmark_replay_fast_forward.py --trades 100000 --span-days 1 --skip-reference
+  benchmark 1M/7 day: python scripts/benchmark_replay_fast_forward.py --trades 1000000 --span-days 7 --skip-reference
+  frontend full: npm run check
+  browser: Playwright CLI wrapper against isolated verified-aggTrade fixture :18109 and Vite :15209
+  repository/database: git diff --check；SQLite PRAGMA quick_check/foreign_key_check；WAL/SHM、端口、截图与证据 hash 检查
+  rollback: node frontend/scripts/replay-rollback-drill.mjs --out output/playwright/phase8-final-20260722/phase8-rollback.json --timeout-ms 120000
+  commit rollback: detached worktree + git revert --no-commit <Phase 8 commit> + git write-tree 与父提交 tree 比对
+Targeted tests: Phase 8 主文件 12 passed；连同两个旧 checkpoint recovery 路径为 14 passed；Phase 5 + Phase 8 扩大集合 33 passed，actor core + Phase 8 扩大集合 51 passed。覆盖四态 planner、关闭开关、无账户路径与 reference 全字段等价、projection coalescing、持仓/订单/funding/risk/multi-track 依赖、取消/续跑/hash、多轨波次、trade-flow continuity/resync/degraded 与 terminal progress 竞态。
+Global tests: backend 1982 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2392 passed；architecture/typecheck/ESLint/Vite production build 全部通过。Phase 8 Python scope Ruff 0 violations，compileall PASS。
+Global baseline audits: 全仓 Ruff 与父提交同为 36 个既有违规。父提交 mypy 为 536 errors/108 files，Phase 8 为 520 errors/108 files/266 source files；新增类型债务为 0，并在本阶段修改范围内消除 16 个既有错误。
+Equivalence evidence: 10,000 trades/7 天同数据双路径：AGGREGATE_SCAN 3.896277 s、2566.55 events/s、102 projection events；FULL_EVENT_SCAN 85.689005 s、116.7 events/s、10005 projection events。cursor、source-event-chain state hash、component hash、report hash 全部相等，等价/资源检查全通过；deterministic evidence hash=sha256:facd895b0beecd235177aea45a297d973908a03edc7e122fed5e8af03b096b85。
+Performance evidence: 100,000 trades/1 天为 27.375770 s、3652.87 events/s、3 page calls、queue high-water 1、late-half RSS +327680 B。1,000,000 trades/7 天为 405.582381 s、2465.59 events/s、245 chunks、39 page calls、page max 50000、queue high-water 1、coalesced projections 992160、published projection events 8088、late-half RSS +6385664 B、peak RSS 139403264 B；全部 1,000,000 source events 完成且 acceptance PASS，evidence hash=sha256:8bbcc8909eba249ed9968556e53f55e154d2eadf5d715b6ddaf4562294980512。
+Browser/API evidence: verified offline AGG Run 先经 BAR/tape parity 才创建。揭示后页面显示 SELL/BUY aggregate tape、Window CVD、AVAILABLE_EXACT tape / AVAILABLE_APPROX aggressor / AGGREGATE_TRADE_NOT_RAW_TRADE；快进后显示 AGGREGATE_SCAN、EXACT_REDUCER_SCAN/NO_PATH_DEPENDENCIES 与 VERIFIED_BY_EXACT_REDUCER_PATH。terminal progress 轮询返回 200。独立 BAR Run 显示 UNSUPPORTED_SOURCE_MODE 且不发 trade-flow 请求，不把缺失历史显示为 0。两页无意外 console error；每个新页只有 favicon 404 与两个既有 slider-vertical CSS warning。动态请求只到 127.0.0.1；证据与截图在 output/playwright/phase8-final-20260722，evidence JSON SHA-256=90d9526fdfb9bb59b717ad2f9fdd28de2062ed50d1dfb83f5b789ce8ceb78abf。
+Database evidence: 隔离 fixture 优雅关停后 training schema_version=6、quick_check=ok、foreign_key_check 空、2 runs、2 sessions、2 segments、4 refs；WAL/SHM 均不存在。replay.db 1507328 B，SHA-256=9283d7c3118478b508bfae4d0427d66bc8800885fbe6921d8d4ef13efa6c1220，:18109/:15209 均释放。fixture 所有 upstream 地址锁到拒绝连接的 127.0.0.1:9，没有公共网络请求。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0、RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_HISTORICAL_BOOK_ENABLED=0、REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0、REPLAY_SEGMENT_AUTO_GC_ENABLED=0、REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0。优化关闭时 planner 返回 FULL_EVENT_SCAN/OPTIMIZATION_DISABLED，正确性不依赖优化路径。
+Rollback: 干净 Phase 8 提交上执行 feature-flag/v1 old-build drill PASS；baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f 的 replay route 为 404，graceful shutdown 状态为 shutdown_pause，同一次演练内关闭开关和旧 build 运行前后的 replay DB 聚合 SHA-256 均保持完全一致。Phase 8 整提交反向应用后的 tree 为 59c32929972255a17b1a840afff1406e44757fa0，与父提交 41d6fc1049493b1ccaec5c8deb8a64b788277d14 的 tree 完全一致；最终证据路径为 output/playwright/phase8-final-20260722/phase8-rollback.json。
+Known limitations: CHECKPOINT_JUMP 的 exact identity/hash 分支已冻结并有 planner golden，但当前服务尚不主动提供前向 checkpoint candidate，不能把它宣传成已命中的运行时加速。多 FULL 轨因全局排序继续 FULL_EVENT_SCAN。AGG Tape 只在 aggregate-record fidelity 精确，主动方/CVD 是 buyer-maker 推断；BAR 不提供逐笔订单流。Phase 9 历史 L2、queue model 与 BOOK_ASSISTED 未开始。
+Decision: PASS；停止在 Phase 8，不进入 Phase 9。
 ```

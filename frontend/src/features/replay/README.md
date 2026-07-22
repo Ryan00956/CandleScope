@@ -8,7 +8,7 @@ The phase-gated v2 workbench now includes the Training Hub, source-neutral marke
 workspace, ViewerState and aligned replay controls, Phase 4 server-owned time
 disclosure and Review/Fork, Phase 5 deterministic multi-market tracks, and the
 Phase 6 versioned contract account, plus Phase 7 on-demand data segments and
-safe GC. New TrainingRuns use `TOUCH_OR_TAPE_V2`,
+safe GC, and Phase 8 explainable fast-forward plus aggregate-trade flow. New TrainingRuns use `TOUCH_OR_TAPE_V2`,
 configured maker/taker policies, CROSS or ISOLATED margin, approximate Sandbox
 funding, simulated-account liquidation events, and a hash-chained cash ledger.
 The UI continuously labels the no-book execution boundary. With
@@ -28,6 +28,22 @@ policy. Automatic download and automatic GC workers
 remain disabled by default. Explicit GC is LRU, rehydration-aware, and requires
 a fresh dry-run plan hash before any replay-owned file can be reclaimed;
 embedded/non-rebuildable archives are never candidates.
+
+Phase 8 adds a server-authoritative four-plan fast-forward response. The
+optimization flag remains off by default; disabling it routes every advance to
+the proven `FULL_EVENT_SCAN` reference path. With it enabled, only an account
+without orders, positions, funding, risk, book, or multi-track path dependencies
+may use `AGGREGATE_SCAN`. Every immutable source event still updates the ordered
+reducer and source-event chain; only redundant intermediate state hashes and
+ordinary projections are coalesced before an exact reset, with a bounded tail
+published event-by-event. Progress exposes the plan, reasons, commit boundary,
+queue high-water, and equivalence status.
+
+The replay-only order-flow tab reads bounded pages no later than the revealed
+source cursor. AGG_TRADE Tape is exact at aggregate-record fidelity, while
+aggressor/CVD is explicitly approximate because side is inferred from
+buyer-maker. Any gap or epoch change clears the projection and requires resync.
+BAR shows `UNSUPPORTED_SOURCE_MODE`; it never renders missing history as zero.
 
 With the repository-default `VITE_REPLAY_PRODUCT_V2_ENABLED=0`, composition is
 still exactly v1. The backend additionally requires both replay flags before

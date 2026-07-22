@@ -87,6 +87,8 @@ test("capability surface never renders unsupported history as numeric zero or st
   assert.equal(model.OHLCV.state, "AVAILABLE_EXACT");
   assert.equal(model.SIMULATED_LIQUIDATION.state, "AVAILABLE_APPROX");
   assert.equal(model.ORDER_BOOK.state, "UNSUPPORTED_NO_HISTORY");
+  assert.equal(model.AGG_TRADE_TAPE.state, "UNSUPPORTED_SOURCE_MODE");
+  assert.equal(model.ORDER_FLOW.state, "UNSUPPORTED_SOURCE_MODE");
   assert.equal(model.ORDER_BOOK.value, "--");
   assert.match(model.FUNDING.detail, /交易所历史 funding\/mark/);
   assert.match(model.FUNDING.detail, /近似账户模拟/);
@@ -97,6 +99,21 @@ test("capability surface never renders unsupported history as numeric zero or st
   const tape = buildReplayCapabilityModel("AGG_TRADE");
   assert.equal(tape.AGG_TRADE_TAPE.state, "AVAILABLE_EXACT");
   assert.equal(tape.ORDER_FLOW.state, "AVAILABLE_APPROX");
+  assert.match(tape.AGG_TRADE_TAPE.detail, /不是交易所 raw fills/);
+  assert.match(tape.ORDER_FLOW.detail, /buyer-maker/);
+});
+
+test("Phase 8 workspace exposes explainable plans and fail-closed aggregate trade flow", () => {
+  const controls = source("src/features/replay/components/ReplayControlBar.tsx");
+  const rail = source("src/features/replay/components/ReplayRightRail.tsx");
+  const hook = source("src/features/replay/useReplayTradeFlow.ts");
+  assert.match(controls, /data-replay-fast-forward-plan/);
+  assert.match(controls, /data-replay-equivalence/);
+  assert.match(rail, /\["flow", "订单流"\]/);
+  assert.match(rail, /AGGREGATE_TRADE_NOT_RAW_TRADE|tradeFlow\.fidelity/);
+  assert.match(rail, /UNSUPPORTED_SOURCE_MODE/);
+  assert.match(hook, /CLEARED_FAIL_CLOSED/);
+  assert.doesNotMatch(`${rail}\n${hook}`, /useMarketDataRuntime|SeriesDataFeed|WebSocket/);
 });
 
 test("workspace preferences inherit live layout once and then persist only inside the run scope", () => {

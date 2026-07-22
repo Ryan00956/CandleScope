@@ -467,6 +467,21 @@ class ReplayService:
                 max_events=max_events,
             )
 
+    async def source_events_page(
+        self,
+        session_id: str,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> dict[str, object]:
+        """Return one actor-serialized page from the revealed source prefix."""
+
+        async with self._lease_handle(session_id) as handle:
+            return await handle.actor.source_events_page(
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+
     async def command(
         self,
         session_id: str,
@@ -477,6 +492,7 @@ class ReplayService:
         if command.type in {
             InternalCommandType.ADJUST_CAPITAL,
             InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
+            InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT,
         } and not _training_internal:
             raise ReplayDomainError(
                 ReplayErrorCode.INVALID_STATE_TRANSITION,

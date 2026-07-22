@@ -226,6 +226,54 @@ class TradeReplaySource:
     def actual_cursor(self) -> RawAggTradeCursor | None:
         return self._last_actual
 
+    def read_revealed_page(
+        self,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> dict[str, object]:
+        """Read a bounded immutable page without moving the replay cursor."""
+
+        revealed_sequence = self._source_sequence
+        page = self._reader.read_sequence_page(
+            after_sequence=after_sequence,
+            revealed_sequence=revealed_sequence,
+            limit=limit,
+        )
+        if self._blind_mode and self._first_actual_trade_id is None and page.trades:
+            origin = self._reader.read_sequence_page(
+                after_sequence=0,
+                revealed_sequence=revealed_sequence,
+                limit=1,
+            )
+            if not origin.trades:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "blind aggregate-trade identity origin is unavailable",
+                )
+            self._first_actual_trade_id = origin.trades[0].first_trade_id
+        trades = tuple(self._public_trade(trade) for trade in page.trades)
+        return {
+            "data_epoch": page.data_epoch,
+            "after_sequence": page.after_sequence,
+            "next_sequence": page.next_sequence,
+            "revealed_sequence": page.revealed_sequence,
+            "has_more": page.has_more,
+            "events": [
+                {
+                    "source_sequence": page.after_sequence + index + 1,
+                    **trade.to_dict(),
+                }
+                for index, trade in enumerate(trades)
+            ],
+            "streaming": {
+                "page_rows": len(trades),
+                "resident_pages": 1,
+                "prefetch_pages": 1,
+                "backpressure": "ACTOR_MAILBOX",
+            },
+        }
+
     def _ensure_page(self) -> None:
         if self._page_index < len(self._page) or self._loaded_exhausted:
             return

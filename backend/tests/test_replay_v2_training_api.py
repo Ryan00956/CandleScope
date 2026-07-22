@@ -144,6 +144,49 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         await service.shutdown(step_timeout=0.2)
 
 
+async def test_phase8_plan_and_trade_flow_routes_fail_closed_by_source(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "phase8-api.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        run = created.json()["run"]
+        session = await service.get_session(run["adapter_session_id"])
+        current = session["snapshot"]["cursor"]["virtual_time_ms"]
+        planned = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run['run_id']}/fast-forward-plan",
+            params={"target_virtual_time_ms": current + INTERVAL_MS},
+        )
+        assert planned.status_code == 200
+        assert planned.json()["plan"]["mode"] == "FULL_EVENT_SCAN"
+        assert planned.json()["plan"]["reason_codes"] == ["OPTIMIZATION_DISABLED"]
+
+        unsupported = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run['run_id']}/trade-flow",
+            params={"track_id": "track-1", "after_sequence": 0, "limit": 200},
+        )
+        assert unsupported.status_code == 409
+        body = unsupported.json()
+        assert body["error"]["code"] == "REPLAY_TRADE_FLOW_UNSUPPORTED_SOURCE"
+        assert body["error"]["details"] == {
+            "tape": "UNSUPPORTED_SOURCE_MODE",
+            "order_flow": "UNSUPPORTED_SOURCE_MODE",
+        }
+    finally:
+        await service.shutdown(step_timeout=0.2)
+
+
 async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Path) -> None:
     service = await _service(tmp_path / "history-api.db")
     app = _app(service)

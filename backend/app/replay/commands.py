@@ -266,6 +266,28 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
             command_type,
             {"kind": kind, "amount": amount, "reason": normalized_reason},
         )
+    if command_type is InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT:
+        _exact_keys(payload, {"count", "tail_events"})
+        count = _positive_bounded_int(
+            payload["count"],
+            field_name="count",
+            upper_bound=MAX_STEP_COUNT,
+        )
+        tail_events = payload["tail_events"]
+        if (
+            isinstance(tail_events, bool)
+            or not isinstance(tail_events, int)
+            or tail_events < 0
+            or tail_events > count
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "tail_events must be between 0 and count",
+            )
+        return ParsedCommand(
+            command_type,
+            {"count": count, "tail_events": tail_events},
+        )
     if command_type is CommandType.END_SESSION:
         if not payload:
             return ParsedCommand(

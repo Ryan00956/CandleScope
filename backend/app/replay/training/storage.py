@@ -1024,6 +1024,7 @@ class TrainingRunStore:
             return connection.execute(
                 """
                 SELECT r.run_id, selected.adapter_session_id, r.source_kind,
+                       r.book_mode,
                        r.base_interval, r.display_interval, r.compatibility,
                        r.exchange, r.market_type, r.settlement_asset,
                        r.catalog_epoch, r.dataset_epoch, r.initial_equity,
@@ -1066,6 +1067,7 @@ class TrainingRunStore:
             "run_id": str(row["run_id"]),
             "adapter_session_id": str(row["adapter_session_id"]),
             "source_kind": str(row["source_kind"]),
+            "book_mode": str(row["book_mode"]),
             "base_interval": str(row["base_interval"]),
             "display_interval": str(row["display_interval"]),
             "compatibility": str(row["compatibility"]),

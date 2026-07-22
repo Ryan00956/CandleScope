@@ -131,6 +131,23 @@ Replay v1 explicitly does **not** support:
 - `L2_BOOK`: no historical order-book queue position or book-assisted fill fidelity.
 - `EXCHANGE_FUTURES_EXACT`: no historical funding, maintenance-margin tiers, liquidation/ADL, or exact exchange account semantics.
 
+Replay v2 remains separately opt-in. Through Phase 8 it adds explainable
+`CHECKPOINT_JUMP` / `AGGREGATE_SCAN` / `FULL_EVENT_SCAN` / `BLOCKED` planning,
+bounded source-page scans, cancellable committed chunks, and a replay-isolated
+aggregate-trade Tape/CVD panel. `AGGREGATE_SCAN` still applies every source event
+to the deterministic reducer and source-event chain; it only skips redundant
+intermediate state materialization and coalesces delivery before an exact reset.
+Any active order, position, funding, risk, book, or multi-track dependency uses
+`FULL_EVENT_SCAN`. BAR runs report Tape/order flow as
+`UNSUPPORTED_SOURCE_MODE`, and aggregate trades are never labeled raw fills.
+The optimization flag defaults to off:
+
+```text
+REPLAY_PRODUCT_V2_ENABLED=0
+VITE_REPLAY_PRODUCT_V2_ENABLED=0
+REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0
+```
+
 ### Prepare Isolated Data
 
 Never point replay at a K-line database or raw archive that another worktree is

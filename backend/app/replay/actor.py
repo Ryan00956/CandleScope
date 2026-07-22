@@ -296,6 +296,13 @@ class _SourceChunkPlanRequest:
 
 
 @dataclass(slots=True)
+class _SourceEventsPageRequest:
+    after_sequence: int
+    limit: int
+    future: asyncio.Future[dict[str, object]]
+
+
+@dataclass(slots=True)
 class _SubscribeRequest:
     after_sequence: int | None
     max_pending: int
@@ -323,6 +330,7 @@ _ActorRequest = (
     | _CheckpointRequest
     | _DurableStateRequest
     | _SourceChunkPlanRequest
+    | _SourceEventsPageRequest
     | _SubscribeRequest
     | _UnsubscribeRequest
     | _ShutdownRequest
@@ -664,6 +672,26 @@ class ReplaySessionActor:
         request = _SourceChunkPlanRequest(
             target_time_ms=target,
             max_events=maximum,
+            future=loop.create_future(),
+        )
+        self._offer_request(request)
+        return await request.future
+
+    async def source_events_page(
+        self,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> dict[str, object]:
+        """Read one bounded page from the revealed immutable source prefix."""
+
+        self._ensure_accepting()
+        after = validate_counter(after_sequence, field_name="after_sequence")
+        maximum = min(self._positive_int(limit, "limit"), 1_000)
+        loop = asyncio.get_running_loop()
+        request = _SourceEventsPageRequest(
+            after_sequence=after,
+            limit=maximum,
             future=loop.create_future(),
         )
         self._offer_request(request)
@@ -1197,7 +1225,8 @@ class ReplaySessionActor:
                 details={"source_sequence": sequence},
             )
         _, recovered_state_hash = await self._apply_source_event_candidate(
-            publish=False
+            publish=False,
+            materialize_state=True,
         )
         if self._source.cursor().source_sequence != sequence:
             raise ReplayDomainError(
@@ -1244,6 +1273,14 @@ class ReplaySessionActor:
                         self._source_chunk_plan(
                             target_time_ms=request.target_time_ms,
                             max_events=request.max_events,
+                        )
+                    )
+            elif isinstance(request, _SourceEventsPageRequest):
+                if not request.future.done():
+                    request.future.set_result(
+                        self._source_events_page(
+                            after_sequence=request.after_sequence,
+                            limit=request.limit,
                         )
                     )
             elif isinstance(request, _SubscribeRequest):
@@ -1464,6 +1501,47 @@ class ReplaySessionActor:
             if self._state is not SessionState.ENDED:
                 self._emit_status("step_complete", mandatory=True)
             return self._command_result(command.command_id, {"consumed": consumed})
+        if command_type is InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT:
+            self._require_state(SessionState.PAUSED, command_type)
+            if self._has_active_trading_path():
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "optimized fast-forward requires an account without trading state",
+                )
+            count = self._positive_int(parsed.values["count"], "count")
+            tail_events = validate_counter(
+                parsed.values["tail_events"], field_name="tail_events"
+            )
+            await self._preflight_event_count(count)
+            self._revision += 1
+            consumed = 0
+            coalesced = count - tail_events
+            for index in range(count):
+                await self._process_source_event(
+                    publish=index >= coalesced,
+                    checkpoint=False,
+                )
+                consumed += 1
+                if consumed % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                    await asyncio.sleep(0)
+            if self._has_active_trading_path():
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "optimized fast-forward created unexpected trading state",
+                )
+            # The optimized path changes only projection delivery. One reset
+            # snapshot makes the client converge to the same exact reducer,
+            # cursor, event-chain, and component state as the STEP reference.
+            self._emit_reset_snapshot("fast_forward_complete", mandatory=True)
+            return self._command_result(
+                command.command_id,
+                {
+                    "consumed": consumed,
+                    "coalesced_projection_events": coalesced,
+                    "tail_events_published": tail_events,
+                    "reference_semantics": "ORDERED_SOURCE_EVENT_REDUCER_V1",
+                },
+            )
         if command_type is CommandType.ADVANCE_BY:
             self._require_state(SessionState.PAUSED, command_type)
             delta_ms = int(parsed.values["ms"])
@@ -1839,7 +1917,8 @@ class ReplaySessionActor:
             self._begin_candidate()
         try:
             component_state, state_hash = await self._apply_source_event_candidate(
-                publish=publish
+                publish=publish,
+                materialize_state=owns_candidate or publish or checkpoint,
             )
         except BaseException:
             if rollback is not None:
@@ -1847,6 +1926,8 @@ class ReplaySessionActor:
             raise
         if not owns_candidate:
             return
+        assert component_state is not None
+        assert state_hash is not None
         checkpoint_blob = (
             self._checkpoint_codec.encode(
                 self._checkpoint_payload(
@@ -1883,7 +1964,8 @@ class ReplaySessionActor:
         self,
         *,
         publish: bool,
-    ) -> tuple[dict[str, object], str]:
+        materialize_state: bool,
+    ) -> tuple[dict[str, object] | None, str | None]:
         event = self._source.peek()
         if event is None:
             raise ReplayDomainError(
@@ -1950,6 +2032,8 @@ class ReplaySessionActor:
             self._pause_clock()
             self._controller_client_id = None
             self._controller_deadline_wall = None
+        if not materialize_state:
+            return None, None
         component_state = self._component_state()
         state_hash = self._compute_state_hash()
         if publish:
@@ -2254,6 +2338,26 @@ class ReplaySessionActor:
             ),
             "max_events": max_events,
         }
+
+    def _source_events_page(
+        self,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> dict[str, object]:
+        read_page = getattr(self._source, "read_revealed_page", None)
+        if not callable(read_page):
+            raise ReplayDomainError(
+                ReplayErrorCode.UNSUPPORTED_SOURCE,
+                "replay source does not expose aggregate-trade pages",
+            )
+        page = read_page(after_sequence=after_sequence, limit=limit)
+        if not isinstance(page, Mapping):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "replay source page response is invalid",
+            )
+        return dict(page)
 
     async def _preflight_advance_target(self, target_time_ms: int) -> int:
         source = self._fork_current_source()
@@ -3209,6 +3313,24 @@ class ReplaySessionActor:
                 int(self._metrics["component_snapshot_materializations"] or 0) + 1
             )
         return dict(cached)
+
+    def _has_active_trading_path(self) -> bool:
+        """Revalidate path dependencies inside the single-writer boundary."""
+
+        state = self._component_state()
+        terminal = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
+        orders = state.get("orders")
+        if isinstance(orders, (list, tuple)) and any(
+            isinstance(order, Mapping) and order.get("status") not in terminal
+            for order in orders
+        ):
+            return True
+        position = state.get("position")
+        return isinstance(position, Mapping) and position.get("quantity") not in {
+            None,
+            "0",
+            0,
+        }
 
     def _compute_state_hash(
         self,

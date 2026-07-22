@@ -108,6 +108,7 @@ def _rss_bytes() -> int | None:
 @dataclass(slots=True)
 class GeneratedPagedArchive:
     dataset_ref: RawAggTradeDatasetRef
+    event_spacing_ms: int = 1
     page_calls: int = 0
     max_page_rows_seen: int = 0
     peak_rss_bytes: int | None = None
@@ -136,7 +137,13 @@ class GeneratedPagedArchive:
         )
         remaining = dataset_ref.row_count - start_index
         count = min(limit, max(0, remaining))
-        rows = tuple(_row(start_index + offset) for offset in range(count))
+        rows = tuple(
+            _row(
+                start_index + offset,
+                event_spacing_ms=self.event_spacing_ms,
+            )
+            for offset in range(count)
+        )
         self.page_calls += 1
         self.max_page_rows_seen = max(self.max_page_rows_seen, len(rows))
         current_rss = _rss_bytes()
@@ -163,10 +170,10 @@ class GeneratedPagedArchive:
         )
 
 
-def _row(index: int) -> dict[str, Any]:
+def _row(index: int, *, event_spacing_ms: int = 1) -> dict[str, Any]:
     price, quote_quantity = PRICE_CYCLE[index % len(PRICE_CYCLE)]
     agg_trade_id = FIRST_AGG_TRADE_ID + index
-    timestamp = START_TIME_MS + index
+    timestamp = START_TIME_MS + index * event_spacing_ms
     return {
         "exchange": "binance",
         "market_type": "futures",
@@ -183,12 +190,18 @@ def _row(index: int) -> dict[str, Any]:
     }
 
 
-def _dataset(trade_count: int) -> RawAggTradeDatasetRef:
+def _dataset(
+    trade_count: int,
+    *,
+    event_spacing_ms: int = 1,
+) -> RawAggTradeDatasetRef:
     if trade_count < 1:
         raise ValueError("trade_count must be positive")
+    if event_spacing_ms < 1:
+        raise ValueError("event_spacing_ms must be positive")
     last_index = trade_count - 1
     last_id = FIRST_AGG_TRADE_ID + last_index
-    last_time = START_TIME_MS + last_index
+    last_time = START_TIME_MS + last_index * event_spacing_ms
     replay_end_time = (
         START_TIME_MS
         + ((last_time - START_TIME_MS) // 60_000 + 1) * 60_000
@@ -263,8 +276,12 @@ def _broker(*, replay_end_time_ms: int, max_closed_bars: int) -> ConservativeBar
     )
 
 
-def _session_config(trade_count: int) -> ReplaySessionConfig:
-    dataset_ref = _dataset(trade_count)
+def _session_config(
+    trade_count: int,
+    *,
+    event_spacing_ms: int = 1,
+) -> ReplaySessionConfig:
+    dataset_ref = _dataset(trade_count, event_spacing_ms=event_spacing_ms)
     return ReplaySessionConfig(
         protocol=REPLAY_PROTOCOL,
         source_kind=SourceKind.AGG_TRADE,
@@ -311,9 +328,13 @@ def run_benchmark(
     trade_count: int = DEFAULT_TRADE_COUNT,
     page_rows: int = DEFAULT_PAGE_ROWS,
     max_closed_bars: int = 128,
+    event_spacing_ms: int = 1,
 ) -> dict[str, object]:
-    dataset_ref = _dataset(trade_count)
-    archive = GeneratedPagedArchive(dataset_ref)
+    dataset_ref = _dataset(trade_count, event_spacing_ms=event_spacing_ms)
+    archive = GeneratedPagedArchive(
+        dataset_ref,
+        event_spacing_ms=event_spacing_ms,
+    )
     source = TradeReplaySource(
         PagedReplayTradeReader(archive, dataset_ref, page_rows=page_rows)
     )
@@ -375,6 +396,7 @@ def run_benchmark(
             "page_rows": page_rows,
             "data_epoch": dataset_ref.data_epoch,
             "generated": True,
+            "event_spacing_ms": event_spacing_ms,
         },
         "result": {
             "elapsed_seconds": round(elapsed_seconds, 6),
@@ -413,9 +435,13 @@ async def run_actor_benchmark(
     event_buffer_size: int = 512,
     checkpoint_event_interval: int = 10_000,
     checkpoint_virtual_ms: int = 300_000,
+    event_spacing_ms: int = 1,
 ) -> dict[str, object]:
-    dataset_ref = _dataset(trade_count)
-    archive = GeneratedPagedArchive(dataset_ref)
+    dataset_ref = _dataset(trade_count, event_spacing_ms=event_spacing_ms)
+    archive = GeneratedPagedArchive(
+        dataset_ref,
+        event_spacing_ms=event_spacing_ms,
+    )
     broker = _broker(
         replay_end_time_ms=dataset_ref.end_time_ms,
         max_closed_bars=max_closed_bars,
@@ -428,7 +454,7 @@ async def run_actor_benchmark(
 
     actor = ReplaySessionActor(
         session_id="aggregate-trade-actor-benchmark",
-        config=_session_config(trade_count),
+        config=_session_config(trade_count, event_spacing_ms=event_spacing_ms),
         source_factory=source_factory,
         initial_virtual_time_ms=START_TIME_MS,
         command_queue_size=command_queue_size,
@@ -565,6 +591,7 @@ async def run_actor_benchmark(
             "page_rows": page_rows,
             "data_epoch": dataset_ref.data_epoch,
             "generated": True,
+            "event_spacing_ms": event_spacing_ms,
         },
         "result": {
             "elapsed_seconds": round(elapsed_seconds, 6),
@@ -653,6 +680,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--event-buffer-size", type=int, default=512)
     parser.add_argument("--checkpoint-event-interval", type=int, default=10_000)
     parser.add_argument("--checkpoint-virtual-ms", type=int, default=300_000)
+    parser.add_argument("--event-spacing-ms", type=int, default=1)
     return parser.parse_args()
 
 
@@ -668,6 +696,7 @@ def main() -> None:
                 event_buffer_size=args.event_buffer_size,
                 checkpoint_event_interval=args.checkpoint_event_interval,
                 checkpoint_virtual_ms=args.checkpoint_virtual_ms,
+                event_spacing_ms=args.event_spacing_ms,
             )
         )
         if args.actor
@@ -675,6 +704,7 @@ def main() -> None:
             trade_count=args.trades,
             page_rows=args.page_rows,
             max_closed_bars=args.max_closed_bars,
+            event_spacing_ms=args.event_spacing_ms,
         )
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))

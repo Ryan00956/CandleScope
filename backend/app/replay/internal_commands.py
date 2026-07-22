@@ -10,6 +10,7 @@ class InternalCommandType(str, Enum):
 
     ADJUST_CAPITAL = "_training_adjust_capital"
     REVEAL_HISTORY_AUTHORIZED = "_training_reveal_history"
+    FAST_FORWARD_EMPTY_ACCOUNT = "_training_fast_forward_empty_account"
 
     def __str__(self) -> str:
         return self.value

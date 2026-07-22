@@ -42,7 +42,9 @@ from .control import (
     validate_bar_duration_ms,
 )
 from .history import build_history_page
+from .fast_forward import FastForwardContext, FastForwardDecision, FastForwardPlanner
 from .models import (
+    FastForwardPlan,
     FundingMode,
     IntegrityMode,
     ReplaySource,
@@ -63,9 +65,13 @@ from .multitrack import (
 )
 from .storage import TrainingRunStore
 from .segments import ReplaySegmentManager
+from .trade_flow import ReplayTradeFlowAdapter
 
 if TYPE_CHECKING:
     from app.replay.service import ReplayService
+
+
+ADVANCE_PROGRESS_RETENTION_SECONDS = 2.0
 
 
 def _stored_counter(value: object, *, field_name: str) -> int:
@@ -108,6 +114,8 @@ class TrainingRunService:
             auto_gc_enabled=replay_service.settings.replay_segment_auto_gc_enabled,
         )
         self._run_id_factory = run_id_factory
+        self._fast_forward_planner = FastForwardPlanner()
+        self._trade_flow_adapter = ReplayTradeFlowAdapter()
         self._advance_jobs: dict[tuple[str, str], dict[str, object]] = {}
         self._run_actors: dict[str, TrainingRunActor] = {}
 
@@ -207,6 +215,126 @@ class TrainingRunService:
         normalized = self._identifier(run_id, field_name="run_id")
         projection = await self.store.get_market_tracks(normalized)
         return await self._with_global_clock(normalized, projection)
+
+    async def get_fast_forward_plan(
+        self,
+        run_id: str,
+        *,
+        target_virtual_time_ms: int,
+    ) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        binding = await self.store.run_binding(normalized)
+        session = await self.replay_service.get_session(str(binding["adapter_session_id"]))
+        snapshot = self._snapshot(session)
+        projection = await self.store.get_market_tracks(normalized)
+        tracks = projection.get("tracks")
+        if not isinstance(tracks, list):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "market tracks projection is invalid",
+                status_code=503,
+            )
+        decision = self._plan_fast_forward(
+            binding=binding,
+            snapshot=snapshot,
+            tracks=tuple(
+                cast(Mapping[str, object], track)
+                for track in tracks
+                if isinstance(track, Mapping)
+            ),
+            target_virtual_time_ms=target_virtual_time_ms,
+        )
+        return {
+            "protocol": "replay.v2",
+            "run_id": normalized,
+            "plan": decision.to_dict(),
+        }
+
+    async def trade_flow_page(
+        self,
+        run_id: str,
+        *,
+        track_id: str | None,
+        after_sequence: int | None,
+        limit: int,
+    ) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1_000:
+            raise TrainingRunError(
+                "REPLAY_TRADE_FLOW_INVALID",
+                "trade-flow limit must be between 1 and 1000",
+                status_code=422,
+            )
+        binding = await self.store.run_binding(normalized)
+        if str(binding["source_kind"]) != "AGG_TRADE":
+            raise TrainingRunError(
+                "REPLAY_TRADE_FLOW_UNSUPPORTED_SOURCE",
+                "BAR runs cannot expose aggregate-trade tape or exact order flow",
+                status_code=409,
+                details={
+                    "tape": "UNSUPPORTED_SOURCE_MODE",
+                    "order_flow": "UNSUPPORTED_SOURCE_MODE",
+                },
+            )
+        selected_track_id = (
+            str(binding["selected_track_id"])
+            if track_id is None
+            else self._identifier(track_id, field_name="track_id")
+        )
+        track = await self.store.get_market_track(normalized, selected_track_id)
+        if track.get("state") in {"DEGRADED", "ERROR"} or track.get(
+            "degraded_reason"
+        ) is not None:
+            raise TrainingRunError(
+                "REPLAY_TRADE_FLOW_DEGRADED",
+                "market track continuity is degraded; clear tape and resync",
+                status_code=409,
+                details={"clear_projection": True, "track_id": selected_track_id},
+            )
+        session_id = self._track_session_id(track)
+        session = await self.replay_service.get_session(session_id)
+        snapshot = self._snapshot(session)
+        cursor = _stored_mapping(snapshot.get("cursor"), field_name="adapter cursor")
+        revealed_sequence = _stored_counter(
+            cursor.get("source_sequence"), field_name="source_sequence"
+        )
+        bounded_limit = min(limit, self.replay_service.settings.trade_page_rows)
+        if after_sequence is None:
+            after = max(0, revealed_sequence - bounded_limit)
+        else:
+            after = _stored_counter(after_sequence, field_name="after_sequence")
+        if after > revealed_sequence:
+            raise TrainingRunError(
+                "REPLAY_TRADE_FLOW_RESYNC_REQUIRED",
+                "trade-flow cursor is ahead of the revealed replay prefix",
+                status_code=409,
+                details={
+                    "clear_projection": True,
+                    "revealed_sequence": revealed_sequence,
+                },
+            )
+        try:
+            page = await self.replay_service.source_events_page(
+                session_id,
+                after_sequence=after,
+                limit=bounded_limit,
+            )
+        except ReplayDomainError as exc:
+            raise TrainingRunError(
+                "REPLAY_TRADE_FLOW_DEGRADED",
+                "aggregate-trade page failed continuity validation",
+                status_code=409,
+                details={
+                    "clear_projection": True,
+                    "reason": exc.code.value,
+                    "track_id": selected_track_id,
+                },
+            ) from exc
+        return self._trade_flow_adapter.project(
+            run_id=normalized,
+            track_id=selected_track_id,
+            source_page=page,
+        )
 
     async def get_market_tracks_by_session(
         self,
@@ -991,6 +1119,34 @@ class TrainingRunService:
         )
         target = plan.get("target_virtual_time_ms")
         if v1_type is CommandType.ADVANCE_BY and isinstance(target, int):
+            decision = self._plan_fast_forward(
+                binding=binding,
+                snapshot=snapshot,
+                tracks=tuple(all_tracks),
+                target_virtual_time_ms=target,
+            )
+            translated_plan = plan
+            plan = {
+                **decision.to_dict(),
+                **{
+                    key: value
+                    for key, value in translated_plan.items()
+                    if key
+                    in {
+                        "grain",
+                        "display_interval",
+                        "viewer_revision",
+                        "target_virtual_time_ms",
+                    }
+                },
+            }
+            if decision.plan is FastForwardPlan.BLOCKED:
+                raise TrainingRunError(
+                    "REPLAY_FAST_FORWARD_BLOCKED",
+                    decision.explanation,
+                    status_code=409,
+                    details={"plan": plan},
+                )
             result = await self._execute_target_scan(
                 command=command,
                 session_id=session_id,
@@ -1942,6 +2098,9 @@ class TrainingRunService:
             )
 
         current_time = self._cursor_time(selected_snapshot)
+        fast_forward_plan: dict[str, object] | None = None
+        advance_job: dict[str, object] | None = None
+        advance_key: tuple[str, str] | None = None
         if command.type is ReplayV2CommandType.STEP_EVENT:
             step_event_payload = self._exact_payload(command.payload, {"count"})
             count = control_count(step_event_payload["count"])
@@ -1982,27 +2141,126 @@ class TrainingRunService:
                     "multi-track control requires an exact global target",
                     status_code=409,
                 )
-            total_events = list(
-                await self._advance_full_tracks_to(
-                    command=command,
+            if command.type in {
+                ReplayV2CommandType.ADVANCE_BY,
+                ReplayV2CommandType.ADVANCE_TO,
+            }:
+                decision = self._plan_fast_forward(
                     binding=binding,
+                    snapshot=selected_snapshot,
                     tracks=ordered,
                     target_virtual_time_ms=target,
                 )
-            )
+                fast_forward_plan = decision.to_dict()
+                if decision.plan is FastForwardPlan.BLOCKED:
+                    raise TrainingRunError(
+                        "REPLAY_FAST_FORWARD_BLOCKED",
+                        decision.explanation,
+                        status_code=409,
+                        details={"plan": fast_forward_plan},
+                    )
+                advance_key = (command.run_id, command.command_id)
+                if advance_key in self._advance_jobs:
+                    raise TrainingRunError(
+                        "ADVANCE_ALREADY_ACTIVE",
+                        "advance command is already active",
+                        status_code=409,
+                    )
+                advance_job = {
+                    "cancel": asyncio.Event(),
+                    "client_instance_id": command.client_instance_id,
+                    "status": "RUNNING",
+                    "initial_virtual_time_ms": current_time,
+                    "target_virtual_time_ms": target,
+                    "current_virtual_time_ms": current_time,
+                    "consumed": 0,
+                    "chunks": 0,
+                    "cancelable": True,
+                    "plan": dict(fast_forward_plan),
+                    "chunk_event_limit": 1,
+                    "queue_high_water": 0,
+                    "stable_order_truncated": False,
+                }
+                self._advance_jobs[advance_key] = advance_job
+            try:
+                total_events = list(
+                    await self._advance_full_tracks_to(
+                        command=command,
+                        binding=binding,
+                        tracks=ordered,
+                        target_virtual_time_ms=target,
+                        job=advance_job,
+                    )
+                )
+            except BaseException:
+                if advance_key is not None:
+                    self._advance_jobs.pop(advance_key, None)
+                raise
+            if advance_key is not None:
+                assert advance_job is not None
+                advance_job["cancelable"] = False
+                # The command response and a racing progress poll must agree
+                # that a terminal job cannot still be cancelled.
+                asyncio.get_running_loop().call_later(
+                    ADVANCE_PROGRESS_RETENTION_SECONDS,
+                    self._advance_jobs.pop,
+                    advance_key,
+                    None,
+                )
         selected = await self.replay_service.get_session(selected_session_id)
         final = self._snapshot(selected)
         viewer = await self.store.get_viewer_state(command.run_id)
+        if fast_forward_plan is not None:
+            equivalence = fast_forward_plan.get("equivalence")
+            if isinstance(equivalence, Mapping):
+                fast_forward_plan["equivalence"] = {
+                    **dict(equivalence),
+                    "status": "REFERENCE_PATH",
+                    "observed_state_hash": final["state_hash"],
+                    "observed_cursor": dict(
+                        _stored_mapping(final["cursor"], field_name="adapter cursor")
+                    ),
+                    "consumed_source_events": (
+                        int(advance_job["consumed"])
+                        if advance_job is not None
+                        else len(total_events)
+                    ),
+                }
+            if advance_job is not None:
+                advance_job["plan"] = dict(fast_forward_plan)
         return self._result_payload(
             command=command,
             session_id=selected_session_id,
             snapshot=final,
             viewer=viewer.to_dict(),
             data={
-                "consumed": len(total_events),
+                "consumed": (
+                    int(advance_job["consumed"])
+                    if advance_job is not None
+                    else len(total_events)
+                ),
+                "cancelled": (
+                    advance_job is not None
+                    and advance_job["status"] == "CANCELLED"
+                ),
                 "full_track_count": len(ordered),
                 "ordering_version": GLOBAL_ORDERING_VERSION,
                 "stable_order": [event.to_dict() for event in total_events],
+                **(
+                    {
+                        "stable_order_truncated": bool(
+                            advance_job["stable_order_truncated"]
+                        ),
+                        "progress": self._public_progress(advance_job),
+                    }
+                    if advance_job is not None
+                    else {}
+                ),
+                **(
+                    {"plan": fast_forward_plan}
+                    if fast_forward_plan is not None
+                    else {}
+                ),
             },
         )
 
@@ -2324,9 +2582,15 @@ class TrainingRunService:
         binding: Mapping[str, object],
         tracks: tuple[Mapping[str, object], ...],
         target_virtual_time_ms: int,
+        job: dict[str, object] | None = None,
     ) -> tuple[StableMarketEvent, ...]:
         all_events: list[StableMarketEvent] = []
         for _wave_index in range(10_000):
+            if job is not None:
+                cancel = job.get("cancel")
+                if isinstance(cancel, asyncio.Event) and cancel.is_set():
+                    job["status"] = "CANCELLED"
+                    return tuple(all_events)
             snapshots: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
             times: set[int] = set()
             next_times: list[int] = []
@@ -2379,6 +2643,9 @@ class TrainingRunService:
                 )
             current = next(iter(times))
             if current >= target_virtual_time_ms:
+                if job is not None:
+                    job["status"] = "COMPLETED"
+                    job["current_virtual_time_ms"] = current
                 return tuple(all_events)
             wave_time = min(next_times) if next_times else target_virtual_time_ms
             wave_events: list[StableMarketEvent] = []
@@ -2455,8 +2722,23 @@ class TrainingRunService:
                 ordered_wave = stable_market_event_order(wave_events)
                 await self.store.record_global_events(command.run_id, ordered_wave)
                 all_events.extend(ordered_wave)
+                if job is not None and len(all_events) > 512:
+                    del all_events[:-512]
+                    job["stable_order_truncated"] = True
             else:
                 await self.store.checkpoint_market_tracks(command.run_id)
+            if job is not None:
+                job["consumed"] = int(job["consumed"]) + len(wave_events)
+                job["chunks"] = int(job["chunks"]) + 1
+                job["current_virtual_time_ms"] = wave_time
+                job["queue_high_water"] = max(
+                    int(job["queue_high_water"]),
+                    len(tracks),
+                )
+                cancel = job.get("cancel")
+                if isinstance(cancel, asyncio.Event) and cancel.is_set():
+                    job["status"] = "CANCELLED"
+                    return tuple(all_events)
             await asyncio.sleep(0)
         raise TrainingRunError(
             "REPLAY_SCAN_LIMIT_EXCEEDED",
@@ -3121,6 +3403,102 @@ class TrainingRunService:
             },
         }
 
+    def _plan_fast_forward(
+        self,
+        *,
+        binding: Mapping[str, object],
+        snapshot: Mapping[str, object],
+        tracks: tuple[Mapping[str, object], ...],
+        target_virtual_time_ms: int,
+    ) -> FastForwardDecision:
+        if (
+            isinstance(target_virtual_time_ms, bool)
+            or not isinstance(target_virtual_time_ms, int)
+            or target_virtual_time_ms < 0
+        ):
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "fast-forward target must be a non-negative integer",
+                status_code=422,
+            )
+        cursor = _stored_mapping(snapshot.get("cursor"), field_name="adapter cursor")
+        current = _stored_counter(
+            cursor.get("virtual_time_ms"), field_name="virtual_time_ms"
+        )
+        full_tracks = tuple(
+            track for track in tracks if track.get("subscription_tier") == "FULL"
+        )
+        dependencies: set[str] = set()
+        blocking: set[str] = set()
+        if len(full_tracks) > 1:
+            dependencies.add("MULTI_TRACK_GLOBAL_ORDER")
+        if str(binding.get("funding_mode")) != "OFF":
+            dependencies.add("FUNDING_SCHEDULE")
+        if str(binding.get("account_status")) != "ACTIVE":
+            dependencies.add("ACCOUNT_RISK_STATE")
+        if str(binding.get("book_mode", "OFF")) != "OFF":
+            dependencies.add("BOOK_ASSISTED_PATH")
+        if snapshot.get("state") == "ERROR" or snapshot.get("degraded_reason") is not None:
+            blocking.add("SESSION_DEGRADED")
+        terminal_order_states = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
+        for track in full_tracks or tracks:
+            if track.get("state") in {"DEGRADED", "ERROR"} or track.get(
+                "degraded_reason"
+            ) is not None:
+                blocking.add("TRACK_DEGRADED")
+            position = track.get("position")
+            if isinstance(position, Mapping) and position.get("quantity") not in {
+                None,
+                "0",
+                0,
+            }:
+                dependencies.add("OPEN_POSITION")
+            count = track.get("open_order_count")
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                dependencies.add("OPEN_ORDER")
+        components = snapshot.get("components")
+        if isinstance(components, Mapping):
+            orders = components.get("orders")
+            if isinstance(orders, (list, tuple)) and any(
+                isinstance(order, Mapping)
+                and order.get("status") not in terminal_order_states
+                for order in orders
+            ):
+                dependencies.add("OPEN_ORDER")
+            position = components.get("position")
+            if isinstance(position, Mapping) and position.get("quantity") not in {
+                None,
+                "0",
+                0,
+            }:
+                dependencies.add("OPEN_POSITION")
+        optimization_enabled = bool(
+            self.replay_service.settings.replay_fast_forward_optimization_enabled
+        )
+        optimized_candidate = optimization_enabled and not dependencies and not blocking
+        chunk_event_limit = (
+            min(
+                4_096,
+                self.replay_service.settings.event_buffer_size,
+                self.replay_service.settings.trade_page_rows,
+            )
+            if optimized_candidate
+            else min(32, self.replay_service.settings.event_buffer_size)
+        )
+        context = FastForwardContext(
+            source_kind=ReplaySource(str(binding["source_kind"])),
+            current_virtual_time_ms=current,
+            target_virtual_time_ms=target_virtual_time_ms,
+            dataset_epoch=str(binding["dataset_epoch"]),
+            optimization_enabled=optimization_enabled,
+            path_dependencies=tuple(dependencies),
+            blocking_reasons=tuple(blocking),
+            chunk_event_limit=max(1, chunk_event_limit),
+            tail_event_count=(min(32, chunk_event_limit) if optimized_candidate else 0),
+            track_count=max(1, len(full_tracks)),
+        )
+        return self._fast_forward_planner.plan(context)
+
     async def get_advance_progress(
         self,
         run_id: str,
@@ -3176,6 +3554,11 @@ class TrainingRunService:
             "chunks": 0,
             "simulated_account_liquidations": 0,
             "cancelable": bool(plan.get("cancelable", False)),
+            "plan": dict(plan),
+            "chunk_event_limit": _stored_counter(
+                plan.get("chunk_event_limit", 32), field_name="chunk_event_limit"
+            ),
+            "queue_high_water": 0,
         }
         self._advance_jobs[key] = job
         try:
@@ -3184,9 +3567,15 @@ class TrainingRunService:
                     job["status"] = "CANCELLED"
                     break
                 current_response = await self.replay_service.get_session(session_id)
-                current = current_response["snapshot"]
-                cursor = current["cursor"]
-                current_time = int(cursor["virtual_time_ms"])
+                current = _stored_mapping(
+                    current_response.get("snapshot"), field_name="adapter snapshot"
+                )
+                cursor = _stored_mapping(
+                    current.get("cursor"), field_name="adapter cursor"
+                )
+                current_time = _stored_counter(
+                    cursor.get("virtual_time_ms"), field_name="virtual_time_ms"
+                )
                 job["current_virtual_time_ms"] = current_time
                 if (
                     current_time >= target_virtual_time_ms
@@ -3197,15 +3586,34 @@ class TrainingRunService:
                 chunk = await self.replay_service.plan_source_chunk(
                     session_id,
                     target_time_ms=target_virtual_time_ms,
-                    max_events=32,
+                    max_events=_stored_counter(
+                        job.get("chunk_event_limit"), field_name="chunk_event_limit"
+                    ),
                 )
                 if cancel.is_set():
                     job["status"] = "CANCELLED"
                     break
-                count = int(chunk["event_count"])
+                count = _stored_counter(
+                    chunk.get("event_count"), field_name="event_count"
+                )
+                v1_type: CommandType | InternalCommandType
+                payload: dict[str, object]
                 if count > 0:
-                    v1_type = CommandType.STEP
-                    payload: dict[str, object] = {"count": count}
+                    if plan.get("mode") == FastForwardPlan.AGGREGATE_SCAN.value:
+                        v1_type = InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT
+                        payload = {
+                            "count": count,
+                            "tail_events": min(
+                                count,
+                                _stored_counter(
+                                    plan.get("tail_event_count", 0),
+                                    field_name="tail_event_count",
+                                ),
+                            ),
+                        }
+                    else:
+                        v1_type = CommandType.STEP
+                        payload = {"count": count}
                 else:
                     # The v1 adapter bounds one duration command to 30 days.
                     duration = min(
@@ -3217,17 +3625,26 @@ class TrainingRunService:
                     protocol=REPLAY_PROTOCOL,
                     command_id=self._advance_part_id(
                         command,
-                        source_sequence=int(cursor["source_sequence"]),
+                        source_sequence=_stored_counter(
+                            cursor.get("source_sequence"),
+                            field_name="source_sequence",
+                        ),
                         virtual_time_ms=current_time,
                         target_virtual_time_ms=target_virtual_time_ms,
                     ),
                     client_instance_id=command.client_instance_id,
-                    expected_revision=int(current["revision"]),
+                    expected_revision=_stored_counter(
+                        current.get("revision"), field_name="revision"
+                    ),
                     type=v1_type,
                     payload=payload,
                 )
                 try:
-                    acknowledged = await self.replay_service.command(session_id, part)
+                    acknowledged = await self.replay_service.command(
+                        session_id,
+                        part,
+                        _training_internal=isinstance(v1_type, InternalCommandType),
+                    )
                 except ReplayDomainError as exc:
                     raise TrainingRunError(
                         exc.code.value,
@@ -3235,15 +3652,34 @@ class TrainingRunService:
                         status_code=exc.http_status,
                         details=exc.details,
                     ) from exc
-                job["chunks"] = int(job["chunks"]) + 1
-                job["consumed"] = int(job["consumed"]) + int(
-                    acknowledged["data"].get("consumed", 0)
+                acknowledged_data = _stored_mapping(
+                    acknowledged.get("data"), field_name="adapter command data"
                 )
-                job["current_virtual_time_ms"] = int(
-                    acknowledged["cursor"]["virtual_time_ms"]
+                acknowledged_cursor = _stored_mapping(
+                    acknowledged.get("cursor"), field_name="adapter cursor"
                 )
-                job["simulated_account_liquidations"] = int(
-                    job["simulated_account_liquidations"]
+                job["chunks"] = (
+                    _stored_counter(job.get("chunks"), field_name="chunks") + 1
+                )
+                job["queue_high_water"] = max(
+                    _stored_counter(
+                        job.get("queue_high_water"), field_name="queue_high_water"
+                    ),
+                    1,
+                )
+                job["consumed"] = _stored_counter(
+                    job.get("consumed"), field_name="consumed"
+                ) + _stored_counter(
+                    acknowledged_data.get("consumed", 0),
+                    field_name="acknowledged consumed",
+                )
+                job["current_virtual_time_ms"] = _stored_counter(
+                    acknowledged_cursor.get("virtual_time_ms"),
+                    field_name="virtual_time_ms",
+                )
+                job["simulated_account_liquidations"] = _stored_counter(
+                    job.get("simulated_account_liquidations"),
+                    field_name="simulated_account_liquidations",
                 ) + await self._reconcile_liquidations(
                     run_id=command.run_id,
                     client_instance_id=command.client_instance_id,
@@ -3252,8 +3688,32 @@ class TrainingRunService:
                 await asyncio.sleep(0)
 
             final_response = await self.replay_service.get_session(session_id)
-            final = final_response["snapshot"]
+            final = _stored_mapping(
+                final_response.get("snapshot"), field_name="adapter snapshot"
+            )
+            final_cursor = _stored_mapping(
+                final.get("cursor"), field_name="adapter cursor"
+            )
             viewer = await self.store.get_viewer_state(command.run_id)
+            resolved_plan = dict(plan)
+            equivalence = resolved_plan.get("equivalence")
+            if isinstance(equivalence, Mapping):
+                resolved_plan["equivalence"] = {
+                    **dict(equivalence),
+                    "status": (
+                        "VERIFIED_BY_EXACT_REDUCER_PATH"
+                        if resolved_plan.get("optimized") is True
+                        else "REFERENCE_PATH"
+                    ),
+                    "observed_state_hash": final["state_hash"],
+                    "observed_cursor": dict(final_cursor),
+                    "consumed_source_events": _stored_counter(
+                        job.get("consumed"), field_name="consumed"
+                    ),
+                }
+            job["plan"] = resolved_plan
+            if job.get("status") in {"COMPLETED", "CANCELLED"}:
+                job["cancelable"] = False
             progress = self._public_progress(job)
             return {
                 "protocol": "replay.v2",
@@ -3267,21 +3727,33 @@ class TrainingRunService:
                 "cursor": final["cursor"],
                 "viewer_state": viewer.to_dict(),
                 "data": {
-                    "consumed": int(job["consumed"]),
+                    "consumed": _stored_counter(
+                        job.get("consumed"), field_name="consumed"
+                    ),
                     "cancelled": job["status"] == "CANCELLED",
                     "target_virtual_time_ms": target_virtual_time_ms,
-                    "plan": dict(plan),
+                    "plan": resolved_plan,
                     "progress": progress,
-                    "simulated_account_liquidations": int(
-                        job["simulated_account_liquidations"]
+                    "simulated_account_liquidations": _stored_counter(
+                        job.get("simulated_account_liquidations"),
+                        field_name="simulated_account_liquidations",
                     ),
                 },
             }
         finally:
-            # Keep a completed snapshot available through the end of this event
-            # loop turn so a racing cancel/progress request gets a stable answer.
-            await asyncio.sleep(0)
-            self._advance_jobs.pop(key, None)
+            if job.get("status") in {"COMPLETED", "CANCELLED"}:
+                # The browser starts polling while the command response is still
+                # in flight. Retain only terminal progress briefly so that race
+                # returns 200 without leaving a completed job cancelable.
+                job["cancelable"] = False
+                asyncio.get_running_loop().call_later(
+                    ADVANCE_PROGRESS_RETENTION_SECONDS,
+                    self._advance_jobs.pop,
+                    key,
+                    None,
+                )
+            else:
+                self._advance_jobs.pop(key, None)
 
     async def _cancel_advance(
         self,
@@ -3342,9 +3814,22 @@ class TrainingRunService:
 
     @staticmethod
     def _public_progress(job: Mapping[str, object]) -> dict[str, object]:
-        initial = int(job["initial_virtual_time_ms"])
-        target = int(job["target_virtual_time_ms"])
-        current = min(target, max(initial, int(job["current_virtual_time_ms"])))
+        initial = _stored_counter(
+            job.get("initial_virtual_time_ms"), field_name="initial_virtual_time_ms"
+        )
+        target = _stored_counter(
+            job.get("target_virtual_time_ms"), field_name="target_virtual_time_ms"
+        )
+        current = min(
+            target,
+            max(
+                initial,
+                _stored_counter(
+                    job.get("current_virtual_time_ms"),
+                    field_name="current_virtual_time_ms",
+                ),
+            ),
+        )
         span = target - initial
         ratio_ppm = (
             1_000_000 if span <= 0 else ((current - initial) * 1_000_000) // span
@@ -3354,9 +3839,19 @@ class TrainingRunService:
             "current_virtual_time_ms": current,
             "target_virtual_time_ms": target,
             "ratio_ppm": ratio_ppm,
-            "consumed": int(job["consumed"]),
-            "chunks": int(job["chunks"]),
+            "consumed": _stored_counter(job.get("consumed"), field_name="consumed"),
+            "chunks": _stored_counter(job.get("chunks"), field_name="chunks"),
             "cancelable": bool(job["cancelable"]),
+            "commit_boundary": "COMPLETE_ACTOR_COMMAND",
+            "chunk_event_limit": _stored_counter(
+                job.get("chunk_event_limit", 32), field_name="chunk_event_limit"
+            ),
+            "queue_high_water": _stored_counter(
+                job.get("queue_high_water", 0), field_name="queue_high_water"
+            ),
+            "plan": dict(
+                _stored_mapping(job.get("plan"), field_name="fast-forward plan")
+            ),
         }
 
     @staticmethod

@@ -11,6 +11,7 @@ import type {
   ReplayV2Json,
 } from "../replayV2Types.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
+import { useReplayTradeFlow } from "../useReplayTradeFlow.js";
 import type { ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 
 const TERMINAL_ORDER_STATES = new Set(["FILLED", "CANCELED", "REJECTED", "EXPIRED"]);
@@ -19,6 +20,7 @@ const RAIL_TABS = [
   ["positions", "持仓"],
   ["orders", "订单"],
   ["fills", "成交"],
+  ["flow", "订单流"],
   ["risk", "账户与风险"],
   ["notes", "记录"],
 ] as const;
@@ -80,6 +82,12 @@ export function ReplayPaperTradingDock({ runtime, viewer, indicatorStatus }: Rep
   const contract = contractPortfolio(portfolio);
   const selectedTrackId = viewer?.viewerState?.selected_track_id ?? "track-1";
   const selectedTrack = viewer?.marketTracks?.tracks.find((item) => item.track_id === selectedTrackId);
+  const tradeFlow = useReplayTradeFlow({
+    runId: viewer?.viewerState?.run_id ?? null,
+    trackId: selectedTrackId,
+    sourceKind: config?.source_kind ?? null,
+    revealedSequence: store.sourceSequence,
+  });
   const settlementAsset = selectedTrack?.settlement_asset ?? store.account?.quote_asset ?? "";
   const portfolioPositions = portfolio?.positions ?? [];
   const structuredOrders: readonly JsonRecord[] = contract?.orders
@@ -246,6 +254,50 @@ export function ReplayPaperTradingDock({ runtime, viewer, indicatorStatus }: Rep
               </article>
             );
           })}
+        </section>
+      )}
+
+      {activeTab === "flow" && (
+        <section
+          className="replay-rail-section replay-trade-flow"
+          data-replay-panel="trade-flow"
+          data-replay-trade-flow-state={tradeFlow.state}
+        >
+          <h2>聚合成交 Tape 与 CVD</h2>
+          {tradeFlow.state === "UNSUPPORTED_SOURCE_MODE" && (
+            <div className="replay-capability-boundary" role="status">
+              <strong>UNSUPPORTED_SOURCE_MODE</strong>
+              <p>BAR 归档没有聚合成交序列，不能生成 Tape 或订单流；这里不会把缺失历史显示成 0。</p>
+            </div>
+          )}
+          {tradeFlow.state === "LOADING" && <p className="replay-empty">正在读取已揭示的有界聚合成交页…</p>}
+          {tradeFlow.state === "DEGRADED" && (
+            <div className="replay-capability-boundary" role="alert">
+              <strong>DEGRADED · 已清空</strong>
+              <p>{tradeFlow.error ?? "订单流连续性校验失败"}</p>
+            </div>
+          )}
+          {tradeFlow.state === "CONTIGUOUS" && (<>
+            <dl className="replay-metrics-grid">
+              <div><dt>Window CVD</dt><dd>{tradeFlow.cvd}</dd></div>
+              <div><dt>Page delta</dt><dd>{tradeFlow.pageDelta}</dd></div>
+            </dl>
+            <small>AVAILABLE_EXACT tape · AVAILABLE_APPROX aggressor · {tradeFlow.fidelity}</small>
+            <small>Window CVD 从当前连续有界窗口的起点累加，不冒充全历史 CVD。</small>
+            {tradeFlow.tape.length === 0 ? (
+              <p className="replay-empty">当前已揭示范围内暂无聚合成交。</p>
+            ) : (
+              <div className="replay-trade-flow-list">
+                {[...tradeFlow.tape].reverse().map((item) => (
+                  <article key={item.source_sequence} data-aggressor-side={item.aggressor_side}>
+                    <strong>{item.aggressor_side} {item.quantity} @ {item.price}</strong>
+                    <span>Δ {item.cvd_delta} · agg #{item.agg_trade_id}</span>
+                    <small>{time(item.trade_time_ms)} · {item.raw_trade_count} raw trades aggregated</small>
+                  </article>
+                ))}
+              </div>
+            )}
+          </>)}
         </section>
       )}
 

@@ -6,6 +6,9 @@ export default function PluginPlatformStatus({ runtime }: { runtime: PluginPlatf
   return (
     <div className="plugin-status-slot" data-plugin-slot="statusArea">
       {runtime.view.registries.statusArea.map((view) => {
+        if (view.configuration.renderer === "sandbox") {
+          return <span key={view.id}>Plugin status unavailable</span>;
+        }
         const candidate = projections.get(view.id);
         const projection = candidate
           && candidate.pluginId === view.pluginId

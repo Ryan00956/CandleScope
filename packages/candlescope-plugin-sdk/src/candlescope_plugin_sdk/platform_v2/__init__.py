@@ -7,11 +7,13 @@ from .constants import (
     DEFAULT_MAX_IN_FLIGHT,
     DEFAULT_MAX_JSON_DEPTH,
     DEFAULT_MAX_STRING_BYTES,
+    DEFAULT_MAX_UI_BRIDGE_MESSAGE_BYTES,
     HOST_API_V1,
     JSONRPC_VERSION,
     MANIFEST_SCHEMA_VERSION,
     PLATFORM_SDK_API_VERSION,
     PLUGIN_PROTOCOL_V2,
+    UI_BRIDGE_V1,
 )
 from .errors import PlatformContractError, PlatformProtocolError
 from .json_codec import (
@@ -97,6 +99,7 @@ __all__ = [
     "DEFAULT_MAX_IN_FLIGHT",
     "DEFAULT_MAX_JSON_DEPTH",
     "DEFAULT_MAX_STRING_BYTES",
+    "DEFAULT_MAX_UI_BRIDGE_MESSAGE_BYTES",
     "DeferredInvocation",
     "FrontendDefinition",
     "FrontendSurface",
@@ -142,6 +145,7 @@ __all__ = [
     "RenderBudget",
     "SymbolsReadRequest",
     "TradesReadRequest",
+    "UI_BRIDGE_V1",
     "canonical_dumps",
     "canonical_sha256",
     "descriptor_from_manifest",

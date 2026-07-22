@@ -58,11 +58,52 @@ function plugin(id = "acme.scanner", available = true) {
   };
 }
 
-function catalog(plugins = [plugin()]) {
+function catalog<T = ReturnType<typeof plugin>>(plugins: T[] = [plugin()] as T[]) {
   return {
     schemaVersion: "candlescope.plugin-catalog/1",
     platform: { enabled: true, started: true, status: "ok", registryRevision: 1 },
     plugins,
+  };
+}
+
+function sandboxPlugin() {
+  const id = "acme.sandbox";
+  return {
+    id,
+    name: "Sandbox",
+    version: "1.0.0",
+    publisher: "acme",
+    state: "active",
+    enabled: true,
+    trustLevel: "untrusted",
+    available: true,
+    permissions: {
+      activationReady: true,
+      requiredSatisfied: true,
+      requiredPermissionIds: [],
+      permissions: [],
+    },
+    contributions: [{
+      id: `${id}.main-view`,
+      localId: "main-view",
+      kind: "view/1",
+      title: "Sandbox",
+      entrypointId: "main",
+      configuration: {
+        slot: "sidePanel",
+        renderer: "sandbox",
+        surface: "main-view",
+        asset: {
+          bundleDigest: `sha256:${"a".repeat(64)}`,
+          entry: "index.html",
+          protocol: "candlescope.ui-bridge/1",
+          sandbox: "allow-scripts",
+          cspProfile: "opaque-origin-v1",
+        },
+      },
+      available: true,
+    }],
+    runtime: { entrypoints: [{ entrypointId: "main", state: "stopped", generation: 0 }] },
   };
 }
 
@@ -93,6 +134,30 @@ test("fifty disabled plugins produce no commands, views, or settings", () => {
   const parsed = parsePluginCatalog(catalog(Array.from({ length: 50 }, (_, index) => plugin(`acme.disabled-${index}`, false))));
   const registries = buildPluginRegistries(parsed);
   assert.equal(Object.values(registries).flat().length, 0);
+});
+
+test("sandbox view catalog accepts only digest-addressed opaque-origin assets", () => {
+  const parsed = parsePluginCatalog(catalog([sandboxPlugin()]));
+  const registries = buildPluginRegistries(parsed);
+  const view = registries.sidePanel[0];
+  assert.equal(view?.configuration.renderer, "sandbox");
+  if (!view || view.configuration.renderer !== "sandbox") assert.fail("sandbox view missing");
+  assert.equal(view.configuration.asset.protocol, "candlescope.ui-bridge/1");
+  assert.equal(view.configuration.asset.bundleDigest, `sha256:${"a".repeat(64)}`);
+
+  const badDigest = catalog([sandboxPlugin()]);
+  badDigest.plugins[0]!.contributions[0]!.configuration.asset.bundleDigest = "sha256:abc";
+  assert.throws(() => parsePluginCatalog(badDigest), /invalid/);
+
+  const unsafeSlot = catalog([sandboxPlugin()]);
+  unsafeSlot.plugins[0]!.contributions[0]!.configuration.slot = "statusArea";
+  assert.throws(() => parsePluginCatalog(unsafeSlot), /invalid/);
+
+  const executableExtra = catalog([sandboxPlugin()]);
+  Object.assign(executableExtra.plugins[0]!.contributions[0]!.configuration, {
+    componentUrl: "https://untrusted.invalid/plugin.js",
+  });
+  assert.throws(() => parsePluginCatalog(executableExtra), /invalid/);
 });
 
 test("UI snapshot accepts scalar projections and rejects executable-shaped extras", () => {

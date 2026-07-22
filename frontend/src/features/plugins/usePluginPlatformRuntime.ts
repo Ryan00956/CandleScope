@@ -160,6 +160,7 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       openSettingsId,
       notice,
       markerSource: markerSourceRef.current!,
+      marketIdentity: { exchange, interval, marketType, symbol },
     },
     actions: {
       refresh,
@@ -197,10 +198,13 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     changeState,
     decidePermission,
     error,
+    exchange,
+    interval,
     invokeCommand,
     loading,
     managementAvailable,
     managerOpen,
+    marketType,
     notice,
     openSettingsId,
     openViewId,
@@ -208,6 +212,7 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     refresh,
     registries,
     snapshot,
+    symbol,
     withRefresh,
   ]);
 }

@@ -5,7 +5,9 @@ export type JsonValue = JsonScalar | JsonValue[] | { [key: string]: JsonValue };
 
 export type PluginPlacement = "commandPalette" | "topToolbar" | "chartContextMenu";
 export type PluginViewSlot = "sidePanel" | "bottomPanel" | "statusArea";
-export type PluginViewRenderer = "table" | "list" | "detail" | "status";
+export type PluginDeclarativeViewRenderer = "table" | "list" | "detail" | "status";
+export type PluginViewRenderer = PluginDeclarativeViewRenderer | "sandbox";
+export type PluginSandboxViewSlot = "sidePanel" | "bottomPanel";
 export type PluginFieldFormat = "text" | "number" | "percent" | "price" | "boolean" | "timestamp";
 
 export interface PluginJsonSchema {
@@ -59,11 +61,11 @@ export interface PluginViewField {
   format: PluginFieldFormat;
 }
 
-export interface PluginViewContribution extends ContributionBase {
+export interface PluginDeclarativeViewContribution extends ContributionBase {
   kind: "view/1";
   configuration: {
     slot: PluginViewSlot;
-    renderer: PluginViewRenderer;
+    renderer: PluginDeclarativeViewRenderer;
     source: { kind: "storage.document"; name: string; path: string[] };
     fields: PluginViewField[];
     maxItems: number;
@@ -71,6 +73,26 @@ export interface PluginViewContribution extends ContributionBase {
     primaryCommand?: string;
   };
 }
+
+export interface PluginSandboxViewContribution extends ContributionBase {
+  kind: "view/1";
+  configuration: {
+    slot: PluginSandboxViewSlot;
+    renderer: "sandbox";
+    surface: string;
+    asset: {
+      bundleDigest: string;
+      entry: string;
+      protocol: "candlescope.ui-bridge/1";
+      sandbox: "allow-scripts";
+      cspProfile: "opaque-origin-v1";
+    };
+  };
+}
+
+export type PluginViewContribution =
+  | PluginDeclarativeViewContribution
+  | PluginSandboxViewContribution;
 
 export type PluginUiContribution =
   | PluginCommandContribution
@@ -120,7 +142,7 @@ export interface PluginViewProjection {
   pluginId: string;
   title: string;
   slot: PluginViewSlot;
-  renderer: PluginViewRenderer;
+  renderer: PluginDeclarativeViewRenderer;
   state: "empty" | "ready" | "error";
   sourceRevision?: number;
   errorCode?: "PLUGIN_VIEW_DATA_INVALID";
@@ -214,6 +236,7 @@ export interface PluginPlatformRuntime {
     openSettingsId: string | null;
     notice: string | null;
     markerSource: ExternalMarkerSource;
+    marketIdentity: PluginMarketIdentity;
   };
   actions: {
     refresh(): Promise<void>;

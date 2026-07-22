@@ -5,6 +5,7 @@ import type {
   PluginCatalogPlugin,
   PluginChartLayer,
   PluginCommandContribution,
+  PluginDeclarativeViewRenderer,
   PluginFieldFormat,
   PluginJsonSchema,
   PluginManagementDetail,
@@ -14,17 +15,19 @@ import type {
   PluginUiSnapshot,
   PluginViewContribution,
   PluginViewProjection,
-  PluginViewRenderer,
   PluginViewSlot,
 } from "./pluginPlatformTypes.js";
 
 const PLUGIN_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/;
 const LOCAL_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
 const FIELD = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+const BUNDLE_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const SANDBOX_ENTRY = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\.html$/;
 const COLOR = /^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$/;
 const PLACEMENTS = new Set<PluginPlacement>(["commandPalette", "topToolbar", "chartContextMenu"]);
 const VIEW_SLOTS = new Set<PluginViewSlot>(["sidePanel", "bottomPanel", "statusArea"]);
-const VIEW_RENDERERS = new Set<PluginViewRenderer>(["table", "list", "detail", "status"]);
+const VIEW_RENDERERS = new Set<PluginDeclarativeViewRenderer>(["table", "list", "detail", "status"]);
+const SANDBOX_VIEW_SLOTS = new Set(["sidePanel", "bottomPanel"] as const);
 const FIELD_FORMATS = new Set<PluginFieldFormat>(["text", "number", "percent", "price", "boolean", "timestamp"]);
 
 type RecordValue = Record<string, unknown>;
@@ -181,6 +184,43 @@ function contribution(value: unknown, path: string, pluginId: string): PluginUiC
     if (parsedSchema.type !== "object" || defaults == null || typeof defaults !== "object" || Array.isArray(defaults)) fail(`${path}.configuration`);
     return { ...base, kind: "settings/1", configuration: { schema: parsedSchema, defaults } } satisfies PluginSettingsContribution;
   }
+  if (config.renderer === "sandbox") {
+    exact(config, ["slot", "renderer", "surface", "asset"], [], `${path}.configuration`);
+    const surface = string(config.surface, `${path}.configuration.surface`, 128);
+    if (!LOCAL_ID.test(surface) || surface !== base.localId) fail(`${path}.configuration.surface`);
+    const asset = record(config.asset, `${path}.configuration.asset`);
+    exact(asset, ["bundleDigest", "entry", "protocol", "sandbox", "cspProfile"], [], `${path}.configuration.asset`);
+    const bundleDigest = string(asset.bundleDigest, `${path}.configuration.asset.bundleDigest`, 71);
+    const entry = string(asset.entry, `${path}.configuration.asset.entry`, 256);
+    if (
+      !BUNDLE_DIGEST.test(bundleDigest)
+      || !SANDBOX_ENTRY.test(entry)
+      || entry.includes("..")
+      || entry.includes("//")
+      || entry.includes("\\")
+      || entry.includes(":")
+      || entry.includes("%")
+      || asset.protocol !== "candlescope.ui-bridge/1"
+      || asset.sandbox !== "allow-scripts"
+      || asset.cspProfile !== "opaque-origin-v1"
+    ) fail(`${path}.configuration.asset`);
+    return {
+      ...base,
+      kind: "view/1",
+      configuration: {
+        slot: oneOf(config.slot, SANDBOX_VIEW_SLOTS, `${path}.configuration.slot`),
+        renderer: "sandbox",
+        surface,
+        asset: {
+          bundleDigest,
+          entry,
+          protocol: "candlescope.ui-bridge/1",
+          sandbox: "allow-scripts",
+          cspProfile: "opaque-origin-v1",
+        },
+      },
+    } satisfies PluginViewContribution;
+  }
   exact(config, ["slot", "renderer", "source", "fields", "maxItems", "emptyState"], ["primaryCommand"], `${path}.configuration`);
   const source = record(config.source, `${path}.configuration.source`);
   exact(source, ["kind", "name", "path"], [], `${path}.configuration.source`);
@@ -249,7 +289,7 @@ function catalogPlugin(value: unknown, path: string, contributionIds: Set<string
     if (parsed) parsedContributions.push(parsed);
   }
   const commandIds = new Set(parsedContributions.filter((item) => item.kind === "command/1").map((item) => item.localId));
-  if (parsedContributions.some((item) => item.kind === "view/1" && item.configuration.primaryCommand !== undefined && !commandIds.has(item.configuration.primaryCommand))) {
+  if (parsedContributions.some((item) => item.kind === "view/1" && item.configuration.renderer !== "sandbox" && item.configuration.primaryCommand !== undefined && !commandIds.has(item.configuration.primaryCommand))) {
     fail(`${path}.contributions`);
   }
   return {

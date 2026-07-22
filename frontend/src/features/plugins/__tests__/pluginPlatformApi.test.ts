@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePluginSettingsValue } from "../pluginPlatformApi.js";
+import { parsePluginSettingsValue, sandboxPluginAssetUrl } from "../pluginPlatformApi.js";
 
 test("settings API unwraps the validated value from its revision envelope", () => {
   assert.deepEqual(parsePluginSettingsValue({
@@ -23,4 +23,15 @@ test("settings API fails closed when the revision envelope has no object value",
     () => parsePluginSettingsValue({ settings: { value: ["1h"] } }),
     /invalid/i,
   );
+});
+
+test("sandbox asset URLs are digest-addressed and reject path confusion", () => {
+  const digest = `sha256:${"b".repeat(64)}`;
+  assert.equal(
+    sandboxPluginAssetUrl("acme.sandbox", digest, "nested/index.html"),
+    `/api/v2/plugins/assets/acme.sandbox/${"b".repeat(64)}/nested/index.html`,
+  );
+  assert.throws(() => sandboxPluginAssetUrl("acme.sandbox", digest, "../index.html"), /invalid/);
+  assert.throws(() => sandboxPluginAssetUrl("acme.sandbox", "sha256:abc", "index.html"), /invalid/);
+  assert.throws(() => sandboxPluginAssetUrl("sandbox", digest, "index.html"), /invalid/);
 });

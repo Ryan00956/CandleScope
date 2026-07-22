@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "plugin": {
+    "id": "candlescope.sandbox-view",
+    "name": "Isolated Sandbox View",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "pythonModule": "candlescope_plugin_sdk.platform_v2.examples.sandbox_view",
+        "resourceProfile": "minimal",
+        "activationEvents": [
+          "onView"
+        ]
+      }
+    ]
+  },
+  "frontend": {
+    "assetsRoot": "web",
+    "surfaces": [
+      {
+        "id": "main-view",
+        "type": "sandbox",
+        "entry": "index.html",
+        "slot": "side-panel"
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "main-view",
+      "kind": "view/1",
+      "title": "Sandbox isolation lab",
+      "entrypoint": "main",
+      "configuration": {
+        "slot": "sidePanel",
+        "renderer": "sandbox",
+        "surface": "main-view"
+      }
+    }
+  ],
+  "permissions": {
+    "required": [],
+    "optional": []
+  },
+  "probes": []
+}

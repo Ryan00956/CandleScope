@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CandleScope Sandbox Isolation Lab</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">CandleScope UI Bridge v1</p>
+        <h1>Sandbox isolation lab</h1>
+        <p id="bridge-status" role="status">Waiting for the one-time bridge channel…</p>
+      </header>
+
+      <section class="context" aria-labelledby="context-title">
+        <h2 id="context-title">Host snapshot</h2>
+        <dl>
+          <div><dt>Lifecycle</dt><dd id="lifecycle">created</dd></div>
+          <div><dt>Theme</dt><dd id="theme">unknown</dd></div>
+          <div><dt>Locale</dt><dd id="locale">unknown</dd></div>
+          <div><dt>Market</dt><dd id="market">unknown</dd></div>
+          <div><dt>Generation</dt><dd id="generation">0</dd></div>
+        </dl>
+      </section>
+
+      <section aria-labelledby="probe-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="probe-title">Isolation probes</h2>
+            <p>Every probe runs inside the untrusted iframe.</p>
+          </div>
+          <button id="run-probes" type="button" disabled>Run probes</button>
+        </div>
+        <ul id="probe-results" aria-live="polite"></ul>
+      </section>
+
+      <section class="actions" aria-labelledby="actions-title">
+        <h2 id="actions-title">Bounded bridge actions</h2>
+        <p>The bridge accepts resize, accessibility announcement and contained-error messages only.</p>
+        <div>
+          <button id="resize" type="button" disabled>Request 520px height</button>
+          <button id="announce" type="button" disabled>Announce ready</button>
+          <button id="contained-error" type="button" class="danger" disabled>Trigger contained error</button>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

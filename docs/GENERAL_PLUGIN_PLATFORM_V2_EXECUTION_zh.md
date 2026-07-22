@@ -2,8 +2,8 @@
 
 > 状态：执行中；Phase 0 已完成（`381dd02`），Phase 1 已完成（`d29ad4d`），Phase 2
 > 已完成（`d755f27`），Phase 3 已完成（`eb7316b`），Phase 4 已完成（`e20d7c4`），
-> Phase 5 已完成（`b77444a`），Phase 6 已完成（`8f18080`），Phase 7 已完成实现与技术验收
-> （本阶段提交）。
+> Phase 5 已完成（`b77444a`），Phase 6 已完成（`8f18080`），Phase 7 已完成（`151b93a`），
+> Phase 8 已完成实现与技术验收（本阶段提交）。
 >
 > 基线：`codex/plugin-platform-v1@400e520`，2026-07-22。
 >
@@ -734,8 +734,8 @@ frontend/src/features/plugins/
 | Phase 4：权限与 OS 沙箱 | 已完成（`e20d7c4`） | Grant Store、Broker、隔离、审计 | 可开放受控 Host API |
 | Phase 5：核心后端扩展点 | 已完成（`b77444a`） | command/settings/storage/event/job | 最小通用插件平台 |
 | Phase 6：市场数据 consumer/图层 | 已完成（`8f18080`） | read/subscribe、Render IR layer | 扫描器、研究、图表工具 |
-| Phase 7：声明式前端 | 已完成（本阶段提交） | catalog、manager、native slots | 无任意 JS 的产品 UI |
-| Phase 8：Sandbox UI | 未开始 | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
+| Phase 7：声明式前端 | 已完成（`151b93a`） | catalog、manager、native slots | 无任意 JS 的产品 UI |
+| Phase 8：Sandbox UI | 已完成（本阶段提交） | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
 | Phase 9：网络/文件/HTTP gateway | 未开始 | 受控外部交互与命名空间 API | 集成型插件 |
 | Phase 10：数据提供器 | 未开始 | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
 | Phase 11：账户与交易 | 未开始 | secret broker、paper/live executor、risk gate | 高风险交易插件 |
@@ -959,7 +959,7 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 
 ## 23. Phase 7：声明式前端与插件管理器
 
-> 2026-07-22 已完成实现与技术验收。严格 `view/1`、公共 UI projection、原生 registry/
+> 2026-07-22 已完成实现与技术验收，并独立提交为 `151b93a`。严格 `view/1`、公共 UI projection、原生 registry/
 > settings/view/status/chart consumer、受保护 Plugin Manager、流式 `.cspkg` 安装与真实浏览器
 > Market Scanner 闭环已交付；证据与保留边界见
 > [`PLUGIN_PLATFORM_V2_PHASE7_zh.md`](PLUGIN_PLATFORM_V2_PHASE7_zh.md)。插件自定义 JS/iframe、
@@ -984,6 +984,12 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 - 插件 UI 异常不会使 AppShell error boundary 崩溃。
 
 ## 24. Phase 8：Sandbox UI 与 UI Bridge
+
+> 2026-07-22 已完成实现与技术验收。digest-addressed asset gateway、opaque-origin/
+> `credentialless` iframe、严格 CSP、`candlescope.ui-bridge/1`、Sandbox View reference plugin 与
+> 真实浏览器 12/12 隔离探针已交付；证据与保留边界见
+> [`PLUGIN_PLATFORM_V2_PHASE8_zh.md`](PLUGIN_PLATFORM_V2_PHASE8_zh.md)。当前 bridge capability 为空，
+> network/files/provider/账户/交易/Marketplace 仍未开放。
 
 ### 交付
 
@@ -1184,6 +1190,9 @@ Plugin Manager/diagnostics，不进入普通远程健康端点。
 - disabled 插件仍持有 job、stream、capability handle 或 UI channel。
 
 ## 33. 推荐的首个产品切片
+
+> 本节保留初始交付顺序。首个 Phase 7 切片已经完成，Phase 8 现已在其上追加受隔离的复杂 UI；
+> 这不改变首切片应保持只读、无任意 JavaScript 的原始产品风险边界。
 
 不要一次实现 Phase 0～13。首个可交付切片建议止于 Phase 7，并只做一个
 **只读 Market Scanner 插件**：

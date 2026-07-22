@@ -34,6 +34,26 @@ function publicPluginBase(): string {
   return `${API_BASE}/../v2/plugins`;
 }
 
+export function sandboxPluginAssetUrl(
+  pluginId: string,
+  bundleDigest: string,
+  entry: string,
+): string {
+  if (
+    !/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(pluginId)
+    || !/^sha256:[0-9a-f]{64}$/.test(bundleDigest)
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\.html$/.test(entry)
+    || entry.includes("..")
+    || entry.includes("//")
+    || entry.includes("\\")
+    || entry.includes(":")
+    || entry.includes("%")
+  ) throw new PluginPlatformApiError("Sandbox plugin asset identity is invalid", 400);
+  const digest = bundleDigest.slice("sha256:".length);
+  const path = entry.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  return `${publicPluginBase()}/assets/${encodeURIComponent(pluginId)}/${digest}/${path}`;
+}
+
 function loopback(hostname: string): boolean {
   return hostname === "localhost"
     || hostname === "::1"

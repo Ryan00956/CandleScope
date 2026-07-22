@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from candlescope_plugin_sdk.platform_v2 import HOST_API_V1, normalize_json
+from candlescope_plugin_sdk.platform_v2 import HOST_API_V1, UI_BRIDGE_V1, normalize_json
 
 from app.plugin_host import EntrypointProcessSpec, EntrypointSupervisor
 from app.plugin_installer_v2 import PlatformPluginInstaller
@@ -35,6 +35,12 @@ from app.plugin_security_v2.grants import (
 from app.plugin_security_v2.sandbox import SandboxPolicy
 
 from .adapters import CoreCapabilityAdapters
+from .assets import (
+    SANDBOX_ATTRIBUTE,
+    SANDBOX_CSP_PROFILE,
+    SandboxAsset,
+    load_sandbox_asset,
+)
 from .contracts import (
     CORE_CONTRIBUTION_KINDS,
     CoreContribution,
@@ -704,6 +710,62 @@ class CorePluginPlatform:
                 )
                 self.events.publish(event_id, {"pluginId": plugin_id})
 
+    @staticmethod
+    def _catalog_contribution(
+        item: CoreContribution, bundle: VerifiedPlatformBundle
+    ) -> dict[str, Any]:
+        value = item.to_catalog()
+        if item.kind != "view/1" or item.configuration.get("renderer") != "sandbox":
+            return value
+        assert bundle.manifest.frontend is not None
+        surface = next(
+            surface
+            for surface in bundle.manifest.frontend.surfaces
+            if surface.id == item.configuration["surface"]
+        )
+        value["configuration"] = {
+            **item.configuration,
+            "asset": {
+                "bundleDigest": bundle.sha256,
+                "entry": surface.entry,
+                "protocol": UI_BRIDGE_V1,
+                "sandbox": SANDBOX_ATTRIBUTE,
+                "cspProfile": SANDBOX_CSP_PROFILE,
+            },
+        }
+        return value
+
+    def sandbox_asset(
+        self, plugin_id: str, bundle_digest: str, asset_path: str
+    ) -> SandboxAsset:
+        """Resolve only an active plugin's current digest-addressed web asset."""
+
+        record = self._records.get(plugin_id)
+        bundle = self._bundles.get(plugin_id)
+        installation = self._installations.get(plugin_id)
+        live_plugin_ids = {owner[0] for owner in self.manager.owner_keys()}
+        if (
+            not self._started
+            or record is None
+            or record.state != "active"
+            or bundle is None
+            or installation is None
+            or plugin_id in self._load_failures
+            or plugin_id not in live_plugin_ids
+            or bundle.sha256 != f"sha256:{bundle_digest}"
+        ):
+            raise core_error(
+                "PLUGIN_SANDBOX_ASSET_NOT_FOUND",
+                "sandbox asset is unavailable",
+                plugin_id=plugin_id,
+            )
+        return load_sandbox_asset(
+            plugin_id=plugin_id,
+            bundle=bundle,
+            installation=installation,
+            asset_path=asset_path,
+        )
+
     def catalog(self) -> dict[str, Any]:
         plugins: list[dict[str, Any]] = []
         live_plugin_ids = {owner[0] for owner in self.manager.owner_keys()}
@@ -770,7 +832,7 @@ class CorePluginPlatform:
                     "permissions": self._permission_summaries[plugin_id],
                     "contributions": [
                         {
-                            **item.to_catalog(),
+                            **self._catalog_contribution(item, bundle),
                             "available": available,
                             **(
                                 {"unavailableReason": unavailable_reason}
@@ -905,6 +967,7 @@ class CorePluginPlatform:
                     self._project_view(item, namespace=namespace)
                     for item in self._plugin_contributions.get(plugin_id, ())
                     if item.kind == "view/1"
+                    and item.configuration.get("renderer") != "sandbox"
                 )
         return {
             "schemaVersion": UI_SCHEMA_VERSION,

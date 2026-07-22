@@ -1,16 +1,25 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { PluginNativeField } from "./PluginNativeFields.js";
+import SandboxPluginFrame from "./SandboxPluginFrame.js";
 import { defaultForPluginSchema } from "./pluginSchemaDefaults.js";
 import { formatPluginValue } from "./pluginViewFormatting.js";
 import type {
   JsonValue,
   PluginCommandContribution,
+  PluginDeclarativeViewContribution,
   PluginManagementDetail,
   PluginPlatformRuntime,
+  PluginSandboxViewContribution,
   PluginSettingsContribution,
   PluginViewContribution,
   PluginViewProjection,
 } from "./pluginPlatformTypes.js";
+
+function isSandboxView(
+  contribution: PluginViewContribution,
+): contribution is PluginSandboxViewContribution {
+  return contribution.configuration.renderer === "sandbox";
+}
 
 export class PluginUiErrorBoundary extends React.Component<
   React.PropsWithChildren,
@@ -23,7 +32,7 @@ export class PluginUiErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error): void {
-    console.error("Declarative plugin UI failed safely", error);
+    console.error("Plugin UI failed safely", error);
   }
 
   render() {
@@ -180,7 +189,7 @@ function SettingsSurface({ runtime, contribution }: {
 }
 
 function ViewContent({ contribution, projection }: {
-  contribution: PluginViewContribution;
+  contribution: PluginDeclarativeViewContribution;
   projection: PluginViewProjection | undefined;
 }) {
   if (!projection || projection.state === "empty") return <p>{contribution.configuration.emptyState}</p>;
@@ -224,6 +233,22 @@ function ViewSurface({ runtime, contribution }: {
   runtime: PluginPlatformRuntime;
   contribution: PluginViewContribution;
 }) {
+  if (isSandboxView(contribution)) {
+    return (
+      <aside
+        className={`plugin-view-surface plugin-view-${contribution.configuration.slot}`}
+        data-plugin-slot={contribution.configuration.slot}
+        data-plugin-view={contribution.id}
+        data-plugin-renderer="sandbox"
+        aria-label={contribution.title}
+      >
+        <header><h2>{contribution.title}</h2><button type="button" aria-label="Close" onClick={runtime.actions.closeView}>×</button></header>
+        <PluginUiErrorBoundary>
+          <SandboxPluginFrame runtime={runtime} contribution={contribution} />
+        </PluginUiErrorBoundary>
+      </aside>
+    );
+  }
   const candidate = runtime.view.snapshot?.views.find((item) => item.id === contribution.id);
   const projection = candidate
     && candidate.pluginId === contribution.pluginId
@@ -423,7 +448,7 @@ export default function PluginPlatformSurfaces({ runtime }: { runtime: PluginPla
       <CommandPalette runtime={runtime} />
       <PluginManager runtime={runtime} />
       {openSettings && <SettingsSurface runtime={runtime} contribution={openSettings} />}
-      {openView && <ViewSurface runtime={runtime} contribution={openView} />}
+      {openView && <ViewSurface key={openView.id} runtime={runtime} contribution={openView} />}
       {runtime.view.error && <div className="plugin-platform-notice plugin-platform-error" role="alert">Plugin Platform unavailable: {runtime.view.error}</div>}
       {runtime.view.notice && (
         <button type="button" className="plugin-platform-notice" onClick={runtime.actions.clearNotice}>{runtime.view.notice}</button>

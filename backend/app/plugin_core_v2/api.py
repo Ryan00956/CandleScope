@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from candlescope_plugin_sdk.platform_v2 import PlatformContractError, loads_strict
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.plugin_installer_v2.errors import PlatformInstallerBaseError
 from app.plugin_security_v2.errors import PlatformSecurityError
@@ -23,6 +23,7 @@ from .runtime import CorePluginPlatform, DisabledCorePluginPlatform
 MAX_CORE_API_BODY_BYTES = 256 * 1024
 MAX_PLUGIN_BUNDLE_BYTES = 16 * 1024 * 1024
 _BUNDLE_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_BUNDLE_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _platform(request: Request) -> CorePluginPlatform | DisabledCorePluginPlatform:
@@ -146,6 +147,51 @@ def create_core_plugin_router() -> APIRouter:
     @router.get("/ui/snapshot")
     async def ui_snapshot(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(_platform(request).ui_snapshot)
+
+    @router.get("/assets/{plugin_id}/{bundle_digest}/{asset_path:path}")
+    async def sandbox_asset(
+        plugin_id: str,
+        bundle_digest: str,
+        asset_path: str,
+        request: Request,
+    ) -> Response:
+        platform = _platform(request)
+        if (
+            not isinstance(platform, CorePluginPlatform)
+            or _BUNDLE_DIGEST.fullmatch(bundle_digest) is None
+        ):
+            raise HTTPException(status_code=404, detail="plugin asset unavailable")
+        try:
+            asset = await asyncio.to_thread(
+                platform.sandbox_asset, plugin_id, bundle_digest, asset_path
+            )
+        except CorePluginError as exc:
+            status = 409 if exc.code == "PLUGIN_SANDBOX_ASSET_INTEGRITY_FAILED" else 404
+            raise HTTPException(
+                status_code=status, detail="plugin asset unavailable"
+            ) from exc
+        sentinel = "__candlescope_asset_root__"
+        asset_url = str(
+            request.url_for(
+                "sandbox_asset",
+                plugin_id=plugin_id,
+                bundle_digest=bundle_digest,
+                asset_path=sentinel,
+            )
+        )
+        if not asset_url.endswith(sentinel):
+            raise HTTPException(status_code=404, detail="plugin asset unavailable")
+        try:
+            headers = asset.headers(asset_base_url=asset_url[: -len(sentinel)])
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=404, detail="plugin asset unavailable"
+            ) from exc
+        if request.headers.get("if-none-match") == asset.etag:
+            return Response(status_code=304, headers=headers)
+        return Response(
+            content=asset.body, media_type=asset.media_type, headers=headers
+        )
 
     @router.get("/manage/diagnostics")
     async def diagnostics(request: Request) -> dict[str, Any]:

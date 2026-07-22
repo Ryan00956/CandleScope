@@ -55,6 +55,11 @@ _SEVERITIES = frozenset({"info", "success", "warning", "error"})
 _COMMAND_PLACEMENTS = frozenset({"commandPalette", "topToolbar", "chartContextMenu"})
 _VIEW_SLOTS = frozenset({"sidePanel", "bottomPanel", "statusArea"})
 _VIEW_RENDERERS = frozenset({"table", "list", "detail", "status"})
+_SANDBOX_VIEW_SLOTS = frozenset({"sidePanel", "bottomPanel"})
+_SANDBOX_FRONTEND_SLOTS = {
+    "sidePanel": "side-panel",
+    "bottomPanel": "bottom-panel",
+}
 _VIEW_FORMATS = frozenset(
     {"text", "number", "percent", "price", "boolean", "timestamp"}
 )
@@ -711,6 +716,29 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
                 contribution_id=item.id,
             ),
         }
+    elif item.kind == "view/1" and config.get("renderer") == "sandbox":
+        _exact_keys(
+            config,
+            allowed={"slot", "renderer", "surface"},
+            required={"slot", "renderer", "surface"},
+            label="sandbox view configuration",
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+        slot = config["slot"]
+        surface = config["surface"]
+        if (
+            slot not in _SANDBOX_VIEW_SLOTS
+            or config["renderer"] != "sandbox"
+            or not isinstance(surface, str)
+            or not _VIEW_FIELD.fullmatch(surface)
+        ):
+            _fail(
+                "sandbox view slot or surface is unsupported",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        config = {"slot": slot, "renderer": "sandbox", "surface": surface}
     elif item.kind == "view/1":
         _exact_keys(
             config,
@@ -904,6 +932,38 @@ def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]
                 "view primaryCommand must reference a command in the same plugin",
                 plugin_id=manifest.plugin.id,
                 contribution_id=item.id,
+            )
+    sandbox_views = {
+        item.id: item
+        for item in result
+        if item.kind == "view/1" and item.configuration.get("renderer") == "sandbox"
+    }
+    sandbox_surfaces = {
+        item.id: item
+        for item in (
+            manifest.frontend.surfaces if manifest.frontend is not None else ()
+        )
+        if item.type == "sandbox"
+    }
+    if set(sandbox_views) != set(sandbox_surfaces):
+        unmatched = sorted(set(sandbox_views) ^ set(sandbox_surfaces))
+        _fail(
+            "sandbox views must exactly match declared frontend surfaces",
+            plugin_id=manifest.plugin.id,
+            contribution_id=unmatched[0],
+        )
+    for surface_id, contribution in sandbox_views.items():
+        surface = sandbox_surfaces[surface_id]
+        if (
+            contribution.configuration["surface"] != surface_id
+            or surface.slot
+            != _SANDBOX_FRONTEND_SLOTS[contribution.configuration["slot"]]
+            or not surface.entry.lower().endswith(".html")
+        ):
+            _fail(
+                "sandbox frontend surface does not match its view contribution",
+                plugin_id=manifest.plugin.id,
+                contribution_id=contribution.id,
             )
     return tuple(result)
 

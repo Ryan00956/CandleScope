@@ -1,0 +1,166 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  background: #09111f;
+  color: #dce9ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 260px;
+  background:
+    radial-gradient(circle at 90% 0%, rgba(48, 127, 255, 0.2), transparent 38%),
+    #09111f;
+}
+
+main {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+header,
+section {
+  border: 1px solid #263958;
+  border-radius: 12px;
+  background: rgba(13, 26, 47, 0.92);
+  padding: 14px;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 8px;
+  font-size: 21px;
+}
+
+h2 {
+  margin-bottom: 8px;
+  font-size: 15px;
+}
+
+p {
+  margin-bottom: 0;
+  color: #91a7c7;
+  line-height: 1.45;
+}
+
+.eyebrow {
+  margin-bottom: 5px;
+  color: #62c8ff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+dt {
+  color: #7890b2;
+}
+
+dd {
+  margin: 0;
+  color: #e9f2ff;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  text-align: right;
+}
+
+.section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+button {
+  border: 1px solid #3377d5;
+  border-radius: 8px;
+  background: #185fbf;
+  color: white;
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 11px;
+}
+
+button:hover:not(:disabled),
+button:focus-visible {
+  background: #2773da;
+  outline: 2px solid #70c8ff;
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+button.danger {
+  border-color: #a34152;
+  background: #742b3b;
+}
+
+#probe-results {
+  display: grid;
+  gap: 7px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+#probe-results li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-radius: 7px;
+  background: #101f37;
+  padding: 8px 10px;
+}
+
+#probe-results strong {
+  color: #7ee7af;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.actions > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  header,
+  section {
+    animation: appear 180ms ease-out both;
+  }
+
+  @keyframes appear {
+    from {
+      opacity: 0;
+      transform: translateY(3px);
+    }
+  }
+}

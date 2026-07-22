@@ -5,7 +5,10 @@ import {
   inferFixedIntervalClosedThrough,
   nextIndicatorBarTime,
   planDeferredRightCatchup,
+  planIndicatorCorrectionRefresh,
+  planVisibleIndicatorHydrationRange,
   resolveInitialHostedRange,
+  VISIBLE_RANGE_RIGHT_PREFETCH_BUCKET_BARS,
 } from "../indicatorRangePlanning.js";
 import type { KlineBar } from "../../market-data/marketDataTypes.js";
 import { mustBeDefined, structuralMock } from "../../../test/testHelpers.js";
@@ -138,6 +141,183 @@ test("resolveInitialHostedRange handles irregular monthly spacing", () => {
   assert.equal(range.endIndex, 3);
 });
 
+test("visible hydration keeps initial and leftward navigation exact", () => {
+  const chartData = bars(5_000);
+  const initialDesired = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "ema", engineName: "EMA", params: { period: 20 } }],
+    { logical: { from: 1_000, to: 1_419 } },
+  ));
+  const initial = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired: initialDesired,
+    interval: "1m",
+    previous: null,
+    seriesKey: "session|1m",
+  });
+  assert.equal(initial.direction, "initial");
+  assert.deepEqual(initial.range, {
+    start: initialDesired.start,
+    end: initialDesired.end,
+  });
+
+  const leftDesired = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "ema", engineName: "EMA", params: { period: 20 } }],
+    { logical: { from: 500, to: 919 } },
+  ));
+  const left = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired: leftDesired,
+    interval: "1m",
+    previous: initial.nextState,
+    seriesKey: "session|1m",
+  });
+  assert.equal(left.direction, "left");
+  assert.equal(left.endIndex, leftDesired.endIndex);
+  assert.deepEqual(left.range, { start: leftDesired.start, end: leftDesired.end });
+});
+
+test("rightward visible hydration uses a fixed K-line bucket instead of a sliding tail", () => {
+  const chartData = bars(5_000);
+  const initialDesired = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "ema", engineName: "EMA", params: { period: 20 } }],
+    { logical: { from: 0, to: 419 } },
+  ));
+  const initial = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired: initialDesired,
+    interval: "1m",
+    seriesKey: "session|1m",
+  });
+  const firstRightDesired = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "ema", engineName: "EMA", params: { period: 20 } }],
+    { logical: { from: 420, to: 839 } },
+  ));
+  const firstRight = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired: firstRightDesired,
+    interval: "1m",
+    previous: initial.nextState,
+    seriesKey: "session|1m",
+  });
+  assert.equal(firstRight.direction, "right");
+  assert.equal(firstRight.endIndex, VISIBLE_RANGE_RIGHT_PREFETCH_BUCKET_BARS - 1);
+  assert.equal(firstRight.range.end, barAt(
+    chartData,
+    VISIBLE_RANGE_RIGHT_PREFETCH_BUCKET_BARS - 1,
+  ).time);
+
+  const sameBucketDesired = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "ema", engineName: "EMA", params: { period: 20 } }],
+    { logical: { from: 840, to: 1_259 } },
+  ));
+  const sameBucket = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired: sameBucketDesired,
+    interval: "1m",
+    previous: firstRight.nextState,
+    seriesKey: "session|1m",
+  });
+  assert.equal(sameBucket.endIndex, firstRight.endIndex);
+
+  const nextBucketDesired = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "ema", engineName: "EMA", params: { period: 20 } }],
+    { logical: { from: 1_260, to: 1_679 } },
+  ));
+  const nextBucket = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired: nextBucketDesired,
+    interval: "1m",
+    previous: sameBucket.nextState,
+    seriesKey: "session|1m",
+  });
+  assert.equal(nextBucket.endIndex, VISIBLE_RANGE_RIGHT_PREFETCH_BUCKET_BARS * 2 - 1);
+});
+
+test("visible right prefetch stops at a K-line hole and resets across series", () => {
+  const chartData = bars(2_000);
+  for (let index = 1_200; index < chartData.length; index += 1) {
+    chartData[index] = structuralMock<KlineBar>({
+      time: barAt(chartData, index).time + 60,
+    });
+  }
+  const previousDesired = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "ema", engineName: "EMA" }],
+    { logical: { from: 0, to: 419 } },
+  ));
+  const previous = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired: previousDesired,
+    interval: "1m",
+    seriesKey: "session|1m",
+  });
+  const desired = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "ema", engineName: "EMA" }],
+    { logical: { from: 420, to: 839 } },
+  ));
+  const stopped = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired,
+    interval: "1m",
+    previous: previous.nextState,
+    seriesKey: "session|1m",
+  });
+  assert.equal(stopped.endIndex, 1_199);
+  assert.equal(stopped.range.end, barAt(chartData, 1_199).time);
+
+  const reset = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired,
+    interval: "1m",
+    previous: previous.nextState,
+    seriesKey: "session|89m",
+  });
+  assert.equal(reset.direction, "initial");
+  assert.equal(reset.endIndex, desired.endIndex);
+  assert.deepEqual(reset.range, { start: desired.start, end: desired.end });
+});
+
+test("visible right prefetch follows calendar-month successors", () => {
+  const monthBars = Array.from({ length: 24 }, (_, index) => structuralMock<KlineBar>({
+    time: Date.UTC(2024, index, 1) / 1_000,
+  }));
+  const initialDesired = mustBeDefined(resolveInitialHostedRange(
+    monthBars,
+    [{ id: "ema", engineName: "EMA" }],
+    { logical: { from: 0, to: 2 } },
+  ));
+  const initial = planVisibleIndicatorHydrationRange({
+    bucketBars: 12,
+    chartData: monthBars,
+    desired: initialDesired,
+    interval: "1M",
+    seriesKey: "session|1M",
+  });
+  const rightDesired = mustBeDefined(resolveInitialHostedRange(
+    monthBars,
+    [{ id: "ema", engineName: "EMA" }],
+    { logical: { from: 3, to: 5 } },
+  ));
+  const right = planVisibleIndicatorHydrationRange({
+    bucketBars: 12,
+    chartData: monthBars,
+    desired: rightDesired,
+    interval: "1M",
+    previous: initial.nextState,
+    seriesKey: "session|1M",
+  });
+  assert.equal(right.direction, "right");
+  assert.equal(right.endIndex, 11);
+  assert.equal(right.range.end, barAt(monthBars, 11).time);
+});
+
 test("right catchup advances monthly bars by the calendar instead of median seconds", () => {
   const february = Date.UTC(2024, 1, 1) / 1_000;
   const march = Date.UTC(2024, 2, 1) / 1_000;
@@ -147,6 +327,83 @@ test("right catchup advances monthly bars by the calendar instead of median seco
   assert.equal(nextIndicatorBarTime(march, "1M", 29 * 86_400), april);
   assert.equal(nextIndicatorBarTime(february, "47m", null), february + 47 * 60);
   assert.equal(nextIndicatorBarTime(february, "60m", null), february + 60 * 60);
+});
+
+test("89m correction refresh bounds finite rolling indicators but preserves recursive suffixes", () => {
+  const step = 89 * 60;
+  const dirty = { start: 1_700_000_000, end: 1_700_000_000 + step * 9 };
+  const desired = {
+    start: dirty.start - step * 100,
+    end: dirty.end + step * 500,
+  };
+
+  const ma = mustBeDefined(planIndicatorCorrectionRefresh(
+    dirty,
+    desired,
+    { id: "ma", engineName: "MA", params: { period: 20 } },
+    "89m",
+  ));
+  assert.deepEqual(ma.affectedRange, {
+    start: dirty.start,
+    end: dirty.end + step * 19,
+  });
+  assert.equal(ma.cascadeRight, false);
+  assert.deepEqual(ma.requestRange, ma.affectedRange);
+
+  const ema = mustBeDefined(planIndicatorCorrectionRefresh(
+    dirty,
+    desired,
+    { id: "ema", engineName: "EMA", params: { period: 20 } },
+    "89m",
+  ));
+  assert.deepEqual(ema.affectedRange, dirty);
+  assert.equal(ema.cascadeRight, true);
+  assert.deepEqual(ema.requestRange, {
+    start: dirty.start,
+    end: desired.end,
+  });
+
+  const macd = mustBeDefined(planIndicatorCorrectionRefresh(
+    dirty,
+    desired,
+    { id: "macd", engineName: "MACD", params: { slow: 26, signal: 9 } },
+    "89m",
+  ));
+  assert.deepEqual(macd.affectedRange, dirty);
+  assert.equal(macd.cascadeRight, true);
+  assert.deepEqual(macd.requestRange, {
+    start: dirty.start,
+    end: desired.end,
+  });
+
+  const custom = mustBeDefined(planIndicatorCorrectionRefresh(
+    dirty,
+    desired,
+    { id: "custom", engineName: "CUSTOM", script: "state := nz(state[1]) + close" },
+    "89m",
+  ));
+  assert.equal(custom.cascadeRight, true);
+  assert.equal(custom.requestRange?.end, desired.end);
+
+  const volume = mustBeDefined(planIndicatorCorrectionRefresh(
+    dirty,
+    desired,
+    { id: "vol", engineName: "VOL" },
+    "89m",
+  ));
+  assert.deepEqual(volume.affectedRange, dirty);
+  assert.equal(volume.cascadeRight, false);
+});
+
+test("correction outside the desired window rebases coverage without requesting the viewport", () => {
+  const plan = mustBeDefined(planIndicatorCorrectionRefresh(
+    { start: 1_000, end: 1_100 },
+    { start: 10_000, end: 20_000 },
+    { id: "vol", engineName: "VOL" },
+    "1h",
+  ));
+  assert.deepEqual(plan.affectedRange, { start: 1_000, end: 1_100 });
+  assert.equal(plan.requestRange, null);
 });
 
 test("planDeferredRightCatchup coalesces moving right edge without resetting grace", () => {

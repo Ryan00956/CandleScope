@@ -20,7 +20,12 @@ from .models import (
     SymbolInfo,
     serialize_exchange_capabilities,
 )
-from .pagination import HistoricalPaginationPolicy, OkxHistoricalPaginationPolicy, ReverseTimePaginationPolicy
+from .pagination import (
+    BinanceHistoricalPaginationPolicy,
+    HistoricalPaginationPolicy,
+    OkxHistoricalPaginationPolicy,
+    ReverseTimePaginationPolicy,
+)
 from .plugin import ExchangePlugin, SymbolNormalizer
 from .protocol import AdapterBackedProtocol, ExchangeProtocol, RestRequestSpec, WsConnectionSpec
 from .rate_limits import (
@@ -61,6 +66,7 @@ __all__ = [
     "ExchangePluginRegistrationError",
     "ExchangeProtocol",
     "HistoricalPaginationPolicy",
+    "BinanceHistoricalPaginationPolicy",
     "HistoricalRequest",
     "NormalizerContractSample",
     "OkxHistoricalPaginationPolicy",

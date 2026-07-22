@@ -7,7 +7,7 @@ import threading
 from bisect import bisect_right
 from collections.abc import Callable
 from concurrent.futures import Future
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.data_engine.interval_policy import (
@@ -29,6 +29,7 @@ from app.data_engine.interval_policy import (
 )
 from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
 from app.data_engine.interval_resolution import IntervalRoute
+from app.data_engine.custom_materialization import custom_materialization_registry
 from app.data_engine.history.calendar import (
     AlwaysOpenCalendar,
     containing_expected_open_ms,
@@ -43,6 +44,7 @@ from .models import BarData, MissingRange, QueryResult, QuerySource, SeriesKey
 BaseQuery = Callable[..., QueryResult]
 BaseQueryBefore = Callable[..., QueryResult]
 CalendarProvider = Callable[[SeriesKey], Any | None]
+TargetWriter = Callable[..., int]
 logger = logging.getLogger("data_manager.custom_query")
 
 
@@ -65,6 +67,16 @@ _IO_TIME_FIELDS = (
 )
 
 
+@dataclass(slots=True)
+class _BaseWindowFlight:
+    """One physical, side-effect-free read of a closed base-history window."""
+
+    series: tuple[str, str, str, str]
+    start_ms: int
+    end_ms: int
+    future: Future[QueryResult]
+
+
 def _bar_data_to_storage_rows(
     bars: list[BarData],
     source_interval: str,
@@ -73,7 +85,11 @@ def _bar_data_to_storage_rows(
     source_ms = parse_interval_ms(source_interval) or 60_000
     return [{
         "open_time": bar.time_ms,
-        "close_time": bar.time_ms + source_ms - 1,
+        "close_time": compute_bucket_end_ms(
+            bar.time_ms,
+            source_ms,
+            interval=source_interval,
+        ) - 1,
         "open": bar.open,
         "high": bar.high,
         "low": bar.low,
@@ -460,6 +476,7 @@ class CustomIntervalQueryService:
         base_query_before: BaseQueryBefore | None = None,
         target_query: BaseQuery | None = None,
         target_query_before: BaseQueryBefore | None = None,
+        target_writer: TargetWriter | None = None,
         calendar_provider: CalendarProvider | None = None,
         bar_aggregator: Any | None = None,
     ) -> None:
@@ -469,14 +486,20 @@ class CustomIntervalQueryService:
         self._base_query_before = base_query_before
         self._target_query = target_query
         self._target_query_before = target_query_before
+        self._target_writer = target_writer
         self._calendar_provider = calendar_provider
         self._bar_aggregator = bar_aggregator
         self._flight_lock = threading.Lock()
         self._flights: dict[tuple[Any, ...], Future[QueryResult]] = {}
+        self._base_window_flight_lock = threading.Lock()
+        self._base_window_flights: list[_BaseWindowFlight] = []
         self._metrics_lock = threading.Lock()
         self._logical_queries = 0
         self._singleflight_owners = 0
         self._singleflight_joins = 0
+        self._base_window_flight_owners = 0
+        self._base_window_flight_joins = 0
+        self._base_window_covering_joins = 0
         self._query_failures = 0
         self._materialized_hits = 0
         self._derived_queries = 0
@@ -487,6 +510,7 @@ class CustomIntervalQueryService:
         self._base_cache_reservation_caps = 0
         self._materialized_probe_seconds = 0.0
         self._base_query_seconds = 0.0
+        self._base_window_join_seconds = 0.0
         self._aggregation_seconds = 0.0
 
     def set_bar_aggregator(self, bar_aggregator: Any | None) -> None:
@@ -500,6 +524,9 @@ class CustomIntervalQueryService:
                 "logical_queries": self._logical_queries,
                 "singleflight_owners": self._singleflight_owners,
                 "singleflight_joins": self._singleflight_joins,
+                "base_window_flight_owners": self._base_window_flight_owners,
+                "base_window_flight_joins": self._base_window_flight_joins,
+                "base_window_covering_joins": self._base_window_covering_joins,
                 "query_failures": self._query_failures,
                 "materialized_hits": self._materialized_hits,
                 "derived_queries": self._derived_queries,
@@ -515,6 +542,10 @@ class CustomIntervalQueryService:
                     2,
                 ),
                 "base_query_ms": round(self._base_query_seconds * 1000, 2),
+                "base_window_join_wait_ms": round(
+                    self._base_window_join_seconds * 1000,
+                    2,
+                ),
                 "aggregation_ms": round(self._aggregation_seconds * 1000, 2),
             }
 
@@ -525,11 +556,13 @@ class CustomIntervalQueryService:
                 self._materialized_hits += 1
             elif metadata.get("target_materialized") is False:
                 self._derived_queries += 1
-            self._base_pages += int(metadata.get("base_page_count") or 0)
-            self._base_rows += int(metadata.get("base_rows_fetched") or 0)
-            self._base_overfetch_rows += int(
-                metadata.get("base_page_overfetch_rows") or 0
-            )
+            base_window_join = metadata.get("base_window_flight_role") == "join"
+            if not base_window_join:
+                self._base_pages += int(metadata.get("base_page_count") or 0)
+                self._base_rows += int(metadata.get("base_rows_fetched") or 0)
+                self._base_overfetch_rows += int(
+                    metadata.get("base_page_overfetch_rows") or 0
+                )
             self._base_cache_reservations += int(
                 metadata.get("base_cache_reservation_active") is True
             )
@@ -539,9 +572,14 @@ class CustomIntervalQueryService:
             self._materialized_probe_seconds += (
                 float(metadata.get("materialized_probe_ms") or 0.0) / 1000
             )
-            self._base_query_seconds += (
-                float(metadata.get("base_query_ms") or 0.0) / 1000
-            )
+            if base_window_join:
+                self._base_window_join_seconds += (
+                    float(metadata.get("base_query_ms") or 0.0) / 1000
+                )
+            else:
+                self._base_query_seconds += (
+                    float(metadata.get("base_query_ms") or 0.0) / 1000
+                )
             self._aggregation_seconds += (
                 float(metadata.get("aggregation_ms") or 0.0) / 1000
             )
@@ -565,6 +603,136 @@ class CustomIntervalQueryService:
             metadata=dict(result.metadata),
             excluded_ranges=[dict(item) for item in result.excluded_ranges],
         )
+
+    @classmethod
+    def _slice_base_window_result(
+        cls,
+        result: QueryResult,
+        *,
+        start_ms: int,
+        end_ms: int,
+        target_limit: int,
+    ) -> QueryResult:
+        """Detach and narrow a covering read to one consumer's source window."""
+        sliced = cls._clone_result(result)
+        sliced.bars = [
+            bar
+            for bar in sliced.bars
+            if start_ms <= bar.time_ms <= end_ms
+        ]
+        if target_limit > 0 and len(sliced.bars) > target_limit:
+            sliced.bars = sliced.bars[-target_limit:]
+
+        missing_ranges: list[MissingRange] = []
+        for item in sliced.missing_ranges:
+            clipped_start = max(start_ms, int(item.start_ms))
+            clipped_end = min(end_ms, int(item.end_ms))
+            if clipped_start > clipped_end:
+                continue
+            missing_ranges.append(replace(
+                item,
+                start_ms=clipped_start,
+                end_ms=clipped_end,
+                missing_bars=(
+                    item.missing_bars
+                    if clipped_start == item.start_ms and clipped_end == item.end_ms
+                    else None
+                ),
+            ))
+        sliced.missing_ranges = missing_ranges
+
+        sliced.total = len(sliced.bars)
+        return sliced
+
+    def _run_base_window_flight(
+        self,
+        *,
+        series: tuple[str, str, str, str],
+        start_ms: int,
+        end_ms: int,
+        target_limit: int,
+        requested_auto_backfill: bool | None,
+        compute: Callable[[], QueryResult],
+        slice_result: bool = True,
+    ) -> QueryResult:
+        """Share a covering base read while keeping repair work out of queries.
+
+        Every physical read performed here forces ``auto_backfill=False`` in
+        its caller.  Missing ranges remain on the returned QueryResult so the
+        DataManager/coordinator boundary is still the only repair owner.
+        """
+        with self._base_window_flight_lock:
+            candidates = [
+                flight
+                for flight in self._base_window_flights
+                if flight.series == series
+                and flight.start_ms <= start_ms
+                and flight.end_ms >= end_ms
+            ]
+            flight = min(
+                candidates,
+                key=lambda item: item.end_ms - item.start_ms,
+                default=None,
+            )
+            owner = flight is None
+            if flight is None:
+                flight = _BaseWindowFlight(
+                    series=series,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    future=Future(),
+                )
+                self._base_window_flights.append(flight)
+
+        with self._metrics_lock:
+            if owner:
+                self._base_window_flight_owners += 1
+            else:
+                self._base_window_flight_joins += 1
+                if flight.start_ms < start_ms or flight.end_ms > end_ms:
+                    self._base_window_covering_joins += 1
+
+        role = "owner" if owner else "join"
+        if not owner:
+            raw_result = flight.future.result()
+        else:
+            try:
+                raw_result = compute()
+            except BaseException as exc:
+                flight.future.set_exception(exc)
+                raise
+            else:
+                flight.future.set_result(self._clone_result(raw_result))
+            finally:
+                with self._base_window_flight_lock:
+                    if flight in self._base_window_flights:
+                        self._base_window_flights.remove(flight)
+
+        result = (
+            self._slice_base_window_result(
+                raw_result,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                target_limit=target_limit,
+            )
+            if slice_result
+            else self._clone_result(raw_result)
+        )
+        result.metadata.update({
+            "base_window_flight_role": role,
+            "base_window_flight_covering": bool(
+                flight.start_ms < start_ms or flight.end_ms > end_ms
+            ),
+            "base_window_start_ms": start_ms,
+            "base_window_end_ms": end_ms,
+            "base_window_owner_start_ms": flight.start_ms,
+            "base_window_owner_end_ms": flight.end_ms,
+            "base_window_side_effect_free": True,
+            "base_window_requested_auto_backfill": bool(
+                requested_auto_backfill
+            ),
+        })
+        return result
 
     @staticmethod
     def _metric_value(result: QueryResult | None, name: str) -> int | float:
@@ -761,6 +929,100 @@ class CustomIntervalQueryService:
             else bar
             for bar in bars
         ]
+
+    def _persist_rebuilt_target(
+        self,
+        bars: list[BarData],
+        base_result: QueryResult,
+        *,
+        symbol: str,
+        interval: str,
+        exchange: str,
+        market_type: str,
+    ) -> tuple[int, str]:
+        """Persist only gap-free, final target buckets rebuilt from trusted base.
+
+        This turns the on-read fallback into a durable fast path.  Forming
+        buckets, untrusted component sets, and any response carrying a base
+        gap remain cache-only so persistence can never conceal missing source
+        history.
+        """
+        if (
+            self._target_writer is None
+            or not bars
+            or base_result.missing_ranges
+            or base_result.retryable
+            or base_result.metadata.get("all_rows_final") is not True
+        ):
+            return 0, "skipped"
+        final_bars = sorted((
+            bar for bar in bars
+            if bar.is_closed and bar.trusted_final
+        ), key=lambda bar: bar.time_ms)
+        if not final_bars:
+            return 0, "skipped"
+        target_ms = parse_interval_ms(interval)
+        if target_ms is None or target_ms <= 0:
+            return 0, "skipped"
+        if any(
+            current.time_ms != compute_bucket_end_ms(
+                previous.time_ms,
+                target_ms,
+                interval=interval,
+            )
+            for previous, current in zip(final_bars, final_bars[1:])
+        ):
+            # A range lease proves every target bucket in its bounds.  Never
+            # let sparse rebuilt rows masquerade as covering materialization.
+            return 0, "skipped_noncontiguous"
+        series = custom_materialization_registry.series_key(
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+        )
+        # Query execution normally already owns one of the bounded storage
+        # workers.  Reconciler materialization persists through that same
+        # executor, so a synchronous join here can let waiting queries occupy
+        # every worker while the lease owner is queued behind them.  The query
+        # already has the rebuilt bars needed for its response; persistence is
+        # only a durable fast-path optimization.  Claim without waiting and
+        # leave a covering/overlapping owner to finish its write.
+        lease, overlap = custom_materialization_registry.claim_nowait(
+            series=series,
+            start_ms=final_bars[0].time_ms,
+            end_ms=final_bars[-1].time_ms,
+            owner="query",
+        )
+        if lease is None:
+            assert overlap is not None
+            return 0, "overlap_busy"
+        if not lease.is_owner:
+            return 0, "join_pending"
+        try:
+            written = int(self._target_writer(
+                symbol,
+                interval,
+                _bar_data_to_storage_rows(final_bars, interval),
+                source="backfill_aggregated",
+                exchange=exchange,
+                market_type=market_type,
+            ) or 0)
+            lease.complete(written, rows_covered=len(final_bars))
+            return written, "owner"
+        except BaseException as exc:
+            lease.fail(exc)
+            if not isinstance(exc, Exception):
+                raise
+            logger.warning(
+                "Materialized custom target write failed for %s:%s:%s@%s: %s",
+                exchange,
+                market_type,
+                symbol,
+                interval,
+                exc,
+            )
+            return 0, "owner_failed"
 
     @staticmethod
     def _merge_materialized_with_rebuilt(
@@ -1353,33 +1615,68 @@ class CustomIntervalQueryService:
 
         seed_limit = min(base_limit, self._cfg.max_limit)
         seed_start_ms = aligned_start_ms if base_limit <= self._cfg.max_limit else None
-        base_started_at = time.monotonic()
-        base_result = self._base_query(
-            symbol,
-            base_interval,
-            start_ms=seed_start_ms,
-            end_ms=base_end_ms,
-            limit=seed_limit,
-            exchange=exchange,
-            market_type=market_type,
-            auto_backfill=auto_backfill,
+        source_interval_ms = parse_interval_ms(base_interval)
+        if source_interval_ms is None or source_interval_ms <= 0:
+            raise ValueError(f"invalid resolved base interval: {base_interval!r}")
+        open_ended_latest = base_end_ms is None and aligned_start_ms is None
+        window_end_ms = (
+            (2 ** 63) - 1
+            if open_ended_latest
+            else int(base_end_ms)
+            if base_end_ms is not None
+            else int(time.time() * 1000)
         )
-        if base_limit > self._cfg.max_limit and self._base_query_before is not None:
-            base_result = self._page_base_history(
-                symbol=symbol,
-                interval=base_interval,
-                before_ms=(
-                    int(base_end_ms) + 1
-                    if base_end_ms is not None
-                    else int(time.time() * 1000) + 1
-                ),
-                target_limit=base_limit,
-                lower_bound_ms=aligned_start_ms,
+        window_start_ms = (
+            int(aligned_start_ms)
+            if aligned_start_ms is not None
+            else window_end_ms + 1 - base_limit * source_interval_ms
+        )
+        read_before_ms = (
+            int(base_end_ms) + 1
+            if base_end_ms is not None
+            else int(time.time() * 1000) + 1
+        )
+
+        def _read_base_range() -> QueryResult:
+            result = self._base_query(
+                symbol,
+                base_interval,
+                start_ms=seed_start_ms,
+                end_ms=base_end_ms,
+                limit=seed_limit,
                 exchange=exchange,
                 market_type=market_type,
-                auto_backfill=auto_backfill,
-                initial_result=base_result,
+                auto_backfill=False,
             )
+            if base_limit > self._cfg.max_limit and self._base_query_before is not None:
+                result = self._page_base_history(
+                    symbol=symbol,
+                    interval=base_interval,
+                    before_ms=read_before_ms,
+                    target_limit=base_limit,
+                    lower_bound_ms=aligned_start_ms,
+                    exchange=exchange,
+                    market_type=market_type,
+                    auto_backfill=False,
+                    initial_result=result,
+                )
+            return result
+
+        base_started_at = time.monotonic()
+        base_result = self._run_base_window_flight(
+            series=(
+                exchange.strip().lower(),
+                market_type.strip().lower(),
+                symbol.strip().upper(),
+                base_interval,
+            ),
+            start_ms=window_start_ms,
+            end_ms=window_end_ms,
+            target_limit=base_limit,
+            requested_auto_backfill=auto_backfill,
+            compute=_read_base_range,
+            slice_result=not open_ended_latest,
+        )
         self._annotate_single_base_page(base_result)
         base_query_ms = (time.monotonic() - base_started_at) * 1000
         aggregation_started_at = time.monotonic()
@@ -1400,6 +1697,17 @@ class CustomIntervalQueryService:
             calendar=calendar,
         )
         derived_bars = self._promote_rebuilt_finality(derived_bars, base_result)
+        (
+            target_materialized_written,
+            target_materialization_role,
+        ) = self._persist_rebuilt_target(
+            derived_bars,
+            base_result,
+            symbol=symbol,
+            interval=interval,
+            exchange=exchange,
+            market_type=market_type,
+        )
         aggregation_ms = (time.monotonic() - aggregation_started_at) * 1000
         if materialized_bars:
             # The materialized target was unable to satisfy the finalized
@@ -1464,6 +1772,8 @@ class CustomIntervalQueryService:
                 "omitted_incomplete_aggregates": omitted_incomplete,
                 "target_materialized": False,
                 "target_materialized_rows": len(materialized_bars),
+                "target_materialized_written": target_materialized_written,
+                "target_materialization_role": target_materialization_role,
             },
             history_state=base_result.history_state,
             complete=base_result.complete,
@@ -1627,16 +1937,34 @@ class CustomIntervalQueryService:
             base_limit,
         )
 
+        source_interval_ms = parse_interval_ms(base_interval)
+        if source_interval_ms is None or source_interval_ms <= 0:
+            raise ValueError(f"invalid resolved base interval: {base_interval!r}")
+        window_end_ms = int(base_end_ms)
+        window_start_ms = window_end_ms + 1 - base_limit * source_interval_ms
+
         base_started_at = time.monotonic()
-        base_result = self._page_base_history(
-            symbol=symbol,
-            interval=base_interval,
-            before_ms=base_end_ms + 1,
+        base_result = self._run_base_window_flight(
+            series=(
+                exchange.strip().lower(),
+                market_type.strip().lower(),
+                symbol.strip().upper(),
+                base_interval,
+            ),
+            start_ms=window_start_ms,
+            end_ms=window_end_ms,
             target_limit=base_limit,
-            lower_bound_ms=None,
-            exchange=exchange,
-            market_type=market_type,
-            auto_backfill=auto_backfill,
+            requested_auto_backfill=auto_backfill,
+            compute=lambda: self._page_base_history(
+                symbol=symbol,
+                interval=base_interval,
+                before_ms=base_end_ms + 1,
+                target_limit=base_limit,
+                lower_bound_ms=None,
+                exchange=exchange,
+                market_type=market_type,
+                auto_backfill=False,
+            ),
         )
         self._annotate_single_base_page(base_result)
         base_query_ms = (time.monotonic() - base_started_at) * 1000
@@ -1659,6 +1987,17 @@ class CustomIntervalQueryService:
         derived_bars = self._promote_rebuilt_finality(derived_bars, base_result)
         aggregation_ms = (time.monotonic() - aggregation_started_at) * 1000
         derived_bars = [bar for bar in derived_bars if bar.time_ms < before_ms]
+        (
+            target_materialized_written,
+            target_materialization_role,
+        ) = self._persist_rebuilt_target(
+            derived_bars,
+            base_result,
+            symbol=symbol,
+            interval=interval,
+            exchange=exchange,
+            market_type=market_type,
+        )
         if materialized_bars:
             # Once base reconstruction was required, it wins overlaps and
             # materialized rows only fill otherwise-unavailable opens.
@@ -1719,6 +2058,8 @@ class CustomIntervalQueryService:
                 "omitted_incomplete_aggregates": omitted_incomplete,
                 "target_materialized": False,
                 "target_materialized_rows": len(materialized_bars),
+                "target_materialized_written": target_materialized_written,
+                "target_materialization_role": target_materialization_role,
             },
             history_state=base_result.history_state,
             complete=base_result.complete,

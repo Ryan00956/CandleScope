@@ -77,6 +77,11 @@ class IndicatorEngine:
         self._idle_since: dict[IndicatorKey, float] = {}
         self._first_committed: dict[IndicatorKey, int] = {}
         self._last_committed: dict[IndicatorKey, int] = {}
+        # Cold subscriptions can be active before storage has returned any
+        # bars.  Preserve the window the client asked us to seed so a later
+        # backfill completion rebuilds the requested history instead of only
+        # the indicator's small warmup tail.
+        self._desired_seed_bars: dict[IndicatorKey, int] = {}
         self._warm_ttl_seconds = max(0.0, float(
             config.INDICATOR_ENGINE_WARM_TTL_SECONDS
             if warm_ttl_seconds is None else warm_ttl_seconds
@@ -107,6 +112,7 @@ class IndicatorEngine:
         self._idle_since.clear()
         self._first_committed.clear()
         self._last_committed.clear()
+        self._desired_seed_bars.clear()
         self._stream_keys.clear()
         self._started = False
         logger.info("IndicatorEngine stopped -- all instances destroyed")
@@ -184,6 +190,8 @@ class IndicatorEngine:
         params: dict[str, Any],
         bars: list[BarData] | None = None,
         exchange: str = "binance",
+        data_revision: dict[str, Any] | None = None,
+        desired_seed_bars: int | None = None,
     ) -> tuple[IndicatorKey, IndicatorResult | None]:
         """Subscribe to an indicator -- create/reuse instance + optional init.
 
@@ -207,6 +215,11 @@ class IndicatorEngine:
         # Bump refcount
         self._refcounts[key] = self._refcounts.get(key, 0) + 1
         self._idle_since.pop(key, None)
+        if desired_seed_bars is not None:
+            self._desired_seed_bars[key] = max(
+                self._desired_seed_bars.get(key, 0),
+                max(0, int(desired_seed_bars)),
+            )
 
         # Track stream
         topic = key.series_topic
@@ -233,6 +246,11 @@ class IndicatorEngine:
                     detail={
                         "range": dict(input_range),
                         "computedRange": dict(input_range),
+                        **(
+                            {"dataRevision": dict(data_revision)}
+                            if isinstance(data_revision, dict)
+                            else {}
+                        ),
                     },
                 )
             except Exception as exc:
@@ -291,6 +309,11 @@ class IndicatorEngine:
                     detail={
                         "range": supplied_range,
                         "computedRange": computed_range,
+                        **(
+                            {"dataRevision": dict(data_revision)}
+                            if isinstance(data_revision, dict)
+                            else {}
+                        ),
                     },
                 )
             except Exception as exc:
@@ -338,6 +361,7 @@ class IndicatorEngine:
         self._idle_since.pop(key, None)
         self._first_committed.pop(key, None)
         self._last_committed.pop(key, None)
+        self._desired_seed_bars.pop(key, None)
 
         self._detach_from_stream(key)
 
@@ -487,6 +511,169 @@ class IndicatorEngine:
             logger.error("initial preview failed for %s: %s", key.uid, exc, exc_info=True)
             return None
 
+    def plan_series_correction(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        market_type: str = "spot",
+        exchange: str = "binance",
+        dirty_range: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Describe the minimum safe work for a historical correction.
+
+        Idle warm instances are invalid after a historical write and are
+        evicted here, before the bridge performs any storage query.  Active
+        instances retain their full computed bar span: rebuilding a rolling or
+        recursive indicator from only its warmup tail would silently change its
+        state and truncate the series exposed to subscribers.
+        """
+        topic = IndicatorKey(
+            symbol,
+            interval,
+            "__topic__",
+            {},
+            market_type=market_type,
+            exchange=exchange,
+        ).series_topic
+        self._prune_idle_instances()
+        for key in [
+            candidate
+            for candidate in self._idle_since
+            if candidate.series_topic == topic
+        ]:
+            self._destroy_instance(key)
+
+        active_keys = [
+            key
+            for key in self._stream_keys.get(topic, set())
+            if self._refcounts.get(key, 0) > 0
+            and self._instances.get(key) is not None
+        ]
+        if not active_keys:
+            return {
+                "hasActive": False,
+                "requiresRecompute": False,
+                "requiredTargetBars": 0,
+            }
+
+        requires_recompute = dirty_range is None
+        required_target_bars = 1
+        dirty_start = int((dirty_range or {}).get("start", 0))
+        dirty_end = int((dirty_range or {}).get("end", dirty_start))
+        for key in active_keys:
+            instance = self._instances[key]
+            required_target_bars = max(
+                required_target_bars,
+                int(instance.bar_count or 0),
+                int(getattr(instance, "warmup_period", 0) or 0),
+                int(self._desired_seed_bars.get(key, 0) or 0),
+            )
+            first = self._first_committed.get(key)
+            last = self._last_committed.get(key)
+            if first is None or last is None:
+                requires_recompute = True
+                continue
+            # Only a correction wholly before this instance's seed is safe to
+            # skip.  Writes inside the span or after its tail require refresh
+            # so newly completed bars are caught up.
+            if dirty_end >= int(first):
+                requires_recompute = True
+
+        return {
+            "hasActive": True,
+            "requiresRecompute": requires_recompute,
+            "requiredTargetBars": required_target_bars,
+        }
+
+    def active_series_intervals(
+        self,
+        symbol: str,
+        *,
+        market_type: str = "spot",
+        exchange: str = "binance",
+    ) -> tuple[str, ...]:
+        """Return intervals with live builtin subscribers for one market.
+
+        Historical source-bar amendments do not always carry derived repair
+        metadata (for example after an aggregator restart).  The data bridge
+        uses this bounded active set to route only corrections that can affect
+        an actually subscribed derived indicator series.
+        """
+        self._prune_idle_instances()
+        normalized_symbol = str(symbol).upper().strip()
+        normalized_market = str(market_type).lower().strip()
+        normalized_exchange = str(exchange).lower().strip()
+        return tuple(sorted({
+            key.interval
+            for keys in self._stream_keys.values()
+            for key in keys
+            if self._refcounts.get(key, 0) > 0
+            and key.symbol == normalized_symbol
+            and key.market_type == normalized_market
+            and key.exchange == normalized_exchange
+        }))
+
+    def resident_series_intervals(
+        self,
+        symbol: str,
+        *,
+        market_type: str = "spot",
+        exchange: str = "binance",
+    ) -> tuple[str, ...]:
+        """Return active plus bounded warm intervals for one market."""
+        self._prune_idle_instances()
+        normalized_symbol = str(symbol).upper().strip()
+        normalized_market = str(market_type).lower().strip()
+        normalized_exchange = str(exchange).lower().strip()
+        return tuple(sorted({
+            key.interval
+            for key in self._instances
+            if (
+                self._refcounts.get(key, 0) > 0
+                or key in self._idle_since
+            )
+            and key.symbol == normalized_symbol
+            and key.market_type == normalized_market
+            and key.exchange == normalized_exchange
+        }))
+
+    def on_series_correction_invalidated(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        market_type: str = "spot",
+        exchange: str = "binance",
+        dirty_range: dict[str, int],
+        data_revision: dict[str, Any] | None = None,
+    ) -> None:
+        """Notify active subscribers when corrected history is out of span."""
+        topic = IndicatorKey(
+            symbol,
+            interval,
+            "__topic__",
+            {},
+            market_type=market_type,
+            exchange=exchange,
+        ).series_topic
+        self._prune_idle_instances()
+        for key in list(self._stream_keys.get(topic, set())):
+            if self._refcounts.get(key, 0) <= 0:
+                continue
+            detail: dict[str, Any] = {
+                "range": dict(dirty_range),
+                "dirtyRange": dict(dirty_range),
+                "recomputed": False,
+            }
+            if isinstance(data_revision, dict):
+                detail["dataRevision"] = dict(data_revision)
+            self._emit(
+                IndicatorEventType.INDICATOR_RECOMPUTED,
+                key,
+                detail=detail,
+            )
+
     def on_bars_backfilled(
         self,
         symbol: str,
@@ -511,6 +698,14 @@ class IndicatorEngine:
         ).series_topic
         topic = key_topic
         self._prune_idle_instances()
+        confirmed_bars = sorted(
+            (
+                bar
+                for bar in bars
+                if getattr(bar, "is_closed", True)
+            ),
+            key=lambda bar: int(bar.time),
+        )
         # An idle instance is detached from realtime dispatch.  Its rolling
         # state cannot be repaired safely by append-only catch-up after a
         # historical correction, so evict it and force a clean seed on resume.
@@ -520,6 +715,8 @@ class IndicatorEngine:
         ]
         for key in idle_for_series:
             self._destroy_instance(key)
+        if not confirmed_bars:
+            return
         keys = self._stream_keys.get(topic, set())
 
         for key in keys:
@@ -528,13 +725,13 @@ class IndicatorEngine:
                 continue
 
             try:
-                instance.recompute(bars)
-                self._first_committed[key] = min(int(bar.time) for bar in bars)
-                self._last_committed[key] = max(int(bar.time) for bar in bars)
+                instance.recompute(confirmed_bars)
+                self._first_committed[key] = int(confirmed_bars[0].time)
+                self._last_committed[key] = int(confirmed_bars[-1].time)
                 result = instance.build_result(key)
                 computed_range = {
-                    "start": int(bars[0].time),
-                    "end": int(bars[-1].time),
+                    "start": int(confirmed_bars[0].time),
+                    "end": int(confirmed_bars[-1].time),
                 }
                 detail = {
                     "range": dict(dirty_range or computed_range),
@@ -549,7 +746,11 @@ class IndicatorEngine:
                     full_result=result,
                     detail=detail,
                 )
-                logger.info("Recomputed %s after backfill (%d bars)", key.uid, len(bars))
+                logger.info(
+                    "Recomputed %s after backfill (%d bars)",
+                    key.uid,
+                    len(confirmed_bars),
+                )
             except Exception as exc:
                 logger.error("Recompute failed for %s: %s", key.uid, exc, exc_info=True)
 

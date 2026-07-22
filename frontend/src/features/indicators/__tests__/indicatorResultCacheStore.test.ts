@@ -211,6 +211,72 @@ test("computed coverage is revision-aware and dirty invalidation keeps only the 
   );
 });
 
+test("bounded correction rebases dirty-outside segments and leaves only the dirty hole", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+
+  replaceCachedIndicatorRange(maIndicator, baseContext, { lines: [] }, { start: 60, end: 600 }, {
+    revision: { serverEpoch: "boot-1", correctionRevision: 1 },
+  });
+  invalidateCachedIndicatorRange(
+    maIndicator,
+    baseContext,
+    { start: 240, end: 360 },
+    {
+      cascadeRight: false,
+      revision: { serverEpoch: "boot-1", correctionRevision: "2" },
+    },
+  );
+
+  const revision = structuralMock<
+    NonNullable<Parameters<typeof getCachedIndicatorComputedSegments>[2]>
+  >({ serverEpoch: "boot-1", correctionRevision: "2" });
+  assert.deepEqual(
+    getCachedIndicatorComputedSegments(maIndicator, baseContext, revision),
+    [
+      {
+        start: 60,
+        end: 180,
+        revision: { serverEpoch: "boot-1", correctionRevision: "2" },
+      },
+      {
+        start: 420,
+        end: 600,
+        revision: { serverEpoch: "boot-1", correctionRevision: "2" },
+      },
+    ],
+  );
+});
+
+test("91m mid-window invalidation drops cached coverage through the right edge", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  const context = { ...baseContext, interval: "91m" };
+  registerCacheResource("chart-data-cache", "binance-spot-BTCUSDT-91m", {
+    type: "kline",
+    dependencyKey: klineDependencyKey(context),
+    bars: 100,
+  });
+  const step = 91 * 60;
+  const start = 1_700_000_000;
+  const dirtyStart = start + step * 2;
+  const end = start + step * 5;
+
+  replaceCachedIndicatorRange(maIndicator, context, { lines: [] }, { start, end });
+  invalidateCachedIndicatorRange(
+    maIndicator,
+    context,
+    { start: dirtyStart, end: dirtyStart + step },
+    { cascadeRight: true },
+  );
+
+  assert.deepEqual(getCachedIndicatorComputedSegments(maIndicator, context), [{
+    start,
+    end: dirtyStart - step,
+  }]);
+});
+
 test("upsertCachedIndicatorLinePoint preserves consecutive realtime bars", () => {
   resetIndicatorResultCache();
   resetCacheRegistry();

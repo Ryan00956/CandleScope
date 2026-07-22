@@ -177,6 +177,7 @@ class QueryEngine:
             base_query_before=self.query_before,
             target_query=self._query_materialized_target,
             target_query_before=self._query_materialized_target_before,
+            target_writer=self._write_materialized_target,
             calendar_provider=self._calendar_for,
         )
 
@@ -233,6 +234,14 @@ class QueryEngine:
         """Read a derived target page without recursively deriving it."""
         kwargs["_materialized_only"] = True
         return self.query_before(*args, **kwargs)
+
+    def _write_materialized_target(self, *args: Any, **kwargs: Any) -> int:
+        """Persist a verified derived page through the configured backend."""
+        storage = self._storage
+        writer = getattr(storage, "upsert_bars", None)
+        if not callable(writer):
+            return 0
+        return int(writer(*args, **kwargs) or 0)
 
     # ── Public: Main Query ───────────────────────────────────
 

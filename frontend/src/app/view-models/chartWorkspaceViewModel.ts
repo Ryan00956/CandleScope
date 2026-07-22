@@ -108,7 +108,11 @@ export function buildChartWorkspaceViewModel({
         loading: marketView.loading,
         onCrosshairMove: marketActions.onCrosshairMove,
         onNeedMoreLeft: marketActions.loadMoreLeft,
+        ...(marketActions.restoreLatestWindow === undefined ? {} : {
+          onNeedMoreRight: marketActions.restoreLatestWindow,
+        }),
         canLoadMoreLeft: marketStatus.canLoadMoreLeft,
+        canRestoreLatestWindow: marketStatus.canRestoreLatestWindow,
         datasetKey,
         upColor: chartSettings.upColor,
         downColor: chartSettings.downColor,

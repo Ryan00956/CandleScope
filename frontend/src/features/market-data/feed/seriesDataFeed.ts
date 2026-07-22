@@ -72,6 +72,7 @@ interface RequestBeforePageOptions {
   cooldownMs?: number;
   pendingCooldownMs?: number;
   errorCooldownMs?: number;
+  indicatorWindowOwner?: string;
 }
 
 interface GetBarsOptions {
@@ -85,8 +86,10 @@ interface GetBarsOptions {
   commit?: FeedCommitMode;
   repair?: string;
   waitMs?: number;
+  maxWaitMs?: number;
   strict?: boolean;
   requestScope?: string;
+  indicatorWindowOwner?: string;
 }
 
 interface GetHistoryOptions {
@@ -96,6 +99,7 @@ interface GetHistoryOptions {
   signal?: AbortSignal;
   commit?: FeedCommitMode;
   requestScope?: string;
+  indicatorWindowOwner?: string;
 }
 
 interface GetBeforeOptions {
@@ -105,6 +109,8 @@ interface GetBeforeOptions {
   signal?: AbortSignal;
   commit?: FeedCommitMode;
   requestScope?: string;
+  maxWaitMs?: number;
+  indicatorWindowOwner?: string;
 }
 
 interface GetRangeOptions {
@@ -120,6 +126,7 @@ interface GetRangeOptions {
   commit?: FeedCommitMode;
   maxPages?: number;
   requestScope?: string;
+  indicatorWindowOwner?: string;
 }
 
 interface GetLatestOptions {
@@ -130,12 +137,23 @@ interface GetLatestOptions {
   commit?: FeedCommitMode;
 }
 
+export interface KlineRequestDemand {
+  scope: string;
+  generation: number;
+}
+
+interface KlineTransportDemandOptions {
+  demandScope?: string;
+  demandGeneration?: number;
+}
+
 interface ApplyResultOptions {
   epoch: number;
   source: string;
   commit: FeedCommitMode;
   mode: FeedApplyMode;
   expectedRealtimeVersion?: number;
+  indicatorWindowOwner?: string;
 }
 
 interface RealtimeRowMutation {
@@ -259,6 +277,17 @@ function isAbortFailure(error: unknown, signal?: AbortSignal): boolean {
     && typeof error === "object"
     && "name" in error
     && (error as { name?: unknown }).name === "AbortError",
+  );
+}
+
+function isStaleRequestGenerationFailure(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && "status" in error
+    && (error as { status?: unknown }).status === 409
+    && "code" in error
+    && (error as { code?: unknown }).code === "stale_request_generation",
   );
 }
 
@@ -599,6 +628,7 @@ export class SeriesDataFeed {
   commitPatchedChartData: CommitChartData;
   patchCacheTick: PatchCacheTick;
   private realtimeFenceBySeries: Map<SeriesKey, RealtimeFenceState>;
+  private requestDemandBySeries: Map<SeriesKey, KlineRequestDemand>;
 
   constructor(config: SeriesDataFeedConfig = {}) {
     this.inflight = new InflightRegistry();
@@ -626,6 +656,7 @@ export class SeriesDataFeed {
     this.commitPatchedChartData = noopCommitChartData;
     this.patchCacheTick = noopPatchCacheTick;
     this.realtimeFenceBySeries = new Map();
+    this.requestDemandBySeries = new Map();
     this.configure(config);
   }
 
@@ -662,6 +693,40 @@ export class SeriesDataFeed {
     return this.seriesKey(series);
   }
 
+  private indicatorWindowOwner(
+    kind: "history" | "before" | "range",
+    series: MarketSeries,
+    epoch: number,
+    identity: readonly unknown[],
+  ): string {
+    return [
+      this.seriesKey(series),
+      "indicator-window",
+      kind,
+      epoch,
+      ...identity.map((value) => String(value ?? "")),
+    ].join("|");
+  }
+
+  setRequestDemand(series: MarketSeries, demand: KlineRequestDemand): void {
+    const scope = demand.scope.trim();
+    const generation = Math.floor(demand.generation);
+    if (!scope) throw new TypeError("K-line request demand scope must not be empty");
+    if (!Number.isSafeInteger(generation) || generation < 0) {
+      throw new TypeError("K-line request demand generation must be a non-negative safe integer");
+    }
+    this.requestDemandBySeries.set(this.seriesKey(series), { scope, generation });
+  }
+
+  private transportDemandOptions(series: MarketSeries): KlineTransportDemandOptions {
+    const demand = this.requestDemandBySeries.get(this.seriesKey(series));
+    if (!demand) return {};
+    return {
+      demandScope: demand.scope,
+      demandGeneration: demand.generation,
+    };
+  }
+
   beginEpoch(series: MarketSeries): number {
     const key = this.seriesKey(series);
     const next = (this.epochBySeries.get(key) || 0) + 1;
@@ -683,6 +748,7 @@ export class SeriesDataFeed {
   cancelSeriesRequests(series: MarketSeries): void {
     const key = this.seriesKey(series);
     this.beginEpoch(series);
+    this.requestDemandBySeries.delete(key);
     const queue = this.backfillReloadQueues.get(key);
     if (queue) {
       for (const job of queue) {
@@ -1078,9 +1144,13 @@ export class SeriesDataFeed {
       const result = await this.getBars(series, {
         to: pending.before,
         countBack: pending.bars ?? 500,
+        maxWaitMs: 0,
         source,
         signal: repairContext.signal,
         requestScope: repairContext.requestScope,
+        ...(pending.indicatorWindowOwner
+          ? { indicatorWindowOwner: pending.indicatorWindowOwner }
+          : {}),
       });
       if (
         result.stale
@@ -1128,6 +1198,11 @@ export class SeriesDataFeed {
       nextPollAt: Date.now() + (pollAttempts >= PENDING_REPAIR_MAX_ATTEMPTS
         ? PENDING_REPAIR_DORMANT_POLL_MS
         : PENDING_REPAIR_POLL_BASE_MS * (2 ** Math.min(4, pollAttempts))),
+      ...(result.indicatorWindowOwner
+        ? { indicatorWindowOwner: result.indicatorWindowOwner }
+        : (existing?.indicatorWindowOwner
+          ? { indicatorWindowOwner: existing.indicatorWindowOwner }
+          : {})),
     });
     return true;
   }
@@ -1214,17 +1289,6 @@ export class SeriesDataFeed {
             }
             if (job.options.pendingInitial && !initialResolved) {
               pendingInitialVerification = job;
-            }
-            const pending = this.beginBeforePageCompletionAttempt(
-              job.series,
-              job.options.completionMaxAttempts,
-            );
-            if (pending) {
-              await this.refreshPendingBeforePage(
-                job.series,
-                pending,
-                "backfill-before-page",
-              );
             }
           } catch (error) {
             console.warn(`Failed to reload after backfill for ${job.series.interval}:`, error);
@@ -1338,8 +1402,10 @@ export class SeriesDataFeed {
           }, result);
         }
       } catch (error) {
-        lastError = error;
-        console.warn(`[Backfill] Exact range reload failed for ${this.seriesKey(job.series)}:`, error);
+        if (!isStaleRequestGenerationFailure(error)) {
+          lastError = error;
+          console.warn(`[Backfill] Exact range reload failed for ${this.seriesKey(job.series)}:`, error);
+        }
       }
     }
 
@@ -1372,11 +1438,17 @@ export class SeriesDataFeed {
           repair: "none",
           strict: false,
           source: "backfill-initial-range-verification",
+          ...(pendingInitial.indicatorWindowOwner
+            ? { indicatorWindowOwner: pendingInitial.indicatorWindowOwner }
+            : {}),
         })
         : await this.getBars(job.series, {
           fallbackDays: job.options.getFallbackDays(job.series),
-          countBack: 1_500,
+          countBack: pendingInitial.countBack ?? 1_500,
           source: "backfill-initial-range-verification",
+          ...(pendingInitial.indicatorWindowOwner
+            ? { indicatorWindowOwner: pendingInitial.indicatorWindowOwner }
+            : {}),
         });
       const rows = result.data || [];
       if (result.stale || result.active === false || !isStillAuthoritative()) return;
@@ -1447,6 +1519,28 @@ export class SeriesDataFeed {
 
   private clearPendingGapRepair(series: MarketSeries, range: TimeRangeSec): void {
     this.pendingGapRepairs.delete(this.gapRepairKey(series, range));
+  }
+
+  private wakePendingGapRepairs(
+    series: MarketSeries,
+    range: TimeRangeSec | null = null,
+  ): number {
+    const seriesKey = this.seriesKey(series);
+    const now = Date.now();
+    let woken = 0;
+    for (const pending of this.pendingGapRepairs.values()) {
+      if (
+        pending.terminalReason
+        || this.seriesKey(pending.series) !== seriesKey
+        || (range && (
+          pending.range.end < range.start
+          || pending.range.start > range.end
+        ))
+      ) continue;
+      pending.nextPollAt = Math.min(pending.nextPollAt, now);
+      woken += 1;
+    }
+    return woken;
   }
 
   private resolveVerifiedPendingGapRepairs(
@@ -1984,6 +2078,28 @@ export class SeriesDataFeed {
     );
     const isPendingLoadMore = Boolean(pendingBeforePage);
 
+    if (isPendingLoadMore && !isPendingInitial) {
+      // A completion chunk is only a hint that the owned page may now be
+      // readable. Do not fan each chunk out into an exact-range reload plus a
+      // second full-page request; the runtime poll is the single validation
+      // owner and will perform one non-blocking page probe.
+      if (pendingBeforePage) pendingBeforePage.nextPollAt = Date.now();
+      return true;
+    }
+
+    if (isPendingInitial && pendingInitial?.range) {
+      const initialRange = {
+        start: millisecondsToSeconds(pendingInitial.range.start),
+        end: millisecondsToSeconds(pendingInitial.range.end),
+      };
+      // Initial custom-interval backfills emit one completion per physical
+      // base chunk. The exact-range poller already owns verification of the
+      // whole requested window, so each completion only makes that poll due.
+      // Reloading both the chunk and the full range here turned one 89m cold
+      // start into dozens of K-line commits and downstream indicator refreshes.
+      if (this.wakePendingGapRepairs(eventSeries, initialRange) > 0) return true;
+    }
+
     if (!userVisibleReason && !isPendingInitial && !isPendingLoadMore) {
       return true;
     }
@@ -2045,6 +2161,7 @@ export class SeriesDataFeed {
       cooldownMs = 3_000,
       pendingCooldownMs = 2_000,
       errorCooldownMs = 3_000,
+      indicatorWindowOwner,
     }: RequestBeforePageOptions = {},
   ): Promise<FeedResult> {
     if (this.isBeforePageExhausted(series, before)) {
@@ -2091,6 +2208,7 @@ export class SeriesDataFeed {
         ...(linkedSignal.signal === undefined ? {} : { signal: linkedSignal.signal }),
         commit,
         requestScope: repairContext.requestScope,
+        ...(indicatorWindowOwner === undefined ? {} : { indicatorWindowOwner }),
       });
       if (this.currentGapRepairGeneration(series) !== repairContext.generation) {
         return {
@@ -2161,8 +2279,10 @@ export class SeriesDataFeed {
       commit = "active",
       repair = "async",
       waitMs = 0,
+      maxWaitMs,
       strict = false,
       requestScope,
+      indicatorWindowOwner,
     }: GetBarsOptions = {},
   ): Promise<FeedResult> {
     const plan = planBarsFetch({
@@ -2185,6 +2305,7 @@ export class SeriesDataFeed {
         ...(signal === undefined ? {} : { signal }),
         commit,
         ...(requestScope === undefined ? {} : { requestScope }),
+        ...(indicatorWindowOwner === undefined ? {} : { indicatorWindowOwner }),
       });
       return { ...result, plan };
     }
@@ -2197,6 +2318,8 @@ export class SeriesDataFeed {
         ...(signal === undefined ? {} : { signal }),
         commit,
         ...(requestScope === undefined ? {} : { requestScope }),
+        ...(maxWaitMs === undefined ? {} : { maxWaitMs }),
+        ...(indicatorWindowOwner === undefined ? {} : { indicatorWindowOwner }),
       });
       return { ...result, plan };
     }
@@ -2208,6 +2331,7 @@ export class SeriesDataFeed {
       ...(signal === undefined ? {} : { signal }),
       commit,
       ...(requestScope === undefined ? {} : { requestScope }),
+      ...(indicatorWindowOwner === undefined ? {} : { indicatorWindowOwner }),
     });
     return { ...result, plan };
   }
@@ -2221,16 +2345,25 @@ export class SeriesDataFeed {
       signal,
       commit = "active",
       requestScope,
+      indicatorWindowOwner: requestedIndicatorWindowOwner,
     }: GetHistoryOptions = {},
   ): Promise<AppliedKlineResult> {
     if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
     const epoch = this.currentEpoch(series);
+    const indicatorWindowOwner = requestedIndicatorWindowOwner || this.indicatorWindowOwner(
+      "history",
+      series,
+      epoch,
+      [days, countBack, requestScope],
+    );
+    const transportDemand = this.transportDemandOptions(series);
     const key = requestKeyFor("history", series, {
       countBack,
       days,
       epoch,
       source,
       requestScope,
+      ...transportDemand,
     });
     const realtimeFence = this.beginRealtimeRequest(series);
     return this.inflight.run(key, async () => {
@@ -2246,6 +2379,7 @@ export class SeriesDataFeed {
         {
           ...(countBack === undefined ? {} : { countBack }),
           ...(signal === undefined ? {} : { signal }),
+          ...transportDemand,
         },
       );
       return this.applyResult(series, result, {
@@ -2254,6 +2388,7 @@ export class SeriesDataFeed {
         commit,
         mode: "range",
         expectedRealtimeVersion: realtimeFence.version,
+        indicatorWindowOwner,
       });
     }).finally(() => {
       this.endRealtimeRequest(realtimeFence);
@@ -2269,16 +2404,27 @@ export class SeriesDataFeed {
       signal,
       commit = "active",
       requestScope,
+      maxWaitMs,
+      indicatorWindowOwner: requestedIndicatorWindowOwner,
     }: GetBeforeOptions = {},
   ): Promise<AppliedKlineResult> {
     if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
     const epoch = this.currentEpoch(series);
+    const indicatorWindowOwner = requestedIndicatorWindowOwner || this.indicatorWindowOwner(
+      "before",
+      series,
+      epoch,
+      [before, bars, requestScope],
+    );
+    const transportDemand = this.transportDemandOptions(series);
     const key = requestKeyFor("before", series, {
       before,
       bars,
       epoch,
       source,
       requestScope,
+      maxWaitMs,
+      ...transportDemand,
     });
     const realtimeFence = this.beginRealtimeRequest(series);
     return this.inflight.run(key, async () => {
@@ -2292,7 +2438,11 @@ export class SeriesDataFeed {
         bars,
         series.marketType,
         series.exchange,
-        signal === undefined ? {} : { signal },
+        {
+          ...(signal === undefined ? {} : { signal }),
+          ...(maxWaitMs === undefined ? {} : { maxWaitMs }),
+          ...transportDemand,
+        },
       );
       throwIfAborted(signal);
       const applied = this.applyResult(series, result, {
@@ -2301,6 +2451,7 @@ export class SeriesDataFeed {
         commit,
         mode: "range",
         expectedRealtimeVersion: realtimeFence.version,
+        indicatorWindowOwner,
       });
       if (!applied.stale) this.updateBeforePageAvailability(series, before, applied);
       return applied;
@@ -2324,6 +2475,7 @@ export class SeriesDataFeed {
       commit = "active",
       maxPages = 20,
       requestScope,
+      indicatorWindowOwner: requestedIndicatorWindowOwner,
     }: GetRangeOptions = {},
   ): Promise<FeedResult> {
     const range = normalizeRangeSec({ start, end, startSec, endSec });
@@ -2333,6 +2485,13 @@ export class SeriesDataFeed {
     if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
 
     const epoch = this.currentEpoch(series);
+    const indicatorWindowOwner = requestedIndicatorWindowOwner || this.indicatorWindowOwner(
+      "range",
+      series,
+      epoch,
+      [range.start, range.end, requestScope],
+    );
+    const transportDemand = this.transportDemandOptions(series);
     const key = requestKeyFor("range", series, {
       start: range.start,
       end: range.end,
@@ -2343,6 +2502,7 @@ export class SeriesDataFeed {
       source,
       maxPages,
       requestScope,
+      ...transportDemand,
     });
     const realtimeFence = this.beginRealtimeRequest(series);
     return this.inflight.run(key, async () => {
@@ -2370,6 +2530,7 @@ export class SeriesDataFeed {
             waitMs,
             strict,
             ...(signal === undefined ? {} : { signal }),
+            ...transportDemand,
           },
         );
         throwIfAborted(signal);
@@ -2379,6 +2540,7 @@ export class SeriesDataFeed {
           commit,
           mode: "range",
           expectedRealtimeVersion: realtimeFence.version,
+          indicatorWindowOwner,
         });
         finalResult = applied;
         pages.push(applied);
@@ -2435,7 +2597,7 @@ export class SeriesDataFeed {
         ? false
         : (allExplicitlyVerified ? true : finalResult?.verified_contiguous);
       const pending = incompletePagination || semanticPending || verifiedContiguous === false;
-      return {
+      const combinedResult: FeedResult = {
         ...(finalResult || {}),
         data: combinedRows,
         rows: combinedRows,
@@ -2461,7 +2623,22 @@ export class SeriesDataFeed {
             : {}),
         } : {}),
         ...(finalResult?.plan === undefined ? {} : { plan: finalResult.plan }),
+        indicatorWindowOwner,
       };
+      const terminalPagination = paginationStopReason === "missing-cursor"
+        || paginationStopReason === "stalled-cursor";
+      if (
+        terminalPagination
+        && this.isCurrent(series, epoch)
+        && (commit === "always" || (commit === "active" && this.shouldCommitActive(series)))
+      ) {
+        this.commitMergedChartData(series.symbol, series.interval, [], {
+          source,
+          deferIndicatorWindow: false,
+          indicatorWindowOwner,
+        });
+      }
+      return combinedResult;
     }).finally(() => {
       this.endRealtimeRequest(realtimeFence);
     });
@@ -2509,12 +2686,27 @@ export class SeriesDataFeed {
   applyResult(
     series: MarketSeries,
     result: KlineFetchResult,
-    { epoch, source, commit, mode, expectedRealtimeVersion }: ApplyResultOptions,
+    {
+      epoch,
+      source,
+      commit,
+      mode,
+      expectedRealtimeVersion,
+      indicatorWindowOwner,
+    }: ApplyResultOptions,
   ): AppliedKlineResult {
     const rawRows = rowsFromResult(result);
     const active = this.shouldCommitActive(series);
     if (!this.isCurrent(series, epoch)) {
-      return { ...result, data: rawRows, rows: rawRows, committed: false, stale: true, active };
+      return {
+        ...result,
+        data: rawRows,
+        rows: rawRows,
+        committed: false,
+        stale: true,
+        active,
+        ...(indicatorWindowOwner ? { indicatorWindowOwner } : {}),
+      };
     }
     const rows = this.reconcileRealtimeRows(
       series,
@@ -2535,8 +2727,20 @@ export class SeriesDataFeed {
 
     if (rows.length > 0) {
       if (commit === "always" || (commit === "active" && active)) {
-        this.commitMergedChartData(series.symbol, series.interval, rows, { source });
-        return { ...result, data: rows, rows, committed: true, stale: false, active };
+        this.commitMergedChartData(series.symbol, series.interval, rows, {
+          source,
+          deferIndicatorWindow: isKlineResultRepairPending(result),
+          ...(indicatorWindowOwner ? { indicatorWindowOwner } : {}),
+        });
+        return {
+          ...result,
+          data: rows,
+          rows,
+          committed: true,
+          stale: false,
+          active,
+          ...(indicatorWindowOwner ? { indicatorWindowOwner } : {}),
+        };
       }
       if (commit === "patch-active" && active) {
         this.commitPatchedChartData(series.symbol, series.interval, rows, {
@@ -2545,7 +2749,10 @@ export class SeriesDataFeed {
         });
         return { ...result, data: rows, rows, committed: true, stale: false, active };
       }
-      if (commit === "patch-cache") {
+      if (commit === "none") {
+        // Snapshot callers own an atomic replacement and must not mutate the
+        // active/cache window before they have revalidated session ownership.
+      } else if (commit === "patch-cache") {
         for (const row of rows) {
           this.patchCacheTick(series.symbol, series.interval, row, {
             marketType: series.marketType,
@@ -2560,6 +2767,27 @@ export class SeriesDataFeed {
       }
     }
 
+    if (
+      rows.length === 0
+      && (commit === "always" || (commit === "active" && active))
+      && !isKlineResultRepairPending(result)
+      && (
+        result.complete === true
+        || result.retryable === false
+        || result.history_state === "ready"
+        || result.history_state === "exhausted"
+      )
+    ) {
+      // A terminal/settled probe may legitimately contain no new rows. Give
+      // the chart owner a chance to publish (or discard) indicator deltas that
+      // were staged by earlier partial commits for this exact series.
+      this.commitMergedChartData(series.symbol, series.interval, [], {
+        source,
+        deferIndicatorWindow: false,
+        ...(indicatorWindowOwner ? { indicatorWindowOwner } : {}),
+      });
+    }
+
     return {
       ...result,
       data: rows,
@@ -2568,6 +2796,7 @@ export class SeriesDataFeed {
       stale: false,
       active,
       mode,
+      ...(indicatorWindowOwner ? { indicatorWindowOwner } : {}),
     };
   }
 }

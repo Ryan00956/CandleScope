@@ -11,6 +11,8 @@ from app.api.v1.stream_indicator_payloads import (
     _indicator_warmup_bars,
     _query_indicator_compute_bars_async,
     _replace_range_from_snapshot,
+    _validate_builtin_compute_bars,
+    _validated_builtin_warmup_bars,
 )
 from app.core import config
 from app.core.executors import run_indicator, run_pyne_wait
@@ -51,12 +53,41 @@ def _validate_jobs(jobs: list[IndicatorRangeBatchJob]) -> None:
         raise ValueError("All indicator range batch items must use the same K-line series")
     for job in jobs:
         target_bars = _job_target_bars(job)
-        if target_bars > 50_000:
-            raise ValueError(f"Too many indicator bars: {target_bars} > 50000")
         if job.meta.get("kind") == "script":
             estimated = target_bars + _job_warmup(job)
             if estimated > max(int(config.PYNE_MAX_BARS), 1):
                 raise ValueError(f"Too many Pyne bars: {estimated} > {config.PYNE_MAX_BARS}")
+        else:
+            params = (
+                job.meta.get("params")
+                if isinstance(job.meta.get("params"), dict)
+                else {}
+            )
+            _validated_builtin_warmup_bars(
+                str(job.meta.get("name") or ""),
+                params,
+                target_bars,
+            )
+
+    union_start = min(job.start for job in jobs)
+    union_end = max(job.end for job in jobs)
+    interval_ms = parse_interval_ms(jobs[0].meta["interval"])
+    assert interval_ms is not None and interval_ms > 0
+    union_target_bars = (
+        (union_end - union_start) // max(interval_ms // 1000, 1)
+    ) + 1
+    max_shared_warmup = max(_job_warmup(job) for job in jobs)
+    builtin_jobs = [job for job in jobs if job.meta.get("kind") != "script"]
+    if builtin_jobs:
+        _validate_builtin_compute_bars(
+            union_target_bars,
+            max_shared_warmup,
+        )
+    script_jobs = [job for job in jobs if job.meta.get("kind") == "script"]
+    if script_jobs:
+        estimated = union_target_bars + max_shared_warmup
+        if estimated > max(int(config.PYNE_MAX_BARS), 1):
+            raise ValueError(f"Too many Pyne bars: {estimated} > {config.PYNE_MAX_BARS}")
 
 
 async def compute_indicator_range_batch_async(
@@ -65,6 +96,7 @@ async def compute_indicator_range_batch_async(
     jobs: list[IndicatorRangeBatchJob],
     range_service: IndicatorRangeResultService,
     backfill_coordinator: Any | None = None,
+    request_owner_id: str | None = None,
 ) -> list[dict[str, Any] | BaseException]:
     """Compute a same-series batch with at most one shared K-line query.
 
@@ -76,26 +108,35 @@ async def compute_indicator_range_batch_async(
     union_end = max(job.end for job in jobs)
     max_warmup = max(_job_warmup(job) for job in jobs)
     seed_meta = jobs[0].meta
-    bars_tasks: dict[str, asyncio.Task[list[Any]]] = {}
+
+    async def _query_segment(
+        segment_start: int,
+        segment_end: int,
+        segment_warmup: int,
+    ) -> list[Any]:
+        return await _query_indicator_compute_bars_async(
+            dm,
+            seed_meta,
+            segment_start,
+            segment_end,
+            warmup_bars=segment_warmup,
+            backfill_coordinator=backfill_coordinator,
+            wait_seconds=None,
+        )
 
     async def _shared_bars() -> list[Any]:
-        revision_token = range_service.revision_token_for_meta(seed_meta)
-        bars_task = bars_tasks.get(revision_token)
-        if bars_task is None:
-            bars_task = asyncio.create_task(
-                _query_indicator_compute_bars_async(
-                    dm,
-                    seed_meta,
-                    union_start,
-                    union_end,
-                    warmup_bars=max_warmup,
-                    backfill_coordinator=backfill_coordinator,
-                    wait_seconds=None,
-                ),
-                name=f"indicator-range-batch-bars:{union_start}-{union_end}",
-            )
-            bars_tasks[revision_token] = bars_task
-        return await asyncio.shield(bars_task)
+        async def _query() -> list[Any]:
+            return await _query_segment(union_start, union_end, max_warmup)
+
+        return await range_service.get_or_query_bars(
+            meta=seed_meta,
+            start=union_start,
+            end=union_end,
+            warmup_bars=max_warmup,
+            query=_query,
+            query_segment=_query_segment,
+            query_owner_id=request_owner_id,
+        )
 
     async def _one(job: IndicatorRangeBatchJob) -> dict[str, Any]:
         target_bars = _job_target_bars(job)
@@ -129,6 +170,7 @@ async def compute_indicator_range_batch_async(
             start=job.start,
             end=job.end,
             compute=_compute,
+            request_owner_id=request_owner_id,
         )
         snapshot_range = snapshot.get("range") if isinstance(snapshot, dict) else None
         available_start = (

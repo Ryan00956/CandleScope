@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -13,7 +14,7 @@ from app.api.v1 import stream_indicators as stream_api
 from app.api.v1 import stream_pyne_subscriptions as pyne_stream_api
 from app.api.v1.indicators import ComputeRequest, CustomIndicatorPayload
 from app.indicator import create_engine
-from app.data_engine.data_manager.models import BarData
+from app.data_engine.data_manager.models import BarData, DataEventType
 from app.indicator.events import IndicatorEvent, IndicatorEventType
 from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.pyne import (
@@ -28,6 +29,7 @@ from app.indicator.pyne import security as pyne_security
 from app.indicator.engine import indicator_code_hash
 from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.types import IndicatorKey
+from app.indicator.range_result_service import IndicatorRangeRevisionChangedError
 
 
 class _QueryResult:
@@ -682,9 +684,127 @@ def test_indicator_range_http_reports_not_ready_for_missing_target_range() -> No
     })
 
     payload = response.json()
+    assert response.status_code == 202
     assert payload["ok"] is False
     assert payload["code"] == "INDICATOR_RANGE_NOT_READY"
-    assert payload["detail"]["retryAfterMs"] == 3000
+    assert payload["detail"]["retryMode"] == "event"
+    assert payload["detail"]["backfillRequestIds"] == []
+    assert "retryAfterMs" not in payload["detail"]
+    assert payload["dataRevision"]["revisionToken"]
+
+
+def test_indicator_range_runtime_failure_is_not_misreported_as_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bars = [BarData.from_dict(item) for item in _bars(5)]
+
+    async def _fail_compute(**_kwargs):
+        raise RuntimeError("indicator execution failed")
+
+    monkeypatch.setattr(
+        indicators_api,
+        "compute_indicator_range_payload_async",
+        _fail_compute,
+    )
+    client = _indicator_client(_RangeDataManager(bars))
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ma-runtime-error",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["code"] == "INDICATOR_RANGE_COMPUTE_FAILED"
+    assert payload["ok"] is False
+    assert "retryMode" not in payload.get("detail", {})
+
+
+def test_indicator_range_revision_race_is_event_driven_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bars = [BarData.from_dict(item) for item in _bars(5)]
+
+    async def _revision_changed(**_kwargs):
+        raise IndicatorRangeRevisionChangedError("revision changed during compute")
+
+    monkeypatch.setattr(
+        indicators_api,
+        "compute_indicator_range_payload_async",
+        _revision_changed,
+    )
+    client = _indicator_client(_RangeDataManager(bars))
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ma-revision-race",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["code"] == "INDICATOR_RANGE_NOT_READY"
+    assert payload["detail"]["retryMode"] == "event"
+    assert "retryAfterMs" not in payload["detail"]
+    assert payload["dataRevision"]["revisionToken"]
+
+
+@pytest.mark.parametrize(("interval", "step_seconds"), [("1m", 60), ("89m", 5_340)])
+def test_indicator_range_warmup_gap_is_read_only_and_does_not_block_target(
+    interval: str,
+    step_seconds: int,
+) -> None:
+    bars = [
+        BarData.from_dict({
+            **item,
+            "time": 1_700_000_000 + index * step_seconds,
+        })
+        for index, item in enumerate(_bars(10))
+    ]
+
+    class MissingWarmup:
+        start_ms = (bars[0].time - 2 * step_seconds) * 1000
+        end_ms = (bars[0].time - step_seconds) * 1000
+
+    class DataManager:
+        def __init__(self) -> None:
+            self.query_kwargs: list[dict] = []
+
+        def query(self, *args, **kwargs):
+            self.query_kwargs.append(dict(kwargs))
+            return _QueryResult(bars, [MissingWarmup()])
+
+    data_manager = DataManager()
+    client = _indicator_client(data_manager)
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": f"ma-warmup-{interval}",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": interval,
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert len(data_manager.query_kwargs) == 1
+    query = data_manager.query_kwargs[0]
+    assert query["auto_backfill"] is False
+    assert "backfill_metadata" not in query
+    assert query["start_ms"] == MissingWarmup.start_ms
+    assert query["end_ms"] == bars[-1].time * 1000
 
 
 def test_indicator_range_http_reports_empty_for_forming_only_target_range() -> None:
@@ -759,6 +879,37 @@ def test_indicator_range_http_rejects_oversized_pyne_before_query(monkeypatch: p
     payload = response.json()
     assert payload["ok"] is False
     assert payload["code"] == "INDICATOR_RANGE_LIMIT"
+    assert dm.query_calls == 0
+
+
+def test_indicator_range_http_rejects_extreme_builtin_warmup_before_query() -> None:
+    class CountingRangeDataManager(_RangeDataManager):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.query_calls = 0
+
+        def query(self, *args, **kwargs):
+            self.query_calls += 1
+            raise AssertionError("oversized builtin warmup must not query K-lines")
+
+    dm = CountingRangeDataManager()
+    client = _indicator_client(dm)
+    start = 1_700_000_000
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ema-extreme-warmup",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "EMA",
+        "params": {"period": 10_000},
+        "start": start,
+        "end": start + 59 * 60,
+    })
+
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RANGE_LIMIT"
+    assert "Too many indicator bars" in payload["error"]
     assert dm.query_calls == 0
 
 
@@ -1254,15 +1405,24 @@ async def test_indicator_unsubscribe_releases_stream_consumer() -> None:
 
 def test_pyne_ws_snapshot_message_runs_script() -> None:
     class FakeDataManager:
-        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
+        def __init__(self) -> None:
+            self.auto_backfill = None
+
+        def query_latest(
+            self, symbol, interval, limit, exchange="binance",
+            market_type="spot", auto_backfill=None,
+        ):
+            self.auto_backfill = auto_backfill
             class Result:
                 bars = [BarData.from_dict(item) for item in _bars(30)]
 
             return Result()
 
+    dm = FakeDataManager()
+
     msg = payload_api._compute_pyne_snapshot_message(
         "custom-1",
-        FakeDataManager(),
+        dm,
         {
             "exchange": "binance",
             "market_type": "spot",
@@ -1286,6 +1446,60 @@ def test_pyne_ws_snapshot_message_runs_script() -> None:
     assert msg["series"][0]["id"].startswith(f"{msg['indicatorId']}:")
     assert msg["annotations"][0]["type"] == "marker"
     assert msg["markers"][0]["data"][0]["text"] == "X"
+    assert dm.auto_backfill is False
+
+
+def test_incremental_pyne_ws_seed_is_read_only() -> None:
+    script = """
+indicator("Inc Close", mode="incremental", overlay=True)
+
+def init(ctx):
+    pass
+
+def on_bar(ctx, bar):
+    ctx.plot("Close", bar.close)
+"""
+
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.auto_backfill = None
+
+        def query_latest(
+            self, symbol, interval, limit, exchange="binance",
+            market_type="spot", auto_backfill=None,
+        ):
+            self.auto_backfill = auto_backfill
+            return type("Result", (), {
+                "bars": [BarData.from_dict(item) for item in _bars(5)],
+            })()
+
+    dm = FakeDataManager()
+    message = payload_api._compute_incremental_pyne_snapshot_message(
+        "incremental-1",
+        dm,
+        {
+            "kind": "script",
+            "scriptMode": "incremental",
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "name": "Inc Close",
+            "indicatorId": "pyne:incremental-1",
+            "script": script,
+            "params": {},
+            "securityMode": "safe",
+            "historyLimit": 100,
+            "pyneSession": PyneIncrementalSession(
+                script=script,
+                params={},
+                security_mode="safe",
+            ),
+        },
+    )
+
+    assert message["ok"] is True
+    assert dm.auto_backfill is False
 
 
 def test_pyne_ws_tick_snapshot_clamps_recompute_history(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1293,7 +1507,10 @@ def test_pyne_ws_tick_snapshot_clamps_recompute_history(monkeypatch: pytest.Monk
         def __init__(self) -> None:
             self.limits: list[int] = []
 
-        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
+        def query_latest(
+            self, symbol, interval, limit, exchange="binance",
+            market_type="spot", auto_backfill=None,
+        ):
             self.limits.append(limit)
 
             class Result:
@@ -1378,7 +1595,10 @@ def test_pyne_ws_bar_update_sends_single_bar_patch() -> None:
     bar_time = bars[-1].time
 
     class FakeDataManager:
-        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
+        def query_latest(
+            self, symbol, interval, limit, exchange="binance",
+            market_type="spot", auto_backfill=None,
+        ):
             class Result:
                 pass
 
@@ -1650,12 +1870,17 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
     class FakeDataManager:
         def __init__(self) -> None:
             self.ensure_stream_calls: list[dict] = []
+            self.query_auto_backfill: list[object] = []
 
         async def ensure_stream(self, *args, **kwargs):
             self.ensure_stream_calls.append({"args": args, "kwargs": kwargs})
             return None
 
-        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
+        def query_latest(
+            self, symbol, interval, limit, exchange="binance",
+            market_type="spot", auto_backfill=None,
+        ):
+            self.query_auto_backfill.append(auto_backfill)
             class Result:
                 bars = [BarData.from_dict(item) for item in _bars(30)]
 
@@ -1714,6 +1939,1053 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
     assert client_meta["saved-1"]["streamConsumerId"] == (
         "ws:indicator:binance:spot:BTCUSDT:1m:saved-1:test"
     )
+
+
+@pytest.mark.anyio
+async def test_pyne_correction_burst_uses_parent_barriers_and_bounded_flushes(
+    monkeypatch,
+) -> None:
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.callback = None
+
+        async def ensure_stream(self, *args, **kwargs):
+            return None
+
+        def subscribe(self, **kwargs):
+            self.callback = kwargs["callback"]
+            return "handle-parent"
+
+    class FakeCoordinator:
+        def __init__(self) -> None:
+            self.releases = {
+                "pyne-parent-request": asyncio.Event(),
+                "pyne-next-request": asyncio.Event(),
+            }
+            self.started: asyncio.Queue[str] = asyncio.Queue()
+            self.wait_calls: list[str] = []
+
+        async def wait_for_request(self, request_id: str):
+            self.wait_calls.append(request_id)
+            self.started.put_nowait(request_id)
+            await self.releases[request_id].wait()
+            return SimpleNamespace(
+                bars_loaded=4,
+                verified_contiguous=True,
+                retryable=False,
+            )
+
+    class FakeRangeService:
+        def __init__(self) -> None:
+            self.revision = 0
+            self.correction_calls: list[dict] = []
+            self.put_calls: list[dict] = []
+
+        def data_revision_for_meta(self, _meta):
+            return {
+                "serverEpoch": "test",
+                "correctionRevision": self.revision,
+                "closedThrough": 600,
+                "revisionToken": f"test:{self.revision}",
+            }
+
+        def note_correction(self, **kwargs):
+            self.revision += 1
+            self.correction_calls.append(kwargs)
+            return {
+                "serverEpoch": "test",
+                "correctionRevision": self.revision,
+                "closedThrough": 600,
+                "dirtyRange": {
+                    "start": kwargs["start"],
+                    "end": kwargs["end"],
+                },
+                "revisionToken": f"test:{self.revision}",
+            }
+
+        def put_payload(
+            self,
+            _meta,
+            _payload,
+            *,
+            start,
+            end,
+            revision_token,
+        ):
+            self.put_calls.append({
+                "start": start,
+                "end": end,
+                "revision_token": revision_token,
+            })
+
+    class FakeSessions:
+        def __init__(self) -> None:
+            self.reset_calls: list[tuple[str, object]] = []
+
+        def acquire(self, _key, _factory):
+            return object()
+
+        def reset_once(self, key, reset_key, _factory):
+            self.reset_calls.append((key, reset_key))
+            return object()
+
+    snapshot_calls: list[str] = []
+
+    async def fake_snapshot(client_id, _dm, _meta, bar_time=0):
+        snapshot_calls.append(client_id)
+        assert bar_time == 0
+        return {
+            "type": "indicator.snapshot",
+            "ok": True,
+            "range": {"start": 0, "end": 600},
+            "lines": [],
+        }
+
+    sessions = FakeSessions()
+    monkeypatch.setattr(
+        pyne_stream_api,
+        "is_incremental_pyne_script",
+        lambda _script: True,
+    )
+    monkeypatch.setattr(
+        pyne_stream_api,
+        "_compute_pyne_snapshot_message_async",
+        fake_snapshot,
+    )
+    monkeypatch.setattr(
+        pyne_stream_api,
+        "_pyne_incremental_sessions",
+        sessions,
+    )
+
+    dm = FakeDataManager()
+    coordinator = FakeCoordinator()
+    range_service = FakeRangeService()
+    custom_handles = {}
+    custom_tasks = {}
+    client_meta = {}
+    sent: list[dict] = []
+    queued: list[dict] = []
+
+    async def send_json(payload: dict) -> bool:
+        sent.append(payload)
+        return True
+
+    async def unsubscribe_client(_client_id: str) -> None:
+        return None
+
+    await pyne_stream_api.handle_pyne_indicator_subscribe(
+        dm=dm,
+        custom_handles=custom_handles,
+        custom_tasks=custom_tasks,
+        queue=asyncio.Queue(),
+        client_meta=client_meta,
+        client_id="pyne-parent",
+        symbol="BTCUSDT",
+        interval="3m",
+        exchange="binance",
+        market_type="spot",
+        name="Incremental",
+        custom_id="",
+        script="incremental-test-script",
+        params={},
+        security_mode="safe",
+        history_limit=100,
+        send_json=send_json,
+        stream_consumer_id="ws:indicator:pyne-parent:test",
+        unsubscribe_client=unsubscribe_client,
+        queue_message=lambda _queue, payload: queued.append(payload),
+        range_service=range_service,
+        backfill_coordinator=coordinator,
+        data_revision={
+            "serverEpoch": "test",
+            "correctionRevision": 0,
+            "closedThrough": 600,
+            "revisionToken": "test:0",
+        },
+    )
+
+    def chunk_event(
+        *,
+        request_id: str,
+        earliest: int,
+        latest: int,
+        request_start: int,
+        request_end: int,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            event_type=DataEventType.BACKFILL_COMPLETED,
+            key=SimpleNamespace(
+                exchange="binance",
+                market_type="spot",
+                symbol="BTCUSDT",
+                interval="3m",
+            ),
+            detail={
+                "request_id": request_id,
+                "bars_count": 2,
+                "earliest": earliest,
+                "latest": latest,
+                "range_start_ms": earliest * 1000,
+                "range_end_ms": latest * 1000,
+                "request_start_ms": request_start * 1000,
+                "request_end_ms": request_end * 1000,
+            },
+            timestamp_ms=123_456,
+        )
+
+    assert dm.callback is not None
+    first_chunk = chunk_event(
+        request_id="pyne-parent-request",
+        earliest=0,
+        latest=120,
+        request_start=0,
+        request_end=600,
+    )
+    second_chunk = chunk_event(
+        request_id="pyne-parent-request",
+        earliest=300,
+        latest=600,
+        request_start=0,
+        request_end=600,
+    )
+    await dm.callback(first_chunk)
+    assert await asyncio.wait_for(coordinator.started.get(), timeout=1) == (
+        "pyne-parent-request"
+    )
+    await dm.callback(second_chunk)
+
+    assert snapshot_calls == ["pyne-parent"]
+    assert coordinator.wait_calls == ["pyne-parent-request"]
+    assert range_service.correction_calls == [{
+        "series_key": "binance:spot:BTCUSDT:3m",
+        "start": 0,
+        "end": 600,
+        "event_id": "backfill:pyne-parent-request:3m",
+    }]
+
+    next_parent = chunk_event(
+        request_id="pyne-next-request",
+        earliest=1200,
+        latest=1500,
+        request_start=1200,
+        request_end=1800,
+    )
+    first_amendment = SimpleNamespace(
+        event_type=DataEventType.BAR_AMENDED,
+        key=next_parent.key,
+        bar=SimpleNamespace(time=900),
+        detail={},
+        timestamp_ms=900_000,
+    )
+    second_amendment = SimpleNamespace(
+        event_type=DataEventType.BAR_AMENDED,
+        key=next_parent.key,
+        bar=SimpleNamespace(time=2100),
+        detail={},
+        timestamp_ms=2_100_000,
+    )
+    await dm.callback(next_parent)
+    await dm.callback(first_amendment)
+    await dm.callback(second_amendment)
+
+    # Four distinct corrections are retained immediately, but the three-event
+    # burst behind the active parent occupies one successor batch.
+    assert len(range_service.correction_calls) == 4
+    assert range_service.revision == 4
+
+    coordinator.releases["pyne-parent-request"].set()
+    assert await asyncio.wait_for(coordinator.started.get(), timeout=1) == (
+        "pyne-next-request"
+    )
+    assert snapshot_calls == ["pyne-parent", "pyne-parent"]
+    assert coordinator.wait_calls == [
+        "pyne-parent-request",
+        "pyne-next-request",
+    ]
+
+    coordinator.releases["pyne-next-request"].set()
+    await custom_tasks["pyne-parent"]
+
+    assert snapshot_calls == ["pyne-parent", "pyne-parent", "pyne-parent"]
+    assert len(sessions.reset_calls) == 3
+    assert sessions.reset_calls[0][1] == ("seed-state", "test:0", 600)
+    assert sessions.reset_calls[1][1] == (
+        "backfill:pyne-parent-request:3m",
+        "correction-snapshot",
+        0,
+    )
+    assert sessions.reset_calls[2][1] == (
+        "bar.amended:binance:spot:BTCUSDT:3m:2100:2100:2100000",
+        "correction-snapshot",
+        0,
+    )
+    assert len(queued) == 2
+    assert queued[0]["type"] == "indicator.recomputed"
+    assert queued[0]["dirtyRange"] == {"start": 0, "end": 600}
+    assert queued[1]["dirtyRange"] == {"start": 900, "end": 2100}
+    assert queued[1]["dataRevision"]["correctionRevision"] == 4
+    assert range_service.put_calls[-1] == {
+        "start": 0,
+        "end": 600,
+        "revision_token": "test:4",
+    }
+
+    await dm.callback(second_chunk)
+    await dm.callback(next_parent)
+    await asyncio.sleep(0)
+    assert coordinator.wait_calls == [
+        "pyne-parent-request",
+        "pyne-next-request",
+    ]
+    assert len(snapshot_calls) == 3
+    assert len(queued) == 2
+
+
+@pytest.mark.anyio
+async def test_pyne_seed_retries_closed_race_and_routes_derived_left_correction(
+    monkeypatch,
+) -> None:
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.subscriptions: list[dict] = []
+
+        async def ensure_stream(self, *args, **kwargs):
+            return None
+
+        def subscribe(self, **kwargs):
+            self.subscriptions.append(kwargs)
+            return f"handle-{len(self.subscriptions)}"
+
+        def unsubscribe(self, _handle):
+            return None
+
+    class FakeRangeService:
+        def __init__(self) -> None:
+            self.closed_through = 19_000
+            self.revision = 0
+            self.corrections: list[dict] = []
+            self.put_calls: list[str] = []
+
+        def data_revision_for_meta(self, _meta):
+            return {
+                "serverEpoch": "test",
+                "correctionRevision": self.revision,
+                "closedThrough": self.closed_through,
+                "revisionToken": f"test:{self.revision}",
+            }
+
+        def note_correction(self, **kwargs):
+            self.revision += 1
+            self.corrections.append(kwargs)
+            return {
+                **self.data_revision_for_meta({}),
+                "dirtyRange": {
+                    "start": kwargs["start"],
+                    "end": kwargs["end"],
+                },
+            }
+
+        def put_payload(self, _meta, _payload, **kwargs):
+            self.put_calls.append(kwargs["revision_token"])
+
+    class FakeCoordinator:
+        def __init__(self) -> None:
+            self.wait_calls: list[str] = []
+
+        async def wait_for_request(self, request_id: str):
+            self.wait_calls.append(request_id)
+            return SimpleNamespace(
+                bars_loaded=4,
+                verified_contiguous=True,
+                retryable=False,
+            )
+
+    class FakeSessions:
+        def __init__(self) -> None:
+            self.reset_calls: list[object] = []
+
+        def acquire(self, _key, _factory):
+            return object()
+
+        def reset_once(self, _key, reset_key, _factory):
+            self.reset_calls.append(reset_key)
+            return object()
+
+    dm = FakeDataManager()
+    range_service = FakeRangeService()
+    coordinator = FakeCoordinator()
+    sessions = FakeSessions()
+    snapshot_calls = 0
+
+    async def fake_snapshot(_client_id, _dm, _meta, bar_time=0):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        assert bar_time == 0
+        if snapshot_calls == 1:
+            range_service.closed_through = 20_000
+            end = 19_000
+        else:
+            end = 20_000
+        return {
+            "type": "indicator.snapshot",
+            "ok": True,
+            "range": {"start": 10_000, "end": end},
+            "lines": [],
+        }
+
+    monkeypatch.setattr(
+        pyne_stream_api,
+        "is_incremental_pyne_script",
+        lambda _script: True,
+    )
+    monkeypatch.setattr(
+        pyne_stream_api,
+        "_compute_pyne_snapshot_message_async",
+        fake_snapshot,
+    )
+    monkeypatch.setattr(
+        pyne_stream_api,
+        "_pyne_incremental_sessions",
+        sessions,
+    )
+
+    custom_handles = {}
+    custom_tasks = {}
+    client_meta = {}
+    sent: list[dict] = []
+    queued: list[dict] = []
+
+    async def send_json(payload: dict) -> bool:
+        sent.append(payload)
+        return True
+
+    await pyne_stream_api.handle_pyne_indicator_subscribe(
+        dm=dm,
+        custom_handles=custom_handles,
+        custom_tasks=custom_tasks,
+        queue=asyncio.Queue(),
+        client_meta=client_meta,
+        client_id="pyne-89m",
+        symbol="BTCUSDT",
+        interval="89m",
+        exchange="binance",
+        market_type="spot",
+        name="Incremental 89m",
+        custom_id="",
+        script="incremental-test-script",
+        params={},
+        security_mode="safe",
+        history_limit=2_000,
+        send_json=send_json,
+        stream_consumer_id="ws:indicator:pyne-89m:test",
+        unsubscribe_client=lambda _client_id: asyncio.sleep(0),
+        queue_message=lambda _queue, payload: queued.append(payload),
+        range_service=range_service,
+        backfill_coordinator=coordinator,
+        data_revision={
+            "serverEpoch": "test",
+            "correctionRevision": 0,
+            "closedThrough": 19_000,
+            "revisionToken": "test:0",
+        },
+    )
+
+    assert snapshot_calls == 2
+    assert sessions.reset_calls[:2] == [
+        ("seed-state", "test:0", 19_000),
+        ("seed-state", "test:0", 20_000),
+    ]
+    assert sent[0]["seeded"] is True
+    assert sent[0]["dataRevision"]["closedThrough"] == 20_000
+    assert client_meta["pyne-89m"]["seedRange"] == {
+        "start": 10_000,
+        "end": 20_000,
+    }
+    assert custom_handles["pyne-89m"] == "handle-1"
+    assert len(dm.subscriptions) == 2
+
+    correction_callback = dm.subscriptions[1]["callback"]
+    await correction_callback(SimpleNamespace(
+        event_type=DataEventType.BACKFILL_COMPLETED,
+        key=SimpleNamespace(
+            exchange="binance",
+            market_type="spot",
+            symbol="BTCUSDT",
+            interval="1m",
+        ),
+        detail={
+            "request_id": "base-to-89m",
+            "bars_count": 100,
+            "request_start_ms": 1_000_000,
+            "request_end_ms": 2_000_000,
+            "derived_repair_targets": [{
+                "interval": "89m",
+                "start_ms": 1_000_000,
+                "end_ms": 2_000_000,
+            }, {
+                "interval": "89m",
+                "start_ms": 3_000_000,
+                "end_ms": 4_000_000,
+            }],
+        },
+        timestamp_ms=123_456,
+    ))
+    await custom_tasks["pyne-89m"]
+
+    assert coordinator.wait_calls == ["base-to-89m"]
+    assert snapshot_calls == 2
+    assert len(sessions.reset_calls) == 2
+    assert range_service.corrections == [{
+        "series_key": "binance:spot:BTCUSDT:89m",
+        "start": 1_000,
+        "end": 4_000,
+        "event_id": "backfill:base-to-89m:89m",
+    }]
+    assert queued[0]["dirtyRange"] == {"start": 1_000, "end": 4_000}
+
+    await correction_callback(SimpleNamespace(
+        event_type=DataEventType.BAR_AMENDED,
+        key=SimpleNamespace(
+            exchange="binance",
+            market_type="spot",
+            symbol="BTCUSDT",
+            interval="1m",
+        ),
+        bar=SimpleNamespace(time=21_000),
+        detail={},
+        timestamp_ms=21_000_000,
+    ))
+    await custom_tasks["pyne-89m"]
+
+    assert snapshot_calls == 3
+    assert range_service.corrections[-1]["series_key"] == (
+        "binance:spot:BTCUSDT:89m"
+    )
+    assert range_service.corrections[-1]["start"] == 16_020
+    assert range_service.corrections[-1]["end"] == 16_020
+    assert queued[-1]["dirtyRange"] == {"start": 16_020, "end": 16_020}
+
+
+@pytest.mark.anyio
+async def test_pyne_connection_uses_one_correction_wildcard_for_many_clients(
+    monkeypatch,
+) -> None:
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.subscriptions: list[dict] = []
+            self.unsubscribed: list[str] = []
+
+        async def ensure_stream(self, *args, **kwargs):
+            return None
+
+        def subscribe(self, **kwargs):
+            self.subscriptions.append(kwargs)
+            return f"handle-{len(self.subscriptions)}"
+
+        def unsubscribe(self, handle):
+            self.unsubscribed.append(handle)
+
+    monkeypatch.setattr(
+        pyne_stream_api,
+        "is_incremental_pyne_script",
+        lambda _script: False,
+    )
+    dm = FakeDataManager()
+    custom_handles: dict[str, object] = {}
+    custom_tasks: dict[str, asyncio.Task] = {}
+    client_meta: dict[str, dict] = {}
+    correction_state = {"handle": None, "callbacks": {}}
+
+    async def send_json(_payload: dict) -> bool:
+        return True
+
+    for index in range(7):
+        client_id = f"pyne-{index}"
+        await pyne_stream_api.handle_pyne_indicator_subscribe(
+            dm=dm,
+            custom_handles=custom_handles,
+            custom_tasks=custom_tasks,
+            queue=asyncio.Queue(),
+            client_meta=client_meta,
+            client_id=client_id,
+            symbol="BTCUSDT",
+            interval="89m",
+            exchange="binance",
+            market_type="spot",
+            name=client_id,
+            custom_id="",
+            script="plot(close)",
+            params={},
+            security_mode="safe",
+            history_limit=2_000,
+            send_json=send_json,
+            stream_consumer_id=f"consumer-{index}",
+            unsubscribe_client=lambda _client_id: asyncio.sleep(0),
+            queue_message=lambda _queue, _payload: None,
+            pyne_correction_state=correction_state,
+        )
+
+    wildcard_subscriptions = [
+        item for item in dm.subscriptions
+        if "symbol" not in item
+    ]
+    assert len(wildcard_subscriptions) == 1
+    assert len(dm.subscriptions) == 8
+    assert len(correction_state["callbacks"]) == 7
+    assert all(not isinstance(handle, (tuple, list)) for handle in custom_handles.values())
+
+    for index in range(7):
+        await stream_api._unsubscribe_indicator_client(
+            f"pyne-{index}",
+            dm=dm,
+            indicator_engine=None,
+            subscribed={},
+            custom_handles=custom_handles,
+            custom_tasks=custom_tasks,
+            client_meta=client_meta,
+        )
+
+    assert correction_state["callbacks"] == {}
+    assert correction_state["handle"] is None
+    assert wildcard_subscriptions[0] is not None
+    assert "handle-2" in dm.unsubscribed
+
+
+@pytest.mark.anyio
+async def test_pyne_initial_seed_query_is_shared_per_connection(monkeypatch) -> None:
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.query_calls: list[dict] = []
+            self.subscriptions: list[dict] = []
+            self.bars = [BarData.from_dict(row) for row in _bars(100)]
+
+        async def ensure_stream(self, *args, **kwargs):
+            return None
+
+        def query_latest(self, *args, **kwargs):
+            self.query_calls.append(dict(kwargs))
+            return SimpleNamespace(
+                bars=self.bars,
+                missing_ranges=[],
+                retryable=False,
+                complete=True,
+            )
+
+        def subscribe(self, **kwargs):
+            self.subscriptions.append(kwargs)
+            return f"handle-{len(self.subscriptions)}"
+
+    dm = FakeDataManager()
+    engine = create_engine()
+    custom_handles: dict[str, object] = {}
+    custom_tasks: dict[str, asyncio.Task] = {}
+    client_meta: dict[str, dict] = {}
+    correction_state = {"handle": None, "callbacks": {}}
+    seed_cache: dict = {}
+    sent: list[dict] = []
+
+    async def send_json(payload: dict) -> bool:
+        sent.append(payload)
+        return True
+
+    for client_id in ("pyne-a", "pyne-b"):
+        await pyne_stream_api.handle_pyne_indicator_subscribe(
+            dm=dm,
+            custom_handles=custom_handles,
+            custom_tasks=custom_tasks,
+            queue=asyncio.Queue(),
+            client_meta=client_meta,
+            client_id=client_id,
+            symbol="BTCUSDT",
+            interval="89m",
+            exchange="binance",
+            market_type="spot",
+            name=client_id,
+            custom_id="",
+            script='''
+indicator("Shared", mode="incremental", overlay=True)
+def init(ctx):
+    ctx.state("count", 0)
+def on_bar(ctx, bar):
+    counter = ctx.state("count")
+    counter.value += 1
+    ctx.plot("Count", counter.value)
+''',
+            params={},
+            security_mode="safe",
+            history_limit=100,
+            send_json=send_json,
+            stream_consumer_id=f"consumer-{client_id}",
+            unsubscribe_client=lambda _client_id: asyncio.sleep(0),
+            queue_message=lambda _queue, _payload: None,
+            pyne_correction_state=correction_state,
+            seed_query_cache=seed_cache,
+            range_service=getattr(engine, "indicator_range_service", None),
+        )
+
+    assert len(dm.query_calls) == 1
+    assert dm.query_calls[0]["limit"] == 101
+    assert len([
+        payload for payload in sent
+        if payload.get("type") == "indicator.subscribed"
+    ]) == 2
+
+    correction_callback = next(
+        item["callback"] for item in dm.subscriptions
+        if "symbol" not in item
+    )
+    await correction_callback(SimpleNamespace(
+        event_type=DataEventType.BAR_AMENDED,
+        key=SimpleNamespace(
+            exchange="binance",
+            market_type="spot",
+            symbol="BTCUSDT",
+            interval="89m",
+        ),
+        bar=SimpleNamespace(time=dm.bars[-1].time),
+        detail={},
+        timestamp_ms=dm.bars[-1].time * 1000,
+    ))
+    await asyncio.gather(*tuple(custom_tasks.values()))
+
+    assert len(dm.query_calls) == 2
+    assert dm.query_calls[-1]["limit"] == 101
+
+
+@pytest.mark.anyio
+async def test_pyne_closed_finality_is_not_cancelled_by_following_preview(
+    monkeypatch,
+) -> None:
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.subscriptions: list[dict] = []
+
+        async def ensure_stream(self, *args, **kwargs):
+            return None
+
+        def subscribe(self, **kwargs):
+            self.subscriptions.append(kwargs)
+            return f"handle-{len(self.subscriptions)}"
+
+    class FakeSessions:
+        def acquire(self, _key, _factory):
+            return object()
+
+    async def fake_snapshot(_client_id, _dm, _meta, bar_time=0):
+        return {
+            "type": "indicator.snapshot",
+            "ok": True,
+            "range": {"start": 300, "end": 600},
+            "lines": [],
+        }
+
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    bar_calls: list[bool] = []
+
+    async def fake_bar(_client_id, _meta, bar, *, preview):
+        bar_calls.append(preview)
+        if not preview:
+            close_started.set()
+            await release_close.wait()
+        return {
+            "type": "indicator.patch",
+            "reason": "bar_update" if preview else "bar_closed",
+            "range": {"start": bar["time"], "end": bar["time"]},
+        }
+
+    monkeypatch.setattr(pyne_stream_api, "is_incremental_pyne_script", lambda _s: True)
+    monkeypatch.setattr(pyne_stream_api, "_compute_pyne_snapshot_message_async", fake_snapshot)
+    monkeypatch.setattr(pyne_stream_api, "_compute_incremental_pyne_bar_message_async", fake_bar)
+    monkeypatch.setattr(pyne_stream_api, "_pyne_incremental_sessions", FakeSessions())
+
+    dm = FakeDataManager()
+    custom_handles: dict[str, object] = {}
+    custom_tasks: dict[str, asyncio.Task] = {}
+    client_meta: dict[str, dict] = {}
+    queued: list[dict] = []
+
+    async def queue_critical(_queue, payload):
+        queued.append(payload)
+
+    await pyne_stream_api.handle_pyne_indicator_subscribe(
+        dm=dm,
+        custom_handles=custom_handles,
+        custom_tasks=custom_tasks,
+        queue=asyncio.Queue(maxsize=1),
+        client_meta=client_meta,
+        client_id="pyne-finality",
+        symbol="BTCUSDT",
+        interval="3m",
+        exchange="binance",
+        market_type="spot",
+        name="Finality",
+        custom_id="",
+        script="incremental-test-script",
+        params={},
+        security_mode="safe",
+        history_limit=100,
+        send_json=lambda _payload: asyncio.sleep(0, result=True),
+        stream_consumer_id="consumer-finality",
+        unsubscribe_client=lambda _client_id: asyncio.sleep(0),
+        queue_message=lambda _queue, payload: queued.append(payload),
+        queue_critical_message=queue_critical,
+    )
+    realtime_callback = dm.subscriptions[0]["callback"]
+    closed_bar = BarData.from_dict({**_bars(1)[0], "time": 780})
+    await realtime_callback(SimpleNamespace(
+        event_type=DataEventType.BAR_CLOSED,
+        bar=closed_bar,
+    ))
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    await realtime_callback(SimpleNamespace(
+        event_type=DataEventType.BAR_UPDATED,
+        bar=BarData.from_dict({**_bars(1)[0], "time": 960, "is_closed": False}),
+    ))
+    release_close.set()
+    await custom_tasks["pyne-finality"]
+
+    assert bar_calls == [False]
+    assert queued[-1]["reason"] == "bar_closed"
+
+    close_started.clear()
+    release_close.clear()
+    queued.clear()
+    await realtime_callback(SimpleNamespace(
+        event_type=DataEventType.BAR_CLOSED,
+        bar=BarData.from_dict({**_bars(1)[0], "time": 960}),
+    ))
+    first_close_task = custom_tasks["pyne-finality"]
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    await realtime_callback(SimpleNamespace(
+        event_type=DataEventType.BAR_CLOSED,
+        bar=BarData.from_dict({**_bars(1)[0], "time": 1_140}),
+    ))
+    await stream_api._unsubscribe_indicator_client(
+        "pyne-finality",
+        dm=dm,
+        indicator_engine=None,
+        subscribed={},
+        custom_handles=custom_handles,
+        custom_tasks=custom_tasks,
+        client_meta=client_meta,
+    )
+    release_close.set()
+    await first_close_task
+    await asyncio.sleep(0)
+
+    assert bar_calls == [False, False]
+    assert queued == []
+    assert "pyne-finality" not in custom_tasks
+
+
+@pytest.mark.anyio
+async def test_pyne_correction_snapshot_does_not_double_commit_included_close(
+    monkeypatch,
+) -> None:
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.subscriptions: list[dict] = []
+
+        async def ensure_stream(self, *args, **kwargs):
+            return None
+
+        def subscribe(self, **kwargs):
+            self.subscriptions.append(kwargs)
+            return f"handle-{len(self.subscriptions)}"
+
+    class FakeSessions:
+        def acquire(self, _key, _factory):
+            return object()
+
+        def reset_once(self, _key, _reset_key, _factory):
+            return object()
+
+    snapshot_started = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    snapshot_calls = 0
+
+    async def fake_snapshot(_client_id, _dm, _meta, bar_time=0):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 2:
+            snapshot_started.set()
+            await release_snapshot.wait()
+            end = 600
+        else:
+            end = 780 if snapshot_calls >= 3 else 600
+        return {
+            "type": "indicator.snapshot",
+            "ok": True,
+            "range": {"start": 300, "end": end},
+            "lines": [],
+        }
+
+    bar_calls: list[bool] = []
+
+    async def fake_bar(_client_id, _meta, _bar, *, preview):
+        bar_calls.append(preview)
+        return {"type": "indicator.patch", "reason": "bar_closed"}
+
+    monkeypatch.setattr(pyne_stream_api, "is_incremental_pyne_script", lambda _s: True)
+    monkeypatch.setattr(pyne_stream_api, "_compute_pyne_snapshot_message_async", fake_snapshot)
+    monkeypatch.setattr(pyne_stream_api, "_compute_incremental_pyne_bar_message_async", fake_bar)
+    monkeypatch.setattr(pyne_stream_api, "_pyne_incremental_sessions", FakeSessions())
+
+    dm = FakeDataManager()
+    custom_tasks: dict[str, asyncio.Task] = {}
+    queued: list[dict] = []
+
+    async def queue_critical(_queue, payload):
+        queued.append(payload)
+
+    await pyne_stream_api.handle_pyne_indicator_subscribe(
+        dm=dm,
+        custom_handles={},
+        custom_tasks=custom_tasks,
+        queue=asyncio.Queue(),
+        client_meta={},
+        client_id="pyne-correction-close",
+        symbol="BTCUSDT",
+        interval="3m",
+        exchange="binance",
+        market_type="spot",
+        name="Correction Close",
+        custom_id="",
+        script="incremental-test-script",
+        params={},
+        security_mode="safe",
+        history_limit=100,
+        send_json=lambda _payload: asyncio.sleep(0, result=True),
+        stream_consumer_id="consumer-correction-close",
+        unsubscribe_client=lambda _client_id: asyncio.sleep(0),
+        queue_message=lambda _queue, payload: queued.append(payload),
+        queue_critical_message=queue_critical,
+    )
+    realtime_callback = dm.subscriptions[0]["callback"]
+    correction_callback = dm.subscriptions[1]["callback"]
+    await correction_callback(SimpleNamespace(
+        event_type=DataEventType.BAR_AMENDED,
+        key=SimpleNamespace(
+            exchange="binance",
+            market_type="spot",
+            symbol="BTCUSDT",
+            interval="3m",
+        ),
+        bar=SimpleNamespace(time=300),
+        detail={},
+        timestamp_ms=300_000,
+    ))
+    correction_task = custom_tasks["pyne-correction-close"]
+    await asyncio.wait_for(snapshot_started.wait(), timeout=1)
+    await realtime_callback(SimpleNamespace(
+        event_type=DataEventType.BAR_CLOSED,
+        bar=BarData.from_dict({**_bars(1)[0], "time": 780}),
+    ))
+    release_snapshot.set()
+    await correction_task
+
+    assert snapshot_calls == 3
+    assert bar_calls == []
+    recomputed = [item for item in queued if item.get("type") == "indicator.recomputed"]
+    assert len(recomputed) == 1
+    assert recomputed[0]["dirtyRange"] == {"start": 780, "end": 780}
+
+
+@pytest.mark.anyio
+async def test_pyne_failed_correction_emits_retryable_invalidation(
+    monkeypatch,
+) -> None:
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.subscriptions: list[dict] = []
+
+        async def ensure_stream(self, *args, **kwargs):
+            return None
+
+        def subscribe(self, **kwargs):
+            self.subscriptions.append(kwargs)
+            return f"handle-{len(self.subscriptions)}"
+
+    class FailedCoordinator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def wait_for_request(self, _request_id):
+            self.calls += 1
+            return SimpleNamespace(
+                bars_loaded=0,
+                verified_contiguous=False,
+                retryable=True,
+            )
+
+    monkeypatch.setattr(
+        pyne_stream_api,
+        "is_incremental_pyne_script",
+        lambda _script: False,
+    )
+    dm = FakeDataManager()
+    coordinator = FailedCoordinator()
+    custom_tasks: dict[str, asyncio.Task] = {}
+    queued: list[dict] = []
+
+    async def queue_critical(_queue, payload):
+        queued.append(payload)
+
+    await pyne_stream_api.handle_pyne_indicator_subscribe(
+        dm=dm,
+        custom_handles={},
+        custom_tasks=custom_tasks,
+        queue=asyncio.Queue(),
+        client_meta={},
+        client_id="pyne-failed-correction",
+        symbol="BTCUSDT",
+        interval="3m",
+        exchange="binance",
+        market_type="spot",
+        name="Failed Correction",
+        custom_id="",
+        script="plot(close)",
+        params={},
+        security_mode="safe",
+        history_limit=100,
+        send_json=lambda _payload: asyncio.sleep(0, result=True),
+        stream_consumer_id="consumer-failed-correction",
+        unsubscribe_client=lambda _client_id: asyncio.sleep(0),
+        queue_message=lambda _queue, payload: queued.append(payload),
+        queue_critical_message=queue_critical,
+        backfill_coordinator=coordinator,
+    )
+    correction_callback = dm.subscriptions[1]["callback"]
+    event = SimpleNamespace(
+        event_type=DataEventType.BACKFILL_COMPLETED,
+        key=SimpleNamespace(
+            exchange="binance",
+            market_type="spot",
+            symbol="BTCUSDT",
+            interval="3m",
+        ),
+        detail={
+            "request_id": "failed-parent",
+            "bars_count": 3,
+            "request_start_ms": 300_000,
+            "request_end_ms": 600_000,
+        },
+        timestamp_ms=600_000,
+    )
+    await correction_callback(event)
+    await custom_tasks["pyne-failed-correction"]
+
+    assert queued[-1]["type"] == "indicator.recomputed"
+    assert queued[-1]["ok"] is False
+    assert queued[-1]["invalidated"] is True
+    assert queued[-1]["retryMode"] == "event"
+
+    await correction_callback(event)
+    await custom_tasks["pyne-failed-correction"]
+    assert coordinator.calls == 2
+    assert len(queued) == 2
 
 
 @pytest.mark.anyio

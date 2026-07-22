@@ -17,6 +17,7 @@ import type {
 } from "./klineContracts.js";
 import type { KlineBar } from "./marketDataTypes.js";
 import type { SeriesDataFeed } from "./feed/seriesDataFeed.js";
+import { planTargetBarRequest } from "./intervalRequestBudget.js";
 
 const WS_RECONNECT_BASE_DELAY = 2_000;
 const WS_RECONNECT_MAX_DELAY = 60_000;
@@ -27,7 +28,21 @@ const POLLING_INTERVAL_MS = 1_000;
 const PENDING_REPAIR_POLL_INTERVAL_MS = 3_000;
 const HELD_WINDOW_GAP_SCAN_INTERVAL_MS = 15_000;
 const WS_RECOVERY_COUNT_BACK = 1_500;
+export const WS_RECOVERY_SOURCE_ROW_BUDGET = 20_000;
 const TAB_RECOVERY_MIN_HIDDEN_MS = 15_000;
+
+export function planKlineRecoveryCountBack(
+  interval: IntervalString,
+  nativeIntervalValues: readonly IntervalString[],
+  desiredCountBack = WS_RECOVERY_COUNT_BACK,
+): number {
+  return planTargetBarRequest({
+    desiredTargetBars: desiredCountBack,
+    interval,
+    nativeIntervals: nativeIntervalValues,
+    sourceRowBudget: WS_RECOVERY_SOURCE_ROW_BUDGET,
+  })?.targetBars ?? desiredCountBack;
+}
 
 export type KlineWebSocketStatus =
   | "idle"
@@ -140,6 +155,7 @@ export interface UseKlineStreamRuntimeOptions {
   symbol: SymbolCode;
   exchange: ExchangeId;
   marketType: MarketType;
+  nativeIntervalValues: readonly IntervalString[];
   trackedIntervals: readonly IntervalString[];
   intervalRef: MutableRefObject<IntervalString>;
   seriesDataFeed: SeriesDataFeed;
@@ -163,6 +179,7 @@ export function useKlineStreamRuntime({
   symbol,
   exchange,
   marketType,
+  nativeIntervalValues,
   trackedIntervals,
   intervalRef,
   seriesDataFeed,
@@ -349,10 +366,16 @@ export function useKlineStreamRuntime({
 
               if (isReconnection) {
                 const currentIntv = intervalRef.current;
+                const recoveryCountBack = planKlineRecoveryCountBack(
+                  currentIntv,
+                  nativeIntervalValues,
+                );
                 console.log(`[WS-Recovery] Reconnected, reloading recent bars for ${symbol}@${currentIntv}`);
-                seriesDataFeed.getBars(
+                if (recoveryCountBack <= 0) {
+                  console.warn(`[WS-Recovery] Skipped ${currentIntv}; source-history budget exceeded`);
+                } else seriesDataFeed.getBars(
                   { exchange, marketType, symbol, interval: currentIntv },
-                  { countBack: WS_RECOVERY_COUNT_BACK, source: "ws-reconnect-history" },
+                  { countBack: recoveryCountBack, source: "ws-reconnect-history" },
                 )
                   .then((result) => {
                     if (
@@ -544,6 +567,7 @@ export function useKlineStreamRuntime({
     handleBackfillCompleted,
     intervalRef,
     marketType,
+    nativeIntervalValues,
     patchCacheTick,
     seriesDataFeed,
     setWsStatus,
@@ -578,7 +602,16 @@ export function useKlineStreamRuntime({
       const currentIntv = intervalRef.current;
       const intervalSecs = parseIntervalSeconds(currentIntv) || 60;
       const missedBars = Math.ceil(hiddenMs / 1000 / intervalSecs) + 5;
-      const countBack = Math.max(50, Math.min(WS_RECOVERY_COUNT_BACK, missedBars));
+      const desiredCountBack = Math.max(50, Math.min(WS_RECOVERY_COUNT_BACK, missedBars));
+      const countBack = planKlineRecoveryCountBack(
+        currentIntv,
+        nativeIntervalValues,
+        desiredCountBack,
+      );
+      if (countBack <= 0) {
+        console.warn(`[TabRecovery] Skipped ${currentIntv}; source-history budget exceeded`);
+        return;
+      }
       recordPerfEvent("ws.kline.tabRecovery", { symbol, marketType, exchange, interval: currentIntv, hiddenMs, countBack });
       seriesDataFeed.getBars(
         { exchange, marketType, symbol, interval: currentIntv },
@@ -614,5 +647,5 @@ export function useKlineStreamRuntime({
       active = false;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [enabled, exchange, intervalRef, marketType, seriesDataFeed, symbol, updateLastPrice]);
+  }, [enabled, exchange, intervalRef, marketType, nativeIntervalValues, seriesDataFeed, symbol, updateLastPrice]);
 }

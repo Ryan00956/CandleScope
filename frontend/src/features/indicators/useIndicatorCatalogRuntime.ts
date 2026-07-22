@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   deleteCustomIndicator as deleteCustomIndicatorRequest,
   fetchCustomIndicators,
@@ -94,36 +94,140 @@ export interface IndicatorCatalogRuntime {
   upsertCustomIndicator(saved: CustomIndicatorRecord, fallback?: CatalogFallback): void;
 }
 
+export interface IndicatorCatalogSnapshot {
+  customIndicators: CatalogCustomIndicator[];
+  presets: IndicatorPreset[];
+}
+
+export interface IndicatorCatalogStore {
+  getSnapshot(): IndicatorCatalogSnapshot | null;
+  load(): Promise<IndicatorCatalogSnapshot>;
+  updateCustomIndicators(
+    updater: (current: CatalogCustomIndicator[]) => CatalogCustomIndicator[],
+  ): void;
+}
+
+/**
+ * Keeps the panel-only catalog warm once a user has opened it.  The store is
+ * deliberately lazy: constructing it performs no request, and callers share
+ * one in-flight request rather than competing for the same catalog endpoints.
+ */
+export function createIndicatorCatalogStore(
+  loadCatalog: () => Promise<IndicatorCatalogSnapshot>,
+): IndicatorCatalogStore {
+  let snapshot: IndicatorCatalogSnapshot | null = null;
+  let inFlight: Promise<IndicatorCatalogSnapshot> | null = null;
+  let pendingCustomIndicatorUpdates: Array<
+    (current: CatalogCustomIndicator[]) => CatalogCustomIndicator[]
+  > = [];
+
+  return {
+    getSnapshot: () => snapshot,
+    load: () => {
+      if (snapshot) return Promise.resolve(snapshot);
+      if (inFlight) return inFlight;
+
+      inFlight = Promise.resolve()
+        .then(loadCatalog)
+        .then((loaded) => {
+          let customIndicators = Array.isArray(loaded.customIndicators)
+            ? loaded.customIndicators
+            : [];
+          for (const update of pendingCustomIndicatorUpdates) {
+            customIndicators = update(customIndicators);
+          }
+          pendingCustomIndicatorUpdates = [];
+          snapshot = {
+            presets: Array.isArray(loaded.presets) ? loaded.presets : [],
+            customIndicators,
+          };
+          return snapshot;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
+      return inFlight;
+    },
+    updateCustomIndicators: (updater) => {
+      if (!snapshot) {
+        pendingCustomIndicatorUpdates.push(updater);
+        return;
+      }
+      snapshot = {
+        ...snapshot,
+        customIndicators: updater(snapshot.customIndicators),
+      };
+    },
+  };
+}
+
+const indicatorCatalogStore = createIndicatorCatalogStore(async () => {
+  const [presetData, customData] = await Promise.all([
+    fetchPresets(),
+    fetchCustomIndicators(),
+  ]);
+  return {
+    presets: presetData,
+    customIndicators: (customData || []).map(normalizeCustomIndicator),
+  };
+});
+
+export function shouldLoadIndicatorCatalog(
+  isOpen: boolean,
+  snapshot: IndicatorCatalogSnapshot | null,
+): boolean {
+  return isOpen && snapshot === null;
+}
+
+export function shouldShowIndicatorCatalogLoading(
+  presetsLoading: boolean,
+  presets: readonly unknown[],
+  customIndicators: readonly unknown[],
+): boolean {
+  return presetsLoading && presets.length === 0 && customIndicators.length === 0;
+}
+
 export function useIndicatorCatalogRuntime({
   isOpen,
 }: UseIndicatorCatalogRuntimeOptions): IndicatorCatalogRuntime {
-  const [presets, setPresets] = useState<IndicatorPreset[]>([]);
-  const [customIndicators, setCustomIndicators] = useState<CatalogCustomIndicator[]>([]);
+  const [presets, setPresets] = useState<IndicatorPreset[]>(() => (
+    indicatorCatalogStore.getSnapshot()?.presets || []
+  ));
+  const [customIndicators, setCustomIndicators] = useState<CatalogCustomIndicator[]>(() => (
+    indicatorCatalogStore.getSnapshot()?.customIndicators || []
+  ));
   const [presetsLoading, setPresetsLoading] = useState(false);
-  const loadedRef = useRef(false);
 
   useEffect(() => {
-    if (!isOpen || loadedRef.current) return undefined;
+    const cached = indicatorCatalogStore.getSnapshot();
+    if (!shouldLoadIndicatorCatalog(isOpen, cached)) {
+      return undefined;
+    }
 
-    let cancelled = false;
-    const loadIndicators = async (): Promise<void> => {
-      setPresetsLoading(true);
-      try {
-        const [presetData, customData] = await Promise.all([fetchPresets(), fetchCustomIndicators()]);
-        if (cancelled) return;
-        setPresets(presetData);
-        setCustomIndicators((customData || []).map(normalizeCustomIndicator));
-        loadedRef.current = true;
-      } catch (error) {
-        console.error("Failed to load presets:", error);
-      } finally {
-        if (!cancelled) setPresetsLoading(false);
+    let active = true;
+    queueMicrotask(() => {
+      if (active && indicatorCatalogStore.getSnapshot() === null) {
+        setPresetsLoading(true);
       }
-    };
-
-    void loadIndicators();
+    });
+    void indicatorCatalogStore.load()
+      .then((loaded) => {
+        if (!active) return;
+        setPresets(loaded.presets);
+        setCustomIndicators(loaded.customIndicators);
+      })
+      .catch((error) => {
+        // Keep the existing API error reporting, while allowing a later open
+        // to retry after this shared request has settled.
+        console.error("Failed to load presets:", error);
+      })
+      .finally(() => {
+        if (active) setPresetsLoading(false);
+      });
     return () => {
-      cancelled = true;
+      // Do not abort the shared request: a concurrent/reopened panel can
+      // still consume it.  This only prevents a closed panel from updating.
+      active = false;
     };
   }, [isOpen]);
 
@@ -136,7 +240,11 @@ export function useIndicatorCatalogRuntime({
   }, []);
 
   const removeCustomIndicator = useCallback((id: string) => {
-    setCustomIndicators((prev) => prev.filter((item) => item.id !== id));
+    const remove = (current: CatalogCustomIndicator[]) => (
+      current.filter((item) => item.id !== id)
+    );
+    indicatorCatalogStore.updateCustomIndicators(remove);
+    setCustomIndicators(remove);
   }, []);
 
   const upsertCustomIndicator = useCallback((
@@ -149,13 +257,15 @@ export function useIndicatorCatalogRuntime({
       paneTarget: renderPaneTarget(saved.renderHints) || fallback.paneTarget || "sub",
       securityMode: saved.securityMode || fallback.securityMode || "safe",
     });
-    setCustomIndicators((prev) => {
+    const upsert = (prev: CatalogCustomIndicator[]) => {
       const index = prev.findIndex((candidate) => candidate.id === item.id);
       if (index === -1) return [...prev, item];
       const next = [...prev];
       next[index] = item;
       return next;
-    });
+    };
+    indicatorCatalogStore.updateCustomIndicators(upsert);
+    setCustomIndicators(upsert);
   }, []);
 
   const deleteCustomIndicator = useCallback(async (id: string) => {
@@ -169,11 +279,18 @@ export function useIndicatorCatalogRuntime({
     return saved;
   }, [upsertCustomIndicator]);
 
+  // Read a completed shared request synchronously during render.  This avoids
+  // a close/reopen frame that briefly shows a spinner for catalog data already
+  // in memory, while local state remains the source during the first request.
+  const cached = indicatorCatalogStore.getSnapshot();
+  const resolvedPresets = cached?.presets || presets;
+  const resolvedCustomIndicators = cached?.customIndicators || customIndicators;
+
   return {
-    customIndicators,
+    customIndicators: resolvedCustomIndicators,
     deleteCustomIndicator,
-    presets,
-    presetsLoading,
+    presets: resolvedPresets,
+    presetsLoading: cached ? false : presetsLoading,
     removeCustomIndicator,
     resolvePresetForChart,
     saveCustomIndicator,

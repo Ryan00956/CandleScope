@@ -6,7 +6,9 @@ import {
   buildCacheLimitsRequestBody,
   fetchExchangeCapabilities,
   fetchExchanges,
+  fetchKlinesBefore,
   fetchKlinesHistory,
+  fetchKlinesRange,
   fetchSubscriptions,
   request,
   syncWatchlistSymbols,
@@ -98,6 +100,59 @@ test("count-back history omits the redundant days window", async (context) => {
   assert.equal(params.has("days"), false);
 });
 
+test("K-line history transports forward chart demand scope and generation", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const capturedUrls: string[] = [];
+  globalThis.fetch = async (url) => {
+    capturedUrls.push(String(url));
+    return jsonResponse({ data: [] });
+  };
+
+  const demand = { demandScope: "chart:client:pane-1", demandGeneration: 7 };
+  await fetchKlinesHistory("BTCUSDT", "1m", 1, "spot", "binance", demand);
+  await fetchKlinesBefore("BTCUSDT", "1m", 1_700_000_000, 500, "spot", "binance", demand);
+  await fetchKlinesRange(
+    "BTCUSDT",
+    "1m",
+    1_699_999_000,
+    1_700_000_000,
+    "spot",
+    "binance",
+    demand,
+  );
+
+  assert.equal(capturedUrls.length, 3);
+  for (const capturedUrl of capturedUrls) {
+    const params = new URL(capturedUrl, "http://localhost").searchParams;
+    assert.equal(params.get("request_scope"), demand.demandScope);
+    assert.equal(params.get("request_generation"), String(demand.demandGeneration));
+  }
+});
+
+test("before-page validation forwards a zero long-poll budget", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let capturedUrl = "";
+  globalThis.fetch = async (url) => {
+    capturedUrl = String(url);
+    return jsonResponse({ data: [] });
+  };
+
+  await fetchKlinesBefore(
+    "BTCUSDT",
+    "89m",
+    1_700_000_000,
+    109,
+    "spot",
+    "binance",
+    { maxWaitMs: 0 },
+  );
+
+  const params = new URL(capturedUrl, "http://localhost").searchParams;
+  assert.equal(params.get("max_wait_ms"), "0");
+});
+
 test("kline parser rejects malformed bars, metadata, and millisecond timestamps", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
@@ -138,6 +193,28 @@ test("request preserves ApiError fields and does not wrap AbortError", async (co
   await assert.rejects(
     () => request("/api/v1/example"),
     (error) => error === abortError,
+  );
+});
+
+test("request preserves structured backend error codes", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => jsonResponse({
+    detail: {
+      code: "stale_request_generation",
+      request_scope: "chart:test",
+      request_generation: 3,
+    },
+  }, { status: 409 });
+
+  await assert.rejects(
+    () => request("/api/v1/klines/range"),
+    (error) => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.status, 409);
+      assert.equal(error.code, "stale_request_generation");
+      return true;
+    },
   );
 });
 

@@ -56,6 +56,9 @@ logger = logging.getLogger("api.klines")
 RELATED_WARMUP_INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
 MAX_RANGE_RESPONSE_BARS = 5_000
 RELATED_WARMUP_TARGET_BARS = 1_000
+BACKFILL_REQUERY_MAX_SECONDS = 1.0
+BACKFILL_FINAL_REQUERY_GRACE_SECONDS = 0.5
+BACKFILL_CLEANUP_GRACE_SECONDS = 0.25
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -201,35 +204,261 @@ def _backfill_request_ids(result: Any) -> list[str]:
     return ids
 
 
+def _consume_background_task(task: asyncio.Task[Any]) -> None:
+    """Consume eventual completion without joining a cancellation-resistant task."""
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except BaseException:
+        pass
+
+
+async def _bounded_awaitable(
+    awaitable: Awaitable[Any],
+    *,
+    timeout_seconds: float,
+) -> tuple[bool, Any | None]:
+    """Await no longer than the budget, even if cancellation is ignored."""
+    task = asyncio.create_task(awaitable)
+    done, _ = await asyncio.wait(
+        {task},
+        timeout=max(0.0, float(timeout_seconds)),
+    )
+    if task in done:
+        return True, await task
+    task.cancel()
+    task.add_done_callback(_consume_background_task)
+    return False, None
+
+
 def _backfill_wait_tasks(
     request: Request,
-    result: Any,
-) -> set[asyncio.Task[bool]]:
-    request_ids = _backfill_request_ids(result)
-    if not request_ids:
+    result: Any | None,
+    *,
+    after_revisions: dict[str, int] | None = None,
+    request_ids: list[str] | None = None,
+) -> set[asyncio.Task[tuple[str, dict[str, Any]]]]:
+    target_ids = (
+        list(request_ids)
+        if request_ids is not None
+        else _backfill_request_ids(result)
+    )
+    if not target_ids:
         return set()
 
     coordinator = _get_backfill_coordinator(request)
     wait_for_request = getattr(coordinator, "wait_for_request", None)
-    if not callable(wait_for_request):
+    wait_for_progress = getattr(coordinator, "wait_for_progress", None)
+    if not callable(wait_for_progress) and not callable(wait_for_request):
         return set()
 
-    async def _wait_one(request_id: str) -> bool:
+    revisions = after_revisions or {}
+
+    async def _wait_one(request_id: str) -> tuple[str, dict[str, Any]]:
         try:
+            if callable(wait_for_progress):
+                progress = await wait_for_progress(
+                    request_id,
+                    after_revision=int(revisions.get(request_id, 0)),
+                )
+                if isinstance(progress, dict):
+                    return request_id, dict(progress)
+                return request_id, {"terminal": True}
             await wait_for_request(request_id)
-            return True
+            return request_id, {"terminal": True}
         except Exception:
             logger.debug(
                 "Waiting for backfill request %s failed",
                 request_id,
                 exc_info=True,
             )
-            return False
+            return request_id, {"terminal": True, "failed": True}
 
     return {
-        asyncio.create_task(_wait_one(request_id))
-        for request_id in request_ids
+        asyncio.create_task(
+            _wait_one(request_id),
+            name=f"kline-backfill-progress:{request_id}",
+        )
+        for request_id in target_ids
     }
+
+
+def _new_request_demand_owner_id(
+    demand_scope: str | None,
+    demand_generation: int | None,
+) -> str | None:
+    normalized_scope = str(demand_scope or "").strip()
+    if not normalized_scope or demand_generation is None:
+        return None
+    return (
+        f"scope:{normalized_scope}:{int(demand_generation)}:"
+        f"{time.monotonic_ns()}"
+    )
+
+
+def _request_backfill_demand_metadata(
+    *,
+    demand_scope: str | None,
+    demand_generation: int | None,
+    demand_owner_id: str | None,
+) -> dict[str, Any] | None:
+    normalized_scope = str(demand_scope or "").strip()
+    normalized_owner = str(demand_owner_id or "").strip()
+    if not normalized_scope or demand_generation is None or not normalized_owner:
+        return None
+    return {
+        "demand_owner_id": normalized_owner,
+        "demand_scope": normalized_scope,
+        "demand_generation": int(demand_generation),
+    }
+
+
+async def _revoke_request_demand_owner(
+    request: Request,
+    demand_owner_id: str | None,
+    *,
+    reason: str,
+) -> None:
+    normalized_owner = str(demand_owner_id or "").strip()
+    if not normalized_owner:
+        return
+    coordinator = _get_backfill_coordinator(request)
+    revoke_owner = getattr(coordinator, "revoke_demand_owner", None)
+    if not callable(revoke_owner):
+        return
+    try:
+        await revoke_owner(normalized_owner, reason=reason)
+    except Exception:
+        logger.debug(
+            "Failed to revoke backfill demand owner %s",
+            normalized_owner,
+            exc_info=True,
+        )
+
+
+async def _advance_request_demand_scope(
+    request: Request,
+    *,
+    demand_scope: str | None,
+    demand_generation: int | None,
+) -> bool:
+    """Supersede older work for one chart pane without breaking old clients."""
+    normalized_scope = str(demand_scope or "").strip()
+    if not normalized_scope or demand_generation is None:
+        return True
+    coordinator = _get_backfill_coordinator(request)
+    advance_scope = getattr(coordinator, "advance_demand_scope", None)
+    if not callable(advance_scope):
+        return True
+    is_current = getattr(coordinator, "is_demand_generation_current", None)
+    if callable(is_current) and not is_current(
+        normalized_scope,
+        int(demand_generation),
+    ):
+        return False
+    try:
+        await advance_scope(normalized_scope, int(demand_generation))
+    except Exception:
+        # Demand cancellation is an optimization/control-plane feature.  A
+        # coordinator mismatch must not turn a valid history request into 500.
+        logger.debug(
+            "Failed to advance backfill demand scope %s@%s",
+            normalized_scope,
+            demand_generation,
+            exc_info=True,
+        )
+        return True
+    return not callable(is_current) or bool(is_current(
+        normalized_scope,
+        int(demand_generation),
+    ))
+
+
+async def _reject_stale_request_generation(
+    request: Request,
+    *,
+    demand_scope: str | None,
+    demand_generation: int | None,
+    advance: bool = True,
+) -> None:
+    if advance:
+        current = await _advance_request_demand_scope(
+            request,
+            demand_scope=demand_scope,
+            demand_generation=demand_generation,
+        )
+    else:
+        normalized_scope = str(demand_scope or "").strip()
+        coordinator = _get_backfill_coordinator(request)
+        is_current = getattr(coordinator, "is_demand_generation_current", None)
+        current = bool(
+            not normalized_scope
+            or demand_generation is None
+            or not callable(is_current)
+            or is_current(normalized_scope, int(demand_generation))
+        )
+    if current:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "stale_request_generation",
+            "request_scope": str(demand_scope or "").strip(),
+            "request_generation": demand_generation,
+        },
+    )
+
+
+async def _acquire_scope_demand_for_result(
+    request: Request,
+    result: Any,
+    *,
+    demand_scope: str | None,
+    demand_generation: int | None,
+    demand_owner_id: str | None = None,
+) -> None:
+    """Attach cancellable scope ownership even when the API does not wait."""
+    normalized_scope = str(demand_scope or "").strip()
+    if not normalized_scope or demand_generation is None:
+        return
+    request_ids = _backfill_request_ids(result)
+    if not request_ids:
+        return
+    coordinator = _get_backfill_coordinator(request)
+    acquire_demand = getattr(coordinator, "acquire_demand", None)
+    if not callable(acquire_demand):
+        return
+    owner_id = str(demand_owner_id or "").strip() or (
+        f"scope:{normalized_scope}:{int(demand_generation)}:{time.monotonic_ns()}"
+    )
+    for request_id in request_ids:
+        try:
+            await acquire_demand(
+                request_id,
+                owner_id=owner_id,
+                scope=normalized_scope,
+                generation=int(demand_generation),
+            )
+        except Exception:
+            logger.debug(
+                "Failed to attach scope demand %s to %s",
+                owner_id,
+                request_id,
+                exc_info=True,
+            )
+
+
+async def _request_disconnected(request: Request) -> bool:
+    if bool(getattr(request.state, "backfill_wait_disconnected", False)):
+        return True
+    is_disconnected = getattr(request, "is_disconnected", None)
+    if not callable(is_disconnected):
+        return False
+    try:
+        return bool(await is_disconnected())
+    except Exception:
+        return False
 
 
 async def _poll_backfill_storage(
@@ -239,7 +468,11 @@ async def _poll_backfill_storage(
     timeout_seconds: float,
     requery: Callable[[bool], Awaitable[Any]],
     wait_through_partial_rows: bool = False,
+    coalesce_nonterminal_progress: bool = False,
     ready: Callable[[Any], bool] | None = None,
+    demand_scope: str | None = None,
+    demand_generation: int | None = None,
+    demand_owner_id: str | None = None,
 ) -> Any:
     """Wait on exact repairs and re-query only on completion or timeout.
 
@@ -247,47 +480,284 @@ async def _poll_backfill_storage(
     with a known tail/interior repair must instead keep waiting for the exact
     repair future (within the same bounded budget), otherwise the API returns
     the known incomplete history immediately.  When exact request ids are not
-    available, retain the legacy bounded polling fallback.
+    available, retain the legacy bounded polling fallback.  Derived-interval
+    callers may coalesce non-terminal chunk progress so an expensive base-bar
+    aggregation runs once at terminal publication or timeout, rather than once
+    for every physical exchange page.
     """
     deadline = time.monotonic() + max(0.0, timeout_seconds)
-    wait_tasks = _backfill_wait_tasks(request, result)
+    coordinator = _get_backfill_coordinator(request)
+    request_ids = _backfill_request_ids(result)
+    owner_id = f"http:{id(request)}:{time.monotonic_ns()}"
+    normalized_scope = str(demand_scope or "").strip() or None
+    scope_owner_id = str(demand_owner_id or "").strip() or (
+        (
+            f"scope:{normalized_scope}:{int(demand_generation)}:"
+            f"{time.monotonic_ns()}"
+        )
+        if normalized_scope is not None and demand_generation is not None
+        else None
+    )
+    acquire_demand = getattr(coordinator, "acquire_demand", None)
+    release_demand = getattr(coordinator, "release_demand", None)
+    leased_ids: list[str] = []
+    scope_leased_ids: list[str] = []
+    if callable(acquire_demand):
+        for request_id in request_ids:
+            if scope_owner_id is not None:
+                try:
+                    scope_acquired = await acquire_demand(
+                        request_id,
+                        owner_id=scope_owner_id,
+                        scope=normalized_scope,
+                        generation=demand_generation,
+                    )
+                except Exception:
+                    scope_acquired = False
+                if scope_acquired:
+                    scope_leased_ids.append(request_id)
+                else:
+                    # The coordinator rejects a generation that lost a race
+                    # with a newer pane request. Do not resurrect it with an
+                    # independent HTTP lease.
+                    continue
+            try:
+                acquired = await acquire_demand(
+                    request_id,
+                    owner_id=owner_id,
+                    scope=normalized_scope,
+                    generation=demand_generation,
+                )
+            except Exception:
+                acquired = False
+            if acquired:
+                leased_ids.append(request_id)
+
+    progress_for_request = getattr(coordinator, "progress_for_request", None)
+    revisions: dict[str, int] = {}
+    if callable(progress_for_request):
+        for request_id in request_ids:
+            progress = progress_for_request(request_id)
+            if isinstance(progress, dict):
+                revisions[request_id] = int(progress.get("revision", 0) or 0)
+
+    wait_tasks = _backfill_wait_tasks(
+        request,
+        result,
+        after_revisions=revisions,
+    )
+    disconnected = False
+    latest_chunk_progress: dict[str, Any] | None = None
+
+    async def _wait_for_disconnect() -> bool:
+        is_disconnected = getattr(request, "is_disconnected", None)
+        if not callable(is_disconnected):
+            await asyncio.Future()
+            return False
+        while True:
+            if await is_disconnected():
+                return True
+            await asyncio.sleep(0.05)
+
+    disconnect_task = asyncio.create_task(
+        _wait_for_disconnect(),
+        name="kline-backfill-disconnect-probe",
+    )
     try:
         while True:
             remaining = deadline - time.monotonic()
+            resume_request_ids: list[str] = []
+            saw_terminal_progress = False
+            wait_budget_expired = False
             if wait_tasks:
-                done: set[asyncio.Task[bool]] = set()
+                done: set[asyncio.Task] = set()
                 if remaining > 0:
                     done, pending = await asyncio.wait(
-                        wait_tasks,
+                        {*wait_tasks, disconnect_task},
                         timeout=remaining,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    wait_tasks = set(pending)
+                    if disconnect_task in done:
+                        disconnected = True
+                        return result
+                    if not done:
+                        wait_budget_expired = True
+                    wait_tasks = {
+                        task for task in pending if task is not disconnect_task
+                    }
                 for task in done:
+                    if task is disconnect_task:
+                        continue
                     # A terminal coordinator state is only a signal to inspect
                     # storage. It cannot prove that the committed rows satisfy
                     # coverage or trusted-finality publication requirements.
-                    await task
+                    request_id, progress = await task
+                    revisions[request_id] = max(
+                        int(revisions.get(request_id, 0)),
+                        int(progress.get("revision", 0) or 0),
+                    )
+                    if int(progress.get("completed_chunk_target_bars", 0) or 0) > 0:
+                        latest_chunk_progress = dict(progress)
+                    if bool(progress.get("terminal")):
+                        saw_terminal_progress = True
+                    else:
+                        resume_request_ids.append(request_id)
             elif remaining > 0:
-                await asyncio.sleep(min(0.2, remaining))
+                done, _ = await asyncio.wait(
+                    {disconnect_task},
+                    timeout=min(0.2, remaining),
+                )
+                if disconnect_task in done:
+                    disconnected = True
+                    return result
 
             # While exact requests are pending, inspect storage only when one
             # finishes or the budget expires. If all requests terminate but
             # publication is still not ready, bounded polling remains active:
             # a coordinator completion may precede a visible durable commit.
-            result = await requery(False)
+            remaining_after_wait = deadline - time.monotonic()
+            if (
+                coalesce_nonterminal_progress
+                and wait_through_partial_rows
+                and resume_request_ids
+                and not saw_terminal_progress
+                and not wait_budget_expired
+                and remaining_after_wait > 0
+            ):
+                wait_tasks.update(_backfill_wait_tasks(
+                    request,
+                    None,
+                    after_revisions=revisions,
+                    request_ids=resume_request_ids,
+                ))
+                continue
+            requery_budget = (
+                BACKFILL_FINAL_REQUERY_GRACE_SECONDS
+                if wait_budget_expired or remaining_after_wait <= 0
+                else min(
+                    BACKFILL_REQUERY_MAX_SECONDS,
+                    max(0.05, remaining_after_wait),
+                )
+            )
+            requery_completed, requeried = await _bounded_awaitable(
+                requery(False),
+                timeout_seconds=requery_budget,
+            )
+            if not requery_completed:
+                logger.warning(
+                    "Backfill storage requery exceeded %.3fs; returning bounded result",
+                    requery_budget,
+                )
+                return result
+            result = requeried
+            if latest_chunk_progress is not None:
+                metadata = getattr(result, "metadata", None)
+                if isinstance(metadata, dict):
+                    metadata["backfill_progress"] = dict(latest_chunk_progress)
             result_ready = (
                 bool(ready(result))
                 if ready is not None
                 else bool(result.bars and not wait_through_partial_rows)
             )
-            if time.monotonic() >= deadline or result_ready:
+            if wait_budget_expired or time.monotonic() >= deadline or result_ready:
                 return result
+            if resume_request_ids:
+                wait_tasks.update(_backfill_wait_tasks(
+                    request,
+                    None,
+                    after_revisions=revisions,
+                    request_ids=resume_request_ids,
+                ))
+    except asyncio.CancelledError:
+        # ASGI request cancellation is the common AbortSignal path. Treat it
+        # exactly like an explicit disconnect so the last demand can stop at
+        # the next physical chunk boundary.
+        disconnected = True
+        raise
     finally:
+        if disconnected:
+            request.state.backfill_wait_disconnected = True
+        disconnect_task.cancel()
         for wait_task in wait_tasks:
             wait_task.cancel()
-        if wait_tasks:
-            await asyncio.gather(*wait_tasks, return_exceptions=True)
+
+        cleanup_tasks: set[asyncio.Task[Any]] = {
+            disconnect_task,
+            *wait_tasks,
+        }
+        if disconnected and scope_owner_id is not None:
+            cleanup_tasks.add(asyncio.create_task(
+                _revoke_request_demand_owner(
+                    request,
+                    scope_owner_id,
+                    reason="http_disconnected",
+                )
+            ))
+
+        async def _release_one(
+            request_id: str,
+            *,
+            owner_id: str,
+            cancel_if_unobserved: bool,
+            reason: str,
+        ) -> None:
+            if not callable(release_demand):
+                return
+            try:
+                await release_demand(
+                    request_id,
+                    owner_id=owner_id,
+                    cancel_if_unobserved=cancel_if_unobserved,
+                    reason=reason,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to release backfill demand %s",
+                    request_id,
+                    exc_info=True,
+                )
+
+        if callable(release_demand):
+            for request_id in leased_ids:
+                cleanup_tasks.add(asyncio.create_task(_release_one(
+                    request_id,
+                    owner_id=owner_id,
+                    cancel_if_unobserved=disconnected,
+                    reason=(
+                        "http_disconnected"
+                        if disconnected
+                        else "http_wait_complete"
+                    ),
+                )))
+            if disconnected and scope_owner_id is not None:
+                for request_id in scope_leased_ids:
+                    cleanup_tasks.add(asyncio.create_task(_release_one(
+                        request_id,
+                        owner_id=scope_owner_id,
+                        cancel_if_unobserved=True,
+                        reason="http_disconnected",
+                    )))
+
+        if cleanup_tasks:
+            done, pending = await asyncio.wait(
+                cleanup_tasks,
+                timeout=BACKFILL_CLEANUP_GRACE_SECONDS,
+            )
+            for task in done:
+                _consume_background_task(task)
+            for task in pending:
+                # Cleanup includes demand revoke/release mutations.  Cancelling
+                # one after it has removed scheduler ownership but before its
+                # durable finalizer completes can strand a zombie request.
+                # The request deadline stays bounded by detaching overdue
+                # cleanup and consuming its eventual result.
+                task.add_done_callback(_consume_background_task)
+            if pending:
+                logger.warning(
+                    "Backfill cleanup exceeded %.3fs; detached pending tasks=%s",
+                    BACKFILL_CLEANUP_GRACE_SECONDS,
+                    [task.get_name() for task in pending],
+                )
 
 
 def _last_closed_open_ms(
@@ -440,6 +910,56 @@ def _history_page_finality_ready(result: Any) -> bool:
         and getattr(result, "history_state", "pending") != "pending"
         and not getattr(result, "retryable", False)
     )
+
+
+def _returned_history_page_ready(
+    result: Any,
+    *,
+    symbol: str,
+    interval: str,
+    exchange: str,
+    market_type: str,
+    calendar: TradingCalendar | None,
+    calendar_known: bool,
+) -> bool:
+    """Allow a cold request to publish the first final contiguous chunk.
+
+    Missing work outside the returned page remains visible through the normal
+    history contract, so the client can render useful candles immediately and
+    continue paging/retrying while the parent repair advances chunk by chunk.
+    """
+    if not getattr(result, "bars", None) or not _all_rows_final(result):
+        return False
+    data = _bars_to_dicts(result.bars)
+    metadata = dict(getattr(result, "metadata", None) or {})
+    progress = metadata.get("backfill_progress")
+    if not isinstance(progress, dict):
+        return False
+    required_bars = int(progress.get("completed_chunk_target_bars", 0) or 0)
+    # A progress wake-up may race a stale/terminal coordinator snapshot. Only
+    # a complete physical chunk is a meaningful first paint boundary.
+    if required_bars <= 0 or len(data) < required_bars:
+        return False
+    opens = [
+        int(item["time"]) * 1000
+        for item in data
+        if item.get("time") is not None
+    ]
+    if not opens:
+        return False
+    verification = _verify_range_continuity(
+        data=data,
+        symbol=symbol,
+        interval=interval,
+        exchange=exchange,
+        market_type=market_type,
+        start_ms=min(opens),
+        end_ms=max(opens),
+        calendar=calendar,
+        calendar_known=calendar_known,
+        excluded_ranges=getattr(result, "excluded_ranges", None),
+    )
+    return bool(verification["verified_contiguous"])
 
 
 def _cap_range_request(
@@ -808,6 +1328,7 @@ def _submit_verification_repairs(
     *,
     reason: str,
     requester: str,
+    demand_metadata: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], list[dict[str, Any]]]:
     """Submit exact API-only gaps through the normal DataManager facade."""
     request_backfill = getattr(dm, "request_backfill", None)
@@ -861,6 +1382,7 @@ def _submit_verification_repairs(
                         "end_ms": int(missing["end_ms"]),
                     },
                     "missing_bars": missing.get("missing_bars"),
+                    **dict(demand_metadata or {}),
                 },
             )
         except Exception:
@@ -957,49 +1479,54 @@ def _schedule_related_interval_warmup(
     end_ms: int,
     exchange: str,
     market_type: str,
+    coordinator: Any | None = None,
+    demand_scope: str | None = None,
+    demand_generation: int | None = None,
+    demand_owner_id: str | None = None,
+    defer_seconds: float = 0.0,
 ) -> None:
     request_backfill = getattr(dm, "request_backfill", None)
     if request_backfill is None:
         return
 
-    for interval in _related_warmup_intervals(current_interval):
-        try:
-            interval_ms = _interval_ms_for_request(interval)
-            # ``end_ms`` is closed for the chart's current interval, but it
-            # can still fall inside a forming candle of a wider related
-            # interval.  Recompute the live edge for each target interval so
-            # a 15m request at 16:45 does not try to repair the still-forming
-            # 16:00 1h candle before 17:00.
-            warmup_calendar, _ = _resolve_history_calendar(
-                dm,
-                exchange=exchange,
-                market_type=market_type,
-                symbol=symbol,
-                interval=interval,
+    normalized_scope = str(demand_scope or "").strip() or None
+
+    def _submit() -> None:
+        if normalized_scope is not None and demand_generation is not None:
+            is_current = getattr(
+                coordinator,
+                "is_demand_generation_current",
+                None,
             )
-            warmup_end_ms = min(
-                end_ms,
-                _last_closed_open_ms(interval, calendar=warmup_calendar),
-            )
-            warmup_start_ms = max(
-                start_ms,
-                warmup_end_ms - (RELATED_WARMUP_TARGET_BARS * interval_ms),
-            )
-            # A narrow visible range can begin after the wider interval's
-            # last closed open.  Fetch that one closed bar instead of emitting
-            # an inverted range or falling forward into the forming candle.
-            warmup_start_ms = min(warmup_start_ms, warmup_end_ms)
-            _call_data_manager_method(
-                request_backfill,
-                symbol,
-                interval,
-                warmup_start_ms,
-                warmup_end_ms,
-                exchange,
-                market_type,
-                reason="related_interval_warmup",
-                requester="klines_history_related",
-                metadata={
+            if callable(is_current) and not is_current(
+                normalized_scope,
+                demand_generation,
+            ):
+                return
+
+        for interval in _related_warmup_intervals(current_interval):
+            try:
+                interval_ms = _interval_ms_for_request(interval)
+                # ``end_ms`` is closed for the chart's current interval, but it
+                # can still fall inside a forming candle of a wider related
+                # interval. Recompute the live edge for each target interval.
+                warmup_calendar, _ = _resolve_history_calendar(
+                    dm,
+                    exchange=exchange,
+                    market_type=market_type,
+                    symbol=symbol,
+                    interval=interval,
+                )
+                warmup_end_ms = min(
+                    end_ms,
+                    _last_closed_open_ms(interval, calendar=warmup_calendar),
+                )
+                warmup_start_ms = max(
+                    start_ms,
+                    warmup_end_ms - (RELATED_WARMUP_TARGET_BARS * interval_ms),
+                )
+                warmup_start_ms = min(warmup_start_ms, warmup_end_ms)
+                metadata: dict[str, Any] = {
                     "focus_scope": "related",
                     "current_interval": current_interval,
                     "requested_interval": interval,
@@ -1012,15 +1539,48 @@ def _schedule_related_interval_warmup(
                         "end_ms": warmup_end_ms,
                         "target_bars": RELATED_WARMUP_TARGET_BARS,
                     },
-                },
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to schedule related warmup for %s@%s: %s",
-                symbol,
-                interval,
-                exc,
-            )
+                }
+                if normalized_scope is not None and demand_generation is not None:
+                    metadata.update({
+                        "demand_owner_id": (
+                            str(demand_owner_id or "").strip()
+                            or (
+                                f"scope:{normalized_scope}:"
+                                f"{int(demand_generation)}:{time.monotonic_ns()}"
+                            )
+                        ),
+                        "demand_scope": normalized_scope,
+                        "demand_generation": int(demand_generation),
+                    })
+                _call_data_manager_method(
+                    request_backfill,
+                    symbol,
+                    interval,
+                    warmup_start_ms,
+                    warmup_end_ms,
+                    exchange,
+                    market_type,
+                    reason="related_interval_warmup",
+                    requester="klines_history_related",
+                    metadata=metadata,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to schedule related warmup for %s@%s: %s",
+                    symbol,
+                    interval,
+                    exc,
+                )
+
+    delay = max(0.0, float(defer_seconds))
+    if delay <= 0:
+        _submit()
+        return
+    try:
+        asyncio.get_running_loop().call_later(delay, _submit)
+    except RuntimeError:
+        # Direct synchronous callers retain the historical immediate behavior.
+        _submit()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1176,6 +1736,16 @@ async def get_klines_history(
     count_back: int | None = Query(None, ge=1, le=MAX_RANGE_RESPONSE_BARS, description="Newest bar count to return; overrides days window when provided"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    request_scope: str | None = Query(
+        None,
+        max_length=128,
+        description="Stable chart/pane scope used to supersede stale history work",
+    ),
+    request_generation: int | None = Query(
+        None,
+        ge=0,
+        description="Monotonic generation within request_scope",
+    ),
     max_wait_ms: int = Query(
         3500,
         ge=0,
@@ -1199,6 +1769,20 @@ async def get_klines_history(
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
 
     dm = _require_data_manager(request)
+    demand_owner_id = _new_request_demand_owner_id(
+        request_scope,
+        request_generation,
+    )
+    demand_metadata = _request_backfill_demand_metadata(
+        demand_scope=request_scope,
+        demand_generation=request_generation,
+        demand_owner_id=demand_owner_id,
+    )
+    await _reject_stale_request_generation(
+        request,
+        demand_scope=request_scope,
+        demand_generation=request_generation,
+    )
     calendar, calendar_known = _resolve_history_calendar(
         dm,
         exchange=exchange,
@@ -1260,6 +1844,11 @@ async def get_klines_history(
                 auto_backfill=auto_backfill,
                 backfill_reason="initial_history",
                 backfill_requester="klines_history",
+                **(
+                    {"backfill_metadata": demand_metadata}
+                    if demand_metadata is not None
+                    else {}
+                ),
             )
 
         def _verify_history_result(candidate: Any) -> tuple[list[dict], dict[str, Any]]:
@@ -1279,6 +1868,7 @@ async def get_klines_history(
             return candidate_data, candidate_verification
 
         result = await _run_history_query()
+        initially_empty = not bool(result.bars)
         backfill_triggered = bool(result.backfill_triggered)
         data, verification = _verify_history_result(result)
         reported_missing = [item.to_dict() for item in result.missing_ranges]
@@ -1293,6 +1883,7 @@ async def get_klines_history(
             verification_only,
             reason="initial_history",
             requester="klines_history",
+            demand_metadata=demand_metadata,
         )
         if submitted:
             result.backfill_triggered = True
@@ -1301,6 +1892,21 @@ async def get_klines_history(
         if suppressions:
             _attach_verification_suppressions(result, suppressions)
             data, verification = _verify_history_result(result)
+        await _acquire_scope_demand_for_result(
+            request,
+            result,
+            demand_scope=request_scope,
+            demand_generation=request_generation,
+            demand_owner_id=demand_owner_id,
+        )
+        # A newer pane request can advance while the storage query is running.
+        # Re-check before waiting or returning the now-stale response.
+        await _reject_stale_request_generation(
+            request,
+            demand_scope=request_scope,
+            demand_generation=request_generation,
+            advance=False,
+        )
 
         # Cold-start path: the first query of an uncached series returns no bars
         # and only schedules an *async* backfill. Without a brief wait the chart
@@ -1320,7 +1926,27 @@ async def get_klines_history(
                 timeout_seconds=max_wait_ms / 1000,
                 requery=_run_history_query,
                 wait_through_partial_rows=bool(result.bars or verification_only),
+                coalesce_nonterminal_progress=bool(
+                    _resolve_interval(
+                        interval,
+                        exchange=exchange,
+                        market_type=market_type,
+                    )["is_custom"]
+                ),
                 ready=lambda candidate: (
+                    (
+                        initially_empty
+                        and _returned_history_page_ready(
+                            candidate,
+                            symbol=symbol,
+                            interval=interval,
+                            exchange=exchange,
+                            market_type=market_type,
+                            calendar=calendar,
+                            calendar_known=calendar_known,
+                        )
+                    )
+                    or
                     (
                         _verify_history_result(candidate)[1]["verified_contiguous"]
                         and _all_rows_final(candidate)
@@ -1333,20 +1959,46 @@ async def get_klines_history(
                         and not candidate.retryable
                     )
                 ),
+                demand_scope=request_scope,
+                demand_generation=request_generation,
+                demand_owner_id=demand_owner_id,
             )
             data, verification = _verify_history_result(result)
+    except asyncio.CancelledError:
+        await _revoke_request_demand_owner(
+            request,
+            demand_owner_id,
+            reason="http_query_cancelled",
+        )
+        raise
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _query_http_exception(exc, "DataManager history query failed") from exc
 
-    _schedule_related_interval_warmup(
-        dm,
-        symbol=symbol,
-        current_interval=interval,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        exchange=exchange,
-        market_type=market_type,
-    )
+    # Related intervals are speculative. Admit them only after the visible
+    # foreground page is fully trustworthy, and never after its HTTP consumer
+    # disconnected. The scheduler still caps background work to one slot.
+    if (
+        bool(data)
+        and bool(verification["verified_contiguous"])
+        and _all_rows_final(result)
+        and not await _request_disconnected(request)
+    ):
+        _schedule_related_interval_warmup(
+            dm,
+            symbol=symbol,
+            current_interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            exchange=exchange,
+            market_type=market_type,
+            coordinator=_get_backfill_coordinator(request),
+            demand_scope=request_scope,
+            demand_generation=request_generation,
+            demand_owner_id=demand_owner_id,
+            defer_seconds=0.25,
+        )
 
     missing_ranges = _merge_missing_ranges(
         [r.to_dict() for r in result.missing_ranges],
@@ -1391,6 +2043,16 @@ async def get_klines_range(
     strict: bool = Query(True, description="Whether caller requires continuity metadata"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    request_scope: str | None = Query(
+        None,
+        max_length=128,
+        description="Stable chart/pane scope used to supersede stale history work",
+    ),
+    request_generation: int | None = Query(
+        None,
+        ge=0,
+        description="Monotonic generation within request_scope",
+    ),
 ):
     """Get K-lines for an exact time range with continuity verification."""
     _validate_interval(interval)
@@ -1404,6 +2066,20 @@ async def get_klines_range(
     market_type = _validate_market_type(market_type)
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
     dm = _require_data_manager(request)
+    demand_owner_id = _new_request_demand_owner_id(
+        request_scope,
+        request_generation,
+    )
+    demand_metadata = _request_backfill_demand_metadata(
+        demand_scope=request_scope,
+        demand_generation=request_generation,
+        demand_owner_id=demand_owner_id,
+    )
+    await _reject_stale_request_generation(
+        request,
+        demand_scope=request_scope,
+        demand_generation=request_generation,
+    )
     calendar, calendar_known = _resolve_history_calendar(
         dm,
         exchange=exchange,
@@ -1476,6 +2152,11 @@ async def get_klines_range(
                 auto_backfill=auto_backfill,
                 backfill_reason="visible_range_gap",
                 backfill_requester="klines_range",
+                **(
+                    {"backfill_metadata": demand_metadata}
+                    if demand_metadata is not None
+                    else {}
+                ),
             )
 
         def _verify_range_result(candidate: Any) -> tuple[list[dict], dict[str, Any]]:
@@ -1510,6 +2191,7 @@ async def get_klines_range(
                 verification_only,
                 reason="visible_range_gap",
                 requester="klines_range",
+                demand_metadata=demand_metadata,
             )
             if submitted:
                 result.backfill_triggered = True
@@ -1518,6 +2200,19 @@ async def get_klines_range(
             if suppressions:
                 _attach_verification_suppressions(result, suppressions)
                 data, verification = _verify_range_result(result)
+        await _acquire_scope_demand_for_result(
+            request,
+            result,
+            demand_scope=request_scope,
+            demand_generation=request_generation,
+            demand_owner_id=demand_owner_id,
+        )
+        await _reject_stale_request_generation(
+            request,
+            demand_scope=request_scope,
+            demand_generation=request_generation,
+            advance=False,
+        )
 
         if (
             repair_mode == "wait"
@@ -1534,13 +2229,32 @@ async def get_klines_range(
                 timeout_seconds=wait_ms / 1000,
                 requery=_run_range_query,
                 wait_through_partial_rows=True,
+                coalesce_nonterminal_progress=bool(
+                    _resolve_interval(
+                        interval,
+                        exchange=exchange,
+                        market_type=market_type,
+                    )["is_custom"]
+                ),
                 ready=lambda candidate: (
                     _verify_range_result(candidate)[1]["verified_contiguous"]
                     and _all_rows_final(candidate)
                 ),
+                demand_scope=request_scope,
+                demand_generation=request_generation,
+                demand_owner_id=demand_owner_id,
             )
             data, verification = _verify_range_result(result)
             backfill_triggered = backfill_triggered or bool(result.backfill_triggered)
+    except asyncio.CancelledError:
+        await _revoke_request_demand_owner(
+            request,
+            demand_owner_id,
+            reason="http_query_cancelled",
+        )
+        raise
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _query_http_exception(exc, "DataManager range query failed") from exc
 
@@ -1595,6 +2309,16 @@ async def get_klines_before(
     bars: int = Query(500, ge=1, le=1000, description="How many bars to load"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    request_scope: str | None = Query(
+        None,
+        max_length=128,
+        description="Stable chart/pane scope used to supersede stale history work",
+    ),
+    request_generation: int | None = Query(
+        None,
+        ge=0,
+        description="Monotonic generation within request_scope",
+    ),
     max_wait_ms: int = Query(
         4500,
         ge=0,
@@ -1615,6 +2339,27 @@ async def get_klines_before(
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
 
     dm = _require_data_manager(request)
+    demand_owner_id = _new_request_demand_owner_id(
+        request_scope,
+        request_generation,
+    )
+    demand_metadata = _request_backfill_demand_metadata(
+        demand_scope=request_scope,
+        demand_generation=request_generation,
+        demand_owner_id=demand_owner_id,
+    )
+    await _reject_stale_request_generation(
+        request,
+        demand_scope=request_scope,
+        demand_generation=request_generation,
+    )
+    calendar, calendar_known = _resolve_history_calendar(
+        dm,
+        exchange=exchange,
+        market_type=market_type,
+        symbol=symbol,
+        interval=interval,
+    )
     try:
         before_ms = before * 1000
 
@@ -1628,11 +2373,30 @@ async def get_klines_before(
                 auto_backfill=auto_backfill,
                 backfill_reason="visible_load_more",
                 backfill_requester="klines_history_before",
+                **(
+                    {"backfill_metadata": demand_metadata}
+                    if demand_metadata is not None
+                    else {}
+                ),
             )
 
         result = await _run_before_query()
+        initially_empty = not bool(result.bars)
         backfill_triggered = bool(result.backfill_triggered)
         has_more = bool(result.has_more)
+        await _acquire_scope_demand_for_result(
+            request,
+            result,
+            demand_scope=request_scope,
+            demand_generation=request_generation,
+            demand_owner_id=demand_owner_id,
+        )
+        await _reject_stale_request_generation(
+            request,
+            demand_scope=request_scope,
+            demand_generation=request_generation,
+            advance=False,
+        )
 
         # Cold drag-left: an uncached older region returns no bars and only
         # schedules an async backfill. Poll the (fast) backfill within a bounded
@@ -1647,7 +2411,31 @@ async def get_klines_before(
                 timeout_seconds=max_wait_ms / 1000,
                 requery=_run_before_query,
                 wait_through_partial_rows=bool(result.bars),
-                ready=_history_page_finality_ready,
+                coalesce_nonterminal_progress=bool(
+                    _resolve_interval(
+                        interval,
+                        exchange=exchange,
+                        market_type=market_type,
+                    )["is_custom"]
+                ),
+                ready=lambda candidate: (
+                    (
+                        initially_empty
+                        and _returned_history_page_ready(
+                            candidate,
+                            symbol=symbol,
+                            interval=interval,
+                            exchange=exchange,
+                            market_type=market_type,
+                            calendar=calendar,
+                            calendar_known=calendar_known,
+                        )
+                    )
+                    or _history_page_finality_ready(candidate)
+                ),
+                demand_scope=request_scope,
+                demand_generation=request_generation,
+                demand_owner_id=demand_owner_id,
             )
             # If the wait timed out before the backfill delivered bars, keep
             # has_more=True (data is still on the way) so the client retries
@@ -1661,6 +2449,15 @@ async def get_klines_before(
                 )
             )
             has_more = bool(result.has_more) if result.bars else not terminal
+    except asyncio.CancelledError:
+        await _revoke_request_demand_owner(
+            request,
+            demand_owner_id,
+            reason="http_query_cancelled",
+        )
+        raise
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _query_http_exception(exc, "DataManager before query failed") from exc
 

@@ -18,11 +18,13 @@ import {
   initialRepairRetryMode,
   reconcileInitialRepairRetry,
 } from "./feed/initialRepairRetryPolicy.js";
+import { planTargetBarRequest } from "./intervalRequestBudget.js";
 
 const INITIAL_BACKFILL_RETRY_MS = 3_000;
 const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
 const INITIAL_BACKFILL_MAX_WAIT_MS = 60_000;
 const INITIAL_HISTORY_COUNT_BACK = 1_500;
+export const INITIAL_HISTORY_SOURCE_ROW_BUDGET = 20_000;
 const OPTIMISTIC_SWITCH_EMPTY_TIMEOUT_MS = 3_000;
 
 type ResolveInitialRows = (
@@ -77,6 +79,48 @@ export function shouldRequestInitialLatest(
   return nativeIntervalValues.some((nativeInterval) => (
     intervalsSemanticallyEquivalent(interval, nativeInterval)
   ));
+}
+
+export function planInitialHistoryCountBack(
+  interval: IntervalString,
+  nativeIntervalValues: readonly IntervalString[],
+): number {
+  return planTargetBarRequest({
+    desiredTargetBars: INITIAL_HISTORY_COUNT_BACK,
+    interval,
+    nativeIntervals: nativeIntervalValues,
+    sourceRowBudget: INITIAL_HISTORY_SOURCE_ROW_BUDGET,
+  })?.targetBars ?? INITIAL_HISTORY_COUNT_BACK;
+}
+
+/**
+ * Release the indicator-window owner created by the original initial-history
+ * request. Exact gap polling intentionally owns a separate token, so settling
+ * the child repair does not by itself release this parent lifecycle.
+ *
+ * The caller must first prove that the pending initial request still belongs
+ * to the active session. An empty commit is enough: the chart window buffer
+ * publishes the staged union and flips `indicatorWindowDeferred` to false
+ * without replacing the partially rendered K-lines.
+ */
+export function releasePendingInitialIndicatorWindow(
+  commitMergedChartData: CommitChartData,
+  pendingInitial: PendingInitialSeries,
+  source: string,
+): boolean {
+  const owner = String(pendingInitial.indicatorWindowOwner || "").trim();
+  if (!owner) return false;
+  commitMergedChartData(
+    pendingInitial.symbol,
+    pendingInitial.interval,
+    [],
+    {
+      source,
+      deferIndicatorWindow: false,
+      indicatorWindowOwner: owner,
+    },
+  );
+  return true;
 }
 
 export function useChartInitialLoad({
@@ -178,11 +222,22 @@ export function useChartInitialLoad({
     pendingInitialHistoryRef.current = null;
 
     const series = { exchange: ex, marketType: mt, symbol: sym, interval: intv };
+    const initialHistoryCountBack = planInitialHistoryCountBack(intv, nativeIntervalValues);
     const initialEpoch = seriesDataFeed.beginEpoch(series);
     controller.signal.addEventListener("abort", () => {
       seriesDataFeed.cancelSeriesRepairs(series);
       trackedInitialRepairRange = null;
     }, { once: true });
+    if (initialHistoryCountBack <= 0) {
+      if (fallbackClearTimer) clearTimeout(fallbackClearTimer);
+      setHasMoreLeft(false);
+      setLoading(false);
+      if (!hasCacheHit) {
+        setConnectionStatus("disconnected");
+        setError(new Error(`K-line interval ${intv} exceeds the safe source-history budget`));
+      }
+      return;
+    }
 
     function commitQuickResult(quickResult: FeedResult | null | undefined): void {
       if (controller.signal.aborted || !quickResult?.data?.length) return;
@@ -223,6 +278,10 @@ export function useChartInitialLoad({
           marketType: mt,
           symbol: sym,
           interval: intv,
+          countBack: initialHistoryCountBack,
+          ...(historyResult.indicatorWindowOwner
+            ? { indicatorWindowOwner: historyResult.indicatorWindowOwner }
+            : {}),
           range: historyResult.start_ms != null && historyResult.end_ms != null
             ? numericRange(historyResult.start_ms, historyResult.end_ms)
             : null,
@@ -239,6 +298,11 @@ export function useChartInitialLoad({
           pendingInitialHistoryRef.current = null;
           trackedInitialRepairRange = null;
           stopInitialHistoryRetry?.();
+          releasePendingInitialIndicatorWindow(
+            commitMergedChartData,
+            pendingInitial,
+            "initial-history-settled",
+          );
           const repairedRows = getFromCache(sym, intv);
           const latest = repairedRows.at(-1);
           if (latest) updateLastPrice(latest, intv);
@@ -260,6 +324,11 @@ export function useChartInitialLoad({
           pendingInitialHistoryRef.current = null;
           trackedInitialRepairRange = null;
           stopInitialHistoryRetry?.();
+          releasePendingInitialIndicatorWindow(
+            commitMergedChartData,
+            pendingInitial,
+            "initial-history-terminal",
+          );
           setError(new Error(`K-line history repair stopped: ${reason}`));
           setConnectionStatus("disconnected");
           setLoading(false);
@@ -326,7 +395,13 @@ export function useChartInitialLoad({
         bars: historyResult.data.length,
       });
       if (!historyResult.committed) {
-        commitMergedChartData(sym, intv, historyResult.data, { source: "initial-history" });
+        commitMergedChartData(sym, intv, historyResult.data, {
+          source: "initial-history",
+          deferIndicatorWindow: repairPending && !terminalFailed,
+          ...(historyResult.indicatorWindowOwner
+            ? { indicatorWindowOwner: historyResult.indicatorWindowOwner }
+            : {}),
+        });
       }
       const latest = historyResult.data[historyResult.data.length - 1];
       if (latest) updateLastPrice(latest, intv);
@@ -376,7 +451,7 @@ export function useChartInitialLoad({
         if (controller.signal.aborted || stoppedRetrying) return false;
         try {
           const retryResult = await seriesDataFeed.getBars(series, {
-            countBack: INITIAL_HISTORY_COUNT_BACK,
+            countBack: initialHistoryCountBack,
             source: "initial-history-retry",
             signal: controller.signal,
           });
@@ -437,7 +512,7 @@ export function useChartInitialLoad({
       marketType: mt,
       symbol: sym,
       interval: intv,
-      countBack: INITIAL_HISTORY_COUNT_BACK,
+      countBack: initialHistoryCountBack,
     });
 
     const initialRequests: Promise<unknown>[] = [];
@@ -473,7 +548,7 @@ export function useChartInitialLoad({
       });
     }
     initialRequests.push(seriesDataFeed.getBars(series, {
-        countBack: INITIAL_HISTORY_COUNT_BACK,
+        countBack: initialHistoryCountBack,
         source: "initial-history",
         signal: controller.signal,
       })

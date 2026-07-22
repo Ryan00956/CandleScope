@@ -12,6 +12,7 @@ from app.data_engine.interval_policy import (
     compute_bucket_start_ms,
     parse_interval_ms,
 )
+from app.data_engine.kline_quality import repair_requires_trusted_finality
 
 
 _DEFAULT_STALE_AFTER_MS = 15 * 60 * 1000
@@ -257,6 +258,7 @@ class GapLedger:
     def mark_started(self, request: Any, *, attempt: int) -> None:
         self._update(
             request,
+            require_repair_ticket=True,
             status="repairing",
             attempts=attempt,
             last_error=None,
@@ -273,6 +275,7 @@ class GapLedger:
     ) -> None:
         self._update(
             request,
+            require_repair_ticket=True,
             status="retry_wait",
             attempts=attempt,
             last_error=_bounded_error(error),
@@ -280,10 +283,19 @@ class GapLedger:
         )
 
     def mark_verifying(self, request: Any) -> None:
-        self._update(request, status="verifying", last_checked_at=_now_ms())
+        self._update(
+            request,
+            require_repair_ticket=True,
+            status="verifying",
+            last_checked_at=_now_ms(),
+        )
 
     def mark_attempts(self, request: Any, *, attempts: int) -> None:
-        self._update(request, attempts=max(0, int(attempts)))
+        self._update(
+            request,
+            require_repair_ticket=True,
+            attempts=max(0, int(attempts)),
+        )
 
     def mark_resolved(
         self,
@@ -297,6 +309,12 @@ class GapLedger:
         next_retry_at: int | None = None
         if status == "source_empty":
             next_retry_at = now + 86_400_000
+        elif status == "partial":
+            # Partial verification is actionable, but giving it a lease keeps
+            # repeated chart polls from immediately restarting the same repair.
+            # Ledger reconciliation will make it eligible again after the
+            # normal stale window.
+            next_retry_at = now + _DEFAULT_STALE_AFTER_MS
         elif status == "failed":
             metadata = dict(getattr(request, "metadata", {}) or {})
             try:
@@ -350,6 +368,169 @@ class GapLedger:
             resolved_at=now if status == "not_expected" else None,
             next_retry_at=next_retry_at,
         )
+
+    def finalize_parent(
+        self,
+        request: Any,
+        *,
+        status: str,
+        missing_count: int | None = None,
+        error: str | None = None,
+        attempts: int = 0,
+        coverage_start_ms: int | None = None,
+        coverage_end_ms: int | None = None,
+        next_retry_at: int | None = None,
+    ) -> bool:
+        """Finalize only the ledger ticket still owned by this scheduler parent.
+
+        A stronger successor can be queued while an ordinary predecessor is
+        still draining.  The natural range key is shared, so terminal writes
+        must compare ``repair_ticket`` and broad coverage must not close a
+        different in-flight ticket or a stronger trusted-finality contract.
+        """
+        now = _now_ms()
+        normalized_status = str(status or "partial")
+        if normalized_status == "filled":
+            missing_count = 0
+        if next_retry_at is None:
+            if normalized_status == "source_empty":
+                next_retry_at = now + 86_400_000
+            elif normalized_status == "partial":
+                next_retry_at = now + _DEFAULT_STALE_AFTER_MS
+            elif normalized_status == "failed":
+                metadata = dict(getattr(request, "metadata", {}) or {})
+                try:
+                    recovery_count = max(
+                        0,
+                        int(metadata.get("ledger_recovery_count", 0) or 0),
+                    )
+                except (TypeError, ValueError):
+                    recovery_count = 0
+                next_retry_at = now + min(
+                    _MAX_FAILED_RETRY_MS,
+                    _DEFAULT_STALE_AFTER_MS * (2 ** min(recovery_count, 8)),
+                )
+        resolved_at = (
+            now
+            if normalized_status in {"filled", "source_empty", "failed"}
+            else None
+        )
+        start_ms, end_ms = _request_range(request)
+        current_requires_trusted = repair_requires_trusted_finality(
+            getattr(request, "metadata", None),
+            reason=getattr(request, "reason", None),
+        )
+
+        with _connect(self._db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE kline_gap_ledger
+                SET status = ?,
+                    missing_count = COALESCE(?, missing_count),
+                    attempts = ?,
+                    last_error = ?,
+                    last_checked_at = ?,
+                    resolved_at = ?,
+                    next_retry_at = ?
+                WHERE exchange = ?
+                  AND market_type = ?
+                  AND symbol = ?
+                  AND interval = ?
+                  AND start_ms = ?
+                  AND end_ms = ?
+                  AND repair_ticket IS ?
+                """,
+                (
+                    normalized_status,
+                    (
+                        max(0, int(missing_count))
+                        if missing_count is not None
+                        else None
+                    ),
+                    max(0, int(attempts)),
+                    _bounded_error(error),
+                    now,
+                    resolved_at,
+                    next_retry_at,
+                    request.exchange,
+                    request.market_type,
+                    request.symbol,
+                    request.interval,
+                    start_ms,
+                    end_ms,
+                    request.request_id,
+                ),
+            )
+            if int(cursor.rowcount or 0) <= 0:
+                conn.commit()
+                return False
+
+            if (
+                normalized_status == "filled"
+                and coverage_start_ms is not None
+                and coverage_end_ms is not None
+            ):
+                candidates = conn.execute(
+                    """
+                    SELECT id, status, reason, repair_ticket, metadata_json
+                    FROM kline_gap_ledger
+                    WHERE exchange = ?
+                      AND market_type = ?
+                      AND symbol = ?
+                      AND interval = ?
+                      AND start_ms >= ?
+                      AND end_ms <= ?
+                      AND status IN (
+                        'source_empty', 'failed', 'unavailable', 'not_expected',
+                        'queued', 'repairing', 'verifying', 'partial', 'retry_wait'
+                      )
+                    """,
+                    (
+                        request.exchange,
+                        request.market_type,
+                        request.symbol,
+                        request.interval,
+                        int(coverage_start_ms),
+                        int(coverage_end_ms),
+                    ),
+                ).fetchall()
+                victim_ids: list[int] = []
+                for row in candidates:
+                    other_ticket = row["repair_ticket"]
+                    if (
+                        row["status"] in {"queued", "repairing", "verifying"}
+                        and other_ticket != request.request_id
+                    ):
+                        continue
+                    if (
+                        not current_requires_trusted
+                        and repair_requires_trusted_finality(
+                            _metadata_object(row["metadata_json"]),
+                            reason=row["reason"],
+                        )
+                    ):
+                        continue
+                    victim_ids.append(int(row["id"]))
+                if victim_ids:
+                    placeholders = ", ".join("?" for _ in victim_ids)
+                    conn.execute(
+                        f"""
+                        UPDATE kline_gap_ledger
+                        SET status = 'filled',
+                            missing_count = 0,
+                            last_error = NULL,
+                            last_checked_at = ?,
+                            resolved_at = ?,
+                            next_retry_at = NULL
+                        WHERE id IN ({placeholders})
+                        """,
+                        (now, now, *victim_ids),
+                    )
+            conn.commit()
+
+        if normalized_status == "source_empty":
+            self._supersede_contained_source_empty(request)
+        return True
 
     def mark_covered_resolved(
         self,
@@ -1073,7 +1254,13 @@ class GapLedger:
             conn.commit()
         return changed
 
-    def _update(self, request: Any, **values: Any) -> None:
+    def _update(
+        self,
+        request: Any,
+        *,
+        require_repair_ticket: bool = False,
+        **values: Any,
+    ) -> None:
         if not values:
             return
         assignments = []
@@ -1090,6 +1277,10 @@ class GapLedger:
             start_ms,
             end_ms,
         ])
+        ticket_clause = ""
+        if require_repair_ticket:
+            ticket_clause = " AND repair_ticket IS ?"
+            params.append(request.request_id)
         with _connect(self._db_path) as conn:
             conn.execute(
                 f"""
@@ -1101,6 +1292,7 @@ class GapLedger:
                   AND interval = ?
                   AND start_ms = ?
                   AND end_ms = ?
+                  {ticket_clause}
                 """,
                 params,
             )

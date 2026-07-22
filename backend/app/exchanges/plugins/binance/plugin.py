@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.data_engine.ingestion.models import StreamType
+from app.exchanges.pagination import BinanceHistoricalPaginationPolicy
 from app.exchanges.plugin import BuiltinExchangePlugin
 from app.exchanges.rate_limits import (
     HistoricalRequest,
@@ -28,6 +29,7 @@ class BinancePlugin(BuiltinExchangePlugin):
             normalizer_factory=self._normalizer,
             symbol_normalizer=BinanceSymbolNormalizer(),
             rate_limit_policy_factory=self._rate_limit_policy,
+            pagination_policy_factory=self._pagination_policy,
             price_stream_type_factory=self._price_stream_type,
         )
 
@@ -197,6 +199,12 @@ class BinancePlugin(BuiltinExchangePlugin):
     @staticmethod
     def _price_stream_type(market_type: str = "spot") -> StreamType:
         return StreamType.MINI_TICKER
+
+    @staticmethod
+    def _pagination_policy(
+        config: Any | None = None,
+    ) -> BinanceHistoricalPaginationPolicy:
+        return BinanceHistoricalPaginationPolicy()
 
 
 def create_plugin() -> BinancePlugin:

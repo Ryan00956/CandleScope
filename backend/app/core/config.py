@@ -358,6 +358,8 @@ INDICATOR_RANGE_CACHE_ENABLED = os.getenv(
 ).strip().lower() not in {"0", "false", "no", "off"}
 INDICATOR_RANGE_CACHE_MAX_ENTRIES = int(os.getenv("INDICATOR_RANGE_CACHE_MAX_ENTRIES", "128"))
 INDICATOR_RANGE_CACHE_TTL_SECONDS = float(os.getenv("INDICATOR_RANGE_CACHE_TTL_SECONDS", "180"))
+INDICATOR_BARS_CACHE_MAX_ENTRIES = int(os.getenv("INDICATOR_BARS_CACHE_MAX_ENTRIES", "8"))
+INDICATOR_BARS_CACHE_TTL_SECONDS = float(os.getenv("INDICATOR_BARS_CACHE_TTL_SECONDS", "30"))
 INDICATOR_RANGE_BACKFILL_WAIT_SECONDS = float(os.getenv("INDICATOR_RANGE_BACKFILL_WAIT_SECONDS", "3"))
 
 # Keep unsubscribed builtin engines warm briefly so a quick interval switch can

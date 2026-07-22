@@ -86,6 +86,15 @@ export interface NormalizedIndicatorDataEntry extends IndicatorDataEntry {
   value: number;
 }
 
+export interface NormalizedIndicatorWhitespaceEntry extends IndicatorDataEntry {
+  time: ChartTime;
+  value?: never;
+}
+
+export type NormalizedIndicatorSeriesEntry =
+  | NormalizedIndicatorDataEntry
+  | NormalizedIndicatorWhitespaceEntry;
+
 export interface IndicatorLine {
   id?: string;
   indicatorId?: string;

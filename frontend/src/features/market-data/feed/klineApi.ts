@@ -11,6 +11,7 @@ import type {
   HistoryExcludedRange,
   HistoryMissingRange,
   KlineApi,
+  KlineBeforeRequestOptions,
   KlineFetchResult,
   KlineHistoryRequestOptions,
   KlineRangeRequestOptions,
@@ -182,7 +183,7 @@ async function fetchKlinesBefore(
   bars: number,
   marketType: string,
   exchange: string,
-  options: KlineRequestOptions,
+  options: KlineBeforeRequestOptions,
 ): Promise<KlineFetchResult> {
   return toMarketDataResult(await fetchTransportKlinesBefore(
     symbol,

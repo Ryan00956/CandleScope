@@ -55,6 +55,8 @@ from app.exchanges.symbols import normalize_symbol
 from ..ingestion.config import IngestionConfig
 from ..ingestion.metrics import LayerMetrics
 from ..ingestion.transport import TransportLayer
+from ..interval_policy import parse_interval_spec
+from ..kline_quality import repair_requires_trusted_finality
 
 from .config import BackfillConfig
 from .models import (
@@ -63,6 +65,7 @@ from .models import (
     CacheBackend,
     FetchResult,
     GapInfo,
+    GapType,
     ReconcileResult,
     RepairReport,
     StorageBackend,
@@ -243,6 +246,7 @@ class BackfillEngine:
         """
         started_at_ms = int(time.time() * 1000)
         symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
+        metadata = dict(metadata or {})
         self._metrics.inc("runs")
         self._metrics.mark("last_run_at")
 
@@ -260,14 +264,32 @@ class BackfillEngine:
         try:
             # ── Phase 1: Detect ──
             status = BackfillStatus.DETECTING
-            gaps = await self.detector.detect(
-                symbol=symbol,
-                intervals=intervals,
-                range_start_ms=range_start_ms,
-                range_end_ms=range_end_ms,
-                exchange=exchange,
-                market_type=market_type,
-            )
+            if repair_requires_trusted_finality(metadata):
+                gaps = self._trusted_finality_refresh_gaps(
+                    symbol=symbol,
+                    intervals=intervals,
+                    range_start_ms=range_start_ms,
+                    range_end_ms=range_end_ms,
+                    exchange=exchange,
+                    market_type=market_type,
+                )
+                metadata["repair_mode"] = "authoritative_refresh"
+                logger.info(
+                    "Forcing authoritative refresh for %s intervals=%s range=[%s,%s]",
+                    symbol,
+                    intervals or "default",
+                    range_start_ms,
+                    range_end_ms,
+                )
+            else:
+                gaps = await self.detector.detect(
+                    symbol=symbol,
+                    intervals=intervals,
+                    range_start_ms=range_start_ms,
+                    range_end_ms=range_end_ms,
+                    exchange=exchange,
+                    market_type=market_type,
+                )
 
             if not gaps:
                 logger.info("No gaps detected for %s — nothing to do", symbol)
@@ -401,6 +423,51 @@ class BackfillEngine:
             symbol, status.value, report.elapsed_ms,
         )
         return report
+
+    def _trusted_finality_refresh_gaps(
+        self,
+        *,
+        symbol: str,
+        intervals: list[str] | None,
+        range_start_ms: int | None,
+        range_end_ms: int | None,
+        exchange: str,
+        market_type: str,
+    ) -> list[GapInfo]:
+        """Build forced fetch ranges for physically present, untrusted rows."""
+
+        if range_start_ms is None or range_end_ms is None:
+            raise ValueError("trusted-finality refresh requires an explicit range")
+        if range_start_ms > range_end_ms:
+            raise ValueError("trusted-finality refresh range is inverted")
+
+        refresh_intervals = intervals or list(self._cfg.gap_scan_intervals)
+        gaps: list[GapInfo] = []
+        for interval in refresh_intervals:
+            spec = parse_interval_spec(interval)
+            if spec is None:
+                raise ValueError(f"invalid trusted-finality refresh interval: {interval!r}")
+
+            cursor = spec.floor_ms(range_start_ms)
+            if cursor < range_start_ms:
+                cursor = spec.next_ms(cursor)
+            missing_bars = 0
+            while cursor <= range_end_ms:
+                missing_bars += 1
+                cursor = spec.next_ms(cursor)
+
+            gaps.append(GapInfo(
+                symbol=symbol,
+                interval=spec.canonical,
+                gap_type=GapType.INTERIOR,
+                start_ms=int(range_start_ms),
+                end_ms=int(range_end_ms),
+                missing_bars=missing_bars,
+                exchange=exchange,
+                market_type=market_type,
+                metadata={"repair_mode": "authoritative_refresh"},
+            ))
+        return gaps
 
     # ── Public: Detect-only (dry run) ────────────────────────
 

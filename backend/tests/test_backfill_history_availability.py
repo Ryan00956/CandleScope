@@ -20,6 +20,7 @@ from app.data_engine.history import (
     SessionCalendar,
     TimeBound,
 )
+from app.data_engine.storage.gap_ledger import GapLedger
 from app.exchanges import (
     HistoryAvailabilityPolicy,
     HistoryEmptyPageSemantics,
@@ -151,9 +152,11 @@ def test_coordinator_clamps_request_before_engine_execution() -> None:
 
         await coordinator.request_and_wait(_request(0, 120_000, request_id="clamp"))
 
-        assert len(engine.calls) == 1
-        assert engine.calls[0]["range_start_ms"] == 60_000
-        assert engine.calls[0]["range_end_ms"] == 120_000
+        assert len(engine.calls) == 3
+        assert {
+            (call["range_start_ms"], call["range_end_ms"])
+            for call in engine.calls
+        } == {(60_000, 120_000)}
 
     asyncio.run(_run())
 
@@ -199,7 +202,9 @@ def test_coordinator_does_not_request_a_closed_session() -> None:
     asyncio.run(_run())
 
 
-def test_authoritative_empty_range_needs_repeated_left_edge_evidence(tmp_path) -> None:
+def test_authoritative_empty_range_confirms_after_repeated_attempt_evidence(
+    tmp_path,
+) -> None:
     async def _run() -> None:
         calendar = AlwaysOpenCalendar()
         repository = HistoryBoundaryRepository(tmp_path / "history.sqlite3")
@@ -227,7 +232,7 @@ def test_authoritative_empty_range_needs_repeated_left_edge_evidence(tmp_path) -
         first = await coordinator.request_and_wait(
             _request(0, 60_000, request_id="evidence-1")
         )
-        candidate = service.get_boundary(
+        confirmed = service.get_boundary(
             HistorySeriesKey("binance", "spot", "BTCUSDT", "kline", "1m"),
             "left",
             include_stale=True,
@@ -235,22 +240,15 @@ def test_authoritative_empty_range_needs_repeated_left_edge_evidence(tmp_path) -
         second = await coordinator.request_and_wait(
             _request(0, 60_000, request_id="evidence-2")
         )
-        confirmed = service.get_boundary(
-            HistorySeriesKey("binance", "spot", "BTCUSDT", "kline", "1m"),
-            "left",
-            include_stale=True,
-        )
         third = await coordinator.request_and_wait(
             _request(0, 60_000, request_id="already-exhausted")
         )
 
-        assert first.terminal_reason is None
-        assert candidate is not None
-        assert candidate.bound.state is BoundaryState.CANDIDATE
-        assert second.terminal_reason == "provider_exhausted"
+        assert first.terminal_reason == "provider_exhausted"
         assert confirmed is not None
         assert confirmed.bound.state is BoundaryState.CONFIRMED
         assert confirmed.bound.value_ms == 120_000
+        assert second.terminal_reason == BoundaryReason.SOURCE_EXHAUSTED.value
         assert third.terminal_reason == BoundaryReason.SOURCE_EXHAUSTED.value
         assert len(engine.calls) == 2
 
@@ -271,19 +269,21 @@ def test_terminal_empty_semantics_confirms_on_first_evidence(tmp_path) -> None:
             calendar=calendar,
             semantics=HistoryEmptyPageSemantics.TERMINAL_EXHAUSTION,
         )
+        ledger = GapLedger(tmp_path / "gaps.sqlite3")
+        engine = _Engine(_report(source_complete=True))
         coordinator = BackfillCoordinator(
             storage=_Storage(earliest_ms=120_000),
             bars_backfilled=_ignore,
             emit_event=_ignore,
-            engine=_Engine(_report(source_complete=True)),
+            engine=engine,
             loop=asyncio.get_running_loop(),
+            gap_ledger=ledger,
             history_service=service,
             history_policy_resolver=lambda request: context,
         )
 
-        outcome = await coordinator.request_and_wait(
-            _request(0, 60_000, request_id="terminal")
-        )
+        request = _request(0, 60_000, request_id="terminal")
+        outcome = await coordinator.request_and_wait(request)
         boundary = service.get_boundary(
             HistorySeriesKey("binance", "spot", "BTCUSDT", "kline", "1m"),
             "left",
@@ -291,6 +291,11 @@ def test_terminal_empty_semantics_confirms_on_first_evidence(tmp_path) -> None:
         )
 
         assert outcome.terminal_reason == "provider_exhausted"
+        assert outcome.verified_contiguous is False
+        assert outcome.retryable is False
+        assert len(engine.calls) == 1
+        assert ledger.get_status(request)["status"] == "source_empty"
+        assert ledger.get_status(request)["next_retry_at"] is not None
         assert boundary is not None
         assert boundary.bound.state is BoundaryState.CONFIRMED
 

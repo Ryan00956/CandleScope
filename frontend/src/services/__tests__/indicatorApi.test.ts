@@ -49,11 +49,18 @@ test("range preserves a typed HTTP 202 payload and forwards AbortSignal", async 
     name: "VOL",
     start: 100,
     end: 200,
+    requestScope: "chart:test:pane-1",
+    requestGeneration: 7,
     signal: controller.signal,
   });
   assert.equal(payload.code, "INDICATOR_RANGE_NOT_READY");
   assert.equal(payload.__httpStatus, 202);
   assert.equal(capturedOptions?.signal, controller.signal);
+  const rangeBody = capturedOptions?.body;
+  if (typeof rangeBody !== "string") throw new Error("Expected serialized request body");
+  const parsedRangeBody = JSON.parse(rangeBody) as Record<string, unknown>;
+  assert.equal(parsedRangeBody.requestScope, "chart:test:pane-1");
+  assert.equal(parsedRangeBody.requestGeneration, 7);
 });
 
 test("batch serializes requests while keeping signal in fetch options", async (context) => {
@@ -81,6 +88,8 @@ test("batch serializes requests while keeping signal in fetch options", async (c
       interval: "1m",
       start: 100,
       end: 200,
+      requestScope: "chart:test:pane-1",
+      requestGeneration: 7,
     }],
     signal: controller.signal,
   });
@@ -96,6 +105,8 @@ test("batch serializes requests while keeping signal in fetch options", async (c
       interval: "1m",
       start: 100,
       end: 200,
+      requestScope: "chart:test:pane-1",
+      requestGeneration: 7,
     }],
   });
 });

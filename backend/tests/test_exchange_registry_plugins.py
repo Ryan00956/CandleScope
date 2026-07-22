@@ -3,7 +3,10 @@ from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import StreamDescriptor, StreamType
 from app.data_engine.ingestion.normalizers.binance import BinanceNormalizer
 from app.data_engine.ingestion.normalizers.okx import OkxNormalizer
-from app.exchanges.pagination import OkxHistoricalPaginationPolicy, ReverseTimePaginationPolicy
+from app.exchanges.pagination import (
+    BinanceHistoricalPaginationPolicy,
+    OkxHistoricalPaginationPolicy,
+)
 from app.exchanges.protocol import AdapterBackedProtocol
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 from app.exchanges.plugins.binance.protocol import BinanceExchangeProtocol
@@ -112,7 +115,10 @@ def test_builtin_plugins_use_concrete_protocols_and_pagination_policies() -> Non
 
     assert isinstance(binance.protocol(), BinanceExchangeProtocol)
     assert isinstance(okx.protocol(), OkxExchangeProtocol)
-    assert isinstance(binance.pagination_policy(BackfillConfig()), ReverseTimePaginationPolicy)
+    assert isinstance(
+        binance.pagination_policy(BackfillConfig()),
+        BinanceHistoricalPaginationPolicy,
+    )
     assert isinstance(okx.pagination_policy(BackfillConfig()), OkxHistoricalPaginationPolicy)
 
     binance_capabilities = binance.capabilities().to_dict()

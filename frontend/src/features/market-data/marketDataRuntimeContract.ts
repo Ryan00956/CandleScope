@@ -54,6 +54,7 @@ export interface MarketDataRuntimeContract {
   actions: {
     retry(): void;
     loadMoreLeft(oldestLoadedTime?: number | null): Promise<void>;
+    restoreLatestWindow?(): Promise<boolean>;
     onCrosshairMove(data: CrosshairData | null | undefined): void;
     onVisibleRangeChange(range: unknown): void;
     consumeIndicatorRangeRequest(requestId: number): void;
@@ -63,9 +64,11 @@ export interface MarketDataRuntimeContract {
     loadingMoreLeft: boolean;
     activeChartReady: boolean;
     canLoadMoreLeft: boolean;
+    canRestoreLatestWindow: boolean;
     barCount: number;
     cacheDiagnostics(): Record<string, unknown>;
     trimCacheEntries(victims?: CacheDiagnosticsEntry[]): Record<string, unknown>;
     indicatorRangeRequests: IndicatorRangeEvent[];
+    requestDemand: Readonly<{ scope: string; generation: number }> | null;
   };
 }

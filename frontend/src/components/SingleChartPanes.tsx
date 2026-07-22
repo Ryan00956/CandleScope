@@ -122,17 +122,21 @@ import {
   buildVisibleRangeSnapshot,
   disposeChartPaneSurface,
   hasCurrentDatasetOwnership,
+  isConfirmedMainPaneHorizontalPan,
   isMainPanePlotPointerStart,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
   removedDrawingSubPaneScopeKeys,
   prepareDrawingSurfaceForSeriesReplacement,
+  resolveLeftHistoryDemand,
   resolveDrawingSurfaceChartTypeBoundary,
+  sameIndicatorSeriesData,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
   shouldInvalidateDrawingFrameOnPointerRelease,
   shouldPublishUserViewportRange,
-  shouldRequestMoreLeft,
+  shouldIssueHistoryTicketForWheel,
+  shouldRequestRightWindowRestore,
   shouldRestoreChartViewport,
 } from "./singleChartPaneLifecycle";
 import {
@@ -183,7 +187,7 @@ import type {
   IndicatorSeriesHandle,
   MainSeriesCrosshairValue,
   MainSeriesHandle,
-  NormalizedIndicatorDataEntry,
+  NormalizedIndicatorSeriesEntry,
 } from "../chart-adapter/chartAdapterTypes.js";
 import type { ChartSurfaceHandle, ChartSurfaceVisibleRange } from "../chart-adapter/useChartSurfaceRuntime.js";
 import type { ViewportController } from "../chart-adapter/viewportController.js";
@@ -232,7 +236,9 @@ export interface SingleChartPanesProps {
   loading?: boolean;
   onCrosshairMove?: ((value: MainSeriesCrosshairValue | null) => void) | null;
   onNeedMoreLeft?: LoadMoreLeft | null;
+  onNeedMoreRight?: (() => Promise<boolean>) | null;
   canLoadMoreLeft?: boolean;
+  canRestoreLatestWindow?: boolean;
   datasetKey: string;
   upColor: string;
   downColor: string;
@@ -334,7 +340,7 @@ interface IndicatorSeriesEntry {
   paneIndex: number;
   series: IndicatorSeriesHandle;
   lineConfig: AdapterIndicatorLine;
-  data: NormalizedIndicatorDataEntry[];
+  data: NormalizedIndicatorSeriesEntry[];
 }
 
 interface PaneRenderState {
@@ -403,6 +409,7 @@ interface AuxiliaryDisplayState {
 }
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
+const HISTORY_WHEEL_GESTURE_IDLE_MS = 160;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
 // v1 layouts may contain 30px panes produced by sequential setHeight replay.
 // Keep the corrected ratio-based layout isolated from those polluted values.
@@ -1083,6 +1090,7 @@ function clearAuxiliaryChartState({
 
 function buildPaneDescriptors({
   dataTimeSet,
+  intervalSeconds,
   mainOverlayLines,
   paneOrder,
   subPanes,
@@ -1092,6 +1100,7 @@ function buildPaneDescriptors({
   indicatorBgcolors,
 }: {
   dataTimeSet: ReadonlySet<number>;
+  intervalSeconds: number | null;
   mainOverlayLines: IndicatorLine[];
   paneOrder: readonly string[];
   subPanes: IndicatorSubPane[];
@@ -1101,7 +1110,12 @@ function buildPaneDescriptors({
   indicatorBgcolors: IndicatorBgColor[];
 }): PaneDescriptor[] {
   const allowedTimeKeys = buildAllowedTimeKeys(dataTimeSet);
-  const mainLines = alignIndicatorLinesToTimes(mainOverlayLines, dataTimeSet, allowedTimeKeys);
+  const mainLines = alignIndicatorLinesToTimes(
+    mainOverlayLines,
+    dataTimeSet,
+    allowedTimeKeys,
+    intervalSeconds,
+  );
   const descriptors: PaneDescriptor[] = [{
     id: "main",
     paneIndex: 0,
@@ -1114,7 +1128,12 @@ function buildPaneDescriptors({
   }];
 
   for (const [index, subPane] of subPanes.entries()) {
-    const lines = alignIndicatorLinesToTimes(subPane.lines, dataTimeSet, allowedTimeKeys);
+    const lines = alignIndicatorLinesToTimes(
+      subPane.lines,
+      dataTimeSet,
+      allowedTimeKeys,
+      intervalSeconds,
+    );
     descriptors.push({
       id: subPane.id,
       paneIndex: index + 1,
@@ -1142,7 +1161,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   loading = false,
   onCrosshairMove,
   onNeedMoreLeft,
+  onNeedMoreRight = null,
   canLoadMoreLeft = true,
+  canRestoreLatestWindow = true,
   datasetKey,
   upColor,
   downColor,
@@ -1295,7 +1316,21 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     panes: Map<string, boolean>;
   }>({ base: null, panes: new Map() });
   const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
+  const onNeedMoreRightRef = useRef(onNeedMoreRight);
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
+  const canRestoreLatestWindowRef = useRef(canRestoreLatestWindow);
+  const loadingRef = useRef(loading);
+  const leftHistoryDemandDatasetRef = useRef<string | null>(null);
+  const leftHistoryInteractionGenerationRef = useRef(0);
+  const leftHistoryConsumedGenerationRef = useRef(0);
+  const leftHistoryFlushFrameRef = useRef<number | null>(null);
+  const historyWheelGestureActiveRef = useRef(false);
+  const historyWheelGestureTimerRef = useRef<TimerHandle | null>(null);
+  const rightWindowRestoreRef = useRef<{
+    datasetKey: string;
+    promise: Promise<boolean>;
+  } | null>(null);
+  const rightWindowRestoreScrollFrameRef = useRef<number | null>(null);
   const datasetKeyRef = useRef(datasetKey);
   const surfaceConfigKeyRef = useRef<string | null>(null);
   const drawingProjectionConfigRef = useRef<string | null>(null);
@@ -1786,6 +1821,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }, [activePaneIds, subPanes]);
   const sourcePaneDescriptors = useMemo(() => buildPaneDescriptors({
     dataTimeSet,
+    intervalSeconds: parseIntervalSeconds(interval),
     mainOverlayLines,
     paneOrder: activePaneIds,
     subPanes: activeSubPanes,
@@ -1795,6 +1831,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     indicatorBgcolors,
   }), [
     dataTimeSet,
+    interval,
     mainOverlayLines,
     activePaneIds,
     activeSubPanes,
@@ -1976,9 +2013,149 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   useEffect(() => { intervalRef.current = interval; }, [interval]);
   useEffect(() => { onNeedMoreLeftRef.current = onNeedMoreLeft; }, [onNeedMoreLeft]);
-  useEffect(() => { canLoadMoreLeftRef.current = canLoadMoreLeft; }, [canLoadMoreLeft]);
+  useEffect(() => { onNeedMoreRightRef.current = onNeedMoreRight; }, [onNeedMoreRight]);
+  useEffect(() => { loadingRef.current = loading; }, [loading]);
   useEffect(() => { onViewportRangeChangeRef.current = onViewportRangeChange; }, [onViewportRangeChange]);
   useEffect(() => { onVisibleRangeChangeRef.current = onVisibleRangeChange; }, [onVisibleRangeChange]);
+
+  const issueHistoryInteractionTicket = useCallback(() => {
+    userInteractedRef.current = true;
+    leftHistoryInteractionGenerationRef.current += 1;
+  }, []);
+
+  const evaluateLeftHistoryDemand = useCallback((range: VisibleLogicalRange) => {
+    const currentData = sourceRowsRef.current;
+    const interactionGeneration = leftHistoryInteractionGenerationRef.current;
+    if (rightWindowRestoreRef.current != null) {
+      // A fresh latest-window replacement owns the series until it settles.
+      // Discard, rather than queue, a competing left gesture during restore.
+      leftHistoryConsumedGenerationRef.current = interactionGeneration;
+      leftHistoryDemandDatasetRef.current = null;
+      return { demanded: false, shouldRequest: false };
+    }
+    const decision = resolveLeftHistoryDemand({
+      canLoad: canLoadMoreLeftRef.current,
+      consumedInteractionGeneration: leftHistoryConsumedGenerationRef.current,
+      hasData: currentData.length > 0,
+      hasHandler: Boolean(onNeedMoreLeftRef.current),
+      interactionGeneration,
+      ...(range?.from === undefined ? {} : { rangeFrom: range.from }),
+      triggerBars: LEFT_EDGE_TRIGGER_BARS,
+      userInteracted: userInteractedRef.current,
+    });
+    if (!decision.demanded) {
+      leftHistoryDemandDatasetRef.current = null;
+      return decision;
+    }
+    leftHistoryDemandDatasetRef.current = datasetKeyRef.current;
+    if (!decision.shouldRequest) return decision;
+    // A visible-range commit or canLoad false -> true transition may re-run
+    // this evaluator many times while the viewport remains at the left edge.
+    // Consume the user gesture before starting work so those re-entries cannot
+    // turn one drag into an unbounded sequence of continuation pages.
+    leftHistoryConsumedGenerationRef.current = interactionGeneration;
+    leftHistoryDemandDatasetRef.current = null;
+    const loadMoreLeft = onNeedMoreLeftRef.current;
+    const firstRow = currentData[0];
+    if (loadMoreLeft && firstRow) void loadMoreLeft(firstRow.time);
+    return decision;
+  }, []);
+
+  const flushLeftHistoryDemand = useCallback(() => {
+    if (leftHistoryDemandDatasetRef.current !== datasetKeyRef.current) return;
+    const chart = chartRef.current;
+    if (!chart) return;
+    evaluateLeftHistoryDemand(chart.timeScale().getVisibleLogicalRange());
+  }, [evaluateLeftHistoryDemand]);
+
+  const scheduleLeftHistoryDemandFlush = useCallback(() => {
+    if (leftHistoryFlushFrameRef.current != null) return;
+    leftHistoryFlushFrameRef.current = requestAnimationFrame(() => {
+      leftHistoryFlushFrameRef.current = null;
+      flushLeftHistoryDemand();
+    });
+  }, [flushLeftHistoryDemand]);
+
+  const requestRightWindowRestore = useCallback((range: VisibleLogicalRange): boolean => {
+    const store = seriesStoreRef.current;
+    const restore = onNeedMoreRightRef.current;
+    const currentData = sourceRowsRef.current;
+    const interactionGeneration = leftHistoryInteractionGenerationRef.current;
+    if (!shouldRequestRightWindowRestore({
+      barCount: currentData.length,
+      canLoad: canRestoreLatestWindowRef.current
+        && !loadingRef.current
+        && rightWindowRestoreRef.current == null,
+      consumedInteractionGeneration: leftHistoryConsumedGenerationRef.current,
+      hasHandler: Boolean(restore),
+      interactionGeneration,
+      ...(range?.to === undefined ? {} : { rangeTo: range.to }),
+      rightTruncated: Boolean(store?.rightTruncated),
+      triggerBars: LEFT_EDGE_TRIGGER_BARS,
+      userInteracted: userInteractedRef.current,
+    }) || !restore) return false;
+
+    const requestedDatasetKey = datasetKeyRef.current;
+    const owner = {
+      datasetKey: requestedDatasetKey,
+      promise: Promise.resolve(false),
+    };
+    // Mutually exclude any queued left-edge continuation before handing
+    // ownership to the runtime, which aborts/invalidate-epochs active work.
+    leftHistoryConsumedGenerationRef.current = interactionGeneration;
+    leftHistoryDemandDatasetRef.current = null;
+    if (leftHistoryFlushFrameRef.current != null) {
+      cancelAnimationFrame(leftHistoryFlushFrameRef.current);
+      leftHistoryFlushFrameRef.current = null;
+    }
+    rightWindowRestoreRef.current = owner;
+    const promise = Promise.resolve()
+      .then(() => restore())
+      .then((restored) => {
+        if (!restored || datasetKeyRef.current !== requestedDatasetKey) return false;
+        if (rightWindowRestoreScrollFrameRef.current != null) {
+          cancelAnimationFrame(rightWindowRestoreScrollFrameRef.current);
+        }
+        rightWindowRestoreScrollFrameRef.current = requestAnimationFrame(() => {
+          rightWindowRestoreScrollFrameRef.current = null;
+          if (datasetKeyRef.current !== requestedDatasetKey) return;
+          chartRef.current?.timeScale().scrollToRealTime?.();
+        });
+        return true;
+      })
+      .catch((error) => {
+        console.warn("SingleChartPanes: failed to restore the latest K-line window", error);
+        return false;
+      })
+      .finally(() => {
+        if (rightWindowRestoreRef.current === owner) rightWindowRestoreRef.current = null;
+      });
+    owner.promise = promise;
+    return true;
+  }, []);
+
+  const evaluateHistoryEdgeGesture = useCallback((
+    range: VisibleLogicalRange,
+    { retireIfIdle = true }: { retireIfIdle?: boolean } = {},
+  ) => {
+    const interactionGeneration = leftHistoryInteractionGenerationRef.current;
+    if (interactionGeneration <= leftHistoryConsumedGenerationRef.current) return;
+    const leftDecision = evaluateLeftHistoryDemand(range);
+    if (leftDecision.demanded) return;
+    if (requestRightWindowRestore(range)) return;
+    if (retireIfIdle) {
+      leftHistoryConsumedGenerationRef.current = interactionGeneration;
+      leftHistoryDemandDatasetRef.current = null;
+    }
+  }, [evaluateLeftHistoryDemand, requestRightWindowRestore]);
+
+  useEffect(() => {
+    canLoadMoreLeftRef.current = canLoadMoreLeft;
+    if (canLoadMoreLeft) scheduleLeftHistoryDemandFlush();
+  }, [canLoadMoreLeft, scheduleLeftHistoryDemandFlush]);
+  useEffect(() => {
+    canRestoreLatestWindowRef.current = canRestoreLatestWindow;
+  }, [canRestoreLatestWindow]);
 
   const captureVisibleRange = useCallback(() => {
     const visibleRange = chartAdapter.getVisibleRange();
@@ -2232,18 +2409,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       const visibleRange = captureVisibleRange();
       publishViewportRangeChange(visibleRange);
       scheduleVisibleRangeSave(visibleRange);
-      const currentData = sourceRowsRef.current;
-      if (shouldRequestMoreLeft({
-        canLoad: canLoadMoreLeftRef.current,
-        hasData: currentData?.length > 0,
-        hasHandler: Boolean(onNeedMoreLeftRef.current),
-        rangeFrom: range.from,
-        triggerBars: LEFT_EDGE_TRIGGER_BARS,
-        userInteracted: userInteractedRef.current,
-      })) {
-        const loadMoreLeft = onNeedMoreLeftRef.current;
-        const firstRow = currentData[0];
-        if (loadMoreLeft && firstRow) void loadMoreLeft(firstRow.time);
+      if (!isChartPointerActiveRef.current && historyWheelGestureActiveRef.current) {
+        evaluateHistoryEdgeGesture(range, { retireIfIdle: false });
       }
     };
 
@@ -2274,6 +2441,15 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         clearTimeout(visibleRangeSaveTimerRef.current);
         visibleRangeSaveTimerRef.current = null;
       }
+      if (leftHistoryFlushFrameRef.current != null) {
+        cancelAnimationFrame(leftHistoryFlushFrameRef.current);
+        leftHistoryFlushFrameRef.current = null;
+      }
+      if (rightWindowRestoreScrollFrameRef.current != null) {
+        cancelAnimationFrame(rightWindowRestoreScrollFrameRef.current);
+        rightWindowRestoreScrollFrameRef.current = null;
+      }
+      rightWindowRestoreRef.current = null;
       // Stop exposing the old chart before touching the underlying LWC
       // instance.  During interval/session transitions its API object can
       // remain reachable briefly even though its internal time points have
@@ -2355,12 +2531,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
       }
     };
-  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, tickMarkFormatter, timeFormatter, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, tickMarkFormatter, timeFormatter, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
     if (!wrapper) return undefined;
-    const markUserInteracted = () => {
+    const markViewportInteracted = () => {
       userInteractedRef.current = true;
       viewportControllerRef.current?.markUserInteracting();
     };
@@ -2400,7 +2576,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       gesture.touchIdentifier = touchIdentifier;
       chartPointerLogicalRangeChangedRef.current = false;
       isChartPointerActiveRef.current = true;
-      markUserInteracted();
+      markViewportInteracted();
     };
     const markMousePointerActive = (event: MouseEvent) => {
       if (event.target instanceof Element && event.target.closest(".pane-control-bar")) return;
@@ -2461,6 +2637,19 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       resetPointerGesture();
       if (!pointerActive) return;
       saveNativePaneHeights();
+      const confirmedHorizontalPan = isConfirmedMainPaneHorizontalPan({
+        drawingToolActive: drawingEngineToolActive,
+        logicalRangeChanged,
+        mainPanePlotStart,
+        maxHorizontalMovementPx,
+        maxVerticalMovementPx,
+        pointerActive,
+      });
+      if (confirmedHorizontalPan) {
+        issueHistoryInteractionTicket();
+        const range = chartRef.current?.timeScale().getVisibleLogicalRange() ?? null;
+        if (range) evaluateHistoryEdgeGesture(range);
+      }
       if (shouldInvalidateDrawingFrameOnPointerRelease({
         drawingToolActive: drawingEngineToolActive,
         logicalRangeChanged,
@@ -2473,7 +2662,38 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }
       if (futureTimeAxisCoveragePendingRef.current) scheduleFutureTimeAxisCoverage();
     };
-    wrapper.addEventListener("wheel", markUserInteracted, { passive: true });
+    const handleWheel = (event: WheelEvent) => {
+      if (event.target instanceof Element && event.target.closest(".pane-control-bar")) return;
+      markViewportInteracted();
+      const containerRect = containerRef.current?.getBoundingClientRect?.() ?? null;
+      const plotRect = chartAdapter.getMainPanePlotRect?.() ?? null;
+      const validWheel = shouldIssueHistoryTicketForWheel({
+        deltaX: event.deltaX,
+        deltaY: event.deltaY,
+        drawingToolActive: drawingEngineToolActive,
+        mainPanePlotStart: isMainPanePlotPointerStart({
+          clientX: event.clientX,
+          clientY: event.clientY,
+          containerRect,
+          plotRect,
+        }),
+      });
+      if (!validWheel) return;
+      if (!historyWheelGestureActiveRef.current) {
+        historyWheelGestureActiveRef.current = true;
+        issueHistoryInteractionTicket();
+      }
+      if (historyWheelGestureTimerRef.current != null) {
+        clearTimeout(historyWheelGestureTimerRef.current);
+      }
+      historyWheelGestureTimerRef.current = setTimeout(() => {
+        historyWheelGestureTimerRef.current = null;
+        historyWheelGestureActiveRef.current = false;
+        const range = chartRef.current?.timeScale().getVisibleLogicalRange() ?? null;
+        if (range) evaluateHistoryEdgeGesture(range);
+      }, HISTORY_WHEEL_GESTURE_IDLE_MS);
+    };
+    wrapper.addEventListener("wheel", handleWheel, { capture: true, passive: true });
     wrapper.addEventListener("mousedown", markMousePointerActive);
     wrapper.addEventListener("touchstart", markTouchPointerActive, { passive: true });
     window.addEventListener("mousemove", trackMouseMovement);
@@ -2483,7 +2703,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     window.addEventListener("touchcancel", releasePointer, { passive: true });
     window.addEventListener("blur", releasePointer);
     return () => {
-      wrapper.removeEventListener("wheel", markUserInteracted);
+      wrapper.removeEventListener("wheel", handleWheel, true);
       wrapper.removeEventListener("mousedown", markMousePointerActive);
       wrapper.removeEventListener("touchstart", markTouchPointerActive);
       window.removeEventListener("mousemove", trackMouseMovement);
@@ -2494,12 +2714,19 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       window.removeEventListener("blur", releasePointer);
       isChartPointerActiveRef.current = false;
       chartPointerLogicalRangeChangedRef.current = false;
+      historyWheelGestureActiveRef.current = false;
+      if (historyWheelGestureTimerRef.current != null) {
+        clearTimeout(historyWheelGestureTimerRef.current);
+        historyWheelGestureTimerRef.current = null;
+      }
       resetPointerGesture();
     };
   }, [
     activeSubPanes.length,
     chartAdapter,
     drawingEngineToolActive,
+    evaluateHistoryEdgeGesture,
+    issueHistoryInteractionTicket,
     notifyDrawingFrameInvalidation,
     saveCurrentPaneHeights,
     scheduleFutureTimeAxisCoverage,
@@ -2971,6 +3198,23 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       materializeRuntimePaneLayout(chart, containerRef.current);
     }
     userInteractedRef.current = false;
+    leftHistoryDemandDatasetRef.current = null;
+    leftHistoryInteractionGenerationRef.current = 0;
+    leftHistoryConsumedGenerationRef.current = 0;
+    historyWheelGestureActiveRef.current = false;
+    if (historyWheelGestureTimerRef.current != null) {
+      clearTimeout(historyWheelGestureTimerRef.current);
+      historyWheelGestureTimerRef.current = null;
+    }
+    rightWindowRestoreRef.current = null;
+    if (leftHistoryFlushFrameRef.current != null) {
+      cancelAnimationFrame(leftHistoryFlushFrameRef.current);
+      leftHistoryFlushFrameRef.current = null;
+    }
+    if (rightWindowRestoreScrollFrameRef.current != null) {
+      cancelAnimationFrame(rightWindowRestoreScrollFrameRef.current);
+      rightWindowRestoreScrollFrameRef.current = null;
+    }
     hasRestoredRangeRef.current = false;
     lastViewportRestoreSourceRef.current = null;
     renderedMainSeriesDataRef.current = [];
@@ -3231,6 +3475,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           rowMapRef: sourceRowMapRef,
           rowIndexMapRef: sourceRowIndexMapRef,
         });
+        scheduleLeftHistoryDemandFlush();
         syncDisplayDataRefsFromProjection({
           store: projectionStore,
           rowsRef: displayRowsRef,
@@ -3265,7 +3510,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }
     });
     return () => { unsubscribe(); };
-  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, mainSeriesRenderContext, materializeRuntimePaneLayout, projectionSettings, publishDrawingProjectionStore, seriesReady, seriesStore, updateMainSeriesReference]);
+  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, mainSeriesRenderContext, materializeRuntimePaneLayout, projectionSettings, publishDrawingProjectionStore, scheduleLeftHistoryDemandFlush, seriesReady, seriesStore, updateMainSeriesReference]);
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);
@@ -3377,7 +3622,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         // Pane descriptors already own clipped, normalized data. Re-filtering
         // every line here doubled the O(lines * bars) work on each realtime
         // indicator/market-data publication.
-        const validData = line.data as NormalizedIndicatorDataEntry[];
+        const validData = line.data as NormalizedIndicatorSeriesEntry[];
         const detail = {
           datasetKey,
           indicatorId: line.indicatorId,
@@ -3391,16 +3636,18 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           existing.series.applyOptions?.(buildIndicatorSeriesOptions(line, {
             crosshairMarkerVisible: showCrosshairDetails && !drawingEngineToolActive,
           }));
-          applyLineSeriesData(existing.series, validData, existing.data, {
-            ...detail,
-            path: "single-fast",
-          }, recordPerfEvent, {
-            preferSetData: shouldPreferIndicatorSetData({
-              createdAtMs: existing.createdAtMs,
-              usesDerivedAxis,
-            }),
-            trustedTrailingUpdate: line.renderUpdate === "tail" && !usesDerivedAxis,
-          });
+          if (!sameIndicatorSeriesData(existing.data, validData)) {
+            applyLineSeriesData(existing.series, validData, existing.data, {
+              ...detail,
+              path: "single-fast",
+            }, recordPerfEvent, {
+              preferSetData: shouldPreferIndicatorSetData({
+                createdAtMs: existing.createdAtMs,
+                usesDerivedAxis,
+              }),
+              trustedTrailingUpdate: line.renderUpdate === "tail" && !usesDerivedAxis,
+            });
+          }
           existing.key = key;
           existing.paneId = pane.id;
           existing.paneIndex = pane.paneIndex;

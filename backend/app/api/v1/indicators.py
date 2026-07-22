@@ -31,6 +31,10 @@ from app.api.v1.indicator_range_batch import (
     IndicatorRangeBatchJob,
     compute_indicator_range_batch_async,
 )
+from app.api.v1.klines import (
+    _reject_stale_request_generation,
+    _revoke_request_demand_owner,
+)
 from app.api.v1.stream_utils import (
     normalize_exchange as _normalize_exchange,
     normalize_market_type as _normalize_market_type,
@@ -51,7 +55,10 @@ from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.engine import indicator_code_hash
 from app.indicator.types import IndicatorKey
 from app.indicator.pyne.security import PyneSecurityPolicy
-from app.indicator.range_result_service import IndicatorRangeResultService
+from app.indicator.range_result_service import (
+    IndicatorRangeResultService,
+    IndicatorRangeRevisionChangedError,
+)
 from app.indicator.serialization import (
     build_error_payload,
     serialize_indicator_result,
@@ -120,6 +127,16 @@ class IndicatorRangeRequest(BaseModel):
     start: int = Field(..., description="Inclusive range start, unix seconds")
     end: int = Field(..., description="Inclusive range end, unix seconds")
     reason: str = Field("range", description="Client reason for the range compute")
+    requestScope: str | None = Field(
+        None,
+        max_length=256,
+        description="Stable chart demand scope shared with K-line requests",
+    )
+    requestGeneration: int | None = Field(
+        None,
+        ge=0,
+        description="Monotonic generation within requestScope",
+    )
 
 
 class IndicatorRangeBatchRequest(BaseModel):
@@ -489,6 +506,95 @@ def _resolve_backfill_coordinator(request: Request) -> Any | None:
     return getattr(request.app.state, "backfill_coordinator", None)
 
 
+def _resolve_indicator_request_demand(
+    req: IndicatorRangeRequest,
+) -> tuple[str | None, int | None]:
+    scope = str(req.requestScope or "").strip() or None
+    generation = req.requestGeneration
+    if (scope is None) != (generation is None):
+        raise ValueError("requestScope and requestGeneration must be provided together")
+    return scope, int(generation) if generation is not None else None
+
+
+def _new_indicator_demand_owner_id(
+    request: Request,
+    *,
+    scope: str | None,
+    generation: int | None,
+) -> str:
+    scope_token = scope or "legacy"
+    generation_token = str(generation) if generation is not None else "none"
+    return (
+        f"indicator:{scope_token}:{generation_token}:"
+        f"{id(request)}:{time.monotonic_ns()}"
+    )
+
+
+async def _wait_for_request_disconnect(
+    request: Request,
+    stop: asyncio.Event,
+) -> bool:
+    """Wait until the ASGI receive channel reports a disconnected client."""
+    while not stop.is_set():
+        try:
+            disconnected = await request.is_disconnected()
+        except Exception:
+            # Monitoring is best-effort.  A receive-channel implementation
+            # error must not be mistaken for a real client disconnect and
+            # cancel otherwise valid indicator work.
+            return False
+        if disconnected:
+            return True
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.05)
+        except asyncio.TimeoutError:
+            pass
+    return False
+
+
+async def _run_until_request_disconnect(
+    request: Request,
+    work: Any,
+    *,
+    task_name: str,
+) -> Any:
+    """Cancel request-owned work promptly when the browser aborts its fetch.
+
+    Uvicorn does not guarantee that a response handler is cancelled as soon as
+    an HTTP disconnect arrives.  Explicitly watching the receive channel keeps
+    old interval/range requests from continuing storage, backfill and indicator
+    work after a rapid chart switch.
+    """
+    work_task = asyncio.create_task(work, name=task_name)
+    monitor_stop = asyncio.Event()
+    disconnect_task = asyncio.create_task(
+        _wait_for_request_disconnect(request, monitor_stop),
+        name=f"{task_name}:disconnect",
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {work_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if work_task in done:
+            return await work_task
+        if disconnect_task.result() is False:
+            # The disconnect probe failed open; finish the normal request
+            # without further monitoring.
+            return await work_task
+        work_task.cancel()
+        await asyncio.gather(work_task, return_exceptions=True)
+        raise asyncio.CancelledError("indicator HTTP request disconnected")
+    except asyncio.CancelledError:
+        if not work_task.done():
+            work_task.cancel()
+        await asyncio.gather(work_task, return_exceptions=True)
+        raise
+    finally:
+        monitor_stop.set()
+        await asyncio.gather(disconnect_task, return_exceptions=True)
+
+
 def _resolve_range_market_type(req: IndicatorRangeRequest) -> str:
     return _normalize_market_type(str(req.market_type or req.marketType or "spot"))
 
@@ -614,9 +720,15 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
 
     try:
         meta = _build_range_meta(req)
+        demand_scope, demand_generation = _resolve_indicator_request_demand(req)
         dm = _require_data_manager(request)
         range_service = _resolve_indicator_range_service(request)
         backfill_coordinator = _resolve_backfill_coordinator(request)
+        demand_owner_id = _new_indicator_demand_owner_id(
+            request,
+            scope=demand_scope,
+            generation=demand_generation,
+        )
         record_access = getattr(dm, "record_cache_access", None)
         if callable(record_access):
             await run_storage(
@@ -642,6 +754,12 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
             hint="请检查指标类型、周期、脚本和参数。",
         )
 
+    await _reject_stale_request_generation(
+        request,
+        demand_scope=demand_scope,
+        demand_generation=demand_generation,
+    )
+
     try:
         async def _compute_uncached() -> dict[str, Any]:
             return await compute_indicator_range_payload_async(
@@ -654,12 +772,25 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
                 backfill_coordinator=backfill_coordinator,
             )
 
-        snapshot, cache_hit, data_revision = await range_service.get_or_compute(
-            meta=meta,
-            start=start_s,
-            end=end_s,
-            compute=_compute_uncached,
-        )
+        try:
+            snapshot, cache_hit, data_revision = await _run_until_request_disconnect(
+                request,
+                range_service.get_or_compute(
+                    meta=meta,
+                    start=start_s,
+                    end=end_s,
+                    compute=_compute_uncached,
+                    request_owner_id=demand_owner_id,
+                ),
+                task_name=f"indicator-range-http:{client_id}:{start_s}-{end_s}",
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(_revoke_request_demand_owner(
+                request,
+                demand_owner_id,
+                reason="indicator_http_disconnected",
+            ))
+            raise
         snapshot_range = snapshot.get("range") if isinstance(snapshot, dict) else None
         available_start = (
             int(snapshot_range.get("start", start_s))
@@ -723,19 +854,24 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
             "range": {"start": start_s, "end": end_s},
             "backfillRequestIds": exc.request_ids,
             "waitedMs": exc.waited_ms,
+            "retryMode": "event",
         }
+        payload["dataRevision"] = range_service.data_revision_for_meta(meta)
         return JSONResponse(status_code=202, content=payload)
-    except RuntimeError as exc:
+    except IndicatorRangeRevisionChangedError as exc:
         payload = build_error_payload(
             "INDICATOR_RANGE_NOT_READY",
             str(exc),
-            hint="K 线历史仍在补齐，稍后重试该指标区间。",
+            hint="K 线历史修订版本刚刚变化；等待修订事件后按最新版本重试。",
         )
         payload["detail"] = {
             "range": {"start": start_s, "end": end_s},
-            "retryAfterMs": 3000,
+            "backfillRequestIds": [],
+            "waitedMs": 0,
+            "retryMode": "event",
         }
-        return payload
+        payload["dataRevision"] = range_service.data_revision_for_meta(meta)
+        return JSONResponse(status_code=202, content=payload)
     except ValueError as exc:
         payload = build_error_payload(
             "INDICATOR_RANGE_LIMIT",
@@ -799,14 +935,22 @@ def _batch_range_error_payload(
             "range": {"start": start_s, "end": end_s},
             "backfillRequestIds": exc.request_ids,
             "waitedMs": exc.waited_ms,
+            "retryMode": "event",
         }
         return payload
-    elif isinstance(exc, RuntimeError):
+    elif isinstance(exc, IndicatorRangeRevisionChangedError):
         payload = build_error_payload(
             "INDICATOR_RANGE_NOT_READY",
             str(exc),
-            hint="K 线历史仍在补齐，等待完成事件后再请求该区间。",
+            hint="K 线历史修订版本刚刚变化；等待修订事件后按最新版本重试。",
         )
+        payload["detail"] = {
+            "range": {"start": start_s, "end": end_s},
+            "backfillRequestIds": [],
+            "waitedMs": 0,
+            "retryMode": "event",
+        }
+        return payload
     elif isinstance(exc, ValueError):
         payload = build_error_payload(
             "INDICATOR_RANGE_LIMIT",
@@ -819,7 +963,8 @@ def _batch_range_error_payload(
             str(exc),
             hint="指标历史区间计算失败，请检查指标参数或脚本。",
         )
-    payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+    if not isinstance(payload.get("detail"), dict):
+        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
     return payload
 
 
@@ -838,6 +983,7 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
         dm = _require_data_manager(request)
         range_service = _resolve_indicator_range_service(request)
         backfill_coordinator = _resolve_backfill_coordinator(request)
+        demand_keys: set[tuple[str | None, int | None]] = set()
         for item in req.requests:
             client_id = str(item.clientId or "").strip()
             start_s = int(item.start or 0)
@@ -846,6 +992,7 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
                 raise ValueError("clientId is required for every batch item")
             if start_s <= 0 or end_s <= 0 or start_s > end_s:
                 raise ValueError("every batch item requires positive start <= end")
+            demand_keys.add(_resolve_indicator_request_demand(item))
             jobs.append(IndicatorRangeBatchJob(
                 client_id=client_id,
                 meta=_build_range_meta(item),
@@ -859,6 +1006,15 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
         }
         if len(series_keys) != 1:
             raise ValueError("all batch items must use the same exchange/market/symbol/interval")
+        if len(demand_keys) != 1:
+            raise ValueError("all batch items must use the same requestScope/requestGeneration")
+
+        demand_scope, demand_generation = next(iter(demand_keys))
+        demand_owner_id = _new_indicator_demand_owner_id(
+            request,
+            scope=demand_scope,
+            generation=demand_generation,
+        )
 
         first_meta = jobs[0].meta
         record_access = getattr(dm, "record_cache_access", None)
@@ -880,12 +1036,33 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
             hint="请检查批量指标的类型、商品、周期、脚本、参数和范围。",
         )
 
-    computed = await compute_indicator_range_batch_async(
-        dm=dm,
-        jobs=jobs,
-        range_service=range_service,
-        backfill_coordinator=backfill_coordinator,
+    await _reject_stale_request_generation(
+        request,
+        demand_scope=demand_scope,
+        demand_generation=demand_generation,
     )
+    try:
+        computed = await _run_until_request_disconnect(
+            request,
+            compute_indicator_range_batch_async(
+                dm=dm,
+                jobs=jobs,
+                range_service=range_service,
+                backfill_coordinator=backfill_coordinator,
+                request_owner_id=demand_owner_id,
+            ),
+            task_name=(
+                f"indicator-range-batch-http:{jobs[0].meta['symbol']}:"
+                f"{jobs[0].meta['interval']}"
+            ),
+        )
+    except asyncio.CancelledError:
+        await asyncio.shield(_revoke_request_demand_owner(
+            request,
+            demand_owner_id,
+            reason="indicator_batch_http_disconnected",
+        ))
+        raise
     results = []
     for job, value in zip(jobs, computed, strict=True):
         payload = (
@@ -893,6 +1070,8 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
             if isinstance(value, BaseException)
             else value
         )
+        if payload.get("code") == "INDICATOR_RANGE_NOT_READY":
+            payload["dataRevision"] = range_service.data_revision_for_meta(job.meta)
         results.append({"clientId": job.client_id, "payload": payload})
     return {
         "schemaVersion": 1,

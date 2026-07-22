@@ -45,6 +45,41 @@ test("alignIndicatorLinesToTimes clips line and color data to the main bar time 
   ]);
 });
 
+test("line normalization inserts whitespace so indicators do not bridge missing candles", () => {
+  const allowed = new Set([10, 40]);
+  const lines = alignIndicatorLinesToTimes([{
+    id: "plot",
+    type: "line",
+    data: [
+      { time: 10, value: 1 },
+      { time: 40, value: 4 },
+    ],
+  }], allowed, undefined, 10);
+
+  assert.deepEqual(mustBeDefined(lines[0]).data, [
+    { time: 10, value: 1 },
+    { time: 20 },
+    { time: 40, value: 4 },
+  ]);
+});
+
+test("histograms remain sparse without synthetic gap bars", () => {
+  const allowed = new Set([10, 40]);
+  const lines = alignIndicatorLinesToTimes([{
+    id: "histogram",
+    type: "histogram",
+    data: [
+      { time: 10, value: 1 },
+      { time: 40, value: 4 },
+    ],
+  }], allowed, undefined, 10);
+
+  assert.deepEqual(mustBeDefined(lines[0]).data, [
+    { time: 10, value: 1 },
+    { time: 40, value: 4 },
+  ]);
+});
+
 test("realtime histogram point colors override historical colorData and survive missing color entries", () => {
   const lines = alignIndicatorLinesToTimes([{
     id: "histogram",

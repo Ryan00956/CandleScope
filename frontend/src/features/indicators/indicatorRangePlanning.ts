@@ -5,6 +5,7 @@ import type {
   DeferredRightCatchupPlan,
   IndicatorDefinition,
   IndicatorParams,
+  IndicatorRange,
   IndicatorVisibleRange,
   InitialHostedRange,
 } from "./indicatorTypes.js";
@@ -13,6 +14,27 @@ const INITIAL_VISIBLE_FALLBACK_BARS = 600;
 const INITIAL_VISIBLE_PADDING_MIN_BARS = 120;
 const INITIAL_VISIBLE_PADDING_RATIO = 0.35;
 const INITIAL_VISIBLE_PADDING_MAX_BARS = 1_000;
+
+/**
+ * Visible-range navigation is bucketed so a drag inside an already planned
+ * K-line block is a cache hit instead of a new sliding-tail HTTP request.
+ * Keep this below the backend's 50k compute ceiling and large enough to cover
+ * several normal chart viewports.
+ */
+export const VISIBLE_RANGE_RIGHT_PREFETCH_BUCKET_BARS = 1_500;
+
+export interface IndicatorVisibleNavigationState {
+  seriesKey: string;
+  visibleEnd: number;
+  visibleStart: number;
+}
+
+export interface IndicatorVisibleHydrationPlan {
+  direction: "initial" | "left" | "right" | "stationary";
+  endIndex: number;
+  nextState: IndicatorVisibleNavigationState | null;
+  range: IndicatorRange;
+}
 
 export const RIGHT_CATCHUP_GRACE_MS = 1_500;
 
@@ -61,9 +83,89 @@ export function estimateOutputWarmupBars(indicator: IndicatorDefinition | null |
   if (name === "EMA") return Math.max(0, paramInt(params, "period", 20) - 1);
   if (name === "RSI" || name === "ATR") return paramInt(params, "period", 14);
   if (name === "MACD") {
-    return paramInt(params, "slow", 26) + paramInt(params, "signal", 9);
+    return paramInt(params, "slow", paramInt(params, "slow_period", 26))
+      + paramInt(params, "signal", paramInt(params, "signal_period", 9));
   }
   return Math.max(0, paramInt(params, "warmup", 0));
+}
+
+/**
+ * Return a correction horizon only for indicators whose formula has a finite
+ * dependency window.  Recursive indicators and custom scripts return null and
+ * must remain invalid through the current cached/desired right edge.
+ */
+export function estimateCorrectionPropagationBars(
+  indicator: IndicatorDefinition | null | undefined,
+): number | null {
+  const name = String(indicator?.engineName || "").toUpperCase();
+  const params = indicator?.params || {};
+  if (name === "VOL") return 0;
+  if (name === "MA" || name === "SMA" || name === "BOLL") {
+    return Math.max(0, paramInt(params, "period", 20) - 1);
+  }
+  // Recursive indicators and arbitrary scripts have no finite mathematical
+  // correction horizon.  Their input warmup is an initialization budget, not
+  // permission to rebase later cached outputs across a historical change.
+  return null;
+}
+
+function advanceIndicatorBoundary(
+  boundary: number,
+  interval: string,
+  bars: number,
+): number {
+  const timeline = createIntervalTimeline(interval);
+  const fixedStep = parseIntervalSeconds(interval) || 1;
+  let cursor = boundary;
+  for (let index = 0; index < bars; index += 1) {
+    cursor = timeline?.next(cursor) ?? (cursor + fixedStep);
+  }
+  return cursor;
+}
+
+export function planIndicatorCorrectionRefresh(
+  dirtyInput: unknown,
+  desiredInput: unknown,
+  indicator: IndicatorDefinition | null | undefined,
+  interval: string,
+): {
+  affectedRange: IndicatorRange;
+  cascadeRight: boolean;
+  requestRange: IndicatorRange | null;
+} | null {
+  const dirty = dirtyInput && typeof dirtyInput === "object" && !Array.isArray(dirtyInput)
+    ? dirtyInput as Partial<IndicatorRange>
+    : null;
+  const desired = desiredInput && typeof desiredInput === "object" && !Array.isArray(desiredInput)
+    ? desiredInput as Partial<IndicatorRange>
+    : null;
+  const dirtyStart = normalizeRangeBoundary(dirty?.start);
+  const dirtyEnd = normalizeRangeBoundary(dirty?.end);
+  if (!dirtyStart || !dirtyEnd || dirtyStart > dirtyEnd) return null;
+  const propagationBars = estimateCorrectionPropagationBars(indicator);
+  const cascadeRight = propagationBars == null;
+  const affectedRange = cascadeRight
+    ? { start: dirtyStart, end: dirtyEnd }
+    : {
+        start: dirtyStart,
+        end: advanceIndicatorBoundary(dirtyEnd, interval, propagationBars),
+      };
+  const desiredStart = normalizeRangeBoundary(desired?.start);
+  const desiredEnd = normalizeRangeBoundary(desired?.end);
+  if (!desiredStart || !desiredEnd || desiredStart > desiredEnd) {
+    return { affectedRange, cascadeRight, requestRange: null };
+  }
+  const requestStart = Math.max(affectedRange.start, desiredStart);
+  const requestEnd = cascadeRight
+    ? desiredEnd
+    : Math.min(affectedRange.end, desiredEnd);
+  return {
+    affectedRange,
+    cascadeRight,
+    requestRange: requestStart <= requestEnd
+      ? { start: requestStart, end: requestEnd }
+      : null,
+  };
 }
 
 function maxHostedWarmupBars(hostedIndicators: readonly IndicatorDefinition[] = []): number {
@@ -204,6 +306,109 @@ export function resolveInitialHostedRange(
     visibleEndIndex: visibleIndexes.endIndex,
     warmupBars,
     paddingBars,
+  };
+}
+
+function resolveVisibleNavigationDirection(
+  previous: IndicatorVisibleNavigationState | null | undefined,
+  next: IndicatorVisibleNavigationState | null,
+): IndicatorVisibleHydrationPlan["direction"] {
+  if (!next || !previous || previous.seriesKey !== next.seriesKey) return "initial";
+  const movedRight = next.visibleStart >= previous.visibleStart
+    && next.visibleEnd >= previous.visibleEnd
+    && (
+      next.visibleStart > previous.visibleStart
+      || next.visibleEnd > previous.visibleEnd
+    );
+  if (movedRight) return "right";
+  const movedLeft = next.visibleStart <= previous.visibleStart
+    && next.visibleEnd <= previous.visibleEnd
+    && (
+      next.visibleStart < previous.visibleStart
+      || next.visibleEnd < previous.visibleEnd
+    );
+  return movedLeft ? "left" : "stationary";
+}
+
+function continuousRightEndIndex(
+  chartData: readonly KlineBar[],
+  startIndex: number,
+  candidateEndIndex: number,
+  interval: unknown,
+): number {
+  const timeline = createIntervalTimeline(interval);
+  if (!timeline) return startIndex;
+  let endIndex = startIndex;
+  for (let index = startIndex + 1; index <= candidateEndIndex; index += 1) {
+    const previousTime = normalizeRangeBoundary(chartBarTimeAt(chartData, index - 1));
+    const currentTime = normalizeRangeBoundary(chartBarTimeAt(chartData, index));
+    if (!previousTime || !currentTime || !timeline.isSuccessor(previousTime, currentTime)) break;
+    endIndex = index;
+  }
+  return endIndex;
+}
+
+/**
+ * Expand only an explicitly right-moving viewport to the end of its fixed
+ * K-line index bucket. Leftward history navigation remains exact, because
+ * speculative right work would be invalidated by the next prepend revision.
+ */
+export function planVisibleIndicatorHydrationRange({
+  bucketBars = VISIBLE_RANGE_RIGHT_PREFETCH_BUCKET_BARS,
+  chartData,
+  desired,
+  interval,
+  previous,
+  seriesKey,
+}: {
+  bucketBars?: number;
+  chartData: readonly KlineBar[];
+  desired: InitialHostedRange;
+  interval: unknown;
+  previous?: IndicatorVisibleNavigationState | null;
+  seriesKey: unknown;
+}): IndicatorVisibleHydrationPlan {
+  const normalizedSeriesKey = String(seriesKey || "");
+  const visibleStart = normalizeRangeBoundary(desired.visibleStart);
+  const visibleEnd = normalizeRangeBoundary(desired.visibleEnd);
+  const nextState = normalizedSeriesKey && visibleStart && visibleEnd
+    ? { seriesKey: normalizedSeriesKey, visibleStart, visibleEnd }
+    : null;
+  const direction = resolveVisibleNavigationDirection(previous, nextState);
+  const exactPlan: IndicatorVisibleHydrationPlan = {
+    direction,
+    endIndex: desired.endIndex,
+    nextState,
+    range: { start: desired.start, end: desired.end },
+  };
+  if (
+    direction !== "right"
+    || !Array.isArray(chartData)
+    || chartData.length === 0
+    || desired.endIndex < 0
+    || desired.endIndex >= chartData.length
+  ) return exactPlan;
+
+  const normalizedBucketBars = Math.max(1, Math.floor(Number(bucketBars) || 1));
+  const anchorIndex = Math.max(desired.endIndex, desired.visibleEndIndex);
+  const bucketEndIndex = Math.min(
+    chartData.length - 1,
+    (Math.floor(anchorIndex / normalizedBucketBars) + 1) * normalizedBucketBars - 1,
+  );
+  if (bucketEndIndex <= desired.endIndex) return exactPlan;
+  const endIndex = continuousRightEndIndex(
+    chartData,
+    desired.endIndex,
+    bucketEndIndex,
+    interval,
+  );
+  const end = normalizeRangeBoundary(chartBarTimeAt(chartData, endIndex));
+  if (!end || end <= desired.end) return exactPlan;
+  return {
+    direction,
+    endIndex,
+    nextState,
+    range: { start: desired.start, end },
   };
 }
 

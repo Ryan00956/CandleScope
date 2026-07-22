@@ -13,6 +13,8 @@ export const MAX_SERIES_BARS = 10_000;
 export const VIEWPORT_FETCH_BUFFER_BARS = 1_000;
 export const MAX_RANGE_RESPONSE_BARS = 5_000;
 
+export type SeriesWindowRetention = "newest" | "oldest";
+
 export const USER_VISIBLE_BACKFILL_REASONS: ReadonlySet<string> = new Set([
   "initial_history",
   "visible_range_gap",
@@ -49,6 +51,7 @@ export function intersectRanges(
 export function trimRowsToMaxBars<TRow>(
   rows: TRow[] | null | undefined,
   maxBars: unknown = MAX_SERIES_BARS,
+  retain: SeriesWindowRetention = "newest",
 ): {
   rows: TRow[];
   trimmedLeft: number;
@@ -67,10 +70,18 @@ export function trimRowsToMaxBars<TRow>(
       originalBars: list.length,
     };
   }
-  const trimmedLeft = list.length - limit;
+  const overflow = list.length - limit;
+  if (retain === "oldest") {
+    return {
+      rows: list.slice(0, limit),
+      trimmedLeft: 0,
+      trimmedRight: overflow,
+      originalBars: list.length,
+    };
+  }
   return {
-    rows: list.slice(trimmedLeft),
-    trimmedLeft,
+    rows: list.slice(overflow),
+    trimmedLeft: overflow,
     trimmedRight: 0,
     originalBars: list.length,
   };

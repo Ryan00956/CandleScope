@@ -8,27 +8,106 @@ import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js"
 import { resolveInitialRows as resolveWatchlistInitialRows } from "../watchlist-full-cache/watchlistFullCacheResolver.js";
 import { useKlineStreamRuntime } from "./useKlineStreamRuntime.js";
 import type { KlineWebSocketStatus } from "./useKlineStreamRuntime.js";
-import { useChartBackgroundPrefetch } from "./useChartBackgroundPrefetch.js";
+import {
+  ChartBackgroundPrefetchPriorityGate,
+  hasChartForegroundWork,
+  useChartBackgroundPrefetch,
+} from "./useChartBackgroundPrefetch.js";
 import { useChartDataRuntime } from "./useChartDataRuntime.js";
 import { buildChartDisplayState } from "./marketDataView.js";
 import type { MarketDisplayData } from "./marketDataView.js";
 import { publishCrosshairData } from "./crosshairDisplayStore.js";
 import { requestIndicatorRangeForWindowMeta } from "./indicatorRangeRuntime.js";
-import { useChartInitialLoad } from "./useChartInitialLoad.js";
+import {
+  planInitialHistoryCountBack,
+  useChartInitialLoad,
+} from "./useChartInitialLoad.js";
 import { useChartLoadMoreLeft } from "./useChartLoadMoreLeft.js";
 import { useSessionTransitionReset } from "./useSessionTransitionReset.js";
-import { INDICATOR_RANGE_REQUEST_REASONS, useMarketDataEvents } from "./marketDataEvents.js";
+import { useMarketDataEvents } from "./marketDataEvents.js";
 import { defaultKlineApi } from "./feed/klineApi.js";
-import { SeriesDataFeed } from "./feed/seriesDataFeed.js";
+import {
+  isKlineResultRepairPending,
+  SeriesDataFeed,
+} from "./feed/seriesDataFeed.js";
 import type { VisibleTimeRangeLike } from "./feed/gapRepairPlanner.js";
 import type {
   BackfillCompletedMessage,
   IndicatorRangeEvent,
+  IndicatorWindowMeta,
 } from "./klineContracts.js";
 import type { KlineBar, MarketSeries } from "./marketDataTypes.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type { MarketDataRuntimeContract } from "./marketDataRuntimeContract.js";
+import { getClientInstanceId } from "../../services/api.js";
+
+let chartDemandScopeSequence = 0;
+
+function createChartDemandScope(): string {
+  chartDemandScopeSequence += 1;
+  return `chart:${getClientInstanceId()}:${chartDemandScopeSequence}`;
+}
+
+export function shouldCommitRightWindowRestore({
+  aborted = false,
+  active = false,
+  currentEpoch = -1,
+  currentSessionKey = null,
+  expectedEpoch = -1,
+  expectedSessionKey = null,
+}: {
+  aborted?: boolean;
+  active?: boolean;
+  currentEpoch?: number;
+  currentSessionKey?: string | null;
+  expectedEpoch?: number;
+  expectedSessionKey?: string | null;
+} = {}): boolean {
+  return !aborted
+    && active
+    && expectedSessionKey != null
+    && currentSessionKey === expectedSessionKey
+    && currentEpoch === expectedEpoch;
+}
+
+export function canRequestMoreLeftDuringRuntime({
+  hasMoreLeft = false,
+  loading = false,
+  loadingMoreLeft = false,
+  marketDataReady = false,
+  restoringLatestWindow = false,
+}: {
+  hasMoreLeft?: boolean;
+  loading?: boolean;
+  loadingMoreLeft?: boolean;
+  marketDataReady?: boolean;
+  restoringLatestWindow?: boolean;
+} = {}): boolean {
+  return marketDataReady
+    && hasMoreLeft
+    && !loadingMoreLeft
+    && !loading
+    && !restoringLatestWindow;
+}
+
+export function canRequestRightWindowRestoreDuringRuntime({
+  loading = false,
+  loadingMoreLeft = false,
+  marketDataReady = false,
+  paginationPhase = "idle",
+}: {
+  loading?: boolean;
+  loadingMoreLeft?: boolean;
+  marketDataReady?: boolean;
+  paginationPhase?: "idle" | "loading" | "pending" | "stalled" | "exhausted";
+} = {}): boolean {
+  return marketDataReady
+    && !loading
+    && !loadingMoreLeft
+    && paginationPhase !== "loading"
+    && paginationPhase !== "pending";
+}
 
 export interface UseMarketDataRuntimeOptions {
   session: ChartSessionRuntime;
@@ -67,12 +146,21 @@ export function useMarketDataRuntime({
   const {
     indicatorRangeRequests,
     consumeIndicatorRangeRequest,
-    createIndicatorRangeRequester,
+    publishIndicatorRangeRequest,
   } = useMarketDataEvents({ interval, sessionKey });
-  const requestWindowDeltaIndicatorRange = useMemo(
-    () => createIndicatorRangeRequester(INDICATOR_RANGE_REQUEST_REASONS.WINDOW_DELTA),
-    [createIndicatorRangeRequester],
-  );
+  const backgroundPrefetchPriorityRef = useRef<ChartBackgroundPrefetchPriorityGate | null>(null);
+  if (backgroundPrefetchPriorityRef.current == null) {
+    backgroundPrefetchPriorityRef.current = new ChartBackgroundPrefetchPriorityGate();
+  }
+  const backgroundPrefetchPriority = backgroundPrefetchPriorityRef.current;
+  const publishIndicatorWindowRange = useCallback((meta: IndicatorWindowMeta) => {
+    requestIndicatorRangeForWindowMeta((start, end, reason) => {
+      if (!reason) return false;
+      const published = publishIndicatorRangeRequest(start, end, reason);
+      if (published) backgroundPrefetchPriority.yieldToForeground();
+      return published;
+    }, meta);
+  }, [backgroundPrefetchPriority, publishIndicatorRangeRequest]);
 
   const {
     chartData,
@@ -92,7 +180,13 @@ export function useMarketDataRuntime({
     markChartDataTransition,
     commitMergedChartData,
     commitPatchedChartData,
-  } = useChartDataRuntime({ exchange, marketType, symbol, interval });
+  } = useChartDataRuntime({
+    exchange,
+    marketType,
+    symbol,
+    interval,
+    onIndicatorWindowMeta: publishIndicatorWindowRange,
+  });
 
   const [loading, setLoading] = useState(true);
   const loadingRef = useRef(loading);
@@ -106,6 +200,47 @@ export function useMarketDataRuntime({
   const [dataSource, setDataSource] = useState<string | null>(null);
   const [wsStatus, setWsStatus] = useState<KlineWebSocketStatus>("idle");
   const lastEnabledSeriesRef = useRef<MarketSeries | null>(null);
+  const activeSessionKeyRef = useRef(sessionKey);
+  activeSessionKeyRef.current = sessionKey;
+  const rightWindowRestoreRequestIdRef = useRef(0);
+  const rightWindowRestoreAbortRef = useRef<AbortController | null>(null);
+  const rightWindowRestoreInFlightRef = useRef<{
+    requestId: number;
+    sessionKey: string;
+    promise: Promise<boolean>;
+  } | null>(null);
+  const [restoringLatestWindow, setRestoringLatestWindowState] = useState(false);
+  const restoringLatestWindowRef = useRef(false);
+  const setRestoringLatestWindow = useCallback((value: boolean) => {
+    restoringLatestWindowRef.current = value;
+    setRestoringLatestWindowState(value);
+  }, []);
+  const requestDemandRef = useRef<{
+    scope: string;
+    generation: number;
+    sessionKey: string | null;
+    ready: boolean;
+  } | null>(null);
+  if (requestDemandRef.current == null) {
+    requestDemandRef.current = {
+      scope: createChartDemandScope(),
+      generation: 0,
+      sessionKey: null,
+      ready: false,
+    };
+  }
+  useEffect(() => {
+    rightWindowRestoreAbortRef.current?.abort();
+    rightWindowRestoreAbortRef.current = null;
+    rightWindowRestoreInFlightRef.current = null;
+    setRestoringLatestWindow(false);
+    return () => {
+      rightWindowRestoreAbortRef.current?.abort();
+      rightWindowRestoreAbortRef.current = null;
+      rightWindowRestoreInFlightRef.current = null;
+      restoringLatestWindowRef.current = false;
+    };
+  }, [sessionKey, setRestoringLatestWindow]);
   const nativeIntervalValues = useMemo(
     () => nativeIntervals.map((item) => item.value),
     [nativeIntervals],
@@ -137,10 +272,6 @@ export function useMarketDataRuntime({
   useEffect(() => {
     updateVisibleRangeDataMeta?.(chartDataMeta);
   }, [chartDataMeta, updateVisibleRangeDataMeta]);
-
-  useEffect(() => {
-    requestIndicatorRangeForWindowMeta(requestWindowDeltaIndicatorRange, chartDataMeta);
-  }, [chartDataMeta, requestWindowDeltaIndicatorRange]);
 
   const updateLastPrice = useCallback((candidate: KlineBar, intv: IntervalString) => {
     setLastPrice((prev) => {
@@ -229,12 +360,16 @@ export function useMarketDataRuntime({
     hasMoreLeft,
     setHasMoreLeft,
     handleNeedMoreLeft,
+    hasActivePaginationOwnership,
+    paginationState,
+    resetPagination,
   } = useChartLoadMoreLeft({
     enabled: marketDataReady,
     symbol,
     exchange,
     marketType,
     interval,
+    nativeIntervalValues,
     chartData,
     loading,
     dataSource,
@@ -271,6 +406,127 @@ export function useMarketDataRuntime({
     setCrosshairData: publishCrosshairData,
     setDataSource,
   });
+
+  const restoreLatestWindow = useCallback((): Promise<boolean> => {
+    backgroundPrefetchPriority.yieldToForeground();
+    if (!marketDataReady || activeSessionKeyRef.current !== sessionKey) {
+      return Promise.resolve(false);
+    }
+    const currentRequest = rightWindowRestoreInFlightRef.current;
+    if (currentRequest?.sessionKey === sessionKey) return currentRequest.promise;
+    if (hasActivePaginationOwnership() || !canRequestRightWindowRestoreDuringRuntime({
+      loading,
+      loadingMoreLeft,
+      marketDataReady,
+      paginationPhase: paginationState.phase,
+    })) return Promise.resolve(false);
+
+    const countBack = planInitialHistoryCountBack(interval, nativeIntervalValues);
+    const demand = requestDemandRef.current;
+    if (
+      countBack <= 0
+      || !demand?.ready
+      || demand.sessionKey !== sessionKey
+    ) return Promise.resolve(false);
+
+    resetPagination();
+    const series = { exchange, marketType, symbol, interval };
+    const epoch = seriesDataFeed.beginEpoch(series);
+    const controller = new AbortController();
+    rightWindowRestoreAbortRef.current?.abort();
+    rightWindowRestoreAbortRef.current = controller;
+    const requestId = rightWindowRestoreRequestIdRef.current + 1;
+    rightWindowRestoreRequestIdRef.current = requestId;
+    const expectedDemandScope = demand.scope;
+    const expectedDemandGeneration = demand.generation;
+    const owner = {
+      requestId,
+      sessionKey,
+      promise: Promise.resolve(false),
+    };
+    rightWindowRestoreInFlightRef.current = owner;
+    setRestoringLatestWindow(true);
+
+    const ownsRequest = () => {
+      const currentDemand = requestDemandRef.current;
+      return rightWindowRestoreInFlightRef.current === owner
+        && currentDemand?.ready === true
+        && currentDemand.sessionKey === sessionKey
+        && currentDemand.scope === expectedDemandScope
+        && currentDemand.generation === expectedDemandGeneration
+        && shouldCommitRightWindowRestore({
+          aborted: controller.signal.aborted,
+          active: seriesDataFeed.shouldCommitActive(series),
+          currentEpoch: seriesDataFeed.currentEpoch(series),
+          currentSessionKey: activeSessionKeyRef.current,
+          expectedEpoch: epoch,
+          expectedSessionKey: sessionKey,
+        });
+    };
+
+    const promise = (async () => {
+      try {
+        const result = await seriesDataFeed.getBars(series, {
+          countBack,
+          source: "right-window-restore",
+          signal: controller.signal,
+          commit: "none",
+        });
+        if (
+          !ownsRequest()
+          || result.stale
+          || result.active === false
+          || isKlineResultRepairPending(result)
+          || !result.data?.length
+        ) return false;
+
+        replaceChartData(symbol, interval, result.data, {
+          source: "right-window-restore",
+        });
+        const latest = result.data.at(-1);
+        if (latest) updateLastPrice(latest, interval);
+        setHasMoreLeft(result.has_more !== false);
+        setDataSource(result.source || "right-window-restore");
+        setConnectionStatus("connected");
+        setError(null);
+        return true;
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.warn("Latest K-line window restore failed; retaining the historical window", error);
+        }
+        return false;
+      } finally {
+        if (rightWindowRestoreInFlightRef.current === owner) {
+          rightWindowRestoreInFlightRef.current = null;
+          setRestoringLatestWindow(false);
+        }
+        if (rightWindowRestoreAbortRef.current === controller) {
+          rightWindowRestoreAbortRef.current = null;
+        }
+      }
+    })();
+    owner.promise = promise;
+    return promise;
+  }, [
+    backgroundPrefetchPriority,
+    exchange,
+    interval,
+    hasActivePaginationOwnership,
+    loading,
+    loadingMoreLeft,
+    marketDataReady,
+    marketType,
+    nativeIntervalValues,
+    paginationState.phase,
+    replaceChartData,
+    resetPagination,
+    seriesDataFeed,
+    sessionKey,
+    setHasMoreLeft,
+    setRestoringLatestWindow,
+    symbol,
+    updateLastPrice,
+  ]);
 
   const getSeriesCacheRows = useCallback((series: {
     exchange: ExchangeId;
@@ -321,6 +577,7 @@ export function useMarketDataRuntime({
     symbol,
     exchange,
     marketType,
+    nativeIntervalValues,
     trackedIntervals,
     intervalRef,
     seriesDataFeed,
@@ -333,6 +590,33 @@ export function useMarketDataRuntime({
     setWsStatus,
   });
 
+  const foregroundIndicatorRequestCount = indicatorRangeRequests.length;
+  const isForegroundBusyForPrefetch = useCallback(() => {
+    const activeSeries = {
+      exchange,
+      marketType,
+      symbol,
+      interval: intervalRef.current,
+    };
+    return hasChartForegroundWork({
+      activePagination: hasActivePaginationOwnership(),
+      indicatorRequests: foregroundIndicatorRequestCount,
+      loading: loadingRef.current,
+      pendingInitial: pendingInitialHistoryRef.current != null,
+      pendingRepairs: seriesDataFeed.pendingRepairCount(activeSeries),
+      restoringLatestWindow: restoringLatestWindowRef.current,
+    });
+  }, [
+    exchange,
+    foregroundIndicatorRequestCount,
+    hasActivePaginationOwnership,
+    intervalRef,
+    marketType,
+    pendingInitialHistoryRef,
+    seriesDataFeed,
+    symbol,
+  ]);
+
   useChartBackgroundPrefetch({
     symbol,
     exchange,
@@ -342,7 +626,15 @@ export function useMarketDataRuntime({
     nativeIntervals: nativeIntervalValues,
     hasCache,
     seriesDataFeed,
-    enabled: activeChartReady && marketDataReady,
+    priorityGate: backgroundPrefetchPriority,
+    isForegroundBusy: isForegroundBusyForPrefetch,
+    // Background interval warming must yield while the active chart is still
+    // loading history, extending left, or waiting for indicator coverage.
+    enabled: activeChartReady
+      && marketDataReady
+      && !loading
+      && !loadingMoreLeft
+      && indicatorRangeRequests.length === 0,
   });
 
   const resetForSessionTransition = useSessionTransitionReset({
@@ -360,13 +652,32 @@ export function useMarketDataRuntime({
   });
 
   useEffect(() => {
+    backgroundPrefetchPriority.yieldToForeground();
     resetForSessionTransition(lastSessionTransition);
     const activeSeries = { exchange, marketType, symbol, interval };
+    const requestDemand = requestDemandRef.current!;
     if (marketDataReady) {
+      if (!requestDemand.ready || requestDemand.sessionKey !== sessionKey) {
+        requestDemand.generation += 1;
+      }
+      requestDemand.ready = true;
+      requestDemand.sessionKey = sessionKey;
+      const previousSeries = lastEnabledSeriesRef.current;
+      if (
+        previousSeries
+        && seriesDataFeed.seriesKey(previousSeries) !== seriesDataFeed.seriesKey(activeSeries)
+      ) {
+        seriesDataFeed.cancelSeriesRequests(previousSeries);
+      }
+      seriesDataFeed.setRequestDemand(activeSeries, {
+        scope: requestDemand.scope,
+        generation: requestDemand.generation,
+      });
       lastEnabledSeriesRef.current = activeSeries;
     } else if (lastEnabledSeriesRef.current) {
       seriesDataFeed.cancelSeriesRequests(lastEnabledSeriesRef.current);
       lastEnabledSeriesRef.current = null;
+      requestDemand.ready = false;
     }
     if (exchangeCatalogStatus === "loading") {
       pendingInitialHistoryRef.current = null;
@@ -398,6 +709,7 @@ export function useMarketDataRuntime({
     void loadData(symbol, interval, marketType, exchange);
     return undefined;
   }, [
+    backgroundPrefetchPriority,
     clearChartData,
     exchange,
     exchangeCatalogStatus,
@@ -410,6 +722,7 @@ export function useMarketDataRuntime({
     pendingInitialHistoryRef,
     resetForSessionTransition,
     seriesDataFeed,
+    sessionKey,
     setHasMoreLeft,
     setLoadingMoreLeft,
     symbol,
@@ -417,10 +730,27 @@ export function useMarketDataRuntime({
 
   const retry = useCallback(() => {
     if (!marketDataReady) return;
+    backgroundPrefetchPriority.yieldToForeground();
+    rightWindowRestoreAbortRef.current?.abort();
+    rightWindowRestoreAbortRef.current = null;
+    rightWindowRestoreInFlightRef.current = null;
+    setRestoringLatestWindow(false);
+    resetPagination();
     void loadData(symbol, interval, marketType, exchange);
-  }, [exchange, interval, loadData, marketDataReady, marketType, symbol]);
+  }, [
+    backgroundPrefetchPriority,
+    exchange,
+    interval,
+    loadData,
+    marketDataReady,
+    marketType,
+    resetPagination,
+    setRestoringLatestWindow,
+    symbol,
+  ]);
 
   const handleMarketVisibleRangeChange = useCallback((range: unknown) => {
+    backgroundPrefetchPriority.yieldToForeground();
     handleVisibleRangeChange(range, chartDataMeta);
     if (!marketDataReady) return;
     const series = { exchange, marketType, symbol, interval };
@@ -432,6 +762,7 @@ export function useMarketDataRuntime({
       { source: "visible-window-gap-planner" },
     );
   }, [
+    backgroundPrefetchPriority,
     chartDataMeta,
     exchange,
     getSeriesCacheRows,
@@ -442,6 +773,12 @@ export function useMarketDataRuntime({
     seriesDataFeed,
     symbol,
   ]);
+  const loadMoreLeftWithPriority = useCallback((
+    oldestLoadedTime?: Parameters<typeof handleNeedMoreLeft>[0],
+  ) => {
+    backgroundPrefetchPriority.yieldToForeground();
+    return handleNeedMoreLeft(oldestLoadedTime);
+  }, [backgroundPrefetchPriority, handleNeedMoreLeft]);
 
   const display = useMemo(
     () => buildChartDisplayState({
@@ -453,6 +790,13 @@ export function useMarketDataRuntime({
     }),
     [exchange, exchangeConfig, lastPrice, marketType, wsStatus],
   );
+  const requestDemand = requestDemandRef.current?.ready
+    && requestDemandRef.current.sessionKey === sessionKey
+    ? {
+        scope: requestDemandRef.current.scope,
+        generation: requestDemandRef.current.generation,
+      }
+    : null;
 
   return {
     view: {
@@ -470,7 +814,8 @@ export function useMarketDataRuntime({
     },
     actions: {
       retry,
-      loadMoreLeft: handleNeedMoreLeft,
+      loadMoreLeft: loadMoreLeftWithPriority,
+      restoreLatestWindow,
       onCrosshairMove: publishCrosshairData,
       onVisibleRangeChange: handleMarketVisibleRangeChange,
       consumeIndicatorRangeRequest,
@@ -479,11 +824,25 @@ export function useMarketDataRuntime({
       hasMoreLeft,
       loadingMoreLeft,
       activeChartReady,
-      canLoadMoreLeft: marketDataReady && hasMoreLeft && !loadingMoreLeft && !loading,
+      canLoadMoreLeft: canRequestMoreLeftDuringRuntime({
+        hasMoreLeft,
+        loading,
+        loadingMoreLeft,
+        marketDataReady,
+        restoringLatestWindow,
+      }),
+      canRestoreLatestWindow: !hasActivePaginationOwnership()
+        && canRequestRightWindowRestoreDuringRuntime({
+        loading,
+        loadingMoreLeft,
+        marketDataReady,
+        paginationPhase: paginationState.phase,
+      }) && !restoringLatestWindow,
       barCount: chartData.length,
       cacheDiagnostics: getCacheDiagnostics,
       trimCacheEntries,
       indicatorRangeRequests,
+      requestDemand,
     },
   };
 }

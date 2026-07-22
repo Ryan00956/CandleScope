@@ -1,5 +1,6 @@
 import type {
   WindowDelta,
+  WindowChangedRange,
   WindowDeltaDetail,
   WindowDeltaType,
 } from "../klineContracts.js";
@@ -19,7 +20,11 @@ import {
   asSeriesKey,
   toEpochSeconds,
 } from "../marketDataTypes.js";
-import { MAX_SERIES_BARS } from "../phase1WindowPolicy.js";
+import {
+  MAX_SERIES_BARS,
+  trimRowsToMaxBars,
+  type SeriesWindowRetention,
+} from "../phase1WindowPolicy.js";
 import { createWindowDelta, WINDOW_DELTA_TYPES } from "./windowDeltas.js";
 
 interface SeriesWindowStoreOptions {
@@ -128,6 +133,7 @@ export class SeriesWindowStore {
   private _version: number;
   private _axisRevision: number;
   private _listeners: Set<SeriesWindowListener>;
+  private _rightTruncated: boolean;
 
   constructor({
     maxBars = MAX_SERIES_BARS,
@@ -145,6 +151,7 @@ export class SeriesWindowStore {
     this._version = 0;
     this._axisRevision = 0;
     this._listeners = new Set();
+    this._rightTruncated = false;
   }
 
   get version(): DataRevision {
@@ -158,6 +165,11 @@ export class SeriesWindowStore {
    */
   get axisRevision(): DataRevision {
     return asDataRevision(this._axisRevision);
+  }
+
+  /** Newer rows were evicted while this bounded window moved into history. */
+  get rightTruncated(): boolean {
+    return this._rightTruncated;
   }
 
   get segments(): SeriesWindowSegment[] {
@@ -283,6 +295,7 @@ export class SeriesWindowStore {
     this._timeSet = new Set();
     this._snapshot = [];
     this._snapshotDirty = false;
+    this._rightTruncated = false;
     this._version += 1;
     this._axisRevision += 1;
     const delta = createWindowDelta(WINDOW_DELTA_TYPES.CLEAR, {
@@ -302,6 +315,7 @@ export class SeriesWindowStore {
     const originalBars = normalized.length;
     this._replaceRows(normalized);
     const trim = this.trimToBudget();
+    this._rightTruncated = false;
     this._version += 1;
     this._axisRevision += 1;
     const delta = createWindowDelta(WINDOW_DELTA_TYPES.REPLACE, {
@@ -353,6 +367,7 @@ export class SeriesWindowStore {
     let addedRight = 0;
     let changed = false;
     let axisChanged = false;
+    const changedTimes = new Set<EpochSeconds>();
     let previousIndex = 0;
     let incomingIndex = 0;
     while (previousIndex < previousRows.length || incomingIndex < incoming.length) {
@@ -369,27 +384,57 @@ export class SeriesWindowStore {
         if (row.time > previousLast) addedRight += 1;
         changed = true;
         axisChanged = true;
+        changedTimes.add(row.time);
         incomingIndex += 1;
         continue;
       }
       nextRows.push(row);
-      if (!sameRow(previous, row)) changed = true;
+      if (!sameRow(previous, row)) {
+        changed = true;
+        changedTimes.add(row.time);
+      }
       previousIndex += 1;
       incomingIndex += 1;
     }
 
     if (!changed) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
 
+    const changedKinds = new Set(Array.from(changedTimes, (time) => (
+      time < previousFirst
+        ? WINDOW_DELTA_TYPES.PREPEND
+        : time > previousLast
+          ? WINDOW_DELTA_TYPES.APPEND
+          : WINDOW_DELTA_TYPES.MID_MERGE
+    )));
+    const type: WindowDeltaType = changedKinds.size === 1
+      ? (changedKinds.values().next().value || WINDOW_DELTA_TYPES.MID_MERGE)
+      : WINDOW_DELTA_TYPES.MID_MERGE;
+
     this._replaceRows(nextRows);
-    const trim = this.trimToBudget();
+    // A before-page must move the active window into history. Keeping the
+    // default newest-side retention here would immediately discard every
+    // newly prepended row once the 10k budget is full.
+    const trim = this.trimToBudget(
+      type === WINDOW_DELTA_TYPES.PREPEND ? "oldest" : "newest",
+    );
+    if (type === WINDOW_DELTA_TYPES.PREPEND && trim.trimmedRight > 0) {
+      this._rightTruncated = true;
+    }
     this._version += 1;
     if (axisChanged || trim.trimmedLeft > 0 || trim.trimmedRight > 0) {
       this._axisRevision += 1;
     }
 
-    let type: WindowDeltaType = WINDOW_DELTA_TYPES.MID_MERGE;
-    if (incomingLast < previousFirst) type = WINDOW_DELTA_TYPES.PREPEND;
-    else if (incomingFirst > previousLast) type = WINDOW_DELTA_TYPES.APPEND;
+    const retainedTimes = this._timeSet;
+    let retainedIncomingRows = 0;
+    for (const row of incoming) {
+      if (retainedTimes.has(row.time)) retainedIncomingRows += 1;
+    }
+    const changedRanges = this._retainedChangedRanges(
+      changedTimes,
+      previousFirst,
+      previousLast,
+    );
 
     const delta = createWindowDelta(type, {
       bars: this.barCount,
@@ -399,6 +444,8 @@ export class SeriesWindowStore {
       originalBars: nextRows.length,
       trimmedLeft: trim.trimmedLeft,
       trimmedRight: trim.trimmedRight,
+      retainedIncomingRows,
+      changedRanges,
       ...meta,
     });
     this._emit(delta);
@@ -509,14 +556,46 @@ export class SeriesWindowStore {
     return delta;
   }
 
-  trimToBudget(): TrimResult {
+  trimToBudget(retain: SeriesWindowRetention = "newest"): TrimResult {
     const count = this.barCount;
     if (count <= this.maxBars) return { trimmedLeft: 0, trimmedRight: 0 };
 
-    const trimmedLeft = count - this.maxBars;
-    const rows = this.snapshot().slice(trimmedLeft);
-    this._replaceRows(rows);
-    return { trimmedLeft, trimmedRight: 0 };
+    const trimmed = trimRowsToMaxBars(this.snapshot(), this.maxBars, retain);
+    this._replaceRows(trimmed.rows);
+    return {
+      trimmedLeft: trimmed.trimmedLeft,
+      trimmedRight: trimmed.trimmedRight,
+    };
+  }
+
+  private _retainedChangedRanges(
+    changedTimes: ReadonlySet<EpochSeconds>,
+    previousFirst: EpochSeconds,
+    previousLast: EpochSeconds,
+  ): WindowChangedRange[] {
+    const ranges: WindowChangedRange[] = [];
+    for (const segment of this._segments) {
+      let followsChangedRow = false;
+      for (const row of segment.bars) {
+        if (!changedTimes.has(row.time)) {
+          followsChangedRow = false;
+          continue;
+        }
+        const type: WindowChangedRange["type"] = row.time < previousFirst
+          ? WINDOW_DELTA_TYPES.PREPEND
+          : row.time > previousLast
+            ? WINDOW_DELTA_TYPES.APPEND
+            : WINDOW_DELTA_TYPES.MID_MERGE;
+        const previousRange = ranges.at(-1);
+        if (followsChangedRow && previousRange?.type === type) {
+          previousRange.end = row.time;
+          continue;
+        }
+        ranges.push({ start: row.time, end: row.time, type });
+        followsChangedRow = true;
+      }
+    }
+    return ranges;
   }
 
   private _replaceRows(rows: KlineBar[]): void {

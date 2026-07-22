@@ -197,6 +197,8 @@ export async function computeIndicatorRange({
   start,
   end,
   reason,
+  requestScope,
+  requestGeneration,
   signal,
 }: IndicatorRangeRequest): Promise<IndicatorPayloadEnvelope> {
   const payload = await request(`${API_BASE}/indicators/range`, {
@@ -219,6 +221,8 @@ export async function computeIndicatorRange({
       start,
       end,
       reason,
+      requestScope,
+      requestGeneration,
     }),
   });
   return parseIndicatorPayloadEnvelope(payload, "indicator.range");

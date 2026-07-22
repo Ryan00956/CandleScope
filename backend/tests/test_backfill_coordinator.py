@@ -840,6 +840,820 @@ def test_backfill_scheduler_wakes_after_rate_limit_without_new_submit() -> None:
     asyncio.run(_run())
 
 
+def test_custom_interval_scheduler_chunks_by_source_rows() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            chunk_bars=1_000,
+            max_concurrency=1,
+        )
+        interval_ms = 89 * 60_000
+        request = RepairRequest(
+            symbol="BTCUSDT",
+            interval="89m",
+            start_ms=0,
+            end_ms=23 * interval_ms,
+            exchange="binance",
+            market_type="spot",
+            reason="initial_history",
+            request_id="source-bounded-89m",
+        )
+
+        await coordinator.request_and_wait(request)
+
+        assert len(engine.calls) == 3
+        for call in engine.calls:
+            plan = call["metadata"]["interval_work_plan"]
+            assert plan["base_interval"] == "1m"
+            assert plan["source_factor"] == 89
+            assert plan["effective_target_bars"] == 8
+            assert plan["planned_source_rows"] == 979
+            assert plan["planned_source_rows"] <= plan["source_row_budget"] == 1_000
+
+    asyncio.run(_run())
+
+
+def test_wait_for_progress_wakes_after_one_complete_physical_chunk() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+                self.release_rest = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                else:
+                    await self.release_rest.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            chunk_bars=2,
+            max_concurrency=1,
+        )
+        request = _request(0, 180_000, request_id="chunk-progress")
+        request.reason = "initial_history"
+        request_id = coordinator.request(request)
+        await engine.first_started.wait()
+        progress_waiter = asyncio.create_task(
+            coordinator.wait_for_progress(request_id, after_revision=0)
+        )
+
+        engine.release_first.set()
+        progress = await asyncio.wait_for(progress_waiter, timeout=1.0)
+
+        assert progress is not None
+        assert progress["revision"] == 1
+        assert progress["terminal"] is False
+        assert progress["completed_chunk_target_bars"] == 2
+        assert progress["completed_chunk_source_rows"] == 2
+        assert progress["completed_chunks"] == 1
+        assert progress["total_chunks"] == 2
+
+        engine.release_rest.set()
+        outcome = await asyncio.wait_for(
+            coordinator.wait_for_request(request_id),
+            timeout=1.0,
+        )
+        assert outcome is not None
+
+    asyncio.run(_run())
+
+
+def test_releasing_last_pending_demand_cancels_without_dispatch() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+        )
+        active = asyncio.create_task(
+            coordinator.request_and_wait(
+                _request(0, 0, request_id="active-blocker")
+            )
+        )
+        await engine.first_started.wait()
+        pending = RepairRequest(
+            symbol="ETHUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            exchange="binance",
+            market_type="spot",
+            request_id="pending-cancel",
+            metadata={"demand_owner_id": "http:pending"},
+        )
+        pending_id = coordinator.request(pending)
+        assert await coordinator.acquire_demand(
+            pending_id,
+            owner_id="http:pending",
+        )
+
+        cancelled = await coordinator.release_demand(
+            pending_id,
+            owner_id="http:pending",
+            cancel_if_unobserved=True,
+        )
+        outcome = await coordinator.wait_for_request(pending_id)
+
+        assert cancelled is True
+        assert outcome is not None and outcome.status == "cancelled"
+        assert {call["symbol"] for call in engine.calls} == {"BTCUSDT"}
+        assert coordinator.snapshot()["cancelled_pending"] == 1
+
+        engine.release_first.set()
+        await active
+
+    asyncio.run(_run())
+
+
+def test_cancelled_pending_mutation_always_completes_future_and_state() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.first_started.set()
+                await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+        )
+        active = asyncio.create_task(coordinator.request_and_wait(
+            _request(0, 0, request_id="cancel-finalize-blocker")
+        ))
+        await engine.first_started.wait()
+        pending = RepairRequest(
+            symbol="ETHUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            request_id="cancel-finalize-pending",
+            metadata={"demand_owner_id": "http:cancel-finalize"},
+        )
+        pending_id = coordinator.request(pending)
+        finalize_started = asyncio.Event()
+        finalize_gate = asyncio.Event()
+        original_finalize = coordinator._scheduler._finalize
+
+        async def _blocked_finalize(request, outcome):
+            if request.request_id == pending_id:
+                finalize_started.set()
+                await finalize_gate.wait()
+                return None
+            return await original_finalize(request, outcome)
+
+        coordinator._scheduler._finalize = _blocked_finalize
+        release_task = asyncio.create_task(coordinator.release_demand(
+            pending_id,
+            owner_id="http:cancel-finalize",
+            cancel_if_unobserved=True,
+        ))
+        await finalize_started.wait()
+        release_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await release_task
+
+        outcome = await asyncio.wait_for(
+            coordinator.wait_for_request(pending_id),
+            timeout=1.0,
+        )
+        assert outcome is not None and outcome.status == "cancelled"
+        assert pending_id not in coordinator._scheduler._requests
+        assert all(
+            item["request_id"] != pending_id
+            for item in coordinator.snapshot()["pending"]
+        )
+
+        finalize_gate.set()
+        engine.release_first.set()
+        await active
+
+    asyncio.run(_run())
+
+
+def test_slow_cancel_finalizer_cannot_remove_new_series_generation() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                self.release_o = asyncio.Event()
+                self.release_c = asyncio.Event()
+                self.c_started = asyncio.Event()
+
+            async def run(self, **kwargs):
+                request_id = kwargs["metadata"]["parent_request_id"]
+                self.calls.append(request_id)
+                if request_id == "series-generation-o":
+                    await self.release_o.wait()
+                elif request_id == "series-generation-c":
+                    self.c_started.set()
+                    await self.release_c.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=2,
+        )
+        ordinary = _request(0, 0, request_id="series-generation-o")
+        ordinary_task = asyncio.create_task(coordinator.request_and_wait(ordinary))
+        await _wait_until(lambda: "series-generation-o" in engine.calls)
+
+        cancelled = _request(60_000, 60_000, request_id="series-generation-a")
+        cancelled.metadata["demand_owner_id"] = "series-generation-owner"
+        cancelled_id = coordinator.request(cancelled)
+        finalize_started = asyncio.Event()
+        finalize_gate = asyncio.Event()
+        original_finalize = coordinator._scheduler._finalize
+
+        async def _blocked_finalize(request, outcome):
+            if request.request_id == cancelled_id:
+                finalize_started.set()
+                await finalize_gate.wait()
+            return await original_finalize(request, outcome)
+
+        coordinator._scheduler._finalize = _blocked_finalize
+        cancel_task = asyncio.create_task(coordinator.release_demand(
+            cancelled_id,
+            owner_id="series-generation-owner",
+            cancel_if_unobserved=True,
+        ))
+        await finalize_started.wait()
+
+        successor_b = _request(60_000, 60_000, request_id="series-generation-b")
+        successor_b_id = coordinator.request(successor_b)
+        engine.release_o.set()
+        await coordinator.wait_for_request(successor_b_id)
+
+        successor_c = _request(60_000, 60_000, request_id="series-generation-c")
+        successor_c_id = coordinator.request(successor_c)
+        await engine.c_started.wait()
+        finalize_gate.set()
+        assert await cancel_task is True
+
+        deduped = _request(60_000, 60_000, request_id="series-generation-d")
+        assert coordinator.request(deduped) == successor_c_id
+        await asyncio.sleep(0)
+        assert "series-generation-d" not in engine.calls
+
+        engine.release_c.set()
+        await coordinator.wait_for_request(successor_c_id)
+        await ordinary_task
+        await coordinator.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_revoke_owner_marks_all_pending_states_before_slow_finalization() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                self.blocker_started = asyncio.Event()
+                self.release_blocker = asyncio.Event()
+
+            async def run(self, **kwargs):
+                request_id = kwargs["metadata"]["parent_request_id"]
+                self.calls.append(request_id)
+                if request_id == "revoke-two-phase-blocker":
+                    self.blocker_started.set()
+                    await self.release_blocker.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+        )
+        blocker = _request(0, 0, request_id="revoke-two-phase-blocker")
+        blocker.symbol = "ETHUSDT"
+        blocker_task = asyncio.create_task(coordinator.request_and_wait(blocker))
+        await engine.blocker_started.wait()
+
+        first = _request(0, 0, request_id="revoke-two-phase-a")
+        first.metadata["demand_owner_id"] = "revoke-two-phase-owner"
+        second = _request(0, 0, request_id="revoke-two-phase-b")
+        second.symbol = "SOLUSDT"
+        second.metadata["demand_owner_id"] = "revoke-two-phase-owner"
+        first_id = coordinator.request(first)
+        second_id = coordinator.request(second)
+
+        finalize_started = asyncio.Event()
+        finalize_gate = asyncio.Event()
+        original_finalize = coordinator._scheduler._finalize
+
+        async def _blocked_finalize(request, outcome):
+            if request.request_id == first_id:
+                finalize_started.set()
+                await finalize_gate.wait()
+            return await original_finalize(request, outcome)
+
+        coordinator._scheduler._finalize = _blocked_finalize
+        revoke_task = asyncio.create_task(coordinator.revoke_demand_owner(
+            "revoke-two-phase-owner",
+            reason="http_disconnected",
+        ))
+        await finalize_started.wait()
+        engine.release_blocker.set()
+        await blocker_task
+        await asyncio.sleep(0.02)
+
+        assert "revoke-two-phase-a" not in engine.calls
+        assert "revoke-two-phase-b" not in engine.calls
+        second_outcome = await coordinator.wait_for_request(second_id)
+        assert second_outcome is not None and second_outcome.status == "cancelled"
+
+        finalize_gate.set()
+        assert await revoke_task == 2
+        first_outcome = await coordinator.wait_for_request(first_id)
+        assert first_outcome is not None and first_outcome.status == "cancelled"
+        await coordinator.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_new_scope_generation_stops_active_repair_after_current_chunk() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+        await coordinator.advance_demand_scope("pane-a", 1)
+        request = _request(0, 120_000, request_id="old-generation")
+        request.reason = "initial_history"
+        request.metadata.update({
+            "demand_owner_id": "scope:pane-a:1",
+            "demand_scope": "pane-a",
+            "demand_generation": 1,
+        })
+        request_id = coordinator.request(request)
+        await engine.first_started.wait()
+        assert await coordinator.acquire_demand(
+            request_id,
+            owner_id="scope:pane-a:1",
+            scope="pane-a",
+            generation=1,
+        )
+
+        assert await coordinator.advance_demand_scope("pane-a", 2) == 1
+        assert coordinator.snapshot()["active"][0]["cancel_requested"] is True
+        engine.release_first.set()
+        outcome = await asyncio.wait_for(
+            coordinator.wait_for_request(request_id),
+            timeout=1.0,
+        )
+
+        assert outcome is not None and outcome.status == "cancelled"
+        assert len(engine.calls) == 1
+        assert coordinator.snapshot()["cancelled_after_chunk"] == 1
+        assert coordinator.snapshot()["active"] == []
+
+    asyncio.run(_run())
+
+
+def test_late_thread_submission_is_rejected_after_scope_advanced() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+        await coordinator.advance_demand_scope("pane-late-thread", 2)
+        request_id = await asyncio.to_thread(
+            coordinator.trigger,
+            "BTCUSDT",
+            "89m",
+            0,
+            89 * 60_000,
+            "binance",
+            "spot",
+            metadata={
+                "demand_owner_id": "pane-late-thread:gen-1:consumer-a",
+                "demand_scope": "pane-late-thread",
+                "demand_generation": 1,
+            },
+        )
+
+        outcome = await asyncio.wait_for(
+            coordinator.wait_for_request(request_id),
+            timeout=1.0,
+        )
+
+        assert outcome is not None
+        assert outcome.status == "cancelled"
+        assert outcome.retryable is False
+        assert "scope_superseded" in str(outcome.error)
+        assert engine.calls == []
+        assert coordinator.snapshot()["active"] == []
+
+    asyncio.run(_run())
+
+
+def test_revoked_owner_rejects_submission_that_arrives_after_http_cancel() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                return _RepairReport(status="completed")
+
+        owner_id = "pane-cancelled:gen-1:consumer-a"
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+        await coordinator.advance_demand_scope("pane-cancelled", 1)
+        await coordinator.revoke_demand_owner(
+            owner_id,
+            reason="http_query_cancelled",
+        )
+        request_id = await asyncio.to_thread(
+            coordinator.trigger,
+            "BTCUSDT",
+            "89m",
+            0,
+            89 * 60_000,
+            "binance",
+            "spot",
+            metadata={
+                "demand_owner_id": owner_id,
+                "demand_scope": "pane-cancelled",
+                "demand_generation": 1,
+            },
+        )
+
+        outcome = await coordinator.wait_for_request(request_id)
+
+        assert outcome is not None and outcome.status == "cancelled"
+        assert outcome.error == "http_query_cancelled"
+        assert engine.calls == []
+
+    asyncio.run(_run())
+
+
+def test_unique_same_generation_owners_survive_one_disconnect_until_advance() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                self.started.set()
+                await self.release.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            chunk_bars=1,
+            max_concurrency=1,
+        )
+        await coordinator.advance_demand_scope("pane-shared", 1)
+        first = _request(0, 120_000, request_id="same-generation-first")
+        first.metadata.update({
+            "demand_owner_id": "pane-shared:gen-1:consumer-a",
+            "demand_scope": "pane-shared",
+            "demand_generation": 1,
+        })
+        request_id = coordinator.request(first)
+        await engine.started.wait()
+        second = _request(0, 120_000, request_id="same-generation-second")
+        second.metadata.update({
+            "demand_owner_id": "pane-shared:gen-1:consumer-b",
+            "demand_scope": "pane-shared",
+            "demand_generation": 1,
+        })
+        assert coordinator.request(second) == request_id
+        assert coordinator.snapshot()["active"][0]["demand_count"] == 2
+
+        assert await coordinator.revoke_demand_owner(
+            "pane-shared:gen-1:consumer-a",
+            reason="http_disconnected",
+        ) == 1
+        snapshot = coordinator.snapshot()
+        assert snapshot["active"][0]["demand_count"] == 1
+        assert snapshot["active"][0]["cancel_requested"] is False
+
+        assert await coordinator.advance_demand_scope("pane-shared", 2) == 1
+        assert coordinator.snapshot()["active"][0]["cancel_requested"] is True
+        engine.release.set()
+        outcome = await coordinator.wait_for_request(request_id)
+
+        assert outcome is not None and outcome.status == "cancelled"
+        assert len(engine.calls) == 1
+
+    asyncio.run(_run())
+
+
+def test_background_dispatch_uses_at_most_one_slot_while_foreground_runs() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.two_started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                if len(self.calls) == 2:
+                    self.two_started.set()
+                await self.release.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=2,
+        )
+
+        def _series(symbol: str, reason: str, request_id: str) -> RepairRequest:
+            return RepairRequest(
+                symbol=symbol,
+                interval="1m",
+                start_ms=0,
+                end_ms=0,
+                exchange="binance",
+                market_type="spot",
+                reason=reason,
+                request_id=request_id,
+            )
+
+        background_one = asyncio.create_task(coordinator.request_and_wait(
+            _series("BTCUSDT", "related_interval_warmup", "background-one")
+        ))
+        await engine.first_started.wait()
+        background_two = asyncio.create_task(coordinator.request_and_wait(
+            _series("ETHUSDT", "background_gap_audit", "background-two")
+        ))
+        await asyncio.sleep(0.02)
+        assert len(engine.calls) == 1
+
+        foreground = asyncio.create_task(coordinator.request_and_wait(
+            _series("SOLUSDT", "initial_history", "foreground")
+        ))
+        await asyncio.wait_for(engine.two_started.wait(), timeout=1.0)
+        assert {call["symbol"] for call in engine.calls} == {
+            "BTCUSDT",
+            "SOLUSDT",
+        }
+        assert coordinator.snapshot()["background_dispatches"] == 1
+
+        engine.release.set()
+        await asyncio.gather(background_one, background_two, foreground)
+        assert coordinator.snapshot()["background_dispatches"] == 2
+
+    asyncio.run(_run())
+
+
+def test_covered_foreground_demand_promotes_active_background_parent() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+        background = _request(0, 180_000, request_id="warmup-parent")
+        background.reason = "related_interval_warmup"
+        background.priority = 100
+        request_id = coordinator.request(background)
+        await engine.first_started.wait()
+        foreground = _request(0, 180_000, request_id="visible-dedupe")
+        foreground.reason = "initial_history"
+        foreground.priority = 10
+
+        assert coordinator.request(foreground) == request_id
+        snapshot = coordinator.snapshot()
+        assert snapshot["priority_promotions"] == 1
+        assert snapshot["active"][0]["priority"] == 10
+        assert snapshot["active"][0]["demand_count"] == 0
+
+        engine.release_first.set()
+        outcome = await coordinator.wait_for_request(request_id)
+
+        assert outcome is not None
+        assert engine.calls[0]["range_start_ms"] == 0
+        assert engine.calls[1]["range_start_ms"] == 180_000
+        assert engine.calls[1]["metadata"]["priority"] == 10
+        assert "initial_history" in engine.calls[1]["metadata"]["reason"]
+
+    asyncio.run(_run())
+
+
+def test_ownerless_background_survives_attached_pane_revocation_and_advance() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+        await coordinator.advance_demand_scope("pane-background", 1)
+        background = _request(0, 120_000, request_id="persistent-background")
+        background.reason = "background_gap_audit"
+        request_id = coordinator.request(background)
+        await engine.first_started.wait()
+
+        for suffix in ("a", "b"):
+            pane = _request(0, 120_000, request_id=f"pane-child-{suffix}")
+            pane.reason = "initial_history"
+            pane.metadata.update({
+                "demand_owner_id": f"pane-background:gen-1:{suffix}",
+                "demand_scope": "pane-background",
+                "demand_generation": 1,
+            })
+            assert coordinator.request(pane) == request_id
+
+        snapshot = coordinator.snapshot()["active"][0]
+        assert snapshot["persistent_interest"] is True
+        assert snapshot["demand_count"] == 2
+        assert await coordinator.revoke_demand_owner(
+            "pane-background:gen-1:a",
+            reason="http_disconnected",
+        ) == 1
+        assert await coordinator.advance_demand_scope("pane-background", 2) == 0
+        snapshot = coordinator.snapshot()["active"][0]
+        assert snapshot["persistent_interest"] is True
+        assert snapshot["demand_count"] == 0
+        assert snapshot["cancel_requested"] is False
+
+        engine.release_first.set()
+        outcome = await coordinator.wait_for_request(request_id)
+
+        assert outcome is not None and outcome.status == "completed"
+        assert len(engine.calls) == 3
+
+    asyncio.run(_run())
+
+
 def test_backfill_coordinator_retries_failed_report_until_success() -> None:
     async def _run() -> None:
         class _Engine:
@@ -1021,6 +1835,634 @@ def test_repair_request_merge_metadata_and_reason_remain_bounded() -> None:
 
     assert len(merged.metadata["merged_request_ids"]) <= 32
     assert len(merged.reason.split("+")) <= 8
+
+
+def test_repair_request_merge_preserves_trusted_finality_requirement() -> None:
+    trusted_refresh = _request(0, 60_000, request_id="trusted-refresh")
+    trusted_refresh.metadata["query_reason"] = "query_untrusted_finality"
+    ordinary_gap = _request(60_000, 120_000, request_id="ordinary-gap")
+    ordinary_gap.metadata["query_reason"] = "query_interior_gap"
+
+    merged = trusted_refresh.merged_with(ordinary_gap)
+
+    assert merged.metadata["requires_trusted_finality"] is True
+
+
+def test_active_ordinary_repair_does_not_swallow_stronger_trusted_request() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+        )
+        ordinary = _request(0, 60_000, request_id="ordinary-active")
+        ordinary_id = coordinator.request(ordinary)
+        await engine.first_started.wait()
+        trusted = _request(0, 60_000, request_id="trusted-after-active")
+        trusted.reason = "query_untrusted_finality"
+        trusted.metadata["query_reason"] = "query_untrusted_finality"
+
+        assert coordinator.request(trusted) == "trusted-after-active"
+        assert len(coordinator.snapshot()["pending"]) == 1
+        engine.release_first.set()
+        ordinary_outcome, trusted_outcome = await asyncio.gather(
+            coordinator.wait_for_request(ordinary_id),
+            coordinator.wait_for_request("trusted-after-active"),
+        )
+
+        assert ordinary_outcome is not None
+        assert trusted_outcome is not None
+        assert len(engine.calls) == 2
+        assert engine.calls[0]["metadata"].get("requires_trusted_finality") is not True
+        assert engine.calls[1]["metadata"]["requires_trusted_finality"] is True
+
+    asyncio.run(_run())
+
+
+def test_pending_covered_repair_upgrades_to_trusted_finality() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+        )
+        queued_snapshots: list[tuple[str, dict[str, Any]]] = []
+        original_on_queued = coordinator._scheduler._on_queued
+
+        def _capture_queued(request: RepairRequest) -> None:
+            queued_snapshots.append((request.request_id, dict(request.metadata)))
+            original_on_queued(request)
+
+        coordinator._scheduler._on_queued = _capture_queued
+        blocker = _request(0, 0, request_id="trusted-upgrade-blocker")
+        blocker_id = coordinator.request(blocker)
+        await engine.first_started.wait()
+        pending = _request(120_000, 180_000, request_id="ordinary-pending")
+        pending_id = coordinator.request(pending)
+        trusted = _request(120_000, 180_000, request_id="trusted-pending-child")
+        trusted.reason = "query_untrusted_finality"
+        trusted.metadata["query_reason"] = "query_untrusted_finality"
+
+        assert coordinator.request(trusted) == pending_id
+        engine.release_first.set()
+        blocker_outcome, pending_outcome = await asyncio.gather(
+            coordinator.wait_for_request(blocker_id),
+            coordinator.wait_for_request(pending_id),
+        )
+
+        assert blocker_outcome is not None
+        assert pending_outcome is not None
+        assert len(engine.calls) == 2
+        assert engine.calls[1]["metadata"]["requires_trusted_finality"] is True
+        assert "query_untrusted_finality" in engine.calls[1]["metadata"]["reason"]
+        pending_snapshots = [
+            metadata
+            for request_id, metadata in queued_snapshots
+            if request_id == pending_id
+        ]
+        assert len(pending_snapshots) == 2
+        assert pending_snapshots[0].get("requires_trusted_finality") is not True
+        assert pending_snapshots[1]["requires_trusted_finality"] is True
+
+    asyncio.run(_run())
+
+
+def test_partially_completed_pending_repair_gets_full_trusted_successor() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+        ordinary = _request(0, 120_000, request_id="ordinary-partial")
+        ordinary_id = coordinator.request(ordinary)
+        await engine.first_started.wait()
+        bucket = coordinator._scheduler._bucket_for(ordinary)
+        bucket.tokens = 0
+        bucket.refill_per_second = 0
+        bucket.cooldown_until_ms = int(time.time() * 1000) + 60_000
+        engine.release_first.set()
+        await _wait_until(lambda: any(
+            item["request_id"] == ordinary_id
+            and item["completed_chunks"] == 1
+            for item in coordinator.snapshot()["pending"]
+        ))
+
+        trusted = _request(0, 120_000, request_id="trusted-full-successor")
+        trusted.reason = "query_untrusted_finality"
+        trusted.metadata["query_reason"] = "query_untrusted_finality"
+        trusted_id = coordinator.request(trusted)
+
+        assert trusted_id == "trusted-full-successor"
+        assert {item["request_id"] for item in coordinator.snapshot()["pending"]} == {
+            ordinary_id,
+            trusted_id,
+        }
+        bucket.tokens = 60
+        bucket.refill_per_second = 60
+        bucket.cooldown_until_ms = 0
+        coordinator._scheduler._drain()
+        ordinary_outcome, trusted_outcome = await asyncio.gather(
+            coordinator.wait_for_request(ordinary_id),
+            coordinator.wait_for_request(trusted_id),
+        )
+
+        assert ordinary_outcome is not None
+        assert trusted_outcome is not None
+        ordinary_calls = [
+            call for call in engine.calls
+            if call["metadata"].get("requires_trusted_finality") is not True
+        ]
+        trusted_calls = [
+            call for call in engine.calls
+            if call["metadata"].get("requires_trusted_finality") is True
+        ]
+        assert [call["range_start_ms"] for call in ordinary_calls] == [
+            0,
+            60_000,
+            120_000,
+        ]
+        assert [call["range_start_ms"] for call in trusted_calls] == [
+            0,
+            60_000,
+            120_000,
+        ]
+
+    asyncio.run(_run())
+
+
+def test_ledger_recovery_requeues_physically_contiguous_untrusted_rows(
+    tmp_path,
+) -> None:
+    async def _run() -> None:
+        class _UntrustedStorage:
+            def scan_gaps(self, **kwargs):
+                return {
+                    "gap_count": 0,
+                    "scanned_bars": 2,
+                    "truncated": False,
+                }
+
+            def query_bars(self, **kwargs):
+                return [
+                    {"open_time": 0, "source": "data_manager_closed"},
+                    {"open_time": 60_000, "source": "backfill"},
+                ]
+
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                self.started.set()
+                await self.release.wait()
+                return _RepairReport(status="completed")
+
+        request = _request(0, 60_000, request_id="trusted-ledger-restart")
+        request.reason = "query_untrusted_finality"
+        request.metadata["requires_trusted_finality"] = True
+        ledger = GapLedger(tmp_path / "trusted-ledger-restart.sqlite")
+        ledger.upsert_detected(request)
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_UntrustedStorage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            gap_ledger=ledger,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+        )
+
+        report = await coordinator.reconcile_gap_ledger(
+            stale_after_ms=0,
+            scan_limit=100,
+        )
+        await asyncio.wait_for(engine.started.wait(), timeout=1.0)
+
+        assert report.resolved == 0
+        assert report.requeued == 1
+        assert engine.calls[0]["metadata"]["requires_trusted_finality"] is True
+
+        engine.release.set()
+        await coordinator.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_ordinary_parent_cannot_finalize_newer_trusted_ledger_ticket(
+    tmp_path,
+) -> None:
+    async def _run() -> None:
+        ledger = GapLedger(tmp_path / "trusted-ledger-ticket.sqlite")
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            gap_ledger=ledger,
+            loop=asyncio.get_running_loop(),
+        )
+
+        ordinary_exact = _request(0, 60_000, request_id="ordinary-exact")
+        trusted_exact = _request(0, 60_000, request_id="trusted-exact")
+        trusted_exact.reason = "query_untrusted_finality"
+        trusted_exact.metadata["requires_trusted_finality"] = True
+        ledger.upsert_detected(ordinary_exact)
+        ledger.upsert_detected(trusted_exact)
+        await coordinator._ledger_finalize_parent(
+            ordinary_exact,
+            RepairOutcome(
+                request=ordinary_exact,
+                status="completed",
+                verified_contiguous=True,
+            ),
+        )
+        assert ledger.get_status(trusted_exact)["status"] == "queued"
+
+        ordinary_cover = _request(0, 120_000, request_id="ordinary-cover")
+        ordinary_cover.symbol = "ETHUSDT"
+        trusted_child = _request(60_000, 60_000, request_id="trusted-child")
+        trusted_child.symbol = "ETHUSDT"
+        trusted_child.reason = "query_untrusted_finality"
+        trusted_child.metadata["requires_trusted_finality"] = True
+        ledger.upsert_detected(ordinary_cover)
+        ledger.upsert_detected(trusted_child)
+        await coordinator._ledger_finalize_parent(
+            ordinary_cover,
+            RepairOutcome(
+                request=ordinary_cover,
+                status="completed",
+                verified_contiguous=True,
+            ),
+        )
+        assert ledger.get_status(ordinary_cover)["status"] == "filled"
+        assert ledger.get_status(trusted_child)["status"] == "queued"
+        await coordinator.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_trusted_finality_repair_verification_rejects_physically_contiguous_legacy_rows() -> None:
+    async def _run() -> None:
+        class _Report:
+            status = "completed"
+            errors: list[str] = []
+            reconcile_result = _ReconcileResult(bars_written=0)
+
+        class _Engine:
+            async def run(self, **kwargs):
+                return _Report()
+
+        class _ContiguousLegacyStorage:
+            def query_bars(self, **kwargs):
+                return [
+                    {"open_time": 0, "source": "backfill"},
+                    {"open_time": 60_000, "source": "data_manager_closed"},
+                ]
+
+        ledger = _Ledger()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_ContiguousLegacyStorage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=_Engine(),
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            gap_ledger=ledger,
+        )
+        request = _request(0, 60_000, request_id="legacy-source")
+        request.reason = "query_untrusted_finality"
+        request.metadata["query_reason"] = "query_untrusted_finality"
+
+        outcome = await coord.request_and_wait(request)
+
+        assert outcome.verified_contiguous is False
+        assert outcome.remaining_missing_bars == 1
+        assert ledger.events[-1] == (
+            "resolved",
+            {
+                "id": "legacy-source",
+                "status": "partial",
+                "missing_count": 1,
+                "error": None,
+            },
+        )
+
+    asyncio.run(_run())
+
+
+def test_custom_target_repair_loads_and_emits_only_target_series() -> None:
+    async def _run() -> None:
+        class _ReconcileResult:
+            bars_written = 91
+            custom_bars_written = 1
+            written_ranges = [
+                {
+                    "exchange": "binance",
+                    "market_type": "spot",
+                    "symbol": "BTCUSDT",
+                    "interval": "1m",
+                    "start_ms": 0,
+                    "end_ms": 5_400_000,
+                    "bars_written": 91,
+                },
+                {
+                    "exchange": "binance",
+                    "market_type": "spot",
+                    "symbol": "BTCUSDT",
+                    "interval": "91m",
+                    "start_ms": 0,
+                    "end_ms": 0,
+                    "bars_written": 1,
+                },
+            ]
+
+        class _Report:
+            status = "completed"
+            errors: list[str] = []
+            reconcile_result = _ReconcileResult()
+
+        class _Engine:
+            async def run(self, **kwargs):
+                assert kwargs["intervals"] == ["91m"]
+                return _Report()
+
+        class _Storage:
+            def query_bars(self, **kwargs):
+                assert kwargs["interval"] == "91m"
+                return [{
+                    "open_time": 0,
+                    "open": 1,
+                    "high": 3,
+                    "low": 1,
+                    "close": 2,
+                    "volume": 91,
+                    "source": "backfill_aggregated",
+                }]
+
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=_Engine(),
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+        request = RepairRequest(
+            symbol="BTCUSDT",
+            interval="91m",
+            start_ms=0,
+            end_ms=0,
+            request_id="repair-91m",
+        )
+
+        outcome = await coord.request_and_wait(request)
+
+        assert outcome.verified_contiguous is True
+        assert outcome.bars_loaded == 1
+        assert [(symbol, interval) for symbol, interval, *_ in dm.loaded] == [
+            ("BTCUSDT", "91m")
+        ]
+        assert dm.loaded[0][3]["event_detail"]["request_id"] == "repair-91m"
+        assert dm.loaded[0][3]["event_detail"]["verified_contiguous"] is True
+
+    asyncio.run(_run())
+
+
+def test_custom_target_repair_does_not_fallback_when_only_base_was_written() -> None:
+    async def _run() -> None:
+        class _ReconcileResult:
+            bars_written = 91
+            custom_bars_written = 0
+            written_ranges = [{
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "interval": "1m",
+                "start_ms": 0,
+                "end_ms": 5_400_000,
+                "bars_written": 91,
+            }]
+
+        class _Report:
+            status = "completed"
+            errors: list[str] = []
+            reconcile_result = _ReconcileResult()
+
+        class _Engine:
+            calls = 0
+
+            async def run(self, **kwargs):
+                self.calls += 1
+                return _Report()
+
+        class _AmbiguousTargetStorage:
+            def query_bars(self, **kwargs):
+                assert kwargs["interval"] == "91m"
+                return [{
+                    "open_time": 0,
+                    "open": 1,
+                    "high": 3,
+                    "low": 1,
+                    "close": 2,
+                    "volume": 91,
+                    "source": "data_manager_closed",
+                }]
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_AmbiguousTargetStorage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+        request = RepairRequest(
+            symbol="BTCUSDT",
+            interval="91m",
+            start_ms=0,
+            end_ms=0,
+            request_id="base-only-91m",
+            metadata={
+                "derived_from": "1m",
+                "requires_trusted_finality": True,
+            },
+        )
+
+        outcome = await coord.request_and_wait(request)
+
+        assert engine.calls == 3
+        assert outcome.verified_contiguous is False
+        assert outcome.remaining_missing_bars == 1
+        assert outcome.retryable is True
+        assert outcome.bars_loaded == 0
+        assert dm.loaded == []
+        assert coord.snapshot()["coverage"] == {}
+
+    asyncio.run(_run())
+
+
+def test_ordinary_incomplete_verification_retries_and_never_claims_coverage() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def run(self, **kwargs):
+                self.calls += 1
+                return _RepairReport(
+                    status="completed",
+                    reconcile_result=_ReconcileResult(bars_written=1),
+                )
+
+        class _StillGappedStorage:
+            def query_bars(self, **kwargs):
+                return [{
+                    "open_time": 0,
+                    "open": 1,
+                    "high": 2,
+                    "low": 1,
+                    "close": 2,
+                    "volume": 3,
+                }]
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_StillGappedStorage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            max_retries=3,
+            base_delay_seconds=0,
+        )
+
+        outcome = await coord.request_and_wait(
+            _request(0, 60_000, request_id="ordinary-partial")
+        )
+
+        assert engine.calls == 3
+        assert outcome.attempts == 3
+        assert outcome.verified_contiguous is False
+        assert outcome.remaining_missing_bars == 1
+        assert outcome.retryable is True
+        assert coord.snapshot()["coverage"] == {}
+
+    asyncio.run(_run())
+
+
+def test_zero_progress_incomplete_verification_stays_retryable_with_deadline(
+    tmp_path,
+) -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def run(self, **kwargs):
+                self.calls += 1
+                return _RepairReport(status="completed")
+
+        class _EmptyStorage:
+            def query_bars(self, **kwargs):
+                return []
+
+        request = _request(0, 60_000, request_id="zero-progress-partial")
+        engine = _Engine()
+        ledger = GapLedger(tmp_path / "klines.sqlite")
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_EmptyStorage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            gap_ledger=ledger,
+            loop=asyncio.get_running_loop(),
+            max_retries=3,
+            base_delay_seconds=0,
+        )
+
+        outcome = await coord.request_and_wait(request)
+        status = ledger.get_status(request)
+
+        assert engine.calls == 3
+        assert outcome.verified_contiguous is False
+        assert outcome.retryable is True
+        assert status["status"] == "partial"
+        assert status["missing_count"] == 2
+        assert status["next_retry_at"] is not None
+        assert coord.snapshot()["coverage"] == {}
+
+    asyncio.run(_run())
 
 
 def test_repair_request_merge_stably_dedupes_derived_targets() -> None:
@@ -1222,6 +2664,7 @@ def test_chunked_parent_is_not_filled_when_any_chunk_verification_is_unknown(
         assert outcome.verified_contiguous is None
         assert ledger.get_status(parent)["status"] == "partial"
         assert ledger.get_status(parent)["resolved_at"] is None
+        assert ledger.get_status(parent)["next_retry_at"] is not None
 
     asyncio.run(_run())
 
@@ -1340,9 +2783,9 @@ def test_stale_queued_ledger_row_requeues_only_after_storage_confirms_gap(tmp_pa
         assert report.scanned == 1
         assert report.resolved == 0
         assert report.requeued == 1
-        await _wait_until(lambda: len(engine.calls) == 1)
+        await _wait_until(lambda: len(engine.calls) == 3)
         await _wait_until(
-            lambda: ledger.get_status(request)["status"] == "source_empty"
+            lambda: ledger.get_status(request)["status"] == "partial"
         )
         assert engine.calls[0]["metadata"]["origin"] == "stale_ledger_recovery"
 
@@ -1670,7 +3113,7 @@ def test_due_inactive_ledger_outcome_requeues_when_closed_storage_still_has_gap(
         assert report.scanned == 1
         assert report.requeued == 1
         await _wait_until(
-            lambda: len(engine.calls) == 1
+            lambda: len(engine.calls) == 3
             and not coordinator.snapshot()["active"]
         )
         assert engine.calls[0]["metadata"]["origin"] == "stale_ledger_recovery"
@@ -1767,8 +3210,7 @@ def test_source_empty_parent_suppresses_repeated_exact_and_child_requests_until_
 ) -> None:
     async def _run() -> None:
         class _EmptyStorage:
-            def query_bars(self, **kwargs):
-                return []
+            pass
 
         class _EmptyEngine:
             def __init__(self) -> None:
@@ -1793,11 +3235,13 @@ def test_source_empty_parent_suppresses_repeated_exact_and_child_requests_until_
             base_delay_seconds=0,
         )
 
-        await coordinator.request_and_wait(parent)
+        ledger.upsert_detected(parent)
+        ledger.mark_resolved(parent, status="source_empty")
+        await coordinator.refresh_suppressions()
         parent_status = ledger.get_status(parent)
         assert parent_status["status"] == "source_empty"
         assert parent_status["next_retry_at"] is not None
-        assert len(engine.calls) == 1
+        assert len(engine.calls) == 0
 
         suppressed = await coordinator.request_and_wait(child)
         assert suppressed.status == "suppressed"
@@ -1807,7 +3251,7 @@ def test_source_empty_parent_suppresses_repeated_exact_and_child_requests_until_
         assert suppressed.retry_at_ms == parent_status["next_retry_at"]
         assert suppressed.suppression["start_ms"] == parent.start_ms
         assert suppressed.suppression["end_ms"] == parent.end_ms
-        assert len(engine.calls) == 1
+        assert len(engine.calls) == 0
         assert ledger.get_status(parent)["status"] == "source_empty"
         assert ledger.get_status(child) is None
 
@@ -1815,7 +3259,7 @@ def test_source_empty_parent_suppresses_repeated_exact_and_child_requests_until_
         await coordinator.refresh_suppressions()
         due_child = _request(60_000, 60_000, request_id="empty-child-due")
         await coordinator.request_and_wait(due_child)
-        assert len(engine.calls) == 2
+        assert len(engine.calls) == 1
 
     asyncio.run(_run())
 

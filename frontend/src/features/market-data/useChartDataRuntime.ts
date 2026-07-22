@@ -14,7 +14,8 @@ import { assertWindowBudget } from "../../runtime/performance/windowBudgetAssert
 import { parseIntervalSeconds } from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
-import type { CommitChartData, PendingInitialSeries } from "./klineContracts.js";
+import type { CommitChartData, PendingInitialSeries, WindowDelta } from "./klineContracts.js";
+import { IndicatorWindowCommitBuffer } from "./indicatorWindowCommitBuffer.js";
 import type { EpochSeconds, KlineBar, SeriesKey } from "./marketDataTypes.js";
 import { resolvePatchedChartDataStatus } from "./chartDataRuntime.js";
 import { MAX_SERIES_BARS } from "./phase1WindowPolicy.js";
@@ -61,7 +62,9 @@ export interface ChartDataCommitMeta extends Record<string, unknown> {
   windowDeltaType?: string;
   incomingFirstTime?: EpochSeconds | null;
   incomingLastTime?: EpochSeconds | null;
+  changedRanges?: WindowDelta["changedRanges"];
   dataRevision?: unknown;
+  indicatorWindowDeferred?: boolean;
 }
 
 interface CommitMetaExtra extends Record<string, unknown> {
@@ -98,6 +101,8 @@ interface ReplaceChartDataOptions {
 }
 
 interface MergeChartDataOptions {
+  deferIndicatorWindow?: boolean;
+  indicatorWindowOwner?: string;
   onMerged?: (rows: KlineBar[]) => void;
   source?: string;
 }
@@ -112,6 +117,7 @@ interface UseChartDataRuntimeOptions {
   marketType: MarketType;
   symbol: SymbolCode;
   interval: IntervalString;
+  onIndicatorWindowMeta?: (meta: ChartDataCommitMeta) => void;
 }
 
 export interface ChartDataRuntime {
@@ -155,6 +161,7 @@ export function useChartDataRuntime({
   marketType,
   symbol,
   interval,
+  onIndicatorWindowMeta,
 }: UseChartDataRuntimeOptions): ChartDataRuntime {
   const [chartData, setChartData] = useState<KlineBar[]>([]);
   const chartDataRef = useRef<KlineBar[]>([]);
@@ -180,6 +187,7 @@ export function useChartDataRuntime({
   const chartDataVersionRef = useRef(0);
   const chartDataCommitMetaRef = useRef<ChartDataCommitMeta | null>(null);
   const pendingInitialHistoryRef = useRef<PendingInitialSeries | null>(null);
+  const indicatorWindowCommitBufferRef = useRef(new IndicatorWindowCommitBuffer());
 
   const cacheKey = useCallback(
     (sym: SymbolCode, intv: IntervalString, mt = marketType, ex = exchange) => buildSeriesWindowKey({
@@ -415,6 +423,7 @@ export function useChartDataRuntime({
 
   const clearCache = useCallback(() => {
     const keys = windowRegistry.clear();
+    indicatorWindowCommitBufferRef.current.clear();
     for (const key of keys) {
       unregisterCacheResource("chart-data-cache", key);
     }
@@ -534,7 +543,7 @@ export function useChartDataRuntime({
     const status = inferCommitStatus(source, data, extra);
     chartDataVersionRef.current = version;
     const seriesKey = cacheKey(sym, intv);
-    const commitMeta = {
+    const commitMeta: ChartDataCommitMeta = {
       version,
       status,
       source,
@@ -547,6 +556,11 @@ export function useChartDataRuntime({
       coverage: bars > 0 ? { from: firstTime, to: lastTime, bars } : null,
       committedAt: Date.now(),
       ...metaExtra,
+      // A realtime/chart commit can land between a partial history commit and
+      // its settled probe. Keep the pending marker sticky for that exact
+      // series so WS corrections cannot flush against an incomplete window.
+      indicatorWindowDeferred: metaExtra.indicatorWindowDeferred === true
+        || indicatorWindowCommitBufferRef.current.hasPending(seriesKey),
     };
     const store = windowRegistry.get(seriesKey);
     if (store && bars > 0) {
@@ -561,6 +575,9 @@ export function useChartDataRuntime({
       unregisterCacheResource("chart-data-cache", seriesKey);
     }
     chartDataCommitMetaRef.current = commitMeta;
+    if (commitMeta.indicatorWindowDeferred !== true) {
+      onIndicatorWindowMeta?.(commitMeta);
+    }
     setChartDataMeta(commitMeta);
     recordPerfEvent("chart.data.commit", {
       source,
@@ -599,7 +616,7 @@ export function useChartDataRuntime({
       }
     }
     return version;
-  }, [cacheKey, exchange, marketType, registerStoreResource, windowRegistry]);
+  }, [cacheKey, exchange, marketType, onIndicatorWindowMeta, registerStoreResource, windowRegistry]);
 
   const markChartDataTransition = useCallback((
     sym: SymbolCode,
@@ -607,6 +624,10 @@ export function useChartDataRuntime({
     source = "session-transition",
   ) => {
     const previous = chartDataCommitMetaRef.current;
+    if (previous?.seriesKey) {
+      indicatorWindowCommitBufferRef.current.discard(previous.seriesKey);
+    }
+    indicatorWindowCommitBufferRef.current.discard(cacheKey(sym, intv));
     const version = chartDataVersionRef.current + 1;
     chartDataVersionRef.current = version;
     const transitionMeta = {
@@ -619,6 +640,9 @@ export function useChartDataRuntime({
       targetInterval: intv,
       committedAt: Date.now(),
       optimistic: true,
+      // The retained bars may belong to the prior series, but deferred history
+      // ownership never does. A session transition cancels it explicitly.
+      indicatorWindowDeferred: false,
     };
     chartDataCommitMetaRef.current = transitionMeta;
     setChartDataMeta(transitionMeta);
@@ -703,6 +727,7 @@ export function useChartDataRuntime({
       }
       const evicted = windowRegistry.evict(key);
       if (!evicted) continue;
+      indicatorWindowCommitBufferRef.current.discard(key);
       unregisterCacheResource("chart-data-cache", key);
       removed.push({
         owner: "chart-data-cache",
@@ -741,6 +766,7 @@ export function useChartDataRuntime({
     { cache = false, source = "replace" }: ReplaceChartDataOptions = {},
   ) => {
     const key = cacheKey(sym, intv);
+    indicatorWindowCommitBufferRef.current.discard(key);
     const store = getStore(sym, intv, { meta: { source } });
     const delta = store.replace(data, { source });
     const next = store.snapshot({ force: true });
@@ -787,6 +813,7 @@ export function useChartDataRuntime({
     intv: IntervalString = interval,
   ) => {
     const key = cacheKey(sym, intv);
+    indicatorWindowCommitBufferRef.current.discard(key);
     const store = getStore(sym, intv);
     store.clear({ source });
     chartDataRef.current = [];
@@ -807,11 +834,32 @@ export function useChartDataRuntime({
     sym: SymbolCode,
     intv: IntervalString,
     incoming: KlineBar[],
-    { onMerged, source = "merge" }: MergeChartDataOptions = {},
+    {
+      deferIndicatorWindow = false,
+      indicatorWindowOwner,
+      onMerged,
+      source = "merge",
+    }: MergeChartDataOptions = {},
   ) => {
-    if (!incoming?.length) return;
     const key = cacheKey(sym, intv);
     const store = getStore(sym, intv, { meta: { source } });
+    if (!incoming?.length) {
+      const indicatorWindowCommit = indicatorWindowCommitBufferRef.current.record(key, [], {
+        ownerToken: indicatorWindowOwner,
+        pending: deferIndicatorWindow,
+      });
+      if (indicatorWindowCommit.lifecycleChanged || indicatorWindowCommit.publish) {
+        recordChartDataCommit(sym, intv, store.snapshot(), source, {
+          status: "ready",
+          ...(indicatorWindowCommit.ranges.length > 0
+            ? { windowDeltaType: WINDOW_DELTA_TYPES.MID_MERGE }
+            : {}),
+          changedRanges: indicatorWindowCommit.ranges,
+          indicatorWindowDeferred: indicatorWindowCommit.deferred,
+        });
+      }
+      return;
+    }
     // Re-seed only when the currently rendered rows belong to this exact
     // series (e.g. the active store was evicted while still displayed).
     // During optimistic session transitions chartDataRef still holds the
@@ -826,9 +874,31 @@ export function useChartDataRuntime({
     const delta = store.applyRange(incoming, { source });
     const next = store.snapshot({ force: delta.changed });
     if (delta.type === WINDOW_DELTA_TYPES.NOOP) {
+      const indicatorWindowCommit = indicatorWindowCommitBufferRef.current.record(key, [], {
+        ownerToken: indicatorWindowOwner,
+        pending: deferIndicatorWindow,
+      });
+      if (indicatorWindowCommit.lifecycleChanged || indicatorWindowCommit.publish) {
+        recordChartDataCommit(sym, intv, next, source, {
+          status: "ready",
+          ...(indicatorWindowCommit.ranges.length > 0
+            ? { windowDeltaType: WINDOW_DELTA_TYPES.MID_MERGE }
+            : {}),
+          changedRanges: indicatorWindowCommit.ranges,
+          indicatorWindowDeferred: indicatorWindowCommit.deferred,
+        });
+      }
       if (onMerged) onMerged(next);
       return;
     }
+    const indicatorWindowCommit = indicatorWindowCommitBufferRef.current.record(
+      key,
+      delta.changedRanges,
+      {
+        ownerToken: indicatorWindowOwner,
+        pending: deferIndicatorWindow,
+      },
+    );
     chartDataRef.current = next;
     setActiveSeriesStore(store);
     registerStoreResource(key, store, { symbol: sym, interval: intv, source });
@@ -852,6 +922,8 @@ export function useChartDataRuntime({
       windowDeltaType: delta.type,
       addedLeft: delta.addedLeft || 0,
       addedRight: delta.addedRight || 0,
+      changedRanges: indicatorWindowCommit.ranges,
+      indicatorWindowDeferred: indicatorWindowCommit.deferred,
     });
     if (onMerged) onMerged(next);
     setChartData(next);
@@ -909,6 +981,11 @@ export function useChartDataRuntime({
       const delta = store.applyRange(ticks, { source });
       if (delta.type === WINDOW_DELTA_TYPES.NOOP) return;
 
+      const deferIndicatorWindow = indicatorWindowCommitBufferRef.current.hasPending(key);
+      const indicatorWindowCommit = deferIndicatorWindow
+        ? indicatorWindowCommitBufferRef.current.record(key, delta.changedRanges)
+        : { ranges: delta.changedRanges || [] };
+
       const next = store.snapshot({ force: true });
       const patchedStatus = resolvePatchedChartDataStatus(
         source,
@@ -930,6 +1007,8 @@ export function useChartDataRuntime({
       });
       recordChartDataCommit(sym, intv, next, source, {
         incomingBars: ticks.length,
+        incomingFirstTime: ticks[0]?.time ?? null,
+        incomingLastTime: ticks[ticks.length - 1]?.time ?? null,
         ...(patchedStatus === undefined ? {} : { status: patchedStatus }),
         seeded: false,
         ...(delta.originalBars === undefined ? {} : { originalBars: delta.originalBars }),
@@ -938,6 +1017,8 @@ export function useChartDataRuntime({
         windowDeltaType: delta.type,
         addedLeft: delta.addedLeft || 0,
         addedRight: delta.addedRight || 0,
+        changedRanges: indicatorWindowCommit.ranges,
+        indicatorWindowDeferred: deferIndicatorWindow,
       });
       setChartData(next);
       return;
@@ -949,6 +1030,7 @@ export function useChartDataRuntime({
     let structural = false;
     let trimmedLeft = 0;
     let trimmedRight = 0;
+    const structuralChangedRanges: WindowDelta["changedRanges"] = [];
     for (const tick of ticks) {
       const delta = store.applyTick(tick, { source });
       if (delta.type === WINDOW_DELTA_TYPES.NOOP) continue;
@@ -958,6 +1040,9 @@ export function useChartDataRuntime({
       replaced = replaced || Boolean(delta.replaced);
       trimmedLeft += delta.trimmedLeft || 0;
       trimmedRight += delta.trimmedRight || 0;
+      if (delta.type === WINDOW_DELTA_TYPES.MID_MERGE) {
+        structuralChangedRanges.push({ start: tick.time, end: tick.time, type: "mid-merge" });
+      }
     }
     if (!changed) return;
 
@@ -975,6 +1060,10 @@ export function useChartDataRuntime({
     }
 
     const next = store.snapshot({ force: true });
+    const deferIndicatorWindow = indicatorWindowCommitBufferRef.current.hasPending(key);
+    const indicatorWindowCommit = deferIndicatorWindow
+      ? indicatorWindowCommitBufferRef.current.record(key, structuralChangedRanges)
+      : { ranges: structuralChangedRanges };
     chartDataRef.current = next;
     setActiveSeriesStore(store);
     registerStoreResource(key, store, { symbol: sym, interval: intv, source });
@@ -990,6 +1079,8 @@ export function useChartDataRuntime({
 
     recordChartDataCommit(sym, intv, next, source, {
       incomingBars: ticks.length,
+      incomingFirstTime: ticks[0]?.time ?? null,
+      incomingLastTime: ticks[ticks.length - 1]?.time ?? null,
       ...(prev.length > 0 && chartDataCommitMetaRef.current?.status !== undefined
         ? { status: chartDataCommitMetaRef.current.status }
         : {}),
@@ -998,6 +1089,8 @@ export function useChartDataRuntime({
       trimmedLeft,
       trimmedRight,
       windowDeltaType: structural ? WINDOW_DELTA_TYPES.MID_MERGE : WINDOW_DELTA_TYPES.TICK,
+      changedRanges: indicatorWindowCommit.ranges,
+      indicatorWindowDeferred: deferIndicatorWindow,
     });
     setChartData(next);
   }, [

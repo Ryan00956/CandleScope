@@ -42,15 +42,22 @@ export interface ApiRequestOptions {
 export interface ApiErrorInit {
   status: number;
   detail?: string | null;
+  code?: string | null;
   url: string;
 }
 
 export interface RequestSignalOptions {
   signal?: AbortSignal;
+  demandScope?: string;
+  demandGeneration?: number;
 }
 
 export interface KlineHistoryOptions extends RequestSignalOptions {
   countBack?: number | null;
+}
+
+export interface KlineBeforeOptions extends RequestSignalOptions {
+  maxWaitMs?: number;
 }
 
 export interface KlineRangeOptions extends RequestSignalOptions {
@@ -73,14 +80,16 @@ export function getClientInstanceId(): string {
 export class ApiError extends Error {
   status: number;
   detail: string;
+  code: string | null;
   url: string;
 
-  constructor({ status, detail, url }: ApiErrorInit) {
+  constructor({ status, detail, code, url }: ApiErrorInit) {
     const resolvedDetail = detail || `HTTP ${status}`;
     super(resolvedDetail);
     this.name = "ApiError";
     this.status = status;
     this.detail = resolvedDetail;
+    this.code = code || null;
     this.url = url;
   }
 }
@@ -124,10 +133,14 @@ export async function request(
   });
   if (!response.ok) {
     const errorData: unknown = await response.json().catch(() => ({}));
-    const detail = isJsonRecord(errorData) && typeof errorData.detail === "string"
-      ? errorData.detail
+    const rawDetail = isJsonRecord(errorData) ? errorData.detail : undefined;
+    const detail = typeof rawDetail === "string"
+      ? rawDetail
       : `HTTP ${response.status}`;
-    throw new ApiError({ status: response.status, detail, url });
+    const code = isJsonRecord(rawDetail) && typeof rawDetail.code === "string"
+      ? rawDetail.code
+      : null;
+    throw new ApiError({ status: response.status, detail, code, url });
   }
   if (response.status === 204) return null;
   const payload: unknown = await response.json();
@@ -167,6 +180,8 @@ export async function fetchKlinesHistory(
     count_back: options.countBack,
     exchange,
     market_type: marketType,
+    request_scope: options.demandScope,
+    request_generation: options.demandGeneration,
   }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/history");
 }
@@ -178,7 +193,7 @@ export async function fetchKlinesBefore(
   bars = 500,
   marketType = "spot",
   exchange = "binance",
-  options: RequestSignalOptions = {},
+  options: KlineBeforeOptions = {},
 ): Promise<TransportKlineResponse> {
   const payload = await request(buildUrl("/klines/history/before", {
     symbol,
@@ -187,6 +202,9 @@ export async function fetchKlinesBefore(
     bars,
     exchange,
     market_type: marketType,
+    max_wait_ms: options.maxWaitMs,
+    request_scope: options.demandScope,
+    request_generation: options.demandGeneration,
   }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/history/before");
 }
@@ -231,6 +249,8 @@ export async function fetchKlinesRange(
     repair: options.repair || "async",
     wait_ms: options.waitMs ?? 0,
     strict: options.strict ?? false,
+    request_scope: options.demandScope,
+    request_generation: options.demandGeneration,
   }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/range");
 }

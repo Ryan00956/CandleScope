@@ -10,6 +10,7 @@ import type {
   IndicatorLine,
   IndicatorMarkerGroup,
   NormalizedIndicatorDataEntry,
+  NormalizedIndicatorSeriesEntry,
   PerfEventRecorder,
   SeriesDataWriter,
 } from "./chartAdapterTypes.js";
@@ -30,7 +31,8 @@ interface NormalizedLineCacheEntry {
   allowedTimeSetSize: number;
   colorData: object | null;
   histogram: boolean;
-  result: NormalizedIndicatorDataEntry[];
+  expectedIntervalSeconds: number | null;
+  result: NormalizedIndicatorSeriesEntry[];
 }
 
 interface AlignedGroupCacheEntry<TResult> {
@@ -94,6 +96,39 @@ function normalizedHistogramPoint(
   return normalized;
 }
 
+function insertLineGapBreaks(
+  data: NormalizedIndicatorDataEntry[],
+  expectedIntervalSeconds: number | null | undefined,
+): NormalizedIndicatorSeriesEntry[] {
+  if (!expectedIntervalSeconds
+    || !Number.isFinite(expectedIntervalSeconds)
+    || expectedIntervalSeconds <= 0
+    || data.length < 2) {
+    return data;
+  }
+
+  let previousNumericTime: number | null = null;
+  let result: NormalizedIndicatorSeriesEntry[] | null = null;
+  for (let index = 0; index < data.length; index += 1) {
+    const point = data[index];
+    if (!point) continue;
+    const numericTime = typeof point.time === "number" && Number.isFinite(point.time)
+      ? point.time
+      : null;
+    if (
+      previousNumericTime !== null
+      && numericTime !== null
+      && numericTime - previousNumericTime > expectedIntervalSeconds * 1.5
+    ) {
+      if (result === null) result = data.slice(0, index);
+      result.push({ time: previousNumericTime + expectedIntervalSeconds });
+    }
+    result?.push(point);
+    previousNumericTime = numericTime;
+  }
+  return result ?? data;
+}
+
 export function toCandlePoint(d: ChartSeriesInputRow): ChartSeriesInputRow {
   const time = d.time;
   if (time == null) return {};
@@ -148,7 +183,8 @@ export function normalizeLineSeriesData(
   line: IndicatorLine | null | undefined,
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
   allowedKeysInput?: ReadonlySet<string> | null,
-): NormalizedIndicatorDataEntry[] {
+  expectedIntervalSeconds: number | null = null,
+): NormalizedIndicatorSeriesEntry[] {
   const allowedKeys = allowedKeysInput ?? buildAllowedTimeKeys(allowedTimeSet);
   const isHistogram = line?.type === "histogram";
   const source = line?.data || [];
@@ -158,11 +194,12 @@ export function normalizeLineSeriesData(
   if (cached?.allowedTimeSet === allowedTimeSetKey
     && cached.allowedTimeSetSize === (allowedTimeSet?.size ?? -1)
     && cached.colorData === colorDataKey
-    && cached.histogram === isHistogram) {
+    && cached.histogram === isHistogram
+    && cached.expectedIntervalSeconds === expectedIntervalSeconds) {
     return cached.result;
   }
   const sourceData = filterEntriesByTime(source, allowedTimeSet, allowedKeys);
-  let result: NormalizedIndicatorDataEntry[];
+  let result: NormalizedIndicatorSeriesEntry[];
   if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
     const colorMap = histogramColorMap(
       filterEntriesByTime(line.colorData, allowedTimeSet, allowedKeys),
@@ -183,15 +220,19 @@ export function normalizeLineSeriesData(
         return normalizedHistogramPoint(d, color);
       });
   } else {
-    result = sourceData.filter((d): d is NormalizedIndicatorDataEntry => (
+    const validData = sourceData.filter((d): d is NormalizedIndicatorDataEntry => (
       d?.time != null && d?.value != null && isFinite(d.value)
     ));
+    result = isHistogram
+      ? validData
+      : insertLineGapBreaks(validData, expectedIntervalSeconds);
   }
   normalizedLineCache.set(source, {
     allowedTimeSet: allowedTimeSetKey,
     allowedTimeSetSize: allowedTimeSet?.size ?? -1,
     colorData: colorDataKey,
     histogram: isHistogram,
+    expectedIntervalSeconds,
     result,
   });
   return result;
@@ -201,11 +242,17 @@ export function alignIndicatorLinesToTimes(
   indicatorLines: IndicatorLine[] = [],
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
   allowedKeysInput?: ReadonlySet<string> | null,
+  expectedIntervalSeconds: number | null = null,
 ): IndicatorLine[] {
   const allowedKeys = allowedKeysInput ?? buildAllowedTimeKeys(allowedTimeSet);
   return (indicatorLines || []).map((line) => ({
     ...line,
-    data: normalizeLineSeriesData(line, allowedTimeSet, allowedKeys),
+    data: normalizeLineSeriesData(
+      line,
+      allowedTimeSet,
+      allowedKeys,
+      expectedIntervalSeconds,
+    ),
     ...(Array.isArray(line?.colorData)
       ? { colorData: filterEntriesByTime(line.colorData, allowedTimeSet, allowedKeys) }
       : {}),

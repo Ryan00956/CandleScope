@@ -34,6 +34,16 @@ test("trimRowsToMaxBars keeps newest rows and reports left trim", () => {
   assert.equal(trim.trimmedRight, 0);
 });
 
+test("trimRowsToMaxBars can retain the oldest rows for historical prepends", () => {
+  const rows = Array.from({ length: 6 }, (_, index) => ({ time: index + 1 }));
+  const trim = trimRowsToMaxBars(rows, 4, "oldest");
+
+  assert.deepEqual(trim.rows.map((row) => row.time), [1, 2, 3, 4]);
+  assert.equal(trim.originalBars, 6);
+  assert.equal(trim.trimmedLeft, 0);
+  assert.equal(trim.trimmedRight, 2);
+});
+
 test("activeCoverageMsFromRows returns millisecond coverage for cached rows", () => {
   assert.deepEqual(
     activeCoverageMsFromRows([{ time: 20 }, { time: 10 }, { time: 30 }]),

@@ -29,6 +29,7 @@ Usage::
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Callable, Awaitable, Any
@@ -36,7 +37,10 @@ from typing import Callable, Awaitable, Any
 from app.data_engine.interval_policy import (
     compute_bucket_close_ms,
     compute_bucket_start_ms,
-    parse_interval_ms,
+)
+from app.data_engine.custom_materialization import (
+    MaterializationLease,
+    custom_materialization_registry,
 )
 
 from ..ingestion.metrics import LayerMetrics
@@ -83,6 +87,7 @@ class Reconciler:
         self._bar_aggregator: Any = None  # BarAggregator instance (optional)
         self._write_batch_callbacks: list[WriteBatchCallback] = []
         self._done_callbacks: list[ReconcileDoneCallback] = []
+        self._materialization_write_tasks: set[asyncio.Task[Any]] = set()
 
     # ── Public: Metrics / Snapshot ───────────────────────────
 
@@ -96,6 +101,9 @@ class Reconciler:
             "dedup_strategy": self._cfg.reconcile_dedup_strategy,
             "write_batch_size": self._cfg.reconcile_write_batch_size,
             "cache_enabled": self._cfg.reconcile_enable_cache_push,
+            "materialization_writes_draining": len(
+                self._materialization_write_tasks
+            ),
             "metrics": self._metrics.snapshot(),
         }
 
@@ -380,6 +388,214 @@ class Reconciler:
 
     # ── Internal: Custom interval aggregation ────────────────
 
+    def _defer_materialization_lease_release(
+        self,
+        lease: MaterializationLease,
+        storage_task: asyncio.Task[Any],
+    ) -> None:
+        """Keep ownership until a cancellation-resistant storage write ends.
+
+        ``run_in_executor`` cannot stop a worker that has begun mutating
+        SQLite.  The HTTP/coordinator task may still cancel immediately, but
+        the materialization range must remain occupied until that physical
+        worker's async wrapper reports completion.
+        """
+        self._materialization_write_tasks.add(storage_task)
+        self._metrics.inc("custom_materialization_cancelled_writes_deferred")
+
+        def _release(completed: asyncio.Task[Any]) -> None:
+            self._materialization_write_tasks.discard(completed)
+            try:
+                completed.result()
+            except BaseException as exc:
+                lease.fail(exc)
+                self._metrics.inc(
+                    "custom_materialization_deferred_write_failures"
+                )
+            else:
+                # The current batch may have committed, but cancellation
+                # means later batches in this lease were never attempted.
+                # Release as failed so a waiter retries the complete range,
+                # only after the physical write is no longer in flight.
+                lease.fail(
+                    "materialization owner cancelled after storage write"
+                )
+                self._metrics.inc(
+                    "custom_materialization_deferred_writes_drained"
+                )
+
+        storage_task.add_done_callback(_release)
+
+    async def _write_custom_materialization(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+        bars: list[FetchedBar],
+        phase: str,
+    ) -> tuple[int, list[dict[str, Any]], list[WrittenRange]]:
+        """Write one target range under shared query/reconciler ownership."""
+        if not bars:
+            return 0, [], []
+
+        bars = sorted(bars, key=lambda bar: bar.open_time)
+        contiguous_runs: list[list[FetchedBar]] = [[bars[0]]]
+        for bar in bars[1:]:
+            if bar.open_time == contiguous_runs[-1][-1].close_time + 1:
+                contiguous_runs[-1].append(bar)
+            else:
+                contiguous_runs.append([bar])
+        if len(contiguous_runs) > 1:
+            total_written = 0
+            all_failures: list[dict[str, Any]] = []
+            all_ranges: list[WrittenRange] = []
+            for run in contiguous_runs:
+                count, failures, ranges = await self._write_custom_materialization(
+                    exchange=exchange,
+                    market_type=market_type,
+                    symbol=symbol,
+                    interval=interval,
+                    bars=run,
+                    phase=phase,
+                )
+                total_written += count
+                all_failures.extend(failures)
+                all_ranges.extend(ranges)
+            return total_written, all_failures, all_ranges
+
+        start_ms = min(bar.open_time for bar in bars)
+        end_ms = max(bar.open_time for bar in bars)
+        series = custom_materialization_registry.series_key(
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+        )
+        async def _claim_materialization():
+            while True:
+                claimed, partial_overlap = (
+                    custom_materialization_registry.claim_nowait(
+                        series=series,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        owner="reconciler",
+                    )
+                )
+                if claimed is not None:
+                    return claimed
+                assert partial_overlap is not None
+                await asyncio.shield(asyncio.wrap_future(partial_overlap))
+
+        lease = await _claim_materialization()
+        while not lease.is_owner:
+            outcome = await asyncio.shield(asyncio.wrap_future(lease.future))
+            if outcome.success:
+                self._metrics.inc("custom_materialization_joins")
+                covered_rows = min(len(bars), outcome.rows_covered)
+                joined_range = (
+                    WrittenRange(
+                        symbol=symbol,
+                        interval=interval,
+                        exchange=exchange,
+                        market_type=market_type,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        bars_written=covered_rows,
+                        source="backfill_aggregated",
+                        phase=f"{phase}_joined_{outcome.owner}",
+                    )
+                    if covered_rows > 0
+                    else None
+                )
+                return (
+                    covered_rows,
+                    [],
+                    [joined_range] if joined_range is not None else [],
+                )
+            lease = await _claim_materialization()
+
+        self._metrics.inc("custom_materialization_owners")
+        written = 0
+        failures: list[dict[str, Any]] = []
+        written_ranges: list[WrittenRange] = []
+        batch_size = self._cfg.reconcile_write_batch_size
+        lease_finished = False
+        lease_release_deferred = False
+        try:
+            for i in range(0, len(bars), batch_size):
+                batch = bars[i : i + batch_size]
+                dicts = [bar.to_storage_dict() for bar in batch]
+                try:
+                    storage_task = asyncio.create_task(
+                        self._storage.upsert_bars(
+                            symbol,
+                            interval,
+                            dicts,
+                            source="backfill_aggregated",
+                            exchange=exchange,
+                            market_type=market_type,
+                        )
+                    )
+                    try:
+                        storage_result = await asyncio.shield(storage_task)
+                    except asyncio.CancelledError:
+                        self._defer_materialization_lease_release(
+                            lease,
+                            storage_task,
+                        )
+                        lease_release_deferred = True
+                        raise
+                    count = int(storage_result or 0)
+                    written += count
+                    # A successful upsert returning zero commonly means the
+                    # exact rows already existed.  Preserve durable coverage
+                    # separately from the physical mutation count so repair
+                    # completion never loses the target range.
+                    written_range = self._written_range_from_batch(
+                        exchange=exchange,
+                        market_type=market_type,
+                        symbol=symbol,
+                        interval=interval,
+                        batch=batch,
+                        bars_written=len(batch),
+                        source="backfill_aggregated",
+                        phase=phase,
+                    )
+                    if written_range is not None:
+                        written_ranges.append(written_range)
+                except Exception as exc:
+                    logger.error(
+                        "Custom bar write failed for %s@%s phase=%s: %s",
+                        symbol,
+                        interval,
+                        phase,
+                        exc,
+                        exc_info=True,
+                    )
+                    self._metrics.inc("write_errors")
+                    failures.append(self._write_failure_detail(
+                        exchange=exchange,
+                        market_type=market_type,
+                        symbol=symbol,
+                        interval=interval,
+                        batch=batch,
+                        error=exc,
+                        phase=phase,
+                    ))
+
+            if failures:
+                lease.fail(failures[0]["error"])
+            else:
+                lease.complete(written, rows_covered=len(bars))
+            lease_finished = True
+            return written, failures, written_ranges
+        except BaseException as exc:
+            if not lease_finished and not lease_release_deferred:
+                lease.fail(exc)
+            raise
+
     async def _generate_custom_bars(
         self,
         decomp: IntervalDecomposition,
@@ -465,47 +681,19 @@ class Reconciler:
                     custom_bars_from_agg.sort(key=lambda b: b.open_time)
                     generated += len(custom_bars_from_agg)
 
-                    # Write to storage
-                    batch_size = self._cfg.reconcile_write_batch_size
-                    for i in range(0, len(custom_bars_from_agg), batch_size):
-                        batch = custom_bars_from_agg[i : i + batch_size]
-                        dicts = [b.to_storage_dict() for b in batch]
-                        try:
-                            n = await self._storage.upsert_bars(
-                                symbol, custom_iv, dicts,
-                                source="backfill_aggregated",
-                                exchange=exchange,
-                                market_type=market_type,
-                            )
-                            written += n
-                            written_range = self._written_range_from_batch(
-                                exchange=exchange,
-                                market_type=market_type,
-                                symbol=symbol,
-                                interval=custom_iv,
-                                batch=batch,
-                                bars_written=n,
-                                source="backfill_aggregated",
-                                phase="custom_via_aggregator",
-                            )
-                            if written_range is not None:
-                                written_ranges.append(written_range)
-                        except Exception as exc:
-                            logger.error(
-                                "Custom bar write (via aggregator) failed "
-                                "for %s@%s: %s",
-                                symbol, custom_iv, exc, exc_info=True,
-                            )
-                            self._metrics.inc("write_errors")
-                            failures.append(self._write_failure_detail(
-                                exchange=exchange,
-                                market_type=market_type,
-                                symbol=symbol,
-                                interval=custom_iv,
-                                batch=batch,
-                                error=exc,
-                                phase="custom_via_aggregator",
-                            ))
+                    count, write_failures, ranges = (
+                        await self._write_custom_materialization(
+                            exchange=exchange,
+                            market_type=market_type,
+                            symbol=symbol,
+                            interval=custom_iv,
+                            bars=custom_bars_from_agg,
+                            phase="custom_via_aggregator",
+                        )
+                    )
+                    written += count
+                    failures.extend(write_failures)
+                    written_ranges.extend(ranges)
                     logger.debug(
                         "Custom bars via BarAggregator: %s@%s → %d bars",
                         symbol, custom_iv, len(custom_bars_from_agg),
@@ -527,48 +715,17 @@ class Reconciler:
             )
             generated += len(custom_bars)
 
-            # Write custom bars
-            batch_size = self._cfg.reconcile_write_batch_size
-            for i in range(0, len(custom_bars), batch_size):
-                batch = custom_bars[i : i + batch_size]
-                dicts = [b.to_storage_dict() for b in batch]
-                try:
-                    n = await self._storage.upsert_bars(
-                        symbol,
-                        custom_iv,
-                        dicts,
-                        source="backfill_aggregated",
-                        exchange=exchange,
-                        market_type=market_type,
-                    )
-                    written += n
-                    written_range = self._written_range_from_batch(
-                        exchange=exchange,
-                        market_type=market_type,
-                        symbol=symbol,
-                        interval=custom_iv,
-                        batch=batch,
-                        bars_written=n,
-                        source="backfill_aggregated",
-                        phase="custom",
-                    )
-                    if written_range is not None:
-                        written_ranges.append(written_range)
-                except Exception as exc:
-                    logger.error(
-                        "Custom bar write failed for %s@%s: %s",
-                        symbol, custom_iv, exc, exc_info=True,
-                    )
-                    self._metrics.inc("write_errors")
-                    failures.append(self._write_failure_detail(
-                        exchange=exchange,
-                        market_type=market_type,
-                        symbol=symbol,
-                        interval=custom_iv,
-                        batch=batch,
-                        error=exc,
-                        phase="custom",
-                    ))
+            count, write_failures, ranges = await self._write_custom_materialization(
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                interval=custom_iv,
+                bars=custom_bars,
+                phase="custom",
+            )
+            written += count
+            failures.extend(write_failures)
+            written_ranges.extend(ranges)
 
         return generated, written, failures, written_ranges
 
@@ -684,6 +841,25 @@ class Reconciler:
                 interval=custom_interval,
             )
 
+            components_cover_bucket = (
+                bucket_bars[0].open_time == bucket_start
+                and all(
+                    current.open_time == previous.close_time + 1
+                    for previous, current in zip(bucket_bars, bucket_bars[1:])
+                )
+                and bucket_bars[-1].close_time >= bucket_end
+            )
+            if not components_cover_bucket:
+                logger.warning(
+                    "Skipping incomplete custom bucket %s@%s open=%d "
+                    "components=%d",
+                    symbol,
+                    custom_interval,
+                    bucket_start,
+                    len(bucket_bars),
+                )
+                continue
+
             if self._custom_aggregator is not None:
                 agg = self._custom_aggregator(
                     bucket_bars, symbol, custom_interval,
@@ -694,18 +870,7 @@ class Reconciler:
                     bucket_bars, symbol, custom_interval,
                     bucket_start, bucket_end,
                 )
-
             if agg is not None:
-                components_cover_bucket = (
-                    bucket_bars[0].open_time == bucket_start
-                    and all(
-                        current.open_time == previous.close_time + 1
-                        for previous, current in zip(bucket_bars, bucket_bars[1:])
-                    )
-                    and bucket_bars[-1].close_time >= bucket_end
-                )
-                if not components_cover_bucket:
-                    agg.enhanced_fields = frozenset()
                 result.append(agg)
 
         return result

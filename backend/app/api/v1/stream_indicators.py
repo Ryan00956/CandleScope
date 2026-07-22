@@ -13,6 +13,7 @@ from app.api.v1.stream_indicator_payloads import (
     _patch_from_snapshot,
     _release_pyne_incremental_meta,
     confirmed_indicator_seed_bars,
+    store_indicator_seed_cache,
 )
 from app.api.v1.stream_pyne_subscriptions import handle_pyne_indicator_subscribe
 from app.api.v1.stream_utils import (
@@ -23,6 +24,7 @@ from app.api.v1.stream_utils import (
     validate_ws_interval as _validate_ws_interval,
 )
 from app.core import config
+from app.core.executors import run_storage
 from app.core.runtime_metrics import ws_runtime_metrics
 from app.data_engine.interval_policy import parse_interval_ms, parse_interval_spec
 from app.data_engine.interval_resolution import IntervalResolutionError
@@ -33,6 +35,20 @@ from app.indicator.serialization import (
     build_indicator_snapshot_payload,
     build_ws_error_payload,
 )
+
+_INDICATOR_SEED_REVISION_ATTEMPTS = 2
+
+
+def _revision_token(revision: dict[str, Any] | None) -> str:
+    if not isinstance(revision, dict):
+        return ""
+    explicit = str(revision.get("revisionToken") or "").strip()
+    if explicit:
+        return explicit
+    return (
+        f"{revision.get('serverEpoch', '')}:"
+        f"{revision.get('correctionRevision', 0)}"
+    )
 
 
 def _indicator_subscription_failure(
@@ -99,9 +115,14 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
     custom_handles: dict[str, Any] = {}
     custom_tasks: dict[str, asyncio.Task] = {}
     client_meta: dict[str, dict] = {}
+    pyne_correction_state: dict[str, Any] = {
+        "handle": None,
+        "callbacks": {},
+    }
     seed_query_cache: dict[tuple[str, str, str, str, int], dict[str, Any]] = {}
     ws_closed = False
     seq = 0
+    critical_enqueue_tasks: set[asyncio.Task] = set()
 
     loop = asyncio.get_running_loop()
 
@@ -117,7 +138,23 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
                 range_service = getattr(indicator_engine, "indicator_range_service", None)
                 if range_service is not None:
                     msg["dataRevision"] = range_service.data_revision_for_meta(meta)
-                loop.call_soon_threadsafe(_queue_indicator_message, queue, msg)
+                if not _is_droppable_indicator_preview(msg):
+                    def _schedule_critical(
+                        critical_msg: dict = msg,
+                        critical_client_id: str = client_id,
+                    ) -> None:
+                        if ws_closed:
+                            return
+                        task = asyncio.create_task(
+                            _queue_indicator_critical_message(queue, critical_msg),
+                            name=f"indicator_ws_critical_{critical_client_id}",
+                        )
+                        critical_enqueue_tasks.add(task)
+                        task.add_done_callback(critical_enqueue_tasks.discard)
+
+                    loop.call_soon_threadsafe(_schedule_critical)
+                else:
+                    loop.call_soon_threadsafe(_queue_indicator_message, queue, msg)
 
     indicator_engine.add_listener(_listener)
 
@@ -211,6 +248,7 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
                     queue=queue,
                     client_meta=client_meta,
                     seed_query_cache=seed_query_cache,
+                    pyne_correction_state=pyne_correction_state,
                     send_json=_safe_send_json,
                     msg=msg,
                 )
@@ -242,6 +280,8 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
         ws_closed = True
         forwarder_task.cancel()
         heartbeat_task.cancel()
+        for task in tuple(critical_enqueue_tasks):
+            task.cancel()
         try:
             await forwarder_task
         except (asyncio.CancelledError, Exception):
@@ -250,6 +290,11 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
             await heartbeat_task
         except (asyncio.CancelledError, Exception):
             pass
+        if critical_enqueue_tasks:
+            await asyncio.gather(
+                *tuple(critical_enqueue_tasks),
+                return_exceptions=True,
+            )
         indicator_engine.remove_listener(_listener)
         client_ids = set(subscribed) | set(custom_handles) | set(custom_tasks) | set(client_meta)
         for client_id in list(client_ids):
@@ -280,6 +325,7 @@ async def _handle_indicator_subscribe(
     seed_query_cache: dict[tuple[str, str, str, str, int], dict[str, Any]],
     send_json,
     msg: dict,
+    pyne_correction_state: dict[str, Any] | None = None,
 ) -> None:
     client_id = str(msg.get("clientId") or "").strip()
     symbol = str(msg.get("symbol") or "BTCUSDT").upper().strip()
@@ -390,7 +436,13 @@ async def _handle_indicator_subscribe(
                     client_meta=client_meta,
                 ),
                 queue_message=_queue_indicator_message,
+                queue_critical_message=_queue_indicator_critical_message,
                 range_service=range_service,
+                backfill_coordinator=getattr(
+                    indicator_engine,
+                    "backfill_coordinator",
+                    None,
+                ),
                 data_revision=script_revision,
                 resume_from=msg.get("resumeFrom") or msg.get("resume_from"),
                 client_server_epoch=msg.get("serverEpoch") or msg.get("server_epoch"),
@@ -399,6 +451,8 @@ async def _handle_indicator_subscribe(
                     if msg.get("correctionRevision") is not None
                     else msg.get("correction_revision")
                 ),
+                pyne_correction_state=pyne_correction_state,
+                seed_query_cache=seed_query_cache,
             )
         except Exception as exc:
             had_meta = client_id in client_meta
@@ -481,49 +535,103 @@ async def _handle_indicator_subscribe(
             "interval": interval,
         }
         seed_cache_key = (exchange, market_type, symbol, interval, history_limit)
-        cached_seed = seed_query_cache.get(seed_cache_key)
-        current_revision = (
-            range_service.data_revision_for_meta(series_meta)
+        current_revision = None
+        query_bars: list[Any] = []
+        seed_attempts = (
+            _INDICATOR_SEED_REVISION_ATTEMPTS
             if range_service is not None
-            else None
+            else 1
         )
-        cache_age = (
-            time.monotonic() - float(cached_seed.get("at", 0))
-            if cached_seed is not None
-            else float("inf")
-        )
-        current_correction = (
-            str(current_revision.get("correctionRevision", "0"))
-            if isinstance(current_revision, dict)
-            else "0"
-        )
-        cached_until = int(cached_seed.get("closedThrough", 0)) if cached_seed else 0
-        current_closed = int((current_revision or {}).get("closedThrough") or 0)
-        if (
-            cached_seed is not None
-            and cache_age <= max(0.0, float(config.INDICATOR_WS_SEED_CACHE_SECONDS))
-            and str(cached_seed.get("correctionRevision", "0")) == current_correction
-            and current_closed <= cached_until
-        ):
-            query_result = cached_seed["result"]
-        else:
-            query_result = dm.query_latest(
-                symbol,
-                interval,
-                limit=history_limit,
-                exchange=exchange,
-                market_type=market_type,
+        for seed_attempt in range(seed_attempts):
+            current_revision = (
+                range_service.data_revision_for_meta(series_meta)
+                if range_service is not None
+                else None
             )
+            cached_seed = seed_query_cache.get(seed_cache_key)
+            cache_age = (
+                time.monotonic() - float(cached_seed.get("at", 0))
+                if cached_seed is not None
+                else float("inf")
+            )
+            current_correction = (
+                str(current_revision.get("correctionRevision", "0"))
+                if isinstance(current_revision, dict)
+                else "0"
+            )
+            cached_until = (
+                int(cached_seed.get("closedThrough", 0))
+                if cached_seed
+                else 0
+            )
+            current_closed = int(
+                (current_revision or {}).get("closedThrough") or 0
+            )
+            queried = not (
+                cached_seed is not None
+                and cache_age <= max(
+                    0.0,
+                    float(config.INDICATOR_WS_SEED_CACHE_SECONDS),
+                )
+                and str(cached_seed.get("correctionRevision", "0"))
+                == current_correction
+                and current_closed <= cached_until
+            )
+            if queried:
+                query_result = await run_storage(
+                    dm.query_latest,
+                    symbol,
+                    interval,
+                    limit=history_limit + 1,
+                    exchange=exchange,
+                    market_type=market_type,
+                    auto_backfill=False,
+                )
+            else:
+                query_result = cached_seed["result"]
             query_bars = list(query_result.bars or [])
-            seed_query_cache[seed_cache_key] = {
-                "at": time.monotonic(),
-                "result": query_result,
-                "correctionRevision": current_correction,
-                "closedThrough": max((int(bar.time) for bar in query_bars), default=0),
-            }
 
-        query_bars = list(query_result.bars or [])
-        seed_bars = confirmed_indicator_seed_bars(query_bars)
+            observed_revision = (
+                range_service.data_revision_for_meta(series_meta)
+                if range_service is not None
+                else current_revision
+            )
+            confirmed_query_bars = confirmed_indicator_seed_bars(query_bars)[
+                -history_limit:
+            ]
+            confirmed_query_end = max(
+                (int(bar.time) for bar in confirmed_query_bars),
+                default=0,
+            )
+            observed_closed = int(
+                (observed_revision or {}).get("closedThrough") or 0
+            )
+            if (
+                _revision_token(observed_revision)
+                != _revision_token(current_revision)
+                or observed_closed > confirmed_query_end
+            ):
+                seed_query_cache.pop(seed_cache_key, None)
+                if seed_attempt + 1 >= seed_attempts:
+                    raise RuntimeError(
+                        "Indicator seed state changed repeatedly."
+                    )
+                continue
+
+            current_revision = observed_revision
+            if queried:
+                store_indicator_seed_cache(seed_query_cache, seed_cache_key, {
+                    "at": time.monotonic(),
+                    "result": query_result,
+                    "correctionRevision": current_correction,
+                    # Do not let a forming tail masquerade as cached closed
+                    # coverage.  When that same timestamp later closes, the
+                    # revision frontier must force a fresh seed query.
+                    "closedThrough": confirmed_query_end,
+                })
+            break
+
+        seed_bars = confirmed_indicator_seed_bars(query_bars)[-history_limit:]
         key, result = indicator_engine.subscribe(
             symbol=symbol,
             interval=interval,
@@ -532,6 +640,8 @@ async def _handle_indicator_subscribe(
             params=params,
             bars=seed_bars,
             exchange=exchange,
+            data_revision=current_revision,
+            desired_seed_bars=history_limit,
         )
         subscribed[client_id] = key
         client_meta[client_id] = {
@@ -544,6 +654,8 @@ async def _handle_indicator_subscribe(
             "params": params,
             "indicatorId": key.uid,
             "streamConsumerId": consumer_id,
+            "historyLimit": history_limit,
+            "_seedQueryCache": seed_query_cache,
         }
     except Exception as exc:
         if client_id in subscribed:
@@ -722,12 +834,20 @@ async def _unsubscribe_indicator_client(
     custom_tasks: dict[str, asyncio.Task],
     client_meta: dict[str, dict],
 ) -> None:
+    meta = client_meta.get(client_id)
+    if meta is not None:
+        meta["_disposed"] = True
     key = subscribed.pop(client_id, None)
     if key is not None and indicator_engine is not None:
         indicator_engine.unsubscribe(key)
 
-    handle = custom_handles.pop(client_id, None)
-    if handle is not None:
+    raw_handles = custom_handles.pop(client_id, None)
+    handles = (
+        list(raw_handles)
+        if isinstance(raw_handles, (list, tuple, set))
+        else ([raw_handles] if raw_handles is not None else [])
+    )
+    for handle in handles:
         try:
             dm.unsubscribe(handle)
         except Exception:
@@ -736,9 +856,63 @@ async def _unsubscribe_indicator_client(
     task = custom_tasks.pop(client_id, None)
     if task is not None:
         task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     meta = client_meta.pop(client_id, None)
     if meta is not None:
+        correction_state = meta.pop("_pyneCorrectionState", None)
+        if isinstance(correction_state, dict):
+            callbacks = correction_state.get("callbacks")
+            if isinstance(callbacks, dict):
+                callbacks.pop(client_id, None)
+                if not callbacks:
+                    correction_handle = correction_state.get("handle")
+                    if correction_handle is not None:
+                        try:
+                            dm.unsubscribe(correction_handle)
+                        except Exception:
+                            pass
+                    correction_state["handle"] = None
+                    snapshot_tasks = correction_state.get("snapshot_tasks")
+                    if isinstance(snapshot_tasks, dict):
+                        for snapshot_task in snapshot_tasks.values():
+                            if (
+                                isinstance(snapshot_task, asyncio.Task)
+                                and not snapshot_task.done()
+                            ):
+                                snapshot_task.cancel()
+                        snapshot_tasks.clear()
+        seed_cache = meta.pop("_seedQueryCache", None)
+        if isinstance(seed_cache, dict):
+            series_identity = (
+                str(meta.get("exchange") or "binance").lower().strip(),
+                str(meta.get("market_type") or "spot").lower().strip(),
+                str(meta.get("symbol") or "").upper().strip(),
+                str(meta.get("interval") or "").strip(),
+            )
+            still_subscribed = any(
+                (
+                    str(other.get("exchange") or "binance").lower().strip(),
+                    str(other.get("market_type") or "spot").lower().strip(),
+                    str(other.get("symbol") or "").upper().strip(),
+                    str(other.get("interval") or "").strip(),
+                ) == series_identity
+                for other in client_meta.values()
+            )
+            if not still_subscribed:
+                for cache_key in list(seed_cache):
+                    if tuple(cache_key[:4]) == series_identity:
+                        seed_cache.pop(cache_key, None)
+        replacement_task = custom_tasks.pop(client_id, None)
+        if replacement_task is not None and replacement_task is not task:
+            replacement_task.cancel()
+            try:
+                await replacement_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await _release_indicator_stream(dm, meta)
         _release_pyne_incremental_meta(meta)
 
@@ -766,9 +940,53 @@ def _queue_indicator_message(queue: asyncio.Queue, msg: dict) -> None:
     try:
         queue.put_nowait(msg)
     except asyncio.QueueFull:
-        if msg.get("type") != "indicator.preview":
+        if not _is_droppable_indicator_preview(msg):
             return
         _coalesce_indicator_preview(queue, msg)
+
+
+def _is_droppable_indicator_preview(msg: dict) -> bool:
+    return bool(
+        msg.get("type") == "indicator.preview"
+        or (
+            msg.get("type") == "indicator.patch"
+            and msg.get("reason") == "bar_update"
+        )
+    )
+
+
+async def _queue_indicator_critical_message(
+    queue: asyncio.Queue,
+    msg: dict,
+) -> None:
+    """Enqueue a correction/finality frame without silently dropping it."""
+    try:
+        queue.put_nowait(msg)
+        return
+    except asyncio.QueueFull:
+        pass
+
+    kept: list[dict] = []
+    removed_preview = False
+    while True:
+        try:
+            current = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        if not removed_preview and _is_droppable_indicator_preview(current):
+            removed_preview = True
+            continue
+        kept.append(current)
+    for current in kept:
+        queue.put_nowait(current)
+    if removed_preview:
+        queue.put_nowait(msg)
+        return
+
+    # Backpressure only this client's correction worker until the websocket
+    # forwarder consumes an older final frame.  The shared correction ingress
+    # remains free to fan out to other clients.
+    await queue.put(msg)
 
 
 def _coalesce_indicator_preview(queue: asyncio.Queue, msg: dict) -> None:
@@ -786,7 +1004,7 @@ def _coalesce_indicator_preview(queue: asyncio.Queue, msg: dict) -> None:
             break
         if (
             not removed
-            and item.get("type") == "indicator.preview"
+            and _is_droppable_indicator_preview(item)
             and item.get("clientId") == client_id
         ):
             removed = True

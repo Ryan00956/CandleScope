@@ -7,11 +7,13 @@ import { structuralMock } from "../../../test/testHelpers.js";
 type RuntimeModule = typeof import("../useIndicatorRuntime.js");
 
 let server: Awaited<ReturnType<typeof createServer>> | null = null;
-let planIndicatorRangeRetry = structuralMock<RuntimeModule["planIndicatorRangeRetry"]>(() => {
-  throw new Error("indicator runtime not loaded");
-});
 let hostedIndicatorRangeRequestsReady = structuralMock<
   RuntimeModule["hostedIndicatorRangeRequestsReady"]
+>(() => {
+  throw new Error("indicator runtime not loaded");
+});
+let shouldWaitForIndicatorRangeSubscription = structuralMock<
+  RuntimeModule["shouldWaitForIndicatorRangeSubscription"]
 >(() => {
   throw new Error("indicator runtime not loaded");
 });
@@ -36,8 +38,8 @@ test.before(async () => {
     server: { middlewareMode: true },
   });
   ({
-    planIndicatorRangeRetry,
     hostedIndicatorRangeRequestsReady,
+    shouldWaitForIndicatorRangeSubscription,
     isTypedIndicatorRangeWait,
     isResolvedIndicatorRangeEmpty,
     resolveIndicatorRealtimeMode,
@@ -76,28 +78,15 @@ test("hosted range waits for all subscribed acknowledgements then fails open at 
   }), true);
 });
 
-test.after(async () => {
-  await server?.close();
+test("HTTP indicator history is not blocked by an unrelated realtime acknowledgement", () => {
+  assert.equal(shouldWaitForIndicatorRangeSubscription(true), false);
+  assert.equal(shouldWaitForIndicatorRangeSubscription(true, false), false);
+  assert.equal(shouldWaitForIndicatorRangeSubscription(true, true), true);
+  assert.equal(shouldWaitForIndicatorRangeSubscription(false, true), false);
 });
 
-test("indicator NOT_READY gets one bounded fallback instead of a polling chain", () => {
-  assert.deepEqual(planIndicatorRangeRetry({
-    attempts: 0,
-    retryAfterMs: 750,
-  }), {
-    delayMs: 3000,
-    nextAttempts: 1,
-    shouldRetry: true,
-  });
-
-  assert.deepEqual(planIndicatorRangeRetry({
-    attempts: 1,
-    retryAfterMs: 750,
-  }), {
-    delayMs: null,
-    nextAttempts: 1,
-    shouldRetry: false,
-  });
+test.after(async () => {
+  await server?.close();
 });
 
 test("typed bounded-wait responses defer to events without a blind retry", () => {
@@ -173,24 +162,4 @@ test("terminal indicator empty ranges resolve coverage while pending empties sta
     complete: false,
     retryable: true,
   }), false);
-});
-
-test("indicator retry honors a longer server delay and normalizes invalid input", () => {
-  assert.deepEqual(planIndicatorRangeRetry({
-    attempts: Number.NaN,
-    retryAfterMs: 5000,
-  }), {
-    delayMs: 5000,
-    nextAttempts: 1,
-    shouldRetry: true,
-  });
-
-  assert.deepEqual(planIndicatorRangeRetry({
-    attempts: 0,
-    retryAfterMs: Number.NaN,
-  }), {
-    delayMs: 3000,
-    nextAttempts: 1,
-    shouldRetry: true,
-  });
 });

@@ -7,7 +7,10 @@
  * - Open code editor for custom indicators
  */
 import { useCallback, useEffect, useState } from "react";
-import { useIndicatorCatalogRuntime } from "./useIndicatorCatalogRuntime";
+import {
+  shouldShowIndicatorCatalogLoading,
+  useIndicatorCatalogRuntime,
+} from "./useIndicatorCatalogRuntime";
 import IndicatorEditor from "./IndicatorEditor";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import type { CatalogIndicator } from "./useIndicatorCatalogRuntime.js";
@@ -569,6 +572,11 @@ plot(ma, "MA", color=line_color)
   const filteredMarketStudies = marketStudies.filter((study) => (
     marketStudyMatchesSearch(study, searchQuery)
   ));
+  const catalogLoading = shouldShowIndicatorCatalogLoading(
+    presetsLoading,
+    presets,
+    customIndicators,
+  );
 
   // Group presets by category
   const groupedPresets: Record<string, CatalogIndicator[]> = {};
@@ -584,7 +592,7 @@ plot(ma, "MA", color=line_color)
     groupedMarketStudies[cat].push(study);
   }
   const groupedCategoryOrder = Array.from(new Set([
-    ...(presetsLoading ? [] : Object.keys(groupedPresets)),
+    ...(catalogLoading ? [] : Object.keys(groupedPresets)),
     ...Object.keys(groupedMarketStudies),
   ]));
 
@@ -694,7 +702,7 @@ plot(ma, "MA", color=line_color)
                     />
                   </div>
 
-                  {presetsLoading && (
+                  {catalogLoading && (
                     <div className="indicator-loading">加载中...</div>
                   )}
 
@@ -796,7 +804,7 @@ plot(ma, "MA", color=line_color)
                     );
                   })}
 
-                  {!presetsLoading
+                  {!catalogLoading
                     && filteredPresets.length === 0
                     && filteredMarketStudies.length === 0 && (
                     <div className="indicator-empty">未找到匹配的指标</div>

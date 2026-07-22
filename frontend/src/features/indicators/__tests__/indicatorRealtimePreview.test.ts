@@ -157,6 +157,52 @@ test("an older realtime correction forces a full indicator render", () => {
   assert.equal(lines[0]?.renderUpdate, "full");
 });
 
+test("a not-yet-warm BOLL preview removes its forming points instead of plotting zero", () => {
+  const boll = {
+    id: "boll",
+    engineName: "BOLL",
+    params: { period: 20 },
+  };
+  const lines = applyRealtimeIndicatorValuesToLines({
+    barTime: 300,
+    candleDownColor: "#down",
+    candleUpColor: "#up",
+    indicator: boll,
+    lines: [
+      {
+        id: "middle",
+        outputName: "middle",
+        pane: "main",
+        type: "line" as const,
+        data: [{ time: 200, value: 100 }, { time: 300, value: 101 }],
+      },
+      {
+        id: "upper",
+        outputName: "upper",
+        pane: "main",
+        type: "line" as const,
+        data: [{ time: 200, value: 110 }, { time: 300, value: 111 }],
+      },
+      {
+        id: "lower",
+        outputName: "lower",
+        pane: "main",
+        type: "line" as const,
+        data: [{ time: 200, value: 90 }, { time: 300, value: 91 }],
+      },
+    ],
+    values: { middle: null, upper: null, lower: null },
+  });
+
+  assert.deepEqual(lines.map((line) => line.data), [
+    [{ time: 200, value: 100 }],
+    [{ time: 200, value: 110 }],
+    [{ time: 200, value: 90 }],
+  ]);
+  assert.deepEqual(lines.map((line) => line.renderUpdate), ["full", "full", "full"]);
+  assert.equal(lines.some((line) => line.data.some((point) => point.value === 0)), false);
+});
+
 test("acknowledged first VOL preview can render before closed history supplies line metadata", () => {
   const lines = applyRealtimeIndicatorValuesToLines({
     bar: {

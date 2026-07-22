@@ -350,6 +350,8 @@ export interface IndicatorRangeRequest {
   start: number;
   end: number;
   reason?: string;
+  requestScope?: string;
+  requestGeneration?: number;
   signal?: AbortSignal;
 }
 

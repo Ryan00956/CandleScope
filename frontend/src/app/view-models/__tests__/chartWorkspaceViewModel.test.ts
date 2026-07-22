@@ -11,6 +11,7 @@ interface ContextOverrides {
   chartSettings?: object;
   indicatorActions?: object;
   marketActions?: object;
+  marketStatus?: object;
   settingsActions?: object;
   tradeFlowActions?: object;
   watchlistView?: object;
@@ -21,6 +22,7 @@ function buildContext({
   chartSettings = { chartType: "candlestick" },
   indicatorActions = {},
   marketActions = {},
+  marketStatus = {},
   settingsActions = {},
   tradeFlowActions = {},
   watchlistView = {},
@@ -43,7 +45,7 @@ function buildContext({
     indicatorComputing: false,
     indicatorView: {},
     marketActions,
-    marketStatus: {},
+    marketStatus,
     marketView: {},
     priceScaleActions: {},
     priceScaleView: {},
@@ -166,6 +168,24 @@ test("chart range handlers separate indicator coverage from user persistence", (
   mustBeDefined(model.chart.chartProps.onVisibleRangeChange)(range);
   assert.deepEqual(indicatorRanges, [range]);
   assert.deepEqual(persistedRanges, [range]);
+});
+
+test("latest-window recovery reaches the chart surface", () => {
+  const restoreLatestWindow = async () => true;
+  const model = buildChartWorkspaceViewModel(buildContext({
+    marketActions: { restoreLatestWindow },
+  }));
+
+  assert.equal(model.chart.chartProps.onNeedMoreRight, restoreLatestWindow);
+});
+
+test("latest-window recovery is gated while left history owns the runtime", () => {
+  const model = buildChartWorkspaceViewModel(buildContext({
+    marketActions: { restoreLatestWindow: async () => true },
+    marketStatus: { canRestoreLatestWindow: false },
+  }));
+
+  assert.equal(model.chart.chartProps.canRestoreLatestWindow, false);
 });
 
 test("watchlist workspace receives the stable external price store handle", () => {

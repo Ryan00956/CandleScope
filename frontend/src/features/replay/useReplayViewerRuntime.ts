@@ -34,6 +34,7 @@ export type ReplayPhase5TradeType = Extract<ReplayV2CommandType,
   | "place_order"
   | "cancel_order"
   | "close_position"
+  | "allocate_isolated_margin"
 >;
 
 export interface ReplayViewerRuntime {

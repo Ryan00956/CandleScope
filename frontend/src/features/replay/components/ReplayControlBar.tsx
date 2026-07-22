@@ -24,6 +24,9 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
   const pending = runtime.pendingCommand?.type ?? null;
   const phase3Pending = viewer?.controlPending?.type ?? null;
+  const contractPortfolio = viewer?.marketTracks?.portfolio.schema_version === "replay.training.portfolio.v2"
+    ? viewer.marketTracks.portfolio
+    : null;
   const effectiveState = viewer?.marketTracks?.global_clock.state ?? store.state;
   const effectiveSpeed = viewer?.marketTracks?.global_clock.speed ?? store.speed ?? 1;
   const forkPending = runtime.forkPending;
@@ -182,9 +185,11 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
         </div>
         <div className="replay-fidelity-chips">
           <span>{tradeTape ? "AGG_TRADE" : `BAR_${config?.base_interval.toUpperCase() ?? "--"}`}</span>
-          <span>PAPER_LINEAR_V1</span>
+          <span>{contractPortfolio?.execution_model ?? "PAPER_LINEAR_V1"}</span>
           <span>{tradeTape ? "EXACT_AGG_TRADE" : "EXACT_BAR"}</span>
-          <span>{tradeTape ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE"}</span>
+          <span>{contractPortfolio === null
+            ? (tradeTape ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE")
+            : "NO_BOOK_QUEUE"}</span>
         </div>
       </div>
 

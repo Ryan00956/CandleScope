@@ -66,7 +66,7 @@ export default function ReplayIntegrityReviewPanel({
     >
       <header className="replay-integrity-heading">
         <div>
-          <span className="training-hub-kicker">SERVER-AUTHORITATIVE · PHASE 5</span>
+          <span className="training-hub-kicker">SERVER-AUTHORITATIVE · PHASE 6</span>
           <h2 id="replay-integrity-title">完整性与复盘</h2>
         </div>
         <button type="button" disabled={busy} onClick={() => void integrityRuntime.actions.refresh()}>
@@ -137,7 +137,7 @@ export default function ReplayIntegrityReviewPanel({
                 >不可逆揭示时间</button>
               )}
               {integrity.revealed && <p className="replay-revealed">时间已揭示；该状态不可回退。</p>}
-              <p>费率、杠杆上限和资金费策略当前明确返回 REPLAY_POLICY_UNSUPPORTED。</p>
+              <p>费率、杠杆上限与 Sandbox 固定资金费经版本化 Run command 变更并写入本审计流；本面板当前直接提供资金与时间披露操作。</p>
             </section>
           </div>
 

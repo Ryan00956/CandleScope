@@ -17,8 +17,12 @@ from ..models import validate_counter, validate_identifier
 from ..sources.trade_reader import ReplayTrade
 from .ledger import LedgerBook, LedgerEntry
 from .models import (
+    AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION,
     AGG_TRADE_TAPE_MODEL_VERSION,
+    BAR_TOUCH_OR_TAPE_MODEL_VERSION,
     BROKER_MODEL_VERSION,
+    PAPER_LINEAR_EXECUTION_MODE,
+    TOUCH_OR_TAPE_EXECUTION_MODE,
     Account,
     BrokerConfig,
     BrokerEventResult,
@@ -175,6 +179,7 @@ class ConservativeBarBroker:
         *,
         config: BrokerConfig,
         bar_builder: ReplayBarBuilder | TradeReplayBarBuilder,
+        execution_mode: str = PAPER_LINEAR_EXECUTION_MODE,
     ) -> None:
         if not isinstance(config, BrokerConfig):
             raise TypeError("config must be BrokerConfig")
@@ -182,11 +187,24 @@ class ConservativeBarBroker:
             raise TypeError("bar_builder must be a supported replay bar reducer")
         self.config = config
         self._bar_builder = bar_builder
-        self._model_version = (
-            AGG_TRADE_TAPE_MODEL_VERSION
-            if isinstance(bar_builder, TradeReplayBarBuilder)
-            else BROKER_MODEL_VERSION
-        )
+        if execution_mode not in {
+            PAPER_LINEAR_EXECUTION_MODE,
+            TOUCH_OR_TAPE_EXECUTION_MODE,
+        }:
+            raise ValueError("execution_mode is unsupported")
+        self._execution_mode = execution_mode
+        if execution_mode == TOUCH_OR_TAPE_EXECUTION_MODE:
+            self._model_version = (
+                AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION
+                if isinstance(bar_builder, TradeReplayBarBuilder)
+                else BAR_TOUCH_OR_TAPE_MODEL_VERSION
+            )
+        else:
+            self._model_version = (
+                AGG_TRADE_TAPE_MODEL_VERSION
+                if isinstance(bar_builder, TradeReplayBarBuilder)
+                else BROKER_MODEL_VERSION
+            )
         self._config_hash = canonical_sha256(config.to_dict())
         self.reset()
 
@@ -325,15 +343,27 @@ class ConservativeBarBroker:
         orders[order.order_id] = order
         client_ids = set(self._client_order_ids)
         client_ids.add(order.client_order_id)
-        account = self._account_from(ledger, self._position)
         working = self._working_state()
         working.orders = orders
         working.ledger = ledger
+        immediate = self._revealed_reference_trigger(order)
+        if immediate is not None:
+            self._fill_working(
+                working,
+                order,
+                source_sequence=sequence,
+                event_time_ms=event_time_ms,
+                trigger=immediate,
+            )
+        account = self._account_from(
+            working.ledger or ledger,
+            working.position,
+        )
         self._commit_working(working, account=account)
         self._client_order_ids = client_ids
         self._next_order += 1
         self._has_trading_activity = True
-        return order
+        return self._orders[order.order_id]
 
     def cancel_order(
         self,
@@ -707,6 +737,8 @@ class ConservativeBarBroker:
                 normalized = CommandType(command_type)
             except ValueError:
                 normalized = InternalCommandType(command_type)
+        fills_before = len(self._fills)
+        warnings_before = len(self._warnings)
         if normalized is InternalCommandType.ADJUST_CAPITAL:
             if set(values) != {"kind", "amount", "reason"}:
                 raise ReplayDomainError(
@@ -775,15 +807,14 @@ class ConservativeBarBroker:
                 ReplayErrorCode.INVALID_STATE_TRANSITION,
                 f"broker does not support command {normalized.value}",
             )
-        # Command projections intentionally share the exact shape used by
-        # source-event projections.  A command does not advance a market bar
-        # or create a fill/warning immediately, but consumers must not need a
-        # second, command-specific parser for replay.order frames.
+        # TOUCH_OR_TAPE_V2 can fill against the currently revealed reference
+        # during the command itself. PAPER_LINEAR_V1 retains its historical
+        # next-source-event behavior.
         return BrokerEventResult(
             bar_update=None,
             orders=(order,),
-            fills=(),
-            warnings=(),
+            fills=tuple(self._fills[fills_before:]),
+            warnings=tuple(self._warnings[warnings_before:]),
             position=self._position,
             account=self._account,
         ).to_dict()
@@ -1002,6 +1033,8 @@ class ConservativeBarBroker:
 
     def restore(self, state: Mapping[str, object]) -> None:
         old_builder = self._bar_builder.snapshot()
+        old_model_version = self._model_version
+        old_execution_mode = self._execution_mode
         try:
             payload = dict(state)
             state_hash = payload.pop("state_hash", None)
@@ -1040,6 +1073,24 @@ class ConservativeBarBroker:
                     "max_drawdown",
                 },
             )
+            checkpoint_model = payload["model_version"]
+            compatible_models = (
+                {
+                    AGG_TRADE_TAPE_MODEL_VERSION: PAPER_LINEAR_EXECUTION_MODE,
+                    AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION: (
+                        TOUCH_OR_TAPE_EXECUTION_MODE
+                    ),
+                }
+                if isinstance(self._bar_builder, TradeReplayBarBuilder)
+                else {
+                    BROKER_MODEL_VERSION: PAPER_LINEAR_EXECUTION_MODE,
+                    BAR_TOUCH_OR_TAPE_MODEL_VERSION: TOUCH_OR_TAPE_EXECUTION_MODE,
+                }
+            )
+            restored_mode = compatible_models.get(checkpoint_model)
+            if restored_mode is not None:
+                self._model_version = str(checkpoint_model)
+                self._execution_mode = restored_mode
             if (
                 payload["schema_version"] != BROKER_STATE_SCHEMA_VERSION
                 or payload["model_version"] != self._model_version
@@ -1135,6 +1186,18 @@ class ConservativeBarBroker:
                     order is not None
                     and fill.synthetic
                     and fill.reason is FillReason.SESSION_END_MARK_CLOSE
+                ):
+                    causal = fill.source_sequence == order.accepted_source_sequence
+                if (
+                    order is not None
+                    and self._execution_mode == TOUCH_OR_TAPE_EXECUTION_MODE
+                    and fill.reason
+                    in {
+                        FillReason.MARKET_REVEALED_REFERENCE,
+                        FillReason.LIMIT_MARKETABLE_REVEALED,
+                        FillReason.STOP_REVEALED_TRIGGER,
+                        FillReason.TAKE_PROFIT_REVEALED_TRIGGER,
+                    }
                 ):
                     causal = fill.source_sequence == order.accepted_source_sequence
                 if order is None or not causal:
@@ -1257,9 +1320,13 @@ class ConservativeBarBroker:
             self._assert_candidate_invariants(candidate, ledger, account)
         except ReplayDomainError:
             self._bar_builder.restore(old_builder)
+            self._model_version = old_model_version
+            self._execution_mode = old_execution_mode
             raise
         except (AssertionError, KeyError, TypeError, ValueError) as exc:
             self._bar_builder.restore(old_builder)
+            self._model_version = old_model_version
+            self._execution_mode = old_execution_mode
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
                 "broker checkpoint domain state is invalid",
@@ -1596,7 +1663,11 @@ class ConservativeBarBroker:
             )
             return (
                 order.limit_price,
-                LiquidityRole.TAKER if gapped else LiquidityRole.MAKER,
+                (
+                    LiquidityRole.MAKER
+                    if self._execution_mode == TOUCH_OR_TAPE_EXECUTION_MODE
+                    else LiquidityRole.TAKER if gapped else LiquidityRole.MAKER
+                ),
                 FillReason.LIMIT_GAP if gapped else FillReason.LIMIT_TOUCH,
             )
         assert order.stop_price is not None
@@ -1620,6 +1691,80 @@ class ConservativeBarBroker:
                     conservative_reference,
                     field_name="trigger reference",
                 ),
+                order.side,
+                self.config,
+            ),
+            LiquidityRole.TAKER,
+            reason,
+        )
+
+    def _revealed_reference_trigger(
+        self,
+        order: ReplayOrder,
+    ) -> tuple[str, LiquidityRole, FillReason] | None:
+        """Resolve only against state already revealed when the command arrives."""
+
+        if self._execution_mode != TOUCH_OR_TAPE_EXECUTION_MODE:
+            return None
+        reference = Decimal(self._position.mark_price)
+        if order.order_type is OrderType.MARKET:
+            return (
+                adverse_market_price(
+                    self._position.mark_price,
+                    order.side,
+                    self.config,
+                ),
+                LiquidityRole.TAKER,
+                FillReason.MARKET_REVEALED_REFERENCE,
+            )
+        if order.order_type is OrderType.LIMIT:
+            assert order.limit_price is not None
+            limit = Decimal(order.limit_price)
+            marketable = (
+                limit >= reference
+                if order.side is OrderSide.BUY
+                else limit <= reference
+            )
+            if not marketable:
+                return None
+            slipped = Decimal(
+                adverse_market_price(
+                    self._position.mark_price,
+                    order.side,
+                    self.config,
+                )
+            )
+            bounded = (
+                min(slipped, limit)
+                if order.side is OrderSide.BUY
+                else max(slipped, limit)
+            )
+            return (
+                decimal_to_string(bounded, field_name="marketable limit fill"),
+                LiquidityRole.TAKER,
+                FillReason.LIMIT_MARKETABLE_REVEALED,
+            )
+        assert order.stop_price is not None
+        stop = Decimal(order.stop_price)
+        if order.order_type is OrderType.STOP_MARKET:
+            triggered = (
+                reference >= stop
+                if order.side is OrderSide.BUY
+                else reference <= stop
+            )
+            reason = FillReason.STOP_REVEALED_TRIGGER
+        else:
+            triggered = (
+                reference <= stop
+                if order.side is OrderSide.BUY
+                else reference >= stop
+            )
+            reason = FillReason.TAKE_PROFIT_REVEALED_TRIGGER
+        if not triggered:
+            return None
+        return (
+            adverse_market_price(
+                self._position.mark_price,
                 order.side,
                 self.config,
             ),

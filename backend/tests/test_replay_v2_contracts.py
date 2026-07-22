@@ -57,10 +57,11 @@ def test_replay_v2_golden_matches_python_enum_and_schema_registry() -> None:
     assert golden["schema_migration_contract"] == SCHEMA_MIGRATION_CONTRACT
 
 
-def test_replay_v2_phase5_package_keeps_runtime_integrity_and_storage_inside_training() -> None:
+def test_replay_v2_phase6_package_keeps_contract_account_inside_training() -> None:
     training_root = ROOT / "backend" / "app" / "replay" / "training"
     assert {path.name for path in training_root.glob("*.py")} == {
         "__init__.py",
+        "account.py",
         "commands.py",
         "control.py",
         "disclosure.py",

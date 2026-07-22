@@ -271,17 +271,17 @@ test("create refreshes catalog epoch with the edited warmup and horizon before P
   assert.equal(submittedEpoch, refreshedEpoch);
 });
 
-test("create model covers frozen fields and exposes the Phase 5 capability boundary", () => {
+test("create model covers Phase 6 account fields and exposes fail-closed boundaries", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const catalog = blindCatalog();
   const draft = createTrainingRunDraft(catalog);
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog);
   assert.equal(evaluation.canSubmit, true);
   assert.deepEqual(evaluation.unsupported, {
-    funding: "Phase 6 尚未实现；当前只能 OFF",
+    funding: "HISTORICAL_EXACT 缺少对齐的历史 funding 与 mark，创建时 fail closed",
     historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF",
-    rule_changes: "Phase 4 仅支持入金、出金与不可逆时间揭示；费率、杠杆和资金费变更仍拒绝",
-    isolated_margin: "Phase 6 尚未实现；当前只允许 CROSS",
+    rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
+    isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
   });
   const request = buildTrainingRunCreateRequest(draft, evaluation, catalog);
   assert.equal(request.protocol, "replay.v2");
@@ -289,10 +289,41 @@ test("create model covers frozen fields and exposes the Phase 5 capability bound
   assert.equal(request.time_disclosure_policy, "HIDE_ALL");
   assert.equal(request.integrity_mode, "CHALLENGE");
   assert.equal(request.funding_mode, "OFF");
+  assert.equal(request.fixed_funding_rate, null);
+  assert.equal(request.funding_interval_ms, null);
   assert.equal(request.book_mode, "OFF");
   assert.equal(request.margin_mode, "CROSS");
   assert.equal(request.allow_rule_changes, false);
   assert.deepEqual(request.allowed_mutations, []);
+});
+
+test("Phase 6 create model enables isolated Sandbox funding but rejects historical exact", () => {
+  const capabilities = parseReplayCapabilities(enabledCapabilities());
+  const catalog = blindCatalog();
+  const base = createTrainingRunDraft(catalog);
+  const sandbox = {
+    ...base,
+    integrityMode: "SANDBOX" as const,
+    marginMode: "ISOLATED" as const,
+    fundingMode: "SANDBOX_FIXED" as const,
+    fixedFundingRate: "-0.0001",
+    fundingIntervalMs: 28_800_000,
+  };
+  const sandboxEvaluation = evaluateTrainingRunDraft(sandbox, capabilities, catalog);
+  assert.equal(sandboxEvaluation.canSubmit, true);
+  const request = buildTrainingRunCreateRequest(sandbox, sandboxEvaluation, catalog);
+  assert.equal(request.margin_mode, "ISOLATED");
+  assert.equal(request.funding_mode, "SANDBOX_FIXED");
+  assert.equal(request.fixed_funding_rate, "-0.0001");
+  assert.equal(request.funding_interval_ms, 28_800_000);
+
+  const exact = evaluateTrainingRunDraft(
+    { ...base, fundingMode: "HISTORICAL_EXACT" },
+    capabilities,
+    catalog,
+  );
+  assert.equal(exact.canSubmit, false);
+  assert.match(exact.errors.join("\n"), /历史 funding.*mark|funding.*mark/);
 });
 
 test("hub markup exposes saves, native actions, filters and explicit unavailable capability reasons", () => {
@@ -332,13 +363,14 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /BTC 手动训练/);
   assert.match(html, /继续训练/);
   assert.match(html, /新建训练/);
-  assert.match(html, /资金费.*Phase 6/);
+  assert.match(html, /资金费.*HISTORICAL_EXACT/);
   assert.match(html, /完整性模式/);
   assert.match(html, /HIDE_MINUTE/);
   assert.match(html, /Practice 可审计变更白名单/);
   assert.match(html, /历史盘口.*Phase 9/);
-  assert.match(html, /Phase 5 多商品已启用/);
-  assert.match(html, /NONE \/ WARM \/ FULL/);
+  assert.match(html, /Phase 6 合约账户已启用/);
+  assert.match(html, /TOUCH_OR_TAPE_V2/);
+  assert.match(html, /不含盘口排队/);
   assert.doesNotMatch(html, /<strong>多商品<\/strong>/);
   assert.doesNotMatch(html, /1710000000000|dataset_epoch|snapshot_blob/);
 });

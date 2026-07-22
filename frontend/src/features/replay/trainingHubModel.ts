@@ -1,6 +1,8 @@
 import type { ReplayCapabilities, ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
 import type {
   ReplayV2IntegrityMode,
+  ReplayV2FundingMode,
+  ReplayV2MarginMode,
   ReplayV2SourceKind,
   ReplayV2StartMode,
   ReplayV2TimeDisclosurePolicy,
@@ -13,6 +15,7 @@ import {
 
 const POSITIVE_DECIMAL = /^(?:[1-9]\d*)(?:\.\d*[1-9])?$/;
 const NON_NEGATIVE_DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/;
+const SIGNED_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/;
 
 export interface TrainingRunDraft {
   readonly name: string;
@@ -33,16 +36,20 @@ export interface TrainingRunDraft {
   readonly makerFeeBps: string;
   readonly takerFeeBps: string;
   readonly marketSlippageBps: string;
+  readonly marginMode: ReplayV2MarginMode;
+  readonly fundingMode: ReplayV2FundingMode;
+  readonly fixedFundingRate: string;
+  readonly fundingIntervalMs: number;
   readonly integrityMode: ReplayV2IntegrityMode;
   readonly timeDisclosurePolicy: ReplayV2TimeDisclosurePolicy;
   readonly allowedMutations: readonly ReplayPolicyMutation[];
 }
 
 export interface TrainingHubUnsupportedCapabilities {
-  readonly funding: "Phase 6 尚未实现；当前只能 OFF";
+  readonly funding: "HISTORICAL_EXACT 缺少对齐的历史 funding 与 mark，创建时 fail closed";
   readonly historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF";
-  readonly rule_changes: "Phase 4 仅支持入金、出金与不可逆时间揭示；费率、杠杆和资金费变更仍拒绝";
-  readonly isolated_margin: "Phase 6 尚未实现；当前只允许 CROSS";
+  readonly rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更";
+  readonly isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金";
 }
 
 export interface TrainingRunDraftEvaluation {
@@ -52,11 +59,11 @@ export interface TrainingRunDraftEvaluation {
   readonly unsupported: TrainingHubUnsupportedCapabilities;
 }
 
-export const PHASE_5_UNSUPPORTED: TrainingHubUnsupportedCapabilities = Object.freeze({
-  funding: "Phase 6 尚未实现；当前只能 OFF",
+export const PHASE_6_BOUNDARIES: TrainingHubUnsupportedCapabilities = Object.freeze({
+  funding: "HISTORICAL_EXACT 缺少对齐的历史 funding 与 mark，创建时 fail closed",
   historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF",
-  rule_changes: "Phase 4 仅支持入金、出金与不可逆时间揭示；费率、杠杆和资金费变更仍拒绝",
-  isolated_margin: "Phase 6 尚未实现；当前只允许 CROSS",
+  rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
+  isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
 });
 
 function firstEntry(catalog: ReplayCatalog): ReplayCatalogEntry | undefined {
@@ -87,6 +94,10 @@ export function createTrainingRunDraft(catalog: ReplayCatalog): TrainingRunDraft
     makerFeeBps: "2",
     takerFeeBps: "5",
     marketSlippageBps: "1",
+    marginMode: "CROSS",
+    fundingMode: "OFF",
+    fixedFundingRate: "0.0001",
+    fundingIntervalMs: 28_800_000,
     integrityMode: "CHALLENGE",
     timeDisclosurePolicy: catalog.blind_mode ? "HIDE_ALL" : "NONE",
     allowedMutations: [],
@@ -159,6 +170,21 @@ export function evaluateTrainingRunDraft(
   if (draft.timeDisclosurePolicy !== "NONE" && !catalog.blind_mode) {
     errors.push("隐藏时间训练必须使用盲化能力目录");
   }
+  if (draft.fundingMode === "HISTORICAL_EXACT") {
+    errors.push("当前数据集没有对齐的历史 funding 与 mark，不能创建 HISTORICAL_EXACT");
+  } else if (draft.fundingMode === "SANDBOX_FIXED") {
+    if (draft.integrityMode !== "SANDBOX") {
+      errors.push("固定资金费只允许用于 Sandbox 近似练习");
+    }
+    if (!SIGNED_DECIMAL.test(draft.fixedFundingRate) || draft.fixedFundingRate === "-0") {
+      errors.push("固定资金费率必须是规范十进制字符串");
+    }
+    if (!Number.isSafeInteger(draft.fundingIntervalMs)
+      || draft.fundingIntervalMs < 60_000
+      || draft.fundingIntervalMs > 30 * 86_400_000) {
+      errors.push("资金费结算间隔必须在 1 分钟至 30 天之间");
+    }
+  }
   if (new Set(draft.allowedMutations).size !== draft.allowedMutations.length
     || draft.allowedMutations.some((item) => !REPLAY_POLICY_MUTATIONS.includes(item))) {
     errors.push("规则变更白名单包含重复或未知项");
@@ -173,7 +199,7 @@ export function evaluateTrainingRunDraft(
     canSubmit: errors.length === 0,
     errors,
     selectedEntry: entry ?? null,
-    unsupported: PHASE_5_UNSUPPORTED,
+    unsupported: PHASE_6_BOUNDARIES,
   };
 }
 
@@ -209,8 +235,14 @@ export function buildTrainingRunCreateRequest(
     integrity_mode: draft.integrityMode,
     time_disclosure_policy: draft.timeDisclosurePolicy,
     book_mode: "OFF",
-    margin_mode: "CROSS",
-    funding_mode: "OFF",
+    margin_mode: draft.marginMode,
+    funding_mode: draft.fundingMode,
+    fixed_funding_rate: draft.fundingMode === "SANDBOX_FIXED"
+      ? draft.fixedFundingRate
+      : null,
+    funding_interval_ms: draft.fundingMode === "SANDBOX_FIXED"
+      ? draft.fundingIntervalMs
+      : null,
     allow_rule_changes: draft.integrityMode !== "CHALLENGE",
     allowed_mutations: draft.integrityMode === "SANDBOX"
       ? REPLAY_POLICY_MUTATIONS

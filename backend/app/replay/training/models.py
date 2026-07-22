@@ -117,6 +117,12 @@ class MarginMode(_StringEnum):
     ISOLATED = "ISOLATED"
 
 
+class FundingMode(_StringEnum):
+    OFF = "OFF"
+    HISTORICAL_EXACT = "HISTORICAL_EXACT"
+    SANDBOX_FIXED = "SANDBOX_FIXED"
+
+
 class ExecutionModelV2(_StringEnum):
     TOUCH_OR_TAPE_V2 = "TOUCH_OR_TAPE_V2"
 
@@ -191,6 +197,7 @@ _ENUM_TYPES: tuple[tuple[str, type[_StringEnum]], ...] = (
     ("fast_forward_plan", FastForwardPlan),
     ("book_mode", BookMode),
     ("margin_mode", MarginMode),
+    ("funding_mode", FundingMode),
     ("execution_model", ExecutionModelV2),
     ("command_type", ReplayV2CommandType),
     ("event_type", ReplayV2EventType),
@@ -713,8 +720,10 @@ class TrainingRunCreateRequest:
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
-    funding_mode: str
+    funding_mode: FundingMode
     allow_rule_changes: bool
+    fixed_funding_rate: str | None = None
+    funding_interval_ms: int | None = None
     allowed_mutations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -738,6 +747,7 @@ class TrainingRunCreateRequest:
             ("time_disclosure_policy", TimeDisclosurePolicy),
             ("book_mode", BookMode),
             ("margin_mode", MarginMode),
+            ("funding_mode", FundingMode),
         ):
             object.__setattr__(
                 self,
@@ -829,44 +839,70 @@ class TrainingRunCreateRequest:
         object.__setattr__(self, "allowed_mutations", allowed)
         if self.book_mode is not BookMode.OFF:
             raise ValueError("historical book mode must remain OFF")
-        if self.margin_mode is not MarginMode.CROSS:
-            raise ValueError("the v1 training adapter supports only CROSS margin mode")
-        if self.funding_mode != "OFF":
-            raise ValueError("the v1 training adapter requires funding mode OFF")
+        if self.funding_mode is FundingMode.SANDBOX_FIXED:
+            if self.integrity_mode is not IntegrityMode.SANDBOX:
+                raise ValueError("SANDBOX_FIXED funding requires SANDBOX integrity mode")
+            if self.fixed_funding_rate is None or self.funding_interval_ms is None:
+                raise ValueError(
+                    "SANDBOX_FIXED funding requires rate and interval"
+                )
+            object.__setattr__(
+                self,
+                "fixed_funding_rate",
+                normalize_decimal_string(
+                    self.fixed_funding_rate,
+                    field_name="fixed_funding_rate",
+                ),
+            )
+            interval = validate_v2_counter(
+                self.funding_interval_ms,
+                field_name="funding_interval_ms",
+            )
+            if interval < 60_000 or interval > 30 * 86_400_000:
+                raise ValueError("funding_interval_ms is outside supported bounds")
+            object.__setattr__(self, "funding_interval_ms", interval)
+        elif self.fixed_funding_rate is not None or self.funding_interval_ms is not None:
+            raise ValueError(
+                "fixed funding fields are available only for SANDBOX_FIXED"
+            )
 
     @classmethod
     def from_dict(cls, value: object) -> "TrainingRunCreateRequest":
         payload = expect_mapping(value, field_name="training run create")
         required = {
-                "protocol",
-                "catalog_epoch",
-                "name",
-                "source_kind",
-                "start_mode",
-                "exchange",
-                "market_type",
-                "symbol",
-                "settlement_asset",
-                "base_interval",
-                "display_interval",
-                "requested_start_ms",
-                "warmup_bars",
-                "forward_cache_ms",
-                "random_seed",
-                "initial_equity",
-                "max_leverage",
-                "maker_fee_bps",
-                "taker_fee_bps",
-                "market_slippage_bps",
-                "integrity_mode",
-                "time_disclosure_policy",
-                "book_mode",
-                "margin_mode",
-                "funding_mode",
-                "allow_rule_changes",
+            "protocol",
+            "catalog_epoch",
+            "name",
+            "source_kind",
+            "start_mode",
+            "exchange",
+            "market_type",
+            "symbol",
+            "settlement_asset",
+            "base_interval",
+            "display_interval",
+            "requested_start_ms",
+            "warmup_bars",
+            "forward_cache_ms",
+            "random_seed",
+            "initial_equity",
+            "max_leverage",
+            "maker_fee_bps",
+            "taker_fee_bps",
+            "market_slippage_bps",
+            "integrity_mode",
+            "time_disclosure_policy",
+            "book_mode",
+            "margin_mode",
+            "funding_mode",
+            "allow_rule_changes",
         }
         missing = required - set(payload)
-        unknown = set(payload) - required - {"allowed_mutations"}
+        unknown = set(payload) - required - {
+            "allowed_mutations",
+            "fixed_funding_rate",
+            "funding_interval_ms",
+        }
         if missing:
             raise ValueError(f"missing field(s): {', '.join(sorted(missing))}")
         if unknown:
@@ -907,7 +943,9 @@ class TrainingRunCreateRequest:
             "time_disclosure_policy": self.time_disclosure_policy.value,
             "book_mode": self.book_mode.value,
             "margin_mode": self.margin_mode.value,
-            "funding_mode": self.funding_mode,
+            "funding_mode": self.funding_mode.value,
+            "fixed_funding_rate": self.fixed_funding_rate,
+            "funding_interval_ms": self.funding_interval_ms,
             "allow_rule_changes": self.allow_rule_changes,
             "allowed_mutations": list(self.allowed_mutations),
         }
@@ -919,6 +957,7 @@ __all__ = [
     "CapabilityState",
     "ExecutionModelV2",
     "FastForwardPlan",
+    "FundingMode",
     "IntegrityMode",
     "MAX_V2_COUNTER",
     "MarginMode",

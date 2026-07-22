@@ -7698,6 +7698,17 @@ body {
 .replay-fidelity-chips span { padding: 3px 6px; border-radius: 4px; color: #a7f3d0; background: rgba(5, 150, 105, .14); font: 10px "JetBrains Mono", monospace; white-space: nowrap; }
 
 .replay-right-rail { width: 350px; min-width: 300px; height: 100%; overflow-y: auto; border-left: 1px solid #1e293b; color: #cbd5e1; background: #0f172a; }
+.replay-rail-account-strip { position: sticky; z-index: 3; top: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; padding: 11px 13px; border-bottom: 1px solid #27364e; background: rgba(15, 23, 42, .97); backdrop-filter: blur(12px); }
+.replay-rail-account-strip div { display: grid; min-width: 0; }
+.replay-rail-account-strip small { overflow: hidden; color: #64748b; font: 9px "JetBrains Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.replay-rail-account-strip strong { color: #f8fafc; font: 13px "JetBrains Mono", monospace; }
+.replay-rail-account-strip > span { padding: 3px 6px; border-radius: 999px; color: #86efac; background: rgba(22, 101, 52, .28); font: 9px "JetBrains Mono", monospace; }
+.replay-rail-account-strip > span[data-account-status="LIQUIDATING"] { color: #fde68a; background: rgba(146, 64, 14, .35); }
+.replay-rail-account-strip > span[data-account-status="BANKRUPT"] { color: #fecaca; background: rgba(153, 27, 27, .4); }
+.replay-rail-account-strip em { grid-column: 1 / -1; color: #fbbf24; font-size: 10px; font-style: normal; }
+.replay-rail-tabs { position: sticky; z-index: 2; top: 65px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 5px; border-bottom: 1px solid #1e293b; background: rgba(15, 23, 42, .97); }
+.replay-rail-tabs button { min-width: 0; padding: 6px 3px; border: 0; border-radius: 4px; color: #64748b; background: transparent; font-size: 10px; }
+.replay-rail-tabs button.active { color: #dbeafe; background: rgba(37, 99, 235, .22); }
 .replay-rail-section { padding: 13px; border-bottom: 1px solid #1e293b; }
 .replay-rail-section h2 { margin: 0 0 10px; color: #f1f5f9; font-size: 13px; }
 .replay-metrics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
@@ -7719,6 +7730,10 @@ body {
 .replay-ambiguity-warning p { margin: 6px 0; }
 .replay-right-rail textarea { width: 100%; min-height: 70px; resize: vertical; }
 .replay-indicator-boundary p { margin: 5px 0; color: #94a3b8; font-size: 11px; }
+.replay-isolated-allocation { display: grid; gap: 7px; margin-top: 11px; padding: 9px; border: 1px solid #334155; border-radius: 6px; background: #111827; }
+.replay-isolated-allocation label { display: grid; gap: 5px; color: #94a3b8; font-size: 10px; }
+.replay-isolated-allocation button { padding: 6px; border: 1px solid #3b82f6; border-radius: 5px; color: #dbeafe; background: rgba(29, 78, 216, .45); }
+.replay-fidelity-panel p { margin: 5px 0; color: #94a3b8; font-size: 10px; overflow-wrap: anywhere; }
 
 .replay-watchlist-pane .wl-header small { color: #64748b; font: 9px "JetBrains Mono", monospace; }
 .replay-watchlist-rows { min-height: 0; overflow: auto; }

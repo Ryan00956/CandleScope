@@ -20,6 +20,7 @@ from app.replay.constants import (
     SourceKind,
     StartPolicy,
 )
+from app.replay.broker.models import TOUCH_OR_TAPE_EXECUTION_MODE
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.internal_commands import InternalCommandType
 from app.replay.models import (
@@ -42,6 +43,7 @@ from .control import (
 )
 from .history import build_history_page
 from .models import (
+    FundingMode,
     IntegrityMode,
     ReplaySource,
     ReplayV2CommandType,
@@ -203,6 +205,11 @@ class TrainingRunService:
             for track in tracks
             if isinstance(track, Mapping) and track.get("subscription_tier") == "FULL"
         )
+        portfolio = projection.get("portfolio")
+        contract_clock = (
+            isinstance(portfolio, Mapping)
+            and portfolio.get("account_model") == "TOUCH_OR_TAPE_V2"
+        )
         actor = self._run_actors.get(run_id)
         actor_clock = actor.playback_snapshot() if actor is not None else None
         actor_generation = (
@@ -222,11 +229,15 @@ class TrainingRunService:
             and actor_generation > 0
             and actor_clock.get("state") in {"PLAYING", "ENDED", "ERROR"}
         )
-        if full_count > 1 and preserve_actor_terminal and actor_clock is not None:
+        if (
+            (contract_clock or full_count > 1)
+            and preserve_actor_terminal
+            and actor_clock is not None
+        ):
             global_clock = dict(actor_clock)
         else:
             global_clock = {
-                "mode": "ORDERED" if full_count > 1 else "ADAPTER",
+                "mode": "ORDERED" if contract_clock or full_count > 1 else "ADAPTER",
                 "state": selected_snapshot["state"],
                 "speed": selected_snapshot["speed"],
                 "reason": None,
@@ -372,6 +383,17 @@ class TrainingRunService:
             base_interval=request.base_interval,
             step_interval=request.display_interval,
         )
+        if request.funding_mode is FundingMode.HISTORICAL_EXACT:
+            raise TrainingRunError(
+                "HISTORICAL_FUNDING_UNAVAILABLE",
+                "historical exact funding requires aligned funding and mark coverage",
+                status_code=409,
+                details={
+                    "funding_rate": "UNSUPPORTED_NO_HISTORY",
+                    "historical_mark": "UNSUPPORTED_NO_HISTORY",
+                    "fallback_applied": False,
+                },
+            )
         run_id = self._identifier(self._run_id_factory(), field_name="run_id")
         config = self._adapter_config(request)
 
@@ -380,6 +402,7 @@ class TrainingRunService:
             session_id: str,
             session_state: Mapping[str, object],
             component_state: Mapping[str, object],
+            broker_config: Mapping[str, object],
         ):
             return self.store.initial_run_writer(
                 run_id=run_id,
@@ -387,6 +410,7 @@ class TrainingRunService:
                 adapter_session_id=session_id,
                 session_state=session_state,
                 component_state=component_state,
+                broker_config=broker_config,
             )
 
         try:
@@ -394,6 +418,7 @@ class TrainingRunService:
                 config,
                 _expected_catalog_epoch=request.catalog_epoch,
                 _extension_factory=extension_factory,
+                _internal_execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
             )
         except ReplayDomainError as exc:
             catalog_drift = False
@@ -647,6 +672,69 @@ class TrainingRunService:
                 result=result,
             )
             return result
+        if command.type is ReplayV2CommandType.ALLOCATE_ISOLATED_MARGIN:
+            snapshot = self._assert_expected_cursor(command, session)
+            payload = self._exact_payload(command.payload, {"track_id", "amount"})
+            track_id = self._identifier(payload["track_id"], field_name="track_id")
+            amount = payload["amount"]
+            if not isinstance(amount, str):
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "isolated margin amount must be a canonical Decimal string",
+                    status_code=422,
+                )
+            try:
+                normalized_amount = normalize_decimal_string(
+                    amount,
+                    field_name="isolated margin amount",
+                )
+            except (TypeError, ValueError) as exc:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "isolated margin amount is invalid",
+                    status_code=422,
+                ) from exc
+            if normalized_amount != amount or Decimal(amount) < 0:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "isolated margin amount must be a non-negative canonical Decimal string",
+                    status_code=422,
+                )
+            cursor = _stored_mapping(snapshot["cursor"], field_name="adapter cursor")
+            portfolio = await self.store.allocate_isolated_margin(
+                run_id=normalized_run,
+                track_id=track_id,
+                amount=amount,
+                command_id=command.command_id,
+                virtual_time_ms=_stored_counter(
+                    cursor["virtual_time_ms"],
+                    field_name="virtual_time_ms",
+                ),
+                source_sequence=_stored_counter(
+                    cursor["source_sequence"],
+                    field_name="source_sequence",
+                ),
+            )
+            viewer = await self.store.get_viewer_state(normalized_run)
+            result = self._result_payload(
+                command=command,
+                session_id=session_id,
+                snapshot=snapshot,
+                viewer=viewer.to_dict(),
+                data={
+                    "account_contract": "TOUCH_OR_TAPE_V2_CONTRACT_ACCOUNT",
+                    "portfolio": portfolio,
+                    "allocated_track_id": track_id,
+                    "allocated_margin": amount,
+                },
+            )
+            await self.store.save_command_result(
+                run_id=normalized_run,
+                command_id=command.command_id,
+                command=command_payload,
+                result=result,
+            )
+            return result
         if command.type is ReplayV2CommandType.RECORD_VIEW_ACTION:
             snapshot = self._assert_expected_cursor(command, session)
             payload = self._exact_payload(
@@ -786,8 +874,19 @@ class TrainingRunService:
             for track in all_tracks
             if track.get("subscription_tier") == "FULL"
         ]
-        multi_track_command = len(full_tracks) > 1 or (
+        contract_clock = binding.get("account_model") == "TOUCH_OR_TAPE_V2"
+        contract_ordered_types = {
+            ReplayV2CommandType.PLAY,
+            ReplayV2CommandType.PAUSE,
+            ReplayV2CommandType.SET_SPEED,
+            ReplayV2CommandType.RELEASE_CONTROLLER,
+        }
+        multi_track_command = (
+            len(full_tracks) > 1
+            or (contract_clock and command.type in contract_ordered_types)
+            or (
             command.type is ReplayV2CommandType.END and len(all_tracks) > 1
+            )
         )
         if multi_track_command and command.type in {
             ReplayV2CommandType.ACQUIRE_CONTROLLER,
@@ -857,26 +956,39 @@ class TrainingRunService:
                 status_code=exc.http_status,
                 details=exc.details,
             ) from exc
+        adapter_data = dict(
+            _stored_mapping(
+                adapter_result.get("data"),
+                field_name="adapter_result.data",
+            )
+        )
+        liquidation_count = await self._reconcile_liquidations(
+            run_id=normalized_run,
+            client_instance_id=command.client_instance_id,
+            command_id=command.command_id,
+        )
+        authoritative = (
+            self._snapshot(await self.replay_service.get_session(session_id))
+            if liquidation_count
+            else adapter_result
+        )
         viewer = await self.store.get_viewer_state(normalized_run)
         result = {
             "protocol": "replay.v2",
             "run_id": normalized_run,
             "session_id": session_id,
             "command_id": command.command_id,
-            "revision": adapter_result["revision"],
-            "sequence": adapter_result["sequence"],
-            "state": adapter_result["state"],
-            "state_hash": adapter_result["state_hash"],
-            "cursor": adapter_result["cursor"],
+            "revision": authoritative["revision"],
+            "sequence": authoritative["sequence"],
+            "state": authoritative["state"],
+            "state_hash": authoritative["state_hash"],
+            "cursor": authoritative["cursor"],
             "viewer_state": viewer.to_dict(),
             "data": {
-                **dict(
-                    _stored_mapping(
-                        adapter_result.get("data"), field_name="adapter_result.data"
-                    )
-                ),
+                **adapter_data,
                 "plan": plan,
                 "adapter_command": v1_type.value,
+                "simulated_account_liquidations": liquidation_count,
             },
         }
         await self.store.save_command_result(
@@ -1162,6 +1274,7 @@ class TrainingRunService:
             created = await self.replay_service.create_session(
                 config,
                 _extension_factory=extension_factory,
+                _internal_execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
             )
         except ReplayDomainError as exc:
             await self.store.mark_market_track_error(
@@ -1275,6 +1388,21 @@ class TrainingRunService:
                 status_code=exc.http_status,
                 details=exc.details,
             ) from exc
+        adapter_data = dict(
+            _stored_mapping(
+                acknowledged.get("data"),
+                field_name="adapter_result.data",
+            )
+        )
+        liquidation_count = await self._reconcile_liquidations(
+            run_id=command.run_id,
+            client_instance_id=command.client_instance_id,
+            command_id=command.command_id,
+        )
+        if liquidation_count:
+            acknowledged = self._snapshot(
+                await self.replay_service.get_session(session_id)
+            )
         checkpoint = await self.store.checkpoint_market_tracks(command.run_id)
         refreshed = await self.store.get_market_tracks(command.run_id)
         viewer = await self.store.get_viewer_state(command.run_id)
@@ -1284,17 +1412,142 @@ class TrainingRunService:
             snapshot=acknowledged,
             viewer=viewer.to_dict(),
             data={
-                **dict(
-                    _stored_mapping(
-                        acknowledged.get("data"), field_name="adapter_result.data"
-                    )
-                ),
+                **adapter_data,
                 "selected_track_id": selected_track_id,
                 "portfolio": refreshed["portfolio"],
                 "global_checkpoint": checkpoint,
-                "account_contract": "SHARED_SETTLEMENT_OVERLAY_V1",
+                "account_contract": "TOUCH_OR_TAPE_V2_CONTRACT_ACCOUNT",
+                "simulated_account_liquidations": liquidation_count,
             },
         )
+
+    async def _reconcile_liquidations(
+        self,
+        *,
+        run_id: str,
+        client_instance_id: str,
+        command_id: str,
+    ) -> int:
+        pending = await self.store.pending_liquidations(run_id)
+        completed = 0
+        for event in pending:
+            session_id = event.get("adapter_session_id")
+            if not isinstance(session_id, str):
+                raise TrainingRunError(
+                    "LIQUIDATION_EXECUTION_FAILED",
+                    "simulated account liquidation lost its market adapter",
+                    status_code=409,
+                )
+            try:
+                await self._ensure_track_controller(
+                    session_id=session_id,
+                    client_instance_id=client_instance_id,
+                    command_id=command_id,
+                )
+                canceled: list[str] = []
+                raw_orders = event.get("open_orders")
+                if isinstance(raw_orders, list):
+                    for raw in raw_orders:
+                        if not isinstance(raw, Mapping) or not isinstance(
+                            raw.get("order_id"),
+                            str,
+                        ):
+                            continue
+                        session = await self.replay_service.get_session(session_id)
+                        snapshot = self._snapshot(session)
+                        cancel = ReplayCommand(
+                            protocol=REPLAY_PROTOCOL,
+                            command_id=self._multi_command_id(
+                                command_id,
+                                str(event["track_id"]),
+                                f"liquidation-cancel-{raw['order_id']}",
+                                _stored_counter(
+                                    snapshot["revision"],
+                                    field_name="revision",
+                                ),
+                            ),
+                            client_instance_id=client_instance_id,
+                            expected_revision=_stored_counter(
+                                snapshot["revision"],
+                                field_name="revision",
+                            ),
+                            type=CommandType.CANCEL_ORDER,
+                            payload={"order_id": raw["order_id"]},
+                        )
+                        await self.replay_service.command(session_id, cancel)
+                        canceled.append(str(raw["order_id"]))
+                session = await self.replay_service.get_session(session_id)
+                snapshot = self._snapshot(session)
+                components = snapshot.get("components")
+                position = (
+                    components.get("position")
+                    if isinstance(components, Mapping)
+                    else None
+                )
+                if not isinstance(position, Mapping) or position.get("quantity") in {
+                    None,
+                    "0",
+                }:
+                    raise TrainingRunError(
+                        "LIQUIDATION_EXECUTION_FAILED",
+                        "simulated liquidation position disappeared before close",
+                        status_code=409,
+                    )
+                close = ReplayCommand(
+                    protocol=REPLAY_PROTOCOL,
+                    command_id=self._multi_command_id(
+                        command_id,
+                        str(event["track_id"]),
+                        "liquidation-close",
+                        _stored_counter(snapshot["revision"], field_name="revision"),
+                    ),
+                    client_instance_id=client_instance_id,
+                    expected_revision=_stored_counter(
+                        snapshot["revision"],
+                        field_name="revision",
+                    ),
+                    type=CommandType.CLOSE_POSITION,
+                    payload={"quantity": None},
+                )
+                closed = await self.replay_service.command(session_id, close)
+                data = _stored_mapping(
+                    closed.get("data"),
+                    field_name="liquidation close data",
+                )
+                orders = data.get("orders")
+                if (
+                    not isinstance(orders, list)
+                    or not orders
+                    or not isinstance(orders[0], Mapping)
+                    or not isinstance(orders[0].get("order_id"), str)
+                ):
+                    raise TrainingRunError(
+                        "LIQUIDATION_EXECUTION_FAILED",
+                        "simulated liquidation close order projection is missing",
+                        status_code=409,
+                    )
+                await self.store.complete_liquidation(
+                    run_id=run_id,
+                    liquidation_id=str(event["liquidation_id"]),
+                    canceled_order_ids=canceled,
+                    close_order_id=str(orders[0]["order_id"]),
+                )
+                completed += 1
+            except (ReplayDomainError, TrainingRunError) as exc:
+                raise TrainingRunError(
+                    "LIQUIDATION_EXECUTION_FAILED",
+                    "simulated account liquidation failed closed",
+                    status_code=409,
+                    details={
+                        "liquidation_id": event["liquidation_id"],
+                        "reason": (
+                            exc.code.value
+                            if isinstance(exc, ReplayDomainError)
+                            else exc.code
+                        ),
+                    },
+                ) from exc
+        return completed
 
     @staticmethod
     def _assert_shared_settlement_reservation(
@@ -1326,7 +1579,33 @@ class TrainingRunService:
             quantity = Decimal(str(payload["quantity"]))
             price = Decimal(str(price_value))
             leverage = Decimal(str(config["max_leverage"]))
-            available = Decimal(str(portfolio["available_equity"]))
+            if portfolio.get("margin_mode") == "ISOLATED":
+                allocations = portfolio.get("isolated_allocations")
+                track_account = selected_track.get("account")
+                if not isinstance(allocations, Mapping) or not isinstance(
+                    track_account,
+                    Mapping,
+                ):
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "isolated account projection is invalid",
+                        status_code=503,
+                    )
+                track_id = str(selected_track["track_id"])
+                allocated = Decimal(str(allocations.get(track_id, "0")))
+                in_use = Decimal(str(track_account.get("margin_used", "0"))) + Decimal(
+                    str(track_account.get("reserved_margin", "0"))
+                )
+                available = allocated - in_use
+                if allocated <= 0:
+                    raise TrainingRunError(
+                        "ISOLATED_MARGIN_REQUIRED",
+                        "allocate isolated margin before placing an opening order",
+                        status_code=409,
+                        details={"track_id": track_id},
+                    )
+            else:
+                available = Decimal(str(portfolio["available_equity"]))
             reservation = (quantity * price / leverage).quantize(
                 Decimal("0.00000001"),
                 rounding=ROUND_CEILING,
@@ -2102,6 +2381,11 @@ class TrainingRunService:
                     status_code=409,
                     details={"track_id": track["track_id"]},
                 ) from exc
+            await self._reconcile_liquidations(
+                run_id=command.run_id,
+                client_instance_id=command.client_instance_id,
+                command_id=command.command_id,
+            )
             if wave_events:
                 ordered_wave = stable_market_event_order(wave_events)
                 await self.store.record_global_events(command.run_id, ordered_wave)
@@ -2506,14 +2790,156 @@ class TrainingRunService:
             ReplayV2CommandType.CHANGE_LEVERAGE_CAP,
             ReplayV2CommandType.CHANGE_FUNDING_POLICY,
         }:
-            raise TrainingRunError(
-                "REPLAY_POLICY_UNSUPPORTED",
-                "the v1 execution adapter cannot revise this rule without changing historical semantics",
-                status_code=409,
-                details={
-                    "command": command_value,
+            if command.type is ReplayV2CommandType.CHANGE_FEE_POLICY:
+                policy_payload = dict(
+                    self._exact_payload(
+                        command.payload,
+                        {"maker_fee_bps", "taker_fee_bps", "reason"},
+                    )
+                )
+                decimal_fields = ("maker_fee_bps", "taker_fee_bps")
+            elif command.type is ReplayV2CommandType.CHANGE_LEVERAGE_CAP:
+                policy_payload = dict(
+                    self._exact_payload(
+                        command.payload,
+                        {"max_leverage", "reason"},
+                    )
+                )
+                decimal_fields = ("max_leverage",)
+            else:
+                policy_payload = dict(
+                    self._exact_payload(
+                        command.payload,
+                        {
+                            "funding_mode",
+                            "fixed_funding_rate",
+                            "funding_interval_ms",
+                            "reason",
+                        },
+                    )
+                )
+                decimal_fields = ()
+            reason = policy_payload.get("reason")
+            if (
+                not isinstance(reason, str)
+                or not reason.strip()
+                or len(reason.strip()) > 500
+            ):
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "policy revision reason must contain 1-500 characters",
+                    status_code=422,
+                )
+            policy_payload["reason"] = reason.strip()
+            for field_name in decimal_fields:
+                value = policy_payload.get(field_name)
+                if not isinstance(value, str):
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_INVALID",
+                        f"{field_name} must be a canonical Decimal string",
+                        status_code=422,
+                    )
+                try:
+                    normalized = normalize_decimal_string(
+                        value,
+                        field_name=field_name,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_INVALID",
+                        f"{field_name} is invalid",
+                        status_code=422,
+                    ) from exc
+                positive = field_name == "max_leverage"
+                decimal_value = Decimal(value)
+                if (
+                    normalized != value
+                    or (positive and decimal_value <= 0)
+                    or (not positive and decimal_value < 0)
+                ):
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_INVALID",
+                        f"{field_name} is outside the supported range",
+                        status_code=422,
+                    )
+            if command.type is ReplayV2CommandType.CHANGE_FUNDING_POLICY:
+                if integrity_mode is not IntegrityMode.SANDBOX:
+                    raise TrainingRunError(
+                        "INTEGRITY_POLICY_REJECTED",
+                        "custom funding policy is available only in SANDBOX",
+                        status_code=409,
+                    )
+                mode = policy_payload.get("funding_mode")
+                rate = policy_payload.get("fixed_funding_rate")
+                interval = policy_payload.get("funding_interval_ms")
+                if mode == "OFF":
+                    if rate is not None or interval is not None:
+                        raise TrainingRunError(
+                            "REPLAY_CONTROL_INVALID",
+                            "OFF funding cannot include fixed funding fields",
+                            status_code=422,
+                        )
+                elif mode == "SANDBOX_FIXED":
+                    if not isinstance(rate, str) or not isinstance(interval, int):
+                        raise TrainingRunError(
+                            "REPLAY_CONTROL_INVALID",
+                            "SANDBOX_FIXED funding requires Decimal rate and interval",
+                            status_code=422,
+                        )
+                    try:
+                        normalized_rate = normalize_decimal_string(
+                            rate,
+                            field_name="fixed_funding_rate",
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise TrainingRunError(
+                            "REPLAY_CONTROL_INVALID",
+                            "fixed funding rate is invalid",
+                            status_code=422,
+                        ) from exc
+                    if (
+                        normalized_rate != rate
+                        or isinstance(interval, bool)
+                        or not 60_000 <= interval <= 30 * 86_400_000
+                    ):
+                        raise TrainingRunError(
+                            "REPLAY_CONTROL_INVALID",
+                            "fixed funding policy is outside supported bounds",
+                            status_code=422,
+                        )
+                else:
+                    raise TrainingRunError(
+                        "HISTORICAL_FUNDING_UNAVAILABLE",
+                        "historical exact funding cannot be enabled without aligned history",
+                        status_code=409,
+                        details={"fallback_applied": False},
+                    )
+            cursor = _stored_mapping(snapshot["cursor"], field_name="adapter cursor")
+            policy = await self.store.revise_contract_policy(
+                run_id=command.run_id,
+                command_id=command.command_id,
+                command_type=command_value,
+                payload=policy_payload,
+                virtual_time_ms=_stored_counter(
+                    cursor["virtual_time_ms"],
+                    field_name="virtual_time_ms",
+                ),
+                source_sequence=_stored_counter(
+                    cursor["source_sequence"],
+                    field_name="source_sequence",
+                ),
+            )
+            viewer = await self.store.get_viewer_state(command.run_id)
+            return self._result_payload(
+                command=command,
+                session_id=session_id,
+                snapshot=snapshot,
+                viewer=viewer.to_dict(),
+                data={
+                    "policy_command": command_value,
                     "atomic": True,
-                    "applied": False,
+                    "applied": True,
+                    **policy,
                 },
             )
         if command.type is ReplayV2CommandType.REVEAL_TIME:
@@ -2683,6 +3109,7 @@ class TrainingRunService:
             "current_virtual_time_ms": initial,
             "consumed": 0,
             "chunks": 0,
+            "simulated_account_liquidations": 0,
             "cancelable": bool(plan.get("cancelable", False)),
         }
         self._advance_jobs[key] = job
@@ -2750,6 +3177,13 @@ class TrainingRunService:
                 job["current_virtual_time_ms"] = int(
                     acknowledged["cursor"]["virtual_time_ms"]
                 )
+                job["simulated_account_liquidations"] = int(
+                    job["simulated_account_liquidations"]
+                ) + await self._reconcile_liquidations(
+                    run_id=command.run_id,
+                    client_instance_id=command.client_instance_id,
+                    command_id=command.command_id,
+                )
                 await asyncio.sleep(0)
 
             final_response = await self.replay_service.get_session(session_id)
@@ -2773,6 +3207,9 @@ class TrainingRunService:
                     "target_virtual_time_ms": target_virtual_time_ms,
                     "plan": dict(plan),
                     "progress": progress,
+                    "simulated_account_liquidations": int(
+                        job["simulated_account_liquidations"]
+                    ),
                 },
             }
         finally:

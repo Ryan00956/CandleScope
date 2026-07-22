@@ -113,6 +113,83 @@ test("Phase 5 market-track parser keeps tier, public price, and force reasons st
   }), /FULL.*cursor|cursor.*FULL/);
 });
 
+test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation domains strict", () => {
+  const payload = marketTracksResponse();
+  const parsed = parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      schema_version: "replay.training.portfolio.v2",
+      account_model: "TOUCH_OR_TAPE_V2",
+      execution_model: "TOUCH_OR_TAPE_V2",
+      execution_fidelity: "NO_BOOK_TOUCH_OR_TAPE_APPROX",
+      settlement_account_shared: false,
+      margin_mode: "ISOLATED",
+      funding_mode: "SANDBOX_FIXED",
+      status: "ACTIVE",
+      initial_equity: "10000",
+      equity: "9999.5",
+      cash_balance: "9999",
+      available_equity: "8999.5",
+      reserved_margin: "0",
+      margin_used: "100",
+      maintenance_margin: "5",
+      realized_pnl: "0",
+      unrealized_pnl: "0.5",
+      fees_paid: "1",
+      funding_cashflow: "-0.1",
+      liquidation_fees_paid: "0",
+      risk_ratio: "1999.9",
+      positions: [{
+        track_id: "track-2",
+        symbol: "ETHUSDT",
+        position: { quantity: "1", mark_price: "204.5" },
+        maintenance_margin: "5",
+        isolated_margin: "1000",
+        margin_equity: "1000.5",
+        risk_ratio: "200.1",
+        rule_revision: 1,
+        rule_hash: `sha256:${"a".repeat(64)}`,
+        mark_fidelity: "REVEALED_BAR_CLOSE_PROXY",
+      }],
+      orders: [{ order_id: "ord-1", track_id: "track-2", status: "OPEN" }],
+      fills: [{ fill_id: "fill-1", track_id: "track-2", configured_fee: "1" }],
+      active_fee_policy: { revision: 1, maker_fee_bps: "2", taker_fee_bps: "5" },
+      instrument_rules: [{ track_id: "track-2", revision: 1 }],
+      isolated_allocations: { "track-2": "1000" },
+      next_funding_time_ms: 1_710_000_300_000,
+      liquidations: [{
+        liquidation_id: "liq-track-2-0000000001",
+        track_id: "track-2",
+        state: "COMPLETED",
+        fidelity: "REVEALED_BAR_CLOSE_PROXY",
+      }],
+      ledger: {
+        chain_version: "replay.training.contract-ledger.v1",
+        entry_count: 3,
+        tail_hash: `sha256:${"b".repeat(64)}`,
+        cash_total: "9999",
+        reconciliation_delta: "0",
+        entries: [],
+      },
+      fidelity: {
+        mark: "REVEALED_PRICE_PROXY_NOT_HISTORICAL_MARK",
+        liquidation: "AVAILABLE_APPROX_SIMULATED_ACCOUNT",
+      },
+    },
+  });
+  assert.equal(parsed.portfolio.schema_version, "replay.training.portfolio.v2");
+  if (parsed.portfolio.schema_version !== "replay.training.portfolio.v2") {
+    assert.fail("contract portfolio did not survive parsing");
+  }
+  assert.equal(parsed.portfolio.margin_mode, "ISOLATED");
+  assert.equal(parsed.portfolio.ledger.reconciliation_delta, "0");
+  assert.equal(parsed.portfolio.liquidations.length, 1);
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: { ...payload.portfolio, account_model: "TOUCH_OR_TAPE_V2" },
+  }), /unknown|unsupported/);
+});
+
 test("Phase 5 API reads tracks by replay session without touching live subscription routes", async () => {
   const requests: string[] = [];
   const client = new ReplayV2ApiClient({
@@ -145,6 +222,20 @@ test("Phase 5 replay watchlist is backed only by replay.v2 track commands", () =
   );
   assert.match(paper, /viewer\.actions\.submitTrade/);
   assert.match(paper, /portfolioPositions|marketTracks\?\.portfolio/);
+  assert.match(paper, /模拟账户强平/);
+  assert.match(paper, /历史市场爆仓/);
+  assert.match(paper, /simulated-account-liquidation/);
+  assert.match(paper, /reconciliation_delta/);
+  assert.match(paper, /不含盘口排队/);
+  assert.match(paper, /data-replay-rail-tab/);
+  assert.doesNotMatch(paper, /BAR v1 不支持/);
+  const integrity = readFileSync(
+    resolve(testDirectory, "../components/ReplayIntegrityReviewPanel.tsx"),
+    "utf8",
+  );
+  assert.match(integrity, /SERVER-AUTHORITATIVE · PHASE 6/);
+  assert.match(integrity, /版本化 Run command/);
+  assert.doesNotMatch(integrity, /REPLAY_POLICY_UNSUPPORTED/);
   const controls = readFileSync(
     resolve(testDirectory, "../components/ReplayControlBar.tsx"),
     "utf8",

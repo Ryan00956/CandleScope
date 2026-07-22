@@ -57,7 +57,7 @@ export function buildReplayCapabilityModel(sourceKind: "BAR" | "AGG_TRADE" | "ba
     MARK_PRICE: item("Mark", "UNSUPPORTED_NO_HISTORY", "冻结 run 未绑定 mark 历史"),
     INDEX_PRICE: item("Index", "UNSUPPORTED_NO_HISTORY", "冻结 run 未绑定 index 历史"),
     BASIS: item("Basis", "UNSUPPORTED_NO_HISTORY", "缺少 mark/index 同步历史"),
-    FUNDING: item("Funding", "UNSUPPORTED_NO_HISTORY", "Phase 2 funding mode 为 OFF"),
+    FUNDING: item("Funding", "UNSUPPORTED_NO_HISTORY", "未绑定交易所历史 funding/mark；Sandbox 固定资金费只属于近似账户模拟"),
     MARKET_LIQUIDATION: item("Market liquidations", "UNSUPPORTED_NO_HISTORY", "未绑定市场爆仓归档"),
     ORDER_BOOK: item("Order book", "UNSUPPORTED_NO_HISTORY", "未绑定历史盘口快照与增量"),
     HOSTED_INDICATORS: item("Hosted indicators", "UNSUPPORTED_NO_PROVIDER", "range/security provider 未启用"),

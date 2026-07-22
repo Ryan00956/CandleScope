@@ -152,6 +152,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               const integrityMode = event.target.value as TrainingRunDraft["integrityMode"];
               patchDraft(runtime, {
                 integrityMode,
+                fundingMode: integrityMode === "SANDBOX" ? draft.fundingMode : "OFF",
                 allowedMutations: integrityMode === "CHALLENGE"
                   ? []
                   : integrityMode === "SANDBOX"
@@ -221,6 +222,61 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           />
         </label>
         <label>
+          保证金模式
+          <select
+            value={draft.marginMode}
+            onChange={(event) => patchDraft(runtime, {
+              marginMode: event.target.value as TrainingRunDraft["marginMode"],
+            })}
+          >
+            <option value="CROSS">CROSS · 共享结算权益</option>
+            <option value="ISOLATED">ISOLATED · 按轨道显式分配</option>
+          </select>
+        </label>
+        <label>
+          资金费模式
+          <select
+            value={draft.fundingMode}
+            onChange={(event) => patchDraft(runtime, {
+              fundingMode: event.target.value as TrainingRunDraft["fundingMode"],
+            })}
+          >
+            <option value="OFF">OFF</option>
+            <option value="SANDBOX_FIXED" disabled={draft.integrityMode !== "SANDBOX"}>
+              SANDBOX_FIXED · 近似练习
+            </option>
+            <option value="HISTORICAL_EXACT" disabled>
+              HISTORICAL_EXACT · 缺历史 mark/funding
+            </option>
+          </select>
+        </label>
+        {draft.fundingMode === "SANDBOX_FIXED" && (
+          <>
+            <label>
+              固定资金费率
+              <input
+                inputMode="decimal"
+                value={draft.fixedFundingRate}
+                onChange={(event) => patchDraft(runtime, {
+                  fixedFundingRate: event.target.value,
+                })}
+              />
+            </label>
+            <label>
+              结算间隔（ms）
+              <input
+                type="number"
+                min={60_000}
+                max={30 * 86_400_000}
+                value={draft.fundingIntervalMs}
+                onChange={(event) => patchDraft(runtime, {
+                  fundingIntervalMs: Number(event.target.value),
+                })}
+              />
+            </label>
+          </>
+        )}
+        <label>
           Maker / Taker bps
           <span className="training-hub-inline-inputs">
             <input
@@ -258,12 +314,12 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             {mutation}
           </label>
         ))}
-        <p>入金、出金和不可逆时间揭示已接通；费率、杠杆上限与资金费策略当前命令会明确拒绝。</p>
+        <p>入金、出金、费率、杠杆上限、Sandbox 固定资金费与不可逆时间揭示均写入审计事件；Challenge 仍全部锁定。</p>
       </fieldset>
-      <div className="training-hub-capability-boundary" aria-label="Phase 5 能力边界">
-        <h3>Phase 5 多商品已启用</h3>
-        <p>进入训练后可在同交易所、同市场类型、同结算资产范围添加 MarketTrack，并使用 NONE / WARM / FULL 分级。</p>
-        <h3>后续阶段明确不可用</h3>
+      <div className="training-hub-capability-boundary" aria-label="Phase 6 能力边界">
+        <h3>Phase 6 合约账户已启用</h3>
+        <p>新 Run 固定使用 TOUCH_OR_TAPE_V2；当前已揭示参考价立即 taker，后续触价挂单 maker，并持续标注“不含盘口排队”。</p>
+        <h3>能力与 fidelity 边界</h3>
         <ul>
           <li><strong>资金费</strong> — {evaluation.unsupported.funding}</li>
           <li><strong>历史盘口</strong> — {evaluation.unsupported.historical_l2}</li>

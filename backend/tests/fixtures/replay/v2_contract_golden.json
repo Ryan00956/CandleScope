@@ -47,6 +47,7 @@
     ],
     "book_mode": ["OFF", "BOOK_ASSISTED_REQUIRED"],
     "margin_mode": ["CROSS", "ISOLATED"],
+    "funding_mode": ["OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"],
     "execution_model": ["TOUCH_OR_TAPE_V2"],
     "command_type": [
       "acquire_controller",

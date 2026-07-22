@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_5_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅、Phase 2 共用市场工作区、Phase 3 ViewerState/固定周期投影/BAR/AGG_TRADE 推进语义、Phase 4 时间披露/完整性审计/权益曲线/只读 Review/Fork，以及 Phase 5 多商品 MarketTrack/稳定全局时钟/订阅分级/共享组合投影均已完成。Phase 6 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
+状态：`PHASE_6_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅、Phase 2 共用市场工作区、Phase 3 ViewerState/固定周期投影/BAR/AGG_TRADE 推进语义、Phase 4 时间披露/完整性审计/权益曲线/只读 Review/Fork、Phase 5 多商品 MarketTrack/稳定全局时钟/订阅分级/共享组合投影，以及 Phase 6 TOUCH_OR_TAPE_V2、版本化合约规则/费率、CROSS/ISOLATED、Sandbox funding、模拟账户强平与结构化账户侧栏均已完成。Phase 7 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -1531,4 +1531,39 @@ Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_E
 Rollback: feature-flag v1 fallback、旧 build v1 rollback drill 与 Phase 5 单提交 tree revert 均 PASS；反向应用提交后 tree 与父提交 c6921c9f7f813adabd452e162719baf20d700fb8 完全一致。
 Known limitations: Phase 5 共享账户明确标记 PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER；各轨仍由 PAPER_LINEAR_V1 执行，不宣称 Phase 6 的 instrument rounding、maker/taker rule revision、funding settlement、CROSS/ISOLATED maintenance margin 或 liquidation fidelity。历史 L2/book-assisted 继续留给 Phase 9；动态 fee/leverage/funding 仍 fail closed。
 Decision: PASS；停止在 Phase 5，不进入 Phase 6。
+```
+
+### Phase 6 执行记录
+
+```text
+Phase: 6 - versioned contract account, funding, margin, and simulated liquidation
+Date: 2026-07-22
+Commit: 本 Phase 独立提交，提交号以 Git 历史为准
+Parent commit: 6b5ed31c17804751ab795881dd6ef940dcfbe36a
+Executor: Codex
+Scope: 新 TrainingRun 固定使用内部 TOUCH_OR_TAPE_V2；实现当前已揭示参考价立即 taker、接受后首次触价 maker、BAR 保守顺序与 AGG_TRADE tape volume；增加版本化 instrument/fee policy、Decimal rounding、CROSS/ISOLATED 分配、Sandbox 固定 funding、maintenance margin、模拟账户强平、hash-chained ledger、重启/Fork 重算，以及下单/持仓/订单/成交/账户风险/记录六域侧栏。replay.v1 PAPER_LINEAR_V1 公共协议与旧成交语义保持不变。
+Files changed: backend broker 私有执行模式、training account/schema v5/store/service/API、合约 golden 与 Phase 6 回归；frontend create contract、严格 portfolio parser、账户/风险侧栏、控制标签、能力边界、完整性文案、测试/CSS/README；本执行记录。
+Schema/protocol changes: replay.training 物理 schema additive 升至 5，新增 contract_account、instrument_rule、fee_policy、contract_order、contract_fill、contract_ledger、funding_settlement、liquidation_event；旧 Run 迁移标记为 PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER，不重解释旧成交。replay.v1 ExecutionModel enum 与 replay.v2 冻结 public command enum 均未扩张；新 adapter 继续以 replay.v1 public config 持久化 PAPER_LINEAR_V1，仅 broker 私有 execution mode 和 training projection 使用 TOUCH_OR_TAPE_V2。
+Commands run:
+  backend replay: .\.venv\Scripts\python.exe -m pytest <all test_replay*.py> -q
+  backend full: .\.venv\Scripts\python.exe -m pytest tests -q
+  backend static: .\.venv\Scripts\python.exe -m compileall -q app\replay app\api\v1\replay.py；.\.venv\Scripts\python.exe -m ruff check <Phase 6 Python scope>
+  benchmark: .\.venv\Scripts\python.exe scripts\benchmark_replay_multitrack.py
+  frontend replay: npm run test:replay
+  frontend full: npm run check
+  browser: Playwright CLI against isolated 8-symbol offline fixture :18106 and Vite :15206
+  rollback: node scripts\replay-rollback-drill.mjs --out <temporary evidence path>
+  commit rollback: detached worktree + git revert --no-commit <Phase 6 commit> + git write-tree 与父提交 tree 比对
+Targeted tests: backend 全部 replay 测试 459 passed，其中 Phase 6 主文件 11 passed；frontend replay 173 passed。覆盖 Decimal rounding/阶梯维持保证金、maker/taker fee、v2 当前参考价立即成交且 v1 仍延迟、挂单不回溯、BAR 止盈止损保守顺序、AGG tape volume、fee/rule revision、funding 边界与重启幂等、多商品 funding、逐仓分配/释放、模拟强平和 Fork 重算。
+Global tests: backend 1950 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2385 passed；architecture/typecheck/ESLint/Vite production build 全部通过。Phase 6 Python scope Ruff 0 violations，compileall PASS。
+Execution evidence: 离线真实页面在 source_sequence 不前进时提交 0.02 ADAUSDT MARKET BUY，同一已揭示游标立即产生 TAKER / MARKET_REVEALED_REFERENCE，成交价 481.54815、configured fee 0.00481549；底部明确显示 TOUCH_OR_TAPE_V2 / EXACT_BAR / NO_BOOK_QUEUE。旧 PAPER_LINEAR_V1 对照测试仍等待下一 source event，未被新语义重写。
+Account/funding evidence: Sandbox + ISOLATED + SANDBOX_FIXED 原子创建成功，track-1 显式分配 2000 USDT 后 available equity 为 8000；成交后 margin used=3.210321、equity=9999.99518451。历史 funding/mark 未绑定时 HISTORICAL_EXACT 创建 fail closed；Sandbox 固定 funding 使用版本化策略和唯一 settlement boundary，专项测试证明跨重启不重复记账。
+Liquidation/fidelity evidence: CROSS/ISOLATED maintenance 与模拟强平沿正常 cancel/close/fee/ledger 路径执行，账户状态区分 ACTIVE/LIQUIDATING/BANKRUPT；UI 独立标记“模拟账户强平”，不冒充“历史市场爆仓”。mark=REVEALED_PRICE_PROXY_NOT_HISTORICAL_MARK、funding=AVAILABLE_APPROX_SANDBOX_FIXED、liquidation=AVAILABLE_APPROX_SIMULATED_ACCOUNT，不宣称交易所历史权威精度。
+Restart/database evidence: 对真实 fixture 后端执行 graceful shutdown 并以同一 SQLite 重启；2000 USDT 逐仓分配、1 条订单/成交、费用、持仓与 TOUCH_OR_TAPE_V2 投影完整恢复。schema_version=5、quick_check=ok、foreign_key_check 空；1 account、1 rule、1 fee policy、1 order、1 fill、3 ledger entries，ledger reconciliation delta=0。
+Browser evidence: 新建页展示 Phase 6 account/funding 边界，Sandbox 后才启用 SANDBOX_FIXED，HISTORICAL_EXACT 保持 disabled；六个账户页签、逐仓分配、立即 taker 成交、fidelity、模拟强平分域和重启恢复均经真实浏览器操作验证。最终 console errors=0，仅 2 个既有非标准 slider-vertical CSS warning；截图保存在 output/playwright/phase6-20260722。
+Performance evidence: Phase 5 稳定全局排序基准的 deterministic evidence hash 仍为 sha256:178e94da14b02f1c4dbe3d9e4339450a7461b9db6093f44a85d15982beca130e；本机 8 轨 80,000 projections wall 3351.392 ms、23870.678/s、queue high-water 8、checkpoint 5683 B，未出现顺序或资源上限回归。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0、RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_HISTORICAL_BOOK_ENABLED=0。关闭 v2 继续使用原 v1 shell/PAPER_LINEAR_V1；旧 build 可忽略 additive schema v5。
+Rollback: 干净 Phase 6 代码树上执行 feature-flag/v1 old-build drill PASS；baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f 的 replay route 为 404，graceful shutdown 状态为 shutdown_pause，最终演练内旧 build 运行前后 replay DB SHA-256 均为 e34457045633a7384f1acaf3a725279d68737ba6165e3bbb2b1b9b7629c7382。Phase 6 单提交反向应用后的 tree 为 7344bd30bebc88179a942167ae3c739489365eea，与父提交 tree 完全一致。
+Known limitations: HISTORICAL_EXACT funding 因缺对齐的交易所历史 mark/index/funding 继续 fail closed；Sandbox fixed funding、proxy mark 与模拟强平均为明确 APPROX。历史 L2/盘口排队仍留给 Phase 9；当前 TOUCH_OR_TAPE_V2 不声称 queue position、partial queue 或交易所真实 liquidation engine parity。
+Decision: PASS；停止在 Phase 6，不进入 Phase 7。
 ```

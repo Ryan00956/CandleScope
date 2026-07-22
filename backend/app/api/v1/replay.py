@@ -35,6 +35,7 @@ from app.replay.training.commands import ReplayV2Command
 from app.replay.training.models import (
     REPLAY_V2_PROTOCOL,
     BookMode,
+    FundingMode,
     IntegrityMode,
     MarginMode,
     ReplaySource,
@@ -292,7 +293,9 @@ class TrainingRunCreatePayload(_StrictModel):
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
-    funding_mode: Literal["OFF"]
+    funding_mode: FundingMode
+    fixed_funding_rate: str | None = Field(default=None, min_length=1, max_length=128)
+    funding_interval_ms: int | None = Field(default=None, ge=60_000, le=2_592_000_000)
     allow_rule_changes: bool
     allowed_mutations: list[str] = Field(default_factory=list, max_length=6)
 

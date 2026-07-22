@@ -35,7 +35,12 @@ from .bars.builder import ReplayBarBuilder, assess_bar_builder_capability
 from .bars.trade_builder import TradeReplayBarBuilder
 from .bars.trade_parity import assert_trade_bar_parity
 from .broker.execution import ConservativeBarBroker
-from .broker.models import BrokerConfig, BrokerLimits, InstrumentFilters
+from .broker.models import (
+    BrokerConfig,
+    BrokerLimits,
+    InstrumentFilters,
+    PAPER_LINEAR_EXECUTION_MODE,
+)
 from .canonical import canonical_json_bytes, canonical_sha256
 from .catalog import ReplayCatalog, ReplayCatalogEntry, ReplaySeriesIdentity
 from .commands import CommandResult
@@ -339,6 +344,7 @@ class ReplayService:
         *,
         _expected_catalog_epoch: str | None = None,
         _extension_factory: Callable[..., object] | None = None,
+        _internal_execution_mode: str = PAPER_LINEAR_EXECUTION_MODE,
     ) -> dict[str, object]:
         if not isinstance(config, ReplaySessionConfig):
             raise TypeError("config must be ReplaySessionConfig")
@@ -426,6 +432,7 @@ class ReplayService:
                 restore_checkpoint=None,
                 forked=False,
                 extension_factory=_extension_factory,
+                execution_mode=_internal_execution_mode,
             )
         except ReplayDomainError as exc:
             if config.blind_mode:
@@ -895,6 +902,7 @@ class ReplayService:
         synthetic_origin_ms: int | None = None,
         broker_config: BrokerConfig | None = None,
         extension_factory: Callable[..., object] | None = None,
+        execution_mode: str = PAPER_LINEAR_EXECUTION_MODE,
     ) -> dict[str, object]:
         session_id = self._session_id_factory()
         if (
@@ -928,6 +936,7 @@ class ReplayService:
             actor_dataset,
             broker,
             trade_dataset_ref=trade_dataset_ref,
+            execution_mode=execution_mode,
         )
         self._datasets.pin(session_id, actor_dataset)
         trade_pin_token: str | None = None
@@ -967,6 +976,7 @@ class ReplayService:
                     session_id=session_id,
                     session_state=durable_state,
                     component_state=snapshot["components"],
+                    broker_config=broker.to_dict(),
                 )
                 if not callable(extension_write):
                     raise TypeError("replay persistence extension must be callable")
@@ -1907,6 +1917,7 @@ class ReplayService:
         broker_config: BrokerConfig,
         *,
         trade_dataset_ref: RawAggTradeDatasetRef | None = None,
+        execution_mode: str = PAPER_LINEAR_EXECUTION_MODE,
     ) -> ConservativeBarBroker:
         max_closed_bars = min(10_000, max(1, dataset.row_count))
         if config.source_kind is SourceKind.AGG_TRADE:
@@ -1931,7 +1942,11 @@ class ReplayService:
                 warmup_bars=dataset.warmup_rows,
                 max_closed_bars=max_closed_bars,
             )
-        return ConservativeBarBroker(config=broker_config, bar_builder=builder)
+        return ConservativeBarBroker(
+            config=broker_config,
+            bar_builder=builder,
+            execution_mode=execution_mode,
+        )
 
     @staticmethod
     def _broker_config(

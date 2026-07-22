@@ -88,6 +88,8 @@ test("capability surface never renders unsupported history as numeric zero or st
   assert.equal(model.SIMULATED_LIQUIDATION.state, "AVAILABLE_APPROX");
   assert.equal(model.ORDER_BOOK.state, "UNSUPPORTED_NO_HISTORY");
   assert.equal(model.ORDER_BOOK.value, "--");
+  assert.match(model.FUNDING.detail, /交易所历史 funding\/mark/);
+  assert.match(model.FUNDING.detail, /近似账户模拟/);
   const html = renderToStaticMarkup(<ReplayCapabilitySurface capabilities={model} />);
   assert.match(html, /UNSUPPORTED_NO_HISTORY/);
   assert.doesNotMatch(html, />0(?:\.0+)?</);

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 
-TRAINING_SCHEMA_VERSION = 4
+TRAINING_SCHEMA_VERSION = 5
 TRAINING_SCHEMA_ID = "replay.training.v1"
 
 
@@ -331,6 +331,157 @@ CREATE TABLE IF NOT EXISTS replay_training_global_checkpoint (
 """
 
 
+TRAINING_SCHEMA_V5 = """
+CREATE TABLE IF NOT EXISTS replay_training_contract_account (
+    run_id TEXT PRIMARY KEY
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    account_model TEXT NOT NULL
+        CHECK (account_model IN ('PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER', 'TOUCH_OR_TAPE_V2')),
+    margin_mode TEXT NOT NULL CHECK (margin_mode IN ('CROSS', 'ISOLATED')),
+    funding_mode TEXT NOT NULL
+        CHECK (funding_mode IN ('OFF', 'HISTORICAL_EXACT', 'SANDBOX_FIXED')),
+    fixed_funding_rate TEXT,
+    funding_interval_ms INTEGER
+        CHECK (funding_interval_ms IS NULL OR funding_interval_ms > 0),
+    next_funding_time_ms INTEGER
+        CHECK (next_funding_time_ms IS NULL OR next_funding_time_ms >= 0),
+    overlay_cash TEXT NOT NULL,
+    isolated_margin_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'LIQUIDATING', 'BANKRUPT')),
+    fidelity TEXT NOT NULL,
+    ledger_tail_hash TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_instrument_rule (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    effective_virtual_time_ms INTEGER NOT NULL CHECK (effective_virtual_time_ms >= 0),
+    rule_json TEXT NOT NULL,
+    rule_hash TEXT NOT NULL,
+    fidelity TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_instrument_rule_effective
+ON replay_training_instrument_rule(run_id, track_id, effective_virtual_time_ms DESC, revision DESC);
+
+CREATE TABLE IF NOT EXISTS replay_training_fee_policy (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    effective_virtual_time_ms INTEGER NOT NULL CHECK (effective_virtual_time_ms >= 0),
+    maker_fee_bps TEXT NOT NULL,
+    taker_fee_bps TEXT NOT NULL,
+    policy_hash TEXT NOT NULL,
+    fidelity TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_contract_order (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    order_json TEXT NOT NULL,
+    rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, order_id)
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_contract_fill (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    fill_id TEXT NOT NULL,
+    fill_json TEXT NOT NULL,
+    rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+    fee_policy_revision INTEGER NOT NULL CHECK (fee_policy_revision >= 1),
+    configured_fee TEXT NOT NULL,
+    fee_fidelity TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, fill_id)
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_contract_ledger (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    ledger_sequence INTEGER NOT NULL CHECK (ledger_sequence >= 1),
+    posting_id TEXT NOT NULL,
+    track_id TEXT,
+    kind TEXT NOT NULL,
+    cash_delta TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    fidelity TEXT NOT NULL,
+    rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+    reference_type TEXT NOT NULL,
+    reference_id TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    previous_hash TEXT NOT NULL,
+    entry_hash TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, ledger_sequence),
+    UNIQUE (run_id, posting_id),
+    UNIQUE (run_id, entry_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_contract_ledger_kind
+ON replay_training_contract_ledger(run_id, kind, ledger_sequence DESC);
+
+CREATE TABLE IF NOT EXISTS replay_training_funding_settlement (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    settlement_time_ms INTEGER NOT NULL CHECK (settlement_time_ms >= 0),
+    position_quantity TEXT NOT NULL,
+    mark_price TEXT NOT NULL,
+    funding_rate TEXT NOT NULL,
+    cash_delta TEXT NOT NULL,
+    fidelity TEXT NOT NULL,
+    ledger_sequence INTEGER NOT NULL CHECK (ledger_sequence >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, settlement_time_ms)
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_liquidation_event (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    liquidation_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('PENDING', 'COMPLETED', 'FAILED')),
+    trigger_virtual_time_ms INTEGER NOT NULL CHECK (trigger_virtual_time_ms >= 0),
+    trigger_source_sequence INTEGER NOT NULL CHECK (trigger_source_sequence >= 0),
+    mark_price TEXT NOT NULL,
+    position_quantity TEXT NOT NULL,
+    position_notional TEXT NOT NULL,
+    maintenance_margin TEXT NOT NULL,
+    account_equity_before TEXT NOT NULL,
+    bankruptcy_price TEXT,
+    liquidation_fee TEXT NOT NULL,
+    fidelity TEXT NOT NULL,
+    canceled_order_ids_json TEXT NOT NULL,
+    close_order_id TEXT,
+    account_equity_after TEXT,
+    reason TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, liquidation_id),
+    UNIQUE (run_id, track_id, trigger_source_sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_liquidation_pending
+ON replay_training_liquidation_event(run_id, state, created_at_ms);
+"""
+
+
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
     """Create only v2-owned tables; never advance the replay.v1 schema row."""
 
@@ -439,6 +590,26 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
             """
         )
         current = 4
+    if current == 4:
+        _execute_script(connection, TRAINING_SCHEMA_V5)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_training_contract_account(
+                run_id, account_model, margin_mode, funding_mode,
+                fixed_funding_rate, funding_interval_ms, next_funding_time_ms,
+                overlay_cash, isolated_margin_json, status, fidelity,
+                ledger_tail_hash, created_at_ms, updated_at_ms
+            )
+            SELECT run_id, 'PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER', margin_mode,
+                   funding_mode, NULL, NULL, NULL, '0', '{}', 'ACTIVE',
+                   'LEGACY_MIGRATION_NO_REINTERPRETATION',
+                   'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+                   ?, ?
+            FROM replay_training_run
+            """,
+            (now_ms, now_ms),
+        )
+        current = 5
     if current != TRAINING_SCHEMA_VERSION:
         raise RuntimeError(f"no replay training schema migration path from {current}")
     connection.execute(

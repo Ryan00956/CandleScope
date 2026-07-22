@@ -1002,7 +1002,7 @@ async def test_run_level_trade_commands_force_full_and_share_available_equity(
             quantity="180",
             limit_price="100",
         )
-        assert first["data"]["account_contract"] == "SHARED_SETTLEMENT_OVERLAY_V1"
+        assert first["data"]["account_contract"] == "TOUCH_OR_TAPE_V2_CONTRACT_ACCOUNT"
         assert Decimal(str(first["data"]["portfolio"]["reserved_margin"])) == Decimal(
             "6000"
         )

@@ -51,6 +51,7 @@ export const REPLAY_V2_ENUMS = Object.freeze({
   ),
   book_mode: enumValues("OFF", "BOOK_ASSISTED_REQUIRED"),
   margin_mode: enumValues("CROSS", "ISOLATED"),
+  funding_mode: enumValues("OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"),
   execution_model: enumValues("TOUCH_OR_TAPE_V2"),
   command_type: enumValues(
     "acquire_controller",
@@ -114,6 +115,8 @@ export type ReplayV2CapabilityKind = EnumValue<typeof REPLAY_V2_ENUMS.capability
 export type ReplayV2CapabilityState = EnumValue<typeof REPLAY_V2_ENUMS.capability_state>;
 export type ReplayV2CommandType = EnumValue<typeof REPLAY_V2_ENUMS.command_type>;
 export type ReplayV2EventType = EnumValue<typeof REPLAY_V2_ENUMS.event_type>;
+export type ReplayV2MarginMode = EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
+export type ReplayV2FundingMode = EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
 
 export interface ReplayV2Cursor {
   readonly virtual_time_ms: number;
@@ -168,7 +171,7 @@ export interface ReplayTrainingMarketTrack {
   readonly account: Readonly<Record<string, ReplayV2Json>>;
 }
 
-export interface ReplayTrainingPortfolio {
+export interface ReplayTrainingPortfolioV1 {
   readonly schema_version: "replay.training.portfolio.v1";
   readonly fidelity: "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER";
   readonly settlement_account_shared: true;
@@ -184,10 +187,53 @@ export interface ReplayTrainingPortfolio {
   readonly positions: readonly ReplayTrainingPortfolioPosition[];
 }
 
+export interface ReplayTrainingContractPortfolio {
+  readonly schema_version: "replay.training.portfolio.v2";
+  readonly account_model: "TOUCH_OR_TAPE_V2";
+  readonly execution_model: "TOUCH_OR_TAPE_V2";
+  readonly execution_fidelity: "NO_BOOK_TOUCH_OR_TAPE_APPROX";
+  readonly settlement_account_shared: boolean;
+  readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
+  readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
+  readonly status: "ACTIVE" | "LIQUIDATING" | "BANKRUPT";
+  readonly initial_equity: string;
+  readonly equity: string;
+  readonly cash_balance: string;
+  readonly available_equity: string;
+  readonly reserved_margin: string;
+  readonly margin_used: string;
+  readonly maintenance_margin: string;
+  readonly realized_pnl: string;
+  readonly unrealized_pnl: string;
+  readonly fees_paid: string;
+  readonly funding_cashflow: string;
+  readonly liquidation_fees_paid: string;
+  readonly risk_ratio: string | null;
+  readonly positions: readonly ReplayTrainingPortfolioPosition[];
+  readonly orders: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly fills: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly active_fee_policy: Readonly<Record<string, ReplayV2Json>> | null;
+  readonly instrument_rules: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly isolated_allocations: Readonly<Record<string, ReplayV2Json>>;
+  readonly next_funding_time_ms: number | null;
+  readonly liquidations: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly ledger: Readonly<Record<string, ReplayV2Json>>;
+  readonly fidelity: Readonly<Record<string, ReplayV2Json>>;
+}
+
+export type ReplayTrainingPortfolio = ReplayTrainingPortfolioV1 | ReplayTrainingContractPortfolio;
+
 export interface ReplayTrainingPortfolioPosition {
   readonly track_id: string;
   readonly symbol: string;
   readonly position: Readonly<Record<string, ReplayV2Json>>;
+  readonly maintenance_margin?: string;
+  readonly isolated_margin?: string;
+  readonly margin_equity?: string;
+  readonly risk_ratio?: string | null;
+  readonly rule_revision?: number;
+  readonly rule_hash?: string;
+  readonly mark_fidelity?: string;
 }
 
 export interface ReplayGlobalClock {
@@ -584,6 +630,141 @@ function parseReplayTrainingMarketTrack(value: unknown): ReplayTrainingMarketTra
 }
 
 function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
+  if (
+    typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && (value as { schema_version?: unknown }).schema_version === "replay.training.portfolio.v2"
+  ) {
+    const portfolio = exactObject(value, "portfolio", [
+      "schema_version",
+      "account_model",
+      "execution_model",
+      "execution_fidelity",
+      "settlement_account_shared",
+      "margin_mode",
+      "funding_mode",
+      "status",
+      "initial_equity",
+      "cash_balance",
+      "equity",
+      "available_equity",
+      "reserved_margin",
+      "margin_used",
+      "maintenance_margin",
+      "realized_pnl",
+      "unrealized_pnl",
+      "fees_paid",
+      "funding_cashflow",
+      "liquidation_fees_paid",
+      "risk_ratio",
+      "positions",
+      "orders",
+      "fills",
+      "active_fee_policy",
+      "instrument_rules",
+      "isolated_allocations",
+      "next_funding_time_ms",
+      "liquidations",
+      "ledger",
+      "fidelity",
+    ]);
+    if (
+      portfolio.account_model !== "TOUCH_OR_TAPE_V2"
+      || portfolio.execution_model !== "TOUCH_OR_TAPE_V2"
+      || portfolio.execution_fidelity !== "NO_BOOK_TOUCH_OR_TAPE_APPROX"
+      || typeof portfolio.settlement_account_shared !== "boolean"
+      || !["ACTIVE", "LIQUIDATING", "BANKRUPT"].includes(String(portfolio.status))
+    ) {
+      throw new TypeError("contract portfolio identity is unsupported");
+    }
+    const objectList = (items: unknown, field: string): unknown[] => {
+      if (!Array.isArray(items)) throw new TypeError(`${field} must be an array`);
+      return items;
+    };
+    const rawPositions = objectList(portfolio.positions, "portfolio.positions");
+    const rawOrders = objectList(portfolio.orders, "portfolio.orders");
+    const rawFills = objectList(portfolio.fills, "portfolio.fills");
+    const rawRules = objectList(portfolio.instrument_rules, "portfolio.instrument_rules");
+    const rawLiquidations = objectList(portfolio.liquidations, "portfolio.liquidations");
+    const positions = rawPositions.map((position, index) => {
+      const field = `portfolio.positions[${index}]`;
+      const item = exactObject(position, field, [
+        "track_id",
+        "symbol",
+        "position",
+        "maintenance_margin",
+        "isolated_margin",
+        "margin_equity",
+        "risk_ratio",
+        "rule_revision",
+        "rule_hash",
+        "mark_fidelity",
+      ]);
+      return {
+        track_id: identifier(item.track_id, `${field}.track_id`),
+        symbol: identifier(item.symbol, `${field}.symbol`),
+        position: jsonObject(item.position, `${field}.position`),
+        maintenance_margin: canonicalDecimal(
+          item.maintenance_margin,
+          `${field}.maintenance_margin`,
+        ),
+        isolated_margin: canonicalDecimal(item.isolated_margin, `${field}.isolated_margin`),
+        margin_equity: canonicalDecimal(item.margin_equity, `${field}.margin_equity`),
+        risk_ratio: item.risk_ratio === null
+          ? null
+          : canonicalDecimal(item.risk_ratio, `${field}.risk_ratio`),
+        rule_revision: counter(item.rule_revision, `${field}.rule_revision`),
+        rule_hash: digest(item.rule_hash, `${field}.rule_hash`),
+        mark_fidelity: identifier(item.mark_fidelity, `${field}.mark_fidelity`),
+      };
+    });
+    const objectArray = (items: readonly unknown[], field: string) => items.map((item, index) => (
+      jsonObject(item, `${field}[${index}]`)
+    ));
+    return {
+      schema_version: "replay.training.portfolio.v2",
+      account_model: "TOUCH_OR_TAPE_V2",
+      execution_model: "TOUCH_OR_TAPE_V2",
+      execution_fidelity: "NO_BOOK_TOUCH_OR_TAPE_APPROX",
+      settlement_account_shared: portfolio.settlement_account_shared,
+      margin_mode: enumValue(portfolio.margin_mode, REPLAY_V2_ENUMS.margin_mode, "portfolio.margin_mode"),
+      funding_mode: enumValue(portfolio.funding_mode, REPLAY_V2_ENUMS.funding_mode, "portfolio.funding_mode"),
+      status: portfolio.status as "ACTIVE" | "LIQUIDATING" | "BANKRUPT",
+      initial_equity: positiveDecimal(portfolio.initial_equity, "portfolio.initial_equity"),
+      cash_balance: canonicalDecimal(portfolio.cash_balance, "portfolio.cash_balance"),
+      equity: canonicalDecimal(portfolio.equity, "portfolio.equity"),
+      available_equity: canonicalDecimal(portfolio.available_equity, "portfolio.available_equity"),
+      reserved_margin: canonicalDecimal(portfolio.reserved_margin, "portfolio.reserved_margin"),
+      margin_used: canonicalDecimal(portfolio.margin_used, "portfolio.margin_used"),
+      maintenance_margin: canonicalDecimal(portfolio.maintenance_margin, "portfolio.maintenance_margin"),
+      realized_pnl: canonicalDecimal(portfolio.realized_pnl, "portfolio.realized_pnl"),
+      unrealized_pnl: canonicalDecimal(portfolio.unrealized_pnl, "portfolio.unrealized_pnl"),
+      fees_paid: canonicalDecimal(portfolio.fees_paid, "portfolio.fees_paid"),
+      funding_cashflow: canonicalDecimal(portfolio.funding_cashflow, "portfolio.funding_cashflow"),
+      liquidation_fees_paid: canonicalDecimal(
+        portfolio.liquidation_fees_paid,
+        "portfolio.liquidation_fees_paid",
+      ),
+      risk_ratio: portfolio.risk_ratio === null
+        ? null
+        : canonicalDecimal(portfolio.risk_ratio, "portfolio.risk_ratio"),
+      positions,
+      orders: objectArray(rawOrders, "portfolio.orders"),
+      fills: objectArray(rawFills, "portfolio.fills"),
+      active_fee_policy: portfolio.active_fee_policy === null
+        ? null
+        : jsonObject(portfolio.active_fee_policy, "portfolio.active_fee_policy"),
+      instrument_rules: objectArray(rawRules, "portfolio.instrument_rules"),
+      isolated_allocations: jsonObject(portfolio.isolated_allocations, "portfolio.isolated_allocations"),
+      next_funding_time_ms: portfolio.next_funding_time_ms === null
+        ? null
+        : counter(portfolio.next_funding_time_ms, "portfolio.next_funding_time_ms"),
+      liquidations: objectArray(rawLiquidations, "portfolio.liquidations"),
+      ledger: jsonObject(portfolio.ledger, "portfolio.ledger"),
+      fidelity: jsonObject(portfolio.fidelity, "portfolio.fidelity"),
+    };
+  }
   const portfolio = exactObject(value, "portfolio", [
     "schema_version",
     "fidelity",
@@ -995,8 +1176,10 @@ export interface TrainingRunCreatePayload {
   readonly integrity_mode: ReplayV2IntegrityMode;
   readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
   readonly book_mode: "OFF";
-  readonly margin_mode: "CROSS";
-  readonly funding_mode: "OFF";
+  readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
+  readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
+  readonly fixed_funding_rate: string | null;
+  readonly funding_interval_ms: number | null;
   readonly allow_rule_changes: boolean;
   readonly allowed_mutations: readonly Extract<ReplayV2CommandType,
     | "deposit"

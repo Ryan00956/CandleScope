@@ -260,10 +260,11 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         ))}
         <p>入金、出金和不可逆时间揭示已接通；费率、杠杆上限与资金费策略当前命令会明确拒绝。</p>
       </fieldset>
-      <div className="training-hub-capability-boundary" aria-label="Phase 4 能力边界">
-        <h3>本阶段明确不可用</h3>
+      <div className="training-hub-capability-boundary" aria-label="Phase 5 能力边界">
+        <h3>Phase 5 多商品已启用</h3>
+        <p>进入训练后可在同交易所、同市场类型、同结算资产范围添加 MarketTrack，并使用 NONE / WARM / FULL 分级。</p>
+        <h3>后续阶段明确不可用</h3>
         <ul>
-          <li><strong>多商品</strong> — {evaluation.unsupported.multi_symbol}</li>
           <li><strong>资金费</strong> — {evaluation.unsupported.funding}</li>
           <li><strong>历史盘口</strong> — {evaluation.unsupported.historical_l2}</li>
           <li><strong>动态规则</strong> — {evaluation.unsupported.rule_changes}</li>

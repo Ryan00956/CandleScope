@@ -6,6 +6,8 @@ import type {
   ReplayV2CommandResult,
   ReplayV2CommandType,
   ReplayV2Json,
+  ReplayMarketTracksResponse,
+  ReplayV2SubscriptionTier,
   ReplayViewerState,
 } from "./replayV2Types.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
@@ -14,15 +16,29 @@ import type { ReplayRuntime } from "./useReplayRuntime.js";
 
 
 export type ReplayPhase3ControlType = Extract<ReplayV2CommandType,
+  | "acquire_controller"
+  | "takeover_controller"
+  | "release_controller"
+  | "play"
+  | "pause"
+  | "set_speed"
   | "step_event"
   | "step_base"
   | "step_display"
   | "advance_by"
   | "advance_to"
+  | "end"
+>;
+
+export type ReplayPhase5TradeType = Extract<ReplayV2CommandType,
+  | "place_order"
+  | "cancel_order"
+  | "close_position"
 >;
 
 export interface ReplayViewerRuntime {
   readonly viewerState: ReplayViewerState | null;
+  readonly marketTracks: ReplayMarketTracksResponse | null;
   readonly seriesStore: SeriesWindowStore;
   readonly loading: boolean;
   readonly error: string | null;
@@ -36,6 +52,21 @@ export interface ReplayViewerRuntime {
       payload: Readonly<Record<string, ReplayV2Json>>,
     ): Promise<ReplayV2CommandResult>;
     cancelAdvance(): Promise<ReplayV2CommandResult>;
+    selectTrack(trackId: string): Promise<ReplayV2CommandResult>;
+    setSubscriptionTier(
+      trackId: string,
+      tier: ReplayV2SubscriptionTier,
+    ): Promise<ReplayV2CommandResult>;
+    addAndSelectTrack(identity: {
+      readonly exchange: string;
+      readonly marketType: string;
+      readonly symbol: string;
+      readonly settlementAsset: string;
+    }): Promise<ReplayV2CommandResult>;
+    submitTrade(
+      type: ReplayPhase5TradeType,
+      payload: Readonly<Record<string, ReplayV2Json>>,
+    ): Promise<ReplayV2CommandResult>;
     reload(): void;
   };
 }
@@ -56,6 +87,7 @@ function progressFromResult(result: ReplayV2CommandResult): Readonly<Record<stri
 
 export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRuntime {
   const [viewerState, setViewerState] = useState<ReplayViewerState | null>(null);
+  const [marketTracks, setMarketTracks] = useState<ReplayMarketTracksResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [controlPending, setControlPending] = useState<ReplayV2Command | null>(null);
@@ -74,13 +106,22 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   useEffect(() => {
     if (sessionId === null) {
       setViewerState(null);
+      setMarketTracks(null);
       return;
     }
     const abort = new AbortController();
     setLoading(true);
     setError(null);
-    void defaultReplayV2Api.viewerBySession(sessionId, abort.signal).then((response) => {
-      setViewerState(response.viewer_state);
+    void Promise.all([
+      defaultReplayV2Api.viewerBySession(sessionId, abort.signal),
+      defaultReplayV2Api.tracksBySession(sessionId, abort.signal),
+    ]).then(([viewerResponse, tracksResponse]) => {
+      const authoritative = tracksResponse.viewer_state.semantic_view_revision
+        >= viewerResponse.viewer_state.semantic_view_revision
+        ? tracksResponse.viewer_state
+        : viewerResponse.viewer_state;
+      setViewerState(authoritative);
+      setMarketTracks(tracksResponse);
     }).catch((cause: unknown) => {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       setError(cause instanceof Error ? cause.message : "ViewerState 加载失败");
@@ -89,6 +130,28 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     });
     return () => abort.abort();
   }, [reloadRevision, sessionId]);
+
+  const refreshMarketTracks = useCallback(async (
+    runId: string,
+  ): Promise<ReplayMarketTracksResponse> => {
+    const response = await defaultReplayV2Api.tracksRun(runId);
+    setMarketTracks(response);
+    setViewerState((current) => current === null
+      || response.viewer_state.semantic_view_revision >= current.semantic_view_revision
+      ? response.viewer_state
+      : current);
+    return response;
+  }, []);
+
+  useEffect(() => {
+    if (marketTracks?.global_clock.state !== "PLAYING") return;
+    const timer = setInterval(() => {
+      void refreshMarketTracks(marketTracks.run_id).catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : "全局时钟状态刷新失败");
+      });
+    }, 250);
+    return () => clearInterval(timer);
+  }, [marketTracks?.global_clock.state, marketTracks?.run_id, refreshMarketTracks]);
 
   useEffect(() => {
     const rebuild = () => {
@@ -192,6 +255,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
         ? result.viewer_state
         : current);
       setProgress(progressFromResult(result));
+      await refreshMarketTracks(command.run_id);
       return result;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "回放控制失败");
@@ -199,7 +263,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     } finally {
       setControlPending((current) => current?.command_id === command.command_id ? null : current);
     }
-  }, [buildCommand]);
+  }, [buildCommand, refreshMarketTracks]);
 
   const setDisplayInterval = useCallback(async (interval: string): Promise<ReplayV2CommandResult> => {
     const viewer = viewerRef.current;
@@ -244,8 +308,115 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     return result;
   }, [buildCommand]);
 
+  const submitTrackCommand = useCallback(async (
+    type: Extract<ReplayV2CommandType,
+      "add_track" | "select_track" | "set_subscription_tier"
+    >,
+    payload: Readonly<Record<string, ReplayV2Json>>,
+    prefix: string,
+  ): Promise<ReplayV2CommandResult> => {
+    if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    const command = buildCommand(type, payload, prefix);
+    setViewerPending(true);
+    setError(null);
+    try {
+      const result = await defaultReplayV2Api.commandRun(command.run_id, command);
+      setViewerState((current) => current === null
+        || result.viewer_state.semantic_view_revision >= current.semantic_view_revision
+        ? result.viewer_state
+        : current);
+      await refreshMarketTracks(command.run_id);
+      return result;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "MarketTrack 操作失败");
+      throw cause;
+    } finally {
+      setViewerPending(false);
+    }
+  }, [buildCommand, refreshMarketTracks]);
+
+  const selectTrack = useCallback(async (trackId: string): Promise<ReplayV2CommandResult> => {
+    const viewer = viewerRef.current;
+    if (viewer === null) throw new Error("ViewerState is unavailable");
+    const result = await submitTrackCommand(
+      "select_track",
+      {
+        track_id: trackId,
+        expected_viewer_revision: viewer.semantic_view_revision,
+      },
+      "select-track",
+    );
+    if (runtime.store.sessionId !== result.session_id && typeof globalThis.location !== "undefined") {
+      globalThis.location.assign(`/replay.html?session=${encodeURIComponent(result.session_id)}`);
+    }
+    return result;
+  }, [runtime.store, submitTrackCommand]);
+
+  const setSubscriptionTier = useCallback(async (
+    trackId: string,
+    tier: ReplayV2SubscriptionTier,
+  ): Promise<ReplayV2CommandResult> => submitTrackCommand(
+    "set_subscription_tier",
+    { track_id: trackId, subscription_tier: tier },
+    "track-tier",
+  ), [submitTrackCommand]);
+
+  const addAndSelectTrack = useCallback(async (identity: {
+    readonly exchange: string;
+    readonly marketType: string;
+    readonly symbol: string;
+    readonly settlementAsset: string;
+  }): Promise<ReplayV2CommandResult> => {
+    const viewer = viewerRef.current;
+    if (viewer === null) throw new Error("ViewerState is unavailable");
+    await submitTrackCommand(
+      "add_track",
+      {
+        exchange: identity.exchange,
+        market_type: identity.marketType,
+        symbol: identity.symbol,
+        settlement_asset: identity.settlementAsset,
+        subscription_tier: "NONE",
+      },
+      "add-track",
+    );
+    const refreshed = await refreshMarketTracks(viewer.run_id);
+    const track = refreshed?.tracks.find((candidate) => (
+      candidate.exchange === identity.exchange
+      && candidate.market_type === identity.marketType
+      && candidate.symbol === identity.symbol
+    ));
+    if (track === undefined) throw new Error("created MarketTrack is missing from replay.v2");
+    return selectTrack(track.track_id);
+  }, [refreshMarketTracks, selectTrack, submitTrackCommand]);
+
+  const submitTrade = useCallback(async (
+    type: ReplayPhase5TradeType,
+    payload: Readonly<Record<string, ReplayV2Json>>,
+  ): Promise<ReplayV2CommandResult> => {
+    if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    const command = buildCommand(type, payload, "trade");
+    setViewerPending(true);
+    setError(null);
+    try {
+      const result = await defaultReplayV2Api.commandRun(command.run_id, command);
+      setViewerState((current) => current === null
+        || result.viewer_state.semantic_view_revision >= current.semantic_view_revision
+        ? result.viewer_state
+        : current);
+      await refreshMarketTracks(command.run_id);
+      return result;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "组合纸面交易失败");
+      throw cause;
+    } finally {
+      setViewerPending(false);
+    }
+  }, [buildCommand, refreshMarketTracks]);
+
   return {
     viewerState,
+    marketTracks,
     seriesStore,
     loading,
     error,
@@ -256,6 +427,10 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       setDisplayInterval,
       submitControl,
       cancelAdvance,
+      selectTrack,
+      setSubscriptionTier,
+      addAndSelectTrack,
+      submitTrade,
       reload: () => setReloadRevision((value) => value + 1),
     },
   };

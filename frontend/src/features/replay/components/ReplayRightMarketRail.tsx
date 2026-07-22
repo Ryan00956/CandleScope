@@ -7,10 +7,12 @@ import ReplayWatchlistPanel from "./ReplayWatchlistPanel.js";
 import type { ReplayWorkspacePreferenceActions, ReplayWorkspacePreferences } from "../replayWorkspacePreferences.js";
 import type { ReplayIndicatorRuntime } from "../useReplayIndicatorRuntime.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
+import type { ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 
 
 export interface ReplayRightMarketRailProps {
   readonly runtime: ReplayRuntime;
+  readonly viewer: ReplayViewerRuntime;
   readonly indicators: ReplayIndicatorRuntime;
   readonly preferences: ReplayWorkspacePreferences;
   readonly actions: ReplayWorkspacePreferenceActions;
@@ -20,6 +22,7 @@ export interface ReplayRightMarketRailProps {
 
 function ReplayRightMarketRail({
   runtime,
+  viewer,
   indicators,
   preferences,
   actions,
@@ -55,7 +58,7 @@ function ReplayRightMarketRail({
         <div className="replay-market-dock-body">
           {preferences.activeDock === "capabilities" && <ReplayCapabilitySurface capabilities={capabilities} />}
           {preferences.activeDock === "paper" && (
-            <ReplayPaperTradingDock runtime={runtime} indicatorStatus={indicators.status} />
+            <ReplayPaperTradingDock runtime={runtime} viewer={viewer} indicatorStatus={indicators.status} />
           )}
           {preferences.activeDock === "activity" && (
             <div className="replay-activity-summary" data-replay-panel="activity">
@@ -70,7 +73,7 @@ function ReplayRightMarketRail({
         </div>
       )}
     </section>
-  ), [actions, capabilities, indicators.status, preferences, runtime]);
+  ), [actions, capabilities, indicators.status, preferences, runtime, viewer]);
 
   return (
     <MarketRightRailFrame
@@ -79,6 +82,7 @@ function ReplayRightMarketRail({
       sidebar={(
         <ReplayWatchlistPanel
           runtime={runtime}
+          viewer={viewer}
           collapsed={preferences.railCollapsed}
           onCollapsedChange={actions.setRailCollapsed}
         />

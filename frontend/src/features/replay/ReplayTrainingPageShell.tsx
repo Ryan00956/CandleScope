@@ -363,6 +363,7 @@ export default function ReplayTrainingPageShell({
           rightRail={active ? (
             <ReplayRightMarketRail
               runtime={runtime}
+              viewer={viewer}
               indicators={indicators}
               preferences={workspace.preferences}
               actions={workspace.actions}

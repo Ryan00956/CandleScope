@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { formatReplayPublicTime, replayOwnsController, replayProgress } from "../replayUiModel.js";
 import type { ReplaySpeed } from "../replayTypes.js";
+import type { ReplayV2Json } from "../replayV2Types.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 import type { ReplayPhase3ControlType, ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 import { parseIntervalSeconds } from "../../../utils/intervals.js";
@@ -23,7 +24,10 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
   const pending = runtime.pendingCommand?.type ?? null;
   const phase3Pending = viewer?.controlPending?.type ?? null;
+  const effectiveState = viewer?.marketTracks?.global_clock.state ?? store.state;
+  const effectiveSpeed = viewer?.marketTracks?.global_clock.speed ?? store.speed ?? 1;
   const forkPending = runtime.forkPending;
+  const multiTrackForkBlocked = (viewer?.marketTracks?.tracks.length ?? 1) > 1;
   const disabled = pending !== null || phase3Pending !== null || forkPending
     || store.connectionState !== "connected" || !ownsController
     || (viewer !== undefined && (viewer.viewerState === null || viewer.viewerPending));
@@ -41,7 +45,10 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const command = (type: Parameters<ReplayRuntime["actions"]["submitCommand"]>[0], payload: Parameters<ReplayRuntime["actions"]["submitCommand"]>[1] = {}) => {
     void runtime.actions.submitCommand(type, payload).catch(() => undefined);
   };
-  const phase3Command = (type: ReplayPhase3ControlType, payload: Readonly<Record<string, number>>) => {
+  const phase3Command = (
+    type: ReplayPhase3ControlType,
+    payload: Readonly<Record<string, ReplayV2Json>> = {},
+  ) => {
     if (viewer !== undefined) void viewer.actions.submitControl(type, payload).catch(() => undefined);
   };
 
@@ -60,7 +67,17 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             type="button"
             data-replay-action="takeover-controller"
             disabled={pending !== null || forkPending || store.connectionState !== "connected"}
-            onClick={() => void runtime.actions.acquireController(store.controllerClientId !== null).catch(() => undefined)}
+            onClick={() => {
+              if (viewer === undefined) {
+                void runtime.actions.acquireController(store.controllerClientId !== null).catch(() => undefined);
+                return;
+              }
+              if (store.controllerClientId === null) {
+                phase3Command("acquire_controller", { takeover: false });
+              } else {
+                phase3Command("takeover_controller");
+              }
+            }}
           >
             {store.controllerClientId ? "接管控制权" : "获取控制权"}
           </button>
@@ -83,39 +100,49 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
         </div>
       )}
       <div className="replay-control-bar">
-        <button type="button" data-replay-action="end" disabled={disabled || store.state === "ENDED"} onClick={() => setShowEnd(true)}>结束</button>
-        <button type="button" data-replay-action="fork" disabled={pending !== null || phase3Pending !== null || viewer?.viewerPending === true || forkPending} onClick={() => void runtime.actions.forkSession().catch(() => undefined)}>Fork</button>
+        <button type="button" data-replay-action="end" disabled={disabled || effectiveState === "ENDED"} onClick={() => setShowEnd(true)}>结束</button>
+        <button
+          type="button"
+          data-replay-action="fork"
+          disabled={pending !== null || phase3Pending !== null || viewer?.viewerPending === true || forkPending || multiTrackForkBlocked}
+          title={multiTrackForkBlocked ? "多商品存档保持 v2-only；当前不会压缩成单商品 v1 Fork" : undefined}
+          onClick={() => void runtime.actions.forkSession().catch(() => undefined)}
+        >Fork</button>
         {viewer === undefined ? (
           <button type="button" data-replay-action="step" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("step", { count: 1 })}>
             {pending === "step" ? "单步中…" : "单步 →"}
           </button>
         ) : (<>
-          <button type="button" data-replay-action="step-display" disabled={disabled || store.state !== "PAUSED"} onClick={() => phase3Command("step_display", { count: 1 })}>
+          <button type="button" data-replay-action="step-display" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => phase3Command("step_display", { count: 1 })}>
             {phase3Pending === "step_display" ? "展示步进中…" : `下一展示 K (${viewer.viewerState?.display_interval ?? "--"}) →`}
           </button>
-          <button type="button" data-replay-action="step-base" disabled={disabled || store.state !== "PAUSED"} onClick={() => phase3Command("step_base", { count: 1 })}>
+          <button type="button" data-replay-action="step-base" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => phase3Command("step_base", { count: 1 })}>
             {phase3Pending === "step_base" ? "基础步进中…" : `基础 K (${config?.base_interval ?? "--"})`}
           </button>
         </>)}
         {viewer !== undefined && tradeTape && (
-          <button type="button" data-replay-action="step-event" disabled={disabled || store.state !== "PAUSED"} onClick={() => phase3Command("step_event", { count: 1 })}>
+          <button type="button" data-replay-action="step-event" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => phase3Command("step_event", { count: 1 })}>
             {phase3Pending === "step_event" ? "成交步进中…" : "下一成交"}
           </button>
         )}
         <button
           type="button"
-          data-replay-action={store.state === "PLAYING" ? "pause" : "play"}
-          disabled={disabled || !["PAUSED", "PLAYING"].includes(store.state ?? "")}
-          onClick={() => command(store.state === "PLAYING" ? "pause" : "play")}
+          data-replay-action={effectiveState === "PLAYING" ? "pause" : "play"}
+          disabled={disabled || !["PAUSED", "PLAYING"].includes(effectiveState ?? "")}
+          onClick={() => {
+            const type = effectiveState === "PLAYING" ? "pause" : "play";
+            if (viewer === undefined) command(type);
+            else phase3Command(type);
+          }}
         >
-          {pending === "pause" ? "正在暂停…" : pending === "play" ? "正在播放…" : store.state === "PLAYING" ? "暂停 ‖" : "播放 ▶"}
+          {pending === "pause" || phase3Pending === "pause" ? "正在暂停…" : pending === "play" || phase3Pending === "play" ? "正在播放…" : effectiveState === "PLAYING" ? "暂停 ‖" : "播放 ▶"}
         </button>
         {viewer === undefined ? (
           <button type="button" data-replay-action="advance" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("advance_by", { ms: 300_000 })}>
             {pending === "advance_by" ? "推进中…" : "前进 5m ⇥"}
           </button>
         ) : (
-          <button type="button" data-replay-action="advance-by" disabled={disabled || store.state !== "PAUSED"} onClick={() => phase3Command("advance_by", { ms: baseIntervalMs * 5 })}>
+          <button type="button" data-replay-action="advance-by" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => phase3Command("advance_by", { ms: baseIntervalMs * 5 })}>
             {phase3Pending === "advance_by" ? "推进中…" : "前进 5 个基础 K ⇥"}
           </button>
         )}
@@ -131,9 +158,15 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
           速度
           <select
             data-replay-action="speed"
-            value={String(store.speed ?? 1)}
-            disabled={disabled || store.state === "ENDED"}
-            onChange={(event) => command("set_speed", { speed: event.target.value === "MAX" ? "MAX" : Number(event.target.value) as ReplaySpeed })}
+            value={String(effectiveSpeed)}
+            disabled={disabled || effectiveState === "ENDED"}
+            onChange={(event) => {
+              const speed = event.target.value === "MAX"
+                ? "MAX"
+                : Number(event.target.value) as ReplaySpeed;
+              if (viewer === undefined) command("set_speed", { speed });
+              else phase3Command("set_speed", { speed });
+            }}
           >
             {SPEEDS.map((speed) => <option key={String(speed)} value={String(speed)}>{speed === "MAX" ? "MAX" : `${speed}×`}</option>)}
           </select>
@@ -178,11 +211,17 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
                 onClick={() => {
                   setShowEnd(false);
                   void (async () => {
-                    if (runtime.store.state === "PLAYING") await runtime.actions.submitCommand("pause", {});
-                    await runtime.actions.submitCommand("end_session", {
+                    const payload = {
                       open_order_disposition: openOrderDisposition,
                       position_disposition: positionDisposition,
-                    });
+                    };
+                    if (viewer === undefined) {
+                      if (runtime.store.state === "PLAYING") await runtime.actions.submitCommand("pause", {});
+                      await runtime.actions.submitCommand("end_session", payload);
+                    } else {
+                      if (effectiveState === "PLAYING") await viewer.actions.submitControl("pause", {});
+                      await viewer.actions.submitControl("end", payload);
+                    }
                     await runtime.actions.loadReport();
                   })().catch(() => undefined);
                 }}

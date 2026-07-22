@@ -39,7 +39,6 @@ export interface TrainingRunDraft {
 }
 
 export interface TrainingHubUnsupportedCapabilities {
-  readonly multi_symbol: "Phase 5 尚未实现";
   readonly funding: "Phase 6 尚未实现；当前只能 OFF";
   readonly historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF";
   readonly rule_changes: "Phase 4 仅支持入金、出金与不可逆时间揭示；费率、杠杆和资金费变更仍拒绝";
@@ -53,8 +52,7 @@ export interface TrainingRunDraftEvaluation {
   readonly unsupported: TrainingHubUnsupportedCapabilities;
 }
 
-export const PHASE_1_UNSUPPORTED: TrainingHubUnsupportedCapabilities = Object.freeze({
-  multi_symbol: "Phase 5 尚未实现",
+export const PHASE_5_UNSUPPORTED: TrainingHubUnsupportedCapabilities = Object.freeze({
   funding: "Phase 6 尚未实现；当前只能 OFF",
   historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF",
   rule_changes: "Phase 4 仅支持入金、出金与不可逆时间揭示；费率、杠杆和资金费变更仍拒绝",
@@ -175,7 +173,7 @@ export function evaluateTrainingRunDraft(
     canSubmit: errors.length === 0,
     errors,
     selectedEntry: entry ?? null,
-    unsupported: PHASE_1_UNSUPPORTED,
+    unsupported: PHASE_5_UNSUPPORTED,
   };
 }
 

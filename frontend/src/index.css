@@ -7722,14 +7722,16 @@ body {
 
 .replay-watchlist-pane .wl-header small { color: #64748b; font: 9px "JetBrains Mono", monospace; }
 .replay-watchlist-rows { min-height: 0; overflow: auto; }
-.replay-watchlist-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; width: 100%; min-height: 43px; padding: 6px 8px; border: 0; border-bottom: 1px solid rgba(148, 163, 184, .08); color: var(--text-secondary); background: transparent; text-align: left; }
+.replay-watchlist-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; width: 100%; min-height: 43px; padding: 6px 8px; border-bottom: 1px solid rgba(148, 163, 184, .08); color: var(--text-secondary); background: transparent; text-align: left; }
 .replay-watchlist-row.active { color: var(--text-primary); background: rgba(59, 130, 246, .09); }
-.replay-watchlist-row:disabled { opacity: .65; }
-.replay-watchlist-row > span:first-child { display: grid; min-width: 0; }
+.replay-watchlist-market { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; }
+.replay-watchlist-market:disabled { opacity: .65; }
+.replay-watchlist-market > span:first-child { display: grid; min-width: 0; }
 .replay-watchlist-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .replay-watchlist-row small { color: var(--text-muted); font-size: 9px; }
 .replay-watchlist-row code { padding: 2px 4px; border-radius: 4px; color: #a7f3d0; background: rgba(5, 150, 105, .13); font-size: 9px; }
 .replay-watchlist-row[data-replay-tier="NONE"] code { color: #94a3b8; background: rgba(71, 85, 105, .16); }
+.replay-track-force { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .replay-market-dock { display: flex; flex: 0 0 auto; flex-direction: column; min-height: 36px; overflow: hidden; border-top: 1px solid var(--border-color); color: var(--text-secondary); background: var(--bg-secondary); }
 .replay-market-dock-tabs { display: flex; flex: 0 0 36px; align-items: center; gap: 3px; padding: 3px 6px; border-bottom: 1px solid var(--border-color); }

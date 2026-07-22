@@ -6,6 +6,7 @@ import {
   parseTrainingRunMutationResponse,
   parseTrainingRunReturnResponse,
   parseReplayAdvanceProgressResponse,
+  parseReplayMarketTracksResponse,
   parseReplayV2CommandResult,
   parseReplayViewerStateResponse,
 } from "./replayV2Types.js";
@@ -25,6 +26,7 @@ import type {
 } from "./replayIntegrityModel.js";
 import type {
   ReplayAdvanceProgressResponse,
+  ReplayMarketTracksResponse,
   ReplayV2Command,
   ReplayV2CommandResult,
   ReplayViewerStateResponse,
@@ -209,6 +211,22 @@ export class ReplayV2ApiClient {
     return this.request(
       `/runs/session/${safeSegment(sessionId, "session id")}/viewer`,
       parseReplayViewerStateResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  tracksBySession(sessionId: string, signal?: AbortSignal): Promise<ReplayMarketTracksResponse> {
+    return this.request(
+      `/runs/session/${safeSegment(sessionId, "session id")}/tracks`,
+      parseReplayMarketTracksResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  tracksRun(runId: string, signal?: AbortSignal): Promise<ReplayMarketTracksResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/tracks`,
+      parseReplayMarketTracksResponse,
       signal ? { signal } : {},
     );
   }

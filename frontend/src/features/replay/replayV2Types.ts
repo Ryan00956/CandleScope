@@ -146,6 +146,69 @@ export interface ReplayV2MarketTrack {
   readonly capabilities: Readonly<Partial<Record<ReplayV2CapabilityKind, ReplayV2CapabilityState>>>;
 }
 
+export interface ReplayTrainingMarketTrack {
+  readonly run_id: string;
+  readonly track_id: string;
+  readonly stable_ordinal: number;
+  readonly adapter_session_id: string | null;
+  readonly exchange: string;
+  readonly market_type: string;
+  readonly symbol: string;
+  readonly settlement_asset: string;
+  readonly state: ReplayV2TrackState;
+  readonly source_kind: ReplayV2SourceKind;
+  readonly subscription_tier: ReplayV2SubscriptionTier;
+  readonly cursor: ReplayV2Cursor | null;
+  readonly forced_full_reasons: readonly string[];
+  readonly capabilities: Readonly<Partial<Record<ReplayV2CapabilityKind, ReplayV2CapabilityState>>>;
+  readonly public_price: string | null;
+  readonly position: Readonly<Record<string, ReplayV2Json>>;
+  readonly open_order_count: number;
+  readonly degraded_reason: string | null;
+  readonly account: Readonly<Record<string, ReplayV2Json>>;
+}
+
+export interface ReplayTrainingPortfolio {
+  readonly schema_version: "replay.training.portfolio.v1";
+  readonly fidelity: "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER";
+  readonly settlement_account_shared: true;
+  readonly initial_equity: string;
+  readonly equity: string;
+  readonly cash_balance: string;
+  readonly available_equity: string;
+  readonly reserved_margin: string;
+  readonly margin_used: string;
+  readonly realized_pnl: string;
+  readonly unrealized_pnl: string;
+  readonly fees_paid: string;
+  readonly positions: readonly ReplayTrainingPortfolioPosition[];
+}
+
+export interface ReplayTrainingPortfolioPosition {
+  readonly track_id: string;
+  readonly symbol: string;
+  readonly position: Readonly<Record<string, ReplayV2Json>>;
+}
+
+export interface ReplayGlobalClock {
+  readonly mode: "ADAPTER" | "ORDERED";
+  readonly state: ReplayV2RunState;
+  readonly speed: number | "MAX";
+  readonly reason: string | null;
+  readonly generation: number;
+  readonly tick: number;
+}
+
+export interface ReplayMarketTracksResponse {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly run_id: string;
+  readonly ordering_version: "replay.global-order.v1";
+  readonly viewer_state: ReplayViewerState;
+  readonly tracks: readonly ReplayTrainingMarketTrack[];
+  readonly portfolio: ReplayTrainingPortfolio;
+  readonly global_clock: ReplayGlobalClock;
+}
+
 export type ReplayV2Json = null | string | boolean | number | readonly ReplayV2Json[] | {
   readonly [key: string]: ReplayV2Json;
 };
@@ -221,6 +284,7 @@ export interface ReplayAdvanceProgressResponse {
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const POSITIVE_CANONICAL_DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/;
+const CANONICAL_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/;
 const MAX_TIMESTAMP_MS = 253_402_300_799_999;
 
 function objectValue(value: unknown, fieldName: string): Record<string, unknown> {
@@ -293,6 +357,17 @@ function digest(value: unknown, fieldName: string): `sha256:${string}` {
 function positiveDecimal(value: unknown, fieldName: string): string {
   if (typeof value !== "string" || !POSITIVE_CANONICAL_DECIMAL.test(value) || value === "0") {
     throw new TypeError(`${fieldName} must be a positive canonical Decimal string`);
+  }
+  return value;
+}
+
+function canonicalDecimal(value: unknown, fieldName: string): string {
+  if (
+    typeof value !== "string"
+    || !CANONICAL_DECIMAL.test(value)
+    || value === "-0"
+  ) {
+    throw new TypeError(`${fieldName} must be a canonical Decimal string`);
   }
   return value;
 }
@@ -418,6 +493,225 @@ export function parseReplayV2MarketTrack(
     cursor: parseCursor(track.cursor, "cursor"),
     forced_full_reasons: reasons,
     capabilities: capabilities(track.capabilities),
+  };
+}
+
+function parseReplayTrainingMarketTrack(value: unknown): ReplayTrainingMarketTrack {
+  const track = exactObject(value, "market track", [
+    "run_id",
+    "track_id",
+    "stable_ordinal",
+    "adapter_session_id",
+    "exchange",
+    "market_type",
+    "symbol",
+    "settlement_asset",
+    "state",
+    "source_kind",
+    "subscription_tier",
+    "cursor",
+    "forced_full_reasons",
+    "capabilities",
+    "public_price",
+    "position",
+    "open_order_count",
+    "degraded_reason",
+    "account",
+  ]);
+  const tier = enumValue(
+    track.subscription_tier,
+    REPLAY_V2_ENUMS.subscription_tier,
+    "market track.subscription_tier",
+  );
+  const adapterSessionId = nullableIdentifier(
+    track.adapter_session_id,
+    "market track.adapter_session_id",
+  );
+  const cursor = track.cursor === null ? null : parseCursor(track.cursor, "market track.cursor");
+  if (tier === "FULL" && cursor === null) {
+    throw new TypeError("FULL market track requires a cursor");
+  }
+  if (adapterSessionId === null && (tier !== "NONE" || cursor !== null)) {
+    throw new TypeError("unprepared market track must remain NONE without a cursor");
+  }
+  if (!Array.isArray(track.forced_full_reasons)) {
+    throw new TypeError("market track.forced_full_reasons must be an array");
+  }
+  const reasons = track.forced_full_reasons.map((reason) => (
+    identifier(reason, "market track.forced_full_reasons")
+  ));
+  if (new Set(reasons).size !== reasons.length) {
+    throw new TypeError("market track.forced_full_reasons must be unique");
+  }
+  if (reasons.length > 0 && tier !== "FULL") {
+    throw new TypeError("forced market track must remain FULL");
+  }
+  const degradedReason = track.degraded_reason;
+  if (degradedReason !== null && (
+    typeof degradedReason !== "string"
+    || degradedReason.length < 1
+    || degradedReason.length > 500
+  )) {
+    throw new TypeError("market track.degraded_reason is invalid");
+  }
+  return {
+    run_id: identifier(track.run_id, "market track.run_id"),
+    track_id: identifier(track.track_id, "market track.track_id"),
+    stable_ordinal: counter(track.stable_ordinal, "market track.stable_ordinal"),
+    adapter_session_id: adapterSessionId,
+    exchange: identifier(track.exchange, "market track.exchange"),
+    market_type: identifier(track.market_type, "market track.market_type"),
+    symbol: identifier(track.symbol, "market track.symbol"),
+    settlement_asset: identifier(track.settlement_asset, "market track.settlement_asset"),
+    state: enumValue(track.state, REPLAY_V2_ENUMS.track_state, "market track.state"),
+    source_kind: enumValue(
+      track.source_kind,
+      REPLAY_V2_ENUMS.source_kind,
+      "market track.source_kind",
+    ),
+    subscription_tier: tier,
+    cursor,
+    forced_full_reasons: reasons,
+    capabilities: capabilities(track.capabilities),
+    public_price: track.public_price === null
+      ? null
+      : positiveDecimal(track.public_price, "market track.public_price"),
+    position: jsonObject(track.position, "market track.position"),
+    open_order_count: counter(track.open_order_count, "market track.open_order_count"),
+    degraded_reason: degradedReason,
+    account: jsonObject(track.account, "market track.account"),
+  };
+}
+
+function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
+  const portfolio = exactObject(value, "portfolio", [
+    "schema_version",
+    "fidelity",
+    "settlement_account_shared",
+    "initial_equity",
+    "equity",
+    "cash_balance",
+    "available_equity",
+    "reserved_margin",
+    "margin_used",
+    "realized_pnl",
+    "unrealized_pnl",
+    "fees_paid",
+    "positions",
+  ]);
+  if (
+    portfolio.schema_version !== "replay.training.portfolio.v1"
+    || portfolio.fidelity !== "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER"
+    || portfolio.settlement_account_shared !== true
+  ) {
+    throw new TypeError("portfolio contract is unsupported");
+  }
+  if (!Array.isArray(portfolio.positions)) {
+    throw new TypeError("portfolio.positions must be an array");
+  }
+  return {
+    schema_version: "replay.training.portfolio.v1",
+    fidelity: "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER",
+    settlement_account_shared: true,
+    initial_equity: positiveDecimal(portfolio.initial_equity, "portfolio.initial_equity"),
+    equity: canonicalDecimal(portfolio.equity, "portfolio.equity"),
+    cash_balance: canonicalDecimal(portfolio.cash_balance, "portfolio.cash_balance"),
+    available_equity: canonicalDecimal(
+      portfolio.available_equity,
+      "portfolio.available_equity",
+    ),
+    reserved_margin: canonicalDecimal(portfolio.reserved_margin, "portfolio.reserved_margin"),
+    margin_used: canonicalDecimal(portfolio.margin_used, "portfolio.margin_used"),
+    realized_pnl: canonicalDecimal(portfolio.realized_pnl, "portfolio.realized_pnl"),
+    unrealized_pnl: canonicalDecimal(portfolio.unrealized_pnl, "portfolio.unrealized_pnl"),
+    fees_paid: canonicalDecimal(portfolio.fees_paid, "portfolio.fees_paid"),
+    positions: portfolio.positions.map((position, index) => {
+      const field = `portfolio.positions[${index}]`;
+      const item = exactObject(position, field, ["track_id", "symbol", "position"]);
+      return {
+        track_id: identifier(item.track_id, `${field}.track_id`),
+        symbol: identifier(item.symbol, `${field}.symbol`),
+        position: jsonObject(item.position, `${field}.position`),
+      };
+    }),
+  };
+}
+
+export function parseReplayMarketTracksResponse(value: unknown): ReplayMarketTracksResponse {
+  const response = exactObject(value, "market tracks response", [
+    "protocol",
+    "run_id",
+    "ordering_version",
+    "viewer_state",
+    "tracks",
+    "portfolio",
+    "global_clock",
+  ]);
+  if (
+    response.protocol !== REPLAY_V2_PROTOCOL
+    || response.ordering_version !== "replay.global-order.v1"
+  ) {
+    throw new TypeError("market tracks response contract is unsupported");
+  }
+  if (!Array.isArray(response.tracks)) {
+    throw new TypeError("market tracks response.tracks must be an array");
+  }
+  const runId = identifier(response.run_id, "market tracks response.run_id");
+  const viewer = parseReplayViewerState(response.viewer_state);
+  const tracks = response.tracks.map(parseReplayTrainingMarketTrack);
+  if (
+    viewer.run_id !== runId
+    || tracks.some((track) => track.run_id !== runId)
+    || !tracks.some((track) => track.track_id === viewer.selected_track_id)
+  ) {
+    throw new TypeError("market tracks response run/viewer identity is inconsistent");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    run_id: runId,
+    ordering_version: "replay.global-order.v1",
+    viewer_state: viewer,
+    tracks,
+    portfolio: parseReplayTrainingPortfolio(response.portfolio),
+    global_clock: parseReplayGlobalClock(response.global_clock),
+  };
+}
+
+function parseReplayGlobalClock(value: unknown): ReplayGlobalClock {
+  const clock = exactObject(value, "global clock", [
+    "mode",
+    "state",
+    "speed",
+    "reason",
+    "generation",
+    "tick",
+  ]);
+  if (clock.mode !== "ADAPTER" && clock.mode !== "ORDERED") {
+    throw new TypeError("global clock mode is unsupported");
+  }
+  const state = enumValue(
+    clock.state,
+    REPLAY_V2_ENUMS.run_state,
+    "global clock state",
+  );
+  const speed = clock.speed;
+  if (speed !== "MAX" && (
+    typeof speed !== "number"
+    || !Number.isSafeInteger(speed)
+    || ![1, 5, 15, 30, 60, 120, 300, 600].includes(speed)
+  )) {
+    throw new TypeError("global clock speed is unsupported");
+  }
+  if (clock.reason !== null && typeof clock.reason !== "string") {
+    throw new TypeError("global clock reason must be a string or null");
+  }
+  return {
+    mode: clock.mode,
+    state,
+    speed,
+    reason: clock.reason,
+    generation: counter(clock.generation, "global clock generation"),
+    tick: counter(clock.tick, "global clock tick"),
   };
 }
 

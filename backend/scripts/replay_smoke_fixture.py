@@ -20,6 +20,16 @@ FIXTURE_START_MS = 1_700_000_040_000
 FIXTURE_ROWS = 4_000
 INTERVAL_MS = 60_000
 LEGACY_LIVE_TAIL_ROWS = 10
+FIXTURE_SYMBOLS: tuple[tuple[str, float], ...] = (
+    ("BTCUSDT", 30_000.0),
+    ("ETHUSDT", 2_000.0),
+    ("SOLUSDT", 100.0),
+    ("XRPUSDT", 500.0),
+    ("ADAUSDT", 400.0),
+    ("BNBUSDT", 300.0),
+    ("DOGEUSDT", 80.0),
+    ("AVAXUSDT", 35.0),
+)
 
 
 def _require_isolated_environment() -> None:
@@ -110,22 +120,29 @@ def _seed_klines() -> None:
     from app.data_engine.storage.klines_repo import init_klines_storage, upsert_klines
 
     init_klines_storage()
-    rows: list[dict[str, object]] = []
-    for index in range(FIXTURE_ROWS):
-        open_time = FIXTURE_START_MS + index * INTERVAL_MS
-        rows.append(_fixture_row(index=index, open_time=open_time))
-    if _legacy_live_tail_required():
-        rows.extend(_legacy_live_tail_rows())
-    inserted = upsert_klines(
-        "BTCUSDT",
-        "1m",
-        rows,
-        source="replay-smoke-fixture",
-        exchange="binance",
-        market_type="spot",
-    )
-    if inserted != len(rows):
-        raise RuntimeError(f"expected {len(rows)} fixture rows, wrote {inserted}")
+    for symbol, price_origin in FIXTURE_SYMBOLS:
+        rows = [
+            _fixture_row(
+                index=index,
+                open_time=FIXTURE_START_MS + index * INTERVAL_MS,
+                price_origin=price_origin,
+            )
+            for index in range(FIXTURE_ROWS)
+        ]
+        if symbol == "BTCUSDT" and _legacy_live_tail_required():
+            rows.extend(_legacy_live_tail_rows())
+        inserted = upsert_klines(
+            symbol,
+            "1m",
+            rows,
+            source="replay-smoke-fixture",
+            exchange="binance",
+            market_type="spot",
+        )
+        if inserted != len(rows):
+            raise RuntimeError(
+                f"expected {len(rows)} {symbol} fixture rows, wrote {inserted}"
+            )
 
 
 def main() -> None:
@@ -156,6 +173,7 @@ def main() -> None:
             "offline": True,
             "fixture_start_ms": FIXTURE_START_MS,
             "fixture_rows": FIXTURE_ROWS,
+            "fixture_symbols": [symbol for symbol, _price in FIXTURE_SYMBOLS],
         }
 
     @app.get("/__replay_smoke__/diagnostics")

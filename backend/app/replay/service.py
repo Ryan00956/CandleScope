@@ -692,6 +692,22 @@ class ReplayService:
                 handle.eviction_complete.clear()
             await self._evict_claimed_handle(session_id, handle, reason="hub")
 
+    async def discard_session(self, session_id: str) -> None:
+        """Evict and delete one non-primary training adapter after detachment."""
+
+        self._ensure_accepting()
+        durable = await self.store.get_session(session_id)
+        if durable is None:
+            return
+        await self.release_session_to_hub(session_id)
+        deleted = await self.store.delete_session(session_id)
+        if not deleted:
+            raise ReplayDomainError(
+                ReplayErrorCode.PERSISTENCE_DEGRADED,
+                "detached replay session could not be deleted",
+                details={"session_id": session_id},
+            )
+
     async def shutdown(self, *, step_timeout: float = 5.0) -> None:
         async with self._shutdown_lock:
             if self._closed:
@@ -708,6 +724,12 @@ class ReplayService:
                 except Exception as exc:
                     errors.append(f"reaper: {exc}")
                 self._reaper_task = None
+
+            if self.training is not None:
+                try:
+                    await self.training.shutdown()
+                except Exception as exc:
+                    errors.append(f"training: {exc}")
 
             # Close the prune lane before draining accepted work. A capacity
             # request that was queued before shutdown will observe accepting=0

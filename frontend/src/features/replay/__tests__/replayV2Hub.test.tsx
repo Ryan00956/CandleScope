@@ -271,14 +271,13 @@ test("create refreshes catalog epoch with the edited warmup and horizon before P
   assert.equal(submittedEpoch, refreshedEpoch);
 });
 
-test("create model covers frozen fields and exposes the Phase 4 integrity boundary", () => {
+test("create model covers frozen fields and exposes the Phase 5 capability boundary", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const catalog = blindCatalog();
   const draft = createTrainingRunDraft(catalog);
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog);
   assert.equal(evaluation.canSubmit, true);
   assert.deepEqual(evaluation.unsupported, {
-    multi_symbol: "Phase 5 尚未实现",
     funding: "Phase 6 尚未实现；当前只能 OFF",
     historical_l2: "Phase 9 可选能力尚未实现；当前只能 OFF",
     rule_changes: "Phase 4 仅支持入金、出金与不可逆时间揭示；费率、杠杆和资金费变更仍拒绝",
@@ -338,7 +337,9 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /HIDE_MINUTE/);
   assert.match(html, /Practice 可审计变更白名单/);
   assert.match(html, /历史盘口.*Phase 9/);
-  assert.match(html, /多商品.*Phase 5/);
+  assert.match(html, /Phase 5 多商品已启用/);
+  assert.match(html, /NONE \/ WARM \/ FULL/);
+  assert.doesNotMatch(html, /<strong>多商品<\/strong>/);
   assert.doesNotMatch(html, /1710000000000|dataset_epoch|snapshot_blob/);
 });
 

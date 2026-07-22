@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 
-TRAINING_SCHEMA_VERSION = 3
+TRAINING_SCHEMA_VERSION = 4
 TRAINING_SCHEMA_ID = "replay.training.v1"
 
 
@@ -259,6 +259,78 @@ ON replay_run_lineage(parent_run_id, parent_event_id);
 """
 
 
+TRAINING_SCHEMA_V4 = """
+CREATE TABLE IF NOT EXISTS replay_training_market_track (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    stable_ordinal INTEGER NOT NULL CHECK (stable_ordinal >= 1),
+    adapter_session_id TEXT UNIQUE
+        REFERENCES replay_session(session_id) ON DELETE SET NULL,
+    exchange TEXT NOT NULL,
+    market_type TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    settlement_asset TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('BAR', 'AGG_TRADE')),
+    state TEXT NOT NULL
+        CHECK (state IN ('DORMANT', 'PREPARING', 'READY', 'DEGRADED', 'ERROR')),
+    subscription_tier TEXT NOT NULL
+        CHECK (subscription_tier IN ('NONE', 'WARM', 'FULL')),
+    dataset_epoch TEXT,
+    virtual_time_ms INTEGER CHECK (virtual_time_ms IS NULL OR virtual_time_ms >= 0),
+    source_sequence INTEGER CHECK (source_sequence IS NULL OR source_sequence >= 0),
+    revision INTEGER CHECK (revision IS NULL OR revision >= 0),
+    forced_full_reasons_json TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL,
+    public_price TEXT,
+    position_json TEXT NOT NULL,
+    account_json TEXT NOT NULL,
+    open_orders_json TEXT NOT NULL,
+    degraded_reason TEXT,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id),
+    UNIQUE (run_id, stable_ordinal),
+    UNIQUE (run_id, exchange, market_type, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_market_track_tier
+ON replay_training_market_track(run_id, subscription_tier, stable_ordinal);
+
+CREATE TABLE IF NOT EXISTS replay_training_global_event (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    global_sequence INTEGER NOT NULL CHECK (global_sequence >= 1),
+    ordering_version TEXT NOT NULL,
+    actual_event_time_ms INTEGER NOT NULL CHECK (actual_event_time_ms >= 0),
+    event_phase INTEGER NOT NULL CHECK (event_phase >= 0),
+    track_id TEXT NOT NULL,
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 1),
+    ordering_hash TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, global_sequence),
+    UNIQUE (run_id, track_id, source_sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_global_event_order
+ON replay_training_global_event(
+    run_id, actual_event_time_ms, event_phase, track_id, source_sequence
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_global_checkpoint (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    checkpoint_sequence INTEGER NOT NULL CHECK (checkpoint_sequence >= 1),
+    ordering_version TEXT NOT NULL,
+    global_virtual_time_ms INTEGER NOT NULL CHECK (global_virtual_time_ms >= 0),
+    global_state_hash TEXT NOT NULL,
+    tracks_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, checkpoint_sequence)
+);
+"""
+
+
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
     """Create only v2-owned tables; never advance the replay.v1 schema row."""
 
@@ -344,6 +416,29 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
             (now_ms,),
         )
         current = 3
+    if current == 3:
+        _execute_script(connection, TRAINING_SCHEMA_V4)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_training_market_track(
+                run_id, track_id, stable_ordinal, adapter_session_id,
+                exchange, market_type, symbol, settlement_asset, source_kind,
+                state, subscription_tier, dataset_epoch, virtual_time_ms,
+                source_sequence, revision, forced_full_reasons_json,
+                capabilities_json, public_price, position_json, account_json,
+                open_orders_json, degraded_reason, created_at_ms, updated_at_ms
+            )
+            SELECT t.run_id, t.track_id, 1, t.adapter_session_id,
+                   t.exchange, t.market_type, t.symbol, r.settlement_asset,
+                   t.source_kind, t.state, t.subscription_tier, t.dataset_epoch,
+                   t.virtual_time_ms, t.source_sequence, t.revision,
+                   '["VIEWED"]', t.capabilities_json, NULL, '{}', '{}', '[]',
+                   NULL, t.created_at_ms, t.updated_at_ms
+            FROM replay_training_track AS t
+            JOIN replay_training_run AS r USING(run_id)
+            """
+        )
+        current = 4
     if current != TRAINING_SCHEMA_VERSION:
         raise RuntimeError(f"no replay training schema migration path from {current}")
     connection.execute(

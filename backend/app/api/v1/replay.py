@@ -518,6 +518,14 @@ async def replay_v2_training_viewer_by_session(
     return {"protocol": REPLAY_V2_PROTOCOL, "viewer_state": viewer}
 
 
+@router.get("/runs/session/{session_id}/tracks")
+async def replay_v2_training_tracks_by_session(
+    request: Request,
+    session_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).get_market_tracks_by_session(session_id)
+
+
 @router.post(
     "/runs/{legacy_session_id}/migrate",
     dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
@@ -541,6 +549,14 @@ async def replay_v2_training_viewer(
 ) -> dict[str, object]:
     viewer = await _training_service(request).get_viewer_state(run_id)
     return {"protocol": REPLAY_V2_PROTOCOL, "viewer_state": viewer}
+
+
+@router.get("/runs/{run_id}/tracks")
+async def replay_v2_training_tracks(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).get_market_tracks(run_id)
 
 
 @router.get("/runs/{run_id}/advances/{command_id}")

@@ -280,6 +280,44 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
         await service.shutdown(step_timeout=0.2)
 
 
+async def test_phase5_market_track_routes_expose_replay_only_portfolio_contract(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "phase5-tracks-api.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        run = created.json()["run"]
+        by_session = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/session/{run['adapter_session_id']}/tracks",
+        )
+        by_run = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run['run_id']}/tracks",
+        )
+        assert by_session.status_code == by_run.status_code == 200
+        assert by_session.json() == by_run.json()
+        payload = by_run.json()
+        assert payload["protocol"] == "replay.v2"
+        assert payload["ordering_version"] == "replay.global-order.v1"
+        assert payload["tracks"][0]["subscription_tier"] == "FULL"
+        assert payload["tracks"][0]["forced_full_reasons"] == ["VIEWED"]
+        assert payload["portfolio"]["settlement_account_shared"] is True
+        assert payload["portfolio"]["equity"] == "10000"
+        assert "live_price" not in by_run.text
+        assert "actual_event_time_ms" not in by_run.text
+    finally:
+        await service.shutdown(step_timeout=0.2)
+
+
 async def test_phase4_http_boundaries_expose_only_public_time_and_exact_review_fork(
     tmp_path: Path,
 ) -> None:

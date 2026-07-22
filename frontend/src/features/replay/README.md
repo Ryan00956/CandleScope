@@ -5,9 +5,10 @@ toggle inside the live application. Both replay product flags remain disabled
 by default while the phase-gated v2 workbench is built and verified.
 
 The phase-gated v2 workbench now includes the Training Hub, source-neutral market
-workspace, ViewerState and aligned replay controls, plus Phase 4 server-owned time
-disclosure, audited integrity mutations, bounded equity curves, and read-only
-Review/Fork. With `VITE_REPLAY_PRODUCT_V2_ENABLED=1`, a direct `replay.html`
+workspace, ViewerState and aligned replay controls, Phase 4 server-owned time
+disclosure and Review/Fork, plus Phase 5 deterministic multi-market tracks,
+`NONE/WARM/FULL` replay tiers, a shared portfolio projection, and one ordered
+global clock. With `VITE_REPLAY_PRODUCT_V2_ENABLED=1`, a direct `replay.html`
 configure entry opens the Hub; opaque `?session=<id>` entries continue through
 the proven v1 runtime adapter. Hub bootstrap performs only the bounded lightweight
 `GET /api/v1/replay/runs` request. Historical datasets are not loaded until a
@@ -15,11 +16,12 @@ concrete training session is entered.
 
 With the repository-default `VITE_REPLAY_PRODUCT_V2_ENABLED=0`, composition is
 still exactly v1. The backend additionally requires both replay flags before
-serving v2 routes. Phase 4 permits only audited deposit, withdraw, and irreversible
-time reveal where the run policy allows them. Dynamic fee, leverage-cap, and
-funding changes remain explicit rejections. Multi-symbol runs, funding settlement,
-historical L2/book-assisted integrity, and isolated-margin mode remain visibly
-unavailable until their owning phases; the UI must not approximate them.
+serving v2 routes. Phase 5 keeps each market on a frozen v1 adapter while the
+TrainingRun owns stable cross-track ordering, tier transitions, controller renewal,
+checkpoints, and the `PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER` portfolio projection.
+Dynamic fee, leverage-cap, funding settlement, historical L2/book-assisted
+integrity, and isolated-margin mode remain explicit rejections until their owning
+phases; the UI must not approximate them.
 
 ## Composition roots
 

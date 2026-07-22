@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_4_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅、Phase 2 共用市场工作区、Phase 3 ViewerState/固定周期投影/BAR/AGG_TRADE 推进语义，以及 Phase 4 时间披露/完整性审计/权益曲线/只读 Review/Fork 均已完成。Phase 5 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
+状态：`PHASE_5_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅、Phase 2 共用市场工作区、Phase 3 ViewerState/固定周期投影/BAR/AGG_TRADE 推进语义、Phase 4 时间披露/完整性审计/权益曲线/只读 Review/Fork，以及 Phase 5 多商品 MarketTrack/稳定全局时钟/订阅分级/共享组合投影均已完成。Phase 6 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -9,6 +9,8 @@
 Phase 0 父提交：`2346dba32c0ce9e35dd6941bc4445366da4362a7`（2026-07-21）
 
 Phase 1 父提交：`bb253d0982c36776452c2b1e0a0cf3f1b211162f`（2026-07-21）
+
+Phase 5 父提交：`c6921c9f7f813adabd452e162719baf20d700fb8`（2026-07-21）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -1492,4 +1494,41 @@ Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_E
 Rollback: feature-flag v1 fallback、旧 build v1 rollback drill 与 Phase 4 单提交 tree revert 均 PASS；反向应用提交后 tree 与父提交 a3930294bd3f2f6a9b4410aecdc7594e8ee17bb8 完全一致。
 Known limitations: Phase 4 仍为单主轨；Phase 5 多商品、Phase 6 funding/isolated margin、Phase 9 可选历史 L2/book-assisted 尚未实现。动态 fee/leverage/funding rule revision 继续 fail closed；全仓 Ruff/mypy 既有基线待独立治理。
 Decision: PASS；停止在 Phase 4，不进入 Phase 5。
+```
+
+### Phase 5 执行记录
+
+```text
+Phase: 5 - deterministic multi-market tracks, global clock, and replay tiers
+Date: 2026-07-22
+Commit: 本 Phase 独立提交，提交号以 Git 历史为准
+Parent commit: c6921c9f7f813adabd452e162719baf20d700fb8
+Executor: Codex
+Scope: 实现 TrainingRun 级串行 actor、跨轨稳定总序、BAR/AGG_TRADE 多轨适配、NONE/WARM/FULL 与 forced-full 状态机、全局 checkpoint、共享结算组合投影、按轨控制权续租、训练自选/切轨/下单 UI 和连续 ordered playback；保留 v1 source/actor/broker 为每轨执行内核，未进入 Phase 6 funding、合约保证金或爆仓模型。
+Files changed: backend replay training schema/store/service/API、v1 session 回收边界、稳定排序 actor、离线 8-symbol fixture、benchmark 与测试；frontend 严格 tracks/global-clock/portfolio parser、API/runtime、训练自选、控制坞、纸面交易与测试/CSS；Replay 边界 README 与本执行记录。
+Schema/protocol changes: replay.training 物理 schema additive 升至 4，新增 market_track、global_event、global_checkpoint；保留既有 legacy track 兼容表。replay.v2 冻结 command enum 与 replay.v1 公共协议集合均未扩张；新增 GET /runs/{run_id}/tracks 与 /runs/session/{session_id}/tracks 投影，所有多轨命令仍走既有 /runs/{run_id}/commands 严格载荷。
+Commands run:
+  backend targeted: .\.venv\Scripts\python.exe -m pytest tests\test_replay_v2_training_phase5.py tests\test_replay_v2_multitrack_benchmark.py tests\test_replay_v2_training_api.py tests\test_replay_v2_contracts.py tests\test_replay_smoke_fixture.py -q
+  backend full: .\.venv\Scripts\python.exe -m pytest tests -q
+  backend lint: .\.venv\Scripts\python.exe -m ruff check <Phase 5 Python scope>
+  backend baseline audits: .\.venv\Scripts\python.exe -m ruff check app tests scripts；D:\anaconda\Scripts\mypy.exe app，并在父提交 detached worktree 同机对照
+  benchmark: .\.venv\Scripts\python.exe scripts\benchmark_replay_multitrack.py
+  frontend targeted: npm run test:replay
+  frontend full: npm run check
+  browser: Playwright CLI against isolated 8-symbol fixture :18105 and Vite :15205
+  rollback: node scripts/replay-rollback-drill.mjs --out <temporary evidence path>
+  commit rollback: detached worktree + git revert --no-commit <Phase 5 commit> + git write-tree 与父提交 tree 比对
+  repository/database: git diff --check；SQLite PRAGMA quick_check/foreign_key_check；global event/checkpoint SQL audit
+Targeted tests: backend Phase 5、benchmark、API、contract 与 fixture 共 63 passed，其中 Phase 5 主文件 22 passed；frontend replay 定向 171 passed。BAR 与 AGG_TRADE 的 2/4/8 FULL 矩阵、1/2/4/8 稳定排序原语、tier 读预算、forced-full、coverage fail-closed、gap/recovery、控制权过期续租、连续播放、组合预留与重启恢复均有独立断言。Phase 5 Python scope Ruff 0 violations。
+Global tests: backend 1939 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2383 passed；architecture/typecheck/ESLint/Vite production build 全部通过。
+Global baseline audits: 全仓 Ruff 与父提交同为 36 个既有违规。父提交同机 mypy 为 528 errors/108 files/261 files checked；Phase 5 最终为 524 errors/108 files/262 files checked，新增类型债务为 0，并消除 4 个既有错误。
+Stable-order evidence: replay.global-order.v1 的键固定为 actual_event_time_ms/event_phase/market_track_stable_id/source_sequence。真实 8 轨连续播放产生 16 个持久化事件，SQL 顺序严格为两个时间波次、每波 track-1..track-8；(track_id, source_sequence) 全部唯一。最新 global checkpoint sequence=12、VirtualTime=946684924245、8 轨组合 hash=sha256:ecedb398cfc71eacfc5656645468b1a6942d8180b0e478e4766c47ecad025ee9，portfolio fidelity=PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER；SQLite quick_check=ok、foreign_key_check 空。
+Ordered-play/controller evidence: 页面等待 17 秒使非主轨 controller lease 过期后，从 UI 改为 60x 仍返回 200；8 轨全部自动续租，forced reason 仅保留选中轨 VIEWED，degraded 均为空。点击播放后 UI 显示“暂停”，global generation=1/tick=2；暂停后 8 轨 VirtualTime 均为 946684924245、source_sequence 均为 2。旧写入曾留下 READY+REVIEW_REQUIRED 的迁移边界，当前同 tier FULL 恢复会同时检查 state/degraded_reason/forced reasons，真实持久化 AVAX 轨成功清锁且有回归测试。
+Tier/account evidence: 真实页面按 NONE -> FULL 顺序完成 1/2/4/8 FULL 矩阵，未调用 live subscription API；NONE 不保留活动轨读，WARM 有界，FULL 才参与连续全局推进。非主轨 ETH 限价买单 1 @ 100 使组合 reserved_margin=33.33333334、available_equity=9966.66666666 并强制 FULL；撤单后预留释放且离开主图可降为 WARM。切轨、重载和服务端重启保留 cursor、tier、forced reasons 与组合投影。
+Performance evidence: 10,000 iterations/track 的正式基准：1 轨 10,000 projections，wall 1667.302 ms，CPU 1593.750 ms，5997.712/s，queue 1，checkpoint 1000 B，Python peak 358484 B，RSS delta 548864 B；2 轨 20,000，1982.623/1984.375 ms，10087.648/s，queue 2，1669 B，394190 B，172032 B；4 轨 40,000，3498.756/3406.250 ms，11432.634/s，queue 4，3007 B，376146 B，77824 B；8 轨 80,000，6068.401/5953.125 ms，13183.044/s，queue 8，5683 B，324900 B，61440 B。证据 hash=sha256:178e94da14b02f1c4dbe3d9e4339450a7461b9db6093f44a85d15982beca130e。
+Browser heap evidence: 同一页面强制 GC 后 1/2/4/8 FULL 的 usedJSHeapSize 分别为 24618980/24636503/24698555/24755355 B，DOM nodes 恒为 490，resource entries 为 214/217/222/231；1 -> 8 增量 136375 B。实际历史起点 token 在 DOM、localStorage、sessionStorage 均为 false；console errors=0，仅两个既有 CSS warning。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0、RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_HISTORICAL_BOOK_ENABLED=0。关闭 v2 继续进入原 v1 shell；多轨 Run 保留为 v2-only，不压缩或伪装成单 symbol v1 session。
+Rollback: feature-flag v1 fallback、旧 build v1 rollback drill 与 Phase 5 单提交 tree revert 均 PASS；反向应用提交后 tree 与父提交 c6921c9f7f813adabd452e162719baf20d700fb8 完全一致。
+Known limitations: Phase 5 共享账户明确标记 PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER；各轨仍由 PAPER_LINEAR_V1 执行，不宣称 Phase 6 的 instrument rounding、maker/taker rule revision、funding settlement、CROSS/ISOLATED maintenance margin 或 liquidation fidelity。历史 L2/book-assisted 继续留给 Phase 9；动态 fee/leverage/funding 仍 fail closed。
+Decision: PASS；停止在 Phase 5，不进入 Phase 6。
 ```

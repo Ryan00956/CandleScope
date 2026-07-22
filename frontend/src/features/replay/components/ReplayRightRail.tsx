@@ -6,6 +6,7 @@ import {
   replayOwnsController,
 } from "../replayUiModel.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
+import type { ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 
 const TERMINAL_ORDER_STATES = new Set(["FILLED", "CANCELED", "REJECTED", "EXPIRED"]);
 
@@ -15,6 +16,7 @@ function orderClientId(): string {
 
 export interface ReplayRightRailProps {
   readonly runtime: ReplayRuntime;
+  readonly viewer?: ReplayViewerRuntime;
   readonly indicatorStatus: {
     readonly mode: string;
     readonly sourceBarCount: number;
@@ -22,7 +24,7 @@ export interface ReplayRightRailProps {
   };
 }
 
-export function ReplayPaperTradingDock({ runtime, indicatorStatus }: ReplayRightRailProps) {
+export function ReplayPaperTradingDock({ runtime, viewer, indicatorStatus }: ReplayRightRailProps) {
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
   const [orderType, setOrderType] = useState<"MARKET" | "LIMIT" | "STOP_MARKET" | "TAKE_PROFIT_MARKET">("MARKET");
   const [quantity, setQuantity] = useState("0.001");
@@ -36,6 +38,7 @@ export function ReplayPaperTradingDock({ runtime, indicatorStatus }: ReplayRight
     && store.connectionState === "connected"
     && runtime.pendingCommand === null
     && !runtime.forkPending
+    && viewer?.viewerPending !== true
     && store.state !== "ENDED";
   const openOrders = useMemo(() => store.orders.filter((order) => !TERMINAL_ORDER_STATES.has(order.status)), [store.orders]);
   // Reports fill the active-session closed-trade gap between atomic snapshots.
@@ -46,6 +49,17 @@ export function ReplayPaperTradingDock({ runtime, indicatorStatus }: ReplayRight
   const recentClosedTrades = useMemo(() => recentReplayActivity(closedTrades), [closedTrades]);
   const recentJournal = useMemo(() => recentReplayActivity(store.journal), [store.journal]);
   const warningCount = store.warnings.length;
+  const portfolio = viewer?.marketTracks?.portfolio ?? null;
+  const portfolioPositions = portfolio?.positions ?? [];
+  const trade = (
+    type: "place_order" | "cancel_order" | "close_position",
+    payload: Readonly<Record<string, string | boolean | null>>,
+  ) => {
+    const result = viewer === undefined
+      ? runtime.actions.submitCommand(type, payload)
+      : viewer.actions.submitTrade(type, payload);
+    void result.catch(() => undefined);
+  };
   const time = (value: number) => formatReplayPublicTime(value, {
     blindMode: config?.blind_mode ?? true,
     originMs: store.replayStartMs,
@@ -64,13 +78,14 @@ export function ReplayPaperTradingDock({ runtime, indicatorStatus }: ReplayRight
       <section className="replay-rail-section" data-replay-panel="account">
         <h2>训练账户</h2>
         <dl className="replay-metrics-grid">
-          <div><dt>Equity</dt><dd>{store.account?.equity ?? "--"} {store.account?.quote_asset ?? ""}</dd></div>
-          <div><dt>Available</dt><dd>{store.account?.available_equity ?? "--"}</dd></div>
-          <div><dt>Reserved</dt><dd>{store.account?.reserved_margin ?? "--"}</dd></div>
-          <div><dt>Realized PnL</dt><dd>{store.account?.realized_pnl ?? "--"}</dd></div>
-          <div><dt>Unrealized PnL</dt><dd>{store.account?.unrealized_pnl ?? "--"}</dd></div>
-          <div><dt>Fees</dt><dd>{store.account?.fees_paid ?? "--"}</dd></div>
+          <div><dt>Equity</dt><dd>{portfolio?.equity ?? store.account?.equity ?? "--"} {store.account?.quote_asset ?? ""}</dd></div>
+          <div><dt>Available</dt><dd>{portfolio?.available_equity ?? store.account?.available_equity ?? "--"}</dd></div>
+          <div><dt>Reserved</dt><dd>{portfolio?.reserved_margin ?? store.account?.reserved_margin ?? "--"}</dd></div>
+          <div><dt>Realized PnL</dt><dd>{portfolio?.realized_pnl ?? store.account?.realized_pnl ?? "--"}</dd></div>
+          <div><dt>Unrealized PnL</dt><dd>{portfolio?.unrealized_pnl ?? store.account?.unrealized_pnl ?? "--"}</dd></div>
+          <div><dt>Fees</dt><dd>{portfolio?.fees_paid ?? store.account?.fees_paid ?? "--"}</dd></div>
         </dl>
+        {viewer !== undefined && <small data-replay-account-contract="shared-settlement">统一结算账户 · {viewer.marketTracks?.tracks.length ?? 0} MarketTracks</small>}
       </section>
 
       <section className="replay-rail-section" data-replay-panel="position">
@@ -85,8 +100,15 @@ export function ReplayPaperTradingDock({ runtime, indicatorStatus }: ReplayRight
           type="button"
           data-replay-action="close-position"
           disabled={!commandReady || store.position?.quantity === "0"}
-          onClick={() => void runtime.actions.submitCommand("close_position", { quantity: null }).catch(() => undefined)}
+          onClick={() => trade("close_position", { quantity: null })}
         >按下一已揭示执行机会平仓</button>
+        {portfolioPositions.length > 0 && (
+          <div className="replay-portfolio-positions" data-replay-portfolio-positions={portfolioPositions.length}>
+            {portfolioPositions.map((item) => (
+              <small key={item.track_id}>{item.symbol} · {String(item.position.quantity ?? "0")}</small>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="replay-rail-section replay-order-ticket" data-replay-panel="order-ticket">
@@ -107,7 +129,7 @@ export function ReplayPaperTradingDock({ runtime, indicatorStatus }: ReplayRight
           type="button"
           data-replay-action="place-order"
           disabled={!commandReady || !quantity.trim() || (orderType !== "MARKET" && !price.trim())}
-          onClick={() => void runtime.actions.submitCommand("place_order", {
+          onClick={() => trade("place_order", {
             client_order_id: orderClientId(),
             side,
             order_type: orderType,
@@ -115,7 +137,7 @@ export function ReplayPaperTradingDock({ runtime, indicatorStatus }: ReplayRight
             reduce_only: reduceOnly,
             limit_price: orderType === "LIMIT" ? price : null,
             stop_price: orderType === "STOP_MARKET" || orderType === "TAKE_PROFIT_MARKET" ? price : null,
-          }).catch(() => undefined)}
+          })}
         >提交纸面委托</button>
         <small>前端不预生成成交；风险、价格步长与成交由服务端权威校验。</small>
       </section>
@@ -126,7 +148,7 @@ export function ReplayPaperTradingDock({ runtime, indicatorStatus }: ReplayRight
           <article className="replay-list-card" key={order.order_id}>
             <strong>{order.side} {order.order_type}</strong><span>{order.quantity} @ {order.limit_price ?? order.stop_price ?? "next open"}</span>
             <span>{order.status} · filled {order.filled_quantity}</span>
-            <button type="button" disabled={!commandReady} onClick={() => void runtime.actions.submitCommand("cancel_order", { order_id: order.order_id }).catch(() => undefined)}>取消</button>
+            <button type="button" disabled={!commandReady} onClick={() => trade("cancel_order", { order_id: order.order_id })}>取消</button>
           </article>
         ))}
       </section>

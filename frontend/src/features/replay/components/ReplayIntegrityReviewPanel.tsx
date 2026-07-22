@@ -66,7 +66,7 @@ export default function ReplayIntegrityReviewPanel({
     >
       <header className="replay-integrity-heading">
         <div>
-          <span className="training-hub-kicker">SERVER-AUTHORITATIVE · PHASE 4</span>
+          <span className="training-hub-kicker">SERVER-AUTHORITATIVE · PHASE 5</span>
           <h2 id="replay-integrity-title">完整性与复盘</h2>
         </div>
         <button type="button" disabled={busy} onClick={() => void integrityRuntime.actions.refresh()}>

@@ -5,12 +5,26 @@ from pathlib import Path
 
 from app.core import config
 from scripts.replay_smoke_fixture import (
+    FIXTURE_SYMBOLS,
     INTERVAL_MS,
     LEGACY_LIVE_TAIL_ROWS,
     _force_offline_upstreams,
     _legacy_live_tail_rows,
     _legacy_live_tail_required,
 )
+
+
+def test_phase5_smoke_fixture_has_multiple_same_settlement_symbols() -> None:
+    assert [symbol for symbol, _price in FIXTURE_SYMBOLS] == [
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "XRPUSDT",
+        "ADAUSDT",
+        "BNBUSDT",
+        "DOGEUSDT",
+        "AVAXUSDT",
+    ]
 
 
 def test_replay_smoke_fixture_removes_public_fallback_upstreams(monkeypatch) -> None:

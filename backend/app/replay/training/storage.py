@@ -5,9 +5,12 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from decimal import Decimal, InvalidOperation
+from typing import cast
 
 from app.replay.canonical import canonical_json, canonical_sha256
+from app.replay.broker.models import decimal_to_string
 from app.replay.storage.sqlite_store import ReplaySQLiteStore
 
 from .errors import TrainingRunError
@@ -19,6 +22,12 @@ from .models import (
     TrainingRunCreateRequest,
     ViewerState,
     validate_v2_counter,
+)
+from .multitrack import (
+    GLOBAL_ORDERING_VERSION,
+    StableMarketEvent,
+    global_ordering_hash,
+    stable_market_event_order,
 )
 from .schema import TRAINING_SCHEMA_ID, migrate_training_schema
 
@@ -48,7 +57,7 @@ WITH cards AS (
         r.time_disclosure_policy AS time_disclosure_policy,
         r.last_symbol AS last_symbol,
         (
-            SELECT COUNT(*) FROM replay_training_track AS t
+            SELECT COUNT(*) FROM replay_training_market_track AS t
             WHERE t.run_id = r.run_id AND t.subscription_tier != 'NONE'
         ) AS subscribed_track_count,
         s.source_sequence AS progress_sequence,
@@ -61,20 +70,29 @@ WITH cards AS (
         CASE WHEN s.updated_at_ms > r.updated_at_ms THEN s.updated_at_ms ELSE r.updated_at_ms END AS updated_at_ms,
         CASE WHEN s.degraded_reason IS NULL THEN r.compatibility ELSE 'UNAVAILABLE' END AS compatibility,
         CASE WHEN s.degraded_reason IS NULL THEN 'OPEN_ADAPTER' ELSE 'UNAVAILABLE' END AS resume_action,
-        r.adapter_session_id AS adapter_session_id,
+        selected_track.adapter_session_id AS adapter_session_id,
         r.parent_legacy_session_id AS parent_legacy_session_id,
         s.degraded_reason AS degraded_reason,
         s.status_reason AS status_reason,
         EXISTS(
             SELECT 1 FROM replay_report AS report
-            WHERE report.session_id = r.adapter_session_id
+            WHERE report.session_id IN (
+                SELECT adapter_session_id
+                FROM replay_training_market_track
+                WHERE run_id = r.run_id AND adapter_session_id IS NOT NULL
+            )
         ) AS report_available,
         EXISTS(
             SELECT 1 FROM replay_equity_sample AS sample
             WHERE sample.run_id = r.run_id
         ) AS review_available
     FROM replay_training_run AS r
-    JOIN replay_session AS s ON s.session_id = r.adapter_session_id
+    JOIN replay_training_viewer_state AS viewer USING(run_id)
+    JOIN replay_training_market_track AS selected_track
+      ON selected_track.run_id = r.run_id
+     AND selected_track.track_id = viewer.selected_track_id
+     AND selected_track.adapter_session_id IS NOT NULL
+    JOIN replay_session AS s ON s.session_id = selected_track.adapter_session_id
 
     UNION ALL
 
@@ -111,6 +129,10 @@ WITH cards AS (
     WHERE NOT EXISTS(
         SELECT 1 FROM replay_training_run AS r
         WHERE r.adapter_session_id = s.session_id
+    )
+      AND NOT EXISTS(
+        SELECT 1 FROM replay_training_market_track AS t
+        WHERE t.adapter_session_id = s.session_id
     )
 )
 """
@@ -279,8 +301,10 @@ class TrainingRunStore:
                 exchange=request.exchange,
                 market_type=request.market_type,
                 symbol=request.symbol,
+                settlement_asset=request.settlement_asset,
                 dataset_epoch=str(session_state["data_epoch"]),
                 cursor={**cursor, "revision": int(session_state["revision"])},
+                component_state=component_state,
                 now_ms=now_ms,
             )
             self._insert_viewer_state(
@@ -503,6 +527,7 @@ class TrainingRunStore:
                 exchange=str(parent["exchange"]),
                 market_type=str(parent["market_type"]),
                 symbol=str(parent["last_symbol"]),
+                settlement_asset=str(parent["settlement_asset"]),
                 dataset_epoch=str(parent["dataset_epoch"]),
                 cursor={
                     **cursor,
@@ -510,6 +535,7 @@ class TrainingRunStore:
                         session_state["revision"], field_name="fork revision"
                     ),
                 },
+                component_state=component_state,
                 now_ms=now_ms,
             )
             parent_view = connection.execute(
@@ -837,8 +863,10 @@ class TrainingRunStore:
                 exchange=str(config.get("exchange") or "unknown"),
                 market_type=str(config.get("market_type") or "unknown"),
                 symbol=symbol,
+                settlement_asset=str(config.get("quote_asset") or "UNKNOWN"),
                 dataset_epoch=str(row["dataset_epoch"]),
                 cursor=cursor,
+                component_state=None,
                 now_ms=now_ms,
             )
             self._insert_viewer_state(
@@ -881,9 +909,17 @@ class TrainingRunStore:
     async def run_id_for_session(self, session_id: str) -> str:
         def read(connection: sqlite3.Connection) -> str | None:
             row = connection.execute(
-                "SELECT run_id FROM replay_training_run WHERE adapter_session_id = ?",
+                """
+                SELECT run_id FROM replay_training_market_track
+                WHERE adapter_session_id = ?
+                """,
                 (session_id,),
             ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT run_id FROM replay_training_run WHERE adapter_session_id = ?",
+                    (session_id,),
+                ).fetchone()
             if row is not None:
                 return str(row["run_id"])
             legacy = connection.execute(
@@ -905,14 +941,29 @@ class TrainingRunStore:
         def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
             return connection.execute(
                 """
-                SELECT r.run_id, r.adapter_session_id, r.source_kind,
-                       r.base_interval, r.compatibility, s.config_json,
+                SELECT r.run_id, selected.adapter_session_id, r.source_kind,
+                       r.base_interval, r.display_interval, r.compatibility,
+                       r.exchange, r.market_type, r.settlement_asset,
+                       r.catalog_epoch, r.dataset_epoch, r.initial_equity,
+                       selected.track_id AS selected_track_id,
+                       selected.stable_ordinal AS selected_track_ordinal,
+                       s.config_json,
                        r.integrity_mode, r.time_disclosure_policy,
                        r.allow_rule_changes, r.active_rule_revision,
                        i.allowed_mutations_json, i.revealed,
-                       i.strict_eligible, i.start_time_known, i.result_label
+                       i.strict_eligible, i.start_time_known, i.result_label,
+                       dataset.actual_replay_start_ms,
+                       dataset.actual_replay_end_ms,
+                       dataset.synthetic_origin_ms
                 FROM replay_training_run AS r
+                JOIN replay_training_viewer_state AS viewer USING(run_id)
+                JOIN replay_training_market_track AS selected
+                  ON selected.run_id = r.run_id
+                 AND selected.track_id = viewer.selected_track_id
+                 AND selected.adapter_session_id IS NOT NULL
                 JOIN replay_session AS s ON s.session_id = r.adapter_session_id
+                JOIN replay_dataset_ref AS dataset
+                  ON dataset.session_id = r.adapter_session_id
                 JOIN replay_training_integrity AS i USING(run_id)
                 WHERE r.run_id = ?
                 """,
@@ -931,8 +982,20 @@ class TrainingRunStore:
             "adapter_session_id": str(row["adapter_session_id"]),
             "source_kind": str(row["source_kind"]),
             "base_interval": str(row["base_interval"]),
+            "display_interval": str(row["display_interval"]),
             "compatibility": str(row["compatibility"]),
             "adapter_config": json.loads(str(row["config_json"])),
+            "exchange": str(row["exchange"]),
+            "market_type": str(row["market_type"]),
+            "settlement_asset": str(row["settlement_asset"]),
+            "catalog_epoch": str(row["catalog_epoch"]),
+            "dataset_epoch": str(row["dataset_epoch"]),
+            "initial_equity": str(row["initial_equity"]),
+            "selected_track_id": str(row["selected_track_id"]),
+            "selected_track_ordinal": int(row["selected_track_ordinal"]),
+            "actual_replay_start_ms": int(row["actual_replay_start_ms"]),
+            "actual_replay_end_ms": int(row["actual_replay_end_ms"]),
+            "synthetic_origin_ms": row["synthetic_origin_ms"],
             "integrity_mode": str(row["integrity_mode"]),
             "time_disclosure_policy": str(row["time_disclosure_policy"]),
             "allow_rule_changes": bool(row["allow_rule_changes"]),
@@ -1670,6 +1733,734 @@ class TrainingRunStore:
 
         await self.base_store.run_extension_write(write)
 
+    async def get_market_tracks(self, run_id: str) -> dict[str, object]:
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[sqlite3.Row, tuple[sqlite3.Row, ...]] | None:
+            run = connection.execute(
+                """
+                SELECT r.run_id, r.initial_equity, r.source_kind,
+                       viewer.*
+                FROM replay_training_run AS r
+                JOIN replay_training_viewer_state AS viewer USING(run_id)
+                WHERE r.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                return None
+            rows = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_market_track
+                    WHERE run_id = ?
+                    ORDER BY stable_ordinal, track_id
+                    """,
+                    (run_id,),
+                ).fetchall()
+            )
+            return run, rows
+
+        result = await self.base_store.run_extension_read(read)
+        if result is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training run does not exist",
+                status_code=404,
+            )
+        run, rows = result
+        tracks = [self._market_track_from_row(row) for row in rows]
+        viewer = self._viewer_from_row(run)
+        return {
+            "protocol": REPLAY_V2_PROTOCOL,
+            "run_id": run_id,
+            "ordering_version": GLOBAL_ORDERING_VERSION,
+            "viewer_state": viewer.to_dict(),
+            "tracks": tracks,
+            "portfolio": self._portfolio_projection(
+                initial_equity=str(run["initial_equity"]),
+                tracks=tracks,
+            ),
+        }
+
+    async def get_market_track(
+        self,
+        run_id: str,
+        track_id: str,
+    ) -> dict[str, object]:
+        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            return connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+
+        row = await self.base_store.run_extension_read(read)
+        if row is None:
+            raise TrainingRunError(
+                "MARKET_TRACK_NOT_FOUND",
+                "training market track does not exist",
+                status_code=404,
+            )
+        return self._market_track_from_row(row)
+
+    async def reserve_market_track(
+        self,
+        *,
+        run_id: str,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        settlement_asset: str,
+        source_kind: str,
+        subscription_tier: str,
+    ) -> dict[str, object]:
+        def write(connection: sqlite3.Connection) -> sqlite3.Row:
+            run = connection.execute(
+                "SELECT virtual_time_ms FROM replay_training_run WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training run does not exist",
+                    status_code=404,
+                )
+            duplicate = connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND exchange = ? AND market_type = ? AND symbol = ?
+                """,
+                (run_id, exchange, market_type, symbol),
+            ).fetchone()
+            if duplicate is not None:
+                raise TrainingRunError(
+                    "MARKET_TRACK_CONFLICT",
+                    "training market track already exists",
+                    status_code=409,
+                    details={"track_id": str(duplicate["track_id"])},
+                )
+            ordinal_row = connection.execute(
+                """
+                SELECT COALESCE(MAX(stable_ordinal), 0) + 1 AS ordinal
+                FROM replay_training_market_track WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            ordinal = int(ordinal_row["ordinal"])
+            track_id = f"track-{ordinal}"
+            now_ms = self.base_store._validated_now_ms()
+            state = "DORMANT" if subscription_tier == "NONE" else "PREPARING"
+            connection.execute(
+                """
+                INSERT INTO replay_training_market_track(
+                    run_id, track_id, stable_ordinal, adapter_session_id,
+                    exchange, market_type, symbol, settlement_asset, source_kind,
+                    state, subscription_tier, dataset_epoch, virtual_time_ms,
+                    source_sequence, revision, forced_full_reasons_json,
+                    capabilities_json, public_price, position_json, account_json,
+                    open_orders_json, degraded_reason, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL,
+                          NULL, '[]', ?, NULL, '{}', '{}', '[]', NULL, ?, ?)
+                """,
+                (
+                    run_id,
+                    track_id,
+                    ordinal,
+                    exchange,
+                    market_type,
+                    symbol,
+                    settlement_asset,
+                    source_kind,
+                    state,
+                    subscription_tier,
+                    canonical_json(_phase1_capabilities(source_kind)),
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            return connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+
+        try:
+            row = await self.base_store.run_extension_write(write)
+        except sqlite3.IntegrityError as exc:
+            raise TrainingRunError(
+                "MARKET_TRACK_CONFLICT",
+                "training market track identity conflicts with an existing track",
+                status_code=409,
+            ) from exc
+        return self._market_track_from_row(row)
+
+    def attach_market_track_writer(
+        self,
+        *,
+        run_id: str,
+        track_id: str,
+        requested_tier: str,
+    ) -> Callable[..., Callable[[sqlite3.Connection, int], None]]:
+        def extension_factory(
+            *,
+            session_id: str,
+            session_state: Mapping[str, object],
+            component_state: Mapping[str, object],
+        ) -> Callable[[sqlite3.Connection, int], None]:
+            def write(connection: sqlite3.Connection, now_ms: int) -> None:
+                row = connection.execute(
+                    """
+                    SELECT * FROM replay_training_market_track
+                    WHERE run_id = ? AND track_id = ?
+                    """,
+                    (run_id, track_id),
+                ).fetchone()
+                if row is None or row["adapter_session_id"] is not None:
+                    raise TrainingRunError(
+                        "MARKET_TRACK_CONFLICT",
+                        "training market track cannot attach an adapter session",
+                        status_code=409,
+                    )
+                cursor = session_state.get("cursor")
+                if not isinstance(cursor, Mapping):
+                    raise TypeError("market track adapter cursor must be an object")
+                position, account, open_orders, public_price = self._track_components(
+                    component_state
+                )
+                connection.execute(
+                    """
+                    UPDATE replay_training_market_track
+                    SET adapter_session_id = ?, state = 'READY',
+                        subscription_tier = ?, dataset_epoch = ?,
+                        virtual_time_ms = ?, source_sequence = ?, revision = ?,
+                        public_price = ?, position_json = ?, account_json = ?,
+                        open_orders_json = ?, degraded_reason = NULL,
+                        updated_at_ms = ?
+                    WHERE run_id = ? AND track_id = ?
+                    """,
+                    (
+                        session_id,
+                        requested_tier,
+                        str(session_state["data_epoch"]),
+                        int(cursor["virtual_time_ms"]),
+                        validate_v2_counter(
+                            session_state["source_sequence"],
+                            field_name="source_sequence",
+                        ),
+                        validate_v2_counter(
+                            session_state["revision"],
+                            field_name="revision",
+                        ),
+                        public_price,
+                        canonical_json(position),
+                        canonical_json(account),
+                        canonical_json(open_orders),
+                        now_ms,
+                        run_id,
+                        track_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_pin(
+                        run_id, pin_id, dataset_epoch, pin_kind,
+                        manifest_json, created_at_ms
+                    ) VALUES (?, ?, ?, 'V1_DATASET_REF', ?, ?)
+                    """,
+                    (
+                        run_id,
+                        f"{track_id}-dataset",
+                        str(session_state["data_epoch"]),
+                        canonical_json(
+                            {
+                                "schema": "replay.training.rehydration.v1",
+                                "adapter_session_id": session_id,
+                                "owner": "replay_dataset_ref",
+                            }
+                        ),
+                        now_ms,
+                    ),
+                )
+
+            return write
+
+        return extension_factory
+
+    async def mark_market_track_error(
+        self,
+        *,
+        run_id: str,
+        track_id: str,
+        reason: str,
+        degraded: bool = False,
+    ) -> None:
+        state = "DEGRADED" if degraded else "ERROR"
+
+        def write(connection: sqlite3.Connection) -> None:
+            row = connection.execute(
+                """
+                SELECT forced_full_reasons_json
+                FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+            if row is None:
+                return
+            reasons = json.loads(str(row["forced_full_reasons_json"]))
+            if not isinstance(reasons, list):
+                reasons = []
+            if degraded and "REVIEW_REQUIRED" not in reasons:
+                reasons.append("REVIEW_REQUIRED")
+            connection.execute(
+                """
+                UPDATE replay_training_market_track
+                SET state = ?, degraded_reason = ?,
+                    forced_full_reasons_json = ?, updated_at_ms = ?
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (
+                    state,
+                    reason[:500],
+                    canonical_json(sorted(set(str(item) for item in reasons))),
+                    self.base_store._validated_now_ms(),
+                    run_id,
+                    track_id,
+                ),
+            )
+
+        await self.base_store.run_extension_write(write)
+
+    async def set_market_track_tier(
+        self,
+        *,
+        run_id: str,
+        track_id: str,
+        subscription_tier: str,
+    ) -> dict[str, object]:
+        def write(connection: sqlite3.Connection) -> sqlite3.Row:
+            row = connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+            if row is None:
+                raise TrainingRunError(
+                    "MARKET_TRACK_NOT_FOUND",
+                    "training market track does not exist",
+                    status_code=404,
+                )
+            reasons = json.loads(str(row["forced_full_reasons_json"]))
+            if not isinstance(reasons, list):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market track force reasons are invalid",
+                    status_code=503,
+                )
+            if reasons and subscription_tier != "FULL":
+                raise TrainingRunError(
+                    "MARKET_TRACK_FORCED_FULL",
+                    "forced FULL market track cannot be downgraded",
+                    status_code=409,
+                    details={"forced_full_reasons": reasons},
+                )
+            if subscription_tier != "NONE" and row["adapter_session_id"] is None:
+                raise TrainingRunError(
+                    "MARKET_TRACK_NOT_PREPARED",
+                    "market track must prepare a frozen adapter before activation",
+                    status_code=409,
+                )
+            state = "DORMANT" if subscription_tier == "NONE" else "READY"
+            connection.execute(
+                """
+                UPDATE replay_training_market_track
+                SET subscription_tier = ?, state = ?, updated_at_ms = ?
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (
+                    subscription_tier,
+                    state,
+                    self.base_store._validated_now_ms(),
+                    run_id,
+                    track_id,
+                ),
+            )
+            return connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+
+        return self._market_track_from_row(
+            await self.base_store.run_extension_write(write)
+        )
+
+    async def clear_market_track_degradation(
+        self,
+        *,
+        run_id: str,
+        track_id: str,
+    ) -> dict[str, object]:
+        def write(connection: sqlite3.Connection) -> sqlite3.Row:
+            row = connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+            if row is None:
+                raise TrainingRunError(
+                    "MARKET_TRACK_NOT_FOUND",
+                    "training market track does not exist",
+                    status_code=404,
+                )
+            reasons = [
+                reason
+                for reason in self._reason_list(row)
+                if reason != "REVIEW_REQUIRED"
+            ]
+            connection.execute(
+                """
+                UPDATE replay_training_market_track
+                SET state = 'READY', degraded_reason = NULL,
+                    forced_full_reasons_json = ?, updated_at_ms = ?
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (
+                    canonical_json(reasons),
+                    self.base_store._validated_now_ms(),
+                    run_id,
+                    track_id,
+                ),
+            )
+            return connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+
+        return self._market_track_from_row(
+            await self.base_store.run_extension_write(write)
+        )
+
+    async def select_market_track(
+        self,
+        *,
+        run_id: str,
+        track_id: str,
+        expected_viewer_revision: int,
+        command_id: str,
+        command: Mapping[str, object],
+    ) -> ViewerState:
+        request_json = canonical_json(command)
+
+        def write(connection: sqlite3.Connection) -> ViewerState:
+            replayed = connection.execute(
+                """
+                SELECT request_json, viewer_state_json
+                FROM replay_training_viewer_event
+                WHERE run_id = ? AND command_id = ?
+                """,
+                (run_id, command_id),
+            ).fetchone()
+            if replayed is not None:
+                if str(replayed["request_json"]) != request_json:
+                    raise TrainingRunError(
+                        "COMMAND_ID_REUSED",
+                        "command_id was reused with a different viewer command",
+                        status_code=409,
+                    )
+                return ViewerState.from_dict(json.loads(str(replayed["viewer_state_json"])))
+            viewer_row = connection.execute(
+                "SELECT * FROM replay_training_viewer_state WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            target = connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+            if viewer_row is None or target is None:
+                raise TrainingRunError(
+                    "MARKET_TRACK_NOT_FOUND",
+                    "training market track does not exist",
+                    status_code=404,
+                )
+            current = self._viewer_from_row(viewer_row)
+            if current.semantic_view_revision != expected_viewer_revision:
+                raise TrainingRunError(
+                    "VIEWER_REVISION_CONFLICT",
+                    "viewer state revision does not match",
+                    status_code=409,
+                    details={
+                        "expected": expected_viewer_revision,
+                        "actual": current.semantic_view_revision,
+                    },
+                )
+            if (
+                target["adapter_session_id"] is None
+                or target["state"] != "READY"
+                or target["subscription_tier"] != "FULL"
+            ):
+                raise TrainingRunError(
+                    "MARKET_TRACK_NOT_READY",
+                    "selected market track must be an aligned FULL track",
+                    status_code=409,
+                )
+            current_track = connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, current.selected_track_id),
+            ).fetchone()
+            if current_track is None or (
+                int(current_track["virtual_time_ms"]) != int(target["virtual_time_ms"])
+            ):
+                raise TrainingRunError(
+                    "GLOBAL_CLOCK_DIVERGED",
+                    "market track is not aligned to the TrainingRun clock",
+                    status_code=409,
+                )
+            if current.selected_track_id != track_id:
+                old_reasons = self._reason_list(current_track)
+                old_reasons = [reason for reason in old_reasons if reason != "VIEWED"]
+                old_tier = str(current_track["subscription_tier"])
+                if not old_reasons and old_tier == "FULL":
+                    old_tier = "WARM"
+                connection.execute(
+                    """
+                    UPDATE replay_training_market_track
+                    SET subscription_tier = ?, forced_full_reasons_json = ?,
+                        updated_at_ms = ?
+                    WHERE run_id = ? AND track_id = ?
+                    """,
+                    (
+                        old_tier,
+                        canonical_json(old_reasons),
+                        self.base_store._validated_now_ms(),
+                        run_id,
+                        current.selected_track_id,
+                    ),
+                )
+            target_reasons = self._reason_list(target)
+            if "VIEWED" not in target_reasons:
+                target_reasons.append("VIEWED")
+            now_ms = self.base_store._validated_now_ms()
+            connection.execute(
+                """
+                UPDATE replay_training_market_track
+                SET subscription_tier = 'FULL', forced_full_reasons_json = ?,
+                    updated_at_ms = ?
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (canonical_json(sorted(target_reasons)), now_ms, run_id, track_id),
+            )
+            updated = ViewerState(
+                run_id=current.run_id,
+                selected_track_id=track_id,
+                display_interval=current.display_interval,
+                chart_type=current.chart_type,
+                visible_range=current.visible_range,
+                pane_layout=current.pane_layout,
+                rail_layout=current.rail_layout,
+                semantic_view_revision=current.semantic_view_revision + 1,
+            )
+            payload_json = canonical_json(updated.to_dict())
+            connection.execute(
+                """
+                UPDATE replay_training_viewer_state
+                SET selected_track_id = ?, semantic_view_revision = ?,
+                    updated_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (track_id, updated.semantic_view_revision, now_ms, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_run
+                SET last_symbol = ?, current_equity = json_extract(?, '$.equity'),
+                    summary_revision = ?, revision = ?, source_sequence = ?,
+                    virtual_time_ms = ?, updated_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (
+                    target["symbol"],
+                    target["account_json"],
+                    target["revision"],
+                    target["revision"],
+                    target["source_sequence"],
+                    target["virtual_time_ms"],
+                    now_ms,
+                    run_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_training_viewer_event(
+                    run_id, semantic_view_revision, command_id, event_type,
+                    request_json, viewer_state_json, created_at_ms
+                ) VALUES (?, ?, ?, 'SELECT_TRACK', ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    updated.semantic_view_revision,
+                    command_id,
+                    request_json,
+                    payload_json,
+                    now_ms,
+                ),
+            )
+            return updated
+
+        return await self.base_store.run_extension_write(write)
+
+    async def record_global_events(
+        self,
+        run_id: str,
+        events: Sequence[StableMarketEvent],
+    ) -> dict[str, object]:
+        ordered = stable_market_event_order(events)
+
+        def write(connection: sqlite3.Connection) -> dict[str, object]:
+            sequence_row = connection.execute(
+                """
+                SELECT COALESCE(MAX(global_sequence), 0) AS sequence
+                FROM replay_training_global_event WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            global_sequence = int(sequence_row["sequence"])
+            now_ms = self.base_store._validated_now_ms()
+            inserted = 0
+            for event in ordered:
+                exists = connection.execute(
+                    """
+                    SELECT global_sequence FROM replay_training_global_event
+                    WHERE run_id = ? AND track_id = ? AND source_sequence = ?
+                    """,
+                    (run_id, event.market_track_stable_id, event.source_sequence),
+                ).fetchone()
+                if exists is not None:
+                    continue
+                global_sequence += 1
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_global_event(
+                        run_id, global_sequence, ordering_version,
+                        actual_event_time_ms, event_phase, track_id,
+                        source_sequence, ordering_hash, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        global_sequence,
+                        GLOBAL_ORDERING_VERSION,
+                        event.actual_event_time_ms,
+                        event.event_phase,
+                        event.market_track_stable_id,
+                        event.source_sequence,
+                        global_ordering_hash((event,)),
+                        now_ms,
+                    ),
+                )
+                inserted += 1
+            checkpoint = self._insert_global_checkpoint(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+            )
+            return {
+                "ordering_version": GLOBAL_ORDERING_VERSION,
+                "inserted": inserted,
+                "global_sequence": global_sequence,
+                "checkpoint": checkpoint,
+            }
+
+        return await self.base_store.run_extension_write(write)
+
+    async def checkpoint_market_tracks(self, run_id: str) -> dict[str, object]:
+        def write(connection: sqlite3.Connection) -> dict[str, object]:
+            return self._insert_global_checkpoint(
+                connection,
+                run_id=run_id,
+                now_ms=self.base_store._validated_now_ms(),
+            )
+
+        return await self.base_store.run_extension_write(write)
+
+    async def global_events(self, run_id: str) -> list[dict[str, object]]:
+        def read(connection: sqlite3.Connection) -> tuple[sqlite3.Row, ...]:
+            return tuple(
+                connection.execute(
+                    """
+                    SELECT global_sequence, ordering_version,
+                           actual_event_time_ms, event_phase, track_id,
+                           source_sequence, ordering_hash
+                    FROM replay_training_global_event
+                    WHERE run_id = ? ORDER BY global_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            )
+
+        rows = await self.base_store.run_extension_read(read)
+        return [dict(row) for row in rows]
+
+    async def remove_market_track(self, run_id: str, track_id: str) -> str | None:
+        def write(connection: sqlite3.Connection) -> str | None:
+            viewer = connection.execute(
+                "SELECT selected_track_id FROM replay_training_viewer_state WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            row = connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+            if row is None:
+                raise TrainingRunError(
+                    "MARKET_TRACK_NOT_FOUND",
+                    "training market track does not exist",
+                    status_code=404,
+                )
+            reasons = self._reason_list(row)
+            if viewer is not None and viewer["selected_track_id"] == track_id or reasons:
+                raise TrainingRunError(
+                    "MARKET_TRACK_FORCED_FULL",
+                    "owned market track cannot be removed",
+                    status_code=409,
+                    details={"forced_full_reasons": reasons},
+                )
+            session_id = row["adapter_session_id"]
+            connection.execute(
+                "DELETE FROM replay_training_market_track WHERE run_id = ? AND track_id = ?",
+                (run_id, track_id),
+            )
+            connection.execute(
+                "DELETE FROM replay_training_pin WHERE run_id = ? AND pin_id = ?",
+                (run_id, f"{track_id}-dataset"),
+            )
+            return None if session_id is None else str(session_id)
+
+        return await self.base_store.run_extension_write(write)
+
     async def history_binding(
         self,
         *,
@@ -1687,7 +2478,7 @@ class TrainingRunStore:
                 """
                 SELECT
                     r.run_id,
-                    r.adapter_session_id,
+                    t.adapter_session_id,
                     r.base_interval,
                     r.display_interval,
                     r.time_disclosure_policy,
@@ -1697,6 +2488,11 @@ class TrainingRunStore:
                     t.market_type,
                     t.symbol,
                     t.source_kind,
+                    legacy.exchange AS legacy_exchange,
+                    legacy.market_type AS legacy_market_type,
+                    legacy.symbol AS legacy_symbol,
+                    legacy.source_kind AS legacy_source_kind,
+                    legacy.dataset_epoch AS legacy_dataset_epoch,
                     t.dataset_epoch AS track_dataset_epoch,
                     t.virtual_time_ms,
                     t.source_sequence,
@@ -1705,10 +2501,11 @@ class TrainingRunStore:
                     s.data_epoch AS session_data_epoch,
                     s.degraded_reason
                 FROM replay_training_run AS r
-                JOIN replay_training_track AS t
-                  ON t.run_id = r.run_id AND t.adapter_session_id = r.adapter_session_id
-                JOIN replay_session AS s ON s.session_id = r.adapter_session_id
-                WHERE r.adapter_session_id = ? AND t.track_id = ?
+                JOIN replay_training_market_track AS t ON t.run_id = r.run_id
+                LEFT JOIN replay_training_track AS legacy
+                  ON legacy.run_id = t.run_id AND legacy.track_id = t.track_id
+                JOIN replay_session AS s ON s.session_id = t.adapter_session_id
+                WHERE t.adapter_session_id = ? AND t.track_id = ?
                 """,
                 (session_id, track_id),
             ).fetchone()
@@ -1734,6 +2531,18 @@ class TrainingRunStore:
                 "training adapter display interval is invalid",
                 status_code=503,
             )
+        if row["legacy_symbol"] is not None and (
+            str(row["legacy_exchange"]) != str(row["exchange"])
+            or str(row["legacy_market_type"]) != str(row["market_type"])
+            or str(row["legacy_symbol"]) != str(row["symbol"])
+            or str(row["legacy_source_kind"]) != str(row["source_kind"])
+            or str(row["legacy_dataset_epoch"]) != str(row["track_dataset_epoch"])
+        ):
+            raise TrainingRunError(
+                "HISTORY_SOURCE_IDENTITY_DRIFT",
+                "training history track identity changed",
+                status_code=409,
+            )
         return {
             "run_id": str(row["run_id"]),
             "session_id": str(row["adapter_session_id"]),
@@ -1755,6 +2564,300 @@ class TrainingRunStore:
             "revision": int(row["revision"]),
             "config": adapter_config,
             "degraded_reason": row["degraded_reason"],
+        }
+
+    @staticmethod
+    def _reason_list(row: Mapping[str, object]) -> list[str]:
+        try:
+            decoded = json.loads(str(row["forced_full_reasons_json"]))
+        except json.JSONDecodeError as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "market track force reasons are invalid",
+                status_code=503,
+            ) from exc
+        if not isinstance(decoded, list) or any(
+            not isinstance(reason, str) for reason in decoded
+        ):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "market track force reasons are invalid",
+                status_code=503,
+            )
+        return sorted(set(decoded))
+
+    @classmethod
+    def _market_track_from_row(
+        cls,
+        row: Mapping[str, object],
+    ) -> dict[str, object]:
+        def json_object(field_name: str) -> dict[str, object]:
+            try:
+                value = json.loads(str(row[field_name]))
+            except json.JSONDecodeError as exc:
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    f"market track {field_name} is invalid",
+                    status_code=503,
+                ) from exc
+            if not isinstance(value, dict):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    f"market track {field_name} is invalid",
+                    status_code=503,
+                )
+            return value
+
+        try:
+            capabilities = json.loads(str(row["capabilities_json"]))
+            open_orders = json.loads(str(row["open_orders_json"]))
+        except json.JSONDecodeError as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "market track projection JSON is invalid",
+                status_code=503,
+            ) from exc
+        if not isinstance(capabilities, dict) or not isinstance(open_orders, list):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "market track projection JSON is invalid",
+                status_code=503,
+            )
+        cursor = None
+        if row["virtual_time_ms"] is not None:
+            if row["source_sequence"] is None or row["revision"] is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market track cursor is incomplete",
+                    status_code=503,
+                )
+            cursor = {
+                "virtual_time_ms": validate_v2_counter(
+                    row["virtual_time_ms"], field_name="virtual_time_ms"
+                ),
+                "source_sequence": validate_v2_counter(
+                    row["source_sequence"], field_name="source_sequence"
+                ),
+                "revision": validate_v2_counter(
+                    row["revision"], field_name="revision"
+                ),
+            }
+        return {
+            "run_id": str(row["run_id"]),
+            "track_id": str(row["track_id"]),
+            "stable_ordinal": validate_v2_counter(
+                row["stable_ordinal"], field_name="stable_ordinal"
+            ),
+            "adapter_session_id": (
+                None
+                if row["adapter_session_id"] is None
+                else str(row["adapter_session_id"])
+            ),
+            "exchange": str(row["exchange"]),
+            "market_type": str(row["market_type"]),
+            "symbol": str(row["symbol"]),
+            "settlement_asset": str(row["settlement_asset"]),
+            "state": str(row["state"]),
+            "source_kind": str(row["source_kind"]),
+            "subscription_tier": str(row["subscription_tier"]),
+            "cursor": cursor,
+            "forced_full_reasons": cls._reason_list(row),
+            "capabilities": capabilities,
+            "public_price": row["public_price"],
+            "position": json_object("position_json"),
+            "open_order_count": len(open_orders),
+            "degraded_reason": row["degraded_reason"],
+            "account": json_object("account_json"),
+        }
+
+    @staticmethod
+    def _portfolio_projection(
+        *,
+        initial_equity: str,
+        tracks: list[dict[str, object]],
+    ) -> dict[str, object]:
+        try:
+            initial = Decimal(initial_equity)
+            equity = initial
+            cash = initial
+            available = initial
+            reserved = Decimal(0)
+            margin_used = Decimal(0)
+            realized = Decimal(0)
+            unrealized = Decimal(0)
+            fees = Decimal(0)
+            positions: list[dict[str, object]] = []
+            for track in tracks:
+                account = track.get("account")
+                if isinstance(account, Mapping) and isinstance(
+                    account.get("equity"), str
+                ):
+                    equity += Decimal(str(account["equity"])) - initial
+                    cash += Decimal(str(account["cash_balance"])) - initial
+                    available += Decimal(str(account["available_equity"])) - initial
+                    reserved += Decimal(str(account["reserved_margin"]))
+                    margin_used += Decimal(str(account["margin_used"]))
+                    realized += Decimal(str(account["realized_pnl"]))
+                    unrealized += Decimal(str(account["unrealized_pnl"]))
+                    fees += Decimal(str(account["fees_paid"]))
+                position = track.get("position")
+                if isinstance(position, Mapping) and position.get("quantity") not in {
+                    None,
+                    "0",
+                }:
+                    positions.append(
+                        {
+                            "track_id": track["track_id"],
+                            "symbol": track["symbol"],
+                            "position": dict(position),
+                        }
+                    )
+        except (InvalidOperation, KeyError, TypeError) as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "multi-market account projection is invalid",
+                status_code=503,
+            ) from exc
+        return {
+            "schema_version": "replay.training.portfolio.v1",
+            "fidelity": "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER",
+            "settlement_account_shared": True,
+            "initial_equity": decimal_to_string(initial, field_name="initial_equity"),
+            "equity": decimal_to_string(equity, field_name="equity"),
+            "cash_balance": decimal_to_string(cash, field_name="cash_balance"),
+            "available_equity": decimal_to_string(
+                available,
+                field_name="available_equity",
+            ),
+            "reserved_margin": decimal_to_string(
+                reserved,
+                field_name="reserved_margin",
+            ),
+            "margin_used": decimal_to_string(margin_used, field_name="margin_used"),
+            "realized_pnl": decimal_to_string(realized, field_name="realized_pnl"),
+            "unrealized_pnl": decimal_to_string(
+                unrealized,
+                field_name="unrealized_pnl",
+            ),
+            "fees_paid": decimal_to_string(fees, field_name="fees_paid"),
+            "positions": positions,
+        }
+
+    @classmethod
+    def _insert_global_checkpoint(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        now_ms: int,
+    ) -> dict[str, object]:
+        rows = tuple(
+            connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? AND subscription_tier = 'FULL'
+                ORDER BY stable_ordinal, track_id
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        if not rows:
+            raise TrainingRunError(
+                "GLOBAL_CLOCK_UNAVAILABLE",
+                "TrainingRun has no FULL market track",
+                status_code=409,
+            )
+        tracks = [cls._market_track_from_row(row) for row in rows]
+        run = connection.execute(
+            "SELECT initial_equity FROM replay_training_run WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training run does not exist",
+                status_code=404,
+            )
+        portfolio = cls._portfolio_projection(
+            initial_equity=str(run["initial_equity"]),
+            tracks=tracks,
+        )
+        if any(not isinstance(track.get("cursor"), Mapping) for track in tracks):
+            raise TrainingRunError(
+                "GLOBAL_CLOCK_DIVERGED",
+                "FULL market track cursor is unavailable",
+                status_code=409,
+            )
+        cursor_times = {
+            int(track["cursor"]["virtual_time_ms"])  # type: ignore[index]
+            for track in tracks
+        }
+        if len(cursor_times) != 1:
+            raise TrainingRunError(
+                "GLOBAL_CLOCK_DIVERGED",
+                "FULL market tracks do not share one VirtualTime",
+                status_code=409,
+            )
+        virtual_time_ms = next(iter(cursor_times))
+        tail = connection.execute(
+            """
+            SELECT COALESCE(MAX(global_sequence), 0) AS sequence
+            FROM replay_training_global_event WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        checkpoint_row = connection.execute(
+            """
+            SELECT COALESCE(MAX(checkpoint_sequence), 0) + 1 AS sequence
+            FROM replay_training_global_checkpoint WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        checkpoint_sequence = int(checkpoint_row["sequence"])
+        state = {
+            "ordering_version": GLOBAL_ORDERING_VERSION,
+            "global_event_sequence": int(tail["sequence"]),
+            "global_virtual_time_ms": virtual_time_ms,
+            "tracks": tracks,
+            "portfolio": portfolio,
+        }
+        state_hash = canonical_sha256(
+            {
+                "schema_version": "replay.training.global-checkpoint.v1",
+                "state": state,
+            }
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_training_global_checkpoint(
+                run_id, checkpoint_sequence, ordering_version,
+                global_virtual_time_ms, global_state_hash, tracks_json,
+                created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                checkpoint_sequence,
+                GLOBAL_ORDERING_VERSION,
+                virtual_time_ms,
+                state_hash,
+                canonical_json({"tracks": tracks, "portfolio": portfolio}),
+                now_ms,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE replay_training_run
+            SET virtual_time_ms = ?, saved_at_ms = ?, updated_at_ms = ?
+            WHERE run_id = ?
+            """,
+            (virtual_time_ms, now_ms, now_ms, run_id),
+        )
+        return {
+            "checkpoint_sequence": checkpoint_sequence,
+            "global_virtual_time_ms": virtual_time_ms,
+            "global_state_hash": state_hash,
+            "portfolio": portfolio,
         }
 
     @staticmethod
@@ -1796,8 +2899,10 @@ class TrainingRunStore:
         exchange: str,
         market_type: str,
         symbol: str,
+        settlement_asset: str,
         dataset_epoch: str,
         cursor: Mapping[str, object],
+        component_state: Mapping[str, object] | None,
         now_ms: int,
     ) -> None:
         connection.execute(
@@ -1818,15 +2923,101 @@ class TrainingRunStore:
                 symbol,
                 source_kind,
                 dataset_epoch,
-                int(cursor["virtual_time_ms"]),
-                int(cursor["source_sequence"]),
-                int(cursor["revision"]),
-                canonical_json(["PRIMARY_TRACK"]),
+                validate_v2_counter(
+                    cursor["virtual_time_ms"], field_name="virtual_time_ms"
+                ),
+                validate_v2_counter(
+                    cursor["source_sequence"], field_name="source_sequence"
+                ),
+                validate_v2_counter(cursor["revision"], field_name="revision"),
+                canonical_json(["VIEWED"]),
                 canonical_json(_phase1_capabilities(source_kind)),
                 now_ms,
                 now_ms,
             ),
         )
+        position, account, open_orders, public_price = TrainingRunStore._track_components(
+            component_state
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_training_market_track(
+                run_id, track_id, stable_ordinal, adapter_session_id,
+                exchange, market_type, symbol, settlement_asset, source_kind,
+                state, subscription_tier, dataset_epoch, virtual_time_ms,
+                source_sequence, revision, forced_full_reasons_json,
+                capabilities_json, public_price, position_json, account_json,
+                open_orders_json, degraded_reason, created_at_ms, updated_at_ms
+            ) VALUES (
+                ?, 'track-1', 1, ?, ?, ?, ?, ?, ?, 'READY', 'FULL', ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, NULL, ?, ?
+            )
+            """,
+            (
+                run_id,
+                adapter_session_id,
+                exchange,
+                market_type,
+                symbol,
+                settlement_asset,
+                source_kind,
+                dataset_epoch,
+                validate_v2_counter(
+                    cursor["virtual_time_ms"], field_name="virtual_time_ms"
+                ),
+                validate_v2_counter(
+                    cursor["source_sequence"], field_name="source_sequence"
+                ),
+                validate_v2_counter(cursor["revision"], field_name="revision"),
+                canonical_json(["VIEWED"]),
+                canonical_json(_phase1_capabilities(source_kind)),
+                public_price,
+                canonical_json(position),
+                canonical_json(account),
+                canonical_json(open_orders),
+                now_ms,
+                now_ms,
+            ),
+        )
+
+    @staticmethod
+    def _track_components(
+        component_state: Mapping[str, object] | None,
+    ) -> tuple[dict[str, object], dict[str, object], list[object], str | None]:
+        if not isinstance(component_state, Mapping):
+            return {}, {}, [], None
+        raw_position = component_state.get("position")
+        raw_account = component_state.get("account")
+        raw_orders = component_state.get("orders")
+        position: dict[str, object] = (
+            dict(cast(Mapping[str, object], raw_position))
+            if isinstance(raw_position, Mapping)
+            else {}
+        )
+        account: dict[str, object] = (
+            dict(cast(Mapping[str, object], raw_account))
+            if isinstance(raw_account, Mapping)
+            else {}
+        )
+        orders: list[object] = (
+            [
+                dict(cast(Mapping[str, object], order))
+                if isinstance(order, Mapping)
+                else order
+                for order in raw_orders
+            ]
+            if isinstance(raw_orders, (list, tuple))
+            else []
+        )
+        mark = position.get("mark_price")
+        public_price = mark if isinstance(mark, str) else None
+        terminal = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
+        open_orders: list[object] = [
+            order
+            for order in orders
+            if isinstance(order, Mapping) and order.get("status") not in terminal
+        ]
+        return position, account, open_orders, public_price
 
     @staticmethod
     def _insert_viewer_state(
@@ -2050,15 +3241,30 @@ class TrainingRunStore:
         cursor = state.get("cursor")
         if not isinstance(cursor, Mapping):
             return
+        track = connection.execute(
+            """
+            SELECT t.*, viewer.selected_track_id, r.time_disclosure_policy,
+                   COALESCE(integrity.revealed, 0) AS revealed
+            FROM replay_training_market_track AS t
+            JOIN replay_training_run AS r USING(run_id)
+            JOIN replay_training_viewer_state AS viewer USING(run_id)
+            LEFT JOIN replay_training_integrity AS integrity USING(run_id)
+            WHERE t.adapter_session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if track is None:
+            return
         account = component_state.get("account")
         equity = account.get("equity") if isinstance(account, Mapping) else None
-        if isinstance(equity, str):
+        selected = str(track["selected_track_id"]) == str(track["track_id"])
+        if selected and isinstance(equity, str):
             connection.execute(
                 """
                 UPDATE replay_training_run
                 SET state = ?, revision = ?, source_sequence = ?, virtual_time_ms = ?,
                     current_equity = ?, summary_revision = ?, updated_at_ms = ?, saved_at_ms = ?
-                WHERE adapter_session_id = ?
+                WHERE run_id = ?
                 """,
                 (
                     state["state"],
@@ -2069,16 +3275,16 @@ class TrainingRunStore:
                     state["revision"],
                     now_ms,
                     now_ms,
-                    session_id,
+                    track["run_id"],
                 ),
             )
-        else:
+        elif selected:
             connection.execute(
                 """
                 UPDATE replay_training_run
                 SET state = ?, revision = ?, source_sequence = ?, virtual_time_ms = ?,
                     updated_at_ms = ?, saved_at_ms = ?
-                WHERE adapter_session_id = ?
+                WHERE run_id = ?
                 """,
                 (
                     state["state"],
@@ -2087,9 +3293,73 @@ class TrainingRunStore:
                     cursor["virtual_time_ms"],
                     now_ms,
                     now_ms,
-                    session_id,
+                    track["run_id"],
                 ),
             )
+        position, account_payload, open_orders, public_price = self._track_components(
+            component_state
+        )
+        automatic_reasons = {
+            "VIEWED",
+            "OPEN_POSITION",
+            "OPEN_ORDER",
+            "CONDITIONAL_ORDER",
+            "LIQUIDATION_RISK",
+        }
+        try:
+            stored_reasons = json.loads(str(track["forced_full_reasons_json"]))
+        except json.JSONDecodeError as exc:
+            raise TypeError("track forced_full_reasons are invalid") from exc
+        if not isinstance(stored_reasons, list) or any(
+            not isinstance(reason, str) for reason in stored_reasons
+        ):
+            raise TypeError("track forced_full_reasons are invalid")
+        reasons = {reason for reason in stored_reasons if reason not in automatic_reasons}
+        if selected:
+            reasons.add("VIEWED")
+        quantity = position.get("quantity")
+        if isinstance(quantity, str) and quantity != "0":
+            reasons.update({"OPEN_POSITION", "LIQUIDATION_RISK"})
+        if open_orders:
+            reasons.add("OPEN_ORDER")
+            if any(
+                order.get("order_type") in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+                for order in open_orders
+                if isinstance(order, Mapping)
+            ):
+                reasons.add("CONDITIONAL_ORDER")
+        tier = "FULL" if reasons else str(track["subscription_tier"])
+        track_state = "ERROR" if state["state"] == "ERROR" else (
+            "DORMANT" if tier == "NONE" else "READY"
+        )
+        connection.execute(
+            """
+            UPDATE replay_training_market_track
+            SET state = ?, subscription_tier = ?, virtual_time_ms = ?,
+                source_sequence = ?, revision = ?, forced_full_reasons_json = ?,
+                public_price = ?, position_json = ?, account_json = ?,
+                open_orders_json = ?, degraded_reason = CASE
+                    WHEN ? = 'ERROR' THEN COALESCE(degraded_reason, 'ADAPTER_ERROR')
+                    ELSE NULL END,
+                updated_at_ms = ?
+            WHERE adapter_session_id = ?
+            """,
+            (
+                track_state,
+                tier,
+                cursor["virtual_time_ms"],
+                state["source_sequence"],
+                state["revision"],
+                canonical_json(sorted(reasons)),
+                public_price,
+                canonical_json(position),
+                canonical_json(account_payload),
+                canonical_json(open_orders),
+                state["state"],
+                now_ms,
+                session_id,
+            ),
+        )
         connection.execute(
             """
             UPDATE replay_training_track
@@ -2107,23 +3377,13 @@ class TrainingRunStore:
             ),
         )
 
-        run = connection.execute(
-            """
-            SELECT r.run_id, r.time_disclosure_policy,
-                   COALESCE(i.revealed, 0) AS revealed
-            FROM replay_training_run AS r
-            LEFT JOIN replay_training_integrity AS i USING(run_id)
-            WHERE r.adapter_session_id = ?
-            """,
-            (session_id,),
-        ).fetchone()
-        if run is not None:
+        if selected:
             self._upsert_equity_samples(
                 connection,
-                run_id=str(run["run_id"]),
+                run_id=str(track["run_id"]),
                 session_id=session_id,
-                policy=str(run["time_disclosure_policy"]),
-                revealed=bool(run["revealed"]),
+                policy=str(track["time_disclosure_policy"]),
+                revealed=bool(track["revealed"]),
                 state=state,
                 component_state=component_state,
                 now_ms=now_ms,
@@ -2155,7 +3415,8 @@ class TrainingRunStore:
                    i.start_time_known, i.strict_eligible, i.revealed
             FROM replay_training_run AS r
             JOIN replay_training_integrity AS i USING(run_id)
-            WHERE r.adapter_session_id = ?
+            JOIN replay_training_market_track AS track USING(run_id)
+            WHERE track.adapter_session_id = ?
             """,
             (session_id,),
         ).fetchone()

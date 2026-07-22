@@ -13,6 +13,7 @@
     "check": "npm run check:architecture && npm run typecheck && npm run lint && npm test && npm run build",
     "perf:baseline": "node scripts/perf-baseline.mjs",
     "perf:drawing": "node scripts/drawing-performance.mjs",
+    "monitor:indicators": "node scripts/indicator-stack-monitor.mjs",
     "perf:drawing:soak:1h": "node scripts/drawing-performance.mjs --phase phase9",
     "audit:drawing:rollback-drills": "node scripts/drawing-rollback-drills-cli.mjs --run-component-tests --allow-incomplete",
     "check:drawing:rollback-drills": "node scripts/drawing-rollback-drills-cli.mjs --run-component-tests",

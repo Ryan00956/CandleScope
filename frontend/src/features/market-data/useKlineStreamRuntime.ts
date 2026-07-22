@@ -25,7 +25,10 @@ const WS_MAX_RECONNECT_ATTEMPTS = 20;
 const WS_PING_INTERVAL = 30_000;
 const WS_INITIAL_FALLBACK_DELAY = 4_000;
 const POLLING_INTERVAL_MS = 1_000;
-const PENDING_REPAIR_POLL_INTERVAL_MS = 3_000;
+// This timer only checks whether an exact-range repair is due. The feed keeps
+// the network backoff and single-flight ownership, so a short scheduler tick
+// removes three-second completion quantization without increasing request rate.
+const PENDING_REPAIR_POLL_INTERVAL_MS = 500;
 const HELD_WINDOW_GAP_SCAN_INTERVAL_MS = 15_000;
 const WS_RECOVERY_COUNT_BACK = 1_500;
 export const WS_RECOVERY_SOURCE_ROW_BUDGET = 20_000;

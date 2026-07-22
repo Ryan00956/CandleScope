@@ -80,13 +80,36 @@ export function estimateOutputWarmupBars(indicator: IndicatorDefinition | null |
   if (name === "MA" || name === "SMA" || name === "BOLL") {
     return Math.max(0, paramInt(params, "period", 20) - 1);
   }
-  if (name === "EMA") return Math.max(0, paramInt(params, "period", 20) - 1);
-  if (name === "RSI" || name === "ATR") return paramInt(params, "period", 14);
+  if (name === "EMA") return paramInt(params, "period", 20) * 5;
+  if (name === "RSI" || name === "ATR") return paramInt(params, "period", 14) * 3;
   if (name === "MACD") {
-    return paramInt(params, "slow", paramInt(params, "slow_period", 26))
-      + paramInt(params, "signal", paramInt(params, "signal_period", 9));
+    return paramInt(params, "slow", paramInt(params, "slow_period", 26)) * 5
+      + paramInt(params, "signal", paramInt(params, "signal_period", 9)) * 3;
   }
-  return Math.max(0, paramInt(params, "warmup", 0));
+  return paramInt(params, "warmup", 200);
+}
+
+/**
+ * Select indicators that can produce at least one value from the currently
+ * available request segment. This keeps a tiny restored left-edge viewport
+ * from caching a misleading successful-but-empty progressive preview for
+ * indicators whose warmup is not present yet.
+ */
+export function selectProgressiveHostedIndicators(
+  hostedIndicators: readonly IndicatorDefinition[] = [],
+  initialRange: Pick<InitialHostedRange, "startIndex" | "endIndex"> | null | undefined,
+): IndicatorDefinition[] {
+  if (!initialRange) return [];
+  const availableBars = Math.max(
+    0,
+    Math.floor(Number(initialRange.endIndex))
+      - Math.floor(Number(initialRange.startIndex))
+      + 1,
+  );
+  if (!Number.isFinite(availableBars) || availableBars <= 0) return [];
+  return hostedIndicators.filter((indicator) => (
+    availableBars > estimateOutputWarmupBars(indicator)
+  ));
 }
 
 /**
@@ -306,6 +329,90 @@ export function resolveInitialHostedRange(
     visibleEndIndex: visibleIndexes.endIndex,
     warmupBars,
     paddingBars,
+  };
+}
+
+/**
+ * During an initial backfill, a derived interval can expose two valid islands
+ * separated by the range that is still being repaired. Hosted indicators must
+ * never be asked to compute across that gap, but they can safely preview the
+ * continuous island that already covers most of the visible viewport.
+ */
+export function resolveProgressiveHostedRange(
+  chartData: readonly KlineBar[],
+  initialRange: InitialHostedRange | null | undefined,
+  interval: unknown,
+): InitialHostedRange | null {
+  if (!initialRange || !Array.isArray(chartData) || chartData.length === 0) return null;
+  const timeline = createIntervalTimeline(interval);
+  if (!timeline) return null;
+
+  const startIndex = Math.max(
+    0,
+    Math.min(chartData.length - 1, Math.floor(Number(initialRange.startIndex))),
+  );
+  const endIndex = Math.max(
+    startIndex,
+    Math.min(chartData.length - 1, Math.floor(Number(initialRange.endIndex))),
+  );
+  const visibleStartIndex = Math.max(
+    startIndex,
+    Math.min(endIndex, Math.floor(Number(initialRange.visibleStartIndex))),
+  );
+  const visibleEndIndex = Math.max(
+    visibleStartIndex,
+    Math.min(endIndex, Math.floor(Number(initialRange.visibleEndIndex))),
+  );
+  type ProgressiveCandidate = {
+    end: number;
+    endIndex: number;
+    length: number;
+    start: number;
+    startIndex: number;
+    visibleOverlap: number;
+  };
+  const candidates: ProgressiveCandidate[] = [];
+
+  const consider = (candidateStartIndex: number, candidateEndIndex: number) => {
+    const start = normalizeRangeBoundary(chartBarTimeAt(chartData, candidateStartIndex));
+    const end = normalizeRangeBoundary(chartBarTimeAt(chartData, candidateEndIndex));
+    if (!start || !end || start > end) return;
+    const overlapStart = Math.max(candidateStartIndex, visibleStartIndex);
+    const overlapEnd = Math.min(candidateEndIndex, visibleEndIndex);
+    const visibleOverlap = Math.max(0, overlapEnd - overlapStart + 1);
+    const length = candidateEndIndex - candidateStartIndex + 1;
+    candidates.push({
+      end,
+      endIndex: candidateEndIndex,
+      length,
+      start,
+      startIndex: candidateStartIndex,
+      visibleOverlap,
+    });
+  };
+
+  let candidateStartIndex = startIndex;
+  for (let index = startIndex + 1; index <= endIndex; index += 1) {
+    const previous = normalizeRangeBoundary(chartBarTimeAt(chartData, index - 1));
+    const current = normalizeRangeBoundary(chartBarTimeAt(chartData, index));
+    if (previous && current && timeline.isSuccessor(previous, current)) continue;
+    consider(candidateStartIndex, index - 1);
+    candidateStartIndex = index;
+  }
+  consider(candidateStartIndex, endIndex);
+  const best = candidates.sort((left, right) => (
+    right.visibleOverlap - left.visibleOverlap
+    || right.length - left.length
+    || right.endIndex - left.endIndex
+  ))[0];
+  if (!best) return null;
+
+  return {
+    ...initialRange,
+    start: best.start,
+    end: best.end,
+    startIndex: best.startIndex,
+    endIndex: best.endIndex,
   };
 }
 

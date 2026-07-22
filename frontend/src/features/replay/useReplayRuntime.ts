@@ -1223,6 +1223,7 @@ function buildReplayMarketDataRuntime(
     status: {
       hasMoreLeft: false,
       loadingMoreLeft: false,
+      initialHistoryPending: false,
       activeChartReady: snapshot.store.hasAuthoritativeSnapshot && store.seriesStore.barCount > 0,
       canLoadMoreLeft: false,
       canRestoreLatestWindow: false,

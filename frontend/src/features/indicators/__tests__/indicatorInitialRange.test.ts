@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  estimateOutputWarmupBars,
   inferFixedIntervalClosedThrough,
   nextIndicatorBarTime,
   planDeferredRightCatchup,
   planIndicatorCorrectionRefresh,
   planVisibleIndicatorHydrationRange,
   resolveInitialHostedRange,
+  resolveProgressiveHostedRange,
+  selectProgressiveHostedIndicators,
   VISIBLE_RANGE_RIGHT_PREFETCH_BUCKET_BARS,
 } from "../indicatorRangePlanning.js";
 import type { KlineBar } from "../../market-data/marketDataTypes.js";
@@ -139,6 +142,117 @@ test("resolveInitialHostedRange handles irregular monthly spacing", () => {
   assert.equal(range.end, barAt(monthBars, 3).time);
   assert.equal(range.startIndex, 0);
   assert.equal(range.endIndex, 3);
+});
+
+test("progressive hydration skips indicators whose available segment is only warmup", () => {
+  const hostedIndicators = [
+    { id: "vol", engineName: "VOL" },
+    { id: "rsi", engineName: "RSI", params: { period: 14 } },
+    { id: "boll", engineName: "BOLL", params: { period: 20 } },
+  ];
+
+  assert.deepEqual(
+    selectProgressiveHostedIndicators(hostedIndicators, { startIndex: 0, endIndex: 2 })
+      .map((indicator) => indicator.id),
+    ["vol"],
+  );
+  assert.deepEqual(
+    selectProgressiveHostedIndicators(hostedIndicators, { startIndex: 0, endIndex: 19 })
+      .map((indicator) => indicator.id),
+    ["vol", "boll"],
+  );
+  assert.deepEqual(
+    selectProgressiveHostedIndicators(hostedIndicators, { startIndex: 0, endIndex: 42 })
+      .map((indicator) => indicator.id),
+    ["vol", "rsi", "boll"],
+  );
+});
+
+test("progressive hydration uses the largest visible continuous island during derived repair", () => {
+  const step = 89 * 60;
+  const left = Array.from({ length: 52 }, (_, index) => structuralMock<KlineBar>({
+    time: 1_700_000_000 + index * step,
+  }));
+  const rightStart = Number(mustBeDefined(left.at(-1)).time) + step * 100;
+  const chartData = [
+    ...left,
+    ...Array.from({ length: 7 }, (_, index) => structuralMock<KlineBar>({
+      time: rightStart + index * step,
+    })),
+  ];
+  const hostedIndicators = [
+    { id: "vol", engineName: "VOL" },
+    { id: "boll", engineName: "BOLL", params: { period: 20 } },
+    { id: "rsi", engineName: "RSI", params: { period: 14 } },
+    { id: "ema", engineName: "EMA", params: { period: 20 } },
+    { id: "macd", engineName: "MACD", params: { slow: 26, signal: 9 } },
+  ];
+  const initial = mustBeDefined(resolveInitialHostedRange(chartData, hostedIndicators, null));
+  const progressive = mustBeDefined(resolveProgressiveHostedRange(
+    chartData,
+    initial,
+    "89m",
+  ));
+
+  assert.equal(progressive.startIndex, 0);
+  assert.equal(progressive.endIndex, 51);
+  assert.equal(progressive.start, barAt(chartData, 0).time);
+  assert.equal(progressive.end, barAt(chartData, 51).time);
+  assert.deepEqual(
+    selectProgressiveHostedIndicators(hostedIndicators, progressive)
+      .map((indicator) => indicator.id),
+    ["vol", "boll", "rsi"],
+  );
+});
+
+test("progressive hydration prefers the island containing the visible viewport", () => {
+  const step = 60;
+  const left = bars(120);
+  const rightStart = Number(mustBeDefined(left.at(-1)).time) + step * 20;
+  const chartData = [
+    ...left,
+    ...Array.from({ length: 20 }, (_, index) => structuralMock<KlineBar>({
+      time: rightStart + index * step,
+    })),
+  ];
+  const initial = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "vol", engineName: "VOL" }],
+    { logical: { from: 120, to: 139 } },
+  ));
+  const progressive = mustBeDefined(resolveProgressiveHostedRange(
+    chartData,
+    initial,
+    "1m",
+  ));
+
+  assert.equal(progressive.startIndex, 120);
+  assert.equal(progressive.endIndex, 139);
+});
+
+test("frontend progressive warmup matches the hosted backend budgets", () => {
+  assert.equal(estimateOutputWarmupBars({ id: "vol", engineName: "VOL" }), 0);
+  assert.equal(estimateOutputWarmupBars({
+    id: "boll",
+    engineName: "BOLL",
+    params: { period: 20 },
+  }), 19);
+  assert.equal(estimateOutputWarmupBars({
+    id: "rsi",
+    engineName: "RSI",
+    params: { period: 14 },
+  }), 42);
+  assert.equal(estimateOutputWarmupBars({
+    id: "ema",
+    engineName: "EMA",
+    params: { period: 20 },
+  }), 100);
+  assert.equal(estimateOutputWarmupBars({
+    id: "macd",
+    engineName: "MACD",
+    params: { slow: 26, signal: 9 },
+  }), 157);
+  assert.equal(estimateOutputWarmupBars({ id: "pyne", engineName: "PYNE" }), 200);
 });
 
 test("visible hydration keeps initial and leftward navigation exact", () => {

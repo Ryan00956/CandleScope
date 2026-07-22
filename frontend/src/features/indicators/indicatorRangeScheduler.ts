@@ -115,6 +115,7 @@ function isAbortError(error: unknown): boolean {
 function selectReason(reasons: ReadonlySet<string>): string {
   const priority = [
     "initial-visible",
+    "initial-progressive",
     "recomputed",
     "backfill-completed",
     "window-mid-merge",

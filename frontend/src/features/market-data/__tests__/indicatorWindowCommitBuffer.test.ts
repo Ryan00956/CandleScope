@@ -4,8 +4,12 @@ import test from "node:test";
 import { epochSeconds } from "../../../test/testHelpers.js";
 import {
   canStartIndicatorInitialHydration,
+  canStartIndicatorProgressiveHydration,
 } from "../../indicators/indicatorWindowDeltaRuntime.js";
-import { resolveInitialHostedRange } from "../../indicators/indicatorRangePlanning.js";
+import {
+  resolveInitialHostedRange,
+  selectProgressiveHostedIndicators,
+} from "../../indicators/indicatorRangePlanning.js";
 import { createIndicatorInitialHydrationGate } from "../../indicators/indicatorRangeRequestDedupe.js";
 import type { IndicatorDefinition } from "../../indicators/indicatorTypes.js";
 import { IndicatorWindowCommitBuffer } from "../indicatorWindowCommitBuffer.js";
@@ -144,7 +148,7 @@ test("cancel and interval switch discard old ownership without crossing series",
   ]).ranges[0]?.start, 2_000);
 });
 
-test("89m initial 89→126→214→222 sequence hydrates seven indicators once over the final window", () => {
+test("89m initial 89→126→214→222 previews once, then publishes the final window once", () => {
   const buffer = new IndicatorWindowCommitBuffer();
   const seriesKey = "binance:futures:BTCUSDT:89m";
   const parentOwner = "history-parent";
@@ -172,34 +176,56 @@ test("89m initial 89→126→214→222 sequence hydrates seven indicators once o
     range: null,
   };
   const hydrationGate = createIndicatorInitialHydrationGate();
+  const progressiveHydrationGate = createIndicatorInitialHydrationGate();
   const hydrationBatches: Array<{
     ids: string[];
     start: number;
     end: number;
     points: number;
+    stage: "progressive" | "authoritative";
   }> = [];
   let chartData: KlineBar[] = [];
   let publishedUnions = 0;
 
   const maybeHydrate = (deferred: boolean) => {
-    if (!canStartIndicatorInitialHydration({
-      chartDataLength: chartData.length,
-      chartDataReady: chartData.length > 0,
-      historyWindowPending: deferred,
-    })) return;
-    const signature = "btc-89m|generation-2|seven-indicators";
-    if (!hydrationGate.begin(signature)) return;
     const range = resolveInitialHostedRange(
       chartData,
       hostedIndicators,
       { logical: { from: 132, to: 221 }, time: null },
     );
     assert.ok(range);
+    const signature = "btc-89m|generation-2|seven-indicators";
+    if (canStartIndicatorProgressiveHydration({
+      chartDataLength: chartData.length,
+      chartDataReady: chartData.length > 0,
+      initialHistoryPending: deferred,
+    })) {
+      const progressiveIndicators = selectProgressiveHostedIndicators(hostedIndicators, range)
+        .filter((indicator) => progressiveHydrationGate.begin(`${signature}|${indicator.id}`));
+      if (progressiveIndicators.length === 0) return;
+      hydrationBatches.push({
+        ids: progressiveIndicators.map((indicator) => indicator.id),
+        start: range.start,
+        end: range.end,
+        points: range.endIndex - range.startIndex + 1,
+        stage: "progressive",
+      });
+      progressiveIndicators.forEach((indicator) => {
+        progressiveHydrationGate.complete(`${signature}|${indicator.id}`);
+      });
+      return;
+    }
+    if (!canStartIndicatorInitialHydration({
+      chartDataLength: chartData.length,
+      chartDataReady: chartData.length > 0,
+      historyWindowPending: deferred,
+    }) || !hydrationGate.begin(signature)) return;
     hydrationBatches.push({
       ids: hostedIndicators.map((indicator) => indicator.id),
       start: range.start,
       end: range.end,
       points: range.endIndex - range.startIndex + 1,
+      stage: "authoritative",
     });
     hydrationGate.complete(signature);
   };
@@ -248,19 +274,43 @@ test("89m initial 89→126→214→222 sequence hydrates seven indicators once o
     true,
     "the child repair cannot release the still-owned initial request",
   );
-  assert.equal(hydrationBatches.length, 0, "partial K-lines stay visible without early hydration");
+  assert.deepEqual(hydrationBatches, [
+    {
+      ids: ["ma", "boll", "rsi", "atr", "vol"],
+      start: allBars[0]!.time,
+      end: allBars[88]!.time,
+      points: 89,
+      stage: "progressive",
+    },
+    {
+      ids: ["ema"],
+      start: allBars[0]!.time,
+      end: allBars[125]!.time,
+      points: 126,
+      stage: "progressive",
+    },
+    {
+      ids: ["macd"],
+      start: allBars[0]!.time,
+      end: allBars[213]!.time,
+      points: 214,
+      stage: "progressive",
+    },
+  ], "each indicator previews once, as soon as its real backend warmup fits");
 
   assert.equal(releasePendingInitialIndicatorWindow(
     commitMergedChartData,
     pendingInitial,
     "initial-history-settled",
   ), true);
-  assert.deepEqual(hydrationBatches, [{
+  assert.deepEqual(hydrationBatches.at(-1), {
     ids: ["ma", "ema", "boll", "rsi", "macd", "atr", "vol"],
     start: allBars[0]!.time,
     end: allBars[221]!.time,
     points: 222,
-  }]);
+    stage: "authoritative",
+  });
+  assert.equal(hydrationBatches.length, 4);
   assert.equal(publishedUnions, 1);
   assert.equal(buffer.hasPending(seriesKey), false);
 
@@ -269,7 +319,7 @@ test("89m initial 89→126→214→222 sequence hydrates seven indicators once o
     pendingInitial,
     "initial-history-settled",
   );
-  assert.equal(hydrationBatches.length, 1, "final release and hydration are idempotent");
+  assert.equal(hydrationBatches.length, 4, "final release and hydration are idempotent");
   assert.equal(publishedUnions, 1, "the staged union is published exactly once");
 });
 

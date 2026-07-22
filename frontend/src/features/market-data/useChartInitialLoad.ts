@@ -62,6 +62,7 @@ export interface UseChartInitialLoadOptions {
   commitMergedChartData: CommitChartData;
   commitPatchedChartData: CommitChartData;
   pendingInitialHistoryRef: MutableRefObject<PendingInitialSeries | null>;
+  setInitialHistoryPending: Dispatch<SetStateAction<boolean>>;
   updateLastPrice(candidate: KlineBar, interval: IntervalString): void;
   setConnectionStatus: Dispatch<SetStateAction<string>>;
   setLoading: Dispatch<SetStateAction<boolean>>;
@@ -137,6 +138,7 @@ export function useChartInitialLoad({
   commitMergedChartData,
   commitPatchedChartData,
   pendingInitialHistoryRef,
+  setInitialHistoryPending,
   updateLastPrice,
   setConnectionStatus,
   setLoading,
@@ -171,6 +173,7 @@ export function useChartInitialLoad({
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    setInitialHistoryPending(true);
 
     const initialRows = resolveInitialRows?.(sym, intv, mt, ex) || {
       rows: getFromCache(sym, intv),
@@ -227,9 +230,11 @@ export function useChartInitialLoad({
     controller.signal.addEventListener("abort", () => {
       seriesDataFeed.cancelSeriesRepairs(series);
       trackedInitialRepairRange = null;
+      setInitialHistoryPending(false);
     }, { once: true });
     if (initialHistoryCountBack <= 0) {
       if (fallbackClearTimer) clearTimeout(fallbackClearTimer);
+      setInitialHistoryPending(false);
       setHasMoreLeft(false);
       setLoading(false);
       if (!hasCacheHit) {
@@ -296,6 +301,7 @@ export function useChartInitialLoad({
             || pendingInitialHistoryRef.current !== pendingInitial
           ) return;
           pendingInitialHistoryRef.current = null;
+          setInitialHistoryPending(false);
           trackedInitialRepairRange = null;
           stopInitialHistoryRetry?.();
           releasePendingInitialIndicatorWindow(
@@ -322,6 +328,7 @@ export function useChartInitialLoad({
             seriesDataFeed.clearPendingResultRepair(series, trackedInitialRepairRange);
           }
           pendingInitialHistoryRef.current = null;
+          setInitialHistoryPending(false);
           trackedInitialRepairRange = null;
           stopInitialHistoryRetry?.();
           releasePendingInitialIndicatorWindow(
@@ -361,6 +368,7 @@ export function useChartInitialLoad({
         trackedInitialRepairRange = trackedRange;
       } else if (!repairPending) {
         pendingInitialHistoryRef.current = null;
+        setInitialHistoryPending(false);
         seriesDataFeed.clearPendingResultRepair(series, trackedInitialRepairRange);
         trackedInitialRepairRange = null;
       }
@@ -482,6 +490,7 @@ export function useChartInitialLoad({
           if (Date.now() - retryStartedAt < INITIAL_BACKFILL_MAX_WAIT_MS) {
             scheduleRetry();
           } else {
+            setInitialHistoryPending(false);
             stopRetrying();
           }
         }, INITIAL_BACKFILL_RETRY_MS);
@@ -587,6 +596,7 @@ export function useChartInitialLoad({
     setDataSource,
     setError,
     setHasMoreLeft,
+    setInitialHistoryPending,
     setLoading,
     setLoadingMoreLeft,
     updateLastPrice,

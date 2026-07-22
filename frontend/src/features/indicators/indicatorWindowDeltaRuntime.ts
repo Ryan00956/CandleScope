@@ -59,6 +59,24 @@ export function canStartIndicatorInitialHydration({
   });
 }
 
+/**
+ * A partially repaired chart window may already contain a stable, continuous
+ * visible segment. Allow one HTTP-only preview for that segment while keeping
+ * the authoritative initial hydration, window deltas, and realtime stream
+ * behind the history owner.
+ */
+export function canStartIndicatorProgressiveHydration({
+  chartDataLength,
+  chartDataReady,
+  initialHistoryPending,
+}: {
+  chartDataLength: number;
+  chartDataReady: boolean;
+  initialHistoryPending: boolean;
+}): boolean {
+  return chartDataReady && chartDataLength > 0 && initialHistoryPending;
+}
+
 export function canStartIndicatorAutoRightCatchup({
   chartDataLength,
   chartDataReady,
@@ -155,6 +173,46 @@ function intersectIndicatorRanges(
   const start = Math.max(left.start, right.start);
   const end = Math.min(left.end, right.end);
   return start <= end ? { start, end } : null;
+}
+
+/**
+ * A progressive initial preview can leave one continuous computed suffix while
+ * the K-line owner is still repairing an older prefix. When that prefix later
+ * arrives as a mid-window delta, requesting only the dirty edge would create a
+ * second indicator island with an artificial interior gap. Extend the refresh
+ * to the nearest compatible computed segment, but never beyond the active
+ * desired window.
+ */
+export function bridgeIndicatorWindowDeltaToComputedCoverage(
+  requestInput: unknown,
+  desiredInput: unknown,
+  computedSegments: Iterable<unknown> = [],
+): IndicatorRange | null {
+  const request = normalizeIndicatorRange(requestInput);
+  const desired = normalizeIndicatorRange(desiredInput);
+  if (!request) return null;
+  if (!desired) return request;
+  const bounded = intersectIndicatorRanges(request, desired);
+  if (!bounded) return request;
+
+  let nearestLeft: IndicatorRange | null = null;
+  let nearestRight: IndicatorRange | null = null;
+  for (const candidate of computedSegments) {
+    const segment = normalizeIndicatorRange(candidate);
+    if (!segment) continue;
+    if (segment.end < bounded.start && segment.end >= desired.start) {
+      if (!nearestLeft || segment.end > nearestLeft.end) nearestLeft = segment;
+      continue;
+    }
+    if (segment.start > bounded.end && segment.start <= desired.end) {
+      if (!nearestRight || segment.start < nearestRight.start) nearestRight = segment;
+    }
+  }
+
+  return {
+    start: nearestLeft?.end ?? bounded.start,
+    end: nearestRight?.start ?? bounded.end,
+  };
 }
 
 export function clampIndicatorWindowRangeToContinuousSegment(

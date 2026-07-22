@@ -42,6 +42,8 @@ import {
   planVisibleIndicatorHydrationRange,
   RIGHT_CATCHUP_GRACE_MS,
   resolveInitialHostedRange,
+  resolveProgressiveHostedRange,
+  selectProgressiveHostedIndicators,
   type IndicatorVisibleNavigationState,
 } from "./indicatorRangePlanning.js";
 import {
@@ -58,8 +60,13 @@ import {
   rebaseCachedIndicatorRevision,
   replaceCachedIndicatorRange,
   resolveCachedIndicatorResults,
+  snapshotIndicatorResultCacheDiagnostics,
   upsertCachedIndicatorLinePoint,
 } from "./indicatorResultCacheStore.js";
+import {
+  buildIndicatorRuntimeDiagnosticSnapshot,
+  registerIndicatorRuntimeDiagnosticSource,
+} from "./indicatorRuntimeDiagnostics.js";
 import {
   clampIndicatorRangeToClosedThrough,
   normalizeIndicatorRange,
@@ -87,7 +94,9 @@ import {
   canRunHostedIndicatorStream,
   canStartIndicatorAutoRightCatchup,
   canStartIndicatorInitialHydration,
+  canStartIndicatorProgressiveHydration,
   canStartIndicatorWindowHydration,
+  bridgeIndicatorWindowDeltaToComputedCoverage,
   createIndicatorRangeEventSettlementBarrier,
   groupIndicatorWindowDeltaRefreshes,
   indicatorWindowCorrectionCoalesceDelay,
@@ -133,6 +142,7 @@ interface UseIndicatorRuntimeOptions {
   datasetKey?: string;
   exchange?: string;
   getCurrentVisibleRange?: () => unknown;
+  initialHistoryPending?: boolean;
   interval?: string;
   indicatorRangeRequests?: IndicatorRangeEvent[];
   consumeIndicatorRangeRequest?: (requestId: number) => void;
@@ -155,6 +165,7 @@ interface ResolvedIndicatorRuntimeInputs {
   exchange: string;
   getCurrentVisibleRange?: () => unknown;
   historyWindowPending: boolean;
+  initialHistoryPending: boolean;
   interval: string;
   indicatorRangeRequests: IndicatorRangeEvent[];
   consumeIndicatorRangeRequest?: (requestId: number) => void;
@@ -305,6 +316,9 @@ function resolveRuntimeInputs(
   const marketDataView = options.marketData?.view;
   const marketDataActions = options.marketData?.actions;
   const marketDataStatus = options.marketData?.status;
+  const initialHistoryPending = options.initialHistoryPending
+    ?? marketDataStatus?.initialHistoryPending
+    ?? false;
   const realtimeMode = resolveIndicatorRealtimeMode(
     options.session?.status.webSocketReady ?? true,
     marketDataView?.wsStatus,
@@ -317,9 +331,11 @@ function resolveRuntimeInputs(
     datasetKey: options.datasetKey ?? sessionView?.datasetKey ?? "",
     exchange: options.exchange ?? sessionView?.exchange ?? "binance",
     historyWindowPending: Boolean(
-      marketDataStatus?.loadingMoreLeft
+      initialHistoryPending
+      || marketDataStatus?.loadingMoreLeft
       || (options.chartDataMeta ?? marketDataView?.meta)?.indicatorWindowDeferred === true
     ),
+    initialHistoryPending,
     interval: options.interval ?? sessionView?.interval ?? "",
     indicatorRangeRequests: options.indicatorRangeRequests ?? marketDataStatus?.indicatorRangeRequests ?? [],
     marketType: options.marketType ?? sessionView?.marketType ?? "spot",
@@ -572,6 +588,7 @@ export function useIndicatorRuntime(
     exchange,
     getCurrentVisibleRange,
     historyWindowPending,
+    initialHistoryPending,
     interval,
     indicatorRangeRequests,
     consumeIndicatorRangeRequest,
@@ -653,6 +670,7 @@ export function useIndicatorRuntime(
   const autoRightCatchupPendingRef = useRef<DeferredRightCatchupPlan | null>(null);
   const autoRightCatchupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialHostedHydrationGateRef = useRef(createIndicatorInitialHydrationGate());
+  const progressiveHostedHydrationGateRef = useRef(createIndicatorInitialHydrationGate());
   const initialHostedRangeRetryTimersRef = useRef(createKeyedIndicatorRetryTimers());
   const pendingIndicatorCorrectionsRef = useRef<Map<string, PendingIndicatorCorrection>>(new Map());
   const indicatorCorrectionFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -859,6 +877,51 @@ export function useIndicatorRuntime(
     historyWindowPendingRef,
   ]);
   const indicatorCacheRuntimeLeaseId = useId();
+  const indicatorDiagnosticRuntimeId = useId();
+
+  const indicatorDiagnosticStateRef = useLatestRef({
+    activeIndicators,
+    chartData,
+    context: {
+      exchange,
+      interval,
+      marketType,
+      sessionKey,
+      symbol,
+    },
+    state: {
+      chartDataReady,
+      chartDataStatus,
+      historyWindowPending,
+      initialHistoryPending,
+      initialHydrationSettled:
+        settledInitialHydrationSignature === currentInitialHydrationSignature,
+      realtimeEnabled,
+      requestDemand: requestDemand ? { ...requestDemand } : null,
+      seriesReady,
+    },
+  });
+
+  useLayoutEffect(() => registerIndicatorRuntimeDiagnosticSource(
+    indicatorDiagnosticRuntimeId,
+    () => {
+      const current = indicatorDiagnosticStateRef.current;
+      return buildIndicatorRuntimeDiagnosticSnapshot({
+        ...current,
+        cache: snapshotIndicatorResultCacheDiagnostics(),
+        state: {
+          ...current.state,
+          hostedPendingResumePatchIds: Array.from(hostedPendingResumePatchIdsRef.current),
+          hostedSubscribedIds: Array.from(hostedSubscribedIdsRef.current),
+        },
+      });
+    },
+  ), [
+    hostedPendingResumePatchIdsRef,
+    hostedSubscribedIdsRef,
+    indicatorDiagnosticRuntimeId,
+    indicatorDiagnosticStateRef,
+  ]);
 
   useLayoutEffect(() => acquireActiveIndicatorCacheLeases(
     activeIndicatorsRef.current,
@@ -885,6 +948,7 @@ export function useIndicatorRuntime(
 
   useLayoutEffect(() => {
     initialHostedHydrationGateRef.current.clear();
+    progressiveHostedHydrationGateRef.current.clear();
     autoRightCatchupRangeSignaturesRef.current.clear();
     completedIndicatorRangeRequestsRef.current.clear();
     deferredIndicatorRangeWaitsRef.current.clear();
@@ -1320,7 +1384,8 @@ export function useIndicatorRuntime(
     const hostedIndicators = getVisibleHostedIndicators(activeIndicatorsRef.current)
       .filter((indicator) => !targetIds || targetIds.has(String(indicator.id)));
     if (hostedIndicators.length === 0) return false;
-    const deferForQueuedCorrection = reason === "initial-visible"
+    const deferForQueuedCorrection = reason === "initial-progressive"
+      || reason === "initial-visible"
       || reason === "visible-range"
       || reason === "auto-right-catchup"
       || String(reason).startsWith("window-");
@@ -2349,7 +2414,19 @@ export function useIndicatorRuntime(
         hostedIndicators,
         requestContext.interval,
         chartData,
-      );
+      ).map(({ indicator, plan }) => ({
+        indicator,
+        plan: request.reason === "window-mid-merge" && plan.requestRange
+          ? {
+              ...plan,
+              requestRange: bridgeIndicatorWindowDeltaToComputedCoverage(
+                plan.requestRange,
+                desiredRange,
+                getCachedIndicatorComputedSegments(indicator, cacheContext, currentRevision),
+              ),
+            }
+          : plan,
+      }));
       if (plannedRefreshes.some(({ indicator }) => (
         pendingIndicatorCorrectionsRef.current.has(String(indicator.id))
       ))) {
@@ -2485,6 +2562,7 @@ export function useIndicatorRuntime(
     pendingVisibleRangeRef.current = null;
     visibleNavigationStateRef.current = null;
     initialHostedHydrationGateRef.current.clear();
+    progressiveHostedHydrationGateRef.current.clear();
     completedIndicatorRangeRequestsRef.current.clear();
     deferredIndicatorRangeWaitsRef.current.clear();
     directIndicatorRangeIntentsRef.current.clear();
@@ -2537,6 +2615,7 @@ export function useIndicatorRuntime(
   useEffect(() => {
     const pendingIndicatorCorrections = pendingIndicatorCorrectionsRef.current;
     const initialHostedHydrationGate = initialHostedHydrationGateRef.current;
+    const progressiveHostedHydrationGate = progressiveHostedHydrationGateRef.current;
     const initialHostedRangeRetryTimers = initialHostedRangeRetryTimersRef.current;
     const deferredIndicatorRangeWaits = deferredIndicatorRangeWaitsRef.current;
     const directIndicatorRangeIntents = directIndicatorRangeIntentsRef.current;
@@ -2563,12 +2642,89 @@ export function useIndicatorRuntime(
       }
       pendingIndicatorCorrections.clear();
       initialHostedHydrationGate.clear();
+      progressiveHostedHydrationGate.clear();
       deferredIndicatorRangeWaits.clear();
       directIndicatorRangeIntents.clear();
       indicatorRangeBatcher.dispose();
       indicatorRangeScheduler.dispose();
     };
   }, [indicatorRangeBatcher, indicatorRangeScheduler]);
+
+  useEffect(() => {
+    if (!canStartIndicatorProgressiveHydration({
+      chartDataLength: chartData.length,
+      chartDataReady,
+      initialHistoryPending,
+    })) return;
+    const hostedIndicators = getVisibleHostedIndicators(activeIndicators);
+    if (hostedIndicators.length === 0) return;
+
+    // The chart's live visible range can still describe the previous interval
+    // during a series transition. Base the opportunistic pass on the current
+    // partial dataset instead of issuing a misleading two-bar preview.
+    const initialRange = resolveInitialHostedRange(
+      chartData,
+      hostedIndicators,
+      null,
+    );
+    if (!initialRange) return;
+    const progressiveRange = resolveProgressiveHostedRange(
+      chartData,
+      initialRange,
+      interval,
+    );
+    if (!progressiveRange) return;
+    const progressiveIndicators = selectProgressiveHostedIndicators(
+      hostedIndicators,
+      progressiveRange,
+    );
+    if (progressiveIndicators.length === 0) return;
+
+    const signature = currentInitialHydrationSignature;
+    const gate = progressiveHostedHydrationGateRef.current;
+    const progressiveTargets = progressiveIndicators.flatMap((indicator) => {
+      const targetSignature = JSON.stringify([signature, indicator.id]);
+      return gate.begin(targetSignature)
+        ? [{ id: indicator.id, signature: targetSignature }]
+        : [];
+    });
+    if (progressiveTargets.length === 0) return;
+    const indicatorIds = progressiveTargets.map((target) => target.id);
+    const completeTargets = () => {
+      for (const target of progressiveTargets) gate.complete(target.signature);
+    };
+    const settle = createIndicatorRangeEventSettlementBarrier({
+      indicatorIds,
+      // This pass is opportunistic. A deferred or failed preview must not
+      // retry in waves while the K-line owner is still extending the window;
+      // the authoritative initial-visible pass runs after owner settlement.
+      onFailure: completeTargets,
+      onSuccess: completeTargets,
+      waitForAllTargetsOnFailure: true,
+    });
+    const accepted = requestIndicatorRange(
+      progressiveRange.start,
+      progressiveRange.end,
+      "initial-progressive",
+      {
+        indicatorIds,
+        onSettled: settle,
+        // The preview is deliberately HTTP-only and must not wait for the
+        // realtime subscription handshake of the still-loading series.
+        waitForSubscription: false,
+      },
+    );
+    if (!accepted) completeTargets();
+  }, [
+    activeIndicators,
+    chartData,
+    chartDataReady,
+    currentInitialHydrationSignature,
+    historyWindowPending,
+    initialHistoryPending,
+    interval,
+    requestIndicatorRange,
+  ]);
 
   useEffect(() => {
     if (!canStartIndicatorInitialHydration({

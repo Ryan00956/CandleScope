@@ -62,6 +62,7 @@ export interface MarketDataRuntimeContract {
   status: {
     hasMoreLeft: boolean;
     loadingMoreLeft: boolean;
+    initialHistoryPending: boolean;
     activeChartReady: boolean;
     canLoadMoreLeft: boolean;
     canRestoreLatestWindow: boolean;

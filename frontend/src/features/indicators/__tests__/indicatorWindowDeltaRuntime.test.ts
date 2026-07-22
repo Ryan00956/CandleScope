@@ -7,7 +7,9 @@ import {
   canRunHostedIndicatorStream,
   canStartIndicatorAutoRightCatchup,
   canStartIndicatorInitialHydration,
+  canStartIndicatorProgressiveHydration,
   canStartIndicatorWindowHydration,
+  bridgeIndicatorWindowDeltaToComputedCoverage,
   clampIndicatorWindowRangeToContinuousSegment,
   createIndicatorRangeEventSettlementBarrier,
   groupIndicatorWindowDeltaRefreshes,
@@ -90,6 +92,33 @@ test("new window deltas wait briefly so matching WS corrections can own the refr
     10_100,
     250,
   ), 0);
+});
+
+test("mid-window refresh bridges a repaired prefix to progressive computed coverage", () => {
+  assert.deepEqual(
+    bridgeIndicatorWindowDeltaToComputedCoverage(
+      { start: 100, end: 180 },
+      { start: 100, end: 600 },
+      [{ start: 400, end: 600 }],
+    ),
+    { start: 100, end: 400 },
+  );
+  assert.deepEqual(
+    bridgeIndicatorWindowDeltaToComputedCoverage(
+      { start: 500, end: 600 },
+      { start: 100, end: 600 },
+      [{ start: 100, end: 300 }],
+    ),
+    { start: 300, end: 600 },
+  );
+  assert.deepEqual(
+    bridgeIndicatorWindowDeltaToComputedCoverage(
+      { start: 100, end: 180 },
+      { start: 100, end: 300 },
+      [{ start: 400, end: 600 }],
+    ),
+    { start: 100, end: 180 },
+  );
 });
 
 test("mid-merge invalidates the exact dirty range and refreshes only the visible suffix", () => {
@@ -568,6 +597,29 @@ test("initial hydration cannot NOT_READY on a partial window and terminal-empty 
   gate.clear();
   assert.equal(attempt(true, "eth-1h"), false, "cancelled old history cannot arm the new session");
   assert.equal(attempt(false, "eth-1h"), true);
+});
+
+test("progressive hydration starts only for a ready partial window", () => {
+  assert.equal(canStartIndicatorProgressiveHydration({
+    chartDataLength: 89,
+    chartDataReady: true,
+    initialHistoryPending: true,
+  }), true);
+  assert.equal(canStartIndicatorProgressiveHydration({
+    chartDataLength: 0,
+    chartDataReady: true,
+    initialHistoryPending: true,
+  }), false);
+  assert.equal(canStartIndicatorProgressiveHydration({
+    chartDataLength: 89,
+    chartDataReady: false,
+    initialHistoryPending: true,
+  }), false);
+  assert.equal(canStartIndicatorProgressiveHydration({
+    chartDataLength: 222,
+    chartDataReady: true,
+    initialHistoryPending: false,
+  }), false, "the settled window belongs to authoritative initial hydration");
 });
 
 test("hosted stream waits for the settled initial owner and stays open during later prepends", () => {

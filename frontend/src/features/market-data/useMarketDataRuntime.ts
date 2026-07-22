@@ -189,6 +189,7 @@ export function useMarketDataRuntime({
   });
 
   const [loading, setLoading] = useState(true);
+  const [initialHistoryPending, setInitialHistoryPending] = useState(false);
   const loadingRef = useRef(loading);
   useEffect(() => {
     loadingRef.current = loading;
@@ -397,6 +398,7 @@ export function useMarketDataRuntime({
     commitMergedChartData,
     commitPatchedChartData,
     pendingInitialHistoryRef,
+    setInitialHistoryPending,
     updateLastPrice,
     setConnectionStatus,
     setLoading,
@@ -549,7 +551,9 @@ export function useMarketDataRuntime({
     pendingInitial: pendingInitialHistoryRef.current,
     getPendingInitial: () => pendingInitialHistoryRef.current,
     clearPendingInitial: () => {
+      const hadPendingInitial = pendingInitialHistoryRef.current != null;
       pendingInitialHistoryRef.current = null;
+      if (hadPendingInitial) setInitialHistoryPending(false);
     },
     getCacheRows: getSeriesCacheRows,
     setLastPrice,
@@ -602,7 +606,7 @@ export function useMarketDataRuntime({
       activePagination: hasActivePaginationOwnership(),
       indicatorRequests: foregroundIndicatorRequestCount,
       loading: loadingRef.current,
-      pendingInitial: pendingInitialHistoryRef.current != null,
+      pendingInitial: initialHistoryPending,
       pendingRepairs: seriesDataFeed.pendingRepairCount(activeSeries),
       restoringLatestWindow: restoringLatestWindowRef.current,
     });
@@ -610,9 +614,9 @@ export function useMarketDataRuntime({
     exchange,
     foregroundIndicatorRequestCount,
     hasActivePaginationOwnership,
+    initialHistoryPending,
     intervalRef,
     marketType,
-    pendingInitialHistoryRef,
     seriesDataFeed,
     symbol,
   ]);
@@ -634,6 +638,7 @@ export function useMarketDataRuntime({
       && marketDataReady
       && !loading
       && !loadingMoreLeft
+      && !initialHistoryPending
       && indicatorRangeRequests.length === 0,
   });
 
@@ -682,6 +687,7 @@ export function useMarketDataRuntime({
     if (exchangeCatalogStatus === "loading") {
       pendingInitialHistoryRef.current = null;
       const timer = setTimeout(() => {
+        setInitialHistoryPending(false);
         setConnectionStatus("loading");
         setDataSource(null);
         setError(null);
@@ -695,6 +701,7 @@ export function useMarketDataRuntime({
     if (!historyIntervalAvailable) {
       pendingInitialHistoryRef.current = null;
       const timer = setTimeout(() => {
+        setInitialHistoryPending(false);
         clearChartData("history-capability-unavailable", symbol, interval);
         setConnectionStatus("disconnected");
         setDataSource(null);
@@ -823,6 +830,7 @@ export function useMarketDataRuntime({
     status: {
       hasMoreLeft,
       loadingMoreLeft,
+      initialHistoryPending,
       activeChartReady,
       canLoadMoreLeft: canRequestMoreLeftDuringRuntime({
         hasMoreLeft,

@@ -116,6 +116,82 @@ test("catalog validator builds only active native registries", () => {
   assert.deepEqual(registries.sidePanel.map((item) => item.id), ["acme.scanner.results"]);
 });
 
+test("command file inputs require native user-action fields within declared bounds", () => {
+  const value = catalog();
+  const configuration = value.plugins[0]!.contributions[0]!.configuration as Record<string, unknown>;
+  configuration.inputSchema = {
+    type: "object",
+    properties: {
+      fileHandle: { type: "string", minLength: 1, maxLength: 256 },
+    },
+    required: ["fileHandle"],
+    additionalProperties: false,
+  };
+  configuration.fileInputs = [{
+    field: "fileHandle",
+    mode: "open",
+    accept: ["application/json", "text/plain"],
+    maxBytes: 131_072,
+  }];
+  const command = parsePluginCatalog(value).plugins[0]!.contributions[0]!;
+  assert.equal(command.kind, "command/1");
+  if (command.kind !== "command/1") assert.fail("command missing");
+  assert.deepEqual(command.configuration.fileInputs, [{
+    field: "fileHandle",
+    mode: "open",
+    accept: ["application/json", "text/plain"],
+    maxBytes: 131_072,
+  }]);
+
+  const invalidCases: Array<(wire: typeof value) => void> = [
+    (wire) => {
+      (wire.plugins[0]!.contributions[0]!.configuration as Record<string, unknown>).requiresUserAction = false;
+    },
+    (wire) => {
+      const files = (wire.plugins[0]!.contributions[0]!.configuration as Record<string, unknown>).fileInputs as Array<Record<string, unknown>>;
+      files[0]!.suggestedName = "not-allowed.json";
+    },
+    (wire) => {
+      const files = (wire.plugins[0]!.contributions[0]!.configuration as Record<string, unknown>).fileInputs as Array<Record<string, unknown>>;
+      files[0]!.maxBytes = 131_073;
+    },
+    (wire) => {
+      const schema = (wire.plugins[0]!.contributions[0]!.configuration as Record<string, unknown>).inputSchema as { required: string[] };
+      schema.required = [];
+    },
+    (wire) => {
+      const config = wire.plugins[0]!.contributions[0]!.configuration as Record<string, unknown>;
+      const schema = config.inputSchema as {
+        properties: Record<string, unknown>;
+        required: string[];
+      };
+      schema.properties.secondHandle = { type: "string", minLength: 1, maxLength: 256 };
+      schema.required.push("secondHandle");
+      config.fileInputs = [
+        {
+          field: "fileHandle",
+          mode: "save",
+          accept: ["application/json"],
+          maxBytes: 131_072,
+          suggestedName: "first.json",
+        },
+        {
+          field: "secondHandle",
+          mode: "save",
+          accept: ["application/json"],
+          maxBytes: 131_072,
+          suggestedName: "second.json",
+        },
+      ];
+    },
+  ];
+  for (const mutate of invalidCases) {
+    const wire = structuredClone(value);
+    mutate(wire);
+    assert.throws(() => parsePluginCatalog(wire), /invalid/);
+  }
+});
+
 test("unknown slots and duplicate contribution IDs fail closed", () => {
   const unknownSlot = catalog();
   unknownSlot.plugins[0]!.contributions[1]!.configuration.slot = "floatingWindow";

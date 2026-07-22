@@ -1,7 +1,8 @@
-"""Host-owned contracts for the Phase 5 contribution and event surface."""
+"""Host-owned contracts for Plugin Platform v2 contribution surfaces."""
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import re
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ CORE_CONTRIBUTION_KINDS = frozenset(
         "job/1",
         "chart-layer/1",
         "view/1",
+        "http-endpoint/1",
     }
 )
 
@@ -64,6 +66,12 @@ _VIEW_FORMATS = frozenset(
     {"text", "number", "percent", "price", "boolean", "timestamp"}
 )
 _VIEW_FIELD = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+_DOMAIN = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+_MEDIA_TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,63}$")
+_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$")
+_HTTP_METHODS = frozenset({"GET", "POST"})
 
 
 def _fail(message: str, *, plugin_id: str, contribution_id: str) -> None:
@@ -452,12 +460,116 @@ class CoreContribution:
         }
 
 
+def _validate_file_inputs(
+    value: Any,
+    schema: dict[str, Any] | None,
+    *,
+    plugin_id: str,
+    contribution_id: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 8 or schema is None:
+        _fail(
+            "command fileInputs require a bounded inputSchema",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    properties = schema.get("properties", {})
+    required_fields = set(schema.get("required", []))
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            _fail(
+                "command file input must be an object",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        _exact_keys(
+            item,
+            allowed={"field", "mode", "accept", "maxBytes", "suggestedName"},
+            required={"field", "mode", "accept", "maxBytes"},
+            label="command file input",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+        field_name = item["field"]
+        mode = item["mode"]
+        accept = item["accept"]
+        suggested_name = item.get("suggestedName")
+        field_schema = (
+            properties.get(field_name) if isinstance(field_name, str) else None
+        )
+        if (
+            not isinstance(field_name, str)
+            or _VIEW_FIELD.fullmatch(field_name) is None
+            or field_name not in required_fields
+            or not isinstance(field_schema, dict)
+            or field_schema.get("type") != "string"
+            or mode not in {"open", "save"}
+            or not isinstance(accept, list)
+            or not 1 <= len(accept) <= 16
+            or len(set(accept)) != len(accept)
+            or not all(
+                isinstance(media_type, str)
+                and media_type == media_type.lower()
+                and _MEDIA_TYPE.fullmatch(media_type)
+                for media_type in accept
+            )
+            or (mode == "open" and suggested_name is not None)
+            or (
+                mode == "save"
+                and (
+                    not isinstance(suggested_name, str)
+                    or _FILE_NAME.fullmatch(suggested_name) is None
+                    or suggested_name in {".", ".."}
+                )
+            )
+        ):
+            _fail(
+                "command file input metadata is invalid",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        result.append(
+            {
+                "field": field_name,
+                "mode": mode,
+                "accept": list(accept),
+                "maxBytes": _bounded_int(
+                    item["maxBytes"],
+                    minimum=1,
+                    maximum=128 * 1024,
+                    label="file input maxBytes",
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                ),
+                **(
+                    {"suggestedName": suggested_name}
+                    if suggested_name is not None
+                    else {}
+                ),
+            }
+        )
+    if len({item["field"] for item in result}) != len(result):
+        _fail(
+            "command fileInputs contain duplicate fields",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    if sum(item["mode"] == "save" for item in result) > 1:
+        _fail(
+            "Phase 9 commands support at most one save destination",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return result
+
+
 def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str, Any]:
     config = dict(item.configuration)
     if item.kind == "command/1":
         _exact_keys(
             config,
-            allowed={"requiresUserAction", "inputSchema", "placements"},
+            allowed={"requiresUserAction", "inputSchema", "placements", "fileInputs"},
             label="command configuration",
             plugin_id=plugin_id,
             contribution_id=item.id,
@@ -480,6 +592,19 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
                     plugin_id=plugin_id,
                     contribution_id=item.id,
                 )
+        if "fileInputs" in config:
+            if config.get("requiresUserAction", True) is not True:
+                _fail(
+                    "commands with fileInputs must require a user action",
+                    plugin_id=plugin_id,
+                    contribution_id=item.id,
+                )
+            config["fileInputs"] = _validate_file_inputs(
+                config["fileInputs"],
+                config.get("inputSchema"),
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
         placements = config.get("placements", ["commandPalette"])
         if (
             not isinstance(placements, list)
@@ -668,6 +793,79 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
                 contribution_id=item.id,
             ),
             "runOnStartup": config.get("runOnStartup", False),
+        }
+    elif item.kind == "http-endpoint/1":
+        _exact_keys(
+            config,
+            allowed={
+                "methods",
+                "responseMode",
+                "maxRequestBytes",
+                "maxResponseBytes",
+                "maxConcurrent",
+                "ratePerMinute",
+            },
+            required={
+                "methods",
+                "responseMode",
+                "maxRequestBytes",
+                "maxResponseBytes",
+                "maxConcurrent",
+                "ratePerMinute",
+            },
+            label="HTTP endpoint configuration",
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+        methods = config["methods"]
+        if (
+            not isinstance(methods, list)
+            or not methods
+            or len(set(methods)) != len(methods)
+            or not all(isinstance(method, str) for method in methods)
+            or not set(methods) <= _HTTP_METHODS
+            or config["responseMode"] not in {"buffered", "server-events"}
+        ):
+            _fail(
+                "HTTP endpoint methods or response mode are invalid",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        config = {
+            "methods": methods,
+            "responseMode": config["responseMode"],
+            "maxRequestBytes": _bounded_int(
+                config["maxRequestBytes"],
+                minimum=0,
+                maximum=128 * 1024,
+                label="HTTP endpoint maxRequestBytes",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            ),
+            "maxResponseBytes": _bounded_int(
+                config["maxResponseBytes"],
+                minimum=1,
+                maximum=128 * 1024,
+                label="HTTP endpoint maxResponseBytes",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            ),
+            "maxConcurrent": _bounded_int(
+                config["maxConcurrent"],
+                minimum=1,
+                maximum=16,
+                label="HTTP endpoint maxConcurrent",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            ),
+            "ratePerMinute": _bounded_int(
+                config["ratePerMinute"],
+                minimum=1,
+                maximum=10_000,
+                label="HTTP endpoint ratePerMinute",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            ),
         }
     elif item.kind == "chart-layer/1":
         _exact_keys(
@@ -908,6 +1106,324 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
     return normalized
 
 
+def _scope_list(
+    value: Any,
+    *,
+    allowed: frozenset[str] | None,
+    minimum: int,
+    maximum: int,
+    label: str,
+    plugin_id: str,
+    contribution_id: str,
+) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or not minimum <= len(value) <= maximum
+        or not all(isinstance(item, str) for item in value)
+        or len(set(value)) != len(value)
+        or (allowed is not None and not set(value) <= allowed)
+    ):
+        _fail(
+            f"{label} is invalid",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return value
+
+
+def _validate_network_scope(
+    scope: dict[str, Any], *, plugin_id: str, contribution_id: str
+) -> None:
+    _exact_keys(
+        scope,
+        allowed={
+            "schemes",
+            "domains",
+            "ports",
+            "methods",
+            "maxRequestBytes",
+            "maxResponseBytes",
+            "maxRedirects",
+            "maxConcurrent",
+            "ratePerMinute",
+        },
+        required={
+            "schemes",
+            "domains",
+            "ports",
+            "methods",
+            "maxRequestBytes",
+            "maxResponseBytes",
+            "maxRedirects",
+            "maxConcurrent",
+            "ratePerMinute",
+        },
+        label="network.connect scope",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    schemes = _scope_list(
+        scope["schemes"],
+        allowed=frozenset({"https"}),
+        minimum=1,
+        maximum=1,
+        label="network schemes",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    if schemes != ["https"]:
+        _fail(
+            "Phase 9 network scope is HTTPS-only",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    domains = _scope_list(
+        scope["domains"],
+        allowed=None,
+        minimum=1,
+        maximum=32,
+        label="network domains",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    for domain in domains:
+        try:
+            ipaddress.ip_address(domain)
+        except ValueError:
+            is_ip = False
+        else:
+            is_ip = True
+        if (
+            domain != domain.lower()
+            or _DOMAIN.fullmatch(domain) is None
+            or is_ip
+            or "*" in domain
+        ):
+            _fail(
+                "network domains must be exact lowercase DNS names",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+    ports = scope["ports"]
+    if (
+        not isinstance(ports, list)
+        or not 1 <= len(ports) <= 16
+        or len(set(ports)) != len(ports)
+        or not all(
+            not isinstance(port, bool) and isinstance(port, int) and 1 <= port <= 65535
+            for port in ports
+        )
+    ):
+        _fail(
+            "network ports are invalid",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    _scope_list(
+        scope["methods"],
+        allowed=_HTTP_METHODS,
+        minimum=1,
+        maximum=len(_HTTP_METHODS),
+        label="network methods",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    for key, minimum, maximum in (
+        ("maxRequestBytes", 0, 128 * 1024),
+        ("maxResponseBytes", 1, 128 * 1024),
+        ("maxRedirects", 0, 8),
+        ("maxConcurrent", 1, 16),
+        ("ratePerMinute", 1, 10_000),
+    ):
+        _bounded_int(
+            scope[key],
+            minimum=minimum,
+            maximum=maximum,
+            label=f"network {key}",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+
+
+def _validate_file_scope(
+    scope: dict[str, Any], *, plugin_id: str, contribution_id: str
+) -> None:
+    _exact_keys(
+        scope,
+        allowed={"mediaTypes", "maxBytes", "ttlSeconds"},
+        required={"mediaTypes", "maxBytes", "ttlSeconds"},
+        label="user-selected file scope",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    media_types = _scope_list(
+        scope["mediaTypes"],
+        allowed=None,
+        minimum=1,
+        maximum=16,
+        label="file mediaTypes",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    if not all(
+        value == value.lower() and _MEDIA_TYPE.fullmatch(value) for value in media_types
+    ):
+        _fail(
+            "file mediaTypes are invalid",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    _bounded_int(
+        scope["maxBytes"],
+        minimum=1,
+        maximum=128 * 1024,
+        label="file maxBytes",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    _bounded_int(
+        scope["ttlSeconds"],
+        minimum=1,
+        maximum=600,
+        label="file ttlSeconds",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+
+
+def _validate_endpoint_scope(
+    scope: dict[str, Any], *, plugin_id: str, contribution_id: str
+) -> None:
+    _exact_keys(
+        scope,
+        allowed={
+            "endpoints",
+            "methods",
+            "maxRequestBytes",
+            "maxResponseBytes",
+            "maxConcurrent",
+            "ratePerMinute",
+        },
+        required={
+            "endpoints",
+            "methods",
+            "maxRequestBytes",
+            "maxResponseBytes",
+            "maxConcurrent",
+            "ratePerMinute",
+        },
+        label="HTTP endpoint scope",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    endpoints = _scope_list(
+        scope["endpoints"],
+        allowed=None,
+        minimum=1,
+        maximum=32,
+        label="HTTP endpoint IDs",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    if not all(_VIEW_FIELD.fullmatch(item) for item in endpoints):
+        _fail(
+            "HTTP endpoint IDs are invalid",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    _scope_list(
+        scope["methods"],
+        allowed=_HTTP_METHODS,
+        minimum=1,
+        maximum=len(_HTTP_METHODS),
+        label="HTTP endpoint methods",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    for key, minimum, maximum in (
+        ("maxRequestBytes", 0, 128 * 1024),
+        ("maxResponseBytes", 1, 128 * 1024),
+        ("maxConcurrent", 1, 16),
+        ("ratePerMinute", 1, 10_000),
+    ):
+        _bounded_int(
+            scope[key],
+            minimum=minimum,
+            maximum=maximum,
+            label=f"HTTP endpoint {key}",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+
+
+def _validate_phase9_permissions(
+    manifest: PluginManifest, contributions: tuple[CoreContribution, ...]
+) -> None:
+    requests = {
+        item.id: item.scope
+        for item in (*manifest.permissions.required, *manifest.permissions.optional)
+    }
+    fallback_id = contributions[0].id if contributions else "permissions"
+    if "network.connect" in requests:
+        _validate_network_scope(
+            requests["network.connect"],
+            plugin_id=manifest.plugin.id,
+            contribution_id=fallback_id,
+        )
+    for permission_id in (
+        "filesystem.open-user-selected",
+        "filesystem.save-user-selected",
+    ):
+        if permission_id in requests:
+            _validate_file_scope(
+                requests[permission_id],
+                plugin_id=manifest.plugin.id,
+                contribution_id=fallback_id,
+            )
+    if "http.endpoint.serve" in requests:
+        _validate_endpoint_scope(
+            requests["http.endpoint.serve"],
+            plugin_id=manifest.plugin.id,
+            contribution_id=fallback_id,
+        )
+    for contribution in contributions:
+        if contribution.kind == "command/1":
+            for item in contribution.configuration.get("fileInputs", []):
+                permission_id = (
+                    "filesystem.open-user-selected"
+                    if item["mode"] == "open"
+                    else "filesystem.save-user-selected"
+                )
+                scope = requests.get(permission_id)
+                if (
+                    scope is None
+                    or not set(item["accept"]) <= set(scope["mediaTypes"])
+                    or item["maxBytes"] > scope["maxBytes"]
+                ):
+                    _fail(
+                        "command file input exceeds its requested permission scope",
+                        plugin_id=manifest.plugin.id,
+                        contribution_id=contribution.id,
+                    )
+        if contribution.kind == "http-endpoint/1":
+            scope = requests.get("http.endpoint.serve")
+            config = contribution.configuration
+            if (
+                scope is None
+                or contribution.id not in scope["endpoints"]
+                or not set(config["methods"]) <= set(scope["methods"])
+                or config["maxRequestBytes"] > scope["maxRequestBytes"]
+                or config["maxResponseBytes"] > scope["maxResponseBytes"]
+                or config["maxConcurrent"] > scope["maxConcurrent"]
+                or config["ratePerMinute"] > scope["ratePerMinute"]
+            ):
+                _fail(
+                    "HTTP endpoint exceeds its requested permission scope",
+                    plugin_id=manifest.plugin.id,
+                    contribution_id=contribution.id,
+                )
+
+
 def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]:
     result: list[CoreContribution] = []
     for item in manifest.contributions:
@@ -965,7 +1481,9 @@ def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]
                 plugin_id=manifest.plugin.id,
                 contribution_id=contribution.id,
             )
-    return tuple(result)
+    values = tuple(result)
+    _validate_phase9_permissions(manifest, values)
+    return values
 
 
 def validate_public_event(event_id: str, payload: dict[str, Any]) -> dict[str, Any]:

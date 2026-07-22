@@ -4,6 +4,7 @@ import type {
   PluginCatalog,
   PluginCatalogPlugin,
   PluginChartLayer,
+  PluginCommandFileInput,
   PluginCommandContribution,
   PluginDeclarativeViewRenderer,
   PluginFieldFormat,
@@ -24,6 +25,8 @@ const FIELD = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const BUNDLE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SANDBOX_ENTRY = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\.html$/;
 const COLOR = /^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$/;
+const MEDIA_TYPE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/;
+const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$/;
 const PLACEMENTS = new Set<PluginPlacement>(["commandPalette", "topToolbar", "chartContextMenu"]);
 const VIEW_SLOTS = new Set<PluginViewSlot>(["sidePanel", "bottomPanel", "statusArea"]);
 const VIEW_RENDERERS = new Set<PluginDeclarativeViewRenderer>(["table", "list", "detail", "status"]);
@@ -164,16 +167,62 @@ function contribution(value: unknown, path: string, pluginId: string): PluginUiC
   const base = contributionBase(data, path, pluginId);
   const config = record(data.configuration, `${path}.configuration`);
   if (kind === "command/1") {
-    exact(config, ["placements"], ["requiresUserAction", "inputSchema"], `${path}.configuration`);
+    exact(config, ["placements"], ["requiresUserAction", "inputSchema", "fileInputs"], `${path}.configuration`);
     const placements = array(config.placements, `${path}.configuration.placements`, 3).map((item, index) => oneOf(item, PLACEMENTS, `${path}.configuration.placements[${index}]`));
     if (!placements.length || new Set(placements).size !== placements.length) fail(`${path}.configuration.placements`);
+    const inputSchema = config.inputSchema === undefined
+      ? undefined
+      : schema(config.inputSchema, `${path}.configuration.inputSchema`);
+    const fileInputs = config.fileInputs === undefined
+      ? undefined
+      : array(config.fileInputs, `${path}.configuration.fileInputs`, 8).map((item, index) => {
+        const file = record(item, `${path}.configuration.fileInputs[${index}]`);
+        exact(file, ["field", "mode", "accept", "maxBytes"], ["suggestedName"], `${path}.configuration.fileInputs[${index}]`);
+        const field = string(file.field, `${path}.configuration.fileInputs[${index}].field`, 64);
+        const mode = oneOf(file.mode, new Set(["open", "save"] as const), `${path}.configuration.fileInputs[${index}].mode`);
+        const accept = array(file.accept, `${path}.configuration.fileInputs[${index}].accept`, 16).map((mediaType, mediaIndex) => {
+          const value = string(mediaType, `${path}.configuration.fileInputs[${index}].accept[${mediaIndex}]`, 128);
+          if (!MEDIA_TYPE.test(value) || value !== value.toLowerCase()) fail(`${path}.configuration.fileInputs[${index}].accept`);
+          return value;
+        });
+        const maxBytes = integer(file.maxBytes, `${path}.configuration.fileInputs[${index}].maxBytes`, 1, 128 * 1024);
+        const suggestedName = file.suggestedName === undefined
+          ? undefined
+          : string(file.suggestedName, `${path}.configuration.fileInputs[${index}].suggestedName`, 128);
+        const property = inputSchema?.type === "object" ? inputSchema.properties?.[field] : undefined;
+        if (
+          !FIELD.test(field)
+          || !accept.length
+          || new Set(accept).size !== accept.length
+          || property?.type !== "string"
+          || !inputSchema?.required?.includes(field)
+          || (mode === "open" && suggestedName !== undefined)
+          || (mode === "save" && (suggestedName === undefined || !FILE_NAME.test(suggestedName) || [".", ".."].includes(suggestedName)))
+        ) fail(`${path}.configuration.fileInputs[${index}]`);
+        return {
+          field,
+          mode,
+          accept,
+          maxBytes,
+          ...(suggestedName === undefined ? {} : { suggestedName }),
+        } satisfies PluginCommandFileInput;
+      });
+    if (fileInputs && (
+      !fileInputs.length
+      || new Set(fileInputs.map((item) => item.field)).size !== fileInputs.length
+      || fileInputs.filter((item) => item.mode === "save").length > 1
+      || config.requiresUserAction === false
+    )) {
+      fail(`${path}.configuration.fileInputs`);
+    }
     return {
       ...base,
       kind: "command/1",
       configuration: {
         placements,
         ...(config.requiresUserAction === undefined ? {} : { requiresUserAction: boolean(config.requiresUserAction, `${path}.configuration.requiresUserAction`) }),
-        ...(config.inputSchema === undefined ? {} : { inputSchema: schema(config.inputSchema, `${path}.configuration.inputSchema`) }),
+        ...(inputSchema === undefined ? {} : { inputSchema }),
+        ...(fileInputs === undefined ? {} : { fileInputs }),
       },
     } satisfies PluginCommandContribution;
   }

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import re
 import secrets
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from candlescope_plugin_sdk.platform_v2 import PlatformContractError, loads_strict
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
 from app.plugin_installer_v2.errors import PlatformInstallerBaseError
 from app.plugin_security_v2.errors import PlatformSecurityError
@@ -22,8 +25,58 @@ from .runtime import CorePluginPlatform, DisabledCorePluginPlatform
 
 MAX_CORE_API_BODY_BYTES = 256 * 1024
 MAX_PLUGIN_BUNDLE_BYTES = 16 * 1024 * 1024
+MAX_USER_FILE_BYTES = 128 * 1024
 _BUNDLE_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _BUNDLE_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_FORWARDED_HEADERS = frozenset(
+    {
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    }
+)
+
+
+def _loopback_host(value: str | None) -> bool:
+    if value is None:
+        return False
+    if value.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _endpoint_request_is_local(request: Request) -> bool:
+    if (
+        request.client is None
+        or not _loopback_host(request.client.host)
+        or not _loopback_host(request.url.hostname)
+        or any(name in request.headers for name in _FORWARDED_HEADERS)
+        or request.headers.get("sec-fetch-site", "same-origin")
+        not in {"same-origin", "none"}
+    ):
+        return False
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme == request.url.scheme
+        and parsed.netloc == request.url.netloc
+        and _loopback_host(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def _platform(request: Request) -> CorePluginPlatform | DisabledCorePluginPlatform:
@@ -48,7 +101,10 @@ async def _body(request: Request, *, required: set[str]) -> dict[str, Any]:
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
-            if int(content_length) > MAX_CORE_API_BODY_BYTES:
+            length = int(content_length)
+            if length < 0:
+                raise ValueError
+            if length > MAX_CORE_API_BODY_BYTES:
                 raise HTTPException(status_code=413, detail="request body is too large")
         except ValueError as exc:
             raise HTTPException(
@@ -64,6 +120,31 @@ async def _body(request: Request, *, required: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != required:
         raise HTTPException(status_code=400, detail="request body shape is invalid")
     return value
+
+
+async def _bounded_binary_body(
+    request: Request, *, maximum: int, allow_empty: bool
+) -> bytes:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            length = int(content_length)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="invalid Content-Length"
+            ) from exc
+        if length < 0:
+            raise HTTPException(status_code=400, detail="invalid Content-Length")
+        if length > maximum or (length == 0 and not allow_empty):
+            raise HTTPException(status_code=413, detail="request body is too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > maximum:
+            raise HTTPException(status_code=413, detail="request body is too large")
+    if not body and not allow_empty:
+        raise HTTPException(status_code=400, detail="request body is required")
+    return bytes(body)
 
 
 async def _bundle_upload(
@@ -193,10 +274,162 @@ def create_core_plugin_router() -> APIRouter:
             content=asset.body, media_type=asset.media_type, headers=headers
         )
 
+    @router.api_route("/endpoints/{plugin_id}/{endpoint_id}", methods=["GET", "POST"])
+    async def plugin_endpoint(
+        plugin_id: str, endpoint_id: str, request: Request
+    ) -> Response:
+        platform = _platform(request)
+        if not isinstance(
+            platform, CorePluginPlatform
+        ) or not _endpoint_request_is_local(request):
+            raise HTTPException(status_code=404, detail="plugin endpoint unavailable")
+        try:
+            maximum, methods = platform.integration.endpoints.limits(
+                plugin_id, endpoint_id
+            )
+            if request.method not in methods:
+                raise HTTPException(
+                    status_code=405,
+                    detail="plugin endpoint method unavailable",
+                    headers={"Allow": ", ".join(sorted(methods))},
+                )
+            body = await _bounded_binary_body(
+                request, maximum=maximum, allow_empty=True
+            )
+            remote_host = request.client.host if request.client is not None else ""
+            response = await platform.integration.endpoints.handle(
+                plugin_id=plugin_id,
+                endpoint_id=endpoint_id,
+                remote_host=remote_host,
+                method=request.method,
+                headers={
+                    key.lower(): value
+                    for key, value in request.headers.items()
+                    if key.lower()
+                    in {"accept", "content-type", "x-candlescope-event-id"}
+                },
+                query=tuple(request.query_params.multi_items()),
+                body=body,
+                trace_id=f"endpoint-{secrets.token_hex(16)}",
+            )
+        except HTTPException:
+            raise
+        except PlatformSecurityError as exc:
+            status = {
+                "PLUGIN_ENDPOINT_NOT_FOUND": 404,
+                "PLUGIN_ENDPOINT_METHOD_DENIED": 405,
+                "PLUGIN_ENDPOINT_REQUEST_TOO_LARGE": 413,
+                "PLUGIN_ENDPOINT_RATE_LIMITED": 429,
+                "PLUGIN_ENDPOINT_CONCURRENCY_EXCEEDED": 429,
+                "PLUGIN_ENDPOINT_REVOKED": 503,
+            }.get(exc.code, 502)
+            raise HTTPException(
+                status_code=status, detail="plugin endpoint unavailable"
+            ) from exc
+        headers = {
+            **response.headers,
+            "cache-control": "no-store",
+            "content-security-policy": "default-src 'none'; sandbox",
+            "cross-origin-resource-policy": "same-origin",
+            "referrer-policy": "no-referrer",
+            "x-frame-options": "DENY",
+            "x-content-type-options": "nosniff",
+        }
+        if response.body is not None:
+            return Response(
+                content=response.body, status_code=response.status, headers=headers
+            )
+
+        async def stream():
+            for chunk in response.event_chunks:
+                yield chunk
+
+        return StreamingResponse(stream(), status_code=response.status, headers=headers)
+
     @router.get("/manage/diagnostics")
     async def diagnostics(request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
         return platform.diagnostics()
+
+    @router.post("/manage/files/open")
+    async def open_user_file(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        parameters = request.query_params.multi_items()
+        if len(parameters) != 2 or {key for key, _value in parameters} != {
+            "contributionId",
+            "field",
+        }:
+            raise HTTPException(
+                status_code=400, detail="file selection query is invalid"
+            )
+        values = dict(parameters)
+        name = request.headers.get("x-candlescope-file-name", "")
+        media_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+        body = await _bounded_binary_body(
+            request, maximum=MAX_USER_FILE_BYTES, allow_empty=False
+        )
+        try:
+            action = request.state.plugin_user_action
+            selection = await asyncio.to_thread(
+                platform.stage_user_file,
+                values["contributionId"],
+                values["field"],
+                name=name,
+                media_type=media_type,
+                body=body,
+                trace_id=f"management-{action}",
+            )
+            return {"fileSelection": selection.to_wire()}
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/files/save")
+    async def save_user_file(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        value = await _body(request, required={"contributionId", "field"})
+        if not all(isinstance(value[key], str) for key in value):
+            raise HTTPException(
+                status_code=400, detail="file selection body is invalid"
+            )
+        try:
+            action = request.state.plugin_user_action
+            selection = await asyncio.to_thread(
+                platform.prepare_user_file_save,
+                value["contributionId"],
+                value["field"],
+                trace_id=f"management-{action}",
+            )
+            return {"fileSelection": selection.to_wire()}
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/files/download")
+    async def download_user_file(request: Request) -> Response:
+        platform = await _guarded_platform(request)
+        value = await _body(request, required={"pluginId", "downloadId"})
+        if not all(isinstance(value[key], str) for key in value):
+            raise HTTPException(status_code=400, detail="file download body is invalid")
+        try:
+            action = request.state.plugin_user_action
+            download = await asyncio.to_thread(
+                platform.download_user_file,
+                value["pluginId"],
+                value["downloadId"],
+                trace_id=f"management-{action}",
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
+        return Response(
+            content=download.body,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="{download.name}"',
+                "Content-Type": download.media_type,
+                "Referrer-Policy": "no-referrer",
+                "X-CandleScope-Content-SHA256": download.sha256,
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @router.post("/manage/install")
     async def install(request: Request) -> dict[str, Any]:

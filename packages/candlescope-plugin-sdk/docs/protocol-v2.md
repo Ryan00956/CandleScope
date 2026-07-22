@@ -6,11 +6,12 @@ CandleScope backend plugin entrypoints. It does not replace
 CandleScope internals.
 
 This document describes the Phase 1 control contract plus additive contracts
-shipped through Phase 6. The CandleScope product now supplies the Host,
+shipped through Phase 9. The CandleScope product now supplies the Host,
 installer, permission broker, core services, scoped read-only live market
-consumer, and marker-only chart-layer registry. Frontend bridges, market-data
-providers, and trading brokers remain independently gated. A Python process
-using this SDK is not thereby a security sandbox.
+consumer, marker-only chart-layer registry, declarative/sandbox UI surfaces,
+and controlled integration gateways. Market-data providers and trading brokers
+remain independently gated. A Python process using this SDK is not thereby a
+security sandbox.
 
 ## Stable identifiers
 
@@ -332,6 +333,47 @@ position, shape, hex color, optional price, text length, total items, encoded
 bytes, revision, layer contribution ownership, context, and generation. Phase
 7 owns native frontend consumption; Phase 6 does not load plugin JavaScript.
 
+## Phase 9 controlled integration gateways
+
+The public SDK exports strict, bounded models for three Host-owned integration
+paths:
+
+- `network.http.request` under an opaque `network.connect` handle;
+- `filesystem.user-selected.read` and `filesystem.user-selected.write` under
+  separate open/save handles;
+- `candlescope.http-endpoint-request/1` and
+  `candlescope.http-endpoint-response/1` for a declared `http-endpoint/1`.
+
+The network request supports only GET/POST, credential-free HTTPS URLs, a small
+header allowlist, canonical base64 bodies, and at most 128 KiB. The product Host
+additionally enforces exact lowercase DNS names, ports, methods, byte limits,
+redirect count, concurrency, rate, public-only DNS resolution, and a pinned
+resolved address for each hop. `Authorization`, cookies, response cookies, and
+arbitrary headers are not part of the contract. The sidecar and sandbox iframe
+retain no direct-egress authority.
+
+User file selection never sends a path to the plugin. A trusted desktop user
+action gives the Host browser bytes or a native save destination; the Host mints
+a short-lived opaque handle bound to the plugin, contribution, field, direction,
+lease, media type, and byte limit. A handle is consumed once. Save output first
+becomes a one-shot Host download receipt whose size and SHA-256 are verified by
+the browser before the selected destination is written. Phase 9 commands support
+multiple open inputs but at most one save destination.
+
+Declared endpoints live only under
+`/api/v2/plugins/endpoints/{pluginId}/{endpointId}`. The Host applies loopback,
+Host/Origin/fetch-metadata, namespace, method, request/response size,
+concurrency, and rate checks before invoking the contribution. Buffered output
+is limited to inert JSON, text, or octet-stream content; the alternative
+`server-events` mode is a finite bounded SSE batch, not a persistent arbitrary
+socket. Disable, uninstall, permission revocation, and generation replacement
+remove registrations and reclaim Host-owned resources.
+
+These are additive Host interpretations of manifest v2 contribution
+configuration and permission scopes. They do not change the frozen Phase 1
+manifest schema or expose Host Python objects, absolute paths, sockets, or
+credentials to SDK code.
+
 ## Error behavior
 
 Standard JSON-RPC parse/request/method/params/internal codes are retained.
@@ -355,14 +397,16 @@ Run the SDK examples after installation:
 ```powershell
 candlescope-hello-command
 candlescope-market-scanner
+candlescope-integration-gateway
 ```
 
 Hello Command contributes one permission-free `command/1`, supports activation, invocation,
 health, deferred cancellation, deactivation, and shutdown, and has a fixed
 transcript. Market Scanner is an integration reference for scoped read/storage/layer
-Host calls; the SDK executable alone still grants no capabilities. Neither
-example proves product UI, untrusted OS sandboxing, secrets, trading, or
-marketplace trust.
+Host calls. Integration Gateway is the credential-free reference for Phase 9
+HTTPS, file, and endpoint contracts. An SDK executable alone still grants no
+capabilities; none of these examples proves product UI, untrusted OS sandboxing,
+secrets, trading, or marketplace trust.
 
 The reference server is deliberately synchronous and bounded. Phase 2 owns the
 production Host supervisor, async concurrent reader/writer, process generation,

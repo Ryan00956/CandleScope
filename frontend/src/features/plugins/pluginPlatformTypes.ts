@@ -43,8 +43,25 @@ export interface PluginCommandContribution extends ContributionBase {
   configuration: {
     requiresUserAction?: boolean;
     inputSchema?: PluginJsonSchema;
+    fileInputs?: PluginCommandFileInput[];
     placements: PluginPlacement[];
   };
+}
+
+export interface PluginCommandFileInput {
+  field: string;
+  mode: "open" | "save";
+  accept: string[];
+  maxBytes: number;
+  suggestedName?: string;
+}
+
+export interface PluginFileSelection {
+  handle: string;
+  name: string;
+  mediaType: string;
+  maxBytes: number;
+  expiresInSeconds: number;
 }
 
 export interface PluginSettingsContribution extends ContributionBase {
@@ -254,6 +271,9 @@ export interface PluginPlatformRuntime {
     writeSettings(id: string, value: Record<string, JsonValue>): Promise<Record<string, JsonValue>>;
     loadDetail(pluginId: string): Promise<PluginManagementDetail>;
     installBundle(file: File): Promise<void>;
+    stageUserFile(id: string, field: string, file: File): Promise<PluginFileSelection>;
+    prepareUserFileSave(id: string, field: string): Promise<PluginFileSelection>;
+    downloadUserFile(pluginId: string, downloadId: string): Promise<Blob>;
     changeState(pluginId: string, action: "enable" | "disable" | "rollback" | "uninstall"): Promise<void>;
     decidePermission(
       pluginId: string,

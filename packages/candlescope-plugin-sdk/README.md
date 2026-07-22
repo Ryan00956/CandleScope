@@ -175,6 +175,7 @@ The installed wheel also exposes:
 candlescope-hello-command
 candlescope-scheduled-notification
 candlescope-market-scanner
+candlescope-integration-gateway
 ```
 
 The latter declares `notification/1` plus `job/1` and completes a no-UI
@@ -182,8 +183,11 @@ scheduled notification through the `notifications.show` Host call. It only
 demonstrates Phase 5 capabilities. `candlescope-market-scanner` demonstrates
 Phase 6 chained Host calls, scoped live symbol/bar reads, private document
 storage, and a marker-only `candlescope.render/1` chart layer. Plugins still
-cannot access `DataManager`, replay data through a live handle, arbitrary
-frontend code, network, files, secrets, accounts, or trading APIs.
+cannot access `DataManager` or replay data through a live handle.
+`candlescope-integration-gateway` demonstrates Phase 9 credential-free,
+Host-mediated HTTPS, one-shot user-selected file handles, and a loopback-only
+namespaced HTTP endpoint. These contracts do not grant direct network or
+filesystem access, secrets, accounts, or trading APIs.
 
 ## Development checks
 
@@ -197,9 +201,9 @@ python scripts/package_smoke.py --dist-dir dist
 
 `package_smoke.py` installs the wheel into a fresh offline venv, replays both
 the frozen v1 Hello Runtime transcript and the v2 Hello Command transcript, and
-checks that the Scheduled Notification and Market Scanner modules, manifest
-resources, and console entry points were packaged. Run it once with Python 3.12 and once with Python
-3.13 before promoting a release.
+checks that the Scheduled Notification, Market Scanner, and Integration Gateway
+modules, manifest resources, and console entry points were packaged. Run it once
+with Python 3.12 and once with Python 3.13 before promoting a release.
 
 Use `python -m build --no-isolation` only when the selected interpreter already
 has the declared build backend installed.

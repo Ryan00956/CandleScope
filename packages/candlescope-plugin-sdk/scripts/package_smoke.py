@@ -86,10 +86,13 @@ def run_smoke(*, dist_dir: Path, python: str) -> None:
                     "import scheduled_notification_manifest; "
                     "from candlescope_plugin_sdk.platform_v2.examples.market_scanner "
                     "import market_scanner_manifest; "
+                    "from candlescope_plugin_sdk.platform_v2.examples.integration_gateway "
+                    "import integration_gateway_manifest; "
                     "print(sdk.__version__, sdk.PROTOCOL_V1, PLUGIN_PROTOCOL_V2, "
                     "HOST_API_V1, manifest_schema()['properties']['schemaVersion']['const'], "
                     "scheduled_notification_manifest().plugin.id, "
-                    "market_scanner_manifest().plugin.id)"
+                    "market_scanner_manifest().plugin.id, "
+                    "integration_gateway_manifest().plugin.id)"
                 ),
             ],
             check=True,
@@ -99,13 +102,15 @@ def run_smoke(*, dist_dir: Path, python: str) -> None:
         if imported.stdout.strip() != (
             "0.2.0 candlescope.script-runtime/1 candlescope.plugin/2 "
             "candlescope.host-api/1 2 candlescope.scheduled-notification "
-            "candlescope.market-scanner"
+            "candlescope.market-scanner candlescope.integration-gateway"
         ):
             raise RuntimeError(f"unexpected installed import output: {imported.stdout!r}")
         if not _venv_command(venv_path, "candlescope-scheduled-notification").is_file():
             raise RuntimeError("scheduled notification console entry point is missing")
         if not _venv_command(venv_path, "candlescope-market-scanner").is_file():
             raise RuntimeError("market scanner console entry point is missing")
+        if not _venv_command(venv_path, "candlescope-integration-gateway").is_file():
+            raise RuntimeError("integration gateway console entry point is missing")
 
         completed = subprocess.run(
             [str(_venv_command(venv_path, "candlescope-hello-runtime"))],

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { PluginNativeField } from "./PluginNativeFields.js";
 import SandboxPluginFrame from "./SandboxPluginFrame.js";
 import { defaultForPluginSchema } from "./pluginSchemaDefaults.js";
@@ -6,8 +6,10 @@ import { formatPluginValue } from "./pluginViewFormatting.js";
 import type {
   JsonValue,
   PluginCommandContribution,
+  PluginCommandFileInput,
   PluginDeclarativeViewContribution,
   PluginManagementDetail,
+  PluginJsonSchema,
   PluginPlatformRuntime,
   PluginSandboxViewContribution,
   PluginSettingsContribution,
@@ -49,6 +51,91 @@ function objectDefault(command: PluginCommandContribution): Record<string, JsonV
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
+interface NativeSaveDestination {
+  createWritable(): Promise<{
+    write(value: Blob): Promise<void>;
+    close(): Promise<void>;
+    abort?(): Promise<void>;
+  }>;
+}
+
+type NativeSavePicker = (options: { suggestedName: string }) => Promise<NativeSaveDestination>;
+
+interface FileDownloadReceipt {
+  downloadId: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  sha256: string;
+}
+
+function commandNativeSchema(command: PluginCommandContribution): PluginJsonSchema | null {
+  const schema = command.configuration.inputSchema;
+  if (!schema || schema.type !== "object") return schema ?? null;
+  const hidden = new Set((command.configuration.fileInputs ?? []).map((item) => item.field));
+  const properties = Object.fromEntries(
+    Object.entries(schema.properties ?? {}).filter(([key]) => !hidden.has(key)),
+  );
+  if (!Object.keys(properties).length) return null;
+  return {
+    ...schema,
+    properties,
+    required: (schema.required ?? []).filter((key) => !hidden.has(key)),
+  };
+}
+
+function fileDownloadReceipt(value: JsonValue): FileDownloadReceipt | null {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value.fileDownload;
+  if (candidate == null || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  if (
+    Object.keys(candidate).sort().join(",") !== "downloadId,mediaType,name,sha256,size"
+    || typeof candidate.downloadId !== "string"
+    || !/^ufd_[A-Za-z0-9_-]{40,128}$/.test(candidate.downloadId)
+    || typeof candidate.name !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$/.test(candidate.name)
+    || typeof candidate.mediaType !== "string"
+    || !/^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/.test(candidate.mediaType)
+    || typeof candidate.size !== "number"
+    || !Number.isSafeInteger(candidate.size)
+    || candidate.size < 0
+    || candidate.size > 128 * 1024
+    || typeof candidate.sha256 !== "string"
+    || !/^sha256:[0-9a-f]{64}$/.test(candidate.sha256)
+  ) throw new Error("Plugin returned an invalid file download receipt");
+  return candidate as unknown as FileDownloadReceipt;
+}
+
+async function writeSelectedDestination(
+  runtime: PluginPlatformRuntime,
+  pluginId: string,
+  config: PluginCommandFileInput,
+  destination: NativeSaveDestination,
+  receipt: FileDownloadReceipt,
+): Promise<void> {
+  if (
+    config.mode !== "save"
+    || receipt.name !== config.suggestedName
+    || !config.accept.includes(receipt.mediaType)
+    || receipt.size > config.maxBytes
+  ) throw new Error("Plugin file download exceeds the selected destination contract");
+  const blob = await runtime.actions.downloadUserFile(pluginId, receipt.downloadId);
+  if (blob.size !== receipt.size || blob.size > config.maxBytes) {
+    throw new Error("Plugin file download size does not match its receipt");
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
+  const actual = `sha256:${[...digest].map((item) => item.toString(16).padStart(2, "0")).join("")}`;
+  if (actual !== receipt.sha256) throw new Error("Plugin file download failed integrity validation");
+  const writable = await destination.createWritable();
+  try {
+    await writable.write(blob);
+    await writable.close();
+  } catch (error) {
+    await writable.abort?.().catch(() => undefined);
+    throw error;
+  }
+}
+
 function Modal({ title, onClose, children, testId }: React.PropsWithChildren<{
   title: string;
   onClose(): void;
@@ -71,15 +158,24 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [input, setInput] = useState<Record<string, JsonValue>>({});
   const [running, setRunning] = useState(false);
+  const [fileBusy, setFileBusy] = useState<string | null>(null);
+  const [fileStatus, setFileStatus] = useState<Record<string, string>>({});
+  const saveDestinations = useRef(new Map<string, NativeSaveDestination>());
   const commands = runtime.view.registries.commandPalette.filter((item) => item.title.toLowerCase().includes(query.toLowerCase()));
   const selected = runtime.view.registries.commandPalette.find((item) => item.id === selectedId) ?? null;
   useEffect(() => {
     if (!runtime.view.paletteOpen) {
       setQuery("");
       setSelectedId(null);
+      setFileBusy(null);
+      setFileStatus({});
+      saveDestinations.current.clear();
     }
   }, [runtime.view.paletteOpen]);
   if (!runtime.view.paletteOpen) return null;
+  const fileInputs = selected?.configuration.fileInputs ?? [];
+  const nativeSchema = selected ? commandNativeSchema(selected) : null;
+  const filesReady = fileInputs.every((item) => typeof input[item.field] === "string" && String(input[item.field]).length > 0);
   return (
     <Modal title="Plugin commands" onClose={runtime.actions.closePalette} testId="plugin-command-palette">
       <input autoFocus className="plugin-command-search" placeholder="Search commands" value={query} onChange={(event) => setQuery(event.target.value)} />
@@ -93,6 +189,9 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
               onClick={() => {
                 setSelectedId(command.id);
                 setInput(objectDefault(command));
+                setFileBusy(null);
+                setFileStatus({});
+                saveDestinations.current.clear();
               }}
             >
               <strong>{command.title}</strong><small>{command.id}</small>
@@ -103,26 +202,111 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
           {!selected && <p>Select a command.</p>}
           {selected && (
             <>
-              {selected.configuration.inputSchema && (
+              {nativeSchema && (
                 <PluginNativeField
                   name="root"
-                  schema={selected.configuration.inputSchema}
+                  schema={nativeSchema}
                   value={input}
                   onChange={(value) => {
                     if (value && typeof value === "object" && !Array.isArray(value)) setInput(value);
                   }}
                 />
               )}
+              {fileInputs.map((fileInput) => (
+                <div className="plugin-command-file" key={fileInput.field} data-plugin-file-mode={fileInput.mode}>
+                  <strong>{fileInput.mode === "open" ? "Select input file" : "Select save destination"}</strong>
+                  <small>{fileInput.accept.join(", ")} · maximum {fileInput.maxBytes} bytes · one use</small>
+                  {fileInput.mode === "open" ? (
+                    <input
+                      type="file"
+                      accept={fileInput.accept.join(",")}
+                      disabled={fileBusy !== null || running}
+                      onChange={async (event) => {
+                        const file = event.target.files?.[0];
+                        event.target.value = "";
+                        if (!file) return;
+                        if (!fileInput.accept.includes(file.type) || file.size < 1 || file.size > fileInput.maxBytes) {
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: "File type or size is outside the declared scope." }));
+                          return;
+                        }
+                        setFileBusy(fileInput.field);
+                        try {
+                          const selection = await runtime.actions.stageUserFile(selected.id, fileInput.field, file);
+                          setInput((current) => ({ ...current, [fileInput.field]: selection.handle }));
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: `${selection.name} selected for one read.` }));
+                        } catch (error) {
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: error instanceof Error ? error.message : "File selection failed." }));
+                        } finally {
+                          setFileBusy(null);
+                        }
+                      }}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={fileBusy !== null || running}
+                      onClick={async () => {
+                        const picker = (window as unknown as { showSaveFilePicker?: NativeSavePicker }).showSaveFilePicker;
+                        if (!picker || !fileInput.suggestedName) {
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: "A native save picker is required." }));
+                          return;
+                        }
+                        setFileBusy(fileInput.field);
+                        try {
+                          const destination = await picker.call(window, { suggestedName: fileInput.suggestedName });
+                          const selection = await runtime.actions.prepareUserFileSave(selected.id, fileInput.field);
+                          saveDestinations.current.set(fileInput.field, destination);
+                          setInput((current) => ({ ...current, [fileInput.field]: selection.handle }));
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: `${selection.name} selected for one write.` }));
+                        } catch (error) {
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: error instanceof Error ? error.message : "Save destination was not selected." }));
+                        } finally {
+                          setFileBusy(null);
+                        }
+                      }}
+                    >
+                      Choose destination…
+                    </button>
+                  )}
+                  {fileStatus[fileInput.field] && <span role="status">{fileStatus[fileInput.field]}</span>}
+                </div>
+              ))}
               <button
                 type="button"
-                disabled={!runtime.view.managementAvailable || running}
+                disabled={!runtime.view.managementAvailable || running || fileBusy !== null || !filesReady}
                 onClick={async () => {
                   setRunning(true);
+                  let commandInvoked = false;
                   try {
-                    await runtime.actions.invokeCommand(selected.id, input);
+                    const result = await runtime.actions.invokeCommand(selected.id, input);
+                    commandInvoked = true;
+                    const receipt = fileDownloadReceipt(result);
+                    const output = fileInputs.find((item) => item.mode === "save");
+                    if (output && !receipt) throw new Error("Plugin did not return the selected file output");
+                    if (receipt) {
+                      const destination = output ? saveDestinations.current.get(output.field) : undefined;
+                      if (!output || !destination) throw new Error("Plugin returned a file without a selected destination");
+                      await writeSelectedDestination(runtime, selected.pluginId, output, destination, receipt);
+                    }
                     runtime.actions.closePalette();
-                  } catch {
-                    // Runtime publishes a bounded notice.
+                  } catch (error) {
+                    if (commandInvoked) runtime.actions.clearNotice();
+                    const statusField = fileInputs.find((item) => item.mode === "save")?.field
+                      ?? fileInputs[0]?.field;
+                    if (statusField) {
+                      setFileStatus((current) => ({
+                        ...current,
+                        [statusField]: error instanceof Error
+                          ? error.message
+                          : "The command or selected file operation failed.",
+                      }));
+                    }
+                    setInput((current) => {
+                      const next = { ...current };
+                      for (const item of fileInputs) delete next[item.field];
+                      return next;
+                    });
+                    saveDestinations.current.clear();
                   } finally {
                     setRunning(false);
                   }

@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 2,
+  "plugin": {
+    "id": "candlescope.integration-gateway",
+    "name": "Controlled Integration Gateway",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "pythonModule": "candlescope_plugin_sdk.platform_v2.examples.integration_gateway",
+        "resourceProfile": "standard",
+        "activationEvents": [
+          "onCommand"
+        ]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "fetch-public",
+      "kind": "command/1",
+      "title": "Fetch through Host HTTPS proxy",
+      "entrypoint": "main",
+      "configuration": {
+        "placements": ["commandPalette"],
+        "requiresUserAction": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "title": "Allowed HTTPS URL",
+              "default": "https://example.com/candlescope-phase9",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          },
+          "required": ["url"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "import-file",
+      "kind": "command/1",
+      "title": "Import a user-selected file",
+      "entrypoint": "main",
+      "configuration": {
+        "placements": ["commandPalette"],
+        "requiresUserAction": true,
+        "fileInputs": [
+          {
+            "field": "fileHandle",
+            "mode": "open",
+            "accept": ["application/json", "text/plain"],
+            "maxBytes": 131072
+          }
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "fileHandle": {
+              "type": "string",
+              "title": "Selected file",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": ["fileHandle"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "export-file",
+      "kind": "command/1",
+      "title": "Export to a user-selected file",
+      "entrypoint": "main",
+      "configuration": {
+        "placements": ["commandPalette"],
+        "requiresUserAction": true,
+        "fileInputs": [
+          {
+            "field": "fileHandle",
+            "mode": "save",
+            "accept": ["application/json"],
+            "maxBytes": 131072,
+            "suggestedName": "candlescope-integration-report.json"
+          }
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "fileHandle": {
+              "type": "string",
+              "title": "Selected destination",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "message": {
+              "type": "string",
+              "title": "Report message",
+              "default": "Phase 9 controlled export",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          "required": ["fileHandle", "message"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "echo",
+      "kind": "http-endpoint/1",
+      "title": "Loopback integration echo",
+      "entrypoint": "main",
+      "configuration": {
+        "methods": ["GET", "POST"],
+        "responseMode": "buffered",
+        "maxRequestBytes": 131072,
+        "maxResponseBytes": 131072,
+        "maxConcurrent": 4,
+        "ratePerMinute": 30
+      }
+    }
+  ],
+  "permissions": {
+    "required": [
+      {
+        "id": "network.connect",
+        "scope": {
+          "schemes": ["https"],
+          "domains": ["example.com"],
+          "ports": [443],
+          "methods": ["GET"],
+          "maxRequestBytes": 0,
+          "maxResponseBytes": 131072,
+          "maxRedirects": 2,
+          "maxConcurrent": 2,
+          "ratePerMinute": 30
+        }
+      },
+      {
+        "id": "filesystem.open-user-selected",
+        "scope": {
+          "mediaTypes": ["application/json", "text/plain"],
+          "maxBytes": 131072,
+          "ttlSeconds": 300
+        }
+      },
+      {
+        "id": "filesystem.save-user-selected",
+        "scope": {
+          "mediaTypes": ["application/json"],
+          "maxBytes": 131072,
+          "ttlSeconds": 300
+        }
+      },
+      {
+        "id": "http.endpoint.serve",
+        "scope": {
+          "endpoints": ["echo"],
+          "methods": ["GET", "POST"],
+          "maxRequestBytes": 131072,
+          "maxResponseBytes": 131072,
+          "maxConcurrent": 4,
+          "ratePerMinute": 30
+        }
+      }
+    ],
+    "optional": []
+  },
+  "probes": []
+}

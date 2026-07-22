@@ -57,6 +57,9 @@ SANDBOX_VIEW_MANIFEST = (
     SDK_SOURCE / "platform_v2" / "examples" / "sandbox-view.manifest.json"
 )
 SANDBOX_VIEW_WEB = SDK_SOURCE / "platform_v2" / "examples" / "sandbox-view-web"
+INTEGRATION_GATEWAY_MANIFEST = (
+    SDK_SOURCE / "platform_v2" / "examples" / "integration-gateway.manifest.json"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,5 +372,46 @@ def build_sandbox_view_bundle(directory: Path) -> PlatformBundleFixture:
     bundle = build_platform_bundle(
         source,
         directory / "sandbox-view-0.1.0.cspkg",
+    )
+    return PlatformBundleFixture(bundle, source, wheel_path, manifest)
+
+
+def build_integration_gateway_bundle(directory: Path) -> PlatformBundleFixture:
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads(INTEGRATION_GATEWAY_MANIFEST.read_text(encoding="utf-8"))
+    source = directory / "source"
+    (source / "wheels").mkdir(parents=True)
+    (source / "schemas").mkdir()
+    (source / "sbom").mkdir()
+    wheel = build_platform_sdk_wheel(
+        directory / "wheelhouse",
+        manifest,
+        manifest_resource="platform_v2/examples/integration-gateway.manifest.json",
+    )
+    wheel_path = source / "wheels" / wheel.name
+    shutil.copyfile(wheel, wheel_path)
+    (source / "manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    shutil.copyfile(MANIFEST_SCHEMA, source / "schemas" / "manifest-v2.schema.json")
+    sbom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "serialNumber": "urn:uuid:00000000-0000-4000-8000-000000000005",
+        "version": 1,
+        "components": [
+            {
+                "type": "library",
+                "name": "candlescope-plugin-sdk",
+                "version": "0.2.0",
+            }
+        ],
+    }
+    (source / "sbom" / "cyclonedx.json").write_text(
+        json.dumps(sbom, indent=2), encoding="utf-8"
+    )
+    bundle = build_platform_bundle(
+        source,
+        directory / "integration-gateway-0.1.0.cspkg",
     )
     return PlatformBundleFixture(bundle, source, wheel_path, manifest)

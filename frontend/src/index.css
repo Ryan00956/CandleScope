@@ -4674,6 +4674,24 @@ body {
 .plugin-command-form,
 .plugin-manager-detail { min-width: 0; overflow: auto; }
 
+.plugin-command-file {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.18);
+}
+
+.plugin-command-file small,
+.plugin-command-file span {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.plugin-command-file input[type='file'] { max-width: 100%; }
+
 .plugin-native-group {
   border: 0;
   padding: 0;

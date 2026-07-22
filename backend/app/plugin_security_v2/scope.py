@@ -14,16 +14,22 @@ from .errors import security_error
 _UPPER_BOUND_KEYS = frozenset(
     {
         "maxConcurrent",
+        "maxBytes",
         "maxDepthLevels",
+        "maxFileBytes",
         "maxHistoryBars",
         "maxItems",
         "maxNotional",
+        "maxRedirects",
+        "maxRequestBytes",
         "maxRequests",
+        "maxResponseBytes",
         "maxRuntimeSeconds",
         "maxSymbolsPerCall",
         "maxTrades",
         "ratePerMinute",
         "storageBytes",
+        "ttlSeconds",
     }
 )
 _SENSITIVE_KEYS = frozenset(

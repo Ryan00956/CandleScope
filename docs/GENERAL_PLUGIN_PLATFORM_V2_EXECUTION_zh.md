@@ -3,7 +3,7 @@
 > 状态：执行中；Phase 0 已完成（`381dd02`），Phase 1 已完成（`d29ad4d`），Phase 2
 > 已完成（`d755f27`），Phase 3 已完成（`eb7316b`），Phase 4 已完成（`e20d7c4`），
 > Phase 5 已完成（`b77444a`），Phase 6 已完成（`8f18080`），Phase 7 已完成（`151b93a`），
-> Phase 8 已完成实现与技术验收（本阶段提交）。
+> Phase 8 已完成（`b0efcc4`），Phase 9 已完成实现与技术验收（本阶段提交）。
 >
 > 基线：`codex/plugin-platform-v1@400e520`，2026-07-22。
 >
@@ -735,8 +735,8 @@ frontend/src/features/plugins/
 | Phase 5：核心后端扩展点 | 已完成（`b77444a`） | command/settings/storage/event/job | 最小通用插件平台 |
 | Phase 6：市场数据 consumer/图层 | 已完成（`8f18080`） | read/subscribe、Render IR layer | 扫描器、研究、图表工具 |
 | Phase 7：声明式前端 | 已完成（`151b93a`） | catalog、manager、native slots | 无任意 JS 的产品 UI |
-| Phase 8：Sandbox UI | 已完成（本阶段提交） | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
-| Phase 9：网络/文件/HTTP gateway | 未开始 | 受控外部交互与命名空间 API | 集成型插件 |
+| Phase 8：Sandbox UI | 已完成（`b0efcc4`） | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
+| Phase 9：网络/文件/HTTP gateway | 已完成（本阶段提交） | 受控外部交互与命名空间 API | 集成型插件 |
 | Phase 10：数据提供器 | 未开始 | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
 | Phase 11：账户与交易 | 未开始 | secret broker、paper/live executor、risk gate | 高风险交易插件 |
 | Phase 12：签名与 Marketplace | 未开始 | publisher、更新、撤销、SBOM | 可分发生态 |
@@ -1010,6 +1010,10 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 - 插件 asset 不能污染主 bundle cache 或 service worker scope。
 
 ## 25. Phase 9：受控网络、文件和 HTTP gateway
+
+> 2026-07-22 已完成实现与技术验收。精确 HTTPS/DNS pin、一次性用户文件 handle、loopback
+> namespace endpoint、生命周期回收、真实浏览器/Windows AppContainer 证据与保留边界见
+> `PLUGIN_PLATFORM_V2_PHASE9_zh.md`。
 
 ### 交付
 

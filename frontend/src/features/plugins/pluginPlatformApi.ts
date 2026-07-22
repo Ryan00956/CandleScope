@@ -7,6 +7,7 @@ import {
 import type {
   JsonValue,
   PluginCatalog,
+  PluginFileSelection,
   PluginManagementDetail,
   PluginUiSnapshot,
 } from "./pluginPlatformTypes.js";
@@ -187,6 +188,33 @@ function safeJson(value: unknown, path: string, depth = 0): JsonValue {
   return Object.fromEntries(Object.entries(data).map(([key, item]) => [key, safeJson(item, `${path}.${key}`, depth + 1)]));
 }
 
+function parseFileSelection(value: unknown): PluginFileSelection {
+  const payload = object(value, "file selection");
+  const selection = object(payload.fileSelection, "file selection.fileSelection");
+  if (
+    Object.keys(selection).sort().join(",") !== "expiresInSeconds,handle,maxBytes,mediaType,name"
+    || typeof selection.handle !== "string"
+    || !/^ufh_[A-Za-z0-9_-]{40,128}$/.test(selection.handle)
+    || typeof selection.name !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$/.test(selection.name)
+    || typeof selection.mediaType !== "string"
+    || !/^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/.test(selection.mediaType)
+    || !Number.isSafeInteger(selection.maxBytes)
+    || Number(selection.maxBytes) < 1
+    || Number(selection.maxBytes) > 128 * 1024
+    || !Number.isSafeInteger(selection.expiresInSeconds)
+    || Number(selection.expiresInSeconds) < 1
+    || Number(selection.expiresInSeconds) > 600
+  ) throw new Error("Plugin file selection response is invalid");
+  return {
+    handle: selection.handle,
+    name: selection.name,
+    mediaType: selection.mediaType,
+    maxBytes: Number(selection.maxBytes),
+    expiresInSeconds: Number(selection.expiresInSeconds),
+  };
+}
+
 export function parsePluginSettingsValue(response: unknown): Record<string, JsonValue> {
   const payload = object(response, "settings response");
   const settings = object(payload.settings, "settings response.settings");
@@ -243,6 +271,82 @@ export async function installPluginBundle(file: File): Promise<void> {
     body: file,
   });
   await responseJson(response);
+}
+
+export async function stagePluginUserFile(
+  contributionId: string,
+  field: string,
+  file: File,
+): Promise<PluginFileSelection> {
+  const session = consumeManagementSession();
+  if (!session) throw new PluginPlatformApiError("Plugin management requires a trusted desktop session", 403);
+  if (
+    !/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+\.[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(contributionId)
+    || !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(field)
+    || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$/.test(file.name)
+    || !/^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/.test(file.type)
+    || file.size < 1
+    || file.size > 128 * 1024
+  ) throw new PluginPlatformApiError("Selected plugin file is invalid or too large", 400);
+  const query = new URLSearchParams({ contributionId, field });
+  const response = await fetch(`${session.apiBase}/manage/files/open?${query}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type,
+      "X-CandleScope-Plugin-Session": session.sessionToken,
+      "X-CandleScope-CSRF": session.csrfToken,
+      "X-CandleScope-User-Action": actionId("select-plugin-file"),
+      "X-CandleScope-File-Name": file.name,
+    },
+    credentials: "omit",
+    body: file,
+  });
+  return parseFileSelection(await responseJson(response));
+}
+
+export async function preparePluginUserFileSave(
+  contributionId: string,
+  field: string,
+): Promise<PluginFileSelection> {
+  return parseFileSelection(await managementRequest("/manage/files/save", {
+    method: "POST",
+    body: { contributionId, field },
+    action: "select-plugin-save-destination",
+  }));
+}
+
+export async function downloadPluginUserFile(
+  pluginId: string,
+  downloadId: string,
+): Promise<Blob> {
+  const session = consumeManagementSession();
+  if (!session) throw new PluginPlatformApiError("Plugin management requires a trusted desktop session", 403);
+  if (
+    !/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(pluginId)
+    || !/^ufd_[A-Za-z0-9_-]{40,128}$/.test(downloadId)
+  ) throw new PluginPlatformApiError("Plugin file download identity is invalid", 400);
+  const response = await fetch(`${session.apiBase}/manage/files/download`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CandleScope-Plugin-Session": session.sessionToken,
+      "X-CandleScope-CSRF": session.csrfToken,
+      "X-CandleScope-User-Action": actionId("download-plugin-file"),
+    },
+    credentials: "omit",
+    body: JSON.stringify({ pluginId, downloadId }),
+  });
+  if (!response.ok) {
+    await responseJson(response);
+    throw new PluginPlatformApiError("Plugin file download failed", response.status);
+  }
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null && Number(contentLength) > 128 * 1024) {
+    throw new PluginPlatformApiError("Plugin file download exceeds its byte limit", 413);
+  }
+  const blob = await response.blob();
+  if (blob.size > 128 * 1024) throw new PluginPlatformApiError("Plugin file download exceeds its byte limit", 413);
+  return blob;
 }
 
 export async function mutatePluginState(

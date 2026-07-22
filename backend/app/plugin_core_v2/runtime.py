@@ -1,4 +1,4 @@
-"""Product composition root for the Phase 5 minimum Plugin Platform."""
+"""Product composition root for the Host-owned Plugin Platform v2 runtime."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from app.plugin_installer_v2.registry import (
     ActivationRegistry,
     load_activation_registry,
 )
+from app.plugin_gateway_v2 import PluginIntegrationGateway
 from app.plugin_platform import PluginManager
 from app.plugin_market_v2.runtime import PluginMarketRuntime
 from app.plugin_security_v2 import (
@@ -97,6 +98,8 @@ class CorePluginPlatform:
         trust_level: str = "local-trusted",
         sandbox_factory: SandboxFactory | None = None,
         approved_startup_plugins: Iterable[str] = (),
+        network_resolver: Any | None = None,
+        network_transport: Any | None = None,
     ) -> None:
         if trust_level not in TRUST_LEVELS:
             raise ValueError("plugin platform trust level is invalid")
@@ -141,6 +144,15 @@ class CorePluginPlatform:
             resolve_contribution=self.resolve_contribution,
         )
         self.adapters.register(self.broker)
+        self.integration = PluginIntegrationGateway(
+            root=self.root,
+            audit_log=self.audit_log,
+            broker=self.broker,
+            authority=self.authority,
+            invoke=self._invoke_integration_endpoint,
+            network_resolver=network_resolver,
+            network_transport=network_transport,
+        )
         self.market = PluginMarketRuntime(
             broker=self.broker,
             authority=self.authority,
@@ -187,7 +199,7 @@ class CorePluginPlatform:
                         if "onStartup" in entrypoint.activation_events:
                             await self._ensure_active(record.plugin_id, entrypoint.id)
             self._maintenance_task = asyncio.create_task(
-                self._maintenance_loop(), name="plugin-core-capability-rotation"
+                self._maintenance_loop(), name="plugin-core-maintenance"
             )
 
     async def stop(self) -> None:
@@ -200,6 +212,7 @@ class CorePluginPlatform:
             await self.jobs.stop()
             await self.events.stop()
             await self.market.stop()
+            await self.integration.stop()
             plugin_ids = set(self._records)
             plugin_ids.update(owner[0] for owner in self.manager.owner_keys())
             for plugin_id in sorted(plugin_ids):
@@ -214,7 +227,8 @@ class CorePluginPlatform:
     async def _maintenance_loop(self) -> None:
         try:
             while True:
-                await asyncio.sleep(3600.0)
+                await asyncio.sleep(60.0)
+                await asyncio.to_thread(self.integration.sweep)
                 now = time.monotonic()
                 for owner, activated_at in tuple(self._activated_at.items()):
                     if now - activated_at < 43_200.0:
@@ -429,6 +443,10 @@ class CorePluginPlatform:
                 grant = grants.get("jobs.schedule")
                 if grant is not None and self._job_scope_allows(grant, contribution):
                     self.jobs.register(contribution, self._invoke_job_callback)
+            elif contribution.kind == "http-endpoint/1":
+                grant = grants.get("http.endpoint.serve")
+                if grant is not None:
+                    self.integration.endpoints.register(contribution, grant)
 
     @staticmethod
     def _event_scope_allows(
@@ -504,6 +522,20 @@ class CorePluginPlatform:
         await self._ensure_active(contribution.plugin_id, contribution.entrypoint_id)
         return await self.manager.invoke(
             contribution.full_id,
+            input_value,
+            user_action=user_action,
+            trace_id=trace_id,
+        )
+
+    async def _invoke_integration_endpoint(
+        self,
+        contribution: CoreContribution,
+        input_value: dict[str, Any],
+        user_action: bool,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        return await self._invoke(
+            contribution,
             input_value,
             user_action=user_action,
             trace_id=trace_id,
@@ -684,6 +716,7 @@ class CorePluginPlatform:
             await self.jobs.unregister_plugin(plugin_id)
             await self.events.unregister_plugin(plugin_id)
             await self.market.clear_plugin(plugin_id, reason="plugin-reconcile")
+            await self.integration.clear_plugin(plugin_id)
             self.authority.revoke_plugin(plugin_id)
             self.settings.unbind_plugin(plugin_id)
             await self.manager.remove_plugin(plugin_id)
@@ -709,6 +742,99 @@ class CorePluginPlatform:
                     else "candlescope.plugin.disabled/1"
                 )
                 self.events.publish(event_id, {"pluginId": plugin_id})
+
+    def _file_input(
+        self, contribution_id: str, field: str, mode: str
+    ) -> tuple[CoreContribution, dict[str, Any], EffectiveGrant]:
+        contribution = self._resolve_full(contribution_id, kind="command/1")
+        file_input = next(
+            (
+                item
+                for item in contribution.configuration.get("fileInputs", [])
+                if item["field"] == field and item["mode"] == mode
+            ),
+            None,
+        )
+        permission_id = (
+            "filesystem.open-user-selected"
+            if mode == "open"
+            else "filesystem.save-user-selected"
+        )
+        grant = next(
+            (
+                item
+                for item in self._effective_grants.get(contribution.plugin_id, ())
+                if item.permission_id == permission_id
+            ),
+            None,
+        )
+        record = self._records.get(contribution.plugin_id)
+        if (
+            file_input is None
+            or grant is None
+            or record is None
+            or record.state != "active"
+        ):
+            raise core_error(
+                "PLUGIN_FILE_SELECTION_DENIED",
+                "user-selected file action is unavailable",
+                plugin_id=contribution.plugin_id,
+            )
+        return contribution, file_input, grant
+
+    def stage_user_file(
+        self,
+        contribution_id: str,
+        field: str,
+        *,
+        name: str,
+        media_type: str,
+        body: bytes,
+        trace_id: str,
+    ):
+        contribution, file_input, grant = self._file_input(
+            contribution_id, field, "open"
+        )
+        return self.integration.files.stage_open(
+            plugin_id=contribution.plugin_id,
+            contribution_id=contribution.id,
+            field=field,
+            name=name,
+            media_type=media_type,
+            body=body,
+            requested_max_bytes=file_input["maxBytes"],
+            scope=grant.scope,
+            trace_id=trace_id,
+        )
+
+    def prepare_user_file_save(
+        self, contribution_id: str, field: str, *, trace_id: str
+    ):
+        contribution, file_input, grant = self._file_input(
+            contribution_id, field, "save"
+        )
+        return self.integration.files.prepare_save(
+            plugin_id=contribution.plugin_id,
+            contribution_id=contribution.id,
+            field=field,
+            name=file_input["suggestedName"],
+            media_type=file_input["accept"][0],
+            requested_max_bytes=file_input["maxBytes"],
+            scope=grant.scope,
+            trace_id=trace_id,
+        )
+
+    def download_user_file(self, plugin_id: str, download_id: str, *, trace_id: str):
+        record = self._records.get(plugin_id)
+        if record is None or record.state != "active":
+            raise core_error(
+                "PLUGIN_FILE_DOWNLOAD_DENIED",
+                "user-selected file download is unavailable",
+                plugin_id=plugin_id,
+            )
+        return self.integration.files.download(
+            plugin_id, download_id, trace_id=trace_id
+        )
 
     @staticmethod
     def _catalog_contribution(
@@ -1093,6 +1219,7 @@ class CorePluginPlatform:
             "jobs": self.jobs.snapshot(),
             "notifications": self.notifications.snapshot(),
             "market": self.market.diagnostics(),
+            "integration": self.integration.diagnostics(),
             "loadFailures": [
                 {
                     "pluginId": key,

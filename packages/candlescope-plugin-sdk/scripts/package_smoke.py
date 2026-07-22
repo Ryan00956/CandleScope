@@ -15,6 +15,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "tests" / "fixtures" / "hello_transcript_v1.json"
+V2_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "hello_command_transcript_v2.json"
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -34,10 +35,10 @@ def _venv_python(venv_path: Path) -> Path:
     return venv_path / "bin" / "python"
 
 
-def _venv_command(venv_path: Path) -> Path:
+def _venv_command(venv_path: Path, name: str) -> Path:
     if os.name == "nt":
-        return venv_path / "Scripts" / "candlescope-hello-runtime.exe"
-    return venv_path / "bin" / "candlescope-hello-runtime"
+        return venv_path / "Scripts" / f"{name}.exe"
+    return venv_path / "bin" / name
 
 
 def _select_wheel(dist_dir: Path) -> Path:
@@ -52,6 +53,7 @@ def _select_wheel(dist_dir: Path) -> Path:
 def run_smoke(*, dist_dir: Path, python: str) -> None:
     wheel = _select_wheel(dist_dir)
     fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    v2_fixture = json.loads(V2_FIXTURE_PATH.read_text(encoding="utf-8"))
     stdin_payload = "".join(
         json.dumps(request, separators=(",", ":")) + "\n" for request in fixture["requests"]
     )
@@ -76,17 +78,25 @@ def run_smoke(*, dist_dir: Path, python: str) -> None:
             [
                 str(venv_python),
                 "-c",
-                ("import candlescope_plugin_sdk as sdk; print(sdk.__version__, sdk.PROTOCOL_V1)"),
+                (
+                    "import candlescope_plugin_sdk as sdk; "
+                    "from candlescope_plugin_sdk.platform_v2 import "
+                    "HOST_API_V1, PLUGIN_PROTOCOL_V2, manifest_schema; "
+                    "print(sdk.__version__, sdk.PROTOCOL_V1, PLUGIN_PROTOCOL_V2, "
+                    "HOST_API_V1, manifest_schema()['properties']['schemaVersion']['const'])"
+                ),
             ],
             check=True,
             capture_output=True,
             text=True,
         )
-        if imported.stdout.strip() != "0.2.0 candlescope.script-runtime/1":
+        if imported.stdout.strip() != (
+            "0.2.0 candlescope.script-runtime/1 candlescope.plugin/2 candlescope.host-api/1 2"
+        ):
             raise RuntimeError(f"unexpected installed import output: {imported.stdout!r}")
 
         completed = subprocess.run(
-            [str(_venv_command(venv_path))],
+            [str(_venv_command(venv_path, "candlescope-hello-runtime"))],
             input=stdin_payload,
             check=True,
             capture_output=True,
@@ -100,6 +110,27 @@ def run_smoke(*, dist_dir: Path, python: str) -> None:
             raise RuntimeError("installed sidecar response hashes do not match fixture")
         if _canonical_sha256(responses) != expected["transcriptSha256"]:
             raise RuntimeError("installed sidecar transcript hash does not match fixture")
+
+        v2_stdin = "".join(
+            json.dumps(request, separators=(",", ":")) + "\n" for request in v2_fixture["requests"]
+        )
+        v2_completed = subprocess.run(
+            [str(_venv_command(venv_path, "candlescope-hello-command"))],
+            input=v2_stdin,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if v2_completed.stderr:
+            raise RuntimeError(f"v2 sidecar wrote unexpected stderr: {v2_completed.stderr!r}")
+        v2_responses = [
+            json.loads(line) for line in v2_completed.stdout.splitlines() if line.strip()
+        ]
+        v2_expected = v2_fixture["expected"]
+        if [_canonical_sha256(item) for item in v2_responses] != v2_expected["responseSha256"]:
+            raise RuntimeError("installed v2 sidecar response hashes do not match fixture")
+        if _canonical_sha256(v2_responses) != v2_expected["transcriptSha256"]:
+            raise RuntimeError("installed v2 sidecar transcript hash does not match fixture")
 
     print(f"package smoke passed: {wheel.name}")
 

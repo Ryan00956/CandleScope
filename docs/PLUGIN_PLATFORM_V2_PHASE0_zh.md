@@ -1,15 +1,16 @@
 # CandleScope 通用插件平台 v2 — Phase 0 执行记录
 
-> 状态：**实现与技术验收已完成，待独立提交**，2026-07-22。
+> 状态：**已完成并独立提交为 `381dd02`**，2026-07-22。
 >
 > 基线：`codex/plugin-platform-v1@400e520a9fa8a816229a5ad64330f10e8de9ddaf`。
 >
 > 边界：本阶段只增加文档、fixture、测试和基准工具/产物；没有改变生产运行时、API、
-> 前端、registry、用户数据库或默认路由。Phase 1 尚未开始。
+> 前端、registry、用户数据库或默认路由。本文保留 Phase 0 时点语义；后续 Phase 1 已完成，
+> 见 `PLUGIN_PLATFORM_V2_PHASE1_zh.md`。
 
 ## 1. 验收结论
 
-Phase 0 的技术退出门全部满足；形成独立阶段提交后才可以开始 Phase 1。不得把本记录解释
+Phase 0 的技术退出门全部满足，并已形成独立提交。不得把本记录解释
 为 manifest v2、通用 Host API、OS 沙箱、Sandbox UI、数据提供器或交易能力已经交付。
 
 | 退出门 | 结果 | 证据 |

@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "candlescope-plugin-sdk"
 version = "0.2.0"
-description = "Typed protocol SDK for CandleScope script runtime plugins."
+description = "Typed, dependency-free SDK for CandleScope sidecar plugins."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "GPL-3.0-only"
 authors = [
   { name = "CandleScope contributors" }
 ]
-keywords = ["candlescope", "plugin", "indicators", "json-rpc", "sidecar"]
+keywords = ["candlescope", "plugin", "contributions", "json-rpc", "sidecar"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -35,6 +35,7 @@ Issues = "https://github.com/Ryan00956/CandleScope/issues"
 dev = [
   "build>=1",
   "hatchling>=1.25",
+  "jsonschema>=4.23",
   "pytest>=7",
   "ruff>=0.5",
   "twine>=5",
@@ -42,6 +43,7 @@ dev = [
 
 [project.scripts]
 candlescope-hello-runtime = "candlescope_plugin_sdk.examples.hello_runtime:main"
+candlescope-hello-command = "candlescope_plugin_sdk.platform_v2.examples.hello_command:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/candlescope_plugin_sdk"]

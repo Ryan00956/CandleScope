@@ -1,6 +1,6 @@
 # CandleScope 通用插件平台 v2 执行方案
 
-> 状态：执行中；Phase 0 技术验收通过、待独立提交，Phase 1 尚未开始。
+> 状态：执行中；Phase 0 已完成（`381dd02`），Phase 1 已完成（本阶段提交），Phase 2 尚未开始。
 >
 > 基线：`codex/plugin-platform-v1@400e520`，2026-07-22。
 >
@@ -283,34 +283,42 @@ plugin.cspkg
         "id": "scanner",
         "type": "sandbox",
         "entry": "index.html",
-        "slot": "sidePanel"
+        "slot": "side-panel"
       }
     ]
   },
-  "contributes": {
-    "commands": [
-      {
-        "id": "scan",
-        "title": "扫描当前市场",
-        "entrypoint": "main"
+  "contributions": [
+    {
+      "id": "scan",
+      "kind": "command/1",
+      "title": "扫描当前市场",
+      "entrypoint": "main",
+      "configuration": {}
+    },
+    {
+      "id": "scanner-view",
+      "kind": "view/1",
+      "title": "市场扫描器",
+      "entrypoint": "main",
+      "configuration": {
+        "surfaceId": "scanner",
+        "slot": "side-panel"
       }
-    ],
-    "views": [
-      {
-        "id": "scanner",
-        "title": "市场扫描器",
-        "slot": "sidePanel"
+    },
+    {
+      "id": "scanner-settings",
+      "kind": "settings/1",
+      "title": "扫描设置",
+      "entrypoint": "main",
+      "configuration": {
+        "minimumVolume": {
+          "type": "number",
+          "default": 1000000,
+          "minimum": 0
+        }
       }
-    ],
-    "settings": [
-      {
-        "id": "minimumVolume",
-        "type": "number",
-        "default": 1000000,
-        "minimum": 0
-      }
-    ]
-  },
+    }
+  ],
   "permissions": {
     "required": [
       {
@@ -329,7 +337,8 @@ plugin.cspkg
     ],
     "optional": [
       {
-        "id": "notifications.show"
+        "id": "notifications.show",
+        "scope": {}
       }
     ]
   },
@@ -337,11 +346,16 @@ plugin.cspkg
     {
       "id": "descriptor",
       "kind": "controlTranscript",
-      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "entrypoint": "main"
     }
   ]
 }
 ```
+
+Phase 1 将 contribution 冻结为统一数组，而不是按 `commands/views/settings` 建多个顶层
+分组。`kind` 负责版本化语义，`configuration` 与 permission `scope` 是仅有的有界扩展区；
+其余对象继续拒绝未知字段。这样新增贡献类型不需要放宽整个 manifest 的严格解析。
 
 ### 7.3 静态声明规则
 
@@ -710,8 +724,8 @@ frontend/src/features/plugins/
 
 | 阶段 | 状态 | 交付物 | 解锁能力 |
 | --- | --- | --- | --- |
-| Phase 0：冻结基线与威胁模型 | 验收通过，待提交 | v1 golden、性能基线、攻击面、参考场景 | 可安全动工 |
-| Phase 1：SDK/manifest v2 | 未开始 | 通用模型、协议文档、Hello Command | 社区可编译契约 |
+| Phase 0：冻结基线与威胁模型 | 已完成（`381dd02`） | v1 golden、性能基线、攻击面、参考场景 | 可安全动工 |
+| Phase 1：SDK/manifest v2 | 已完成（本阶段提交） | 通用模型、协议文档、Hello Command | 社区可编译契约 |
 | Phase 2：通用 Host 控制面 | 未开始 | 双向 RPC、generation、通用 supervisor | 后端贡献点运行 |
 | Phase 3：Bundle/Installer v2 | 未开始 | 多 entrypoint/assets、staging、原子激活 | 可管理安装与回滚 |
 | Phase 4：权限与 OS 沙箱 | 未开始 | Grant Store、Broker、隔离、审计 | 可开放受控 Host API |
@@ -727,9 +741,9 @@ frontend/src/features/plugins/
 
 ## 16. Phase 0：冻结基线与威胁模型
 
-> 2026-07-22 技术验收通过，待形成独立阶段提交。实测环境、冻结哈希、性能 artifact、
+> 2026-07-22 已完成并独立提交为 `381dd02`。实测环境、冻结哈希、性能 artifact、
 > L0～L4 威胁登记、六个参考插件合同和全部回归门禁见
-> `PLUGIN_PLATFORM_V2_PHASE0_zh.md`。Phase 1 未开始。
+> `PLUGIN_PLATFORM_V2_PHASE0_zh.md`。该记录保留 Phase 0 时点的边界结论。
 
 ### 范围
 
@@ -758,6 +772,9 @@ frontend/src/features/plugins/
 直接 revert 测试/文档提交，不影响运行时。
 
 ## 17. Phase 1：SDK 与 manifest v2
+
+> 2026-07-22 已完成实现与技术验收，并随本阶段独立提交交付。公开协议、冻结哈希、
+> wheel smoke、完整回归和未交付边界见 `PLUGIN_PLATFORM_V2_PHASE1_zh.md`。Phase 2 尚未开始。
 
 ### 范围
 

@@ -2,15 +2,26 @@
 
 [English](README.md)
 
-`candlescope-plugin-sdk` 是社区开发 CandleScope 脚本 runtime 插件时使用的零
-运行时依赖 Python 契约。插件作为隔离 sidecar 运行，通过 stdin/stdout 交换
-UTF-8 JSON-RPC 2.0 JSON Lines。
+`candlescope-plugin-sdk` 是社区开发 CandleScope sidecar 插件时使用的零运行时依赖
+Python 契约。现在公开两个互相隔离的命名空间：
+
+- 顶层继续冻结 `candlescope.script-runtime/1`，服务脚本/指标 runtime；
+- `candlescope_plugin_sdk.platform_v2` 新增通用 manifest、贡献点、权限、生命周期、
+  取消和有界双向 Host 调用。
+
+两者都通过 stdin/stdout 交换 UTF-8 JSON-RPC 2.0 JSON Lines。进程隔离仍只是依赖和
+传输边界，不等同于完整 OS 沙箱。
 
 v1 协议 ID：
 
 ```text
 candlescope.script-runtime/1
 ```
+
+通用平台协议为 `candlescope.plugin/2` 与 `candlescope.host-api/1`。完整契约见
+[`docs/protocol-v2.md`](docs/protocol-v2.md)，可运行参考见
+[`Hello Command`](examples/platform-v2/hello-command.manifest.json)。Phase 1 只交付 SDK
+契约；生产 Host、权限代理、installer 和沙箱仍由后续阶段实现。
 
 ## v1 已冻结能力
 
@@ -101,5 +112,6 @@ python -m build
 python scripts/package_smoke.py --dist-dir dist
 ```
 
-`package_smoke.py` 会把构建出的 wheel 离线安装到全新临时 venv，再通过真实
-console entry point 重放固定五方法 transcript。
+`package_smoke.py` 会把构建出的 wheel 离线安装到全新临时 venv，再通过真实 console
+entry point 同时重放冻结的 v1 Hello Runtime 与 v2 Hello Command transcript。发布前应在
+Python 3.12 和 3.13 各运行一次。

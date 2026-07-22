@@ -3,14 +3,29 @@
 [简体中文](README_zh.md)
 
 `candlescope-plugin-sdk` is the dependency-free Python contract for building
-CandleScope script runtime plugins. A plugin runs as an isolated sidecar and
-speaks UTF-8 JSON-RPC 2.0 over newline-delimited stdin/stdout.
+CandleScope sidecar plugins. It now exposes two isolated public namespaces:
+
+- the frozen top-level `candlescope.script-runtime/1` API for script/indicator
+  runtimes;
+- the additive `candlescope_plugin_sdk.platform_v2` API for general plugin
+  manifests, contributions, permissions, lifecycle, cancellation, and bounded
+  bidirectional Host calls.
+
+Both use UTF-8 JSON-RPC 2.0 over newline-delimited stdin/stdout. Process
+separation remains a dependency/transport boundary, not a complete OS sandbox.
 
 The v1 protocol identifier is:
 
 ```text
 candlescope.script-runtime/1
 ```
+
+The general platform identifiers are `candlescope.plugin/2` and
+`candlescope.host-api/1`. See
+[`docs/protocol-v2.md`](docs/protocol-v2.md) and the packaged
+[`Hello Command`](examples/platform-v2/hello-command.manifest.json). Phase 1
+defines an SDK contract only; a production Host, permission broker, installer,
+and sandbox arrive behind later gates.
 
 ## What v1 freezes
 
@@ -143,6 +158,10 @@ python -m pytest -q
 python -m build
 python scripts/package_smoke.py --dist-dir dist
 ```
+
+`package_smoke.py` installs the wheel into a fresh offline venv and replays both
+the frozen v1 Hello Runtime transcript and the v2 Hello Command transcript. Run
+it once with Python 3.12 and once with Python 3.13 before promoting a release.
 
 Use `python -m build --no-isolation` only when the selected interpreter already
 has the declared build backend installed.

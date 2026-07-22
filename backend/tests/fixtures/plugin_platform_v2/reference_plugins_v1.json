@@ -1,0 +1,172 @@
+{
+  "schemaVersion": "candlescope.plugin-platform.reference-plugins.v1",
+  "description": "Frozen Phase 0 acceptance contracts for the six reference plugins used to prove Plugin Platform v2 without promoting proposals to shipped capability.",
+  "plugins": [
+    {
+      "id": "phase0.hello-command",
+      "displayName": "Hello Command",
+      "firstTargetPhase": 1,
+      "purpose": "Prove the generic SDK transcript, lifecycle, descriptor, command dispatch, cancellation, and malformed-input behavior.",
+      "contributions": [
+        "command/1"
+      ],
+      "requiredCapabilities": [],
+      "optionalCapabilities": [],
+      "forbiddenCapabilities": [
+        "network.connect",
+        "filesystem.open-user-selected",
+        "secrets.use",
+        "accounts.read",
+        "trade.submit"
+      ],
+      "acceptance": [
+        "A fixed command invocation returns the frozen JSON-only result.",
+        "The process remains stopped until the command activation event.",
+        "Cancellation, crash, timeout, oversize output, and unknown methods fail closed.",
+        "Disable invalidates the process instance and all late responses."
+      ]
+    },
+    {
+      "id": "phase0.market-scanner",
+      "displayName": "Read-only Market Scanner",
+      "firstTargetPhase": 7,
+      "purpose": "Prove that the platform can deliver a useful non-indicator product feature with native UI, scoped data reads, settings, storage, jobs, and optional notifications.",
+      "contributions": [
+        "command/1",
+        "settings/1",
+        "view/1",
+        "job/1",
+        "chart-layer/1"
+      ],
+      "requiredCapabilities": [
+        "market.symbols.read",
+        "market.bars.read",
+        "storage.private"
+      ],
+      "optionalCapabilities": [
+        "notifications.show"
+      ],
+      "forbiddenCapabilities": [
+        "network.connect",
+        "filesystem.open-user-selected",
+        "secrets.use",
+        "accounts.read",
+        "trade.submit"
+      ],
+      "acceptance": [
+        "Install from a fixed-digest bundle and show exact read/storage scopes before enable.",
+        "Scan a bounded symbol set through the host market-data adapter without direct DataManager access.",
+        "Render a declarative side panel and optional chart markers without plugin JavaScript.",
+        "Revocation makes the next read fail and disable removes process, job, view, layer, and handles.",
+        "An update that expands symbols, history depth, or required permissions remains staged.",
+        "Rollback restores the prior version and compatible private data while v1 runtimes remain unchanged."
+      ]
+    },
+    {
+      "id": "phase0.sandbox-view",
+      "displayName": "Sandbox View",
+      "firstTargetPhase": 8,
+      "purpose": "Prove complex custom UI through an isolated iframe and the versioned UI bridge without entering the CandleScope JavaScript realm.",
+      "contributions": [
+        "view/1"
+      ],
+      "requiredCapabilities": [],
+      "optionalCapabilities": [
+        "storage.private"
+      ],
+      "forbiddenCapabilities": [
+        "network.connect",
+        "filesystem.open-user-selected",
+        "secrets.use",
+        "accounts.read",
+        "trade.submit"
+      ],
+      "acceptance": [
+        "The iframe cannot access parent DOM, cookies, host storage, host JavaScript objects, or service-worker scope.",
+        "Direct fetch, WebSocket, popup, top navigation, form submission, and download are denied by default.",
+        "Only a one-time MessageChannel token can call the negotiated UI bridge.",
+        "Origin spoofing, token replay, oversized messages, and stale generation messages are rejected.",
+        "Suspend and dispose release bridge calls and subscriptions without affecting AppShell."
+      ]
+    },
+    {
+      "id": "phase0.mock-provider",
+      "displayName": "Mock Market-data Provider",
+      "firstTargetPhase": 10,
+      "purpose": "Prove the public symbol/history/realtime provider contract and stream backpressure without relying on a live exchange or credentials.",
+      "contributions": [
+        "symbol-provider/1",
+        "market-data-provider/1"
+      ],
+      "requiredCapabilities": [
+        "market.data.provide"
+      ],
+      "optionalCapabilities": [],
+      "forbiddenCapabilities": [
+        "secrets.use",
+        "accounts.read",
+        "trade.submit"
+      ],
+      "acceptance": [
+        "Deterministic fixtures produce canonical symbols, capabilities, history pages, and realtime events.",
+        "Provider output enters the host ingestion/normalization path and cannot directly write cache, SQLite, GapLedger, or EventBus.",
+        "Closed, corrected, duplicate, gap, out-of-order, snapshot/delta, sequence, and resync semantics are explicit.",
+        "Credit exhaustion applies bounded backpressure and a slow provider cannot block Data Engine producers.",
+        "Crash and restart isolate the provider and do not contaminate another exchange identity."
+      ]
+    },
+    {
+      "id": "phase0.paper-broker",
+      "displayName": "Paper Broker",
+      "firstTargetPhase": 11,
+      "purpose": "Prove account and order contribution shapes, risk gates, idempotency, audit, and kill switch before any live credential or execution capability exists.",
+      "contributions": [
+        "account-provider/1",
+        "order-executor/1"
+      ],
+      "requiredCapabilities": [
+        "accounts.read",
+        "trade.simulate"
+      ],
+      "optionalCapabilities": [],
+      "forbiddenCapabilities": [
+        "network.connect",
+        "secrets.use",
+        "trade.submit",
+        "trade.cancel"
+      ],
+      "acceptance": [
+        "Fixture accounts expose only canonical balances, positions, orders, and timestamps.",
+        "Every OrderIntent passes scope, risk, quantity, price, idempotency, and audit gates.",
+        "Duplicate submit, cancel/fill races, unknown results, reconnect, recovery, and no-lookahead are deterministic.",
+        "Revocation and the global kill switch reject the next action.",
+        "The reference plugin cannot obtain a live secret or live execution handle."
+      ]
+    },
+    {
+      "id": "phase0.v1-script-runtime-adapter",
+      "displayName": "v1 Script Runtime Adapter",
+      "firstTargetPhase": 13,
+      "purpose": "Prove that Pyne and Pine Compatibility can appear in the unified catalog while their existing protocol, release artifacts, routes, and public transports remain stable.",
+      "contributions": [
+        "script-runtime/1"
+      ],
+      "requiredCapabilities": [],
+      "optionalCapabilities": [],
+      "forbiddenCapabilities": [
+        "network.connect",
+        "filesystem.open-user-selected",
+        "secrets.use",
+        "accounts.read",
+        "trade.submit"
+      ],
+      "acceptance": [
+        "The adapter preserves candlescope.script-runtime/1 and candlescope.render/1 wire contracts.",
+        "Current SDK transcript and HTTP compute, HTTP range, and indicator WebSocket canonical hashes remain unchanged.",
+        "Existing pinned Pyne and Pine bundles install and pass fresh-process semantic probes.",
+        "Registry import is explicit, previewable, reversible, and never guesses a v1-to-v2 conversion.",
+        "A stale or unavailable runtime fails closed without legacy fallback."
+      ]
+    }
+  ]
+}

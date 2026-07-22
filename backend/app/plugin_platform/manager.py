@@ -117,6 +117,49 @@ class PluginManager:
                 raise
             self._started = True
 
+    async def add_supervisors(
+        self, supervisors: Iterable[EntrypointSupervisor]
+    ) -> None:
+        """Add a newly active installation without disturbing other plugins."""
+
+        values = tuple(supervisors)
+        additions = {item.owner_key: item for item in values}
+        if len(additions) != len(values):
+            raise ValueError("added supervisor owner keys must be unique")
+        async with self._lifecycle_lock:
+            conflicts = sorted(set(additions) & set(self._supervisors))
+            if conflicts:
+                raise ValueError(
+                    f"supervisor owner keys are already registered: {conflicts}"
+                )
+            self._supervisors.update(additions)
+
+    async def remove_plugin(self, plugin_id: str) -> int:
+        """Stop and forget every owner for one plugin generation."""
+
+        async with self._lifecycle_lock:
+            owners = sorted(
+                (owner for owner in self._supervisors if owner[0] == plugin_id),
+                reverse=True,
+            )
+            registrations = tuple(
+                item
+                for item in self.contributions.registrations()
+                if item.plugin_id == plugin_id
+            )
+            for registration in registrations:
+                self.contributions.remove_owner(
+                    plugin_id=registration.plugin_id,
+                    entrypoint_id=registration.entrypoint_id,
+                    generation=registration.generation,
+                )
+            for owner in owners:
+                supervisor = self._supervisors.pop(owner)
+                await supervisor.stop()
+                self._activation_capabilities.pop(owner, None)
+                self._activation_failures.pop(owner, None)
+            return len(owners)
+
     async def _activate_supervisor(
         self,
         supervisor: EntrypointSupervisor,
@@ -223,6 +266,12 @@ class PluginManager:
                 entrypoint_id=owner[1],
             )
         return supervisor
+
+    def supervisor(self, plugin_id: str, entrypoint_id: str) -> EntrypointSupervisor:
+        return self._supervisor((plugin_id, entrypoint_id))
+
+    def owner_keys(self) -> tuple[OwnerKey, ...]:
+        return tuple(sorted(self._supervisors))
 
     def health_summary(self) -> dict[str, Any]:
         self._prune_stale_contributions()

@@ -32,6 +32,10 @@ ScopeExtractor = Callable[[dict[str, Any]], dict[str, Any]]
 CapabilityHandler = Callable[
     [HostCallRequest], Awaitable[dict[str, Any]] | dict[str, Any]
 ]
+CapabilityLeaseHandler = Callable[
+    [HostCallRequest, "CapabilityLease"],
+    Awaitable[dict[str, Any]] | dict[str, Any],
+]
 
 
 def _fingerprint(handle: str) -> str:
@@ -453,14 +457,24 @@ class CapabilityHandleAuthority:
 class CapabilityMethodPolicy:
     method: str
     permission_id: str
-    handler: CapabilityHandler
+    handler: CapabilityHandler | None = None
     scope_extractor: ScopeExtractor = lambda _params: {}
     require_user_action: bool = False
     max_calls_per_minute: int = 60
     max_calls_per_activation: int = 1_000
+    handler_with_lease: CapabilityLeaseHandler | None = None
 
     def __post_init__(self) -> None:
-        if not self.method or not self.permission_id or not callable(self.handler):
+        if (
+            not self.method
+            or not self.permission_id
+            or (self.handler is None) == (self.handler_with_lease is None)
+            or (self.handler is not None and not callable(self.handler))
+            or (
+                self.handler_with_lease is not None
+                and not callable(self.handler_with_lease)
+            )
+        ):
             raise ValueError("capability method policy identity is invalid")
         if not callable(self.scope_extractor):
             raise ValueError("scope_extractor must be callable")
@@ -562,7 +576,11 @@ class CapabilityBroker:
                     details={"permissionId": lease.permission_id},
                 )
             self._consume_budget(policy, lease)
-            result = policy.handler(call)
+            if policy.handler_with_lease is not None:
+                result = policy.handler_with_lease(call, lease)
+            else:
+                assert policy.handler is not None
+                result = policy.handler(call)
             if inspect.isawaitable(result):
                 result = await result
             normalized = normalize_json(result, path="host.call.result")

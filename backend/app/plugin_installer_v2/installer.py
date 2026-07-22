@@ -944,6 +944,86 @@ class PlatformPluginInstaller:
         probe = self._run_probe(installation, bundle)
         return bundle, receipt, probe
 
+    def verify_activation_static(
+        self, record: ActivationRecord
+    ) -> tuple[VerifiedPlatformBundle, Path]:
+        """Verify an activation without executing code from a disabled plugin.
+
+        Fresh-process semantics remain an install/check gate.  Product catalog
+        bootstrap revalidates the immutable bundle, receipt, content digests,
+        activation binding and venv launch target, but deliberately does not
+        import or execute the plugin until an activation event occurs.
+        """
+
+        if not isinstance(record, ActivationRecord):
+            raise TypeError("record must be an ActivationRecord")
+        installation = self._installation_path(record.plugin_id, record.installation_id)
+        with _installation_lock(self.lock_path, self.lock_timeout_seconds):
+            if installation.is_symlink() or not installation.is_dir():
+                raise PlatformInstallerError(
+                    "managed installation must be a real directory",
+                    plugin_id=record.plugin_id,
+                )
+            bundle = inspect_platform_bundle(
+                self._bundle_path(installation), host_version=self.host_version
+            )
+            receipt = self._load_receipt(installation)
+            receipt.assert_bundle(bundle)
+            if (
+                installation.name != bundle.installation_id
+                or installation.parent.name != bundle.manifest.plugin.id
+            ):
+                raise PlatformInstallerError(
+                    "managed installation path does not match its identity"
+                )
+            required_permissions = tuple(
+                item.id for item in bundle.manifest.permissions.required
+            )
+            if (
+                record.installation_id != bundle.installation_id
+                or record.bundle_sha256 != bundle.sha256
+                or record.manifest_sha256 != bundle.manifest_sha256
+                or record.name != bundle.manifest.plugin.name
+                or record.version != bundle.manifest.plugin.version
+                or record.publisher != bundle.manifest.plugin.publisher
+                or record.plugin_id != bundle.manifest.plugin.id
+                or record.required_permissions != required_permissions
+            ):
+                raise PlatformInstallerError(
+                    "activation does not match its immutable installation",
+                    plugin_id=record.plugin_id,
+                )
+            self._verify_content(
+                installation, bundle.envelope.contents, bundle.envelope_sha256
+            )
+            expected_python = self._venv_python(installation).resolve(strict=False)
+            if not expected_python.is_file():
+                raise PlatformInstallerError(
+                    "managed virtual environment Python is missing",
+                    plugin_id=record.plugin_id,
+                )
+            manifest_entrypoints = {
+                item.id: item for item in bundle.manifest.backend_entrypoints
+            }
+            if set(manifest_entrypoints) != {item.id for item in record.entrypoints}:
+                raise PlatformInstallerError(
+                    "activation entrypoints do not match the manifest",
+                    plugin_id=record.plugin_id,
+                )
+            for entrypoint in record.entrypoints:
+                declared = manifest_entrypoints[entrypoint.id]
+                if (
+                    entrypoint.executable.resolve(strict=False) != expected_python
+                    or entrypoint.working_directory.resolve(strict=False)
+                    != installation.resolve(strict=False)
+                    or entrypoint.module != declared.python_module
+                ):
+                    raise PlatformInstallerError(
+                        "activation launch target does not match its immutable installation",
+                        plugin_id=record.plugin_id,
+                    )
+            return bundle, installation
+
     def _remove_staging(self, path: Path) -> None:
         staging_root = self.staging_directory.resolve(strict=False)
         if path.resolve(strict=False).parent != staging_root or not path.name.endswith(

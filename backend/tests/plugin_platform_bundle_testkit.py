@@ -47,6 +47,9 @@ TRANSCRIPT = (
     / "hello_command_transcript_v2.json"
 )
 MANIFEST_SCHEMA = SDK_SOURCE / "platform_v2" / "schemas" / "manifest-v2.schema.json"
+SCHEDULED_MANIFEST = (
+    SDK_SOURCE / "platform_v2" / "examples" / "scheduled-notification.manifest.json"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +78,7 @@ def build_platform_sdk_wheel(
     manifest: dict[str, Any],
     *,
     sdk_version: str = "0.2.0",
+    manifest_resource: str = "platform_v2/examples/hello-command.manifest.json",
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     filename = f"candlescope_plugin_sdk-{sdk_version}-py3-none-any.whl"
@@ -89,7 +93,7 @@ def build_platform_sdk_wheel(
             data = data.replace(
                 b'__version__ = "0.2.0"', f'__version__ = "{sdk_version}"'.encode()
             )
-        if relative == "platform_v2/examples/hello-command.manifest.json":
+        if relative == manifest_resource:
             data = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode(
                 "utf-8"
             )
@@ -223,5 +227,57 @@ def build_hello_platform_bundle(
         directory / f"hello-command-{version}.cspkg",
         operating_systems=operating_systems,
         architectures=architectures,
+    )
+    return PlatformBundleFixture(bundle, source, wheel_path, manifest)
+
+
+def build_scheduled_notification_bundle(
+    directory: Path,
+    *,
+    interval_seconds: float = 60.0,
+    run_on_startup: bool = False,
+) -> PlatformBundleFixture:
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads(SCHEDULED_MANIFEST.read_text(encoding="utf-8"))
+    job = next(item for item in manifest["contributions"] if item["kind"] == "job/1")
+    job["configuration"]["schedule"]["intervalSeconds"] = interval_seconds
+    job["configuration"]["runOnStartup"] = run_on_startup
+    manifest["permissions"]["required"][1]["scope"]["maxRunsPerHour"] = min(
+        3600, 3600 / interval_seconds
+    )
+    source = directory / "source"
+    (source / "wheels").mkdir(parents=True)
+    (source / "schemas").mkdir()
+    (source / "sbom").mkdir()
+    wheel = build_platform_sdk_wheel(
+        directory / "wheelhouse",
+        manifest,
+        manifest_resource="platform_v2/examples/scheduled-notification.manifest.json",
+    )
+    wheel_path = source / "wheels" / wheel.name
+    shutil.copyfile(wheel, wheel_path)
+    (source / "manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    shutil.copyfile(MANIFEST_SCHEMA, source / "schemas" / "manifest-v2.schema.json")
+    sbom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "serialNumber": "urn:uuid:00000000-0000-4000-8000-000000000002",
+        "version": 1,
+        "components": [
+            {
+                "type": "library",
+                "name": "candlescope-plugin-sdk",
+                "version": "0.2.0",
+            }
+        ],
+    }
+    (source / "sbom" / "cyclonedx.json").write_text(
+        json.dumps(sbom, indent=2), encoding="utf-8"
+    )
+    bundle = build_platform_bundle(
+        source,
+        directory / "scheduled-notification-0.1.0.cspkg",
     )
     return PlatformBundleFixture(bundle, source, wheel_path, manifest)

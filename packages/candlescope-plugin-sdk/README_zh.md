@@ -20,8 +20,10 @@ candlescope.script-runtime/1
 
 通用平台协议为 `candlescope.plugin/2` 与 `candlescope.host-api/1`。完整契约见
 [`docs/protocol-v2.md`](docs/protocol-v2.md)，可运行参考见
-[`Hello Command`](examples/platform-v2/hello-command.manifest.json)。Phase 1 只交付 SDK
-契约；生产 Host、权限代理、installer 和沙箱仍由后续阶段实现。
+[`Hello Command`](examples/platform-v2/hello-command.manifest.json) 和
+[`Scheduled Notification`](examples/platform-v2/scheduled-notification.manifest.json)。CandleScope
+Phase 2–5 已提供生产 Host、Installer、权限/沙箱和 opt-in 核心产品组合根；SDK 本身仍不授予
+任何 Host 能力，实际 capability、scope 和信任级别以安装目标为准。
 
 ## v1 已冻结能力
 
@@ -115,6 +117,16 @@ python backend\scripts\candlescope_plugin.py v2 --json inspect `
 v2 格式不会自动迁移 v1 包；完整布局、固定 SHA-256、staged、安装与回滚契约见
 [`PLUGIN_PLATFORM_V2_PHASE3_zh.md`](../../docs/PLUGIN_PLATFORM_V2_PHASE3_zh.md)。
 
+安装 SDK wheel 后还可直接运行：
+
+```powershell
+candlescope-hello-command
+candlescope-scheduled-notification
+```
+
+后者声明 `notification/1` 与 `job/1`，通过 `notifications.show` Host call 完成无 UI 定时
+通知。它只演示 Phase 5 已开放的能力；行情、图表、网络、文件、secrets 和交易仍不可用。
+
 ## 开发门禁
 
 ```powershell
@@ -125,6 +137,7 @@ python -m build
 python scripts/package_smoke.py --dist-dir dist
 ```
 
-`package_smoke.py` 会把构建出的 wheel 离线安装到全新临时 venv，再通过真实 console
-entry point 同时重放冻结的 v1 Hello Runtime 与 v2 Hello Command transcript。发布前应在
-Python 3.12 和 3.13 各运行一次。
+`package_smoke.py` 会把构建出的 wheel 离线安装到全新临时 venv，通过真实 console entry
+point 重放冻结的 v1 Hello Runtime 与 v2 Hello Command transcript，并确认 Scheduled
+Notification 的模块、manifest resource 和 console entry point 已被打包。发布前应在 Python
+3.12 和 3.13 各运行一次。

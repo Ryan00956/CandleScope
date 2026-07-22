@@ -199,6 +199,10 @@ token 不在 HTTP 响应中返回。产品默认挂载和可信桌面 token hand
 
 ## 8. 保留边界与下一阶段
 
+> 后续状态（2026-07-22）：下述 Phase 5 组合根与核心扩展点已经按这些边界交付，见
+> [`PLUGIN_PLATFORM_V2_PHASE5_zh.md`](PLUGIN_PLATFORM_V2_PHASE5_zh.md)。Phase 4 的安全结论和
+> 当时未接入产品 lifecycle 的历史边界保持不变。
+
 本阶段通过了 Windows OS 层 direct file/network 负例，所以可以继续 Phase 5。但以下陈述仍然
 不成立：
 

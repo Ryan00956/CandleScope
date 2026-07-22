@@ -91,6 +91,15 @@ def _patch_startup_dependencies(
 
     routing = routing or _RoutingService()
 
+    for name in (
+        "CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED",
+        "CANDLESCOPE_PLUGIN_PLATFORM_V2_ROOT",
+        "CANDLESCOPE_PLUGIN_PLATFORM_V2_TRUST",
+        "CANDLESCOPE_PLUGIN_PLATFORM_V2_MANAGEMENT_ORIGINS",
+        "CANDLESCOPE_PLUGIN_PLATFORM_V2_STARTUP_ALLOWLIST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     monkeypatch.setattr(main_module, "EventLoopLagMonitor", _LagMonitor)
     monkeypatch.setattr(main_module, "init_klines_storage", lambda: None)
     monkeypatch.setattr(main_module, "init_market_metrics_storage", lambda: None)
@@ -142,8 +151,23 @@ async def test_application_lifecycle_owns_plugin_host_and_health_summary(
         assert routing.start_calls == 1
         assert main_module.app.state.plugin_runtime_host is host
         assert main_module.app.state.indicator_runtime_service is routing
+        assert (
+            main_module.app.state.plugin_platform_v2.health_summary()["status"]
+            == "disabled"
+        )
         health = await main_module.health_check()
         assert health["plugin_runtimes"] == host.health_summary()
+        assert health["plugin_platform_v2"] == {
+            "status": "disabled",
+            "enabled": False,
+            "started": False,
+            "installed": 0,
+            "activeRecords": 0,
+            "runningEntrypoints": 0,
+            "subscriptions": 0,
+            "jobs": 0,
+            "failedPlugins": 0,
+        }
         assert set(health["plugin_runtimes"]) == {
             "status",
             "configured",

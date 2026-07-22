@@ -23,9 +23,12 @@ candlescope.script-runtime/1
 The general platform identifiers are `candlescope.plugin/2` and
 `candlescope.host-api/1`. See
 [`docs/protocol-v2.md`](docs/protocol-v2.md) and the packaged
-[`Hello Command`](examples/platform-v2/hello-command.manifest.json). Phase 1
-defines an SDK contract only; a production Host, permission broker, installer,
-and sandbox arrive behind later gates.
+[`Hello Command`](examples/platform-v2/hello-command.manifest.json) and
+[`Scheduled Notification`](examples/platform-v2/scheduled-notification.manifest.json).
+CandleScope Phases 2–5 now provide the production Host, Installer,
+permission/sandbox controls, and an opt-in core product composition root. The
+SDK itself grants no Host capability; effective scopes and trust policy remain
+owned by the installation target.
 
 ## What v1 freezes
 
@@ -165,6 +168,18 @@ The v2 parser never guesses a migration from a v1 bundle. See the
 for the layout, pinned SHA-256, staged state, installation, and rollback
 contracts.
 
+The installed wheel also exposes:
+
+```powershell
+candlescope-hello-command
+candlescope-scheduled-notification
+```
+
+The latter declares `notification/1` plus `job/1` and completes a no-UI
+scheduled notification through the `notifications.show` Host call. It only
+demonstrates Phase 5 capabilities; market data, chart, network, file, secret,
+and trading APIs remain unavailable.
+
 ## Development checks
 
 ```powershell
@@ -175,9 +190,11 @@ python -m build
 python scripts/package_smoke.py --dist-dir dist
 ```
 
-`package_smoke.py` installs the wheel into a fresh offline venv and replays both
-the frozen v1 Hello Runtime transcript and the v2 Hello Command transcript. Run
-it once with Python 3.12 and once with Python 3.13 before promoting a release.
+`package_smoke.py` installs the wheel into a fresh offline venv, replays both
+the frozen v1 Hello Runtime transcript and the v2 Hello Command transcript, and
+checks that the Scheduled Notification module, manifest resource, and console
+entry point were packaged. Run it once with Python 3.12 and once with Python
+3.13 before promoting a release.
 
 Use `python -m build --no-isolation` only when the selected interpreter already
 has the declared build backend installed.

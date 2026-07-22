@@ -308,14 +308,15 @@ golden。可信开发包已发布为
 artifact。CandleScope 已删除 `packages/pyne-runtime` 和 in-process Pyne facade。完整执行记录见
 [`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
 
-独立演进的通用 Plugin Platform v2 已完成 SDK、业务无关 Host、Bundle/Installer，以及
-权限与 Windows OS 沙箱四个基础阶段。显式 `candlescope-plugin v2` 命令现支持独立 Grant
-Store、permission diff、grant/deny/revoke、scope、哈希链审计和安全 staging；Host 通过代际
-opaque capability、速率/消息配额与 AppContainer/Job Object/ACL 隔离受控 sidecar。真实恶意
-探针已证明用户文件、direct network、fork、内存、CPU、磁盘和 stderr 边界。当前 v2 registry
-和受保护 management router 仍未接入产品默认启动，publisher identity 也尚未签名，因此默认
-路径继续只用于 first-party-pinned/local-trusted 插件，不开放 Marketplace。执行记录见
-[`PLUGIN_PLATFORM_V2_PHASE4_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE4_zh.md)。
+独立演进的通用 Plugin Platform v2 已完成前五阶段，并达到“最小通用插件平台”：除 SDK、
+业务无关 Host、Bundle/Installer、权限与 Windows OS 沙箱外，`app.plugin_core_v2` 已把 active
+registry 接入 opt-in 产品生命周期，提供 command/settings/notification/event/job、插件私有
+KV/document/blob、snapshot/migration、版本化公共事件、定时任务、公开安全 catalog 和受保护
+management API。Hello Command 与无 UI Scheduled Notification 已通过真实离线安装、grant、
+lazy activation、Host call 和 revoke 回收。feature flag 默认关闭，环境 bootstrap 继续只允许
+显式 local-trusted，publisher identity 也尚未签名；市场数据、图表/前端、网络、provider、交易
+和 Marketplace 均未开放。执行记录见
+[`PLUGIN_PLATFORM_V2_PHASE5_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE5_zh.md)。
 
 Phase 8 新增独立可构建的
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README_zh.md)：

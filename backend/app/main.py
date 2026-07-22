@@ -69,6 +69,7 @@ from app.core.config import (
 )
 from app.core.executors import executors_snapshot
 from app.core.runtime_metrics import EventLoopLagMonitor, ws_runtime_metrics
+from app.plugin_core_v2 import create_core_plugin_router
 from app.data_engine.storage import (
     init_klines_storage,
     init_liquidation_storage,
@@ -80,6 +81,7 @@ logger = logging.getLogger("candlescope")
 
 APP_NAME = "CandleScope"
 APP_VERSION = "0.3.0"
+PLUGIN_PLATFORM_V2_HOST_VERSION = "0.4.0"
 
 app = FastAPI(
     title="CandleScope API",
@@ -110,6 +112,7 @@ app.include_router(symbols_router, prefix="/api/v1")
 app.include_router(subscriptions_router, prefix="/api/v1")
 app.include_router(price_ws_router, prefix="/api/v1")
 app.include_router(replay_router, prefix="/api/v1")
+app.include_router(create_core_plugin_router())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -217,11 +220,16 @@ async def startup_event() -> None:
         ensure_first_party_plugins_from_environment,
     )
     from app.plugin_runtime import build_runtime_host_from_environment
+    from app.plugin_core_v2 import (
+        build_core_plugin_platform_from_environment,
+        build_management_guard_from_environment,
+    )
     from app.indicator.runtime_service import (
         build_indicator_runtime_service_from_environment,
     )
 
     plugin_runtime_host = None
+    plugin_platform_v2 = None
     try:
         first_party_bootstrap = await asyncio.to_thread(
             ensure_first_party_plugins_from_environment,
@@ -238,13 +246,25 @@ async def startup_event() -> None:
             host=plugin_runtime_host,
         )
         await indicator_runtime_service.start()
+        plugin_platform_v2 = build_core_plugin_platform_from_environment(
+            host_name=APP_NAME,
+            host_version=PLUGIN_PLATFORM_V2_HOST_VERSION,
+        )
+        plugin_platform_v2_guard = build_management_guard_from_environment(
+            platform=plugin_platform_v2,
+        )
+        await plugin_platform_v2.start()
     except BaseException:
+        if plugin_platform_v2 is not None:
+            await plugin_platform_v2.stop()
         if plugin_runtime_host is not None:
             await plugin_runtime_host.stop()
         await lag_monitor.stop()
         raise
     app.state.plugin_runtime_host = plugin_runtime_host
     app.state.indicator_runtime_service = indicator_runtime_service
+    app.state.plugin_platform_v2 = plugin_platform_v2
+    app.state.plugin_platform_v2_management_guard = plugin_platform_v2_guard
     plugin_summary = plugin_runtime_host.health_summary()
     print(
         "[startup] Runtime plugin host "
@@ -276,10 +296,14 @@ async def startup_event() -> None:
     try:
         await _init_data_manager()
     except BaseException:
+        await plugin_platform_v2.stop()
         await indicator_runtime_service.stop()
         await plugin_runtime_host.stop()
         await lag_monitor.stop()
         raise
+    plugin_platform_v2.publish_event(
+        "candlescope.app.ready/1", {"hostVersion": PLUGIN_PLATFORM_V2_HOST_VERSION}
+    )
 
 
 @app.on_event("shutdown")
@@ -288,6 +312,16 @@ async def shutdown_event() -> None:
     lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
     if lag_monitor is not None:
         await lag_monitor.stop()
+
+    plugin_platform_v2 = getattr(app.state, "plugin_platform_v2", None)
+    if plugin_platform_v2 is not None:
+        try:
+            plugin_platform_v2.publish_event(
+                "candlescope.app.stopping/1", {"reason": "Application shutdown"}
+            )
+            await plugin_platform_v2.stop()
+        except Exception as exc:
+            logger.warning("Plugin Platform v2 shutdown error: %s", exc, exc_info=True)
 
     indicator_engine = getattr(app.state, "indicator_engine", None)
     if indicator_engine is not None:
@@ -364,6 +398,9 @@ async def health_check() -> dict:
     plugin_runtime_host = getattr(app.state, "plugin_runtime_host", None)
     if plugin_runtime_host is not None:
         result["plugin_runtimes"] = plugin_runtime_host.health_summary()
+    plugin_platform_v2 = getattr(app.state, "plugin_platform_v2", None)
+    if plugin_platform_v2 is not None:
+        result["plugin_platform_v2"] = plugin_platform_v2.health_summary()
     first_party_bootstrap = getattr(
         app.state,
         "first_party_plugin_bootstrap",

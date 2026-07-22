@@ -305,3 +305,43 @@ test("shared gate reduces a manager configured for two workers to one speculativ
   manager.dispose();
   gate.dispose();
 });
+
+test("active-chart hydration preempts a watchlist preload and the desired job resumes once", async () => {
+  resetWatchlistFullCache();
+  const job = preloadJob("BTCUSDT", "45m");
+  const gate = new ForegroundPreloadGate(0);
+  let calls = 0;
+  let firstAborted = false;
+  const manager = createWatchlistFullCachePreloadManager({
+    foregroundPreloadGate: gate,
+    fetchJob: async (_job, _limit, signal) => {
+      calls += 1;
+      if (calls > 1) return { all_rows_final: true, data: rows(2), source: "resumed" };
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          firstAborted = true;
+          reject(new DOMException("Hydration preempted watchlist", "AbortError"));
+        }, { once: true });
+      });
+    },
+  });
+
+  manager.syncJobs([job]);
+  assert.equal(calls, 1);
+  const hydration = gate.tryAcquireHydration("active-chart-history");
+  assert.ok(hydration);
+  await nextTurn();
+  assert.equal(firstAborted, true);
+  assert.equal(calls, 1, "watchlist remains queued while hydration owns the slot");
+  assert.equal(mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval)).status, "idle");
+
+  gate.release(hydration);
+  await nextTurn();
+  assert.equal(calls, 2);
+  assert.equal(mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval)).status, "warm");
+  await nextTurn();
+  assert.equal(calls, 2, "one hydration preemption produces one resumed watchlist attempt");
+
+  manager.dispose();
+  gate.dispose();
+});

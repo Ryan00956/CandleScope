@@ -189,7 +189,7 @@ test("background tracked interval cache uses the same realtime row fence", async
   assert.equal(result.data[0]?.close, 15);
 });
 
-test("physical K-line transports default to foreground while explicit preload skips the foreground lease", async () => {
+test("only foreground K-line transports enter the foreground lease", async () => {
   const gate = new ForegroundPreloadGate(0);
   const observed: Array<{ kind: string; foreground: number; preload: string | null }> = [];
   const observe = (kind: string) => {
@@ -230,6 +230,17 @@ test("physical K-line transports default to foreground while explicit preload sk
   await feed.getRange(SERIES, { start: epochSeconds(1), end: epochSeconds(20) });
   await feed.getLatest(SERIES);
 
+  const hydrateLease = gate.tryAcquireHydration("active-hydration");
+  assert.ok(hydrateLease);
+  await feed.getHistory(SERIES, {
+    priority: "hydrate",
+    intent: "active_hydration",
+    signal: hydrateLease.controller.signal,
+    source: "active-hydration",
+  });
+  assert.equal(hydrateLease.controller.signal.aborted, false);
+  gate.release(hydrateLease);
+
   const explicitPreload = gate.tryAcquirePreload("explicit-preload");
   assert.ok(explicitPreload);
   await feed.getLatest(SERIES, {
@@ -245,6 +256,11 @@ test("physical K-line transports default to foreground while explicit preload sk
     ["range", 1],
     ["latest", 1],
   ]);
+  assert.deepEqual(observed.at(4), {
+    kind: "history",
+    foreground: 0,
+    preload: "active-hydration",
+  });
   assert.deepEqual(observed.at(-1), {
     kind: "latest",
     foreground: 0,
@@ -807,6 +823,51 @@ test("dedupes exact range requests", async () => {
   assert.equal(calls, 1);
 });
 
+test("history inflight identity includes bounded wait and intent", async () => {
+  let calls = 0;
+  let release: (() => void) | undefined;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const optionsSeen: KlineHistoryRequestOptions[] = [];
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesHistory: async (_symbol, _interval, _days, _marketType, _exchange, options) => {
+        calls += 1;
+        optionsSeen.push(options);
+        await pending;
+        return { data: rows([10, 20]) };
+      },
+    },
+  });
+  const base = {
+    commit: "none" as const,
+    source: "history-identity",
+    priority: "hydrate" as const,
+    maxWaitMs: 350,
+    intent: "viewport" as const,
+  };
+
+  const exact = feed.getHistory(SERIES, base);
+  const joined = feed.getHistory(SERIES, base);
+  const differentWait = feed.getHistory(SERIES, { ...base, maxWaitMs: 800 });
+  const differentIntent = feed.getHistory(SERIES, {
+    ...base,
+    intent: "active_hydration",
+  });
+  while (calls < 3) await new Promise((resolve) => setImmediate(resolve));
+  mustBeDefined(release)();
+  await Promise.all([exact, joined, differentWait, differentIntent]);
+
+  assert.equal(calls, 3, "only the exact max-wait/intent pair may join inflight work");
+  assert.deepEqual(
+    optionsSeen.map(({ maxWaitMs, intent }) => ({ maxWaitMs, intent })),
+    [
+      { maxWaitMs: 350, intent: "viewport" },
+      { maxWaitMs: 800, intent: "viewport" },
+      { maxWaitMs: 350, intent: "active_hydration" },
+    ],
+  );
+});
+
 test("drops stale responses after epoch advances", async () => {
   let commitCalls = 0;
   const feed = new SeriesDataFeed({
@@ -918,11 +979,15 @@ test("getBars plans countBack history using interval duration", async () => {
 
   const result = await feed.getBars(SERIES, {
     countBack: 24,
+    maxWaitMs: 450,
+    intent: "viewport",
     source: "countback-history",
   });
 
   assert.equal(requestedDays, 1);
   assert.equal(mustBeDefined<KlineHistoryRequestOptions>(requestedOptions).countBack, 24);
+  assert.equal(mustBeDefined<KlineHistoryRequestOptions>(requestedOptions).maxWaitMs, 450);
+  assert.equal(mustBeDefined<KlineHistoryRequestOptions>(requestedOptions).intent, "viewport");
   assert.equal(mustBeDefined(result.plan).type, "history");
 });
 

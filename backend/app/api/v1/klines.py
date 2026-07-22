@@ -18,7 +18,7 @@ import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -1832,6 +1832,15 @@ async def get_klines_history(
     count_back: int | None = Query(None, ge=1, le=MAX_RANGE_RESPONSE_BARS, description="Newest bar count to return; overrides days window when provided"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    intent: Annotated[
+        Literal["viewport", "active_hydration"],
+        Query(
+            description=(
+                "History demand lane: viewport is foreground; active_hydration "
+                "fills the active series in the background"
+            )
+        ),
+    ] = "viewport",
     request_scope: str | None = Query(
         None,
         max_length=128,
@@ -1863,6 +1872,11 @@ async def get_klines_history(
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
+    history_reason = (
+        "initial_history"
+        if intent == "viewport"
+        else "active_history_hydration"
+    )
 
     dm = _require_data_manager(request)
     demand_owner_id = _new_request_demand_owner_id(
@@ -1938,7 +1952,7 @@ async def get_klines_history(
                 exchange=exchange,
                 market_type=market_type,
                 auto_backfill=auto_backfill,
-                backfill_reason="initial_history",
+                backfill_reason=history_reason,
                 backfill_requester="klines_history",
                 **(
                     {"backfill_metadata": demand_metadata}
@@ -1977,7 +1991,7 @@ async def get_klines_history(
         submitted, request_ids, suppressions = _submit_verification_repairs(
             dm,
             verification_only,
-            reason="initial_history",
+            reason=history_reason,
             requester="klines_history",
             demand_metadata=demand_metadata,
         )
@@ -2105,6 +2119,7 @@ async def get_klines_history(
         "market_type": market_type,
         "symbol": symbol.upper(),
         "interval": interval,
+        "intent": intent,
         "days": days,
         "count_back": count_back,
         "start_ms": start_ms,

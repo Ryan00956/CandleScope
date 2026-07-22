@@ -28,6 +28,48 @@ export function resolvePatchedChartDataStatus(
   return currentStatus === "ready" ? "ready" : "provisional";
 }
 
+const CHART_HISTORY_PROOF_FIELDS = [
+  "historyComplete",
+  "historyRepairPending",
+  "historyValidatedCountBack",
+  "lastValidatedMs",
+] as const;
+
+/**
+ * Structural/realtime commits must not erase the last explicit history proof.
+ * The window registry is the durable per-series owner; explicit fields from a
+ * new history result override it, while malformed persisted values fail closed.
+ */
+export function inheritChartHistoryProof(
+  persistedMeta: Record<string, unknown> | null | undefined,
+  explicitMeta: Record<string, unknown> | null | undefined = {},
+): Record<string, unknown> {
+  const inherited: Record<string, unknown> = {};
+  const persisted = persistedMeta || {};
+  if (Object.prototype.hasOwnProperty.call(persisted, "historyComplete")) {
+    inherited.historyComplete = persisted.historyComplete === true;
+  }
+  if (Object.prototype.hasOwnProperty.call(persisted, "historyRepairPending")) {
+    inherited.historyRepairPending = persisted.historyRepairPending === true;
+  }
+  if (Object.prototype.hasOwnProperty.call(persisted, "historyValidatedCountBack")) {
+    const parsed = Number(persisted.historyValidatedCountBack);
+    inherited.historyValidatedCountBack = Number.isSafeInteger(parsed) && parsed >= 0
+      ? parsed
+      : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(persisted, "lastValidatedMs")) {
+    const parsed = Number(persisted.lastValidatedMs);
+    inherited.lastValidatedMs = Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+
+  const explicit = explicitMeta || {};
+  for (const field of CHART_HISTORY_PROOF_FIELDS) {
+    if (explicit[field] !== undefined) inherited[field] = explicit[field];
+  }
+  return inherited;
+}
+
 /**
  * Async history and WebSocket callbacks may outlive the chart session that
  * created them. They may still refresh their own warm cache, but only the

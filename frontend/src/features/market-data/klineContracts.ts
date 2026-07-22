@@ -114,8 +114,14 @@ export interface KlineRequestOptions {
   demandGeneration?: number;
 }
 
+export type KlineHistoryIntent = "viewport" | "active_hydration";
+
 export interface KlineHistoryRequestOptions extends KlineRequestOptions {
   countBack?: number | null;
+  /** Backend wait budget for the requested history window. */
+  maxWaitMs?: number;
+  /** Distinguishes the first visible window from active-series hydration. */
+  intent?: KlineHistoryIntent;
 }
 
 export interface KlineBeforeRequestOptions extends KlineRequestOptions {
@@ -170,7 +176,7 @@ export interface KlineApi {
 
 export type FeedCommitMode = "active" | "always" | "patch-active" | "patch-cache" | "cache" | "none";
 export type FeedApplyMode = "range" | "tick";
-export type FeedRequestPriority = "foreground" | "preload";
+export type FeedRequestPriority = "foreground" | "hydrate" | "preload";
 
 export interface FeedCommitMeta {
   source: string;

@@ -151,12 +151,13 @@ API 和 settings 代码应通过 DataManager/coordinator 触发修复，不要�
 
 | 来源 | Reason | Priority |
 |---|---|---:|
-| `/klines/history` | `initial_history` | 10 |
+| `/klines/history?intent=viewport`（默认） | `initial_history` | 10 |
 | 可见区/向左加载 | `visible_range_gap` / `visible_load_more` | 20 |
 | 前台 base seed / tail gap | `visible_seed_gap` / `tail_gap` | 25 |
 | 显式 latest refresh | `latest_refresh` | 30 |
 | query repair family | `query_*` | 35 |
 | price daily open | `price_daily_open` | 70 |
+| `/klines/history?intent=active_hydration` | `active_history_hydration` | 90 |
 | 同商品相关周期预热 | `related_interval_warmup` | 100 |
 | Full subscription 预热 | `full_subscription_warmup` | 110 |
 | 启动扫描 | `startup_gap_scan` | 140 |
@@ -165,6 +166,9 @@ API 和 settings 代码应通过 DataManager/coordinator 触发修复，不要�
 相关周期预热按 demand scope debounce，必须等前台持续安静后才提交；成功接纳的
 精确 target range 写入有界的五分钟 TTL registry。新闭合的 target range 不会被旧
 TTL 挡住，提交失败或返回 false 也不会污染 TTL。
+
+活跃商品历史补齐同样按 newest-first 执行，但始终属于后台 lane；它不会与 viewport
+parent 合并，避免宽范围缓存补齐扩大或继承可见请求的前台所有权。
 
 ## Events
 

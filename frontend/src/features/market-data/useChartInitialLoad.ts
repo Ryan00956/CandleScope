@@ -33,7 +33,9 @@ import { planTargetBarRequest } from "./intervalRequestBudget.js";
 const INITIAL_BACKFILL_RETRY_MS = 3_000;
 const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
 const INITIAL_BACKFILL_MAX_WAIT_MS = 60_000;
-const INITIAL_HISTORY_COUNT_BACK = 1_500;
+export const INITIAL_HISTORY_COUNT_BACK = 1_500;
+export const INITIAL_VIEWPORT_COUNT_BACK = 500;
+export const INITIAL_VIEWPORT_MAX_WAIT_MS = 1_500;
 export const INITIAL_HISTORY_SOURCE_ROW_BUDGET = 20_000;
 export const WARM_CACHE_REVALIDATE_TTL_MS = 60_000;
 
@@ -200,6 +202,16 @@ export function planInitialHistoryCountBack(
   })?.targetBars ?? INITIAL_HISTORY_COUNT_BACK;
 }
 
+export function planInitialViewportCountBack(
+  interval: IntervalString,
+  nativeIntervalValues: readonly IntervalString[],
+): number {
+  return Math.min(
+    INITIAL_VIEWPORT_COUNT_BACK,
+    planInitialHistoryCountBack(interval, nativeIntervalValues),
+  );
+}
+
 /**
  * Release the indicator-window owner created by the original initial-history
  * request. Exact gap polling intentionally owns a separate token, so settling
@@ -358,6 +370,7 @@ export function useChartInitialLoad({
 
     const series = { exchange: ex, marketType: mt, symbol: sym, interval: intv };
     const initialHistoryCountBack = planInitialHistoryCountBack(intv, nativeIntervalValues);
+    const initialViewportCountBack = planInitialViewportCountBack(intv, nativeIntervalValues);
     const initialEpoch = seriesDataFeed.beginEpoch(series);
     controller.signal.addEventListener("abort", () => {
       seriesDataFeed.cancelSeriesRepairs(series);
@@ -379,7 +392,7 @@ export function useChartInitialLoad({
       setInitialHistoryPending(false);
       return;
     }
-    if (initialHistoryCountBack <= 0) {
+    if (initialViewportCountBack <= 0) {
       setInitialHistoryPending(false);
       setHasMoreLeft(false);
       setLoading(false);
@@ -429,7 +442,7 @@ export function useChartInitialLoad({
           marketType: mt,
           symbol: sym,
           interval: intv,
-          countBack: initialHistoryCountBack,
+          countBack: initialViewportCountBack,
           ...(historyResult.indicatorWindowOwner
             ? { indicatorWindowOwner: historyResult.indicatorWindowOwner }
             : {}),
@@ -449,7 +462,7 @@ export function useChartInitialLoad({
           if (!canFinalizePendingInitialHistory(pendingInitial, settledResult)) {
             // A defensive fallback for any non-cap resolution path that emits
             // a usable-but-unproven range. Keep the initial lifecycle pending
-            // and restore full-countBack retry ownership.
+            // and restore viewport-countBack retry ownership.
             trackedInitialRepairRange = null;
             setConnectionStatus("loading");
             startInitialHistoryRetry();
@@ -541,7 +554,7 @@ export function useChartInitialLoad({
 
       const historyProof = initialHistoryCacheProof(
         historyResult,
-        initialHistoryCountBack,
+        initialViewportCountBack,
       );
       const historyCommitMeta: FeedCommitMeta = {
         source: "initial-history",
@@ -629,7 +642,9 @@ export function useChartInitialLoad({
         if (controller.signal.aborted || stoppedRetrying) return false;
         try {
           const retryResult = await seriesDataFeed.getBars(series, {
-            countBack: initialHistoryCountBack,
+            countBack: initialViewportCountBack,
+            maxWaitMs: INITIAL_VIEWPORT_MAX_WAIT_MS,
+            intent: "viewport",
             source: "initial-history-retry",
             signal: controller.signal,
           });
@@ -690,7 +705,7 @@ export function useChartInitialLoad({
       marketType: mt,
       symbol: sym,
       interval: intv,
-      countBack: initialHistoryCountBack,
+      countBack: initialViewportCountBack,
     });
 
     const initialRequests: Promise<unknown>[] = [];
@@ -726,7 +741,9 @@ export function useChartInitialLoad({
       });
     }
     initialRequests.push(seriesDataFeed.getBars(series, {
-        countBack: initialHistoryCountBack,
+        countBack: initialViewportCountBack,
+        maxWaitMs: INITIAL_VIEWPORT_MAX_WAIT_MS,
+        intent: "viewport",
         source: "initial-history",
         signal: controller.signal,
       })

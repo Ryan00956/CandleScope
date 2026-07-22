@@ -158,7 +158,7 @@ Current demand mapping:
 
 | Source | Reason | Priority |
 |---|---|---:|
-| `/klines/history` | `initial_history` | 10 |
+| `/klines/history?intent=viewport` (default) | `initial_history` | 10 |
 | `/klines/range` | `visible_range_gap` | 20 |
 | `/klines/history/before` | `visible_load_more` | 20 |
 | foreground custom/base warm start | `visible_seed_gap` | 25 |
@@ -166,6 +166,7 @@ Current demand mapping:
 | `/klines/latest` if explicitly enabled | `latest_refresh` | 30 |
 | query repair family | `query_*` | 35 |
 | price stream daily open | `price_daily_open` | 70 |
+| `/klines/history?intent=active_hydration` | `active_history_hydration` | 90 |
 | same-symbol interval warmup | `related_interval_warmup` | 100 |
 | `SubscriptionTier.FULL` warmup | `full_subscription_warmup` | 110 |
 | startup scan | `startup_gap_scan` | 140 |
@@ -178,6 +179,10 @@ admission is debounced per demand scope, waits for a foreground-quiet dwell,
 and records successful exact target ranges in a bounded five-minute TTL
 registry. A newly closed target range bypasses the older entry; rejected or
 failed submissions never poison the TTL.
+
+Active-series hydration is also newest-first, but remains a background lane.
+It never coalesces with a viewport parent, so a wide cache fill cannot expand
+or inherit ownership of the visible request.
 
 ## Events
 

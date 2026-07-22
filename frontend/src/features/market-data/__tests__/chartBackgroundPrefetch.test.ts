@@ -48,6 +48,22 @@ test("foreground work synchronously aborts speculative warming and starts a fres
   assert.ok(priority.tryAcquire(11_100));
 });
 
+test("ordinary prefetch eligibility extends dwell without killing active-chart hydration", () => {
+  const priority = new ChartBackgroundPrefetchPriorityGate(1_000);
+  priority.yieldToForeground(10_000);
+  const hydration = priority.tryAcquireHydration("active-chart-history");
+  assert.ok(hydration, "hydration bypasses ordinary preload dwell");
+
+  priority.requireQuietDwell(10_100);
+  assert.equal(hydration.controller.signal.aborted, false);
+  assert.equal(priority.isCurrent(hydration), true);
+  assert.equal(priority.tryAcquire(11_100), null, "ordinary warming cannot steal hydration");
+
+  priority.release(hydration);
+  assert.equal(priority.tryAcquire(11_099), null);
+  assert.ok(priority.tryAcquire(11_100));
+});
+
 test("background prefetch yields to the active chart, memory cache, full cache, and inflight owner", () => {
   const base = {
     activeInterval: "45m",

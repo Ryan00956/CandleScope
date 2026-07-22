@@ -218,8 +218,9 @@ export function useChartBackgroundPrefetch({
     }
     // Becoming eligible marks the end of foreground ownership, not the start
     // of an immediate speculative window. Require a complete quiet grace from
-    // this transition before touching another interval.
-    prefetchPriority.yieldToForeground();
+    // this transition before touching another interval, without aborting an
+    // already-admitted active-chart hydration request.
+    prefetchPriority.requireQuietDwell();
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const currentSymbolKey = symbolKey(symbol, marketType, exchange);

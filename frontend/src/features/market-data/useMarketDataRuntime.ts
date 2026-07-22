@@ -24,8 +24,10 @@ import { publishCrosshairData } from "./crosshairDisplayStore.js";
 import { requestIndicatorRangeForWindowMeta } from "./indicatorRangeRuntime.js";
 import {
   planInitialHistoryCountBack,
+  planInitialViewportCountBack,
   useChartInitialLoad,
 } from "./useChartInitialLoad.js";
+import { useActiveChartHistoryHydration } from "./useActiveChartHistoryHydration.js";
 import { useChartLoadMoreLeft } from "./useChartLoadMoreLeft.js";
 import { useSessionTransitionReset } from "./useSessionTransitionReset.js";
 import { useMarketDataEvents } from "./marketDataEvents.js";
@@ -436,6 +438,31 @@ export function useMarketDataRuntime({
     setHasMoreLeft,
     setCrosshairData: publishCrosshairData,
     setDataSource,
+  });
+
+  const activeHistoryTargetCountBack = planInitialHistoryCountBack(
+    interval,
+    nativeIntervalValues,
+  );
+  const activeHistoryViewportCountBack = planInitialViewportCountBack(
+    interval,
+    nativeIntervalValues,
+  );
+  useActiveChartHistoryHydration({
+    enabled: activeChartReady
+      && marketDataReady
+      && !loading
+      && !initialHistoryPending,
+    series: { exchange, marketType, symbol, interval },
+    sessionKey,
+    viewportCountBack: activeHistoryViewportCountBack,
+    targetCountBack: activeHistoryTargetCountBack,
+    historyComplete: chartDataMeta.historyComplete === true,
+    historyRepairPending: chartDataMeta.historyRepairPending === true,
+    validatedCountBack: chartDataMeta.historyValidatedCountBack ?? null,
+    seriesDataFeed,
+    priorityGate: backgroundPrefetchPriority,
+    commitMergedChartData,
   });
 
   const restoreLatestWindow = useCallback((): Promise<boolean> => {

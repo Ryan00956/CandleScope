@@ -100,6 +100,29 @@ test("count-back history omits the redundant days window", async (context) => {
   assert.equal(params.has("days"), false);
 });
 
+test("history forwards bounded wait and caller intent", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let capturedUrl = "";
+  globalThis.fetch = async (url) => {
+    capturedUrl = String(url);
+    return jsonResponse({ data: [] });
+  };
+
+  await fetchKlinesHistory(
+    "BTCUSDT",
+    "1m",
+    1,
+    "spot",
+    "binance",
+    { maxWaitMs: 0, intent: "active_hydration" },
+  );
+
+  const params = new URL(capturedUrl, "http://localhost").searchParams;
+  assert.equal(params.get("max_wait_ms"), "0");
+  assert.equal(params.get("intent"), "active_hydration");
+});
+
 test("K-line history transports forward chart demand scope and generation", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });

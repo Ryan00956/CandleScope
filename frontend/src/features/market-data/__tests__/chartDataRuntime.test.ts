@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   deferredWarmChartPublicationStillOwnsTarget,
   detectGaps,
+  inheritChartHistoryProof,
   klineRowsEqual,
   pendingWarmPublicationMatchesCommit,
   resolvePatchedChartDataStatus,
@@ -11,6 +12,55 @@ import {
   shouldDeferWarmChartPublication,
 } from "../chartDataRuntime.js";
 import { epochSeconds } from "../../../test/testHelpers.js";
+import { shouldStartActiveHistoryHydration } from "../useActiveChartHistoryHydration.js";
+
+test("realtime commits inherit monotonic history proof from the series registry", () => {
+  const viewportProof = inheritChartHistoryProof({
+    historyComplete: true,
+    historyRepairPending: false,
+    historyValidatedCountBack: 500,
+    lastValidatedMs: 100,
+  });
+  assert.deepEqual(viewportProof, {
+    historyComplete: true,
+    historyRepairPending: false,
+    historyValidatedCountBack: 500,
+    lastValidatedMs: 100,
+  });
+
+  const hydrationProof = inheritChartHistoryProof(viewportProof, {
+    historyValidatedCountBack: 1_500,
+    lastValidatedMs: 200,
+  });
+  assert.deepEqual(hydrationProof, {
+    historyComplete: true,
+    historyRepairPending: false,
+    historyValidatedCountBack: 1_500,
+    lastValidatedMs: 200,
+  });
+  const shouldStart = (meta: Record<string, unknown>) => shouldStartActiveHistoryHydration({
+    enabled: true,
+    historyComplete: meta.historyComplete === true,
+    historyRepairPending: meta.historyRepairPending === true,
+    viewportCountBack: 500,
+    targetCountBack: 1_500,
+    validatedCountBack: Number(meta.historyValidatedCountBack),
+  });
+  assert.equal(shouldStart(viewportProof), true, "an append must not abort pending hydration");
+  assert.equal(shouldStart(hydrationProof), false, "an append must not restart completed hydration");
+
+  assert.deepEqual(inheritChartHistoryProof({
+    historyComplete: "yes",
+    historyRepairPending: false,
+    historyValidatedCountBack: "damaged",
+    lastValidatedMs: -1,
+  }), {
+    historyComplete: false,
+    historyRepairPending: false,
+    historyValidatedCountBack: null,
+    lastValidatedMs: null,
+  });
+});
 
 test("detectGaps reports internal K-line gaps", () => {
   const gaps = detectGaps([

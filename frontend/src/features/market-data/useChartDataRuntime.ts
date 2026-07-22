@@ -24,6 +24,7 @@ import type {
 } from "./marketDataTypes.js";
 import {
   deferredWarmChartPublicationStillOwnsTarget,
+  inheritChartHistoryProof,
   pendingWarmPublicationMatchesCommit,
   resolvePatchedChartDataStatus,
   seriesCommitOwnsActiveChart,
@@ -667,6 +668,11 @@ export function useChartDataRuntime({
     const lastTime = lastIndex >= 0 ? data[lastIndex]?.time ?? null : null;
     const bars = data?.length || 0;
     const status = inferCommitStatus(source, data, extra);
+    const store = windowRegistry.get(seriesKey);
+    const historyProof = inheritChartHistoryProof(
+      store ? windowRegistry.meta(seriesKey) : null,
+      metaExtra,
+    );
     chartDataVersionRef.current = version;
     const commitMeta: ChartDataCommitMeta = {
       version,
@@ -681,13 +687,13 @@ export function useChartDataRuntime({
       coverage: bars > 0 ? { from: firstTime, to: lastTime, bars } : null,
       committedAt: Date.now(),
       ...metaExtra,
+      ...historyProof,
       // A realtime/chart commit can land between a partial history commit and
       // its settled probe. Keep the pending marker sticky for that exact
       // series so WS corrections cannot flush against an incomplete window.
       indicatorWindowDeferred: metaExtra.indicatorWindowDeferred === true
         || indicatorWindowCommitBufferRef.current.hasPending(seriesKey),
     };
-    const store = windowRegistry.get(seriesKey);
     if (store && bars > 0) {
       registerStoreResource(seriesKey, store, {
         symbol: sym,

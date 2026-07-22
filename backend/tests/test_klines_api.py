@@ -2307,6 +2307,7 @@ def test_history_endpoint_submits_initial_history_demand_metadata() -> None:
     )
 
     assert response.status_code == 200
+    assert response.json()["intent"] == "viewport"
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert args[0:2] == ("BTCUSDT", "1h")
@@ -2321,6 +2322,48 @@ def test_history_endpoint_submits_initial_history_demand_metadata() -> None:
     )
 
     assert calls[1:] == []
+
+
+def test_history_endpoint_active_hydration_uses_background_demand_lane() -> None:
+    calls: list[tuple[tuple, dict]] = []
+    dm = DataManager()
+    dm.set_backfill_trigger(lambda *args, **kwargs: calls.append((args, kwargs)))
+    client = _client(dm)
+
+    response = client.get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "ETHUSDT",
+            "interval": "1h",
+            "days": 0.001,
+            "exchange": "binance",
+            "market_type": "spot",
+            "intent": "active_hydration",
+            "max_wait_ms": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent"] == "active_hydration"
+    assert len(calls) == 1
+    _args, kwargs = calls[0]
+    assert kwargs["reason"] == "active_history_hydration"
+    assert kwargs["priority"] == 90
+    assert kwargs["requester"] == "klines_history"
+
+
+def test_history_endpoint_rejects_unknown_intent() -> None:
+    response = _client(DataManager()).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "intent": "prefetch_everything",
+            "max_wait_ms": 0,
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_range_query_reports_exact_visible_gap() -> None:

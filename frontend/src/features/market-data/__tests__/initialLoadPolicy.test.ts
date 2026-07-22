@@ -6,6 +6,7 @@ import {
   canUseWarmCacheWithoutImmediateRevalidation,
   initialHistoryCacheProof,
   planInitialHistoryCountBack,
+  planInitialViewportCountBack,
   shouldRequestInitialLatest,
   WARM_CACHE_REVALIDATE_TTL_MS,
 } from "../useChartInitialLoad.js";
@@ -208,6 +209,14 @@ test("derived initial history is bounded by native source-row expansion", () => 
   assert.equal(planInitialHistoryCountBack("10001m", nativeIntervals), 0);
   assert.equal(planInitialHistoryCountBack("invalid", nativeIntervals), 0);
   assert.equal(planInitialHistoryCountBack("89m", []), 0);
+
+  assert.equal(planInitialViewportCountBack("1m", nativeIntervals), 500);
+  assert.equal(planInitialViewportCountBack("45m", nativeIntervals), 500);
+  assert.equal(planInitialViewportCountBack("57m", nativeIntervals), 500);
+  assert.equal(planInitialViewportCountBack("47m", nativeIntervals), 422);
+  assert.equal(planInitialViewportCountBack("91m", nativeIntervals), 216);
+  assert.equal(planInitialViewportCountBack("10001m", nativeIntervals), 0);
+  assert.equal(planInitialViewportCountBack("89m", []), 0);
 });
 
 test("derived left pagination uses the smaller interactive source-row budget", () => {

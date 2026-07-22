@@ -817,6 +817,124 @@ def test_backfill_scheduler_runs_initial_history_from_newest_chunk() -> None:
     asyncio.run(_run())
 
 
+def test_active_history_hydration_is_background_priority_and_newest_first() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+        request = RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=180_000,
+            exchange="binance",
+            market_type="spot",
+            reason="active_history_hydration",
+        )
+
+        assert request.priority == 90
+        await coordinator.request_and_wait(request)
+
+        assert [call["range_start_ms"] for call in engine.calls] == [
+            180_000,
+            120_000,
+            60_000,
+            0,
+        ]
+        assert coordinator.snapshot()["background_dispatches"] == 4
+
+    asyncio.run(_run())
+
+
+def test_active_history_hydration_does_not_coalesce_with_foreground_parent() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.foreground_started = asyncio.Event()
+                self.release_foreground = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.foreground_started.set()
+                    await self.release_foreground.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+        foreground = RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            reason="initial_history",
+            request_id="viewport-parent",
+        )
+        hydration = RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            reason="active_history_hydration",
+            request_id="hydration-child",
+        )
+
+        foreground_id = coordinator.request(foreground)
+        await engine.foreground_started.wait()
+        hydration_id = coordinator.request(hydration)
+
+        assert foreground_id == "viewport-parent"
+        assert hydration_id == "hydration-child"
+        snapshot = coordinator.snapshot()
+        assert snapshot["deduped"] == 0
+        assert snapshot["merged"] == 0
+        assert [item["request_id"] for item in snapshot["pending"]] == [
+            "hydration-child",
+        ]
+        assert snapshot["pending"][0]["priority"] == 90
+
+        engine.release_foreground.set()
+        outcomes = await asyncio.gather(
+            coordinator.wait_for_request(foreground_id),
+            coordinator.wait_for_request(hydration_id),
+        )
+        assert all(outcome is not None for outcome in outcomes)
+        assert [call["metadata"]["reason"] for call in engine.calls] == [
+            "initial_history",
+            "active_history_hydration",
+        ]
+
+    asyncio.run(_run())
+
+
 def test_backfill_scheduler_wakes_after_rate_limit_without_new_submit() -> None:
     async def _run() -> None:
         class _Engine:

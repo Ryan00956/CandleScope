@@ -100,3 +100,73 @@ test("quiet-dwell notification resumes one globally serialized speculative owner
   gate.release(second);
   gate.dispose();
 });
+
+test("active-chart hydration bypasses dwell and preempts an ordinary speculative owner", () => {
+  const clock = createClock();
+  const gate = new ForegroundPreloadGate({
+    quietDwellMs: 1_000,
+    now: clock.now,
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+  });
+  const watchlist = gate.tryAcquirePreload("watchlist");
+  assert.ok(watchlist);
+  let reentrantPreload: ReturnType<typeof gate.tryAcquirePreload> = null;
+  let reentrantHydration: ReturnType<typeof gate.tryAcquireHydration> = null;
+  watchlist.controller.signal.addEventListener("abort", () => {
+    reentrantPreload = gate.tryAcquirePreload("reentrant-watchlist");
+    reentrantHydration = gate.tryAcquireHydration("reentrant-hydration");
+  }, { once: true });
+
+  gate.requireQuietDwell();
+  const hydration = gate.tryAcquireHydration("active-chart-history");
+  assert.ok(hydration);
+  assert.equal(watchlist.controller.signal.aborted, true);
+  assert.equal(reentrantPreload, null, "abort listeners cannot steal the reserved hydration slot");
+  assert.equal(reentrantHydration, null, "abort listeners cannot replace the reserved hydration slot");
+  assert.equal(gate.isCurrent(watchlist), false);
+  assert.equal(gate.isCurrent(hydration), true);
+  assert.equal(gate.tryAcquirePreload("chart-background-prefetch"), null);
+  assert.equal(gate.tryAcquireHydration("duplicate-hydration"), null);
+
+  clock.advance(100);
+  const hydrationGeneration = hydration.generation;
+  gate.requireQuietDwell();
+  assert.equal(hydration.controller.signal.aborted, false);
+  assert.equal(gate.isCurrent(hydration), true);
+  assert.equal(hydration.generation, hydrationGeneration);
+
+  gate.release(watchlist);
+  assert.equal(gate.isCurrent(hydration), true, "stale ordinary release cannot steal hydration");
+  gate.release(hydration);
+  assert.equal(gate.tryAcquirePreload("watchlist-resume"), null);
+  clock.advance(999);
+  assert.equal(gate.tryAcquirePreload("watchlist-resume"), null);
+  clock.advance(1);
+  assert.ok(gate.tryAcquirePreload("watchlist-resume"));
+  gate.dispose();
+});
+
+test("foreground aborts hydration and hydration cannot reacquire until foreground releases", () => {
+  const clock = createClock();
+  const gate = new ForegroundPreloadGate({
+    quietDwellMs: 1_000,
+    now: clock.now,
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+  });
+  const hydration = gate.tryAcquireHydration("active-chart-history");
+  assert.ok(hydration);
+
+  const foreground = gate.enterForeground("interval-switch");
+  assert.equal(hydration.controller.signal.aborted, true);
+  assert.equal(gate.tryAcquireHydration("stale-chart-history"), null);
+  assert.equal(gate.tryAcquirePreload("watchlist"), null);
+
+  foreground.release();
+  const nextHydration = gate.tryAcquireHydration("current-chart-history");
+  assert.ok(nextHydration, "hydration bypasses the post-foreground quiet dwell");
+  assert.equal(gate.tryAcquirePreload("watchlist"), null);
+  gate.release(nextHydration);
+  gate.dispose();
+});

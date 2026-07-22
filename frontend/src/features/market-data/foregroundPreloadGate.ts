@@ -29,6 +29,12 @@ export interface ForegroundPreloadGateSnapshot {
   waitMs: number;
 }
 
+type SpeculativeLane = "preload" | "hydration";
+type ActivePreloadLease = PreloadLease & {
+  readonly lane: SpeculativeLane;
+  readonly token: symbol;
+};
+
 /**
  * App-instance arbitration between user-visible market-data work and
  * speculative preloading.
@@ -45,10 +51,11 @@ export class ForegroundPreloadGate {
   private readonly cancel: (handle: TimerHandle) => void;
   private readonly foregroundOwners = new Map<symbol, string>();
   private readonly listeners = new Set<() => void>();
-  private activePreload: (PreloadLease & { readonly token: symbol }) | null = null;
+  private activePreload: ActivePreloadLease | null = null;
   private blockedUntil = 0;
   private generation = 0;
   private wakeTimer: TimerHandle | null = null;
+  private foregroundPreemptionDepth = 0;
   private disposed = false;
 
   constructor(options: number | ForegroundPreloadGateOptions = {}) {
@@ -96,28 +103,63 @@ export class ForegroundPreloadGate {
     this.preemptForForeground(now);
   }
 
+  /**
+   * Starts a fresh quiet dwell without pretending that foreground work began.
+   *
+   * This is used when ordinary preloading becomes eligible. It intentionally
+   * leaves an admitted active-chart hydration lease alone; only real
+   * foreground ownership may abort that higher-priority speculative lane.
+   */
+  requireQuietDwell(now = this.now()): void {
+    if (this.disposed) return;
+    this.extendQuietDwell(now);
+  }
+
   waitMs(now = this.now()): number {
     if (this.disposed || this.foregroundOwners.size > 0) return Number.POSITIVE_INFINITY;
     return Math.max(0, this.blockedUntil - now);
   }
 
   tryAcquirePreload(ownerOrNow: string | number = "preload", requestedNow?: number): PreloadLease | null {
-    if (this.disposed || this.activePreload || this.foregroundOwners.size > 0) return null;
+    if (
+      this.disposed
+      || this.foregroundPreemptionDepth > 0
+      || this.activePreload
+      || this.foregroundOwners.size > 0
+    ) return null;
     const owner = typeof ownerOrNow === "string" ? ownerOrNow : "preload";
     const now = typeof ownerOrNow === "number" ? ownerOrNow : (requestedNow ?? this.now());
     if (this.waitMs(now) > 0) {
       this.scheduleWake();
       return null;
     }
-    const token = Symbol(owner);
-    const lease = {
-      controller: new AbortController(),
-      generation: this.generation,
-      owner,
-      token,
-    };
-    this.activePreload = lease;
-    return lease;
+    return this.acquireSpeculative(owner, "preload");
+  }
+
+  /**
+   * Admit active-chart history hydration ahead of ordinary speculative work.
+   *
+   * Hydration never steals foreground ownership and never waits for the
+   * ordinary quiet dwell. If watchlist/chart preloading won the speculative
+   * slot first, it is synchronously aborted and fenced before hydration takes
+   * that same globally serialized slot.
+   */
+  tryAcquireHydration(owner = "active-chart-hydration"): PreloadLease | null {
+    if (
+      this.disposed
+      || this.foregroundPreemptionDepth > 0
+      || this.foregroundOwners.size > 0
+    ) return null;
+    if (this.activePreload?.lane === "hydration") return null;
+
+    const ordinaryPreload = this.activePreload;
+    if (ordinaryPreload) {
+      this.generation += 1;
+      const hydration = this.acquireSpeculative(owner, "hydration");
+      ordinaryPreload.controller.abort();
+      return hydration;
+    }
+    return this.acquireSpeculative(owner, "hydration");
   }
 
   isCurrent(lease: PreloadLease): boolean {
@@ -169,9 +211,30 @@ export class ForegroundPreloadGate {
     this.blockedUntil = Math.max(this.blockedUntil, now + this.quietDwellMs);
     const activePreload = this.activePreload;
     this.activePreload = null;
-    activePreload?.controller.abort();
+    this.foregroundPreemptionDepth += 1;
+    try {
+      activePreload?.controller.abort();
+    } finally {
+      this.foregroundPreemptionDepth -= 1;
+    }
     this.scheduleWake();
     this.notify();
+  }
+
+  private acquireSpeculative(owner: string, lane: SpeculativeLane): PreloadLease {
+    if (this.wakeTimer != null) {
+      this.cancel(this.wakeTimer);
+      this.wakeTimer = null;
+    }
+    const lease: ActivePreloadLease = {
+      controller: new AbortController(),
+      generation: this.generation,
+      lane,
+      owner,
+      token: Symbol(owner),
+    };
+    this.activePreload = lease;
+    return lease;
   }
 
   private extendQuietDwell(now: number): void {

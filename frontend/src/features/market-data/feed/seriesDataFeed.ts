@@ -12,6 +12,7 @@ import type {
   HistoryMissingRange,
   KlineApi,
   KlineFetchResult,
+  KlineHistoryIntent,
   KlineStreamController,
   KlineStreamOptions,
   MergeCacheData,
@@ -91,6 +92,7 @@ interface GetBarsOptions {
   maxWaitMs?: number;
   strict?: boolean;
   requestScope?: string;
+  intent?: KlineHistoryIntent;
   indicatorWindowOwner?: string;
   priority?: FeedRequestPriority;
 }
@@ -102,6 +104,8 @@ interface GetHistoryOptions {
   signal?: AbortSignal;
   commit?: FeedCommitMode;
   requestScope?: string;
+  maxWaitMs?: number;
+  intent?: KlineHistoryIntent;
   indicatorWindowOwner?: string;
   priority?: FeedRequestPriority;
 }
@@ -781,7 +785,7 @@ export class SeriesDataFeed {
     request: () => Promise<TResult>,
   ): Promise<TResult> {
     const gate = this.foregroundPreloadGate;
-    if (!gate || priority === "preload") return request();
+    if (!gate || priority !== "foreground") return request();
     const lease = gate.enterForeground(owner);
     try {
       return await request();
@@ -2402,6 +2406,7 @@ export class SeriesDataFeed {
       repair = "async",
       waitMs = 0,
       maxWaitMs,
+      intent,
       strict = false,
       requestScope,
       indicatorWindowOwner,
@@ -2456,6 +2461,8 @@ export class SeriesDataFeed {
       ...(signal === undefined ? {} : { signal }),
       commit,
       ...(requestScope === undefined ? {} : { requestScope }),
+      ...(maxWaitMs === undefined ? {} : { maxWaitMs }),
+      ...(intent === undefined ? {} : { intent }),
       ...(indicatorWindowOwner === undefined ? {} : { indicatorWindowOwner }),
       priority,
     });
@@ -2471,6 +2478,8 @@ export class SeriesDataFeed {
       signal,
       commit = "active",
       requestScope,
+      maxWaitMs,
+      intent,
       indicatorWindowOwner: requestedIndicatorWindowOwner,
       priority = "foreground",
     }: GetHistoryOptions = {},
@@ -2481,7 +2490,7 @@ export class SeriesDataFeed {
       "history",
       series,
       epoch,
-      [days, countBack, requestScope],
+      [days, countBack, requestScope, maxWaitMs, intent],
     );
     const transportDemand = this.transportDemandOptions(series);
     const key = requestKeyFor("history", series, {
@@ -2491,6 +2500,8 @@ export class SeriesDataFeed {
       source,
       priority,
       requestScope,
+      maxWaitMs,
+      intent,
       ...transportDemand,
     });
     const realtimeFence = this.beginRealtimeRequest(series);
@@ -2510,6 +2521,8 @@ export class SeriesDataFeed {
         {
           ...(countBack === undefined ? {} : { countBack }),
           ...(signal === undefined ? {} : { signal }),
+          ...(maxWaitMs === undefined ? {} : { maxWaitMs }),
+          ...(intent === undefined ? {} : { intent }),
           ...transportDemand,
         },
       );

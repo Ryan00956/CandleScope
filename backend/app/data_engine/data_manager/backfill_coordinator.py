@@ -70,6 +70,7 @@ BACKFILL_REASON_PRIORITIES: dict[str, int] = {
     "query_shortfall": 35,
     "query_interior_gap": 35,
     "price_daily_open": 70,
+    "active_history_hydration": 90,
     "related_interval_warmup": 100,
     "full_subscription_warmup": 110,
     "startup_gap_scan": 140,
@@ -77,6 +78,7 @@ BACKFILL_REASON_PRIORITIES: dict[str, int] = {
 }
 
 _BACKGROUND_BACKFILL_REASONS = frozenset({
+    "active_history_hydration",
     "related_interval_warmup",
     "full_subscription_warmup",
     "startup_gap_scan",
@@ -569,6 +571,7 @@ class _BackfillScheduler:
             active_state is not None
             and not active_state.stale
             and not active_state.cancel_requested
+            and self._can_coalesce(active_state.request, request)
             and self._covers(active_state.request, request)
             and not self._requires_stronger_finality(
                 active_state.request,
@@ -587,7 +590,10 @@ class _BackfillScheduler:
             state = self._requests.get(request_id)
             if state is None or state.stale:
                 continue
-            if self._covers(state.request, request):
+            if self._can_coalesce(state.request, request) and self._covers(
+                state.request,
+                request,
+            ):
                 stronger_finality = self._requires_stronger_finality(
                     state.request,
                     request,
@@ -1255,6 +1261,7 @@ class _BackfillScheduler:
         }
         return bool(reasons & {
             "initial_history",
+            "active_history_hydration",
             "visible_load_more",
             "visible_range_gap",
             "visible_seed_gap",
@@ -1997,9 +2004,29 @@ class _BackfillScheduler:
         tolerance = interval_ms * 3
         return (
             existing.series_key == new.series_key
+            and cls._can_coalesce(existing, new)
             and existing.start_ms <= new.end_ms + tolerance
             and new.start_ms <= existing.end_ms + tolerance
         )
+
+    @staticmethod
+    def _can_coalesce(existing: RepairRequest, new: RepairRequest) -> bool:
+        """Keep active hydration from widening or owning foreground work.
+
+        Other background parents retain their established foreground-promotion
+        behavior. ``active_history_hydration`` is a dedicated cache-fill lane:
+        it may dedupe/merge only with the same lane, never with a viewport
+        parent whose response latency must remain bounded to visible demand.
+        """
+
+        def _is_active_hydration(request: RepairRequest) -> bool:
+            return "active_history_hydration" in {
+                part.strip()
+                for part in str(request.reason or "").split("+")
+                if part.strip()
+            }
+
+        return _is_active_hydration(existing) == _is_active_hydration(new)
 
     @staticmethod
     def _is_failed(status: Any) -> bool:

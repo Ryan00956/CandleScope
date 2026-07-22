@@ -54,6 +54,8 @@ export interface RequestSignalOptions {
 
 export interface KlineHistoryOptions extends RequestSignalOptions {
   countBack?: number | null;
+  maxWaitMs?: number;
+  intent?: "viewport" | "active_hydration";
 }
 
 export interface KlineBeforeOptions extends RequestSignalOptions {
@@ -182,6 +184,8 @@ export async function fetchKlinesHistory(
     count_back: options.countBack,
     exchange,
     market_type: marketType,
+    max_wait_ms: options.maxWaitMs,
+    intent: options.intent,
     request_scope: options.demandScope,
     request_generation: options.demandGeneration,
   }), requestSignalOptions(options.signal));

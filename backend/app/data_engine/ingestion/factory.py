@@ -324,6 +324,7 @@ class ExchangeIngestionFactory:
         end_ms: int | None = None,
         from_id: int | None = None,
         history: bool = False,
+        defer_on_rate_limit: bool = False,
     ) -> list[MarketEvent]:
         """Fetch and normalize one REST snapshot or history page."""
 
@@ -338,6 +339,7 @@ class ExchangeIngestionFactory:
             end_ms=end_ms,
             from_id=from_id,
             history=history,
+            defer_on_rate_limit=defer_on_rate_limit,
         ))
         normalizer = create_normalizer(self._cfg, descriptor)
         events: list[MarketEvent] = []
@@ -348,6 +350,30 @@ class ExchangeIngestionFactory:
             if event is not None:
                 events.append(event)
         return events
+
+    async def market_rate_limit_admission(
+        self,
+        descriptor: StreamDescriptor,
+        *,
+        limit: int = 1,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        from_id: int | None = None,
+        history: bool = False,
+    ) -> Any:
+        """Inspect the exact plugin-owned REST budget without consuming it."""
+
+        descriptor.validate()
+        ingress = await self._ensure_ingress()
+        return await ingress.transport.http_admission(TransportRequest(
+            descriptor=descriptor,
+            limit=limit,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            from_id=from_id,
+            history=history,
+            defer_on_rate_limit=True,
+        ))
 
     async def start_price(
         self,

@@ -25,6 +25,8 @@ import websockets
 
 from app.exchanges import (
     HistoricalRequest,
+    RateLimitAdmission,
+    RateLimitDeferred,
     bootstrap_default_adapters,
     get_exchange_registry,
     get_shared_rate_limit_manager,
@@ -230,11 +232,36 @@ class TransportLayer:
             url = f"{base}{spec.path}"
             acquired_here = False
             try:
+                needs_quota = not (quota_acquired and tried == 0)
+                if needs_quota:
+                    # Wait/return before taking the scarce endpoint gate, but
+                    # do not consume yet. A queued request must re-check after
+                    # the gate because another in-flight request may have
+                    # opened a shared 418 circuit in the meantime.
+                    await self._wait_for_http_admission(
+                        quota_rule,
+                        quota_request,
+                        defer=req.defer_on_rate_limit,
+                    )
                 if not quota_semaphore_held:
                     await quota_semaphore.acquire()
                     acquired_here = True
-                if not (quota_acquired and tried == 0):
-                    await self._rate_limits.acquire(quota_rule, quota_request)
+                if needs_quota:
+                    try:
+                        await self._rate_limits.acquire_nowait(
+                            quota_rule,
+                            quota_request,
+                        )
+                    except RateLimitDeferred:
+                        if req.defer_on_rate_limit:
+                            raise
+                        # The circuit/budget changed while waiting for the
+                        # semaphore. Release it and repeat the non-consuming
+                        # wait; never sleep while monopolizing the gate.
+                        if acquired_here:
+                            quota_semaphore.release()
+                            acquired_here = False
+                        continue
 
                 self._metrics.inc("http_requests_sent")
                 self._metrics.set("http_active_endpoint", base)
@@ -296,6 +323,10 @@ class TransportLayer:
                     for row in rows
                 ]
 
+            except RateLimitDeferred:
+                # No physical request was made.  Preserve the typed scheduler
+                # control signal and never rotate endpoints for shared budget.
+                raise
             except Exception as exc:
                 last_exc = exc
                 self._rate_limits.record_response(
@@ -308,6 +339,17 @@ class TransportLayer:
                 )
                 self._metrics.inc("http_requests_failed")
                 self._metrics.mark("http_last_error_at")
+                if isinstance(exc, TransportError):
+                    exc.rate_limit_recorded = True
+                if _is_rate_limit_http_error(exc):
+                    # Alternate Binance/OKX hostnames share the same IP quota;
+                    # failover would multiply the warning into a temporary ban.
+                    if req.defer_on_rate_limit:
+                        raise await self._rate_limits.deferred_error(
+                            quota_rule,
+                            quota_request,
+                        ) from exc
+                    raise
                 if _is_non_retryable_http_error(exc):
                     raise
                 logger.warning(
@@ -321,17 +363,61 @@ class TransportLayer:
                     quota_semaphore.release()
 
         if isinstance(last_exc, TransportError):
-            raise TransportError(
+            wrapped = TransportError(
                 f"All {total} HTTP endpoints failed; last error: "
                 f"[{type(last_exc).__name__}] {last_exc}",
                 status_code=last_exc.status_code,
                 retry_after=last_exc.retry_after,
                 headers=last_exc.headers,
                 body_code=last_exc.body_code,
-            ) from last_exc
+            )
+            wrapped.rate_limit_recorded = last_exc.rate_limit_recorded
+            raise wrapped from last_exc
         raise TransportError(
             f"All {total} HTTP endpoints failed; last error: [{type(last_exc).__name__}] {last_exc}"
         ) from last_exc
+
+    async def http_admission(self, req: TransportRequest) -> RateLimitAdmission:
+        """Inspect REST quota for ``req`` without consuming it or doing I/O."""
+
+        desc = req.descriptor
+        exchange = getattr(desc, "exchange", "binance")
+        market_type = getattr(desc, "market_type", "spot")
+        plugin = self._registry.get_plugin(exchange)
+        protocol = plugin.protocol()
+        spec = protocol.rest_request(req, config=self._cfg)
+        if spec is None:
+            raise TransportError(f"No REST endpoint for stream type: {desc.stream_type}")
+        quota_request = HistoricalRequest(
+            exchange=exchange,
+            market_type=market_type,
+            endpoint=spec.path,
+            symbol=desc.symbol,
+            interval=desc.interval,
+            start_ms=req.start_ms,
+            end_ms=req.end_ms,
+            limit=req.limit,
+            params=dict(spec.params),
+        )
+        quota_rule = plugin.rate_limit_policy(self._cfg).rule_for(quota_request)
+        return await self._rate_limits.inspect(quota_rule, quota_request)
+
+    async def _wait_for_http_admission(
+        self,
+        rule: Any,
+        request: HistoricalRequest,
+        *,
+        defer: bool,
+    ) -> RateLimitAdmission:
+        """Wait outside the endpoint gate, or return typed scheduler control."""
+
+        while True:
+            admission = await self._rate_limits.inspect(rule, request)
+            if admission.allowed:
+                return admission
+            if defer:
+                raise RateLimitDeferred(admission)
+            await asyncio.sleep(max(0.001, admission.retry_after_seconds))
 
     # ── Public: WebSocket ────────────────────────────────────
 
@@ -648,6 +734,7 @@ class TransportError(Exception):
         self.retry_after = retry_after
         self.headers = headers or {}
         self.body_code = body_code
+        self.rate_limit_recorded = False
 
 
 def _parse_retry_after(value: str | None) -> float | None:
@@ -681,4 +768,15 @@ def _is_non_retryable_http_error(exc: Exception) -> bool:
         isinstance(exc, TransportError)
         and exc.status_code == 400
         and exc.body_code in _NON_RETRYABLE_HTTP_BODY_CODES
+    )
+
+
+def _is_rate_limit_http_error(exc: Exception) -> bool:
+    if not isinstance(exc, TransportError):
+        return False
+    return (
+        exc.status_code in {418, 429}
+        or exc.body_code in {"-1003", "50011"}
+        or "HTTP 418" in str(exc)
+        or "HTTP 429" in str(exc)
     )

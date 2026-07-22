@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from collections.abc import Sequence
 from decimal import Decimal
 
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient
 import app.api.v1.full_order_book as full_order_book_module
 from app.api.v1.full_order_book import (
     clear_full_order_book_projection_cache,
+    full_order_book_snapshot,
     full_order_book_projection_cache_info,
     router as full_order_book_router,
     serialize_record,
@@ -17,6 +20,7 @@ from app.api.v1.full_order_book import (
 from app.api.v1.order_book_projection import project_order_book_levels
 from app.data_engine.ingestion.models import DataSource
 from app.data_engine.market_data.events import HubRecord, MarketStateEvent
+from app.data_engine.market_data.full_order_book_service import FullOrderBookRateLimited
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
 
 
@@ -489,6 +493,97 @@ def test_full_order_book_http_timeout_and_internal_errors_release_and_redact() -
     )
     assert "secret" not in failed.text
     assert failing_dm.release_calls == failing_dm.ensure_calls
+
+
+def test_full_order_book_http_exposes_rate_limit_deadline_and_releases_lease() -> None:
+    retry_at_ms = int(time.time() * 1000) + 2_500
+
+    class _RateLimitedManager(_FullOrderBookDataManager):
+        async def wait_for_full_order_book_snapshot(self, key, *, timeout_seconds):
+            raise FullOrderBookRateLimited(
+                retry_at_ms=retry_at_ms,
+                bucket_key="binance:futures:request_weight:ip",
+            )
+
+    dm = _RateLimitedManager()
+    response = _client(dm).get("/api/v1/full-order-book/snapshot")
+
+    assert response.status_code == 429
+    assert int(response.headers["Retry-After"]) >= 2
+    assert response.json()["detail"] == {
+        "code": "upstream_rate_limited",
+        "message": "full order-book upstream is temporarily rate limited",
+        "retry_at_ms": retry_at_ms,
+        "bucket_key": "binance:futures:request_weight:ip",
+    }
+    assert dm.release_calls == dm.ensure_calls
+
+
+def test_rate_limited_http_response_is_built_before_slow_physical_release() -> None:
+    async def run() -> None:
+        release_started = asyncio.Event()
+        release_gate = asyncio.Event()
+        retry_at_ms = int(time.time() * 1000) + 2_500
+
+        class _SlowReleaseManager(_FullOrderBookDataManager):
+            async def wait_for_full_order_book_snapshot(
+                self,
+                key,
+                *,
+                timeout_seconds,
+            ):
+                raise FullOrderBookRateLimited(
+                    retry_at_ms=retry_at_ms,
+                    bucket_key="binance:futures:request_weight:ip",
+                )
+
+            async def release_full_order_book_stream(
+                self,
+                key,
+                *,
+                consumer_id,
+            ):
+                self.release_calls.append((key, consumer_id))
+                release_started.set()
+                await release_gate.wait()
+                return True
+
+        dm = _SlowReleaseManager()
+        app = FastAPI()
+        app.state.data_manager = dm
+        request = full_order_book_module.Request({
+            "type": "http",
+            "app": app,
+            "headers": [],
+            "method": "GET",
+            "path": "/api/v1/full-order-book/snapshot",
+        })
+        response = await asyncio.wait_for(
+            full_order_book_snapshot(
+                request,
+                symbol="BTCUSDT",
+                exchange="binance",
+                market_type="futures",
+                update_interval_ms=None,
+                limit=100,
+                price_grouping="raw",
+                wait_ms=5_000,
+            ),
+            timeout=0.05,
+        )
+
+        assert response.status_code == 429
+        assert json.loads(response.body)["detail"]["retry_at_ms"] == retry_at_ms
+        assert release_started.is_set() is False
+        assert response.background is not None
+
+        cleanup = asyncio.create_task(response.background())
+        await release_started.wait()
+        release_gate.set()
+        await cleanup
+        assert dm.release_calls == dm.ensure_calls
+
+    asyncio.run(run())
 
 
 def test_full_order_book_http_reports_missing_and_unready_manager() -> None:

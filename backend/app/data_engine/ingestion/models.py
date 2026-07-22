@@ -314,6 +314,10 @@ class TransportRequest:
     history: bool = False
     quota_acquired: bool = False
     quota_semaphore_held: bool = False
+    # Scheduler-managed and bounded snapshot callers must never sleep while
+    # holding their own worker slot.  They opt into an immediate typed defer
+    # and return the work to their delayed queue instead.
+    defer_on_rate_limit: bool = False
 
     # Convenience properties for backward compat
     @property

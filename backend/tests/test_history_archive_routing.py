@@ -6,6 +6,8 @@ import io
 import zipfile
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.data_engine.backfill.archive_cache import HistoricalArchiveCache
 from app.data_engine.backfill.config import BackfillConfig
 from app.data_engine.backfill.fetcher import HistoricalFetcher
@@ -16,6 +18,8 @@ from app.data_engine.backfill.models import (
 )
 from app.data_engine.backfill.reconciler import Reconciler
 from app.data_engine.backfill.source_router import (
+    ArchiveObjectResult,
+    ArchiveRoutePlan,
     HistoricalSourceRouter,
     _filter_daily_candidates,
 )
@@ -28,6 +32,7 @@ from app.data_engine.ingestion.models import (
 )
 from app.exchanges.archive import ArchiveHttpResponse
 from app.exchanges.plugins.binance.archive import BinanceKlineArchiveProvider
+from app.exchanges.rate_limits import RateLimitAdmission, RateLimitDeferred
 
 
 UTC = timezone.utc
@@ -208,6 +213,69 @@ def _task(ref, start_index: int, end_index: int) -> BackfillTask:
             },
         },
     )
+
+
+def test_archive_routed_rest_deferral_is_not_downgraded_to_partial(tmp_path) -> None:
+    async def _run() -> RateLimitDeferred:
+        ref = _january_ref()
+        task = BackfillTask(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=ref.end_ms - MINUTE_MS + 1,
+            end_ms=ref.end_ms + MINUTE_MS,
+            exchange="binance",
+            market_type="futures",
+        )
+        archive_result = ArchiveObjectResult(
+            ref=ref,
+            bars=(),
+            content_sha256="0" * 64,
+            provider_checksum=None,
+            cache_hit=True,
+            revision_changed=False,
+            size_bytes=0,
+            cache_elapsed_ms=0,
+            download_elapsed_ms=0,
+            verify_elapsed_ms=0,
+            parse_elapsed_ms=0,
+        )
+        future = asyncio.create_task(asyncio.sleep(0, result=archive_result))
+        plan = ArchiveRoutePlan(
+            refs_by_task={task.task_key: (ref,)},
+            futures={ref.object_key: future},
+            owner_task_by_object={ref.object_key: task.task_key},
+        )
+        fetcher = HistoricalFetcher(
+            _config(tmp_path),
+            _RestTransport([]),
+            IngestionConfig(),
+        )
+        retry_at_monotonic = asyncio.get_running_loop().time() + 0.05
+        deferred = RateLimitDeferred(RateLimitAdmission(
+            allowed=False,
+            bucket_key="binance:futures:request_weight:ip",
+            cost=5,
+            reason="circuit_open",
+            retry_after_seconds=0.05,
+            retry_at_monotonic=retry_at_monotonic,
+            retry_at_ms=int(datetime.now(tz=UTC).timestamp() * 1000) + 50,
+            rule_name="binance_futures_klines",
+            status_code=418,
+            body_code="-1003",
+            circuit_key="binance:ip",
+        ))
+
+        async def _defer_rest(_task):
+            raise deferred
+
+        fetcher._fetch_rest_task = _defer_rest  # type: ignore[method-assign]
+        with pytest.raises(RateLimitDeferred) as caught:
+            await fetcher._fetch_routed_task(task, (ref,), plan)
+        return caught.value
+
+    caught = asyncio.run(_run())
+    assert caught.status_code == 418
+    assert caught.reason == "circuit_open"
 
 
 def test_parent_range_routes_page_chunks_to_one_archive_import(tmp_path) -> None:

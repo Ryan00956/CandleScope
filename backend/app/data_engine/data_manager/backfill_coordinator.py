@@ -50,6 +50,7 @@ from app.exchanges.models import (
     HistoryAvailabilityPolicy,
     HistoryEmptyPageSemantics,
 )
+from app.exchanges.rate_limits import RateLimitDeferred
 from .models import BarData, DataEvent, DataEventType, SeriesKey, audience_for_backfill_reason
 
 logger = logging.getLogger("data_manager.backfill_coordinator")
@@ -410,6 +411,12 @@ class _FetchChunk:
     parent_id: str
     request: RepairRequest
     sequence: int
+    queue_sequence: int = 0
+    eligible_at_monotonic: float = 0.0
+    retry_at_ms: int | None = None
+    defer_reason: str | None = None
+    rate_limit_bucket: str | None = None
+    defer_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,6 +537,7 @@ class _BackfillScheduler:
         self.deduped = 0
         self.merged = 0
         self.rate_limited_skips = 0
+        self.exchange_rate_limit_deferrals = 0
         self.priority_promotions = 0
         self.cancelled_pending = 0
         self.cancelled_after_chunk = 0
@@ -564,6 +572,10 @@ class _BackfillScheduler:
         ):
             self._merge_request_interest(active_state, request)
             self.deduped += 1
+            # A background parent can become foreground demand here.  That
+            # changes the global background-slot admission decision even when
+            # this exact series is already active, so re-evaluate the queue.
+            self._drain()
             return active_state.request.request_id, active_state.future
 
         for request_id in list(series.pending):
@@ -590,6 +602,10 @@ class _BackfillScheduler:
                         status="trusted_finality_upgraded",
                     )
                 self.deduped += 1
+                # Pending background work may have just been promoted to
+                # foreground demand.  It is now runnable in a spare slot and
+                # must not wait for an unrelated active chunk to finish.
+                self._drain()
                 return state.request.request_id, state.future
             if state.completed == 0 and self._should_merge(state.request, request):
                 state.request = state.request.merged_with(request)
@@ -601,6 +617,10 @@ class _BackfillScheduler:
                 self._on_queued(state.request)
                 self._publish_progress(state, status="merged")
                 self.merged += 1
+                # _replace_pending_chunks rebuilds the ready work.  A merge
+                # may occur while the only active task is stalled upstream,
+                # so explicitly wake the scheduler for the replacement.
+                self._drain()
                 return state.request.request_id, state.future
 
         future = self._future_for(request)
@@ -666,6 +686,21 @@ class _BackfillScheduler:
         chunk_ids: Iterable[str] = state.chunk_ids
         if promoted and self._newest_first(state.request):
             chunk_ids = reversed(state.chunk_ids)
+        if promoted:
+            # Priority queues do not support an in-place key update.  Remove
+            # each old heap item before inserting the promoted chunk; leaving
+            # both entries inflates ready diagnostics and can repeatedly skip
+            # the same physical chunk while its series is active.
+            promoted_chunk_ids = {
+                chunk_id
+                for chunk_id in state.chunk_ids
+                if chunk_id not in self._tasks and chunk_id in self._chunks
+            }
+            if promoted_chunk_ids:
+                self._ready = [
+                    item for item in self._ready if item[3] not in promoted_chunk_ids
+                ]
+                heapq.heapify(self._ready)
         for chunk_id in chunk_ids:
             chunk = self._chunks.get(chunk_id)
             if chunk is None:
@@ -983,6 +1018,7 @@ class _BackfillScheduler:
     def snapshot(self) -> dict[str, Any]:
         active: list[dict[str, Any]] = []
         pending: list[dict[str, Any]] = []
+        now_monotonic = time.monotonic()
         for series_key, series in self._series.items():
             series_label = ":".join(series_key)
             if series.active:
@@ -993,6 +1029,26 @@ class _BackfillScheduler:
                 state = self._requests.get(request_id)
                 if state is not None and not state.stale:
                     pending.append(self._state_snapshot(series_label, state, active=False))
+
+        deferred = [
+            {
+                "chunk_id": chunk.chunk_id,
+                "request_id": chunk.parent_id,
+                "series": ":".join(chunk.request.series_key),
+                "priority": chunk.request.priority,
+                "sequence": chunk.sequence,
+                "retry_at_ms": chunk.retry_at_ms,
+                "retry_in_ms": max(
+                    0,
+                    int((chunk.eligible_at_monotonic - now_monotonic) * 1000),
+                ),
+                "reason": chunk.defer_reason,
+                "bucket_key": chunk.rate_limit_bucket,
+                "defer_count": chunk.defer_count,
+            }
+            for chunk in self._chunks.values()
+            if chunk.eligible_at_monotonic > now_monotonic
+        ]
 
         return {
             "submitted": self.submitted,
@@ -1008,8 +1064,15 @@ class _BackfillScheduler:
             "pending": pending,
             "ready_chunks": len(self._ready),
             "running_chunks": len(self._tasks),
+            "max_concurrency": self._max_concurrency,
             "next_drain_in_ms": self._next_drain_in_ms(),
             "rate_limited_skips": self.rate_limited_skips,
+            "exchange_rate_limit_deferrals": self.exchange_rate_limit_deferrals,
+            "deferred_chunks": len(deferred),
+            "deferred": sorted(
+                deferred,
+                key=lambda item: (int(item["retry_at_ms"] or 0), item["chunk_id"]),
+            ),
             "buckets": {
                 key: bucket.snapshot()
                 for key, bucket in sorted(self._buckets.items())
@@ -1029,8 +1092,14 @@ class _BackfillScheduler:
         }
 
     def _replace_pending_chunks(self, state: _RequestState) -> None:
-        for chunk_id in state.chunk_ids:
+        replaced_chunk_ids = set(state.chunk_ids)
+        for chunk_id in replaced_chunk_ids:
             self._chunks.pop(chunk_id, None)
+        if replaced_chunk_ids:
+            self._ready = [
+                item for item in self._ready if item[3] not in replaced_chunk_ids
+            ]
+            heapq.heapify(self._ready)
         state.chunk_ids = []
         state.completed = 0
         state.failed = None
@@ -1185,14 +1254,21 @@ class _BackfillScheduler:
             "latest_refresh",
         })
 
-    def _push_ready(self, chunk: _FetchChunk) -> None:
-        self._seq += 1
+    def _push_ready(
+        self,
+        chunk: _FetchChunk,
+        *,
+        preserve_sequence: bool = False,
+    ) -> None:
+        if not preserve_sequence or chunk.queue_sequence <= 0:
+            self._seq += 1
+            chunk.queue_sequence = self._seq
         heapq.heappush(
             self._ready,
             (
                 int(chunk.request.priority or 100),
                 int(chunk.request.metadata.get("created_at_ms", 0) or 0),
-                self._seq,
+                chunk.queue_sequence,
                 chunk.chunk_id,
             ),
         )
@@ -1211,6 +1287,12 @@ class _BackfillScheduler:
                 state = self._requests.get(chunk.parent_id)
                 if state is None or state.stale or state.failed is not None:
                     self._chunks.pop(chunk.chunk_id, None)
+                    continue
+                now_monotonic = time.monotonic()
+                if chunk.eligible_at_monotonic > now_monotonic:
+                    delay = chunk.eligible_at_monotonic - now_monotonic
+                    next_delay = delay if next_delay is None else min(next_delay, delay)
+                    skipped.append(item)
                     continue
                 series = self._series.setdefault(chunk.request.series_key, _SeriesState())
                 if series.active is not None:
@@ -1231,6 +1313,10 @@ class _BackfillScheduler:
                     skipped.append(item)
                     continue
 
+                chunk.eligible_at_monotonic = 0.0
+                chunk.retry_at_ms = None
+                chunk.defer_reason = None
+                chunk.rate_limit_bucket = None
                 series.active = chunk.parent_id
                 if chunk.parent_id in series.pending:
                     series.pending.remove(chunk.parent_id)
@@ -1281,6 +1367,8 @@ class _BackfillScheduler:
             chunk = self._chunks.get(item[3])
             if chunk is None or self._is_background(chunk.request):
                 continue
+            if chunk.eligible_at_monotonic > time.monotonic():
+                continue
             state = self._requests.get(chunk.parent_id)
             if state is not None and not state.stale and state.failed is None:
                 return True
@@ -1327,6 +1415,9 @@ class _BackfillScheduler:
         try:
             try:
                 outcome = await self._execute(chunk.request)
+            except RateLimitDeferred as exc:
+                await self._defer_chunk(chunk, exc)
+                return
             except asyncio.CancelledError:
                 outcome = RepairOutcome(
                     request=chunk.request,
@@ -1344,6 +1435,82 @@ class _BackfillScheduler:
         finally:
             self._tasks.pop(chunk.chunk_id, None)
             self._drain()
+
+    async def _defer_chunk(
+        self,
+        chunk: _FetchChunk,
+        exc: RateLimitDeferred,
+    ) -> None:
+        """Return quota-blocked work to the ready heap without completing it."""
+
+        state = self._requests.get(chunk.parent_id)
+        series = self._series.get(chunk.request.series_key)
+        if series is not None and series.active == chunk.parent_id:
+            series.active = None
+
+        if state is None:
+            self._chunks.pop(chunk.chunk_id, None)
+            if series is not None and not series.pending and series.active is None:
+                self._series.pop(chunk.request.series_key, None)
+            return
+
+        # Cancellation wins every race with deferral. Never let a revoked
+        # request reappear when an old quota timer fires.
+        if state.cancel_requested:
+            self._chunks.pop(chunk.chunk_id, None)
+            if series is not None and chunk.parent_id in series.pending:
+                series.pending.remove(chunk.parent_id)
+            await self._finish_pending_cancellation(
+                state,
+                self._cancelled_outcome(state),
+                series,
+            )
+            return
+
+        if state.stale or state.failed is not None:
+            self._chunks.pop(chunk.chunk_id, None)
+            return
+
+        now_monotonic = time.monotonic()
+        eligible_at = exc.retry_at_monotonic or (
+            now_monotonic + exc.retry_after_seconds
+        )
+        eligible_at = max(now_monotonic + 0.01, eligible_at)
+        retry_at_ms = exc.retry_at_ms or (
+            int(time.time() * 1000)
+            + max(1, int((eligible_at - now_monotonic) * 1000))
+        )
+        chunk.eligible_at_monotonic = eligible_at
+        chunk.retry_at_ms = int(retry_at_ms)
+        chunk.defer_reason = exc.reason
+        chunk.rate_limit_bucket = exc.bucket_key
+        chunk.defer_count += 1
+        self.exchange_rate_limit_deferrals += 1
+        if series is None:
+            series = self._series.setdefault(
+                chunk.request.series_key,
+                _SeriesState(),
+            )
+        if chunk.parent_id not in series.pending:
+            series.pending.append(chunk.parent_id)
+        self._push_ready(chunk, preserve_sequence=True)
+        state.progress_revision += 1
+        self._publish_progress(
+            state,
+            status="rate_limit_deferred",
+            details={
+                "retry_at_ms": chunk.retry_at_ms,
+                "retry_in_ms": max(
+                    0,
+                    int((eligible_at - now_monotonic) * 1000),
+                ),
+                "rate_limit_bucket": chunk.rate_limit_bucket,
+                "rate_limit_reason": chunk.defer_reason,
+                "deferred_chunk_sequence": chunk.sequence,
+                "defer_count": chunk.defer_count,
+            },
+        )
+        self._schedule_drain(eligible_at - now_monotonic)
 
     async def _finish_chunk(self, chunk: _FetchChunk, outcome: RepairOutcome) -> None:
         self._chunks.pop(chunk.chunk_id, None)
@@ -1596,9 +1763,16 @@ class _BackfillScheduler:
             self._outcomes.pop(oldest_request_id, None)
 
     def _discard_remaining_chunks(self, state: _RequestState) -> None:
+        discarded: set[str] = set()
         for chunk_id in state.chunk_ids:
             if chunk_id not in self._tasks:
                 self._chunks.pop(chunk_id, None)
+                discarded.add(chunk_id)
+        if discarded:
+            self._ready = [
+                item for item in self._ready if item[3] not in discarded
+            ]
+            heapq.heapify(self._ready)
         state.stale = True
 
     def _aggregate_outcome(self, state: _RequestState) -> RepairOutcome:
@@ -1704,6 +1878,13 @@ class _BackfillScheduler:
         *,
         active: bool,
     ) -> dict[str, Any]:
+        now_monotonic = time.monotonic()
+        deferred = [
+            chunk
+            for chunk_id in state.chunk_ids
+            if (chunk := self._chunks.get(chunk_id)) is not None
+            and chunk.eligible_at_monotonic > now_monotonic
+        ]
         payload = {
             "series": series,
             "request_id": state.request.request_id,
@@ -1720,6 +1901,20 @@ class _BackfillScheduler:
             "demand_count": len(state.demand_leases),
             "persistent_interest": state.persistent_interest,
             "cancel_requested": state.cancel_requested,
+            "deferred_chunks": len(deferred),
+            "retry_at_ms": min(
+                (
+                    int(chunk.retry_at_ms)
+                    for chunk in deferred
+                    if chunk.retry_at_ms is not None
+                ),
+                default=None,
+            ),
+            "rate_limit_buckets": sorted({
+                str(chunk.rate_limit_bucket)
+                for chunk in deferred
+                if chunk.rate_limit_bucket
+            }),
         }
         metadata = state.request.metadata or {}
         for key in (
@@ -4205,6 +4400,16 @@ class BackfillCoordinator:
                         or self._report_retryable(report)
                     ),
                 )
+            except RateLimitDeferred as exc:
+                await self._ledger_mark_retry_wait(
+                    request,
+                    attempt=attempt,
+                    error=(
+                        f"rate_limit_deferred:{exc.bucket_key}:{exc.reason}"
+                    ),
+                    delay_seconds=exc.retry_after_seconds,
+                )
+                raise
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

@@ -3,11 +3,18 @@ from __future__ import annotations
 import asyncio
 import time
 
+import pytest
+
 from app.data_engine.backfill.config import BackfillConfig
 from app.data_engine.backfill.fetcher import HistoricalFetcher
 from app.data_engine.backfill.models import BackfillTask
 from app.data_engine.ingestion.transport import TransportError
-from app.exchanges.rate_limits import HistoricalRequest, RateLimitManager, RateLimitRule
+from app.exchanges.rate_limits import (
+    HistoricalRequest,
+    RateLimitDeferred,
+    RateLimitManager,
+    RateLimitRule,
+)
 
 
 class _DummyTransport:
@@ -34,6 +41,42 @@ class _FailsOnceTransport:
         if self.calls == 1:
             raise TransportError("temporary failure")
         return []
+
+
+class _RateLimitedTransport:
+    def __init__(self, *, status_code: int, body_code: str | None = None) -> None:
+        self.status_code = status_code
+        self.body_code = body_code
+        self.calls = 0
+
+    async def http_fetch(self, req):  # noqa: ANN001
+        self.calls += 1
+        raise TransportError(
+            f"HTTP {self.status_code}",
+            status_code=self.status_code,
+            retry_after=0.05,
+            headers={"Retry-After": "0.05"},
+            body_code=self.body_code,
+        )
+
+
+class _GatedRateLimitedTransport(_RateLimitedTransport):
+    def __init__(self, entered: asyncio.Event, release: asyncio.Event) -> None:
+        super().__init__(status_code=418, body_code="-1003")
+        self.entered = entered
+        self.release = release
+
+    async def http_fetch(self, req):  # noqa: ANN001
+        self.calls += 1
+        self.entered.set()
+        await self.release.wait()
+        raise TransportError(
+            "HTTP 418",
+            status_code=418,
+            retry_after=0.05,
+            headers={"Retry-After": "0.05"},
+            body_code="-1003",
+        )
 
 
 def _task(exchange: str, market_type: str = "spot") -> BackfillTask:
@@ -295,8 +338,8 @@ def test_historical_fetcher_rate_limits_once_per_retry_attempt() -> None:
     ]
 
 
-def test_rate_limit_cooldown_blocks_matching_bucket() -> None:
-    async def run() -> float:
+def test_rate_limit_cooldown_defers_matching_bucket_without_sleeping() -> None:
+    async def run() -> tuple[float, RateLimitDeferred]:
         cfg = BackfillConfig(
             fetch_rate_limit_delay=0,
             fetch_binance_futures_rate_limit_delay=0,
@@ -310,10 +353,15 @@ def test_rate_limit_cooldown_blocks_matching_bucket() -> None:
             TransportError("HTTP 429", status_code=429),
         )
         start = time.monotonic()
-        await fetcher._rate_limit(task)
-        return time.monotonic() - start
+        with pytest.raises(RateLimitDeferred) as caught:
+            await fetcher._rate_limit(task)
+        return time.monotonic() - start, caught.value
 
-    assert asyncio.run(run()) >= 0.045
+    elapsed, deferred = asyncio.run(run())
+    assert elapsed < 0.04
+    assert deferred.retry_after_seconds >= 0.04
+    assert deferred.retry_at_ms is not None
+    assert deferred.bucket_key == "binance:futures:request_weight:ip"
 
 
 def test_rate_limit_cooldown_blocks_only_matching_bucket() -> None:
@@ -385,6 +433,227 @@ def test_rate_limit_manager_uses_retry_after_header_for_cooldown() -> None:
     assert snapshot["cooldown_until"] - before >= 0.04
     assert snapshot["cooldown_remaining_seconds"] > 0
     assert snapshot["last_headers"]["retry-after"] == "0.05"
+
+
+def test_binance_418_opens_exchange_ip_circuit_across_buckets() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager()
+        futures_request = HistoricalRequest(
+            exchange="binance",
+            market_type="futures",
+            endpoint="/fapi/v1/klines",
+            symbol="BTCUSDT",
+        )
+        spot_request = HistoricalRequest(
+            exchange="binance",
+            market_type="spot",
+            endpoint="/api/v3/klines",
+            symbol="BTCUSDT",
+        )
+        okx_request = HistoricalRequest(
+            exchange="okx",
+            market_type="spot",
+            endpoint="/api/v5/market/history-candles",
+            symbol="BTC-USDT",
+        )
+        futures_rule = RateLimitRule(
+            name="binance_futures",
+            bucket_key="binance:futures:request_weight:ip",
+            capacity=100,
+            refill_interval_seconds=60,
+        )
+        spot_rule = RateLimitRule(
+            name="binance_spot",
+            bucket_key="binance:spot:request_weight:ip",
+            capacity=100,
+            refill_interval_seconds=60,
+        )
+        okx_rule = RateLimitRule(
+            name="okx_history",
+            bucket_key="okx:history-candles:ip",
+            capacity=100,
+            refill_interval_seconds=2,
+        )
+
+        manager.record_response(
+            futures_rule,
+            status_code=418,
+            body_code="-1003",
+            headers={"Retry-After": "0.05"},
+        )
+        return (
+            await manager.inspect(futures_rule, futures_request),
+            await manager.inspect(spot_rule, spot_request),
+            await manager.inspect(okx_rule, okx_request),
+            manager.circuit_snapshot(),
+        )
+
+    futures, spot, okx, circuits = asyncio.run(run())
+    assert futures.allowed is False and futures.reason == "circuit_open"
+    assert spot.allowed is False and spot.reason == "circuit_open"
+    assert futures.circuit_key == spot.circuit_key == "binance:ip"
+    assert futures.status_code == spot.status_code == 418
+    assert futures.body_code == spot.body_code == "-1003"
+    assert okx.allowed is True
+    assert circuits["binance:ip"]["open"] is True
+
+
+def test_binance_429_cools_only_the_matching_budget_bucket() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager()
+        futures_request = HistoricalRequest(
+            exchange="binance",
+            market_type="futures",
+            endpoint="/fapi/v1/klines",
+            symbol="BTCUSDT",
+        )
+        spot_request = HistoricalRequest(
+            exchange="binance",
+            market_type="spot",
+            endpoint="/api/v3/klines",
+            symbol="BTCUSDT",
+        )
+        futures_rule = RateLimitRule(
+            name="binance_futures",
+            bucket_key="binance:futures:request_weight:ip",
+            capacity=100,
+            refill_interval_seconds=60,
+        )
+        spot_rule = RateLimitRule(
+            name="binance_spot",
+            bucket_key="binance:spot:request_weight:ip",
+            capacity=100,
+            refill_interval_seconds=60,
+        )
+
+        manager.record_response(
+            futures_rule,
+            status_code=429,
+            headers={"Retry-After": "0.05"},
+        )
+        return (
+            await manager.inspect(futures_rule, futures_request),
+            await manager.inspect(spot_rule, spot_request),
+            manager.circuit_snapshot(),
+        )
+
+    futures, spot, circuits = asyncio.run(run())
+    assert futures.allowed is False and futures.reason == "cooldown"
+    assert spot.allowed is True
+    assert circuits == {}
+
+
+def test_bucket_created_after_418_recovery_cannot_restart_at_full_capacity() -> None:
+    async def run() -> tuple:
+        manager = RateLimitManager()
+        futures_request = HistoricalRequest(
+            exchange="binance",
+            market_type="futures",
+            endpoint="/fapi/v1/klines",
+            symbol="BTCUSDT",
+        )
+        spot_request = HistoricalRequest(
+            exchange="binance",
+            market_type="spot",
+            endpoint="/api/v3/klines",
+            symbol="BTCUSDT",
+        )
+        futures_rule = RateLimitRule(
+            name="binance_futures",
+            bucket_key="binance:futures:request_weight:ip",
+            capacity=60,
+            refill_interval_seconds=60,
+        )
+        spot_rule = RateLimitRule(
+            name="binance_spot",
+            bucket_key="binance:spot:request_weight:ip",
+            capacity=60,
+            refill_interval_seconds=60,
+        )
+        manager.record_response(
+            futures_rule,
+            status_code=418,
+            body_code="-1003",
+            headers={"Retry-After": "0.02"},
+        )
+        await asyncio.sleep(0.025)
+
+        futures = await manager.inspect(futures_rule, futures_request)
+        # This bucket did not exist when the 418 was recorded. It is created
+        # only after another bucket has already completed circuit recovery.
+        spot = await manager.inspect(spot_rule, spot_request)
+        return futures, spot, manager.snapshot()
+
+    futures, spot, snapshot = asyncio.run(run())
+    assert futures.allowed is False and futures.reason == "budget"
+    assert spot.allowed is False and spot.reason == "budget"
+    assert snapshot["binance:futures:request_weight:ip"]["circuit_generation"] == 1
+    assert snapshot["binance:spot:request_weight:ip"]["circuit_generation"] == 1
+
+
+@pytest.mark.parametrize(
+    ("status_code", "body_code"),
+    [(429, None), (418, "-1003")],
+)
+def test_historical_fetcher_propagates_rate_limit_as_scheduler_deferral(
+    status_code: int,
+    body_code: str | None,
+) -> None:
+    async def run() -> tuple[RateLimitDeferred, int, float]:
+        transport = _RateLimitedTransport(
+            status_code=status_code,
+            body_code=body_code,
+        )
+        fetcher = HistoricalFetcher(
+            BackfillConfig(
+                fetch_rate_limit_delay=0,
+                fetch_binance_futures_rate_limit_delay=0,
+                fetch_max_retries=5,
+            ),
+            transport,  # type: ignore[arg-type]
+        )
+        started = time.monotonic()
+        with pytest.raises(RateLimitDeferred) as caught:
+            await fetcher.fetch([_task("binance", "futures")])
+        return caught.value, transport.calls, time.monotonic() - started
+
+    deferred, calls, elapsed = asyncio.run(run())
+    assert calls == 1
+    assert elapsed < 0.04
+    assert deferred.retry_after_seconds >= 0.04
+    assert deferred.status_code == status_code
+    assert deferred.body_code == body_code
+
+
+def test_backfill_waiter_rechecks_circuit_after_exchange_semaphore() -> None:
+    async def run() -> tuple[RateLimitDeferred, int]:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        transport = _GatedRateLimitedTransport(entered, release)
+        fetcher = HistoricalFetcher(
+            BackfillConfig(
+                fetch_global_concurrency=2,
+                fetch_binance_futures_concurrency=1,
+                fetch_rate_limit_delay=0,
+                fetch_binance_futures_rate_limit_delay=0,
+            ),
+            transport,  # type: ignore[arg-type]
+        )
+        fetch_task = asyncio.create_task(fetcher.fetch([
+            _task("binance", "futures"),
+            _task("binance", "futures"),
+        ]))
+        await entered.wait()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(RateLimitDeferred) as caught:
+            await fetch_task
+        return caught.value, transport.calls
+
+    deferred, calls = asyncio.run(run())
+    assert calls == 1
+    assert deferred.status_code == 418
+    assert deferred.reason == "circuit_open"
 
 
 def test_rate_limit_manager_reports_token_refill_wait() -> None:

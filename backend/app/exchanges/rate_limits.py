@@ -95,6 +95,51 @@ class RateLimitDecision:
     rule_name: str
 
 
+@dataclass(frozen=True, slots=True)
+class RateLimitAdmission:
+    """Immediate exchange-budget admission result.
+
+    ``allowed=False`` is a scheduling decision, not a request failure.  Callers
+    that already own scarce worker/concurrency slots must release them and
+    retry no earlier than ``retry_at_monotonic``.
+    """
+
+    allowed: bool
+    bucket_key: str
+    cost: int
+    reason: str | None
+    retry_after_seconds: float
+    retry_at_monotonic: float | None
+    retry_at_ms: int | None
+    rule_name: str
+    status_code: int | None = None
+    body_code: str | None = None
+    circuit_key: str | None = None
+
+
+class RateLimitDeferred(RuntimeError):
+    """Typed control signal for work that must return to a delayed queue."""
+
+    def __init__(self, admission: RateLimitAdmission) -> None:
+        if admission.allowed:
+            raise ValueError("cannot defer an allowed rate-limit admission")
+        self.admission = admission
+        self.bucket_key = admission.bucket_key
+        self.rule_name = admission.rule_name
+        self.reason = admission.reason or "budget"
+        self.retry_after_seconds = max(0.001, admission.retry_after_seconds)
+        self.retry_at_monotonic = admission.retry_at_monotonic
+        self.retry_at_ms = admission.retry_at_ms
+        self.status_code = admission.status_code
+        self.body_code = admission.body_code
+        self.circuit_key = admission.circuit_key
+        super().__init__(
+            "exchange rate-limit admission deferred "
+            f"for {self.bucket_key} ({self.reason}); "
+            f"retry in {self.retry_after_seconds:.3f}s"
+        )
+
+
 @dataclass(slots=True)
 class _Bucket:
     key: str
@@ -112,6 +157,9 @@ class _Bucket:
     last_status_code: int | None = None
     last_body_code: str | None = None
     last_headers: dict[str, str] = field(default_factory=dict)
+    deferred_requests: int = 0
+    last_deferred_at_ms: int | None = None
+    circuit_generation: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def refill(self, now: float) -> None:
@@ -138,6 +186,38 @@ class _Bucket:
             "last_status_code": self.last_status_code,
             "last_body_code": self.last_body_code,
             "last_headers": dict(self.last_headers),
+            "deferred_requests": self.deferred_requests,
+            "last_deferred_at_ms": self.last_deferred_at_ms,
+            "circuit_generation": self.circuit_generation,
+        }
+
+
+@dataclass(slots=True)
+class _Circuit:
+    key: str
+    cooldown_until: float = 0.0
+    last_status_code: int | None = None
+    last_body_code: str | None = None
+    last_headers: dict[str, str] = field(default_factory=dict)
+    opened_at_ms: int | None = None
+    generation: int = 0
+    recovery_pending: bool = False
+
+    def snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        return {
+            "key": self.key,
+            "open": now < self.cooldown_until,
+            "cooldown_remaining_seconds": round(
+                max(0.0, self.cooldown_until - now),
+                3,
+            ),
+            "last_status_code": self.last_status_code,
+            "last_body_code": self.last_body_code,
+            "last_headers": dict(self.last_headers),
+            "opened_at_ms": self.opened_at_ms,
+            "generation": self.generation,
+            "recovery_pending": self.recovery_pending,
         }
 
 
@@ -146,44 +226,84 @@ class RateLimitManager:
 
     def __init__(self) -> None:
         self._buckets: dict[str, _Bucket] = {}
+        self._circuits: dict[str, _Circuit] = {}
+
+    async def inspect(
+        self,
+        rule: RateLimitRule,
+        request: HistoricalRequest,
+    ) -> RateLimitAdmission:
+        """Return current admission state without consuming quota."""
+
+        return await self._admit(rule, request, consume=False)
+
+    async def acquire_nowait(
+        self,
+        rule: RateLimitRule,
+        request: HistoricalRequest,
+    ) -> RateLimitDecision:
+        """Reserve quota immediately or raise :class:`RateLimitDeferred`."""
+
+        admission = await self._admit(rule, request, consume=True)
+        if not admission.allowed:
+            bucket = self._bucket_for(rule)
+            bucket.deferred_requests += 1
+            bucket.last_deferred_at_ms = int(time.time() * 1000)
+            raise RateLimitDeferred(admission)
+        now = time.monotonic()
+        return RateLimitDecision(
+            bucket_key=admission.bucket_key,
+            cost=admission.cost,
+            wait_seconds=0.0,
+            allowed_at=now,
+            rule_name=admission.rule_name,
+        )
 
     async def acquire(
         self,
         rule: RateLimitRule,
         request: HistoricalRequest,
     ) -> RateLimitDecision:
-        bucket = self._bucket_for(rule)
-        cost = min(rule.request_cost(request), bucket.capacity)
-        wait_seconds = 0.0
         total_wait_seconds = 0.0
 
         while True:
-            async with bucket.lock:
-                now = time.monotonic()
-                bucket.refill(now)
-                if now < bucket.cooldown_until:
-                    wait_seconds = max(0.0, bucket.cooldown_until - now)
-                elif bucket.tokens >= cost:
-                    bucket.tokens -= cost
-                    bucket.last_cost = cost
-                    bucket.last_wait_seconds = total_wait_seconds
-                    return RateLimitDecision(
-                        bucket_key=rule.bucket_key,
-                        cost=cost,
-                        wait_seconds=total_wait_seconds,
-                        allowed_at=now,
-                        rule_name=rule.name,
-                    )
-                elif bucket.refill_per_second > 0:
-                    wait_seconds = max(
-                        0.001,
-                        (cost - bucket.tokens) / bucket.refill_per_second,
-                    )
-                else:
-                    wait_seconds = 1.0
-
+            admission = await self._admit(rule, request, consume=True)
+            if admission.allowed:
+                bucket = self._bucket_for(rule)
+                bucket.last_wait_seconds = total_wait_seconds
+                return RateLimitDecision(
+                    bucket_key=admission.bucket_key,
+                    cost=admission.cost,
+                    wait_seconds=total_wait_seconds,
+                    allowed_at=time.monotonic(),
+                    rule_name=admission.rule_name,
+                )
+            wait_seconds = max(0.001, admission.retry_after_seconds)
             total_wait_seconds += wait_seconds
             await asyncio.sleep(wait_seconds)
+
+    async def deferred_error(
+        self,
+        rule: RateLimitRule,
+        request: HistoricalRequest,
+    ) -> RateLimitDeferred:
+        """Build a typed defer signal from the manager's current state."""
+
+        admission = await self.inspect(rule, request)
+        if admission.allowed:
+            now = time.monotonic()
+            retry_after = max(0.001, float(rule.cooldown_seconds or 0.0))
+            admission = RateLimitAdmission(
+                allowed=False,
+                bucket_key=rule.bucket_key,
+                cost=max(1, rule.request_cost(request)),
+                reason="exchange_response",
+                retry_after_seconds=retry_after,
+                retry_at_monotonic=now + retry_after,
+                retry_at_ms=int(time.time() * 1000 + retry_after * 1000),
+                rule_name=rule.name,
+            )
+        return RateLimitDeferred(admission)
 
     def record_cooldown(self, rule: RateLimitRule, seconds: float) -> bool:
         if seconds <= 0:
@@ -228,13 +348,179 @@ class RateLimitManager:
         )
         if cooldown_seconds <= 0:
             return False
-        return self.record_cooldown(rule, cooldown_seconds)
+        bucket_extended = self.record_cooldown(rule, cooldown_seconds)
+        circuit_extended = False
+        if status_code == 418:
+            circuit_extended = self._record_global_circuit(
+                rule,
+                seconds=cooldown_seconds,
+                status_code=status_code,
+                body_code=body_code,
+                headers=normalized_headers,
+            )
+        return bucket_extended or circuit_extended
 
     def snapshot(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, bucket in sorted(self._buckets.items()):
+            payload = bucket.snapshot()
+            circuit = self._circuits.get(self._circuit_key_for_bucket(key))
+            if circuit is not None:
+                payload["global_circuit"] = circuit.snapshot()
+            result[key] = payload
+        return result
+
+    def circuit_snapshot(self) -> dict[str, Any]:
         return {
-            key: bucket.snapshot()
-            for key, bucket in sorted(self._buckets.items())
+            key: circuit.snapshot()
+            for key, circuit in sorted(self._circuits.items())
         }
+
+    async def _admit(
+        self,
+        rule: RateLimitRule,
+        request: HistoricalRequest,
+        *,
+        consume: bool,
+    ) -> RateLimitAdmission:
+        bucket = self._bucket_for(rule)
+        cost = min(rule.request_cost(request), bucket.capacity)
+        async with bucket.lock:
+            now = time.monotonic()
+            now_ms = int(time.time() * 1000)
+            bucket.refill(now)
+            circuit_key = self._circuit_key_for_bucket(rule.bucket_key)
+            circuit = self._circuits.get(circuit_key)
+            if circuit is not None and now < circuit.cooldown_until:
+                wait_seconds = max(0.001, circuit.cooldown_until - now)
+                return self._deferred_admission(
+                    rule,
+                    bucket,
+                    cost=cost,
+                    reason="circuit_open",
+                    wait_seconds=wait_seconds,
+                    now=now,
+                    now_ms=now_ms,
+                    circuit=circuit,
+                )
+            if circuit is not None and circuit.recovery_pending:
+                # A long IP ban refills every token bucket while no traffic is
+                # flowing.  Reset the exchange pools once at recovery so the
+                # first post-ban tick cannot unleash a full-capacity burst.
+                circuit.recovery_pending = False
+                for key, candidate in self._buckets.items():
+                    if self._circuit_key_for_bucket(key) == circuit_key:
+                        candidate.tokens = 0.0
+                        candidate.updated_at = now
+                        candidate.circuit_generation = circuit.generation
+                bucket.refill(now)
+            if now < bucket.cooldown_until:
+                wait_seconds = max(0.001, bucket.cooldown_until - now)
+                return self._deferred_admission(
+                    rule,
+                    bucket,
+                    cost=cost,
+                    reason="cooldown",
+                    wait_seconds=wait_seconds,
+                    now=now,
+                    now_ms=now_ms,
+                    circuit=circuit,
+                )
+            if bucket.tokens < cost:
+                wait_seconds = (
+                    max(0.001, (cost - bucket.tokens) / bucket.refill_per_second)
+                    if bucket.refill_per_second > 0
+                    else 1.0
+                )
+                return self._deferred_admission(
+                    rule,
+                    bucket,
+                    cost=cost,
+                    reason="budget",
+                    wait_seconds=wait_seconds,
+                    now=now,
+                    now_ms=now_ms,
+                    circuit=circuit,
+                )
+            if consume:
+                bucket.tokens -= cost
+                bucket.last_cost = cost
+                bucket.last_wait_seconds = 0.0
+            return RateLimitAdmission(
+                allowed=True,
+                bucket_key=rule.bucket_key,
+                cost=cost,
+                reason=None,
+                retry_after_seconds=0.0,
+                retry_at_monotonic=None,
+                retry_at_ms=None,
+                rule_name=rule.name,
+                status_code=bucket.last_status_code,
+                body_code=bucket.last_body_code,
+                circuit_key=(circuit.key if circuit is not None else None),
+            )
+
+    @staticmethod
+    def _deferred_admission(
+        rule: RateLimitRule,
+        bucket: _Bucket,
+        *,
+        cost: int,
+        reason: str,
+        wait_seconds: float,
+        now: float,
+        now_ms: int,
+        circuit: _Circuit | None,
+    ) -> RateLimitAdmission:
+        return RateLimitAdmission(
+            allowed=False,
+            bucket_key=rule.bucket_key,
+            cost=cost,
+            reason=reason,
+            retry_after_seconds=wait_seconds,
+            retry_at_monotonic=now + wait_seconds,
+            retry_at_ms=now_ms + max(1, int(wait_seconds * 1000)),
+            rule_name=rule.name,
+            status_code=(
+                circuit.last_status_code
+                if circuit is not None and reason == "circuit_open"
+                else bucket.last_status_code
+            ),
+            body_code=(
+                circuit.last_body_code
+                if circuit is not None and reason == "circuit_open"
+                else bucket.last_body_code
+            ),
+            circuit_key=(circuit.key if circuit is not None else None),
+        )
+
+    def _record_global_circuit(
+        self,
+        rule: RateLimitRule,
+        *,
+        seconds: float,
+        status_code: int | None,
+        body_code: str | None,
+        headers: Mapping[str, str],
+    ) -> bool:
+        key = self._circuit_key_for_bucket(rule.bucket_key)
+        circuit = self._circuits.setdefault(key, _Circuit(key=key))
+        circuit.last_status_code = status_code
+        circuit.last_body_code = body_code
+        circuit.last_headers = _rate_limit_headers(headers)
+        cooldown_until = time.monotonic() + max(0.0, seconds)
+        if cooldown_until <= circuit.cooldown_until:
+            return False
+        circuit.cooldown_until = cooldown_until
+        circuit.opened_at_ms = int(time.time() * 1000)
+        circuit.generation += 1
+        circuit.recovery_pending = True
+        return True
+
+    @staticmethod
+    def _circuit_key_for_bucket(bucket_key: str) -> str:
+        exchange = str(bucket_key or "unknown").split(":", 1)[0]
+        return f"{exchange}:ip"
 
     def _bucket_for(self, rule: RateLimitRule) -> _Bucket:
         bucket = self._buckets.get(rule.bucket_key)
@@ -243,6 +529,22 @@ class RateLimitManager:
 
         capacity = max(1, int(rule.capacity))
         interval = max(0.001, float(rule.refill_interval_seconds))
+        now = time.monotonic()
+        refill_per_second = capacity / interval
+        circuit = self._circuits.get(self._circuit_key_for_bucket(rule.bucket_key))
+        initial_tokens = float(capacity)
+        circuit_generation = 0
+        if circuit is not None and circuit.generation > 0:
+            # A bucket first touched after an IP-wide ban must not bypass the
+            # recovery ramp by materializing at full capacity. Give it only
+            # the quota that could conservatively have refilled since the
+            # circuit deadline; while the circuit is open this is exactly 0.
+            recovered_for = max(0.0, now - circuit.cooldown_until)
+            initial_tokens = min(
+                float(capacity),
+                recovered_for * refill_per_second,
+            )
+            circuit_generation = circuit.generation
         bucket = _Bucket(
             key=rule.bucket_key,
             rule_name=rule.name,
@@ -250,8 +552,10 @@ class RateLimitManager:
             refill_interval_seconds=interval,
             max_concurrency=rule.max_concurrency,
             capacity=capacity,
-            refill_per_second=capacity / interval,
-            tokens=float(capacity),
+            refill_per_second=refill_per_second,
+            tokens=initial_tokens,
+            updated_at=now,
+            circuit_generation=circuit_generation,
         )
         self._buckets[rule.bucket_key] = bucket
         return bucket
@@ -353,7 +657,7 @@ def _cooldown_seconds(
     retry_after: float | None,
     fallback: float | None,
 ) -> float:
-    if status_code in {418, 429} or body_code == "50011":
+    if status_code in {418, 429} or body_code in {"-1003", "50011"}:
         return max(
             0.0,
             float(retry_after or 0.0),

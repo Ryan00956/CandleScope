@@ -30,7 +30,9 @@ from .plugin import ExchangePlugin, SymbolNormalizer
 from .protocol import AdapterBackedProtocol, ExchangeProtocol, RestRequestSpec, WsConnectionSpec
 from .rate_limits import (
     HistoricalRequest,
+    RateLimitAdmission,
     RateLimitDecision,
+    RateLimitDeferred,
     RateLimitManager,
     RateLimitOverride,
     RateLimitPolicy,
@@ -70,7 +72,9 @@ __all__ = [
     "HistoricalRequest",
     "NormalizerContractSample",
     "OkxHistoricalPaginationPolicy",
+    "RateLimitAdmission",
     "RateLimitDecision",
+    "RateLimitDeferred",
     "RateLimitManager",
     "RateLimitOverride",
     "RateLimitPolicy",

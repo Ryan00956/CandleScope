@@ -51,6 +51,7 @@ import time
 from typing import Any
 
 from app.exchanges.symbols import normalize_symbol
+from app.exchanges.rate_limits import RateLimitDeferred
 
 from ..ingestion.config import IngestionConfig
 from ..ingestion.metrics import LayerMetrics
@@ -409,6 +410,10 @@ class BackfillEngine:
                 else:
                     status = BackfillStatus.COMPLETED
 
+        except RateLimitDeferred:
+            # Quota deferral is scheduler control flow.  No reconcile/write or
+            # terminal report may be produced for work that has not run yet.
+            raise
         except Exception as exc:
             status = BackfillStatus.FAILED
             errors.append(str(exc))

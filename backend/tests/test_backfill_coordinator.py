@@ -18,6 +18,7 @@ from app.data_engine.data_manager.backfill_coordinator import (
 )
 from app.data_engine.history.models import HistoryDisposition
 from app.data_engine.storage.gap_ledger import GapLedger
+from app.exchanges.rate_limits import RateLimitAdmission, RateLimitDeferred
 
 
 @dataclass(slots=True)
@@ -97,6 +98,27 @@ def _request(start_ms: int, end_ms: int, *, request_id: str | None = None) -> Re
         market_type="spot",
         **kwargs,
     )
+
+
+def _quota_deferral(
+    seconds: float,
+    *,
+    bucket_key: str = "binance:futures:request_weight:ip",
+) -> RateLimitDeferred:
+    now_monotonic = time.monotonic()
+    return RateLimitDeferred(RateLimitAdmission(
+        allowed=False,
+        bucket_key=bucket_key,
+        cost=5,
+        reason="cooldown",
+        retry_after_seconds=seconds,
+        retry_at_monotonic=now_monotonic + seconds,
+        retry_at_ms=int(time.time() * 1000 + seconds * 1000),
+        rule_name="binance_futures_klines",
+        status_code=429,
+        body_code=None,
+        circuit_key=None,
+    ))
 
 
 def test_backfill_coordinator_merges_pending_requests_for_same_series() -> None:
@@ -837,6 +859,114 @@ def test_backfill_scheduler_wakes_after_rate_limit_without_new_submit() -> None:
 
         assert outcome.status == "completed"
         assert coord.snapshot()["next_drain_in_ms"] is None
+
+    asyncio.run(_run())
+
+
+def test_rate_limit_deferral_releases_worker_slot_and_preserves_chunk_progress() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                self.btc_calls = 0
+
+            async def run(self, **kwargs):
+                symbol = kwargs["symbol"]
+                self.calls.append(symbol)
+                if symbol == "BTCUSDT":
+                    self.btc_calls += 1
+                    if self.btc_calls == 1:
+                        raise _quota_deferral(0.12)
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+        btc = _request(0, 0, request_id="quota-deferred-btc")
+        btc.market_type = "futures"
+        btc_task = asyncio.create_task(coordinator.request_and_wait(btc))
+
+        await _wait_until(
+            lambda: coordinator.snapshot()["deferred_chunks"] == 1,
+        )
+        deferred_snapshot = coordinator.snapshot()
+        assert deferred_snapshot["running_chunks"] == 0
+        assert deferred_snapshot["exchange_rate_limit_deferrals"] == 1
+        assert deferred_snapshot["pending"][0]["completed_chunks"] == 0
+        assert deferred_snapshot["pending"][0]["pending_chunks"] == 1
+        assert deferred_snapshot["deferred"][0]["defer_count"] == 1
+
+        eth = _request(0, 0, request_id="healthy-eth")
+        eth.symbol = "ETHUSDT"
+        eth_task = asyncio.create_task(coordinator.request_and_wait(eth))
+        eth_outcome = await asyncio.wait_for(eth_task, timeout=0.08)
+        assert eth_outcome.status == "completed"
+        assert btc_task.done() is False
+
+        btc_outcome = await asyncio.wait_for(btc_task, timeout=1.0)
+        assert btc_outcome.status == "completed"
+        assert engine.calls == ["BTCUSDT", "ETHUSDT", "BTCUSDT"]
+        assert coordinator.snapshot()["deferred_chunks"] == 0
+
+    asyncio.run(_run())
+
+
+def test_cancelling_rate_limit_deferred_chunk_prevents_timer_revival() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def run(self, **kwargs):
+                self.calls += 1
+                raise _quota_deferral(0.08)
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+        request = _request(0, 0, request_id="quota-deferred-cancel")
+        request.market_type = "futures"
+        request.metadata["demand_owner_id"] = "chart:quota-cancel"
+        request_id = coordinator.request(request)
+
+        await _wait_until(
+            lambda: coordinator.snapshot()["deferred_chunks"] == 1,
+        )
+        assert await coordinator.release_demand(
+            request_id,
+            owner_id="chart:quota-cancel",
+            cancel_if_unobserved=True,
+        )
+        outcome = await asyncio.wait_for(
+            coordinator.wait_for_request(request_id),
+            timeout=1.0,
+        )
+        assert outcome is not None and outcome.status == "cancelled"
+
+        await asyncio.sleep(0.12)
+        assert engine.calls == 1
+        snapshot = coordinator.snapshot()
+        assert snapshot["deferred_chunks"] == 0
+        assert snapshot["ready_chunks"] == 0
+        assert snapshot["running_chunks"] == 0
 
     asyncio.run(_run())
 
@@ -1591,6 +1721,95 @@ def test_background_dispatch_uses_at_most_one_slot_while_foreground_runs() -> No
         engine.release.set()
         await asyncio.gather(background_one, background_two, foreground)
         assert coordinator.snapshot()["background_dispatches"] == 2
+
+    asyncio.run(_run())
+
+
+def test_pending_background_promotion_wakes_spare_foreground_slot() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.promoted_started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                if kwargs["symbol"] == "ETHUSDT":
+                    self.promoted_started.set()
+                await self.release.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=2,
+        )
+
+        def _series(
+            symbol: str,
+            reason: str,
+            request_id: str,
+            priority: int,
+        ) -> RepairRequest:
+            return RepairRequest(
+                symbol=symbol,
+                interval="1m",
+                start_ms=0,
+                end_ms=0,
+                exchange="binance",
+                market_type="spot",
+                reason=reason,
+                priority=priority,
+                request_id=request_id,
+            )
+
+        first_id = coordinator.request(
+            _series("BTCUSDT", "background_gap_audit", "background-active", 25)
+        )
+        await engine.first_started.wait()
+
+        pending_id = coordinator.request(
+            _series("ETHUSDT", "background_gap_audit", "background-pending", 25)
+        )
+        await asyncio.sleep(0)
+        pending_snapshot = coordinator.snapshot()
+        assert len(engine.calls) == 1
+        assert pending_snapshot["ready_chunks"] == 1
+        assert pending_snapshot["running_chunks"] == 1
+        assert pending_snapshot["max_concurrency"] == 2
+        assert pending_snapshot["next_drain_in_ms"] is None
+
+        promoted_id = coordinator.request(
+            _series("ETHUSDT", "initial_history", "visible-dedupe", 10)
+        )
+        assert promoted_id == pending_id
+        await asyncio.wait_for(engine.promoted_started.wait(), timeout=1.0)
+
+        promoted_snapshot = coordinator.snapshot()
+        assert promoted_snapshot["priority_promotions"] == 1
+        assert promoted_snapshot["ready_chunks"] == 0
+        assert promoted_snapshot["running_chunks"] == 2
+        assert {call["symbol"] for call in engine.calls} == {"BTCUSDT", "ETHUSDT"}
+        promoted_call = next(call for call in engine.calls if call["symbol"] == "ETHUSDT")
+        assert promoted_call["metadata"]["priority"] == 10
+        assert "initial_history" in promoted_call["metadata"]["reason"]
+
+        engine.release.set()
+        outcomes = await asyncio.gather(
+            coordinator.wait_for_request(first_id),
+            coordinator.wait_for_request(pending_id),
+        )
+        assert all(outcome is not None and outcome.status == "completed" for outcome in outcomes)
 
     asyncio.run(_run())
 

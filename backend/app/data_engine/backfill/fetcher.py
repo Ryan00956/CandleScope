@@ -34,6 +34,7 @@ from typing import Callable, Awaitable, Any
 from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
 from app.exchanges import (
     HistoricalRequest,
+    RateLimitDeferred,
     RateLimitPolicy,
     RateLimitRule,
     bootstrap_default_adapters,
@@ -248,6 +249,20 @@ class HistoricalFetcher:
         coros = [self._fetch_task(task, route_plan) for task in tasks]
         raw_results = await asyncio.gather(*coros, return_exceptions=True)
 
+        deferred = [
+            result
+            for result in raw_results
+            if isinstance(result, RateLimitDeferred)
+        ]
+        if deferred:
+            # One scheduler chunk may contain several physical gap tasks.  A
+            # parent retry must wait for the latest shared-bucket deadline so
+            # it does not immediately re-enter and churn the queue again.
+            raise max(
+                deferred,
+                key=lambda exc: int(exc.retry_at_ms or 0),
+            )
+
         # Handle any unexpected exceptions returned by gather
         results: list[FetchResult] = []
         for i, r in enumerate(raw_results):
@@ -369,15 +384,24 @@ class HistoricalFetcher:
 
             while retry_count < max_attempts:
                 try:
+                    # Check without consuming before the endpoint gate. The
+                    # consuming admission happens after the gate so a request
+                    # queued behind an in-flight 418 cannot slip through with
+                    # a stale reservation.
+                    await self._rate_limit_admission(task, req)
                     exchange_semaphore = self._get_exchange_semaphore(task, req)
                     async with exchange_semaphore:
-                        await self._rate_limit(task, req)
+                        if self._custom_rate_limiter is None:
+                            await self._rate_limit(task, req)
                         req.quota_acquired = True
+                        req.defer_on_rate_limit = True
                         req.quota_semaphore_held = True
                         try:
                             raw_messages = await self._transport.http_fetch(req)
                         except TransportError as exc:
                             await self._record_rate_limit_cooldown(task, exc, req)
+                            if self._is_rate_limited(exc):
+                                raise await self._rate_limit_deferred(task, req) from exc
                             raise
                         if raw_messages:
                             self._record_rate_limit_response(task, req, raw_messages[0])
@@ -394,6 +418,9 @@ class HistoricalFetcher:
 
                     success = True
                     break
+
+                except RateLimitDeferred:
+                    raise
 
                 except TransportError as exc:
                     retry_count += 1
@@ -626,6 +653,20 @@ class HistoricalFetcher:
             return_exceptions=True,
         )
 
+        deferred = [
+            value
+            for value in rest_results
+            if isinstance(value, RateLimitDeferred)
+        ]
+        if deferred:
+            # Archive routing is an implementation detail of the same
+            # scheduler chunk. Never downgrade quota control flow to a
+            # partial FetchResult merely because archive rows were available.
+            raise max(
+                deferred,
+                key=lambda exc: int(exc.retry_at_ms or 0),
+            )
+
         errors: list[str] = []
         pages_fetched = 0
         rest_bars: list[FetchedBar] = []
@@ -853,7 +894,23 @@ class HistoricalFetcher:
         rule = self._rate_limit_rule(task, historical_request)
         if penalty_seconds > 0:
             self._rate_limit_manager.record_cooldown(rule, penalty_seconds)
-        await self._rate_limit_manager.acquire(rule, historical_request)
+        await self._rate_limit_manager.acquire_nowait(rule, historical_request)
+
+    async def _rate_limit_admission(
+        self,
+        task: BackfillTask,
+        request: TransportRequest | None = None,
+    ) -> None:
+        """Preflight quota without reserving tokens or holding concurrency."""
+
+        if self._custom_rate_limiter is not None:
+            await self._custom_rate_limiter()
+            return
+        historical_request = self._historical_request(task, request)
+        rule = self._rate_limit_rule(task, historical_request)
+        admission = await self._rate_limit_manager.inspect(rule, historical_request)
+        if not admission.allowed:
+            raise RateLimitDeferred(admission)
 
     def _get_exchange_semaphore(
         self,
@@ -964,6 +1021,8 @@ class HistoricalFetcher:
         exc: TransportError,
         request: TransportRequest | None = None,
     ) -> None:
+        if bool(getattr(exc, "rate_limit_recorded", False)):
+            return
         backoff_seconds = self._retry_backoff_seconds(task, exc, request)
         if backoff_seconds <= 0:
             return
@@ -985,6 +1044,18 @@ class HistoricalFetcher:
                 backoff_seconds,
             )
 
+    async def _rate_limit_deferred(
+        self,
+        task: BackfillTask,
+        request: TransportRequest | None = None,
+    ) -> RateLimitDeferred:
+        historical_request = self._historical_request(task, request)
+        rule = self._rate_limit_rule(task, historical_request)
+        return await self._rate_limit_manager.deferred_error(
+            rule,
+            historical_request,
+        )
+
     def _record_rate_limit_response(
         self,
         task: BackfillTask,
@@ -1003,8 +1074,9 @@ class HistoricalFetcher:
     @staticmethod
     def _is_rate_limited(exc: TransportError) -> bool:
         return (
-            getattr(exc, "status_code", None) == 429
-            or getattr(exc, "body_code", None) == "50011"
+            getattr(exc, "status_code", None) in {418, 429}
+            or getattr(exc, "body_code", None) in {"-1003", "50011"}
+            or "HTTP 418" in str(exc)
             or "HTTP 429" in str(exc)
         )
 

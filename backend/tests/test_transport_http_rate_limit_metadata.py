@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import (
     StreamDescriptor,
@@ -10,6 +12,7 @@ from app.data_engine.ingestion.models import (
     TransportRequest,
 )
 from app.data_engine.ingestion.transport import TransportError, TransportLayer
+from app.exchanges.rate_limits import RateLimitAdmission, RateLimitDeferred
 
 
 class _FakeResponse:
@@ -69,12 +72,54 @@ class _BinanceInvalidParameterResponse(_FakeResponse):
         return '{"msg":"parameter \'startTime\' is invalid.","code":-1130}'
 
 
+class _BinanceRateLimitResponse(_FakeResponse):
+    def __init__(self, *, status: int) -> None:
+        super().__init__(
+            {},
+            status=status,
+            headers={"Retry-After": "0.05"},
+        )
+        self.url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+
+    async def text(self) -> str:
+        return '{"msg":"IP banned until retry time","code":-1003}'
+
+
+class _GatedBinanceRateLimitResponse(_BinanceRateLimitResponse):
+    def __init__(self, entered: asyncio.Event, release: asyncio.Event) -> None:
+        super().__init__(status=418)
+        self._entered = entered
+        self._release = release
+
+    async def __aenter__(self) -> "_GatedBinanceRateLimitResponse":
+        self._entered.set()
+        await self._release.wait()
+        return self
+
+
 class _CountingRateLimits:
     def __init__(self) -> None:
         self.acquire_calls = 0
+        self.inspect_calls = 0
         self.response_calls = 0
 
     async def acquire(self, rule: object, request: object) -> None:
+        self.acquire_calls += 1
+
+    async def inspect(self, rule: object, request: object) -> RateLimitAdmission:
+        self.inspect_calls += 1
+        return RateLimitAdmission(
+            allowed=True,
+            bucket_key="test:bucket",
+            cost=1,
+            reason=None,
+            retry_after_seconds=0,
+            retry_at_monotonic=None,
+            retry_at_ms=None,
+            rule_name="test",
+        )
+
+    async def acquire_nowait(self, rule: object, request: object) -> None:
         self.acquire_calls += 1
 
     def record_response(self, rule: object, **kwargs: object) -> bool:
@@ -184,3 +229,107 @@ def test_http_fetch_does_not_fail_over_binance_invalid_parameter() -> None:
     assert calls == 1
     assert exc.status_code == 400
     assert exc.body_code == "-1130"
+
+
+@pytest.mark.parametrize("status_code", [418, 429])
+def test_http_fetch_does_not_fail_over_shared_rate_limit_response(
+    status_code: int,
+) -> None:
+    async def run() -> tuple[TransportError, int]:
+        config = IngestionConfig(
+            http_base_urls_futures=["https://one.example", "https://two.example"],
+        )
+        transport = TransportLayer(config)
+        session = _SequenceSession([
+            _BinanceRateLimitResponse(status=status_code),
+        ])
+        transport._http_session = session  # type: ignore[assignment]
+        request = TransportRequest(
+            descriptor=StreamDescriptor(
+                symbol="BTCUSDT",
+                stream_type=StreamType.MARK_PRICE,
+                exchange="binance",
+                market_type="futures",
+            ),
+        )
+
+        with pytest.raises(TransportError) as caught:
+            await transport.http_fetch(request)
+        return caught.value, session.calls
+
+    exc, calls = asyncio.run(run())
+    assert calls == 1
+    assert exc.status_code == status_code
+    assert exc.body_code == "-1003"
+    assert exc.retry_after == 0.05
+    assert exc.rate_limit_recorded is True
+
+
+def test_http_fetch_returns_typed_deferral_after_physical_418() -> None:
+    async def run() -> tuple[RateLimitDeferred, int]:
+        config = IngestionConfig(
+            http_base_urls_futures=["https://one.example", "https://two.example"],
+        )
+        transport = TransportLayer(config)
+        session = _SequenceSession([_BinanceRateLimitResponse(status=418)])
+        transport._http_session = session  # type: ignore[assignment]
+        request = TransportRequest(
+            descriptor=StreamDescriptor(
+                symbol="BTCUSDT",
+                stream_type=StreamType.MARK_PRICE,
+                exchange="binance",
+                market_type="futures",
+            ),
+            defer_on_rate_limit=True,
+        )
+
+        with pytest.raises(RateLimitDeferred) as caught:
+            await transport.http_fetch(request)
+        return caught.value, session.calls
+
+    deferred, calls = asyncio.run(run())
+    assert calls == 1
+    assert deferred.reason == "circuit_open"
+    assert deferred.status_code == 418
+    assert deferred.body_code == "-1003"
+    assert deferred.retry_after_seconds >= 0.04
+
+
+def test_request_queued_behind_physical_418_rechecks_before_sending() -> None:
+    async def run() -> tuple[list[object], int]:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        config = IngestionConfig(
+            http_base_urls_futures=["https://one.example"],
+        )
+        transport = TransportLayer(config)
+        session = _SequenceSession([
+            _GatedBinanceRateLimitResponse(entered, release),
+        ])
+        transport._http_session = session  # type: ignore[assignment]
+
+        def request() -> TransportRequest:
+            return TransportRequest(
+                descriptor=StreamDescriptor(
+                    symbol="BTCUSDT",
+                    stream_type=StreamType.MARK_PRICE,
+                    exchange="binance",
+                    market_type="futures",
+                ),
+                defer_on_rate_limit=True,
+            )
+
+        first = asyncio.create_task(transport.http_fetch(request()))
+        await entered.wait()
+        second = asyncio.create_task(transport.http_fetch(request()))
+        await asyncio.sleep(0)
+        assert session.calls == 1
+
+        release.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        return results, session.calls
+
+    results, calls = asyncio.run(run())
+    assert calls == 1
+    assert all(isinstance(value, RateLimitDeferred) for value in results)
+    assert all(value.status_code == 418 for value in results)

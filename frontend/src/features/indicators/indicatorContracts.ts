@@ -4,6 +4,7 @@ import type {
   IndicatorBarColor,
   IndicatorBgColor,
   IndicatorColorPoint,
+  IndicatorComputeBatchResponse,
   CustomIndicatorRecord,
   IndicatorDeleteResponse,
   IndicatorErrorDetail,
@@ -1077,6 +1078,49 @@ export function parseIndicatorRangeBatchResponse(
         };
       },
     ),
+  };
+}
+
+export function parseIndicatorComputeBatchResponse(
+  value: unknown,
+  path = "indicator.computeBatch",
+): IndicatorComputeBatchResponse {
+  const record = expectIndicatorRecord(value, path);
+  const seenJobKeys = new Set<string>();
+  const seenClientIds = new Set<string>();
+  const results = expectIndicatorArray(record.results, `${path}.results`).map(
+    (item, index) => {
+      const itemPath = `${path}.results[${index}]`;
+      const result = expectIndicatorRecord(item, itemPath);
+      const clientId = expectIndicatorNonEmptyString(
+        result.clientId,
+        `${itemPath}.clientId`,
+      );
+      const jobKey = expectIndicatorNonEmptyString(
+        result.jobKey,
+        `${itemPath}.jobKey`,
+      );
+      if (seenClientIds.has(clientId)) {
+        throw new IndicatorPayloadError(`${itemPath}.clientId`, "expected a unique client id");
+      }
+      if (seenJobKeys.has(jobKey)) {
+        throw new IndicatorPayloadError(`${itemPath}.jobKey`, "expected a unique job key");
+      }
+      seenClientIds.add(clientId);
+      seenJobKeys.add(jobKey);
+      return {
+        clientId,
+        jobKey,
+        payload: parseIndicatorPayloadEnvelope(
+          result.payload,
+          `${itemPath}.payload`,
+        ),
+      };
+    },
+  );
+  return {
+    ok: expectIndicatorBoolean(record.ok, `${path}.ok`),
+    results,
   };
 }
 

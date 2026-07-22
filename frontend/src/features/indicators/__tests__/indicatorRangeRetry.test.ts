@@ -17,6 +17,11 @@ let shouldWaitForIndicatorRangeSubscription = structuralMock<
 >(() => {
   throw new Error("indicator runtime not loaded");
 });
+let buildIndicatorRangeLifecycleKey = structuralMock<
+  RuntimeModule["buildIndicatorRangeLifecycleKey"]
+>(() => {
+  throw new Error("indicator runtime not loaded");
+});
 let isTypedIndicatorRangeWait = structuralMock<RuntimeModule["isTypedIndicatorRangeWait"]>(() => {
   throw new Error("indicator runtime not loaded");
 });
@@ -35,11 +40,12 @@ test.before(async () => {
   server = await createServer({
     appType: "custom",
     optimizeDeps: { noDiscovery: true, include: [] },
-    server: { middlewareMode: true },
+    server: { hmr: false, middlewareMode: true },
   });
   ({
     hostedIndicatorRangeRequestsReady,
     shouldWaitForIndicatorRangeSubscription,
+    buildIndicatorRangeLifecycleKey,
     isTypedIndicatorRangeWait,
     isResolvedIndicatorRangeEmpty,
     resolveIndicatorRealtimeMode,
@@ -83,6 +89,29 @@ test("HTTP indicator history is not blocked by an unrelated realtime acknowledge
   assert.equal(shouldWaitForIndicatorRangeSubscription(true, false), false);
   assert.equal(shouldWaitForIndicatorRangeSubscription(true, true), true);
   assert.equal(shouldWaitForIndicatorRangeSubscription(false, true), false);
+});
+
+test("hosted range lifecycle changes with request scope and generation", () => {
+  const first = buildIndicatorRangeLifecycleKey("series", {
+    scope: "viewport",
+    generation: 1,
+  });
+  assert.equal(buildIndicatorRangeLifecycleKey("series", {
+    scope: "viewport",
+    generation: 1,
+  }), first);
+  assert.notEqual(buildIndicatorRangeLifecycleKey("series", {
+    scope: "viewport",
+    generation: 2,
+  }), first);
+  assert.notEqual(buildIndicatorRangeLifecycleKey("series", {
+    scope: "history",
+    generation: 1,
+  }), first);
+  assert.notEqual(buildIndicatorRangeLifecycleKey("other-series", {
+    scope: "viewport",
+    generation: 1,
+  }), first);
 });
 
 test.after(async () => {

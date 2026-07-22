@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { performance } from "node:perf_hooks";
 
 import {
   acquireActiveIndicatorCacheLeases,
@@ -7,9 +8,13 @@ import {
   buildIndicatorCacheHydrationSignature,
   buildIndicatorResultCacheKey,
   getCachedIndicatorComputedSegments,
+  getCachedIndicatorMetadata,
   getCachedIndicatorResult,
+  getCachedIndicatorRevision,
   invalidateCachedIndicatorRange,
+  patchCachedIndicatorResult as patchCachedIndicatorResultProduction,
   replaceCachedIndicatorRange as replaceCachedIndicatorRangeProduction,
+  removeCachedIndicatorResult,
   resetIndicatorResultCache,
   snapshotIndicatorResultCacheEntries,
   snapshotIndicatorResultCacheDiagnostics,
@@ -27,6 +32,7 @@ import { mustBeDefined, structuralMock } from "../../../test/testHelpers.js";
 
 type CacheSnapshotParams = Parameters<typeof cacheIndicatorSnapshotProduction>;
 type ReplaceRangeParams = Parameters<typeof replaceCachedIndicatorRangeProduction>;
+type PatchResultParams = Parameters<typeof patchCachedIndicatorResultProduction>;
 
 function cacheIndicatorSnapshot(
   indicator: CacheSnapshotParams[0],
@@ -53,6 +59,20 @@ function replaceCachedIndicatorRange(
     structuralMock<NormalizedIndicatorPayload>(payload),
     range,
     options ? structuralMock<NonNullable<ReplaceRangeParams[4]>>(options) : undefined,
+  );
+}
+
+function patchCachedIndicatorResult(
+  indicator: PatchResultParams[0],
+  context: PatchResultParams[1],
+  payload: object,
+  options?: object,
+) {
+  return patchCachedIndicatorResultProduction(
+    indicator,
+    context,
+    structuralMock<NormalizedIndicatorPayload>(payload),
+    options ? structuralMock<NonNullable<PatchResultParams[3]>>(options) : undefined,
   );
 }
 
@@ -123,6 +143,168 @@ test("cache hydration identity changes on re-add but ignores runtime line update
 
   assert.notEqual(added, absent);
   assert.equal(rendered, added);
+});
+
+test("indicator result cache isolates hosted and explicit local execution", () => {
+  const hosted = buildIndicatorResultCacheKey(maIndicator, baseContext);
+  const local = buildIndicatorResultCacheKey({
+    ...maIndicator,
+    executionTarget: "local",
+  }, baseContext);
+
+  assert.notEqual(local, hosted);
+});
+
+test("removing a local result cannot delete the hosted cache identity", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+  const local = { ...maIndicator, executionTarget: "local" as const };
+  cacheIndicatorSnapshot(maIndicator, baseContext, {
+    lines: [{ data: [{ time: 10, value: 100 }] }],
+  });
+  cacheIndicatorSnapshot(local, baseContext, {
+    lines: [{ data: [{ time: 10, value: 200 }] }],
+  });
+
+  assert.equal(removeCachedIndicatorResult(local, baseContext), true);
+  assert.equal(getCachedIndicatorResult(local, baseContext), null);
+  assert.equal(
+    mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext))
+      .normalized.lines[0]?.data[0]?.value,
+    100,
+  );
+});
+
+test("cache owns and freezes source data while repeated reads share one stable result", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+  const source = structuralMock<NormalizedIndicatorPayload>({
+    lines: [{
+      outputName: "ma",
+      data: [{ time: 10, value: 100 }],
+    }],
+    markers: [{
+      id: "cross",
+      indicatorId: "wrong-owner",
+      data: [{ time: 10, text: "buy" }],
+    }],
+    fills: [],
+    hlines: [],
+    bgcolors: [],
+    barcolors: [],
+    signals: [],
+  });
+  const written = cacheIndicatorSnapshotProduction(maIndicator, baseContext, source);
+
+  mustBeDefined(source.lines[0]).data[0]!.value = 999;
+  source.lines.push({ data: [{ time: 20, value: 200 }] });
+  mustBeDefined(mustBeDefined(source.markers[0]).data)[0]!.text = "changed";
+
+  const first = mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext));
+  const second = mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext));
+  assert.strictEqual(second, first);
+  assert.strictEqual(second.normalized, first.normalized);
+  assert.strictEqual(second.normalized.lines[0]?.data, first.normalized.lines[0]?.data);
+  assert.deepEqual(first.normalized.lines[0]?.data, [{ time: 10, value: 100 }]);
+  assert.deepEqual(first.normalized.markers, [{
+    id: "cross",
+    indicatorId: "ma",
+    data: [{ time: 10, text: "buy" }],
+  }]);
+  assert.equal(Object.isFrozen(written), true);
+  assert.equal(Object.isFrozen(first), true);
+  assert.equal(Object.isFrozen(first.normalized), true);
+  assert.equal(Object.isFrozen(first.normalized.lines), true);
+  assert.equal(Object.isFrozen(first.normalized.lines[0]?.data), true);
+  assert.equal(Object.isFrozen(first.normalized.lines[0]?.data[0]), true);
+  assert.equal(Reflect.set(mustBeDefined(first.normalized.lines[0]?.data[0]), "value", 7), false);
+});
+
+test("cache patch publishes a new version while preserving old and untouched identities", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+  cacheIndicatorSnapshot(maIndicator, baseContext, {
+    lines: [
+      {
+        outputName: "fast",
+        data: [{ time: 10, value: 1 }, { time: 20, value: 2 }],
+      },
+      {
+        outputName: "slow",
+        data: [{ time: 10, value: 10 }],
+      },
+    ],
+  });
+  const before = mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext));
+  const beforeFast = mustBeDefined(before.normalized.lines[0]);
+  const beforeSlow = mustBeDefined(before.normalized.lines[1]);
+
+  patchCachedIndicatorResult(maIndicator, baseContext, {
+    lines: [{ outputName: "fast", data: [{ time: 20, value: 200 }] }],
+  });
+
+  const after = mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext));
+  const afterFast = mustBeDefined(after.normalized.lines[0]);
+  const afterSlow = mustBeDefined(after.normalized.lines[1]);
+  assert.notStrictEqual(after, before);
+  assert.ok(after.contentVersion > before.contentVersion);
+  assert.deepEqual(beforeFast.data, [{ time: 10, value: 1 }, { time: 20, value: 2 }]);
+  assert.deepEqual(afterFast.data, [{ time: 10, value: 1 }, { time: 20, value: 200 }]);
+  assert.strictEqual(afterFast.data[0], beforeFast.data[0]);
+  assert.strictEqual(afterSlow, beforeSlow);
+  assert.strictEqual(afterSlow.data, beforeSlow.data);
+  assert.equal(Object.isFrozen(afterFast.data), true);
+});
+
+test("cache metadata and revision reads stay lightweight and payload-free", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+  cacheIndicatorSnapshotProduction(
+    maIndicator,
+    baseContext,
+    structuralMock<NormalizedIndicatorPayload>({
+      lines: [{ outputName: "ma", data: [{ time: 10, value: 1 }] }],
+    }),
+    [],
+    { revision: { serverEpoch: "boot-1", correctionRevision: "2" } },
+  );
+
+  const first = mustBeDefined(getCachedIndicatorMetadata(maIndicator, baseContext));
+  const second = mustBeDefined(getCachedIndicatorMetadata(maIndicator, baseContext));
+  assert.strictEqual(second, first);
+  assert.equal("normalized" in first, false);
+  assert.equal(first.contentVersion > 0, true);
+  assert.strictEqual(getCachedIndicatorRevision(maIndicator, baseContext), first.revision);
+  assert.deepEqual(first.revision, {
+    serverEpoch: "boot-1",
+    correctionRevision: "2",
+  });
+  assert.equal(Object.isFrozen(first), true);
+  assert.equal(Object.isFrozen(first.revision), true);
+});
+
+test("cache content versions remain monotonic across resets", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+  cacheIndicatorSnapshot(maIndicator, baseContext, {
+    lines: [{ outputName: "ma", data: [{ time: 10, value: 1 }] }],
+  });
+  const before = mustBeDefined(getCachedIndicatorMetadata(maIndicator, baseContext));
+
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+  cacheIndicatorSnapshot(maIndicator, baseContext, {
+    lines: [{ outputName: "ma", data: [{ time: 20, value: 2 }] }],
+  });
+  const after = mustBeDefined(getCachedIndicatorMetadata(maIndicator, baseContext));
+
+  assert.ok(after.contentVersion > before.contentVersion);
 });
 
 test("replaceCachedIndicatorRange replaces only the requested time window", () => {
@@ -358,6 +540,17 @@ test("indicator result cache coverage handles large multiline outputs", () => {
   }));
 
   cacheIndicatorSnapshot(maIndicator, baseContext, { lines });
+
+  const cached = mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext));
+  const readStartedAt = performance.now();
+  for (let index = 0; index < 12; index += 1) {
+    assert.strictEqual(getCachedIndicatorResult(maIndicator, baseContext), cached);
+  }
+  const readElapsedMs = performance.now() - readStartedAt;
+  assert.ok(
+    readElapsedMs < 100,
+    `stable 150k-point cache reads took ${readElapsedMs.toFixed(1)}ms`,
+  );
 
   const entry = mustBeDefined(snapshotIndicatorResultCacheDiagnostics().entries[0]);
   const coverage = mustBeDefined(entry.coverage);

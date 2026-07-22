@@ -5,6 +5,7 @@ Endpoints:
   GET  /indicators/registry           → list all registered indicator specs
   GET  /indicators/registry/{name}    → get single indicator spec
   POST /indicators/compute            → compute indicator on provided bars (new engine)
+  POST /indicators/compute/batch      → compute up to 32 indicators on shared bars
 
   # Preset-compatible endpoints (for frontend IndicatorPanel)
   GET  /indicators/presets            → list presets (maps to registry)
@@ -91,6 +92,36 @@ class ComputeRequest(BaseModel):
     ohlcv: list[dict[str, Any]] = Field(default_factory=list, description="OHLCV bar data array")
     script: str | None = Field(None, description="Legacy Python script (optional)")
     securityMode: str | None = Field(None, description="'safe', 'research', or 'unsafe' for Pyne scripts")
+
+
+class IndicatorComputeBatchContext(BaseModel):
+    """Series identity shared by every local-compute item in a batch."""
+
+    exchange: str = Field(..., description="Exchange context")
+    marketType: str = Field(..., description="Market type context")
+    symbol: str = Field(..., description="Trading symbol")
+    interval: str = Field(..., description="K-line interval")
+
+
+class IndicatorComputeBatchItem(BaseModel):
+    """One independently computed item in a local-compute batch."""
+
+    jobKey: str = Field(..., description="Stable compute-job identity")
+    clientId: str = Field(..., description="Frontend indicator client identity")
+    name: str | None = Field(None, description="Builtin indicator name")
+    mode: str | None = Field(None, description="'builtin' or 'script'")
+    params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
+    script: str | None = Field(None, description="Pyne script")
+    securityMode: str | None = Field(None, description="Pyne security mode")
+
+
+class IndicatorComputeBatchRequest(BaseModel):
+    """Versioned local-compute batch with one shared series and OHLCV array."""
+
+    schemaVersion: int = Field(1, description="Batch contract version; must be 1")
+    context: IndicatorComputeBatchContext
+    ohlcv: list[dict[str, Any]] = Field(default_factory=list)
+    requests: list[IndicatorComputeBatchItem] = Field(default_factory=list)
 
 
 class CustomIndicatorPayload(BaseModel):
@@ -1086,6 +1117,88 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
 #  Compute endpoint — unified
 # ═══════════════════════════════════════════════════════════════
 
+@router.post("/compute/batch")
+async def compute_batch(req: IndicatorComputeBatchRequest):
+    """Compute 1-32 local indicators over one shared OHLCV array.
+
+    Every item has a unique ``jobKey`` and ``clientId``. Results retain request
+    order and both identities; one failed item does not fail its siblings.
+    Builtin jobs share a single validated ``BarData`` conversion, while each
+    job keeps its own executor timeout and isolated one-shot engine.
+    """
+    validation_error = _validate_compute_batch(req)
+    if validation_error is not None:
+        return validation_error
+    shared_ohlcv_error = _validate_compute_ohlcv_window(req.ohlcv)
+    if shared_ohlcv_error is not None:
+        return shared_ohlcv_error
+
+    context = req.context
+    prepared: list[
+        tuple[
+            str,
+            str,
+            ComputeRequest,
+            str | None,
+            str | None,
+            dict[str, Any] | None,
+        ]
+    ] = []
+    for item in req.requests:
+        compute_req = ComputeRequest(
+            name=item.name,
+            mode=item.mode,
+            params=item.params,
+            exchange=context.exchange,
+            symbol=context.symbol,
+            interval=context.interval,
+            market_type=context.marketType,
+            ohlcv=req.ohlcv,
+            script=item.script,
+            securityMode=item.securityMode,
+        )
+        route, indicator_name, route_error = _resolve_compute_route(compute_req)
+        prepared.append((
+            item.jobKey.strip(),
+            item.clientId.strip(),
+            compute_req,
+            route,
+            indicator_name,
+            route_error,
+        ))
+
+    shared_bars: list[BarData] | None = None
+    shared_bars_error: dict[str, Any] | None = None
+    if any(item[3] == "builtin" and item[5] is None for item in prepared):
+        shared_bars, shared_bars_error = _parse_builtin_ohlcv(req.ohlcv)
+
+    payloads = await asyncio.gather(*(
+        _compute_batch_item(
+            compute_req,
+            route=route,
+            indicator_name=indicator_name,
+            route_error=route_error,
+            shared_bars=shared_bars,
+            shared_bars_error=shared_bars_error,
+        )
+        for _, _, compute_req, route, indicator_name, route_error in prepared
+    ))
+    results = [
+        {
+            "jobKey": prepared_item[0],
+            "clientId": prepared_item[1],
+            "payload": payload,
+        }
+        for prepared_item, payload in zip(prepared, payloads, strict=True)
+    ]
+    return {
+        "schemaVersion": 1,
+        "ok": all(payload.get("ok") is True for payload in payloads),
+        "type": "indicator.compute_batch",
+        "results": results,
+    }
+
+
 @router.post("/compute")
 async def compute(req: ComputeRequest):
     """Compute an indicator on the provided OHLCV data.
@@ -1098,36 +1211,53 @@ async def compute(req: ComputeRequest):
     Returns ``{ok, error, lines, result}`` — ``lines`` is the flat list
     for direct frontend rendering, ``result`` is the full structured output.
     """
+    route, indicator_name, route_error = _resolve_compute_route(req)
+    if route_error is not None:
+        return route_error
+    if route == "builtin" and indicator_name:
+        return await _compute_engine(indicator_name, req)
+    if route == "script":
+        return await _compute_script(req)
+    return build_error_payload(
+        "INDICATOR_REQUEST_EMPTY",
+        "Provide either 'name' or 'script'",
+        hint="内置指标传 name，自定义指标传 script。",
+    )
+
+
+def _resolve_compute_route(
+    req: ComputeRequest,
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """Resolve legacy and explicit compute modes without doing any work."""
     mode = req.mode.strip().lower() if req.mode else None
     if mode and mode not in {"builtin", "script"}:
-        return build_error_payload(
+        return None, None, build_error_payload(
             "INVALID_MODE",
             "mode must be 'builtin' or 'script'",
             hint="内置指标使用 mode='builtin'，自定义 Pyne 脚本使用 mode='script'。",
         )
 
     indicator_name = req.name
-
     if mode == "script":
         if not req.script:
-            return build_error_payload(
+            return None, None, build_error_payload(
                 "PYNE_SCRIPT_REQUIRED",
                 "Script mode requires 'script'",
                 hint="请提交 Pyne 脚本文本，或切换到 builtin 模式。",
             )
-        return await _compute_script(req)
+        return "script", None, None
 
     if mode == "builtin":
         if not indicator_name and req.script and req.script.startswith(_ENGINE_SCRIPT_MARKER):
             first_line = req.script.split("\n")[0]
             indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
         if not indicator_name:
-            return build_error_payload(
+            return None, None, build_error_payload(
                 "INDICATOR_NAME_REQUIRED",
                 "Builtin mode requires 'name'",
                 hint="请传入内置指标名称，例如 MA、MACD、RSI。",
             )
-        return await _compute_engine(indicator_name, req)
+        return "builtin", indicator_name, None
 
     # Legacy mode: preserve old behavior for existing frontend/localStorage data.
     use_engine = indicator_name is not None
@@ -1137,28 +1267,128 @@ async def compute(req: ComputeRequest):
         use_engine = True
 
     if use_engine and indicator_name:
-        return await _compute_engine(indicator_name, req)
+        return "builtin", indicator_name, None
     if req.script:
-        return await _compute_script(req)
-    return build_error_payload(
+        return "script", None, None
+    return None, None, build_error_payload(
         "INDICATOR_REQUEST_EMPTY",
         "Provide either 'name' or 'script'",
         hint="内置指标传 name，自定义指标传 script。",
     )
 
 
-async def _compute_engine(name: str, req: ComputeRequest) -> dict:
-    """Compute using the new indicator engine."""
-    name = name.upper()
-
-    if not registry.has(name):
-        return build_error_payload(
-            "INDICATOR_NOT_FOUND",
-            f"Indicator '{name}' not registered",
-            hint="请检查指标名称是否存在于 /api/v1/indicators/registry。",
+def _validate_compute_batch(
+    req: IndicatorComputeBatchRequest,
+) -> dict[str, Any] | None:
+    """Fail closed before scheduling any work for an ambiguous batch."""
+    if req.schemaVersion != 1:
+        return _invalid_compute_batch("schemaVersion must be 1")
+    if not 1 <= len(req.requests) <= 32:
+        return _invalid_compute_batch(
+            "requests must contain between 1 and 32 compute items"
         )
 
-    ohlcv = req.ohlcv
+    context_fields = {
+        "exchange": req.context.exchange,
+        "marketType": req.context.marketType,
+        "symbol": req.context.symbol,
+        "interval": req.context.interval,
+    }
+    for field_name, value in context_fields.items():
+        if not value.strip():
+            return _invalid_compute_batch(f"context.{field_name} must not be blank")
+
+    job_keys: set[str] = set()
+    client_ids: set[str] = set()
+    for index, item in enumerate(req.requests):
+        job_key = item.jobKey.strip()
+        client_id = item.clientId.strip()
+        if not job_key or not client_id:
+            return _invalid_compute_batch(
+                f"requests[{index}] requires non-blank jobKey and clientId"
+            )
+        if item.jobKey != job_key or item.clientId != client_id:
+            return _invalid_compute_batch(
+                f"requests[{index}] jobKey and clientId must not have outer whitespace"
+            )
+        if len(job_key) > 256 or len(client_id) > 256:
+            return _invalid_compute_batch(
+                f"requests[{index}] jobKey and clientId must be at most 256 characters"
+            )
+        if job_key in job_keys:
+            return _invalid_compute_batch(f"duplicate jobKey: {job_key}")
+        if client_id in client_ids:
+            return _invalid_compute_batch(f"duplicate clientId: {client_id}")
+        job_keys.add(job_key)
+        client_ids.add(client_id)
+    return None
+
+
+def _invalid_compute_batch(message: str) -> dict[str, Any]:
+    return build_error_payload(
+        "INVALID_INDICATOR_COMPUTE_BATCH",
+        message,
+        hint="请使用 schemaVersion=1，并提交 1-32 个身份唯一的指标任务。",
+    )
+
+
+async def _compute_batch_item(
+    req: ComputeRequest,
+    *,
+    route: str | None,
+    indicator_name: str | None,
+    route_error: dict[str, Any] | None,
+    shared_bars: list[BarData] | None,
+    shared_bars_error: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compute one batch item while containing unexpected sibling failures."""
+    if route_error is not None:
+        return route_error
+    try:
+        if route == "builtin" and indicator_name:
+            return await _compute_engine(
+                indicator_name,
+                req,
+                preparsed_bars=shared_bars,
+                preparsed_bars_error=shared_bars_error,
+                use_preparsed_bars=True,
+            )
+        if route == "script":
+            return await _compute_script(req)
+        return build_error_payload(
+            "INDICATOR_REQUEST_EMPTY",
+            "Provide either 'name' or 'script'",
+            hint="内置指标传 name，自定义指标传 script。",
+        )
+    except Exception as exc:
+        return build_error_payload(
+            "INDICATOR_BATCH_ITEM_FAILED",
+            str(exc),
+            hint="当前指标任务计算失败；同批其他指标不受影响。",
+        )
+
+
+def _parse_builtin_ohlcv(
+    ohlcv: list[dict[str, Any]],
+) -> tuple[list[BarData] | None, dict[str, Any] | None]:
+    """Validate and convert a builtin OHLCV input exactly once."""
+    window_error = _validate_compute_ohlcv_window(ohlcv)
+    if window_error is not None:
+        return None, window_error
+    try:
+        return [BarData.from_dict(item) for item in ohlcv], None
+    except (KeyError, ValueError, TypeError) as exc:
+        return None, build_error_payload(
+            "INVALID_OHLCV",
+            f"Invalid OHLCV data: {exc}",
+            hint="OHLCV 每根 K 线需要包含 time/open/high/low/close/volume。",
+        )
+
+
+def _validate_compute_ohlcv_window(
+    ohlcv: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Reject unsafe shared input sizes before any batch item is scheduled."""
     if not ohlcv:
         return build_error_payload(
             "INVALID_OHLCV",
@@ -1171,14 +1401,40 @@ async def _compute_engine(name: str, req: ComputeRequest) -> dict:
             "Too many data points (max 50000)",
             hint="请缩小历史窗口，或为后端指标计算增加分页/窗口策略。",
         )
+    return None
 
-    try:
-        bars = [BarData.from_dict(d) for d in ohlcv]
-    except (KeyError, ValueError, TypeError) as exc:
+
+async def _compute_engine(
+    name: str,
+    req: ComputeRequest,
+    *,
+    preparsed_bars: list[BarData] | None = None,
+    preparsed_bars_error: dict[str, Any] | None = None,
+    use_preparsed_bars: bool = False,
+) -> dict:
+    """Compute using the new indicator engine."""
+    name = name.upper()
+
+    if not registry.has(name):
+        return build_error_payload(
+            "INDICATOR_NOT_FOUND",
+            f"Indicator '{name}' not registered",
+            hint="请检查指标名称是否存在于 /api/v1/indicators/registry。",
+        )
+
+    if use_preparsed_bars:
+        if preparsed_bars_error is not None:
+            return preparsed_bars_error
+        bars = preparsed_bars
+    else:
+        bars, bars_error = _parse_builtin_ohlcv(req.ohlcv)
+        if bars_error is not None:
+            return bars_error
+    if bars is None:
         return build_error_payload(
             "INVALID_OHLCV",
-            f"Invalid OHLCV data: {exc}",
-            hint="OHLCV 每根 K 线需要包含 time/open/high/low/close/volume。",
+            "No parsed OHLCV data available",
+            hint="请确认前端已经加载 K 线数据后再计算指标。",
         )
 
     try:

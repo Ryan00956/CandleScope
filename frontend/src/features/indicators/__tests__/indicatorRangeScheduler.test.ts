@@ -10,6 +10,7 @@ import {
   subtractIndicatorRange,
 } from "../indicatorRangeCoverage.js";
 import { createIndicatorRangeScheduler } from "../indicatorRangeScheduler.js";
+import { buildIndicatorRangeLifecycleKey } from "../indicatorRangeLifecycle.js";
 import { resolveDirectIndicatorRangeRevision } from "../indicatorRangeRequestDedupe.js";
 import {
   planVisibleIndicatorHydrationRange,
@@ -358,6 +359,52 @@ test("a newer correction revision supersedes an in-flight response in the same s
   mustBeDefined(resolveOld)({ revision: 1 });
   await flushMicrotask();
   assert.deepEqual(applied, [2]);
+});
+
+test("revision supersession stays in the demand lifecycle while generation changes abort", async () => {
+  const scheduler = createIndicatorRangeScheduler<{ key: string }, { ok: boolean }>();
+  const firstLifecycle = buildIndicatorRangeLifecycleKey("series", {
+    scope: "viewport",
+    generation: 1,
+  });
+  const nextLifecycle = buildIndicatorRangeLifecycleKey("series", {
+    scope: "viewport",
+    generation: 2,
+  });
+  let signal: AbortSignal | undefined;
+  let resolveRequest: ((value: { ok: boolean }) => void) | undefined;
+  const pending = new Promise<{ ok: boolean }>((resolve) => { resolveRequest = resolve; });
+  let applied = 0;
+  scheduler.ensureCoverage({
+    sessionKey: firstLifecycle,
+    targets: [{ key: "ma" }],
+    range: { start: 60, end: 120 },
+    revision: { correctionRevision: 1 },
+    getCoveredSegments: () => [],
+    execute: ({ signal: currentSignal }) => {
+      signal = currentSignal;
+      return pending;
+    },
+    apply: () => { applied += 1; },
+  });
+  await flushMicrotask();
+  const originalEpoch = scheduler.snapshot().epoch;
+
+  scheduler.supersedeRevision({
+    abortInFlight: false,
+    revision: { correctionRevision: 2 },
+    sessionKey: firstLifecycle,
+    targetKeys: ["ma"],
+  });
+  assert.equal(scheduler.snapshot().epoch, originalEpoch);
+  assert.equal(mustBeDefined(signal).aborted, false);
+
+  scheduler.setSession(nextLifecycle);
+  assert.ok(scheduler.snapshot().epoch > originalEpoch);
+  assert.equal(mustBeDefined(signal).aborted, true);
+  mustBeDefined(resolveRequest)({ ok: true });
+  await flushMicrotask();
+  assert.equal(applied, 0);
 });
 
 test("queued correction supersedes stale apply without aborting physical work", async () => {

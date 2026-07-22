@@ -17,6 +17,7 @@ import {
   parseCustomIndicatorList,
   parseCustomIndicatorRecord,
   parseIndicatorDeleteResponse,
+  parseIndicatorComputeBatchResponse,
   parseIndicatorPayloadEnvelope,
   parseIndicatorPreset,
   parseIndicatorPresetList,
@@ -29,6 +30,8 @@ import type {
   CustomIndicatorRecord,
   CustomIndicatorSaveInput,
   IndicatorComputeRequest,
+  IndicatorComputeBatchJob,
+  IndicatorComputeBatchResponse,
   IndicatorDeleteResponse,
   IndicatorPayloadEnvelope,
   IndicatorPreset,
@@ -179,6 +182,95 @@ export async function computeIndicator({
     body: JSON.stringify(body),
   });
   return parseIndicatorPayloadEnvelope(payload, "indicator.compute");
+}
+
+/** Compute explicit local indicators in one request with one shared OHLCV payload. */
+export async function computeIndicatorBatch({
+  jobs = [],
+  signal,
+}: {
+  jobs?: IndicatorComputeBatchJob[];
+  signal?: AbortSignal;
+} = {}): Promise<IndicatorComputeBatchResponse> {
+  if (jobs.length < 1 || jobs.length > 32) {
+    throw new RangeError("Indicator compute batch requires between 1 and 32 jobs");
+  }
+  const first = jobs[0];
+  if (!first) throw new RangeError("Indicator compute batch is empty");
+  const shared = first.request;
+  const seenClientIds = new Set<string>();
+  const seenJobKeys = new Set<string>();
+  const requests = jobs.map(({ clientId, jobKey, request: item }) => {
+    if (
+      !clientId.trim()
+      || clientId !== clientId.trim()
+      || clientId.length > 256
+      || seenClientIds.has(clientId)
+    ) {
+      throw new TypeError(
+        "Indicator compute batch client ids must be trimmed, non-empty, unique, and at most 256 characters",
+      );
+    }
+    if (
+      !jobKey.trim()
+      || jobKey !== jobKey.trim()
+      || jobKey.length > 256
+      || seenJobKeys.has(jobKey)
+    ) {
+      throw new TypeError(
+        "Indicator compute batch job keys must be trimmed, non-empty, unique, and at most 256 characters",
+      );
+    }
+    if (
+      item.ohlcv !== shared.ohlcv
+      || item.exchange !== shared.exchange
+      || item.marketType !== shared.marketType
+      || item.symbol !== shared.symbol
+      || item.interval !== shared.interval
+    ) {
+      throw new TypeError("Indicator compute batch jobs must share one chart context and OHLCV array");
+    }
+    seenClientIds.add(clientId);
+    seenJobKeys.add(jobKey);
+    return {
+      clientId,
+      jobKey,
+      mode: item.mode,
+      securityMode: item.securityMode,
+      name: item.name,
+      script: item.script,
+      params: item.params || {},
+    };
+  });
+  const payload = await request(`${API_BASE}/indicators/compute/batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    ...indicatorSignalOptions(signal),
+    body: JSON.stringify({
+      schemaVersion: 1,
+      context: {
+        exchange: shared.exchange || "binance",
+        marketType: shared.marketType || "spot",
+        symbol: shared.symbol || "UNKNOWN",
+        interval: shared.interval || "1m",
+      },
+      ohlcv: shared.ohlcv,
+      requests,
+    }),
+  });
+  const parsed = parseIndicatorComputeBatchResponse(payload);
+  if (parsed.results.length !== jobs.length) {
+    throw new Error(
+      `Indicator compute batch returned ${parsed.results.length} results for ${jobs.length} jobs`,
+    );
+  }
+  const expectedByKey = new Map(jobs.map((job) => [job.jobKey, job.clientId]));
+  for (const result of parsed.results) {
+    if (expectedByKey.get(result.jobKey) !== result.clientId) {
+      throw new Error("Indicator compute batch returned an unexpected job identity");
+    }
+  }
+  return parsed;
 }
 
 /** Compute server-hosted indicator output for a K-line history range. */

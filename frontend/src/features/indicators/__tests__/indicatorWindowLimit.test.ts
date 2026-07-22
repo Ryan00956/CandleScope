@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   buildIndicatorOhlcv,
+  buildIndicatorOhlcvSignature,
+  chunkIndicatorComputeJobs,
   INDICATOR_HISTORY_LIMIT,
   limitIndicatorHistory,
 } from "../indicatorComputeRuntime.js";
@@ -57,4 +59,33 @@ test("local indicator ohlcv is capped to the newest indicator window", () => {
     close: 10.5,
     volume: 100,
   });
+});
+
+test("local compute signature follows the transmitted tail instead of prepended history", () => {
+  const tail = bars(INDICATOR_HISTORY_LIMIT);
+  const prepended = [
+    ...bars(10).map((bar, index) => ({ ...bar, time: epochSeconds(1_600_000_000 + index * 60) })),
+    ...tail,
+  ];
+  assert.equal(
+    buildIndicatorOhlcvSignature(prepended),
+    buildIndicatorOhlcvSignature(tail),
+  );
+
+  const corrected = tail.map((bar, index) => (
+    index === 1_000 ? { ...bar, close: Number(bar.close) + 1 } : bar
+  ));
+  assert.notEqual(
+    buildIndicatorOhlcvSignature(corrected),
+    buildIndicatorOhlcvSignature(tail),
+  );
+});
+
+test("local compute keeps ordinary plans in one request and bounds oversized plans", () => {
+  assert.deepEqual(chunkIndicatorComputeJobs([1, 2, 3, 4]), [[1, 2, 3, 4]]);
+  const jobs = Array.from({ length: 33 }, (_, index) => index);
+  const chunks = chunkIndicatorComputeJobs(jobs);
+  assert.equal(chunks.length, 2);
+  assert.equal(chunks[0]?.length, 32);
+  assert.deepEqual(chunks[1], [32]);
 });

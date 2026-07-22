@@ -37,6 +37,7 @@ import type {
   IndicatorCacheEntry,
   IndicatorCacheMetadata,
   IndicatorCacheResult,
+  IndicatorCacheResultMetadata,
   IndicatorColorPoint,
   IndicatorCoverage,
   IndicatorDefinition,
@@ -65,8 +66,13 @@ const OUTPUT_ITEM_ESTIMATED_BYTES = 120;
 type IndicatorContextInput = Partial<IndicatorCacheContext>;
 type IndicatorCacheEntryPatch = Omit<
   IndicatorCacheEntry,
-  "key" | "dependencyKey" | "lastUpdatedMs" | "lastAccessMs"
+  "key" | "contentVersion" | "dependencyKey" | "lastUpdatedMs" | "lastAccessMs"
 >;
+
+interface InternalIndicatorCacheEntry extends IndicatorCacheEntry {
+  metadataView: IndicatorCacheResultMetadata;
+  resultView: IndicatorCacheResult;
+}
 
 interface IndicatorCacheTrimVictim {
   key?: string;
@@ -87,9 +93,10 @@ interface PointRecord {
   time?: number;
 }
 
-const entries = new Map<string, IndicatorCacheEntry>();
+const entries = new Map<string, InternalIndicatorCacheEntry>();
 const entryGenerations = new Map<string, number>();
 let nextEntryGeneration = 0;
+let nextContentVersion = 0;
 
 function markEntryMutation(key: string): number {
   nextEntryGeneration += 1;
@@ -101,9 +108,33 @@ function forgetEntryGeneration(key: string): void {
   entryGenerations.delete(key);
 }
 
+function cloneAndFreeze<T>(value: T): T {
+  if (value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    const source = value as unknown[];
+    return Object.freeze(source.map((item: unknown) => cloneAndFreeze(item))) as T;
+  }
+  const next: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    next[key] = cloneAndFreeze(item);
+  }
+  return Object.freeze(next) as T;
+}
+
+function freezeOwned<T>(value: T): T {
+  if (value == null || typeof value !== "object" || Object.isFrozen(value)) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) freezeOwned(item);
+    return Object.freeze(value) as T;
+  }
+  for (const item of Object.values(value)) freezeOwned(item);
+  return Object.freeze(value);
+}
+
 function clone<T>(value: T): T {
-  if (value == null) return value;
-  return JSON.parse(JSON.stringify(value)) as T;
+  return cloneAndFreeze(value);
 }
 
 function stableJson(value: unknown): string {
@@ -153,6 +184,7 @@ function indicatorIdentity(
   const computeParams = resolveCacheComputeParams(indicator, context);
   return [
     indicator.id || "",
+    indicator.executionTarget || "hosted",
     builtin ? "builtin" : "script",
     getBuiltinIndicatorName(indicator) ||
       indicator.engineName ||
@@ -194,36 +226,29 @@ function emptyNormalized(): NormalizedIndicatorPayload {
   };
 }
 
-function normalizeCachedPayload(
-  normalized: Partial<NormalizedIndicatorPayload> = {},
-): NormalizedIndicatorPayload {
-  return {
-    ...emptyNormalized(),
-    ...clone(normalized),
-  };
-}
-
 function retargetItems<T extends IndicatorAuxiliaryItem>(
   items: T[] = [],
   indicatorId: string,
 ): T[] {
-  return (clone(items) || []).map((item) => ({ ...item, indicatorId }));
+  return freezeOwned((items || []).map((item) => {
+    const owned = cloneAndFreeze(item);
+    return freezeOwned({ ...owned, indicatorId }) as T;
+  }));
 }
 
-function retargetNormalized(
-  normalized: NormalizedIndicatorPayload,
+function normalizeCachedPayload(
+  normalized: Partial<NormalizedIndicatorPayload> = {},
   indicatorId: string,
 ): NormalizedIndicatorPayload {
-  const next = normalizeCachedPayload(normalized);
-  return {
-    ...next,
-    markers: retargetItems(next.markers, indicatorId),
-    fills: retargetItems(next.fills, indicatorId),
-    hlines: retargetItems(next.hlines, indicatorId),
-    bgcolors: retargetItems(next.bgcolors, indicatorId),
-    barcolors: retargetItems(next.barcolors, indicatorId),
-    signals: retargetItems(next.signals, indicatorId),
-  };
+  return freezeOwned({
+    lines: cloneAndFreeze(normalized.lines || []),
+    markers: retargetItems(normalized.markers || [], indicatorId),
+    fills: retargetItems(normalized.fills || [], indicatorId),
+    hlines: retargetItems(normalized.hlines || [], indicatorId),
+    bgcolors: retargetItems(normalized.bgcolors || [], indicatorId),
+    barcolors: retargetItems(normalized.barcolors || [], indicatorId),
+    signals: retargetItems(normalized.signals || [], indicatorId),
+  });
 }
 
 function buildOutputCoverage(
@@ -537,6 +562,27 @@ function enforceLimit(): void {
   }
 }
 
+function snapshotCacheEntry(
+  entry: InternalIndicatorCacheEntry,
+): IndicatorCacheEntry {
+  return Object.freeze({
+    key: entry.key,
+    contentVersion: entry.contentVersion,
+    dependencyKey: entry.dependencyKey,
+    indicatorId: entry.indicatorId,
+    context: entry.context,
+    normalized: entry.normalized,
+    schema: entry.schema,
+    outputCoverage: entry.outputCoverage,
+    coverage: entry.coverage,
+    computedSegments: entry.computedSegments,
+    staleSegments: entry.staleSegments,
+    revision: entry.revision,
+    lastUpdatedMs: entry.lastUpdatedMs,
+    lastAccessMs: entry.lastAccessMs,
+  });
+}
+
 function putEntry(
   key: string,
   patch: IndicatorCacheEntryPatch,
@@ -545,12 +591,58 @@ function putEntry(
   if (!dependencyAvailable(dependencyKey)) {
     return null;
   }
-  const next = {
-    ...patch,
+  nextContentVersion += 1;
+  const context = freezeOwned(patch.context);
+  const normalized = freezeOwned(patch.normalized);
+  const schema = freezeOwned(patch.schema);
+  const outputCoverage = freezeOwned(patch.outputCoverage || patch.coverage);
+  const computedSegments = freezeOwned(patch.computedSegments);
+  const staleSegments = freezeOwned(patch.staleSegments);
+  const revision = freezeOwned(patch.revision);
+  const lastUpdatedMs = Date.now();
+  const base: IndicatorCacheEntry = {
     key,
+    contentVersion: nextContentVersion,
     dependencyKey,
-    lastUpdatedMs: Date.now(),
+    indicatorId: patch.indicatorId,
+    context,
+    normalized,
+    schema,
+    outputCoverage,
+    coverage: outputCoverage,
+    computedSegments,
+    staleSegments,
+    revision,
+    lastUpdatedMs,
     lastAccessMs: Date.now(),
+  };
+  const resultView = freezeOwned<IndicatorCacheResult>({
+    indicatorId: base.indicatorId,
+    contentVersion: base.contentVersion,
+    normalized,
+    schema,
+    outputCoverage,
+    coverage: outputCoverage,
+    computedSegments,
+    staleSegments,
+    revision,
+    lastUpdatedMs,
+  });
+  const metadataView = freezeOwned<IndicatorCacheResultMetadata>({
+    key,
+    indicatorId: base.indicatorId,
+    contentVersion: base.contentVersion,
+    outputCoverage,
+    coverage: outputCoverage,
+    computedSegments,
+    staleSegments,
+    revision,
+    lastUpdatedMs,
+  });
+  const next: InternalIndicatorCacheEntry = {
+    ...base,
+    metadataView,
+    resultView,
   };
   entries.delete(key);
   entries.set(key, next);
@@ -563,7 +655,7 @@ function putEntry(
   });
   registerCacheDependency("indicator-result-cache", key, dependencyKey);
   enforceLimit();
-  return next;
+  return snapshotCacheEntry(next);
 }
 
 export function buildIndicatorCacheContext(
@@ -639,7 +731,7 @@ export function cacheIndicatorSnapshot(
   const key = buildIndicatorResultCacheKey(indicator, context);
   const current = entries.get(key);
   const normalizedContext = normalizeContext(context);
-  const payload = normalizeCachedPayload(normalized);
+  const payload = normalizeCachedPayload(normalized, indicator.id);
   const revision = normalizeIndicatorRevision(
     metadata.revision || metadata.dataRevision || metadata,
   );
@@ -649,13 +741,14 @@ export function cacheIndicatorSnapshot(
     revision,
     normalizedContext,
   );
+  const coverage = freezeOwned(buildOutputCoverage(payload));
   return putEntry(key, {
     indicatorId: indicator.id,
     context: normalizedContext,
     normalized: payload,
-    schema: clone(schema) || [],
-    outputCoverage: buildOutputCoverage(payload),
-    coverage: buildOutputCoverage(payload),
+    schema: cloneAndFreeze(schema) || [],
+    outputCoverage: coverage,
+    coverage,
     computedSegments,
     staleSegments: clearStaleRange(
       current?.staleSegments,
@@ -675,9 +768,9 @@ export function patchCachedIndicatorResult(
   if (!indicator?.id) return null;
   const key = buildIndicatorResultCacheKey(indicator, context);
   const current = entries.get(key);
-  const incoming = normalizeCachedPayload(normalized);
+  const incoming = normalizeCachedPayload(normalized, indicator.id);
   const base = current?.normalized || emptyNormalized();
-  const nextNormalized: NormalizedIndicatorPayload = {
+  const nextNormalized: NormalizedIndicatorPayload = freezeOwned({
     ...base,
     lines: mergeIndicatorLines(base.lines, incoming.lines),
     markers: mergeIndicatorItems(base.markers, incoming.markers),
@@ -686,18 +779,19 @@ export function patchCachedIndicatorResult(
     bgcolors: mergeIndicatorItems(base.bgcolors, incoming.bgcolors),
     barcolors: mergeIndicatorItems(base.barcolors, incoming.barcolors),
     signals: mergeIndicatorItems(base.signals, incoming.signals),
-  };
+  });
   const normalizedContext = normalizeContext(context);
   const revision = normalizeIndicatorRevision(
     metadata.revision || metadata.dataRevision || metadata,
   );
+  const coverage = freezeOwned(buildOutputCoverage(nextNormalized));
   return putEntry(key, {
     indicatorId: indicator.id,
     context: normalizedContext,
     normalized: nextNormalized,
     schema: current?.schema || [],
-    outputCoverage: buildOutputCoverage(nextNormalized),
-    coverage: buildOutputCoverage(nextNormalized),
+    outputCoverage: coverage,
+    coverage,
     computedSegments: appendComputedRange(
       current?.computedSegments,
       metadata.range,
@@ -723,9 +817,9 @@ export function replaceCachedIndicatorRange(
   if (!indicator?.id) return null;
   const key = buildIndicatorResultCacheKey(indicator, context);
   const current = entries.get(key);
-  const incoming = normalizeCachedPayload(normalized);
+  const incoming = normalizeCachedPayload(normalized, indicator.id);
   const base = current?.normalized || emptyNormalized();
-  const nextNormalized: NormalizedIndicatorPayload = {
+  const nextNormalized: NormalizedIndicatorPayload = freezeOwned({
     ...base,
     lines: replaceIndicatorLinesRange(base.lines, incoming.lines, range),
     markers: replaceIndicatorItemsRange(base.markers, incoming.markers, range),
@@ -734,18 +828,19 @@ export function replaceCachedIndicatorRange(
     bgcolors: replaceIndicatorItemsRange(base.bgcolors, incoming.bgcolors, range),
     barcolors: replaceIndicatorItemsRange(base.barcolors, incoming.barcolors, range),
     signals: replaceIndicatorItemsRange(base.signals, incoming.signals, range),
-  };
+  });
   const normalizedContext = normalizeContext(context);
   const revision = normalizeIndicatorRevision(
     metadata.revision || metadata.dataRevision || metadata,
   );
+  const coverage = freezeOwned(buildOutputCoverage(nextNormalized));
   return putEntry(key, {
     indicatorId: indicator.id,
     context: normalizedContext,
     normalized: nextNormalized,
     schema: current?.schema || [],
-    outputCoverage: buildOutputCoverage(nextNormalized),
-    coverage: buildOutputCoverage(nextNormalized),
+    outputCoverage: coverage,
+    coverage,
     computedSegments: appendComputedRange(
       current?.computedSegments,
       range,
@@ -770,17 +865,18 @@ export function updateCachedIndicatorLines(
   const key = buildIndicatorResultCacheKey(indicator, context);
   const current = entries.get(key);
   const baseNormalized = current?.normalized || emptyNormalized();
-  const nextNormalized = {
+  const nextNormalized = freezeOwned({
     ...baseNormalized,
     lines: normalizeLinesWithSharing(lines, baseNormalized.lines || []),
-  };
+  });
+  const coverage = freezeOwned(buildOutputCoverage(nextNormalized));
   return putEntry(key, {
     indicatorId: indicator.id,
     context: normalizeContext(context),
     normalized: nextNormalized,
     schema: current?.schema || [],
-    outputCoverage: buildOutputCoverage(nextNormalized),
-    coverage: buildOutputCoverage(nextNormalized),
+    outputCoverage: coverage,
+    coverage,
     computedSegments: current?.computedSegments || [],
     staleSegments: current?.staleSegments || [],
     revision: current?.revision || null,
@@ -830,31 +926,26 @@ export function upsertCachedIndicatorLinePoint(
     }
     return { ...line, data: nextData };
   });
-  if (!changed) return current;
+  if (!changed) return snapshotCacheEntry(current);
 
-  const nextNormalized = {
+  const nextNormalized = freezeOwned({
     ...baseNormalized,
     lines: nextLines,
-  };
+  });
+  const coverage = freezeOwned(removedPoint
+    ? buildOutputCoverage(nextNormalized)
+    : extendCoverage(
+        current.outputCoverage || current.coverage,
+        barTime,
+        pointDelta,
+      ));
   return putEntry(key, {
     indicatorId: indicator.id,
     context: normalizeContext(context),
     normalized: nextNormalized,
     schema: current?.schema || [],
-    outputCoverage: removedPoint
-      ? buildOutputCoverage(nextNormalized)
-      : extendCoverage(
-          current.outputCoverage || current.coverage,
-          barTime,
-          pointDelta,
-        ),
-    coverage: removedPoint
-      ? buildOutputCoverage(nextNormalized)
-      : extendCoverage(
-          current.outputCoverage || current.coverage,
-          barTime,
-          pointDelta,
-        ),
+    outputCoverage: coverage,
+    coverage,
     computedSegments: appendComputedRange(
       current.computedSegments,
       { start: barTime, end: barTime },
@@ -870,10 +961,10 @@ export function upsertCachedIndicatorLinePoint(
   });
 }
 
-export function getCachedIndicatorResult(
+function resolveCachedEntry(
   indicator: IndicatorDefinition | null | undefined,
   context: IndicatorContextInput,
-): IndicatorCacheResult | null {
+): InternalIndicatorCacheEntry | null {
   if (!indicator?.id) return null;
   const entry = entries.get(buildIndicatorResultCacheKey(indicator, context));
   if (!entry) return null;
@@ -891,17 +982,41 @@ export function getCachedIndicatorResult(
   entries.delete(entry.key);
   entries.set(entry.key, entry);
   markEntryMutation(entry.key);
-  return {
-    indicatorId: indicator.id,
-    normalized: retargetNormalized(entry.normalized, indicator.id),
-    schema: clone(entry.schema) || [],
-    outputCoverage: clone(entry.outputCoverage || entry.coverage),
-    coverage: clone(entry.outputCoverage || entry.coverage),
-    computedSegments: clone(entry.computedSegments || []),
-    staleSegments: clone(entry.staleSegments || []),
-    revision: clone(entry.revision),
-    lastUpdatedMs: entry.lastUpdatedMs,
-  };
+  return entry;
+}
+
+export function getCachedIndicatorResult(
+  indicator: IndicatorDefinition | null | undefined,
+  context: IndicatorContextInput,
+): IndicatorCacheResult | null {
+  return resolveCachedEntry(indicator, context)?.resultView || null;
+}
+
+export function getCachedIndicatorMetadata(
+  indicator: IndicatorDefinition | null | undefined,
+  context: IndicatorContextInput,
+): IndicatorCacheResultMetadata | null {
+  return resolveCachedEntry(indicator, context)?.metadataView || null;
+}
+
+export function getCachedIndicatorRevision(
+  indicator: IndicatorDefinition | null | undefined,
+  context: IndicatorContextInput,
+): IndicatorRevision | null {
+  return resolveCachedEntry(indicator, context)?.revision || null;
+}
+
+export function removeCachedIndicatorResult(
+  indicator: IndicatorDefinition | null | undefined,
+  context: IndicatorContextInput,
+): boolean {
+  if (!indicator?.id) return false;
+  const key = buildIndicatorResultCacheKey(indicator, context);
+  const removed = entries.delete(key);
+  if (!removed) return false;
+  forgetEntryGeneration(key);
+  unregisterCacheResource("indicator-result-cache", key);
+  return true;
 }
 
 export function getCachedIndicatorComputedSegments(
@@ -970,7 +1085,7 @@ export function invalidateCachedIndicatorRange(
     options.revision || options.dataRevision || options,
   );
   const normalizedRange = normalizeIndicatorRange(range);
-  if (!normalizedRange) return current;
+  if (!normalizedRange) return snapshotCacheEntry(current);
   const coverageOptions = rangeOptions(current.context);
   const cascadeRight = options.cascadeRight !== false;
   const invalidatedEnd = cascadeRight
@@ -1009,12 +1124,12 @@ export function rebaseCachedIndicatorRevision(
   const key = buildIndicatorResultCacheKey(indicator, context);
   const current = entries.get(key);
   const revision = normalizeIndicatorRevision(revisionInput);
-  if (!current || !revision) return current || null;
+  if (!current || !revision) return current ? snapshotCacheEntry(current) : null;
   if (
     current.revision &&
     !indicatorRevisionsCompatible(current.revision, revision)
   )
-    return current;
+    return snapshotCacheEntry(current);
   return putEntry(key, {
     ...current,
     computedSegments: (current.computedSegments || []).map((segment) => ({
@@ -1043,7 +1158,7 @@ export function resetIndicatorResultCache(): void {
 }
 
 export function snapshotIndicatorResultCacheEntries(): IndicatorCacheEntry[] {
-  return Array.from(entries.values()).map(clone);
+  return Array.from(entries.values(), snapshotCacheEntry);
 }
 
 export function snapshotIndicatorResultCacheDiagnostics() {
@@ -1066,6 +1181,7 @@ export function snapshotIndicatorResultCacheDiagnostics() {
       dependencyState: deps,
       tier: activeLeaseCount > 0 ? "active" : deps.orphan ? "cold" : "warm",
       activeLeaseCount,
+      contentVersion: entry.contentVersion,
       generation: entryGenerations.get(entry.key) || 0,
       context: clone(entry.context),
       points,
@@ -1173,10 +1289,10 @@ export function trimIndicatorResultCacheEntries(
       }
       const trimSafety = analyzeTrimSafety(normalized);
       if (trimSafety.safeRangeTrim) {
-        const nextNormalized = trimNormalizedBefore(
+        const nextNormalized = freezeOwned(trimNormalizedBefore(
           normalized,
           victim.keepStart,
-        );
+        ));
         const nextAccounting = indicatorAccounting(nextNormalized);
         const removedPoints = Math.max(0, accounting.points - nextAccounting.points);
         const removedItems = Math.max(0, accounting.items - nextAccounting.items);
@@ -1200,11 +1316,14 @@ export function trimIndicatorResultCacheEntries(
           skipped.push({ key, reason: "trim-no-relief" });
           continue;
         }
-        const nextEntry = {
-          ...entry,
+        const coverage = freezeOwned(buildOutputCoverage(nextNormalized));
+        const updated = putEntry(key, {
+          indicatorId: entry.indicatorId,
+          context: entry.context,
           normalized: nextNormalized,
-          outputCoverage: buildOutputCoverage(nextNormalized),
-          coverage: buildOutputCoverage(nextNormalized),
+          schema: entry.schema,
+          outputCoverage: coverage,
+          coverage,
           computedSegments: (entry.computedSegments || []).flatMap((segment) =>
             subtractIndicatorRange(
               segment,
@@ -1214,10 +1333,13 @@ export function trimIndicatorResultCacheEntries(
               },
             ),
           ),
-          lastUpdatedMs: Date.now(),
-        };
-        entries.set(key, nextEntry);
-        markEntryMutation(key);
+          staleSegments: entry.staleSegments,
+          revision: entry.revision,
+        });
+        if (!updated) {
+          skipped.push({ key, reason: "dependency-unavailable" });
+          continue;
+        }
         removed.push({
           owner: "indicator-result-cache",
           key,

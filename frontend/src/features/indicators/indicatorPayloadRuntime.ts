@@ -12,6 +12,7 @@ import type {
   IndicatorLine,
   IndicatorOutput,
   IndicatorParameterSchema,
+  IndicatorPayloadEnvelope,
   IndicatorRange,
   IndicatorUnifiedAnnotation,
   IndicatorUnifiedSeries,
@@ -112,6 +113,7 @@ export function isBuiltinIndicator(
 export function isWsHostedIndicator(
   indicator: IndicatorDefinition | null | undefined,
 ): boolean {
+  if (indicator?.executionTarget === "local") return false;
   return isBuiltinIndicator(indicator) || Boolean(indicator?.script);
 }
 
@@ -712,7 +714,17 @@ export function normalizeIndicatorPayload(
   payload: unknown,
   indicatorId: string,
 ): NormalizedIndicatorPayload {
-  const parsed = parseIndicatorPayloadEnvelope(payload);
+  return normalizeParsedIndicatorPayload(
+    parseIndicatorPayloadEnvelope(payload),
+    indicatorId,
+  );
+}
+
+/** Normalize an envelope that already crossed the strict wire-contract parser. */
+export function normalizeParsedIndicatorPayload(
+  parsed: IndicatorPayloadEnvelope,
+  indicatorId: string,
+): NormalizedIndicatorPayload {
   const hasUnifiedSeries = parsed.series.length > 0;
   const annotations = parsed.annotations;
   const splitAnnotations = splitUnifiedAnnotations(annotations, indicatorId);

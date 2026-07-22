@@ -53,7 +53,8 @@ import {
   buildIndicatorResultCacheKey,
   cacheIndicatorSnapshot,
   getCachedIndicatorComputedSegments,
-  getCachedIndicatorResult,
+  getCachedIndicatorMetadata,
+  getCachedIndicatorRevision,
   getCachedIndicatorResumeState,
   invalidateCachedIndicatorRange,
   patchCachedIndicatorResult,
@@ -74,6 +75,11 @@ import {
 } from "./indicatorRangeCoverage.js";
 import { createIndicatorRangeScheduler } from "./indicatorRangeScheduler.js";
 import { createIndicatorRangeBatcher } from "./indicatorRangeBatcher.js";
+import {
+  createIndicatorHydrationScheduler,
+  hydrateIndicatorDefinitionsFromCache,
+} from "./indicatorHydrationRuntime.js";
+import { buildIndicatorRangeLifecycleKey } from "./indicatorRangeLifecycle.js";
 import {
   buildIndicatorInitialHydrationSignature,
   buildIndicatorRangeRefreshSignature,
@@ -104,7 +110,6 @@ import {
   reconcileConsumedIndicatorRangeRequestIds,
 } from "./indicatorWindowDeltaRuntime.js";
 import {
-  clearIndicatorLineData,
   formatIndicatorError,
   mergeIndicatorLines,
   normalizeIndicatorPayload,
@@ -131,6 +136,8 @@ import type {
   IndicatorVisibleRange,
   IndicatorValuesMessage,
 } from "./indicatorTypes.js";
+
+export { buildIndicatorRangeLifecycleKey } from "./indicatorRangeLifecycle.js";
 
 interface UseIndicatorRuntimeOptions {
   session?: ChartSessionRuntime;
@@ -694,6 +701,7 @@ export function useIndicatorRuntime(
     coalesceWindowMs: 40,
     sendBatch: ({ requests, signal }) => computeIndicatorRangeBatch({ requests, signal }),
   }));
+  const [indicatorHydrationScheduler] = useState(createIndicatorHydrationScheduler);
   const [rangeRetryTick, setRangeRetryTick] = useState(0);
   const [subscriptionAckTick, setSubscriptionAckTick] = useState(0);
   const [settledInitialHydrationSignature, setSettledInitialHydrationSignature] = useState<
@@ -823,15 +831,17 @@ export function useIndicatorRuntime(
     marketType,
     symbol,
   ]);
+  const indicatorHydrationLifecycleKey = `indicator-cache:${indicatorCacheHydrationSignature}`;
+  const indicatorHydrationLifecycleKeyRef = useLatestRef(indicatorHydrationLifecycleKey);
   const currentSeriesKey = useMemo(
     () => [sessionKey, exchange, marketType, symbol, interval].join("|"),
     [exchange, interval, marketType, sessionKey, symbol],
   );
-  const currentStreamLifecycleKey = useMemo(() => JSON.stringify([
+  const currentStreamLifecycleKey = useMemo(() => buildIndicatorRangeLifecycleKey(
     currentSeriesKey,
-    requestDemand?.scope || "",
-    requestDemand?.generation ?? "",
-  ]), [currentSeriesKey, requestDemand?.generation, requestDemand?.scope]);
+    requestDemand,
+  ), [currentSeriesKey, requestDemand]);
+  const currentStreamLifecycleKeyRef = useLatestRef(currentStreamLifecycleKey);
   const currentInitialHydrationSignature = useMemo(() => {
     const cacheContext = buildIndicatorCacheContext({
       candleDownColor,
@@ -1408,6 +1418,10 @@ export function useIndicatorRuntime(
       requestContext.symbol,
       requestContext.interval,
     ].join("|");
+    const requestLifecycleKey = buildIndicatorRangeLifecycleKey(
+      contextKey,
+      currentRequestDemand,
+    );
     if (
       shouldWaitForIndicatorRangeSubscription(
         realtimeEnabled,
@@ -1426,7 +1440,7 @@ export function useIndicatorRuntime(
     }
     const cacheContext = getIndicatorCacheContext();
     const cachedRevision = hostedIndicators
-      .map((indicator) => getCachedIndicatorResult(indicator, cacheContext)?.revision)
+      .map((indicator) => getCachedIndicatorRevision(indicator, cacheContext))
       .find(Boolean);
     const serverRevision = normalizeIndicatorRevision(
       options.revision
@@ -1517,7 +1531,7 @@ export function useIndicatorRuntime(
     }
 
     const scheduled = indicatorRangeScheduler.ensureCoverage({
-      sessionKey: contextKey,
+      sessionKey: requestLifecycleKey,
       targets,
       range: { start: startSec, end: requestEndSec },
       reason,
@@ -1602,6 +1616,7 @@ export function useIndicatorRuntime(
         throw indicatorRangePayloadError(payload, "Indicator range error");
       },
       apply: ({ range, result: payload, target }) => {
+        if (currentStreamLifecycleKeyRef.current !== requestLifecycleKey) return;
         if (payload?.code === "INDICATOR_RANGE_EMPTY" && !isResolvedIndicatorRangeEmpty(payload)) return;
         const currentIndicator = activeIndicatorsRef.current.find((item) => item.id === target.indicator.id);
         if (!currentIndicator) return;
@@ -1661,6 +1676,7 @@ export function useIndicatorRuntime(
     candleUpColorRef,
     chartDataMetaRef,
     chartDataRef,
+    currentStreamLifecycleKeyRef,
     getIndicatorCacheContext,
     indicatorRangeBatcher,
     indicatorRangeRequestsRef,
@@ -2100,7 +2116,10 @@ export function useIndicatorRuntime(
       indicatorRangeScheduler.supersedeRevision({
         abortInFlight: false,
         revision,
-        sessionKey: seriesKey,
+        sessionKey: buildIndicatorRangeLifecycleKey(
+          seriesKey,
+          requestDemandRef.current,
+        ),
         targetKeys: [targetKey],
       });
     }
@@ -2127,6 +2146,7 @@ export function useIndicatorRuntime(
     historyWindowPendingRef,
     indicatorRangeScheduler,
     queueIndicatorCorrection,
+    requestDemandRef,
     runtimeContextRef,
     scheduleIndicatorCorrectionFlush,
   ]);
@@ -2548,7 +2568,7 @@ export function useIndicatorRuntime(
     symbol,
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     autoRightCatchupRangeSignaturesRef.current.clear();
     autoRightCatchupPendingRef.current = null;
     if (autoRightCatchupTimerRef.current) {
@@ -2596,14 +2616,9 @@ export function useIndicatorRuntime(
       hostedSubscriptionWaitTimerRef.current = null;
       setSubscriptionAckTick((tick) => tick + 1);
     }, INDICATOR_SUBSCRIPTION_ACK_TIMEOUT_MS);
-    indicatorRangeScheduler.setSession([
-      sessionKey,
-      exchange,
-      marketType,
-      symbol,
-      interval,
-    ].join("|"));
+    indicatorRangeScheduler.setSession(currentStreamLifecycleKey);
   }, [
+    currentStreamLifecycleKey,
     exchange,
     indicatorRangeScheduler,
     interval,
@@ -3010,30 +3025,88 @@ export function useIndicatorRuntime(
       realtimeIndicatorBatcherRef.current?.clear();
       provisionalIndicatorPreviewsRef.current.clear();
     }
-    const cachedEntries = resolveCachedIndicatorResults(activeIndicatorsRef.current, getIndicatorCacheContext());
-    const cachedById = new Map(cachedEntries.map((entry) => [entry.indicatorId, entry]));
-    setActiveIndicators((prev) =>
-      prev.map((indicator) => {
-        const cached = cachedById.get(indicator.id);
-        return {
-          ...indicator,
-          lines: cached?.normalized?.lines || clearIndicatorLineData(indicator.lines || []),
-          error: null,
-          ...(cached && cached.schema.length > 0 ? { paramSchema: cached.schema } : {}),
-        };
-      })
+  }, [realtimeEnabled]);
+
+  useLayoutEffect(() => {
+    indicatorHydrationScheduler.activate(indicatorHydrationLifecycleKey);
+    // Context ownership changes synchronously: the first chart commit must not
+    // retain outputs from the previous product/config. Warm line arrays are
+    // cheap stable cache views, so publish them now without cloning.
+    outputDispatch({ type: "reset-context" });
+    const cachedEntries = resolveCachedIndicatorResults(
+      activeIndicatorsRef.current,
+      getIndicatorCacheContext(),
     );
-    outputDispatch({ type: "hydrate-cache", entries: cachedEntries });
+    setActiveIndicators((previous) => hydrateIndicatorDefinitionsFromCache(
+      previous,
+      cachedEntries,
+      { clearMissing: true },
+    ));
   }, [
     activeIndicatorsRef,
-    exchange,
     getIndicatorCacheContext,
-    interval,
-    indicatorCacheHydrationSignature,
-    marketType,
-    realtimeEnabled,
+    indicatorHydrationLifecycleKey,
+    indicatorHydrationScheduler,
+    outputDispatch,
     setActiveIndicators,
-    symbol,
+  ]);
+
+  useEffect(() => {
+    const cacheContext = getIndicatorCacheContext();
+    const currentIndicators = activeIndicatorsRef.current;
+    if (
+      buildIndicatorCacheHydrationSignature(currentIndicators, cacheContext)
+      !== indicatorCacheHydrationSignature
+    ) return undefined;
+
+    const contentVersion = currentIndicators.map((indicator) => (
+      getCachedIndicatorMetadata(indicator, cacheContext)?.contentVersion ?? "missing"
+    )).join("|");
+    indicatorHydrationScheduler.schedule({
+      lifecycleKey: indicatorHydrationLifecycleKey,
+      contentSignature: indicatorCacheHydrationSignature,
+      contentVersion,
+      isCurrent: (identity) => (
+        indicatorHydrationLifecycleKeyRef.current === identity.lifecycleKey
+      ),
+      run: (identity) => {
+        if (indicatorHydrationLifecycleKeyRef.current !== identity.lifecycleKey) return;
+        const currentContext = getIndicatorCacheContext();
+        const indicators = activeIndicatorsRef.current;
+        if (
+          buildIndicatorCacheHydrationSignature(indicators, currentContext)
+          !== indicatorCacheHydrationSignature
+        ) return;
+
+        // Resolve at execution time so a WS/range update that lands while the
+        // task is deferred wins over the snapshot observed when it was queued.
+        const cachedEntries = resolveCachedIndicatorResults(indicators, currentContext);
+        setActiveIndicators((previous) => {
+          if (
+            buildIndicatorCacheHydrationSignature(previous, currentContext)
+            !== indicatorCacheHydrationSignature
+          ) return previous;
+          return hydrateIndicatorDefinitionsFromCache(
+            previous,
+            cachedEntries,
+            { clearMissing: false },
+          );
+        });
+        if (indicatorHydrationLifecycleKeyRef.current === identity.lifecycleKey) {
+          outputDispatch({ type: "hydrate-cache", entries: cachedEntries });
+        }
+      },
+    });
+    return () => indicatorHydrationScheduler.cancel();
+  }, [
+    activeIndicatorsRef,
+    getIndicatorCacheContext,
+    indicatorCacheHydrationSignature,
+    indicatorHydrationLifecycleKey,
+    indicatorHydrationLifecycleKeyRef,
+    indicatorHydrationScheduler,
+    outputDispatch,
+    setActiveIndicators,
   ]);
 
   const paneData = useMemo(

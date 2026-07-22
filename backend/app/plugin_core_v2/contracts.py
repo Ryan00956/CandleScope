@@ -25,6 +25,7 @@ CORE_CONTRIBUTION_KINDS = frozenset(
         "event-subscriber/1",
         "job/1",
         "chart-layer/1",
+        "view/1",
     }
 )
 
@@ -51,6 +52,13 @@ _SCHEMA_TYPES = frozenset(
 )
 _CHANNELS = frozenset({"toast"})
 _SEVERITIES = frozenset({"info", "success", "warning", "error"})
+_COMMAND_PLACEMENTS = frozenset({"commandPalette", "topToolbar", "chartContextMenu"})
+_VIEW_SLOTS = frozenset({"sidePanel", "bottomPanel", "statusArea"})
+_VIEW_RENDERERS = frozenset({"table", "list", "detail", "status"})
+_VIEW_FORMATS = frozenset(
+    {"text", "number", "percent", "price", "boolean", "timestamp"}
+)
+_VIEW_FIELD = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 
 
 def _fail(message: str, *, plugin_id: str, contribution_id: str) -> None:
@@ -444,7 +452,7 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
     if item.kind == "command/1":
         _exact_keys(
             config,
-            allowed={"requiresUserAction", "inputSchema"},
+            allowed={"requiresUserAction", "inputSchema", "placements"},
             label="command configuration",
             plugin_id=plugin_id,
             contribution_id=item.id,
@@ -467,6 +475,21 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
                     plugin_id=plugin_id,
                     contribution_id=item.id,
                 )
+        placements = config.get("placements", ["commandPalette"])
+        if (
+            not isinstance(placements, list)
+            or not placements
+            or len(placements) > len(_COMMAND_PLACEMENTS)
+            or not all(isinstance(value, str) for value in placements)
+            or len(set(placements)) != len(placements)
+            or not set(placements) <= _COMMAND_PLACEMENTS
+        ):
+            _fail(
+                "command placements are invalid",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        config["placements"] = placements
     elif item.kind == "settings/1":
         _exact_keys(
             config,
@@ -688,6 +711,166 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
                 contribution_id=item.id,
             ),
         }
+    elif item.kind == "view/1":
+        _exact_keys(
+            config,
+            allowed={
+                "slot",
+                "renderer",
+                "source",
+                "fields",
+                "maxItems",
+                "emptyState",
+                "primaryCommand",
+            },
+            required={"slot", "renderer", "source", "fields"},
+            label="view configuration",
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+        slot = config["slot"]
+        renderer = config["renderer"]
+        if slot not in _VIEW_SLOTS or renderer not in _VIEW_RENDERERS:
+            _fail(
+                "view slot or renderer is unsupported",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        if slot == "statusArea" and renderer != "status":
+            _fail(
+                "statusArea views must use the status renderer",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        if slot != "statusArea" and renderer == "status":
+            _fail(
+                "status renderer is restricted to statusArea",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        source = config["source"]
+        if not isinstance(source, dict):
+            _fail(
+                "view source must be an object",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        _exact_keys(
+            source,
+            allowed={"kind", "name", "path"},
+            required={"kind", "name"},
+            label="view source",
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+        source_path = source.get("path", [])
+        if (
+            source.get("kind") != "storage.document"
+            or not isinstance(source.get("name"), str)
+            or not _VIEW_FIELD.fullmatch(source["name"])
+            or not isinstance(source_path, list)
+            or len(source_path) > 8
+            or not all(
+                isinstance(value, str) and _VIEW_FIELD.fullmatch(value)
+                for value in source_path
+            )
+        ):
+            _fail(
+                "view source is invalid",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        raw_fields = config["fields"]
+        if not isinstance(raw_fields, list) or not 1 <= len(raw_fields) <= 16:
+            _fail(
+                "view fields must be a bounded array",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        fields: list[dict[str, str]] = []
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, dict):
+                _fail(
+                    "view field must be an object",
+                    plugin_id=plugin_id,
+                    contribution_id=item.id,
+                )
+            _exact_keys(
+                raw_field,
+                allowed={"field", "label", "format"},
+                required={"field", "label"},
+                label="view field",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+            field_name = raw_field["field"]
+            label = raw_field["label"]
+            field_format = raw_field.get("format", "text")
+            if (
+                not isinstance(field_name, str)
+                or not _VIEW_FIELD.fullmatch(field_name)
+                or not isinstance(label, str)
+                or not label
+                or label != label.strip()
+                or len(label) > 128
+                or field_format not in _VIEW_FORMATS
+            ):
+                _fail(
+                    "view field metadata is invalid",
+                    plugin_id=plugin_id,
+                    contribution_id=item.id,
+                )
+            fields.append({"field": field_name, "label": label, "format": field_format})
+        if len({value["field"] for value in fields}) != len(fields):
+            _fail(
+                "view fields contain duplicates",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        empty_state = config.get("emptyState", "No data")
+        primary_command = config.get("primaryCommand")
+        if (
+            not isinstance(empty_state, str)
+            or not empty_state
+            or empty_state != empty_state.strip()
+            or len(empty_state) > 256
+            or (
+                primary_command is not None
+                and (
+                    not isinstance(primary_command, str)
+                    or not _VIEW_FIELD.fullmatch(primary_command)
+                )
+            )
+        ):
+            _fail(
+                "view text or primary command is invalid",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        config = {
+            "slot": slot,
+            "renderer": renderer,
+            "source": {
+                "kind": "storage.document",
+                "name": source["name"],
+                "path": source_path,
+            },
+            "fields": fields,
+            "maxItems": _bounded_int(
+                config.get("maxItems", 50),
+                minimum=1,
+                maximum=200,
+                label="maxItems",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            ),
+            "emptyState": empty_state,
+            **(
+                {"primaryCommand": primary_command}
+                if primary_command is not None
+                else {}
+            ),
+        }
     else:
         raise AssertionError(
             "core configuration validator received an unsupported kind"
@@ -713,6 +896,15 @@ def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]
                 configuration=_validate_core_configuration(manifest.plugin.id, item),
             )
         )
+    command_ids = {item.id for item in result if item.kind == "command/1"}
+    for item in result:
+        primary_command = item.configuration.get("primaryCommand")
+        if primary_command is not None and primary_command not in command_ids:
+            _fail(
+                "view primaryCommand must reference a command in the same plugin",
+                plugin_id=manifest.plugin.id,
+                contribution_id=item.id,
+            )
     return tuple(result)
 
 

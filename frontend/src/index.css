@@ -4513,6 +4513,269 @@ body {
   }
 }
 
+/* ── Plugin Platform v2: Host-owned declarative surfaces ── */
+.plugin-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 46vw;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.plugin-toolbar::-webkit-scrollbar { display: none; }
+
+.plugin-toolbar button,
+.plugin-action-row button,
+.plugin-modal button,
+.plugin-view-surface button {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  padding: 6px 9px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.plugin-toolbar button {
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.plugin-toolbar button:hover:not(:disabled),
+.plugin-modal button:hover:not(:disabled),
+.plugin-view-surface button:hover:not(:disabled) {
+  border-color: var(--accent-blue);
+  color: var(--text-primary);
+}
+
+.plugin-toolbar button:disabled,
+.plugin-modal button:disabled,
+.plugin-view-surface button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.plugin-status-slot {
+  display: flex;
+  gap: 8px;
+  color: var(--accent-cyan);
+}
+
+.plugin-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1600;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(2, 6, 23, 0.68);
+  backdrop-filter: blur(5px);
+}
+
+.plugin-modal {
+  width: min(960px, 94vw);
+  max-height: min(760px, 90vh);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  color: var(--text-primary);
+}
+
+.plugin-modal > header,
+.plugin-view-surface > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.plugin-modal h2,
+.plugin-view-surface h2,
+.plugin-manager-detail h3,
+.plugin-manager-detail h4 { margin: 0; }
+
+.plugin-modal-body {
+  overflow: auto;
+  padding: 18px;
+}
+
+.plugin-command-search,
+.plugin-native-field input:not([type='checkbox']),
+.plugin-native-field select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  padding: 8px 10px;
+}
+
+.plugin-command-layout,
+.plugin-manager-layout {
+  display: grid;
+  grid-template-columns: minmax(210px, 30%) minmax(0, 1fr);
+  gap: 16px;
+  min-height: 360px;
+  margin-top: 14px;
+}
+
+.plugin-install-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.plugin-install-row label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.plugin-install-row small { color: var(--text-muted); }
+
+.plugin-command-layout nav,
+.plugin-manager-layout nav {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow: auto;
+  border-right: 1px solid var(--border-color);
+  padding-right: 12px;
+}
+
+.plugin-command-layout nav button,
+.plugin-manager-layout nav button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+}
+
+.plugin-command-layout nav button.active,
+.plugin-manager-layout nav button.active {
+  border-color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.plugin-command-layout small,
+.plugin-manager-layout small,
+.plugin-native-field small {
+  color: var(--text-muted);
+}
+
+.plugin-command-form,
+.plugin-manager-detail { min-width: 0; overflow: auto; }
+
+.plugin-native-group {
+  border: 0;
+  padding: 0;
+  margin: 0 0 14px;
+}
+
+.plugin-native-group .plugin-native-group {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.plugin-native-field {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+  color: var(--text-secondary);
+}
+
+.plugin-native-checkbox {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.plugin-native-checkbox small { grid-column: 2; }
+.plugin-native-array-row { border-left: 2px solid var(--border-color); padding-left: 10px; margin-bottom: 8px; }
+.plugin-action-row { display: flex; gap: 7px; flex-wrap: wrap; margin: 12px 0; }
+
+.plugin-view-surface {
+  position: fixed;
+  z-index: 850;
+  overflow: auto;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.4);
+  padding-bottom: 16px;
+}
+
+.plugin-view-surface > :not(header) { margin: 16px; }
+
+.plugin-view-sidePanel {
+  top: 50px;
+  right: 0;
+  bottom: 25px;
+  width: min(460px, 92vw);
+}
+
+.plugin-view-bottomPanel {
+  right: 0;
+  bottom: 25px;
+  left: 0;
+  max-height: min(360px, 55vh);
+}
+
+.plugin-native-table-wrap { overflow: auto; }
+.plugin-native-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.plugin-native-table th,
+.plugin-native-table td { padding: 8px; border-bottom: 1px solid var(--border-color); text-align: left; white-space: nowrap; }
+.plugin-native-table th { color: var(--text-muted); }
+.plugin-native-list { display: grid; gap: 8px; padding: 0; list-style: none; }
+.plugin-native-list li { display: flex; flex-wrap: wrap; gap: 12px; padding: 10px; border: 1px solid var(--border-color); border-radius: 7px; }
+.plugin-native-detail { display: grid; grid-template-columns: minmax(100px, auto) 1fr; gap: 8px 14px; }
+.plugin-native-detail dt { color: var(--text-muted); }
+.plugin-native-detail dd { margin: 0; }
+
+.plugin-permissions article {
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.plugin-permissions article > div:first-child { display: flex; justify-content: space-between; gap: 8px; }
+.plugin-permissions pre,
+.plugin-manager-detail pre { max-height: 160px; overflow: auto; white-space: pre-wrap; color: var(--text-muted); background: var(--bg-primary); padding: 8px; border-radius: 6px; }
+
+.plugin-platform-notice,
+.plugin-ui-fallback {
+  position: fixed;
+  z-index: 1800;
+  right: 16px;
+  bottom: 38px;
+  max-width: min(480px, 90vw);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  padding: 10px 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.plugin-platform-error { border-color: var(--candle-down); }
+
+@media (max-width: 900px) {
+  .plugin-command-layout,
+  .plugin-manager-layout { grid-template-columns: 1fr; }
+  .plugin-command-layout nav,
+  .plugin-manager-layout nav { max-height: 180px; border-right: 0; border-bottom: 1px solid var(--border-color); padding: 0 0 10px; }
+  .plugin-toolbar { max-width: 32vw; }
+}
+
 /* ── 指标按钮 ────────────────────────────────────────────── */
 .indicator-toggle-btn {
   display: flex;

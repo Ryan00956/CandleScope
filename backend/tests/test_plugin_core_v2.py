@@ -144,6 +144,46 @@ def test_core_contribution_contracts_are_strict_and_catalog_safe() -> None:
         core_contributions(PluginManifest.from_wire(invalid_bounds))
 
 
+def test_declarative_view_contract_rejects_unknown_slots_and_command_references() -> (
+    None
+):
+    value = _core_manifest().to_wire()
+    value["contributions"].append(
+        {
+            "id": "results",
+            "kind": "view/1",
+            "title": "Results",
+            "entrypoint": "main",
+            "configuration": {
+                "slot": "sidePanel",
+                "renderer": "table",
+                "source": {
+                    "kind": "storage.document",
+                    "name": "latest",
+                    "path": ["rows"],
+                },
+                "fields": [{"field": "symbol", "label": "Symbol", "format": "text"}],
+                "primaryCommand": "command",
+            },
+        }
+    )
+    contributions = core_contributions(PluginManifest.from_wire(value))
+    view = next(item for item in contributions if item.kind == "view/1")
+    assert view.configuration["slot"] == "sidePanel"
+    assert view.configuration["maxItems"] == 50
+    assert contributions[0].configuration["placements"] == ["commandPalette"]
+
+    unknown_slot = json.loads(json.dumps(value))
+    unknown_slot["contributions"][-1]["configuration"]["slot"] = "floatingWindow"
+    with pytest.raises(CorePluginError, match="unsupported"):
+        core_contributions(PluginManifest.from_wire(unknown_slot))
+
+    unknown_command = json.loads(json.dumps(value))
+    unknown_command["contributions"][-1]["configuration"]["primaryCommand"] = "missing"
+    with pytest.raises(CorePluginError, match="same plugin"):
+        core_contributions(PluginManifest.from_wire(unknown_command))
+
+
 def test_environment_bootstrap_is_disabled_by_default_and_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -194,6 +234,10 @@ def test_private_storage_isolates_namespaces_and_recovers_migration_snapshot(
     first = StorageNamespace("acme.plugin", "manifest:acme")
     other_plugin = StorageNamespace("acme.other", "manifest:acme")
     other_publisher = StorageNamespace("acme.plugin", "manifest:other")
+
+    assert storage.document_get_if_exists(first, "doc") == {"found": False}
+    assert storage.summary_if_exists(first)["exists"] is False
+    assert list((tmp_path / "private").rglob("*.sqlite")) == []
 
     storage.kv_put(first, "key", {"value": 1}, quota_bytes=4096)
     storage.document_put(first, "doc", {"version": 1}, quota_bytes=4096)
@@ -528,6 +572,70 @@ async def test_catalog_is_public_but_mutations_require_local_management_guard(
             catalog = await client.get("/api/v2/plugins/catalog")
             assert catalog.status_code == 200
             assert catalog.json()["plugins"][0]["id"] == "candlescope.hello-command"
+            ui_snapshot = await client.get("/api/v2/plugins/ui/snapshot")
+            assert ui_snapshot.status_code == 200
+            assert ui_snapshot.json() == {
+                "schemaVersion": "candlescope.plugin-ui/1",
+                "registryRevision": 1,
+                "views": [],
+                "chartLayers": [],
+            }
+            assert (
+                await client.get(
+                    "/api/v2/plugins/manage/candlescope.hello-command/detail"
+                )
+            ).status_code == 403
+            detail = await client.get(
+                "/api/v2/plugins/manage/candlescope.hello-command/detail",
+                headers=guard.trusted_headers(),
+            )
+            assert detail.status_code == 200
+            assert detail.json()["update"] == {
+                "policy": "local-artifact-only",
+                "automatic": False,
+                "available": False,
+            }
+            assert detail.json()["dataRetention"]["retainedOnUninstall"] is True
+            permission_detail = detail.json()["permissions"][0]
+            assert set(permission_detail) == {
+                "pluginId",
+                "activationReady",
+                "requiredSatisfied",
+                "permissions",
+            }
+            assert all(
+                set(item)
+                == {
+                    "permissionId",
+                    "kind",
+                    "decision",
+                    "requestedScope",
+                    "grantedScope",
+                }
+                for item in permission_detail["permissions"]
+            )
+            upload_headers = {
+                **guard.trusted_headers(user_action="install-bundle"),
+                "Content-Type": "application/vnd.candlescope.plugin+zip",
+                "X-CandleScope-Bundle-SHA256": "sha256:" + "0" * 64,
+            }
+            mismatch = await client.post(
+                "/api/v2/plugins/manage/install",
+                headers=upload_headers,
+                content=fixture.bundle.path.read_bytes(),
+            )
+            assert mismatch.status_code == 400
+            upload_headers["X-CandleScope-Bundle-SHA256"] = fixture.bundle.sha256
+            uploaded = await client.post(
+                "/api/v2/plugins/manage/install",
+                headers=upload_headers,
+                content=fixture.bundle.path.read_bytes(),
+            )
+            assert uploaded.status_code == 200
+            assert uploaded.json()["installation"]["pluginId"] == (
+                "candlescope.hello-command"
+            )
+            assert list((root / "incoming-v2").glob("*.cspkg")) == []
             assert (
                 await client.post(
                     "/api/v2/plugins/manage/commands/candlescope.hello-command.hello/invoke",

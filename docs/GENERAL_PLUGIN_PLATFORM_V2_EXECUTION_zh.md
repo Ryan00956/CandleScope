@@ -2,7 +2,8 @@
 
 > 状态：执行中；Phase 0 已完成（`381dd02`），Phase 1 已完成（`d29ad4d`），Phase 2
 > 已完成（`d755f27`），Phase 3 已完成（`eb7316b`），Phase 4 已完成（`e20d7c4`），
-> Phase 5 已完成（`b77444a`），Phase 6 已完成实现与技术验收（本阶段提交）。
+> Phase 5 已完成（`b77444a`），Phase 6 已完成（`8f18080`），Phase 7 已完成实现与技术验收
+> （本阶段提交）。
 >
 > 基线：`codex/plugin-platform-v1@400e520`，2026-07-22。
 >
@@ -732,8 +733,8 @@ frontend/src/features/plugins/
 | Phase 3：Bundle/Installer v2 | 已完成（`eb7316b`） | 多 entrypoint/assets、staging、原子激活 | 可管理安装与回滚 |
 | Phase 4：权限与 OS 沙箱 | 已完成（`e20d7c4`） | Grant Store、Broker、隔离、审计 | 可开放受控 Host API |
 | Phase 5：核心后端扩展点 | 已完成（`b77444a`） | command/settings/storage/event/job | 最小通用插件平台 |
-| Phase 6：市场数据 consumer/图层 | 已完成（本阶段提交） | read/subscribe、Render IR layer | 扫描器、研究、图表工具 |
-| Phase 7：声明式前端 | 未开始 | catalog、manager、native slots | 无任意 JS 的产品 UI |
+| Phase 6：市场数据 consumer/图层 | 已完成（`8f18080`） | read/subscribe、Render IR layer | 扫描器、研究、图表工具 |
+| Phase 7：声明式前端 | 已完成（本阶段提交） | catalog、manager、native slots | 无任意 JS 的产品 UI |
 | Phase 8：Sandbox UI | 未开始 | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
 | Phase 9：网络/文件/HTTP gateway | 未开始 | 受控外部交互与命名空间 API | 集成型插件 |
 | Phase 10：数据提供器 | 未开始 | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
@@ -883,7 +884,7 @@ compatibility wrapper 可切回原 v1 supervisor；不改变 bundle/registry 格
 - per-plugin quota、rate limit、trace 和审计；
 - Windows Job Object、restricted token/AppContainer、ACL、临时目录和进程树控制；
 - 默认 direct network deny，Host 代理尚不开放；
-- CLI/management API 只显示授权意图和 scope，不显示 raw secret；Phase 7 再提供对应页面；
+- CLI/management API 只显示授权意图和 scope，不显示 raw secret；Phase 7 已提供 Host 原生页面；
 - malicious probe bundle：读取数据库/用户目录、联网、fork、资源耗尽、伪造 handle。
 
 ### 退出门
@@ -935,8 +936,8 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 > 2026-07-22 已完成实现与技术验收。受 scope 约束的 live symbol/K 线/TradeFlow/partial
 > order-book 只读 broker、有界 K 线订阅、marker-only `chart-layer/1` 和 Market Scanner
 > 参考插件已交付；证据与保留边界见
-> [`PLUGIN_PLATFORM_V2_PHASE6_zh.md`](PLUGIN_PLATFORM_V2_PHASE6_zh.md)。图层仅进入 Host
-> registry，Phase 7 前不会投影到原生图表；网络、provider、账户与交易仍未开放。
+> [`PLUGIN_PLATFORM_V2_PHASE6_zh.md`](PLUGIN_PLATFORM_V2_PHASE6_zh.md)。Phase 7 已将安全
+> projection 接到原生图表与 AppShell；网络、provider、账户与交易仍未开放。
 
 ### 交付
 
@@ -957,6 +958,12 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 - 高负载插件断开后 Data Engine producer 延迟回到基线。
 
 ## 23. Phase 7：声明式前端与插件管理器
+
+> 2026-07-22 已完成实现与技术验收。严格 `view/1`、公共 UI projection、原生 registry/
+> settings/view/status/chart consumer、受保护 Plugin Manager、流式 `.cspkg` 安装与真实浏览器
+> Market Scanner 闭环已交付；证据与保留边界见
+> [`PLUGIN_PLATFORM_V2_PHASE7_zh.md`](PLUGIN_PLATFORM_V2_PHASE7_zh.md)。插件自定义 JS/iframe、
+> network/files、provider、账户、交易与 Marketplace 仍未开放。
 
 ### 交付
 

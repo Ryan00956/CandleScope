@@ -30,6 +30,10 @@
       "entrypoint": "main",
       "configuration": {
         "requiresUserAction": true,
+        "placements": [
+          "commandPalette",
+          "topToolbar"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {},
@@ -93,6 +97,77 @@
           "lookbackBars": 20,
           "minimumMovePct": 0
         }
+      }
+    },
+    {
+      "id": "results",
+      "kind": "view/1",
+      "title": "Market scanner results",
+      "entrypoint": "main",
+      "configuration": {
+        "slot": "sidePanel",
+        "renderer": "table",
+        "source": {
+          "kind": "storage.document",
+          "name": "latest-scan",
+          "path": [
+            "matches"
+          ]
+        },
+        "fields": [
+          {
+            "field": "symbol",
+            "label": "Symbol",
+            "format": "text"
+          },
+          {
+            "field": "changePct",
+            "label": "Move",
+            "format": "percent"
+          },
+          {
+            "field": "close",
+            "label": "Close",
+            "format": "price"
+          },
+          {
+            "field": "time",
+            "label": "Closed at",
+            "format": "timestamp"
+          }
+        ],
+        "maxItems": 50,
+        "emptyState": "Run the scanner to populate results",
+        "primaryCommand": "scan"
+      }
+    },
+    {
+      "id": "summary",
+      "kind": "view/1",
+      "title": "Market scanner summary",
+      "entrypoint": "main",
+      "configuration": {
+        "slot": "statusArea",
+        "renderer": "status",
+        "source": {
+          "kind": "storage.document",
+          "name": "latest-scan",
+          "path": []
+        },
+        "fields": [
+          {
+            "field": "scannedSymbols",
+            "label": "Scanned",
+            "format": "number"
+          },
+          {
+            "field": "interval",
+            "label": "Interval",
+            "format": "text"
+          }
+        ],
+        "maxItems": 1,
+        "emptyState": "Scanner idle"
       }
     },
     {

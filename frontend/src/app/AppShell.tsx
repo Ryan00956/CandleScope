@@ -7,6 +7,9 @@ import TopBar from "./TopBar";
 import MarketPageFrame from "./MarketPageFrame";
 import { buildAppShellViewModel } from "./appShellViewModel";
 import type { AppShellProps } from "./appShellContracts.js";
+import PluginPlatformSurfaces, { PluginUiErrorBoundary } from "../features/plugins/PluginPlatformSurfaces.js";
+import PluginPlatformToolbar from "../features/plugins/PluginPlatformToolbar.js";
+import PluginPlatformStatus from "../features/plugins/PluginPlatformStatus.js";
 
 function AppShell({
   pageExportRef,
@@ -24,6 +27,7 @@ function AppShell({
   exportFlow,
   alerts,
   replayEntry,
+  plugins,
 }: AppShellProps) {
   const model = useMemo(
     () => buildAppShellViewModel({
@@ -72,11 +76,16 @@ function AppShell({
   return (
     <MarketPageFrame
       rootRef={pageExportRef}
-      topBar={<TopBar {...model.topBar} />}
+      topBar={<TopBar {...model.topBar} extensionControls={<PluginUiErrorBoundary><PluginPlatformToolbar runtime={plugins} /></PluginUiErrorBoundary>} />}
       intervalSelector={<IntervalSelector {...model.intervalSelector} />}
-      workspace={<ChartWorkspace {...chartWorkspace} />}
-      featureSurfaces={<LazyFeatureSurfaces surfaces={model.lazySurfaces} />}
-      statusBar={<StatusBar status={model.statusBar} />}
+      workspace={<ChartWorkspace {...chartWorkspace} pluginMarkerSource={plugins.view.markerSource} />}
+      featureSurfaces={(
+        <>
+          <LazyFeatureSurfaces surfaces={model.lazySurfaces} />
+          <PluginPlatformSurfaces runtime={plugins} />
+        </>
+      )}
+      statusBar={<StatusBar status={model.statusBar} extensions={<PluginUiErrorBoundary><PluginPlatformStatus runtime={plugins} /></PluginUiErrorBoundary>} />}
     />
   );
 }

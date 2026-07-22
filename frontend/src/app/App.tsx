@@ -16,6 +16,7 @@ import { useTradeFlowRuntime } from "../features/trade-flow/useTradeFlowRuntime"
 import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime";
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime";
 import { useReplayEntryCapability } from "../features/replay/useReplayEntryCapability";
+import { usePluginPlatformRuntime } from "../features/plugins/usePluginPlatformRuntime";
 import AppProviders from "./AppProviders";
 import AppShell from "./AppShell";
 import type {
@@ -33,6 +34,12 @@ export default function App() {
   const realtimePriceRef = useRef<number | null>(null);
   const chartSession = useChartSession({
     chartSurfaceActions: chartSurface.actions,
+  });
+  const plugins = usePluginPlatformRuntime({
+    exchange: chartSession.view.exchange,
+    marketType: chartSession.view.marketType,
+    symbol: chartSession.view.symbol,
+    interval: chartSession.view.interval,
   });
 
   const marketData = useMarketDataRuntime({
@@ -242,6 +249,7 @@ export default function App() {
         exportFlow={exportFlow}
         alerts={alertsRuntime}
         replayEntry={replayEntry}
+        plugins={plugins}
       />
     </AppProviders>
   );

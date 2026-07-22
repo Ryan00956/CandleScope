@@ -1,4 +1,5 @@
 import { memo, useSyncExternalStore } from "react";
+import type { ReactNode } from "react";
 import SymbolSearch from "../features/symbol-search/SymbolSearch.js";
 import { markPerf } from "../runtime/performance/perfMarks";
 import { loadSettingsModal } from "./lazySurfaceLoaders.js";
@@ -40,6 +41,7 @@ export interface TopBarProps {
   };
   advancedMarketData: AdvancedMarketRuntimeView;
   replayEntry: ReplayEntryCapabilityView;
+  extensionControls?: ReactNode;
 }
 
 function isCompleteMarketDisplayData(
@@ -52,7 +54,7 @@ function isCompleteMarketDisplayData(
     && typeof value.close === "number";
 }
 
-function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, replayEntry }: TopBarProps) {
+function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, replayEntry, extensionControls }: TopBarProps) {
   const {
     currentSymbol,
     currentMarketType,
@@ -163,6 +165,8 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
       >
         🔔
       </button>
+
+      {extensionControls}
 
       {displayData && (
         <div className="price-info">

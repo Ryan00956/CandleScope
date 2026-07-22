@@ -12,6 +12,7 @@ import type { WatchlistRuntime } from "../features/watchlist/useWatchlistRuntime
 import type { OrderBookRuntime } from "../features/order-book/orderBookTypes.js";
 import type { ReplayEntryCapabilityView } from "../features/replay/useReplayEntryCapability.js";
 import type { TradeFlowRuntime } from "../features/trade-flow/tradeFlowTypes.js";
+import type { PluginPlatformRuntime } from "../features/plugins/pluginPlatformTypes.js";
 import type { ChartWorkspaceProps } from "./ChartWorkspace.js";
 import type { LazyFeatureSurfaceModels } from "./LazyFeatureSurfaces.js";
 import type { StatusBarModel } from "./StatusBar.js";
@@ -131,4 +132,6 @@ export interface AppShellRefs {
   chartSurfaceRef: RefObject<ChartSurfaceHandle | null>;
 }
 
-export type AppShellProps = AppShellRuntimeInputs & AppShellRefs;
+export type AppShellProps = AppShellRuntimeInputs & AppShellRefs & {
+  plugins: PluginPlatformRuntime;
+};

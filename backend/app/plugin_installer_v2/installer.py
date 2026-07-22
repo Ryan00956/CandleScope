@@ -32,7 +32,11 @@ from .bundle import (
     inspect_platform_bundle,
     verify_platform_bundle,
 )
-from .errors import PlatformBundleError, PlatformInstallerError
+from .errors import (
+    PlatformBundleError,
+    PlatformInstallerBaseError,
+    PlatformInstallerError,
+)
 from .registry import (
     LEGACY_REGISTRY_FILE_NAME,
     REGISTRY_FILE_NAME,
@@ -1444,6 +1448,52 @@ class PlatformPluginInstaller:
     def list_plugins(self) -> tuple[dict[str, Any], ...]:
         registry = load_activation_registry(self.registry_path)
         return tuple(item.to_wire() for item in registry.plugins)
+
+    def rollback_status(self, plugin_id: str) -> dict[str, Any]:
+        """Describe the exact local rollback target without mutating registry state."""
+
+        registry = load_activation_registry(self.registry_path)
+        current = registry.by_id().get(plugin_id)
+        if current is None:
+            raise PlatformInstallerError(
+                "plugin is not present in v2 activation registry"
+            )
+        path = self._history_path(plugin_id, current.activation_id)
+        if not path.exists():
+            return {"available": False, "reason": "ROLLBACK_HISTORY_MISSING"}
+        try:
+            transaction = _read_json(path, "activation history")
+            expected = {
+                "schemaVersion",
+                "transactionId",
+                "pluginId",
+                "createdAt",
+                "before",
+                "after",
+            }
+            if (
+                set(transaction) != expected
+                or transaction.get("schemaVersion") != HISTORY_SCHEMA_VERSION
+                or transaction.get("transactionId") != current.activation_id
+                or transaction.get("pluginId") != plugin_id
+                or transaction.get("after") != current.to_wire()
+            ):
+                return {"available": False, "reason": "ROLLBACK_HISTORY_INVALID"}
+            before_value = transaction.get("before")
+            if before_value is None:
+                return {
+                    "available": True,
+                    "target": {"state": "uninstalled", "version": None},
+                }
+            target = ActivationRecord.from_wire(
+                before_value, "activation history.before"
+            )
+            return {
+                "available": True,
+                "target": {"state": target.state, "version": target.version},
+            }
+        except PlatformInstallerBaseError:
+            return {"available": False, "reason": "ROLLBACK_HISTORY_INVALID"}
 
     def _change_state(self, plugin_id: str, target_state: str) -> StateChangeResult:
         with _installation_lock(self.lock_path, self.lock_timeout_seconds):

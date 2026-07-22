@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import re
+import secrets
+from pathlib import Path
 from typing import Any
 
 from candlescope_plugin_sdk.platform_v2 import PlatformContractError, loads_strict
@@ -17,6 +21,8 @@ from .runtime import CorePluginPlatform, DisabledCorePluginPlatform
 
 
 MAX_CORE_API_BODY_BYTES = 256 * 1024
+MAX_PLUGIN_BUNDLE_BYTES = 16 * 1024 * 1024
+_BUNDLE_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _platform(request: Request) -> CorePluginPlatform | DisabledCorePluginPlatform:
@@ -59,6 +65,66 @@ async def _body(request: Request, *, required: set[str]) -> dict[str, Any]:
     return value
 
 
+async def _bundle_upload(
+    request: Request, platform: CorePluginPlatform
+) -> tuple[Path, str]:
+    expected_sha256 = request.headers.get("x-candlescope-bundle-sha256", "")
+    if _BUNDLE_SHA256.fullmatch(expected_sha256) is None:
+        raise HTTPException(status_code=400, detail="exact bundle SHA-256 is required")
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip()
+    if content_type not in {
+        "application/octet-stream",
+        "application/vnd.candlescope.plugin+zip",
+    }:
+        raise HTTPException(
+            status_code=415, detail="plugin bundle media type is invalid"
+        )
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if not 0 < int(content_length) <= MAX_PLUGIN_BUNDLE_BYTES:
+                raise HTTPException(
+                    status_code=413, detail="plugin bundle is too large"
+                )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="invalid Content-Length"
+            ) from exc
+    incoming = platform.root / "incoming-v2"
+    if incoming.exists() and (incoming.is_symlink() or not incoming.is_dir()):
+        raise HTTPException(status_code=409, detail="plugin upload directory is unsafe")
+    await asyncio.to_thread(incoming.mkdir, parents=True, exist_ok=True)
+    if incoming.is_symlink() or not incoming.is_dir():
+        raise HTTPException(status_code=409, detail="plugin upload directory is unsafe")
+    upload = incoming / f"upload-{secrets.token_hex(16)}.cspkg"
+    size = 0
+    digest = hashlib.sha256()
+    try:
+        with upload.open("xb") as handle:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > MAX_PLUGIN_BUNDLE_BYTES:
+                    raise HTTPException(
+                        status_code=413, detail="plugin bundle is too large"
+                    )
+                digest.update(chunk)
+                handle.write(chunk)
+            handle.flush()
+        if size == 0:
+            raise HTTPException(status_code=400, detail="plugin bundle is required")
+        actual_sha256 = "sha256:" + digest.hexdigest()
+        if not secrets.compare_digest(actual_sha256, expected_sha256):
+            raise HTTPException(
+                status_code=400, detail="plugin bundle SHA-256 mismatch"
+            )
+        return upload, expected_sha256
+    except BaseException:
+        await asyncio.to_thread(upload.unlink, missing_ok=True)
+        raise
+
+
 def _raise_api_error(exc: Exception) -> None:
     if isinstance(
         exc,
@@ -77,10 +143,44 @@ def create_core_plugin_router() -> APIRouter:
     async def catalog(request: Request) -> dict[str, Any]:
         return _platform(request).catalog()
 
+    @router.get("/ui/snapshot")
+    async def ui_snapshot(request: Request) -> dict[str, Any]:
+        return await asyncio.to_thread(_platform(request).ui_snapshot)
+
     @router.get("/manage/diagnostics")
     async def diagnostics(request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
         return platform.diagnostics()
+
+    @router.post("/manage/install")
+    async def install(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        upload = None
+        try:
+            upload, expected_sha256 = await _bundle_upload(request, platform)
+            result = await asyncio.to_thread(
+                platform.installer.install,
+                upload,
+                expected_sha256=expected_sha256,
+                enabled=True,
+            )
+            await platform.reconcile_plugin(result.plugin_id)
+            return {"installation": result.to_wire()}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+        finally:
+            if upload is not None:
+                await asyncio.to_thread(upload.unlink, missing_ok=True)
+
+    @router.get("/manage/{plugin_id}/detail")
+    async def plugin_detail(plugin_id: str, request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            return await asyncio.to_thread(platform.management_detail, plugin_id)
+        except Exception as exc:
+            _raise_api_error(exc)
 
     @router.get("/manage/permissions")
     async def permissions(

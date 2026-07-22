@@ -13,6 +13,8 @@ import { useAdvancedMarketPanes } from "../features/advanced-market-data/useAdva
 import MarketWorkspaceFrame from "./MarketWorkspaceFrame.js";
 import { useTradeFlowPanes } from "../features/trade-flow/useTradeFlowPanes.js";
 import type { TradeFlowRuntime } from "../features/trade-flow/tradeFlowTypes.js";
+import { combineExternalMarkerSources } from "../chart-adapter/externalMarkerSource.js";
+import type { ExternalMarkerSource } from "../chart-adapter/externalMarkerSource.js";
 
 const ExportPanel = React.lazy(() => import("../features/export/ExportPanel"));
 const DrawingToolbar = React.lazy(() => import("../features/drawings/DrawingToolbar"));
@@ -32,6 +34,7 @@ export interface ChartWorkspaceProps {
   watchlist: WatchlistSidebarProps;
   orderBook: OrderBookRuntime;
   tradeFlow: TradeFlowRuntime;
+  pluginMarkerSource?: ExternalMarkerSource | null;
   errorBoundary?: ComponentType<PropsWithChildren>;
 }
 
@@ -42,20 +45,25 @@ function ChartWorkspace({
   watchlist,
   orderBook,
   tradeFlow,
+  pluginMarkerSource = null,
   errorBoundary = ChartErrorBoundary,
 }: ChartWorkspaceProps) {
   const Boundary = errorBoundary;
   const advancedPanes = useAdvancedMarketPanes(chart.advancedMarketData);
   const tradeFlowPanes = useTradeFlowPanes(tradeFlow, chart.chartProps.seriesStore);
+  const markerSource = React.useMemo(
+    () => combineExternalMarkerSources([tradeFlow.view.markerSource, pluginMarkerSource]),
+    [pluginMarkerSource, tradeFlow.view.markerSource],
+  );
   const chartProps = React.useMemo(() => ({
     ...chart.chartProps,
-    externalMarkerSource: tradeFlow.view.markerSource,
+    externalMarkerSource: markerSource,
     subPanes: [
       ...tradeFlowPanes,
       ...advancedPanes,
       ...(chart.chartProps.subPanes || []),
     ],
-  }), [advancedPanes, chart.chartProps, tradeFlow.view.markerSource, tradeFlowPanes]);
+  }), [advancedPanes, chart.chartProps, markerSource, tradeFlowPanes]);
 
   const chartNode = chart.error ? (
           <div className="chart-area">

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -682,7 +683,12 @@ async def test_market_scanner_bundle_runs_real_sidecar_broker_storage_and_layer(
             "command/1",
             "settings/1",
             "chart-layer/1",
+            "view/1",
         }
+        empty_ui = platform.ui_snapshot()
+        assert empty_ui["schemaVersion"] == "candlescope.plugin-ui/1"
+        assert [item["state"] for item in empty_ui["views"]] == ["empty", "empty"]
+        assert list((root / "private").rglob("*.sqlite")) == []
         outcome = await platform.invoke_command(
             "candlescope.market-scanner.scan",
             {},
@@ -704,10 +710,49 @@ async def test_market_scanner_bundle_runs_real_sidecar_broker_storage_and_layer(
         layers = platform.market.chart_layers.projections()
         assert len(layers) == 1
         assert layers[0]["render"]["items"][0]["type"] == "marker"
+        ui = platform.ui_snapshot()
+        views = {item["id"]: item for item in ui["views"]}
+        results = views["candlescope.market-scanner.results"]
+        assert results["state"] == "ready"
+        assert len(results["data"]["rows"]) == 2
+        assert set(results["data"]["rows"][0]) == {
+            "symbol",
+            "changePct",
+            "close",
+            "time",
+        }
+        assert "allRowsFinal" not in json.dumps(results)
+        assert views["candlescope.market-scanner.summary"]["data"]["values"] == {
+            "scannedSymbols": 2,
+            "interval": "1h",
+        }
+        assert len(ui["chartLayers"]) == 1
+
+        detail = platform.management_detail(installed.plugin_id)
+        assert detail["schemaVersion"] == "candlescope.plugin-management-detail/1"
+        assert detail["rollback"]["available"] is True
+        assert detail["dataRetention"]["storage"]["exists"] is True
+
+        platform.private_storage.document_put(
+            StorageNamespace("candlescope.market-scanner", "manifest:candlescope"),
+            "latest-scan",
+            {
+                "interval": "1h",
+                "scannedSymbols": 1,
+                "matches": [{"symbol": {"not": "a scalar"}}],
+            },
+        )
+        malformed = {item["id"]: item for item in platform.ui_snapshot()["views"]}
+        assert malformed["candlescope.market-scanner.results"]["state"] == "error"
+        assert malformed["candlescope.market-scanner.results"]["errorCode"] == (
+            "PLUGIN_VIEW_DATA_INVALID"
+        )
+        assert malformed["candlescope.market-scanner.summary"]["state"] == "ready"
 
         installer.disable(installed.plugin_id)
         await platform.reconcile_plugin(installed.plugin_id)
         assert platform.market.chart_layers.projections() == ()
         assert platform.market.subscriptions.snapshot()["active"] == 0
+        assert platform.ui_snapshot()["views"] == []
     finally:
         await platform.stop()

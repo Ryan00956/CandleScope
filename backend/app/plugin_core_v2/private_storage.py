@@ -198,6 +198,64 @@ class PluginPrivateStorage:
     def _database_path(self, namespace: StorageNamespace) -> Path:
         return self._directory(namespace) / "storage-v1.sqlite"
 
+    def _existing_database_path(self, namespace: StorageNamespace) -> Path | None:
+        publisher_root = self.root / namespace.publisher_key
+        directory = publisher_root / namespace.plugin_id
+        if directory.resolve(strict=False).parent != publisher_root.resolve(
+            strict=False
+        ):
+            raise core_error(
+                "PLUGIN_STORAGE_NAMESPACE_INVALID", "storage namespace escaped its root"
+            )
+        for candidate, label in (
+            (publisher_root, "publisher storage root"),
+            (directory, "plugin storage root"),
+        ):
+            if candidate.exists() and (
+                candidate.is_symlink() or not candidate.is_dir()
+            ):
+                raise core_error("PLUGIN_STORAGE_ROOT_UNSAFE", f"{label} is unsafe")
+        path = directory / "storage-v1.sqlite"
+        if not path.exists():
+            return None
+        if path.is_symlink() or not path.is_file():
+            raise core_error(
+                "PLUGIN_STORAGE_ROOT_UNSAFE", "storage database path is unsafe"
+            )
+        return path
+
+    @contextmanager
+    def _readonly_connection(
+        self, namespace: StorageNamespace
+    ) -> Iterator[sqlite3.Connection | None]:
+        path = self._existing_database_path(namespace)
+        if path is None:
+            yield None
+            return
+        connection = sqlite3.connect(
+            f"{path.as_uri()}?mode=ro", uri=True, timeout=2.0, isolation_level=None
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA trusted_schema=OFF")
+            metadata = connection.execute(
+                "SELECT schema_version FROM metadata WHERE singleton = 1"
+            ).fetchone()
+            if metadata is None or metadata["schema_version"] != STORAGE_SCHEMA_VERSION:
+                raise core_error(
+                    "PLUGIN_STORAGE_SCHEMA_INVALID",
+                    "private storage schema is unsupported",
+                )
+            yield connection
+        except sqlite3.Error as exc:
+            raise core_error(
+                "PLUGIN_STORAGE_SCHEMA_INVALID",
+                "private storage database could not be read",
+            ) from exc
+        finally:
+            connection.close()
+
     @contextmanager
     def _connection(self, namespace: StorageNamespace) -> Iterator[sqlite3.Connection]:
         path = self._database_path(namespace)
@@ -297,6 +355,40 @@ class PluginPrivateStorage:
                 "counts": counts,
             }
 
+    def summary_if_exists(
+        self, namespace: StorageNamespace, *, quota_bytes: int | None = None
+    ) -> dict[str, Any]:
+        """Return retention metadata without creating storage during UI polling."""
+
+        quota = _quota(quota_bytes)
+        with self._lock(namespace), self._readonly_connection(namespace) as connection:
+            if connection is None:
+                return {
+                    "exists": False,
+                    "usageBytes": 0,
+                    "quotaBytes": quota,
+                    "dataVersion": 0,
+                    "counts": {"kv": 0, "documents": 0, "blobs": 0},
+                }
+            counts = {
+                table: int(
+                    connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                )
+                for table in ("kv", "documents", "blobs")
+            }
+            data_version = int(
+                connection.execute(
+                    "SELECT data_version FROM metadata WHERE singleton = 1"
+                ).fetchone()[0]
+            )
+            return {
+                "exists": True,
+                "usageBytes": self._usage(connection),
+                "quotaBytes": quota,
+                "dataVersion": data_version,
+                "counts": counts,
+            }
+
     def kv_get(self, namespace: StorageNamespace, key: str) -> dict[str, Any]:
         key = _validate_name(key, "KV key")
         with self._lock(namespace), self._connection(namespace) as connection:
@@ -350,6 +442,30 @@ class PluginPrivateStorage:
     def document_get(self, namespace: StorageNamespace, name: str) -> dict[str, Any]:
         name = _validate_name(name, "document name")
         with self._lock(namespace), self._connection(namespace) as connection:
+            row = connection.execute(
+                "SELECT value_json, revision FROM documents WHERE name = ?", (name,)
+            ).fetchone()
+            return {
+                "found": row is not None,
+                **(
+                    {
+                        "value": json.loads(row["value_json"]),
+                        "revision": row["revision"],
+                    }
+                    if row
+                    else {}
+                ),
+            }
+
+    def document_get_if_exists(
+        self, namespace: StorageNamespace, name: str
+    ) -> dict[str, Any]:
+        """Read an existing document without provisioning a new namespace."""
+
+        name = _validate_name(name, "document name")
+        with self._lock(namespace), self._readonly_connection(namespace) as connection:
+            if connection is None:
+                return {"found": False}
             row = connection.execute(
                 "SELECT value_json, revision FROM documents WHERE name = ?", (name,)
             ).fetchone()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -43,11 +44,13 @@ from .contracts import (
 from .errors import core_error
 from .events import PublicEventHub
 from .jobs import PluginJobScheduler
-from .private_storage import PluginPrivateStorage
+from .private_storage import PluginPrivateStorage, StorageNamespace
 from .services import NotificationCenter, PluginSettingsStore
 
 
 CATALOG_SCHEMA_VERSION = "candlescope.plugin-catalog/1"
+UI_SCHEMA_VERSION = "candlescope.plugin-ui/1"
+MANAGEMENT_DETAIL_SCHEMA_VERSION = "candlescope.plugin-management-detail/1"
 TRUST_LEVELS = frozenset({"first-party-pinned", "local-trusted", "untrusted"})
 SandboxFactory = Callable[
     [ActivationRecord, VerifiedPlatformBundle, str], SandboxPolicy
@@ -792,6 +795,193 @@ class CorePluginPlatform:
             "plugins": plugins,
         }
 
+    @staticmethod
+    def _ui_scalar(value: Any) -> str | int | float | bool | None:
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, str) and len(value) <= 512:
+            return value
+        if isinstance(value, int) and abs(value) <= 2**53 - 1:
+            return value
+        if isinstance(value, float) and math.isfinite(value) and abs(value) <= 1e15:
+            return value
+        raise ValueError("declarative view fields must be bounded JSON scalars")
+
+    def _project_view(
+        self,
+        contribution: CoreContribution,
+        *,
+        namespace: StorageNamespace,
+    ) -> dict[str, Any]:
+        config = contribution.configuration
+        renderer = config["renderer"]
+        base = {
+            "id": contribution.full_id,
+            "pluginId": contribution.plugin_id,
+            "title": contribution.title,
+            "slot": config["slot"],
+            "renderer": renderer,
+        }
+        try:
+            source = config["source"]
+            document = self.private_storage.document_get_if_exists(
+                namespace, source["name"]
+            )
+            if not document["found"]:
+                return {
+                    **base,
+                    "state": "empty",
+                    "data": {"rows": []}
+                    if renderer in {"table", "list"}
+                    else {"values": {}},
+                }
+            value = document["value"]
+            for segment in source["path"]:
+                if not isinstance(value, dict) or segment not in value:
+                    raise ValueError("view source path is unavailable")
+                value = value[segment]
+            fields = config["fields"]
+            if renderer in {"table", "list"}:
+                if not isinstance(value, list):
+                    raise ValueError("collection view source must resolve to an array")
+                rows: list[dict[str, Any]] = []
+                for raw_row in value[: config["maxItems"]]:
+                    if not isinstance(raw_row, dict):
+                        raise ValueError("collection view rows must be objects")
+                    rows.append(
+                        {
+                            field["field"]: self._ui_scalar(raw_row.get(field["field"]))
+                            for field in fields
+                        }
+                    )
+                return {
+                    **base,
+                    "state": "ready" if rows else "empty",
+                    "sourceRevision": document["revision"],
+                    "data": {"rows": rows},
+                }
+            if not isinstance(value, dict):
+                raise ValueError("detail view source must resolve to an object")
+            values = {
+                field["field"]: self._ui_scalar(value.get(field["field"]))
+                for field in fields
+            }
+            return {
+                **base,
+                "state": "ready",
+                "sourceRevision": document["revision"],
+                "data": {"values": values},
+            }
+        except Exception:
+            return {
+                **base,
+                "state": "error",
+                "errorCode": "PLUGIN_VIEW_DATA_INVALID",
+                "data": {"rows": []}
+                if renderer in {"table", "list"}
+                else {"values": {}},
+            }
+
+    def ui_snapshot(self) -> dict[str, Any]:
+        """Project only explicitly declared scalar UI data for active plugins."""
+
+        live_plugin_ids = {owner[0] for owner in self.manager.owner_keys()}
+        views: list[dict[str, Any]] = []
+        if self._started:
+            for plugin_id in sorted(self._records):
+                record = self._records[plugin_id]
+                bundle = self._bundles.get(plugin_id)
+                if (
+                    record.state != "active"
+                    or bundle is None
+                    or plugin_id in self._load_failures
+                    or plugin_id not in live_plugin_ids
+                ):
+                    continue
+                namespace = StorageNamespace(
+                    plugin_id, manifest_publisher_identity(bundle.manifest)
+                )
+                views.extend(
+                    self._project_view(item, namespace=namespace)
+                    for item in self._plugin_contributions.get(plugin_id, ())
+                    if item.kind == "view/1"
+                )
+        return {
+            "schemaVersion": UI_SCHEMA_VERSION,
+            "registryRevision": self._registry.revision,
+            "views": views,
+            "chartLayers": list(self.market.chart_layers.projections())
+            if self._started
+            else [],
+        }
+
+    def management_detail(self, plugin_id: str) -> dict[str, Any]:
+        """Return guarded lifecycle, grant, health and retention metadata."""
+
+        record = self._records.get(plugin_id)
+        if record is None:
+            raise core_error(
+                "PLUGIN_CORE_PLUGIN_NOT_FOUND",
+                "plugin is not present in the activation registry",
+                plugin_id=plugin_id,
+            )
+        plugin = next(
+            value for value in self.catalog()["plugins"] if value["id"] == plugin_id
+        )
+        bundle = self._bundles.get(plugin_id)
+        storage: dict[str, Any]
+        if bundle is None:
+            storage = {"available": False, "reason": "PLUGIN_BUNDLE_UNAVAILABLE"}
+        else:
+            storage = {
+                "available": True,
+                **self.private_storage.summary_if_exists(
+                    StorageNamespace(
+                        plugin_id, manifest_publisher_identity(bundle.manifest)
+                    )
+                ),
+            }
+        permission_details = [
+            {
+                "pluginId": item["pluginId"],
+                "activationReady": item["activationReady"],
+                "requiredSatisfied": item["requiredSatisfied"],
+                "permissions": [
+                    {
+                        "permissionId": permission["permissionId"],
+                        "kind": permission["kind"],
+                        "decision": permission["decision"],
+                        "requestedScope": permission["requestedScope"],
+                        "grantedScope": permission["grantedScope"],
+                    }
+                    for permission in item["permissions"]
+                ],
+            }
+            for item in self.installer.permission_summary(plugin_id)
+        ]
+        return {
+            "schemaVersion": MANAGEMENT_DETAIL_SCHEMA_VERSION,
+            "plugin": plugin,
+            "permissions": permission_details,
+            "health": {
+                "available": plugin["available"],
+                "unavailableReason": plugin.get("unavailableReason"),
+                "entrypoints": plugin["runtime"]["entrypoints"],
+            },
+            "update": {
+                "policy": "local-artifact-only",
+                "automatic": False,
+                "available": False,
+            },
+            "rollback": self.installer.rollback_status(plugin_id),
+            "dataRetention": {
+                "retainedOnDisable": True,
+                "retainedOnUninstall": True,
+                "automaticDeletion": False,
+                "storage": storage,
+            },
+        }
+
     def health_summary(self) -> dict[str, Any]:
         active_records = sum(item.state == "active" for item in self._records.values())
         manager = self.manager.health_summary()
@@ -885,6 +1075,14 @@ class DisabledCorePluginPlatform:
                 "registryRevision": 0,
             },
             "plugins": [],
+        }
+
+    def ui_snapshot(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": UI_SCHEMA_VERSION,
+            "registryRevision": 0,
+            "views": [],
+            "chartLayers": [],
         }
 
     def health_summary(self) -> dict[str, Any]:

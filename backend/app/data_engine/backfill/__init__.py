@@ -332,6 +332,11 @@ class BackfillEngine:
             for task in plan.tasks:
                 task.exchange = exchange
                 task.market_type = market_type
+                # The scheduler intentionally page-bounds each physical run.
+                # Preserve its parent-range metadata on the lower-level task
+                # so archive routing can still decide from the complete user
+                # demand (not from a single ~1000-source-row chunk).
+                task.metadata = {**metadata, **task.metadata}
             status = BackfillStatus.FETCHING
             fetch_results = await self.fetcher.fetch(plan.tasks)
 
@@ -378,6 +383,19 @@ class BackfillEngine:
                 reconcile_result = await self.reconciler.reconcile(
                     fetch_results, plan,
                 )
+
+                if not reconcile_result.errors:
+                    # Do not suppress a parent archive object until its base
+                    # rows, receipt, derived bars and range publication have
+                    # all completed successfully.  Failed/cancelled passes
+                    # remain eligible for the next scheduler retry.
+                    acknowledge_imports = getattr(
+                        self.fetcher,
+                        "acknowledge_archive_imports",
+                        None,
+                    )
+                    if callable(acknowledge_imports):
+                        acknowledge_imports(fetch_results)
 
                 if reconcile_result.errors:
                     errors.extend(reconcile_result.errors)

@@ -74,7 +74,7 @@ by `HistoricalFetcher` and exposed under the backfill engine fetcher snapshot.
 |---|---|---|
 | Detect | `GapDetector` | Compare requested/storage/live reference ranges and produce `GapInfo` |
 | Plan | `BackfillPlanner` | Convert gaps into fetch tasks and custom interval decompositions |
-| Fetch | `HistoricalFetcher` | Execute paginated exchange REST calls with concurrency, retry, and 429 cooldown |
+| Fetch | `HistoricalFetcher` | Route closed bulk history to official archives and tails/holes/fallbacks to paginated REST |
 | Reconcile | `Reconciler` | Deduplicate, aggregate custom intervals, batch-write storage, record `WrittenRange` |
 | Publish | `RepairPublisher` | Log/callback final `RepairReport` |
 
@@ -174,6 +174,30 @@ Custom interval writes reuse `BarAggregator.aggregate_batch()` so batch repair d
 - HTTP 429 handling uses `Retry-After` when present and applies cooldown to
   the matching endpoint bucket.
 
+## Official Historical Archives
+
+Bulk closed history is transparent to chart and indicator callers:
+
+- Complete Binance Spot and USD-M months use monthly ZIPs; recent complete
+  dates may use daily ZIPs when the range would otherwise require at least
+  three REST pages. Native Binance intervals use their matching archive, while
+  custom intervals such as `89m` and `47m` continue to use exact `1m` input.
+- The current day, partial package periods, forming candles, archive holes,
+  missing objects, checksum/ZIP/schema failures, and timeouts use REST.
+- Archive 404/empty results never become history-boundary evidence. Only an
+  authoritative REST empty page can close the gap ledger.
+- ZIPs are content-addressed under `DATA_DIR/history_archives`, survive K-line
+  database deletion, and are LRU-bounded. Downloads are two-wide; archive
+  SQLite imports are serialized and one object is one transaction.
+- Binance checksum sidecars are revalidated every 24 hours. A revision
+  invalidates overlapping derived custom bars before regeneration.
+- OKX is disabled by default. When explicitly enabled, startup probes its
+  unstable website download contract and disables the complete capability on
+  incompatible URLs, schema, or `confirm` semantics.
+
+Fetcher diagnostics expose the selected source, cache/object counts, bytes,
+download/parse timing, REST tail/fallback counts, and singleflight waiters.
+
 ## Deduplication
 
 `DeduplicationStrategy` values:
@@ -210,6 +234,10 @@ Write failures are surfaced through `ReconcileResult.write_errors` and `failed_b
 | `BACKFILL_RATE_LIMIT_BINANCE_FUTURES_WEIGHT_PER_MINUTE` | Binance futures request-weight budget |
 | `BACKFILL_RATE_LIMIT_OKX_CANDLES_REQUESTS_PER_2S` | OKX market candles request window |
 | `BACKFILL_RATE_LIMIT_OKX_HISTORY_CANDLES_REQUESTS_PER_2S` | OKX history candles request window |
+| `HISTORY_ARCHIVE_ENABLED` | enable official archive routing; default `1` |
+| `HISTORY_ARCHIVE_CACHE_DIR` | persistent ZIP cache; default `DATA_DIR/history_archives` |
+| `HISTORY_ARCHIVE_CACHE_MAX_BYTES` | archive cache LRU cap; default `10737418240` (10 GiB) |
+| `OKX_HISTORY_ARCHIVE_ENABLED` | enable guarded OKX archive probe/routing; default `0` |
 | `BACKFILL_RECONCILE_DEDUP_STRATEGY` | write conflict policy |
 | `BACKFILL_RECONCILE_WRITE_BATCH_SIZE` | storage write batch size |
 | `BACKFILL_RECONCILE_GENERATE_CUSTOM` | generate custom interval rows |
@@ -225,6 +253,10 @@ python -m pytest -q \
   tests/test_backfill_gap_detector.py \
   tests/test_backfill_rate_limit.py \
   tests/test_backfill_reconciler.py \
+  tests/test_history_archive_providers.py \
+  tests/test_history_archive_cache.py \
+  tests/test_history_archive_routing.py \
+  tests/test_history_archive_storage.py \
   tests/test_transport_http_rate_limit_metadata.py \
   tests/test_okx_backfill_fetcher.py
 ```

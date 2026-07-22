@@ -28,7 +28,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Callable, Awaitable
+from dataclasses import replace
+from typing import Callable, Awaitable, Any
 
 from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
 from app.exchanges import (
@@ -40,7 +41,7 @@ from app.exchanges import (
     get_shared_rate_limit_semaphore,
     get_exchange_registry,
 )
-from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_policy import parse_interval_ms, parse_interval_spec
 
 from ..ingestion.config import IngestionConfig
 from ..ingestion.metrics import LayerMetrics
@@ -60,6 +61,7 @@ from .models import (
     FetchedBar,
     FetchResult,
 )
+from .source_router import ArchiveRoutePlan, HistoricalSourceRouter
 
 logger = logging.getLogger("backfill.Fetcher")
 
@@ -81,15 +83,29 @@ class HistoricalFetcher:
         config: BackfillConfig,
         transport: TransportLayer,
         ingestion_config: IngestionConfig | None = None,
+        *,
+        source_router: HistoricalSourceRouter | None = None,
     ) -> None:
         self._cfg = config
         self._transport = transport
         self._ingestion_cfg = ingestion_config or IngestionConfig()
         self._metrics = LayerMetrics("HistoricalFetcher")
+        self._last_history_diagnostics: dict[str, Any] = {}
 
         # Concurrency control
         self._semaphore = asyncio.Semaphore(self._global_fetch_concurrency())
         self._rate_limit_manager = get_shared_rate_limit_manager()
+        self._source_router = source_router
+        if (
+            self._source_router is None
+            and self._cfg.history_archive_enabled
+            and isinstance(transport, TransportLayer)
+        ):
+            proxy_resolver = getattr(transport, "_resolve_proxy", None)
+            self._source_router = HistoricalSourceRouter(
+                config,
+                proxy_resolver=proxy_resolver if callable(proxy_resolver) else None,
+            )
 
         # Extension points
         self._progress_callbacks: list[ProgressCallback] = []
@@ -117,8 +133,43 @@ class HistoricalFetcher:
             "binance_futures_rate_limit_delay": self._cfg.fetch_binance_futures_rate_limit_delay,
             "okx_rate_limit_delay": self._cfg.fetch_okx_rate_limit_delay,
             "exchange_rate_limits": self._rate_limit_manager.snapshot(),
+            "history_archive": (
+                self._source_router.snapshot()
+                if self._source_router is not None
+                else {
+                    "enabled": False,
+                    "reason": "transport_not_archive_capable",
+                }
+            ),
+            "last_history_request": dict(self._last_history_diagnostics),
             "metrics": self._metrics.snapshot(),
         }
+
+    async def probe_history_archives(self) -> dict[str, Any]:
+        if self._source_router is None:
+            return {"enabled": False, "reason": "archive_router_unavailable"}
+        return await self._source_router.probe_enabled_capabilities()
+
+    def acknowledge_archive_imports(
+        self,
+        fetch_results: list[FetchResult],
+    ) -> None:
+        """Confirm archive receipts only after reconciliation succeeds."""
+        if self._source_router is None:
+            return
+        object_keys: set[str] = set()
+        for result in fetch_results:
+            raw = result.metadata.get("archive_objects")
+            if not isinstance(raw, list):
+                continue
+            for receipt in raw:
+                if not isinstance(receipt, dict):
+                    continue
+                object_key = str(receipt.get("object_key") or "").strip()
+                if object_key:
+                    object_keys.add(object_key)
+        if object_keys:
+            self._source_router.acknowledge_imports(object_keys)
 
     # ── Public: Extension points ─────────────────────────────
 
@@ -180,12 +231,21 @@ class HistoricalFetcher:
         if not tasks:
             return []
 
+        fetch_started = time.monotonic()
         self._metrics.inc("fetch_runs")
         self._metrics.mark("last_fetch_at")
         logger.info("Historical fetch started: %d tasks", len(tasks))
 
-        # Execute tasks with bounded concurrency
-        coros = [self._fetch_task(task) for task in tasks]
+        route_plan = (
+            await self._source_router.prepare(tasks)
+            if self._source_router is not None
+            else ArchiveRoutePlan({}, {}, {})
+        )
+
+        # REST requests keep the existing bounded semaphore. Archive downloads
+        # use their own two-wide semaphore and are already running here, so
+        # partial/current REST tails can progress in parallel.
+        coros = [self._fetch_task(task, route_plan) for task in tasks]
         raw_results = await asyncio.gather(*coros, return_exceptions=True)
 
         # Handle any unexpected exceptions returned by gather
@@ -214,16 +274,35 @@ class HistoricalFetcher:
             "Historical fetch completed: %d tasks, %d bars, %d failed",
             len(tasks), total_bars, failed,
         )
+        if self._source_router is not None:
+            # Cold parent archives are intentionally launched only after the
+            # foreground REST pass has completed.  The task is not awaited:
+            # later scheduler chunks join the same singleflight objects.
+            self._source_router.start_deferred_prefetch(route_plan)
+        fetch_elapsed_ms = int((time.monotonic() - fetch_started) * 1_000)
+        self._metrics.inc("fetch_elapsed_ms_total", fetch_elapsed_ms)
+        self._metrics.set("last_fetch_elapsed_ms", fetch_elapsed_ms)
         return list(results)
 
     # ── Internal: Single task execution ──────────────────────
 
-    async def _fetch_task(self, task: BackfillTask) -> FetchResult:
-        """Fetch all pages for a single task."""
-        async with self._semaphore:
-            return await self._fetch_task_inner(task)
+    async def _fetch_task(
+        self,
+        task: BackfillTask,
+        route_plan: ArchiveRoutePlan,
+    ) -> FetchResult:
+        """Fetch one task from archive-covered slices plus REST residuals."""
+        refs = route_plan.refs_for(task)
+        if refs:
+            return await self._fetch_routed_task(task, refs, route_plan)
+        return await self._fetch_rest_task(task)
 
-    async def _fetch_task_inner(self, task: BackfillTask) -> FetchResult:
+    async def _fetch_rest_task(self, task: BackfillTask) -> FetchResult:
+        """Fetch all REST pages for a single task."""
+        async with self._semaphore:
+            return await self._fetch_rest_task_inner(task)
+
+    async def _fetch_rest_task_inner(self, task: BackfillTask) -> FetchResult:
         """Inner fetch logic with pagination and retry."""
         start_time = time.monotonic()
         all_bars: list[FetchedBar] = []
@@ -403,13 +482,309 @@ class HistoricalFetcher:
             ),
             empty_reason=empty_reason if source_complete and not errors else None,
             retryable=bool(errors),
+            metadata={
+                "history_sources": sorted({bar.source for bar in all_bars} or {"backfill"}),
+                "history_lane": task.metadata.get("history_lane", "rest"),
+                "rest_pages": pages_fetched,
+            },
         )
+        self._last_history_diagnostics = {
+            "selected_sources": result.metadata["history_sources"],
+            "archive_object_count": 0,
+            "archive_cache_hits": 0,
+            "archive_download_bytes": 0,
+            "archive_download_elapsed_ms": 0,
+            "archive_verify_elapsed_ms": 0,
+            "archive_parse_elapsed_ms": 0,
+            "rest_pages": pages_fetched,
+            "rest_tail_ranges": 1,
+            "rest_fallback_ranges": 0,
+        }
 
         logger.info(
             "Task %s: %d bars in %dms (%d pages, status=%s)",
             task.task_key, len(all_bars), elapsed, pages_fetched, status.value,
         )
         return result
+
+    async def _fetch_routed_task(
+        self,
+        task: BackfillTask,
+        refs,
+        route_plan: ArchiveRoutePlan,
+    ) -> FetchResult:
+        started = time.monotonic()
+        interval_spec = parse_interval_spec(task.interval)
+        if interval_spec is None:
+            return await self._fetch_rest_task(task)
+
+        coverage_refs = [
+            ref
+            for ref in refs
+            if _ranges_intersect(
+                task.start_ms,
+                task.end_ms,
+                ref.start_ms,
+                ref.end_ms,
+            )
+        ]
+        archive_ranges = [
+            (max(task.start_ms, ref.start_ms), min(task.end_ms, ref.end_ms))
+            for ref in coverage_refs
+        ]
+        uncovered = _subtract_ranges(
+            task.start_ms,
+            task.end_ms,
+            archive_ranges,
+            interval_spec,
+        )
+        rest_tail_tasks = [
+            asyncio.create_task(
+                self._fetch_rest_task(
+                    _slice_task(task, start_ms, end_ms, lane="rest_tail")
+                )
+            )
+            for start_ms, end_ms in uncovered
+        ]
+
+        archive_values = await asyncio.gather(
+            *(route_plan.future_for(ref) for ref in refs),
+            return_exceptions=True,
+        )
+        archive_bars: list[FetchedBar] = []
+        archive_receipts: list[dict[str, Any]] = []
+        archive_errors: list[str] = []
+        fallback_ranges: list[tuple[int, int]] = []
+        sources: set[str] = set()
+
+        for ref, value in zip(refs, archive_values):
+            covers_task = _ranges_intersect(
+                task.start_ms,
+                task.end_ms,
+                ref.start_ms,
+                ref.end_ms,
+            )
+            if not covers_task:
+                if isinstance(value, BaseException):
+                    archive_errors.append(f"{ref.object_key}: {value}")
+                    self._metrics.inc("archive_prefill_errors")
+                    continue
+                if route_plan.owns_object(task, ref):
+                    archive_bars.extend(value.bars)
+                    archive_receipts.append(value.receipt())
+                sources.update(bar.source for bar in value.bars)
+                continue
+            intersection = (
+                max(task.start_ms, ref.start_ms),
+                min(task.end_ms, ref.end_ms),
+            )
+            if isinstance(value, BaseException):
+                archive_errors.append(f"{ref.object_key}: {value}")
+                fallback_ranges.append(intersection)
+                self._metrics.inc("archive_rest_fallbacks")
+                logger.warning(
+                    "rest_fallback object=%s task=%s error=%s",
+                    ref.object_key,
+                    task.task_key,
+                    value,
+                )
+                continue
+            selected = [
+                bar for bar in value.bars
+                if intersection[0] <= bar.open_time <= intersection[1]
+            ]
+            owns_object = route_plan.owns_object(task, ref)
+            if owns_object:
+                # Import the complete closed archive object once.  The object
+                # was selected from the scheduler's parent range, so these
+                # extra rows are bounded, intentional historical prefill.
+                archive_bars.extend(value.bars)
+                archive_receipts.append(value.receipt())
+            sources.update(bar.source for bar in selected)
+            missing = _missing_ranges(
+                intersection[0],
+                intersection[1],
+                {bar.open_time for bar in selected},
+                interval_spec,
+            )
+            if missing:
+                fallback_ranges.extend(missing)
+                self._metrics.inc("archive_hole_rest_fallbacks", len(missing))
+
+        fallback_ranges = _merge_ranges(fallback_ranges, interval_spec)
+        fallback_tasks = [
+            asyncio.create_task(
+                self._fetch_rest_task(
+                    _slice_task(task, start_ms, end_ms, lane="rest_fallback")
+                )
+            )
+            for start_ms, end_ms in fallback_ranges
+        ]
+        rest_results = await asyncio.gather(
+            *rest_tail_tasks,
+            *fallback_tasks,
+            return_exceptions=True,
+        )
+
+        errors: list[str] = []
+        pages_fetched = 0
+        rest_bars: list[FetchedBar] = []
+        retryable = False
+        rest_fetch_results: list[FetchResult] = []
+        for value in rest_results:
+            if isinstance(value, BaseException):
+                errors.append(str(value))
+                retryable = True
+                continue
+            rest_fetch_results.append(value)
+            pages_fetched += value.pages_fetched
+            rest_bars.extend(value.bars)
+            if value.status in {BackfillStatus.FAILED, BackfillStatus.PARTIAL}:
+                errors.extend(value.errors)
+                retryable = retryable or value.retryable
+            sources.update(bar.source for bar in value.bars)
+
+        # REST is allowed to amend an archive row at equal authority, so add it
+        # last when an overlap is produced by a defensive fallback.
+        by_open_time = {bar.open_time: bar for bar in archive_bars}
+        for bar in rest_bars:
+            by_open_time[bar.open_time] = bar
+        bars = sorted(by_open_time.values(), key=lambda item: item.open_time)
+        if errors and not bars:
+            status = BackfillStatus.FAILED
+        elif errors:
+            status = BackfillStatus.PARTIAL
+        else:
+            status = BackfillStatus.COMPLETED
+
+        elapsed_ms = self._elapsed_ms(started)
+        await self._fire_progress(task, len(bars), max(1, task.estimated_bars))
+        owned_archive_values = [
+            value
+            for ref, value in zip(refs, archive_values)
+            if route_plan.owns_object(task, ref)
+            and not isinstance(value, BaseException)
+        ]
+        metadata = {
+            "history_sources": sorted(sources),
+            "archive_objects": archive_receipts,
+            "archive_errors": archive_errors,
+            "archive_object_count": len(owned_archive_values),
+            "archive_coverage_object_count": len(coverage_refs),
+            "archive_cache_hits": sum(
+                1
+                for value in owned_archive_values
+                if value.cache_hit
+            ),
+            "archive_download_bytes": sum(
+                value.size_bytes
+                for value in owned_archive_values
+                if not value.cache_hit
+            ),
+            "archive_download_elapsed_ms": sum(
+                value.download_elapsed_ms
+                for value in owned_archive_values
+            ),
+            "archive_verify_elapsed_ms": sum(
+                value.verify_elapsed_ms
+                for value in owned_archive_values
+            ),
+            "archive_parse_elapsed_ms": sum(
+                value.parse_elapsed_ms
+                for value in owned_archive_values
+            ),
+            "archive_import_rows": len(archive_bars),
+            "rest_tail_ranges": len(uncovered),
+            "rest_fallback_ranges": len(fallback_ranges),
+            "rest_pages": pages_fetched,
+        }
+        self._metrics.inc("archive_objects_selected", len(owned_archive_values))
+        self._metrics.inc("archive_cache_hits", metadata["archive_cache_hits"])
+        self._metrics.inc(
+            "archive_download_bytes",
+            metadata["archive_download_bytes"],
+        )
+        self._metrics.inc("rest_tail_ranges", len(uncovered))
+        self._metrics.inc("rest_fallback_ranges", len(fallback_ranges))
+        self._metrics.set("last_history_sources", sorted(sources))
+        self._metrics.set("last_archive_object_count", len(owned_archive_values))
+        self._metrics.set(
+            "last_archive_download_elapsed_ms",
+            metadata["archive_download_elapsed_ms"],
+        )
+        self._metrics.set(
+            "last_archive_parse_elapsed_ms",
+            metadata["archive_parse_elapsed_ms"],
+        )
+        self._metrics.set(
+            "last_archive_verify_elapsed_ms",
+            metadata["archive_verify_elapsed_ms"],
+        )
+        self._last_history_diagnostics = {
+            "selected_sources": metadata["history_sources"],
+            "archive_object_count": metadata["archive_object_count"],
+            "archive_coverage_object_count": metadata[
+                "archive_coverage_object_count"
+            ],
+            "archive_cache_hits": metadata["archive_cache_hits"],
+            "archive_download_bytes": metadata["archive_download_bytes"],
+            "archive_download_elapsed_ms": metadata[
+                "archive_download_elapsed_ms"
+            ],
+            "archive_verify_elapsed_ms": metadata[
+                "archive_verify_elapsed_ms"
+            ],
+            "archive_parse_elapsed_ms": metadata["archive_parse_elapsed_ms"],
+            "archive_import_rows": metadata["archive_import_rows"],
+            "rest_pages": metadata["rest_pages"],
+            "rest_tail_ranges": metadata["rest_tail_ranges"],
+            "rest_fallback_ranges": metadata["rest_fallback_ranges"],
+        }
+        logger.info(
+            "Task %s: %d bars in %dms archive_objects=%d rest_pages=%d status=%s",
+            task.task_key,
+            len(bars),
+            elapsed_ms,
+            len(refs),
+            pages_fetched,
+            status.value,
+        )
+        rest_requested_ranges = uncovered + fallback_ranges
+        rest_covers_task = (
+            bool(rest_requested_ranges)
+            and not _subtract_ranges(
+                task.start_ms,
+                task.end_ms,
+                rest_requested_ranges,
+                interval_spec,
+            )
+            and len(rest_fetch_results) == len(rest_results)
+        )
+        source_complete = bool(
+            rest_covers_task
+            and any(value.source_complete for value in rest_fetch_results)
+        )
+        exhausted_values = [
+            value.exhausted_before_ms
+            for value in rest_fetch_results
+            if value.source_complete and value.exhausted_before_ms is not None
+        ]
+        return FetchResult(
+            task=task,
+            bars=bars,
+            status=status,
+            elapsed_ms=elapsed_ms,
+            pages_fetched=pages_fetched,
+            errors=errors,
+            # Archive absence/404 is never boundary evidence. Only when REST
+            # physically covered the complete routed task may its empty-page
+            # evidence be propagated to the coordinator.
+            source_complete=source_complete,
+            exhausted_before_ms=(min(exhausted_values) if exhausted_values else None),
+            empty_reason="source_empty" if source_complete else None,
+            retryable=retryable,
+            metadata=metadata,
+        )
 
     # ── Internal: MarketEvent → FetchedBar ───────────────────
 
@@ -658,3 +1033,112 @@ class HistoricalFetcher:
     @staticmethod
     def _elapsed_ms(start: float) -> int:
         return int((time.monotonic() - start) * 1000)
+
+
+def _slice_task(
+    task: BackfillTask,
+    start_ms: int,
+    end_ms: int,
+    *,
+    lane: str,
+) -> BackfillTask:
+    spec = parse_interval_spec(task.interval)
+    estimated = 0
+    if spec is not None and start_ms <= end_ms:
+        cursor = spec.floor_ms(start_ms)
+        if cursor < start_ms:
+            cursor = spec.next_ms(cursor)
+        while cursor <= end_ms:
+            estimated += 1
+            cursor = spec.next_ms(cursor)
+    return replace(
+        task,
+        start_ms=int(start_ms),
+        end_ms=int(end_ms),
+        estimated_bars=estimated,
+        metadata={**task.metadata, "history_lane": lane},
+    )
+
+
+def _subtract_ranges(
+    start_ms: int,
+    end_ms: int,
+    covered_ranges: list[tuple[int, int]],
+    spec,
+) -> list[tuple[int, int]]:
+    if start_ms > end_ms:
+        return []
+    normalized = _merge_ranges(covered_ranges, spec)
+    cursor = spec.floor_ms(start_ms)
+    if cursor < start_ms:
+        cursor = spec.next_ms(cursor)
+    missing: list[tuple[int, int]] = []
+    run_start: int | None = None
+    previous: int | None = None
+    while cursor <= end_ms:
+        covered = any(left <= cursor <= right for left, right in normalized)
+        if not covered:
+            if run_start is None:
+                run_start = cursor
+            previous = cursor
+        elif run_start is not None and previous is not None:
+            missing.append((run_start, previous))
+            run_start = None
+            previous = None
+        cursor = spec.next_ms(cursor)
+    if run_start is not None and previous is not None:
+        missing.append((run_start, previous))
+    return missing
+
+
+def _missing_ranges(
+    start_ms: int,
+    end_ms: int,
+    available_open_times: set[int],
+    spec,
+) -> list[tuple[int, int]]:
+    cursor = spec.floor_ms(start_ms)
+    if cursor < start_ms:
+        cursor = spec.next_ms(cursor)
+    missing: list[tuple[int, int]] = []
+    run_start: int | None = None
+    previous: int | None = None
+    while cursor <= end_ms:
+        if cursor not in available_open_times:
+            if run_start is None:
+                run_start = cursor
+            previous = cursor
+        elif run_start is not None and previous is not None:
+            missing.append((run_start, previous))
+            run_start = None
+            previous = None
+        cursor = spec.next_ms(cursor)
+    if run_start is not None and previous is not None:
+        missing.append((run_start, previous))
+    return missing
+
+
+def _merge_ranges(ranges: list[tuple[int, int]], spec) -> list[tuple[int, int]]:
+    ordered = sorted(
+        ((int(start), int(end)) for start, end in ranges if start <= end),
+        key=lambda item: (item[0], item[1]),
+    )
+    if not ordered:
+        return []
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
+        previous_start, previous_end = merged[-1]
+        if start <= spec.next_ms(previous_end):
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _ranges_intersect(
+    left_start: int,
+    left_end: int,
+    right_start: int,
+    right_end: int,
+) -> bool:
+    return left_start <= right_end and right_start <= left_end

@@ -52,7 +52,7 @@ class ExchangePluginLoadStatus:
     capability_schema_version: int | None = None
     protocol_class: str = ""
     adapter_class: str = ""
-    policy_classes: dict[str, str] = field(default_factory=dict)
+    policy_classes: dict[str, str | None] = field(default_factory=dict)
     rate_limit_rules: list[dict[str, Any]] = field(default_factory=list)
     capability_summary: dict[str, int] = field(default_factory=dict)
     error: str = ""
@@ -218,6 +218,12 @@ class ExchangeRegistry:
         source: str,
     ) -> ExchangePluginLoadStatus:
         rate_limit_policy = plugin.rate_limit_policy()
+        archive_provider_factory = getattr(plugin, "history_archive_provider", None)
+        archive_provider = (
+            archive_provider_factory()
+            if callable(archive_provider_factory)
+            else None
+        )
         return ExchangePluginLoadStatus(
             plugin_id=plugin.id,
             source=source,
@@ -231,6 +237,11 @@ class ExchangeRegistry:
                 "pagination": _qualified_class_name(plugin.pagination_policy()),
                 "realtime": _qualified_class_name(plugin.realtime_policy()),
                 "symbol": _qualified_class_name(plugin.symbol_normalizer()),
+                "history_archive": (
+                    _qualified_class_name(archive_provider)
+                    if archive_provider is not None
+                    else None
+                ),
             },
             rate_limit_rules=_rate_limit_rule_summaries(rate_limit_policy),
             capability_summary=_capability_summary(capabilities),

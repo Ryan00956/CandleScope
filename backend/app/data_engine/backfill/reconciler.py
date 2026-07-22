@@ -38,6 +38,7 @@ from app.data_engine.interval_policy import (
     compute_bucket_close_ms,
     compute_bucket_start_ms,
 )
+from app.data_engine.kline_quality import source_rank
 from app.data_engine.custom_materialization import (
     MaterializationLease,
     custom_materialization_registry,
@@ -198,6 +199,12 @@ class Reconciler:
         result = ReconcileResult()
 
         try:
+            archive_receipts = self._collect_archive_receipts(fetch_results)
+            archive_receipts_by_key = {
+                str(item["object_key"]): item
+                for item in archive_receipts
+            }
+            handled_archive_receipts: set[str] = set()
             # 1. Collect all bars grouped by (exchange, market_type, symbol, interval)
             grouped = self._group_bars(fetch_results)
             total_received = sum(len(bars) for bars in grouped.values())
@@ -205,17 +212,58 @@ class Reconciler:
 
             # 2 & 3. Dedup + write standard bars
             for (exchange, market_type, symbol, interval), bars in grouped.items():
-                written, skipped, deduped, failures, written_ranges = await self._dedup_and_write(
-                    symbol, interval, bars, exchange=exchange, market_type=market_type,
+                (
+                    written,
+                    skipped,
+                    deduped,
+                    failures,
+                    written_ranges,
+                    archive_imported,
+                    archive_invalidated,
+                    handled_receipts,
+                ) = await self._dedup_and_write(
+                    symbol,
+                    interval,
+                    bars,
+                    exchange=exchange,
+                    market_type=market_type,
+                    archive_receipts=archive_receipts_by_key,
                 )
                 result.bars_written += written
                 result.bars_skipped += skipped
                 result.bars_deduplicated += deduped
                 result.written_ranges.extend(written_ranges)
+                result.archive_objects_imported += archive_imported
+                result.archive_dependent_rows_invalidated += archive_invalidated
+                handled_archive_receipts.update(handled_receipts)
+                self._metrics.inc("archive_objects_imported", archive_imported)
+                self._metrics.inc(
+                    "archive_dependent_rows_invalidated",
+                    archive_invalidated,
+                )
                 self._record_write_failures(result, failures)
 
+            # Archive receipts are advisory metadata, but revision
+            # invalidation is part of correctness and must happen after the
+            # official base rows commit and before custom bars regenerate.
+            remaining_archive_receipts = [
+                item
+                for item in archive_receipts
+                if str(item["object_key"]) not in handled_archive_receipts
+            ]
+            if remaining_archive_receipts and result.write_errors == 0:
+                await self._persist_archive_receipts(
+                    remaining_archive_receipts,
+                    result,
+                )
+
             # 4. Generate custom-interval bars
-            if self._cfg.reconcile_generate_custom and plan.custom_intervals:
+            if (
+                not result.errors
+                and self._cfg.reconcile_generate_custom
+                and plan.custom_intervals
+            ):
+                custom_started = time.monotonic()
                 for decomp in plan.decompositions:
                     gen, wrt, failures, written_ranges = await self._generate_custom_bars(
                         decomp, grouped,
@@ -224,6 +272,17 @@ class Reconciler:
                     result.custom_bars_written += wrt
                     result.written_ranges.extend(written_ranges)
                     self._record_write_failures(result, failures)
+                custom_elapsed_ms = int(
+                    (time.monotonic() - custom_started) * 1_000
+                )
+                self._metrics.inc(
+                    "custom_materialization_elapsed_ms_total",
+                    custom_elapsed_ms,
+                )
+                self._metrics.set(
+                    "last_custom_materialization_elapsed_ms",
+                    custom_elapsed_ms,
+                )
 
             # 5. Push to cache
             if self._cfg.reconcile_enable_cache_push and self._cache is not None:
@@ -236,6 +295,8 @@ class Reconciler:
             logger.error("Reconciliation error: %s", exc, exc_info=True)
 
         result.elapsed_ms = int((time.monotonic() - start) * 1000)
+        self._metrics.inc("reconcile_elapsed_ms_total", result.elapsed_ms)
+        self._metrics.set("last_reconcile_elapsed_ms", result.elapsed_ms)
 
         # Fire done callbacks
         for cb in self._done_callbacks:
@@ -261,19 +322,83 @@ class Reconciler:
         fetch_results: list[FetchResult],
     ) -> dict[tuple[str, str, str, str], list[FetchedBar]]:
         """Group all fetched bars by (exchange, market_type, symbol, interval)."""
-        grouped: dict[tuple[str, str, str, str], list[FetchedBar]] = {}
+        indexed: dict[
+            tuple[str, str, str, str],
+            dict[int, FetchedBar],
+        ] = {}
         for fr in fetch_results:
             if fr.status == BackfillStatus.FAILED:
                 continue
             for bar in fr.bars:
                 key = (bar.exchange, bar.market_type, bar.symbol, bar.interval)
-                grouped.setdefault(key, []).append(bar)
+                by_open_time = indexed.setdefault(key, {})
+                existing = by_open_time.get(bar.open_time)
+                if existing is None or Reconciler._prefer_grouped_bar(existing, bar):
+                    by_open_time[bar.open_time] = bar
 
-        # Sort each group by open_time
-        for bars in grouped.values():
-            bars.sort(key=lambda b: b.open_time)
+        return {
+            key: sorted(values.values(), key=lambda bar: bar.open_time)
+            for key, values in indexed.items()
+        }
 
-        return grouped
+    @staticmethod
+    def _prefer_grouped_bar(existing: FetchedBar, incoming: FetchedBar) -> bool:
+        incoming_rank = source_rank(incoming.source)
+        existing_rank = source_rank(existing.source)
+        if incoming_rank != existing_rank:
+            return incoming_rank > existing_rank
+        # REST may carry a same-authority amendment for an archive row.  Keep
+        # it when both arrive in the same reconciliation pass.
+        incoming_is_archive = incoming.source.startswith("backfill_archive_")
+        existing_is_archive = existing.source.startswith("backfill_archive_")
+        if incoming_is_archive != existing_is_archive:
+            return not incoming_is_archive
+        return True
+
+    @staticmethod
+    def _collect_archive_receipts(
+        fetch_results: list[FetchResult],
+    ) -> list[dict[str, Any]]:
+        receipts: dict[str, dict[str, Any]] = {}
+        for fetch_result in fetch_results:
+            if fetch_result.status == BackfillStatus.FAILED:
+                continue
+            raw_receipts = fetch_result.metadata.get("archive_objects")
+            if not isinstance(raw_receipts, list):
+                continue
+            for raw in raw_receipts:
+                if not isinstance(raw, dict):
+                    continue
+                object_key = str(raw.get("object_key") or "").strip()
+                if object_key:
+                    receipts[object_key] = dict(raw)
+        return list(receipts.values())
+
+    async def _persist_archive_receipts(
+        self,
+        receipts: list[dict[str, Any]],
+        result: ReconcileResult,
+    ) -> None:
+        try:
+            revised = [item for item in receipts if item.get("revision_changed")]
+            invalidator = getattr(self._storage, "invalidate_archive_dependents", None)
+            if revised and callable(invalidator):
+                invalidated = int(await invalidator(revised) or 0)
+                result.archive_dependent_rows_invalidated += invalidated
+                self._metrics.inc(
+                    "archive_dependent_rows_invalidated",
+                    invalidated,
+                )
+            recorder = getattr(self._storage, "record_history_archive_imports", None)
+            if callable(recorder):
+                recorded = int(await recorder(receipts) or 0)
+                result.archive_objects_imported += recorded
+                self._metrics.inc("archive_objects_imported", recorded)
+        except Exception as exc:
+            message = f"Archive import receipt failed: {exc}"
+            result.errors.append(message)
+            self._metrics.inc("archive_receipt_errors")
+            logger.error(message, exc_info=True)
 
     # ── Internal: Dedup + Write ──────────────────────────────
 
@@ -284,13 +409,23 @@ class Reconciler:
         bars: list[FetchedBar],
         exchange: str = "binance",
         market_type: str = "spot",
-    ) -> tuple[int, int, int, list[dict[str, Any]], list[WrittenRange]]:
+        archive_receipts: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[
+        int,
+        int,
+        int,
+        list[dict[str, Any]],
+        list[WrittenRange],
+        int,
+        int,
+        set[str],
+    ]:
         """Deduplicate bars against DB and write in batches.
 
         Returns (written, skipped, deduplicated, failures, written_ranges).
         """
         if not bars:
-            return 0, 0, 0, [], []
+            return 0, 0, 0, [], [], 0, 0, set()
 
         strategy = DeduplicationStrategy(self._cfg.reconcile_dedup_strategy)
         batch_size = self._cfg.reconcile_write_batch_size
@@ -328,48 +463,146 @@ class Reconciler:
                     continue
             to_write.append(bar)
 
-        # Write in batches
+        # Preserve provenance. Official archive groups are deliberately sent
+        # to storage in one call so each selected archive range commits or
+        # rolls back as a unit; ordinary REST remains bounded by the existing
+        # write batch size.
         written = 0
         failures: list[dict[str, Any]] = []
         written_ranges: list[WrittenRange] = []
-        for i in range(0, len(to_write), batch_size):
-            batch = to_write[i : i + batch_size]
-            dicts = [b.to_storage_dict() for b in batch]
-            try:
-                n = await self._storage.upsert_bars(
-                    symbol, interval, dicts, source="backfill", exchange=exchange, market_type=market_type,
+        archive_imported = 0
+        archive_invalidated = 0
+        handled_archive_receipts: set[str] = set()
+        by_source: dict[tuple[str, str | None], list[FetchedBar]] = {}
+        for bar in to_write:
+            source = bar.source or "backfill"
+            object_key = (
+                bar.archive_object_key
+                if source.startswith("backfill_archive_")
+                else None
+            )
+            by_source.setdefault((source, object_key), []).append(bar)
+        for (source, object_key), source_bars in by_source.items():
+            effective_batch_size = (
+                len(source_bars)
+                if source.startswith("backfill_archive_")
+                else batch_size
+            )
+            effective_batch_size = max(1, effective_batch_size)
+            for i in range(0, len(source_bars), effective_batch_size):
+                batch = source_bars[i : i + effective_batch_size]
+                dicts = [b.to_storage_dict() for b in batch]
+                archive_write_started = (
+                    time.monotonic()
+                    if source.startswith("backfill_archive_")
+                    else None
                 )
-                written += n
-                written_range = self._written_range_from_batch(
-                    exchange=exchange,
-                    market_type=market_type,
-                    symbol=symbol,
-                    interval=interval,
-                    batch=batch,
-                    bars_written=n,
-                    source="backfill",
-                    phase="standard",
-                )
-                if written_range is not None:
-                    written_ranges.append(written_range)
-                await self._fire_write_batch(symbol, interval, n)
-            except Exception as exc:
-                logger.error(
-                    "Write batch failed for %s@%s: %s",
-                    symbol, interval, exc, exc_info=True,
-                )
-                self._metrics.inc("write_errors")
-                failures.append(self._write_failure_detail(
-                    exchange=exchange,
-                    market_type=market_type,
-                    symbol=symbol,
-                    interval=interval,
-                    batch=batch,
-                    error=exc,
-                    phase="standard",
-                ))
+                try:
+                    receipt = (
+                        (archive_receipts or {}).get(object_key or "")
+                        if source.startswith("backfill_archive_")
+                        else None
+                    )
+                    archive_importer = getattr(
+                        self._storage,
+                        "import_history_archive",
+                        None,
+                    )
+                    if receipt is not None and callable(archive_importer):
+                        import_outcome = await archive_importer(
+                            symbol,
+                            interval,
+                            dicts,
+                            receipt,
+                            source=source,
+                            exchange=exchange,
+                            market_type=market_type,
+                        )
+                        n = int(import_outcome.get("written") or 0)
+                        archive_imported += int(
+                            bool(import_outcome.get("imported"))
+                        )
+                        archive_invalidated += int(
+                            import_outcome.get("invalidated") or 0
+                        )
+                        handled_archive_receipts.add(str(object_key))
+                        if import_outcome.get("skipped"):
+                            self._metrics.inc("archive_import_dedup_hits")
+                    else:
+                        n = await self._storage.upsert_bars(
+                            symbol,
+                            interval,
+                            dicts,
+                            source=source,
+                            exchange=exchange,
+                            market_type=market_type,
+                        )
+                    written += n
+                    written_range = self._written_range_from_batch(
+                        exchange=exchange,
+                        market_type=market_type,
+                        symbol=symbol,
+                        interval=interval,
+                        batch=batch,
+                        bars_written=n,
+                        source=source,
+                        phase=(
+                            "archive_standard"
+                            if source.startswith("backfill_archive_")
+                            else "standard"
+                        ),
+                    )
+                    if written_range is not None:
+                        written_ranges.append(written_range)
+                    if n > 0:
+                        await self._fire_write_batch(symbol, interval, n)
+                except Exception as exc:
+                    logger.error(
+                        "Write batch failed for %s@%s source=%s: %s",
+                        symbol,
+                        interval,
+                        source,
+                        exc,
+                        exc_info=True,
+                    )
+                    self._metrics.inc("write_errors")
+                    failures.append(self._write_failure_detail(
+                        exchange=exchange,
+                        market_type=market_type,
+                        symbol=symbol,
+                        interval=interval,
+                        batch=batch,
+                        error=exc,
+                        phase=(
+                            "archive_standard"
+                            if source.startswith("backfill_archive_")
+                            else "standard"
+                        ),
+                    ))
+                finally:
+                    if archive_write_started is not None:
+                        archive_write_elapsed_ms = int(
+                            (time.monotonic() - archive_write_started) * 1_000
+                        )
+                        self._metrics.inc(
+                            "archive_write_elapsed_ms_total",
+                            archive_write_elapsed_ms,
+                        )
+                        self._metrics.set(
+                            "last_archive_write_elapsed_ms",
+                            archive_write_elapsed_ms,
+                        )
 
-        return written, skipped, deduped, failures, written_ranges
+        return (
+            written,
+            skipped,
+            deduped,
+            failures,
+            written_ranges,
+            archive_imported,
+            archive_invalidated,
+            handled_archive_receipts,
+        )
 
     def _should_replace(
         self, bar: FetchedBar, strategy: DeduplicationStrategy,
@@ -640,6 +873,50 @@ class Reconciler:
                 bars, custom_ms, decomp.alignment_epoch_ms,
                 custom_interval=custom_iv,
             )
+
+            archive_bulk_fast_path = (
+                decomp.alignment_epoch_ms == 0
+                and len(bars) >= 1_000
+                and any(
+                    bar.source.startswith("backfill_archive_")
+                    for bar in bars
+                )
+            )
+            if archive_bulk_fast_path:
+                # Archive packages are strictly ordered, closed and validated
+                # before they reach reconciliation.  Feeding 100k+ component
+                # rows one at a time through the live async event pipeline is
+                # semantically redundant and dominated warm rebuild time.
+                # The pure batch implementation shares interval-policy bucket
+                # boundaries and emits only fully covered buckets; parity with
+                # BarAggregator is guarded by interval-policy consistency tests.
+                custom_bars = self._aggregate_to_custom(
+                    bars,
+                    symbol,
+                    custom_iv,
+                    custom_ms,
+                    decomp.alignment_epoch_ms,
+                )
+                generated += len(custom_bars)
+                count, write_failures, ranges = (
+                    await self._write_custom_materialization(
+                        exchange=exchange,
+                        market_type=market_type,
+                        symbol=symbol,
+                        interval=custom_iv,
+                        bars=custom_bars,
+                        phase="custom_archive_bulk",
+                    )
+                )
+                written += count
+                failures.extend(write_failures)
+                written_ranges.extend(ranges)
+                self._metrics.inc("custom_archive_bulk_fast_paths")
+                self._metrics.inc(
+                    "custom_archive_bulk_component_rows",
+                    len(bars),
+                )
+                continue
 
             # ── Route through BarAggregator if available ─────
             if self._bar_aggregator is not None:

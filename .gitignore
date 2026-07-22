@@ -213,13 +213,22 @@ backend/data/**/*.sqlite*
 backend/data/custom_indicators.json
 backend/data/custom_indicators.json.tmp
 backend/data/cache_gc_audit.jsonl
+backend/data/history_archives/
 
 # CandleScope generated perf/test artifacts. Keep ad-hoc/raw runs local, while
 # allowing the curated drawing-engine V2 baselines required by its execution
 # document to be versioned deliberately.
+/.playwright-cli/
+/output/
 frontend/.playwright-cli/
 frontend/output/
 frontend/*.tsbuildinfo
+**/.playwright-cli/
+**/.playwright/
+**/playwright-report/
+**/test-results/
+**/blob-report/
+**/output/playwright/
 docs/perf-baselines/*
 !docs/perf-baselines/drawing-engine-v2/
 docs/perf-baselines/drawing-engine-v2/*

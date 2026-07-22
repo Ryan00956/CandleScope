@@ -23,6 +23,7 @@ from app.data_engine.storage.gap_ledger import GapLedger
 @dataclass(slots=True)
 class _ReconcileResult:
     bars_written: int = 0
+    written_ranges: list[Any] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -884,6 +885,65 @@ def test_custom_interval_scheduler_chunks_by_source_rows() -> None:
             assert plan["effective_target_bars"] == 8
             assert plan["planned_source_rows"] == 979
             assert plan["planned_source_rows"] <= plan["source_row_budget"] == 1_000
+
+    asyncio.run(_run())
+
+
+def test_scheduler_skips_chunks_covered_by_broad_archive_write() -> None:
+    async def _run() -> None:
+        interval_ms = 89 * 60_000
+
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                return _RepairReport(
+                    status="completed",
+                    reconcile_result=_ReconcileResult(
+                        written_ranges=[SimpleNamespace(
+                            exchange="binance",
+                            market_type="spot",
+                            symbol="BTCUSDT",
+                            interval="89m",
+                            start_ms=0,
+                            end_ms=23 * interval_ms,
+                        )],
+                    ),
+                )
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            chunk_bars=1_000,
+            max_concurrency=1,
+        )
+        request = RepairRequest(
+            symbol="BTCUSDT",
+            interval="89m",
+            start_ms=0,
+            end_ms=23 * interval_ms,
+            exchange="binance",
+            market_type="spot",
+            reason="initial_history",
+            request_id="archive-covered-89m",
+        )
+
+        outcome = await asyncio.wait_for(
+            coordinator.request_and_wait(request),
+            timeout=1.0,
+        )
+
+        assert outcome.status == "completed"
+        assert len(engine.calls) == 1
+        assert coordinator.snapshot()["covered_chunks_skipped"] == 2
 
     asyncio.run(_run())
 

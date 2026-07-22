@@ -131,6 +131,18 @@ PORT = int(os.getenv("CANDLE_PORT", "8000"))
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("CANDLE_DATA_DIR", BASE_DIR / "data"))
 KLINES_DB_PATH = Path(os.getenv("KLINES_DB_PATH", DATA_DIR / "candlescope.db"))
+HISTORY_ARCHIVE_ENABLED = os.getenv(
+    "HISTORY_ARCHIVE_ENABLED", "1"
+).strip().lower() in {"1", "true", "yes", "on"}
+HISTORY_ARCHIVE_CACHE_DIR = Path(
+    os.getenv("HISTORY_ARCHIVE_CACHE_DIR", DATA_DIR / "history_archives")
+)
+HISTORY_ARCHIVE_CACHE_MAX_BYTES = int(
+    os.getenv("HISTORY_ARCHIVE_CACHE_MAX_BYTES", str(10 * 1024**3))
+)
+OKX_HISTORY_ARCHIVE_ENABLED = os.getenv(
+    "OKX_HISTORY_ARCHIVE_ENABLED", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # Replay remains disabled by default and owns a database separate from K-lines.
 # These limits are frozen Phase 0 safety ceilings; environment overrides may

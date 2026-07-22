@@ -31,6 +31,7 @@ class BinancePlugin(BuiltinExchangePlugin):
             rate_limit_policy_factory=self._rate_limit_policy,
             pagination_policy_factory=self._pagination_policy,
             price_stream_type_factory=self._price_stream_type,
+            history_archive_provider_factory=self._history_archive_provider,
         )
 
     @staticmethod
@@ -205,6 +206,13 @@ class BinancePlugin(BuiltinExchangePlugin):
         config: Any | None = None,
     ) -> BinanceHistoricalPaginationPolicy:
         return BinanceHistoricalPaginationPolicy()
+
+    @staticmethod
+    def _history_archive_provider(config: Any | None = None):
+        del config
+        from .archive import BinanceKlineArchiveProvider
+
+        return BinanceKlineArchiveProvider()
 
 
 def create_plugin() -> BinancePlugin:

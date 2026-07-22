@@ -27,6 +27,7 @@ class OkxPlugin(BuiltinExchangePlugin):
             rate_limit_policy_factory=self._rate_limit_policy,
             pagination_policy_factory=self._pagination_policy,
             realtime_policy=RealtimePolicy(update_mode=RealtimeUpdateMode.BASE_INTERVAL_FANOUT),
+            history_archive_provider_factory=self._history_archive_provider,
         )
 
     @staticmethod
@@ -89,6 +90,13 @@ class OkxPlugin(BuiltinExchangePlugin):
     @staticmethod
     def _pagination_policy(config: Any | None = None) -> OkxHistoricalPaginationPolicy:
         return OkxHistoricalPaginationPolicy()
+
+    @staticmethod
+    def _history_archive_provider(config: Any | None = None):
+        del config
+        from .archive import OkxKlineArchiveProvider
+
+        return OkxKlineArchiveProvider()
 
 
 def create_plugin() -> OkxPlugin:

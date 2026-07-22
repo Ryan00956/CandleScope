@@ -44,6 +44,11 @@ SOURCE_QUALITY: dict[str, SourceQuality] = {
     "backfill_aggregated": SourceQuality(60, FinalityTrust.TRUSTED_FINAL),
     # Direct provider history.
     "backfill": SourceQuality(70, FinalityTrust.TRUSTED_FINAL),
+    # Official closed-period archive rows carry the same semantic authority as
+    # provider REST. Checksums prove transfer integrity, not higher market-data
+    # authority, so explicit REST verification remains able to supersede them.
+    "backfill_archive_verified": SourceQuality(70, FinalityTrust.TRUSTED_FINAL),
+    "backfill_archive_confirmed": SourceQuality(70, FinalityTrust.TRUSTED_FINAL),
     # An explicit amendment is authoritative over the original close.
     "data_manager_amended": SourceQuality(80, FinalityTrust.TRUSTED_FINAL),
     # Reserved names for exact REST verification and repair lanes.

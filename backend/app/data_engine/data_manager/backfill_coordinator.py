@@ -324,6 +324,16 @@ class RepairReconcileSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class RepairWrittenRangeSummary:
+    exchange: str
+    market_type: str
+    symbol: str
+    interval: str
+    start_ms: int
+    end_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class RepairReportSummary:
     """Report statistics retained without FetchResult bar payloads."""
 
@@ -334,6 +344,7 @@ class RepairReportSummary:
     fetch_result_count: int
     fetched_bar_count: int
     written_range_count: int
+    written_ranges: tuple[RepairWrittenRangeSummary, ...]
     elapsed_ms: int
 
 
@@ -523,6 +534,7 @@ class _BackfillScheduler:
         self.cancelled_pending = 0
         self.cancelled_after_chunk = 0
         self.background_dispatches = 0
+        self.covered_chunks_skipped = 0
 
     def submit(self, request: RepairRequest) -> tuple[str, asyncio.Future[RepairOutcome]]:
         if self._shutdown:
@@ -990,6 +1002,7 @@ class _BackfillScheduler:
             "cancelled_pending": self.cancelled_pending,
             "cancelled_after_chunk": self.cancelled_after_chunk,
             "background_dispatches": self.background_dispatches,
+            "covered_chunks_skipped": self.covered_chunks_skipped,
             "running_background_chunks": self._running_background_count(),
             "active": active,
             "pending": pending,
@@ -1343,6 +1356,11 @@ class _BackfillScheduler:
                 self._series.pop(chunk.request.series_key, None)
             return
 
+        skipped_covered = self._discard_chunks_covered_by_report(
+            state,
+            outcome,
+            current_chunk_id=chunk.chunk_id,
+        )
         state.completed += 1
         state.attempts += int(outcome.attempts or 0)
         state.bars_loaded += int(outcome.bars_loaded or 0)
@@ -1385,6 +1403,7 @@ class _BackfillScheduler:
                     ).get("planned_source_rows", 0)
                     or 0
                 ),
+                "covered_chunks_skipped": skipped_covered,
             },
         )
 
@@ -1479,6 +1498,96 @@ class _BackfillScheduler:
                 # Remaining chunks are already in the global queue. Keep the parent
                 # visible in pending diagnostics while it waits for the next turn.
                 series.pending.append(state.request.request_id)
+
+    def _discard_chunks_covered_by_report(
+        self,
+        state: _RequestState,
+        outcome: RepairOutcome,
+        *,
+        current_chunk_id: str,
+    ) -> int:
+        """Drop queued pages already covered by a broad archive import.
+
+        Archive objects intentionally write beyond the planner's current
+        1,000-source-row chunk.  The exact target-interval written ranges are
+        durable evidence that later queued chunks no longer need another
+        fetch/reconcile/materialize pass.
+        """
+        if self._is_failed(outcome.status) or outcome.report is None:
+            return 0
+        normalized = [
+            value
+            for raw in list(
+                getattr(outcome.report, "written_ranges", None) or []
+            )
+            if (value := self._normalize_summary_written_range(raw)) is not None
+            and value["exchange"] == state.request.exchange.lower().strip()
+            and value["market_type"] == state.request.market_type.lower().strip()
+            and value["symbol"] == state.request.symbol.upper().strip()
+            and value["interval"] == state.request.interval
+        ]
+        if not normalized:
+            return 0
+        interval_ms = parse_interval_ms(state.request.interval) or 1
+        ordered = sorted(
+            (int(item["start_ms"]), int(item["end_ms"]))
+            for item in normalized
+        )
+        merged: list[tuple[int, int]] = []
+        for start_ms, end_ms in ordered:
+            if not merged or start_ms > merged[-1][1] + interval_ms:
+                merged.append((start_ms, end_ms))
+            else:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end_ms))
+
+        removed: set[str] = set()
+        for chunk_id in state.chunk_ids:
+            if chunk_id == current_chunk_id or chunk_id in self._tasks:
+                continue
+            pending = self._chunks.get(chunk_id)
+            if pending is None or pending.parent_id != state.request.request_id:
+                continue
+            if any(
+                start_ms <= pending.request.start_ms
+                and pending.request.end_ms <= end_ms
+                for start_ms, end_ms in merged
+            ):
+                removed.add(chunk_id)
+                self._chunks.pop(chunk_id, None)
+        if not removed:
+            return 0
+        state.chunk_ids = [
+            chunk_id for chunk_id in state.chunk_ids if chunk_id not in removed
+        ]
+        self._ready = [item for item in self._ready if item[3] not in removed]
+        heapq.heapify(self._ready)
+        self.covered_chunks_skipped += len(removed)
+        coverage = self._coverage.setdefault(state.request.series_key, [])
+        coverage.extend(
+            {"start_ms": start_ms, "end_ms": end_ms}
+            for start_ms, end_ms in merged
+        )
+        return len(removed)
+
+    @staticmethod
+    def _normalize_summary_written_range(raw: Any) -> dict[str, Any] | None:
+        def _value(key: str, default: Any = None) -> Any:
+            if isinstance(raw, dict):
+                return raw.get(key, default)
+            return getattr(raw, key, default)
+
+        start_ms = _value("start_ms")
+        end_ms = _value("end_ms")
+        if start_ms is None or end_ms is None:
+            return None
+        return {
+            "exchange": str(_value("exchange", "binance")).lower().strip(),
+            "market_type": str(_value("market_type", "spot")).lower().strip(),
+            "symbol": str(_value("symbol", "")).upper().strip(),
+            "interval": _value("interval", ""),
+            "start_ms": int(start_ms),
+            "end_ms": int(end_ms),
+        }
 
     def _retain_outcome(self, request_id: str, outcome: RepairOutcome) -> None:
         self._outcomes[request_id] = outcome
@@ -5041,7 +5150,20 @@ class BackfillCoordinator:
 
         fetch_results = cls._report_fetch_results(report)
         errors = [str(error) for error in getattr(report, "errors", None) or []]
-        report_ranges = list(getattr(report, "written_ranges", None) or [])
+        report_ranges = cls._raw_written_ranges(report)
+        range_summaries: list[RepairWrittenRangeSummary] = []
+        for raw_range in report_ranges[:256]:
+            normalized = cls._normalize_written_range(raw_range)
+            if normalized is None:
+                continue
+            range_summaries.append(RepairWrittenRangeSummary(
+                exchange=normalized["exchange"],
+                market_type=normalized["market_type"],
+                symbol=normalized["symbol"],
+                interval=normalized["interval"],
+                start_ms=normalized["start_ms"],
+                end_ms=normalized["end_ms"],
+            ))
         return RepairReportSummary(
             status=getattr(report, "status", "unknown"),
             errors=tuple(error[:500] for error in errors[:20]),
@@ -5053,6 +5175,7 @@ class BackfillCoordinator:
                 for result in fetch_results
             ),
             written_range_count=len(report_ranges),
+            written_ranges=tuple(range_summaries),
             elapsed_ms=int(getattr(report, "elapsed_ms", 0) or 0),
         )
 

@@ -892,6 +892,8 @@ async def start_data_engine() -> DataEngineRuntime:
             transport=transport,
             ingestion_config=ingestion_cfg,
         )
+        archive_probe = await backfill_engine.fetcher.probe_history_archives()
+        logger.info("Historical archive capability probe: %s", archive_probe)
         backfill_engine.detector.set_calendar_resolver(
             _calendar_resolver,
             registry=history_service.calendars,

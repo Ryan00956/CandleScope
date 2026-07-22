@@ -21,7 +21,7 @@ import { buildReplayCapabilityModel } from "./replayCapabilityModel.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
 import { handleReplayShortcut } from "./replayShortcuts.js";
 import { returnToTrainingHub } from "./trainingHubNavigation.js";
-import { formatReplayPublicTime, replayOwnsController } from "./replayUiModel.js";
+import { formatReplayPublicTime, replayEffectiveTrainingState, replayOwnsController } from "./replayUiModel.js";
 import { useReplayHistoryRuntime } from "./useReplayHistoryRuntime.js";
 import { useReplayIntegrityRuntime } from "./useReplayIntegrityRuntime.js";
 import type { ReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
@@ -96,6 +96,11 @@ export default function ReplayTrainingPageShell({
   const config = runtime.store.sessionConfig;
   const active = runtime.phase === "ACTIVE" && config !== null && runtime.store.hasAuthoritativeSnapshot;
   const ownsController = replayOwnsController(runtime.store, runtime.clientInstanceId);
+  const effectiveState = replayEffectiveTrainingState(
+    viewer.marketTracks?.global_clock.state,
+    runtime.store.state,
+    runtime.store.controllerClientId,
+  );
   const capabilities = useMemo(() => buildReplayCapabilityModel(config?.source_kind ?? "BAR"), [config?.source_kind]);
   const fallbackPublicTime = formatReplayPublicTime(runtime.store.virtualTimeMs, {
     blindMode: config?.blind_mode ?? true,
@@ -136,19 +141,19 @@ export default function ReplayTrainingPageShell({
         if (!ownsController || runtime.store.connectionState !== "connected"
           || runtime.pendingCommand !== null || viewer.controlPending !== null
           || viewer.viewerPending || runtime.forkPending) return false;
-        if (action === "toggle-play" && runtime.store.state === "PLAYING") {
-          void runtime.actions.submitCommand("pause", {}).catch(() => undefined);
+        if (action === "toggle-play" && effectiveState === "PLAYING") {
+          void viewer.actions.submitControl("pause", {}).catch(() => undefined);
           return true;
         }
-        if (action === "toggle-play" && runtime.store.state === "PAUSED") {
-          void runtime.actions.submitCommand("play", {}).catch(() => undefined);
+        if (action === "toggle-play" && effectiveState === "PAUSED") {
+          void viewer.actions.submitControl("play", {}).catch(() => undefined);
           return true;
         }
-        if (action === "step" && runtime.store.state === "PAUSED") {
+        if (action === "step" && effectiveState === "PAUSED") {
           void viewer.actions.submitControl("step_display", { count: 1 }).catch(() => undefined);
           return true;
         }
-        if (action === "advance-window" && runtime.store.state === "PAUSED") {
+        if (action === "advance-window" && effectiveState === "PAUSED") {
           const baseMs = (parseIntervalSeconds(config?.base_interval ?? "1m") ?? 60) * 1_000;
           void viewer.actions.submitControl("advance_by", { ms: baseMs * 5 }).catch(() => undefined);
           return true;
@@ -158,7 +163,7 @@ export default function ReplayTrainingPageShell({
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [config?.base_interval, ownsController, runtime.actions, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, runtime.store.state, viewer.actions, viewer.controlPending, viewer.viewerPending]);
+  }, [config?.base_interval, effectiveState, ownsController, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, viewer.actions, viewer.controlPending, viewer.viewerPending]);
 
   const interval = (viewer.viewerState?.display_interval ?? config?.base_interval ?? "1m") as IntervalString;
   const displayIntervals = useMemo(() => {
@@ -380,13 +385,17 @@ export default function ReplayTrainingPageShell({
           className="replay-status-bar"
           connectionStatus={runtime.store.connectionState}
           dataAttributes={{
-            "data-replay-session-state": runtime.store.state ?? "",
+            "data-replay-generation": runtime.store.generation,
+            "data-replay-session-state": effectiveState ?? "",
+            "data-replay-adapter-state": runtime.store.state ?? "",
             "data-replay-source-sequence": runtime.store.sourceSequence,
             "data-replay-revision": runtime.store.revision,
             "data-replay-state-hash": runtime.store.stateHash ?? "",
             "data-replay-cursor-ms": runtime.store.virtualTimeMs ?? "",
             "data-replay-max-bar-ms": viewerLast?.time === undefined ? "" : Number(viewerLast.time) * 1_000,
             "data-replay-last-bar-closed": String(viewerLast?.replayClosed ?? ""),
+            "data-replay-order-count": runtime.store.orders.length,
+            "data-replay-fill-count": runtime.store.fills.length,
             "data-replay-revealed": String(runtime.store.revealed),
             "data-replay-history-epoch": history.historyEpoch ?? "",
             "data-replay-view-interval": interval,
@@ -397,7 +406,7 @@ export default function ReplayTrainingPageShell({
           }}
           left={<>
             <span><span className={`status-dot ${runtime.store.connectionState === "connected" ? "connected" : "loading"}`} />K 线回放 · REPLAY</span>
-            <span>{runtime.store.state ?? runtime.phase}</span>
+            <span>{effectiveState ?? runtime.phase}</span>
             <span>{viewerBarCount} display bars</span>
             {history.loading && <span>Loading older replay data…</span>}
             {!history.hasMore && !history.loading && <span>No more frozen history</span>}

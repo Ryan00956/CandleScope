@@ -148,7 +148,7 @@ async def test_projection_coalescing_preserves_source_chain_and_component_hash()
             snapshot = (await actor.snapshot()).to_dict()
             return snapshot, dict(reducer.snapshot()), dict(result.data)
         finally:
-            await actor.shutdown(step_timeout=0.2)
+            await actor.shutdown(step_timeout=1.0)
 
     optimized, reference = await asyncio.gather(
         run(
@@ -274,8 +274,8 @@ async def test_optimized_empty_account_matches_full_event_reference(
         assert optimized_snapshot["snapshot"]["components"] == reference_snapshot["snapshot"]["components"]  # type: ignore[index]
         assert optimized_snapshot["snapshot"]["state_hash"] == reference_snapshot["snapshot"]["state_hash"]  # type: ignore[index]
     finally:
-        await optimized.shutdown(step_timeout=0.2)
-        await reference.shutdown(step_timeout=0.2)
+        await optimized.shutdown(step_timeout=1.0)
+        await reference.shutdown(step_timeout=1.0)
 
 
 async def test_cancelled_optimized_scan_resumes_to_full_reference_hash(
@@ -380,8 +380,8 @@ async def test_cancelled_optimized_scan_resumes_to_full_reference_hash(
         assert optimized_snapshot["snapshot"]["components"] == reference_snapshot["snapshot"]["components"]  # type: ignore[index]
         assert optimized_snapshot["snapshot"]["state_hash"] == reference_snapshot["snapshot"]["state_hash"]  # type: ignore[index]
     finally:
-        await optimized.shutdown(step_timeout=0.2)
-        await reference.shutdown(step_timeout=0.2)
+        await optimized.shutdown(step_timeout=1.0)
+        await reference.shutdown(step_timeout=1.0)
 
 
 async def test_multi_track_full_scan_reports_progress_and_cancels_on_wave_boundary(
@@ -494,7 +494,7 @@ async def test_multi_track_full_scan_reports_progress_and_cancels_on_wave_bounda
             }
         ) == 1
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_open_order_forces_full_event_scan(
@@ -537,7 +537,7 @@ async def test_open_order_forces_full_event_scan(
         assert planned["plan"]["mode"] == "FULL_EVENT_SCAN"  # type: ignore[index]
         assert "OPEN_ORDER" in planned["plan"]["reason_codes"]  # type: ignore[index]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_trade_flow_reads_only_revealed_prefix_with_bounded_resync_pages(
@@ -598,7 +598,7 @@ async def test_trade_flow_reads_only_revealed_prefix_with_bounded_resync_pages(
             )
         assert resync.value.details["clear_projection"] is True
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 def test_trade_flow_gap_requires_clear_and_resync() -> None:

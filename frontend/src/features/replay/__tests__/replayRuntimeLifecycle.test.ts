@@ -98,6 +98,90 @@ test("HTTP session snapshot validates only; first published chart truth is the W
   assert.equal(lifecycle.store.seriesStore.barCount, 1);
 });
 
+for (const recovery of [
+  {
+    label: "reacquires the controller previously owned by this browser",
+    controllerClientId: "browser-0001",
+    recoveredControllerClientId: null,
+    expectedCommands: 1,
+  },
+  {
+    label: "keeps a browser that did not own the controller read-only",
+    controllerClientId: "browser-other",
+    recoveredControllerClientId: null,
+    expectedCommands: 0,
+  },
+  {
+    label: "never takes over a controller acquired by another browser during recovery",
+    controllerClientId: "browser-0001",
+    recoveredControllerClientId: "browser-other",
+    expectedCommands: 0,
+  },
+] as const) {
+  test(`a reset generation ${recovery.label}`, async (context) => {
+    const harness = streamHarness();
+    const commands: unknown[] = [];
+    const lifecycle = new ReplayRuntimeLifecycle({
+      entry: { kind: "session", sessionId: "session-0001" },
+      clientInstanceId: "browser-0001",
+      commandIdFactory: () => "command-reacquire-0001",
+      api: {
+        async capabilities() { return parseReplayCapabilities(enabledCapabilities()); },
+        async getSession() {
+          return parseReplaySessionResponse(replaySessionResponse({ controllerClientId: recovery.controllerClientId }));
+        },
+        async command(_sessionId, command) {
+          commands.push(command);
+          return parseReplayCommandResult({
+            protocol: "replay.v1",
+            session_id: "session-0001",
+            command_id: command.command_id,
+            revision: 1,
+            sequence: 1,
+            state: "PAUSED",
+            state_hash: `sha256:${"4".repeat(64)}`,
+            cursor: {
+              virtual_time_ms: BASE_TIME_MS + 59_999,
+              source_sequence: 0,
+              last_base_bar_open_ms: 1_700_000_000_000,
+              last_trade_time_ms: null,
+              last_agg_trade_id: null,
+              at_end: false,
+            },
+            data: { controller: "browser-0001" },
+          });
+        },
+      },
+      streamFactory: (options) => harness.factory(options),
+    });
+    context.after(() => lifecycle.dispose());
+    lifecycle.start();
+    await settle();
+    const callbacks = harness.options[0]!;
+    callbacks.onGeneration?.({ generation: 1, reason: "initial", resetAuthoritativeState: true });
+    callbacks.onSnapshot?.(parseReplaySessionResponse(replaySessionResponse({
+      controllerClientId: recovery.controllerClientId,
+    })).snapshot, 1);
+    callbacks.onGeneration?.({ generation: 2, reason: "resync", resetAuthoritativeState: true });
+    callbacks.onSnapshot?.(parseReplaySessionResponse(replaySessionResponse({
+      controllerClientId: recovery.recoveredControllerClientId,
+    })).snapshot, 2);
+    await settle();
+
+    assert.equal(commands.length, recovery.expectedCommands);
+    if (recovery.expectedCommands === 1) {
+      assert.deepEqual(commands[0], {
+        protocol: "replay.v1",
+        command_id: "command-reacquire-0001",
+        client_instance_id: "browser-0001",
+        expected_revision: 0,
+        type: "acquire_controller",
+        payload: {},
+      });
+    }
+  });
+}
+
 test("the first WS snapshot cannot predate the HTTP validation authority floor", async (context) => {
   const harness = streamHarness();
   const validation = parseReplaySessionResponse(replaySessionResponse({

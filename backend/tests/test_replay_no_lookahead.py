@@ -218,4 +218,4 @@ async def test_blind_public_boundary_never_leaks_future_or_actual_history_before
         assert revealed_report["revealed"] is True
         assert revealed_report["actual_history"] == revealed["data"]["actual_history"]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)

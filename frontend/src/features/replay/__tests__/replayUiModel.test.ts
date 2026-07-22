@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseReplayCapabilities, parseReplayCatalog, parseReplaySessionResponse } from "../replayParser.js";
-import { buildReplayReportExport, replayReportToCsv } from "../replayReportExport.js";
+import {
+  buildReplayReportExport,
+  buildReplayTrainingReportExport,
+  replayReportToCsv,
+  replayTrainingReportToCsv,
+} from "../replayReportExport.js";
+import type { ReplayTrainingReportResponse } from "../replayIntegrityModel.js";
 import {
   buildReplaySessionConfig,
   createReplaySessionDraft,
@@ -11,6 +17,7 @@ import {
   recentReplayActivity,
   REPLAY_ACTIVITY_VIEW_LIMIT,
   replayCatalogIdentity,
+  replayEffectiveTrainingState,
 } from "../replayUiModel.js";
 import { buildReplaySmaLine } from "../useReplayIndicatorRuntime.js";
 import {
@@ -99,6 +106,15 @@ test("activity views keep a newest-first bounded window without mutating authori
   assert.equal(authority.length, 100);
 });
 
+test("training state fails closed when the global clock outlives its controller lease", () => {
+  assert.equal(replayEffectiveTrainingState("PLAYING", "PAUSED", null), "PAUSED");
+  assert.equal(replayEffectiveTrainingState("PLAYING", "PLAYING", null), "PAUSED");
+  assert.equal(replayEffectiveTrainingState("ADVANCING", "PAUSED", null), "PAUSED");
+  assert.equal(replayEffectiveTrainingState("PLAYING", "PAUSED", "other-browser"), "PLAYING");
+  assert.equal(replayEffectiveTrainingState("ERROR", "PAUSED", null), "ERROR");
+  assert.equal(replayEffectiveTrainingState(null, "PAUSED", null), "PAUSED");
+});
+
 test("replay local indicator drops every source row after the public cursor", () => {
   const rows: KlineBar[] = Array.from({ length: 25 }, (_, index) => ({
     time: ((BASE_TIME_MS / 1_000) + index * 60) as EpochSeconds,
@@ -138,4 +154,46 @@ test("report exports bind fidelity, warnings and hashes without actual history b
   const csv = replayReportToCsv(input);
   assert.match(csv, /EXACT_BAR_COVERAGE/);
   assert.match(csv, /report_hash/);
+});
+
+test("v2 training exports preserve integrity policy and hide actual history until reveal", () => {
+  const response = {
+    protocol: "replay.v2",
+    run_id: "run-0001",
+    data_fidelity: "EXACT_BAR_COVERAGE",
+    execution_fidelity: "BAR_CONSERVATIVE",
+    revealed: false,
+    report: replayReport(),
+    integrity: {
+      protocol: "replay.v2",
+      run_id: "run-0001",
+      integrity_mode: "CHALLENGE",
+      configured_time_disclosure_policy: "HIDE_ALL",
+      effective_time_disclosure_policy: "HIDE_ALL",
+      strict_eligible: true,
+      start_time_known: false,
+      revealed: false,
+      allowed_mutations: [],
+      result_label: "STRICT_CHALLENGE",
+      active_rule_revision: 1,
+      active_rule_hash: replayDigest("e"),
+      active_rule: {},
+      public_time: {
+        policy: "HIDE_ALL",
+        timeline_ms: 86_400_000,
+        relative_ms: 0,
+        sequence: 0,
+        label: "D+1 T+00:00:00",
+      },
+      mutations: [],
+    },
+  } satisfies ReplayTrainingReportResponse;
+  const exported = buildReplayTrainingReportExport(response);
+  assert.equal(exported.protocol, "replay.v2");
+  assert.equal(Object.hasOwn(exported, "actual_history"), false);
+  assert.equal((exported.integrity as ReplayTrainingReportResponse["integrity"]).result_label, "STRICT_CHALLENGE");
+  const csv = replayTrainingReportToCsv(response);
+  assert.match(csv, /STRICT_CHALLENGE/);
+  assert.match(csv, /report_hash/);
+  assert.doesNotMatch(csv, /actual_history/);
 });

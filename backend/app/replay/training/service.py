@@ -133,18 +133,40 @@ class TrainingRunService:
         await self.segments.start()
         await self.historical_books.start()
 
-    async def shutdown(self) -> None:
+    async def shutdown(self) -> frozenset[str]:
         """Stop server-owned ordered playback before replay.v1 actors close."""
 
         tasks: list[asyncio.Task[None]] = []
-        for actor in tuple(self._run_actors.values()):
+        active_run_ids: list[str] = []
+        for run_id, actor in tuple(self._run_actors.items()):
             async with actor.serialized():
+                if actor.playback_snapshot()["state"] == "PLAYING":
+                    active_run_ids.append(run_id)
                 task = actor.request_ordered_pause(reason="SERVICE_SHUTDOWN")
                 if task is not None:
                     tasks.append(task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        shutdown_pause_sessions: set[str] = set()
+        for run_id in active_run_ids:
+            projection = await self.store.get_market_tracks(run_id)
+            tracks = projection.get("tracks")
+            if not isinstance(tracks, list):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market tracks projection is invalid during shutdown",
+                    status_code=503,
+                )
+            for track in tracks:
+                if not isinstance(track, Mapping):
+                    continue
+                session_id = track.get("adapter_session_id")
+                if track.get("subscription_tier") == "FULL" and isinstance(
+                    session_id, str
+                ):
+                    shutdown_pause_sessions.add(session_id)
         await self.segments.shutdown()
+        return frozenset(shutdown_pause_sessions)
 
     async def list_runs(
         self,
@@ -495,7 +517,16 @@ class TrainingRunService:
             and portfolio.get("account_model") == "TOUCH_OR_TAPE_V2"
         )
         actor = self._run_actors.get(run_id)
-        actor_clock = actor.playback_snapshot() if actor is not None else None
+        actor_clock: dict[str, object] | None = None
+        if actor is not None:
+            actor_clock = actor.playback_snapshot()
+            if (
+                actor_clock["state"] == "PLAYING"
+                and selected_snapshot.get("controller_client_id")
+                != actor.playback_client_id
+            ):
+                actor.request_ordered_pause(reason="CONTROLLER_LEASE_LOST")
+                actor_clock = actor.playback_snapshot()
         actor_generation = (
             _stored_counter(
                 actor_clock.get("generation", 0), field_name="global_clock.generation"
@@ -511,7 +542,10 @@ class TrainingRunService:
         preserve_actor_terminal = (
             actor_clock is not None
             and actor_generation > 0
-            and actor_clock.get("state") in {"PLAYING", "ENDED", "ERROR"}
+            and (
+                actor_clock.get("state") in {"PLAYING", "ENDED", "ERROR"}
+                or actor_clock.get("reason") == "CONTROLLER_LEASE_LOST"
+            )
         )
         if (
             (contract_clock or full_count > 1)
@@ -2568,11 +2602,34 @@ class TrainingRunService:
                             "ORDERED_PLAYBACK_REQUIRES_A_FULL_TRACK"
                         )
                         break
+                    playback_client_id = actor.playback_client_id
+                    if playback_client_id is None:
+                        terminal_reason = "CONTROLLER_LEASE_LOST"
+                        break
+                    controller_lease_lost = False
+                    for track in tracks:
+                        try:
+                            await self.replay_service.heartbeat(
+                                self._track_session_id(track),
+                                playback_client_id,
+                            )
+                        except ReplayDomainError:
+                            controller_lease_lost = True
+                            terminal_reason = "CONTROLLER_LEASE_LOST"
+                            break
+                    if controller_lease_lost:
+                        break
                     selected_session_id = str(binding["adapter_session_id"])
                     selected = await self.replay_service.get_session(
                         selected_session_id
                     )
                     selected_snapshot = self._snapshot(selected)
+                    if (
+                        selected_snapshot.get("controller_client_id")
+                        != playback_client_id
+                    ):
+                        terminal_reason = "CONTROLLER_LEASE_LOST"
+                        break
                     current_time = self._cursor_time(selected_snapshot)
                     speed = actor.playback_snapshot()["speed"]
                     if speed == "MAX":
@@ -3124,6 +3181,11 @@ class TrainingRunService:
         track_id: str,
     ) -> Mapping[str, object]:
         for _chunk_index in range(100_000):
+            await self._ensure_track_controller(
+                session_id=session_id,
+                client_instance_id=client_instance_id,
+                command_id=command_id,
+            )
             session = await self.replay_service.get_session(session_id)
             snapshot = self._snapshot(session)
             cursor = snapshot.get("cursor")
@@ -3202,7 +3264,23 @@ class TrainingRunService:
         snapshot = self._snapshot(session)
         owner = snapshot.get("controller_client_id")
         if owner == client_instance_id:
-            return
+            try:
+                await self.replay_service.heartbeat(
+                    session_id,
+                    client_instance_id,
+                )
+                return
+            except ReplayDomainError as exc:
+                if exc.code is not ReplayErrorCode.CONTROLLER_CONFLICT:
+                    raise TrainingRunError(
+                        exc.code.value,
+                        exc.message,
+                        status_code=exc.http_status,
+                        details=exc.details,
+                    ) from exc
+                session = await self.replay_service.get_session(session_id)
+                snapshot = self._snapshot(session)
+                owner = snapshot.get("controller_client_id")
         if owner is not None:
             raise TrainingRunError(
                 "CONTROLLER_CONFLICT",

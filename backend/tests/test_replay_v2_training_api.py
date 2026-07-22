@@ -141,7 +141,7 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         assert returned.json()["checkpointed"] is True
         assert returned.json()["state"] == "PAUSED"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_phase8_plan_and_trade_flow_routes_fail_closed_by_source(
@@ -184,7 +184,7 @@ async def test_phase8_plan_and_trade_flow_routes_fail_closed_by_source(
             "order_flow": "UNSUPPORTED_SOURCE_MODE",
         }
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Path) -> None:
@@ -241,7 +241,7 @@ async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Pa
         assert stale.json()["protocol"] == "replay.v2"
         assert stale.json()["error"]["code"] == "HISTORY_EPOCH_MISMATCH"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
@@ -320,7 +320,7 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
         assert malformed.json()["protocol"] == "replay.v2"
         assert malformed.json()["error"]["code"] == "TRAINING_RUN_INVALID"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_phase5_market_track_routes_expose_replay_only_portfolio_contract(
@@ -358,7 +358,7 @@ async def test_phase5_market_track_routes_expose_replay_only_portfolio_contract(
         assert "live_price" not in by_run.text
         assert "actual_event_time_ms" not in by_run.text
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_phase4_http_boundaries_expose_only_public_time_and_exact_review_fork(
@@ -437,7 +437,7 @@ async def test_phase4_http_boundaries_expose_only_public_time_and_exact_review_f
         assert forked.json()["run"]["dataset_epoch"] == reviewed["dataset_epoch"]
         assert forked.json()["run"]["state_hash"] == reviewed["selected_state_hash"]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_v2_validation_and_catalog_drift_use_v2_error_envelopes(
@@ -467,7 +467,7 @@ async def test_v2_validation_and_catalog_drift_use_v2_error_envelopes(
         assert stale.status_code == 409
         assert stale.json()["error"]["code"] == "CATALOG_EPOCH_MISMATCH"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_legacy_migration_route_is_additive_and_idempotent(tmp_path: Path) -> None:
@@ -494,7 +494,7 @@ async def test_legacy_migration_route_is_additive_and_idempotent(tmp_path: Path)
         assert second.json()["created"] is False
         assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_enabled_flags_without_a_started_training_service_fail_closed(

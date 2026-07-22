@@ -140,7 +140,7 @@ async def test_history_pages_are_snapshot_bound_revealed_only_and_repository_fre
         )
         assert second["has_more"] is False
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_history_rejects_epoch_boundary_and_source_identity_drift(
@@ -200,7 +200,7 @@ async def test_history_rejects_epoch_boundary_and_source_identity_drift(
             )
         assert drift.value.code == "HISTORY_SOURCE_IDENTITY_DRIFT"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_blind_history_uses_only_the_public_synthetic_timeline(
@@ -226,7 +226,7 @@ async def test_blind_history_uses_only_the_public_synthetic_timeline(
         assert "actual_replay" not in encoded
         assert all(bar["close_time_ms"] <= boundary for bar in page["bars"])
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_agg_trade_training_history_decodes_the_frozen_bundle(
@@ -301,4 +301,4 @@ async def test_agg_trade_training_history_decodes_the_frozen_bundle(
         assert page["bars"]
         assert all(bar["close_time_ms"] <= boundary for bar in page["bars"])
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)

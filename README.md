@@ -103,11 +103,16 @@ CandleScope is a local-first market charting application with:
 Replay v1 is a local-first, deterministic market-training runtime. It opens in
 an independent `replay.html` document with its own composition root; the live
 page never swaps its market source or owns replay state. Replay is disabled by
-default on both sides:
+default on both sides. The v2 product, aggregate-trade archive, and historical-
+book capability are independently closed as well:
 
 ```text
 REPLAY_ENABLED=0
+REPLAY_PRODUCT_V2_ENABLED=0
 VITE_REPLAY_ENTRY_ENABLED=0
+VITE_REPLAY_PRODUCT_V2_ENABLED=0
+RAW_AGG_TRADE_ARCHIVE_ENABLED=0
+REPLAY_HISTORICAL_BOOK_ENABLED=0
 ```
 
 The frontend flag only hides or shows the live-page entry. The backend
@@ -265,36 +270,47 @@ Release-quality local checks:
 ```powershell
 Set-Location H:\program\CandleScope-kline-replay
 $ReplayHead = (git rev-parse HEAD).Trim()
-$ReplayEvidenceRoot = "H:\program\CandleScope-release-evidence\$ReplayHead"
+$ReplayEvidenceRoot = "H:\program\CandleScope-release-evidence\$ReplayHead\replay-v2"
 New-Item -ItemType Directory -Force $ReplayEvidenceRoot | Out-Null
 
 Set-Location backend
-.\.venv\Scripts\python.exe scripts\audit_replay_determinism.py `
-  > "$ReplayEvidenceRoot\replay-determinism.json"
-.\.venv\Scripts\python.exe scripts\benchmark_replay.py `
-  --bars 43200 --trades 1000000 --trade-page-rows 50000 `
-  --checkpoint-event-interval 10000 `
-  --baseline ..\docs\perf-baselines\replay-v1-backend-20260718.json `
-  > "$ReplayEvidenceRoot\replay-backend-1m.json"
+.\.venv\Scripts\python.exe scripts\run_replay_v2_release_checks.py `
+  --npm F:\工具箱\node.js\node-v22.14.0-win-x64\npm.cmd `
+  --out "$ReplayEvidenceRoot\checks.json"
+.\.venv\Scripts\python.exe scripts\benchmark_replay_v2_release.py `
+  --out "$ReplayEvidenceRoot\benchmark.json"
 
 Set-Location ..\frontend
 npm run smoke:replay -- --timeout-ms 120000 `
-  > "$ReplayEvidenceRoot\replay-smoke.json"
+  --out "$ReplayEvidenceRoot\replay-v1-smoke.json"
+npm run smoke:replay:v2 -- --timeout-ms 120000 `
+  --out "$ReplayEvidenceRoot\replay-v2-smoke.json"
 node scripts\replay-soak.mjs `
+  --product-v2 `
   --duration-ms 14400000 --cycles 100 --projection-events 1000000 `
   --sample-ms 60000 --timeout-ms 120000 `
-  --out "$ReplayEvidenceRoot\replay-browser-soak.json"
-node scripts\replay-rollback-drill.mjs `
+  --out "$ReplayEvidenceRoot\replay-v2-soak.json"
+node scripts\replay-v2-rollback-drill.mjs `
+  --product-v2 `
   --baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f `
   --timeout-ms 120000 `
-  --out "$ReplayEvidenceRoot\replay-rollback.json"
+  --out "$ReplayEvidenceRoot\replay-v2-rollback.json"
+
+Set-Location ..\backend
+.\.venv\Scripts\python.exe scripts\verify_replay_v2_release.py `
+  --evidence-dir "$ReplayEvidenceRoot" `
+  --out "$ReplayEvidenceRoot\release-manifest.json"
 ```
 
 Release evidence commands reject a dirty worktree or a changing Git HEAD.
 Keep their outputs outside the repository so one completed gate cannot make
-the next gate fail the clean-tree check. The 4-hour soak is a real release
-gate, not a short harness mode. Passing these local gates does not by itself
-authorize default enablement or replace a production observation window.
+the next gate fail the clean-tree check. The final verifier also checks all 28
+product-contract scenarios, exact default-off flags, artifact hashes, 100
+archive lifecycles, keyboard/focus/reduced-motion evidence, and a detached
+`git revert --no-commit` drill. The 4-hour soak is a real release gate, not a
+short harness mode. Passing these local gates does not authorize default
+enablement or replace the required production capacity/alerting observation
+window and explicit enablement decision.
 
 ## Architecture
 

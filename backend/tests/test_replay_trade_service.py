@@ -91,7 +91,7 @@ async def test_trade_service_uses_shared_actor_api_and_pin_lifecycle(
     forked = await service.fork_session(session_id)
     assert forked["snapshot"]["state_hash"] == stepped["state_hash"]
     assert archive.diagnostics()["active_pins"] == 2
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
     assert archive.diagnostics()["active_pins"] == 0
 
 
@@ -106,7 +106,7 @@ async def test_trade_capability_stays_closed_without_a_verified_exact_partition(
         "enabled": False,
         "reason": "DATASET_INCOMPLETE",
     }
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_blind_trade_service_never_exposes_archive_paths_or_actual_time(
@@ -139,7 +139,7 @@ async def test_blind_trade_service_never_exposes_archive_paths_or_actual_time(
     assert stepped["cursor"]["last_trade_time_ms"] == SYNTHETIC_TIME_ANCHOR_MS + 1_000
     assert stepped["cursor"]["last_agg_trade_id"] == 1
     expected_hash = stepped["state_hash"]
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
     recovered_service = await _service(
         tmp_path / "replay.db",
@@ -149,7 +149,7 @@ async def test_blind_trade_service_never_exposes_archive_paths_or_actual_time(
     recovered = await recovered_service.get_session(session_id)
     assert recovered["snapshot"]["state_hash"] == expected_hash
     assert recovered["snapshot"]["cursor"]["last_agg_trade_id"] == 1
-    await recovered_service.shutdown(step_timeout=0.2)
+    await recovered_service.shutdown(step_timeout=1.0)
 
 
 async def test_blind_trade_parity_failure_redacts_actual_kline_times(
@@ -188,7 +188,7 @@ async def test_blind_trade_parity_failure_redacts_actual_kline_times(
     )
     assert str(TRADE_REPLAY_START_MS) not in serialized_error
     assert "1000" not in serialized_error
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_trade_service_recovers_checkpoint_and_revalidates_generation(
@@ -208,7 +208,7 @@ async def test_trade_service_recovers_checkpoint_and_revalidates_generation(
         _command("step", CommandType.STEP, acquired["revision"], {"count": 3}),
     )
     expected_hash = stepped["state_hash"]
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
     assert archive.diagnostics()["active_pins"] == 0
 
     recovered_service = await _service(database, archive, prefix="second")
@@ -217,5 +217,5 @@ async def test_trade_service_recovers_checkpoint_and_revalidates_generation(
     assert recovered["snapshot"]["state_hash"] == expected_hash
     assert recovered["snapshot"]["cursor"]["last_agg_trade_id"] == 1_002
     assert archive.diagnostics()["active_pins"] == 1
-    await recovered_service.shutdown(step_timeout=0.2)
+    await recovered_service.shutdown(step_timeout=1.0)
     assert archive.diagnostics()["active_pins"] == 0

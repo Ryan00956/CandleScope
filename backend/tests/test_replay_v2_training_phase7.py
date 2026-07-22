@@ -141,7 +141,7 @@ async def test_create_registers_one_checksum_bound_segment_and_completed_prepare
             ).fetchone()[0]
             assert dangling == 0
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_identical_run_dataset_deduplicates_segment_but_keeps_independent_refs(
@@ -158,7 +158,7 @@ async def test_identical_run_dataset_deduplicates_segment_but_keeps_independent_
         assert all_segments["summary"]["segment_count"] == 1
         assert all_segments["items"][0]["ref_count"] == 4
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_actor_checkpoint_and_review_owners_follow_archive_lifecycle(
@@ -236,7 +236,7 @@ async def test_actor_checkpoint_and_review_owners_follow_archive_lifecycle(
                 (run_id, review["review_id"]),
             ).fetchone() == (1,)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_external_prepare_is_single_flight_and_idempotent(tmp_path: Path) -> None:
@@ -277,7 +277,7 @@ async def test_external_prepare_is_single_flight_and_idempotent(tmp_path: Path) 
                 (spec.identity()[1],),
             ).fetchone() == (1,)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_checksum_mismatch_quarantines_and_never_publishes(tmp_path: Path) -> None:
@@ -307,7 +307,7 @@ async def test_checksum_mismatch_quarantines_and_never_publishes(tmp_path: Path)
         assert not any((manager.root / ".tmp").iterdir())
         assert len(tuple((manager.root / ".quarantine").iterdir())) == 1
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_manifest_mismatches_quarantine_before_io_and_retry_succeeds(
@@ -376,7 +376,7 @@ async def test_manifest_mismatches_quarantine_before_io_and_retry_succeeds(
                     (good_spec.identity()[0],),
                 ).fetchall() == [("QUARANTINED", expected_reason), ("READY", None)]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_cancel_requested_prepare_never_publishes_partial_data(tmp_path: Path) -> None:
@@ -430,7 +430,7 @@ async def test_cancel_requested_prepare_never_publishes_partial_data(tmp_path: P
         assert not any((manager.root / ".tmp").iterdir())
         assert not any((manager.root / "objects").iterdir())
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_agg_trade_partition_set_uses_unified_checksum_bound_adapter(
@@ -462,7 +462,7 @@ async def test_agg_trade_partition_set_uses_unified_checksum_bound_adapter(
         assert segment["storage_kind"] == "EMBEDDED_ARCHIVE"
         assert segment["rebuildable"] is False
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_interrupted_prepare_cleans_temp_and_records_error(tmp_path: Path) -> None:
@@ -495,7 +495,7 @@ async def test_interrupted_prepare_cleans_temp_and_records_error(tmp_path: Path)
                 (spec.identity()[0],),
             ).fetchone() == ("ERROR", "OSError")
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_gc_dry_run_matches_execution_and_rehydrates_identical_hash(
@@ -559,7 +559,7 @@ async def test_gc_dry_run_matches_execution_and_rehydrates_identical_hash(
                 (segment_id,),
             ).fetchone() == (_checksum(payload),)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_non_rebuildable_actor_review_and_recovery_are_never_gc_candidates(
@@ -627,7 +627,7 @@ async def test_non_rebuildable_actor_review_and_recovery_are_never_gc_candidates
         assert (manager.root / "objects" / f"{segment_id}.blob").is_file()
         assert plan["non_rebuildable_auto_reclaimed"] is False
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_gc_windows_lock_failure_restores_ready_state(
@@ -667,7 +667,7 @@ async def test_gc_windows_lock_failure_restores_ready_state(
             ).fetchone() == ("READY", None)
         assert (manager.root / "objects" / f"{segment_id}.blob").is_file()
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_gc_rejects_noncanonical_owned_path_without_touching_siblings(
@@ -721,7 +721,7 @@ async def test_gc_rejects_noncanonical_owned_path_without_touching_siblings(
         assert (manager.root / "objects" / f"{first_id}.blob").read_bytes() == first_payload
         assert (manager.root / "objects" / f"{second_id}.blob").read_bytes() == second_payload
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_gc_never_recursively_deletes_object_replaced_by_directory(
@@ -769,7 +769,7 @@ async def test_gc_never_recursively_deletes_object_replaced_by_directory(
                 (segment_id,),
             ).fetchone() == ("QUARANTINED", None)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_gc_claim_blocks_new_actor_pin_until_rehydration(
@@ -845,7 +845,7 @@ async def test_gc_claim_blocks_new_actor_pin_until_rehydration(
         assert restored["health"] == "READY"
         await service.training.store.set_actor_segment_refs(run_id, active=True)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_reclaim_crash_recovery_restores_trash_and_stale_temp_cleanup(
@@ -892,7 +892,7 @@ async def test_reclaim_crash_recovery_restores_trash_and_stale_temp_cleanup(
                 "SELECT COUNT(*) FROM replay_data_gc_audit WHERE action = 'RECOVERY'"
             ).fetchone()[0] == 1
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_restart_marks_interrupted_prepare_retryable_and_cleans_artifacts(
@@ -988,7 +988,7 @@ async def test_restart_marks_interrupted_prepare_retryable_and_cleans_artifacts(
         assert restored["health"] == "READY"
         assert (manager.root / "objects" / f"{segment_id}.blob").read_bytes() == payload
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_phase7_http_plan_does_not_build_dataset_and_hidden_run_redacts_range(
@@ -1064,4 +1064,4 @@ async def test_phase7_http_plan_does_not_build_dataset_and_hidden_run_redacts_ra
         assert gc_plan.json()["candidates"] == []
         assert "NON_REBUILDABLE" in gc_plan.json()["protected"][0]["protection_reasons"]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)

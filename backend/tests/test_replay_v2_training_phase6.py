@@ -406,7 +406,7 @@ async def test_contract_account_fee_revision_and_ledger_recompute_to_zero(
         assert previous == account["ledger_tail_hash"]
         assert cash_total == Decimal(str(portfolio["cash_balance"]))
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_historical_exact_funding_fails_closed_without_fallback(
@@ -423,7 +423,7 @@ async def test_historical_exact_funding_fails_closed_without_fallback(
         assert rejected.value.code == "HISTORICAL_FUNDING_UNAVAILABLE"
         assert rejected.value.details["fallback_applied"] is False
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_sandbox_funding_boundary_and_restart_are_idempotent(tmp_path: Path) -> None:
@@ -491,7 +491,7 @@ async def test_sandbox_funding_boundary_and_restart_are_idempotent(tmp_path: Pat
             ).fetchone()[0]
         assert count_before_restart == 1
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
     restored = await _service(database)
     try:
@@ -508,11 +508,12 @@ async def test_sandbox_funding_boundary_and_restart_are_idempotent(tmp_path: Pat
                 (run_id,),
             ).fetchone()[0] == count_before_restart
     finally:
-        await restored.shutdown(step_timeout=0.2)
+        await restored.shutdown(step_timeout=1.0)
 
 
 async def test_multi_market_funding_settles_once_per_track_at_global_boundary(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "multi-funding.db"
     service = await _service(database, symbols=("ETHUSDT",))
@@ -573,6 +574,36 @@ async def test_multi_market_funding_settles_once_per_track_at_global_boundary(
             command_type=ReplayV2CommandType.PLACE_ORDER,
             payload={"client_order_id": "funding-eth-position", **market_payload},
         )
+        heartbeat_sessions: list[str] = []
+        original_heartbeat = service.heartbeat
+
+        async def observed_heartbeat(
+            session_id: str,
+            client_instance_id: str,
+        ) -> None:
+            heartbeat_sessions.append(session_id)
+            await original_heartbeat(session_id, client_instance_id)
+
+        monkeypatch.setattr(service, "heartbeat", observed_heartbeat)
+        assert service.training is not None
+        original_multi_track_control = service.training._execute_multi_track_control
+        expire_before_step = True
+
+        async def expire_after_cursor_validation(**kwargs):
+            nonlocal expire_before_step
+            command = kwargs["command"]
+            if expire_before_step and command.type is ReplayV2CommandType.STEP_BASE:
+                expire_before_step = False
+                for adapter_session_id in (primary_id, secondary_id):
+                    actor = service._sessions[adapter_session_id].actor
+                    actor._controller_deadline_wall = actor._read_wall() - 1
+            return await original_multi_track_control(**kwargs)
+
+        monkeypatch.setattr(
+            service.training,
+            "_execute_multi_track_control",
+            expire_after_cursor_validation,
+        )
         for index in range(2):
             await _send(
                 service,
@@ -582,6 +613,7 @@ async def test_multi_market_funding_settles_once_per_track_at_global_boundary(
                 command_type=ReplayV2CommandType.STEP_BASE,
                 payload={"count": 1},
             )
+        assert set(heartbeat_sessions) == {primary_id, secondary_id}
         projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
         assert Decimal(str(projection["portfolio"]["funding_cashflow"])) < 0
         with sqlite3.connect(database) as connection:
@@ -596,7 +628,7 @@ async def test_multi_market_funding_settles_once_per_track_at_global_boundary(
         assert [row[0] for row in settlements] == ["track-1", "track-2"]
         assert settlements[0][1] == settlements[1][1]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_isolated_margin_requires_allocation_and_releases_when_flat(
@@ -677,7 +709,7 @@ async def test_isolated_margin_requires_allocation_and_releases_when_flat(
         assert "MARGIN_ALLOCATION" in kinds
         assert "MARGIN_RELEASE" in kinds
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def _risk_service(path: Path) -> ReplayService:
@@ -772,4 +804,4 @@ async def test_simulated_liquidation_closes_normally_and_stays_distinct(
             "AVAILABLE_APPROX_SIMULATED_ACCOUNT"
         )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)

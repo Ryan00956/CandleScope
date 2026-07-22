@@ -1615,7 +1615,7 @@ async def test_clean_shutdown_fails_every_read_queued_behind_its_barrier() -> No
     )
     await asyncio.wait_for(persistence_started.wait(), timeout=0.2)
 
-    shutdown_task = asyncio.create_task(actor.shutdown(step_timeout=0.2))
+    shutdown_task = asyncio.create_task(actor.shutdown(step_timeout=1.0))
 
     async def wait_for_shutdown_barrier() -> None:
         while not actor.diagnostics()["closing"]:

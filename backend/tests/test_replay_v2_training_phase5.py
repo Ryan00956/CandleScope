@@ -69,10 +69,22 @@ def _multi_repository(*symbols: str):
 
 
 async def _service(
-    path: Path, *, symbols: tuple[str, ...] = ("ETHUSDT",)
+    path: Path,
+    *,
+    symbols: tuple[str, ...] = ("ETHUSDT",),
+    controller_ttl_seconds: float | None = None,
 ) -> ReplayService:
+    settings = replay_settings(path)
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replace(
+            settings,
+            product_v2_enabled=True,
+            controller_ttl_seconds=(
+                settings.controller_ttl_seconds
+                if controller_ttl_seconds is None
+                else controller_ttl_seconds
+            ),
+        ),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
         repository=_multi_repository(*symbols),
         now_ms=lambda: NOW_MS,
@@ -469,7 +481,7 @@ async def test_none_track_performs_zero_history_reads_then_selects_atomically(
             == by_id["track-1"]["cursor"]["virtual_time_ms"]
         )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_global_step_keeps_full_tracks_aligned_and_persists_ordering(
@@ -540,7 +552,7 @@ async def test_global_step_keeps_full_tracks_aligned_and_persists_ordering(
             == 3
         )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_ordered_playback_uses_one_global_lane_and_pauses_aligned(
@@ -621,7 +633,157 @@ async def test_ordered_playback_uses_one_global_lane_and_pauses_aligned(
             adapter = await service.get_session(str(track["adapter_session_id"]))
             assert adapter["snapshot"]["state"] == "PAUSED"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_ordered_playback_refreshes_full_track_controller_leases(
+    tmp_path: Path,
+) -> None:
+    service = await _service(
+        tmp_path / "global-play-heartbeat.db",
+        symbols=("ETHUSDT",),
+        controller_ttl_seconds=0.5,
+    )
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        selected_id = str(created["run"]["adapter_session_id"])
+        await _add_track(
+            service,
+            run_id=run_id,
+            selected_session_id=selected_id,
+            symbol="ETHUSDT",
+            tier="FULL",
+            command_id="add-heartbeat-track",
+        )
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=selected_id,
+            command_id="acquire-heartbeat-tracks",
+        )
+        selected = await service.get_session(selected_id)
+        await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "play-heartbeat-tracks",
+                ReplayV2CommandType.PLAY,
+                selected,
+                {},
+            ),
+        )
+
+        await asyncio.sleep(0.8)
+        tracks = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
+        assert tracks["global_clock"]["state"] == "PLAYING"
+        for track in tracks["tracks"]:
+            if track["subscription_tier"] != "FULL":
+                continue
+            adapter = await service.get_session(str(track["adapter_session_id"]))
+            assert adapter["snapshot"]["controller_client_id"] == "phase5-browser"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_global_clock_fail_closes_when_adapter_controller_lease_is_lost(
+    tmp_path: Path,
+) -> None:
+    service = await _service(
+        tmp_path / "global-play-expiry.db",
+        controller_ttl_seconds=0.03,
+    )
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        selected_id = str(created["run"]["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=selected_id,
+            command_id="acquire-expiring-track",
+        )
+        selected = await service.get_session(selected_id)
+        await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "play-expiring-track",
+                ReplayV2CommandType.PLAY,
+                selected,
+                {},
+            ),
+        )
+
+        await asyncio.sleep(0.08)
+        tracks = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
+        assert tracks["global_clock"]["state"] == "PAUSED"
+        assert tracks["global_clock"]["reason"] == "CONTROLLER_LEASE_LOST"
+        adapter = await service.get_session(selected_id)
+        assert adapter["snapshot"]["state"] == "PAUSED"
+        assert adapter["snapshot"]["controller_client_id"] is None
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_shutdown_persists_active_global_playback_as_shutdown_pause(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "global-play-shutdown.db"
+    service = await _service(path, symbols=("ETHUSDT",))
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        selected_id = str(created["run"]["adapter_session_id"])
+        added = await _add_track(
+            service,
+            run_id=run_id,
+            selected_session_id=selected_id,
+            symbol="ETHUSDT",
+            tier="FULL",
+            command_id="add-shutdown-track",
+        )
+        added_track = added["data"]["track"]
+        assert isinstance(added_track, dict)
+        added_session_id = str(added_track["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=selected_id,
+            command_id="acquire-shutdown-tracks",
+        )
+        selected = await service.get_session(selected_id)
+        playing = await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "play-before-service-shutdown",
+                ReplayV2CommandType.PLAY,
+                selected,
+                {},
+            ),
+        )
+        assert playing["state"] == "PLAYING"
+
+        await service.shutdown(step_timeout=0.5)
+
+        with sqlite3.connect(path) as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id, state, status_reason
+                FROM replay_session
+                WHERE session_id IN (?, ?)
+                ORDER BY session_id
+                """,
+                (selected_id, added_session_id),
+            ).fetchall()
+        assert len(rows) == 2
+        assert {(state, reason) for _, state, reason in rows} == {
+            ("PAUSED", "shutdown_pause")
+        }
+    finally:
+        if not service.store.closed:
+            await service.shutdown(step_timeout=0.5)
 
 
 async def test_global_command_reacquires_nonselected_controller_lease(
@@ -686,7 +848,7 @@ async def test_global_command_reacquires_nonselected_controller_lease(
         )
         assert secondary_track["degraded_reason"] is None
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_multi_track_end_finalizes_every_prepared_adapter(
@@ -733,7 +895,7 @@ async def test_multi_track_end_finalizes_every_prepared_adapter(
             adapter = await service.get_session(str(track["adapter_session_id"]))
             assert adapter["snapshot"]["state"] == "ENDED"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 @pytest.mark.parametrize("track_count", (2, 4, 8))
@@ -792,7 +954,7 @@ async def test_bar_full_track_matrix_persists_stable_total_order(
         persisted = await service.training.store.global_events(run_id)  # type: ignore[union-attr]
         assert [event["track_id"] for event in persisted] == expected_ids
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 @pytest.mark.parametrize("track_count", (2, 4, 8))
@@ -867,7 +1029,7 @@ async def test_agg_trade_full_track_matrix_uses_the_same_stable_total_order(
             len({track["cursor"]["virtual_time_ms"] for track in tracks["tracks"]}) == 1
         )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_cross_scope_and_missing_coverage_fail_without_switching_viewer(
@@ -917,7 +1079,7 @@ async def test_cross_scope_and_missing_coverage_fail_without_switching_viewer(
         assert viewer["selected_track_id"] == "track-1"
         assert tracks["portfolio"]["equity"] == "10000"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_warm_track_stays_frozen_while_full_track_advances(
@@ -968,7 +1130,7 @@ async def test_warm_track_stays_frozen_while_full_track_advances(
             "revision": before["snapshot"]["revision"],
         }
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_run_level_trade_commands_force_full_and_share_available_equity(
@@ -1042,7 +1204,7 @@ async def test_run_level_trade_commands_force_full_and_share_available_equity(
         assert unchanged["portfolio"]["reserved_margin"] == "6000"
         assert unchanged["portfolio"]["available_equity"] == "4000"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_forced_full_downgrade_rejects_then_risk_release_checkpoints(
@@ -1162,7 +1324,7 @@ async def test_forced_full_downgrade_rejects_then_risk_release_checkpoints(
                 >= 4
             )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_full_track_preflight_failure_pauses_without_partial_wave_and_recovers(
@@ -1267,7 +1429,7 @@ async def test_full_track_preflight_failure_pauses_without_partial_wave_and_reco
             == 2
         )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_restart_restores_all_track_cursors_reasons_and_portfolio(
@@ -1302,7 +1464,7 @@ async def test_restart_restores_all_track_cursors_reasons_and_portfolio(
         limit_price="100",
     )
     before = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
     restored = await _service(path)
     try:
@@ -1322,4 +1484,4 @@ async def test_restart_restores_all_track_cursors_reasons_and_portfolio(
         assert payload["portfolio"] == before["portfolio"]
         assert payload["tracks"][0]["forced_full_reasons"] == ["OPEN_ORDER", "VIEWED"]
     finally:
-        await restored.shutdown(step_timeout=0.2)
+        await restored.shutdown(step_timeout=1.0)

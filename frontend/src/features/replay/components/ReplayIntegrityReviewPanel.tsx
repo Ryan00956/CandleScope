@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 
 import { buildEquityPolyline } from "../replayIntegrityModel.js";
+import { downloadReplayTrainingReport } from "../replayReportExport.js";
 import { replayOwnsController } from "../replayUiModel.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 import type { ReplayIntegrityRuntime } from "../useReplayIntegrityRuntime.js";
@@ -23,6 +24,7 @@ export default function ReplayIntegrityReviewPanel({
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const integrity = integrityRuntime.integrity;
   const review = integrityRuntime.review;
+  const report = integrityRuntime.report;
   const ownsController = replayOwnsController(runtime.store, runtime.clientInstanceId);
   const busy = integrityRuntime.operation !== null;
   const equityPoints = useMemo(() => buildEquityPolyline(
@@ -162,17 +164,21 @@ export default function ReplayIntegrityReviewPanel({
             )}
           </section>
 
-          {integrityRuntime.report !== null && (
-            <section className="replay-integrity-report" aria-labelledby="replay-phase4-report-title">
+          {report !== null && (
+            <section className="replay-integrity-report" data-replay-panel="report" aria-labelledby="replay-phase4-report-title">
               <div className="replay-integrity-section-heading">
                 <h3 id="replay-phase4-report-title">固化报告</h3>
-                <code>{integrityRuntime.report.report.report_hash}</code>
+                <code>{report.report.report_hash}</code>
+                <div className="replay-report-actions">
+                  <button type="button" onClick={() => downloadReplayTrainingReport(report, "json")}>导出 JSON</button>
+                  <button type="button" onClick={() => downloadReplayTrainingReport(report, "csv")}>导出 CSV</button>
+                </div>
               </div>
               <div className="replay-integrity-summary">
-                <div><span>Final equity</span><strong>{integrityRuntime.report.report.final_equity}</strong></div>
-                <div><span>Realized PnL</span><strong>{integrityRuntime.report.report.realized_pnl}</strong></div>
-                <div><span>Fees</span><strong>{integrityRuntime.report.report.fees_paid}</strong></div>
-                <div><span>Trades</span><strong>{integrityRuntime.report.report.trade_count}</strong></div>
+                <div><span>Final equity</span><strong>{report.report.final_equity}</strong></div>
+                <div><span>Realized PnL</span><strong>{report.report.realized_pnl}</strong></div>
+                <div><span>Fees</span><strong>{report.report.fees_paid}</strong></div>
+                <div><span>Trades</span><strong>{report.report.trade_count}</strong></div>
               </div>
             </section>
           )}

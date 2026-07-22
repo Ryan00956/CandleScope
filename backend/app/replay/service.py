@@ -739,6 +739,7 @@ class ReplayService:
                 self._accepting = False
                 self._prune_abort.set()
             errors: list[str] = []
+            force_shutdown_pause_sessions: frozenset[str] = frozenset()
             self._reaper_stop.set()
             reaper = self._reaper_task
             if reaper is not None:
@@ -750,7 +751,7 @@ class ReplayService:
 
             if self.training is not None:
                 try:
-                    await self.training.shutdown()
+                    force_shutdown_pause_sessions = await self.training.shutdown()
                 except Exception as exc:
                     errors.append(f"training: {exc}")
 
@@ -765,17 +766,22 @@ class ReplayService:
                 owners = tuple(self._pending_lifecycle_owners)
                 for owner in owners:
                     owner.cancel()
-                if not await self._wait_for_pending_lifecycle_drain(
-                    timeout=step_timeout
-                ):
-                    errors.append(
-                        "lifecycle: replay requests did not cancel before shutdown"
-                    )
+                # A cancelled create may already have committed its row and must
+                # retain store ownership until its compensating delete finishes.
+                # ``step_timeout`` bounds the graceful drain before cancellation;
+                # abandoning cancellation cleanup would close SQLite underneath
+                # an accepted transaction and can leave an invisible orphan.
+                await self._wait_for_pending_lifecycle_drain(timeout=None)
 
             handles = tuple(self._sessions.items())
             for session_id, handle in handles:
                 try:
-                    await handle.actor.shutdown(step_timeout=step_timeout)
+                    await handle.actor.shutdown(
+                        step_timeout=step_timeout,
+                        force_pause_reason=(
+                            session_id in force_shutdown_pause_sessions
+                        ),
+                    )
                 except Exception as exc:
                     errors.append(f"{session_id}: {exc}")
                 finally:
@@ -906,6 +912,24 @@ class ReplayService:
                 pass
         if shutdown_error is not None:
             raise shutdown_error
+
+    async def _abort_unregistered_actor_uninterruptibly(
+        self,
+        actor: ReplaySessionActor,
+    ) -> None:
+        """Stop an unpublished actor without issuing a durable shutdown mutation."""
+
+        actor_task = actor.task
+        if actor_task is None:
+            return
+        if not actor_task.done():
+            actor_task.cancel()
+        try:
+            await self._await_task_uninterruptibly(actor_task)
+        except BaseException:
+            # Cancellation is the expected physical stop for an actor whose
+            # session is being rolled back before service registration.
+            pass
 
     async def _create_from_dataset(
         self,
@@ -1091,15 +1115,6 @@ class ReplayService:
                 # This branch protects against an unexpected synchronous failure
                 # without tearing down a handle already owned by the service.
                 raise
-            if actor is not None:
-                try:
-                    await self._shutdown_actor_uninterruptibly(
-                        actor,
-                        step_timeout=0.5,
-                        task_name=f"replay-create-cleanup-{session_id}",
-                    )
-                except BaseException:
-                    pass
             compensation_error: BaseException | None = None
             if persisted:
                 try:
@@ -1114,6 +1129,8 @@ class ReplayService:
                         )
                 except BaseException as exc:
                     compensation_error = exc
+            if actor is not None:
+                await self._abort_unregistered_actor_uninterruptibly(actor)
             self._datasets.release(session_id)
             if trade_pin_token is not None:
                 self._raw_trade_archive.release_dataset(trade_pin_token)
@@ -1804,7 +1821,11 @@ class ReplayService:
                     task.cancel()
             await asyncio.gather(snapshot_task, abort_task, return_exceptions=True)
 
-    async def _wait_for_pending_lifecycle_drain(self, *, timeout: float) -> bool:
+    async def _wait_for_pending_lifecycle_drain(
+        self,
+        *,
+        timeout: float | None,
+    ) -> bool:
         async def wait() -> None:
             while True:
                 async with self._lifecycle_lock:
@@ -1818,10 +1839,13 @@ class ReplayService:
                     self._lifecycle_changed.clear()
                 await self._lifecycle_changed.wait()
 
-        try:
-            await asyncio.wait_for(wait(), timeout=max(0.01, timeout))
-        except TimeoutError:
-            return False
+        if timeout is None:
+            await wait()
+        else:
+            try:
+                await asyncio.wait_for(wait(), timeout=max(0.01, timeout))
+            except TimeoutError:
+                return False
         return True
 
     def _track_pending_lifecycle_owner(self) -> None:

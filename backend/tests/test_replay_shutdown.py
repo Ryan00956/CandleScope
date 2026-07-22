@@ -152,7 +152,7 @@ async def test_cancelled_runtime_partial_start_shuts_recovered_actor_and_store(
     seed = await _service(path)
     created = await seed.create_session(replay_config())
     session_id = str(created["session_id"])
-    await seed.shutdown(step_timeout=0.2)
+    await seed.shutdown(step_timeout=1.0)
 
     recovery_published = asyncio.Event()
     services: list[ReplayService] = []
@@ -203,7 +203,7 @@ async def test_cancelled_runtime_partial_start_shuts_recovered_actor_and_store(
         await asyncio.gather(startup, return_exceptions=True)
         for service in services:
             if not service.store.closed:
-                await service.shutdown(step_timeout=0.2)
+                await service.shutdown(step_timeout=1.0)
 
 
 async def test_cancelled_runtime_shutdown_finishes_owned_service_cleanup(
@@ -225,7 +225,7 @@ async def test_cancelled_runtime_shutdown_finishes_owned_service_cleanup(
         await original_shutdown(step_timeout=step_timeout)
 
     monkeypatch.setattr(service, "shutdown", blocked_shutdown)
-    shutdown = asyncio.create_task(runtime.shutdown(step_timeout=0.2))
+    shutdown = asyncio.create_task(runtime.shutdown(step_timeout=1.0))
     try:
         await asyncio.wait_for(shutdown_entered.wait(), timeout=1)
         shutdown.cancel()
@@ -284,7 +284,7 @@ async def test_persistence_failure_rolls_back_event_and_stops_further_playback(
 
     monkeypatch.setattr(service.store, "commit_command", original)
     service.store._degraded_reason = None
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_shutdown_finishes_actor_barriers_before_closing_store(
@@ -304,7 +304,7 @@ async def test_shutdown_finishes_actor_barriers_before_closing_store(
         await original_close()
 
     monkeypatch.setattr(service.store, "close", observed_close)
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
     assert close_observation == [True]
     assert all(actor.task is not None and actor.task.done() for actor in actors)
 
@@ -349,7 +349,7 @@ async def test_shutdown_drains_durable_create_before_registration_without_orphan
     try:
         await asyncio.wait_for(durable_row_written.wait(), timeout=2)
         assert service.diagnostics()["pending_session_reservations"] == 1
-        shutdown_task = asyncio.create_task(service.shutdown(step_timeout=0.2))
+        shutdown_task = asyncio.create_task(service.shutdown(step_timeout=1.0))
         for _ in range(20):
             if service.diagnostics()["accepting"] is False:
                 break
@@ -383,7 +383,7 @@ async def test_shutdown_drains_durable_create_before_registration_without_orphan
         if shutdown_task is not None:
             await asyncio.gather(shutdown_task, return_exceptions=True)
         if not service.store.closed:
-            await service.shutdown(step_timeout=0.2)
+            await service.shutdown(step_timeout=1.0)
 
 
 @pytest.mark.parametrize("operation", ["create", "fork"])
@@ -447,7 +447,7 @@ async def test_cancelled_create_after_durable_commit_is_compensated(
         if not operation_task.done():
             operation_task.cancel()
         await asyncio.gather(operation_task, return_exceptions=True)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_cancelled_trade_create_releases_pin_returned_by_worker(
@@ -500,7 +500,7 @@ async def test_cancelled_trade_create_releases_pin_returned_by_worker(
         if not create.done():
             create.cancel()
         await asyncio.gather(create, return_exceptions=True)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
         assert archive._pins == {}
 
 
@@ -568,7 +568,7 @@ async def test_cancelled_lazy_trade_recovery_releases_pin_returned_by_worker(
         if not recovery.done():
             recovery.cancel()
         await asyncio.gather(recovery, return_exceptions=True)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
         assert archive._pins == {}
 
 
@@ -757,7 +757,7 @@ async def test_shutdown_cancels_lazy_recovery_bootstrap_without_actor_leak(
         assert diagnostics["pending_recoveries"] == (session_id,)
         assert diagnostics["pending_lifecycle_owners"] == 1
 
-        await asyncio.wait_for(service.shutdown(step_timeout=0.2), timeout=2)
+        await asyncio.wait_for(service.shutdown(step_timeout=1.0), timeout=2)
         assert get_task.cancelled()
         assert bootstrap_cancelled.is_set()
         assert candidate_shutdown.is_set()
@@ -774,7 +774,7 @@ async def test_shutdown_cancels_lazy_recovery_bootstrap_without_actor_leak(
             get_task.cancel()
         await asyncio.gather(get_task, return_exceptions=True)
         if not service.store.closed:
-            await service.shutdown(step_timeout=0.2)
+            await service.shutdown(step_timeout=1.0)
 
 
 async def test_client_and_shutdown_double_cancel_compensates_real_commit(
@@ -815,6 +815,12 @@ async def test_client_and_shutdown_double_cancel_compensates_real_commit(
             await asyncio.sleep(0.005)
         assert create_task.cancelling() >= 2
 
+        # Forced cancellation does not authorize shutdown to close SQLite while
+        # an already-committed create still owns its compensating transaction.
+        await asyncio.sleep(0.3)
+        assert shutdown_task.done() is False
+        assert service.store.closed is False
+
         release_persist_call.set()
         with pytest.raises(asyncio.CancelledError):
             await create_task
@@ -841,7 +847,7 @@ async def test_client_and_shutdown_double_cancel_compensates_real_commit(
         if shutdown_task is not None:
             await asyncio.gather(shutdown_task, return_exceptions=True)
         if not service.store.closed:
-            await service.shutdown(step_timeout=0.2)
+            await service.shutdown(step_timeout=1.0)
 
 
 async def test_startup_recovery_cancellation_propagates_without_degrading_session(
@@ -852,7 +858,7 @@ async def test_startup_recovery_cancellation_propagates_without_degrading_sessio
     seed = await _service(path)
     created = await seed.create_session(replay_config())
     session_id = str(created["session_id"])
-    await seed.shutdown(step_timeout=0.2)
+    await seed.shutdown(step_timeout=1.0)
 
     service = ReplayService(
         settings=replay_settings(path),
@@ -914,4 +920,4 @@ async def test_startup_recovery_cancellation_propagates_without_degrading_sessio
         if not start_task.done():
             start_task.cancel()
         await asyncio.gather(start_task, return_exceptions=True)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)

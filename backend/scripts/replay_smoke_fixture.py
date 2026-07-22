@@ -17,6 +17,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import Protocol
 
 
 # Keep every fixture row on an exact UTC 1m boundary. The replay catalog
@@ -25,6 +26,15 @@ FIXTURE_START_MS = 1_700_000_040_000
 FIXTURE_ROWS = 4_000
 INTERVAL_MS = 60_000
 LEGACY_LIVE_TAIL_ROWS = 10
+SOAK_LIVE_SYMBOL = "QAUSDT"
+SOAK_LIVE_HISTORY_ROWS = 2_000
+SOAK_LIVE_FUTURE_MS = 5 * 60 * 60 * 1_000
+SOAK_LIVE_INTERVALS: tuple[tuple[str, int], ...] = (
+    ("1m", 60_000),
+    ("5m", 5 * 60_000),
+    ("15m", 15 * 60_000),
+    ("1h", 60 * 60_000),
+)
 AGG_TRADE_FIXTURE_MINUTES = 1_600
 AGG_TRADE_ROWS_PER_MINUTE = 2
 HISTORICAL_BOOK_FIXTURE_MINUTES = FIXTURE_ROWS
@@ -38,6 +48,36 @@ FIXTURE_SYMBOLS: tuple[tuple[str, float], ...] = (
     ("DOGEUSDT", 80.0),
     ("AVAXUSDT", 35.0),
 )
+
+
+class _ReplayAdapterReleaseBoundary(Protocol):
+    async def release_session_to_hub(self, session_id: str) -> None: ...
+
+
+async def _release_replay_adapter_when_idle(
+    service: _ReplayAdapterReleaseBoundary,
+    session_id: str,
+    *,
+    max_attempts: int = 100,
+    retry_delay_seconds: float = 0.05,
+) -> int:
+    """Retry only the service's explicit transient busy signal for local QA."""
+
+    from app.replay.errors import ReplayDomainError, ReplayErrorCode
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await service.release_session_to_hub(session_id)
+            return attempt
+        except ReplayDomainError as exc:
+            if (
+                exc.code is not ReplayErrorCode.REVISION_CONFLICT
+                or exc.message != "replay session is busy"
+                or attempt >= max_attempts
+            ):
+                raise
+            await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError("unreachable replay adapter release retry state")
 
 
 def _require_isolated_environment() -> None:
@@ -76,11 +116,26 @@ def _force_offline_upstreams() -> None:
     os.environ["INGESTION_PROXY_MODE"] = "none"
 
 
-def _fixture_row(*, index: int, open_time: int, price_origin: float = 30_000.0) -> dict[str, object]:
+def _disable_fixture_gap_maintenance() -> None:
+    """Disable storage repair loops that cannot succeed in the offline fixture."""
+
+    from app.data_engine import runtime
+
+    runtime._start_startup_gap_scan = lambda *_args, **_kwargs: None
+    runtime._start_background_gap_audit = lambda *_args, **_kwargs: None
+
+
+def _fixture_row(
+    *,
+    index: int,
+    open_time: int,
+    price_origin: float = 30_000.0,
+    interval_ms: int = INTERVAL_MS,
+) -> dict[str, object]:
     base = price_origin + (index % 80) * 2.0 + (index // 80) * 0.25
     return {
         "open_time": open_time,
-        "close_time": open_time + INTERVAL_MS - 1,
+        "close_time": open_time + interval_ms - 1,
         "open": base,
         "high": base + 12.0,
         "low": base - 12.0,
@@ -110,6 +165,31 @@ def _legacy_live_tail_rows(*, now_ms: int | None = None) -> list[dict[str, objec
     ]
 
 
+def _soak_live_window_rows(
+    *,
+    interval_ms: int,
+    now_ms: int | None = None,
+) -> list[dict[str, object]]:
+    """Build a closed-loop live window that remains gap-free for a 4h soak."""
+
+    current_ms = int(time.time() * 1_000) if now_ms is None else now_ms
+    last_closed_open_ms = (current_ms // interval_ms - 1) * interval_ms
+    first_open_ms = last_closed_open_ms - (SOAK_LIVE_HISTORY_ROWS - 1) * interval_ms
+    last_future_open_ms = (
+        (current_ms + SOAK_LIVE_FUTURE_MS) // interval_ms
+    ) * interval_ms
+    row_count = (last_future_open_ms - first_open_ms) // interval_ms + 1
+    return [
+        _fixture_row(
+            index=index,
+            open_time=first_open_ms + index * interval_ms,
+            price_origin=25_000.0,
+            interval_ms=interval_ms,
+        )
+        for index in range(row_count)
+    ]
+
+
 def _legacy_live_tail_required(
     *,
     runtime_backend_root: Path | None = None,
@@ -124,7 +204,25 @@ def _legacy_live_tail_required(
     return runtime_root != fixture_root
 
 
-def _seed_klines() -> None:
+def _smoke_live_tail_required(
+    *,
+    explicit: bool,
+    runtime_backend_root: Path | None = None,
+    fixture_backend_root: Path | None = None,
+) -> bool:
+    """Enable the bounded current tail only for an explicit QA lane or rollback."""
+
+    return explicit or _legacy_live_tail_required(
+        runtime_backend_root=runtime_backend_root,
+        fixture_backend_root=fixture_backend_root,
+    )
+
+
+def _seed_klines(
+    *,
+    include_live_tail: bool = False,
+    include_soak_live_window: bool = False,
+) -> dict[str, int]:
     from app.data_engine.storage.klines_repo import init_klines_storage, upsert_klines
 
     init_klines_storage()
@@ -137,7 +235,7 @@ def _seed_klines() -> None:
             )
             for index in range(FIXTURE_ROWS)
         ]
-        if symbol == "BTCUSDT" and _legacy_live_tail_required():
+        if symbol == "BTCUSDT" and include_live_tail:
             rows.extend(_legacy_live_tail_rows())
         inserted = upsert_klines(
             symbol,
@@ -151,6 +249,29 @@ def _seed_klines() -> None:
             raise RuntimeError(
                 f"expected {len(rows)} {symbol} fixture rows, wrote {inserted}"
             )
+    live_window_rows: dict[str, int] = {}
+    if include_soak_live_window:
+        now_ms = int(time.time() * 1_000)
+        for interval, interval_ms in SOAK_LIVE_INTERVALS:
+            rows = _soak_live_window_rows(
+                interval_ms=interval_ms,
+                now_ms=now_ms,
+            )
+            inserted = upsert_klines(
+                SOAK_LIVE_SYMBOL,
+                interval,
+                rows,
+                source="replay-soak-live-window",
+                exchange="binance",
+                market_type="spot",
+            )
+            if inserted != len(rows):
+                raise RuntimeError(
+                    f"expected {len(rows)} {SOAK_LIVE_SYMBOL} {interval} live rows, "
+                    f"wrote {inserted}"
+                )
+            live_window_rows[interval] = len(rows)
+    return live_window_rows
 
 
 def _seed_agg_trades() -> int:
@@ -427,10 +548,17 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--agg-trades", action="store_true")
     parser.add_argument("--historical-book", action="store_true")
+    parser.add_argument("--live-tail", action="store_true")
+    parser.add_argument("--live-window", action="store_true")
+    parser.add_argument("--disable-gap-maintenance", action="store_true")
     args = parser.parse_args()
     _require_isolated_environment()
     _force_offline_upstreams()
-    _seed_klines()
+    live_tail_enabled = _smoke_live_tail_required(explicit=args.live_tail)
+    live_window_rows = _seed_klines(
+        include_live_tail=live_tail_enabled,
+        include_soak_live_window=args.live_window,
+    )
     agg_trade_rows = _seed_agg_trades() if args.agg_trades else 0
     historical_book_bar_rows = (
         _seed_historical_book_futures_bars() if args.historical_book else 0
@@ -438,6 +566,8 @@ def main() -> None:
     historical_book_source = (
         _seed_historical_book_source() if args.historical_book else None
     )
+    if args.disable_gap_maintenance:
+        _disable_fixture_gap_maintenance()
 
     import uvicorn
     from app.api.v1 import symbols as symbols_api
@@ -477,6 +607,17 @@ def main() -> None:
             "fixture_start_ms": FIXTURE_START_MS,
             "fixture_rows": FIXTURE_ROWS,
             "fixture_symbols": [symbol for symbol, _price in FIXTURE_SYMBOLS],
+            "live_tail_rows": LEGACY_LIVE_TAIL_ROWS if live_tail_enabled else 0,
+            "live_window": (
+                {
+                    "symbol": SOAK_LIVE_SYMBOL,
+                    "rows_by_interval": live_window_rows,
+                    "future_horizon_ms": SOAK_LIVE_FUTURE_MS,
+                }
+                if live_window_rows
+                else None
+            ),
+            "gap_maintenance_enabled": not args.disable_gap_maintenance,
             "agg_trade_rows": agg_trade_rows,
             "historical_book_bar_rows": historical_book_bar_rows,
             "historical_book": historical_book_archive,
@@ -533,6 +674,27 @@ def main() -> None:
             reconnect_gate.set()
             service.subscribe = original_subscribe
         return {"disconnected_subscribers": len(overflow_signals)}
+
+    @app.post("/__replay_smoke__/evict-replay-adapter/{session_id}")
+    async def evict_replay_adapter(session_id: str) -> dict[str, object]:
+        """Force one durable adapter eviction for browser recovery QA."""
+
+        from fastapi import HTTPException
+
+        service = getattr(app.state, "replay_service", None)
+        if service is None:
+            raise HTTPException(status_code=404, detail="fixture replay service not found")
+        before = service.diagnostics(redact_paths=True)
+        release_attempts = await _release_replay_adapter_when_idle(service, session_id)
+        after = service.diagnostics(redact_paths=True)
+        return {
+            "evicted": True,
+            "session_id": session_id,
+            "release_attempts": release_attempts,
+            "sessions_evicted_before": int(before["sessions_evicted"]),
+            "sessions_evicted_after": int(after["sessions_evicted"]),
+            "hub_sessions_evicted_after": int(after["hub_sessions_evicted"]),
+        }
 
     @app.post("/__replay_smoke__/shutdown")
     async def replay_smoke_graceful_shutdown() -> dict[str, object]:

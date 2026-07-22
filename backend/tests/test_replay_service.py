@@ -98,7 +98,7 @@ async def test_service_create_command_idempotency_fork_and_shutdown(
     assert forked["session_id"] != session_id
 
     tasks = [handle.actor.task for handle in service._sessions.values()]
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
     assert service.store.closed is True
     assert all(task is not None and task.done() for task in tasks)
     with sqlite3.connect(tmp_path / "replay.db") as connection:
@@ -171,7 +171,7 @@ async def test_ended_command_ack_survives_derived_report_persistence_failure(
         assert unavailable.value.code is ReplayErrorCode.PERSISTENCE_DEGRADED
     finally:
         service.store._degraded_reason = None
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_blind_service_redacts_actual_time_until_explicit_reveal(
@@ -214,7 +214,7 @@ async def test_blind_service_redacts_actual_time_until_explicit_reveal(
         "replay_start_ms": START_MS + 4 * INTERVAL_MS,
         "replay_end_open_ms": START_MS + 8 * INTERVAL_MS,
     }
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_ended_session_is_reclaimed_after_stream_snapshot_and_remains_recoverable(
@@ -299,7 +299,7 @@ async def test_ended_session_is_reclaimed_after_stream_snapshot_and_remains_reco
     assert revealed["data"]["actual_history"]["replay_start_ms"] == (
         START_MS + 4 * INTERVAL_MS
     )
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_controller_free_idle_session_ttl_reclaims_and_lazy_recovers(
@@ -340,7 +340,7 @@ async def test_controller_free_idle_session_ttl_reclaims_and_lazy_recovers(
     restored = await service.get_session(first_id)
     assert restored["snapshot"]["state"] == SessionState.PAUSED.value
     assert second_id not in service._sessions
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_stale_reaper_snapshot_cannot_evict_a_concurrent_successful_command(
@@ -401,7 +401,7 @@ async def test_stale_reaper_snapshot_cannot_evict_a_concurrent_successful_comman
     finally:
         release_snapshot.set()
         await asyncio.gather(prune_task, return_exceptions=True)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_request_waits_for_claimed_eviction_then_recovers_new_actor(
@@ -461,7 +461,7 @@ async def test_request_waits_for_claimed_eviction_then_recovers_new_actor(
         if get_task is not None and not get_task.done():
             get_task.cancel()
             await asyncio.gather(get_task, return_exceptions=True)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_slow_session_creation_reserves_capacity_without_blocking_existing_commands(
@@ -517,7 +517,7 @@ async def test_slow_session_creation_reserves_capacity_without_blocking_existing
     finally:
         release_build.set()
         await asyncio.gather(create_task, return_exceptions=True)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_lazy_recovery_is_singleflight_and_does_not_block_resident_commands(
@@ -610,7 +610,7 @@ async def test_lazy_recovery_is_singleflight_and_does_not_block_resident_command
         if second is not None:
             pending.append(second)
         await asyncio.gather(*pending, return_exceptions=True)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_blind_catalog_and_bar_materialization_errors_are_redacted(
@@ -662,7 +662,7 @@ async def test_blind_catalog_and_bar_materialization_errors_are_redacted(
         "details": dict(create_failure.value.details),
     })
     assert service.diagnostics()["pending_session_reservations"] == 0
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_startup_defers_healthy_sessions_over_capacity_for_lazy_recovery(
@@ -682,7 +682,7 @@ async def test_startup_defers_healthy_sessions_over_capacity_for_lazy_recovery(
     first = await seed.create_session(replay_config())
     second = await seed.create_session(replay_config())
     session_ids = {str(first["session_id"]), str(second["session_id"])}
-    await seed.shutdown(step_timeout=0.2)
+    await seed.shutdown(step_timeout=1.0)
 
     now = [NOW_MS]
     service = ReplayService(
@@ -716,7 +716,7 @@ async def test_startup_defers_healthy_sessions_over_capacity_for_lazy_recovery(
         assert restored["snapshot"]["state"] == SessionState.PAUSED.value
         assert service._sessions[deferred_id].in_flight == 0
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_cancelled_lazy_recovery_owner_releases_claim_and_handle_lease(
@@ -797,7 +797,7 @@ async def test_cancelled_lazy_recovery_owner_releases_claim_and_handle_lease(
         if not owner.done():
             owner.cancel()
             await asyncio.gather(owner, return_exceptions=True)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_blind_internal_failures_and_capabilities_never_disclose_sentinel(
@@ -879,7 +879,7 @@ async def test_blind_internal_failures_and_capabilities_never_disclose_sentinel(
     assert service.diagnostics()["pending_handle_acquisitions"] == 0
     assert service._sessions[fork_source_id].in_flight == 0
 
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
     with sqlite3.connect(path) as connection:
         connection.execute(
             "UPDATE replay_session SET degraded_reason = ? WHERE session_id = ?",
@@ -911,4 +911,4 @@ async def test_blind_internal_failures_and_capabilities_never_disclose_sentinel(
             sort_keys=True,
         )
     finally:
-        await restarted.shutdown(step_timeout=0.2)
+        await restarted.shutdown(step_timeout=1.0)

@@ -171,7 +171,7 @@ async def test_manual_hidden_start_is_known_and_never_strict(tmp_path: Path) -> 
         assert integrity["result_label"] == "START_TIME_KNOWN"
         assert str(START_MS + 4 * INTERVAL_MS) not in json.dumps(integrity)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_integrity_policy_capital_audit_and_equity_are_atomic(
@@ -243,7 +243,7 @@ async def test_integrity_policy_capital_audit_and_equity_are_atomic(
         assert equity["samples"][-1]["state_hash"] == deposited["state_hash"]
         assert equity["bounded"] is True
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_failed_audit_projection_rolls_back_the_entire_capital_command(
@@ -343,7 +343,7 @@ async def test_failed_audit_projection_rolls_back_the_entire_capital_command(
                 (session_id,),
             ).fetchone() == (0,)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_internal_capital_command_recovers_without_expanding_v1_transport(
@@ -385,7 +385,7 @@ async def test_internal_capital_command_recovers_without_expanding_v1_transport(
         )
         expected_hash = deposited["state_hash"]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
     recovered_service = await _service(path, prefix="recovered")
     try:
@@ -393,7 +393,7 @@ async def test_internal_capital_command_recovers_without_expanding_v1_transport(
         assert recovered["snapshot"]["state_hash"] == expected_hash
         assert recovered["snapshot"]["components"]["account"]["equity"] == "10250"
     finally:
-        await recovered_service.shutdown(step_timeout=0.2)
+        await recovered_service.shutdown(step_timeout=1.0)
 
 
 async def test_reveal_is_irreversible_audited_and_report_gated(
@@ -466,7 +466,7 @@ async def test_reveal_is_irreversible_audited_and_report_gated(
                 ),
             )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_view_actions_are_coalesced_and_review_fork_is_exact(tmp_path: Path) -> None:
@@ -525,13 +525,13 @@ async def test_view_actions_are_coalesced_and_review_fork_is_exact(tmp_path: Pat
         assert forked["run"]["dataset_epoch"] == review["dataset_epoch"]
         assert forked["run"]["state_hash"] == review["selected_state_hash"]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_phase4_schema_is_additive_and_bounded(tmp_path: Path) -> None:
     path = tmp_path / "schema.db"
     service = await _service(path)
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT version FROM replay_training_schema_version WHERE singleton = 1"

@@ -1,11 +1,11 @@
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { freeHarnessPort } from "./replay-harness-port.mjs";
 import { captureReplayReleaseEvidence } from "./replay-release-evidence.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -15,12 +15,13 @@ const backendRoot = path.join(repositoryRoot, "backend");
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 function parseArgs(argv) {
-  const result = { headed: false, timeoutMs: DEFAULT_TIMEOUT_MS, chromePath: process.env.CHROME_PATH || "" };
+  const result = { headed: false, timeoutMs: DEFAULT_TIMEOUT_MS, chromePath: process.env.CHROME_PATH || "", out: null };
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     if (value === "--headed") result.headed = true;
     else if (value === "--timeout-ms") result.timeoutMs = Number(argv[++index]);
     else if (value === "--chrome-path") result.chromePath = String(argv[++index] || "");
+    else if (value === "--out") result.out = path.resolve(String(argv[++index] || ""));
     else if (/^[0-9]+$/.test(value)) result.timeoutMs = Number(value);
     else throw new Error(`Unknown replay smoke option: ${value}`);
   }
@@ -40,19 +41,6 @@ function findChrome(explicit = "") {
     "/usr/bin/chromium",
   ].filter(Boolean);
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
-}
-
-async function freePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = typeof address === "object" && address ? address.port : 0;
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
 }
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -320,7 +308,11 @@ async function main() {
   const releaseEvidence = captureReplayReleaseEvidence(repositoryRoot);
   const chromePath = findChrome(args.chromePath);
   if (!chromePath) throw new Error("Chrome or Edge not found; set CHROME_PATH or --chrome-path");
-  const [backendPort, frontendPort, debugPort] = await Promise.all([freePort(), freePort(), freePort()]);
+  const [backendPort, frontendPort, debugPort] = await Promise.all([
+    freeHarnessPort(),
+    freeHarnessPort(),
+    freeHarnessPort(),
+  ]);
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "candlescope-replay-smoke-"));
   const userDataDir = path.join(tempRoot, "chrome-profile");
   fs.mkdirSync(userDataDir);
@@ -344,11 +336,22 @@ async function main() {
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
   };
-  const backend = spawn(python, ["-m", "scripts.replay_smoke_fixture", "--port", String(backendPort)], {
-    cwd: backendRoot,
-    env: backendEnv,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const backend = spawn(
+    python,
+    [
+      "-m",
+      "scripts.replay_smoke_fixture",
+      "--port",
+      String(backendPort),
+      "--live-window",
+      "--disable-gap-maintenance",
+    ],
+    {
+      cwd: backendRoot,
+      env: backendEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   const backendTail = processTail(backend);
   const vite = spawn(process.execPath, [path.join(frontendRoot, "node_modules", "vite", "bin", "vite.js")], {
     cwd: frontendRoot,
@@ -377,6 +380,19 @@ async function main() {
   const connections = [];
   try {
     await waitForHttp(`http://127.0.0.1:${backendPort}/__replay_smoke__/fixture`, backend, args.timeoutMs);
+    const fixture = await readJson(
+      `http://127.0.0.1:${backendPort}/__replay_smoke__/fixture`,
+    );
+    assert(
+      fixture.gap_maintenance_enabled === false,
+      "offline browser smoke fixture left gap maintenance enabled",
+      fixture,
+    );
+    assert(
+      Number(fixture.live_window?.rows_by_interval?.["1m"] || 0) >= 2_000,
+      "offline browser smoke fixture did not seed the bounded live window",
+      fixture,
+    );
     await waitForHttp(`http://127.0.0.1:${frontendPort}/`, vite, args.timeoutMs);
     const debugBase = `http://127.0.0.1:${debugPort}`;
     await waitForHttp(`${debugBase}/json/version`, chrome, args.timeoutMs);
@@ -597,7 +613,13 @@ async function main() {
       recorded_at: releaseEvidence.recorded_at,
       release_evidence: releaseEvidence.evidence,
       passed: true,
-      fixture: { offline: true, rows: 4_000, backendPort, frontendPort },
+      fixture: {
+        offline: true,
+        rows: 4_000,
+        backendPort,
+        frontendPort,
+        liveWindow: fixture.live_window,
+      },
       live: { before: liveBefore, after: liveAfter, webSockets: [...new Set(liveCapture.webSockets)] },
       replay: {
         initial,
@@ -613,6 +635,10 @@ async function main() {
         missingSessionFailClosed: true,
       },
     };
+    if (args.out) {
+      fs.mkdirSync(path.dirname(args.out), { recursive: true });
+      fs.writeFileSync(args.out, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+    }
     console.log(JSON.stringify(summary, null, 2));
   } catch (error) {
     error.message = `${error.message}\nRelease evidence:\n${JSON.stringify(releaseEvidence, null, 2)}\nBackend tail:\n${backendTail().join("\n")}\nVite tail:\n${viteTail().join("\n")}\nChrome tail:\n${chromeTail().join("\n")}`;

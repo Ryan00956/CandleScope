@@ -1,0 +1,183 @@
+{
+  "schema_version": "replay.v2.release-acceptance.v1",
+  "contract": "docs/KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md#17-验收场景",
+  "expected_scenarios": 28,
+  "production_enablement": "NOT_AUTHORIZED_DEFAULTS_REMAIN_OFF",
+  "release_gates": [
+    "full_suite",
+    "browser",
+    "benchmark",
+    "soak",
+    "rollback"
+  ],
+  "scenarios": [
+    {
+      "id": 1,
+      "title": "live 打开 Hub 且 live 身份不漂移",
+      "automated": { "path": "frontend/scripts/replay-soak.mjs", "needle": "live_runtime_isolated" },
+      "release_gate": "soak"
+    },
+    {
+      "id": 2,
+      "title": "大厅列出继续查看恢复且按需加载",
+      "automated": { "path": "frontend/src/features/replay/__tests__/replayV2Hub.test.tsx", "needle": "hub bootstrap loads only lightweight saves" },
+      "release_gate": "browser"
+    },
+    {
+      "id": 3,
+      "title": "手动边界明确且随机 seed 可重现",
+      "automated": { "path": "backend/tests/test_replay_catalog.py", "needle": "test_catalog_random_selection_is_seeded_and_matches_golden" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 4,
+      "title": "HIDE_DAY 不泄露年月日",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase4.py", "needle": "test_seven_disclosure_policies_are_server_projected_without_hidden_units" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 5,
+      "title": "HIDE_ALL 跨边界无真实时间泄漏",
+      "automated": { "path": "backend/tests/test_replay_no_lookahead.py", "needle": "test_blind_public_boundary_never_leaks_future_or_actual_history_before_reveal" },
+      "release_gate": "browser"
+    },
+    {
+      "id": 6,
+      "title": "创建失败原子回滚 pin 账户和存档",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase1.py", "needle": "test_create_run_rolls_back_every_row_and_runtime_pin_on_late_failure" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 7,
+      "title": "训练页复用 live 视觉骨架",
+      "automated": { "path": "frontend/src/features/replay/__tests__/replayTrainingWorkspace.test.tsx", "needle": "v2 workspace owns the same source-neutral market slots" },
+      "release_gate": "browser"
+    },
+    {
+      "id": 8,
+      "title": "replay 全状态不请求 live 数据",
+      "automated": { "path": "backend/tests/test_replay_architecture.py", "needle": "test_replay_package_has_no_live_bus_or_private_trading_imports" },
+      "release_gate": "soak"
+    },
+    {
+      "id": 9,
+      "title": "历史左补且右侧不越过虚拟时间",
+      "automated": { "path": "backend/tests/test_replay_v2_training_history.py", "needle": "test_history_pages_are_snapshot_bound_revealed_only_and_repository_free" },
+      "release_gate": "browser"
+    },
+    {
+      "id": 10,
+      "title": "BAR 基础步形成 15m 共十五次",
+      "automated": { "path": "frontend/src/features/replay/__tests__/replayViewerProjection.test.ts", "needle": "a single revealed base bar remains a forming 15m bar until bucket close" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 11,
+      "title": "STEP_DISPLAY 先补当前桶再走完整桶",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase3.py", "needle": "test_aligned_step_finishes_forming_bucket_then_advances_full_buckets" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 12,
+      "title": "切换显示周期不改变领域 cursor",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase3.py", "needle": "test_display_switch_is_persistent_and_does_not_move_domain_state" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 13,
+      "title": "AGG_TRADE 控制和恢复 hash 一致",
+      "automated": { "path": "backend/tests/test_replay_trade_determinism.py", "needle": "test_trade_step_play_advance_max_and_restore_are_identical" },
+      "release_gate": "benchmark"
+    },
+    {
+      "id": 14,
+      "title": "快进计划按路径依赖 fail closed",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase8.py", "needle": "test_open_order_forces_full_event_scan" },
+      "release_gate": "benchmark"
+    },
+    {
+      "id": 15,
+      "title": "同根 K 止盈止损采用保守顺序",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase6.py", "needle": "test_v2_bar_same_root_tp_sl_keeps_adverse_conservative_order" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 16,
+      "title": "市价即时成交且挂单不回填",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase6.py", "needle": "test_limit_never_backfills_before_acceptance_and_fee_role_is_stable" },
+      "release_gate": "soak"
+    },
+    {
+      "id": 17,
+      "title": "费用资金费保证金爆仓账本可重算",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase6.py", "needle": "test_contract_account_fee_revision_and_ledger_recompute_to_zero" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 18,
+      "title": "缺 mark 或阶梯时爆仓不声称 exact",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase6.py", "needle": "test_simulated_liquidation_closes_normally_and_stays_distinct" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 19,
+      "title": "按商品加载且 NONE 零历史读取",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase5.py", "needle": "test_none_track_performs_zero_history_reads_then_selects_atomically" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 20,
+      "title": "风险商品强制 FULL 并持续风控",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase5.py", "needle": "test_run_level_trade_commands_force_full_and_share_available_equity" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 21,
+      "title": "多商品事件总序跨进程稳定",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase5.py", "needle": "test_global_ordering_hash_is_cross_process_and_hash_seed_stable" },
+      "release_gate": "benchmark"
+    },
+    {
+      "id": 22,
+      "title": "forced FULL gap 暂停全局时钟",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase5.py", "needle": "test_full_track_preflight_failure_pauses_without_partial_wave_and_recovers" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 23,
+      "title": "controller 失联暂停且刷新不自播",
+      "automated": { "path": "backend/tests/test_replay_actor.py", "needle": "test_controller_takeover_heartbeat_release_and_ttl_auto_pause" },
+      "release_gate": "soak"
+    },
+    {
+      "id": 24,
+      "title": "作弊变更只从事件时刻生效",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase4.py", "needle": "test_integrity_policy_capital_audit_and_equity_are_atomic" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 25,
+      "title": "Review 只读且继续创建 fork",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase4.py", "needle": "test_view_actions_are_coalesced_and_review_fork_is_exact" },
+      "release_gate": "soak"
+    },
+    {
+      "id": 26,
+      "title": "GC 保护不可重建数据并同 hash 恢复",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase7.py", "needle": "test_gc_dry_run_matches_execution_and_rehydrates_identical_hash" },
+      "release_gate": "benchmark"
+    },
+    {
+      "id": 27,
+      "title": "不支持 capability 显式显示原因",
+      "automated": { "path": "frontend/src/features/replay/__tests__/replayTrainingWorkspace.test.tsx", "needle": "capability surface never renders unsupported history as numeric zero" },
+      "release_gate": "browser"
+    },
+    {
+      "id": 28,
+      "title": "legacy v1 迁移或只读恢复不改 hash",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase1.py", "needle": "test_legacy_migration_creates_wrapper_without_changing_v1_hashes" },
+      "release_gate": "rollback"
+    }
+  ]
+}

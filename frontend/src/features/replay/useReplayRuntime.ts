@@ -938,6 +938,16 @@ export class ReplayRuntimeLifecycle {
       },
       onGeneration: ({ generation, reason, resetAuthoritativeState }) => {
         if (!isCurrentStream()) return;
+        const previous = this.store.getSnapshot();
+        if (resetAuthoritativeState
+          && previous.hasAuthoritativeSnapshot
+          && previous.controllerClientId === this.clientInstanceId
+          && previous.state !== "ENDED") {
+          // Actor recovery deliberately drops controller leases. Remember only
+          // this browser's proven ownership so the first recovered snapshot can
+          // reacquire without ever taking over another client.
+          this.acquireAfterSnapshot = true;
+        }
         const globalGeneration = this.store.getSnapshot().generation + 1;
         generationMap.set(generation, globalGeneration);
         if (resetAuthoritativeState) {
@@ -976,8 +986,11 @@ export class ReplayRuntimeLifecycle {
         this.commandRevisionFloor = Math.max(this.commandRevisionFloor, snapshot.revision);
         this.error = null;
         this.publish();
-        if (this.acquireAfterSnapshot && snapshot.controller_client_id === null) {
-          this.acquireAfterSnapshot = false;
+        const acquireController = this.acquireAfterSnapshot
+          && snapshot.controller_client_id === null
+          && snapshot.state !== "ENDED";
+        this.acquireAfterSnapshot = false;
+        if (acquireController) {
           void this.submitCommand("acquire_controller", {}).catch(() => undefined);
         }
         if (snapshot.state === "ENDED") {
@@ -1072,6 +1085,7 @@ export class ReplayRuntimeLifecycle {
     this.createRequest = null;
     this.forkRequest = null;
     this.forkPending = false;
+    this.acquireAfterSnapshot = false;
     this.operation = preservePendingCommand && this.pendingCommand !== null ? "command" : null;
   }
 

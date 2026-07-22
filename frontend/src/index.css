@@ -7845,6 +7845,19 @@ body {
 .training-hub-card > footer button { padding: 7px 9px; border: 1px solid #475569; border-radius: 5px; color: #e2e8f0; background: #1d4ed8; }
 .training-hub-card > footer button + button { color: #ddd6fe; background: transparent; border-color: #7c3aed; }
 .training-hub-card button:disabled, .training-hub-heading button:disabled { opacity: .45; cursor: not-allowed; }
+
+@media (prefers-reduced-motion: reduce) {
+  .training-hub-page *,
+  .replay-control-stack *,
+  .replay-right-rail *,
+  .replay-report-panel * {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  .replay-loading-spinner { animation: none !important; }
+}
 .training-hub-empty { display: grid; place-items: center; gap: 9px; min-height: 240px; border: 1px dashed #334155; border-radius: 11px; color: #94a3b8; background: rgba(15, 23, 42, .5); }
 .training-hub-empty strong { color: #e2e8f0; font-size: 17px; }
 .training-hub-load-more { display: block; margin: 17px auto; }

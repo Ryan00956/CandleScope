@@ -1,5 +1,10 @@
-import { useState } from "react";
-import { formatReplayPublicTime, replayOwnsController, replayProgress } from "../replayUiModel.js";
+import { useEffect, useRef, useState } from "react";
+import {
+  formatReplayPublicTime,
+  replayEffectiveTrainingState,
+  replayOwnsController,
+  replayProgress,
+} from "../replayUiModel.js";
 import type { ReplaySpeed } from "../replayTypes.js";
 import type { ReplayV2Json } from "../replayV2Types.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
@@ -46,6 +51,8 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const [showEnd, setShowEnd] = useState(false);
   const [openOrderDisposition, setOpenOrderDisposition] = useState<"expire" | "cancel" | "preserve">("expire");
   const [positionDisposition, setPositionDisposition] = useState<"keep" | "mark_close">("keep");
+  const endDialogRef = useRef<HTMLElement | null>(null);
+  const endTriggerRef = useRef<HTMLButtonElement | null>(null);
   const store = runtime.store;
   const config = store.sessionConfig;
   const tradeTape = config?.source_kind === "agg_trade";
@@ -55,7 +62,11 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const contractPortfolio = viewer?.marketTracks?.portfolio.schema_version === "replay.training.portfolio.v2"
     ? viewer.marketTracks.portfolio
     : null;
-  const effectiveState = viewer?.marketTracks?.global_clock.state ?? store.state;
+  const effectiveState = replayEffectiveTrainingState(
+    viewer?.marketTracks?.global_clock.state,
+    store.state,
+    store.controllerClientId,
+  );
   const effectiveSpeed = viewer?.marketTracks?.global_clock.speed ?? store.speed ?? 1;
   const forkPending = runtime.forkPending;
   const multiTrackForkBlocked = (viewer?.marketTracks?.tracks.length ?? 1) > 1;
@@ -83,6 +94,48 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   ) => {
     if (viewer !== undefined) void viewer.actions.submitControl(type, payload).catch(() => undefined);
   };
+
+  useEffect(() => {
+    if (!showEnd) return undefined;
+    const dialog = endDialogRef.current;
+    if (dialog === null) return undefined;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const trigger = endTriggerRef.current;
+    const focusable = () => [...dialog.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), select:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+    )].filter((item) => !item.hasAttribute("hidden") && item.getAttribute("aria-hidden") !== "true");
+    const initial = dialog.querySelector<HTMLElement>('[data-replay-action="cancel-end"]') ?? focusable()[0] ?? dialog;
+    initial.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setShowEnd(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (items.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      const restore = trigger ?? previous;
+      requestAnimationFrame(() => restore?.focus());
+    };
+  }, [showEnd]);
 
   return (
     <section className="replay-control-stack" aria-label="K 线回放控制">
@@ -132,7 +185,15 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
         </div>
       )}
       <div className="replay-control-bar">
-        <button type="button" data-replay-action="end" disabled={disabled || effectiveState === "ENDED"} onClick={() => setShowEnd(true)}>结束</button>
+        <button
+          ref={endTriggerRef}
+          type="button"
+          data-replay-action="end"
+          aria-haspopup="dialog"
+          aria-expanded={showEnd}
+          disabled={disabled || effectiveState === "ENDED"}
+          onClick={() => setShowEnd(true)}
+        >结束</button>
         <button
           type="button"
           data-replay-action="fork"
@@ -237,9 +298,18 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
 
       {showEnd && (
         <div className="replay-modal-backdrop" role="presentation">
-          <section className="replay-end-dialog" role="dialog" aria-modal="true" aria-labelledby="replay-end-title">
+          <section
+            ref={endDialogRef}
+            className="replay-end-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="replay-end-title"
+            aria-describedby="replay-end-description"
+            data-replay-focus-trap="active"
+            tabIndex={-1}
+          >
             <h2 id="replay-end-title">结束训练回放</h2>
-            <p>先暂停并固化报告。按最后已揭示 mark 平仓会记录为合成的 SESSION_END_MARK_CLOSE。</p>
+            <p id="replay-end-description">先暂停并固化报告。按最后已揭示 mark 平仓会记录为合成的 SESSION_END_MARK_CLOSE。</p>
             <label>未成交订单
               <select value={openOrderDisposition} onChange={(event) => setOpenOrderDisposition(event.target.value as typeof openOrderDisposition)}>
                 <option value="expire">到期</option><option value="cancel">取消</option><option value="preserve">保留到报告</option>
@@ -251,7 +321,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
               </select>
             </label>
             <div className="replay-dialog-actions">
-              <button type="button" onClick={() => setShowEnd(false)}>取消</button>
+              <button type="button" data-replay-action="cancel-end" onClick={() => setShowEnd(false)}>取消</button>
               <button
                 type="button"
                 data-replay-action="confirm-end"

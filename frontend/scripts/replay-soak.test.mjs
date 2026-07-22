@@ -1,7 +1,54 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { auditBoundary } from "./replay-soak.mjs";
+import {
+  auditBoundary,
+  createV2ArchiveRun,
+  createStreamingBoundaryAudit,
+  isAuthoritativeReplayStatus,
+  restoreCommandReadinessAfterReconnect,
+} from "./replay-soak.mjs";
+
+const catalogEntry = {
+  identity: {
+    exchange: "binance",
+    market_type: "spot",
+    symbol: "BTCUSDT",
+  },
+  selected_base_interval: "1m",
+};
+
+const createPayload = {
+  exchange: "binance",
+  market_type: "spot",
+  symbol: "BTCUSDT",
+  base_interval: "1m",
+  warmup_bars: 200,
+  forward_cache_ms: 86_400_000,
+  time_disclosure_policy: "HIDE_ALL",
+  random_seed: 7,
+};
+
+function reconnectCdp({ recovery }) {
+  const calls = [];
+  return {
+    calls,
+    async send(method, payload) {
+      assert.equal(method, "Runtime.evaluate");
+      calls.push(payload.expression);
+      if (payload.expression.includes("const command = document.querySelector")) {
+        return { result: { value: recovery } };
+      }
+      if (payload.expression.includes("const element = document.querySelector")) {
+        return { result: { value: true } };
+      }
+      if (payload.expression.includes("const button = document.querySelector")) {
+        return { result: { value: true } };
+      }
+      throw new Error(`Unexpected Runtime.evaluate expression: ${payload.expression}`);
+    },
+  };
+}
 
 test("replay soak blind audit catches standalone fixture epochs across HTTP shapes", () => {
   for (const value of [
@@ -37,4 +84,126 @@ test("replay soak blind audit retains calendar and filesystem path boundaries", 
     result.forbiddenMatches.map((item) => item.boundary),
     ["fixture_calendar_date", "windows_filesystem_path", "archive_or_database_path"],
   );
+});
+
+test("replay soak streaming blind audit covers every item without aggregate serialization", () => {
+  const audit = createStreamingBoundaryAudit("http");
+  audit.add({ body: JSON.stringify({ event_time_ms: 1_700_160_666_666 }) });
+  for (let index = 0; index < 10_050; index += 1) {
+    audit.add({ index, body: `safe-response-${index}` });
+  }
+  audit.add({ body: JSON.stringify({ event_time_ms: 1_700_260_666_666 }) });
+
+  const result = audit.finish();
+  assert.equal(result.itemCount, 10_052);
+  assert.equal(result.passed, false);
+  assert.equal(result.framing, "length-prefixed-json-lines.v1");
+  assert.deepEqual(result.forbiddenMatches[0]?.values, ["1700160666666", "1700260666666"]);
+  assert.match(result.sha256, /^sha256:[0-9a-f]{64}$/);
+  assert.ok(result.bytes > 0);
+  assert.equal(audit.add({ body: "late-frame" }), false);
+  assert.equal(result.itemsAfterFinish, 1);
+  assert.equal(audit.finish(), result);
+});
+
+test("replay soak reconnect accepts an already-ready controller", async () => {
+  const cdp = reconnectCdp({ recovery: "ready" });
+  assert.equal(await restoreCommandReadinessAfterReconnect(cdp, 1_000, true), "ready");
+  assert.equal(cdp.calls.some((expression) => expression.includes("const element = document.querySelector")), false);
+  assert.equal(cdp.calls.at(-1).includes('data-replay-action="step-display"'), true);
+});
+
+test("replay soak reconnect takes over before waiting for command readiness", async () => {
+  const cdp = reconnectCdp({ recovery: "takeover" });
+  assert.equal(await restoreCommandReadinessAfterReconnect(cdp, 1_000, true), "takeover");
+  assert.equal(cdp.calls.some((expression) => expression.includes('data-replay-action="takeover-controller"')), true);
+  assert.equal(cdp.calls.at(-1).includes('data-replay-action="step-display"'), true);
+});
+
+test("v2 lifecycle refreshes exactly once for catalog epoch drift", async () => {
+  const calls = [];
+  let catalogReads = 0;
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (!options.method) {
+      catalogReads += 1;
+      return {
+        catalog_epoch: `sha256:${String(catalogReads).repeat(64)}`,
+        entries: [catalogEntry],
+      };
+    }
+    if (catalogReads === 1) {
+      const error = new Error("catalog changed");
+      error.status = 409;
+      error.responseBody = {
+        error: { code: "CATALOG_EPOCH_MISMATCH" },
+      };
+      throw error;
+    }
+    return { run: { run_id: "run-2", adapter_session_id: "session-2" } };
+  };
+
+  const result = await createV2ArchiveRun({
+    backendOrigin: "http://127.0.0.1:18000",
+    createPayload,
+    index: 15,
+    requestJson,
+  });
+
+  assert.equal(result.catalogEpochRefreshes, 1);
+  assert.equal(result.catalogEpoch, `sha256:${"2".repeat(64)}`);
+  assert.equal(calls.length, 4);
+  assert.equal(
+    JSON.parse(calls[3].options.body).catalog_epoch,
+    result.catalogEpoch,
+  );
+});
+
+test("v2 lifecycle does not retry unrelated conflicts", async () => {
+  let calls = 0;
+  const requestJson = async (_url, options = {}) => {
+    calls += 1;
+    if (!options.method) {
+      return {
+        catalog_epoch: `sha256:${"a".repeat(64)}`,
+        entries: [catalogEntry],
+      };
+    }
+    const error = new Error("capacity conflict");
+    error.status = 409;
+    error.responseBody = { error: { code: "TRAINING_RUN_CREATE_FAILED" } };
+    throw error;
+  };
+
+  await assert.rejects(
+    createV2ArchiveRun({
+      backendOrigin: "http://127.0.0.1:18000",
+      createPayload,
+      index: 0,
+      requestJson,
+    }),
+    /capacity conflict/,
+  );
+  assert.equal(calls, 2);
+});
+
+test("replay soak rejects resync placeholders as command acknowledgements", () => {
+  const authoritative = {
+    connection: "connected",
+    generation: 3,
+    state: "PAUSED",
+    sourceSequence: 225,
+    revision: 652,
+    stateHash: `sha256:${"a".repeat(64)}`,
+  };
+  assert.equal(isAuthoritativeReplayStatus(authoritative), true);
+  assert.equal(isAuthoritativeReplayStatus({
+    ...authoritative,
+    connection: "resyncing",
+    sourceSequence: 0,
+    revision: 0,
+    stateHash: "",
+  }), false);
+  assert.equal(isAuthoritativeReplayStatus({ ...authoritative, stateHash: "" }), false);
+  assert.equal(isAuthoritativeReplayStatus({ ...authoritative, generation: 0 }), false);
 });

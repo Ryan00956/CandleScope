@@ -238,7 +238,7 @@ async def test_api_blind_snapshot_contains_only_synthetic_time_and_no_paths(
     assert str(START_MS + 4 * INTERVAL_MS) not in serialized
     assert str(tmp_path) not in serialized
     assert payload["snapshot"]["cursor"]["virtual_time_ms"] == SYNTHETIC_TIME_ANCHOR_MS
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_blind_api_redacts_unexpected_data_dependency_errors(
@@ -303,7 +303,7 @@ async def test_blind_api_redacts_unexpected_data_dependency_errors(
         assert sentinel not in created.text
         assert service.diagnostics()["pending_session_reservations"] == 0
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_debug_snapshot_adds_redacted_replay_diagnostics(

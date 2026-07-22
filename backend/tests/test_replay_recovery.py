@@ -74,7 +74,7 @@ async def _durable_session(
             session_id,
             _command("play", CommandType.PLAY, 2),
         )
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
     return (
         session_id,
         str(stepped["state_hash"]),
@@ -102,7 +102,7 @@ async def test_restart_recovers_paused_without_autoplay_and_matches_durable_hash
     await asyncio.sleep(0.03)
     cursor_after = (await service.get_session(session_id))["snapshot"]["cursor"]
     assert cursor_after == cursor_before
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_corrupt_recent_checkpoints_fall_back_and_replay_command_tail(
@@ -122,7 +122,7 @@ async def test_corrupt_recent_checkpoints_fall_back_and_replay_command_tail(
     assert snapshot["cursor"]["source_sequence"] == source_sequence
     assert snapshot["state"] == SessionState.PAUSED.value
     assert service.store.diagnostics()["corrupt_checkpoints_skipped"] >= 1
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
 
 async def test_recovered_actor_retains_original_initial_checkpoint_for_seek(
@@ -142,7 +142,7 @@ async def test_recovered_actor_retains_original_initial_checkpoint_for_seek(
         _command("step-before-restart", CommandType.STEP, 1, {"count": 4}),
     )
     assert stepped["cursor"]["source_sequence"] == 4
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
     recovered_service = await _service(path)
     recovered = (await recovered_service.get_session(session_id))["snapshot"]
@@ -164,7 +164,7 @@ async def test_recovered_actor_retains_original_initial_checkpoint_for_seek(
         ),
     )
     assert sought["cursor"]["source_sequence"] == 0
-    await recovered_service.shutdown(step_timeout=0.2)
+    await recovered_service.shutdown(step_timeout=1.0)
 
 
 @pytest.mark.parametrize("corrupt_latest", [False, True])
@@ -228,7 +228,7 @@ async def test_v1_recovery_uses_only_exact_latest_legacy_checkpoint(
             assert snapshot["state_hash"] == _state_hash
             assert snapshot["cursor"]["source_sequence"] == _source_sequence
     finally:
-        await recovered_service.shutdown(step_timeout=0.2)
+        await recovered_service.shutdown(step_timeout=1.0)
 
 
 async def test_old_checkpoint_replays_play_command_and_autonomous_source_tail(
@@ -261,7 +261,7 @@ async def test_old_checkpoint_replays_play_command_and_autonomous_source_tail(
         raise AssertionError("MAX replay did not reach ENDED")
     final_hash = str(snapshot["state_hash"])
     final_source = int(snapshot["cursor"]["source_sequence"])
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
     with sqlite3.connect(path) as connection:
         connection.execute(
@@ -273,7 +273,7 @@ async def test_old_checkpoint_replays_play_command_and_autonomous_source_tail(
     assert recovered["state"] == SessionState.ENDED.value
     assert recovered["state_hash"] == final_hash
     assert recovered["cursor"]["source_sequence"] == final_source
-    await recovered_service.shutdown(step_timeout=0.2)
+    await recovered_service.shutdown(step_timeout=1.0)
 
 
 async def test_recovery_tail_preserves_autonomous_events_replayed_after_seek(
@@ -345,7 +345,7 @@ async def test_recovery_tail_preserves_autonomous_events_replayed_after_seek(
         raise AssertionError("MAX replay did not finish after rewind")
     final_hash = str(final_snapshot["state_hash"])
     final_source_sequence = int(final_snapshot["cursor"]["source_sequence"])
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
     with sqlite3.connect(path) as connection:
         seek_mutation_id = connection.execute(
@@ -379,7 +379,7 @@ async def test_recovery_tail_preserves_autonomous_events_replayed_after_seek(
     assert recovered["state_hash"] == final_hash
     assert recovered["cursor"]["source_sequence"] == final_source_sequence
     assert recovered_service.store.diagnostics()["corrupt_checkpoints_skipped"] >= 1
-    await recovered_service.shutdown(step_timeout=0.2)
+    await recovered_service.shutdown(step_timeout=1.0)
 
 
 @pytest.mark.parametrize("target", ["dataset", "checkpoint"])
@@ -409,4 +409,4 @@ async def test_dataset_or_all_checkpoint_corruption_fails_closed_per_session(
     diagnostics = service.diagnostics(redact_paths=True)
     assert diagnostics["recovery_failures"] == 1
     assert diagnostics["persistence"]["path"] == "<redacted>"
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)

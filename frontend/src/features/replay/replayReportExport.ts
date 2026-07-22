@@ -1,4 +1,5 @@
 import type { ReplayReportResponse } from "./replayParser.js";
+import type { ReplayTrainingReportResponse } from "./replayIntegrityModel.js";
 import type { ReplayCommandTimelineEntry, ReplayJournalEntry, ReplaySessionConfig } from "./replayTypes.js";
 
 export interface ReplayReportExportInput {
@@ -71,6 +72,75 @@ export function replayReportToCsv(input: ReplayReportExportInput): string {
   return `${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
 }
 
+export function buildReplayTrainingReportExport(
+  response: ReplayTrainingReportResponse,
+): Readonly<Record<string, unknown>> {
+  return {
+    schema_version: "candlescope-replay-training-report.v2",
+    protocol: "replay.v2",
+    run_id: response.run_id,
+    fidelity: {
+      data: response.data_fidelity,
+      execution: response.execution_fidelity,
+    },
+    revealed: response.revealed,
+    ...(response.revealed && response.actual_history
+      ? { actual_history: response.actual_history }
+      : {}),
+    report: response.report,
+    warnings: response.report.warnings,
+    integrity: response.integrity,
+  };
+}
+
+export function replayTrainingReportToCsv(response: ReplayTrainingReportResponse): string {
+  const { report, integrity } = response;
+  const rows: unknown[][] = [
+    ["section", "key", "value", "detail"],
+    ["run", "run_id", response.run_id, ""],
+    ["fidelity", "data", response.data_fidelity, ""],
+    ["fidelity", "execution", response.execution_fidelity, ""],
+    ["integrity", "mode", integrity.integrity_mode, integrity.result_label],
+    ["integrity", "strict_eligible", integrity.strict_eligible, ""],
+    ["integrity", "start_time_known", integrity.start_time_known, ""],
+    ["integrity", "active_rule_revision", integrity.active_rule_revision, integrity.active_rule_hash],
+    ["integrity", "report_hash", report.report_hash, ""],
+    ["integrity", "state_hash", report.state_hash, ""],
+    ["integrity", "ledger_tail_hash", report.ledger_tail_hash, ""],
+    ["summary", "initial_equity", report.initial_equity, ""],
+    ["summary", "final_equity", report.final_equity, ""],
+    ["summary", "realized_pnl", report.realized_pnl, ""],
+    ["summary", "fees_paid", report.fees_paid, ""],
+    ["summary", "max_drawdown", report.max_drawdown, ""],
+    ["summary", "trade_count", report.trade_count, ""],
+    ["summary", "win_rate", report.win_rate, ""],
+    ["summary", "profit_factor", report.profit_factor, ""],
+    ["summary", "ambiguous_bar_count", report.ambiguous_bar_count, ""],
+    ...report.warnings.map((warning) => ["warning", warning.code, warning.message, warning.order_ids.join("|")]),
+    ...report.orders.map((order) => ["order", order.order_id, order.status, order]),
+    ...report.fills.map((fill) => ["fill", fill.fill_id, fill.reason, fill]),
+    ...report.closed_trades.map((trade) => ["closed_trade", trade.trade_id, trade.realized_pnl, trade]),
+    ...integrity.mutations.map((mutation) => [
+      "mutation",
+      mutation.event_id,
+      mutation.event_type,
+      {
+        public_time: mutation.public_time,
+        rule_revision: mutation.rule_revision,
+        old_value: mutation.old_value,
+        new_value: mutation.new_value,
+        reason: mutation.reason,
+        state_hash_before: mutation.state_hash_before,
+        state_hash_after: mutation.state_hash_after,
+      },
+    ]),
+    ...(response.revealed && response.actual_history
+      ? Object.entries(response.actual_history).map(([key, value]) => ["actual_history", key, value, ""])
+      : []),
+  ];
+  return `${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
+}
+
 export function downloadReplayReport(
   input: ReplayReportExportInput,
   format: "json" | "csv",
@@ -83,6 +153,23 @@ export function downloadReplayReport(
   const link = document.createElement("a");
   link.href = url;
   link.download = `candlescope-replay-${input.sessionId}.${format}`;
+  link.rel = "noopener";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+export function downloadReplayTrainingReport(
+  response: ReplayTrainingReportResponse,
+  format: "json" | "csv",
+): void {
+  const content = format === "json"
+    ? `${JSON.stringify(buildReplayTrainingReportExport(response), null, 2)}\n`
+    : replayTrainingReportToCsv(response);
+  const blob = new Blob([content], { type: format === "json" ? "application/json" : "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `candlescope-replay-run-${response.run_id}.${format}`;
   link.rel = "noopener";
   link.click();
   URL.revokeObjectURL(url);

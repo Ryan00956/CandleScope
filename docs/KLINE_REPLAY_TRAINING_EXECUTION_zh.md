@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_9_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0–8 既有门禁保持通过，Phase 9 已实现 Binance USD-M snapshot + ordered diff-depth 的独立受管历史 L2、严格 schema/checksum/range/`U/u/pu` 连续性校验、Run pin、显式 GC/rehydration、BOOK_ASSISTED 创建门禁、盘口投影、断链立即清空/暂停与显式 resync。账户执行内核仍为 `TOUCH_OR_TAPE_V2`，只声明 `BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE`，不声称真实盘口排队。代码、合成 verified fixture、100k 基准、真实浏览器、SQLite、默认关闭重启和提交回滚门禁均通过；尚未接入或宣称生产历史 L2 数据。Phase 10 尚未开始，仓库全部 replay/worker/GC/优化/L2 开关继续默认关闭。
+状态：`PHASE_10_PASS`，其唯一权威是仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 的 `passed=true`；缺失、HEAD 不同或任一 artifact hash 漂移时本状态自动视为 `PENDING/FAIL`。产品合同第 17 节 28 个场景已冻结为可机读证据矩阵；全量后端/前端、v1 live+replay smoke、v2 短 smoke、正式 1m/1-2-4-8/segment/fast-forward/book benchmark、v2 live+replay 4 小时与 100 次 archive lifecycle、键盘/焦点/ARIA/reduced-motion、运行时与旧 build 回滚、提交级反向应用均由 clean-HEAD 工具 fail closed 汇总。仓库六个发布开关继续默认关闭；本地 PASS 不授权生产启用，真实容量、告警、支持清单、观察窗与显式决策仍未完成。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -17,6 +17,8 @@ Phase 7 父提交：`463bd0ba679d6e10baa0f0958231e96220590ee7`（2026-07-22）
 Phase 8 父提交：`41d6fc1049493b1ccaec5c8deb8a64b788277d14`（2026-07-22）
 
 Phase 9 父提交：`ad233cfe5abe49565ffd5852b540a78453498a64`（2026-07-22）
+
+Phase 10 父提交：`afd802a1617daf6a05f25a1b9318fbc3da341b5c`（2026-07-22）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -1692,4 +1694,38 @@ Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_E
 Rollback: 在正常验收库副本上以 REPLAY_HISTORICAL_BOOK_ENABLED=0 真实重启：v1 core BAR/AGG_TRADE capability 仍 available；既有 BOOK Run 为 PAUSED/UNAVAILABLE，track 为 DEGRADED，projection 为 DISABLED 且 bids/asks=[]，写入 FEATURE_DISABLED，fallback_applied=false；优雅关停后该 fail-closed 状态仍持久，quick_check=ok、foreign_key_check 空、WAL/SHM 无残留、:18111 无监听。最终提交级反向应用门禁以父 tree f0696eae35883574a059421e32308ec0712688ab 为唯一接受值；最终机器证据位于 output/playwright/phase9-final-20260722/phase9-evidence.json。
 Known limitations: 仓库没有生产 Binance 历史 L2 capture、下载器或官方归档可供上线，本阶段只验证 schema/导入/运行合同和合成 verified fixture；生产启用前必须由 operator 提供真实连续捕获并通过同一 importer。BOOK_ASSISTED 不含 queue model，不改善或冒充真实 maker queue fill。100k 冷校验/导入/重建约各 23 s，尚未冻结墙钟 SLO；超大生产范围应先做分段/index/checkpoint 性能设计。自动 L2 GC/下载未上线。Phase 10 发布收口、迁移矩阵、生产观察与显式启用决策尚未开始。
 Decision: PASS；停止在 Phase 9，不进入 Phase 10。
+```
+
+### Phase 10 执行记录
+
+```text
+Phase: 10 - end-to-end product, performance, migration, and release closure
+Date: 2026-07-22
+Commit: 本 Phase 独立提交，提交号以 Git 历史和外部 release-manifest 的完整 git_head 为准
+Parent commit: afd802a1617daf6a05f25a1b9318fbc3da341b5c
+Executor: Codex
+Scope: 冻结产品合同第 17 节 28 场景到逐项自动证据；扩展既有真实浏览器 soak 为 replay.v2 clean-HEAD 4 小时/100 次 create-return-resume-end-report-review 生命周期，同时验证 live 隔离、controller/reload/resync、订单成交、六边界 no-lookahead、DOM/heap/target/subscriber 后半程上界、键盘 Hub/控制/下单、危险确认焦点陷阱、ARIA、Escape 焦点恢复和 reduced motion。扩展回滚演练覆盖活动 v2 Run checkpoint、同时关闭 core/v2、保留 archive、旧 build 忽略 v2 新表且 DB 字节不变；新增全量检查、正式基准和最终发布清单工具。未启用任何生产开关，未接入真实资金或生产历史 L2。
+Files changed: backend Phase 10 release common/check/benchmark/verifier scripts 与回归；frontend v1 smoke 外部输出、v2 soak/rollback、发布可观测字段、危险对话框可访问性与 reduced-motion、package scripts/tests；28 场景 acceptance JSON、README 与本执行记录。
+Schema/protocol changes: 无领域数据库 schema 或 replay.v1/v2 wire 变更。新增的 replay.v2.release-acceptance/checks/benchmark/manifest、replay-v2-browser-soak 与 replay-v2-rollback-drill 都是发布证据 schema，不进入产品运行时协议。
+Commands run:
+  pre-commit targeted: python -m pytest -q backend/tests/test_replay_v2_training_phase10.py；npm run typecheck；npm run test:replay；node --check replay-smoke/replay-soak/replay-rollback-drill
+  clean-HEAD full: python backend/scripts/run_replay_v2_release_checks.py --npm <npm.cmd> --out <external HEAD>/replay-v2/checks.json
+  clean-HEAD benchmark: python backend/scripts/benchmark_replay_v2_release.py --out <external HEAD>/replay-v2/benchmark.json
+  clean-HEAD v1 browser: npm run smoke:replay -- --out <external HEAD>/replay-v2/replay-v1-smoke.json
+  clean-HEAD v2 browser harness: npm run smoke:replay:v2 -- --out <external HEAD>/replay-v2/replay-v2-smoke.json
+  clean-HEAD v2 formal soak: node scripts/replay-soak.mjs --product-v2 --duration-ms 14400000 --cycles 100 --projection-events 1000000 --sample-ms 60000 --out <external HEAD>/replay-v2/replay-v2-soak.json
+  clean-HEAD rollback: node scripts/replay-v2-rollback-drill.mjs --product-v2 --baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f --out <external HEAD>/replay-v2/replay-v2-rollback.json
+  clean-HEAD final: python backend/scripts/verify_replay_v2_release.py --evidence-dir <external HEAD>/replay-v2 --out <external HEAD>/replay-v2/release-manifest.json
+  visual audit: Playwright CLI wrapper against the isolated v2 fixture, with snapshot/screenshot artifacts outside tracked source
+  repository: git diff --check；scoped Python static checks；detached git revert --no-commit in final verifier
+Targeted evidence: Phase 10 后端 5 passed；replay 前端 183 passed；TypeScript 与 Node 脚本语法通过。28 个 scenario id 必须严格为 1..28，每项 source path/needle 必须在当前 HEAD 存在，五类 release gate 必须全部被覆盖。
+Global evidence: 提交前顺序执行 backend 2002 passed（4 个既有 FastAPI deprecation warnings）与 frontend 2395 passed，architecture/typecheck/ESLint/production build 全部通过。clean-HEAD `checks.json` 再次记录两端命令、返回码、时长和 stdout/stderr SHA-256；任一命令非零、工作树脏或 HEAD 漂移均不生成 PASS 清单。最终计数和所有日志 hash 以外部 manifest 绑定的 artifact 为准。
+Performance evidence: formal aggregator 固定运行 v1 BAR 43,200 + AGG_TRADE 1,000,000 frozen-baseline、v2 1/2/4/8 轨各 10,000 iterations、10,000 segment GC、1,000,000 trade/7-day full-reference fast-forward equivalence、100,000 historical-book frames；五项必须分别满足已有 correctness/resource acceptance 后才写 benchmark passed=true。
+Browser/accessibility evidence: 正式 soak 必须为 mode=release-4h、duration>=14,400,000 ms、cycles>=100、projectionEvents>=1,000,000；每个 archive cycle 必须 return-to-Hub checkpoint/release、PAUSED 恢复、ENDED、report、read-only review 且原 state hash 不变。Hub 创建、下单、Space play/pause、ArrowRight step 使用真实键盘事件；结束确认验证对话框描述、焦点环、Escape 恢复；CDP emulation 验证 prefers-reduced-motion 生效。短 harness 不能替代正式 soak。
+No-lookahead/network evidence: 正式 soak 对 HTTP、WebSocket、DOM、localStorage、IndexedDB 和未揭示导出进行同一 forbidden-time/path 扫描；replay target 不得请求 live market endpoint，live target 不得建立 replay WebSocket。任一边界、控制恢复或运行时异常失败即停止。
+Rollback evidence: v2 活动 session 优雅关停必须持久化 PAUSED/shutdown_pause，并保留 replay_training_run 到同 adapter session/state hash；关闭 REPLAY_ENABLED、REPLAY_PRODUCT_V2_ENABLED、VITE_REPLAY_ENTRY_ENABLED、VITE_REPLAY_PRODUCT_V2_ENABLED 后 capability/persistence/entry 均关闭但 live 正常。旧 baseline build replay route=404，运行前后 replay DB 文件集合/size/SHA-256 完全一致。最终 verifier 在一次性 detached worktree 执行 git revert --no-commit，并要求 working tree 与 index 相对 Phase 父提交均 zero diff、untracked=0。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0、RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_HISTORICAL_BOOK_ENABLED=0。final verifier 从 backend config、frontend strict flag source、README 与全量测试交叉验证。
+Evidence binding: 所有发布 artifact 必须位于仓库外含完整 git_head 的目录；每份 JSON 自带相同 release_evidence.git_head/git_dirty=false。release-manifest 重新计算 artifact bytes/SHA-256、执行提交回滚并再次确认 clean HEAD；它是 PASS 的唯一权威。
+Known limitations: 没有生产历史 L2 数据、自动 L2 下载或真实 queue model；本地基准与离线浏览器 fixture 不能代替真实数据容量、监控告警、支持清单和生产观察窗。BOOK_ASSISTED 仍只声明连续性门禁且 queue_exact=false。发布开关保持关闭，生产启用需要另一个明确决策。
+Decision: 仅当外部同 HEAD release-manifest.json 为 passed=true 时 PASS；完成后停止在 Phase 10，不自动启用生产，也不进入未定义的下一 Phase。
 ```

@@ -80,6 +80,13 @@ test("Phase 3 workspace projects ViewerState and exposes only source-valid repla
   assert.match(controls, /viewer !== undefined && tradeTape/);
   assert.match(controls, /data-replay-action="step-event"/);
   assert.match(controls, /data-replay-action="cancel-advance"/);
+  assert.match(workspace, /const effectiveState = replayEffectiveTrainingState\(/);
+  assert.match(controls, /const effectiveState = replayEffectiveTrainingState\(/);
+  assert.match(workspace, /viewer\.actions\.submitControl\("play", \{\}\)/);
+  assert.match(workspace, /viewer\.actions\.submitControl\("pause", \{\}\)/);
+  assert.match(workspace, /"data-replay-session-state": effectiveState/);
+  assert.match(workspace, /"data-replay-adapter-state": runtime\.store\.state/);
+  assert.match(workspace, /"data-replay-generation": runtime\.store\.generation/);
 });
 
 test("capability surface never renders unsupported history as numeric zero or stale precision", () => {
@@ -157,4 +164,24 @@ test("workspace preferences inherit live layout once and then persist only insid
   assert.equal(restored.railWidth, 360);
   assert.equal(restored.railCollapsed, false);
   assert.equal(restored.activeDock, "paper");
+});
+
+test("Phase 10 release surface exposes soak telemetry and an accessible danger dialog", () => {
+  const workspace = source("src/features/replay/ReplayTrainingPageShell.tsx");
+  const controls = source("src/features/replay/components/ReplayControlBar.tsx");
+  const integrity = source("src/features/replay/components/ReplayIntegrityReviewPanel.tsx");
+  const styles = source("src/index.css");
+
+  assert.match(workspace, /data-replay-order-count/);
+  assert.match(workspace, /data-replay-fill-count/);
+  assert.match(controls, /data-replay-focus-trap="active"/);
+  assert.match(controls, /aria-describedby="replay-end-description"/);
+  assert.match(controls, /event\.key === "Escape"/);
+  assert.match(controls, /event\.key !== "Tab"/);
+  assert.match(controls, /requestAnimationFrame\(\(\) => restore\?\.focus\(\)\)/);
+  assert.match(integrity, /data-replay-panel="report"/);
+  assert.match(integrity, /downloadReplayTrainingReport\(report, "json"\)/);
+  assert.match(integrity, /downloadReplayTrainingReport\(report, "csv"\)/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(styles, /\.replay-loading-spinner \{ animation: none !important; \}/);
 });

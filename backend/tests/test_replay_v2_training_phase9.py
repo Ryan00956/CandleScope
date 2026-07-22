@@ -238,7 +238,7 @@ async def test_default_off_rejects_book_mode_without_affecting_core(
         )
         assert ordinary["created"] is True
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_exact_archive_enables_create_pins_projection_and_report_fidelity(
@@ -287,7 +287,7 @@ async def test_exact_archive_enables_create_pins_projection_and_report_fidelity(
                 (run_id,),
             ).fetchone()[0] == "BOUND"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_single_book_track_uses_ordered_playback_and_pauses_cleanly(
@@ -344,7 +344,7 @@ async def test_single_book_track_uses_ordered_playback_and_pauses_cleanly(
             == "AVAILABLE_EXACT"
         )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_advance_updates_book_projection_without_queue_claim(
@@ -386,7 +386,7 @@ async def test_advance_updates_book_projection_without_queue_claim(
         assert book["bids"][0] == ["101", "10"]
         assert book["queue_exact"] is False
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_forward_cache_is_track_scoped_and_backward_requests_rebuild(
@@ -439,7 +439,7 @@ async def test_forward_cache_is_track_scoped_and_backward_requests_rebuild(
             key
         ].state.previous_ordinal == 0
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_owned_archive_tamper_clears_stale_book_and_pauses_run(
@@ -503,7 +503,7 @@ async def test_owned_archive_tamper_clears_stale_book_and_pauses_run(
                 (run_id,),
             ).fetchone()[0] == "UNAVAILABLE"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_explicit_resync_restores_only_same_checksum_archive(
@@ -550,7 +550,7 @@ async def test_explicit_resync_restores_only_same_checksum_archive(
                 (run_id,),
             ).fetchone()[0] == "RESYNC"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_full_track_without_same_l2_coverage_fails_closed(
@@ -588,7 +588,7 @@ async def test_full_track_without_same_l2_coverage_fails_closed(
         tracks = await service.training.store.get_market_tracks(run_id)
         assert not any(track["symbol"] == "ETHUSDT" for track in tracks["tracks"])
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_warm_track_needs_no_book_but_cannot_upgrade_without_exact_l2(
@@ -645,7 +645,7 @@ async def test_warm_track_needs_no_book_but_cannot_upgrade_without_exact_l2(
         assert current["subscription_tier"] == "WARM"
         assert current["historical_book"]["status"] == "OFF"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_historical_book_gc_protects_pins_and_rehydrates_exact_object(
@@ -706,7 +706,7 @@ async def test_historical_book_gc_protects_pins_and_rehydrates_exact_object(
             ).fetchall()
         assert [row[0] for row in audit] == ["DRY_RUN", "RUN", "REHYDRATE"]
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_flag_off_restart_clears_book_and_never_falls_back_to_touch(
@@ -740,7 +740,7 @@ async def test_flag_off_restart_clears_book_and_never_falls_back_to_touch(
             ),
         )
     finally:
-        await enabled_service.shutdown(step_timeout=0.2)
+        await enabled_service.shutdown(step_timeout=1.0)
 
     disabled_service = await _service(
         database,
@@ -776,7 +776,7 @@ async def test_flag_off_restart_clears_book_and_never_falls_back_to_touch(
             ).fetchone()
         assert event == ("FEATURE_DISABLED", target)
     finally:
-        await disabled_service.shutdown(step_timeout=0.2)
+        await disabled_service.shutdown(step_timeout=1.0)
 
     with sqlite3.connect(database) as connection:
         persisted_track = connection.execute(
@@ -880,4 +880,4 @@ async def test_phase9_http_plan_create_inventory_gc_and_resync_contracts(
         assert resynced.json()["resynced_track_count"] == 1
         assert resynced.json()["fallback_applied"] is False
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)

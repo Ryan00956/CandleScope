@@ -319,6 +319,7 @@ class _UnsubscribeRequest:
 class _ShutdownRequest:
     future: asyncio.Future[None]
     step_timeout: float
+    force_pause_reason: bool
 
 
 _ActorRequest = (
@@ -755,7 +756,12 @@ class ReplaySessionActor:
             return self._last_snapshot
         return self._snapshot_value(materialize=False)
 
-    async def shutdown(self, *, step_timeout: float = 5.0) -> None:
+    async def shutdown(
+        self,
+        *,
+        step_timeout: float = 5.0,
+        force_pause_reason: bool = False,
+    ) -> None:
         if (
             isinstance(step_timeout, bool)
             or not isinstance(step_timeout, (int, float))
@@ -763,6 +769,8 @@ class ReplaySessionActor:
             or float(step_timeout) <= 0
         ):
             raise ValueError("step_timeout must be positive and finite")
+        if not isinstance(force_pause_reason, bool):
+            raise TypeError("force_pause_reason must be a bool")
         if self._task is None:
             self._closed = True
             self._accepting = False
@@ -778,7 +786,11 @@ class ReplaySessionActor:
                 int(self._metrics["shutdown_attempts"] or 0) + 1
             )
             loop = asyncio.get_running_loop()
-            request = _ShutdownRequest(loop.create_future(), timeout)
+            request = _ShutdownRequest(
+                loop.create_future(),
+                timeout,
+                force_pause_reason,
+            )
             self._shutdown_request = request
             try:
                 await asyncio.wait_for(self._queue.put(request), timeout=timeout)
@@ -792,6 +804,8 @@ class ReplaySessionActor:
                     "replay actor shutdown enqueue timed out",
                 ) from exc
             self._record_queue_high_water()
+        elif force_pause_reason:
+            request.force_pause_reason = True
         error: BaseException | None = None
         try:
             # The actor may first finish one atomic event, then independently
@@ -1822,9 +1836,12 @@ class ReplaySessionActor:
                 request.future.set_exception(exc)
             return
         self._begin_candidate()
-        if self._state is SessionState.PLAYING:
-            self._pause_clock()
-            self._state = SessionState.PAUSED
+        if self._state is SessionState.PLAYING or (
+            request.force_pause_reason and self._state is SessionState.PAUSED
+        ):
+            if self._state is SessionState.PLAYING:
+                self._pause_clock()
+                self._state = SessionState.PAUSED
             self._revision += 1
             self._emit_status("shutdown_pause", mandatory=True)
         if self._flush_hook is not None:

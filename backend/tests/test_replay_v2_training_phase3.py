@@ -215,7 +215,7 @@ async def test_create_run_uses_base_adapter_and_persists_initial_viewer(
         )
         assert history_binding["display_interval"] == "1m"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_create_and_viewer_switch_reject_unsupported_display_intervals(
@@ -247,7 +247,7 @@ async def test_create_and_viewer_switch_reject_unsupported_display_intervals(
                     ),
                 )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_schema_v1_upgrade_backfills_viewer_state_without_touching_v1(
@@ -259,7 +259,7 @@ async def test_schema_v1_upgrade_backfills_viewer_state_without_touching_v1(
         await _request(service, display_interval="15m")
     )
     run_id = created["run"]["run_id"]
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
     with sqlite3.connect(path) as connection:
         connection.execute("DROP TABLE replay_training_command")
@@ -286,7 +286,7 @@ async def test_schema_v1_upgrade_backfills_viewer_state_without_touching_v1(
                 (run_id,),
             ).fetchone() == ("INITIAL_VIEWER_STATE",)
     finally:
-        await restored.shutdown(step_timeout=0.2)
+        await restored.shutdown(step_timeout=1.0)
 
 
 async def test_display_switch_is_persistent_and_does_not_move_domain_state(
@@ -434,7 +434,7 @@ async def test_bar_step_display_matches_exact_base_steps_and_stale_view_binding(
                 ),
             )
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_cancel_advance_stops_on_a_committed_source_event_boundary(
@@ -528,7 +528,7 @@ async def test_cancel_advance_stops_on_a_committed_source_event_boundary(
         assert cancelled["cursor"]["source_sequence"] == 1
         assert cancelled["data"]["progress"]["status"] == "CANCELLED"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_agg_trade_supports_event_base_display_and_arbitrary_time_controls(
@@ -675,4 +675,4 @@ async def test_agg_trade_supports_event_base_display_and_arbitrary_time_controls
         assert display["data"]["plan"]["grain"] == "DISPLAY"
         assert display["cursor"]["last_agg_trade_id"] == 1_003
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)

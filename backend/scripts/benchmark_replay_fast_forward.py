@@ -34,6 +34,7 @@ from scripts.benchmark_replay_trade import (  # noqa: E402
 
 
 SCHEMA_VERSION = "replay-fast-forward-benchmark.v1"
+BENCHMARK_CLIENT_ID = "phase8-benchmark"
 
 
 def _command(
@@ -46,7 +47,7 @@ def _command(
     return ReplayCommand(
         protocol=REPLAY_PROTOCOL,
         command_id=command_id,
-        client_instance_id="phase8-benchmark",
+        client_instance_id=BENCHMARK_CLIENT_ID,
         expected_revision=revision,
         type=command_type,
         payload=payload,
@@ -61,6 +62,7 @@ async def _run_mode(
     chunk_events: int,
     tail_events: int,
     event_spacing_ms: int,
+    controller_ttl_seconds: float = 3_600,
 ) -> dict[str, object]:
     mode = "AGGREGATE_SCAN" if optimized else "FULL_EVENT_SCAN"
     dataset = _dataset(trade_count, event_spacing_ms=event_spacing_ms)
@@ -86,7 +88,7 @@ async def _run_mode(
         command_queue_size=32,
         event_buffer_size=chunk_events,
         max_emit_fps=30,
-        controller_ttl_seconds=3_600,
+        controller_ttl_seconds=controller_ttl_seconds,
         checkpoint_event_interval=max(trade_count + 1, 10_000),
         checkpoint_virtual_ms=max(dataset.end_time_ms - START_TIME_MS + 1, 300_000),
         reducer=broker,
@@ -106,6 +108,7 @@ async def _run_mode(
     consumed = 0
     coalesced = 0
     chunks = 0
+    controller_heartbeats = 0
     try:
         acquired = await actor.submit(
             _command(
@@ -142,6 +145,12 @@ async def _run_mode(
             consumed += int(result.data.get("consumed", 0))
             coalesced += int(result.data.get("coalesced_projection_events", 0))
             chunks += 1
+            if consumed < trade_count:
+                # The formal full-reference scan can exceed the controller TTL.
+                # Model the real client lease contract between bounded chunks so
+                # a long benchmark cannot expire its own controller mid-run.
+                await actor.heartbeat(BENCHMARK_CLIENT_ID)
+                controller_heartbeats += 1
             while pending and consumed >= pending[0][0]:
                 _, label = pending.pop(0)
                 gc.collect()
@@ -172,6 +181,7 @@ async def _run_mode(
             },
             "streaming": {
                 "chunks": chunks,
+                "controller_heartbeats": controller_heartbeats,
                 "chunk_event_limit": chunk_events,
                 "tail_event_count": tail_events if optimized else 0,
                 "coalesced_projection_events": coalesced,
@@ -236,6 +246,10 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             int(optimized_streaming["archive_max_page_rows"]) <= args.page_rows
         ),
         "bounded_queue": int(optimized_streaming["queue_high_water"]) <= 32,
+        "controller_lease_maintained": (
+            int(optimized_streaming["controller_heartbeats"])
+            == max(0, int(optimized_streaming["chunks"]) - 1)
+        ),
         "no_capacity_forced_flush": (
             optimized_streaming["projection_capacity_forced_flushes"] == 0
         ),
@@ -277,6 +291,10 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             ),
             "reference_bounded_queue": (
                 int(reference_streaming["queue_high_water"]) <= 32
+            ),
+            "reference_controller_lease_maintained": (
+                int(reference_streaming["controller_heartbeats"])
+                == max(0, int(reference_streaming["chunks"]) - 1)
             ),
             "reference_no_capacity_forced_flush": (
                 reference_streaming["projection_capacity_forced_flushes"] == 0

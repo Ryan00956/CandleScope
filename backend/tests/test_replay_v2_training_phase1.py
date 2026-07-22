@@ -110,7 +110,7 @@ async def test_training_schema_is_additive_and_old_v1_store_ignores_it(
 ) -> None:
     path = tmp_path / "replay.db"
     service = await _service(path)
-    await service.shutdown(step_timeout=0.2)
+    await service.shutdown(step_timeout=1.0)
 
     with sqlite3.connect(path) as connection:
         assert connection.execute(
@@ -159,7 +159,7 @@ async def test_v2_flag_off_does_not_create_training_schema(tmp_path: Path) -> No
                 "WHERE type = 'table' AND name LIKE 'replay_training_%'"
             ).fetchone() == (0,)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_create_run_atomically_persists_adapter_track_rule_action_and_pin(
@@ -204,7 +204,7 @@ async def test_create_run_atomically_persists_adapter_track_rule_action_and_pin(
             "replay_training_pin": 1,
         }
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_create_run_rolls_back_every_row_and_runtime_pin_on_late_failure(
@@ -237,7 +237,7 @@ async def test_create_run_rolls_back_every_row_and_runtime_pin_on_late_failure(
             ):
                 assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_create_rejects_catalog_epoch_drift_without_partial_rows(
@@ -257,7 +257,7 @@ async def test_create_rejects_catalog_epoch_drift_without_partial_rows(
             assert connection.execute("SELECT COUNT(*) FROM replay_session").fetchone() == (0,)
             assert connection.execute("SELECT COUNT(*) FROM replay_training_run").fetchone() == (0,)
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_thousands_of_legacy_saves_page_without_reading_dataset_blob(
@@ -327,7 +327,7 @@ async def test_thousands_of_legacy_saves_page_without_reading_dataset_blob(
         )
     finally:
         service.store._connection.set_trace_callback(None)
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
     assert len(first["items"]) == len(second["items"]) == 50
     assert {item["run_id"] for item in first["items"]}.isdisjoint(
@@ -365,7 +365,7 @@ async def test_blind_run_card_never_exposes_history_identity_or_actual_time(
         assert "partition" not in serialized
         assert listed["items"][0]["time_disclosure_policy"] == "HIDE_ALL"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_legacy_migration_creates_wrapper_without_changing_v1_hashes(
@@ -417,7 +417,7 @@ async def test_legacy_migration_creates_wrapper_without_changing_v1_hashes(
         repeated = await service.training.migrate_legacy(legacy_id, name=None)  # type: ignore[union-attr]
         assert repeated["run"]["run_id"] == "migrated-1"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_return_to_hub_pauses_checkpoints_releases_and_recovers(
@@ -463,4 +463,4 @@ async def test_return_to_hub_pauses_checkpoints_releases_and_recovers(
         recovered = await service.get_session(session_id)
         assert recovered["snapshot"]["state"] == "PAUSED"
     finally:
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)

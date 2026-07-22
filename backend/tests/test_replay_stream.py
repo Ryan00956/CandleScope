@@ -124,7 +124,7 @@ async def test_actor_subscription_is_atomic_resumable_and_bounded() -> None:
 
     for subscription in (reset, resume, missed, overflow):
         await actor.unsubscribe(subscription.token)
-    await actor.shutdown(step_timeout=0.2)
+    await actor.shutdown(step_timeout=1.0)
 
 
 @pytest.mark.anyio
@@ -168,7 +168,7 @@ async def test_cancelled_queued_subscribe_never_registers_an_orphan_token() -> N
     assert diagnostics["subscribers"] == 0
     assert diagnostics["subscriber_opens"] == 0
     assert diagnostics["pending_unsubscribes"] == 0
-    await actor.shutdown(step_timeout=0.2)
+    await actor.shutdown(step_timeout=1.0)
 
 
 @pytest.mark.anyio
@@ -218,7 +218,7 @@ async def test_unsubscribe_cleanup_bypasses_a_saturated_business_mailbox() -> No
     assert diagnostics["subscribers"] == 0
     assert diagnostics["pending_unsubscribes"] == 0
     assert diagnostics["subscriber_closes"] == 1
-    await actor.shutdown(step_timeout=0.2)
+    await actor.shutdown(step_timeout=1.0)
 
 
 @pytest.mark.anyio
@@ -256,7 +256,7 @@ async def test_actor_flushes_pending_projection_on_fps_deadline_without_new_even
 
     await actor.submit(_command("pause", CommandType.PAUSE, 2))
     await actor.unsubscribe(subscription.token)
-    await actor.shutdown(step_timeout=0.2)
+    await actor.shutdown(step_timeout=1.0)
 
 
 @pytest.mark.anyio
@@ -325,7 +325,7 @@ async def test_subscription_snapshot_closes_old_pending_projection_range() -> No
     assert update["bar"]["open_time_ms"] == 3_000
 
     await actor.unsubscribe(subscription.token)
-    await actor.shutdown(step_timeout=0.2)
+    await actor.shutdown(step_timeout=1.0)
 
 
 def _event(event_type: str = "replay.snapshot") -> ReplayEvent:
@@ -558,7 +558,7 @@ async def test_websocket_cancel_during_service_handoff_cannot_orphan_actor_token
         assert diagnostics["subscriber_closes"] == 1
     finally:
         release_handoff_exit.set()
-        await service.shutdown(step_timeout=0.2)
+        await service.shutdown(step_timeout=1.0)
 
 
 def test_websocket_handoff_heartbeat_and_disconnect_cleanup() -> None:

@@ -4,9 +4,11 @@ import type {
   ReplayCatalogEntry,
   ReplayExecutionFidelity,
   ReplaySessionConfig,
+  ReplaySessionState,
   ReplaySourceKind,
 } from "./replayTypes.js";
 import type { ReplayStoreSnapshot } from "./replayStore.js";
+import type { ReplayV2RunState } from "./replayV2Types.js";
 
 export const REPLAY_ACTIVITY_VIEW_LIMIT = 20;
 
@@ -173,6 +175,20 @@ export function buildReplaySessionConfig(
 
 export function replayOwnsController(store: ReplayStoreSnapshot, clientInstanceId: string): boolean {
   return store.controllerClientId === clientInstanceId;
+}
+
+export function replayEffectiveTrainingState(
+  globalState: ReplayV2RunState | null | undefined,
+  adapterState: ReplaySessionState | null,
+  controllerClientId: string | null,
+): ReplaySessionState | ReplayV2RunState | null {
+  if (globalState === "ERROR" || adapterState === "ERROR") return "ERROR";
+  if (globalState === "ENDED" || adapterState === "ENDED") return "ENDED";
+  if (controllerClientId === null && (globalState === "PLAYING" || globalState === "ADVANCING")) {
+    return adapterState === "INITIALIZING" ? "INITIALIZING" : "PAUSED";
+  }
+  if (controllerClientId === null && adapterState === "PLAYING") return "PAUSED";
+  return globalState ?? adapterState;
 }
 
 export function replayProgress(store: ReplayStoreSnapshot): number | null {

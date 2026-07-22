@@ -330,6 +330,17 @@ class ReplayForkPayload(_StrictModel):
     event_id: str = Field(min_length=1, max_length=128)
 
 
+class ReplaySegmentGcPlanPayload(_StrictModel):
+    protocol: Literal["replay.data.gc.v1"]
+    target_reclaim_bytes: int = Field(ge=1, le=1_000_000_000_000)
+    max_segments: int = Field(default=100, ge=1, le=10_000)
+
+
+class ReplaySegmentGcRunPayload(ReplaySegmentGcPlanPayload):
+    plan_hash: str = Field(min_length=71, max_length=71)
+    confirm: Literal[True]
+
+
 async def enforce_replay_request_limit(request: Request) -> None:
     _validate_declared_replay_length(request)
     cached = getattr(request, "_body", None)
@@ -480,6 +491,87 @@ async def create_replay_v2_run(
 
 
 @router.post(
+    "/runs/data-segments/plan",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def plan_replay_v2_data_segment(
+    request: Request,
+    payload: TrainingRunCreatePayload,
+) -> dict[str, object]:
+    create_request = TrainingRunCreateRequest.from_dict(
+        payload.model_dump(mode="json")
+    )
+    return await _training_service(request).segment_plan(create_request)
+
+
+@router.get("/runs/data-segments")
+async def list_replay_v2_data_segments(request: Request) -> dict[str, object]:
+    return await _training_service(request).list_data_segments()
+
+
+@router.post(
+    "/runs/data-segments/gc/dry-run",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def dry_run_replay_v2_data_segment_gc(
+    request: Request,
+    payload: ReplaySegmentGcPlanPayload,
+) -> dict[str, object]:
+    return await _training_service(request).data_segment_gc_plan(
+        target_reclaim_bytes=payload.target_reclaim_bytes,
+        max_segments=payload.max_segments,
+    )
+
+
+@router.post(
+    "/runs/data-segments/gc/run",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def run_replay_v2_data_segment_gc(
+    request: Request,
+    payload: ReplaySegmentGcRunPayload,
+) -> dict[str, object]:
+    return await _training_service(request).data_segment_gc_run(
+        plan_hash=payload.plan_hash,
+        target_reclaim_bytes=payload.target_reclaim_bytes,
+        max_segments=payload.max_segments,
+    )
+
+
+@router.get("/runs/data-segments/jobs/{job_id}")
+async def get_replay_v2_data_segment_job(
+    request: Request,
+    job_id: str,
+) -> dict[str, object]:
+    normalized = validate_identifier(job_id, field_name="job_id")
+    return await _training_service(request).segments.get_prepare_job(normalized)
+
+
+@router.post(
+    "/runs/data-segments/jobs/{job_id}/cancel",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def cancel_replay_v2_data_segment_job(
+    request: Request,
+    job_id: str,
+) -> dict[str, object]:
+    normalized = validate_identifier(job_id, field_name="job_id")
+    return await _training_service(request).segments.cancel_prepare(normalized)
+
+
+@router.post(
+    "/runs/data-segments/{segment_id}/rehydrate",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def rehydrate_replay_v2_data_segment(
+    request: Request,
+    segment_id: str,
+) -> dict[str, object]:
+    normalized = validate_identifier(segment_id, field_name="segment_id")
+    return await _training_service(request).segments.rehydrate(normalized)
+
+
+@router.post(
     "/runs/session/{session_id}/return-to-hub",
     dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
 )
@@ -552,6 +644,14 @@ async def replay_v2_training_viewer(
 ) -> dict[str, object]:
     viewer = await _training_service(request).get_viewer_state(run_id)
     return {"protocol": REPLAY_V2_PROTOCOL, "viewer_state": viewer}
+
+
+@router.get("/runs/{run_id}/data-segments")
+async def replay_v2_training_data_segments(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).list_data_segments(run_id=run_id)
 
 
 @router.get("/runs/{run_id}/tracks")

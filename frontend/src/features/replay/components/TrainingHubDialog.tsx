@@ -44,6 +44,12 @@ function CatalogOption({ entry }: { readonly entry: ReplayCatalogEntry }) {
   );
 }
 
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
   const { draft, evaluation } = runtime;
   if (!runtime.createOpen) return null;
@@ -316,7 +322,20 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         ))}
         <p>入金、出金、费率、杠杆上限、Sandbox 固定资金费与不可逆时间揭示均写入审计事件；Challenge 仍全部锁定。</p>
       </fieldset>
-      <div className="training-hub-capability-boundary" aria-label="Phase 6 能力边界">
+      <div className="training-hub-capability-boundary" aria-label="Phase 7 数据与能力边界">
+        <h3>Phase 7 按需数据段</h3>
+        {runtime.segmentPlan === null ? (
+          <p>参数变更后会在提交前重新生成服务端 prepare plan；选择商品本身不会加载历史。</p>
+        ) : (
+          <ul>
+            <li><strong>动作</strong> — {runtime.segmentPlan.prepare_action}</li>
+            <li><strong>预计范围</strong> — {runtime.segmentPlan.estimated_rows} rows · {formatBytes(runtime.segmentPlan.estimated_size_bytes)}</li>
+            <li><strong>本地同源 READY 库存</strong> — {runtime.segmentPlan.existing_ready_segments} segments · {formatBytes(runtime.segmentPlan.existing_ready_bytes)}（创建时再核对范围）</li>
+            <li><strong>失败策略</strong> — 校验失败 quarantine，禁止 Run 引用</li>
+            <li><strong>后台下载</strong> — {runtime.segmentPlan.download_worker_enabled ? "显式启用" : "默认关闭"}</li>
+            <li><strong>自动 GC</strong> — {runtime.segmentPlan.auto_gc_enabled ? "显式启用" : "默认关闭"}</li>
+          </ul>
+        )}
         <h3>Phase 6 合约账户已启用</h3>
         <p>新 Run 固定使用 TOUCH_OR_TAPE_V2；当前已揭示参考价立即 taker，后续触价挂单 maker，并持续标注“不含盘口排队”。</p>
         <h3>能力与 fidelity 边界</h3>

@@ -62,6 +62,7 @@ from .multitrack import (
     stable_market_event_order,
 )
 from .storage import TrainingRunStore
+from .segments import ReplaySegmentManager
 
 if TYPE_CHECKING:
     from app.replay.service import ReplayService
@@ -99,12 +100,20 @@ class TrainingRunService:
     ) -> None:
         self.replay_service = replay_service
         self.store = TrainingRunStore(replay_service.store)
+        self.segments = ReplaySegmentManager(
+            replay_service.store,
+            download_worker_enabled=(
+                replay_service.settings.replay_segment_download_worker_enabled
+            ),
+            auto_gc_enabled=replay_service.settings.replay_segment_auto_gc_enabled,
+        )
         self._run_id_factory = run_id_factory
         self._advance_jobs: dict[tuple[str, str], dict[str, object]] = {}
         self._run_actors: dict[str, TrainingRunActor] = {}
 
     async def start(self) -> None:
         await self.store.start()
+        await self.segments.start()
 
     async def shutdown(self) -> None:
         """Stop server-owned ordered playback before replay.v1 actors close."""
@@ -117,6 +126,7 @@ class TrainingRunService:
                     tasks.append(task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self.segments.shutdown()
 
     async def list_runs(
         self,
@@ -137,6 +147,51 @@ class TrainingRunService:
 
     async def get_run(self, run_id: str) -> dict[str, object]:
         return await self.store.get_run(self._identifier(run_id, field_name="run_id"))
+
+    async def segment_plan(
+        self, request: TrainingRunCreateRequest
+    ) -> dict[str, object]:
+        if not isinstance(request, TrainingRunCreateRequest):
+            raise TypeError("request must be TrainingRunCreateRequest")
+        return await self.segments.plan_for_request(request)
+
+    async def list_data_segments(
+        self, *, run_id: str | None = None
+    ) -> dict[str, object]:
+        normalized = (
+            None
+            if run_id is None
+            else self._identifier(run_id, field_name="run_id")
+        )
+        redact = normalized is None
+        if normalized is not None:
+            integrity = await self.store.integrity(normalized)
+            redact = not bool(integrity.get("revealed"))
+        return await self.segments.list_segments(
+            run_id=normalized,
+            redact_ranges=redact,
+        )
+
+    async def data_segment_gc_plan(
+        self, *, target_reclaim_bytes: int, max_segments: int
+    ) -> dict[str, object]:
+        return await self.segments.gc_plan(
+            target_reclaim_bytes=target_reclaim_bytes,
+            max_segments=max_segments,
+        )
+
+    async def data_segment_gc_run(
+        self,
+        *,
+        plan_hash: str,
+        target_reclaim_bytes: int,
+        max_segments: int,
+    ) -> dict[str, object]:
+        return await self.segments.gc_run(
+            plan_hash=plan_hash,
+            target_reclaim_bytes=target_reclaim_bytes,
+            max_segments=max_segments,
+        )
 
     async def get_viewer_state(self, run_id: str) -> dict[str, object]:
         normalized = self._identifier(run_id, field_name="run_id")
@@ -403,6 +458,10 @@ class TrainingRunService:
             session_state: Mapping[str, object],
             component_state: Mapping[str, object],
             broker_config: Mapping[str, object],
+            dataset_ref: Mapping[str, object],
+            dataset_blob: Mapping[str, object],
+            actual_replay_start_ms: int,
+            actual_replay_end_ms: int,
         ):
             return self.store.initial_run_writer(
                 run_id=run_id,
@@ -411,6 +470,10 @@ class TrainingRunService:
                 session_state=session_state,
                 component_state=component_state,
                 broker_config=broker_config,
+                dataset_ref=dataset_ref,
+                dataset_blob=dataset_blob,
+                actual_replay_start_ms=actual_replay_start_ms,
+                actual_replay_end_ms=actual_replay_end_ms,
             )
 
         try:
@@ -525,6 +588,7 @@ class TrainingRunService:
                     )
                 released += 1
             checkpoint = await self.store.checkpoint_market_tracks(run_id)
+            await self.store.set_actor_segment_refs(run_id, active=False)
         result: dict[str, object] = {
             "protocol": "replay.v2",
             "run_id": run_id,
@@ -624,6 +688,7 @@ class TrainingRunService:
                 status_code=409,
                 details={"compatibility": binding["compatibility"]},
             )
+        await self.store.set_actor_segment_refs(normalized_run, active=True)
         session_id = str(binding["adapter_session_id"])
         if command.type is ReplayV2CommandType.CANCEL_ADVANCE:
             result = await self._cancel_advance(command, session_id=session_id)

@@ -7,7 +7,8 @@ by default while the phase-gated v2 workbench is built and verified.
 The phase-gated v2 workbench now includes the Training Hub, source-neutral market
 workspace, ViewerState and aligned replay controls, Phase 4 server-owned time
 disclosure and Review/Fork, Phase 5 deterministic multi-market tracks, and the
-Phase 6 versioned contract account. New TrainingRuns use `TOUCH_OR_TAPE_V2`,
+Phase 6 versioned contract account, plus Phase 7 on-demand data segments and
+safe GC. New TrainingRuns use `TOUCH_OR_TAPE_V2`,
 configured maker/taker policies, CROSS or ISOLATED margin, approximate Sandbox
 funding, simulated-account liquidation events, and a hash-chained cash ledger.
 The UI continuously labels the no-book execution boundary. With
@@ -16,6 +17,17 @@ configure entry opens the Hub; opaque `?session=<id>` entries continue through
 the proven v1 runtime adapter. Hub bootstrap performs only the bounded lightweight
 `GET /api/v1/replay/runs` request. Historical datasets are not loaded until a
 concrete training session is entered.
+
+Phase 7 adds a checksum-bound data-segment registry over the existing immutable
+BAR snapshots and raw aggTrade partition manifests without rewriting either
+production store. Opening the create panel reads a small prepare plan only;
+selecting a symbol does not fetch history, and create prepares only the selected
+symbol/range. The Hub shows estimated rows/bytes, same-source READY inventory
+(with exact range reuse revalidated at create), and the fail-closed quarantine
+policy. Automatic download and automatic GC workers
+remain disabled by default. Explicit GC is LRU, rehydration-aware, and requires
+a fresh dry-run plan hash before any replay-owned file can be reclaimed;
+embedded/non-rebuildable archives are never candidates.
 
 With the repository-default `VITE_REPLAY_PRODUCT_V2_ENABLED=0`, composition is
 still exactly v1. The backend additionally requires both replay flags before

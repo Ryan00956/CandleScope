@@ -977,6 +977,10 @@ class ReplayService:
                     session_state=durable_state,
                     component_state=snapshot["components"],
                     broker_config=broker.to_dict(),
+                    dataset_ref=persisted_ref,
+                    dataset_blob=persisted_blob,
+                    actual_replay_start_ms=actual_dataset.replay_start_ms,
+                    actual_replay_end_ms=actual_dataset.replay_end_open_ms,
                 )
                 if not callable(extension_write):
                     raise TypeError("replay persistence extension must be callable")

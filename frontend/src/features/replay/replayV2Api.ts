@@ -2,6 +2,10 @@ import { ReplayApiClient } from "./replayApi.js";
 import type { ReplayApiClientOptions, ReplayCatalogQuery } from "./replayApi.js";
 import type { ReplayCapabilities, ReplayCatalog } from "./replayTypes.js";
 import {
+  parseReplaySegmentPreparePlan,
+  type ReplaySegmentPreparePlan,
+} from "./replaySegmentTypes.js";
+import {
   parseTrainingRunListResponse,
   parseTrainingRunMutationResponse,
   parseTrainingRunReturnResponse,
@@ -164,6 +168,17 @@ export class ReplayV2ApiClient {
     signal?: AbortSignal,
   ): Promise<TrainingRunMutationResponse> {
     return this.request("/runs", parseTrainingRunMutationResponse, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  segmentPlan(
+    payload: TrainingRunCreatePayload,
+    signal?: AbortSignal,
+  ): Promise<ReplaySegmentPreparePlan> {
+    return this.request("/runs/data-segments/plan", parseReplaySegmentPreparePlan, {
       method: "POST",
       body: JSON.stringify(payload),
       ...(signal ? { signal } : {}),

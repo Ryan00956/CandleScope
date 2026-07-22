@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_6_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0 契约边界、Phase 1 TrainingRun/训练大厅、Phase 2 共用市场工作区、Phase 3 ViewerState/固定周期投影/BAR/AGG_TRADE 推进语义、Phase 4 时间披露/完整性审计/权益曲线/只读 Review/Fork、Phase 5 多商品 MarketTrack/稳定全局时钟/订阅分级/共享组合投影，以及 Phase 6 TOUCH_OR_TAPE_V2、版本化合约规则/费率、CROSS/ISOLATED、Sandbox funding、模拟账户强平与结构化账户侧栏均已完成。Phase 7 尚未开始，Replay v1/v2 仓库默认开关均保持关闭。
+状态：`PHASE_7_PASS`。产品合同已于 2026-07-21 确认并冻结；Phase 0–6 既有门禁保持通过，Phase 7 的统一数据段注册表、本地 BAR/raw aggTrade adapter、prepare/quarantine/cancel/single-flight、pin/rehydration manifest、显式 GC dry-run/run 与 Hub 按需 prepare plan 已实现，并通过代码、全量测试、性能、真实浏览器、旧构建与整提交回滚门禁。Phase 8 尚未开始，Replay v1/v2、segment 下载 worker 与自动 GC 的仓库默认开关均保持关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -11,6 +11,8 @@ Phase 0 父提交：`2346dba32c0ce9e35dd6941bc4445366da4362a7`（2026-07-21）
 Phase 1 父提交：`bb253d0982c36776452c2b1e0a0cf3f1b211162f`（2026-07-21）
 
 Phase 5 父提交：`c6921c9f7f813adabd452e162719baf20d700fb8`（2026-07-21）
+
+Phase 7 父提交：`463bd0ba679d6e10baa0f0958231e96220590ee7`（2026-07-22）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -141,6 +143,8 @@ backend/data/replay-dev/replay_segments/
 | `VITE_REPLAY_PRODUCT_V2_ENABLED` | `0` | replay document 选择 v2 hub/workspace |
 | `RAW_AGG_TRADE_ARCHIVE_ENABLED` | `0` | 成交 archive 能力 |
 | `REPLAY_HISTORICAL_BOOK_ENABLED` | `0` | 可选历史 L2，Phase 9 前不存在 |
+| `REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED` | `0` | 外部 segment 下载生产者开关；Phase 7 不自动启动远程下载 |
+| `REPLAY_SEGMENT_AUTO_GC_ENABLED` | `0` | segment 自动 GC 调度开关；Phase 7 只开放显式 dry-run/run |
 
 前端开关从来不是安全边界。v2 直接 URL、API、WS 和后台任务都必须由后端 capability 拒绝。
 
@@ -185,6 +189,8 @@ $env:REPLAY_ENABLED = '1'
 $env:REPLAY_PRODUCT_V2_ENABLED = '1'
 $env:RAW_AGG_TRADE_ARCHIVE_ENABLED = '0'
 $env:REPLAY_HISTORICAL_BOOK_ENABLED = '0'
+$env:REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED = '0'
+$env:REPLAY_SEGMENT_AUTO_GC_ENABLED = '0'
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18082
 ```
 
@@ -1566,4 +1572,41 @@ Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_E
 Rollback: 干净 Phase 6 代码树上执行 feature-flag/v1 old-build drill PASS；baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f 的 replay route 为 404，graceful shutdown 状态为 shutdown_pause，最终演练内旧 build 运行前后 replay DB SHA-256 均为 e34457045633a7384f1acaf3a725279d68737ba6165e3bbb2b1b9b7629c7382。Phase 6 单提交反向应用后的 tree 为 7344bd30bebc88179a942167ae3c739489365eea，与父提交 tree 完全一致。
 Known limitations: HISTORICAL_EXACT funding 因缺对齐的交易所历史 mark/index/funding 继续 fail closed；Sandbox fixed funding、proxy mark 与模拟强平均为明确 APPROX。历史 L2/盘口排队仍留给 Phase 9；当前 TOUCH_OR_TAPE_V2 不声称 queue position、partial queue 或交易所真实 liquidation engine parity。
 Decision: PASS；停止在 Phase 6，不进入 Phase 7。
+```
+
+### Phase 7 执行记录
+
+```text
+Phase: 7 - on-demand replay segments, rehydration, pin lifecycle, and safe GC
+Date: 2026-07-22
+Commit: 本 Phase 独立提交，提交号以 Git 历史为准
+Parent commit: 463bd0ba679d6e10baa0f0958231e96220590ee7
+Executor: Codex
+Scope: 新增统一 replay data segment registry，把既有不可变 BAR snapshot 与 raw aggTrade partition manifest 作为 adapter 纳入同一身份、checksum、coverage、health 和引用模型；Run create/fork/attach 在原事务内注册 archive/actor 引用。新增受信 manifest 校验、外部 prepare single-flight/progress/cancel/retry/quarantine、显式 GC dry-run/run、两阶段 rename、崩溃恢复、同 hash rehydration，以及 Hub 提交前按需 prepare plan。未启用自动远程下载或自动 GC，也未进入 Phase 8 快进优化。
+Files changed: backend additive schema v6、segment manager/adapter、training store/service/API/config、10k registry benchmark、契约/竞态/崩溃/路径安全测试；frontend 严格 prepare-plan parser、API/lifecycle、Hub 能力边界与测试/README；本执行记录。原始 K 线表、raw aggTrade partition 和 replay.v1 公共协议均未改写。
+Schema/protocol changes: replay.training 物理 schema additive 升至 6，新增 replay_data_segment、replay_data_segment_ref、replay_data_prepare_job、replay_data_gc_audit 及 LRU/identity/ref/single-flight/audit 索引。新增 replay.data.segment.v1、replay.data.prepare.v1、replay.data.rehydration.v1、replay.data.gc.v1 内部/管理合同；replay.v1 与冻结的 replay.v2 command enum 不扩张。
+Commands run:
+  backend targeted: python -m pytest -q tests/test_replay_v2_training_phase7.py tests/test_replay_v2_segment_benchmark.py
+  backend full: python -m pytest -q
+  backend static: python -m compileall -q app scripts；python -m ruff check <Phase 7 Python scope>
+  backend baseline audits: python -m ruff check .；python -m mypy app，并在父提交临时 worktree 同机对照
+  benchmark: python scripts/benchmark_replay_segments.py --segments 10000 --iterations 20 --p95-budget-ms 1500 --json-out ../output/playwright/phase7-final-20260722/phase7-segment-benchmark.json
+  frontend targeted: npm run test:replay
+  frontend full: npm run check
+  browser: Playwright CLI wrapper against isolated offline fixture :18108 and Vite :15208
+  repository/database: git diff --check；SQLite PRAGMA quick_check/foreign_key_check；segment/ref/audit SQL audit；WAL/SHM 与端口释放检查
+  rollback: 待本提交创建后在干净树执行 replay-rollback-drill.mjs 与 detached worktree tree-revert 比对
+Targeted tests: Phase 7 主文件与 10k benchmark 共 19 passed；frontend replay 176 passed。覆盖 create/fork/attach 原子注册、同内容去重、actor/checkpoint/review 生命周期、BAR/aggTrade adapter、single-flight/cancel/retry、manifest schema/origin/checksum/epoch/size/identity/range 错误、checksum quarantine、进程中断、Windows 文件锁、GC/pin 竞争、dry-run 精确集合、不可重建保护、同 hash 恢复、崩溃恢复、非规范路径、目录替换不递归删除、极小 Decimal 持仓保护与 no-lookahead HTTP 脱敏。
+Global tests: backend 1969 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2388 passed；architecture/typecheck/ESLint/Vite production build 全部通过。Phase 7 Python scope Ruff 0 violations，compileall PASS。
+Global baseline audits: 全仓 Ruff 与父提交同为 36 个既有违规；同机 mypy 父提交与 Phase 7 均为 536 errors/108 files，checked files 从 263 增至 264，新增 segments.py 不增加错误归属。
+Registry/pin evidence: Run create 在同一 SQLite 事务内写入 checksum-bound EMBEDDED_ARCHIVE/READY segment、RUN_ARCHIVE 与 ACTOR refs、READY prepare receipt；相同不可变数据去重 segment 但保留独立 Run refs。return-to-Hub 释放 ACTOR，重新 command 在兼容性检查后激活；checkpoint ref 以每 Run/segment 一个稳定 latest key 记录已提交证明并立即 released，重复 checkpoint 不增长 ref 表；Review/Recovery 与 open position 始终保护。旧 schema v5 pin 启动迁移只补缺失 RUN_ARCHIVE，不会把已释放 actor ref 重新激活。
+Prepare/rehydration evidence: 外部 producer 必须发布 replay-owned root 内的非 symlink 普通文件，schema/origin/checksum/schema version/dataset epoch/size/source identity/range 与绝对 trusted-file locator 全部匹配后才原子 publish；失败进入 quarantine，partial/temp 不可引用。并发同 identity single-flight，cancel 不 publish，重启把中断 job 标为 PROCESS_RESTART_INTERRUPTED 后可重试。可重建冷段 GC 后按保留 manifest 恢复，checksum 与 dataset hash 完全相同。
+GC safety evidence: dry-run 由单批 registry/ref/job 读取生成 LRU 候选与 canonical plan hash；run 先重算 hash，再在事务 claim 中重验 generation、storage、rebuildable、prepare、actor/review/recovery、活动 Run 与持仓保护。目标字节最小为 1，不能用 0 表示“全部”。删除采用 owned path 精确格式、普通文件探针和两阶段 rename；Windows sharing violation 恢复 READY；缺失/目录/符号链接进入 quarantine，意外目录与哨兵文件不递归删除。不可重建、嵌入式、有仓位或活动引用 segment 的自动回收集合始终为空。
+Performance evidence: 10,000 个真实 replay-owned 普通文件、20 次单批 registry + 确定性 GC plan：p50 736.826 ms、p95 842.475 ms、max 847.188 ms，低于 1500 ms 预算；candidate/protected=10000/0，estimated bytes=40960000，plan hash=sha256:4049ab4f826b3023d3e4af647529d88c3f5bc198ceb5f849f695ff80543d99df，deterministic evidence hash=sha256:ec22475cb36921c008c11df455080487a28ddc981088aad88b6f8ab933eae7e2。
+Browser/API evidence: Hub 首屏动态请求只有 GET /runs?limit=50，segment/history load 为 0；打开新建后才请求 capability/catalog/prepare-plan，商品参数变化清除旧 plan，POST create 前重新规划。AVAXUSDT 创建返回 201；全局和 hidden Run registry 的真实 range/source 均 redacted，trusted file/URL 永不公开。GC dry-run 对活动的 EMBEDDED_ARCHIVE/non-rebuildable 段返回 0 candidate、1 protected，理由精确为 ACTIVE_ACTOR/NON_REBUILDABLE/STORAGE_NOT_REPLAY_OWNED；download/auto-GC flags 均 false。workspace console errors=0；开发 Hub 仅 favicon 404 与两个既有 slider-vertical CSS warning。证据与截图在 output/playwright/phase7-final-20260722。
+Database evidence: 隔离 fixture 优雅关停后 training schema_version=6、quick_check=ok、foreign_key_check 空、1 segment、2 refs、dangling refs=0、1 GC audit；最终 SQLite 连接关闭后 WAL/SHM 均不存在，DB SHA-256=c84df965fb0a751ea068983c7145e7a5bb79a84e907480331eddfb2253e1a11d，:18108/:15208 均释放。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0、RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_HISTORICAL_BOOK_ENABLED=0、REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0、REPLAY_SEGMENT_AUTO_GC_ENABLED=0。关闭 worker/auto-GC 保留 registry/manifest/ref/audit，不删除已准备对象；旧 build 可忽略 additive schema v6。
+Rollback: 干净 Phase 7 提交上执行 feature-flag/v1 old-build drill PASS；baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f 的 replay route 为 404，graceful shutdown 状态为 shutdown_pause，演练内旧 build 运行前后 replay DB SHA-256 均为 817de9be0579bbf414de1294b60ca47fd69d3af058952c226cef7effe451dd28。Phase 7 整提交反向应用后的 tree 为 c8cf7e1ed82a665005a66597949306eee8fa45ab，与父提交 463bd0ba679d6e10baa0f0958231e96220590ee7 的 tree 完全一致。
+Known limitations: 当前 BAR 与 raw aggTrade 都是已有本地不可变数据的 adapter；外部 producer/prepare job/rehydration seam 已验证，但没有声称通用 HTTP/S3 下载策略或自动调度已经上线。自动 GC 不运行，只有显式 dry-run/run 管理 API；存储预算策略仍需部署方决定。Phase 8 fast-forward/成交订单流与 Phase 9 历史 L2/book-assisted 尚未实现。
+Decision: PASS；停止在 Phase 7，不进入 Phase 8。
 ```

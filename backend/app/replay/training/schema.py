@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 
-TRAINING_SCHEMA_VERSION = 5
+TRAINING_SCHEMA_VERSION = 6
 TRAINING_SCHEMA_ID = "replay.training.v1"
 
 
@@ -482,6 +482,116 @@ ON replay_training_liquidation_event(run_id, state, created_at_ms);
 """
 
 
+TRAINING_SCHEMA_V6 = """
+CREATE TABLE IF NOT EXISTS replay_data_segment (
+    segment_id TEXT PRIMARY KEY,
+    identity_key TEXT NOT NULL UNIQUE,
+    protocol TEXT NOT NULL CHECK (protocol = 'replay.data.segment.v1'),
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('BAR', 'AGG_TRADE', 'FUTURE')),
+    adapter_kind TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    market_type TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    base_interval TEXT,
+    range_start_ms INTEGER NOT NULL CHECK (range_start_ms >= 0),
+    range_end_ms INTEGER NOT NULL CHECK (range_end_ms >= range_start_ms),
+    schema_version TEXT NOT NULL,
+    dataset_epoch TEXT NOT NULL,
+    checksum_sha256 TEXT NOT NULL,
+    coverage_state TEXT NOT NULL
+        CHECK (coverage_state IN ('EXACT', 'PARTIAL', 'UNKNOWN')),
+    continuity_state TEXT NOT NULL
+        CHECK (continuity_state IN ('CONTIGUOUS', 'GAPPED', 'UNKNOWN')),
+    health TEXT NOT NULL
+        CHECK (health IN (
+            'LOADING', 'READY', 'QUARANTINED', 'EVICTED',
+            'RECLAIMING', 'ERROR', 'CANCELED'
+        )),
+    storage_kind TEXT NOT NULL
+        CHECK (storage_kind IN (
+            'EMBEDDED_ARCHIVE', 'EXTERNAL_REPLAY_OWNED', 'EXTERNAL_READ_ONLY'
+        )),
+    local_path TEXT,
+    byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+    rebuildable INTEGER NOT NULL CHECK (rebuildable IN (0, 1)),
+    trusted_origin TEXT NOT NULL,
+    rehydration_manifest_json TEXT NOT NULL,
+    quarantine_reason TEXT,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    reclaim_token TEXT,
+    last_used_at_ms INTEGER NOT NULL CHECK (last_used_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_data_segment_lru
+ON replay_data_segment(health, storage_kind, rebuildable, last_used_at_ms, segment_id);
+
+CREATE INDEX IF NOT EXISTS idx_replay_data_segment_identity
+ON replay_data_segment(source_kind, exchange, market_type, symbol, range_start_ms, range_end_ms);
+
+CREATE TABLE IF NOT EXISTS replay_data_segment_ref (
+    segment_id TEXT NOT NULL
+        REFERENCES replay_data_segment(segment_id) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT,
+    owner_kind TEXT NOT NULL
+        CHECK (owner_kind IN (
+            'RUN_ARCHIVE', 'ACTOR', 'CHECKPOINT', 'REVIEW', 'RECOVERY'
+        )),
+    owner_id TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    released_at_ms INTEGER CHECK (released_at_ms IS NULL OR released_at_ms >= created_at_ms),
+    PRIMARY KEY (segment_id, run_id, owner_kind, owner_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_data_segment_ref_run
+ON replay_data_segment_ref(run_id, active, owner_kind, segment_id);
+
+CREATE TABLE IF NOT EXISTS replay_data_prepare_job (
+    job_id TEXT PRIMARY KEY,
+    identity_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    state TEXT NOT NULL
+        CHECK (state IN (
+            'PLANNED', 'LOADING', 'VALIDATING', 'PUBLISHING',
+            'READY', 'QUARANTINED', 'CANCELED', 'ERROR'
+        )),
+    progress_numerator INTEGER NOT NULL CHECK (progress_numerator >= 0),
+    progress_denominator INTEGER NOT NULL CHECK (progress_denominator >= 1),
+    segment_id TEXT REFERENCES replay_data_segment(segment_id) ON DELETE SET NULL,
+    run_id TEXT REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT,
+    failure_reason TEXT,
+    cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
+    temp_path TEXT,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_data_prepare_job_identity
+ON replay_data_prepare_job(identity_key, state, updated_at_ms DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_replay_data_prepare_singleflight
+ON replay_data_prepare_job(identity_key)
+WHERE state IN ('PLANNED', 'LOADING', 'VALIDATING', 'PUBLISHING');
+
+CREATE TABLE IF NOT EXISTS replay_data_gc_audit (
+    audit_id TEXT PRIMARY KEY,
+    action TEXT NOT NULL CHECK (action IN ('DRY_RUN', 'RUN', 'RECOVERY')),
+    plan_hash TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_data_gc_audit_created
+ON replay_data_gc_audit(created_at_ms DESC, audit_id DESC);
+"""
+
+
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
     """Create only v2-owned tables; never advance the replay.v1 schema row."""
 
@@ -610,6 +720,9 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
             (now_ms, now_ms),
         )
         current = 5
+    if current == 5:
+        _execute_script(connection, TRAINING_SCHEMA_V6)
+        current = 6
     if current != TRAINING_SCHEMA_VERSION:
         raise RuntimeError(f"no replay training schema migration path from {current}")
     connection.execute(

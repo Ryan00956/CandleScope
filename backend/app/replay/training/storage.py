@@ -42,6 +42,7 @@ from .multitrack import (
     stable_market_event_order,
 )
 from .schema import TRAINING_SCHEMA_ID, migrate_training_schema
+from .segments import backfill_archive_segments, register_archive_segment
 
 
 _LIST_LIMIT_MAX = 100
@@ -244,9 +245,11 @@ class TrainingRunStore:
 
     async def start(self) -> None:
         now = self.base_store._validated_now_ms()
-        await self.base_store.run_extension_write(
-            lambda connection: migrate_training_schema(connection, now_ms=now)
-        )
+        def migrate(connection: sqlite3.Connection) -> None:
+            migrate_training_schema(connection, now_ms=now)
+            backfill_archive_segments(connection, now_ms=now)
+
+        await self.base_store.run_extension_write(migrate)
         self.base_store.register_session_summary_writer(self._sync_session_summary)
         self.base_store.register_session_mutation_writer(self._sync_session_mutation)
 
@@ -259,6 +262,10 @@ class TrainingRunStore:
         session_state: Mapping[str, object],
         component_state: Mapping[str, object],
         broker_config: Mapping[str, object],
+        dataset_ref: Mapping[str, object],
+        dataset_blob: Mapping[str, object],
+        actual_replay_start_ms: int,
+        actual_replay_end_ms: int,
     ) -> Callable[[sqlite3.Connection, int], None]:
         def write(connection: sqlite3.Connection, now_ms: int) -> None:
             cursor = session_state.get("cursor")
@@ -362,6 +369,18 @@ class TrainingRunStore:
                 dataset_epoch=str(session_state["data_epoch"]),
                 now_ms=now_ms,
             )
+            register_archive_segment(
+                connection,
+                run_id=run_id,
+                track_id="track-1",
+                adapter_session_id=adapter_session_id,
+                source_kind=request.source_kind.value,
+                dataset_ref=dataset_ref,
+                dataset_blob=dataset_blob,
+                actual_replay_start_ms=actual_replay_start_ms,
+                actual_replay_end_ms=actual_replay_end_ms,
+                now_ms=now_ms,
+            )
             start_time_known = request.start_mode.value == "MANUAL"
             strict_eligible = (
                 request.integrity_mode.value == "CHALLENGE"
@@ -457,6 +476,10 @@ class TrainingRunStore:
             session_state: Mapping[str, object],
             component_state: Mapping[str, object],
             broker_config: Mapping[str, object],
+            dataset_ref: Mapping[str, object],
+            dataset_blob: Mapping[str, object],
+            actual_replay_start_ms: int,
+            actual_replay_end_ms: int,
         ) -> None:
             parent = connection.execute(
                 """
@@ -625,6 +648,18 @@ class TrainingRunStore:
                 dataset_epoch=str(parent["dataset_epoch"]),
                 now_ms=now_ms,
             )
+            register_archive_segment(
+                connection,
+                run_id=child_run_id,
+                track_id="track-1",
+                adapter_session_id=session_id,
+                source_kind=str(parent["source_kind"]),
+                dataset_ref=dataset_ref,
+                dataset_blob=dataset_blob,
+                actual_replay_start_ms=actual_replay_start_ms,
+                actual_replay_end_ms=actual_replay_end_ms,
+                now_ms=now_ms,
+            )
             result_label = f"{parent['integrity_mode']}_FORKED_REVIEW"
             connection.execute(
                 """
@@ -708,6 +743,10 @@ class TrainingRunStore:
             session_state: Mapping[str, object],
             component_state: Mapping[str, object],
             broker_config: Mapping[str, object],
+            dataset_ref: Mapping[str, object],
+            dataset_blob: Mapping[str, object],
+            actual_replay_start_ms: int,
+            actual_replay_end_ms: int,
         ) -> Callable[[sqlite3.Connection, int], None]:
             return lambda connection, now_ms: write(
                 connection,
@@ -716,6 +755,10 @@ class TrainingRunStore:
                 session_state=session_state,
                 component_state=component_state,
                 broker_config=broker_config,
+                dataset_ref=dataset_ref,
+                dataset_blob=dataset_blob,
+                actual_replay_start_ms=actual_replay_start_ms,
+                actual_replay_end_ms=actual_replay_end_ms,
             )
 
         return factory
@@ -1374,6 +1417,11 @@ class TrainingRunStore:
                     "training run does not exist",
                     status_code=404,
                 )
+            self._assert_run_segments_ready(
+                connection,
+                run_id=run_id,
+                operation="review",
+            )
             checkpoints = connection.execute(
                 """
                 SELECT cp.checkpoint_id, cp.source_sequence,
@@ -1483,6 +1531,18 @@ class TrainingRunStore:
                     now_ms,
                     now_ms,
                 ),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO replay_data_segment_ref(
+                    segment_id, run_id, track_id, owner_kind, owner_id,
+                    active, created_at_ms, released_at_ms
+                )
+                SELECT segment_id, run_id, track_id, 'REVIEW', ?, 1, ?, NULL
+                FROM replay_data_segment_ref
+                WHERE run_id = ? AND owner_kind = 'RUN_ARCHIVE'
+                """,
+                (review_id, now_ms, run_id),
             )
             return {
                 "protocol": REPLAY_V2_PROTOCOL,
@@ -2464,6 +2524,10 @@ class TrainingRunStore:
             session_state: Mapping[str, object],
             component_state: Mapping[str, object],
             broker_config: Mapping[str, object],
+            dataset_ref: Mapping[str, object],
+            dataset_blob: Mapping[str, object],
+            actual_replay_start_ms: int,
+            actual_replay_end_ms: int,
         ) -> Callable[[sqlite3.Connection, int], None]:
             def write(connection: sqlite3.Connection, now_ms: int) -> None:
                 row = connection.execute(
@@ -2538,6 +2602,18 @@ class TrainingRunStore:
                         ),
                         now_ms,
                     ),
+                )
+                register_archive_segment(
+                    connection,
+                    run_id=run_id,
+                    track_id=track_id,
+                    adapter_session_id=session_id,
+                    source_kind=str(row["source_kind"]),
+                    dataset_ref=dataset_ref,
+                    dataset_blob=dataset_blob,
+                    actual_replay_start_ms=actual_replay_start_ms,
+                    actual_replay_end_ms=actual_replay_end_ms,
+                    now_ms=now_ms,
                 )
                 self._insert_contract_track_rule(
                     connection,
@@ -2965,6 +3041,27 @@ class TrainingRunStore:
 
         return await self.base_store.run_extension_write(write)
 
+    async def set_actor_segment_refs(self, run_id: str, *, active: bool) -> None:
+        now_ms = self.base_store._validated_now_ms()
+
+        def write(connection: sqlite3.Connection) -> None:
+            if active:
+                self._assert_run_segments_ready(
+                    connection,
+                    run_id=run_id,
+                    operation="actor activation",
+                )
+            connection.execute(
+                """
+                UPDATE replay_data_segment_ref
+                SET active = ?, released_at_ms = ?
+                WHERE run_id = ? AND owner_kind = 'ACTOR'
+                """,
+                (int(active), None if active else now_ms, run_id),
+            )
+
+        await self.base_store.run_extension_write(write)
+
     async def global_events(self, run_id: str) -> list[dict[str, object]]:
         def read(connection: sqlite3.Connection) -> tuple[sqlite3.Row, ...]:
             return tuple(
@@ -3018,6 +3115,10 @@ class TrainingRunStore:
             connection.execute(
                 "DELETE FROM replay_training_pin WHERE run_id = ? AND pin_id = ?",
                 (run_id, f"{track_id}-dataset"),
+            )
+            connection.execute(
+                "DELETE FROM replay_data_segment_ref WHERE run_id = ? AND track_id = ?",
+                (run_id, track_id),
             )
             return None if session_id is None else str(session_id)
 
@@ -3636,6 +3737,35 @@ class TrainingRunStore:
             },
         }
 
+    @staticmethod
+    def _assert_run_segments_ready(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        operation: str,
+    ) -> None:
+        unavailable = connection.execute(
+            """
+            SELECT s.segment_id, s.health
+            FROM replay_data_segment_ref AS r
+            JOIN replay_data_segment AS s USING(segment_id)
+            WHERE r.run_id = ? AND r.owner_kind = 'RUN_ARCHIVE'
+              AND s.health != 'READY'
+            ORDER BY s.segment_id LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        if unavailable is not None:
+            raise TrainingRunError(
+                "SEGMENT_NOT_READY",
+                f"replay data segment must be ready before {operation}",
+                status_code=409,
+                details={
+                    "segment_id": str(unavailable["segment_id"]),
+                    "health": str(unavailable["health"]),
+                },
+            )
+
     @classmethod
     def _insert_global_checkpoint(
         cls,
@@ -3644,6 +3774,11 @@ class TrainingRunStore:
         run_id: str,
         now_ms: int,
     ) -> dict[str, object]:
+        cls._assert_run_segments_ready(
+            connection,
+            run_id=run_id,
+            operation="checkpoint",
+        )
         rows = tuple(
             connection.execute(
                 """
@@ -3739,6 +3874,22 @@ class TrainingRunStore:
                 canonical_json({"tracks": tracks, "portfolio": portfolio}),
                 now_ms,
             ),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_data_segment_ref(
+                segment_id, run_id, track_id, owner_kind, owner_id,
+                active, created_at_ms, released_at_ms
+            )
+            SELECT segment_id, run_id, track_id, 'CHECKPOINT',
+                   'latest-global-checkpoint', 0, ?, ?
+            FROM replay_data_segment_ref
+            WHERE run_id = ? AND owner_kind = 'RUN_ARCHIVE'
+            ON CONFLICT(segment_id, run_id, owner_kind, owner_id) DO UPDATE SET
+                active = 0,
+                released_at_ms = excluded.released_at_ms
+            """,
+            (now_ms, now_ms, run_id),
         )
         connection.execute(
             """

@@ -57,7 +57,7 @@ def test_replay_v2_golden_matches_python_enum_and_schema_registry() -> None:
     assert golden["schema_migration_contract"] == SCHEMA_MIGRATION_CONTRACT
 
 
-def test_replay_v2_phase6_package_keeps_contract_account_inside_training() -> None:
+def test_replay_v2_phase7_package_keeps_segments_inside_training() -> None:
     training_root = ROOT / "backend" / "app" / "replay" / "training"
     assert {path.name for path in training_root.glob("*.py")} == {
         "__init__.py",
@@ -71,6 +71,7 @@ def test_replay_v2_phase6_package_keeps_contract_account_inside_training() -> No
         "models.py",
         "multitrack.py",
         "schema.py",
+        "segments.py",
         "service.py",
         "storage.py",
     }
@@ -178,6 +179,8 @@ def test_replay_v2_flags_are_strict_default_off_and_nested_under_replay(
     assert default.enabled is False
     assert default.product_v2_enabled is False
     assert default.product_v2_available is False
+    assert default.replay_segment_download_worker_enabled is False
+    assert default.replay_segment_auto_gc_enabled is False
 
     nested_off = load_replay_settings(
         {"REPLAY_PRODUCT_V2_ENABLED": "1"},
@@ -200,6 +203,16 @@ def test_replay_v2_flags_are_strict_default_off_and_nested_under_replay(
             data_dir=tmp_path,
             klines_db_path=tmp_path / "candlescope.db",
         )
+    for variable in (
+        "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED",
+        "REPLAY_SEGMENT_AUTO_GC_ENABLED",
+    ):
+        with pytest.raises(ValueError, match=variable):
+            load_replay_settings(
+                {variable: "sometimes"},
+                data_dir=tmp_path,
+                klines_db_path=tmp_path / "candlescope.db",
+            )
 
 
 @pytest.mark.anyio

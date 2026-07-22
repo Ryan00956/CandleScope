@@ -52,6 +52,8 @@ class ReplaySettings:
     controller_ttl_seconds: int
     idle_ttl_seconds: int
     product_v2_enabled: bool = False
+    replay_segment_download_worker_enabled: bool = False
+    replay_segment_auto_gc_enabled: bool = False
 
     @property
     def product_v2_available(self) -> bool:
@@ -131,6 +133,12 @@ def load_replay_settings(
         product_v2_enabled=_strict_replay_bool(
             environment, "REPLAY_PRODUCT_V2_ENABLED", "0"
         ),
+        replay_segment_download_worker_enabled=_strict_replay_bool(
+            environment, "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED", "0"
+        ),
+        replay_segment_auto_gc_enabled=_strict_replay_bool(
+            environment, "REPLAY_SEGMENT_AUTO_GC_ENABLED", "0"
+        ),
     )
 
 # Server
@@ -153,6 +161,10 @@ REPLAY_SETTINGS = load_replay_settings(
 REPLAY_ENABLED = REPLAY_SETTINGS.enabled
 REPLAY_PRODUCT_V2_ENABLED = REPLAY_SETTINGS.product_v2_enabled
 REPLAY_PRODUCT_V2_AVAILABLE = REPLAY_SETTINGS.product_v2_available
+REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED = (
+    REPLAY_SETTINGS.replay_segment_download_worker_enabled
+)
+REPLAY_SEGMENT_AUTO_GC_ENABLED = REPLAY_SETTINGS.replay_segment_auto_gc_enabled
 REPLAY_DB_PATH = REPLAY_SETTINGS.db_path
 REPLAY_MAX_ACTIVE_SESSIONS = REPLAY_SETTINGS.max_active_sessions
 REPLAY_COMMAND_QUEUE_SIZE = REPLAY_SETTINGS.command_queue_size

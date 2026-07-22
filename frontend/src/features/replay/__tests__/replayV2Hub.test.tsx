@@ -20,6 +20,7 @@ import {
   parseTrainingRunListResponse,
   parseTrainingRunMutationResponse,
 } from "../replayV2Types.js";
+import { parseReplaySegmentPreparePlan } from "../replaySegmentTypes.js";
 import type { ReplayDigest } from "../replayTypes.js";
 import { parseReplayCapabilities, parseReplayCatalog } from "../replayParser.js";
 import { enabledCapabilities } from "./fixtures.js";
@@ -67,6 +68,31 @@ function mutationResponse() {
     created: true,
     migrated: false,
     run: runCard(),
+  };
+}
+
+function segmentPlanResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    protocol: "replay.data.prepare.v1",
+    state: "PREPARE_ON_CREATE",
+    source_kind: "BAR",
+    identity: {
+      exchange: "binance",
+      market_type: "spot",
+      symbol: "BTCUSDT",
+      base_interval: "1m",
+    },
+    estimated_size_bytes: 394_560,
+    estimated_rows: 1_644,
+    prepare_action: "SNAPSHOT_LOCAL_BAR_RANGE",
+    existing_ready_segments: 1,
+    existing_ready_bytes: 380_000,
+    selection_loads_history: false,
+    create_loads_only_selected_range: true,
+    download_worker_enabled: false,
+    auto_gc_enabled: false,
+    failure_policy: "QUARANTINE_AND_FAIL_CLOSED",
+    ...overrides,
   };
 }
 
@@ -127,6 +153,92 @@ test("run-list API is bounded to /runs and never requests sessions or datasets",
   assert.equal(listed.items.length, 1);
   assert.deepEqual(urls, ["/api/v1/replay/runs?limit=50&compatibility=READY"]);
   assert.doesNotMatch(urls.join("\n"), /sessions|dataset|catalog/);
+});
+
+test("Phase 7 prepare-plan parser is exact and preserves fail-closed worker flags", () => {
+  const parsed = parseReplaySegmentPreparePlan(segmentPlanResponse());
+  assert.equal(parsed.prepare_action, "SNAPSHOT_LOCAL_BAR_RANGE");
+  assert.equal(parsed.selection_loads_history, false);
+  assert.equal(parsed.create_loads_only_selected_range, true);
+  assert.equal(parsed.download_worker_enabled, false);
+  assert.equal(parsed.auto_gc_enabled, false);
+  assert.throws(() => parseReplaySegmentPreparePlan(segmentPlanResponse({ future: true })));
+  assert.throws(() => parseReplaySegmentPreparePlan(segmentPlanResponse({
+    failure_policy: "FALLBACK",
+  })));
+});
+
+test("segment plan uses the selected create contract and never opens a dataset endpoint", async () => {
+  const requests: Array<{ url: string; body: unknown }> = [];
+  const client = new ReplayV2ApiClient({
+    fetcher: async (input, init) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body)),
+      });
+      return new Response(JSON.stringify(segmentPlanResponse()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const catalog = blindCatalog();
+  const draft = createTrainingRunDraft(catalog);
+  const evaluation = evaluateTrainingRunDraft(
+    draft,
+    parseReplayCapabilities(enabledCapabilities()),
+    catalog,
+  );
+  const payload = buildTrainingRunCreateRequest(draft, evaluation, catalog);
+  await client.segmentPlan(payload);
+  assert.deepEqual(requests, [{
+    url: "/api/v1/replay/runs/data-segments/plan",
+    body: payload,
+  }]);
+  assert.doesNotMatch(requests[0]?.url ?? "", /sessions|snapshot_blob/);
+});
+
+test("Hub loads a segment plan only after create opens and refreshes it before create", async (context) => {
+  const calls: string[] = [];
+  const lifecycle = new TrainingHubLifecycle({
+    api: {
+      async listRuns() {
+        calls.push("runs");
+        return parseTrainingRunListResponse(listResponse([]));
+      },
+      async capabilities() {
+        calls.push("capabilities");
+        return parseReplayCapabilities(enabledCapabilities());
+      },
+      async catalog() {
+        calls.push("catalog");
+        return blindCatalog();
+      },
+      async segmentPlan() {
+        calls.push("segment-plan");
+        return parseReplaySegmentPreparePlan(segmentPlanResponse());
+      },
+      async createRun() {
+        calls.push("create");
+        return parseTrainingRunMutationResponse(mutationResponse());
+      },
+      async migrateLegacy() {
+        throw new Error("not used");
+      },
+    },
+    navigateToSession: (sessionId) => calls.push(`navigate:${sessionId}`),
+  });
+  context.after(() => lifecycle.dispose());
+  lifecycle.start();
+  await settle();
+  assert.deepEqual(calls, ["runs"]);
+  await lifecycle.openCreate();
+  assert.deepEqual(calls, ["runs", "capabilities", "catalog", "segment-plan"]);
+  assert.equal(lifecycle.getSnapshot().segmentPlan?.failure_policy, "QUARANTINE_AND_FAIL_CLOSED");
+  const draft = lifecycle.getSnapshot().draft;
+  assert.ok(draft);
+  await lifecycle.createRun(draft);
+  assert.deepEqual(calls.slice(-4), ["catalog", "segment-plan", "create", "navigate:adapter-1"]);
 });
 
 test("hub bootstrap loads only lightweight saves; create capability work starts on demand", async (context) => {
@@ -345,6 +457,7 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
       parseReplayCapabilities(enabledCapabilities()),
       catalog,
     ),
+    segmentPlan: parseReplaySegmentPreparePlan(segmentPlanResponse()),
     actions: {
       refresh() {},
       loadNext() {},
@@ -369,6 +482,11 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /Practice 可审计变更白名单/);
   assert.match(html, /历史盘口.*Phase 9/);
   assert.match(html, /Phase 6 合约账户已启用/);
+  assert.match(html, /Phase 7 按需数据段/);
+  assert.match(html, /SNAPSHOT_LOCAL_BAR_RANGE/);
+  assert.match(html, /校验失败 quarantine/);
+  assert.match(html, /后台下载.*默认关闭/);
+  assert.match(html, /自动 GC.*默认关闭/);
   assert.match(html, /TOUCH_OR_TAPE_V2/);
   assert.match(html, /不含盘口排队/);
   assert.doesNotMatch(html, /<strong>多商品<\/strong>/);

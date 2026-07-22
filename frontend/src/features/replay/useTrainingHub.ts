@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { ReplayApiError } from "./replayApi.js";
 import type { ReplayCapabilities, ReplayCatalog } from "./replayTypes.js";
+import type { ReplaySegmentPreparePlan } from "./replaySegmentTypes.js";
 import { defaultReplayV2Api, ReplayV2ApiError } from "./replayV2Api.js";
 import type { TrainingRunListQuery } from "./replayV2Api.js";
 import {
@@ -45,6 +46,7 @@ export interface TrainingHubSnapshot {
   readonly catalog: ReplayCatalog | null;
   readonly draft: TrainingRunDraft | null;
   readonly evaluation: TrainingRunDraftEvaluation | null;
+  readonly segmentPlan: ReplaySegmentPreparePlan | null;
 }
 
 export interface TrainingHubApiBoundary {
@@ -60,6 +62,10 @@ export interface TrainingHubApiBoundary {
     signal?: AbortSignal,
   ): Promise<ReplayCatalog>;
   createRun(payload: TrainingRunCreatePayload, signal?: AbortSignal): Promise<TrainingRunMutationResponse>;
+  segmentPlan?(
+    payload: TrainingRunCreatePayload,
+    signal?: AbortSignal,
+  ): Promise<ReplaySegmentPreparePlan>;
   migrateLegacy(
     sessionId: string,
     name?: string | null,
@@ -106,6 +112,7 @@ export class TrainingHubLifecycle {
   private catalog: ReplayCatalog | null = null;
   private draft: TrainingRunDraft | null = null;
   private evaluation: TrainingRunDraftEvaluation | null = null;
+  private segmentPlan: ReplaySegmentPreparePlan | null = null;
   private abortController = new AbortController();
   private requestToken = 0;
   private started = false;
@@ -168,6 +175,7 @@ export class TrainingHubLifecycle {
       this.capabilities = null;
       this.catalog = null;
       this.evaluation = null;
+      this.segmentPlan = null;
     }
     this.operation = "create-context";
     this.publish();
@@ -187,6 +195,12 @@ export class TrainingHubLifecycle {
       this.catalog = catalog;
       this.draft = preservedDraft ?? createTrainingRunDraft(catalog);
       this.evaluation = evaluateTrainingRunDraft(this.draft, capabilities, catalog);
+      this.segmentPlan = await this.loadSegmentPlan(
+        this.draft,
+        this.evaluation,
+        catalog,
+      );
+      if (!this.accept(token)) return;
       this.operation = null;
       this.publish();
     } catch (error) {
@@ -206,6 +220,7 @@ export class TrainingHubLifecycle {
     this.evaluation = this.capabilities !== null && this.catalog !== null
       ? evaluateTrainingRunDraft(draft, this.capabilities, this.catalog)
       : null;
+    this.segmentPlan = null;
     this.publish();
   }
 
@@ -240,6 +255,8 @@ export class TrainingHubLifecycle {
         this.publish();
         return;
       }
+      this.segmentPlan = await this.loadSegmentPlan(draft, evaluation, catalog);
+      if (!this.accept(token)) return;
       const result = await this.api.createRun(
         buildTrainingRunCreateRequest(draft, evaluation, catalog),
         this.abortController.signal,
@@ -321,6 +338,18 @@ export class TrainingHubLifecycle {
     }
   }
 
+  private async loadSegmentPlan(
+    draft: TrainingRunDraft,
+    evaluation: TrainingRunDraftEvaluation,
+    catalog: ReplayCatalog,
+  ): Promise<ReplaySegmentPreparePlan | null> {
+    if (!evaluation.canSubmit || this.api.segmentPlan === undefined) return null;
+    return this.api.segmentPlan(
+      buildTrainingRunCreateRequest(draft, evaluation, catalog),
+      this.abortController.signal,
+    );
+  }
+
   private accept(token: number): boolean {
     return !this.disposed && token === this.requestToken;
   }
@@ -351,6 +380,7 @@ export class TrainingHubLifecycle {
       catalog: this.catalog,
       draft: this.draft,
       evaluation: this.evaluation,
+      segmentPlan: this.segmentPlan,
     };
   }
 }

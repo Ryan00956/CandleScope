@@ -4720,6 +4720,17 @@ body {
 .plugin-native-array-row { border-left: 2px solid var(--border-color); padding-left: 10px; margin-bottom: 8px; }
 .plugin-action-row { display: flex; gap: 7px; flex-wrap: wrap; margin: 12px 0; }
 
+.plugin-paper-panel {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.55);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.plugin-paper-panel p { margin: 8px 0; color: var(--text-secondary); }
+.plugin-paper-panel .plugin-action-row { align-items: center; justify-content: space-between; }
+
 .plugin-view-surface {
   position: fixed;
   z-index: 850;

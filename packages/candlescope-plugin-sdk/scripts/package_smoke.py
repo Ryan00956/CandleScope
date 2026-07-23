@@ -81,7 +81,7 @@ def run_smoke(*, dist_dir: Path, python: str) -> None:
                 (
                     "import candlescope_plugin_sdk as sdk; "
                     "from candlescope_plugin_sdk.platform_v2 import "
-                    "HOST_API_V1, PLUGIN_PROTOCOL_V2, manifest_schema; "
+                    "HOST_API_V1, PAPER_PROTOCOL_V1, PLUGIN_PROTOCOL_V2, manifest_schema; "
                     "from candlescope_plugin_sdk.platform_v2.examples.scheduled_notification "
                     "import scheduled_notification_manifest; "
                     "from candlescope_plugin_sdk.platform_v2.examples.market_scanner "
@@ -90,12 +90,16 @@ def run_smoke(*, dist_dir: Path, python: str) -> None:
                     "import integration_gateway_manifest; "
                     "from candlescope_plugin_sdk.platform_v2.examples.mock_exchange_provider "
                     "import mock_exchange_provider_manifest; "
+                    "from candlescope_plugin_sdk.platform_v2.examples.paper_broker "
+                    "import paper_broker_manifest; "
                     "print(sdk.__version__, sdk.PROTOCOL_V1, PLUGIN_PROTOCOL_V2, "
-                    "HOST_API_V1, manifest_schema()['properties']['schemaVersion']['const'], "
+                    "HOST_API_V1, PAPER_PROTOCOL_V1, "
+                    "manifest_schema()['properties']['schemaVersion']['const'], "
                     "scheduled_notification_manifest().plugin.id, "
                     "market_scanner_manifest().plugin.id, "
                     "integration_gateway_manifest().plugin.id, "
-                    "mock_exchange_provider_manifest().plugin.id)"
+                    "mock_exchange_provider_manifest().plugin.id, "
+                    "paper_broker_manifest().plugin.id)"
                 ),
             ],
             check=True,
@@ -104,9 +108,10 @@ def run_smoke(*, dist_dir: Path, python: str) -> None:
         )
         if imported.stdout.strip() != (
             "0.2.0 candlescope.script-runtime/1 candlescope.plugin/2 "
-            "candlescope.host-api/1 2 candlescope.scheduled-notification "
+            "candlescope.host-api/1 candlescope.paper/1 2 "
+            "candlescope.scheduled-notification "
             "candlescope.market-scanner candlescope.integration-gateway "
-            "candlescope.mock-exchange-provider"
+            "candlescope.mock-exchange-provider candlescope.paper-broker"
         ):
             raise RuntimeError(f"unexpected installed import output: {imported.stdout!r}")
         if not _venv_command(venv_path, "candlescope-scheduled-notification").is_file():
@@ -117,6 +122,8 @@ def run_smoke(*, dist_dir: Path, python: str) -> None:
             raise RuntimeError("integration gateway console entry point is missing")
         if not _venv_command(venv_path, "candlescope-mock-exchange-provider").is_file():
             raise RuntimeError("mock exchange provider console entry point is missing")
+        if not _venv_command(venv_path, "candlescope-paper-broker").is_file():
+            raise RuntimeError("Paper broker console entry point is missing")
 
         completed = subprocess.run(
             [str(_venv_command(venv_path, "candlescope-hello-runtime"))],

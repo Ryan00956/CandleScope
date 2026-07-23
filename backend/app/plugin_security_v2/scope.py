@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from candlescope_plugin_sdk.platform_v2 import canonical_dumps, normalize_json
@@ -20,6 +21,8 @@ _UPPER_BOUND_KEYS = frozenset(
         "maxHistoryBars",
         "maxItems",
         "maxNotional",
+        "maxOpenOrders",
+        "maxOrdersPerMinute",
         "maxRedirects",
         "maxRequestBytes",
         "maxRequests",
@@ -32,6 +35,10 @@ _UPPER_BOUND_KEYS = frozenset(
         "ttlSeconds",
     }
 )
+_DECIMAL_UPPER_BOUND_KEYS = frozenset(
+    {"maxOrderQuantity", "maxOrderNotional", "maxPositionNotional"}
+)
+_BOOLEAN_AUTHORITY_KEYS = frozenset({"allowShort"})
 _SENSITIVE_KEYS = frozenset(
     {
         "apiKey",
@@ -101,6 +108,27 @@ def scope_contains(container: Any, candidate: Any, *, key: str | None = None) ->
         and isinstance(candidate, (int, float))
     ):
         return candidate <= container
+    if (
+        key in _DECIMAL_UPPER_BOUND_KEYS
+        and isinstance(container, str)
+        and isinstance(candidate, str)
+    ):
+        try:
+            container_decimal = Decimal(container)
+            candidate_decimal = Decimal(candidate)
+        except InvalidOperation:
+            return False
+        return (
+            container_decimal.is_finite()
+            and candidate_decimal.is_finite()
+            and candidate_decimal <= container_decimal
+        )
+    if (
+        key in _BOOLEAN_AUTHORITY_KEYS
+        and isinstance(container, bool)
+        and isinstance(candidate, bool)
+    ):
+        return not candidate or container
     return _json_equal(container, candidate)
 
 

@@ -49,6 +49,20 @@ def test_scope_comparison_is_fail_closed_and_limit_aware() -> None:
     assert classify_scope_change(broad, narrow) == "narrowed"
     assert classify_scope_change(narrow, broad) == "expanded"
     assert classify_scope_change({"mode": "closed"}, {"mode": "forming"}) == "changed"
+    assert (
+        scope_contains(
+            {"maxOrderNotional": "100000", "allowShort": True},
+            {"maxOrderNotional": "50000", "allowShort": False},
+        )
+        is True
+    )
+    assert (
+        scope_contains(
+            {"maxOrderNotional": "50000", "allowShort": False},
+            {"maxOrderNotional": "100000", "allowShort": True},
+        )
+        is False
+    )
 
 
 def test_grant_store_requires_explicit_initial_grant_and_revocation_is_immediate(
@@ -309,6 +323,94 @@ def test_partial_required_grant_high_risk_and_sensitive_scope_fail_closed(
             permission_id="market.bars.read",
             scope={"token": "do-not-store-this"},
         )
+
+
+def test_paper_permissions_require_explicit_host_policy_and_live_permissions_stay_closed(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(
+        optional=[
+            {
+                "id": "trade.simulate",
+                "scope": {"maxOrderNotional": "100000", "allowShort": True},
+            },
+            {"id": "trade.submit", "scope": {"maxNotional": 10}},
+        ]
+    )
+    bundle, manifest_digest = _digests("paper-policy")
+    closed, _ = _store(tmp_path / "closed")
+    closed.reconcile(manifest, bundle_sha256=bundle, manifest_sha256=manifest_digest)
+    with pytest.raises(PlatformSecurityError, match="remain unavailable"):
+        closed.grant(
+            manifest,
+            bundle_sha256=bundle,
+            manifest_sha256=manifest_digest,
+            permission_id="trade.simulate",
+        )
+
+    audit = AuditLog(tmp_path / "paper" / "audit" / "events")
+    paper = GrantStore(
+        tmp_path / "paper" / GRANT_STORE_FILE_NAME,
+        audit_log=audit,
+        available_restricted_permissions={"accounts.read", "trade.simulate"},
+    )
+    paper.reconcile(manifest, bundle_sha256=bundle, manifest_sha256=manifest_digest)
+    granted = paper.grant(
+        manifest,
+        bundle_sha256=bundle,
+        manifest_sha256=manifest_digest,
+        permission_id="trade.simulate",
+        scope={"maxOrderNotional": "50000", "allowShort": False},
+    )
+    assert granted.decision == "granted"
+    with pytest.raises(PlatformSecurityError, match="remain unavailable"):
+        paper.grant(
+            manifest,
+            bundle_sha256=bundle,
+            manifest_sha256=manifest_digest,
+            permission_id="trade.submit",
+        )
+
+    required_manifest = _manifest(
+        required=[
+            {
+                "id": "trade.simulate",
+                "scope": {"maxOrderNotional": "100000", "allowShort": False},
+            }
+        ]
+    )
+    required_bundle, required_digest = _digests("paper-policy-required")
+    paper.reconcile(
+        required_manifest,
+        bundle_sha256=required_bundle,
+        manifest_sha256=required_digest,
+    )
+    paper.grant(
+        required_manifest,
+        bundle_sha256=required_bundle,
+        manifest_sha256=required_digest,
+        permission_id="trade.simulate",
+    )
+    closed_after_restart = GrantStore(
+        tmp_path / "paper" / GRANT_STORE_FILE_NAME,
+        audit_log=audit,
+    )
+    assert (
+        closed_after_restart.required_satisfied(
+            required_manifest,
+            bundle_sha256=required_bundle,
+            manifest_sha256=required_digest,
+        )
+        is False
+    )
+    assert (
+        closed_after_restart.effective_grants(
+            required_manifest,
+            bundle_sha256=required_bundle,
+            manifest_sha256=required_digest,
+        )
+        == ()
+    )
 
 
 def test_audit_chain_detects_tampering(tmp_path: Path) -> None:

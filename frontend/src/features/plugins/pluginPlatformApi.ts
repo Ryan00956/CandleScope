@@ -374,3 +374,11 @@ export async function mutatePluginPermission(
     },
   );
 }
+
+export async function setPaperKillSwitch(enabled: boolean): Promise<void> {
+  await managementRequest("/manage/paper/kill-switch", {
+    method: "POST",
+    body: { enabled },
+    action: enabled ? "paper-kill-switch" : "paper-resume",
+  });
+}

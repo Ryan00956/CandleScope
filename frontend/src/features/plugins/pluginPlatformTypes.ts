@@ -172,9 +172,60 @@ export type PluginProviderContribution =
   | PluginSymbolProviderContribution
   | PluginMarketDataProviderContribution;
 
+export interface PluginPaperAccountContribution extends ContributionBase {
+  kind: "account-provider/1";
+  configuration: {
+    brokerId: string;
+    displayName: string;
+    environment: "paper";
+    accounts: Array<{
+      id: string;
+      label: string;
+      baseCurrency: string;
+      initialBalances: Array<{ asset: string; available: string }>;
+    }>;
+  };
+}
+
+export interface PluginPaperExecutorContribution extends ContributionBase {
+  kind: "order-executor/1";
+  configuration: {
+    brokerId: string;
+    environment: "paper";
+    protocol: "candlescope.paper/1";
+    orderTypes: Array<"market" | "limit">;
+    symbols: Array<{
+      symbol: string;
+      marketType: string;
+      baseAsset: string;
+      quoteAsset: string;
+      priceTick: string;
+      quantityStep: string;
+      minQuantity: string;
+      maxQuantity: string;
+      minNotional: string;
+      maxNotional: string;
+    }>;
+    limits: {
+      maxOrderQuantity: string;
+      maxOrderNotional: string;
+      maxPositionNotional: string;
+      maxOpenOrders: number;
+      maxOrdersPerMinute: number;
+      allowShort: false;
+    };
+    maxQuoteAgeMs: number;
+  };
+}
+
+export type PluginPaperContribution =
+  | PluginPaperAccountContribution
+  | PluginPaperExecutorContribution;
+
 export type PluginCatalogContribution =
   | PluginUiContribution
-  | PluginProviderContribution;
+  | PluginProviderContribution
+  | PluginPaperContribution;
 
 export interface PluginCatalogPlugin {
   id: string;
@@ -291,12 +342,38 @@ export interface PluginManagementDetail {
     reason?: string;
     target?: { state: string; version: string | null };
   };
+  paperTrading: PluginPaperStatus & { available: boolean };
   dataRetention: {
     retainedOnDisable: true;
     retainedOnUninstall: true;
     automaticDeletion: false;
     storage: Record<string, JsonValue>;
   };
+}
+
+export interface PluginPaperStatus {
+  schemaVersion: "candlescope.paper-status/1";
+  killSwitchEnabled: boolean;
+  mode: "paper-only";
+  liveTradingAvailable: false;
+  secretsAvailable: false;
+  brokers: Array<{
+    brokerId: string;
+    pluginId: string;
+    displayName: string;
+    accounts: string[];
+    orderTypes: Array<"market" | "limit">;
+    symbols: Array<{ symbol: string; marketType: string }>;
+    limits: {
+      maxOrderQuantity: string;
+      maxOrderNotional: string;
+      maxPositionNotional: string;
+      maxOpenOrders: number;
+      maxOrdersPerMinute: number;
+      allowShort: boolean;
+      maxQuoteAgeMs: number;
+    };
+  }>;
 }
 
 export interface PluginPlatformRuntime {
@@ -341,6 +418,7 @@ export interface PluginPlatformRuntime {
       decision: "grant" | "deny" | "revoke",
       scope?: Record<string, JsonValue>,
     ): Promise<void>;
+    setPaperKillSwitch(enabled: boolean): Promise<void>;
   };
 }
 

@@ -10,6 +10,7 @@ import {
   mutatePluginState,
   pluginManagementAvailable,
   readPluginSettings,
+  setPaperKillSwitch,
   preparePluginUserFileSave,
   stagePluginUserFile,
   writePluginSettings,
@@ -149,6 +150,11 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     `Permission ${decision} completed`,
   ), [withRefresh]);
 
+  const changePaperKillSwitch = useCallback(async (enabled: boolean) => withRefresh(
+    () => setPaperKillSwitch(enabled),
+    enabled ? "Paper kill switch enabled" : "Paper order submission resumed",
+  ), [withRefresh]);
+
   return useMemo<PluginPlatformRuntime>(() => ({
     view: {
       catalog,
@@ -198,11 +204,13 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       downloadUserFile: downloadPluginUserFile,
       changeState,
       decidePermission,
+      setPaperKillSwitch: changePaperKillSwitch,
     },
   }), [
     catalog,
     changeState,
     decidePermission,
+    changePaperKillSwitch,
     error,
     exchange,
     interval,

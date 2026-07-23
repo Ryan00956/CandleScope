@@ -6,11 +6,11 @@ CandleScope backend plugin entrypoints. It does not replace
 CandleScope internals.
 
 This document describes the Phase 1 control contract plus additive contracts
-shipped through Phase 10. The CandleScope product now supplies the Host,
+shipped through Phase 11A. The CandleScope product now supplies the Host,
 installer, permission broker, core services, scoped read-only live market
 consumer, marker-only chart-layer registry, declarative/sandbox UI surfaces,
-controlled integration gateways, and public market-data providers. Account and
-trading brokers remain independently gated. A Python process using this SDK is
+controlled integration gateways, public market-data providers, and an explicitly
+pinned Paper-only broker. Live account and trading brokers remain independently gated. A Python process using this SDK is
 not thereby a security sandbox.
 
 ## Stable identifiers
@@ -20,6 +20,7 @@ not thereby a security sandbox.
 | `candlescope.plugin/2` | Host-to-plugin lifecycle and contribution invocation |
 | `candlescope.host-api/1` | Plugin-to-Host capability calls through `host.call` |
 | `candlescope.stream/1` | Host-polled provider data plane for bounded public market streams |
+| `candlescope.paper/1` | Intent/ack protocol for the Host-owned Paper broker |
 | `jsonl/1` | One bounded UTF-8 JSON-RPC frame per line |
 | manifest `schemaVersion: 2` | Static identity, entrypoints, contributions, permissions, and probes |
 
@@ -417,6 +418,35 @@ The packaged `candlescope-mock-exchange-provider` executable and
 `platform_v2.examples.mock_exchange_provider` module form the deterministic
 reference implementation.
 
+## Phase 11A Paper-only accounts and orders
+
+A Paper broker declares one paired `account-provider/1` and `order-executor/1`
+per broker ID on the same entrypoint. The account contribution declares bounded
+fixture accounts and initial balances. The executor declares symbols, tick/step,
+quantity/notional/position/rate/open-order limits, supported market/limit order
+types, and `candlescope.paper/1`. Phase 11A requires `accounts.read` and
+`trade.simulate`; `secrets.use`, `network.connect`, `trade.submit`, and
+`trade.cancel` remain unavailable.
+
+`OrderIntent` uses canonical decimal strings and carries broker/account,
+client-order and idempotency IDs, symbol/market, side/type, quantity, optional
+limit price, and an exact Host quote ID plus observed market time. The sidecar
+may only return a strict `candlescope.paper-executor-ack/1` with `accepted`,
+`rejected`, or `unknown`; it cannot choose balances, fill price, fees, risk
+outcome, or account state. `accounts.snapshot`, `orders.submit`,
+`orders.cancel`, and `orders.recover` are the only Paper operations.
+
+The Host serializes submit/cancel/fill races, binds each idempotency key to the
+canonical intent hash, persists pending state before invocation, and never
+blindly replays an unknown submission. Recovery is explicit. Quotes are
+Host-published, time-bounded, and exact-ID matched, so future or stale prices
+fail before sidecar invocation. The Host owns the ledger, reservation/fill
+rules, immutable audit events, and a persisted global kill switch. Disabling a
+plugin or revoking either Paper grant removes the active broker before the next
+action. This mode is available only when the product explicitly enables Paper
+trading under `first-party-pinned`; saved grants become ineffective if that
+policy is absent on restart.
+
 ## Error behavior
 
 Standard JSON-RPC parse/request/method/params/internal codes are retained.
@@ -442,6 +472,7 @@ candlescope-hello-command
 candlescope-market-scanner
 candlescope-integration-gateway
 candlescope-mock-exchange-provider
+candlescope-paper-broker
 ```
 
 Hello Command contributes one permission-free `command/1`, supports activation, invocation,
@@ -450,8 +481,9 @@ transcript. Market Scanner is an integration reference for scoped read/storage/l
 Host calls. Integration Gateway is the credential-free reference for Phase 9
 HTTPS, file, and endpoint contracts. An SDK executable alone still grants no
 capabilities. Mock Exchange Provider is the deterministic Phase 10 reference
-for symbol/history/Kline/full-depth contracts. None of these examples proves
-untrusted OS sandboxing, secrets, trading, or marketplace trust.
+for symbol/history/Kline/full-depth contracts. Paper Broker is the deterministic
+Phase 11A reference for intent acknowledgement; it does not prove or obtain live
+execution. None of these examples proves secrets, live trading, or marketplace trust.
 
 The reference server is deliberately synchronous and bounded. Phase 2 owns the
 production Host supervisor, async concurrent reader/writer, process generation,

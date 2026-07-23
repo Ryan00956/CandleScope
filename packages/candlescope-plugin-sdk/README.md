@@ -177,6 +177,7 @@ candlescope-scheduled-notification
 candlescope-market-scanner
 candlescope-integration-gateway
 candlescope-mock-exchange-provider
+candlescope-paper-broker
 ```
 
 The latter declares `notification/1` plus `job/1` and completes a no-UI
@@ -192,7 +193,12 @@ paired Phase 10 `symbol-provider/1` and `market-data-provider/1` contributions,
 bounded history plus `candlescope.stream/1` Kline/full-depth sessions. Provider
 output always returns to the Host-owned ingestion and storage path. These
 contracts do not grant direct network or filesystem access, secrets, accounts,
-or trading APIs.
+or trading APIs. `candlescope-paper-broker` is the Phase 11A reference for paired
+`account-provider/1` and `order-executor/1` contributions. It exchanges strict
+Paper intents and acknowledgements only; the Host owns balances, positions,
+quotes, fills, risk, idempotency, audit, and the global kill switch. Live
+credentials, `trade.submit`, `trade.cancel`, and plugin network access remain
+unavailable.
 
 ## Development checks
 

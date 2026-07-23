@@ -24,6 +24,7 @@ from app.plugin_installer_v2.registry import (
 from app.plugin_gateway_v2 import PluginIntegrationGateway
 from app.plugin_platform import PluginManager
 from app.plugin_market_v2.runtime import PluginMarketRuntime
+from app.plugin_paper_v2 import PaperQuote, PluginPaperRuntime
 from app.plugin_provider_v2 import PluginProviderRuntime
 from app.plugin_security_v2 import (
     AuditLog,
@@ -100,6 +101,7 @@ class CorePluginPlatform:
         trust_level: str = "local-trusted",
         sandbox_factory: SandboxFactory | None = None,
         approved_startup_plugins: Iterable[str] = (),
+        paper_trading_enabled: bool = False,
         network_resolver: Any | None = None,
         network_transport: Any | None = None,
     ) -> None:
@@ -110,16 +112,28 @@ class CorePluginPlatform:
                 "PLUGIN_CORE_SANDBOX_REQUIRED",
                 "untrusted product activation requires an explicit SandboxPolicy factory",
             )
+        if paper_trading_enabled and trust_level != "first-party-pinned":
+            raise core_error(
+                "PLUGIN_PAPER_TRUST_REQUIRED",
+                "Phase 11A paper permissions require an explicitly pinned first-party platform",
+            )
         self.root = Path(root).expanduser().resolve(strict=False)
         self.host_name = host_name
         self.host_version = host_version
         self.trust_level = trust_level
         self.sandbox_factory = sandbox_factory
         self.approved_startup_plugins = frozenset(approved_startup_plugins)
+        self.paper_trading_enabled = paper_trading_enabled
 
         self.audit_log = AuditLog(self.root / "audit-v2" / "events")
         self.grant_store = GrantStore(
-            self.root / "platform-grants-v2.json", audit_log=self.audit_log
+            self.root / "platform-grants-v2.json",
+            audit_log=self.audit_log,
+            available_restricted_permissions=(
+                ("accounts.read", "trade.simulate")
+                if self.paper_trading_enabled
+                else ()
+            ),
         )
         self.installer = PlatformPluginInstaller(
             root=self.root,
@@ -162,6 +176,11 @@ class CorePluginPlatform:
             deliver=self._deliver_market_batch,
         )
         self.providers = PluginProviderRuntime(invoke=self._invoke_provider)
+        self.paper = PluginPaperRuntime(
+            root=self.root,
+            audit_log=self.audit_log,
+            invoke=self._invoke_paper,
+        )
 
         self._registry = ActivationRegistry()
         self._records: dict[str, ActivationRecord] = {}
@@ -215,6 +234,7 @@ class CorePluginPlatform:
             await self.jobs.stop()
             await self.events.stop()
             await self.providers.stop()
+            await self.paper.stop()
             await self.market.stop()
             await self.integration.stop()
             plugin_ids = set(self._records)
@@ -271,7 +291,7 @@ class CorePluginPlatform:
                 if not values:
                     raise core_error(
                         "PLUGIN_CORE_NO_SUPPORTED_CONTRIBUTIONS",
-                        "plugin has no Phase 5 core contributions",
+                        "plugin has no supported core contributions",
                         plugin_id=plugin_id,
                     )
                 conflicts = sorted(
@@ -438,10 +458,15 @@ class CorePluginPlatform:
         try:
             self.providers.register_plugin(self._plugin_contributions[plugin_id])
             await self.providers.refresh_plugin_symbols(plugin_id)
+            self.paper.register_plugin(
+                self._plugin_contributions[plugin_id],
+                self._effective_grants[plugin_id],
+            )
         except Exception as exc:
             await self.providers.clear_plugin(
                 plugin_id, reason="provider-registration-failed"
             )
+            await self.paper.clear_plugin(plugin_id)
             self.authority.revoke_plugin(plugin_id)
             self.settings.unbind_plugin(plugin_id)
             await self.manager.remove_plugin(plugin_id)
@@ -551,6 +576,20 @@ class CorePluginPlatform:
             input_value,
             user_action=False,
             trace_id="provider:" + uuid.uuid4().hex,
+        )
+
+    async def _invoke_paper(
+        self,
+        contribution: CoreContribution,
+        input_value: dict[str, Any],
+        user_action: bool,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        return await self._invoke(
+            contribution,
+            input_value,
+            user_action=user_action,
+            trace_id=trace_id,
         )
 
     async def _invoke_integration_endpoint(
@@ -747,11 +786,66 @@ class CorePluginPlatform:
             value,
         )
 
+    async def publish_paper_quote(self, quote: PaperQuote, *, trace_id: str) -> None:
+        """Accept a quote only from a Host-owned market-data integration."""
+
+        await self.paper.publish_quote(quote, trace_id=trace_id)
+
+    async def paper_account_snapshot(
+        self, broker_id: str, account_id: str
+    ) -> dict[str, Any]:
+        return await self.paper.account_snapshot(broker_id, account_id)
+
+    async def submit_paper_order(
+        self, intent: dict[str, Any], *, trace_id: str
+    ) -> dict[str, Any]:
+        return await self.paper.submit(intent, trace_id=trace_id, user_action=True)
+
+    async def cancel_paper_order(
+        self,
+        *,
+        broker_id: str,
+        account_id: str,
+        order_id: str,
+        idempotency_key: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        return await self.paper.cancel(
+            broker_id=broker_id,
+            account_id=account_id,
+            order_id=order_id,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            user_action=True,
+        )
+
+    async def recover_paper_order(
+        self,
+        *,
+        broker_id: str,
+        account_id: str,
+        idempotency_key: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        return await self.paper.recover(
+            broker_id=broker_id,
+            account_id=account_id,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            user_action=True,
+        )
+
+    async def set_paper_kill_switch(
+        self, enabled: bool, *, trace_id: str
+    ) -> dict[str, Any]:
+        return await self.paper.set_kill_switch(enabled, trace_id=trace_id)
+
     async def reconcile_plugin(self, plugin_id: str) -> None:
         async with self._reconcile_lock:
             await self.jobs.unregister_plugin(plugin_id)
             await self.events.unregister_plugin(plugin_id)
             await self.providers.clear_plugin(plugin_id, reason="plugin-reconcile")
+            await self.paper.clear_plugin(plugin_id)
             await self.market.clear_plugin(plugin_id, reason="plugin-reconcile")
             await self.integration.clear_plugin(plugin_id)
             self.authority.revoke_plugin(plugin_id)
@@ -972,7 +1066,7 @@ class CorePluginPlatform:
                         "kind": item.kind,
                         "title": item.title,
                         "available": False,
-                        "reason": "CONTRIBUTION_KIND_NOT_IN_PHASE5",
+                        "reason": "CONTRIBUTION_KIND_NOT_SUPPORTED_BY_HOST",
                     }
                     for item in bundle.manifest.contributions
                     if item.kind not in CORE_CONTRIBUTION_KINDS
@@ -1185,6 +1279,10 @@ class CorePluginPlatform:
             }
             for item in self.installer.permission_summary(plugin_id)
         ]
+        paper_status = self.paper.status()
+        paper_brokers = [
+            item for item in paper_status["brokers"] if item["pluginId"] == plugin_id
+        ]
         return {
             "schemaVersion": MANAGEMENT_DETAIL_SCHEMA_VERSION,
             "plugin": plugin,
@@ -1200,6 +1298,11 @@ class CorePluginPlatform:
                 "available": False,
             },
             "rollback": self.installer.rollback_status(plugin_id),
+            "paperTrading": {
+                **paper_status,
+                "brokers": paper_brokers,
+                "available": bool(paper_brokers),
+            },
             "dataRetention": {
                 "retainedOnDisable": True,
                 "retainedOnUninstall": True,

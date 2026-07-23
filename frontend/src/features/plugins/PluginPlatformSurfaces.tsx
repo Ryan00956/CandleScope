@@ -11,6 +11,7 @@ import type {
   PluginManagementDetail,
   PluginJsonSchema,
   PluginPlatformRuntime,
+  PluginPaperContribution,
   PluginProviderContribution,
   PluginSandboxViewContribution,
   PluginSettingsContribution,
@@ -557,6 +558,71 @@ function ProviderRows({ providers }: { providers: PluginProviderContribution[] }
   );
 }
 
+function PaperRows({
+  contributions,
+  detail,
+  runtime,
+  reload,
+}: {
+  contributions: PluginPaperContribution[];
+  detail: PluginManagementDetail | null;
+  runtime: PluginPlatformRuntime;
+  reload(): Promise<void>;
+}) {
+  if (!contributions.length) return null;
+  const account = contributions.find((item) => item.kind === "account-provider/1");
+  const executor = contributions.find((item) => item.kind === "order-executor/1");
+  const paper = detail?.paperTrading;
+  const toggleKillSwitch = async () => {
+    if (!paper) return;
+    const next = !paper.killSwitchEnabled;
+    if (!next && !window.confirm("Resume Paper order submission? Host risk checks and limits remain active.")) return;
+    try {
+      await runtime.actions.setPaperKillSwitch(next);
+      await reload();
+    } catch { /* notice published */ }
+  };
+  return (
+    <section className="plugin-paper-panel" data-plugin-paper-only>
+      <h4>Paper trading only</h4>
+      <p>Host-owned balances, fills, risk, idempotency and audit. No live credentials, live submission, or plugin network access.</p>
+      {account?.kind === "account-provider/1" && (
+        <p>
+          <strong>{account.configuration.displayName}</strong>
+          {` · ${account.configuration.accounts.map((item) => `${item.label} (${item.baseCurrency})`).join(", ")}`}
+        </p>
+      )}
+      {executor?.kind === "order-executor/1" && (
+        <>
+          <p>
+            {executor.configuration.orderTypes.join(" + ")}
+            {` · ${executor.configuration.symbols.map((item) => `${item.symbol}/${item.marketType}`).join(", ")}`}
+          </p>
+          <p>
+            {`Order ≤ ${executor.configuration.limits.maxOrderNotional} · position ≤ ${executor.configuration.limits.maxPositionNotional}`}
+            {` · ${executor.configuration.limits.maxOrdersPerMinute}/min · no short selling`}
+          </p>
+        </>
+      )}
+      {paper && (
+        <div className="plugin-action-row">
+          <strong data-paper-kill-switch-state>
+            Global kill switch: {paper.killSwitchEnabled ? "ON" : "OFF"}
+          </strong>
+          <button
+            type="button"
+            data-paper-kill-switch
+            disabled={!runtime.view.managementAvailable}
+            onClick={() => void toggleKillSwitch()}
+          >
+            {paper.killSwitchEnabled ? "Resume Paper orders" : "Stop Paper orders"}
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
   const plugins = useMemo(
     () => runtime.view.catalog?.plugins ?? [],
@@ -642,6 +708,16 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
                   item.kind === "symbol-provider/1" || item.kind === "market-data-provider/1"
                 ),
               )} />
+              <PaperRows
+                contributions={selected.contributions.filter(
+                  (item): item is PluginPaperContribution => (
+                    item.kind === "account-provider/1" || item.kind === "order-executor/1"
+                  ),
+                )}
+                detail={detail}
+                runtime={runtime}
+                reload={reload}
+              />
               {detail && (
                 <>
                   <h4>Health</h4>

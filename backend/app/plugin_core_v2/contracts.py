@@ -6,6 +6,7 @@ import ipaddress
 import math
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from candlescope_plugin_sdk.platform_v2 import (
@@ -30,6 +31,8 @@ CORE_CONTRIBUTION_KINDS = frozenset(
         "http-endpoint/1",
         "symbol-provider/1",
         "market-data-provider/1",
+        "account-provider/1",
+        "order-executor/1",
     }
 )
 
@@ -82,6 +85,13 @@ _PROVIDER_CHANNEL_KINDS = frozenset({"kline", "full_depth"})
 _PROVIDER_QUALITY_LEVELS = frozenset(
     {"authoritative", "verified", "best-effort", "synthetic"}
 )
+_PAPER_PROTOCOL = "candlescope.paper/1"
+_PAPER_ORDER_TYPES = frozenset({"market", "limit"})
+_PAPER_BROKER_ID = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+_PAPER_ACCOUNT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_PAPER_SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9._:-]{0,63}$")
+_PAPER_ASSET = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,31}$")
+_PAPER_DECIMAL = re.compile(r"^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
 
 
 def _fail(message: str, *, plugin_id: str, contribution_id: str) -> None:
@@ -157,6 +167,44 @@ def _bounded_number(
             contribution_id=contribution_id,
         )
     return float(value)
+
+
+def _paper_decimal(
+    value: Any,
+    *,
+    label: str,
+    plugin_id: str,
+    contribution_id: str,
+    positive: bool = False,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) > 128
+        or _PAPER_DECIMAL.fullmatch(value) is None
+    ):
+        _fail(
+            f"{label} must be a canonical decimal string",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        _fail(
+            f"{label} must be a finite decimal",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    normalized = format(parsed, "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    if normalized != value or (positive and parsed <= 0):
+        _fail(
+            f"{label} is not a canonical bounded decimal",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return value
 
 
 def validate_settings_schema(
@@ -1013,6 +1061,409 @@ def _validate_market_provider_configuration(
     }
 
 
+def _validate_paper_account_configuration(
+    config: dict[str, Any], *, plugin_id: str, contribution_id: str
+) -> dict[str, Any]:
+    _exact_keys(
+        config,
+        allowed={"brokerId", "displayName", "environment", "accounts"},
+        required={"brokerId", "displayName", "environment", "accounts"},
+        label="paper account provider configuration",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    if config["environment"] != "paper":
+        _fail(
+            "Phase 11A account providers must declare the paper environment",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    broker_id = _provider_string(
+        config["brokerId"],
+        label="paper brokerId",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        maximum=64,
+        pattern=_PAPER_BROKER_ID,
+    )
+    display_name = _provider_string(
+        config["displayName"],
+        label="paper displayName",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        maximum=128,
+    )
+    raw_accounts = config["accounts"]
+    if not isinstance(raw_accounts, list) or not 1 <= len(raw_accounts) <= 16:
+        _fail(
+            "paper accounts must contain 1 to 16 entries",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    accounts: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_accounts):
+        if not isinstance(raw, dict):
+            _fail(
+                "paper account must be an object",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        _exact_keys(
+            raw,
+            allowed={"id", "label", "baseCurrency", "initialBalances"},
+            required={"id", "label", "baseCurrency", "initialBalances"},
+            label="paper account",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+        balances = raw["initialBalances"]
+        if not isinstance(balances, list) or not 1 <= len(balances) <= 32:
+            _fail(
+                "paper initialBalances must contain 1 to 32 entries",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        normalized_balances: list[dict[str, str]] = []
+        for balance in balances:
+            if not isinstance(balance, dict):
+                _fail(
+                    "paper initial balance must be an object",
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                )
+            _exact_keys(
+                balance,
+                allowed={"asset", "available"},
+                required={"asset", "available"},
+                label="paper initial balance",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+            normalized_balances.append(
+                {
+                    "asset": _provider_string(
+                        balance["asset"],
+                        label="paper balance asset",
+                        plugin_id=plugin_id,
+                        contribution_id=contribution_id,
+                        maximum=32,
+                        pattern=_PAPER_ASSET,
+                    ),
+                    "available": _paper_decimal(
+                        balance["available"],
+                        label="paper balance available",
+                        plugin_id=plugin_id,
+                        contribution_id=contribution_id,
+                    ),
+                }
+            )
+        if len({item["asset"] for item in normalized_balances}) != len(
+            normalized_balances
+        ):
+            _fail(
+                "paper initial balances contain duplicate assets",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        base_currency = _provider_string(
+            raw["baseCurrency"],
+            label="paper account baseCurrency",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+            maximum=32,
+            pattern=_PAPER_ASSET,
+        )
+        if base_currency not in {item["asset"] for item in normalized_balances}:
+            _fail(
+                "paper baseCurrency requires an initial balance",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        accounts.append(
+            {
+                "id": _provider_string(
+                    raw["id"],
+                    label="paper account id",
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                    maximum=128,
+                    pattern=_PAPER_ACCOUNT_ID,
+                ),
+                "label": _provider_string(
+                    raw["label"],
+                    label="paper account label",
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                    maximum=128,
+                ),
+                "baseCurrency": base_currency,
+                "initialBalances": normalized_balances,
+            }
+        )
+    if len({item["id"] for item in accounts}) != len(accounts):
+        _fail(
+            "paper accounts contain duplicate ids",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return {
+        "brokerId": broker_id,
+        "displayName": display_name,
+        "environment": "paper",
+        "accounts": accounts,
+    }
+
+
+def _validate_paper_executor_configuration(
+    config: dict[str, Any], *, plugin_id: str, contribution_id: str
+) -> dict[str, Any]:
+    _exact_keys(
+        config,
+        allowed={
+            "brokerId",
+            "environment",
+            "protocol",
+            "orderTypes",
+            "symbols",
+            "limits",
+            "maxQuoteAgeMs",
+        },
+        required={
+            "brokerId",
+            "environment",
+            "protocol",
+            "orderTypes",
+            "symbols",
+            "limits",
+            "maxQuoteAgeMs",
+        },
+        label="paper order executor configuration",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    if config["environment"] != "paper" or config["protocol"] != _PAPER_PROTOCOL:
+        _fail(
+            "Phase 11A executors require the paper/1 protocol",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    broker_id = _provider_string(
+        config["brokerId"],
+        label="paper brokerId",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        maximum=64,
+        pattern=_PAPER_BROKER_ID,
+    )
+    order_types = _provider_string_list(
+        config["orderTypes"],
+        label="paper orderTypes",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        minimum=1,
+        maximum=len(_PAPER_ORDER_TYPES),
+    )
+    if not set(order_types) <= _PAPER_ORDER_TYPES:
+        _fail(
+            "paper orderTypes are unsupported",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    raw_symbols = config["symbols"]
+    if not isinstance(raw_symbols, list) or not 1 <= len(raw_symbols) <= 128:
+        _fail(
+            "paper symbols must contain 1 to 128 entries",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    symbols: list[dict[str, str]] = []
+    symbol_keys = {
+        "symbol",
+        "marketType",
+        "baseAsset",
+        "quoteAsset",
+        "priceTick",
+        "quantityStep",
+        "minQuantity",
+        "maxQuantity",
+        "minNotional",
+        "maxNotional",
+    }
+    for raw in raw_symbols:
+        if not isinstance(raw, dict):
+            _fail(
+                "paper symbol must be an object",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        _exact_keys(
+            raw,
+            allowed=symbol_keys,
+            required=symbol_keys,
+            label="paper symbol",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+        item = {
+            "symbol": _provider_string(
+                raw["symbol"],
+                label="paper symbol",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+                maximum=64,
+                pattern=_PAPER_SYMBOL,
+            ),
+            "marketType": _provider_string(
+                raw["marketType"],
+                label="paper marketType",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+                maximum=32,
+                pattern=_MARKET_TYPE_ID,
+            ),
+            "baseAsset": _provider_string(
+                raw["baseAsset"],
+                label="paper baseAsset",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+                maximum=32,
+                pattern=_PAPER_ASSET,
+            ),
+            "quoteAsset": _provider_string(
+                raw["quoteAsset"],
+                label="paper quoteAsset",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+                maximum=32,
+                pattern=_PAPER_ASSET,
+            ),
+        }
+        for name in (
+            "priceTick",
+            "quantityStep",
+            "minQuantity",
+            "maxQuantity",
+            "minNotional",
+            "maxNotional",
+        ):
+            item[name] = _paper_decimal(
+                raw[name],
+                label=f"paper symbol {name}",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+                positive=True,
+            )
+        if (
+            Decimal(item["minQuantity"]) > Decimal(item["maxQuantity"])
+            or Decimal(item["minNotional"]) > Decimal(item["maxNotional"])
+            or item["baseAsset"] == item["quoteAsset"]
+        ):
+            _fail(
+                "paper symbol bounds are inconsistent",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        symbols.append(item)
+    if len({(item["symbol"], item["marketType"]) for item in symbols}) != len(symbols):
+        _fail(
+            "paper symbols contain duplicate market keys",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    limits = config["limits"]
+    limit_keys = {
+        "maxOrderQuantity",
+        "maxOrderNotional",
+        "maxPositionNotional",
+        "maxOpenOrders",
+        "maxOrdersPerMinute",
+        "allowShort",
+    }
+    if not isinstance(limits, dict):
+        _fail(
+            "paper limits must be an object",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    _exact_keys(
+        limits,
+        allowed=limit_keys,
+        required=limit_keys,
+        label="paper limits",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    if not isinstance(limits["allowShort"], bool):
+        _fail(
+            "paper allowShort must be boolean",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    if limits["allowShort"]:
+        _fail(
+            "Phase 11A does not permit short selling",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    normalized_limits = {
+        key: _paper_decimal(
+            limits[key],
+            label=f"paper limits {key}",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+            positive=True,
+        )
+        for key in ("maxOrderQuantity", "maxOrderNotional", "maxPositionNotional")
+    }
+    normalized_limits.update(
+        {
+            "maxOpenOrders": _bounded_int(
+                limits["maxOpenOrders"],
+                minimum=1,
+                maximum=1024,
+                label="paper maxOpenOrders",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            ),
+            "maxOrdersPerMinute": _bounded_int(
+                limits["maxOrdersPerMinute"],
+                minimum=1,
+                maximum=10_000,
+                label="paper maxOrdersPerMinute",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            ),
+            "allowShort": limits["allowShort"],
+        }
+    )
+    if any(
+        Decimal(item["maxQuantity"]) > Decimal(normalized_limits["maxOrderQuantity"])
+        or Decimal(item["maxNotional"]) > Decimal(normalized_limits["maxOrderNotional"])
+        for item in symbols
+    ):
+        _fail(
+            "paper symbol bounds exceed executor limits",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return {
+        "brokerId": broker_id,
+        "environment": "paper",
+        "protocol": _PAPER_PROTOCOL,
+        "orderTypes": order_types,
+        "symbols": symbols,
+        "limits": normalized_limits,
+        "maxQuoteAgeMs": _bounded_int(
+            config["maxQuoteAgeMs"],
+            minimum=100,
+            maximum=60_000,
+            label="paper maxQuoteAgeMs",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        ),
+    }
+
+
 def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str, Any]:
     config = dict(item.configuration)
     if item.kind == "symbol-provider/1":
@@ -1023,6 +1474,18 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
         )
     elif item.kind == "market-data-provider/1":
         config = _validate_market_provider_configuration(
+            config,
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+    elif item.kind == "account-provider/1":
+        config = _validate_paper_account_configuration(
+            config,
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+    elif item.kind == "order-executor/1":
+        config = _validate_paper_executor_configuration(
             config,
             plugin_id=plugin_id,
             contribution_id=item.id,
@@ -1885,6 +2348,213 @@ def _validate_phase9_permissions(
                 )
 
 
+def _validate_phase11_permissions(
+    manifest: PluginManifest, contributions: tuple[CoreContribution, ...]
+) -> None:
+    paper = tuple(
+        item
+        for item in contributions
+        if item.kind in {"account-provider/1", "order-executor/1"}
+    )
+    if not paper:
+        return
+    required = {item.id: item.scope for item in manifest.permissions.required}
+    requested = {
+        item.id: item.scope
+        for item in (*manifest.permissions.required, *manifest.permissions.optional)
+    }
+    forbidden = sorted(
+        set(requested)
+        & {"network.connect", "secrets.use", "trade.submit", "trade.cancel"}
+    )
+    if forbidden:
+        _fail(
+            "Phase 11A paper plugins cannot request live credentials, network, or live trading permissions",
+            plugin_id=manifest.plugin.id,
+            contribution_id=paper[0].id,
+        )
+    if not {"accounts.read", "trade.simulate"} <= set(required):
+        _fail(
+            "paper account and executor contributions require accounts.read and trade.simulate",
+            plugin_id=manifest.plugin.id,
+            contribution_id=paper[0].id,
+        )
+    account_scope = required["accounts.read"]
+    trade_scope = required["trade.simulate"]
+    if not isinstance(account_scope, dict) or not isinstance(trade_scope, dict):
+        _fail(
+            "paper permission scopes must be objects",
+            plugin_id=manifest.plugin.id,
+            contribution_id=paper[0].id,
+        )
+    _exact_keys(
+        account_scope,
+        allowed={"brokers", "accounts"},
+        required={"brokers", "accounts"},
+        label="accounts.read scope",
+        plugin_id=manifest.plugin.id,
+        contribution_id=paper[0].id,
+    )
+    account_brokers = _scope_list(
+        account_scope["brokers"],
+        allowed=None,
+        minimum=1,
+        maximum=16,
+        label="accounts.read brokers",
+        plugin_id=manifest.plugin.id,
+        contribution_id=paper[0].id,
+    )
+    account_ids = _scope_list(
+        account_scope["accounts"],
+        allowed=None,
+        minimum=1,
+        maximum=64,
+        label="accounts.read accounts",
+        plugin_id=manifest.plugin.id,
+        contribution_id=paper[0].id,
+    )
+    if not all(_PAPER_BROKER_ID.fullmatch(item) for item in account_brokers) or not all(
+        _PAPER_ACCOUNT_ID.fullmatch(item) for item in account_ids
+    ):
+        _fail(
+            "accounts.read scope identifiers are invalid",
+            plugin_id=manifest.plugin.id,
+            contribution_id=paper[0].id,
+        )
+    trade_keys = {
+        "brokers",
+        "accounts",
+        "symbols",
+        "marketTypes",
+        "orderTypes",
+        "maxOrderQuantity",
+        "maxOrderNotional",
+        "maxPositionNotional",
+        "maxOpenOrders",
+        "maxOrdersPerMinute",
+        "allowShort",
+    }
+    _exact_keys(
+        trade_scope,
+        allowed=trade_keys,
+        required=trade_keys,
+        label="trade.simulate scope",
+        plugin_id=manifest.plugin.id,
+        contribution_id=paper[0].id,
+    )
+    trade_lists: dict[str, list[str]] = {}
+    for key, maximum in (
+        ("brokers", 16),
+        ("accounts", 64),
+        ("symbols", 128),
+        ("marketTypes", 32),
+        ("orderTypes", 2),
+    ):
+        trade_lists[key] = _scope_list(
+            trade_scope[key],
+            allowed=None,
+            minimum=1,
+            maximum=maximum,
+            label=f"trade.simulate {key}",
+            plugin_id=manifest.plugin.id,
+            contribution_id=paper[0].id,
+        )
+    if (
+        not all(_PAPER_BROKER_ID.fullmatch(item) for item in trade_lists["brokers"])
+        or not all(
+            _PAPER_ACCOUNT_ID.fullmatch(item) for item in trade_lists["accounts"]
+        )
+        or not all(_PAPER_SYMBOL.fullmatch(item) for item in trade_lists["symbols"])
+        or not all(
+            _MARKET_TYPE_ID.fullmatch(item) for item in trade_lists["marketTypes"]
+        )
+        or not set(trade_lists["orderTypes"]) <= _PAPER_ORDER_TYPES
+        or not isinstance(trade_scope["allowShort"], bool)
+    ):
+        _fail(
+            "trade.simulate scope identifiers or enums are invalid",
+            plugin_id=manifest.plugin.id,
+            contribution_id=paper[0].id,
+        )
+    trade_limits = {
+        key: _paper_decimal(
+            trade_scope[key],
+            label=f"trade.simulate {key}",
+            plugin_id=manifest.plugin.id,
+            contribution_id=paper[0].id,
+            positive=True,
+        )
+        for key in ("maxOrderQuantity", "maxOrderNotional", "maxPositionNotional")
+    }
+    trade_limits.update(
+        {
+            "maxOpenOrders": _bounded_int(
+                trade_scope["maxOpenOrders"],
+                minimum=1,
+                maximum=1024,
+                label="trade.simulate maxOpenOrders",
+                plugin_id=manifest.plugin.id,
+                contribution_id=paper[0].id,
+            ),
+            "maxOrdersPerMinute": _bounded_int(
+                trade_scope["maxOrdersPerMinute"],
+                minimum=1,
+                maximum=10_000,
+                label="trade.simulate maxOrdersPerMinute",
+                plugin_id=manifest.plugin.id,
+                contribution_id=paper[0].id,
+            ),
+            "allowShort": trade_scope["allowShort"],
+        }
+    )
+    for item in paper:
+        broker_id = item.configuration["brokerId"]
+        if broker_id not in account_brokers or broker_id not in trade_lists["brokers"]:
+            _fail(
+                "paper broker exceeds its requested permission scope",
+                plugin_id=manifest.plugin.id,
+                contribution_id=item.id,
+            )
+        if item.kind == "account-provider/1":
+            configured_accounts = {
+                account["id"] for account in item.configuration["accounts"]
+            }
+            if not configured_accounts <= set(
+                account_ids
+            ) or not configured_accounts <= set(trade_lists["accounts"]):
+                _fail(
+                    "paper accounts exceed their requested permission scopes",
+                    plugin_id=manifest.plugin.id,
+                    contribution_id=item.id,
+                )
+            continue
+        config = item.configuration
+        limits = config["limits"]
+        if (
+            not {symbol["symbol"] for symbol in config["symbols"]}
+            <= set(trade_lists["symbols"])
+            or not {symbol["marketType"] for symbol in config["symbols"]}
+            <= set(trade_lists["marketTypes"])
+            or not set(config["orderTypes"]) <= set(trade_lists["orderTypes"])
+            or any(
+                Decimal(limits[key]) > Decimal(trade_limits[key])
+                for key in (
+                    "maxOrderQuantity",
+                    "maxOrderNotional",
+                    "maxPositionNotional",
+                )
+            )
+            or limits["maxOpenOrders"] > trade_limits["maxOpenOrders"]
+            or limits["maxOrdersPerMinute"] > trade_limits["maxOrdersPerMinute"]
+            or (limits["allowShort"] and not trade_limits["allowShort"])
+        ):
+            _fail(
+                "paper executor exceeds its requested trade.simulate scope",
+                plugin_id=manifest.plugin.id,
+                contribution_id=item.id,
+            )
+
+
 def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]:
     result: list[CoreContribution] = []
     for item in manifest.contributions:
@@ -1958,6 +2628,43 @@ def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]
                 plugin_id=manifest.plugin.id,
                 contribution_id=market_provider.id,
             )
+    account_providers = {
+        item.configuration["brokerId"]: item
+        for item in result
+        if item.kind == "account-provider/1"
+    }
+    order_executors = {
+        item.configuration["brokerId"]: item
+        for item in result
+        if item.kind == "order-executor/1"
+    }
+    paper_entries = [
+        item
+        for item in result
+        if item.kind in {"account-provider/1", "order-executor/1"}
+    ]
+    if (
+        len(account_providers)
+        != sum(item.kind == "account-provider/1" for item in paper_entries)
+        or len(order_executors)
+        != sum(item.kind == "order-executor/1" for item in paper_entries)
+        or set(account_providers) != set(order_executors)
+    ):
+        contribution = paper_entries[0] if paper_entries else None
+        if contribution is not None:
+            _fail(
+                "each paper broker requires exactly one account provider and one order executor",
+                plugin_id=manifest.plugin.id,
+                contribution_id=contribution.id,
+            )
+    for broker_id, executor in order_executors.items():
+        accounts = account_providers[broker_id]
+        if executor.entrypoint_id != accounts.entrypoint_id:
+            _fail(
+                "paired paper contributions must use the same entrypoint",
+                plugin_id=manifest.plugin.id,
+                contribution_id=executor.id,
+            )
     sandbox_views = {
         item.id: item
         for item in result
@@ -1992,6 +2699,7 @@ def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]
             )
     values = tuple(result)
     _validate_phase9_permissions(manifest, values)
+    _validate_phase11_permissions(manifest, values)
     return values
 
 

@@ -166,6 +166,71 @@ function providerPlugin() {
   };
 }
 
+function paperPlugin() {
+  const id = "candlescope.paper-broker";
+  return {
+    ...plugin(id),
+    name: "CandleScope Paper Broker",
+    trustLevel: "first-party-pinned",
+    contributions: [
+      {
+        id: `${id}.accounts`,
+        localId: "accounts",
+        kind: "account-provider/1",
+        title: "Paper Accounts",
+        entrypointId: "main",
+        configuration: {
+          brokerId: "fixture-paper",
+          displayName: "Fixture Paper Broker",
+          environment: "paper",
+          accounts: [{
+            id: "paper-main",
+            label: "Paper Main",
+            baseCurrency: "USDT",
+            initialBalances: [{ asset: "USDT", available: "100000" }],
+          }],
+        },
+        available: true,
+      },
+      {
+        id: `${id}.executor`,
+        localId: "executor",
+        kind: "order-executor/1",
+        title: "Paper Executor",
+        entrypointId: "main",
+        configuration: {
+          brokerId: "fixture-paper",
+          environment: "paper",
+          protocol: "candlescope.paper/1",
+          orderTypes: ["market", "limit"],
+          symbols: [{
+            symbol: "BTCUSDT",
+            marketType: "spot",
+            baseAsset: "BTC",
+            quoteAsset: "USDT",
+            priceTick: "0.01",
+            quantityStep: "0.001",
+            minQuantity: "0.001",
+            maxQuantity: "2",
+            minNotional: "10",
+            maxNotional: "100000",
+          }],
+          limits: {
+            maxOrderQuantity: "2",
+            maxOrderNotional: "100000",
+            maxPositionNotional: "200000",
+            maxOpenOrders: 16,
+            maxOrdersPerMinute: 60,
+            allowShort: false,
+          },
+          maxQuoteAgeMs: 10000,
+        },
+        available: true,
+      },
+    ],
+  };
+}
+
 test("catalog validator builds only active native registries", () => {
   const parsed = parsePluginCatalog(catalog());
   const registries = buildPluginRegistries(parsed);
@@ -208,6 +273,29 @@ test("catalog validates public providers while keeping them out of UI extension 
   const invalidTimestampSource = invalidTimestamp.contributions[1]!.configuration.sourceQuality!;
   invalidTimestampSource.timestamp = "sidecar";
   assert.throws(() => parsePluginCatalog(catalog([invalidTimestamp])), /sourceQuality\.timestamp/);
+});
+
+test("catalog validates Paper-only contributions and never registers them as UI code", () => {
+  const parsed = parsePluginCatalog(catalog([paperPlugin()]));
+  assert.deepEqual(parsed.plugins[0]?.contributions.map((item) => item.kind), [
+    "account-provider/1",
+    "order-executor/1",
+  ]);
+  assert.deepEqual(buildPluginRegistries(parsed).commandPalette, []);
+
+  const live = paperPlugin();
+  live.contributions[1]!.configuration.environment = "live";
+  assert.throws(() => parsePluginCatalog(catalog([live])), /configuration/);
+
+  const floatDecimal = paperPlugin();
+  const floatLimits = (floatDecimal.contributions[1]!.configuration as { limits: Record<string, unknown> }).limits;
+  floatLimits.maxOrderNotional = 100000;
+  assert.throws(() => parsePluginCatalog(catalog([floatDecimal])), /maxOrderNotional/);
+
+  const shorting = paperPlugin();
+  const shortLimits = (shorting.contributions[1]!.configuration as { limits: Record<string, unknown> }).limits;
+  shortLimits.allowShort = true;
+  assert.throws(() => parsePluginCatalog(catalog([shorting])), /allowShort/);
 });
 
 test("command file inputs require native user-action fields within declared bounds", () => {
@@ -385,6 +473,15 @@ test("management detail accepts only the Host-projected lifecycle shape", () => 
     health: { available: true, entrypoints: [{ entrypointId: "main", state: "stopped", generation: 0 }] },
     update: { policy: "local-artifact-only", automatic: false, available: false },
     rollback: { available: true, target: { state: "disabled", version: "1.0.0" } },
+    paperTrading: {
+      schemaVersion: "candlescope.paper-status/1",
+      killSwitchEnabled: false,
+      mode: "paper-only",
+      liveTradingAvailable: false,
+      secretsAvailable: false,
+      brokers: [],
+      available: false,
+    },
     dataRetention: {
       retainedOnDisable: true,
       retainedOnUninstall: true,

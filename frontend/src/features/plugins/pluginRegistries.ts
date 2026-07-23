@@ -32,6 +32,8 @@ export function buildPluginRegistries(catalog: PluginCatalog | null): PluginRegi
       item.available
       && item.kind !== "symbol-provider/1"
       && item.kind !== "market-data-provider/1"
+      && item.kind !== "account-provider/1"
+      && item.kind !== "order-executor/1"
     ));
   for (const item of contributions) {
     if (item.kind === "command/1") {

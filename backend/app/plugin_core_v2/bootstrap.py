@@ -21,6 +21,9 @@ PLUGIN_PLATFORM_V2_MANAGEMENT_ORIGINS_ENV = (
 PLUGIN_PLATFORM_V2_STARTUP_ALLOWLIST_ENV = (
     "CANDLESCOPE_PLUGIN_PLATFORM_V2_STARTUP_ALLOWLIST"
 )
+PLUGIN_PLATFORM_V2_PAPER_TRADING_ENV = (
+    "CANDLESCOPE_PLUGIN_PLATFORM_V2_PAPER_TRADING_ENABLED"
+)
 
 
 def _environment_bool(environ: Mapping[str, str], name: str, *, default: bool) -> bool:
@@ -85,6 +88,9 @@ def build_core_plugin_platform_from_environment(
         host_version=host_version,
         trust_level=trust_level,
         approved_startup_plugins=allowlist,
+        paper_trading_enabled=_environment_bool(
+            env, PLUGIN_PLATFORM_V2_PAPER_TRADING_ENV, default=False
+        ),
     )
 
 

@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from candlescope_plugin_sdk.platform_v2 import PermissionRequest, PluginManifest
 
@@ -58,6 +58,7 @@ KNOWN_PERMISSION_IDS = frozenset(
 UNAVAILABLE_HIGH_RISK_PERMISSIONS = frozenset(
     {"secrets.use", "accounts.read", "trade.simulate", "trade.submit", "trade.cancel"}
 )
+PAPER_ONLY_PERMISSION_IDS = frozenset({"accounts.read", "trade.simulate"})
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PLUGIN_ID = re.compile(r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$")
@@ -487,6 +488,7 @@ class GrantStore:
         *,
         audit_log: AuditLog,
         lock_timeout_seconds: float = 10.0,
+        available_restricted_permissions: Iterable[str] = (),
     ) -> None:
         self.path = Path(path).resolve(strict=False)
         if self.path.name.casefold() != GRANT_STORE_FILE_NAME.casefold():
@@ -497,6 +499,13 @@ class GrantStore:
         self.lock_path = self.path.parent / "platform-grants-v2.lock"
         self.audit_log = audit_log
         self.lock_timeout_seconds = lock_timeout_seconds
+        available = frozenset(available_restricted_permissions)
+        if not available <= PAPER_ONLY_PERMISSION_IDS:
+            raise security_error(
+                "PLUGIN_PERMISSION_POLICY_INVALID",
+                "only Phase 11A paper permissions may be selectively enabled",
+            )
+        self.available_restricted_permissions = available
 
     def load(self) -> GrantDocument:
         if not self.path.exists():
@@ -615,10 +624,16 @@ class GrantStore:
             tuple(items),
         )
 
-    @staticmethod
-    def _required_satisfied(record: PluginGrantRecord) -> bool:
+    def _permission_available(self, permission_id: str) -> bool:
+        return (
+            permission_id not in UNAVAILABLE_HIGH_RISK_PERMISSIONS
+            or permission_id in self.available_restricted_permissions
+        )
+
+    def _required_satisfied(self, record: PluginGrantRecord) -> bool:
         return all(
-            item.decision == "granted"
+            self._permission_available(item.permission_id)
+            and item.decision == "granted"
             and item.granted_scope is not None
             and scope_contains(item.granted_scope, item.requested_scope)
             for item in record.permissions
@@ -817,7 +832,11 @@ class GrantStore:
             raise security_error(
                 "PLUGIN_PERMISSION_SOURCE_INVALID", "source is invalid"
             )
-        if permission_id in UNAVAILABLE_HIGH_RISK_PERMISSIONS and decision == "granted":
+        if (
+            permission_id in UNAVAILABLE_HIGH_RISK_PERMISSIONS
+            and permission_id not in self.available_restricted_permissions
+            and decision == "granted"
+        ):
             raise security_error(
                 "PLUGIN_PERMISSION_NOT_AVAILABLE",
                 "credential, account, and trading permissions remain unavailable before signed-publisher and trading phases",
@@ -1025,7 +1044,9 @@ class GrantStore:
                 item.confirmation_version,
             )
             for item in record.permissions
-            if item.decision == "granted" and item.granted_scope is not None
+            if item.decision == "granted"
+            and item.granted_scope is not None
+            and self._permission_available(item.permission_id)
         )
 
     def required_satisfied(
@@ -1101,6 +1122,7 @@ class GrantStore:
         permission = record.by_id().get(permission_id)
         return bool(
             permission is not None
+            and self._permission_available(permission_id)
             and permission.decision == "granted"
             and permission.granted_scope
             == normalize_scope(scope, path="capability.scope")

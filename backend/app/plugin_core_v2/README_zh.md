@@ -1,6 +1,6 @@
 # Plugin Platform v2 核心产品组合根
 
-`app.plugin_core_v2` 是 Phase 5–6 的产品组合层。它把 Phase 2 的进程 Host、Phase 3 的
+`app.plugin_core_v2` 是 Phase 5–11A 的产品组合层。它把 Phase 2 的进程 Host、Phase 3 的
 immutable installation/activation registry 和 Phase 4 的 Grant Store/capability broker
 组合成最小通用插件平台，同时保持业务数据库、Data Engine 和私有 Python 对象不可见。
 
@@ -17,6 +17,10 @@ immutable installation/activation registry 和 Phase 4 的 Grant Store/capabilit
 | `storage.private` | publisher + plugin 命名空间的 KV/document/blob、逻辑配额、snapshot 和事务迁移 |
 | `market.*.read` | 只经 DataManager facade 返回 symbol、K 线、TradeFlow 与 partial order-book 公共 DTO |
 | `market.bars.subscribe` | 精确 series lease、有界队列、forming latest-coalesce、closed/amended 可靠投递与 resync |
+| `view/1` | Host 原生声明式 UI，或 opaque-origin、严格 bridge 的 sandbox surface |
+| `http-endpoint/1` | loopback namespace 内的受控 endpoint；网络与用户文件均经 Host gateway |
+| `symbol-provider/1` + `market-data-provider/1` | 成对 sidecar provider；输出回到 Host ingestion/Data Engine 真相路径 |
+| `account-provider/1` + `order-executor/1` | first-party pinned、显式开启的 Paper-only intent/ack；账本、成交和风控归 Host |
 
 公共事件当前只有 `candlescope.app.ready/1`、`candlescope.app.stopping/1`、
 `candlescope.plugin.enabled/1` 和 `candlescope.plugin.disabled/1`。插件不能订阅
@@ -31,6 +35,13 @@ $env:CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED='1'
 $env:CANDLESCOPE_PLUGIN_PLATFORM_V2_ROOT='C:\managed\candlescope-plugin-platform-v2'
 ```
 
+Paper 还必须同时显式设置：
+
+```powershell
+$env:CANDLESCOPE_PLUGIN_PLATFORM_V2_TRUST='first-party-pinned'
+$env:CANDLESCOPE_PLUGIN_PLATFORM_V2_PAPER_TRADING_ENABLED='1'
+```
+
 未设置 `CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED` 时，`app.main` 只挂载返回空 catalog 的
 disabled facade，不读取 registry、不创建 supervisor、不注册 event/job，也不启动插件进程。
 显式启用后，组合根只对 registry 中 `active` 且 grant 完整的 installation 建立惰性
@@ -39,7 +50,7 @@ supervisor。disabled/staged 插件只经过静态 bundle/receipt/content/launch
 
 普通插件只因 command、event delivery 或 job execution 激活。`onStartup` 还必须同时出现在
 `CANDLESCOPE_PLUGIN_PLATFORM_V2_STARTUP_ALLOWLIST`。disable、uninstall、rollback 或 grant
-变化统一走 `reconcile_plugin()`：先释放 market subscription/layer，再撤销 handle、event、job、settings binding 和 supervisor，
+变化统一走 `reconcile_plugin()`：先释放 market subscription/layer/provider/Paper broker，再撤销 handle、event、job、settings binding 和 supervisor，
 再读取新 registry；旧 generation 和迟到结果不能重新发布。
 
 环境 bootstrap 默认 `local-trusted`。把
@@ -51,7 +62,7 @@ AppContainer runtime roots 不能从字符串推断；调用方必须注入显�
 - `GET /api/v2/plugins/catalog` 是公开安全投影，不含 executable、安装路径、PID、stderr、
   capability handle 或 secret；
 - `/api/v2/plugins/manage/*` 提供 diagnostics、权限决策、enable/disable、rollback、uninstall、
-  command/job、settings 和 notification 管理操作；
+  command/job、settings、notification 与 Paper status/account/submit/cancel/recover/kill-switch 管理操作；
 - 所有 management 请求要求 loopback client/Host、精确 Origin 和 ephemeral local session；
   mutation 还要求 CSRF 与显式 user-action ID；
 - session/CSRF 只保存在 Host 内存，不通过 HTTP 返回。Phase 7 的可信桌面 handoff 和管理 UI
@@ -67,6 +78,7 @@ plugin-platform-v2/
 ├── installations/
 ├── history/
 ├── audit-v2/events/
+├── paper-v1/paper-state-v1.json
 └── private/<publisher-hash>/<plugin-id>/
     ├── storage-v1.sqlite
     └── snapshots/snapshot-<uuid>.json
@@ -77,18 +89,16 @@ KV/document/blob 写入在 SQLite transaction 内计算逻辑使用量，越 quo
 生成带 payload SHA-256 的原子 snapshot；迁移操作、版本更新或 quota 检查失败时数据库事务
 保留旧状态，显式 restore 同样是原子事务。
 
-## Phase 6 边界
+## Phase 11A 边界
 
-Phase 6 已开放 scope 内的只读 live market consumer 与 Host-owned chart layer registry；live 与
-replay handle 强隔离，插件不能得到 DataManager/EventBus/SQLite。K 线批次当前复用有界控制面
-`eventBatch`，逐笔和订单簿只开放有界 read；专用 named-pipe/UDS data plane、MessagePack 和
-高频 trade/order-book subscribe 尚未宣称完成。
-
-声明式前端与 Plugin Manager、sandbox UI、网络/文件/HTTP gateway、数据提供器、secrets、
-账户、交易、签名 publisher 和 Marketplace 仍属于 Phase 7–12。没有对应 Host adapter 的
-permission 仍然不可调用。
+声明式前端、Plugin Manager、sandbox UI、受控网络/文件/HTTP gateway、公开数据提供器与
+Paper-only 账户/订单已交付。Paper 插件没有 secret、真实账户连接、raw socket 或 live execution
+handle；`secrets.use`、`trade.submit`、`trade.cancel` 继续不可授予。移除 Paper policy 后，磁盘上旧
+grant 也不会成为 effective capability。签名 publisher、Live opt-in 与 Marketplace 仍属于后续阶段。
 
 执行证据和回滚边界见
 [`docs/PLUGIN_PLATFORM_V2_PHASE5_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE5_zh.md)。
 Phase 6 市场数据、背压和参考扫描器证据见
 [`docs/PLUGIN_PLATFORM_V2_PHASE6_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE6_zh.md)。
+Phase 11A Paper 合同与证据见
+[`docs/PLUGIN_PLATFORM_V2_PHASE11A_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE11A_zh.md)。

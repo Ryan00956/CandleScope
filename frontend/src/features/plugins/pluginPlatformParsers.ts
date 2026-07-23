@@ -12,6 +12,9 @@ import type {
   PluginJsonSchema,
   PluginManagementDetail,
   PluginMarketProviderChannel,
+  PluginPaperAccountContribution,
+  PluginPaperExecutorContribution,
+  PluginPaperStatus,
   PluginPlacement,
   PluginSettingsContribution,
   PluginUiSnapshot,
@@ -31,6 +34,10 @@ const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$/;
 const EXCHANGE_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const MARKET_TYPE_ID = /^[a-z][a-z0-9-]{0,31}$/;
 const INTERVAL_ID = /^[1-9][0-9]{0,5}[smhdwM]$/;
+const PAPER_ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const PAPER_SYMBOL = /^[A-Z0-9][A-Z0-9._:-]{0,63}$/;
+const PAPER_ASSET = /^[A-Z0-9][A-Z0-9._-]{0,31}$/;
+const PAPER_DECIMAL = /^(?:0|[1-9][0-9]*)(?:\.[0-9]*[1-9])?$/;
 const PROVIDER_QUALITY_LEVELS = new Set([
   "authoritative", "verified", "best-effort", "synthetic",
 ] as const);
@@ -237,13 +244,137 @@ function providerChannel(value: unknown, path: string): PluginMarketProviderChan
   };
 }
 
+function paperDecimal(value: unknown, path: string): string {
+  const parsed = string(value, path, 128);
+  if (!PAPER_DECIMAL.test(parsed)) fail(path);
+  return parsed;
+}
+
+function paperAccountContribution(
+  config: RecordValue,
+  path: string,
+  base: ReturnType<typeof contributionBase>,
+): PluginPaperAccountContribution {
+  exact(config, ["brokerId", "displayName", "environment", "accounts"], [], path);
+  const brokerId = string(config.brokerId, `${path}.brokerId`, 64);
+  if (!EXCHANGE_ID.test(brokerId) || config.environment !== "paper") fail(path);
+  const accounts = array(config.accounts, `${path}.accounts`, 16).map((raw, index) => {
+    const account = record(raw, `${path}.accounts[${index}]`);
+    exact(account, ["id", "label", "baseCurrency", "initialBalances"], [], `${path}.accounts[${index}]`);
+    const id = string(account.id, `${path}.accounts[${index}].id`, 128);
+    const baseCurrency = string(account.baseCurrency, `${path}.accounts[${index}].baseCurrency`, 32);
+    if (!PAPER_ACCOUNT_ID.test(id) || !PAPER_ASSET.test(baseCurrency)) fail(`${path}.accounts[${index}]`);
+    const initialBalances = array(account.initialBalances, `${path}.accounts[${index}].initialBalances`, 32).map((balanceValue, balanceIndex) => {
+      const balance = record(balanceValue, `${path}.accounts[${index}].initialBalances[${balanceIndex}]`);
+      exact(balance, ["asset", "available"], [], `${path}.accounts[${index}].initialBalances[${balanceIndex}]`);
+      const asset = string(balance.asset, `${path}.accounts[${index}].initialBalances[${balanceIndex}].asset`, 32);
+      if (!PAPER_ASSET.test(asset)) fail(`${path}.accounts[${index}].initialBalances[${balanceIndex}].asset`);
+      return { asset, available: paperDecimal(balance.available, `${path}.accounts[${index}].initialBalances[${balanceIndex}].available`) };
+    });
+    if (
+      !initialBalances.length
+      || new Set(initialBalances.map((item) => item.asset)).size !== initialBalances.length
+      || !initialBalances.some((item) => item.asset === baseCurrency)
+    ) fail(`${path}.accounts[${index}].initialBalances`);
+    return {
+      id,
+      label: string(account.label, `${path}.accounts[${index}].label`, 128),
+      baseCurrency,
+      initialBalances,
+    };
+  });
+  if (!accounts.length || new Set(accounts.map((item) => item.id)).size !== accounts.length) fail(`${path}.accounts`);
+  return {
+    ...base,
+    kind: "account-provider/1",
+    configuration: {
+      brokerId,
+      displayName: string(config.displayName, `${path}.displayName`, 128),
+      environment: "paper",
+      accounts,
+    },
+  };
+}
+
+function paperExecutorContribution(
+  config: RecordValue,
+  path: string,
+  base: ReturnType<typeof contributionBase>,
+): PluginPaperExecutorContribution {
+  exact(config, ["brokerId", "environment", "protocol", "orderTypes", "symbols", "limits", "maxQuoteAgeMs"], [], path);
+  const brokerId = string(config.brokerId, `${path}.brokerId`, 64);
+  if (!EXCHANGE_ID.test(brokerId) || config.environment !== "paper" || config.protocol !== "candlescope.paper/1") fail(path);
+  const orderTypes = array(config.orderTypes, `${path}.orderTypes`, 2).map((item, index) => (
+    oneOf(item, new Set(["market", "limit"] as const), `${path}.orderTypes[${index}]`)
+  ));
+  if (!orderTypes.length || new Set(orderTypes).size !== orderTypes.length) fail(`${path}.orderTypes`);
+  const symbols = array(config.symbols, `${path}.symbols`, 128).map((raw, index) => {
+    const symbol = record(raw, `${path}.symbols[${index}]`);
+    const keys = ["symbol", "marketType", "baseAsset", "quoteAsset", "priceTick", "quantityStep", "minQuantity", "maxQuantity", "minNotional", "maxNotional"];
+    exact(symbol, keys, [], `${path}.symbols[${index}]`);
+    const symbolId = string(symbol.symbol, `${path}.symbols[${index}].symbol`, 64);
+    const marketType = string(symbol.marketType, `${path}.symbols[${index}].marketType`, 32);
+    const baseAsset = string(symbol.baseAsset, `${path}.symbols[${index}].baseAsset`, 32);
+    const quoteAsset = string(symbol.quoteAsset, `${path}.symbols[${index}].quoteAsset`, 32);
+    if (
+      !PAPER_SYMBOL.test(symbolId)
+      || !MARKET_TYPE_ID.test(marketType)
+      || !PAPER_ASSET.test(baseAsset)
+      || !PAPER_ASSET.test(quoteAsset)
+      || baseAsset === quoteAsset
+    ) fail(`${path}.symbols[${index}]`);
+    return {
+      symbol: symbolId,
+      marketType,
+      baseAsset,
+      quoteAsset,
+      priceTick: paperDecimal(symbol.priceTick, `${path}.symbols[${index}].priceTick`),
+      quantityStep: paperDecimal(symbol.quantityStep, `${path}.symbols[${index}].quantityStep`),
+      minQuantity: paperDecimal(symbol.minQuantity, `${path}.symbols[${index}].minQuantity`),
+      maxQuantity: paperDecimal(symbol.maxQuantity, `${path}.symbols[${index}].maxQuantity`),
+      minNotional: paperDecimal(symbol.minNotional, `${path}.symbols[${index}].minNotional`),
+      maxNotional: paperDecimal(symbol.maxNotional, `${path}.symbols[${index}].maxNotional`),
+    };
+  });
+  if (!symbols.length || new Set(symbols.map((item) => `${item.marketType}:${item.symbol}`)).size !== symbols.length) fail(`${path}.symbols`);
+  const limits = record(config.limits, `${path}.limits`);
+  exact(limits, ["maxOrderQuantity", "maxOrderNotional", "maxPositionNotional", "maxOpenOrders", "maxOrdersPerMinute", "allowShort"], [], `${path}.limits`);
+  if (limits.allowShort !== false) fail(`${path}.limits.allowShort`);
+  return {
+    ...base,
+    kind: "order-executor/1",
+    configuration: {
+      brokerId,
+      environment: "paper",
+      protocol: "candlescope.paper/1",
+      orderTypes,
+      symbols,
+      limits: {
+        maxOrderQuantity: paperDecimal(limits.maxOrderQuantity, `${path}.limits.maxOrderQuantity`),
+        maxOrderNotional: paperDecimal(limits.maxOrderNotional, `${path}.limits.maxOrderNotional`),
+        maxPositionNotional: paperDecimal(limits.maxPositionNotional, `${path}.limits.maxPositionNotional`),
+        maxOpenOrders: integer(limits.maxOpenOrders, `${path}.limits.maxOpenOrders`, 1, 1024),
+        maxOrdersPerMinute: integer(limits.maxOrdersPerMinute, `${path}.limits.maxOrdersPerMinute`, 1, 10_000),
+        allowShort: false,
+      },
+      maxQuoteAgeMs: integer(config.maxQuoteAgeMs, `${path}.maxQuoteAgeMs`, 100, 60_000),
+    },
+  };
+}
+
 function contribution(value: unknown, path: string, pluginId: string): PluginCatalogContribution | null {
   const data = record(value, path);
   const kind = string(data.kind, `${path}.kind`, 64);
-  if (!["command/1", "settings/1", "view/1", "symbol-provider/1", "market-data-provider/1"].includes(kind)) return null;
+  if (!["command/1", "settings/1", "view/1", "symbol-provider/1", "market-data-provider/1", "account-provider/1", "order-executor/1"].includes(kind)) return null;
   exact(data, ["id", "localId", "kind", "title", "entrypointId", "configuration", "available"], ["unavailableReason"], path);
   const base = contributionBase(data, path, pluginId);
   const config = record(data.configuration, `${path}.configuration`);
+  if (kind === "account-provider/1") {
+    return paperAccountContribution(config, `${path}.configuration`, base);
+  }
+  if (kind === "order-executor/1") {
+    return paperExecutorContribution(config, `${path}.configuration`, base);
+  }
   if (kind === "symbol-provider/1") {
     exact(config, ["exchange", "displayName", "marketTypes", "maxPageSize", "cacheTtlSeconds"], [], `${path}.configuration`);
     const exchange = string(config.exchange, `${path}.configuration.exchange`, 64);
@@ -619,9 +750,76 @@ export function parsePluginUiSnapshot(value: unknown): PluginUiSnapshot {
   return { schemaVersion: "candlescope.plugin-ui/1", registryRevision: integer(data.registryRevision, "ui.registryRevision"), views, chartLayers };
 }
 
+function paperStatus(value: unknown, path: string, withAvailable = false): PluginPaperStatus & { available?: boolean } {
+  const data = record(value, path);
+  const required = [
+    "schemaVersion", "killSwitchEnabled", "mode", "liveTradingAvailable",
+    "secretsAvailable", "brokers",
+  ];
+  exact(data, withAvailable ? [...required, "available"] : required, [], path);
+  if (
+    data.schemaVersion !== "candlescope.paper-status/1"
+    || data.mode !== "paper-only"
+    || data.liveTradingAvailable !== false
+    || data.secretsAvailable !== false
+  ) fail(path);
+  const brokers = array(data.brokers, `${path}.brokers`, 16).map((raw, index) => {
+    const broker = record(raw, `${path}.brokers[${index}]`);
+    exact(broker, ["brokerId", "pluginId", "displayName", "accounts", "orderTypes", "symbols", "limits"], [], `${path}.brokers[${index}]`);
+    const brokerId = string(broker.brokerId, `${path}.brokers[${index}].brokerId`, 64);
+    const pluginId = string(broker.pluginId, `${path}.brokers[${index}].pluginId`, 128);
+    if (!EXCHANGE_ID.test(brokerId) || !PLUGIN_ID.test(pluginId)) fail(`${path}.brokers[${index}]`);
+    const accounts = array(broker.accounts, `${path}.brokers[${index}].accounts`, 64).map((item, accountIndex) => {
+      const account = string(item, `${path}.brokers[${index}].accounts[${accountIndex}]`, 128);
+      if (!PAPER_ACCOUNT_ID.test(account)) fail(`${path}.brokers[${index}].accounts[${accountIndex}]`);
+      return account;
+    });
+    const orderTypes = array(broker.orderTypes, `${path}.brokers[${index}].orderTypes`, 2).map((item, typeIndex) => (
+      oneOf(item, new Set(["market", "limit"] as const), `${path}.brokers[${index}].orderTypes[${typeIndex}]`)
+    ));
+    const symbols = array(broker.symbols, `${path}.brokers[${index}].symbols`, 128).map((item, symbolIndex) => {
+      const symbol = record(item, `${path}.brokers[${index}].symbols[${symbolIndex}]`);
+      exact(symbol, ["symbol", "marketType"], [], `${path}.brokers[${index}].symbols[${symbolIndex}]`);
+      const symbolId = string(symbol.symbol, `${path}.brokers[${index}].symbols[${symbolIndex}].symbol`, 64);
+      const marketType = string(symbol.marketType, `${path}.brokers[${index}].symbols[${symbolIndex}].marketType`, 32);
+      if (!PAPER_SYMBOL.test(symbolId) || !MARKET_TYPE_ID.test(marketType)) fail(`${path}.brokers[${index}].symbols[${symbolIndex}]`);
+      return { symbol: symbolId, marketType };
+    });
+    const limits = record(broker.limits, `${path}.brokers[${index}].limits`);
+    exact(limits, ["maxOrderQuantity", "maxOrderNotional", "maxPositionNotional", "maxOpenOrders", "maxOrdersPerMinute", "allowShort", "maxQuoteAgeMs"], [], `${path}.brokers[${index}].limits`);
+    return {
+      brokerId,
+      pluginId,
+      displayName: string(broker.displayName, `${path}.brokers[${index}].displayName`, 128),
+      accounts,
+      orderTypes,
+      symbols,
+      limits: {
+        maxOrderQuantity: paperDecimal(limits.maxOrderQuantity, `${path}.brokers[${index}].limits.maxOrderQuantity`),
+        maxOrderNotional: paperDecimal(limits.maxOrderNotional, `${path}.brokers[${index}].limits.maxOrderNotional`),
+        maxPositionNotional: paperDecimal(limits.maxPositionNotional, `${path}.brokers[${index}].limits.maxPositionNotional`),
+        maxOpenOrders: integer(limits.maxOpenOrders, `${path}.brokers[${index}].limits.maxOpenOrders`, 1, 1024),
+        maxOrdersPerMinute: integer(limits.maxOrdersPerMinute, `${path}.brokers[${index}].limits.maxOrdersPerMinute`, 1, 10_000),
+        allowShort: boolean(limits.allowShort, `${path}.brokers[${index}].limits.allowShort`),
+        maxQuoteAgeMs: integer(limits.maxQuoteAgeMs, `${path}.brokers[${index}].limits.maxQuoteAgeMs`, 100, 60_000),
+      },
+    };
+  });
+  if (new Set(brokers.map((item) => item.brokerId)).size !== brokers.length) fail(`${path}.brokers`);
+  return {
+    schemaVersion: "candlescope.paper-status/1",
+    killSwitchEnabled: boolean(data.killSwitchEnabled, `${path}.killSwitchEnabled`),
+    mode: "paper-only",
+    liveTradingAvailable: false,
+    secretsAvailable: false,
+    brokers,
+    ...(withAvailable ? { available: boolean(data.available, `${path}.available`) } : {}),
+  };
+}
+
 export function parsePluginManagementDetail(value: unknown): PluginManagementDetail {
   const data = record(value, "detail");
-  exact(data, ["schemaVersion", "plugin", "permissions", "health", "update", "rollback", "dataRetention"], [], "detail");
+  exact(data, ["schemaVersion", "plugin", "permissions", "health", "update", "rollback", "paperTrading", "dataRetention"], [], "detail");
   if (data.schemaVersion !== "candlescope.plugin-management-detail/1") fail("detail.schemaVersion");
   const contributionIds = new Set<string>();
   const plugin = catalogPlugin(data.plugin, "detail.plugin", contributionIds);
@@ -687,6 +885,7 @@ export function parsePluginManagementDetail(value: unknown): PluginManagementDet
       ...(rollback.reason === undefined ? {} : { reason: string(rollback.reason, "detail.rollback.reason", 128) }),
       ...(target === undefined ? {} : { target: { state: string(target.state, "detail.rollback.target.state", 64), version: target.version === null ? null : string(target.version, "detail.rollback.target.version", 64) } }),
     },
+    paperTrading: paperStatus(data.paperTrading, "detail.paperTrading", true) as PluginPaperStatus & { available: boolean },
     dataRetention: {
       retainedOnDisable: retention.retainedOnDisable === true ? true : fail("detail.dataRetention.retainedOnDisable"),
       retainedOnUninstall: retention.retainedOnUninstall === true ? true : fail("detail.dataRetention.retainedOnUninstall"),

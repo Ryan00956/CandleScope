@@ -1070,7 +1070,11 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 
 ### 11A：Paper only
 
-- `secrets.use` 仍只提供测试 credential handle；
+> 2026-07-23 已完成实现与技术验收。严格 Paper DTO、first-party pinned 策略门、Host-owned
+> ledger/risk/fill、幂等与 unknown recovery、不可变审计、全局 kill switch、真实 `.cspkg`/sidecar、
+> 原生 Manager 与浏览器证据见 `PLUGIN_PLATFORM_V2_PHASE11A_zh.md`。
+
+- `secrets.use` 本阶段保持完全不可授予；fixture 不持有任何 credential handle；
 - `account-provider/1` 使用 fixture 账户；
 - `order-executor/1` 只接 Replay/Paper broker；
 - OrderIntent、risk gate、idempotency、audit、kill switch；

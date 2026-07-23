@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.plugin_installer_v2.errors import PlatformInstallerBaseError
+from app.plugin_paper_v2.errors import PaperTradingError
 from app.plugin_security_v2.errors import PlatformSecurityError
 from app.plugin_security_v2.management import LocalManagementGuard
 
@@ -208,9 +209,23 @@ async def _bundle_upload(
 
 
 def _raise_api_error(exc: Exception) -> None:
+    if isinstance(exc, PlatformContractError):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": exc.code,
+                "message": exc.message,
+                **({"path": exc.path} if exc.path is not None else {}),
+            },
+        ) from exc
     if isinstance(
         exc,
-        (CorePluginError, PlatformInstallerBaseError, PlatformSecurityError),
+        (
+            CorePluginError,
+            PlatformInstallerBaseError,
+            PlatformSecurityError,
+            PaperTradingError,
+        ),
     ):
         raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
     raise HTTPException(
@@ -471,6 +486,103 @@ def create_core_plugin_router() -> APIRouter:
                 platform.installer.permission_summary, plugin_id
             )
             return {"grants": list(values)}
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.get("/manage/paper/status")
+    async def paper_status(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        return platform.paper.status()
+
+    @router.get("/manage/paper/accounts/{broker_id}/{account_id}")
+    async def paper_account(
+        broker_id: str, account_id: str, request: Request
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            return await platform.paper_account_snapshot(broker_id, account_id)
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/paper/orders/submit")
+    async def paper_submit(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(request, required={"intent"})
+            if not isinstance(value["intent"], dict):
+                raise HTTPException(
+                    status_code=400, detail="OrderIntent must be an object"
+                )
+            action = request.state.plugin_user_action
+            return await platform.submit_paper_order(
+                value["intent"], trace_id=f"management-{action}"
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/paper/orders/cancel")
+    async def paper_cancel(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(
+                request,
+                required={"brokerId", "accountId", "orderId", "idempotencyKey"},
+            )
+            if not all(isinstance(value[key], str) for key in value):
+                raise HTTPException(
+                    status_code=400, detail="paper cancel identifiers must be strings"
+                )
+            action = request.state.plugin_user_action
+            return await platform.cancel_paper_order(
+                broker_id=value["brokerId"],
+                account_id=value["accountId"],
+                order_id=value["orderId"],
+                idempotency_key=value["idempotencyKey"],
+                trace_id=f"management-{action}",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/paper/orders/recover")
+    async def paper_recover(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(
+                request, required={"brokerId", "accountId", "idempotencyKey"}
+            )
+            if not all(isinstance(value[key], str) for key in value):
+                raise HTTPException(
+                    status_code=400, detail="paper recovery identifiers must be strings"
+                )
+            action = request.state.plugin_user_action
+            return await platform.recover_paper_order(
+                broker_id=value["brokerId"],
+                account_id=value["accountId"],
+                idempotency_key=value["idempotencyKey"],
+                trace_id=f"management-{action}",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/paper/kill-switch")
+    async def paper_kill_switch(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(request, required={"enabled"})
+            if not isinstance(value["enabled"], bool):
+                raise HTTPException(status_code=400, detail="enabled must be boolean")
+            action = request.state.plugin_user_action
+            return await platform.set_paper_kill_switch(
+                value["enabled"], trace_id=f"management-{action}"
+            )
+        except HTTPException:
+            raise
         except Exception as exc:
             _raise_api_error(exc)
 

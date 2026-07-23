@@ -117,8 +117,14 @@ export function shouldRequestMoreLeft({
   }).shouldRequest;
 }
 
+/**
+ * `rangeTo` is an index on Lightweight Charts' displayed horizontal axis.
+ * Derived representations (such as Renko) can have a different number of
+ * display points than their source K-lines, so this must be the display-axis
+ * count rather than the source-window count.
+ */
 export function shouldRequestRightWindowRestore({
-  barCount = 0,
+  logicalBarCount = 0,
   canLoad = false,
   consumedInteractionGeneration = 0,
   hasHandler = false,
@@ -128,7 +134,7 @@ export function shouldRequestRightWindowRestore({
   userInteracted = false,
   interactionGeneration = userInteracted ? 1 : 0,
 }: {
-  barCount?: number;
+  logicalBarCount?: number;
   canLoad?: boolean;
   consumedInteractionGeneration?: number;
   hasHandler?: boolean;
@@ -146,12 +152,12 @@ export function shouldRequestRightWindowRestore({
     || interactionGeneration <= consumedInteractionGeneration
     || !hasHandler
     || !rightTruncated
-    || !Number.isSafeInteger(barCount)
-    || barCount <= 0
+    || !Number.isSafeInteger(logicalBarCount)
+    || logicalBarCount <= 0
     || !finiteNumber(rangeTo)
     || !finiteNumber(triggerBars)
   ) return false;
-  return rangeTo >= Math.max(0, barCount - 1 - Math.max(0, triggerBars));
+  return rangeTo >= Math.max(0, logicalBarCount - 1 - Math.max(0, triggerBars));
 }
 
 export function sameIndicatorSeriesData(

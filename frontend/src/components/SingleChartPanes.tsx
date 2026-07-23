@@ -2185,10 +2185,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const requestRightWindowRestore = useCallback((range: VisibleLogicalRange): boolean => {
     const store = seriesStoreRef.current;
     const restore = onNeedMoreRightRef.current;
-    const currentData = sourceRowsRef.current;
+    // Visible logical ranges are indexed by the active display axis. In a
+    // derived representation one source K-line can produce several display
+    // points, so comparing this range to sourceRows would restore the latest
+    // window before the user actually reaches the display-axis right edge.
+    const logicalBarCount = displayRowsRef.current.length;
     const interactionGeneration = leftHistoryInteractionGenerationRef.current;
     if (!shouldRequestRightWindowRestore({
-      barCount: currentData.length,
+      logicalBarCount,
       canLoad: canRestoreLatestWindowRef.current
         && !loadingRef.current
         && rightWindowRestoreRef.current == null,

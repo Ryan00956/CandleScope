@@ -29,6 +29,7 @@ import {
   runDrawingSurfaceDisposeBoundaryLifecycle,
   runDrawingSurfaceDisposeBarrier,
   scenePaintCoversDrawingHandoff,
+  shouldPassThroughNativeChartPointer,
   shouldReturnToCursorAfterDrawingCompletion,
   shouldDeferDrawingCoordinateCleanupToChartTypeBoundary,
   subscribeDrawingPointerRectInvalidation,
@@ -93,6 +94,33 @@ test("pointerdown recaptures geometry after a passive hover cached the previous 
   assert.equal(pointerDownRect.left, 140);
   assert.equal(pointerDownRect.top, 180);
   assert.equal(rectReads, 2);
+});
+
+test("drawing readiness failures preserve native blank-chart panning only", () => {
+  const blockedDrawingState = {
+    drawingMutationReady: false,
+    editingText: false,
+    hasInteractionHit: false,
+    passiveCursor: true,
+  };
+
+  assert.equal(shouldPassThroughNativeChartPointer(blockedDrawingState), true);
+  assert.equal(shouldPassThroughNativeChartPointer({
+    ...blockedDrawingState,
+    passiveCursor: false,
+  }), false, "active drawing tools remain fail closed");
+  assert.equal(shouldPassThroughNativeChartPointer({
+    ...blockedDrawingState,
+    editingText: true,
+  }), false, "text editing retains the pointer");
+  assert.equal(shouldPassThroughNativeChartPointer({
+    ...blockedDrawingState,
+    hasInteractionHit: true,
+  }), false, "existing drawing hits retain the pointer");
+  assert.equal(shouldPassThroughNativeChartPointer({
+    ...blockedDrawingState,
+    drawingMutationReady: true,
+  }), false, "ready drawing state continues through the normal interaction path");
 });
 
 test("continuous drawing keeps a completed creation tool active", () => {

@@ -648,7 +648,7 @@ test("an unconsumed left-edge gesture waits through loading then consumes once",
 
 test("a right-truncated historical window restores only at the user-driven right edge", () => {
   const request = {
-    barCount: 10_000,
+    logicalBarCount: 10_000,
     canLoad: true,
     hasHandler: true,
     rangeTo: 9_990,
@@ -672,6 +672,26 @@ test("a right-truncated historical window restores only at the user-driven right
     consumedInteractionGeneration: 4,
     interactionGeneration: 5,
   }), true, "a fresh eligible gesture can own one restore");
+});
+
+test("right-window restore measures the displayed logical axis for derived charts", () => {
+  const request = {
+    canLoad: true,
+    hasHandler: true,
+    rangeTo: 105,
+    rightTruncated: true,
+    triggerBars: 15,
+    userInteracted: true,
+  };
+
+  assert.equal(shouldRequestRightWindowRestore({
+    ...request,
+    logicalBarCount: 120,
+  }), true, "the same range is near the end of a 120-point axis");
+  assert.equal(shouldRequestRightWindowRestore({
+    ...request,
+    logicalBarCount: 250,
+  }), false, "a longer Renko display axis must not restore early");
 });
 
 test("indicator reconcile treats point-identical arrays as the same payload", () => {

@@ -533,6 +533,28 @@ export function runDrawingPointerTransientBarrier({
 }
 
 /**
+ * Drawing mutation admission must fail closed without also disabling the
+ * underlying chart. A passive-cursor pointerdown that hits no drawing state
+ * owns no drawing mutation, so let Lightweight Charts receive it for panning.
+ */
+export function shouldPassThroughNativeChartPointer({
+  drawingMutationReady,
+  editingText,
+  hasInteractionHit,
+  passiveCursor,
+}: Readonly<{
+  drawingMutationReady: boolean;
+  editingText: boolean;
+  hasInteractionHit: boolean;
+  passiveCursor: boolean;
+}>): boolean {
+  return !drawingMutationReady
+    && passiveCursor
+    && !editingText
+    && !hasInteractionHit;
+}
+
+/**
  * A completed drawing may only restore the cursor when the same creation tool
  * is still selected. This prevents a late terminal event from overriding a
  * deliberate tool change made during the gesture.
@@ -3371,7 +3393,23 @@ export function useDrawing({
       // symbol A's store/surface credentials. Consume this first B-side action
       // and schedule the lifecycle effect to retry before creating, selecting,
       // dragging, or otherwise mutating any canonical primitive.
-      if (!prepareUserMutationScope()) {
+      const drawingMutationReady = prepareUserMutationScope();
+      if (!drawingMutationReady) {
+        const passiveCursor = isPassiveCursorTool(tool);
+        const hasInteractionHit = passiveCursor && !editingTextIdRef.current
+          ? Boolean(
+              hitTestSelectedOverlayHandle(pos.x, pos.y)
+              || hitTestInteractive(pos.x, pos.y),
+            )
+          : false;
+        if (shouldPassThroughNativeChartPointer({
+          drawingMutationReady,
+          editingText: editingTextIdRef.current !== null,
+          hasInteractionHit,
+          passiveCursor,
+        })) {
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
         return;

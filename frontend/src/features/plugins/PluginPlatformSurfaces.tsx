@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { PluginNativeField } from "./PluginNativeFields.js";
 import SandboxPluginFrame from "./SandboxPluginFrame.js";
 import { defaultForPluginSchema } from "./pluginSchemaDefaults.js";
+import { LOCAL_BUNDLE_INSTALL_LABEL } from "./pluginTrustLabels.js";
 import { formatPluginValue } from "./pluginViewFormatting.js";
 import type {
   JsonValue,
@@ -662,7 +663,7 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
     <Modal title="Plugin Manager" onClose={runtime.actions.closeManager} testId="plugin-manager">
       <div className="plugin-install-row">
         <label>
-          <span>{installing ? "Installing and verifying…" : "Install signed .cspkg bundle"}</span>
+          <span>{installing ? "Installing and verifying…" : LOCAL_BUNDLE_INSTALL_LABEL}</span>
           <input
             type="file"
             accept=".cspkg,application/vnd.candlescope.plugin+zip"

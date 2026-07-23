@@ -738,7 +738,7 @@ frontend/src/features/plugins/
 | Phase 8：Sandbox UI | 已完成（`b0efcc4`） | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
 | Phase 9：网络/文件/HTTP gateway | 已完成（`9b4a638`） | 受控外部交互与命名空间 API | 集成型插件 |
 | Phase 10：数据提供器 | 已完成（本阶段提交） | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
-| Phase 11：账户与交易 | 11A 已完成；11B0 安全设计已完成；11B Live 未开始 | secret broker、paper/live executor、risk gate | 高风险交易插件 |
+| Phase 11：账户与交易 | 11A、11B0、11B WP-A 已完成；WP-B 实施中；Live 仍关闭 | publisher evidence、secret broker、paper/live executor、risk gate | 高风险交易插件 |
 | Phase 12：签名与 Marketplace | 未开始 | publisher、更新、撤销、SBOM | 可分发生态 |
 | Phase 13：v1 收敛与 GA | 未开始 | script runtime adapter、兼容周期、正式门禁 | 单一产品插件目录 |
 
@@ -1086,8 +1086,10 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 > 推荐的独立 Live Transaction Broker、迁移/回滚与验收门见
 > [`PLUGIN_PLATFORM_V2_PHASE11B0_zh.md`](PLUGIN_PLATFORM_V2_PHASE11B0_zh.md) 和
 > [`security/phase11b-live-authority/hardening.md`](security/phase11b-live-authority/hardening.md)。
-> 这不表示 Live 已开始；在方案被明确选择并生成绑定 revision 的 implementation plan
-> 前，`secrets.use`、`trade.submit`、`trade.cancel` 与认证交易网络继续不可达。
+> 2026-07-23 已选择 Option 3，并完成 WP-A build-pinned publisher evidence；执行证据见
+> [`PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md`](PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md)。
+> 这不表示 Live 已开始；`secrets.use`、账户发现、`trade.submit`、`trade.cancel`
+> 与认证交易网络继续不可达。
 
 - 仅 `first-party-pinned` 或 `verified-publisher`；
 - secret broker 对真实凭据提供不暴露明文的签名/代理能力；

@@ -12,6 +12,9 @@ Phase 11B 已经实现。
 - source drift at inventory time: `none`
 - source drift at review time: `present`，仅包含本分析目录、Phase 11B0 执行记录和
   路线图状态注记；`backend/`、`frontend/` 与 `packages/` 没有变化
+- implementation planning revision: `d26418e5d45e1e35dc80e8ae307c265ec9a1a3ca`
+- implementation drift check: `e464c4f..d26418e` 只包含 Phase 11B0 的 10 个文档；
+  WP-A/WP-B 开始前不存在 backend、frontend 或 SDK 源码漂移
 - analysis id: `hardening_20260723_phase11b_live_authority`
 
 ## Evidence collection

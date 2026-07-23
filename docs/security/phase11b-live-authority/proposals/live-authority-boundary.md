@@ -2,13 +2,16 @@
 
 ## Decision
 
-我们需要决定 CandleScope 是否、以及通过哪一个权威边界开放 Phase 11B Live
-opt-in。这个决定不是“API key 存在哪里”这么窄：同一个边界还必须回答 publisher
-是否可信、账户是不是用户实际选择的账户、一个订单是否已经发过、超时后能否重试、
-kill switch 何时生效，以及用户看到的确认是否来自 Host。
+2026-07-23，用户已选择 **Option 3：独立 Live Transaction Broker**，并授权实施
+WP-A 与 WP-B。实现绑定到证据集合
+`b025a166090f5ff5947f5ec97f0a102c22fa52c16ca0da9312e3e5765317db6d`
+和实施前 revision `d26418e5d45e1e35dc80e8ae307c265ec9a1a3ca`；详细计划见
+[implementation plan](../implementation/isolated-live-transaction-broker.md)。
 
-当前实现应继续保持 Paper-only，直到本提案中的一个选项被明确选择、转成绑定最新
-revision 的 implementation plan，并逐门验证。
+这个选择不是“API key 存在哪里”这么窄：同一个权威边界最终还必须回答 publisher
+是否可信、账户是不是用户实际选择的账户、一个订单是否已经发过、超时后能否重试、
+kill switch 何时生效，以及用户看到的确认是否来自 Host。当前实现仍保持
+Paper-only；本次只交付 build-pinned trust evidence 与零网络 Broker foundation。
 
 ## Executive Recommendation
 

@@ -47,7 +47,10 @@ Option 2 适合严格信任整个 Host 后端、只做一个第一方 venue 且�
 
 ## Next Decisions
 
-需要明确选择 Option 1、2 或 3。若选择推荐的 Option 3，下一步才会生成绑定本证据摘要
-和最新 revision 的 implementation plan，并先交付“信任证明 + secret handle + Broker
-空壳、零网络动作”的可回滚工作包。`verified-publisher`、生产实盘 submit/cancel 和
-自动化 Live session 都继续保持关闭。
+2026-07-23，用户已选择 **Option 3：独立 Live Transaction Broker**，并授权继续
+WP-A/WP-B。实施计划见
+[implementation/isolated-live-transaction-broker.md](implementation/isolated-live-transaction-broker.md)。
+
+当前授权只覆盖“信任证明 + secret handle + Broker foundation、零网络动作”。WP-A
+与 WP-B 必须分别提交、分别可回滚；`verified-publisher`、账户发现、认证网络、
+生产实盘 submit/cancel 和自动化 Live session 都继续保持关闭。

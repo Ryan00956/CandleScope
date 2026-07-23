@@ -10,7 +10,17 @@
     "targetRevision": "e464c4f7add0e64b1139692ce0daaeef71fb2159",
     "gitTree": "c824383f391e842d1ace2dadde5233c392f55ff6",
     "sourceDrift": "present",
-    "sourceDriftDetail": "The current worktree differs only by this derived hardening package, the Phase 11B0 execution record, and the roadmap status annotation; backend, frontend, and SDK source remain unchanged."
+    "sourceDriftDetail": "At implementation planning revision d26418e5d45e1e35dc80e8ae307c265ec9a1a3ca, e464c4f..d26418e contains only the ten Phase 11B0 documentation files; backend, frontend, and SDK source remain unchanged."
+  },
+  "selection": {
+    "selectedOptionId": "isolated-live-transaction-broker",
+    "selectedAt": "2026-07-23",
+    "authorizedWorkPackages": [
+      "WP-A",
+      "WP-B"
+    ],
+    "implementationRevision": "d26418e5d45e1e35dc80e8ae307c265ec9a1a3ca",
+    "implementationPlanPath": "implementation/isolated-live-transaction-broker.md"
   },
   "assessment": {
     "outcome": "opportunities_identified",

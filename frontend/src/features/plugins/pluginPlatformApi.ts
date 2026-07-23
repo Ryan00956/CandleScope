@@ -6,6 +6,8 @@ import {
   parsePluginLiveControlStatus,
   parsePluginLiveExecutionRecord,
   parsePluginManagementDetail,
+  parsePluginMarketplaceCatalog,
+  parsePluginMarketplaceStatus,
   parsePluginUiSnapshot,
 } from "./pluginPlatformParsers.js";
 import type {
@@ -17,6 +19,8 @@ import type {
   PluginLiveControlStatus,
   PluginLiveExecutionRecord,
   PluginManagementDetail,
+  PluginMarketplaceCatalog,
+  PluginMarketplaceStatus,
   PluginUiSnapshot,
 } from "./pluginPlatformTypes.js";
 
@@ -146,6 +150,16 @@ export async function fetchPluginCatalog(signal?: AbortSignal): Promise<PluginCa
   return parsePluginCatalog(await responseJson(response));
 }
 
+export async function fetchPluginMarketplaceCatalog(
+  signal?: AbortSignal,
+): Promise<PluginMarketplaceCatalog> {
+  const response = await fetch(
+    `${publicPluginBase()}/marketplace/catalog`,
+    { ...(signal ? { signal } : {}) },
+  );
+  return parsePluginMarketplaceCatalog(await responseJson(response));
+}
+
 export async function fetchPluginUiSnapshot(signal?: AbortSignal): Promise<PluginUiSnapshot> {
   const response = await fetch(`${publicPluginBase()}/ui/snapshot`, { ...(signal ? { signal } : {}) });
   return parsePluginUiSnapshot(await responseJson(response));
@@ -266,6 +280,45 @@ export async function writePluginSettings(id: string, value: Record<string, Json
 
 export async function fetchPluginManagementDetail(pluginId: string): Promise<PluginManagementDetail> {
   return parsePluginManagementDetail(await managementRequest(`/manage/${encodeURIComponent(pluginId)}/detail`));
+}
+
+export async function fetchPluginMarketplaceStatus(): Promise<PluginMarketplaceStatus> {
+  return parsePluginMarketplaceStatus(await managementRequest("/manage/marketplace/status"));
+}
+
+export async function refreshPluginMarketplace(marketplaceId: string): Promise<void> {
+  if (!/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(marketplaceId)) {
+    throw new PluginPlatformApiError("Marketplace identity is invalid", 400);
+  }
+  await managementRequest(`/manage/marketplace/${encodeURIComponent(marketplaceId)}/refresh`, {
+    method: "POST",
+    action: "marketplace-refresh",
+  });
+}
+
+export async function preparePluginMarketplaceRelease(
+  pluginId: string,
+  version: string,
+): Promise<void> {
+  await managementRequest(`/manage/marketplace/${encodeURIComponent(pluginId)}/prepare`, {
+    method: "POST",
+    body: { version },
+    action: "marketplace-prepare",
+  });
+}
+
+export async function applyPluginMarketplaceRelease(pluginId: string): Promise<void> {
+  await managementRequest(`/manage/marketplace/${encodeURIComponent(pluginId)}/apply`, {
+    method: "POST",
+    action: "marketplace-apply",
+  });
+}
+
+export async function activatePluginMarketplaceRelease(pluginId: string): Promise<void> {
+  await managementRequest(`/manage/marketplace/${encodeURIComponent(pluginId)}/activate`, {
+    method: "POST",
+    action: "marketplace-activate",
+  });
 }
 
 export async function installPluginBundle(file: File): Promise<void> {

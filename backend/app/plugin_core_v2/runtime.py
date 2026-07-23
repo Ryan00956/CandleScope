@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import math
+import os
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -23,6 +24,12 @@ from app.plugin_installer_v2.registry import (
     load_activation_registry,
 )
 from app.plugin_live_v2 import LiveBrokerController
+from app.plugin_marketplace_v2 import (
+    BundleTrust,
+    MarketplaceFetcher,
+    MarketplaceRoot,
+    PluginMarketplaceService,
+)
 from app.plugin_gateway_v2 import PluginIntegrationGateway
 from app.plugin_platform import PluginManager
 from app.plugin_market_v2.runtime import PluginMarketRuntime
@@ -33,12 +40,17 @@ from app.plugin_security_v2 import (
     CapabilityBroker,
     CapabilityHandleAuthority,
     GrantStore,
+    PinnedPythonRuntime,
+    prepare_pinned_python_runtime,
 )
 from app.plugin_security_v2.grants import (
     EffectiveGrant,
     manifest_publisher_identity,
 )
-from app.plugin_security_v2.sandbox import SandboxPolicy
+from app.plugin_security_v2.sandbox import (
+    SandboxPolicy,
+    sandbox_profile_name,
+)
 
 from .adapters import CoreCapabilityAdapters
 from .assets import (
@@ -109,6 +121,9 @@ class CorePluginPlatform:
         live_reconciliation_shadow_enabled: bool = False,
         live_native_control_enabled: bool = False,
         live_testnet_execution_enabled: bool = False,
+        marketplace_enabled: bool = False,
+        marketplace_roots: Iterable[MarketplaceRoot] = (),
+        marketplace_fetcher: MarketplaceFetcher | None = None,
         network_resolver: Any | None = None,
         network_transport: Any | None = None,
     ) -> None:
@@ -124,40 +139,29 @@ class CorePluginPlatform:
         if not isinstance(live_account_readonly_enabled, bool):
             raise ValueError("live_account_readonly_enabled must be a boolean")
         if not isinstance(live_reconciliation_shadow_enabled, bool):
-            raise ValueError(
-                "live_reconciliation_shadow_enabled must be a boolean"
-            )
+            raise ValueError("live_reconciliation_shadow_enabled must be a boolean")
         if not isinstance(live_native_control_enabled, bool):
             raise ValueError("live_native_control_enabled must be a boolean")
         if not isinstance(live_testnet_execution_enabled, bool):
-            raise ValueError(
-                "live_testnet_execution_enabled must be a boolean"
-            )
+            raise ValueError("live_testnet_execution_enabled must be a boolean")
+        if not isinstance(marketplace_enabled, bool):
+            raise ValueError("marketplace_enabled must be a boolean")
         if live_account_readonly_enabled and not live_broker_foundation_enabled:
             raise core_error(
                 "PLUGIN_LIVE_ACCOUNT_FOUNDATION_REQUIRED",
                 "Phase 11B read-only accounts require the Broker foundation",
             )
-        if (
-            live_reconciliation_shadow_enabled
-            and not live_account_readonly_enabled
-        ):
+        if live_reconciliation_shadow_enabled and not live_account_readonly_enabled:
             raise core_error(
                 "PLUGIN_LIVE_SHADOW_ACCOUNT_REQUIRED",
                 "Phase 11B reconciliation shadow requires read-only accounts",
             )
-        if (
-            live_native_control_enabled
-            and not live_reconciliation_shadow_enabled
-        ):
+        if live_native_control_enabled and not live_reconciliation_shadow_enabled:
             raise core_error(
                 "PLUGIN_LIVE_CONTROL_SHADOW_REQUIRED",
                 "Phase 11B native Live control requires reconciliation shadow",
             )
-        if (
-            live_testnet_execution_enabled
-            and not live_native_control_enabled
-        ):
+        if live_testnet_execution_enabled and not live_native_control_enabled:
             raise core_error(
                 "PLUGIN_LIVE_EXECUTION_CONTROL_REQUIRED",
                 "Phase 11B OKX Demo execution requires native Live control",
@@ -168,15 +172,12 @@ class CorePluginPlatform:
                 "Phase 11A paper permissions require an explicitly pinned first-party platform",
             )
         if (
-            (
-                live_broker_foundation_enabled
-                or live_account_readonly_enabled
-                or live_reconciliation_shadow_enabled
-                or live_native_control_enabled
-                or live_testnet_execution_enabled
-            )
-            and trust_level != "first-party-pinned"
-        ):
+            live_broker_foundation_enabled
+            or live_account_readonly_enabled
+            or live_reconciliation_shadow_enabled
+            or live_native_control_enabled
+            or live_testnet_execution_enabled
+        ) and trust_level != "first-party-pinned":
             raise core_error(
                 "PLUGIN_LIVE_BROKER_TRUST_REQUIRED",
                 "Phase 11B Broker foundation requires an explicitly pinned first-party platform",
@@ -190,20 +191,16 @@ class CorePluginPlatform:
         self.paper_trading_enabled = paper_trading_enabled
         self.live_broker_foundation_enabled = live_broker_foundation_enabled
         self.live_account_readonly_enabled = live_account_readonly_enabled
-        self.live_reconciliation_shadow_enabled = (
-            live_reconciliation_shadow_enabled
-        )
+        self.live_reconciliation_shadow_enabled = live_reconciliation_shadow_enabled
         self.live_native_control_enabled = live_native_control_enabled
-        self.live_testnet_execution_enabled = (
-            live_testnet_execution_enabled
-        )
+        self.live_testnet_execution_enabled = live_testnet_execution_enabled
+        self.marketplace_enabled = marketplace_enabled
+        self._pinned_python_runtime: PinnedPythonRuntime | None = None
         self.live_broker = LiveBrokerController(
             enabled=live_broker_foundation_enabled,
             root=self.root / "live-broker-v1",
             read_only_accounts_enabled=live_account_readonly_enabled,
-            reconciliation_shadow_enabled=(
-                live_reconciliation_shadow_enabled
-            ),
+            reconciliation_shadow_enabled=(live_reconciliation_shadow_enabled),
             native_control_enabled=live_native_control_enabled,
             testnet_execution_enabled=live_testnet_execution_enabled,
         )
@@ -223,6 +220,21 @@ class CorePluginPlatform:
             host_version=self.host_version,
             audit_log=self.audit_log,
             grant_store=self.grant_store,
+            publisher_identity_resolver=self._bundle_publisher_identity,
+            execution_trust_resolver=self._bundle_execution_trust,
+            probe_sandbox_factory=(
+                self._marketplace_probe_sandbox_policy if os.name == "nt" else None
+            ),
+            probe_python_runtime_factory=(
+                self._marketplace_probe_python_runtime if os.name == "nt" else None
+            ),
+        )
+        self.marketplace = PluginMarketplaceService(
+            root=self.root,
+            installer=self.installer,
+            roots=tuple(marketplace_roots),
+            enabled=marketplace_enabled,
+            fetcher=marketplace_fetcher,
         )
         self.authority = CapabilityHandleAuthority(
             self.audit_log,
@@ -280,10 +292,192 @@ class CorePluginPlatform:
         self._maintenance_task: asyncio.Task[None] | None = None
         self._started = False
 
+    def _bundle_trust(self, bundle: VerifiedPlatformBundle) -> BundleTrust:
+        marketplace = getattr(self, "marketplace", None)
+        if marketplace is None:
+            return BundleTrust(
+                self.trust_level,
+                manifest_publisher_identity(bundle.manifest),
+                "legacy-or-first-party-bootstrap",
+                None,
+                None,
+            )
+        return marketplace.bundle_trust(
+            bundle,
+            fallback_trust_level=self.trust_level,
+        )
+
+    def _bundle_publisher_identity(self, bundle: VerifiedPlatformBundle) -> str:
+        return self._bundle_trust(bundle).publisher_identity
+
+    def _bundle_execution_trust(self, bundle: VerifiedPlatformBundle) -> str:
+        trust = self._bundle_trust(bundle).trust_level
+        if trust == "verified-publisher":
+            return "untrusted"
+        if trust in {"local-developer", "local-trusted"}:
+            return "local-trusted"
+        if trust in {"first-party-pinned", "untrusted"}:
+            return trust
+        raise core_error(
+            "PLUGIN_CORE_TRUST_INVALID",
+            "bundle trust evidence resolved to an unsupported level",
+            plugin_id=bundle.manifest.plugin.id,
+        )
+
+    @staticmethod
+    def _sandbox_key(bundle: VerifiedPlatformBundle, publisher_identity: str) -> str:
+        return hashlib.sha256(
+            (
+                f"{publisher_identity}\0{bundle.manifest.plugin.id}\0"
+                f"{bundle.manifest.plugin.version.split('.', 1)[0]}"
+            ).encode("utf-8")
+        ).hexdigest()[:20]
+
+    @staticmethod
+    def _sandbox_path_token(value: str, *, length: int = 12) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
+
+    def _marketplace_python_runtime(self) -> PinnedPythonRuntime:
+        if os.name != "nt":
+            raise core_error(
+                "PLUGIN_CORE_SANDBOX_REQUIRED",
+                "verified publisher Python execution requires Windows AppContainer",
+            )
+        if self._pinned_python_runtime is None:
+            self._pinned_python_runtime = prepare_pinned_python_runtime(
+                self.root / "sandbox-v2" / "python-runtimes",
+                self.installer.python_executable,
+            )
+        return self._pinned_python_runtime
+
+    @staticmethod
+    def _sandbox_site_packages(installation: Path) -> Path:
+        site_packages = (installation / "venv" / "Lib" / "site-packages").resolve(
+            strict=True
+        )
+        if not site_packages.is_dir() or site_packages.is_symlink():
+            raise core_error(
+                "PLUGIN_CORE_SANDBOX_RUNTIME_INVALID",
+                "verified publisher site-packages directory is unavailable",
+            )
+        return site_packages
+
+    def _marketplace_probe_python_runtime(
+        self,
+        bundle: VerifiedPlatformBundle,
+        installation: Path,
+    ) -> tuple[Path, Path]:
+        trust = self._bundle_trust(bundle)
+        if trust.trust_level != "verified-publisher":
+            raise core_error(
+                "PLUGIN_CORE_SANDBOX_TRUST_INVALID",
+                "pinned probe Python is reserved for verified publisher artifacts",
+                plugin_id=bundle.manifest.plugin.id,
+            )
+        runtime = self._marketplace_python_runtime()
+        return runtime.executable, self._sandbox_site_packages(installation)
+
+    def _marketplace_probe_sandbox_policy(
+        self,
+        bundle: VerifiedPlatformBundle,
+        installation: Path,
+        entrypoint_id: str,
+    ) -> SandboxPolicy:
+        trust = self._bundle_trust(bundle)
+        if trust.trust_level != "verified-publisher":
+            raise core_error(
+                "PLUGIN_CORE_SANDBOX_TRUST_INVALID",
+                "probe sandbox is reserved for verified publisher artifacts",
+                plugin_id=bundle.manifest.plugin.id,
+            )
+        major = int(bundle.manifest.plugin.version.split(".", 1)[0])
+        key = self._sandbox_key(bundle, trust.publisher_identity)
+        installation_token = bundle.installation_id[:20]
+        entrypoint_token = self._sandbox_path_token(entrypoint_id)
+        runtime = self._marketplace_python_runtime()
+        return SandboxPolicy(
+            profile_name=sandbox_profile_name(
+                bundle.manifest.plugin.id,
+                trust.publisher_identity,
+                major,
+            ),
+            installation_directory=installation,
+            private_directory=(
+                self.root
+                / "sandbox-v2"
+                / "probe-private"
+                / key
+                / installation_token
+                / entrypoint_token
+            ),
+            runtime_directory=(
+                self.root
+                / "sandbox-v2"
+                / "probe-runtime"
+                / key
+                / installation_token
+                / entrypoint_token
+            ),
+            additional_read_only_paths=(runtime.root,),
+            memory_limit_bytes=256 * 1024 * 1024,
+            cpu_rate_percent=25,
+            cpu_time_seconds=60,
+            disk_limit_bytes=16 * 1024 * 1024,
+            max_processes=1,
+            max_wall_seconds=90,
+        )
+
+    def _marketplace_runtime_sandbox_policy(
+        self,
+        record: ActivationRecord,
+        bundle: VerifiedPlatformBundle,
+        entrypoint_id: str,
+    ) -> SandboxPolicy | None:
+        if self.sandbox_factory is not None:
+            return self.sandbox_factory(record, bundle, entrypoint_id)
+        trust = self._bundle_trust(bundle)
+        if trust.trust_level != "verified-publisher" or os.name != "nt":
+            return None
+        major = int(bundle.manifest.plugin.version.split(".", 1)[0])
+        key = self._sandbox_key(bundle, trust.publisher_identity)
+        installation_token = bundle.installation_id[:20]
+        entrypoint_token = self._sandbox_path_token(entrypoint_id)
+        runtime = self._marketplace_python_runtime()
+        installation = next(
+            item.working_directory
+            for item in record.entrypoints
+            if item.id == entrypoint_id
+        )
+        return SandboxPolicy(
+            profile_name=sandbox_profile_name(
+                bundle.manifest.plugin.id,
+                trust.publisher_identity,
+                major,
+            ),
+            installation_directory=installation,
+            private_directory=self.root / "sandbox-v2" / "private" / key,
+            runtime_directory=(
+                self.root
+                / "sandbox-v2"
+                / "runtime"
+                / key
+                / installation_token
+                / entrypoint_token
+            ),
+            additional_read_only_paths=(runtime.root,),
+            memory_limit_bytes=256 * 1024 * 1024,
+            cpu_rate_percent=25,
+            cpu_time_seconds=300,
+            disk_limit_bytes=64 * 1024 * 1024,
+            max_processes=1,
+            max_wall_seconds=86_400,
+        )
+
     async def start(self) -> None:
         async with self._reconcile_lock:
             if self._started:
                 return
+            await asyncio.to_thread(self.marketplace.enforce_trust_policy)
             await self.live_broker.start()
             try:
                 self.market.start()
@@ -304,7 +498,9 @@ class CorePluginPlatform:
                         manifest = self._bundles[record.plugin_id].manifest
                         for entrypoint in manifest.backend_entrypoints:
                             if "onStartup" in entrypoint.activation_events:
-                                await self._ensure_active(record.plugin_id, entrypoint.id)
+                                await self._ensure_active(
+                                    record.plugin_id, entrypoint.id
+                                )
                 self._maintenance_task = asyncio.create_task(
                     self._maintenance_loop(), name="plugin-core-maintenance"
                 )
@@ -341,6 +537,11 @@ class CorePluginPlatform:
         try:
             while True:
                 await asyncio.sleep(60.0)
+                disabled_plugins = await asyncio.to_thread(
+                    self.marketplace.enforce_trust_policy
+                )
+                for plugin_id in disabled_plugins:
+                    await self.reconcile_plugin(plugin_id)
                 await asyncio.to_thread(self.integration.sweep)
                 now = time.monotonic()
                 for owner, activated_at in tuple(self._activated_at.items()):
@@ -402,6 +603,7 @@ class CorePluginPlatform:
                     bundle.manifest,
                     bundle_sha256=bundle.sha256,
                     manifest_sha256=bundle.manifest_sha256,
+                    publisher_identity=self._bundle_publisher_identity(bundle),
                 )
             except Exception as exc:
                 failures[plugin_id] = self._failure_wire(exc)
@@ -466,6 +668,7 @@ class CorePluginPlatform:
             bundle.manifest,
             bundle_sha256=bundle.sha256,
             manifest_sha256=bundle.manifest_sha256,
+            publisher_identity=self._bundle_publisher_identity(bundle),
         ):
             self._load_failures[plugin_id] = {
                 "code": "PLUGIN_CORE_GRANTS_NOT_READY",
@@ -474,7 +677,7 @@ class CorePluginPlatform:
             }
             return
         try:
-            publisher_identity = manifest_publisher_identity(bundle.manifest)
+            publisher_identity = self._bundle_publisher_identity(bundle)
             for contribution in self._plugin_contributions[plugin_id]:
                 if contribution.kind == "settings/1":
                     await asyncio.to_thread(
@@ -508,22 +711,31 @@ class CorePluginPlatform:
             if item.id == entrypoint_id
         )
         limits = _RESOURCE_LIMITS[declared.resource_profile]
-        sandbox = (
-            self.sandbox_factory(record, bundle, entrypoint_id)
-            if self.sandbox_factory is not None
-            else None
+        sandbox = self._marketplace_runtime_sandbox_policy(
+            record,
+            bundle,
+            entrypoint_id,
         )
+        execution_trust = self._bundle_execution_trust(bundle)
+        executable = activation.executable
+        arguments = ("-I", "-u", "-m", activation.module)
+        if self._bundle_trust(bundle).trust_level == "verified-publisher":
+            runtime = self._marketplace_python_runtime()
+            executable, arguments = runtime.command(
+                site_packages=self._sandbox_site_packages(activation.working_directory),
+                module=activation.module,
+            )
         spec = EntrypointProcessSpec(
             plugin_id=record.plugin_id,
             entrypoint_id=entrypoint_id,
-            executable=activation.executable,
-            arguments=("-I", "-u", "-m", activation.module),
+            executable=executable,
+            arguments=arguments,
             working_directory=activation.working_directory,
             enabled=True,
             auto_start=False,
             required=False,
             sandbox_policy=sandbox,
-            trust_level=self.trust_level,
+            trust_level=execution_trust,
             **limits,
         )
         return EntrypointSupervisor(
@@ -859,7 +1071,7 @@ class CorePluginPlatform:
         return await asyncio.to_thread(
             self.settings.read,
             contribution.plugin_id,
-            manifest_publisher_identity(self._bundles[contribution.plugin_id].manifest),
+            self._bundle_publisher_identity(self._bundles[contribution.plugin_id]),
             contribution.id,
         )
 
@@ -870,7 +1082,7 @@ class CorePluginPlatform:
         return await asyncio.to_thread(
             self.settings.write,
             contribution.plugin_id,
-            manifest_publisher_identity(self._bundles[contribution.plugin_id].manifest),
+            self._bundle_publisher_identity(self._bundles[contribution.plugin_id]),
             contribution.id,
             value,
         )
@@ -979,9 +1191,7 @@ class CorePluginPlatform:
                 "mode": result["mode"],
                 "generation": result["generation"],
                 "policyEpoch": result["policyEpoch"],
-                "revokedConfirmationCount": result[
-                    "revokedConfirmationCount"
-                ],
+                "revokedConfirmationCount": result["revokedConfirmationCount"],
             },
         )
         return result
@@ -1112,18 +1322,14 @@ class CorePluginPlatform:
             account_ref=account_ref,
             shadow_ref=shadow_ref,
             receipt_ref=receipt_ref,
-            expected_confirmation_sha256=(
-                expected_confirmation_sha256
-            ),
+            expected_confirmation_sha256=(expected_confirmation_sha256),
             expected_policy_epoch=expected_policy_epoch,
             expected_control_generation=expected_control_generation,
         )
         self.audit_log.append(
             category="live-execution",
             action="demo-spot-submit",
-            outcome=(
-                "accepted" if result["accepted"] else "rejected"
-            ),
+            outcome=("accepted" if result["accepted"] else "rejected"),
             trace_id=trace_id,
             plugin_id=result["pluginId"],
             data={
@@ -1152,18 +1358,14 @@ class CorePluginPlatform:
             account_ref=account_ref,
             shadow_ref=shadow_ref,
             receipt_ref=receipt_ref,
-            expected_confirmation_sha256=(
-                expected_confirmation_sha256
-            ),
+            expected_confirmation_sha256=(expected_confirmation_sha256),
             expected_policy_epoch=expected_policy_epoch,
             expected_control_generation=expected_control_generation,
         )
         self.audit_log.append(
             category="live-execution",
             action="demo-spot-cancel",
-            outcome=(
-                "accepted" if result["accepted"] else "rejected"
-            ),
+            outcome=("accepted" if result["accepted"] else "rejected"),
             trace_id=trace_id,
             plugin_id=result["pluginId"],
             data={
@@ -1198,9 +1400,7 @@ class CorePluginPlatform:
                 "clientOrderId": execution["clientOrderId"],
                 "orderIntentSha256": execution["orderIntentSha256"],
                 "state": execution["state"],
-                "reconciliationRequired": execution[
-                    "reconciliationRequired"
-                ],
+                "reconciliationRequired": execution["reconciliationRequired"],
                 "policyEpoch": execution["policyEpoch"],
             },
         )
@@ -1448,7 +1648,11 @@ class CorePluginPlatform:
                     "publisher": record.publisher,
                     "state": record.state,
                     "enabled": record.enabled,
-                    "trustLevel": self.trust_level,
+                    "trustLevel": (
+                        self._bundle_trust(bundle).trust_level
+                        if bundle is not None
+                        else "untrusted"
+                    ),
                     "available": available,
                     **(
                         {"unavailableReason": unavailable_reason}
@@ -1587,7 +1791,7 @@ class CorePluginPlatform:
                 ):
                     continue
                 namespace = StorageNamespace(
-                    plugin_id, manifest_publisher_identity(bundle.manifest)
+                    plugin_id, self._bundle_publisher_identity(bundle)
                 )
                 views.extend(
                     self._project_view(item, namespace=namespace)
@@ -1625,9 +1829,7 @@ class CorePluginPlatform:
             storage = {
                 "available": True,
                 **self.private_storage.summary_if_exists(
-                    StorageNamespace(
-                        plugin_id, manifest_publisher_identity(bundle.manifest)
-                    )
+                    StorageNamespace(plugin_id, self._bundle_publisher_identity(bundle))
                 ),
             }
         permission_details = [
@@ -1662,9 +1864,7 @@ class CorePluginPlatform:
                 "entrypoints": plugin["runtime"]["entrypoints"],
             },
             "update": {
-                "policy": "local-artifact-only",
-                "automatic": False,
-                "available": False,
+                **self.marketplace.update_status(plugin_id),
             },
             "rollback": self.installer.rollback_status(plugin_id),
             "paperTrading": {
@@ -1679,6 +1879,54 @@ class CorePluginPlatform:
                 "storage": storage,
             },
         }
+
+    async def observe_plugin_health(self, plugin_id: str) -> list[dict[str, Any]]:
+        """Run every activated entrypoint through a real Host health request."""
+
+        record = self._records.get(plugin_id)
+        bundle = self._bundles.get(plugin_id)
+        if record is None or bundle is None or record.state != "active":
+            raise core_error(
+                "PLUGIN_CORE_HEALTH_OBSERVATION_UNAVAILABLE",
+                "plugin is not available for runtime health observation",
+                plugin_id=plugin_id,
+            )
+        grants = self._effective_grants.get(plugin_id, ())
+        results: list[dict[str, Any]] = []
+        for entrypoint in bundle.manifest.backend_entrypoints:
+            supervisor = self.manager.supervisor(plugin_id, entrypoint.id)
+            initial_state = supervisor.state
+            temporary_activation = initial_state in {"stopped", "handshaken"}
+            try:
+                if supervisor.state == "stopped":
+                    await supervisor.start()
+                if supervisor.state == "handshaken":
+                    await supervisor.activate(grants)
+                if supervisor.state != "active":
+                    raise core_error(
+                        "PLUGIN_CORE_HEALTH_OBSERVATION_FAILED",
+                        "entrypoint did not reach the active state",
+                        plugin_id=plugin_id,
+                        details={"entrypointId": entrypoint.id},
+                    )
+                health = await supervisor.health_check()
+                results.append(
+                    {
+                        "entrypointId": entrypoint.id,
+                        "health": normalize_json(
+                            health,
+                            path=f"healthObservation.{entrypoint.id}",
+                        ),
+                    }
+                )
+            finally:
+                if temporary_activation:
+                    with contextlib.suppress(Exception):
+                        await supervisor.deactivate(
+                            "marketplace health observation complete"
+                        )
+                    await supervisor.stop()
+        return results
 
     def health_summary(self) -> dict[str, Any]:
         active_records = sum(item.state == "active" for item in self._records.values())

@@ -7,6 +7,11 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from app.plugin_security_v2.management import LocalManagementGuard
+from app.plugin_marketplace_v2 import (
+    MarketplaceError,
+    MarketplaceRoot,
+    load_marketplace_roots_bytes,
+)
 
 from .errors import core_error
 from .runtime import CorePluginPlatform, DisabledCorePluginPlatform
@@ -39,6 +44,15 @@ PLUGIN_PLATFORM_V2_LIVE_NATIVE_CONTROL_ENV = (
 PLUGIN_PLATFORM_V2_LIVE_TESTNET_EXECUTION_ENV = (
     "CANDLESCOPE_PLUGIN_PLATFORM_V2_LIVE_TESTNET_EXECUTION_ENABLED"
 )
+PLUGIN_PLATFORM_V2_MARKETPLACE_ENV = (
+    "CANDLESCOPE_PLUGIN_PLATFORM_V2_MARKETPLACE_ENABLED"
+)
+PLUGIN_PLATFORM_V2_MARKETPLACE_ROOTS_ENV = (
+    "CANDLESCOPE_PLUGIN_PLATFORM_V2_MARKETPLACE_ROOTS"
+)
+DEFAULT_MARKETPLACE_ROOTS = (
+    Path(__file__).resolve().parents[1] / "official-marketplace-roots.json"
+)
 
 
 def _environment_bool(environ: Mapping[str, str], name: str, *, default: bool) -> bool:
@@ -61,6 +75,35 @@ def default_platform_root(environ: Mapping[str, str]) -> Path:
         return Path(environ["LOCALAPPDATA"]) / "CandleScope" / "plugin-platform-v2"
     home = environ.get("HOME") or str(Path.home())
     return Path(home) / ".candlescope" / "plugin-platform-v2"
+
+
+def marketplace_roots_from_environment(
+    environ: Mapping[str, str],
+) -> tuple[MarketplaceRoot, ...]:
+    configured = environ.get(PLUGIN_PLATFORM_V2_MARKETPLACE_ROOTS_ENV)
+    if configured is not None and not configured.strip():
+        raise core_error(
+            "PLUGIN_CORE_ENVIRONMENT_INVALID",
+            f"{PLUGIN_PLATFORM_V2_MARKETPLACE_ROOTS_ENV} must not be empty",
+        )
+    path = (
+        Path(configured).expanduser().resolve(strict=False)
+        if configured is not None
+        else DEFAULT_MARKETPLACE_ROOTS
+    )
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise MarketplaceError(
+                "PLUGIN_MARKETPLACE_ROOTS_INVALID",
+                "marketplace roots must be a regular file",
+            )
+        return load_marketplace_roots_bytes(path.read_bytes())
+    except (OSError, MarketplaceError) as exc:
+        raise core_error(
+            "PLUGIN_CORE_MARKETPLACE_ROOTS_INVALID",
+            "build-pinned marketplace roots could not be loaded",
+            details={"errorType": type(exc).__name__},
+        ) from exc
 
 
 def build_core_plugin_platform_from_environment(
@@ -131,6 +174,12 @@ def build_core_plugin_platform_from_environment(
             PLUGIN_PLATFORM_V2_LIVE_TESTNET_EXECUTION_ENV,
             default=False,
         ),
+        marketplace_enabled=_environment_bool(
+            env,
+            PLUGIN_PLATFORM_V2_MARKETPLACE_ENV,
+            default=False,
+        ),
+        marketplace_roots=marketplace_roots_from_environment(env),
     )
 
 

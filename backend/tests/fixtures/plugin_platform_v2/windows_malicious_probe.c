@@ -202,6 +202,15 @@ static int run_cpu_probe(void) {
     }
 }
 
+static int run_echo_probe(void) {
+    char line[4096];
+    while (fgets(line, sizeof(line), stdin) != NULL) {
+        fputs(line, stdout);
+        fflush(stdout);
+    }
+    return 0;
+}
+
 int wmain(int argc, wchar_t **argv) {
     if (argc >= 3 && wcscmp(argv[1], L"disk") == 0) {
         return run_disk_probe(argv[2]);
@@ -211,6 +220,9 @@ int wmain(int argc, wchar_t **argv) {
     }
     if (argc >= 2 && wcscmp(argv[1], L"cpu") == 0) {
         return run_cpu_probe();
+    }
+    if (argc >= 2 && wcscmp(argv[1], L"echo") == 0) {
+        return run_echo_probe();
     }
     if (argc != 7 || wcscmp(argv[1], L"attack") != 0) {
         fwprintf(stderr, L"usage: probe attack SECRET SOURCE INSTALL_WRITE PRIVATE_WRITE LOOPBACK_PORT\n");

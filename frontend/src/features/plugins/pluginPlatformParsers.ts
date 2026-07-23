@@ -16,6 +16,12 @@ import type {
   PluginLiveControlStatus,
   PluginLiveExecutionRecord,
   PluginMarketProviderChannel,
+  PluginMarketplaceCandidate,
+  PluginMarketplaceCatalog,
+  PluginMarketplacePermissionDiff,
+  PluginMarketplaceRelease,
+  PluginMarketplaceStatus,
+  PluginMarketplaceUpdate,
   PluginPaperAccountContribution,
   PluginPaperExecutorContribution,
   PluginPaperStatus,
@@ -29,8 +35,15 @@ import type {
 
 const PLUGIN_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/;
 const LOCAL_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
+const MARKETPLACE_LOCAL_ID = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
+const MARKETPLACE_SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const MARKETPLACE_LICENSE = /^[A-Za-z0-9][A-Za-z0-9.+(): /-]{0,255}$/;
+const MARKETPLACE_MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
+const MARKETPLACE_MAX_REMOTE_ARTIFACT_BYTES = 128 * 1024 * 1024;
 const FIELD = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const BUNDLE_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const ED25519_KEY_ID = /^ed25519:[0-9a-f]{64}$/;
+const UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
 const SANDBOX_ENTRY = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\.html$/;
 const COLOR = /^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$/;
 const MEDIA_TYPE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/;
@@ -98,6 +111,29 @@ function array(value: unknown, path: string, maximum: number): unknown[] {
 function oneOf<T extends string>(value: unknown, choices: ReadonlySet<T>, path: string): T {
   if (typeof value !== "string" || !choices.has(value as T)) fail(path);
   return value as T;
+}
+
+function rawString(value: unknown, path: string, maximum: number): string {
+  if (typeof value !== "string" || !value || value.length > maximum || value.includes("\0")) fail(path);
+  return value;
+}
+
+function utcTimestamp(value: unknown, path: string): string {
+  const result = string(value, path, 64);
+  if (!UTC_TIMESTAMP.test(result) || !Number.isFinite(Date.parse(result))) fail(path);
+  return result;
+}
+
+function digest(value: unknown, path: string): string {
+  const result = string(value, path, 71);
+  if (!BUNDLE_DIGEST.test(result)) fail(path);
+  return result;
+}
+
+function keyId(value: unknown, path: string): string {
+  const result = string(value, path, 72);
+  if (!ED25519_KEY_ID.test(result)) fail(path);
+  return result;
 }
 
 function jsonValue(value: unknown, path: string, depth = 0): JsonValue {
@@ -615,7 +651,7 @@ function catalogPlugin(value: unknown, path: string, contributionIds: Set<string
     publisher: string(data.publisher, `${path}.publisher`, 128),
     state: oneOf(data.state, new Set(["active", "disabled", "staged"] as const), `${path}.state`),
     enabled: boolean(data.enabled, `${path}.enabled`),
-    trustLevel: oneOf(data.trustLevel, new Set(["first-party-pinned", "local-trusted", "untrusted"] as const), `${path}.trustLevel`),
+    trustLevel: oneOf(data.trustLevel, new Set(["first-party-pinned", "verified-publisher", "local-developer", "local-trusted", "untrusted"] as const), `${path}.trustLevel`),
     available: boolean(data.available, `${path}.available`),
     ...(data.unavailableReason === undefined ? {} : { unavailableReason: string(data.unavailableReason, `${path}.unavailableReason`, 128) }),
     permissions: {
@@ -1233,6 +1269,416 @@ function paperStatus(value: unknown, path: string, withAvailable = false): Plugi
   };
 }
 
+function httpsUrl(value: unknown, path: string): string {
+  const result = string(value, path, 2048);
+  let parsed: URL;
+  try {
+    parsed = new URL(result);
+  } catch {
+    return fail(path);
+  }
+  if (
+    parsed.protocol !== "https:"
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+    || (parsed.port && parsed.port !== "443")
+  ) fail(path);
+  return result;
+}
+
+function marketplaceScope(value: unknown, path: string): Record<string, JsonValue> | null {
+  if (value === null) return null;
+  const parsed = jsonValue(value, path);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) fail(path);
+  return parsed;
+}
+
+function marketplaceVersion(value: unknown, path: string): string {
+  const result = string(value, path, 64);
+  if (!MARKETPLACE_SEMVER.test(result)) fail(path);
+  return result;
+}
+
+function marketplaceLicense(value: unknown, path: string): string {
+  const result = string(value, path, 256);
+  if (!MARKETPLACE_LICENSE.test(result)) fail(path);
+  return result;
+}
+
+function marketplaceRelease(value: unknown, path: string): PluginMarketplaceRelease {
+  const data = record(value, path);
+  exact(data, [
+    "pluginId",
+    "version",
+    "publisherId",
+    "artifact",
+    "publishedAt",
+    "licenseExpression",
+    "dependencies",
+    "sha256Sums",
+    "sha256SumsSha256",
+    "publisherKeyId",
+    "transparency",
+    "revoked",
+  ], [], path);
+  const pluginId = string(data.pluginId, `${path}.pluginId`, 128);
+  const publisherId = string(data.publisherId, `${path}.publisherId`, 128);
+  if (!PLUGIN_ID.test(pluginId) || !MARKETPLACE_LOCAL_ID.test(publisherId)) fail(path);
+  const artifact = record(data.artifact, `${path}.artifact`);
+  exact(artifact, [
+    "fileName",
+    "url",
+    "sha256",
+    "size",
+    "manifestSha256",
+    "sbomSha256",
+  ], [], `${path}.artifact`);
+  const fileName = string(artifact.fileName, `${path}.artifact.fileName`, 207);
+  const artifactSha256 = digest(artifact.sha256, `${path}.artifact.sha256`);
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.cspkg$/.test(fileName)
+    || rawString(data.sha256Sums, `${path}.sha256Sums`, 512)
+      !== `${artifactSha256.slice("sha256:".length)}  ${fileName}\n`
+  ) fail(path);
+  const dependencies = array(data.dependencies, `${path}.dependencies`, 1_000).map((raw, index) => {
+    const item = record(raw, `${path}.dependencies[${index}]`);
+    exact(item, ["name", "version", "licenseExpression"], [], `${path}.dependencies[${index}]`);
+    const name = string(item.name, `${path}.dependencies[${index}].name`, 128);
+    if (!MARKETPLACE_LOCAL_ID.test(name)) fail(`${path}.dependencies[${index}].name`);
+    return {
+      name,
+      version: string(item.version, `${path}.dependencies[${index}].version`, 128),
+      licenseExpression: marketplaceLicense(item.licenseExpression, `${path}.dependencies[${index}].licenseExpression`),
+    };
+  });
+  const transparency = record(data.transparency, `${path}.transparency`);
+  exact(transparency, ["logIndex", "leafSha256", "recordSha256"], [], `${path}.transparency`);
+  return {
+    pluginId,
+    version: marketplaceVersion(data.version, `${path}.version`),
+    publisherId,
+    artifact: {
+      fileName,
+      url: httpsUrl(artifact.url, `${path}.artifact.url`),
+      sha256: artifactSha256,
+      size: integer(artifact.size, `${path}.artifact.size`, 1, MARKETPLACE_MAX_ARTIFACT_BYTES),
+      manifestSha256: digest(artifact.manifestSha256, `${path}.artifact.manifestSha256`),
+      sbomSha256: digest(artifact.sbomSha256, `${path}.artifact.sbomSha256`),
+    },
+    publishedAt: utcTimestamp(data.publishedAt, `${path}.publishedAt`),
+    licenseExpression: marketplaceLicense(data.licenseExpression, `${path}.licenseExpression`),
+    dependencies,
+    sha256Sums: data.sha256Sums as string,
+    sha256SumsSha256: digest(data.sha256SumsSha256, `${path}.sha256SumsSha256`),
+    publisherKeyId: keyId(data.publisherKeyId, `${path}.publisherKeyId`),
+    transparency: {
+      logIndex: integer(transparency.logIndex, `${path}.transparency.logIndex`, 0),
+      leafSha256: digest(transparency.leafSha256, `${path}.transparency.leafSha256`),
+      recordSha256: digest(transparency.recordSha256, `${path}.transparency.recordSha256`),
+    },
+    revoked: boolean(data.revoked, `${path}.revoked`),
+  };
+}
+
+function marketplacePermissionDiff(value: unknown, path: string): PluginMarketplacePermissionDiff {
+  const data = record(value, path);
+  exact(data, [
+    "pluginId",
+    "publisherIdentityChanged",
+    "majorVersionChanged",
+    "bundleChanged",
+    "requiresConfirmation",
+    "permissions",
+  ], [], path);
+  const pluginId = string(data.pluginId, `${path}.pluginId`, 128);
+  if (!PLUGIN_ID.test(pluginId)) fail(`${path}.pluginId`);
+  const permissions = array(data.permissions, `${path}.permissions`, 128).map((raw, index) => {
+    const itemPath = `${path}.permissions[${index}]`;
+    const item = record(raw, itemPath);
+    exact(item, [
+      "permissionId",
+      "kind",
+      "previousKind",
+      "change",
+      "previousDecision",
+      "requestedScope",
+      "previousScope",
+      "requiresConfirmation",
+    ], [], itemPath);
+    const permissionKind = item.kind === null
+      ? null
+      : oneOf(item.kind, new Set(["required", "optional"] as const), `${itemPath}.kind`);
+    const previousKind = item.previousKind === null
+      ? null
+      : oneOf(item.previousKind, new Set(["required", "optional"] as const), `${itemPath}.previousKind`);
+    const previousDecision = item.previousDecision === null
+      ? null
+      : oneOf(item.previousDecision, new Set(["pending", "granted", "denied", "revoked"] as const), `${itemPath}.previousDecision`);
+    return {
+      permissionId: string(item.permissionId, `${itemPath}.permissionId`, 128),
+      kind: permissionKind,
+      previousKind,
+      change: oneOf(item.change, new Set([
+        "added",
+        "removed",
+        "identity-changed",
+        "kind-changed",
+        "unchanged",
+        "narrowed",
+        "expanded",
+        "changed",
+      ] as const), `${itemPath}.change`),
+      previousDecision,
+      requestedScope: marketplaceScope(item.requestedScope, `${itemPath}.requestedScope`),
+      previousScope: marketplaceScope(item.previousScope, `${itemPath}.previousScope`),
+      requiresConfirmation: boolean(item.requiresConfirmation, `${itemPath}.requiresConfirmation`),
+    };
+  });
+  const requiresConfirmation = boolean(data.requiresConfirmation, `${path}.requiresConfirmation`);
+  if (requiresConfirmation !== permissions.some((item) => item.requiresConfirmation)) fail(`${path}.requiresConfirmation`);
+  return {
+    pluginId,
+    publisherIdentityChanged: boolean(data.publisherIdentityChanged, `${path}.publisherIdentityChanged`),
+    majorVersionChanged: boolean(data.majorVersionChanged, `${path}.majorVersionChanged`),
+    bundleChanged: boolean(data.bundleChanged, `${path}.bundleChanged`),
+    requiresConfirmation,
+    permissions,
+  };
+}
+
+function marketplaceCandidate(value: unknown, path: string): PluginMarketplaceCandidate {
+  const data = record(value, path);
+  exact(data, [
+    "pluginId",
+    "version",
+    "marketplaceId",
+    "publisherId",
+    "bundleSha256",
+    "artifactFile",
+    "phase",
+    "preparedAt",
+    "fromVersion",
+    "permissionDiff",
+    "compatibility",
+    "migration",
+    "observation",
+  ], [], path);
+  const pluginId = string(data.pluginId, `${path}.pluginId`, 128);
+  const marketplaceId = string(data.marketplaceId, `${path}.marketplaceId`, 128);
+  const publisherId = string(data.publisherId, `${path}.publisherId`, 128);
+  if (
+    !PLUGIN_ID.test(pluginId)
+    || !MARKETPLACE_LOCAL_ID.test(marketplaceId)
+    || !MARKETPLACE_LOCAL_ID.test(publisherId)
+  ) fail(path);
+  const bundleSha256 = digest(data.bundleSha256, `${path}.bundleSha256`);
+  const artifactFile = string(data.artifactFile, `${path}.artifactFile`, 128);
+  if (artifactFile !== `${bundleSha256.slice("sha256:".length)}.cspkg`) fail(`${path}.artifactFile`);
+  const permissionDiff = marketplacePermissionDiff(data.permissionDiff, `${path}.permissionDiff`);
+  if (permissionDiff.pluginId !== pluginId) fail(`${path}.permissionDiff.pluginId`);
+  const compatibility = record(data.compatibility, `${path}.compatibility`);
+  exact(compatibility, ["hostVersion", "verified"], [], `${path}.compatibility`);
+  const migration = record(data.migration, `${path}.migration`);
+  exact(migration, ["required", "supported", "policy"], [], `${path}.migration`);
+  const observation = record(data.observation, `${path}.observation`);
+  exact(observation, ["status", "observedAt", "detail"], [], `${path}.observation`);
+  return {
+    pluginId,
+    version: marketplaceVersion(data.version, `${path}.version`),
+    marketplaceId,
+    publisherId,
+    bundleSha256,
+    artifactFile,
+    phase: oneOf(data.phase, new Set([
+      "verified-staged",
+      "activation-staged",
+      "observing",
+      "active",
+      "rolled-back",
+      "failed",
+    ] as const), `${path}.phase`),
+    preparedAt: utcTimestamp(data.preparedAt, `${path}.preparedAt`),
+    fromVersion: data.fromVersion === null ? null : marketplaceVersion(data.fromVersion, `${path}.fromVersion`),
+    permissionDiff,
+    compatibility: {
+      hostVersion: string(compatibility.hostVersion, `${path}.compatibility.hostVersion`, 64),
+      verified: compatibility.verified === true ? true : fail(`${path}.compatibility.verified`),
+    },
+    migration: {
+      required: migration.required === false ? false : fail(`${path}.migration.required`),
+      supported: migration.supported === true ? true : fail(`${path}.migration.supported`),
+      policy: migration.policy === "same-major-only" ? "same-major-only" : fail(`${path}.migration.policy`),
+    },
+    observation: {
+      status: oneOf(observation.status, new Set([
+        "not-started",
+        "observing",
+        "passed",
+        "failed",
+        "rolled-back",
+      ] as const), `${path}.observation.status`),
+      observedAt: observation.observedAt === null ? null : utcTimestamp(observation.observedAt, `${path}.observation.observedAt`),
+      detail: observation.detail === null ? null : string(observation.detail, `${path}.observation.detail`, 512),
+    },
+  };
+}
+
+function marketplaceUpdate(value: unknown, path: string): PluginMarketplaceUpdate {
+  const data = record(value, path);
+  exact(data, [
+    "policy",
+    "automatic",
+    "available",
+    "ownership",
+    "reason",
+    "candidate",
+    "latest",
+  ], [], path);
+  const latest = data.latest === null ? null : marketplaceRelease(data.latest, `${path}.latest`);
+  const available = boolean(data.available, `${path}.available`);
+  if (available !== (latest !== null)) fail(`${path}.available`);
+  return {
+    policy: data.policy === "signed-marketplace-or-local-artifact"
+      ? "signed-marketplace-or-local-artifact"
+      : fail(`${path}.policy`),
+    automatic: data.automatic === false ? false : fail(`${path}.automatic`),
+    available,
+    ownership: oneOf(data.ownership, new Set(["signed-marketplace", "local-or-first-party"] as const), `${path}.ownership`),
+    reason: data.reason === null ? null : string(data.reason, `${path}.reason`, 128),
+    candidate: data.candidate === null ? null : marketplaceCandidate(data.candidate, `${path}.candidate`),
+    latest,
+  };
+}
+
+export function parsePluginMarketplaceCatalog(value: unknown): PluginMarketplaceCatalog {
+  const data = record(value, "marketplaceCatalog");
+  exact(data, ["schemaVersion", "enabled", "marketplaces", "plugins"], [], "marketplaceCatalog");
+  if (data.schemaVersion !== "candlescope.marketplace-catalog/1") fail("marketplaceCatalog.schemaVersion");
+  const marketplaces = array(data.marketplaces, "marketplaceCatalog.marketplaces", 32).map((raw, index) => {
+    const path = `marketplaceCatalog.marketplaces[${index}]`;
+    const item = record(raw, path);
+    exact(item, ["marketplaceId", "indexUrl", "keyId", "enabled", "cache"], [], path);
+    const marketplaceId = string(item.marketplaceId, `${path}.marketplaceId`, 128);
+    if (!MARKETPLACE_LOCAL_ID.test(marketplaceId)) fail(`${path}.marketplaceId`);
+    const cache = record(item.cache, `${path}.cache`);
+    const status = oneOf(cache.status, new Set(["valid", "invalid-or-empty"] as const), `${path}.cache.status`);
+    if (status === "valid") {
+      exact(cache, ["status", "sequence", "expiresAt"], [], `${path}.cache`);
+      return {
+        marketplaceId,
+        indexUrl: httpsUrl(item.indexUrl, `${path}.indexUrl`),
+        keyId: keyId(item.keyId, `${path}.keyId`),
+        enabled: boolean(item.enabled, `${path}.enabled`),
+        cache: {
+          status,
+          sequence: integer(cache.sequence, `${path}.cache.sequence`, 1),
+          expiresAt: utcTimestamp(cache.expiresAt, `${path}.cache.expiresAt`),
+        },
+      };
+    }
+    exact(cache, ["status", "reason"], [], `${path}.cache`);
+    return {
+      marketplaceId,
+      indexUrl: httpsUrl(item.indexUrl, `${path}.indexUrl`),
+      keyId: keyId(item.keyId, `${path}.keyId`),
+      enabled: boolean(item.enabled, `${path}.enabled`),
+      cache: {
+        status,
+        reason: cache.reason === null ? null : string(cache.reason, `${path}.cache.reason`, 128),
+      },
+    };
+  });
+  if (new Set(marketplaces.map((item) => item.marketplaceId)).size !== marketplaces.length) fail("marketplaceCatalog.marketplaces");
+  const plugins = array(data.plugins, "marketplaceCatalog.plugins", 20_000).map((raw, index) => {
+    const path = `marketplaceCatalog.plugins[${index}]`;
+    const item = record(raw, path);
+    exact(item, ["pluginId", "publisher", "latest", "releaseCount", "installedVersion", "installable"], [], path);
+    const pluginId = string(item.pluginId, `${path}.pluginId`, 128);
+    if (!PLUGIN_ID.test(pluginId)) fail(`${path}.pluginId`);
+    const publisher = record(item.publisher, `${path}.publisher`);
+    exact(publisher, ["publisherId", "displayName", "keyId", "status"], [], `${path}.publisher`);
+    const publisherId = string(publisher.publisherId, `${path}.publisher.publisherId`, 128);
+    if (!MARKETPLACE_LOCAL_ID.test(publisherId)) fail(`${path}.publisher.publisherId`);
+    const publisherStatus = oneOf(
+      publisher.status,
+      new Set(["active"] as const),
+      `${path}.publisher.status`,
+    );
+    const latest = marketplaceRelease(item.latest, `${path}.latest`);
+    if (latest.pluginId !== pluginId || latest.publisherId !== publisherId) fail(path);
+    const installable = boolean(item.installable, `${path}.installable`);
+    if (installable && latest.artifact.size > MARKETPLACE_MAX_REMOTE_ARTIFACT_BYTES) fail(`${path}.installable`);
+    return {
+      pluginId,
+      publisher: {
+        publisherId,
+        displayName: string(publisher.displayName, `${path}.publisher.displayName`, 128),
+        keyId: keyId(publisher.keyId, `${path}.publisher.keyId`),
+        status: publisherStatus,
+      },
+      latest,
+      releaseCount: integer(item.releaseCount, `${path}.releaseCount`, 1, 20_000),
+      installedVersion: item.installedVersion === null ? null : marketplaceVersion(item.installedVersion, `${path}.installedVersion`),
+      installable,
+    };
+  });
+  if (new Set(plugins.map((item) => item.pluginId)).size !== plugins.length) fail("marketplaceCatalog.plugins");
+  return {
+    schemaVersion: "candlescope.marketplace-catalog/1",
+    enabled: boolean(data.enabled, "marketplaceCatalog.enabled"),
+    marketplaces,
+    plugins,
+  };
+}
+
+export function parsePluginMarketplaceStatus(value: unknown): PluginMarketplaceStatus {
+  const data = record(value, "marketplaceStatus");
+  exact(data, [
+    "schemaVersion",
+    "enabled",
+    "automaticUpdates",
+    "rootCount",
+    "validCacheCount",
+    "cacheErrors",
+    "candidates",
+    "updates",
+  ], [], "marketplaceStatus");
+  if (data.schemaVersion !== "candlescope.marketplace-status/1") fail("marketplaceStatus.schemaVersion");
+  const cacheErrorsRaw = record(data.cacheErrors, "marketplaceStatus.cacheErrors");
+  if (Object.keys(cacheErrorsRaw).length > 32) fail("marketplaceStatus.cacheErrors");
+  const cacheErrors = Object.fromEntries(Object.entries(cacheErrorsRaw).map(([marketplaceId, error]) => {
+    if (!MARKETPLACE_LOCAL_ID.test(marketplaceId)) fail("marketplaceStatus.cacheErrors");
+    return [marketplaceId, string(error, `marketplaceStatus.cacheErrors.${marketplaceId}`, 128)];
+  }));
+  const candidates = array(data.candidates, "marketplaceStatus.candidates", 2048)
+    .map((item, index) => marketplaceCandidate(item, `marketplaceStatus.candidates[${index}]`));
+  if (new Set(candidates.map((item) => item.pluginId)).size !== candidates.length) fail("marketplaceStatus.candidates");
+  const updates = array(data.updates, "marketplaceStatus.updates", 2048).map((raw, index) => {
+    const path = `marketplaceStatus.updates[${index}]`;
+    const item = record(raw, path);
+    const pluginId = string(item.pluginId, `${path}.pluginId`, 128);
+    if (!PLUGIN_ID.test(pluginId)) fail(`${path}.pluginId`);
+    const update = marketplaceUpdate(
+      Object.fromEntries(Object.entries(item).filter(([key]) => key !== "pluginId")),
+      path,
+    );
+    return { pluginId, ...update };
+  });
+  if (new Set(updates.map((item) => item.pluginId)).size !== updates.length) fail("marketplaceStatus.updates");
+  return {
+    schemaVersion: "candlescope.marketplace-status/1",
+    enabled: boolean(data.enabled, "marketplaceStatus.enabled"),
+    automaticUpdates: data.automaticUpdates === false ? false : fail("marketplaceStatus.automaticUpdates"),
+    rootCount: integer(data.rootCount, "marketplaceStatus.rootCount", 0, 32),
+    validCacheCount: integer(data.validCacheCount, "marketplaceStatus.validCacheCount", 0, 32),
+    cacheErrors,
+    candidates,
+    updates,
+  };
+}
+
 export function parsePluginManagementDetail(value: unknown): PluginManagementDetail {
   const data = record(value, "detail");
   exact(data, ["schemaVersion", "plugin", "permissions", "health", "update", "rollback", "paperTrading", "dataRetention"], [], "detail");
@@ -1269,9 +1715,13 @@ export function parsePluginManagementDetail(value: unknown): PluginManagementDet
   const rollback = record(data.rollback, "detail.rollback");
   const retention = record(data.dataRetention, "detail.dataRetention");
   exact(health, ["available", "entrypoints"], ["unavailableReason"], "detail.health");
-  exact(update, ["policy", "automatic", "available"], [], "detail.update");
   exact(rollback, ["available"], ["reason", "target"], "detail.rollback");
   exact(retention, ["retainedOnDisable", "retainedOnUninstall", "automaticDeletion", "storage"], [], "detail.dataRetention");
+  const parsedUpdate = marketplaceUpdate(update, "detail.update");
+  if (
+    (parsedUpdate.candidate !== null && parsedUpdate.candidate.pluginId !== plugin.id)
+    || (parsedUpdate.latest !== null && parsedUpdate.latest.pluginId !== plugin.id)
+  ) fail("detail.update");
   const storage = jsonValue(retention.storage, "detail.dataRetention.storage");
   if (storage == null || typeof storage !== "object" || Array.isArray(storage)) fail("detail.dataRetention.storage");
   const target = rollback.target === undefined ? undefined : record(rollback.target, "detail.rollback.target");
@@ -1291,11 +1741,7 @@ export function parsePluginManagementDetail(value: unknown): PluginManagementDet
         return { entrypointId: string(item.entrypointId, "detail.health.entrypointId", 128), state: string(item.state, "detail.health.state", 64), generation: integer(item.generation, "detail.health.generation") };
       }),
     },
-    update: {
-      policy: update.policy === "local-artifact-only" ? "local-artifact-only" : fail("detail.update.policy"),
-      automatic: update.automatic === false ? false : fail("detail.update.automatic"),
-      available: update.available === false ? false : fail("detail.update.available"),
-    },
+    update: parsedUpdate,
     rollback: {
       available: rollbackAvailable,
       ...(rollback.reason === undefined ? {} : { reason: string(rollback.reason, "detail.rollback.reason", 128) }),

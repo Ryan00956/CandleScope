@@ -434,9 +434,10 @@ def _read_handle(kernel32: Any, handle: wintypes.HANDLE, stream: BinaryIO) -> No
 
 def _write_handle(kernel32: Any, handle: wintypes.HANDLE, stream: BinaryIO) -> None:
     written = wintypes.DWORD()
+    read_available = getattr(stream, "read1", stream.read)
     try:
         while True:
-            chunk = stream.read(65_536)
+            chunk = read_available(65_536)
             if not chunk:
                 break
             buffer = ctypes.create_string_buffer(chunk)

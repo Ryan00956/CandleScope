@@ -3,12 +3,14 @@
 > 状态：执行中；Phase 0 已完成（`381dd02`），Phase 1 已完成（`d29ad4d`），Phase 2
 > 已完成（`d755f27`），Phase 3 已完成（`eb7316b`），Phase 4 已完成（`e20d7c4`），
 > Phase 5 已完成（`b77444a`），Phase 6 已完成（`8f18080`），Phase 7 已完成（`151b93a`），
-> Phase 8 已完成（`b0efcc4`），Phase 9 已完成实现与技术验收（本阶段提交）。
+> Phase 8 已完成（`b0efcc4`），Phase 9～11 已完成实现与技术验收，Phase 12 已完成
+> 实现与技术验收（本阶段提交）。
 >
 > 基线：`codex/plugin-platform-v1@400e520`，2026-07-22。
 >
-> 原始方案授权边界：本文只定义目标架构、实施顺序、质量门和回滚边界；实际代码变更仍按
-> 用户后续逐阶段授权执行，不授权发布安装包、迁移用户插件或开放 marketplace。
+> 原始方案授权边界：本文定义目标架构、实施顺序、质量门和回滚边界；实际代码变更按
+> 用户后续逐阶段授权执行。当前 Phase 12 只交付默认关闭的签名 Marketplace 机制，
+> 不发布生产 Marketplace root、不迁移用户插件，也不授权真实 Demo/真钱/WP-G。
 
 ## 1. 结论
 
@@ -739,7 +741,7 @@ frontend/src/features/plugins/
 | Phase 9：网络/文件/HTTP gateway | 已完成（`9b4a638`） | 受控外部交互与命名空间 API | 集成型插件 |
 | Phase 10：数据提供器 | 已完成（本阶段提交） | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
 | Phase 11：账户与交易 | 11A、11B0、11B WP-A～WP-F 已完成本地技术验收；真实 Demo smoke 未执行；production 关闭 | publisher evidence、Broker、账户绑定、durable shadow/execution journal、Host-native control、固定 Demo risk gate | 高风险交易插件 |
-| Phase 12：签名与 Marketplace | 未开始 | publisher、更新、撤销、SBOM | 可分发生态 |
+| Phase 12：签名与 Marketplace | 已完成实现与技术验收（本阶段提交）；默认 roots 为空、功能关闭 | publisher、更新、撤销、SBOM、透明日志、分阶段激活 | 可验证分发生态 |
 | Phase 13：v1 收敛与 GA | 未开始 | script runtime adapter、兼容周期、正式门禁 | 单一产品插件目录 |
 
 ## 16. Phase 0：冻结基线与威胁模型
@@ -1126,6 +1128,14 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 - 无法证明 secrets 不泄漏时保持 paper-only。
 
 ## 28. Phase 12：签名、更新与 Marketplace
+
+> 2026-07-23 已完成 Phase 12 实现与技术验收。Ed25519 root/publisher 双层签名、
+> append-only index/transparency/revocation、不可变 cache、SBOM/许可证绑定、
+> permission diff、显式 prepare/apply/activate、真实运行时健康观察与有界回滚、
+> Windows AppContainer pinned runtime 和 Plugin Manager 流程见
+> [`PLUGIN_PLATFORM_V2_PHASE12_zh.md`](PLUGIN_PLATFORM_V2_PHASE12_zh.md)。
+> 官方 roots 文件当前为空，Marketplace 默认关闭；`verified-publisher` 只证明来源，
+> 不解锁 Live authority。真实 Demo/真钱测试和 WP-G 不在本阶段。
 
 ### 交付
 

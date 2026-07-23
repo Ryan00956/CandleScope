@@ -3,10 +3,14 @@ import {
   fetchPluginCatalog,
   fetchPluginLiveControlStatus,
   fetchPluginManagementDetail,
+  fetchPluginMarketplaceCatalog,
+  fetchPluginMarketplaceStatus,
   fetchPluginUiSnapshot,
   downloadPluginUserFile,
   invokePluginCommand,
   installPluginBundle,
+  activatePluginMarketplaceRelease,
+  applyPluginMarketplaceRelease,
   issueLiveConfirmation,
   killLiveControl,
   mutatePluginPermission,
@@ -23,6 +27,8 @@ import {
   cancelLiveExecution,
   reconcileLiveExecution,
   preparePluginUserFileSave,
+  preparePluginMarketplaceRelease,
+  refreshPluginMarketplace,
   stagePluginUserFile,
   writePluginSettings,
 } from "./pluginPlatformApi.js";
@@ -33,6 +39,7 @@ import type {
   PluginCatalog,
   PluginMarketIdentity,
   PluginLiveControlStatus,
+  PluginMarketplaceCatalog,
   PluginPlatformRuntime,
   PluginUiSnapshot,
 } from "./pluginPlatformTypes.js";
@@ -65,6 +72,7 @@ const UNAVAILABLE_LIVE_CONTROL: PluginLiveControlStatus = {
 export function usePluginPlatformRuntime(identity: PluginMarketIdentity): PluginPlatformRuntime {
   const { exchange, interval, marketType, symbol } = identity;
   const [catalog, setCatalog] = useState<PluginCatalog | null>(null);
+  const [marketplaceCatalog, setMarketplaceCatalog] = useState<PluginMarketplaceCatalog | null>(null);
   const [snapshot, setSnapshot] = useState<PluginUiSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -83,8 +91,9 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
   const refresh = useCallback(async (): Promise<void> => {
     const sequence = ++refreshSequenceRef.current;
     try {
-      const [nextCatalog, initialSnapshot, nextLiveControl] = await Promise.all([
+      const [nextCatalog, nextMarketplaceCatalog, initialSnapshot, nextLiveControl] = await Promise.all([
         fetchPluginCatalog(),
+        fetchPluginMarketplaceCatalog(),
         fetchPluginUiSnapshot(),
         fetchPluginLiveControlStatus(),
       ]);
@@ -96,12 +105,14 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       }
       if (sequence !== refreshSequenceRef.current) return;
       setCatalog(nextCatalog);
+      setMarketplaceCatalog(nextMarketplaceCatalog);
       setSnapshot(nextSnapshot);
       setLiveControl(nextLiveControl);
       setError(null);
     } catch (caught) {
       if (sequence !== refreshSequenceRef.current) return;
       setCatalog(null);
+      setMarketplaceCatalog(null);
       setSnapshot(null);
       setLiveControl((current) => (
         current.mode === "disabled" ? UNAVAILABLE_LIVE_CONTROL : { ...current, available: false, mode: "unavailable" }
@@ -311,6 +322,7 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
   return useMemo<PluginPlatformRuntime>(() => ({
     view: {
       catalog,
+      marketplaceCatalog,
       snapshot,
       registries,
       loading,
@@ -350,6 +362,23 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
         }
       },
       loadDetail: fetchPluginManagementDetail,
+      loadMarketplaceStatus: fetchPluginMarketplaceStatus,
+      refreshMarketplace: (marketplaceId) => withRefresh(
+        () => refreshPluginMarketplace(marketplaceId),
+        "Signed marketplace index refreshed",
+      ),
+      prepareMarketplaceRelease: (pluginId, version) => withRefresh(
+        () => preparePluginMarketplaceRelease(pluginId, version),
+        "Marketplace artifact downloaded, verified, and staged",
+      ),
+      applyMarketplaceRelease: (pluginId) => withRefresh(
+        () => applyPluginMarketplaceRelease(pluginId),
+        "Marketplace release applied as an inactive staged activation",
+      ),
+      activateMarketplaceRelease: (pluginId) => withRefresh(
+        () => activatePluginMarketplaceRelease(pluginId),
+        "Marketplace release activated and passed Host health observation",
+      ),
       installBundle: (file) => withRefresh(
         () => installPluginBundle(file),
         "Plugin bundle installed",
@@ -401,6 +430,7 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     },
   }), [
     catalog,
+    marketplaceCatalog,
     changeState,
     decidePermission,
     changePaperKillSwitch,

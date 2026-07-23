@@ -446,19 +446,23 @@ The product bootstrap pins its URL, size, platform, and outer SHA-256, while the
 generic community installer remains local-artifact-only. CandleScope no longer
 contains `packages/pyne-runtime` or an in-process Pyne facade.
 
-The separately evolving general Plugin Platform v2 has completed Phases 1–11A.
+The separately evolving general Plugin Platform v2 has completed Phases 1–12.
 Above the SDK, business-neutral Host, Bundle/Installer, permissions, and Windows
 OS sandbox, the product composition now provides commands/settings/events/jobs,
 private storage, scoped market consumers, Host-owned chart layers, declarative
 and opaque-origin sandbox UI, controlled HTTPS/file/endpoint gateways, and
-paired public symbol/market-data providers. Phase 11A adds an independently
-enabled, `first-party-pinned` Paper broker: plugins exchange only strict
-OrderIntent/ack messages, while the Host owns quote time, ledger, fills, risk,
-idempotency, recovery, immutable audit, and the global kill switch. The platform
-and Paper flags remain off by default. `secrets.use`, live
-`trade.submit`/`trade.cancel`, community-plugin live networking, and Marketplace
-distribution remain unavailable. See the
-[`Phase 11A execution record`](docs/PLUGIN_PLATFORM_V2_PHASE11A_zh.md).
+paired public symbol/market-data providers, plus Paper and the default-off
+WP-A–WP-F Live Broker technical path. Phase 12 adds a default-off Ed25519-signed
+Marketplace with immutable artifact/index caches, SBOM/license binding,
+transparency, revocation, permission diffs, and explicit
+prepare/apply/activate/health-rollback stages.
+
+The repository ships with no Marketplace roots. `verified-publisher` proves
+release provenance, not trusted code: community backends still run as
+`untrusted` code in Windows AppContainer and Host grants remain independent.
+Community Live `trade.submit`/`trade.cancel`, real Demo/real-money testing, and
+WP-G remain unavailable. See the
+[`Phase 12 execution record`](docs/PLUGIN_PLATFORM_V2_PHASE12_zh.md).
 
 Phase 8 adds the independently buildable
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README.md).

@@ -11,6 +11,7 @@ import type {
   PluginDeclarativeViewContribution,
   PluginManagementDetail,
   PluginJsonSchema,
+  PluginMarketplaceStatus,
   PluginPlatformRuntime,
   PluginPaperContribution,
   PluginProviderContribution,
@@ -624,6 +625,157 @@ function PaperRows({
   );
 }
 
+function MarketplacePanel({
+  runtime,
+  status,
+  busy,
+  run,
+}: {
+  runtime: PluginPlatformRuntime;
+  status: PluginMarketplaceStatus | null;
+  busy: string | null;
+  run(key: string, operation: () => Promise<void>): Promise<void>;
+}) {
+  const catalog = runtime.view.marketplaceCatalog;
+  if (catalog === null) return <section className="plugin-marketplace-panel"><p>Loading signed marketplace metadata…</p></section>;
+  return (
+    <section className="plugin-marketplace-panel" data-plugin-marketplace>
+      <header>
+        <div>
+          <h3>Signed Marketplace</h3>
+          <p>Publisher signatures, immutable SHA-256 artifacts, SBOM/license evidence, transparency and revocation are verified by Host.</p>
+        </div>
+        <strong data-plugin-marketplace-state>{catalog.enabled ? "enabled" : "disabled"}</strong>
+      </header>
+      <p>Marketplace metadata never grants permissions. Downloads only create a verified candidate; apply remains staged and activation is always explicit. Automatic updates are disabled.</p>
+      <div className="plugin-marketplace-roots">
+        {catalog.marketplaces.map((marketplace) => (
+          <article key={marketplace.marketplaceId}>
+            <div>
+              <strong>{marketplace.marketplaceId}</strong>
+              <small>
+                {marketplace.cache.status === "valid"
+                  ? `verified index #${marketplace.cache.sequence} · expires ${marketplace.cache.expiresAt}`
+                  : `cache unavailable · ${marketplace.cache.reason ?? "no verified index"}`}
+              </small>
+            </div>
+            <button
+              type="button"
+              data-marketplace-refresh={marketplace.marketplaceId}
+              disabled={!runtime.view.managementAvailable || !catalog.enabled || !marketplace.enabled || busy !== null}
+              onClick={() => void run(
+                `refresh:${marketplace.marketplaceId}`,
+                () => runtime.actions.refreshMarketplace(marketplace.marketplaceId),
+              )}
+            >
+              {busy === `refresh:${marketplace.marketplaceId}` ? "Verifying…" : "Refresh signed index"}
+            </button>
+          </article>
+        ))}
+        {!catalog.marketplaces.length && <p>No build-pinned marketplace root is configured. Local developer bundles remain a separate trust class.</p>}
+      </div>
+      <div className="plugin-marketplace-list">
+        {catalog.plugins.map((entry) => {
+          const candidate = status?.candidates.find((item) => item.pluginId === entry.pluginId) ?? null;
+          const update = status?.updates.find((item) => item.pluginId === entry.pluginId) ?? null;
+          const installed = runtime.view.catalog?.plugins.find((item) => item.id === entry.pluginId) ?? null;
+          const prepareAvailable = entry.installedVersion === null || update?.available === true;
+          const activationReady = installed?.permissions.activationReady === true;
+          return (
+            <article key={entry.pluginId} data-marketplace-plugin={entry.pluginId}>
+              <div className="plugin-marketplace-title">
+                <div>
+                  <strong>{entry.pluginId}</strong>
+                  <small>{entry.publisher.displayName} · verified key {entry.publisher.keyId.slice(0, 24)}…</small>
+                </div>
+                <span>
+                  {entry.latest.version} · {entry.latest.licenseExpression}
+                  {entry.latest.revoked ? " · revoked" : ""}
+                </span>
+              </div>
+              <p>
+                {entry.latest.artifact.sha256}
+                {` · ${entry.latest.artifact.size} bytes · transparency #${entry.latest.transparency.logIndex}`}
+              </p>
+              <p>
+                Installed: {entry.installedVersion ?? "no"}
+                {candidate ? ` · candidate ${candidate.version}: ${candidate.phase}` : ""}
+              </p>
+              {candidate && (
+                <div className="plugin-marketplace-candidate" data-marketplace-candidate-phase={candidate.phase}>
+                  <p>
+                    Compatibility: Host {candidate.compatibility.hostVersion} verified · migration {candidate.migration.policy}
+                    {` · permission confirmation ${candidate.permissionDiff.requiresConfirmation ? "required" : "not required"}`}
+                  </p>
+                  {candidate.permissionDiff.permissions.length > 0 && (
+                    <ul>
+                      {candidate.permissionDiff.permissions.map((permission) => (
+                        <li key={permission.permissionId}>
+                          {permission.permissionId} · {permission.change}
+                          {permission.requiresConfirmation ? " · confirmation required" : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {candidate.observation.status !== "not-started" && (
+                    <p>Health observation: {candidate.observation.status}{candidate.observation.detail ? ` · ${candidate.observation.detail}` : ""}</p>
+                  )}
+                </div>
+              )}
+              <div className="plugin-action-row">
+                <button
+                  type="button"
+                  data-marketplace-prepare={entry.pluginId}
+                  disabled={!runtime.view.managementAvailable || !catalog.enabled || !entry.installable || !prepareAvailable || busy !== null}
+                  onClick={() => void run(
+                    `prepare:${entry.pluginId}`,
+                    () => runtime.actions.prepareMarketplaceRelease(entry.pluginId, entry.latest.version),
+                  )}
+                >
+                  {busy === `prepare:${entry.pluginId}` ? "Downloading and verifying…" : "Download, verify & stage"}
+                </button>
+                {candidate?.phase === "verified-staged" && (
+                  <button
+                    type="button"
+                    data-marketplace-apply={entry.pluginId}
+                    disabled={!runtime.view.managementAvailable || busy !== null}
+                    onClick={() => void run(
+                      `apply:${entry.pluginId}`,
+                      () => runtime.actions.applyMarketplaceRelease(entry.pluginId),
+                    )}
+                  >
+                    {busy === `apply:${entry.pluginId}` ? "Probing in sandbox…" : "Apply as inactive staged"}
+                  </button>
+                )}
+                {candidate?.phase === "activation-staged" && (
+                  <button
+                    type="button"
+                    data-marketplace-activate={entry.pluginId}
+                    disabled={!runtime.view.managementAvailable || !activationReady || busy !== null}
+                    onClick={() => {
+                      if (!window.confirm(`Activate ${entry.pluginId} ${candidate.version} and begin immediate Host health observation?`)) return;
+                      void run(
+                        `activate:${entry.pluginId}`,
+                        () => runtime.actions.activateMarketplaceRelease(entry.pluginId),
+                      );
+                    }}
+                  >
+                    {busy === `activate:${entry.pluginId}` ? "Activating and observing…" : "Activate & observe"}
+                  </button>
+                )}
+              </div>
+              {candidate?.phase === "activation-staged" && !activationReady && (
+                <small>Grant every required permission in the installed-plugin detail before activation.</small>
+              )}
+            </article>
+          );
+        })}
+        {catalog.enabled && !catalog.plugins.length && <p>The verified index contains no installable releases.</p>}
+      </div>
+    </section>
+  );
+}
+
 function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
   const plugins = useMemo(
     () => runtime.view.catalog?.plugins ?? [],
@@ -631,8 +783,10 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PluginManagementDetail | null>(null);
+  const [marketplaceStatus, setMarketplaceStatus] = useState<PluginMarketplaceStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [installing, setInstalling] = useState(false);
+  const [marketplaceBusy, setMarketplaceBusy] = useState<string | null>(null);
   useEffect(() => {
     if (!runtime.view.managerOpen) return;
     if (!selectedId || !plugins.some((item) => item.id === selectedId)) setSelectedId(plugins[0]?.id ?? null);
@@ -649,6 +803,23 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
     // reload is intentionally keyed by the selected plugin and manager visibility.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runtime.view.managerOpen, runtime.view.managementAvailable, selectedId]);
+  const reloadMarketplace = async () => {
+    if (!runtime.view.managementAvailable) {
+      setMarketplaceStatus(null);
+      return;
+    }
+    try {
+      setMarketplaceStatus(await runtime.actions.loadMarketplaceStatus());
+    } catch {
+      setMarketplaceStatus(null);
+    }
+  };
+  useEffect(() => {
+    if (!runtime.view.managerOpen) return;
+    void reloadMarketplace();
+    // Marketplace mutations explicitly reload protected state after the public refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runtime.view.managerOpen, runtime.view.managementAvailable]);
   if (!runtime.view.managerOpen) return null;
   const selected = plugins.find((item) => item.id === selectedId) ?? null;
   const mutate = async (action: "enable" | "disable" | "rollback" | "uninstall") => {
@@ -658,6 +829,18 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
       await runtime.actions.changeState(selected.id, action);
       if (action !== "uninstall") await reload();
     } catch { /* notice published */ }
+  };
+  const runMarketplace = async (key: string, operation: () => Promise<void>) => {
+    setMarketplaceBusy(key);
+    try {
+      await operation();
+      await reloadMarketplace();
+      await reload();
+    } catch {
+      // Runtime publishes a bounded notice and leaves the last verified state visible.
+    } finally {
+      setMarketplaceBusy(null);
+    }
   };
   return (
     <Modal title="Plugin Manager" onClose={runtime.actions.closeManager} testId="plugin-manager">
@@ -681,6 +864,12 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
         </label>
         <small>SHA-256 is recomputed by both browser and Host. Maximum 16 MiB.</small>
       </div>
+      <MarketplacePanel
+        runtime={runtime}
+        status={marketplaceStatus}
+        busy={marketplaceBusy}
+        run={runMarketplace}
+      />
       <div className="plugin-manager-layout">
         <nav>
           {plugins.map((plugin) => (
@@ -724,7 +913,12 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
                   <h4>Health</h4>
                   <p>{detail.health.available ? "Available" : `Unavailable: ${detail.health.unavailableReason ?? "unknown"}`}</p>
                   <h4>Updates and rollback</h4>
-                  <p>Updates: local artifact only · automatic updates disabled</p>
+                  <p>
+                    Updates: signed Marketplace or local artifact · automatic updates disabled
+                    {detail.update.latest ? ` · verified ${detail.update.latest.version} available` : ""}
+                    {detail.update.reason ? ` · ${detail.update.reason}` : ""}
+                  </p>
+                  {detail.update.candidate && <p>Candidate: {detail.update.candidate.version} · {detail.update.candidate.phase}</p>}
                   <p>Rollback: {detail.rollback.available ? `available → ${detail.rollback.target?.version ?? detail.rollback.target?.state ?? "previous activation"}` : detail.rollback.reason ?? "unavailable"}</p>
                   <h4>Data retention</h4>
                   <p>Private data is retained on disable and uninstall. Automatic deletion is disabled.</p>

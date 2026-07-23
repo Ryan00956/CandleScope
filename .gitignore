@@ -218,6 +218,7 @@ backend/data/cache_gc_audit.jsonl
 # allowing the curated drawing-engine V2 baselines required by its execution
 # document to be versioned deliberately.
 frontend/.playwright-cli/
+/.playwright-cli/
 frontend/output/
 /output/playwright/
 frontend/*.tsbuildinfo

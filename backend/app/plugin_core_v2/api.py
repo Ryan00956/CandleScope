@@ -17,7 +17,10 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.plugin_installer_v2.errors import PlatformInstallerBaseError
+from app.plugin_installer_v2.bundle import verify_platform_bundle
 from app.plugin_live_v2 import LiveBrokerError
+from app.plugin_marketplace_v2 import MarketplaceError
+from app.plugin_marketplace_v2.models import MAX_INDEX_BYTES
 from app.plugin_paper_v2.errors import PaperTradingError
 from app.plugin_security_v2.errors import PlatformSecurityError
 from app.plugin_security_v2.management import LocalManagementGuard
@@ -228,9 +231,11 @@ def _raise_api_error(exc: Exception) -> None:
             PlatformSecurityError,
             PaperTradingError,
             LiveBrokerError,
+            MarketplaceError,
         ),
     ):
-        raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
+        status_code = exc.status_code if isinstance(exc, MarketplaceError) else 409
+        raise HTTPException(status_code=status_code, detail=exc.to_dict()) from exc
     raise HTTPException(
         status_code=500, detail="plugin platform operation failed"
     ) from exc
@@ -242,6 +247,16 @@ def create_core_plugin_router() -> APIRouter:
     @router.get("/catalog")
     async def catalog(request: Request) -> dict[str, Any]:
         return _platform(request).catalog()
+
+    @router.get("/marketplace/catalog")
+    async def marketplace_catalog(request: Request) -> dict[str, Any]:
+        platform = _platform(request)
+        if not isinstance(platform, CorePluginPlatform):
+            raise HTTPException(status_code=404, detail="marketplace unavailable")
+        try:
+            return await asyncio.to_thread(platform.marketplace.public_catalog)
+        except Exception as exc:
+            _raise_api_error(exc)
 
     @router.get("/ui/snapshot")
     async def ui_snapshot(request: Request) -> dict[str, Any]:
@@ -373,6 +388,218 @@ def create_core_plugin_router() -> APIRouter:
         platform = await _guarded_platform(request)
         return platform.diagnostics()
 
+    @router.get("/manage/marketplace/status")
+    async def marketplace_status(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            return await asyncio.to_thread(platform.marketplace.status)
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    async def _reconcile_marketplace_policy(
+        platform: CorePluginPlatform,
+    ) -> list[str]:
+        disabled = await asyncio.to_thread(platform.marketplace.enforce_trust_policy)
+        for plugin_id in disabled:
+            await platform.reconcile_plugin(plugin_id)
+        return list(disabled)
+
+    @router.post("/manage/marketplace/{marketplace_id}/refresh")
+    async def refresh_marketplace(
+        marketplace_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            result = await asyncio.to_thread(
+                platform.marketplace.refresh,
+                marketplace_id,
+            )
+            return {
+                "refresh": result,
+                "disabledPlugins": await _reconcile_marketplace_policy(platform),
+            }
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/marketplace/{marketplace_id}/index")
+    async def import_marketplace_index(
+        marketplace_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        if (
+            request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            != "application/json"
+        ):
+            raise HTTPException(
+                status_code=415,
+                detail="marketplace index media type is invalid",
+            )
+        data = await _bounded_binary_body(
+            request,
+            maximum=MAX_INDEX_BYTES,
+            allow_empty=False,
+        )
+        try:
+            result = await asyncio.to_thread(
+                platform.marketplace.import_index,
+                data,
+                marketplace_id=marketplace_id,
+            )
+            return {
+                "import": result,
+                "disabledPlugins": await _reconcile_marketplace_policy(platform),
+            }
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/marketplace/{plugin_id}/prepare")
+    async def prepare_marketplace_release(
+        plugin_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        value = await _body(request, required={"version"})
+        if value["version"] is not None and not isinstance(value["version"], str):
+            raise HTTPException(
+                status_code=400,
+                detail="marketplace version is invalid",
+            )
+        try:
+            candidate = await asyncio.to_thread(
+                platform.marketplace.prepare,
+                plugin_id,
+                version=value["version"],
+            )
+            return {"candidate": candidate}
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/marketplace/{plugin_id}/{version}/artifact")
+    async def import_marketplace_artifact(
+        plugin_id: str,
+        version: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        upload = None
+        try:
+            upload, _expected_sha256 = await _bundle_upload(request, platform)
+            artifact = await asyncio.to_thread(upload.read_bytes)
+            candidate = await asyncio.to_thread(
+                platform.marketplace.prepare,
+                plugin_id,
+                version=version,
+                artifact_bytes=artifact,
+            )
+            return {"candidate": candidate}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+        finally:
+            if upload is not None:
+                await asyncio.to_thread(upload.unlink, missing_ok=True)
+
+    @router.post("/manage/marketplace/{plugin_id}/apply")
+    async def apply_marketplace_release(
+        plugin_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            result = await asyncio.to_thread(
+                platform.marketplace.apply,
+                plugin_id,
+            )
+            await platform.reconcile_plugin(plugin_id)
+            return result
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/marketplace/{plugin_id}/activate")
+    async def activate_marketplace_release(
+        plugin_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            activation = await asyncio.to_thread(
+                platform.marketplace.begin_activation,
+                plugin_id,
+            )
+            try:
+                await platform.reconcile_plugin(plugin_id)
+                health_evidence = await platform.observe_plugin_health(plugin_id)
+                observation = await asyncio.to_thread(
+                    platform.marketplace.finish_observation,
+                    plugin_id,
+                    healthy=True,
+                    detail=(
+                        f"Host runtime health passed for {len(health_evidence)} "
+                        "entrypoint(s)"
+                    ),
+                )
+            except Exception as health_error:
+                rollback_steps: list[dict[str, Any]] = []
+                candidate_digest = activation["candidate"]["bundleSha256"]
+                for _attempt in range(8):
+                    current = next(
+                        (
+                            item
+                            for item in await asyncio.to_thread(
+                                platform.installer.list_plugins
+                            )
+                            if item["pluginId"] == plugin_id
+                        ),
+                        None,
+                    )
+                    if current is None or current["bundleSha256"] != candidate_digest:
+                        break
+                    rollback_status = await asyncio.to_thread(
+                        platform.installer.rollback_status,
+                        plugin_id,
+                    )
+                    if not rollback_status["available"]:
+                        raise MarketplaceError(
+                            "PLUGIN_MARKETPLACE_HEALTH_ROLLBACK_FAILED",
+                            "failed marketplace activation could not reach its previous activation",
+                            details={"reason": rollback_status.get("reason")},
+                        ) from health_error
+                    rollback = await asyncio.to_thread(
+                        platform.installer.rollback,
+                        plugin_id,
+                    )
+                    rollback_steps.append(rollback.to_wire())
+                else:
+                    raise MarketplaceError(
+                        "PLUGIN_MARKETPLACE_HEALTH_ROLLBACK_FAILED",
+                        "failed marketplace activation exceeded the bounded rollback chain",
+                    ) from health_error
+                await platform.reconcile_plugin(plugin_id)
+                await asyncio.to_thread(
+                    platform.marketplace.mark_rolled_back,
+                    plugin_id,
+                    detail="runtime health observation failed; activation rolled back",
+                )
+                raise MarketplaceError(
+                    "PLUGIN_MARKETPLACE_HEALTH_ROLLBACK",
+                    "marketplace activation failed runtime health observation and was rolled back",
+                    details={
+                        "rollbackSteps": rollback_steps,
+                        "healthErrorType": type(health_error).__name__,
+                    },
+                ) from health_error
+            return {
+                "activation": activation,
+                "observation": observation,
+                "health": health_evidence,
+                "rollback": platform.installer.rollback_status(plugin_id),
+            }
+        except Exception as exc:
+            _raise_api_error(exc)
+
     @router.post("/manage/files/open")
     async def open_user_file(request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
@@ -459,6 +686,16 @@ def create_core_plugin_router() -> APIRouter:
         upload = None
         try:
             upload, expected_sha256 = await _bundle_upload(request, platform)
+            bundle = await asyncio.to_thread(
+                verify_platform_bundle,
+                upload,
+                expected_sha256=expected_sha256,
+                host_version=platform.installer.host_version,
+            )
+            await asyncio.to_thread(
+                platform.marketplace.record_local_bundle,
+                bundle,
+            )
             result = await asyncio.to_thread(
                 platform.installer.install,
                 upload,
@@ -562,8 +799,7 @@ def create_core_plugin_router() -> APIRouter:
                 required={"scopeType", "subject", "reason"},
             )
             if (
-                value["scopeType"]
-                not in {"grant", "plugin", "publisher", "credential"}
+                value["scopeType"] not in {"grant", "plugin", "publisher", "credential"}
                 or not isinstance(value["subject"], str)
                 or not isinstance(value["reason"], str)
             ):
@@ -625,8 +861,7 @@ def create_core_plugin_router() -> APIRouter:
                 or not isinstance(value["shadowRef"], str)
                 or not isinstance(value["expectedIntentSha256"], str)
                 or any(
-                    isinstance(value[key], bool)
-                    or not isinstance(value[key], int)
+                    isinstance(value[key], bool) or not isinstance(value[key], int)
                     for key in (
                         "expectedPolicyEpoch",
                         "expectedControlGeneration",
@@ -644,9 +879,7 @@ def create_core_plugin_router() -> APIRouter:
                 shadow_ref=value["shadowRef"],
                 expected_intent_sha256=value["expectedIntentSha256"],
                 expected_policy_epoch=value["expectedPolicyEpoch"],
-                expected_control_generation=value[
-                    "expectedControlGeneration"
-                ],
+                expected_control_generation=value["expectedControlGeneration"],
                 ttl_seconds=value["ttlSeconds"],
                 trace_id=f"management-{action}",
             )
@@ -719,23 +952,19 @@ def create_core_plugin_router() -> APIRouter:
                 "expectedControlGeneration",
             },
         )
-        if (
-            not all(
-                isinstance(value[key], str)
-                for key in (
-                    "accountRef",
-                    "shadowRef",
-                    "receiptRef",
-                    "expectedConfirmationSha256",
-                )
+        if not all(
+            isinstance(value[key], str)
+            for key in (
+                "accountRef",
+                "shadowRef",
+                "receiptRef",
+                "expectedConfirmationSha256",
             )
-            or any(
-                isinstance(value[key], bool)
-                or not isinstance(value[key], int)
-                for key in (
-                    "expectedPolicyEpoch",
-                    "expectedControlGeneration",
-                )
+        ) or any(
+            isinstance(value[key], bool) or not isinstance(value[key], int)
+            for key in (
+                "expectedPolicyEpoch",
+                "expectedControlGeneration",
             )
         ):
             raise HTTPException(
@@ -747,13 +976,9 @@ def create_core_plugin_router() -> APIRouter:
             "account_ref": value["accountRef"],
             "shadow_ref": value["shadowRef"],
             "receipt_ref": value["receiptRef"],
-            "expected_confirmation_sha256": value[
-                "expectedConfirmationSha256"
-            ],
+            "expected_confirmation_sha256": value["expectedConfirmationSha256"],
             "expected_policy_epoch": value["expectedPolicyEpoch"],
-            "expected_control_generation": value[
-                "expectedControlGeneration"
-            ],
+            "expected_control_generation": value["expectedControlGeneration"],
             "trace_id": trace_id,
         }
         if action_name == "submit":
@@ -805,9 +1030,7 @@ def create_core_plugin_router() -> APIRouter:
             return await platform.reconcile_live_execution(
                 account_ref=value["accountRef"],
                 shadow_ref=value["shadowRef"],
-                trace_id=(
-                    f"management-{request.state.plugin_user_action}"
-                ),
+                trace_id=(f"management-{request.state.plugin_user_action}"),
             )
         except HTTPException:
             raise
@@ -981,6 +1204,11 @@ def create_core_plugin_router() -> APIRouter:
             )
             result = await asyncio.to_thread(platform.installer.rollback, plugin_id)
             await platform.reconcile_plugin(plugin_id)
+            await asyncio.to_thread(
+                platform.marketplace.mark_rolled_back,
+                plugin_id,
+                detail="user requested rollback",
+            )
             return {"rollback": result.to_wire()}
         except Exception as exc:
             _raise_api_error(exc)

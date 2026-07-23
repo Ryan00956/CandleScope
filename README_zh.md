@@ -308,15 +308,18 @@ golden。可信开发包已发布为
 artifact。CandleScope 已删除 `packages/pyne-runtime` 和 in-process Pyne facade。完整执行记录见
 [`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
 
-独立演进的通用 Plugin Platform v2 已完成 Phase 1–11A：在 SDK、业务无关 Host、
+独立演进的通用 Plugin Platform v2 已完成 Phase 1–12：在 SDK、业务无关 Host、
 Bundle/Installer、权限与 Windows OS 沙箱之上，产品组合根已提供 command/settings/event/job、
 私有存储、只读市场 consumer、Host-owned 图表图层、声明式与 opaque-origin sandbox UI、受控
-HTTPS/文件/endpoint gateway，以及成对的公开 symbol/market-data provider。Phase 11A 进一步加入
-仅限 `first-party-pinned` 且需独立开关的 Paper broker：插件只交换严格 OrderIntent/ack，Host 持有
-行情时间、账本、成交、风控、幂等、恢复、不可变审计与全局 kill switch。平台和 Paper 开关默认均
-关闭；`secrets.use`、实盘 `trade.submit`/`trade.cancel`、社区插件实盘网络与 Marketplace 仍未开放。
-最新执行记录见
-[`PLUGIN_PLATFORM_V2_PHASE11A_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE11A_zh.md)。
+HTTPS/文件/endpoint gateway、成对的公开 symbol/market-data provider，以及 Paper 与默认关闭的
+WP-A～WP-F Live Broker 技术路径。Phase 12 新增默认关闭的 Ed25519 签名 Marketplace、不可变
+artifact/index cache、SBOM/许可证绑定、透明日志、撤销、permission diff 和显式
+prepare/apply/activate/健康回滚流程。
+
+仓库默认 Marketplace roots 为空；`verified-publisher` 只证明发布来源，社区 backend 仍在 Windows
+AppContainer 中按 `untrusted` 运行，权限由 Host 单独授予。`secrets.use`、社区 Live
+`trade.submit`/`trade.cancel`、真实 Demo/真钱测试与 WP-G 仍未开放。最新执行记录见
+[`PLUGIN_PLATFORM_V2_PHASE12_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE12_zh.md)。
 
 Phase 8 新增独立可构建的
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README_zh.md)：

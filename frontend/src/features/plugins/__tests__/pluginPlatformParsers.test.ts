@@ -7,6 +7,8 @@ import {
   parsePluginLiveControlStatus,
   parsePluginLiveExecutionRecord,
   parsePluginManagementDetail,
+  parsePluginMarketplaceCatalog,
+  parsePluginMarketplaceStatus,
   parsePluginUiSnapshot,
 } from "../pluginPlatformParsers.js";
 import { buildPluginRegistries } from "../pluginRegistries.js";
@@ -71,6 +73,70 @@ function catalog<T = ReturnType<typeof plugin>>(plugins: T[] = [plugin()] as T[]
     schemaVersion: "candlescope.plugin-catalog/1",
     platform: { enabled: true, started: true, status: "ok", registryRevision: 1 },
     plugins,
+  };
+}
+
+function marketplaceRelease() {
+  const artifactSha256 = `sha256:${"a".repeat(64)}`;
+  const fileName = "acme.scanner-1.1.0.cspkg";
+  return {
+    pluginId: "acme.scanner",
+    version: "1.1.0",
+    publisherId: "acme",
+    artifact: {
+      fileName,
+      url: `https://plugins.example.invalid/artifacts/${fileName}`,
+      sha256: artifactSha256,
+      size: 1024,
+      manifestSha256: `sha256:${"b".repeat(64)}`,
+      sbomSha256: `sha256:${"c".repeat(64)}`,
+    },
+    publishedAt: "2026-07-23T02:00:00Z",
+    licenseExpression: "MIT",
+    dependencies: [{ name: "demo-wheel", version: "1.0.0", licenseExpression: "MIT" }],
+    sha256Sums: `${"a".repeat(64)}  ${fileName}\n`,
+    sha256SumsSha256: `sha256:${"d".repeat(64)}`,
+    publisherKeyId: `ed25519:${"e".repeat(64)}`,
+    transparency: {
+      logIndex: 1,
+      leafSha256: `sha256:${"f".repeat(64)}`,
+      recordSha256: `sha256:${"1".repeat(64)}`,
+    },
+    revoked: false,
+  };
+}
+
+function marketplaceCandidate() {
+  return {
+    pluginId: "acme.scanner",
+    version: "1.1.0",
+    marketplaceId: "candlescope.community",
+    publisherId: "acme",
+    bundleSha256: `sha256:${"a".repeat(64)}`,
+    artifactFile: `${"a".repeat(64)}.cspkg`,
+    phase: "verified-staged",
+    preparedAt: "2026-07-23T02:01:00Z",
+    fromVersion: "1.0.0",
+    permissionDiff: {
+      pluginId: "acme.scanner",
+      publisherIdentityChanged: false,
+      majorVersionChanged: false,
+      bundleChanged: true,
+      requiresConfirmation: true,
+      permissions: [{
+        permissionId: "market.bars.read",
+        kind: "required",
+        previousKind: null,
+        change: "added",
+        previousDecision: null,
+        requestedScope: { maxHistoryBars: 50 },
+        previousScope: null,
+        requiresConfirmation: true,
+      }],
+    },
+    compatibility: { hostVersion: "0.1.0", verified: true },
+    migration: { required: false, supported: true, policy: "same-major-only" },
+    observation: { status: "not-started", observedAt: null, detail: null },
   };
 }
 
@@ -635,6 +701,97 @@ test("UI snapshot accepts scalar projections and rejects executable-shaped extra
   assert.throws(() => parsePluginUiSnapshot(invalid), /invalid/);
 });
 
+test("marketplace catalog and status preserve only verified distribution metadata", () => {
+  const release = marketplaceRelease();
+  const candidate = marketplaceCandidate();
+  const marketplaceCatalog = {
+    schemaVersion: "candlescope.marketplace-catalog/1",
+    enabled: true,
+    marketplaces: [{
+      marketplaceId: "candlescope.community",
+      indexUrl: "https://plugins.example.invalid/index.json",
+      keyId: `ed25519:${"2".repeat(64)}`,
+      enabled: true,
+      cache: {
+        status: "valid",
+        sequence: 1,
+        expiresAt: "2026-07-30T02:00:00Z",
+      },
+    }],
+    plugins: [{
+      pluginId: "acme.scanner",
+      publisher: {
+        publisherId: "acme",
+        displayName: "Acme",
+        keyId: `ed25519:${"e".repeat(64)}`,
+        status: "active",
+      },
+      latest: release,
+      releaseCount: 1,
+      installedVersion: "1.0.0",
+      installable: true,
+    }],
+  };
+  assert.equal(parsePluginMarketplaceCatalog(marketplaceCatalog).plugins[0]?.latest.version, "1.1.0");
+
+  const validSemver = structuredClone(marketplaceCatalog);
+  validSemver.plugins[0]!.latest.version = "1.1.0-1alpha+build.01";
+  assert.equal(
+    parsePluginMarketplaceCatalog(validSemver).plugins[0]?.latest.version,
+    "1.1.0-1alpha+build.01",
+  );
+
+  const longArtifact = structuredClone(marketplaceCatalog);
+  const longFileName = `a${"b".repeat(199)}.cspkg`;
+  longArtifact.plugins[0]!.latest.artifact.fileName = longFileName;
+  longArtifact.plugins[0]!.latest.artifact.url = `https://plugins.example.invalid/artifacts/${longFileName}`;
+  longArtifact.plugins[0]!.latest.sha256Sums = `${"a".repeat(64)}  ${longFileName}\n`;
+  assert.equal(
+    parsePluginMarketplaceCatalog(longArtifact).plugins[0]?.latest.artifact.fileName,
+    longFileName,
+  );
+
+  const oversized = structuredClone(marketplaceCatalog);
+  oversized.plugins[0]!.latest.artifact.size = 128 * 1024 * 1024 + 1;
+  oversized.plugins[0]!.installable = false;
+  assert.equal(parsePluginMarketplaceCatalog(oversized).plugins[0]?.installable, false);
+  oversized.plugins[0]!.installable = true;
+  assert.throws(() => parsePluginMarketplaceCatalog(oversized), /invalid/);
+
+  const invalidVersion = structuredClone(marketplaceCatalog);
+  invalidVersion.plugins[0]!.latest.version = "1.01.0";
+  assert.throws(() => parsePluginMarketplaceCatalog(invalidVersion), /invalid/);
+
+  const inactivePublisher = structuredClone(marketplaceCatalog);
+  inactivePublisher.plugins[0]!.publisher.status = "disabled";
+  assert.throws(() => parsePluginMarketplaceCatalog(inactivePublisher), /invalid/);
+
+  const update = {
+    policy: "signed-marketplace-or-local-artifact",
+    automatic: false,
+    available: true,
+    ownership: "signed-marketplace",
+    reason: null,
+    candidate,
+    latest: release,
+  };
+  const status = {
+    schemaVersion: "candlescope.marketplace-status/1",
+    enabled: true,
+    automaticUpdates: false,
+    rootCount: 1,
+    validCacheCount: 1,
+    cacheErrors: {},
+    candidates: [candidate],
+    updates: [{ pluginId: "acme.scanner", ...update }],
+  };
+  assert.equal(parsePluginMarketplaceStatus(status).candidates[0]?.permissionDiff.requiresConfirmation, true);
+
+  const injected = structuredClone(marketplaceCatalog);
+  Object.assign(injected.plugins[0]!.latest, { installScript: "powershell -enc ..." });
+  assert.throws(() => parsePluginMarketplaceCatalog(injected), /invalid/);
+});
+
 test("management detail accepts only the Host-projected lifecycle shape", () => {
   const value = {
     schemaVersion: "candlescope.plugin-management-detail/1",
@@ -652,7 +809,15 @@ test("management detail accepts only the Host-projected lifecycle shape", () => 
       }],
     }],
     health: { available: true, entrypoints: [{ entrypointId: "main", state: "stopped", generation: 0 }] },
-    update: { policy: "local-artifact-only", automatic: false, available: false },
+    update: {
+      policy: "signed-marketplace-or-local-artifact",
+      automatic: false,
+      available: false,
+      ownership: "local-or-first-party",
+      reason: "NO_SIGNED_UPDATE",
+      candidate: null,
+      latest: null,
+    },
     rollback: { available: true, target: { state: "disabled", version: "1.0.0" } },
     paperTrading: {
       schemaVersion: "candlescope.paper-status/1",

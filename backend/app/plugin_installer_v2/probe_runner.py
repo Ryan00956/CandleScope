@@ -33,6 +33,10 @@ from app.plugin_host import (  # noqa: E402
     ManagedSidecarProcess,
     SidecarProcessSpec,
 )
+from app.plugin_security_v2.sandbox import SandboxPolicy  # noqa: E402
+from app.plugin_security_v2.python_runtime import (  # noqa: E402
+    SANDBOX_PYTHON_BOOTSTRAP,
+)
 
 
 MAX_PROBE_MESSAGE_BYTES = 1024 * 1024
@@ -51,7 +55,86 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--python", type=Path, required=True, dest="python_executable")
     parser.add_argument("--working-directory", type=Path, required=True)
     parser.add_argument("--host-version", required=True)
+    parser.add_argument("--sandbox-policies", type=Path)
+    parser.add_argument("--sandbox-python", type=Path)
+    parser.add_argument("--sandbox-site-packages", type=Path)
     return parser
+
+
+def _sandbox_policies(
+    args: argparse.Namespace,
+    manifest: PluginManifest,
+) -> dict[str, SandboxPolicy]:
+    if args.sandbox_policies is None:
+        if args.sandbox_python is not None or args.sandbox_site_packages is not None:
+            raise PlatformContractError(
+                "INVALID_CONTRACT",
+                "sandbox Python requires sandbox policies",
+            )
+        return {}
+    if args.sandbox_python is None or args.sandbox_site_packages is None:
+        raise PlatformContractError(
+            "INVALID_CONTRACT",
+            "sandbox policies require a pinned Python runtime",
+        )
+    value = loads_strict(args.sandbox_policies.read_bytes())
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schemaVersion", "entrypoints"}
+        or value["schemaVersion"] != 1
+        or not isinstance(value["entrypoints"], dict)
+        or set(value["entrypoints"])
+        != {item.id for item in manifest.backend_entrypoints}
+    ):
+        raise PlatformContractError(
+            "INVALID_CONTRACT",
+            "sandbox probe policy document is invalid",
+        )
+    try:
+        return {
+            entrypoint_id: SandboxPolicy.from_wire(policy)
+            for entrypoint_id, policy in value["entrypoints"].items()
+        }
+    except ValueError as exc:
+        raise PlatformContractError(
+            "INVALID_CONTRACT",
+            "sandbox probe policy is invalid",
+        ) from exc
+
+
+def _entrypoint_command(
+    args: argparse.Namespace,
+    *,
+    module: str,
+    sandbox_policy: SandboxPolicy | None,
+) -> tuple[Path, tuple[str, ...]]:
+    if sandbox_policy is None:
+        return args.python_executable, ("-I", "-u", "-m", module)
+    runtime = args.sandbox_python.resolve(strict=True)
+    site_packages = args.sandbox_site_packages.resolve(strict=True)
+    working = args.working_directory.resolve(strict=True)
+    if (
+        not runtime.is_file()
+        or runtime.is_symlink()
+        or not site_packages.is_dir()
+        or site_packages.is_symlink()
+        or working not in site_packages.parents
+    ):
+        raise PlatformContractError(
+            "INVALID_CONTRACT",
+            "sandbox Python runtime paths are invalid",
+        )
+    return (
+        runtime,
+        (
+            "-I",
+            "-u",
+            "-c",
+            SANDBOX_PYTHON_BOOTSTRAP,
+            str(site_packages),
+            module,
+        ),
+    )
 
 
 def _probe_assets(args: argparse.Namespace) -> dict[str, Path]:
@@ -90,6 +173,7 @@ async def _replay_control_transcript(
     *,
     entrypoint_id: str,
     asset_path: Path,
+    sandbox_policy: SandboxPolicy | None,
 ) -> str:
     transcript = loads_strict(asset_path.read_bytes(), limits=ASSET_JSON_LIMITS)
     if not isinstance(transcript, dict) or not isinstance(
@@ -117,13 +201,20 @@ async def _replay_control_transcript(
         )
     entrypoints = {item.id: item for item in manifest.backend_entrypoints}
     entrypoint = entrypoints[entrypoint_id]
+    executable, arguments = _entrypoint_command(
+        args,
+        module=entrypoint.python_module,
+        sandbox_policy=sandbox_policy,
+    )
     process = ManagedSidecarProcess(
         SidecarProcessSpec(
             identity=f"semantic-probe:{manifest.plugin.id}:{entrypoint_id}",
-            executable=args.python_executable,
-            arguments=("-I", "-u", "-m", entrypoint.python_module),
+            executable=executable,
+            arguments=arguments,
             working_directory=args.working_directory,
             max_message_bytes=MAX_PROBE_MESSAGE_BYTES,
+            trust_level="untrusted" if sandbox_policy is not None else "local-trusted",
+            sandbox_policy=sandbox_policy,
         )
     )
     responses: list[Any] = []
@@ -166,6 +257,12 @@ async def _replay_control_transcript(
                 "INVALID_CONTRACT",
                 f"control transcript produced an extra response: {extra[:128]!r}",
             )
+    except (JsonLineError, TimeoutError) as exc:
+        stderr = process.stderr_tail.strip()
+        raise RuntimeError(
+            "semantic probe transport failed"
+            + (f": {stderr[-2_048:]}" if stderr else "")
+        ) from exc
     finally:
         await process.terminate()
     actual_hashes = [canonical_sha256(item) for item in responses]
@@ -177,7 +274,9 @@ async def _replay_control_transcript(
 
 
 async def _semantic_probes(
-    args: argparse.Namespace, manifest: PluginManifest
+    args: argparse.Namespace,
+    manifest: PluginManifest,
+    sandbox_policies: dict[str, SandboxPolicy],
 ) -> list[dict[str, str]]:
     assets = _probe_assets(args)
     results: list[dict[str, str]] = []
@@ -191,6 +290,7 @@ async def _semantic_probes(
             manifest,
             entrypoint_id=probe.entrypoint,
             asset_path=assets[probe.id],
+            sandbox_policy=sandbox_policies.get(probe.entrypoint),
         )
         if actual != probe.sha256:
             raise PlatformContractError(
@@ -214,21 +314,30 @@ async def _semantic_probes(
 async def _probe(args: argparse.Namespace) -> dict[str, Any]:
     value = loads_strict(args.manifest.read_bytes())
     manifest = PluginManifest.from_wire(value)
-    semantic_probes = await _semantic_probes(args, manifest)
+    sandbox_policies = _sandbox_policies(args, manifest)
+    semantic_probes = await _semantic_probes(args, manifest, sandbox_policies)
     results: list[dict[str, Any]] = []
     activate = not manifest.permissions.required
     for entrypoint in manifest.backend_entrypoints:
+        sandbox_policy = sandbox_policies.get(entrypoint.id)
+        executable, arguments = _entrypoint_command(
+            args,
+            module=entrypoint.python_module,
+            sandbox_policy=sandbox_policy,
+        )
         spec = EntrypointProcessSpec(
             plugin_id=manifest.plugin.id,
             entrypoint_id=entrypoint.id,
-            executable=args.python_executable,
-            arguments=("-I", "-u", "-m", entrypoint.python_module),
+            executable=executable,
+            arguments=arguments,
             working_directory=args.working_directory,
             enabled=True,
             max_restart_attempts=0,
             startup_timeout_seconds=15.0,
             request_timeout_seconds=15.0,
             shutdown_timeout_seconds=3.0,
+            trust_level="untrusted" if sandbox_policy is not None else "local-trusted",
+            sandbox_policy=sandbox_policy,
         )
         supervisor = EntrypointSupervisor(
             spec,

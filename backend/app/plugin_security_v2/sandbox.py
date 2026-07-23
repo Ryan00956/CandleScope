@@ -138,6 +138,98 @@ class SandboxPolicy:
         object.__setattr__(self, "additional_read_only_paths", read_paths)
         object.__setattr__(self, "environment", environment)
 
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "mode": self.mode,
+            "profileName": self.profile_name,
+            "installationDirectory": str(self.installation_directory),
+            "privateDirectory": str(self.private_directory),
+            "runtimeDirectory": str(self.runtime_directory),
+            "additionalReadOnlyPaths": [
+                str(item) for item in self.additional_read_only_paths
+            ],
+            "environment": [
+                {"name": key, "value": value} for key, value in self.environment
+            ],
+            "limits": {
+                "memoryBytes": self.memory_limit_bytes,
+                "cpuRatePercent": self.cpu_rate_percent,
+                "cpuTimeSeconds": self.cpu_time_seconds,
+                "diskBytes": self.disk_limit_bytes,
+                "maxProcesses": self.max_processes,
+                "maxWallSeconds": self.max_wall_seconds,
+            },
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "SandboxPolicy":
+        if not isinstance(value, dict) or set(value) != {
+            "schemaVersion",
+            "mode",
+            "profileName",
+            "installationDirectory",
+            "privateDirectory",
+            "runtimeDirectory",
+            "additionalReadOnlyPaths",
+            "environment",
+            "limits",
+        }:
+            raise ValueError("sandbox policy wire schema is invalid")
+        if value["schemaVersion"] != 1:
+            raise ValueError("sandbox policy wire schemaVersion is unsupported")
+        read_paths = value["additionalReadOnlyPaths"]
+        environment = value["environment"]
+        limits = value["limits"]
+        if (
+            not isinstance(read_paths, list)
+            or not all(isinstance(item, str) for item in read_paths)
+            or not isinstance(environment, list)
+            or not all(
+                isinstance(item, dict)
+                and set(item) == {"name", "value"}
+                and isinstance(item["name"], str)
+                and isinstance(item["value"], str)
+                for item in environment
+            )
+            or not isinstance(limits, dict)
+            or set(limits)
+            != {
+                "memoryBytes",
+                "cpuRatePercent",
+                "cpuTimeSeconds",
+                "diskBytes",
+                "maxProcesses",
+                "maxWallSeconds",
+            }
+            or not all(
+                isinstance(value.get(key), str)
+                for key in {
+                    "mode",
+                    "profileName",
+                    "installationDirectory",
+                    "privateDirectory",
+                    "runtimeDirectory",
+                }
+            )
+        ):
+            raise ValueError("sandbox policy wire values are invalid")
+        return cls(
+            mode=value["mode"],
+            profile_name=value["profileName"],
+            installation_directory=Path(value["installationDirectory"]),
+            private_directory=Path(value["privateDirectory"]),
+            runtime_directory=Path(value["runtimeDirectory"]),
+            additional_read_only_paths=tuple(Path(item) for item in read_paths),
+            environment=tuple((item["name"], item["value"]) for item in environment),
+            memory_limit_bytes=limits["memoryBytes"],
+            cpu_rate_percent=limits["cpuRatePercent"],
+            cpu_time_seconds=limits["cpuTimeSeconds"],
+            disk_limit_bytes=limits["diskBytes"],
+            max_processes=limits["maxProcesses"],
+            max_wall_seconds=limits["maxWallSeconds"],
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedSandboxLaunch:
@@ -388,10 +480,10 @@ def prepare_sandbox_launch(
     executable = Path(command[0]).resolve(strict=False)
     working = Path(working_directory).resolve(strict=False)
     allowed_roots = (policy.installation_directory, *policy.additional_read_only_paths)
-    if not _is_within(executable, policy.installation_directory):
+    if not any(_is_within(executable, root) for root in allowed_roots):
         raise security_error(
             "PLUGIN_SANDBOX_COMMAND_OUTSIDE_INSTALLATION",
-            "sandbox executable is outside the immutable installation",
+            "sandbox executable is outside the immutable installation and Host-pinned runtime roots",
             details={"path": str(executable)},
         )
     if not _is_within(working, policy.installation_directory):

@@ -591,9 +591,13 @@ async def test_catalog_is_public_but_mutations_require_local_management_guard(
             )
             assert detail.status_code == 200
             assert detail.json()["update"] == {
-                "policy": "local-artifact-only",
+                "policy": "signed-marketplace-or-local-artifact",
                 "automatic": False,
                 "available": False,
+                "ownership": "local-or-first-party",
+                "reason": "NO_SIGNED_UPDATE",
+                "candidate": None,
+                "latest": None,
             }
             assert detail.json()["dataRetention"]["retainedOnUninstall"] is True
             permission_detail = detail.json()["permissions"][0]

@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -24,6 +24,7 @@ from candlescope_plugin_sdk.platform_v2 import (
 
 from app.plugin_security_v2 import AuditLog, GrantStore
 from app.plugin_security_v2.grants import GrantMutationResult, PermissionDiff
+from app.plugin_security_v2.sandbox import SandboxPolicy
 
 from .bundle import (
     DEFAULT_HOST_VERSION,
@@ -582,6 +583,18 @@ class PlatformPluginInstaller:
         lock_timeout_seconds: float = DEFAULT_INSTALL_LOCK_TIMEOUT_SECONDS,
         audit_log: AuditLog | None = None,
         grant_store: GrantStore | None = None,
+        publisher_identity_resolver: (
+            Callable[[VerifiedPlatformBundle], str] | None
+        ) = None,
+        execution_trust_resolver: (
+            Callable[[VerifiedPlatformBundle], str] | None
+        ) = None,
+        probe_sandbox_factory: (
+            Callable[[VerifiedPlatformBundle, Path, str], SandboxPolicy] | None
+        ) = None,
+        probe_python_runtime_factory: (
+            Callable[[VerifiedPlatformBundle, Path], tuple[Path, Path]] | None
+        ) = None,
     ) -> None:
         self.root = Path(root or _default_root()).expanduser().resolve(strict=False)
         self.registry_path = (
@@ -617,6 +630,10 @@ class PlatformPluginInstaller:
                 self.root / "platform-grants-v2.json",
                 audit_log=self.audit_log,
             )
+        self.publisher_identity_resolver = publisher_identity_resolver
+        self.execution_trust_resolver = execution_trust_resolver
+        self.probe_sandbox_factory = probe_sandbox_factory
+        self.probe_python_runtime_factory = probe_python_runtime_factory
 
     @property
     def installs_directory(self) -> Path:
@@ -794,26 +811,88 @@ class PlatformPluginInstaller:
     def _run_probe(
         self, installation: Path, bundle: VerifiedPlatformBundle
     ) -> dict[str, Any]:
-        output = _run_command(
-            (
-                str(self.python_executable),
-                "-I",
-                str(PROBE_RUNNER),
-                "--manifest",
-                str(self._content_directory(installation) / "manifest.json"),
-                "--bundle-descriptor",
-                str(self._content_directory(installation) / "bundle.json"),
-                "--python",
-                str(self._venv_python(installation)),
-                "--working-directory",
-                str(installation),
-                "--host-version",
-                self.host_version,
-            ),
-            label="fresh-process platform Host probe",
-            timeout_seconds=max(60.0, 25.0 * len(bundle.manifest.backend_entrypoints)),
-            cwd=installation,
+        trust_level = (
+            self.execution_trust_resolver(bundle)
+            if self.execution_trust_resolver is not None
+            else "local-trusted"
         )
+        if trust_level not in {
+            "first-party-pinned",
+            "local-trusted",
+            "untrusted",
+        }:
+            raise PlatformInstallerError("resolved execution trust level is invalid")
+        sandbox_path: Path | None = None
+        command = [
+            str(self.python_executable),
+            "-I",
+            str(PROBE_RUNNER),
+            "--manifest",
+            str(self._content_directory(installation) / "manifest.json"),
+            "--bundle-descriptor",
+            str(self._content_directory(installation) / "bundle.json"),
+            "--python",
+            str(self._venv_python(installation)),
+            "--working-directory",
+            str(installation),
+            "--host-version",
+            self.host_version,
+        ]
+        if trust_level == "untrusted":
+            if (
+                self.probe_sandbox_factory is None
+                or self.probe_python_runtime_factory is None
+            ):
+                raise PlatformInstallerError(
+                    "verified publisher probe requires an explicit OS sandbox and pinned Python runtime",
+                    plugin_id=bundle.manifest.plugin.id,
+                )
+            policies = {
+                item.id: self.probe_sandbox_factory(
+                    bundle,
+                    installation,
+                    item.id,
+                ).to_wire()
+                for item in bundle.manifest.backend_entrypoints
+            }
+            sandbox_path = installation / f".probe-sandbox-{uuid.uuid4().hex}.json"
+            runtime_executable, site_packages = self.probe_python_runtime_factory(
+                bundle,
+                installation,
+            )
+            if not isinstance(runtime_executable, Path) or not isinstance(
+                site_packages, Path
+            ):
+                raise PlatformInstallerError(
+                    "probe Python runtime factory returned an invalid result",
+                    plugin_id=bundle.manifest.plugin.id,
+                )
+            _atomic_write_json(
+                sandbox_path,
+                {"schemaVersion": 1, "entrypoints": policies},
+                replace_existing=False,
+            )
+            command.extend(("--sandbox-policies", str(sandbox_path)))
+            command.extend(
+                (
+                    "--sandbox-python",
+                    str(runtime_executable),
+                    "--sandbox-site-packages",
+                    str(site_packages),
+                )
+            )
+        try:
+            output = _run_command(
+                tuple(command),
+                label="fresh-process platform Host probe",
+                timeout_seconds=max(
+                    60.0, 25.0 * len(bundle.manifest.backend_entrypoints)
+                ),
+                cwd=installation,
+            )
+        finally:
+            if sandbox_path is not None:
+                sandbox_path.unlink(missing_ok=True)
         try:
             value = _mapping(loads_strict(output), "fresh-process probe result")
         except (PlatformContractError, PlatformInstallerError) as exc:
@@ -1026,6 +1105,10 @@ class PlatformPluginInstaller:
                         "activation launch target does not match its immutable installation",
                         plugin_id=record.plugin_id,
                     )
+            if self.execution_trust_resolver is not None:
+                self.execution_trust_resolver(bundle)
+            if self.publisher_identity_resolver is not None:
+                self._publisher_identity(bundle)
             return bundle, installation
 
     def _remove_staging(self, path: Path) -> None:
@@ -1107,10 +1190,13 @@ class PlatformPluginInstaller:
         *,
         enabled: bool,
         activation_ready: bool,
+        force_staged: bool = False,
     ) -> ActivationRecord:
         required = tuple(item.id for item in bundle.manifest.permissions.required)
         state = (
-            "staged" if not activation_ready else ("active" if enabled else "disabled")
+            "staged"
+            if force_staged or not activation_ready
+            else ("active" if enabled else "disabled")
         )
         return ActivationRecord(
             plugin_id=bundle.manifest.plugin.id,
@@ -1187,9 +1273,14 @@ class PlatformPluginInstaller:
         *,
         expected_sha256: str,
         enabled: bool = False,
+        force_staged: bool = False,
     ) -> InstallResult:
-        if not isinstance(enabled, bool):
-            raise PlatformInstallerError("enabled must be a boolean")
+        if not isinstance(enabled, bool) or not isinstance(force_staged, bool):
+            raise PlatformInstallerError("enabled and force_staged must be booleans")
+        if enabled and force_staged:
+            raise PlatformInstallerError(
+                "force_staged cannot be combined with enabled activation"
+            )
         bundle = verify_platform_bundle(
             bundle_path,
             expected_sha256=expected_sha256,
@@ -1209,16 +1300,19 @@ class PlatformPluginInstaller:
                 bundle.manifest,
                 bundle_sha256=bundle.sha256,
                 manifest_sha256=bundle.manifest_sha256,
+                publisher_identity=self._publisher_identity(bundle),
             )
             grant_reconciliation = self.grant_store.reconcile(
                 bundle.manifest,
                 bundle_sha256=bundle.sha256,
                 manifest_sha256=bundle.manifest_sha256,
+                publisher_identity=self._publisher_identity(bundle),
             )
             activation_ready = self.grant_store.activation_ready(
                 bundle.manifest,
                 bundle_sha256=bundle.sha256,
                 manifest_sha256=bundle.manifest_sha256,
+                publisher_identity=self._publisher_identity(bundle),
             )
             current = registry.by_id().get(plugin_id)
             candidate = self._new_record(
@@ -1226,6 +1320,7 @@ class PlatformPluginInstaller:
                 final_path,
                 enabled=enabled,
                 activation_ready=activation_ready,
+                force_staged=force_staged,
             )
             if current is not None and self._same_activation_intent(current, candidate):
                 return InstallResult(
@@ -1260,11 +1355,19 @@ class PlatformPluginInstaller:
                 activation_ready,
             )
 
-    @staticmethod
-    def _grant_arguments(bundle: VerifiedPlatformBundle) -> dict[str, str]:
+    def _publisher_identity(self, bundle: VerifiedPlatformBundle) -> str:
+        if self.publisher_identity_resolver is None:
+            return f"manifest:{bundle.manifest.plugin.publisher}"
+        identity = self.publisher_identity_resolver(bundle)
+        if not isinstance(identity, str) or not identity or len(identity) > 256:
+            raise PlatformInstallerError("resolved publisher identity is invalid")
+        return identity
+
+    def _grant_arguments(self, bundle: VerifiedPlatformBundle) -> dict[str, str]:
         return {
             "bundle_sha256": bundle.sha256,
             "manifest_sha256": bundle.manifest_sha256,
+            "publisher_identity": self._publisher_identity(bundle),
         }
 
     def _current_bundle(
@@ -1498,8 +1601,13 @@ class PlatformPluginInstaller:
     def _change_state(self, plugin_id: str, target_state: str) -> StateChangeResult:
         with _installation_lock(self.lock_path, self.lock_timeout_seconds):
             registry = load_activation_registry(self.registry_path)
-            current, bundle = self._current_bundle(registry, plugin_id)
+            current = registry.by_id().get(plugin_id)
+            if current is None:
+                raise PlatformInstallerError(
+                    "plugin is not present in v2 activation registry"
+                )
             if target_state == "active":
+                current, bundle = self._current_bundle(registry, plugin_id)
                 self.grant_store.reconcile(
                     bundle.manifest,
                     **self._grant_arguments(bundle),

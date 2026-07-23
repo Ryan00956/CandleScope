@@ -16,6 +16,7 @@ from .grants import (
     PermissionDiffItem,
 )
 from .scope import classify_scope_change, scope_contains
+from .python_runtime import PinnedPythonRuntime, prepare_pinned_python_runtime
 from .sandbox import (
     PreparedSandboxLaunch,
     SandboxPolicy,
@@ -36,12 +37,14 @@ __all__ = [
     "GrantStore",
     "PermissionDiff",
     "PermissionDiffItem",
+    "PinnedPythonRuntime",
     "PlatformSecurityError",
     "PreparedSandboxLaunch",
     "SandboxPolicy",
     "classify_scope_change",
     "delete_appcontainer_profile",
     "prepare_sandbox_launch",
+    "prepare_pinned_python_runtime",
     "sandbox_profile_name",
     "scope_contains",
 ]

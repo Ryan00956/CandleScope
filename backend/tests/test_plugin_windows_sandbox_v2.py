@@ -1,21 +1,30 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import os
 import shutil
 import socket
 import subprocess
+import sys
 import uuid
 import ctypes
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from app.plugin_host.process import ManagedSidecarProcess, SidecarProcessSpec
 from app.plugin_security_v2 import (
+    PlatformSecurityError,
     SandboxPolicy,
     delete_appcontainer_profile,
     prepare_sandbox_launch,
+)
+from app.plugin_security_v2.python_runtime import (
+    _destination_files,
+    _validate_cached_runtime,
 )
 
 
@@ -24,6 +33,67 @@ PROBE_SOURCE = FIXTURE_DIRECTORY / "windows_malicious_probe.c"
 
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows AppContainer only")
+
+
+def test_cached_pinned_runtime_manifest_cannot_rebind_tampered_content(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    executable = runtime / "python.exe"
+    executable.write_bytes(b"host-python")
+    library_source = b"VALUE = 'host-stdlib'\n"
+    archive_name = f"python{sys.version_info.major}{sys.version_info.minor}.zip"
+    with zipfile.ZipFile(
+        runtime / archive_name,
+        "w",
+        compression=zipfile.ZIP_STORED,
+        allowZip64=False,
+    ) as archive:
+        info = zipfile.ZipInfo("host_module.py", (1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_STORED
+        info.external_attr = 0o444 << 16
+        archive.writestr(info, library_source)
+    identity = "sha256:" + ("a" * 64)
+    records = [
+        {
+            "path": "python.exe",
+            "sha256": f"sha256:{hashlib.sha256(b'host-python').hexdigest()}",
+            "size": len(b"host-python"),
+            "storage": "file",
+        },
+        {
+            "path": "host_module.py",
+            "sha256": f"sha256:{hashlib.sha256(library_source).hexdigest()}",
+            "size": len(library_source),
+            "storage": "stdlib-archive",
+        },
+    ]
+    manifest_path = runtime / "runtime-manifest-v1.json"
+    manifest = {
+        "schemaVersion": 1,
+        "identitySha256": identity,
+        "pythonVersion": (
+            f"{sys.version_info.major}.{sys.version_info.minor}."
+            f"{sys.version_info.micro}"
+        ),
+        "files": _destination_files(runtime),
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    _validate_cached_runtime(runtime, identity, records)
+
+    executable.write_bytes(b"attacker-python")
+    manifest["files"] = _destination_files(runtime)
+    manifest_path.write_text(
+        json.dumps(manifest, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    with pytest.raises(PlatformSecurityError) as failure:
+        _validate_cached_runtime(runtime, identity, records)
+    assert failure.value.code == "PLUGIN_SANDBOX_PYTHON_RUNTIME_INVALID"
 
 
 def test_sandbox_policy_rejects_overlapping_or_drive_roots(tmp_path: Path) -> None:
@@ -241,6 +311,32 @@ def test_cpu_time_quota_terminates_only_the_sandbox_process(
     assert status["status"] == "exited"
     assert status["exitCode"] != 0
     assert status["elapsedMillis"] < 8_000
+
+
+@pytest.mark.anyio
+async def test_appcontainer_forwards_interactive_jsonl_without_waiting_for_eof(
+    compiled_probe: tuple[Path, Path],
+    sandbox_policy: SandboxPolicy,
+) -> None:
+    installation, executable = compiled_probe
+    managed = ManagedSidecarProcess(
+        SidecarProcessSpec(
+            "candlescope.sandbox-probe:echo",
+            executable,
+            ("echo",),
+            installation,
+            sandbox_policy=sandbox_policy,
+        )
+    )
+    await managed.start()
+    try:
+        assert managed.connection is not None
+        payload = b'{"phase":12,"streaming":true}'
+        await asyncio.wait_for(managed.connection.write(payload), timeout=3.0)
+        echoed = await asyncio.wait_for(managed.connection.read(), timeout=3.0)
+        assert echoed == payload
+    finally:
+        await managed.terminate()
 
 
 @pytest.mark.anyio

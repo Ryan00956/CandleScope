@@ -1,6 +1,6 @@
 # Plugin Platform v2 核心产品组合根
 
-`app.plugin_core_v2` 是 Phase 5–11B WP-C 的产品组合层。它把 Phase 2 的进程 Host、Phase 3 的
+`app.plugin_core_v2` 是 Phase 5–12 的产品组合层。它把 Phase 2 的进程 Host、Phase 3 的
 immutable installation/activation registry 和 Phase 4 的 Grant Store/capability broker
 组合成最小通用插件平台，同时保持业务数据库、Data Engine 和私有 Python 对象不可见。
 
@@ -42,6 +42,16 @@ $env:CANDLESCOPE_PLUGIN_PLATFORM_V2_TRUST='first-party-pinned'
 $env:CANDLESCOPE_PLUGIN_PLATFORM_V2_PAPER_TRADING_ENABLED='1'
 ```
 
+签名 Marketplace 同样是独立、默认关闭的能力：
+
+```powershell
+$env:CANDLESCOPE_PLUGIN_PLATFORM_V2_MARKETPLACE_ENABLED='1'
+$env:CANDLESCOPE_PLUGIN_PLATFORM_V2_MARKETPLACE_ROOTS='C:\build\official-marketplace-roots.json'
+```
+
+默认 `official-marketplace-roots.json` 不含任何 root；启用 Marketplace 但没有 build-pinned
+enabled root 会失败。生产包应携带审核后的 roots，环境路径只用于受控打包/测试。
+
 WP-B Broker foundation 也必须同时使用 first-party pinned 平台并单独显式开启：
 
 ```powershell
@@ -80,11 +90,15 @@ AppContainer runtime roots 不能从字符串推断；调用方必须注入显�
 - `GET /api/v2/plugins/catalog` 是公开安全投影，不含 executable、安装路径、PID、stderr、
   capability handle 或 secret；
 - `/api/v2/plugins/manage/*` 提供 diagnostics、权限决策、enable/disable、rollback、uninstall、
-  command/job、settings、notification 与 Paper status/account/submit/cancel/recover/kill-switch 管理操作；
+  command/job、settings、notification、Paper/Live 管理操作，以及 Marketplace 的
+  refresh/prepare/apply/activate；
+- `GET /api/v2/plugins/marketplace/catalog` 只投影签名 publisher/release 与安装状态；
+- Marketplace 的 prepare、inactive apply 和 explicit activate 是三个独立 mutation；没有自动更新、
+  自动权限或自动激活；
 - 所有 management 请求要求 loopback client/Host、精确 Origin 和 ephemeral local session；
   mutation 还要求 CSRF 与显式 user-action ID；
-- session/CSRF 只保存在 Host 内存，不通过 HTTP 返回。Phase 7 的可信桌面 handoff 和管理 UI
-  尚未交付。
+- session/CSRF 只保存在 Host 内存，并通过一次性桌面 bootstrap 交给 Plugin Manager；公共
+  catalog/status 不返回这些令牌。
 
 ## 持久化
 
@@ -93,6 +107,10 @@ plugin-platform-v2/
 ├── platform-registry-v2.json
 ├── platform-grants-v2.json
 ├── plugin-settings-v1.json
+├── marketplace-state-v1.json
+├── marketplace-v1/
+│   ├── indexes/<sha256>.json
+│   └── artifacts/<sha256>.cspkg
 ├── installations/
 ├── history/
 ├── audit-v2/events/
@@ -111,14 +129,18 @@ KV/document/blob 写入在 SQLite transaction 内计算逻辑使用量，越 quo
 生成带 payload SHA-256 的原子 snapshot；迁移操作、版本更新或 quota 检查失败时数据库事务
 保留旧状态，显式 restore 同样是原子事务。
 
-## Phase 11 边界
+## Phase 12 边界
 
 声明式前端、Plugin Manager、sandbox UI、受控网络/文件/HTTP gateway、公开数据提供器与
-Paper-only 账户/订单与 Broker 私有的 OKX Demo 只读账户绑定已交付。Paper/普通插件没有
-secret、认证 header、raw socket 或 Live account handle；`secrets.use`、`trade.submit`、
-`trade.cancel` 继续不可授予。移除 Paper policy 后，磁盘上旧 grant 也不会成为 effective
-capability。订单 journal、reconciliation、确认、Live submit/cancel、签名 publisher 与
-Marketplace 仍属于后续工作包。
+Paper-only 账户/订单、默认关闭的 WP-A～WP-F Live Broker 技术路径和签名 Marketplace 已交付。
+Marketplace 用 root/publisher Ed25519 签名、不可变 index/artifact cache、SBOM/许可证绑定、
+transparency/revocation、permission diff 和显式 staged activation 验证发布来源。
+
+`verified-publisher` 不等于可信代码或 Live 资格：社区 backend 仍按 `untrusted` 在 Windows
+AppContainer 中运行，Grant Store 仍独立决定权限，Phase 11B Live 仍只接受独立 build-pinned
+first-party evidence。普通/社区插件没有 credential、认证 header、raw socket 或 Live account
+handle；`secrets.use`、公开 `trade.submit`、`trade.cancel` 继续不可授予。真实 Demo/真钱测试、
+production canary 和 WP-G 未执行。
 
 执行证据和回滚边界见
 [`docs/PLUGIN_PLATFORM_V2_PHASE5_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE5_zh.md)。
@@ -133,3 +155,5 @@ Phase 11B WP-A/WP-B/WP-C 的 build-pinned publisher evidence、独立 Broker、D
 [`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md)
 以及
 [`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md)。
+Phase 12 签名、更新、撤销、离线 cache、AppContainer 与 Manager 证据见
+[`docs/PLUGIN_PLATFORM_V2_PHASE12_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE12_zh.md)。

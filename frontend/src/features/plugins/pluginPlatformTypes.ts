@@ -234,7 +234,12 @@ export interface PluginCatalogPlugin {
   publisher: string;
   state: "active" | "disabled" | "staged";
   enabled: boolean;
-  trustLevel: "first-party-pinned" | "local-trusted" | "untrusted";
+  trustLevel:
+    | "first-party-pinned"
+    | "verified-publisher"
+    | "local-developer"
+    | "local-trusted"
+    | "untrusted";
   available: boolean;
   unavailableReason?: string;
   permissions: {
@@ -263,6 +268,150 @@ export interface PluginCatalog {
     registryRevision: number;
   };
   plugins: PluginCatalogPlugin[];
+}
+
+export interface PluginMarketplaceRelease {
+  pluginId: string;
+  version: string;
+  publisherId: string;
+  artifact: {
+    fileName: string;
+    url: string;
+    sha256: string;
+    size: number;
+    manifestSha256: string;
+    sbomSha256: string;
+  };
+  publishedAt: string;
+  licenseExpression: string;
+  dependencies: Array<{
+    name: string;
+    version: string;
+    licenseExpression: string;
+  }>;
+  sha256Sums: string;
+  sha256SumsSha256: string;
+  publisherKeyId: string;
+  transparency: {
+    logIndex: number;
+    leafSha256: string;
+    recordSha256: string;
+  };
+  revoked: boolean;
+}
+
+export interface PluginMarketplacePermissionDiff {
+  pluginId: string;
+  publisherIdentityChanged: boolean;
+  majorVersionChanged: boolean;
+  bundleChanged: boolean;
+  requiresConfirmation: boolean;
+  permissions: Array<{
+    permissionId: string;
+    kind: "required" | "optional" | null;
+    previousKind: "required" | "optional" | null;
+    change:
+      | "added"
+      | "removed"
+      | "identity-changed"
+      | "kind-changed"
+      | "unchanged"
+      | "narrowed"
+      | "expanded"
+      | "changed";
+    previousDecision: "pending" | "granted" | "denied" | "revoked" | null;
+    requestedScope: Record<string, JsonValue> | null;
+    previousScope: Record<string, JsonValue> | null;
+    requiresConfirmation: boolean;
+  }>;
+}
+
+export interface PluginMarketplaceCandidate {
+  pluginId: string;
+  version: string;
+  marketplaceId: string;
+  publisherId: string;
+  bundleSha256: string;
+  artifactFile: string;
+  phase:
+    | "verified-staged"
+    | "activation-staged"
+    | "observing"
+    | "active"
+    | "rolled-back"
+    | "failed";
+  preparedAt: string;
+  fromVersion: string | null;
+  permissionDiff: PluginMarketplacePermissionDiff;
+  compatibility: {
+    hostVersion: string;
+    verified: true;
+  };
+  migration: {
+    required: false;
+    supported: true;
+    policy: "same-major-only";
+  };
+  observation: {
+    status: "not-started" | "observing" | "passed" | "failed" | "rolled-back";
+    observedAt: string | null;
+    detail: string | null;
+  };
+}
+
+export interface PluginMarketplaceUpdate {
+  policy: "signed-marketplace-or-local-artifact";
+  automatic: false;
+  available: boolean;
+  ownership: "signed-marketplace" | "local-or-first-party";
+  reason: string | null;
+  candidate: PluginMarketplaceCandidate | null;
+  latest: PluginMarketplaceRelease | null;
+}
+
+export interface PluginMarketplaceCatalog {
+  schemaVersion: "candlescope.marketplace-catalog/1";
+  enabled: boolean;
+  marketplaces: Array<{
+    marketplaceId: string;
+    indexUrl: string;
+    keyId: string;
+    enabled: boolean;
+    cache:
+      | {
+        status: "valid";
+        sequence: number;
+        expiresAt: string;
+      }
+      | {
+        status: "invalid-or-empty";
+        reason: string | null;
+      };
+  }>;
+  plugins: Array<{
+    pluginId: string;
+    publisher: {
+      publisherId: string;
+      displayName: string;
+      keyId: string;
+      status: "active";
+    };
+    latest: PluginMarketplaceRelease;
+    releaseCount: number;
+    installedVersion: string | null;
+    installable: boolean;
+  }>;
+}
+
+export interface PluginMarketplaceStatus {
+  schemaVersion: "candlescope.marketplace-status/1";
+  enabled: boolean;
+  automaticUpdates: false;
+  rootCount: number;
+  validCacheCount: number;
+  cacheErrors: Record<string, string>;
+  candidates: PluginMarketplaceCandidate[];
+  updates: Array<PluginMarketplaceUpdate & { pluginId: string }>;
 }
 
 export interface PluginViewProjection {
@@ -336,7 +485,7 @@ export interface PluginManagementDetail {
     unavailableReason?: string | null;
     entrypoints: Array<{ entrypointId: string; state: string; generation: number }>;
   };
-  update: { policy: "local-artifact-only"; automatic: false; available: false };
+  update: PluginMarketplaceUpdate;
   rollback: {
     available: boolean;
     reason?: string;
@@ -516,6 +665,7 @@ export interface PluginLiveExecutionRecord {
 export interface PluginPlatformRuntime {
   view: {
     catalog: PluginCatalog | null;
+    marketplaceCatalog: PluginMarketplaceCatalog | null;
     snapshot: PluginUiSnapshot | null;
     registries: PluginRegistries;
     loading: boolean;
@@ -546,6 +696,11 @@ export interface PluginPlatformRuntime {
     readSettings(id: string): Promise<Record<string, JsonValue>>;
     writeSettings(id: string, value: Record<string, JsonValue>): Promise<Record<string, JsonValue>>;
     loadDetail(pluginId: string): Promise<PluginManagementDetail>;
+    loadMarketplaceStatus(): Promise<PluginMarketplaceStatus>;
+    refreshMarketplace(marketplaceId: string): Promise<void>;
+    prepareMarketplaceRelease(pluginId: string, version: string): Promise<void>;
+    applyMarketplaceRelease(pluginId: string): Promise<void>;
+    activateMarketplaceRelease(pluginId: string): Promise<void>;
     installBundle(file: File): Promise<void>;
     stageUserFile(id: string, field: string, file: File): Promise<PluginFileSelection>;
     prepareUserFileSave(id: string, field: string): Promise<PluginFileSelection>;

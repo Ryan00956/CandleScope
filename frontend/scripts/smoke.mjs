@@ -23,6 +23,9 @@ import {
   formatDrawingEngineDomEvidenceFailure,
   shouldRequireDrawingEngineDomEvidenceForSmoke,
 } from "./drawing-engine-dom-evidence.mjs";
+import {
+  assessTwoClickDrawingCreationEvidence,
+} from "./drawing-two-click-creation-evidence.mjs";
 
 const DEFAULT_URL = "http://127.0.0.1:15173/";
 const DEFAULT_TIMEOUT_MS = 45_000;
@@ -1600,6 +1603,50 @@ async function dispatchDrag(
   return committedFrames;
 }
 
+async function dispatchFreehandStroke(cdp, points) {
+  if (!Array.isArray(points) || points.length < 2) return 0;
+  const first = points[0];
+  const last = points.at(-1);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: first.x,
+    y: first.y,
+    button: "none",
+    buttons: 0,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: first.x,
+    y: first.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await waitForAnimationFrames(cdp, 2);
+  for (let offset = 1; offset < points.length; offset += 16) {
+    const batch = points.slice(offset, offset + 16).map((point) => (
+      cdp.send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: point.x,
+        y: point.y,
+        button: "left",
+        buttons: 1,
+      })
+    ));
+    await Promise.all(batch);
+    await waitForAnimationFrames(cdp, 1);
+  }
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: last.x,
+    y: last.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  return points.length;
+}
+
 async function readSavedDrawingCount(cdp, drawingKey) {
   const drawings = await readSavedDrawings(cdp, drawingKey);
   return drawings.length;
@@ -1665,6 +1712,79 @@ async function readDrawingDocumentRecord(cdp, drawingKey) {
   return value && typeof value === "object" ? value : null;
 }
 
+async function readDrawingRuntimeSummary(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const summary = window.__CANDLESCOPE_DRAWING_PERF__?.readRuntimeSummary?.();
+      if (!summary || !Number.isSafeInteger(summary.entityCount)) return null;
+      return {
+        entityCount: summary.entityCount,
+        pointCount: Number.isSafeInteger(summary.pointCount) ? summary.pointCount : null,
+        typeCounts: summary.typeCounts && typeof summary.typeCounts === "object"
+          ? { ...summary.typeCounts }
+          : {},
+        effectiveEngineMode: summary.effectiveEngineMode ?? null,
+        scenePublicationReady: summary.scenePublicationReady === true,
+      };
+    })()`,
+    returnByValue: true,
+  });
+  const value = result.result?.value;
+  return value && typeof value === "object" ? value : null;
+}
+
+async function readDrawingCreationSnapshot(cdp, drawingKey) {
+  const [record, savedDrawings, runtimeSummary] = await Promise.all([
+    readDrawingDocumentRecord(cdp, drawingKey),
+    readSavedDrawings(cdp, drawingKey),
+    readDrawingRuntimeSummary(cdp),
+  ]);
+  const entities = Array.isArray(record?.entities) ? record.entities : [];
+  return {
+    documentRevision: Number.isSafeInteger(record?.documentRevision)
+      ? record.documentRevision
+      : null,
+    savedDrawingCount: savedDrawings.length,
+    entityCount: entities.length,
+    runtimeSummary,
+    savedDrawings: savedDrawings.map((drawing) => ({
+      id: drawing?.id ?? null,
+      type: drawing?.type ?? null,
+      lineType: drawing?.lineType ?? null,
+      dataPoints: drawing?.type === "line" && Array.isArray(drawing.dataPoints)
+        ? drawing.dataPoints
+        : null,
+    })),
+    entities: entities.map((entity) => ({
+      id: entity?.id ?? null,
+      kind: entity?.kind ?? null,
+      geometryKind: entity?.geometry?.kind ?? null,
+      lineType: entity?.geometry?.lineType ?? null,
+      dataPointCount: Array.isArray(entity?.geometry?.dataPoints)
+        ? entity.geometry.dataPoints.length
+        : 0,
+    })),
+  };
+}
+
+async function waitForDrawingCreationSnapshotCount(
+  cdp,
+  drawingKey,
+  expectedCount,
+  timeoutMs = 5_000,
+) {
+  const started = Date.now();
+  let snapshot = await readDrawingCreationSnapshot(cdp, drawingKey);
+  const converged = () => snapshot.savedDrawingCount === expectedCount
+    && snapshot.entityCount === expectedCount
+    && snapshot.runtimeSummary?.entityCount === expectedCount;
+  while (!converged() && Date.now() - started < timeoutMs) {
+    await wait(100);
+    snapshot = await readDrawingCreationSnapshot(cdp, drawingKey);
+  }
+  return snapshot;
+}
+
 async function readDrawingPersistenceSnapshot(cdp, drawingKey, drawingId) {
   const record = await readDrawingDocumentRecord(cdp, drawingKey);
   const savedDrawings = await readSavedDrawings(cdp, drawingKey);
@@ -1709,17 +1829,6 @@ async function readLatestChartLastTime(cdp) {
   });
   const value = result.result?.value;
   return Number.isFinite(value) ? value : null;
-}
-
-async function waitForSavedDrawing(cdp, drawingKey, timeoutMs = 5_000) {
-  const started = Date.now();
-  let count = await readSavedDrawingCount(cdp, drawingKey);
-  while (Date.now() - started < timeoutMs) {
-    if (count > 0) return count;
-    await wait(250);
-    count = await readSavedDrawingCount(cdp, drawingKey);
-  }
-  return count;
 }
 
 async function waitForSavedDrawingCountAtLeast(cdp, drawingKey, minimum, timeoutMs = 5_000) {
@@ -1803,21 +1912,28 @@ async function waitForSavedDrawingGeometryChange(
 
 async function verifyDrawingWorkflow(cdp, timeoutMs) {
   const drawingKey = "binance:spot:BTCUSDT__main";
+  const penButtonSelector = '[data-drawing-tool="pen"]';
   const lineButtonSelector = '[data-drawing-tool="line-segment"]';
+  const cursorButtonSelector = '[data-drawing-tool="cursor"]';
   const chartSelector = '.chart-pane[data-pane-id="main"] .chart-pane-container, .chart-pane[data-pane-id="single-chart"]';
 
-  const lineToolClicked = await clickSelector(cdp, lineButtonSelector);
+  const penToolClicked = await clickSelector(cdp, penButtonSelector);
   await wait(250);
-  const activeResult = await cdp.send("Runtime.evaluate", {
-    expression: `Boolean(document.querySelector(${JSON.stringify(`${lineButtonSelector}.active`)}))`,
+  const penActiveResult = await cdp.send("Runtime.evaluate", {
+    expression: `Boolean(document.querySelector(${JSON.stringify(`${penButtonSelector}.active`)}))`,
     returnByValue: true,
   });
-  const lineToolActive = Boolean(activeResult.result?.value);
-  const drawingEngineReady = lineToolActive
+  const penToolActive = Boolean(penActiveResult.result?.value);
+  const drawingEngineReady = penToolActive
     ? await waitForSelector(cdp, '[data-drawing-engine="ready"]')
     : false;
 
   const rect = await getRect(cdp, chartSelector);
+  let lineToolClicked = false;
+  let lineToolActive = false;
+  let lineToolStayedActive = false;
+  let drawingPenCreation = null;
+  let drawingTwoClickCreation = null;
   let drawingPersistedCount = 0;
   let drawingDragPersisted = false;
   let drawingDragPersistence = null;
@@ -1832,17 +1948,130 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
   let futureAnchorStored = false;
   let chartLastTime = null;
 
-  if (rect && lineToolActive && drawingEngineReady) {
+  if (rect && penToolActive && drawingEngineReady) {
     chartLastTime = await readLatestChartLastTime(cdp);
-    const y = Math.round(rect.y + rect.height * 0.45);
-    await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.35), y);
-    await wait(150);
-    await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.58), Math.round(rect.y + rect.height * 0.42));
-    drawingPersistedCount = await waitForSavedDrawing(cdp, drawingKey);
+    const initialSnapshot = await readDrawingCreationSnapshot(cdp, drawingKey);
+    const penPoints = Array.from({ length: 64 }, (_, index) => ({
+      x: Math.round(rect.x + rect.width * (0.23 + index * 0.0018)),
+      y: Math.round(rect.y + rect.height * (0.62 + Math.sin(index * 0.28) * 0.035)),
+    }));
+    await dispatchFreehandStroke(cdp, penPoints);
+    const afterPenSnapshot = await waitForDrawingCreationSnapshotCount(
+      cdp,
+      drawingKey,
+      initialSnapshot.savedDrawingCount + 1,
+    );
+    const initialSavedIds = new Set(initialSnapshot.savedDrawings.map((drawing) => drawing.id));
+    const initialEntityIds = new Set(initialSnapshot.entities.map((entity) => entity.id));
+    const addedPenSaved = afterPenSnapshot.savedDrawings.filter(
+      (drawing) => !initialSavedIds.has(drawing.id),
+    );
+    const addedPenEntities = afterPenSnapshot.entities.filter(
+      (entity) => !initialEntityIds.has(entity.id),
+    );
+    const penDrawingId = addedPenSaved.length === 1
+      && addedPenEntities.length === 1
+      && addedPenSaved[0]?.id === addedPenEntities[0]?.id
+      ? addedPenSaved[0].id
+      : null;
+    const penCountsAdvanced = afterPenSnapshot.savedDrawingCount
+      === initialSnapshot.savedDrawingCount + 1
+      && afterPenSnapshot.entityCount === initialSnapshot.entityCount + 1
+      && afterPenSnapshot.runtimeSummary?.entityCount
+        === initialSnapshot.runtimeSummary?.entityCount + 1;
+    const penKindsMatched = addedPenSaved[0]?.type === "freehand"
+      && addedPenEntities[0]?.kind === "freehand"
+      && (afterPenSnapshot.runtimeSummary?.typeCounts?.freehand ?? 0)
+        === (initialSnapshot.runtimeSummary?.typeCounts?.freehand ?? 0) + 1;
+    drawingPenCreation = {
+      passed: penCountsAdvanced && penKindsMatched && penDrawingId !== null,
+      drawingId: penDrawingId,
+      countsAdvanced: penCountsAdvanced,
+      kindsMatched: penKindsMatched,
+      before: initialSnapshot,
+      after: afterPenSnapshot,
+    };
 
-    if (drawingPersistedCount > 0) {
+    lineToolClicked = await clickSelector(cdp, lineButtonSelector);
+    await wait(250);
+    lineToolActive = lineToolClicked
+      && await waitForSelector(cdp, `${lineButtonSelector}.active`);
+
+    const firstLineStart = {
+      x: Math.round(rect.x + rect.width * 0.38),
+      y: Math.round(rect.y + rect.height * 0.40),
+    };
+    const firstLineEnd = {
+      x: Math.round(rect.x + rect.width * 0.50),
+      y: Math.round(rect.y + rect.height * 0.45),
+    };
+    const secondLineStart = {
+      x: Math.round(rect.x + rect.width * 0.58),
+      y: Math.round(rect.y + rect.height * 0.53),
+    };
+    const secondLineEnd = {
+      x: Math.round(rect.x + rect.width * 0.70),
+      y: Math.round(rect.y + rect.height * 0.47),
+    };
+    let firstLineEvidence = null;
+    let secondLineEvidence = null;
+
+    if (drawingPenCreation.passed && lineToolActive) {
+      const beforeFirstLine = afterPenSnapshot;
+      await dispatchClick(cdp, firstLineStart.x, firstLineStart.y);
+      await waitForAnimationFrames(cdp, 2);
+      await wait(150);
+      const afterFirstLineFirstClick = await readDrawingCreationSnapshot(cdp, drawingKey);
+      await dispatchClick(cdp, firstLineEnd.x, firstLineEnd.y);
+      const afterFirstLineSecondClick = await waitForDrawingCreationSnapshotCount(
+        cdp,
+        drawingKey,
+        beforeFirstLine.savedDrawingCount + 1,
+      );
+      firstLineEvidence = assessTwoClickDrawingCreationEvidence({
+        beforeFirstClick: beforeFirstLine,
+        afterFirstClick: afterFirstLineFirstClick,
+        afterSecondClick: afterFirstLineSecondClick,
+      });
+
+      lineToolStayedActive = await waitForSelector(cdp, `${lineButtonSelector}.active`);
+      if (firstLineEvidence.passed && lineToolStayedActive) {
+        const beforeSecondLine = afterFirstLineSecondClick;
+        await dispatchClick(cdp, secondLineStart.x, secondLineStart.y);
+        await waitForAnimationFrames(cdp, 2);
+        await wait(150);
+        const afterSecondLineFirstClick = await readDrawingCreationSnapshot(cdp, drawingKey);
+        await dispatchClick(cdp, secondLineEnd.x, secondLineEnd.y);
+        const afterSecondLineSecondClick = await waitForDrawingCreationSnapshotCount(
+          cdp,
+          drawingKey,
+          beforeSecondLine.savedDrawingCount + 1,
+        );
+        secondLineEvidence = assessTwoClickDrawingCreationEvidence({
+          beforeFirstClick: beforeSecondLine,
+          afterFirstClick: afterSecondLineFirstClick,
+          afterSecondClick: afterSecondLineSecondClick,
+        });
+        drawingPersistedCount = afterSecondLineSecondClick.savedDrawingCount;
+      }
+    }
+
+    drawingTwoClickCreation = {
+      passed: drawingPenCreation.passed
+        && lineToolActive
+        && lineToolStayedActive
+        && firstLineEvidence?.passed === true
+        && secondLineEvidence?.passed === true,
+      penToSegment: firstLineEvidence,
+      consecutiveSegment: secondLineEvidence,
+      lineToolStayedActive,
+    };
+
+    if (drawingTwoClickCreation.passed && drawingPersistedCount > 0) {
       const beforeDragDrawings = await readSavedDrawings(cdp, drawingKey);
-      const dragDrawing = beforeDragDrawings.at(-1) || null;
+      const dragDrawing = beforeDragDrawings.find(
+        (drawing) => drawing?.id === firstLineEvidence.addedDrawingId,
+      ) || null;
       if (dragDrawing?.id && Array.isArray(dragDrawing.dataPoints)) {
         const firstPoint = dragDrawing.dataPoints[0] || null;
         const lastPoint = dragDrawing.dataPoints.at(-1) || null;
@@ -1851,9 +2080,8 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
         const beforeDragPersistence = drawingInitialGeometryValid
           ? await readDrawingPersistenceSnapshot(cdp, drawingKey, dragDrawing.id)
           : null;
-        const dragFromX = Math.round(rect.x + rect.width * ((0.35 + 0.58) / 2));
-        const dragFromY = Math.round(rect.y + rect.height * ((0.45 + 0.42) / 2));
-        const cursorButtonSelector = '[data-drawing-tool="cursor"]';
+        const dragFromX = Math.round((firstLineStart.x + firstLineEnd.x) / 2);
+        const dragFromY = Math.round((firstLineStart.y + firstLineEnd.y) / 2);
         const cursorClicked = await clickSelector(cdp, cursorButtonSelector);
         drawingCursorToolActive = cursorClicked
           && await waitForSelector(cdp, `${cursorButtonSelector}.active`);
@@ -1897,7 +2125,7 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
         }
       }
 
-      await clickSelector(cdp, '[data-drawing-tool="cursor"]');
+      await clickSelector(cdp, cursorButtonSelector);
       await wait(150);
       await dispatchDrag(
         cdp,
@@ -1933,10 +2161,15 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
   }
 
   return {
+    drawingPenToolClicked: penToolClicked,
+    drawingPenToolActive: penToolActive,
     drawingLineToolClicked: lineToolClicked,
     drawingLineToolActive: lineToolActive,
+    drawingLineToolStayedActive: lineToolStayedActive,
     drawingEngineReady,
     drawingChartRectFound: Boolean(rect),
+    drawingPenCreation,
+    drawingTwoClickCreation,
     drawingPersistedCount,
     drawingInitialGeometryValid,
     drawingCursorToolActive,
@@ -2247,11 +2480,18 @@ async function main() {
       || !report.symbolSearchOpened
       || !report.settingsOpened
       || (args.drawingCheck && (
-        !drawingWorkflow?.drawingLineToolClicked
+        !drawingWorkflow?.drawingPenToolClicked
+        || !drawingWorkflow?.drawingPenToolActive
+        || !drawingWorkflow?.drawingPenCreation?.passed
+        || !drawingWorkflow?.drawingLineToolClicked
         || !drawingWorkflow?.drawingLineToolActive
+        || !drawingWorkflow?.drawingLineToolStayedActive
+        || !drawingWorkflow?.drawingTwoClickCreation?.passed
         || !drawingWorkflow?.drawingEngineReady
         || !drawingWorkflow?.drawingChartRectFound
-        || drawingWorkflow?.drawingPersistedCount !== 1
+        || drawingWorkflow?.drawingPersistedCount
+          !== drawingWorkflow?.drawingTwoClickCreation?.consecutiveSegment
+            ?.counts?.afterSecondClick?.saved
         || !drawingWorkflow?.drawingInitialGeometryValid
         || !drawingWorkflow?.drawingCursorToolActive
         || !drawingWorkflow?.drawingLineToolReactivated

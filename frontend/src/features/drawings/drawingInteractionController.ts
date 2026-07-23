@@ -1034,6 +1034,18 @@ export function resolvePassiveCursorSelectedNonTextHit<
   return hit && supportsHitType(hit.type) ? hit : null;
 }
 
+/**
+ * A blank click owned by a creation tool may clear the previous drawing
+ * selection, but that selection transition must not consume the pointerdown.
+ * The caller continues into the active tool's creation state machine.
+ */
+export function clearSelectionForBlankDrawingCreationPointerDown(
+  selectedId: string | null | undefined,
+  deselect: () => void,
+): void {
+  if (selectedId) deselect();
+}
+
 export interface SelectedOverlayHandleHitTestOptions {
   readonly selectedId: string;
   readonly x: number;
@@ -3558,13 +3570,12 @@ export function useDrawing({
           return;
         }
 
-        // Deselect if something was selected
-        if (selectedIdRef.current) {
-          deselectAll();
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
+        // A blank position-tool click clears stale selection and continues
+        // into placement so one-point creation is never a two-click gesture.
+        clearSelectionForBlankDrawingCreationPointerDown(
+          selectedIdRef.current,
+          deselectAll,
+        );
 
         // Place new position: click sets entry price
         if (interactionSurfaceMode === "overlay") {
@@ -3809,13 +3820,13 @@ export function useDrawing({
           return;
         }
 
-        // Deselect if something was selected
-        if (selectedIdRef.current) {
-          deselectAll();
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
+        // Blank creation clicks clear stale selection but still belong to the
+        // active creation state machine below. Returning here turns every
+        // post-completion first click into a selection-only click.
+        clearSelectionForBlankDrawingCreationPointerDown(
+          selectedIdRef.current,
+          deselectAll,
+        );
 
         // One-point axis lines: click creates immediately; drag before mouseup adjusts it.
         if (isAxisLineTool) {

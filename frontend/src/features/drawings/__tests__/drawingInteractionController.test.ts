@@ -9,6 +9,7 @@ import {
   acquireDrawingExportInteractionPresentation,
   canApplyDrawingVisibilityToCurrentPrimitives,
   cancelFreehandPrimitiveOnSurface,
+  clearSelectionForBlankDrawingCreationPointerDown,
   commitSavedDrawingAfterDynamicFrame,
   createDrawingPointerRectCache,
   createDrawingExportVisibilityIntentGate,
@@ -1162,6 +1163,67 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
     dataPoints: [{ time: 10, price: 10 }, { time: 20, price: 20 }],
   };
   assert.deepEqual(dynamicSelectionHandlesForSavedDrawing(freehand, project), []);
+});
+
+test("blank creation pointerdown clears stale selection without consuming the creation click", () => {
+  for (const tool of ["line-segment", "fibonacci", "shape-rectangle", "angle-measure"]) {
+    let selectedId: string | null = "previous-drawing";
+    let deselectCount = 0;
+    let anchorPending = false;
+    let createdCount = 0;
+
+    const pointerDown = () => {
+      clearSelectionForBlankDrawingCreationPointerDown(selectedId, () => {
+        deselectCount += 1;
+        selectedId = null;
+      });
+
+      if (anchorPending) {
+        anchorPending = false;
+        createdCount += 1;
+        selectedId = `${tool}-${createdCount}`;
+      } else {
+        anchorPending = true;
+      }
+    };
+
+    pointerDown();
+    assert.equal(anchorPending, true, `${tool}: deselecting click also sets the first anchor`);
+    assert.equal(deselectCount, 1, `${tool}: stale selection is cleared once`);
+
+    pointerDown();
+    assert.equal(createdCount, 1, `${tool}: second click completes the drawing`);
+
+    pointerDown();
+    assert.equal(anchorPending, true, `${tool}: next drawing starts on its first click`);
+    assert.equal(deselectCount, 2, `${tool}: completed drawing selection is cleared once`);
+
+    pointerDown();
+    assert.equal(createdCount, 2, `${tool}: continuous drawings remain two clicks each`);
+    assert.equal(deselectCount, 2, `${tool}: no selection transition on the second click`);
+  }
+
+  for (const tool of [
+    "line-horizontal",
+    "line-vertical",
+    "line-cross",
+    "position-long",
+    "position-short",
+  ]) {
+    let selectedId: string | null = "previous-drawing";
+    let deselectCount = 0;
+    let createdCount = 0;
+
+    clearSelectionForBlankDrawingCreationPointerDown(selectedId, () => {
+      deselectCount += 1;
+      selectedId = null;
+    });
+    createdCount += 1;
+
+    assert.equal(deselectCount, 1, `${tool}: stale selection is cleared`);
+    assert.equal(selectedId, null, `${tool}: selection is cleared before creation`);
+    assert.equal(createdCount, 1, `${tool}: the same click creates the one-point drawing`);
+  }
 });
 
 test("stale position scene handles fall back to current viewport projection", () => {

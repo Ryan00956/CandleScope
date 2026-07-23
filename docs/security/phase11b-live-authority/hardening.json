@@ -17,7 +17,8 @@
     "selectedAt": "2026-07-23",
     "authorizedWorkPackages": [
       "WP-A",
-      "WP-B"
+      "WP-B",
+      "WP-C"
     ],
     "implementationRevision": "d26418e5d45e1e35dc80e8ae307c265ec9a1a3ca",
     "implementationPlanPath": "implementation/isolated-live-transaction-broker.md"
@@ -25,23 +26,28 @@
   "implementationStatus": {
     "completedWorkPackages": [
       "WP-A",
-      "WP-B"
+      "WP-B",
+      "WP-C"
     ],
     "wpACommit": "5d0128e",
-    "wpBCommit": "this-stage-commit",
+    "wpBCommit": "8aba4e9",
+    "wpCCommit": "this-stage-commit",
     "liveEnabled": false,
-    "networkMethodCount": 0,
+    "readOnlyAccountBindingEnabledByDefault": false,
+    "networkMethodCountWhenReadOnlyEnabled": 2,
     "nextAuthorizedWorkPackage": null,
     "verification": {
-      "focused": "34 passed",
-      "affectedRegression": "60 passed",
-      "backendFull": "2110 passed, 2 failed, 4 warnings",
-      "isolatedRerun": "Replay shutdown test passed; unchanged Windows AppContainer child-termination zero-wait assertion still failed",
-      "backendFullGate": "residual-blocker-recorded"
+      "focused": "49 passed",
+      "affectedRegression": "109 passed",
+      "backendFull": "2127 passed, 0 failed, 8 warnings",
+      "sdkFull": "80 passed",
+      "frontendFull": "2353 passed plus architecture, plugin boundary, typecheck, lint, and build",
+      "backendFullGate": "passed-with-recorded-warnings"
     },
     "phaseRecordPaths": [
       "../../PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md",
-      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md"
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md",
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md"
     ]
   },
   "assessment": {

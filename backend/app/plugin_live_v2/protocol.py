@@ -1,4 +1,4 @@
-"""Strict, private, zero-network protocol for the Live Broker foundation."""
+"""Strict private protocol for the staged Live Broker."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 from .errors import LiveBrokerError, broker_error
 
 
-LIVE_BROKER_PROTOCOL_VERSION = "candlescope.live-broker-foundation/1"
+LIVE_BROKER_PROTOCOL_VERSION = "candlescope.live-broker/2"
 MAX_BROKER_MESSAGE_BYTES = 128 * 1024
 MAX_BROKER_SEQUENCE = (1 << 53) - 1
 
@@ -20,6 +20,9 @@ METHOD_POLICY_ADVANCE = "policy.advance"
 METHOD_CREDENTIAL_PUT = "credential.put"
 METHOD_CREDENTIAL_DESCRIBE = "credential.describe"
 METHOD_CREDENTIAL_REVOKE = "credential.revoke"
+METHOD_ACCOUNT_DISCOVER = "account.discover"
+METHOD_ACCOUNT_DESCRIBE = "account.describe"
+METHOD_ACCOUNT_REBIND = "account.rebind"
 METHOD_SHUTDOWN = "foundation.shutdown"
 
 LIVE_BROKER_METHODS = frozenset(
@@ -30,6 +33,9 @@ LIVE_BROKER_METHODS = frozenset(
         METHOD_CREDENTIAL_PUT,
         METHOD_CREDENTIAL_DESCRIBE,
         METHOD_CREDENTIAL_REVOKE,
+        METHOD_ACCOUNT_DISCOVER,
+        METHOD_ACCOUNT_DESCRIBE,
+        METHOD_ACCOUNT_REBIND,
         METHOD_SHUTDOWN,
     }
 )
@@ -136,7 +142,7 @@ class BrokerRequest:
         if not isinstance(method, str) or method not in LIVE_BROKER_METHODS:
             raise broker_error(
                 "LIVE_BROKER_METHOD_DENIED",
-                "Broker method is not in the zero-network allowlist",
+                "Broker method is not in the private allowlist",
                 fatal=True,
             )
         params = _mapping(data["params"], "Broker request params")

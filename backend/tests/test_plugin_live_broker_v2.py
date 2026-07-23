@@ -128,7 +128,7 @@ def _request(
     }
 
 
-def test_protocol_method_allowlist_has_no_network_account_or_order_surface() -> None:
+def test_protocol_allowlist_adds_only_read_only_account_surface() -> None:
     assert LIVE_BROKER_METHODS == {
         "foundation.bootstrap",
         "foundation.health",
@@ -136,12 +136,14 @@ def test_protocol_method_allowlist_has_no_network_account_or_order_surface() -> 
         "credential.put",
         "credential.describe",
         "credential.revoke",
+        "account.discover",
+        "account.describe",
+        "account.rebind",
         "foundation.shutdown",
     }
     forbidden = {
         "network",
         "http",
-        "account",
         "query",
         "sign",
         "submit",
@@ -156,7 +158,7 @@ def test_protocol_method_allowlist_has_no_network_account_or_order_surface() -> 
     )
 
 
-def test_broker_implementation_import_graph_has_no_network_client() -> None:
+def test_broker_network_imports_are_isolated_to_okx_readonly_connector() -> None:
     package = Path(__file__).parents[1] / "app" / "plugin_live_v2"
     banned_roots = {
         "aiohttp",
@@ -178,7 +180,11 @@ def test_broker_implementation_import_graph_has_no_network_client() -> None:
             else:
                 continue
             for root in sorted(roots & banned_roots):
-                violations.append(f"{path.name}:{node.lineno}:{root}")
+                if path.name != "okx_readonly.py" or root not in {
+                    "http",
+                    "socket",
+                }:
+                    violations.append(f"{path.name}:{node.lineno}:{root}")
     assert violations == []
 
 
@@ -270,6 +276,7 @@ def test_feature_off_creates_no_process_pipe_vault_or_handle(
             "restartCount": 0,
             "lastErrorCode": None,
             "vaultBackend": None,
+            "readOnlyAccountsEnabled": False,
             "networkMethods": 0,
         }
         await controller.stop()

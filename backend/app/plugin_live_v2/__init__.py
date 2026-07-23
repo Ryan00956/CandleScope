@@ -1,6 +1,9 @@
 """Fail-closed foundations for the Phase 11B isolated Live authority."""
 
+from .accounts import OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
 from .client import (
+    AccountDescription,
+    AccountHandle,
     CredentialDescription,
     CredentialHandle,
     LiveBrokerController,
@@ -29,6 +32,8 @@ from .vault import (
 )
 
 __all__ = [
+    "AccountDescription",
+    "AccountHandle",
     "CredentialDescription",
     "CredentialHandle",
     "CredentialVault",
@@ -41,6 +46,7 @@ __all__ = [
     "LiveBrokerController",
     "LiveBrokerError",
     "PUBLISHER_EVIDENCE_SCHEMA_VERSION",
+    "OKX_DEMO_SPOT_READONLY_CONNECTOR_ID",
     "FirstPartyLiveRelease",
     "FirstPartyLiveReleaseLock",
     "LivePublisherTrustStore",

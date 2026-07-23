@@ -542,3 +542,37 @@ class LivePublisherTrustStore:
                 details={"reason": "evidence-mismatch"},
             )
         return release
+
+    def verify_binding_metadata(
+        self,
+        *,
+        plugin_id: str,
+        connector_id: str,
+        publisher_identity: str,
+        version: str,
+        bundle_sha256: str,
+        manifest_sha256: str,
+        release_record_sha256: str,
+        release_lock_sha256: str,
+    ) -> FirstPartyLiveRelease:
+        """Revalidate persisted credential metadata without reconstructing evidence."""
+
+        release = self._by_connector.get(connector_id)
+        expected = (
+            release is not None
+            and plugin_id == release.plugin_id
+            and publisher_identity == self._publisher_identity(release)
+            and version == release.version
+            and bundle_sha256 == release.bundle_sha256
+            and manifest_sha256 == release.manifest_sha256
+            and release_record_sha256 == release.record_sha256
+            and release_lock_sha256 == self.release_lock.lock_sha256
+        )
+        if not expected or release is None:
+            raise _error(
+                "LIVE_PUBLISHER_EVIDENCE_REJECTED",
+                "persisted publisher evidence is not valid for this Host build",
+                plugin_id=plugin_id,
+                details={"reason": "binding-mismatch"},
+            )
+        return release

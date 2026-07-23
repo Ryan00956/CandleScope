@@ -22,6 +22,9 @@ from app.plugin_host.process import ManagedSidecarProcess, SidecarProcessSpec
 from .errors import LiveBrokerError, broker_error
 from .protocol import (
     MAX_BROKER_MESSAGE_BYTES,
+    METHOD_ACCOUNT_DESCRIBE,
+    METHOD_ACCOUNT_DISCOVER,
+    METHOD_ACCOUNT_REBIND,
     METHOD_BOOTSTRAP,
     METHOD_CREDENTIAL_DESCRIBE,
     METHOD_CREDENTIAL_PUT,
@@ -72,6 +75,57 @@ class CredentialDescription:
     version: str
     label: str
     created_at: str
+    created_policy_epoch: int
+
+
+@dataclass(frozen=True, slots=True)
+class AccountHandle:
+    opaque_ref: str = field(repr=False)
+    plugin_id: str = ""
+    connector_id: str = ""
+    publisher_identity: str = ""
+    version: str = ""
+    venue: str = ""
+    environment: str = ""
+    product_scope: str = ""
+    permission: str = ""
+    account_mode: str = ""
+    position_mode: str = ""
+    status: str = ""
+    credential_generation: int = 0
+    asset_count: int = 0
+    created_at: str = ""
+    refreshed_at: str = ""
+    created_policy_epoch: int = 0
+
+    def __repr__(self) -> str:
+        return (
+            "AccountHandle("
+            f"connector_id={self.connector_id!r}, "
+            f"venue={self.venue!r}, "
+            f"environment={self.environment!r}, "
+            f"status={self.status!r}, "
+            f"credential_generation={self.credential_generation!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AccountDescription:
+    plugin_id: str
+    connector_id: str
+    publisher_identity: str
+    version: str
+    venue: str
+    environment: str
+    product_scope: str
+    permission: str
+    account_mode: str
+    position_mode: str
+    status: str
+    credential_generation: int
+    asset_count: int
+    created_at: str
+    refreshed_at: str
     created_policy_epoch: int
 
 
@@ -133,6 +187,87 @@ def _description(value: dict[str, Any]) -> CredentialDescription:
     )
 
 
+def _account_description(value: dict[str, Any]) -> AccountDescription:
+    expected = {
+        "pluginId",
+        "connectorId",
+        "publisherIdentity",
+        "version",
+        "venue",
+        "environment",
+        "productScope",
+        "permission",
+        "accountMode",
+        "positionMode",
+        "status",
+        "credentialGeneration",
+        "assetCount",
+        "createdAt",
+        "refreshedAt",
+        "createdPolicyEpoch",
+    }
+    _exact_result(value, expected, "account metadata")
+    strings = (
+        value["pluginId"],
+        value["connectorId"],
+        value["publisherIdentity"],
+        value["version"],
+        value["venue"],
+        value["environment"],
+        value["productScope"],
+        value["permission"],
+        value["accountMode"],
+        value["positionMode"],
+        value["status"],
+        value["createdAt"],
+        value["refreshedAt"],
+    )
+    integers = (
+        value["credentialGeneration"],
+        value["assetCount"],
+        value["createdPolicyEpoch"],
+    )
+    if (
+        not all(isinstance(item, str) and item for item in strings)
+        or not all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 0
+            for item in integers
+        )
+        or value["credentialGeneration"] < 1
+        or value["assetCount"] > 10_000
+        or value["venue"] != "okx"
+        or value["environment"] != "demo"
+        or value["productScope"] != "spot"
+        or value["status"] not in {"active", "credential-revoked"}
+        or value["permission"] != "read_only"
+        or value["accountMode"] != "spot"
+        or value["positionMode"] not in {"net_mode", "long_short_mode"}
+    ):
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "account metadata values are invalid",
+            fatal=True,
+        )
+    return AccountDescription(
+        plugin_id=value["pluginId"],
+        connector_id=value["connectorId"],
+        publisher_identity=value["publisherIdentity"],
+        version=value["version"],
+        venue=value["venue"],
+        environment=value["environment"],
+        product_scope=value["productScope"],
+        permission=value["permission"],
+        account_mode=value["accountMode"],
+        position_mode=value["positionMode"],
+        status=value["status"],
+        credential_generation=value["credentialGeneration"],
+        asset_count=value["assetCount"],
+        created_at=value["createdAt"],
+        refreshed_at=value["refreshedAt"],
+        created_policy_epoch=value["createdPolicyEpoch"],
+    )
+
+
 class LiveBrokerController:
     """Start no process when disabled; own exactly one private worker when enabled."""
 
@@ -145,6 +280,7 @@ class LiveBrokerController:
         trust_store: LivePublisherTrustStore | None = None,
         vault_backend: str = "windows-dpapi",
         allow_test_backend: bool = False,
+        read_only_accounts_enabled: bool = False,
         request_timeout_seconds: float = DEFAULT_BROKER_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         if not isinstance(enabled, bool):
@@ -153,6 +289,12 @@ class LiveBrokerController:
             raise ValueError("vault_backend is unsupported")
         if vault_backend == "fake" and not allow_test_backend:
             raise ValueError("fake vault backend requires explicit test authorization")
+        if not isinstance(read_only_accounts_enabled, bool):
+            raise TypeError("read_only_accounts_enabled must be a boolean")
+        if read_only_accounts_enabled and not enabled:
+            raise ValueError(
+                "read_only_accounts_enabled requires the Broker foundation"
+            )
         if (
             isinstance(request_timeout_seconds, bool)
             or not isinstance(request_timeout_seconds, (int, float))
@@ -170,6 +312,7 @@ class LiveBrokerController:
             raise TypeError("trust_store must be LivePublisherTrustStore")
         self.trust_store = trust_store
         self.vault_backend = vault_backend
+        self.read_only_accounts_enabled = read_only_accounts_enabled
         self.request_timeout_seconds = float(request_timeout_seconds)
         self._worker_path = Path(__file__).with_name("worker.py").resolve(
             strict=False
@@ -219,7 +362,8 @@ class LiveBrokerController:
             "restartCount": self._restart_count,
             "lastErrorCode": self._last_error_code,
             "vaultBackend": self.vault_backend if self.enabled else None,
-            "networkMethods": 0,
+            "readOnlyAccountsEnabled": self.read_only_accounts_enabled,
+            "networkMethods": 2 if self.read_only_accounts_enabled else 0,
         }
 
     def _new_process(self) -> ManagedSidecarProcess:
@@ -233,6 +377,11 @@ class LiveBrokerController:
                 str(self.root),
                 self.vault_backend,
                 str(self.release_lock_path),
+                (
+                    "accounts-on"
+                    if self.read_only_accounts_enabled
+                    else "accounts-off"
+                ),
             ),
             working_directory=self._worker_path.parents[2],
             max_message_bytes=MAX_BROKER_MESSAGE_BYTES,
@@ -292,7 +441,13 @@ class LiveBrokerController:
             )
             _exact_result(
                 result,
-                {"sessionDigest", "vaultBackend", "credentialCount"},
+                {
+                    "sessionDigest",
+                    "vaultBackend",
+                    "credentialCount",
+                    "accountCount",
+                    "readOnlyAccountsEnabled",
+                },
                 "foundation.bootstrap result",
             )
             if (
@@ -301,6 +456,11 @@ class LiveBrokerController:
                 or isinstance(result["credentialCount"], bool)
                 or not isinstance(result["credentialCount"], int)
                 or result["credentialCount"] < 0
+                or isinstance(result["accountCount"], bool)
+                or not isinstance(result["accountCount"], int)
+                or result["accountCount"] < 0
+                or result["readOnlyAccountsEnabled"]
+                is not self.read_only_accounts_enabled
             ):
                 raise broker_error(
                     "LIVE_BROKER_BOOTSTRAP_REJECTED",
@@ -427,11 +587,38 @@ class LiveBrokerController:
                     "status",
                     "vaultBackend",
                     "credentialCount",
+                    "accountCount",
                     "pendingDeleteCount",
+                    "readOnlyAccountsEnabled",
                     "networkMethods",
                 },
                 "foundation.health result",
             )
+            counts = (
+                result["credentialCount"],
+                result["accountCount"],
+                result["pendingDeleteCount"],
+                result["networkMethods"],
+            )
+            if (
+                result["status"] not in {"ok", "degraded"}
+                or result["vaultBackend"] != self.vault_backend
+                or not all(
+                    isinstance(item, int)
+                    and not isinstance(item, bool)
+                    and item >= 0
+                    for item in counts
+                )
+                or result["readOnlyAccountsEnabled"]
+                is not self.read_only_accounts_enabled
+                or result["networkMethods"]
+                != (2 if self.read_only_accounts_enabled else 0)
+            ):
+                raise broker_error(
+                    "LIVE_BROKER_RESPONSE_INVALID",
+                    "Broker health values are invalid",
+                    fatal=True,
+                )
             return result
 
     async def put_credential(
@@ -539,6 +726,111 @@ class LiveBrokerController:
                 fatal=True,
             )
 
+    def _require_read_only_accounts(self) -> None:
+        if not self.read_only_accounts_enabled:
+            raise broker_error(
+                "LIVE_ACCOUNTS_DISABLED",
+                "read-only Live accounts are disabled",
+            )
+
+    async def discover_account(
+        self,
+        credential: CredentialHandle,
+    ) -> AccountHandle:
+        self._require_read_only_accounts()
+        if not isinstance(credential, CredentialHandle):
+            raise TypeError("credential must be CredentialHandle")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_ACCOUNT_DISCOVER,
+                {"credentialHandle": credential.opaque_ref},
+            )
+        expected = {
+            "accountRef",
+            "pluginId",
+            "connectorId",
+            "publisherIdentity",
+            "version",
+            "venue",
+            "environment",
+            "productScope",
+            "permission",
+            "accountMode",
+            "positionMode",
+            "status",
+            "credentialGeneration",
+            "assetCount",
+            "createdAt",
+            "refreshedAt",
+            "createdPolicyEpoch",
+        }
+        _exact_result(result, expected, "account.discover result")
+        account_ref = result.pop("accountRef")
+        if (
+            not isinstance(account_ref, str)
+            or not account_ref.startswith("acct_")
+            or len(account_ref) != 48
+        ):
+            raise broker_error(
+                "LIVE_BROKER_RESPONSE_INVALID",
+                "Broker returned an invalid account reference",
+                fatal=True,
+            )
+        description = _account_description(result)
+        return AccountHandle(
+            opaque_ref=account_ref,
+            plugin_id=description.plugin_id,
+            connector_id=description.connector_id,
+            publisher_identity=description.publisher_identity,
+            version=description.version,
+            venue=description.venue,
+            environment=description.environment,
+            product_scope=description.product_scope,
+            permission=description.permission,
+            account_mode=description.account_mode,
+            position_mode=description.position_mode,
+            status=description.status,
+            credential_generation=description.credential_generation,
+            asset_count=description.asset_count,
+            created_at=description.created_at,
+            refreshed_at=description.refreshed_at,
+            created_policy_epoch=description.created_policy_epoch,
+        )
+
+    async def describe_account(
+        self,
+        account: AccountHandle,
+    ) -> AccountDescription:
+        self._require_read_only_accounts()
+        if not isinstance(account, AccountHandle):
+            raise TypeError("account must be AccountHandle")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_ACCOUNT_DESCRIBE,
+                {"accountRef": account.opaque_ref},
+            )
+        return _account_description(result)
+
+    async def rebind_account(
+        self,
+        account: AccountHandle,
+        credential: CredentialHandle,
+    ) -> AccountDescription:
+        self._require_read_only_accounts()
+        if not isinstance(account, AccountHandle):
+            raise TypeError("account must be AccountHandle")
+        if not isinstance(credential, CredentialHandle):
+            raise TypeError("credential must be CredentialHandle")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_ACCOUNT_REBIND,
+                {
+                    "accountRef": account.opaque_ref,
+                    "credentialHandle": credential.opaque_ref,
+                },
+            )
+        return _account_description(result)
+
     async def advance_policy(self, *, reason: str) -> int:
         if (
             not isinstance(reason, str)
@@ -561,11 +853,26 @@ class LiveBrokerController:
             {
                 "advanced",
                 "revokedCredentialCount",
+                "revokedAccountCount",
                 "pendingDeleteCount",
             },
             "policy.advance result",
         )
-        if result["advanced"] is not True or self._policy_epoch != next_epoch:
+        counts = (
+            result["revokedCredentialCount"],
+            result["revokedAccountCount"],
+            result["pendingDeleteCount"],
+        )
+        if (
+            result["advanced"] is not True
+            or self._policy_epoch != next_epoch
+            or not all(
+                isinstance(item, int)
+                and not isinstance(item, bool)
+                and item >= 0
+                for item in counts
+            )
+        ):
             raise broker_error(
                 "LIVE_BROKER_RESPONSE_INVALID",
                 "Broker did not advance policy epoch as requested",

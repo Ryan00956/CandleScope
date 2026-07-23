@@ -1,5 +1,9 @@
 # CandleScope 通用插件平台 v2 — Phase 11B WP-B 执行记录
 
+> 本文保留 WP-B 提交时点的历史边界与测试数字。用户随后已授权并完成 WP-C
+> 认证只读账户绑定；当前状态与新门禁见
+> [`PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md`](PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md)。
+
 - 日期：2026-07-23
 - 分支：`codex/plugin-platform-v1`
 - 方案：Option 3 — 独立 Live Transaction Broker

@@ -131,7 +131,9 @@ Broker state 从 schema v1 升到 v2：
 
 - v1 只含 credentials/pending deletes；
 - v2 additive 增加 account bindings；
-- 读取 v1 时先严格验证，再原子写成 accounts 为空的 v2；
+- feature false 时新状态继续写 v1，且读取 v1 不迁移；
+- 只有 feature true 时，读取 v1 才先严格验证，再原子写成 accounts 为空的 v2；
+- 已存在 v2 即使随后关闭 feature 也不被隐式降级；
 - 未知 schema、半迁移 state 或 active account 指向缺失 credential 时 fail closed；
 - state 写盘成功后才发布新的内存 binding。
 
@@ -141,8 +143,10 @@ Broker state 从 schema v1 升到 v2：
 2. 停止 Broker；
 3. 确认没有 WP-D journal/order；
 4. 备份 v2 state 与 DPAPI ciphertext；
-5. 使用受测降级工具删除空/只读 account metadata 后写回 v1，或保留 WP-C 代码但关闭
-   功能；不能让旧 WP-B 直接读取未知 v2。
+5. 使用
+   `backend/scripts/downgrade_live_broker_state_v2_to_v1.py`
+   备份并删除只读 account metadata 后写回 v1，或保留 WP-C 代码但关闭功能；不能让
+   旧 WP-B 直接读取未知 v2。
 
 ## Feature Gates
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import re
 import secrets
 import uuid
@@ -14,8 +15,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .accounts import (
+    OKX_DEMO_SPOT_READONLY_CONNECTOR_ID,
+    ReadOnlyAccountConnector,
+    ReadOnlyAccountProof,
+)
 from .errors import LiveBrokerError, broker_error
 from .protocol import (
+    METHOD_ACCOUNT_DESCRIBE,
+    METHOD_ACCOUNT_DISCOVER,
+    METHOD_ACCOUNT_REBIND,
     METHOD_BOOTSTRAP,
     METHOD_CREDENTIAL_DESCRIBE,
     METHOD_CREDENTIAL_PUT,
@@ -28,6 +37,7 @@ from .protocol import (
     success_response,
 )
 from .state import (
+    AccountBinding,
     BrokerPersistentState,
     BrokerStateStore,
     CredentialBinding,
@@ -47,7 +57,9 @@ from .vault import (
 
 
 MAX_ACTIVE_CREDENTIALS = 1024
+MAX_ACCOUNT_BINDINGS = 1024
 _CREDENTIAL_HANDLE = re.compile(r"^cred_[A-Za-z0-9_-]{43}$")
+_ACCOUNT_HANDLE = re.compile(r"^acct_[A-Za-z0-9_-]{43}$")
 
 
 def _utc_now() -> str:
@@ -90,7 +102,7 @@ def _text(value: Any, label: str, *, maximum: int) -> str:
 
 
 class LiveBrokerService:
-    """Own policy epoch and credentials without any network operation."""
+    """Own policy epoch, credentials, and optionally pinned read-only accounts."""
 
     def __init__(
         self,
@@ -98,12 +110,21 @@ class LiveBrokerService:
         *,
         vault_backend: str,
         release_lock_path: Path | str,
+        read_only_accounts_enabled: bool = False,
+        account_connector: ReadOnlyAccountConnector | None = None,
     ) -> None:
+        if not isinstance(read_only_accounts_enabled, bool):
+            raise TypeError("read_only_accounts_enabled must be a boolean")
+        if account_connector is not None and not read_only_accounts_enabled:
+            raise ValueError(
+                "account_connector requires read_only_accounts_enabled"
+            )
         self.root = Path(root).expanduser().resolve(strict=False)
         self.trust_store = LivePublisherTrustStore.from_path(release_lock_path)
         self.state_store = BrokerStateStore(
             self.root,
             vault_backend=vault_backend,
+            accounts_enabled=read_only_accounts_enabled,
         )
         self.state = self.state_store.load_or_create()
         self.vault: CredentialVault
@@ -120,6 +141,22 @@ class LiveBrokerService:
                 "Broker vault backend is unsupported",
                 fatal=True,
             )
+        if read_only_accounts_enabled and account_connector is None:
+            from .okx_readonly import OkxDemoReadOnlyConnector
+
+            account_connector = OkxDemoReadOnlyConnector()
+        if account_connector is not None and (
+            account_connector.connector_id
+            != OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+            or account_connector.network_method_count != 2
+        ):
+            raise broker_error(
+                "LIVE_ACCOUNT_CONNECTOR_REJECTED",
+                "read-only account connector does not match the pinned contract",
+                fatal=True,
+            )
+        self.read_only_accounts_enabled = read_only_accounts_enabled
+        self.account_connector = account_connector
         self._session_id: str | None = None
         self._expected_sequence = 1
         self.shutdown_requested = False
@@ -186,6 +223,8 @@ class LiveBrokerService:
                 "sessionDigest": _sha256_text(request.session_id),
                 "vaultBackend": self.vault.backend_name,
                 "credentialCount": len(self.state.credentials),
+                "accountCount": len(self.state.accounts),
+                "readOnlyAccountsEnabled": self.read_only_accounts_enabled,
             },
         )
 
@@ -238,11 +277,17 @@ class LiveBrokerService:
             return self._describe_credential(request)
         if request.method == METHOD_CREDENTIAL_REVOKE:
             return self._revoke_credential(request)
+        if request.method == METHOD_ACCOUNT_DISCOVER:
+            return self._discover_account(request)
+        if request.method == METHOD_ACCOUNT_DESCRIBE:
+            return self._describe_account(request)
+        if request.method == METHOD_ACCOUNT_REBIND:
+            return self._rebind_account(request)
         if request.method == METHOD_SHUTDOWN:
             return self._shutdown(request)
         raise broker_error(
             "LIVE_BROKER_METHOD_DENIED",
-            "Broker method is not in the zero-network allowlist",
+            "Broker method is not in the private allowlist",
             fatal=True,
         )
 
@@ -259,8 +304,14 @@ class LiveBrokerService:
                 ),
                 "vaultBackend": self.vault.backend_name,
                 "credentialCount": len(self.state.credentials),
+                "accountCount": len(self.state.accounts),
                 "pendingDeleteCount": len(self.state.pending_deletes),
-                "networkMethods": 0,
+                "readOnlyAccountsEnabled": self.read_only_accounts_enabled,
+                "networkMethods": (
+                    self.account_connector.network_method_count
+                    if self.account_connector is not None
+                    else 0
+                ),
             },
         )
 
@@ -283,12 +334,14 @@ class LiveBrokerService:
             )
         _text(request.params["reason"], "policy.advance reason", maximum=128)
         record_ids = {item.record_id for item in self.state.credentials}
+        account_count = len(self.state.accounts)
         pending = set(self.state.pending_deletes) | record_ids
         updated = BrokerPersistentState(
             broker_id=self.state.broker_id,
             vault_backend=self.state.vault_backend,
             policy_epoch=next_epoch,
             credentials=(),
+            accounts=(),
             pending_deletes=tuple(sorted(pending)),
         )
         self.state_store.write(updated)
@@ -300,6 +353,7 @@ class LiveBrokerService:
             {
                 "advanced": True,
                 "revokedCredentialCount": len(record_ids),
+                "revokedAccountCount": account_count,
                 "pendingDeleteCount": len(self.state.pending_deletes),
             },
         )
@@ -480,6 +534,16 @@ class LiveBrokerService:
         updated = replace(
             self.state,
             credentials=retained,
+            accounts=tuple(
+                replace(item, status="credential-revoked")
+                if (
+                    item.status == "active"
+                    and item.credential_handle_sha256
+                    == binding.handle_sha256
+                )
+                else item
+                for item in self.state.accounts
+            ),
             pending_deletes=pending,
         )
         self.state_store.write(updated)
@@ -492,6 +556,291 @@ class LiveBrokerService:
                 "revoked": True,
                 "pendingDeleteCount": len(self.state.pending_deletes),
             },
+        )
+
+    def _require_account_connector(self) -> ReadOnlyAccountConnector:
+        connector = self.account_connector
+        if not self.read_only_accounts_enabled or connector is None:
+            raise broker_error(
+                "LIVE_ACCOUNTS_DISABLED",
+                "read-only Live accounts are disabled",
+            )
+        return connector
+
+    def _account_credential(
+        self,
+        params: Mapping[str, Any],
+        label: str,
+    ) -> CredentialBinding:
+        handle = self._handle(params, label)
+        binding = self._find_binding(handle)
+        if (
+            binding is None
+            or binding.policy_epoch != self.policy_epoch
+            or binding.connector_id
+            != OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+        ):
+            raise broker_error(
+                "LIVE_ACCOUNT_CREDENTIAL_UNAVAILABLE",
+                "read-only account credential is unavailable",
+            )
+        try:
+            self.trust_store.verify_binding_metadata(
+                plugin_id=binding.plugin_id,
+                connector_id=binding.connector_id,
+                publisher_identity=binding.publisher_identity,
+                version=binding.version,
+                bundle_sha256=binding.bundle_sha256,
+                manifest_sha256=binding.manifest_sha256,
+                release_record_sha256=binding.release_record_sha256,
+                release_lock_sha256=binding.release_lock_sha256,
+            )
+        except LiveTrustError as exc:
+            raise broker_error(
+                "LIVE_ACCOUNT_PUBLISHER_REJECTED",
+                "read-only account credential is not valid for this Host build",
+                details={"trustCode": exc.code},
+            ) from exc
+        return binding
+
+    def _discover_proof(
+        self,
+        binding: CredentialBinding,
+    ) -> ReadOnlyAccountProof:
+        connector = self._require_account_connector()
+        with self.vault.open_secret(binding.record_id) as secret:
+            proof = connector.discover(secret)
+        if (
+            proof.connector_id != binding.connector_id
+            or proof.venue != "okx"
+            or proof.environment != "demo"
+            or proof.product_scope != "spot"
+            or proof.permission != "read_only"
+        ):
+            raise broker_error(
+                "LIVE_ACCOUNT_PROOF_REJECTED",
+                "read-only account proof does not match the credential scope",
+                fatal=True,
+            )
+        return proof
+
+    def _stable_account_ref(self, canonical_account_sha256: str) -> str:
+        token = base64.urlsafe_b64encode(
+            hmac.digest(
+                self.state.broker_id.encode("ascii"),
+                canonical_account_sha256.encode("ascii"),
+                hashlib.sha256,
+            )
+        ).decode("ascii")
+        return f"acct_{token.rstrip('=')}"
+
+    @staticmethod
+    def _account_metadata(binding: AccountBinding) -> dict[str, Any]:
+        return {
+            "pluginId": binding.plugin_id,
+            "connectorId": binding.connector_id,
+            "publisherIdentity": binding.publisher_identity,
+            "version": binding.version,
+            "venue": binding.venue,
+            "environment": binding.environment,
+            "productScope": binding.product_scope,
+            "permission": binding.permission,
+            "accountMode": binding.account_mode,
+            "positionMode": binding.position_mode,
+            "status": binding.status,
+            "credentialGeneration": binding.credential_generation,
+            "assetCount": binding.asset_count,
+            "createdAt": binding.created_at,
+            "refreshedAt": binding.refreshed_at,
+            "createdPolicyEpoch": binding.policy_epoch,
+        }
+
+    def _account_handle(
+        self,
+        params: Mapping[str, Any],
+        label: str,
+    ) -> str:
+        handle = _text(params["accountRef"], label, maximum=64)
+        if _ACCOUNT_HANDLE.fullmatch(handle) is None:
+            raise broker_error(
+                "LIVE_ACCOUNT_NOT_FOUND",
+                "read-only account reference is unavailable",
+            )
+        return handle
+
+    def _find_account(self, account_ref: str) -> AccountBinding | None:
+        digest = _sha256_text(account_ref)
+        return next(
+            (
+                binding
+                for binding in self.state.accounts
+                if binding.account_handle_sha256 == digest
+            ),
+            None,
+        )
+
+    def _discover_account(self, request: BrokerRequest) -> BrokerResponse:
+        self._require_account_connector()
+        _exact_params(
+            request.params,
+            {"credentialHandle"},
+            "account.discover params",
+        )
+        if len(self.state.accounts) >= MAX_ACCOUNT_BINDINGS:
+            raise broker_error(
+                "LIVE_ACCOUNT_LIMIT",
+                "Broker account binding limit has been reached",
+            )
+        credential = self._account_credential(
+            request.params,
+            "account.discover credentialHandle",
+        )
+        proof = self._discover_proof(credential)
+        if any(
+            item.canonical_account_sha256
+            == proof.canonical_account_sha256
+            for item in self.state.accounts
+        ):
+            raise broker_error(
+                "LIVE_ACCOUNT_ALREADY_BOUND",
+                "canonical read-only account is already bound",
+            )
+        account_ref = self._stable_account_ref(
+            proof.canonical_account_sha256
+        )
+        binding = AccountBinding(
+            account_handle_sha256=_sha256_text(account_ref),
+            canonical_account_sha256=proof.canonical_account_sha256,
+            credential_handle_sha256=credential.handle_sha256,
+            plugin_id=credential.plugin_id,
+            connector_id=credential.connector_id,
+            publisher_identity=credential.publisher_identity,
+            version=credential.version,
+            bundle_sha256=credential.bundle_sha256,
+            manifest_sha256=credential.manifest_sha256,
+            release_record_sha256=credential.release_record_sha256,
+            release_lock_sha256=credential.release_lock_sha256,
+            venue=proof.venue,
+            environment=proof.environment,
+            product_scope=proof.product_scope,
+            permission=proof.permission,
+            account_mode=proof.account_mode,
+            position_mode=proof.position_mode,
+            status="active",
+            credential_generation=1,
+            asset_count=proof.asset_count,
+            created_at=proof.observed_at,
+            refreshed_at=proof.observed_at,
+            policy_epoch=self.policy_epoch,
+        )
+        updated = replace(
+            self.state,
+            accounts=(*self.state.accounts, binding),
+        )
+        self.state_store.write(updated)
+        self.state = updated
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            {
+                "accountRef": account_ref,
+                **self._account_metadata(binding),
+            },
+        )
+
+    def _describe_account(self, request: BrokerRequest) -> BrokerResponse:
+        self._require_account_connector()
+        _exact_params(
+            request.params,
+            {"accountRef"},
+            "account.describe params",
+        )
+        account_ref = self._account_handle(
+            request.params,
+            "account.describe accountRef",
+        )
+        binding = self._find_account(account_ref)
+        if binding is None or binding.policy_epoch != self.policy_epoch:
+            raise broker_error(
+                "LIVE_ACCOUNT_NOT_FOUND",
+                "read-only account reference is unavailable",
+            )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            self._account_metadata(binding),
+        )
+
+    def _rebind_account(self, request: BrokerRequest) -> BrokerResponse:
+        self._require_account_connector()
+        _exact_params(
+            request.params,
+            {"accountRef", "credentialHandle"},
+            "account.rebind params",
+        )
+        account_ref = self._account_handle(
+            request.params,
+            "account.rebind accountRef",
+        )
+        existing = self._find_account(account_ref)
+        if existing is None or existing.policy_epoch != self.policy_epoch:
+            raise broker_error(
+                "LIVE_ACCOUNT_NOT_FOUND",
+                "read-only account reference is unavailable",
+            )
+        credential = self._account_credential(
+            request.params,
+            "account.rebind credentialHandle",
+        )
+        if (
+            credential.handle_sha256 == existing.credential_handle_sha256
+            or credential.plugin_id != existing.plugin_id
+            or credential.connector_id != existing.connector_id
+            or credential.publisher_identity != existing.publisher_identity
+        ):
+            raise broker_error(
+                "LIVE_ACCOUNT_REBIND_REJECTED",
+                "read-only account credential cannot rebind this account",
+            )
+        proof = self._discover_proof(credential)
+        if (
+            proof.canonical_account_sha256
+            != existing.canonical_account_sha256
+        ):
+            raise broker_error(
+                "LIVE_ACCOUNT_REBIND_REJECTED",
+                "read-only credential belongs to another canonical account",
+            )
+        rebound = replace(
+            existing,
+            credential_handle_sha256=credential.handle_sha256,
+            version=credential.version,
+            bundle_sha256=credential.bundle_sha256,
+            manifest_sha256=credential.manifest_sha256,
+            release_record_sha256=credential.release_record_sha256,
+            release_lock_sha256=credential.release_lock_sha256,
+            position_mode=proof.position_mode,
+            status="active",
+            credential_generation=existing.credential_generation + 1,
+            asset_count=proof.asset_count,
+            refreshed_at=proof.observed_at,
+        )
+        updated = replace(
+            self.state,
+            accounts=tuple(
+                rebound
+                if item.account_handle_sha256
+                == existing.account_handle_sha256
+                else item
+                for item in self.state.accounts
+            ),
+        )
+        self.state_store.write(updated)
+        self.state = updated
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            self._account_metadata(rebound),
         )
 
     def _shutdown(self, request: BrokerRequest) -> BrokerResponse:

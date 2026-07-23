@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import time
 import textwrap
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -92,6 +93,25 @@ class ComputeRequest(BaseModel):
     ohlcv: list[dict[str, Any]] = Field(default_factory=list, description="OHLCV bar data array")
     script: str | None = Field(None, description="Legacy Python script (optional)")
     securityMode: str | None = Field(None, description="'safe', 'research', or 'unsafe' for Pyne scripts")
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchComputeRequest:
+    """Validated batch item that deliberately aliases the shared OHLCV list."""
+
+    name: str | None
+    mode: str | None
+    params: dict[str, Any]
+    exchange: str
+    symbol: str
+    interval: str
+    market_type: str
+    ohlcv: list[dict[str, Any]]
+    script: str | None
+    securityMode: str | None
+
+
+ComputeRequestLike = ComputeRequest | _BatchComputeRequest
 
 
 class IndicatorComputeBatchContext(BaseModel):
@@ -1138,14 +1158,17 @@ async def compute_batch(req: IndicatorComputeBatchRequest):
         tuple[
             str,
             str,
-            ComputeRequest,
+            _BatchComputeRequest,
             str | None,
             str | None,
             dict[str, Any] | None,
         ]
     ] = []
     for item in req.requests:
-        compute_req = ComputeRequest(
+        # ``ComputeRequest(...)`` would make Pydantic deep-copy this 50k-bar
+        # list for every item.  The enclosing batch model and the window have
+        # already been validated above, so retain the one validated list.
+        compute_req = _BatchComputeRequest(
             name=item.name,
             mode=item.mode,
             params=item.params,
@@ -1226,7 +1249,7 @@ async def compute(req: ComputeRequest):
 
 
 def _resolve_compute_route(
-    req: ComputeRequest,
+    req: ComputeRequestLike,
 ) -> tuple[str | None, str | None, dict[str, Any] | None]:
     """Resolve legacy and explicit compute modes without doing any work."""
     mode = req.mode.strip().lower() if req.mode else None
@@ -1333,7 +1356,7 @@ def _invalid_compute_batch(message: str) -> dict[str, Any]:
 
 
 async def _compute_batch_item(
-    req: ComputeRequest,
+    req: ComputeRequestLike,
     *,
     route: str | None,
     indicator_name: str | None,
@@ -1406,7 +1429,7 @@ def _validate_compute_ohlcv_window(
 
 async def _compute_engine(
     name: str,
-    req: ComputeRequest,
+    req: ComputeRequestLike,
     *,
     preparsed_bars: list[BarData] | None = None,
     preparsed_bars_error: dict[str, Any] | None = None,
@@ -1466,7 +1489,7 @@ async def _compute_engine(
     return serialize_indicator_result(result)
 
 
-async def _compute_script(req: ComputeRequest) -> dict:
+async def _compute_script(req: ComputeRequestLike) -> dict:
     """Compute using Pyne runtime (with full legacy backward compatibility).
 
     The Pyne runtime provides a rich Pine-style namespace including
@@ -1503,7 +1526,7 @@ async def _run_indicator_http_compute(func, *args, executor_kind: str = "indicat
     )
 
 
-def _compute_builtin_once(name: str, req: ComputeRequest, bars: list[BarData]):
+def _compute_builtin_once(name: str, req: ComputeRequestLike, bars: list[BarData]):
     """Compute a builtin indicator without touching the runtime IndicatorEngine.
 
     HTTP compute is one-shot work. Using a temporary engine keeps it isolated

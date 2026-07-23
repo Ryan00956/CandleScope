@@ -140,6 +140,36 @@ def test_related_warmup_keeps_only_latest_scope_generation_during_dwell() -> Non
     assert snapshot["singleflight_joined"] == 1
 
 
+def test_related_warmup_does_not_reuse_old_generation_ttl() -> None:
+    async def run() -> tuple[_WarmupDataManager, dict[str, int]]:
+        dm = _WarmupDataManager()
+        coordinator = _Coordinator()
+        scheduler = RelatedIntervalWarmupScheduler(
+            ttl_seconds=1,
+            dwell_seconds=0.01,
+            busy_recheck_seconds=0.005,
+        )
+        _schedule(dm, coordinator, scheduler, generation=1)
+        await asyncio.sleep(0.04)
+        assert len(dm.calls) == 3
+
+        coordinator.current = 2
+        _schedule(dm, coordinator, scheduler, generation=2)
+        await asyncio.sleep(0.04)
+        snapshot = scheduler.snapshot()
+        scheduler.cancel()
+        return dm, snapshot
+
+    dm, snapshot = asyncio.run(run())
+    assert len(dm.calls) == 6
+    assert {
+        kwargs["metadata"]["demand_generation"]
+        for _, kwargs in dm.calls
+    } == {1, 2}
+    assert snapshot["submitted"] == 6
+    assert snapshot["ttl_hits"] == 0
+
+
 def test_rejected_related_warmup_does_not_poison_ttl() -> None:
     async def run() -> tuple[_WarmupDataManager, dict[str, int]]:
         dm = _WarmupDataManager()

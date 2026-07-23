@@ -1613,15 +1613,27 @@ def _schedule_related_interval_warmup(
                         )
                         return False
 
+                ttl_key = (
+                    exchange.strip().lower(),
+                    market_type.strip().lower(),
+                    symbol.strip().upper(),
+                    interval,
+                    warmup_start_ms,
+                    warmup_end_ms,
+                )
+                # A cancelled scope generation must not leave an admission
+                # TTL that suppresses its successor.  Retain dedupe within a
+                # generation; the BackfillCoordinator still dedupes physical
+                # work if successive generations overlap.
+                if normalized_scope is not None and demand_generation is not None:
+                    ttl_key = (
+                        "demand_scope",
+                        normalized_scope,
+                        int(demand_generation),
+                        *ttl_key,
+                    )
                 submissions.append(RelatedWarmupSubmission(
-                    key=(
-                        exchange.strip().lower(),
-                        market_type.strip().lower(),
-                        symbol.strip().upper(),
-                        interval,
-                        warmup_start_ms,
-                        warmup_end_ms,
-                    ),
+                    key=ttl_key,
                     submit=_submit_target,
                 ))
             except Exception as exc:

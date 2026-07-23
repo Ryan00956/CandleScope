@@ -143,6 +143,28 @@ def test_compute_batch_parses_builtin_bars_once_and_isolates_ordered_results(
 
 
 @pytest.mark.anyio
+async def test_compute_batch_reuses_one_validated_ohlcv_list_for_all_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_ohlcv: list[list[dict[str, object]]] = []
+
+    async def capture_request(req, **_kwargs) -> dict[str, object]:
+        seen_ohlcv.append(req.ohlcv)
+        return {"ok": True, "lines": []}
+
+    monkeypatch.setattr(indicators_api, "_compute_batch_item", capture_request)
+    request = indicators_api.IndicatorComputeBatchRequest(
+        **_body([_item(1), _item(2), _item(3)])
+    )
+
+    payload = await indicators_api.compute_batch(request)
+
+    assert payload["ok"] is True
+    assert len(seen_ohlcv) == 3
+    assert all(ohlcv is request.ohlcv for ohlcv in seen_ohlcv)
+
+
+@pytest.mark.anyio
 async def test_compute_batch_rejects_shared_script_ohlcv_window_before_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

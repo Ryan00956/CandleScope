@@ -405,7 +405,6 @@ export default function IndicatorPanel({
   const handleAddPreset = useCallback(async (preset: CatalogIndicator) => {
     try {
       onAddIndicator(await resolvePresetForChart(preset));
-      setTab("active");
     } catch (err) {
       console.error("Failed to add preset:", err);
     }

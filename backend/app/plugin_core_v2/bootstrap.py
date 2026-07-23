@@ -24,6 +24,9 @@ PLUGIN_PLATFORM_V2_STARTUP_ALLOWLIST_ENV = (
 PLUGIN_PLATFORM_V2_PAPER_TRADING_ENV = (
     "CANDLESCOPE_PLUGIN_PLATFORM_V2_PAPER_TRADING_ENABLED"
 )
+PLUGIN_PLATFORM_V2_LIVE_BROKER_FOUNDATION_ENV = (
+    "CANDLESCOPE_PLUGIN_PLATFORM_V2_LIVE_BROKER_FOUNDATION_ENABLED"
+)
 
 
 def _environment_bool(environ: Mapping[str, str], name: str, *, default: bool) -> bool:
@@ -90,6 +93,11 @@ def build_core_plugin_platform_from_environment(
         approved_startup_plugins=allowlist,
         paper_trading_enabled=_environment_bool(
             env, PLUGIN_PLATFORM_V2_PAPER_TRADING_ENV, default=False
+        ),
+        live_broker_foundation_enabled=_environment_bool(
+            env,
+            PLUGIN_PLATFORM_V2_LIVE_BROKER_FOUNDATION_ENV,
+            default=False,
         ),
     )
 

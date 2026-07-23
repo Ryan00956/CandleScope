@@ -235,6 +235,55 @@ class PublisherEvidence:
             "releaseLockSha256": self.release_lock_sha256,
         }
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "PublisherEvidence":
+        if not isinstance(value, Mapping):
+            raise _error(
+                "LIVE_PUBLISHER_EVIDENCE_REJECTED",
+                "publisher evidence must be an object",
+            )
+        expected = {
+            "schemaVersion",
+            "trustLevel",
+            "pluginId",
+            "connectorId",
+            "publisher",
+            "publisherIdentity",
+            "version",
+            "bundleSha256",
+            "manifestSha256",
+            "releaseRecordSha256",
+            "releaseLockSha256",
+        }
+        if set(value) != expected:
+            raise _error(
+                "LIVE_PUBLISHER_EVIDENCE_REJECTED",
+                "publisher evidence fields do not match the internal schema",
+                details={
+                    "missingFields": sorted(expected - set(value)),
+                    "unknownFields": sorted(set(value) - expected),
+                },
+            )
+        try:
+            return cls(
+                schema_version=value["schemaVersion"],
+                trust_level=value["trustLevel"],
+                plugin_id=value["pluginId"],
+                connector_id=value["connectorId"],
+                publisher=value["publisher"],
+                publisher_identity=value["publisherIdentity"],
+                version=value["version"],
+                bundle_sha256=value["bundleSha256"],
+                manifest_sha256=value["manifestSha256"],
+                release_record_sha256=value["releaseRecordSha256"],
+                release_lock_sha256=value["releaseLockSha256"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                "LIVE_PUBLISHER_EVIDENCE_REJECTED",
+                "publisher evidence values are invalid",
+            ) from exc
+
 
 def load_first_party_live_release_lock(
     path: Path | str = DEFAULT_LIVE_RELEASE_LOCK_PATH,

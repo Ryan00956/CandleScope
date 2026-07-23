@@ -21,6 +21,7 @@ from app.plugin_installer_v2.registry import (
     ActivationRegistry,
     load_activation_registry,
 )
+from app.plugin_live_v2 import LiveBrokerController
 from app.plugin_gateway_v2 import PluginIntegrationGateway
 from app.plugin_platform import PluginManager
 from app.plugin_market_v2.runtime import PluginMarketRuntime
@@ -102,6 +103,7 @@ class CorePluginPlatform:
         sandbox_factory: SandboxFactory | None = None,
         approved_startup_plugins: Iterable[str] = (),
         paper_trading_enabled: bool = False,
+        live_broker_foundation_enabled: bool = False,
         network_resolver: Any | None = None,
         network_transport: Any | None = None,
     ) -> None:
@@ -112,10 +114,20 @@ class CorePluginPlatform:
                 "PLUGIN_CORE_SANDBOX_REQUIRED",
                 "untrusted product activation requires an explicit SandboxPolicy factory",
             )
+        if not isinstance(live_broker_foundation_enabled, bool):
+            raise ValueError("live_broker_foundation_enabled must be a boolean")
         if paper_trading_enabled and trust_level != "first-party-pinned":
             raise core_error(
                 "PLUGIN_PAPER_TRUST_REQUIRED",
                 "Phase 11A paper permissions require an explicitly pinned first-party platform",
+            )
+        if (
+            live_broker_foundation_enabled
+            and trust_level != "first-party-pinned"
+        ):
+            raise core_error(
+                "PLUGIN_LIVE_BROKER_TRUST_REQUIRED",
+                "Phase 11B Broker foundation requires an explicitly pinned first-party platform",
             )
         self.root = Path(root).expanduser().resolve(strict=False)
         self.host_name = host_name
@@ -124,6 +136,11 @@ class CorePluginPlatform:
         self.sandbox_factory = sandbox_factory
         self.approved_startup_plugins = frozenset(approved_startup_plugins)
         self.paper_trading_enabled = paper_trading_enabled
+        self.live_broker_foundation_enabled = live_broker_foundation_enabled
+        self.live_broker = LiveBrokerController(
+            enabled=live_broker_foundation_enabled,
+            root=self.root / "live-broker-v1",
+        )
 
         self.audit_log = AuditLog(self.root / "audit-v2" / "events")
         self.grant_store = GrantStore(
@@ -201,31 +218,37 @@ class CorePluginPlatform:
         async with self._reconcile_lock:
             if self._started:
                 return
-            self.market.start()
-            await self._refresh_static_state()
-            for record in self._registry.plugins:
-                if record.state == "active":
-                    await self._add_live_plugin(record.plugin_id)
-            await self.manager.start()
-            self._started = True
-            for record in self._registry.plugins:
-                if record.state == "active" and record.plugin_id in self._bundles:
-                    await self._register_work(record.plugin_id)
-            for record in self._registry.plugins:
-                if (
-                    record.state == "active"
-                    and record.plugin_id in self.approved_startup_plugins
-                ):
-                    manifest = self._bundles[record.plugin_id].manifest
-                    for entrypoint in manifest.backend_entrypoints:
-                        if "onStartup" in entrypoint.activation_events:
-                            await self._ensure_active(record.plugin_id, entrypoint.id)
-            self._maintenance_task = asyncio.create_task(
-                self._maintenance_loop(), name="plugin-core-maintenance"
-            )
+            await self.live_broker.start()
+            try:
+                self.market.start()
+                await self._refresh_static_state()
+                for record in self._registry.plugins:
+                    if record.state == "active":
+                        await self._add_live_plugin(record.plugin_id)
+                await self.manager.start()
+                self._started = True
+                for record in self._registry.plugins:
+                    if record.state == "active" and record.plugin_id in self._bundles:
+                        await self._register_work(record.plugin_id)
+                for record in self._registry.plugins:
+                    if (
+                        record.state == "active"
+                        and record.plugin_id in self.approved_startup_plugins
+                    ):
+                        manifest = self._bundles[record.plugin_id].manifest
+                        for entrypoint in manifest.backend_entrypoints:
+                            if "onStartup" in entrypoint.activation_events:
+                                await self._ensure_active(record.plugin_id, entrypoint.id)
+                self._maintenance_task = asyncio.create_task(
+                    self._maintenance_loop(), name="plugin-core-maintenance"
+                )
+            except BaseException:
+                await self.live_broker.stop()
+                raise
 
     async def stop(self) -> None:
         async with self._reconcile_lock:
+            await self.live_broker.stop()
             maintenance = self._maintenance_task
             self._maintenance_task = None
             if maintenance is not None:

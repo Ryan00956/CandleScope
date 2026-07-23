@@ -738,7 +738,7 @@ frontend/src/features/plugins/
 | Phase 8：Sandbox UI | 已完成（`b0efcc4`） | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
 | Phase 9：网络/文件/HTTP gateway | 已完成（`9b4a638`） | 受控外部交互与命名空间 API | 集成型插件 |
 | Phase 10：数据提供器 | 已完成（本阶段提交） | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
-| Phase 11：账户与交易 | 11A、11B0、11B WP-A 已完成；WP-B 实施中；Live 仍关闭 | publisher evidence、secret broker、paper/live executor、risk gate | 高风险交易插件 |
+| Phase 11：账户与交易 | 11A、11B0、11B WP-A/WP-B 已完成；WP-C 未授权；Live 仍关闭 | publisher evidence、Broker foundation、paper/live executor、risk gate | 高风险交易插件 |
 | Phase 12：签名与 Marketplace | 未开始 | publisher、更新、撤销、SBOM | 可分发生态 |
 | Phase 13：v1 收敛与 GA | 未开始 | script runtime adapter、兼容周期、正式门禁 | 单一产品插件目录 |
 
@@ -1088,6 +1088,9 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 > [`security/phase11b-live-authority/hardening.md`](security/phase11b-live-authority/hardening.md)。
 > 2026-07-23 已选择 Option 3，并完成 WP-A build-pinned publisher evidence；执行证据见
 > [`PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md`](PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md)。
+> 同日已完成默认关闭的 WP-B 独立 Broker foundation；私有 IPC、policy epoch、
+> opaque credential handle、Windows DPAPI vault、故障/性能证据见
+> [`PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md`](PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md)。
 > 这不表示 Live 已开始；`secrets.use`、账户发现、`trade.submit`、`trade.cancel`
 > 与认证交易网络继续不可达。
 

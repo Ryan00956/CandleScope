@@ -232,6 +232,7 @@ docs/perf-baselines/drawing-engine-v2/*
 docs/perf-baselines/plugin-platform-v2/*
 !docs/perf-baselines/plugin-platform-v2/README.md
 !docs/perf-baselines/plugin-platform-v2/phase0-*.json
+!docs/perf-baselines/plugin-platform-v2/phase11b-wpb-*.json
 
 # CandleScope local-only agent state and construction notes
 .codex

@@ -1,6 +1,6 @@
 # Plugin Platform v2 核心产品组合根
 
-`app.plugin_core_v2` 是 Phase 5–11A 的产品组合层。它把 Phase 2 的进程 Host、Phase 3 的
+`app.plugin_core_v2` 是 Phase 5–11B WP-B 的产品组合层。它把 Phase 2 的进程 Host、Phase 3 的
 immutable installation/activation registry 和 Phase 4 的 Grant Store/capability broker
 组合成最小通用插件平台，同时保持业务数据库、Data Engine 和私有 Python 对象不可见。
 
@@ -42,6 +42,16 @@ $env:CANDLESCOPE_PLUGIN_PLATFORM_V2_TRUST='first-party-pinned'
 $env:CANDLESCOPE_PLUGIN_PLATFORM_V2_PAPER_TRADING_ENABLED='1'
 ```
 
+WP-B Broker foundation 也必须同时使用 first-party pinned 平台并单独显式开启：
+
+```powershell
+$env:CANDLESCOPE_PLUGIN_PLATFORM_V2_TRUST='first-party-pinned'
+$env:CANDLESCOPE_PLUGIN_PLATFORM_V2_LIVE_BROKER_FOUNDATION_ENABLED='1'
+```
+
+该开关只启动零网络 Broker foundation，不会开放账户、签名、query、submit 或 cancel。
+默认/推荐值仍是 `0`；production release lock 当前为空。
+
 未设置 `CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED` 时，`app.main` 只挂载返回空 catalog 的
 disabled facade，不读取 registry、不创建 supervisor、不注册 event/job，也不启动插件进程。
 显式启用后，组合根只对 registry 中 `active` 且 grant 完整的 installation 建立惰性
@@ -79,6 +89,10 @@ plugin-platform-v2/
 ├── history/
 ├── audit-v2/events/
 ├── paper-v1/paper-state-v1.json
+├── live-broker-v1/
+│   ├── broker.lock
+│   ├── broker-state-v1.json
+│   └── vault-v1/<record-id>.dpapi
 └── private/<publisher-hash>/<plugin-id>/
     ├── storage-v1.sqlite
     └── snapshots/snapshot-<uuid>.json
@@ -89,7 +103,7 @@ KV/document/blob 写入在 SQLite transaction 内计算逻辑使用量，越 quo
 生成带 payload SHA-256 的原子 snapshot；迁移操作、版本更新或 quota 检查失败时数据库事务
 保留旧状态，显式 restore 同样是原子事务。
 
-## Phase 11A 边界
+## Phase 11 边界
 
 声明式前端、Plugin Manager、sandbox UI、受控网络/文件/HTTP gateway、公开数据提供器与
 Paper-only 账户/订单已交付。Paper 插件没有 secret、真实账户连接、raw socket 或 live execution
@@ -102,3 +116,7 @@ Phase 6 市场数据、背压和参考扫描器证据见
 [`docs/PLUGIN_PLATFORM_V2_PHASE6_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE6_zh.md)。
 Phase 11A Paper 合同与证据见
 [`docs/PLUGIN_PLATFORM_V2_PHASE11A_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE11A_zh.md)。
+Phase 11B WP-A/WP-B 的 build-pinned publisher evidence、零网络 Broker、DPAPI 与回滚证据见
+[`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md)
+和
+[`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md`](../../../docs/PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md)。

@@ -17,6 +17,10 @@ WP-B：
   Broker 私有 IPC。
 - Paper runtime、Paper 协议、Paper 数据与回滚路径保持独立。
 
+实施状态：WP-A 已独立提交为 `5d0128e`；WP-B 已完成技术验收并进入本阶段独立提交。
+验收记录分别见 `docs/PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md` 与
+`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md`。WP-C 尚未授权。
+
 生产默认值保持关闭。没有匹配的内置 release lock 记录、Windows vault 不可用、协议
 握手失败、policy epoch 不一致或 Broker 退出时，结果都是 fail closed，而不是退回
 主进程明文 secret 或普通 plugin network gateway。

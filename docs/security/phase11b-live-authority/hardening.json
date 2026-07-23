@@ -22,6 +22,28 @@
     "implementationRevision": "d26418e5d45e1e35dc80e8ae307c265ec9a1a3ca",
     "implementationPlanPath": "implementation/isolated-live-transaction-broker.md"
   },
+  "implementationStatus": {
+    "completedWorkPackages": [
+      "WP-A",
+      "WP-B"
+    ],
+    "wpACommit": "5d0128e",
+    "wpBCommit": "this-stage-commit",
+    "liveEnabled": false,
+    "networkMethodCount": 0,
+    "nextAuthorizedWorkPackage": null,
+    "verification": {
+      "focused": "34 passed",
+      "affectedRegression": "60 passed",
+      "backendFull": "2110 passed, 2 failed, 4 warnings",
+      "isolatedRerun": "Replay shutdown test passed; unchanged Windows AppContainer child-termination zero-wait assertion still failed",
+      "backendFullGate": "residual-blocker-recorded"
+    },
+    "phaseRecordPaths": [
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md",
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md"
+    ]
+  },
   "assessment": {
     "outcome": "opportunities_identified",
     "summary": "Phase 11B requires one authoritative boundary for publisher proof, credential use, canonical accounts, durable execution, reconciliation, confirmation, and revocation before Live can be enabled."

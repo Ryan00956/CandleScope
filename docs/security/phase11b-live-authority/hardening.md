@@ -8,9 +8,10 @@ sandbox UI 边界，并在同一 revision 上重跑了 31 个聚焦测试。证�
 Paper-only 边界是有意且有效的，但仓库里还没有一个能同时拥有 publisher 证明、
 凭据、规范账户、实盘订单日志、对账和网络撤销的单一权威组件。
 
-完整清单与摘要见 [context.md](context.md)。这些材料支持架构决策，不表示实盘风险
-已经被修复或 Phase 11B 已经交付。当前工作树相对证据 revision 的 drift 仅是本派生
-设计、Phase 11B0 执行记录和路线图注记；运行时代码仍未改变。
+完整清单与摘要见 [context.md](context.md)。这些材料是架构决策时的冻结证据快照；
+此后用户选择 Option 3，并只授权实现 WP-A/WP-B。当前运行时代码已增加 build-pinned
+publisher evidence 与零网络 Broker foundation，但这不表示 Phase 11B 已整体交付，
+更不表示任何实盘风险已经被解除。
 
 ## Constraints
 
@@ -52,5 +53,11 @@ WP-A/WP-B。实施计划见
 [implementation/isolated-live-transaction-broker.md](implementation/isolated-live-transaction-broker.md)。
 
 当前授权只覆盖“信任证明 + secret handle + Broker foundation、零网络动作”。WP-A
-与 WP-B 必须分别提交、分别可回滚；`verified-publisher`、账户发现、认证网络、
-生产实盘 submit/cancel 和自动化 Live session 都继续保持关闭。
+已独立提交为 `5d0128e`，WP-B 已完成技术验收并在独立阶段提交中。两个工作包分别
+可回滚；`verified-publisher`、账户发现、认证网络、生产实盘 submit/cancel 和
+自动化 Live session 都继续保持关闭。下一步 WP-C 不在当前授权范围内。
+
+WP-A/WP-B 聚焦与受影响回归已通过。最终 backend 全量运行有两个既有路径失败：
+Replay shutdown 超时在隔离复跑通过；未修改的 Windows AppContainer 子进程回收
+零等待断言可稳定复现。后者保留为仓库级 residual gate，因此不把 backend 全量写成
+绿灯，也不阻塞本阶段默认关闭、零网络的独立提交。

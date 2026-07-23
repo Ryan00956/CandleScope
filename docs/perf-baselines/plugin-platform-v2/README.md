@@ -13,5 +13,15 @@
 - 采集器：`backend/scripts/plugin_platform_phase0_baseline.py`；
 - 方法、限制、威胁模型和门禁结果见 `docs/PLUGIN_PLATFORM_V2_PHASE0_zh.md`。
 
+WP-B Broker foundation 基线：
+
+- `phase11b-wpb-2026-07-23-windows-amd64.json`：10 次独立 worker 冷启动和
+  10,000 次串行 `foundation.health` 私有 pipe 往返，并记录请求前后 RSS；
+- 采集器：`backend/scripts/plugin_live_broker_benchmark.py`；
+- 该基线使用 fake vault、空 production release lock、零 credential、零网络方法，
+  只测量 WP-B 的固定本地 hop 和 idle RSS；
+- artifact SHA-256 与完整验收说明见
+  `docs/PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md`。
+
 性能数字是本机基线，不是生产 SLO。协议和 fixture 哈希是精确迁移门：如果契约需要变化，
 必须新增版本及迁移说明，不能直接改写预期值来让检查通过。

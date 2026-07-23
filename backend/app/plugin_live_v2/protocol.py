@@ -10,7 +10,7 @@ from typing import Any
 from .errors import LiveBrokerError, broker_error
 
 
-LIVE_BROKER_PROTOCOL_VERSION = "candlescope.live-broker/2"
+LIVE_BROKER_PROTOCOL_VERSION = "candlescope.live-broker/3"
 MAX_BROKER_MESSAGE_BYTES = 128 * 1024
 MAX_BROKER_SEQUENCE = (1 << 53) - 1
 
@@ -23,6 +23,9 @@ METHOD_CREDENTIAL_REVOKE = "credential.revoke"
 METHOD_ACCOUNT_DISCOVER = "account.discover"
 METHOD_ACCOUNT_DESCRIBE = "account.describe"
 METHOD_ACCOUNT_REBIND = "account.rebind"
+METHOD_SHADOW_PREPARE = "shadow.prepare"
+METHOD_SHADOW_DESCRIBE = "shadow.describe"
+METHOD_SHADOW_RECONCILE = "shadow.reconcile"
 METHOD_SHUTDOWN = "foundation.shutdown"
 
 LIVE_BROKER_METHODS = frozenset(
@@ -36,6 +39,9 @@ LIVE_BROKER_METHODS = frozenset(
         METHOD_ACCOUNT_DISCOVER,
         METHOD_ACCOUNT_DESCRIBE,
         METHOD_ACCOUNT_REBIND,
+        METHOD_SHADOW_PREPARE,
+        METHOD_SHADOW_DESCRIBE,
+        METHOD_SHADOW_RECONCILE,
         METHOD_SHUTDOWN,
     }
 )

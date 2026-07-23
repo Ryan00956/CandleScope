@@ -123,6 +123,7 @@ def run(
     vault_backend: str,
     release_lock_path: Path,
     read_only_accounts_enabled: bool,
+    reconciliation_shadow_enabled: bool,
 ) -> int:
     service: LiveBrokerService | None = None
     with BrokerDirectoryLock(root):
@@ -132,6 +133,9 @@ def run(
                 vault_backend=vault_backend,
                 release_lock_path=release_lock_path,
                 read_only_accounts_enabled=read_only_accounts_enabled,
+                reconciliation_shadow_enabled=(
+                    reconciliation_shadow_enabled
+                ),
             )
             while True:
                 line = sys.stdin.buffer.readline(MAX_BROKER_MESSAGE_BYTES + 2)
@@ -188,8 +192,13 @@ def run(
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if (
-        len(arguments) != 4
+        len(arguments) != 5
         or arguments[3] not in {"accounts-off", "accounts-on"}
+        or arguments[4] not in {"shadow-off", "shadow-on"}
+        or (
+            arguments[4] == "shadow-on"
+            and arguments[3] != "accounts-on"
+        )
     ):
         print("LIVE_BROKER_ARGUMENTS_INVALID", file=sys.stderr, flush=True)
         return 2
@@ -201,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             vault_backend=arguments[1],
             release_lock_path=release_lock,
             read_only_accounts_enabled=arguments[3] == "accounts-on",
+            reconciliation_shadow_enabled=arguments[4] == "shadow-on",
         )
     except LiveBrokerError as exc:
         print(exc.code, file=sys.stderr, flush=True)

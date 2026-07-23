@@ -128,7 +128,7 @@ def _request(
     }
 
 
-def test_protocol_allowlist_adds_only_read_only_account_surface() -> None:
+def test_protocol_allowlist_adds_only_read_only_account_and_shadow_surface() -> None:
     assert LIVE_BROKER_METHODS == {
         "foundation.bootstrap",
         "foundation.health",
@@ -139,6 +139,9 @@ def test_protocol_allowlist_adds_only_read_only_account_surface() -> None:
         "account.discover",
         "account.describe",
         "account.rebind",
+        "shadow.prepare",
+        "shadow.describe",
+        "shadow.reconcile",
         "foundation.shutdown",
     }
     forbidden = {
@@ -277,6 +280,7 @@ def test_feature_off_creates_no_process_pipe_vault_or_handle(
             "lastErrorCode": None,
             "vaultBackend": None,
             "readOnlyAccountsEnabled": False,
+            "reconciliationShadowEnabled": False,
             "networkMethods": 0,
         }
         await controller.stop()

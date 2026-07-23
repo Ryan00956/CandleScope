@@ -105,6 +105,7 @@ class CorePluginPlatform:
         paper_trading_enabled: bool = False,
         live_broker_foundation_enabled: bool = False,
         live_account_readonly_enabled: bool = False,
+        live_reconciliation_shadow_enabled: bool = False,
         network_resolver: Any | None = None,
         network_transport: Any | None = None,
     ) -> None:
@@ -119,10 +120,22 @@ class CorePluginPlatform:
             raise ValueError("live_broker_foundation_enabled must be a boolean")
         if not isinstance(live_account_readonly_enabled, bool):
             raise ValueError("live_account_readonly_enabled must be a boolean")
+        if not isinstance(live_reconciliation_shadow_enabled, bool):
+            raise ValueError(
+                "live_reconciliation_shadow_enabled must be a boolean"
+            )
         if live_account_readonly_enabled and not live_broker_foundation_enabled:
             raise core_error(
                 "PLUGIN_LIVE_ACCOUNT_FOUNDATION_REQUIRED",
                 "Phase 11B read-only accounts require the Broker foundation",
+            )
+        if (
+            live_reconciliation_shadow_enabled
+            and not live_account_readonly_enabled
+        ):
+            raise core_error(
+                "PLUGIN_LIVE_SHADOW_ACCOUNT_REQUIRED",
+                "Phase 11B reconciliation shadow requires read-only accounts",
             )
         if paper_trading_enabled and trust_level != "first-party-pinned":
             raise core_error(
@@ -133,6 +146,7 @@ class CorePluginPlatform:
             (
                 live_broker_foundation_enabled
                 or live_account_readonly_enabled
+                or live_reconciliation_shadow_enabled
             )
             and trust_level != "first-party-pinned"
         ):
@@ -149,10 +163,16 @@ class CorePluginPlatform:
         self.paper_trading_enabled = paper_trading_enabled
         self.live_broker_foundation_enabled = live_broker_foundation_enabled
         self.live_account_readonly_enabled = live_account_readonly_enabled
+        self.live_reconciliation_shadow_enabled = (
+            live_reconciliation_shadow_enabled
+        )
         self.live_broker = LiveBrokerController(
             enabled=live_broker_foundation_enabled,
             root=self.root / "live-broker-v1",
             read_only_accounts_enabled=live_account_readonly_enabled,
+            reconciliation_shadow_enabled=(
+                live_reconciliation_shadow_enabled
+            ),
         )
 
         self.audit_log = AuditLog(self.root / "audit-v2" / "events")

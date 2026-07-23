@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import re
 import secrets
 import sys
 from dataclasses import dataclass, field
@@ -31,10 +32,14 @@ from .protocol import (
     METHOD_CREDENTIAL_REVOKE,
     METHOD_HEALTH,
     METHOD_POLICY_ADVANCE,
+    METHOD_SHADOW_DESCRIBE,
+    METHOD_SHADOW_PREPARE,
+    METHOD_SHADOW_RECONCILE,
     METHOD_SHUTDOWN,
     BrokerRequest,
     BrokerResponse,
 )
+from .shadow import ShadowOrderIntent, canonical_positive_decimal
 from .trust import (
     DEFAULT_LIVE_RELEASE_LOCK_PATH,
     LivePublisherTrustStore,
@@ -126,6 +131,63 @@ class AccountDescription:
     asset_count: int
     created_at: str
     refreshed_at: str
+    created_policy_epoch: int
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowOrderHandle:
+    opaque_ref: str = field(repr=False)
+    plugin_id: str = ""
+    connector_id: str = ""
+    publisher_identity: str = ""
+    version: str = ""
+    client_order_id: str = ""
+    intent_sha256: str = ""
+    instrument_id: str = ""
+    side: str = ""
+    order_type: str = ""
+    quantity: str = ""
+    limit_price: str = ""
+    state: str = ""
+    venue_order_id: str | None = None
+    accumulated_fill_size: str = "0"
+    average_price: str | None = None
+    reconcile_attempt_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+    created_policy_epoch: int = 0
+
+    def __repr__(self) -> str:
+        return (
+            "ShadowOrderHandle("
+            f"connector_id={self.connector_id!r}, "
+            f"client_order_id={self.client_order_id!r}, "
+            f"instrument_id={self.instrument_id!r}, "
+            f"state={self.state!r}, "
+            f"reconcile_attempt_count={self.reconcile_attempt_count!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowOrderDescription:
+    plugin_id: str
+    connector_id: str
+    publisher_identity: str
+    version: str
+    client_order_id: str
+    intent_sha256: str
+    instrument_id: str
+    side: str
+    order_type: str
+    quantity: str
+    limit_price: str
+    state: str
+    venue_order_id: str | None
+    accumulated_fill_size: str
+    average_price: str | None
+    reconcile_attempt_count: int
+    created_at: str
+    updated_at: str
     created_policy_epoch: int
 
 
@@ -268,6 +330,133 @@ def _account_description(value: dict[str, Any]) -> AccountDescription:
     )
 
 
+def _shadow_description(value: dict[str, Any]) -> ShadowOrderDescription:
+    expected = {
+        "pluginId",
+        "connectorId",
+        "publisherIdentity",
+        "version",
+        "clientOrderId",
+        "intentSha256",
+        "instrumentId",
+        "side",
+        "orderType",
+        "quantity",
+        "limitPrice",
+        "state",
+        "venueOrderId",
+        "accumulatedFillSize",
+        "averagePrice",
+        "reconcileAttemptCount",
+        "createdAt",
+        "updatedAt",
+        "createdPolicyEpoch",
+    }
+    _exact_result(value, expected, "shadow order metadata")
+    strings = (
+        value["pluginId"],
+        value["connectorId"],
+        value["publisherIdentity"],
+        value["version"],
+        value["clientOrderId"],
+        value["intentSha256"],
+        value["instrumentId"],
+        value["side"],
+        value["orderType"],
+        value["quantity"],
+        value["limitPrice"],
+        value["state"],
+        value["accumulatedFillSize"],
+        value["createdAt"],
+        value["updatedAt"],
+    )
+    integers = (
+        value["reconcileAttemptCount"],
+        value["createdPolicyEpoch"],
+    )
+    if (
+        not all(isinstance(item, str) and item for item in strings)
+        or not all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 0
+            for item in integers
+        )
+        or re.fullmatch(r"[A-Za-z0-9]{32}", value["clientOrderId"]) is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", value["intentSha256"])
+        is None
+        or value["state"]
+        not in {
+            "prepared",
+            "querying",
+            "unknown",
+            "live",
+            "partially_filled",
+            "filled",
+            "canceled",
+            "mmp_canceled",
+        }
+        or (
+            value["venueOrderId"] is not None
+            and (
+                not isinstance(value["venueOrderId"], str)
+                or re.fullmatch(r"[0-9]{1,32}", value["venueOrderId"])
+                is None
+            )
+        )
+        or (
+            value["averagePrice"] is not None
+            and not isinstance(value["averagePrice"], str)
+        )
+    ):
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "shadow order metadata values are invalid",
+            fatal=True,
+        )
+    try:
+        ShadowOrderIntent(
+            idempotency_key="intent_" + "A" * 43,
+            instrument_id=value["instrumentId"],
+            side=value["side"],
+            order_type=value["orderType"],
+            quantity=value["quantity"],
+            limit_price=value["limitPrice"],
+        )
+        if value["accumulatedFillSize"] != "0":
+            canonical_positive_decimal(
+                value["accumulatedFillSize"],
+                "accumulated fill size",
+            )
+        if value["averagePrice"] is not None:
+            canonical_positive_decimal(value["averagePrice"], "average price")
+    except ValueError as exc:
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "shadow order metadata values are invalid",
+            fatal=True,
+        ) from exc
+    return ShadowOrderDescription(
+        plugin_id=value["pluginId"],
+        connector_id=value["connectorId"],
+        publisher_identity=value["publisherIdentity"],
+        version=value["version"],
+        client_order_id=value["clientOrderId"],
+        intent_sha256=value["intentSha256"],
+        instrument_id=value["instrumentId"],
+        side=value["side"],
+        order_type=value["orderType"],
+        quantity=value["quantity"],
+        limit_price=value["limitPrice"],
+        state=value["state"],
+        venue_order_id=value["venueOrderId"],
+        accumulated_fill_size=value["accumulatedFillSize"],
+        average_price=value["averagePrice"],
+        reconcile_attempt_count=value["reconcileAttemptCount"],
+        created_at=value["createdAt"],
+        updated_at=value["updatedAt"],
+        created_policy_epoch=value["createdPolicyEpoch"],
+    )
+
+
 class LiveBrokerController:
     """Start no process when disabled; own exactly one private worker when enabled."""
 
@@ -281,6 +470,7 @@ class LiveBrokerController:
         vault_backend: str = "windows-dpapi",
         allow_test_backend: bool = False,
         read_only_accounts_enabled: bool = False,
+        reconciliation_shadow_enabled: bool = False,
         request_timeout_seconds: float = DEFAULT_BROKER_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         if not isinstance(enabled, bool):
@@ -294,6 +484,15 @@ class LiveBrokerController:
         if read_only_accounts_enabled and not enabled:
             raise ValueError(
                 "read_only_accounts_enabled requires the Broker foundation"
+            )
+        if not isinstance(reconciliation_shadow_enabled, bool):
+            raise TypeError("reconciliation_shadow_enabled must be a boolean")
+        if (
+            reconciliation_shadow_enabled
+            and not read_only_accounts_enabled
+        ):
+            raise ValueError(
+                "reconciliation_shadow_enabled requires read-only accounts"
             )
         if (
             isinstance(request_timeout_seconds, bool)
@@ -313,6 +512,7 @@ class LiveBrokerController:
         self.trust_store = trust_store
         self.vault_backend = vault_backend
         self.read_only_accounts_enabled = read_only_accounts_enabled
+        self.reconciliation_shadow_enabled = reconciliation_shadow_enabled
         self.request_timeout_seconds = float(request_timeout_seconds)
         self._worker_path = Path(__file__).with_name("worker.py").resolve(
             strict=False
@@ -363,7 +563,16 @@ class LiveBrokerController:
             "lastErrorCode": self._last_error_code,
             "vaultBackend": self.vault_backend if self.enabled else None,
             "readOnlyAccountsEnabled": self.read_only_accounts_enabled,
-            "networkMethods": 2 if self.read_only_accounts_enabled else 0,
+            "reconciliationShadowEnabled": (
+                self.reconciliation_shadow_enabled
+            ),
+            "networkMethods": (
+                3
+                if self.reconciliation_shadow_enabled
+                else 2
+                if self.read_only_accounts_enabled
+                else 0
+            ),
         }
 
     def _new_process(self) -> ManagedSidecarProcess:
@@ -381,6 +590,11 @@ class LiveBrokerController:
                     "accounts-on"
                     if self.read_only_accounts_enabled
                     else "accounts-off"
+                ),
+                (
+                    "shadow-on"
+                    if self.reconciliation_shadow_enabled
+                    else "shadow-off"
                 ),
             ),
             working_directory=self._worker_path.parents[2],
@@ -447,6 +661,9 @@ class LiveBrokerController:
                     "credentialCount",
                     "accountCount",
                     "readOnlyAccountsEnabled",
+                    "reconciliationShadowEnabled",
+                    "journalCount",
+                    "unresolvedCount",
                 },
                 "foundation.bootstrap result",
             )
@@ -461,6 +678,22 @@ class LiveBrokerController:
                 or result["accountCount"] < 0
                 or result["readOnlyAccountsEnabled"]
                 is not self.read_only_accounts_enabled
+                or result["reconciliationShadowEnabled"]
+                is not self.reconciliation_shadow_enabled
+                or isinstance(result["journalCount"], bool)
+                or not isinstance(result["journalCount"], int)
+                or result["journalCount"] < 0
+                or isinstance(result["unresolvedCount"], bool)
+                or not isinstance(result["unresolvedCount"], int)
+                or result["unresolvedCount"] < 0
+                or result["unresolvedCount"] > result["journalCount"]
+                or (
+                    not self.reconciliation_shadow_enabled
+                    and (
+                        result["journalCount"] != 0
+                        or result["unresolvedCount"] != 0
+                    )
+                )
             ):
                 raise broker_error(
                     "LIVE_BROKER_BOOTSTRAP_REJECTED",
@@ -590,6 +823,9 @@ class LiveBrokerController:
                     "accountCount",
                     "pendingDeleteCount",
                     "readOnlyAccountsEnabled",
+                    "reconciliationShadowEnabled",
+                    "journalCount",
+                    "unresolvedCount",
                     "networkMethods",
                 },
                 "foundation.health result",
@@ -598,6 +834,8 @@ class LiveBrokerController:
                 result["credentialCount"],
                 result["accountCount"],
                 result["pendingDeleteCount"],
+                result["journalCount"],
+                result["unresolvedCount"],
                 result["networkMethods"],
             )
             if (
@@ -611,8 +849,24 @@ class LiveBrokerController:
                 )
                 or result["readOnlyAccountsEnabled"]
                 is not self.read_only_accounts_enabled
+                or result["reconciliationShadowEnabled"]
+                is not self.reconciliation_shadow_enabled
+                or result["unresolvedCount"] > result["journalCount"]
+                or (
+                    not self.reconciliation_shadow_enabled
+                    and (
+                        result["journalCount"] != 0
+                        or result["unresolvedCount"] != 0
+                    )
+                )
                 or result["networkMethods"]
-                != (2 if self.read_only_accounts_enabled else 0)
+                != (
+                    3
+                    if self.reconciliation_shadow_enabled
+                    else 2
+                    if self.read_only_accounts_enabled
+                    else 0
+                )
             ):
                 raise broker_error(
                     "LIVE_BROKER_RESPONSE_INVALID",
@@ -830,6 +1084,135 @@ class LiveBrokerController:
                 },
             )
         return _account_description(result)
+
+    def _require_reconciliation_shadow(self) -> None:
+        if not self.reconciliation_shadow_enabled:
+            raise broker_error(
+                "LIVE_RECONCILIATION_SHADOW_DISABLED",
+                "query-only reconciliation shadow is disabled",
+            )
+
+    @staticmethod
+    def _shadow_handle_from_description(
+        shadow_ref: str,
+        description: ShadowOrderDescription,
+    ) -> ShadowOrderHandle:
+        return ShadowOrderHandle(
+            opaque_ref=shadow_ref,
+            plugin_id=description.plugin_id,
+            connector_id=description.connector_id,
+            publisher_identity=description.publisher_identity,
+            version=description.version,
+            client_order_id=description.client_order_id,
+            intent_sha256=description.intent_sha256,
+            instrument_id=description.instrument_id,
+            side=description.side,
+            order_type=description.order_type,
+            quantity=description.quantity,
+            limit_price=description.limit_price,
+            state=description.state,
+            venue_order_id=description.venue_order_id,
+            accumulated_fill_size=description.accumulated_fill_size,
+            average_price=description.average_price,
+            reconcile_attempt_count=description.reconcile_attempt_count,
+            created_at=description.created_at,
+            updated_at=description.updated_at,
+            created_policy_epoch=description.created_policy_epoch,
+        )
+
+    async def prepare_shadow_order(
+        self,
+        account: AccountHandle,
+        intent: ShadowOrderIntent,
+    ) -> ShadowOrderHandle:
+        self._require_reconciliation_shadow()
+        if not isinstance(account, AccountHandle):
+            raise TypeError("account must be AccountHandle")
+        if not isinstance(intent, ShadowOrderIntent):
+            raise TypeError("intent must be ShadowOrderIntent")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_SHADOW_PREPARE,
+                {
+                    "accountRef": account.opaque_ref,
+                    "intent": {
+                        "idempotencyKey": intent.idempotency_key,
+                        **intent.canonical_wire(),
+                    },
+                },
+            )
+        expected = {
+            "shadowRef",
+            "pluginId",
+            "connectorId",
+            "publisherIdentity",
+            "version",
+            "clientOrderId",
+            "intentSha256",
+            "instrumentId",
+            "side",
+            "orderType",
+            "quantity",
+            "limitPrice",
+            "state",
+            "venueOrderId",
+            "accumulatedFillSize",
+            "averagePrice",
+            "reconcileAttemptCount",
+            "createdAt",
+            "updatedAt",
+            "createdPolicyEpoch",
+        }
+        _exact_result(result, expected, "shadow.prepare result")
+        shadow_ref = result.pop("shadowRef")
+        if (
+            not isinstance(shadow_ref, str)
+            or not shadow_ref.startswith("shdw_")
+            or len(shadow_ref) != 48
+        ):
+            raise broker_error(
+                "LIVE_BROKER_RESPONSE_INVALID",
+                "Broker returned an invalid shadow order reference",
+                fatal=True,
+            )
+        return self._shadow_handle_from_description(
+            shadow_ref,
+            _shadow_description(result),
+        )
+
+    async def describe_shadow_order(
+        self,
+        shadow: ShadowOrderHandle,
+    ) -> ShadowOrderDescription:
+        self._require_reconciliation_shadow()
+        if not isinstance(shadow, ShadowOrderHandle):
+            raise TypeError("shadow must be ShadowOrderHandle")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_SHADOW_DESCRIBE,
+                {"shadowRef": shadow.opaque_ref},
+            )
+        return _shadow_description(result)
+
+    async def reconcile_shadow_order(
+        self,
+        account: AccountHandle,
+        shadow: ShadowOrderHandle,
+    ) -> ShadowOrderDescription:
+        self._require_reconciliation_shadow()
+        if not isinstance(account, AccountHandle):
+            raise TypeError("account must be AccountHandle")
+        if not isinstance(shadow, ShadowOrderHandle):
+            raise TypeError("shadow must be ShadowOrderHandle")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_SHADOW_RECONCILE,
+                {
+                    "accountRef": account.opaque_ref,
+                    "shadowRef": shadow.opaque_ref,
+                },
+            )
+        return _shadow_description(result)
 
     async def advance_policy(self, *, reason: str) -> int:
         if (

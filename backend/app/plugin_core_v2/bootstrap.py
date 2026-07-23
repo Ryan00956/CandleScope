@@ -30,6 +30,9 @@ PLUGIN_PLATFORM_V2_LIVE_BROKER_FOUNDATION_ENV = (
 PLUGIN_PLATFORM_V2_LIVE_ACCOUNT_READONLY_ENV = (
     "CANDLESCOPE_PLUGIN_PLATFORM_V2_LIVE_ACCOUNT_READONLY_ENABLED"
 )
+PLUGIN_PLATFORM_V2_LIVE_RECONCILIATION_SHADOW_ENV = (
+    "CANDLESCOPE_PLUGIN_PLATFORM_V2_LIVE_RECONCILIATION_SHADOW_ENABLED"
+)
 
 
 def _environment_bool(environ: Mapping[str, str], name: str, *, default: bool) -> bool:
@@ -105,6 +108,11 @@ def build_core_plugin_platform_from_environment(
         live_account_readonly_enabled=_environment_bool(
             env,
             PLUGIN_PLATFORM_V2_LIVE_ACCOUNT_READONLY_ENV,
+            default=False,
+        ),
+        live_reconciliation_shadow_enabled=_environment_bool(
+            env,
+            PLUGIN_PLATFORM_V2_LIVE_RECONCILIATION_SHADOW_ENV,
             default=False,
         ),
     )

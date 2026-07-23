@@ -7,12 +7,15 @@ from .client import (
     CredentialDescription,
     CredentialHandle,
     LiveBrokerController,
+    ShadowOrderDescription,
+    ShadowOrderHandle,
 )
 from .errors import LiveBrokerError
 from .protocol import (
     LIVE_BROKER_METHODS,
     LIVE_BROKER_PROTOCOL_VERSION,
 )
+from .shadow import ShadowOrderIntent
 from .trust import (
     DEFAULT_LIVE_RELEASE_LOCK_PATH,
     FIRST_PARTY_PINNED_TRUST_LEVEL,
@@ -52,6 +55,9 @@ __all__ = [
     "LivePublisherTrustStore",
     "LiveTrustError",
     "PublisherEvidence",
+    "ShadowOrderDescription",
+    "ShadowOrderHandle",
+    "ShadowOrderIntent",
     "WindowsDpapiCredentialVault",
     "load_first_party_live_release_lock",
 ]

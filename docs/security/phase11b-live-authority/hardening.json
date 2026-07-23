@@ -18,7 +18,8 @@
     "authorizedWorkPackages": [
       "WP-A",
       "WP-B",
-      "WP-C"
+      "WP-C",
+      "WP-D"
     ],
     "implementationRevision": "d26418e5d45e1e35dc80e8ae307c265ec9a1a3ca",
     "implementationPlanPath": "implementation/isolated-live-transaction-broker.md"
@@ -27,19 +28,23 @@
     "completedWorkPackages": [
       "WP-A",
       "WP-B",
-      "WP-C"
+      "WP-C",
+      "WP-D"
     ],
     "wpACommit": "5d0128e",
     "wpBCommit": "8aba4e9",
-    "wpCCommit": "this-stage-commit",
+    "wpCCommit": "3e4a2b9",
+    "wpDCommit": "this-stage-commit",
     "liveEnabled": false,
     "readOnlyAccountBindingEnabledByDefault": false,
+    "reconciliationShadowEnabledByDefault": false,
     "networkMethodCountWhenReadOnlyEnabled": 2,
+    "networkMethodCountWhenShadowEnabled": 3,
     "nextAuthorizedWorkPackage": null,
     "verification": {
-      "focused": "49 passed",
-      "affectedRegression": "109 passed",
-      "backendFull": "2127 passed, 0 failed, 8 warnings",
+      "focused": "63 passed",
+      "affectedRegression": "60 passed",
+      "backendFull": "2141 passed, 0 failed, 4 warnings",
       "sdkFull": "80 passed",
       "frontendFull": "2353 passed plus architecture, plugin boundary, typecheck, lint, and build",
       "backendFullGate": "passed-with-recorded-warnings"
@@ -47,7 +52,8 @@
     "phaseRecordPaths": [
       "../../PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md",
       "../../PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md",
-      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md"
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md",
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPD_zh.md"
     ]
   },
   "assessment": {

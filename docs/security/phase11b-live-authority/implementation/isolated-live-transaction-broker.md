@@ -3,7 +3,7 @@
 ## Selected Design And Constraints
 
 2026-07-23 已选择 Option 3：独立 Live Transaction Broker。初始授权为 WP-A/WP-B，
-随后用户明确授权继续 WP-C：
+随后用户明确授权继续 WP-C 与 WP-D：
 
 - WP-A 建立 build-pinned first-party `PublisherEvidence`，精确绑定 plugin、
   connector、publisher、version、bundle SHA-256 与 manifest SHA-256。
@@ -13,17 +13,20 @@
   DNS、socket、HTTP 或交易所调用。
 - WP-C 只增加 build-pinned OKX Demo Spot read-only account binding、两个固定认证
   GET 和 discover/describe/rebind；不增加订单 query、journal、submit 或 cancel。
+- WP-D 只增加 Broker 私有 durable journal、稳定 client order ID 与固定
+  order-detail GET 的 query-only reconciliation；不增加 submit 或 cancel。
 - `trade.submit`、`trade.cancel`、`network.connect` 和 Phase 12
   `verified-publisher` 继续不可用。
 - 插件进程和插件 UI 永远看不到凭据明文、vault handle、认证 header、签名材料或
   Broker 私有 IPC。
 - Paper runtime、Paper 协议、Paper 数据与回滚路径保持独立。
 
-实施状态：WP-A 已独立提交为 `5d0128e`，WP-B 为 `8aba4e9`；WP-C 技术验收完成，
-等待本阶段独立提交。验收记录分别见
+实施状态：WP-A 已独立提交为 `5d0128e`，WP-B 为 `8aba4e9`，WP-C 为 `3e4a2b9`；
+WP-D 技术验收完成，等待本阶段独立提交。验收记录分别见
 `docs/PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md`、
 `docs/PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md` 与
-`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md`。WP-D 尚未授权。
+`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md`；WP-D 记录见
+`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPD_zh.md`。WP-E 尚未授权。
 
 生产默认值保持关闭。没有匹配的内置 release lock 记录、Windows vault 不可用、协议
 握手失败、policy epoch 不一致或 Broker 退出时，结果都是 fail closed，而不是退回
@@ -62,6 +65,10 @@ WP-C 在同一 Broker 包中增加 operation-specific OKX Demo read-only connect
 canonical account state、credential rebind、schema v2 migration 和受测 v2→v1
 downgrade 工具；公开 SDK、Grant Store 和 management API 不变。
 
+WP-D 在同一 Broker 包中增加独立 SQLite/WAL shadow journal、稳定 `clOrdId`、
+operation-specific order query connector、crash/unknown recovery，以及发现 WP-D
+journal 时拒绝 WP-C→WP-B 降级的保护；公开 SDK、Grant Store 和 management API 不变。
+
 现有 Grant Store、Capability Broker、integration network gateway 与 Paper Runtime
 不增加 Live permission，也不获得 credential use 权限。
 
@@ -90,13 +97,21 @@ downgrade 工具；公开 SDK、Grant Store 和 management API 不变。
    - 实现 discover/describe/rebind、credential revoke 和 policy advance 语义。
    - feature 默认关闭；v1→v2 只在显式启用时迁移，并提供受测 v2→v1 降级工具。
    - 跑权限、DNS/TLS、secret/UID canary、DPAPI restart、全量回归，独立提交。
+4. **WP-D — Durable query-only reconciliation shadow**
+   - 以 SQLite/WAL、`synchronous=FULL`、精确 schema 与 event hash chain 保存 shadow。
+   - 由 Broker 生成 32 位稳定 `clOrdId`，同一 journal 生命周期内不删除、不复用。
+   - 协议只增加 prepare/describe/reconcile；唯一网络增量是固定 order-detail GET。
+   - query 前 durable 标记 `querying`，失败或 crash/restart 恢复成显式 `unknown`。
+   - feature 默认关闭；关闭时不创建/打开 journal，WP-C network count 仍为 2。
+   - 跑 idempotency、mismatch、crash windows、tamper、rollback、DPAPI 与全量回归，
+     独立提交。
 
-WP-D–WP-G 不在当前授权内，不创建 journal、订单 query、确认或资金动作。
+WP-E–WP-G 不在当前授权内，不创建确认、submit/cancel 或资金动作。
 
 ## Compatibility And Migration
 
-WP-A/WP-B/WP-C 都是 additive internal contracts。现有 `.cspkg` schema、公开 SDK、插件
-RPC、activation registry 和 Paper 数据不迁移。旧安装继续按 digest-only 语义工作，
+WP-A/WP-B/WP-C/WP-D 都是 additive internal contracts。现有 `.cspkg` schema、公开
+SDK、插件 RPC、activation registry 和 Paper 数据不迁移。旧安装继续按 digest-only 语义工作，
 但不能因此获得 Live 资格。
 
 Live release lock 与普通 activation registry 分开；只有 Host build 内置记录可参与
@@ -117,7 +132,8 @@ Credential records 只属于 Broker 私有根目录。格式升级必须先验�
 - 只有通过 WP-A 的 exact evidence 才能调用 credential put；`local-trusted`、
   `untrusted`、manifest display publisher 和普通 digest receipt 都不足以授权。
 - Broker method allowlist 以常量和架构测试双重锁定；只有 WP-C 专用模块可导入
-  `http`/`socket`，其他网络 client 或任何 order/trade 方法都会使测试失败。
+  `http`/`socket`；WP-D 复用同一专用模块且只增加一个固定 GET，其他网络 client 或
+  任何 order mutation 方法都会使测试失败。
 - stdout 仅承载严格有界协议；stderr 有界且不包含 request params。
 - policy epoch 单调持久化；advance 后旧 handle/request 不能继续使用。
 - Broker crash 不触发 Host 内 fallback，不改变 Paper 状态。
@@ -157,9 +173,22 @@ WP-C：
 - feature off 不构造 connector、不迁移 state、不做 DNS/network。
 - v1→v2 migration、显式 v2→v1 downgrade 和 Windows DPAPI restart 通过。
 
+WP-D：
+
+- same idempotency/same intent 稳定，same key/different intent 冲突。
+- query 前 durable commit；transport、not-found、identity/state/fill mismatch 保持
+  `unknown`，终态拒绝继续 query。
+- query 前 crash 与 response 后 persist 前 crash 均在 reopen 时恢复为 `unknown`。
+- exact schema、foreign key、event hash/transition、broker identity 和 limits
+  fail closed；tamper 测试通过。
+- feature off 不创建/打开 journal，WP-C network count 保持 2；打开时明确报告 3。
+- raw secret/account/idempotency canary 不进入 journal；DPAPI/journal restart 通过。
+- WP-C→WP-B downgrade 发现 SQLite/WAL/SHM 任一文件时拒绝。
+
 回归门包括相关 backend tests、完整 `backend/tests`、frontend typecheck/test/build、
 SDK tests、`git diff --check`。WP-B 不需要浏览器或 testnet 来证明零网络 foundation，
-但必须保留 Phase 11A 浏览器 smoke 和 Paper 回归。
+WP-D 同样不以 mock 结果声称真实 OKX Demo 兼容；两者都必须保留 Phase 11A 浏览器
+smoke 和 Paper 回归。
 
 ## Performance And Resource Benchmarks
 
@@ -190,21 +219,25 @@ WP-B 在本机记录而不是预先声称以下预算已满足：
 6. 回滚 WP-C：先关闭 account flag、停止 Broker、备份 state/vault，再用
    `downgrade_live_broker_state_v2_to_v1.py` 显式删除 account metadata 并写 v1；
    或保留 WP-C 代码但保持 flag=false。
+7. 回滚 WP-D：先关闭 shadow flag、停止 Broker、checkpoint 并完整归档
+   SQLite/WAL/SHM，保留 unresolved identity，再回退 WP-D 独立提交。
 
-WP-C 没有订单状态，因此回滚不需要 venue order cleanup；没有真实 Demo key smoke。
+WP-C→WP-B 降级工具发现 WP-D journal 时拒绝。WP-D 没有发送订单，因此不做 venue
+order cleanup；本阶段也没有真实 Demo key smoke。
 
 ## Acceptance Criteria
 
 - Option 3 选择、证据 revision、drift 与授权范围可追溯。
-- WP-A、WP-B 与 WP-C 是独立、可单独回退的提交。
+- WP-A、WP-B、WP-C 与 WP-D 是独立、可单独回退的提交。
 - 只有 exact build-pinned first-party release record 能产生 `PublisherEvidence`。
 - local/unsigned/mismatched publisher 在任何 credential handle 创建前被拒绝。
 - Broker 是独立进程且只有私有继承 IPC；协议版本和 policy epoch 强制执行。
 - credential API 只返回 opaque reference/metadata，secret canary 不越过 vault 边界。
-- WP-B 单独启用时零 network；WP-C 只允许两个固定认证 GET 和三个 account 方法。
+- WP-B 单独启用时零 network；WP-C 只允许两个固定认证 GET；WP-D 只增加一个固定
+  order-detail GET 和三个 shadow 方法。
 - stale epoch/replay 失败，Broker crash 不影响 Paper。
 - feature off 为零进程、零 pipe、零 vault 创建、零 handle。
-- `trade.submit`、`trade.cancel`、order query 和 verified publisher 仍不可用。
+- `trade.submit`、`trade.cancel`、order mutation 和 verified publisher 仍不可用。
 - 聚焦、全量、frontend、SDK 和 diff hygiene 门通过，或明确记录真实 blocker。
 
 ## Open Decisions
@@ -213,6 +246,7 @@ WP-C 没有订单状态，因此回滚不需要 venue order cleanup；没有真�
 - WP-C 继续使用 current-user DPAPI。是否迁移 Windows Credential Manager 是未来独立
   hardening，不阻塞默认关闭的只读绑定。
 - Broker 继续使用 inherited pipe；是否迁移 ACL named pipe 是未来独立 hardening。
-- WP-D 前选择 journal 存储和 crash-consistency 模型。
+- WP-D 已选择 SQLite/WAL、`synchronous=FULL` 与 query-before-result 两段 durable
+  transaction；若未来更换存储必须新增 schema/migration，不得静默解释现有 journal。
 - WP-E 前冻结原生 intent-bound confirmation 与 audit export 合同。
 - WP-F/WP-G 必须分别获得新的明确授权；测试通过不会自动打开 testnet 或 production。

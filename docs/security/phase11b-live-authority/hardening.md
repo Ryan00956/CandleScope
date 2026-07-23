@@ -9,9 +9,10 @@ Paper-only 边界是有意且有效的，但仓库里还没有一个能同时拥
 凭据、规范账户、实盘订单日志、对账和网络撤销的单一权威组件。
 
 完整清单与摘要见 [context.md](context.md)。这些材料是架构决策时的冻结证据快照；
-此后用户选择 Option 3，先授权 WP-A/WP-B，再明确授权 WP-C。当前运行时代码已增加
-build-pinned publisher evidence、独立 Broker foundation 与默认关闭的 OKX Demo Spot
-认证只读账户绑定，但这不表示 Phase 11B 已整体交付，更不表示任何实盘风险已经被解除。
+此后用户选择 Option 3，并依次授权 WP-A/WP-B/WP-C/WP-D。当前运行时代码已增加
+build-pinned publisher evidence、独立 Broker foundation、默认关闭的 OKX Demo Spot
+认证只读账户绑定，以及 durable query-only reconciliation shadow；这不表示 Phase 11B
+已整体交付，更不表示任何实盘风险已经被解除。
 
 ## Constraints
 
@@ -49,16 +50,17 @@ Option 2 适合严格信任整个 Host 后端、只做一个第一方 venue 且�
 ## Next Decisions
 
 2026-07-23，用户已选择 **Option 3：独立 Live Transaction Broker**，并已授权完成
-WP-A/WP-B/WP-C。实施计划见
+WP-A/WP-B/WP-C/WP-D。实施计划见
 [implementation/isolated-live-transaction-broker.md](implementation/isolated-live-transaction-broker.md)。
 
-当前授权覆盖“信任证明 + secret handle + Broker foundation + 认证只读账户绑定”。
-WP-A/WP-B 已独立提交为 `5d0128e`/`8aba4e9`，WP-C 技术验收完成并进入独立提交。
-`verified-publisher`、订单 query/journal/reconciliation、生产实盘 submit/cancel 和
-自动化 Live session 都继续关闭；下一步 WP-D 不在当前授权范围内。
+当前授权覆盖“信任证明 + secret handle + Broker foundation + 认证只读账户绑定 +
+durable query-only reconciliation shadow”。WP-A/WP-B/WP-C 已独立提交为
+`5d0128e`/`8aba4e9`/`3e4a2b9`，WP-D 技术验收完成并进入独立提交。
+`verified-publisher`、Host-native confirmation、生产实盘 submit/cancel 和自动化
+Live session 都继续关闭；下一步 WP-E 不在当前授权范围内。
 
-WP-C 最终门为：聚焦 49 passed、受影响回归 109 passed、backend 全量 2127 passed、
-SDK 80 passed、frontend 2353 passed 加 typecheck/lint/build。此前 Windows
-AppContainer 子进程回收零等待 residual 已由 `2fedb4f` 改为有界回收门并在全量通过。
-backend 仍有 4 条既有 FastAPI deprecation 和 4 条 Windows subprocess 本地编码
-warning，未被包装成零告警。
+WP-D 最终门为：聚焦 63 passed、受影响回归 60 passed、backend 全量 2141 passed、
+SDK 80 passed、frontend 2353 passed 加 architecture/plugin boundary/typecheck/lint/
+build。backend 仍有 4 条既有 FastAPI deprecation，frontend build 仍有大 chunk 提示；
+都未被包装成零告警。WP-D 影响范围 Ruff 通过；仓库级 Ruff 的 34 个既有、
+非 WP-D 问题仍按原样保留。

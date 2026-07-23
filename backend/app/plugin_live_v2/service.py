@@ -31,10 +31,18 @@ from .protocol import (
     METHOD_CREDENTIAL_REVOKE,
     METHOD_HEALTH,
     METHOD_POLICY_ADVANCE,
+    METHOD_SHADOW_DESCRIBE,
+    METHOD_SHADOW_PREPARE,
+    METHOD_SHADOW_RECONCILE,
     METHOD_SHUTDOWN,
     BrokerRequest,
     BrokerResponse,
     success_response,
+)
+from .journal import ShadowOrderJournal
+from .shadow import (
+    ReadOnlyOrderQueryConnector,
+    ShadowOrderIntent,
 )
 from .state import (
     AccountBinding,
@@ -112,12 +120,27 @@ class LiveBrokerService:
         release_lock_path: Path | str,
         read_only_accounts_enabled: bool = False,
         account_connector: ReadOnlyAccountConnector | None = None,
+        reconciliation_shadow_enabled: bool = False,
+        reconciliation_connector: ReadOnlyOrderQueryConnector | None = None,
     ) -> None:
         if not isinstance(read_only_accounts_enabled, bool):
             raise TypeError("read_only_accounts_enabled must be a boolean")
+        if not isinstance(reconciliation_shadow_enabled, bool):
+            raise TypeError("reconciliation_shadow_enabled must be a boolean")
+        if reconciliation_shadow_enabled and not read_only_accounts_enabled:
+            raise ValueError(
+                "reconciliation_shadow_enabled requires read-only accounts"
+            )
         if account_connector is not None and not read_only_accounts_enabled:
             raise ValueError(
                 "account_connector requires read_only_accounts_enabled"
+            )
+        if (
+            reconciliation_connector is not None
+            and not reconciliation_shadow_enabled
+        ):
+            raise ValueError(
+                "reconciliation_connector requires reconciliation shadow"
             )
         self.root = Path(root).expanduser().resolve(strict=False)
         self.trust_store = LivePublisherTrustStore.from_path(release_lock_path)
@@ -155,8 +178,29 @@ class LiveBrokerService:
                 "read-only account connector does not match the pinned contract",
                 fatal=True,
             )
+        if reconciliation_shadow_enabled and reconciliation_connector is None:
+            from .okx_readonly import OkxDemoOrderQueryConnector
+
+            reconciliation_connector = OkxDemoOrderQueryConnector()
+        if reconciliation_connector is not None and (
+            reconciliation_connector.connector_id
+            != OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+            or reconciliation_connector.network_method_count != 1
+        ):
+            raise broker_error(
+                "LIVE_SHADOW_CONNECTOR_REJECTED",
+                "reconciliation connector does not match the pinned contract",
+                fatal=True,
+            )
         self.read_only_accounts_enabled = read_only_accounts_enabled
         self.account_connector = account_connector
+        self.reconciliation_shadow_enabled = reconciliation_shadow_enabled
+        self.reconciliation_connector = reconciliation_connector
+        self.shadow_journal = (
+            ShadowOrderJournal(self.root, broker_id=self.state.broker_id)
+            if reconciliation_shadow_enabled
+            else None
+        )
         self._session_id: str | None = None
         self._expected_sequence = 1
         self.shutdown_requested = False
@@ -169,6 +213,25 @@ class LiveBrokerService:
     @property
     def expected_sequence(self) -> int:
         return self._expected_sequence
+
+    def _network_method_count(self) -> int:
+        return (
+            (
+                self.account_connector.network_method_count
+                if self.account_connector is not None
+                else 0
+            )
+            + (
+                self.reconciliation_connector.network_method_count
+                if self.reconciliation_connector is not None
+                else 0
+            )
+        )
+
+    def _shadow_summary(self) -> dict[str, int]:
+        if self.shadow_journal is None:
+            return {"journalCount": 0, "unresolvedCount": 0}
+        return self.shadow_journal.summary()
 
     def _reconcile_vault(self) -> None:
         available = self.vault.list_record_ids()
@@ -216,6 +279,7 @@ class LiveBrokerService:
         _exact_params(request.params, set(), "foundation.bootstrap params")
         self._session_id = request.session_id
         self._expected_sequence = 2
+        shadow = self._shadow_summary()
         return success_response(
             request.sequence,
             self.policy_epoch,
@@ -225,6 +289,10 @@ class LiveBrokerService:
                 "credentialCount": len(self.state.credentials),
                 "accountCount": len(self.state.accounts),
                 "readOnlyAccountsEnabled": self.read_only_accounts_enabled,
+                "reconciliationShadowEnabled": (
+                    self.reconciliation_shadow_enabled
+                ),
+                **shadow,
             },
         )
 
@@ -283,6 +351,12 @@ class LiveBrokerService:
             return self._describe_account(request)
         if request.method == METHOD_ACCOUNT_REBIND:
             return self._rebind_account(request)
+        if request.method == METHOD_SHADOW_PREPARE:
+            return self._prepare_shadow(request)
+        if request.method == METHOD_SHADOW_DESCRIBE:
+            return self._describe_shadow(request)
+        if request.method == METHOD_SHADOW_RECONCILE:
+            return self._reconcile_shadow(request)
         if request.method == METHOD_SHUTDOWN:
             return self._shutdown(request)
         raise broker_error(
@@ -293,6 +367,7 @@ class LiveBrokerService:
 
     def _health(self, request: BrokerRequest) -> BrokerResponse:
         _exact_params(request.params, set(), "foundation.health params")
+        shadow = self._shadow_summary()
         return success_response(
             request.sequence,
             self.policy_epoch,
@@ -307,11 +382,11 @@ class LiveBrokerService:
                 "accountCount": len(self.state.accounts),
                 "pendingDeleteCount": len(self.state.pending_deletes),
                 "readOnlyAccountsEnabled": self.read_only_accounts_enabled,
-                "networkMethods": (
-                    self.account_connector.network_method_count
-                    if self.account_connector is not None
-                    else 0
+                "reconciliationShadowEnabled": (
+                    self.reconciliation_shadow_enabled
                 ),
+                **shadow,
+                "networkMethods": self._network_method_count(),
             },
         )
 
@@ -584,6 +659,13 @@ class LiveBrokerService:
                 "LIVE_ACCOUNT_CREDENTIAL_UNAVAILABLE",
                 "read-only account credential is unavailable",
             )
+        self._verify_credential_binding(binding)
+        return binding
+
+    def _verify_credential_binding(
+        self,
+        binding: CredentialBinding,
+    ) -> None:
         try:
             self.trust_store.verify_binding_metadata(
                 plugin_id=binding.plugin_id,
@@ -601,7 +683,6 @@ class LiveBrokerService:
                 "read-only account credential is not valid for this Host build",
                 details={"trustCode": exc.code},
             ) from exc
-        return binding
 
     def _discover_proof(
         self,
@@ -678,6 +759,32 @@ class LiveBrokerService:
             ),
             None,
         )
+
+    def _current_account_credential(
+        self,
+        account: AccountBinding,
+    ) -> CredentialBinding:
+        credential = next(
+            (
+                item
+                for item in self.state.credentials
+                if item.handle_sha256
+                == account.credential_handle_sha256
+            ),
+            None,
+        )
+        if (
+            account.status != "active"
+            or credential is None
+            or credential.policy_epoch != self.policy_epoch
+            or credential.connector_id != account.connector_id
+        ):
+            raise broker_error(
+                "LIVE_SHADOW_CREDENTIAL_UNAVAILABLE",
+                "shadow reconciliation credential is unavailable",
+            )
+        self._verify_credential_binding(credential)
+        return credential
 
     def _discover_account(self, request: BrokerRequest) -> BrokerResponse:
         self._require_account_connector()
@@ -843,6 +950,135 @@ class LiveBrokerService:
             self._account_metadata(rebound),
         )
 
+    def _require_shadow_journal(self) -> ShadowOrderJournal:
+        journal = self.shadow_journal
+        if (
+            not self.reconciliation_shadow_enabled
+            or journal is None
+            or self.reconciliation_connector is None
+        ):
+            raise broker_error(
+                "LIVE_RECONCILIATION_SHADOW_DISABLED",
+                "query-only reconciliation shadow is disabled",
+            )
+        return journal
+
+    def _shadow_account(
+        self,
+        params: Mapping[str, Any],
+        label: str,
+    ) -> tuple[str, AccountBinding, CredentialBinding]:
+        account_ref = self._account_handle(params, label)
+        account = self._find_account(account_ref)
+        if (
+            account is None
+            or account.policy_epoch != self.policy_epoch
+            or account.status != "active"
+        ):
+            raise broker_error(
+                "LIVE_SHADOW_ACCOUNT_UNAVAILABLE",
+                "shadow canonical account is unavailable",
+            )
+        credential = self._current_account_credential(account)
+        return account_ref, account, credential
+
+    @staticmethod
+    def _shadow_ref(
+        params: Mapping[str, Any],
+        label: str,
+    ) -> str:
+        return _text(params["shadowRef"], label, maximum=64)
+
+    def _prepare_shadow(self, request: BrokerRequest) -> BrokerResponse:
+        journal = self._require_shadow_journal()
+        _exact_params(
+            request.params,
+            {"accountRef", "intent"},
+            "shadow.prepare params",
+        )
+        account_ref, account, _credential = self._shadow_account(
+            request.params,
+            "shadow.prepare accountRef",
+        )
+        try:
+            intent = ShadowOrderIntent.from_wire(request.params["intent"])
+        except ValueError as exc:
+            raise broker_error(
+                "LIVE_SHADOW_INTENT_INVALID",
+                "shadow intent does not match the fixed Spot limit contract",
+            ) from exc
+        shadow_ref, record = journal.prepare(
+            account_ref=account_ref,
+            account=account,
+            intent=intent,
+            policy_epoch=self.policy_epoch,
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            {
+                "shadowRef": shadow_ref,
+                **record.metadata(),
+            },
+        )
+
+    def _describe_shadow(self, request: BrokerRequest) -> BrokerResponse:
+        journal = self._require_shadow_journal()
+        _exact_params(
+            request.params,
+            {"shadowRef"},
+            "shadow.describe params",
+        )
+        shadow_ref = self._shadow_ref(
+            request.params,
+            "shadow.describe shadowRef",
+        )
+        record = journal.describe(shadow_ref)
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            record.metadata(),
+        )
+
+    def _reconcile_shadow(self, request: BrokerRequest) -> BrokerResponse:
+        journal = self._require_shadow_journal()
+        connector = self.reconciliation_connector
+        assert connector is not None
+        _exact_params(
+            request.params,
+            {"accountRef", "shadowRef"},
+            "shadow.reconcile params",
+        )
+        account_ref, account, credential = self._shadow_account(
+            request.params,
+            "shadow.reconcile accountRef",
+        )
+        shadow_ref = self._shadow_ref(
+            request.params,
+            "shadow.reconcile shadowRef",
+        )
+        querying = journal.begin_reconcile(
+            shadow_ref,
+            account_ref=account_ref,
+            account=account,
+        )
+        try:
+            with self.vault.open_secret(credential.record_id) as secret:
+                proof = connector.query_order(
+                    secret,
+                    instrument_id=querying.instrument_id,
+                    client_order_id=querying.client_order_id,
+                )
+        except LiveBrokerError as exc:
+            journal.fail_reconcile(shadow_ref, error_code=exc.code)
+            raise
+        observed = journal.complete_reconcile(shadow_ref, proof)
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            observed.metadata(),
+        )
+
     def _shutdown(self, request: BrokerRequest) -> BrokerResponse:
         _exact_params(request.params, set(), "foundation.shutdown params")
         self.shutdown_requested = True
@@ -853,4 +1089,8 @@ class LiveBrokerService:
         )
 
     def close(self) -> None:
-        self.vault.close()
+        try:
+            if self.shadow_journal is not None:
+                self.shadow_journal.close()
+        finally:
+            self.vault.close()

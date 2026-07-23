@@ -259,8 +259,73 @@ export interface PluginCatalogPlugin {
   };
 }
 
+export type PluginV1CompatibilityImportStatus =
+  | "not-imported"
+  | "current"
+  | "stale"
+  | "invalid";
+
+export interface PluginV1CompatibilityContribution {
+  id: string;
+  kind: "script-runtime/1";
+  runtimeId: string;
+  title: string;
+  version: string;
+  package: string;
+  available: boolean;
+  protocol: "candlescope.script-runtime/1";
+  renderProtocol: "candlescope.render/1";
+  languages: Array<{
+    id: string;
+    name: string;
+    extensions: string[];
+    aliases: string[];
+    routeMode: "legacy" | "shadow" | "sidecar";
+    available: boolean;
+  }>;
+  features: string[];
+  routeModes: Array<"legacy" | "shadow" | "sidecar">;
+  release: {
+    managed: boolean;
+    bundleSha256?: string;
+  };
+  imported: boolean;
+}
+
+export interface PluginV1CompatibilityCatalog {
+  schemaVersion: "candlescope.v1-script-runtime-compatibility/1";
+  status: "ready" | "unavailable" | "invalid";
+  kind: "script-runtime/1";
+  protocol: "candlescope.script-runtime/1";
+  renderProtocol: "candlescope.render/1";
+  import: {
+    status: PluginV1CompatibilityImportStatus;
+    stateRevision: number;
+    activeSnapshotRevision: number | null;
+    sourceSha256: string | null;
+    importedSourceSha256: string | null;
+    historyDepth: number;
+    rollbackAvailable: boolean;
+  };
+  contributions: PluginV1CompatibilityContribution[];
+}
+
+export interface PluginV1CompatibilityPreview {
+  schemaVersion: "candlescope.v1-compatibility-preview/1";
+  action: "import" | "rollback";
+  available: boolean;
+  stateRevision: number;
+  sourceSha256: string;
+  targetSnapshotRevision: number | null;
+  changes: Array<{
+    id: string;
+    action: "add" | "update" | "remove";
+  }>;
+  previewSha256: string | null;
+}
+
 export interface PluginCatalog {
-  schemaVersion: "candlescope.plugin-catalog/1";
+  schemaVersion: "candlescope.plugin-catalog/2";
   platform: {
     enabled: boolean;
     started: boolean;
@@ -268,6 +333,7 @@ export interface PluginCatalog {
     registryRevision: number;
   };
   plugins: PluginCatalogPlugin[];
+  compatibility: PluginV1CompatibilityCatalog;
 }
 
 export interface PluginMarketplaceRelease {
@@ -701,6 +767,10 @@ export interface PluginPlatformRuntime {
     prepareMarketplaceRelease(pluginId: string, version: string): Promise<void>;
     applyMarketplaceRelease(pluginId: string): Promise<void>;
     activateMarketplaceRelease(pluginId: string): Promise<void>;
+    previewV1CompatibilityImport(): Promise<PluginV1CompatibilityPreview>;
+    applyV1CompatibilityImport(previewSha256: string): Promise<void>;
+    previewV1CompatibilityRollback(): Promise<PluginV1CompatibilityPreview>;
+    applyV1CompatibilityRollback(previewSha256: string): Promise<void>;
     installBundle(file: File): Promise<void>;
     stageUserFile(id: string, field: string, file: File): Promise<PluginFileSelection>;
     prepareUserFileSave(id: string, field: string): Promise<PluginFileSelection>;

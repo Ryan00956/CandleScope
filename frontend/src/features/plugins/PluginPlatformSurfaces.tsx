@@ -19,6 +19,7 @@ import type {
   PluginSettingsContribution,
   PluginViewContribution,
   PluginViewProjection,
+  PluginV1CompatibilityPreview,
 } from "./pluginPlatformTypes.js";
 
 function isSandboxView(
@@ -787,6 +788,10 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
   const [loading, setLoading] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [marketplaceBusy, setMarketplaceBusy] = useState<string | null>(null);
+  const [compatibilityPreview, setCompatibilityPreview] = useState<PluginV1CompatibilityPreview | null>(null);
+  const [compatibilityBusy, setCompatibilityBusy] = useState<"import" | "rollback" | null>(null);
+  const compatibility = runtime.view.catalog?.compatibility ?? null;
+  const platformEnabled = runtime.view.catalog?.platform.enabled === true;
   useEffect(() => {
     if (!runtime.view.managerOpen) return;
     if (!selectedId || !plugins.some((item) => item.id === selectedId)) setSelectedId(plugins[0]?.id ?? null);
@@ -804,7 +809,7 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runtime.view.managerOpen, runtime.view.managementAvailable, selectedId]);
   const reloadMarketplace = async () => {
-    if (!runtime.view.managementAvailable) {
+    if (!runtime.view.managementAvailable || !platformEnabled) {
       setMarketplaceStatus(null);
       return;
     }
@@ -819,7 +824,10 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
     void reloadMarketplace();
     // Marketplace mutations explicitly reload protected state after the public refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtime.view.managerOpen, runtime.view.managementAvailable]);
+  }, [runtime.view.managerOpen, runtime.view.managementAvailable, platformEnabled]);
+  useEffect(() => {
+    setCompatibilityPreview(null);
+  }, [compatibility?.import.sourceSha256, runtime.view.managerOpen]);
   if (!runtime.view.managerOpen) return null;
   const selected = plugins.find((item) => item.id === selectedId) ?? null;
   const mutate = async (action: "enable" | "disable" | "rollback" | "uninstall") => {
@@ -842,35 +850,153 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
       setMarketplaceBusy(null);
     }
   };
+  const previewCompatibility = async (action: "import" | "rollback") => {
+    setCompatibilityBusy(action);
+    try {
+      setCompatibilityPreview(
+        action === "import"
+          ? await runtime.actions.previewV1CompatibilityImport()
+          : await runtime.actions.previewV1CompatibilityRollback(),
+      );
+    } catch {
+      setCompatibilityPreview(null);
+    } finally {
+      setCompatibilityBusy(null);
+    }
+  };
+  const applyCompatibility = async () => {
+    if (!compatibilityPreview?.available || !compatibilityPreview.previewSha256) return;
+    const action = compatibilityPreview.action;
+    if (!window.confirm(
+      action === "import"
+        ? "Import this exact v1 registry preview into the compatibility catalog? The v1 registry itself will not be modified."
+        : "Roll back the compatibility catalog to this exact preview? The v1 registry itself will not be modified.",
+    )) return;
+    setCompatibilityBusy(action);
+    try {
+      if (action === "import") {
+        await runtime.actions.applyV1CompatibilityImport(compatibilityPreview.previewSha256);
+      } else {
+        await runtime.actions.applyV1CompatibilityRollback(compatibilityPreview.previewSha256);
+      }
+      setCompatibilityPreview(null);
+    } catch {
+      // Runtime publishes the fail-closed Host response.
+    } finally {
+      setCompatibilityBusy(null);
+    }
+  };
   return (
     <Modal title="Plugin Manager" onClose={runtime.actions.closeManager} testId="plugin-manager">
-      <div className="plugin-install-row">
-        <label>
-          <span>{installing ? "Installing and verifying…" : LOCAL_BUNDLE_INSTALL_LABEL}</span>
-          <input
-            type="file"
-            accept=".cspkg,application/vnd.candlescope.plugin+zip"
-            data-plugin-install-input
-            disabled={!runtime.view.managementAvailable || installing}
-            onChange={async (event) => {
-              const file = event.target.files?.[0];
-              event.target.value = "";
-              if (!file) return;
-              setInstalling(true);
-              try { await runtime.actions.installBundle(file); } catch { /* notice published */ }
-              finally { setInstalling(false); }
-            }}
-          />
-        </label>
-        <small>SHA-256 is recomputed by both browser and Host. Maximum 16 MiB.</small>
-      </div>
-      <MarketplacePanel
-        runtime={runtime}
-        status={marketplaceStatus}
-        busy={marketplaceBusy}
-        run={runMarketplace}
-      />
-      <div className="plugin-manager-layout">
+      {compatibility && (
+        <section className="plugin-v1-compatibility" data-v1-compatibility-status={compatibility.import.status}>
+          <h3>Script runtimes (v1 compatibility)</h3>
+          <p>
+            {compatibility.kind} · {compatibility.protocol} · {compatibility.import.status}
+            {compatibility.import.sourceSha256 ? ` · ${compatibility.import.sourceSha256}` : ""}
+          </p>
+          <p>
+            Discovery is live and read-only. Import and rollback change only the unified catalog snapshot;
+            existing v1 activation, installer, HTTP, range and WebSocket routes stay unchanged.
+          </p>
+          <ul>
+            {compatibility.contributions.map((contribution) => (
+              <li key={contribution.id} data-v1-runtime={contribution.runtimeId}>
+                <strong>{contribution.title}</strong>
+                {` ${contribution.version} · ${contribution.languages.map((item) => `${item.id}:${item.routeMode}`).join(", ")}`}
+                {contribution.release.bundleSha256 ? ` · ${contribution.release.bundleSha256}` : ""}
+                {contribution.imported ? " · imported" : " · live preview"}
+              </li>
+            ))}
+          </ul>
+          {!compatibility.contributions.length && <p>No v1 script runtimes are routed.</p>}
+          <div className="plugin-action-row">
+            <button
+              type="button"
+              data-v1-compatibility-preview="import"
+              disabled={!platformEnabled || !runtime.view.managementAvailable || compatibilityBusy !== null}
+              onClick={() => void previewCompatibility("import")}
+            >
+              {compatibilityBusy === "import" ? "Previewing…" : "Preview registry import"}
+            </button>
+            <button
+              type="button"
+              data-v1-compatibility-preview="rollback"
+              disabled={
+                !platformEnabled
+                || !runtime.view.managementAvailable
+                || !compatibility.import.rollbackAvailable
+                || compatibilityBusy !== null
+              }
+              onClick={() => void previewCompatibility("rollback")}
+            >
+              {compatibilityBusy === "rollback" ? "Previewing…" : "Preview compatibility rollback"}
+            </button>
+          </div>
+          {!platformEnabled && <small>Enable Plugin Platform v2 to persist an explicit compatibility import.</small>}
+          {compatibilityPreview && (
+            <div className="plugin-v1-compatibility-preview" data-v1-compatibility-action={compatibilityPreview.action}>
+              <p>
+                Preview {compatibilityPreview.previewSha256 ?? "unavailable"} · state revision {compatibilityPreview.stateRevision}
+                {compatibilityPreview.targetSnapshotRevision == null ? "" : ` · target ${compatibilityPreview.targetSnapshotRevision}`}
+              </p>
+              {compatibilityPreview.changes.length
+                ? (
+                  <ul>
+                    {compatibilityPreview.changes.map((change) => (
+                      <li key={change.id}>{change.action}: {change.id}</li>
+                    ))}
+                  </ul>
+                )
+                : (
+                  <p>
+                    No public contribution changes. Applying can refresh a changed source identity;
+                    an already-current repeat remains idempotent.
+                  </p>
+                )}
+              <button
+                type="button"
+                data-v1-compatibility-apply={compatibilityPreview.action}
+                disabled={!compatibilityPreview.available || compatibilityBusy !== null}
+                onClick={() => void applyCompatibility()}
+              >
+                Apply exact {compatibilityPreview.action} preview
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+      {platformEnabled && (
+        <div className="plugin-install-row">
+          <label>
+            <span>{installing ? "Installing and verifying…" : LOCAL_BUNDLE_INSTALL_LABEL}</span>
+            <input
+              type="file"
+              accept=".cspkg,application/vnd.candlescope.plugin+zip"
+              data-plugin-install-input
+              disabled={!runtime.view.managementAvailable || installing}
+              onChange={async (event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (!file) return;
+                setInstalling(true);
+                try { await runtime.actions.installBundle(file); } catch { /* notice published */ }
+                finally { setInstalling(false); }
+              }}
+            />
+          </label>
+          <small>SHA-256 is recomputed by both browser and Host. Maximum 16 MiB.</small>
+        </div>
+      )}
+      {platformEnabled && (
+        <MarketplacePanel
+          runtime={runtime}
+          status={marketplaceStatus}
+          busy={marketplaceBusy}
+          run={runMarketplace}
+        />
+      )}
+      {platformEnabled && <div className="plugin-manager-layout">
         <nav>
           {plugins.map((plugin) => (
             <button type="button" key={plugin.id} className={selectedId === plugin.id ? "active" : ""} onClick={() => setSelectedId(plugin.id)}>
@@ -930,7 +1056,7 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
             </>
           )}
         </section>
-      </div>
+      </div>}
     </Modal>
   );
 }

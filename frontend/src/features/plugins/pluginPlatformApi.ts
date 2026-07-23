@@ -9,6 +9,7 @@ import {
   parsePluginMarketplaceCatalog,
   parsePluginMarketplaceStatus,
   parsePluginUiSnapshot,
+  parsePluginV1CompatibilityPreview,
 } from "./pluginPlatformParsers.js";
 import type {
   JsonValue,
@@ -22,6 +23,7 @@ import type {
   PluginMarketplaceCatalog,
   PluginMarketplaceStatus,
   PluginUiSnapshot,
+  PluginV1CompatibilityPreview,
 } from "./pluginPlatformTypes.js";
 
 interface PluginManagementBootstrapV1 {
@@ -284,6 +286,34 @@ export async function fetchPluginManagementDetail(pluginId: string): Promise<Plu
 
 export async function fetchPluginMarketplaceStatus(): Promise<PluginMarketplaceStatus> {
   return parsePluginMarketplaceStatus(await managementRequest("/manage/marketplace/status"));
+}
+
+export async function previewV1CompatibilityImport(): Promise<PluginV1CompatibilityPreview> {
+  return parsePluginV1CompatibilityPreview(
+    await managementRequest("/manage/compatibility/v1/import-preview"),
+  );
+}
+
+export async function applyV1CompatibilityImport(previewSha256: string): Promise<void> {
+  await managementRequest("/manage/compatibility/v1/import", {
+    method: "POST",
+    body: { previewSha256 },
+    action: "v1-compatibility-import",
+  });
+}
+
+export async function previewV1CompatibilityRollback(): Promise<PluginV1CompatibilityPreview> {
+  return parsePluginV1CompatibilityPreview(
+    await managementRequest("/manage/compatibility/v1/rollback-preview"),
+  );
+}
+
+export async function applyV1CompatibilityRollback(previewSha256: string): Promise<void> {
+  await managementRequest("/manage/compatibility/v1/rollback", {
+    method: "POST",
+    body: { previewSha256 },
+    action: "v1-compatibility-rollback",
+  });
 }
 
 export async function refreshPluginMarketplace(marketplaceId: string): Promise<void> {

@@ -4516,6 +4516,7 @@ body {
 /* ── Plugin Platform v2: Host-owned declarative surfaces ── */
 .plugin-toolbar {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 5px;
   min-width: 0;
@@ -4640,6 +4641,26 @@ body {
 
 .plugin-install-row label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .plugin-install-row small { color: var(--text-muted); }
+
+.plugin-v1-compatibility {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid rgba(167, 139, 250, 0.42);
+  border-radius: 8px;
+  background: rgba(109, 40, 217, 0.08);
+}
+
+.plugin-v1-compatibility h3,
+.plugin-v1-compatibility p { margin: 0; }
+.plugin-v1-compatibility p,
+.plugin-v1-compatibility small { color: var(--text-muted); overflow-wrap: anywhere; }
+.plugin-v1-compatibility ul { margin: 0; padding-left: 20px; color: var(--text-secondary); }
+.plugin-v1-compatibility-preview {
+  padding: 10px;
+  border-left: 3px solid #a78bfa;
+  background: rgba(109, 40, 217, 0.12);
+}
 
 .plugin-marketplace-panel {
   display: grid;

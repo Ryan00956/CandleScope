@@ -57,6 +57,7 @@ class _RoutingService:
         self.start_calls = 0
         self.stop_calls = 0
         self.fail_start = False
+        self.catalog_projector: Any | None = None
 
     async def start(self) -> None:
         self.start_calls += 1
@@ -65,6 +66,17 @@ class _RoutingService:
 
     async def stop(self) -> None:
         self.stop_calls += 1
+
+    def bind_catalog_projector(self, projector: Any) -> None:
+        self.catalog_projector = projector
+
+    def compatibility_source_catalog(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "defaultLanguage": "pyne",
+            "languages": [],
+            "runtimes": [],
+        }
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -149,8 +161,10 @@ async def test_application_lifecycle_owns_plugin_host_and_health_summary(
     try:
         assert host.start_calls == 1
         assert routing.start_calls == 1
+        assert callable(routing.catalog_projector)
         assert main_module.app.state.plugin_runtime_host is host
         assert main_module.app.state.indicator_runtime_service is routing
+        assert main_module.app.state.plugin_v1_compatibility.indicator_source is routing
         assert (
             main_module.app.state.plugin_platform_v2.health_summary()["status"]
             == "disabled"

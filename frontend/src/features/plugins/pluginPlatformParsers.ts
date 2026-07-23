@@ -31,10 +31,15 @@ import type {
   PluginViewContribution,
   PluginViewProjection,
   PluginViewSlot,
+  PluginV1CompatibilityCatalog,
+  PluginV1CompatibilityContribution,
+  PluginV1CompatibilityPreview,
 } from "./pluginPlatformTypes.js";
 
 const PLUGIN_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/;
 const LOCAL_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
+const V1_ID = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+const V1_COMPATIBILITY_ID = /^compat\.v1\.[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 const MARKETPLACE_LOCAL_ID = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const MARKETPLACE_SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const MARKETPLACE_LICENSE = /^[A-Za-z0-9][A-Za-z0-9.+(): /-]{0,255}$/;
@@ -684,18 +689,256 @@ function catalogPlugin(value: unknown, path: string, contributionIds: Set<string
   };
 }
 
+function nullableDigest(value: unknown, path: string): string | null {
+  if (value === null) return null;
+  return digest(value, path);
+}
+
+function v1CompatibilityContribution(
+  value: unknown,
+  path: string,
+): PluginV1CompatibilityContribution {
+  const data = record(value, path);
+  exact(
+    data,
+    [
+      "id",
+      "kind",
+      "runtimeId",
+      "title",
+      "version",
+      "package",
+      "available",
+      "protocol",
+      "renderProtocol",
+      "languages",
+      "features",
+      "routeModes",
+      "release",
+      "imported",
+    ],
+    [],
+    path,
+  );
+  const id = string(data.id, `${path}.id`, 160);
+  const runtimeId = string(data.runtimeId, `${path}.runtimeId`, 64);
+  if (
+    !V1_COMPATIBILITY_ID.test(id)
+    || !V1_ID.test(runtimeId)
+    || id !== `compat.v1.${runtimeId}`
+    || data.kind !== "script-runtime/1"
+    || data.protocol !== "candlescope.script-runtime/1"
+    || data.renderProtocol !== "candlescope.render/1"
+  ) fail(path);
+  const languages = array(data.languages, `${path}.languages`, 64).map((raw, index) => {
+    const languagePath = `${path}.languages[${index}]`;
+    const language = record(raw, languagePath);
+    exact(language, ["id", "name", "extensions", "aliases", "routeMode", "available"], [], languagePath);
+    const languageId = string(language.id, `${languagePath}.id`, 64);
+    if (!V1_ID.test(languageId)) fail(`${languagePath}.id`);
+    const extensions = array(language.extensions, `${languagePath}.extensions`, 32)
+      .map((item, itemIndex) => string(item, `${languagePath}.extensions[${itemIndex}]`, 32));
+    const aliases = array(language.aliases, `${languagePath}.aliases`, 32)
+      .map((item, itemIndex) => string(item, `${languagePath}.aliases[${itemIndex}]`, 64));
+    if (
+      new Set(extensions).size !== extensions.length
+      || new Set(aliases).size !== aliases.length
+    ) fail(languagePath);
+    return {
+      id: languageId,
+      name: string(language.name, `${languagePath}.name`, 128),
+      extensions,
+      aliases,
+      routeMode: oneOf(
+        language.routeMode,
+        new Set(["legacy", "shadow", "sidecar"] as const),
+        `${languagePath}.routeMode`,
+      ),
+      available: boolean(language.available, `${languagePath}.available`),
+    };
+  });
+  if (!languages.length || new Set(languages.map((item) => item.id)).size !== languages.length) {
+    fail(`${path}.languages`);
+  }
+  const features = array(data.features, `${path}.features`, 64)
+    .map((item, index) => string(item, `${path}.features[${index}]`, 128));
+  const routeModes = array(data.routeModes, `${path}.routeModes`, 3)
+    .map((item, index) => oneOf(
+      item,
+      new Set(["legacy", "shadow", "sidecar"] as const),
+      `${path}.routeModes[${index}]`,
+    ));
+  if (
+    new Set(features).size !== features.length
+    || !routeModes.length
+    || new Set(routeModes).size !== routeModes.length
+    || languages.some((item) => !routeModes.includes(item.routeMode))
+  ) fail(path);
+  const release = record(data.release, `${path}.release`);
+  exact(release, ["managed"], ["bundleSha256"], `${path}.release`);
+  const managed = boolean(release.managed, `${path}.release.managed`);
+  const bundleSha256 = release.bundleSha256 === undefined
+    ? undefined
+    : digest(release.bundleSha256, `${path}.release.bundleSha256`);
+  if ((bundleSha256 !== undefined) !== managed) fail(`${path}.release`);
+  return {
+    id,
+    kind: "script-runtime/1",
+    runtimeId,
+    title: string(data.title, `${path}.title`, 128),
+    version: string(data.version, `${path}.version`, 128),
+    package: string(data.package, `${path}.package`, 128),
+    available: boolean(data.available, `${path}.available`),
+    protocol: "candlescope.script-runtime/1",
+    renderProtocol: "candlescope.render/1",
+    languages,
+    features,
+    routeModes,
+    release: {
+      managed,
+      ...(bundleSha256 === undefined ? {} : { bundleSha256 }),
+    },
+    imported: boolean(data.imported, `${path}.imported`),
+  };
+}
+
+function v1CompatibilityCatalog(
+  value: unknown,
+  path: string,
+): PluginV1CompatibilityCatalog {
+  const data = record(value, path);
+  exact(
+    data,
+    [
+      "schemaVersion",
+      "status",
+      "kind",
+      "protocol",
+      "renderProtocol",
+      "import",
+      "contributions",
+    ],
+    [],
+    path,
+  );
+  if (
+    data.schemaVersion !== "candlescope.v1-script-runtime-compatibility/1"
+    || data.kind !== "script-runtime/1"
+    || data.protocol !== "candlescope.script-runtime/1"
+    || data.renderProtocol !== "candlescope.render/1"
+  ) fail(path);
+  const status = oneOf(
+    data.status,
+    new Set(["ready", "unavailable", "invalid"] as const),
+    `${path}.status`,
+  );
+  const importState = record(data.import, `${path}.import`);
+  exact(
+    importState,
+    [
+      "status",
+      "stateRevision",
+      "activeSnapshotRevision",
+      "sourceSha256",
+      "importedSourceSha256",
+      "historyDepth",
+      "rollbackAvailable",
+    ],
+    [],
+    `${path}.import`,
+  );
+  const importStatus = oneOf(
+    importState.status,
+    new Set(["not-imported", "current", "stale", "invalid"] as const),
+    `${path}.import.status`,
+  );
+  const activeSnapshotRevision = importState.activeSnapshotRevision === null
+    ? null
+    : integer(importState.activeSnapshotRevision, `${path}.import.activeSnapshotRevision`, 1);
+  const sourceSha256 = nullableDigest(importState.sourceSha256, `${path}.import.sourceSha256`);
+  const importedSourceSha256 = nullableDigest(
+    importState.importedSourceSha256,
+    `${path}.import.importedSourceSha256`,
+  );
+  const stateRevision = integer(importState.stateRevision, `${path}.import.stateRevision`);
+  const historyDepth = integer(importState.historyDepth, `${path}.import.historyDepth`, 0, 8);
+  const rollbackAvailable = boolean(
+    importState.rollbackAvailable,
+    `${path}.import.rollbackAvailable`,
+  );
+  const contributions = array(data.contributions, `${path}.contributions`, 128)
+    .map((item, index) => v1CompatibilityContribution(item, `${path}.contributions[${index}]`));
+  if (
+    new Set(contributions.map((item) => item.id)).size !== contributions.length
+    || new Set(contributions.map((item) => item.runtimeId)).size !== contributions.length
+    || rollbackAvailable !== (historyDepth > 0)
+    || (status === "unavailable" && (
+      importStatus !== "not-imported"
+      || sourceSha256 !== null
+      || contributions.length > 0
+    ))
+    || (status === "ready" && (
+      importStatus === "invalid"
+      || sourceSha256 === null
+    ))
+    || (status === "invalid" && (
+      importStatus !== "invalid"
+      || (sourceSha256 === null && contributions.length > 0)
+    ))
+    || (importStatus === "current" && (
+      activeSnapshotRevision === null
+      || sourceSha256 !== importedSourceSha256
+      || contributions.some((item) => !item.imported)
+    ))
+    || (importStatus === "stale" && (
+      activeSnapshotRevision === null
+      || importedSourceSha256 === null
+      || sourceSha256 === importedSourceSha256
+    ))
+    || (importStatus !== "current" && contributions.some((item) => item.imported))
+    || (importStatus === "not-imported" && (
+      activeSnapshotRevision !== null
+      || importedSourceSha256 !== null
+    ))
+    || (importStatus === "invalid" && (
+      stateRevision !== 0
+      || activeSnapshotRevision !== null
+      || importedSourceSha256 !== null
+      || historyDepth !== 0
+      || rollbackAvailable
+    ))
+  ) fail(path);
+  return {
+    schemaVersion: "candlescope.v1-script-runtime-compatibility/1",
+    status,
+    kind: "script-runtime/1",
+    protocol: "candlescope.script-runtime/1",
+    renderProtocol: "candlescope.render/1",
+    import: {
+      status: importStatus,
+      stateRevision,
+      activeSnapshotRevision,
+      sourceSha256,
+      importedSourceSha256,
+      historyDepth,
+      rollbackAvailable,
+    },
+    contributions,
+  };
+}
+
 export function parsePluginCatalog(value: unknown): PluginCatalog {
   if (JSON.stringify(value).length > 2 * 1024 * 1024) fail("catalog");
   const data = record(value, "catalog");
-  exact(data, ["schemaVersion", "platform", "plugins"], [], "catalog");
-  if (data.schemaVersion !== "candlescope.plugin-catalog/1") fail("catalog.schemaVersion");
+  exact(data, ["schemaVersion", "platform", "plugins", "compatibility"], [], "catalog");
+  if (data.schemaVersion !== "candlescope.plugin-catalog/2") fail("catalog.schemaVersion");
   const platform = record(data.platform, "catalog.platform");
   exact(platform, ["enabled", "started", "status", "registryRevision"], [], "catalog.platform");
   const contributionIds = new Set<string>();
   const plugins = array(data.plugins, "catalog.plugins", 256).map((item, index) => catalogPlugin(item, `catalog.plugins[${index}]`, contributionIds));
   if (new Set(plugins.map((item) => item.id)).size !== plugins.length) fail("catalog.plugins");
   return {
-    schemaVersion: "candlescope.plugin-catalog/1",
+    schemaVersion: "candlescope.plugin-catalog/2",
     platform: {
       enabled: boolean(platform.enabled, "catalog.platform.enabled"),
       started: boolean(platform.started, "catalog.platform.started"),
@@ -703,6 +946,76 @@ export function parsePluginCatalog(value: unknown): PluginCatalog {
       registryRevision: integer(platform.registryRevision, "catalog.platform.registryRevision"),
     },
     plugins,
+    compatibility: v1CompatibilityCatalog(data.compatibility, "catalog.compatibility"),
+  };
+}
+
+export function parsePluginV1CompatibilityPreview(
+  value: unknown,
+): PluginV1CompatibilityPreview {
+  const data = record(value, "v1 compatibility preview");
+  exact(
+    data,
+    [
+      "schemaVersion",
+      "action",
+      "available",
+      "stateRevision",
+      "sourceSha256",
+      "targetSnapshotRevision",
+      "changes",
+      "previewSha256",
+    ],
+    [],
+    "v1 compatibility preview",
+  );
+  if (data.schemaVersion !== "candlescope.v1-compatibility-preview/1") {
+    fail("v1 compatibility preview.schemaVersion");
+  }
+  const available = boolean(data.available, "v1 compatibility preview.available");
+  const previewSha256 = nullableDigest(
+    data.previewSha256,
+    "v1 compatibility preview.previewSha256",
+  );
+  if (available !== (previewSha256 !== null)) fail("v1 compatibility preview");
+  const changes = array(data.changes, "v1 compatibility preview.changes", 256)
+    .map((raw, index) => {
+      const path = `v1 compatibility preview.changes[${index}]`;
+      const item = record(raw, path);
+      exact(item, ["id", "action"], [], path);
+      const id = string(item.id, `${path}.id`, 160);
+      if (!V1_COMPATIBILITY_ID.test(id)) fail(`${path}.id`);
+      return {
+        id,
+        action: oneOf(
+          item.action,
+          new Set(["add", "update", "remove"] as const),
+          `${path}.action`,
+        ),
+      };
+    });
+  if (new Set(changes.map((item) => item.id)).size !== changes.length) {
+    fail("v1 compatibility preview.changes");
+  }
+  return {
+    schemaVersion: "candlescope.v1-compatibility-preview/1",
+    action: oneOf(
+      data.action,
+      new Set(["import", "rollback"] as const),
+      "v1 compatibility preview.action",
+    ),
+    available,
+    stateRevision: integer(data.stateRevision, "v1 compatibility preview.stateRevision"),
+    sourceSha256: digest(data.sourceSha256, "v1 compatibility preview.sourceSha256"),
+    targetSnapshotRevision: data.targetSnapshotRevision === null
+      ? null
+      : integer(
+        data.targetSnapshotRevision,
+        "v1 compatibility preview.targetSnapshotRevision",
+        1,
+      ),
+    changes,
+    previewSha256,
   };
 }
 

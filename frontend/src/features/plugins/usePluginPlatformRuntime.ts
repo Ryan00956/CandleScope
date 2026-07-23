@@ -28,6 +28,10 @@ import {
   reconcileLiveExecution,
   preparePluginUserFileSave,
   preparePluginMarketplaceRelease,
+  previewV1CompatibilityImport,
+  applyV1CompatibilityImport,
+  previewV1CompatibilityRollback,
+  applyV1CompatibilityRollback,
   refreshPluginMarketplace,
   stagePluginUserFile,
   writePluginSettings,
@@ -378,6 +382,16 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       activateMarketplaceRelease: (pluginId) => withRefresh(
         () => activatePluginMarketplaceRelease(pluginId),
         "Marketplace release activated and passed Host health observation",
+      ),
+      previewV1CompatibilityImport,
+      applyV1CompatibilityImport: (previewSha256) => withRefresh(
+        () => applyV1CompatibilityImport(previewSha256),
+        "v1 script runtime registry imported into the compatibility catalog",
+      ),
+      previewV1CompatibilityRollback,
+      applyV1CompatibilityRollback: (previewSha256) => withRefresh(
+        () => applyV1CompatibilityRollback(previewSha256),
+        "v1 compatibility catalog rolled back to the previewed snapshot",
       ),
       installBundle: (file) => withRefresh(
         () => installPluginBundle(file),

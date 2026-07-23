@@ -72,13 +72,33 @@ from .private_storage import PluginPrivateStorage, StorageNamespace
 from .services import NotificationCenter, PluginSettingsStore
 
 
-CATALOG_SCHEMA_VERSION = "candlescope.plugin-catalog/1"
+CATALOG_SCHEMA_VERSION = "candlescope.plugin-catalog/2"
 UI_SCHEMA_VERSION = "candlescope.plugin-ui/1"
 MANAGEMENT_DETAIL_SCHEMA_VERSION = "candlescope.plugin-management-detail/1"
 TRUST_LEVELS = frozenset({"first-party-pinned", "local-trusted", "untrusted"})
 SandboxFactory = Callable[
     [ActivationRecord, VerifiedPlatformBundle, str], SandboxPolicy
 ]
+
+
+def _empty_v1_compatibility_catalog() -> dict[str, Any]:
+    return {
+        "schemaVersion": "candlescope.v1-script-runtime-compatibility/1",
+        "status": "unavailable",
+        "kind": "script-runtime/1",
+        "protocol": "candlescope.script-runtime/1",
+        "renderProtocol": "candlescope.render/1",
+        "import": {
+            "status": "not-imported",
+            "stateRevision": 0,
+            "activeSnapshotRevision": None,
+            "sourceSha256": None,
+            "importedSourceSha256": None,
+            "historyDepth": 0,
+            "rollbackAvailable": False,
+        },
+        "contributions": [],
+    }
 
 
 _RESOURCE_LIMITS: dict[str, dict[str, Any]] = {
@@ -291,6 +311,73 @@ class CorePluginPlatform:
         self._reconcile_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task[None] | None = None
         self._started = False
+        self.v1_compatibility: Any | None = None
+
+    def bind_v1_compatibility(self, compatibility: Any) -> None:
+        if not callable(getattr(compatibility, "public_catalog", None)):
+            raise TypeError("v1 compatibility bridge must expose public_catalog()")
+        if (
+            self.v1_compatibility is not None
+            and self.v1_compatibility is not compatibility
+        ):
+            raise core_error(
+                "PLUGIN_CORE_V1_COMPATIBILITY_ALREADY_BOUND",
+                "the v1 compatibility bridge is already bound",
+            )
+        self.v1_compatibility = compatibility
+
+    def apply_v1_compatibility_import(
+        self,
+        preview_sha256: str,
+        *,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        if self.v1_compatibility is None:
+            raise core_error(
+                "PLUGIN_CORE_V1_COMPATIBILITY_UNAVAILABLE",
+                "the v1 compatibility bridge is unavailable",
+            )
+        result = self.v1_compatibility.apply_import(preview_sha256)
+        self.audit_log.append(
+            category="v1-compatibility",
+            action="registry-import",
+            outcome="applied" if result["changed"] else "unchanged",
+            trace_id=trace_id,
+            data={
+                "previewSha256": preview_sha256,
+                "stateRevision": result["compatibility"]["import"]["stateRevision"],
+                "sourceSha256": result["compatibility"]["import"]["sourceSha256"],
+            },
+        )
+        return result
+
+    def apply_v1_compatibility_rollback(
+        self,
+        preview_sha256: str,
+        *,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        if self.v1_compatibility is None:
+            raise core_error(
+                "PLUGIN_CORE_V1_COMPATIBILITY_UNAVAILABLE",
+                "the v1 compatibility bridge is unavailable",
+            )
+        result = self.v1_compatibility.apply_rollback(preview_sha256)
+        self.audit_log.append(
+            category="v1-compatibility",
+            action="catalog-rollback",
+            outcome="applied",
+            trace_id=trace_id,
+            data={
+                "previewSha256": preview_sha256,
+                "stateRevision": result["compatibility"]["import"]["stateRevision"],
+                "sourceSha256": result["compatibility"]["import"]["sourceSha256"],
+                "importedSourceSha256": result["compatibility"]["import"][
+                    "importedSourceSha256"
+                ],
+            },
+        )
+        return result
 
     def _bundle_trust(self, bundle: VerifiedPlatformBundle) -> BundleTrust:
         marketplace = getattr(self, "marketplace", None)
@@ -1685,6 +1772,11 @@ class CorePluginPlatform:
                 "registryRevision": self._registry.revision,
             },
             "plugins": plugins,
+            "compatibility": (
+                self.v1_compatibility.public_catalog()
+                if self.v1_compatibility is not None
+                else _empty_v1_compatibility_catalog()
+            ),
         }
 
     @staticmethod
@@ -1995,6 +2087,22 @@ class DisabledCorePluginPlatform:
 
     enabled = False
 
+    def __init__(self) -> None:
+        self.v1_compatibility: Any | None = None
+
+    def bind_v1_compatibility(self, compatibility: Any) -> None:
+        if not callable(getattr(compatibility, "public_catalog", None)):
+            raise TypeError("v1 compatibility bridge must expose public_catalog()")
+        if (
+            self.v1_compatibility is not None
+            and self.v1_compatibility is not compatibility
+        ):
+            raise core_error(
+                "PLUGIN_CORE_V1_COMPATIBILITY_ALREADY_BOUND",
+                "the v1 compatibility bridge is already bound",
+            )
+        self.v1_compatibility = compatibility
+
     async def start(self) -> None:
         return None
 
@@ -2031,6 +2139,11 @@ class DisabledCorePluginPlatform:
                 "registryRevision": 0,
             },
             "plugins": [],
+            "compatibility": (
+                self.v1_compatibility.public_catalog()
+                if self.v1_compatibility is not None
+                else _empty_v1_compatibility_catalog()
+            ),
         }
 
     def ui_snapshot(self) -> dict[str, Any]:

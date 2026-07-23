@@ -103,6 +103,16 @@ async def _guarded_platform(request: Request) -> CorePluginPlatform:
     return platform
 
 
+def _v1_compatibility(platform: CorePluginPlatform) -> Any:
+    compatibility = getattr(platform, "v1_compatibility", None)
+    if compatibility is None:
+        raise HTTPException(
+            status_code=503,
+            detail="v1 script runtime compatibility bridge is unavailable",
+        )
+    return compatibility
+
+
 async def _body(request: Request, *, required: set[str]) -> dict[str, Any]:
     content_length = request.headers.get("content-length")
     if content_length is not None:
@@ -387,6 +397,58 @@ def create_core_plugin_router() -> APIRouter:
     async def diagnostics(request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
         return platform.diagnostics()
+
+    @router.get("/manage/compatibility/v1/status")
+    async def v1_compatibility_status(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            return await asyncio.to_thread(_v1_compatibility(platform).public_catalog)
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.get("/manage/compatibility/v1/import-preview")
+    async def v1_compatibility_import_preview(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            return await asyncio.to_thread(_v1_compatibility(platform).import_preview)
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/compatibility/v1/import")
+    async def v1_compatibility_import(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        payload = await _body(request, required={"previewSha256"})
+        try:
+            return await asyncio.to_thread(
+                platform.apply_v1_compatibility_import,
+                payload["previewSha256"],
+                trace_id=f"management-{request.state.plugin_user_action}",
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.get("/manage/compatibility/v1/rollback-preview")
+    async def v1_compatibility_rollback_preview(
+        request: Request,
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            return await asyncio.to_thread(_v1_compatibility(platform).rollback_preview)
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/compatibility/v1/rollback")
+    async def v1_compatibility_rollback(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        payload = await _body(request, required={"previewSha256"})
+        try:
+            return await asyncio.to_thread(
+                platform.apply_v1_compatibility_rollback,
+                payload["previewSha256"],
+                trace_id=f"management-{request.state.plugin_user_action}",
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
 
     @router.get("/manage/marketplace/status")
     async def marketplace_status(request: Request) -> dict[str, Any]:

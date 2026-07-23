@@ -1,16 +1,17 @@
 # CandleScope 通用插件平台 v2 执行方案
 
-> 状态：执行中；Phase 0 已完成（`381dd02`），Phase 1 已完成（`d29ad4d`），Phase 2
+> 状态：Phase 0～13 已完成实现与技术验收；Phase 0 已完成（`381dd02`），Phase 1 已完成（`d29ad4d`），Phase 2
 > 已完成（`d755f27`），Phase 3 已完成（`eb7316b`），Phase 4 已完成（`e20d7c4`），
 > Phase 5 已完成（`b77444a`），Phase 6 已完成（`8f18080`），Phase 7 已完成（`151b93a`），
 > Phase 8 已完成（`b0efcc4`），Phase 9～11 已完成实现与技术验收，Phase 12 已完成
-> 实现与技术验收（本阶段提交）。
+> 实现与技术验收（`c024d2f`），Phase 13 已完成实现与技术验收（本阶段提交）。
 >
 > 基线：`codex/plugin-platform-v1@400e520`，2026-07-22。
 >
 > 原始方案授权边界：本文定义目标架构、实施顺序、质量门和回滚边界；实际代码变更按
-> 用户后续逐阶段授权执行。当前 Phase 12 只交付默认关闭的签名 Marketplace 机制，
-> 不发布生产 Marketplace root、不迁移用户插件，也不授权真实 Demo/真钱/WP-G。
+> 用户后续逐阶段授权执行。当前 Phase 13 只交付 v1 compatibility catalog、显式
+> import/rollback 与正式技术门禁；不删除 v1 Host/installer/transports，也不授权真实
+> Demo/真钱/WP-G。
 
 ## 1. 结论
 
@@ -741,8 +742,8 @@ frontend/src/features/plugins/
 | Phase 9：网络/文件/HTTP gateway | 已完成（`9b4a638`） | 受控外部交互与命名空间 API | 集成型插件 |
 | Phase 10：数据提供器 | 已完成（本阶段提交） | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
 | Phase 11：账户与交易 | 11A、11B0、11B WP-A～WP-F 已完成本地技术验收；真实 Demo smoke 未执行；production 关闭 | publisher evidence、Broker、账户绑定、durable shadow/execution journal、Host-native control、固定 Demo risk gate | 高风险交易插件 |
-| Phase 12：签名与 Marketplace | 已完成实现与技术验收（本阶段提交）；默认 roots 为空、功能关闭 | publisher、更新、撤销、SBOM、透明日志、分阶段激活 | 可验证分发生态 |
-| Phase 13：v1 收敛与 GA | 未开始 | script runtime adapter、兼容周期、正式门禁 | 单一产品插件目录 |
+| Phase 12：签名与 Marketplace | 已完成实现与技术验收（`c024d2f`）；默认 roots 为空、功能关闭 | publisher、更新、撤销、SBOM、透明日志、分阶段激活 | 可验证分发生态 |
+| Phase 13：v1 收敛与 GA | 已完成实现与技术验收（本阶段提交）；v1 Host/installer 至少保留两个正式版本周期 | script runtime adapter、显式目录导入/回滚、冻结 wire 与正式门禁 | 单一产品插件目录 |
 
 ## 16. Phase 0：冻结基线与威胁模型
 
@@ -1157,6 +1158,11 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 - 撤销策略不会误删用户数据，并能阻止下一次启动。
 
 ## 29. Phase 13：v1 收敛与正式发布
+
+> 2026-07-24 已完成实现与技术验收。统一 `script-runtime/1` compatibility catalog、显式
+> preview/import/rollback、冻结 v1 wire、SDK 兼容矩阵、两版本 rollback drill 与完整证据见
+> `PLUGIN_PLATFORM_V2_PHASE13_zh.md`。本阶段不执行真实 Demo/真钱测试，也不删除 v1 Host、
+> installer 或 transports。
 
 ### 交付
 

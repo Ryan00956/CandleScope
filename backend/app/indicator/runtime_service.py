@@ -139,6 +139,7 @@ async def removed_in_process_runtime() -> dict[str, Any]:
 LegacyExecutor = Callable[[], Awaitable[dict[str, Any]]]
 SidecarAdapter = Callable[[ExecuteBatchResult], dict[str, Any]]
 FailureAdapter = Callable[[IndicatorRuntimeFailure], dict[str, Any]]
+CatalogProjector = Callable[[Mapping[str, Any]], dict[str, Any]]
 
 
 def _value(item: Any, *names: str, default: Any = None) -> Any:
@@ -216,6 +217,7 @@ class IndicatorRuntimeService:
         self._start_lock = asyncio.Lock()
         self._started = False
         self._runtime_descriptors: dict[str, RuntimeDescriptor] = {}
+        self._catalog_projector: CatalogProjector | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._pending_shadow = 0
         self._lock = threading.Lock()
@@ -297,19 +299,28 @@ class IndicatorRuntimeService:
         if tasks:
             await asyncio.gather(*tasks)
 
-    async def public_catalog(self) -> dict[str, Any]:
-        """Describe routed script languages without exposing host internals.
+    def bind_catalog_projector(self, projector: CatalogProjector) -> None:
+        """Bind the Phase 13 unified-catalog projection exactly once."""
+
+        if not callable(projector):
+            raise TypeError("catalog projector must be callable")
+        if self._catalog_projector is not None and self._catalog_projector != projector:
+            raise IndicatorRuntimeRoutesError(
+                "script runtime catalog projector is already bound"
+            )
+        self._catalog_projector = projector
+
+    def compatibility_source_catalog(self) -> dict[str, Any]:
+        """Return the validated native v1 projection for the compatibility bridge.
 
         The runtime descriptor is already the plugin's public handshake contract.
         This projection adds only host-owned routing state; it never includes
         registry paths, commands, process identifiers, stderr, or failure details.
         """
-        try:
-            await self.start()
-        except PluginHostError as exc:
+        if not self._started:
             raise IndicatorRuntimeRoutesError(
-                "script runtime catalog is unavailable"
-            ) from exc
+                "script runtime catalog was requested before startup validation"
+            )
         runtimes: dict[str, dict[str, Any]] = {}
         languages: list[dict[str, Any]] = []
 
@@ -364,6 +375,20 @@ class IndicatorRuntimeService:
             "languages": languages,
             "runtimes": list(runtimes.values()),
         }
+
+    async def public_catalog(self) -> dict[str, Any]:
+        """Project routed script languages through the unified Phase 13 catalog."""
+
+        try:
+            await self.start()
+        except PluginHostError as exc:
+            raise IndicatorRuntimeRoutesError(
+                "script runtime catalog is unavailable"
+            ) from exc
+        source = self.compatibility_source_catalog()
+        if self._catalog_projector is None:
+            return source
+        return self._catalog_projector(source)
 
     def route_for(self, language: str) -> IndicatorRuntimeRoute:
         return self.routes.for_language(language)

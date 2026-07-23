@@ -10,6 +10,7 @@ import {
   parsePluginMarketplaceCatalog,
   parsePluginMarketplaceStatus,
   parsePluginUiSnapshot,
+  parsePluginV1CompatibilityPreview,
 } from "../pluginPlatformParsers.js";
 import { buildPluginRegistries } from "../pluginRegistries.js";
 
@@ -70,9 +71,51 @@ function plugin(id = "acme.scanner", available = true) {
 
 function catalog<T = ReturnType<typeof plugin>>(plugins: T[] = [plugin()] as T[]) {
   return {
-    schemaVersion: "candlescope.plugin-catalog/1",
+    schemaVersion: "candlescope.plugin-catalog/2",
     platform: { enabled: true, started: true, status: "ok", registryRevision: 1 },
     plugins,
+    compatibility: {
+      schemaVersion: "candlescope.v1-script-runtime-compatibility/1",
+      status: "ready",
+      kind: "script-runtime/1",
+      protocol: "candlescope.script-runtime/1",
+      renderProtocol: "candlescope.render/1",
+      import: {
+        status: "current",
+        stateRevision: 1,
+        activeSnapshotRevision: 1,
+        sourceSha256: `sha256:${"9".repeat(64)}`,
+        importedSourceSha256: `sha256:${"9".repeat(64)}`,
+        historyDepth: 1,
+        rollbackAvailable: true,
+      },
+      contributions: [{
+        id: "compat.v1.pyne.runtime",
+        kind: "script-runtime/1",
+        runtimeId: "pyne.runtime",
+        title: "Pyne Runtime",
+        version: "1.0.0",
+        package: "candlescope-plugin-pyne",
+        available: true,
+        protocol: "candlescope.script-runtime/1",
+        renderProtocol: "candlescope.render/1",
+        languages: [{
+          id: "pyne",
+          name: "Pyne",
+          extensions: [".pyne"],
+          aliases: [],
+          routeMode: "sidecar",
+          available: true,
+        }],
+        features: ["batch-execution/1", "render.line-series/1"],
+        routeModes: ["sidecar"],
+        release: {
+          managed: true,
+          bundleSha256: `sha256:${"8".repeat(64)}`,
+        },
+        imported: true,
+      }],
+    },
   };
 }
 
@@ -485,6 +528,76 @@ test("catalog validator builds only active native registries", () => {
   assert.equal(registries.commandPalette[0]?.pluginId, "acme.scanner");
   assert.deepEqual(registries.topToolbar.map((item) => item.id), ["acme.scanner.scan"]);
   assert.deepEqual(registries.sidePanel.map((item) => item.id), ["acme.scanner.results"]);
+});
+
+test("Phase 13 compatibility catalog is strict and never enters executable registries", () => {
+  const parsed = parsePluginCatalog(catalog());
+  assert.equal(parsed.schemaVersion, "candlescope.plugin-catalog/2");
+  assert.equal(parsed.compatibility.import.status, "current");
+  assert.equal(parsed.compatibility.contributions[0]?.kind, "script-runtime/1");
+  assert.equal(parsed.compatibility.contributions[0]?.release.managed, true);
+  assert.equal(buildPluginRegistries(parsed).commandPalette.length, 1);
+
+  const fullV1IdentifierRange = structuredClone(catalog());
+  fullV1IdentifierRange.compatibility.contributions[0]!.id = "compat.v1.1_py.runtime";
+  fullV1IdentifierRange.compatibility.contributions[0]!.runtimeId = "1_py.runtime";
+  fullV1IdentifierRange.compatibility.contributions[0]!.languages[0]!.id = "1_pyne";
+  assert.equal(
+    parsePluginCatalog(fullV1IdentifierRange).compatibility.contributions[0]?.runtimeId,
+    "1_py.runtime",
+  );
+
+  const mismatchedCompatibilityId = structuredClone(fullV1IdentifierRange);
+  mismatchedCompatibilityId.compatibility.contributions[0]!.id = "compat.v1.other";
+  assert.throws(() => parsePluginCatalog(mismatchedCompatibilityId), /invalid/i);
+
+  const invalidSource = structuredClone(catalog());
+  Object.assign(invalidSource.compatibility, {
+    status: "invalid",
+    contributions: [],
+  });
+  Object.assign(invalidSource.compatibility.import, {
+    status: "invalid",
+    stateRevision: 0,
+    activeSnapshotRevision: null,
+    sourceSha256: null,
+    importedSourceSha256: null,
+    historyDepth: 0,
+    rollbackAvailable: false,
+  });
+  assert.equal(parsePluginCatalog(invalidSource).compatibility.status, "invalid");
+
+  const inconsistentRollback = structuredClone(catalog());
+  inconsistentRollback.compatibility.import.historyDepth = 0;
+  assert.throws(() => parsePluginCatalog(inconsistentRollback), /invalid/i);
+
+  const executable = structuredClone(catalog());
+  (executable.compatibility.contributions[0] as Record<string, unknown>).executable = "python.exe";
+  assert.throws(() => parsePluginCatalog(executable), /invalid/i);
+
+  const falseImport = structuredClone(catalog());
+  falseImport.compatibility.contributions[0]!.imported = false;
+  assert.throws(() => parsePluginCatalog(falseImport), /invalid/i);
+
+  const preview = parsePluginV1CompatibilityPreview({
+    schemaVersion: "candlescope.v1-compatibility-preview/1",
+    action: "import",
+    available: true,
+    stateRevision: 1,
+    sourceSha256: `sha256:${"9".repeat(64)}`,
+    targetSnapshotRevision: null,
+    changes: [{ id: "compat.v1.pyne.runtime", action: "update" }],
+    previewSha256: `sha256:${"7".repeat(64)}`,
+  });
+  assert.equal(preview.changes[0]?.action, "update");
+  assert.throws(
+    () => parsePluginV1CompatibilityPreview({ ...preview, executable: "python.exe" }),
+    /invalid/i,
+  );
+  assert.throws(
+    () => parsePluginV1CompatibilityPreview({ ...preview, previewSha256: null }),
+    /invalid/i,
+  );
 });
 
 test("catalog validates public providers while keeping them out of UI extension registries", () => {

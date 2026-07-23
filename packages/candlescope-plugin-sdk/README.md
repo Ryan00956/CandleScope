@@ -20,6 +20,13 @@ The v1 protocol identifier is:
 candlescope.script-runtime/1
 ```
 
+Phase 13 compatibility discovery does not convert v1 bundles or activations to
+v2. Runtime authors continue to use the frozen v1 SDK and `.cspkg` template;
+the Host exposes validated routes through a read-only `script-runtime/1`
+compatibility contribution. See
+[`docs/v1-compatibility-adapter.md`](docs/v1-compatibility-adapter.md) for the
+release checklist, compatibility matrix, and troubleshooting guide.
+
 The general platform identifiers are `candlescope.plugin/2` and
 `candlescope.host-api/1`. See
 [`docs/protocol-v2.md`](docs/protocol-v2.md) and the packaged

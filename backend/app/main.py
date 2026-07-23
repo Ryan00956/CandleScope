@@ -16,6 +16,7 @@ health endpoints, but data APIs report explicit service-unavailable errors.
 
 import asyncio
 import logging
+import os
 
 # ── Monkey-patch: websockets recv_messages bug ──────────────────
 # websockets ≥15 initializes ``recv_messages`` in ``connection_made``,
@@ -227,6 +228,8 @@ async def startup_event() -> None:
     from app.indicator.runtime_service import (
         build_indicator_runtime_service_from_environment,
     )
+    from app.plugin_compat_v1 import V1ScriptRuntimeCompatibilityBridge
+    from app.plugin_core_v2.bootstrap import default_platform_root
 
     plugin_runtime_host = None
     plugin_platform_v2 = None
@@ -250,6 +253,19 @@ async def startup_event() -> None:
             host_name=APP_NAME,
             host_version=PLUGIN_PLATFORM_V2_HOST_VERSION,
         )
+        v1_compatibility = V1ScriptRuntimeCompatibilityBridge(
+            root=getattr(
+                plugin_platform_v2,
+                "root",
+                default_platform_root(os.environ),
+            ),
+            indicator_source=indicator_runtime_service,
+            runtime_host=plugin_runtime_host,
+        )
+        indicator_runtime_service.bind_catalog_projector(
+            v1_compatibility.project_indicator_catalog
+        )
+        plugin_platform_v2.bind_v1_compatibility(v1_compatibility)
         plugin_platform_v2_guard = build_management_guard_from_environment(
             platform=plugin_platform_v2,
         )
@@ -262,6 +278,7 @@ async def startup_event() -> None:
         raise
     app.state.plugin_runtime_host = plugin_runtime_host
     app.state.indicator_runtime_service = indicator_runtime_service
+    app.state.plugin_v1_compatibility = v1_compatibility
     app.state.plugin_platform_v2 = plugin_platform_v2
     app.state.plugin_platform_v2_management_guard = plugin_platform_v2_guard
     plugin_summary = plugin_runtime_host.health_summary()

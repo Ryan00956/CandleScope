@@ -2,10 +2,11 @@ import type { PluginPlatformRuntime } from "./pluginPlatformTypes.js";
 
 export default function PluginPlatformToolbar({ runtime }: { runtime: PluginPlatformRuntime }) {
   const { catalog, registries, managementAvailable } = runtime.view;
-  if (!catalog?.platform.enabled) return null;
+  if (!catalog) return null;
+  if (!catalog.platform.enabled && catalog.compatibility.contributions.length === 0) return null;
   return (
     <div className="plugin-toolbar" data-plugin-slot="topToolbar">
-      {registries.topToolbar.map((command) => {
+      {catalog.platform.enabled && registries.topToolbar.map((command) => {
         const properties = command.configuration.inputSchema?.properties ?? {};
         const direct = Object.keys(properties).length === 0;
         return (
@@ -24,22 +25,22 @@ export default function PluginPlatformToolbar({ runtime }: { runtime: PluginPlat
           </button>
         );
       })}
-      {registries.commandPalette.length > 0 && (
+      {catalog.platform.enabled && registries.commandPalette.length > 0 && (
         <button type="button" data-plugin-command-palette onClick={runtime.actions.openPalette}>
           Commands
         </button>
       )}
-      {[...registries.sidePanel, ...registries.bottomPanel].map((view) => (
+      {catalog.platform.enabled && [...registries.sidePanel, ...registries.bottomPanel].map((view) => (
         <button type="button" key={view.id} data-plugin-view-button={view.id} onClick={() => runtime.actions.openView(view.id)}>
           {view.title}
         </button>
       ))}
-      {registries.settings.map((settings) => (
+      {catalog.platform.enabled && registries.settings.map((settings) => (
         <button type="button" key={settings.id} data-plugin-settings-button={settings.id} onClick={() => runtime.actions.openSettings(settings.id)}>
           {settings.title}
         </button>
       ))}
-      {runtime.view.liveControl.mode !== "disabled" && (
+      {catalog.platform.enabled && runtime.view.liveControl.mode !== "disabled" && (
         <button
           type="button"
           data-live-control-button

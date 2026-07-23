@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import locale
 import os
 import re
 import subprocess
@@ -374,7 +375,6 @@ def _grant_acl(path: Path, sid: str, permission: str) -> None:
             command,
             check=False,
             capture_output=True,
-            text=True,
             timeout=120,
             shell=False,
         )
@@ -391,7 +391,9 @@ def _grant_acl(path: Path, sid: str, permission: str) -> None:
             details={
                 "path": str(path),
                 "returnCode": completed.returncode,
-                "stderr": completed.stderr[-1_024:],
+                "stderr": completed.stderr[-4_096:].decode(
+                    locale.getencoding(), errors="replace"
+                )[-1_024:],
             },
         )
 

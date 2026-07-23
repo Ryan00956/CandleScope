@@ -18,6 +18,11 @@ v1 协议 ID：
 candlescope.script-runtime/1
 ```
 
+Phase 13 的统一发现不会把 v1 bundle/activation 转换成 v2。runtime 作者继续使用冻结的
+v1 SDK 和 `.cspkg` 模板，Host 只把已校验 route 暴露成只读
+`script-runtime/1` compatibility contribution。发布清单、兼容矩阵和故障排查见
+[`docs/v1-compatibility-adapter_zh.md`](docs/v1-compatibility-adapter_zh.md)。
+
 通用平台协议为 `candlescope.plugin/2` 与 `candlescope.host-api/1`。完整契约见
 [`docs/protocol-v2.md`](docs/protocol-v2.md)，可运行参考见
 [`Hello Command`](examples/platform-v2/hello-command.manifest.json) 和

@@ -1519,6 +1519,103 @@ async function waitForSelector(cdp, selector, timeoutMs = 5_000) {
   return false;
 }
 
+async function createDrawingEngineRequestGate(cdp) {
+  const heldRequestIds = new Set();
+  const continuationErrors = [];
+  let holding = true;
+  let disabled = false;
+
+  cdp.on("Fetch.requestPaused", (event) => {
+    if (!event?.requestId) return;
+    if (holding) {
+      heldRequestIds.add(event.requestId);
+      return;
+    }
+    void cdp.send("Fetch.continueRequest", { requestId: event.requestId })
+      .catch((error) => continuationErrors.push(String(error)));
+  });
+  await cdp.send("Fetch.enable", {
+    patterns: [{
+      requestStage: "Request",
+      urlPattern: "*DrawingEngineHost*",
+    }],
+  });
+
+  return {
+    async waitForHeldRequest(timeoutMs) {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        if (heldRequestIds.size > 0) return true;
+        await wait(25);
+      }
+      return false;
+    },
+    snapshot() {
+      return {
+        continuationErrors: [...continuationErrors],
+        heldRequestCount: heldRequestIds.size,
+      };
+    },
+    async release() {
+      if (disabled) return;
+      holding = false;
+      const requestIds = [...heldRequestIds];
+      heldRequestIds.clear();
+      await Promise.all(requestIds.map(async (requestId) => {
+        try {
+          await cdp.send("Fetch.continueRequest", { requestId });
+        } catch (error) {
+          continuationErrors.push(String(error));
+        }
+      }));
+      await cdp.send("Fetch.disable");
+      disabled = true;
+    },
+  };
+}
+
+async function verifyDrawingToolbarReadinessGate(cdp, requestGate, timeoutMs) {
+  const waitingToolbarPresent = await waitForSelector(
+    cdp,
+    '[data-drawing-toolbar-state="waiting-for-engine"]',
+    timeoutMs,
+  );
+  const drawingEngineRequestHeld = await requestGate.waitForHeldRequest(timeoutMs);
+  const stateResult = await cdp.send("Runtime.evaluate", {
+    expression: `({
+      activePenPresent: Boolean(document.querySelector('[data-drawing-tool="pen"].active')),
+      clickablePenPresent: Boolean(document.querySelector('.drawing-toolbar [data-drawing-tool="pen"]:not(:disabled)')),
+      disabledPenPresent: Boolean(document.querySelector('.drawing-toolbar [data-drawing-tool="pen"]:disabled')),
+      chartTypePresent: Boolean(document.querySelector('.drawing-toolbar [data-chart-type]')),
+      exportPresent: Boolean(document.querySelector('.drawing-toolbar [data-drawing-action="export"]')),
+      engineReady: Boolean(document.querySelector('[data-drawing-engine="ready"]'))
+    })`,
+    returnByValue: true,
+  });
+  const state = stateResult.result?.value ?? {};
+  const gateSnapshot = requestGate.snapshot();
+  return {
+    passed: waitingToolbarPresent
+      && drawingEngineRequestHeld
+      && state.clickablePenPresent !== true
+      && state.disabledPenPresent === true
+      && state.activePenPresent !== true
+      && state.chartTypePresent === true
+      && state.exportPresent === true
+      && state.engineReady !== true
+      && gateSnapshot.continuationErrors.length === 0,
+    waitingToolbarPresent,
+    drawingEngineRequestHeld,
+    clickablePenPresentWhileEngineBlocked: state.clickablePenPresent === true,
+    disabledPenPresentWhileEngineBlocked: state.disabledPenPresent === true,
+    activePenPresentWhileEngineBlocked: state.activePenPresent === true,
+    chartTypePresentWhileEngineBlocked: state.chartTypePresent === true,
+    exportPresentWhileEngineBlocked: state.exportPresent === true,
+    engineReadyWhileBlocked: state.engineReady === true,
+    ...gateSnapshot,
+  };
+}
+
 async function getRect(cdp, selector) {
   const result = await cdp.send("Runtime.evaluate", {
     expression: `(() => {
@@ -1910,23 +2007,22 @@ async function waitForSavedDrawingGeometryChange(
   return drawingPersistenceChangeEvidence(previousSnapshot, latestSnapshot);
 }
 
-async function verifyDrawingWorkflow(cdp, timeoutMs) {
+async function verifyDrawingWorkflow(cdp, timeoutMs, drawingToolbarGate = null) {
   const drawingKey = "binance:spot:BTCUSDT__main";
   const penButtonSelector = '[data-drawing-tool="pen"]';
   const lineButtonSelector = '[data-drawing-tool="line-segment"]';
   const cursorButtonSelector = '[data-drawing-tool="cursor"]';
   const chartSelector = '.chart-pane[data-pane-id="main"] .chart-pane-container, .chart-pane[data-pane-id="single-chart"]';
 
-  const penToolClicked = await clickSelector(cdp, penButtonSelector);
-  await wait(250);
-  const penActiveResult = await cdp.send("Runtime.evaluate", {
-    expression: `Boolean(document.querySelector(${JSON.stringify(`${penButtonSelector}.active`)}))`,
-    returnByValue: true,
-  });
-  const penToolActive = Boolean(penActiveResult.result?.value);
-  const drawingEngineReady = penToolActive
-    ? await waitForSelector(cdp, '[data-drawing-engine="ready"]')
-    : false;
+  const penToolAvailable = await waitForSelector(
+    cdp,
+    `.drawing-toolbar ${penButtonSelector}:not(:disabled)`,
+    timeoutMs,
+  );
+  let penToolClicked = false;
+  let penToolActive = false;
+  let drawingEngineMounted = false;
+  let drawingEngineReady = false;
 
   const rect = await getRect(cdp, chartSelector);
   let lineToolClicked = false;
@@ -1948,19 +2044,36 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
   let futureAnchorStored = false;
   let chartLastTime = null;
 
-  if (rect && penToolActive && drawingEngineReady) {
+  if (rect && penToolAvailable) {
     chartLastTime = await readLatestChartLastTime(cdp);
     const initialSnapshot = await readDrawingCreationSnapshot(cdp, drawingKey);
     const penPoints = Array.from({ length: 64 }, (_, index) => ({
       x: Math.round(rect.x + rect.width * (0.23 + index * 0.0018)),
       y: Math.round(rect.y + rect.height * (0.62 + Math.sin(index * 0.28) * 0.035)),
     }));
-    await dispatchFreehandStroke(cdp, penPoints);
+    const toolClickStartedAtMs = Date.now();
+    penToolClicked = await clickSelector(cdp, penButtonSelector);
+    const gestureStartedAtMs = Date.now();
+    if (penToolClicked) await dispatchFreehandStroke(cdp, penPoints);
     const afterPenSnapshot = await waitForDrawingCreationSnapshotCount(
       cdp,
       drawingKey,
       initialSnapshot.savedDrawingCount + 1,
     );
+    const penActiveResult = await cdp.send("Runtime.evaluate", {
+      expression: `Boolean(document.querySelector(${JSON.stringify(`${penButtonSelector}.active`)}))`,
+      returnByValue: true,
+    });
+    penToolActive = Boolean(penActiveResult.result?.value);
+    const drawingEngineStateResult = await cdp.send("Runtime.evaluate", {
+      expression: `({
+        mounted: Boolean(document.querySelector("[data-drawing-engine]")),
+        ready: Boolean(document.querySelector('[data-drawing-engine="ready"]'))
+      })`,
+      returnByValue: true,
+    });
+    drawingEngineMounted = Boolean(drawingEngineStateResult.result?.value?.mounted);
+    drawingEngineReady = Boolean(drawingEngineStateResult.result?.value?.ready);
     const initialSavedIds = new Set(initialSnapshot.savedDrawings.map((drawing) => drawing.id));
     const initialEntityIds = new Set(initialSnapshot.entities.map((entity) => entity.id));
     const addedPenSaved = afterPenSnapshot.savedDrawings.filter(
@@ -1986,6 +2099,10 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
     drawingPenCreation = {
       passed: penCountsAdvanced && penKindsMatched && penDrawingId !== null,
       drawingId: penDrawingId,
+      activationToGestureMs: gestureStartedAtMs - toolClickStartedAtMs,
+      immediateAfterToolActivation: gestureStartedAtMs - toolClickStartedAtMs < 100,
+      scenePublicationReadyBeforeGesture:
+        initialSnapshot.runtimeSummary?.scenePublicationReady === true,
       countsAdvanced: penCountsAdvanced,
       kindsMatched: penKindsMatched,
       before: initialSnapshot,
@@ -1993,7 +2110,6 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
     };
 
     lineToolClicked = await clickSelector(cdp, lineButtonSelector);
-    await wait(250);
     lineToolActive = lineToolClicked
       && await waitForSelector(cdp, `${lineButtonSelector}.active`);
 
@@ -2167,6 +2283,8 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
     drawingLineToolActive: lineToolActive,
     drawingLineToolStayedActive: lineToolStayedActive,
     drawingEngineReady,
+    drawingEngineMounted,
+    drawingToolbarGate,
     drawingChartRectFound: Boolean(rect),
     drawingPenCreation,
     drawingTwoClickCreation,
@@ -2236,6 +2354,7 @@ async function main() {
   const requestUrls = new Map();
   let cdp;
   let indicatorRangeNetworkCapture;
+  let drawingEngineRequestGate;
 
   try {
     await waitForDevTools(debugBase);
@@ -2296,6 +2415,9 @@ async function main() {
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable", INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS);
     await cdp.send("Page.enable");
+    if (args.drawingCheck) {
+      drawingEngineRequestGate = await createDrawingEngineRequestGate(cdp);
+    }
     if (args.exportMatrix) {
       await cdp.send("Browser.setDownloadBehavior", {
         behavior: "allow",
@@ -2335,7 +2457,39 @@ async function main() {
     });
     await cdp.send("Page.navigate", { url: args.url });
 
-    const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
+    const chartReadyPromise = waitForChartReady(cdp, args.timeoutMs);
+    let drawingWorkflowPromise = null;
+    if (drawingEngineRequestGate) {
+      const drawingToolbarGate = await verifyDrawingToolbarReadinessGate(
+        cdp,
+        drawingEngineRequestGate,
+        args.timeoutMs,
+      );
+      await drawingEngineRequestGate.release();
+      drawingWorkflowPromise = args.seedIndicators
+        ? (async () => {
+            // The no-seed drawing smoke exercises the first interactive frame.
+            // With seeded indicators, let native pane materialization settle so
+            // later selection/drag coordinates are measured against one layout.
+            await chartReadyPromise;
+            await waitForSeededIndicatorReport(cdp, args);
+            await indicatorRangeNetworkCapture.waitForIdle({
+              quietMs: 500,
+              timeoutMs: Math.min(args.timeoutMs, 10_000),
+            });
+            await waitForAnimationFrames(cdp, 2);
+            return verifyDrawingWorkflow(cdp, args.timeoutMs, drawingToolbarGate);
+          })()
+        : verifyDrawingWorkflow(
+            cdp,
+            args.timeoutMs,
+            drawingToolbarGate,
+          );
+    }
+    const { bodyText, loadedAt } = await chartReadyPromise;
+    const drawingWorkflow = drawingWorkflowPromise
+      ? await drawingWorkflowPromise
+      : null;
     const advancedMarket = args.marketType === "futures"
       ? await verifyAdvancedMarketStudyWorkflow(cdp, Math.min(args.timeoutMs, 15_000))
       : {
@@ -2364,7 +2518,6 @@ async function main() {
       shortSwitch = await runShortSwitchAcceptance(cdp, indicatorRangeNetworkCapture, args);
       indicatorRangeNetworkCapture.startPhase("post-short-switch");
     }
-    const drawingWorkflow = args.drawingCheck ? await verifyDrawingWorkflow(cdp, args.timeoutMs) : null;
     // drawingWorkflow reloads the page after persistence verification. Chart
     // readiness covers bars/connectivity only; seeded indicator series and
     // their native pane layout restore asynchronously after that boundary.
@@ -2422,6 +2575,12 @@ async function main() {
     const screenshotData = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
     fs.writeFileSync(screenshot, Buffer.from(screenshotData.data, "base64"));
 
+    const criticalConsoleWarnings = warnings.filter(({ text }) => (
+      text.includes("Maximum update depth exceeded")
+      || text.includes("Drawing document-only scene failed closed")
+      || text.includes("Drawing scene runtime failed after the fallback boundary")
+      || text.includes("drawing scene publication was rejected by the current surface")
+    ));
     const report = {
       url: args.url,
       loadedAtMs: loadedAt,
@@ -2457,6 +2616,7 @@ async function main() {
       failedApiResponses: failedApiResponses.slice(0, 20),
       failures,
       warnings: warnings.slice(0, 20),
+      criticalConsoleWarnings: criticalConsoleWarnings.slice(0, 20),
       exceptions: exceptions.slice(0, 20),
       screenshot,
       seededIndicators: args.seedIndicators,
@@ -2480,14 +2640,17 @@ async function main() {
       || !report.symbolSearchOpened
       || !report.settingsOpened
       || (args.drawingCheck && (
-        !drawingWorkflow?.drawingPenToolClicked
+        !drawingWorkflow?.drawingToolbarGate?.passed
+        || !drawingWorkflow?.drawingPenToolClicked
         || !drawingWorkflow?.drawingPenToolActive
         || !drawingWorkflow?.drawingPenCreation?.passed
+        || !drawingWorkflow?.drawingPenCreation?.immediateAfterToolActivation
         || !drawingWorkflow?.drawingLineToolClicked
         || !drawingWorkflow?.drawingLineToolActive
         || !drawingWorkflow?.drawingLineToolStayedActive
         || !drawingWorkflow?.drawingTwoClickCreation?.passed
         || !drawingWorkflow?.drawingEngineReady
+        || !drawingWorkflow?.drawingEngineMounted
         || !drawingWorkflow?.drawingChartRectFound
         || drawingWorkflow?.drawingPersistedCount
           !== drawingWorkflow?.drawingTwoClickCreation?.consecutiveSegment
@@ -2512,11 +2675,20 @@ async function main() {
       || (args.shortSwitch && !shortSwitch?.acceptance?.passed)
       || (args.chartTypeMatrix && !chartTypeMatrix?.passed)
       || (args.exportMatrix && !exportMatrix?.passed)
+      || criticalConsoleWarnings.length > 0
       || exceptions.length > 0
       || failedApiResponses.length > 0
       || failures.length > 0;
     process.exitCode = failed ? 1 : 0;
   } finally {
+    if (drawingEngineRequestGate) {
+      try {
+        await drawingEngineRequestGate.release();
+      } catch {
+        // Browser/process cleanup below is the final fallback for a broken
+        // interception session.
+      }
+    }
     if (cdp) cdp.close();
     await stopProcess(chrome);
     await removeDirectoryWithRetries(userDataDir);

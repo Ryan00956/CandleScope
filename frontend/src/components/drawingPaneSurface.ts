@@ -28,6 +28,66 @@ export function drawingPaneIdAfterPointerLeave(
   return drawingToolActive ? currentPaneId : null;
 }
 
+/** Admit only the pane that can receive the next drawing pointer gesture. */
+export function drawingPaneWarmMountKeys({
+  dataReady,
+  interactionDrawingKey,
+  loading,
+}: Readonly<{
+  dataReady: boolean;
+  interactionDrawingKey: string | null;
+  loading: boolean;
+}>): ReadonlySet<string> {
+  return !loading && dataReady && interactionDrawingKey
+    ? new Set([interactionDrawingKey])
+    : new Set();
+}
+
+export function isDrawingInteractionReady({
+  interactionDrawingKey,
+  registeredKeys,
+  surfaceDataReady,
+  supportsDrawingFeatures,
+}: Readonly<{
+  interactionDrawingKey: string | null;
+  registeredKeys: ReadonlySet<string>;
+  surfaceDataReady: boolean;
+  supportsDrawingFeatures: boolean;
+}>): boolean {
+  return !supportsDrawingFeatures || Boolean(
+    surfaceDataReady
+    && interactionDrawingKey
+    && registeredKeys.has(interactionDrawingKey),
+  );
+}
+
+/** Ignore a late cleanup from an older host that reused the same pane/key. */
+export function ownsDrawingApiRegistrationCleanup<T>({
+  cleanupApi,
+  cleanupKey,
+  currentApi,
+  currentKey,
+}: Readonly<{
+  cleanupApi: T | null;
+  cleanupKey: string;
+  currentApi: T | null;
+  currentKey: string | null;
+}>): boolean {
+  return currentKey === cleanupKey
+    && cleanupApi !== null
+    && currentApi === cleanupApi;
+}
+
+export function reconcileRegisteredDrawingPaneMountKeys(
+  previous: ReadonlySet<string>,
+  currentKeys: Iterable<string>,
+): ReadonlySet<string> {
+  const next = new Set(currentKeys);
+  if (next.size === previous.size
+    && [...next].every((key) => previous.has(key))) return previous;
+  return next;
+}
+
 /** Route engine tools to one host; passive cursor tools have no exclusive owner. */
 export function drawingToolForPane<T>(
   tool: T | null,

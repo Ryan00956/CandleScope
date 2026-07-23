@@ -2,9 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildChartWorkspaceViewModel } from "../chartWorkspaceViewModel.js";
+import { drawingToolWhenInteractionReady } from "../../drawingInteractionReadiness.js";
 import { mustBeDefined, structuralMock } from "../../../test/testHelpers.js";
 
 type WorkspaceContext = Parameters<typeof buildChartWorkspaceViewModel>[0];
+
+test("drawing engine tools stay inactive until pane pointer listeners are ready", () => {
+  assert.equal(drawingToolWhenInteractionReady("pen", false), null);
+  assert.equal(drawingToolWhenInteractionReady("line-segment", false), null);
+  assert.equal(drawingToolWhenInteractionReady("pen", true), "pen");
+  assert.equal(drawingToolWhenInteractionReady("cursor-crosshair", false), "cursor-crosshair");
+  assert.equal(drawingToolWhenInteractionReady(null, false), null);
+});
 
 interface ContextOverrides {
   advancedMarketActions?: object;

@@ -45,6 +45,7 @@ import {
   canRecoverDrawingVisibleSceneInPlace,
   isDrawingVisibleScenePublicationReady,
   prepareDrawingMutationScope,
+  prepareDrawingMutationScopeWithSynchronousRecovery,
   restorePrePresentationHiddenDrawingSceneRuntime,
 } from "../useDrawingPersistenceLifecycle.js";
 import type { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
@@ -876,6 +877,75 @@ test("scene-canary mutation readiness waits for an accepted current-surface publ
     surfaceScope: "BTCUSDT",
   }, () => { retries += 1; }), false);
   assert.equal(retries, 1);
+});
+
+test("current-scope first publication is synchronously recovered without losing pointerdown", () => {
+  let ready = false;
+  const calls: string[] = [];
+  const readState = () => ({
+    activeScope: "BTCUSDT",
+    hasSeries: true,
+    previousScope: "BTCUSDT",
+    ready,
+    requestedScope: "BTCUSDT",
+    surfaceScope: "BTCUSDT",
+  });
+
+  assert.equal(prepareDrawingMutationScopeWithSynchronousRecovery({
+    canRecoverCurrentScope: () => true,
+    flushCurrentSurface() {
+      calls.push("flush");
+      ready = true;
+      return true;
+    },
+    readState,
+    requestRetry() {
+      calls.push("retry");
+    },
+  }), true);
+  assert.deepEqual(calls, ["retry", "flush"]);
+});
+
+test("synchronous publication recovery never crosses a stale drawing scope", () => {
+  let flushed = 0;
+  assert.equal(prepareDrawingMutationScopeWithSynchronousRecovery({
+    canRecoverCurrentScope: () => true,
+    flushCurrentSurface() {
+      flushed += 1;
+      return true;
+    },
+    readState: () => ({
+      activeScope: "BTCUSDT",
+      hasSeries: true,
+      previousScope: "BTCUSDT",
+      ready: false,
+      requestedScope: "ETHUSDT",
+      surfaceScope: "BTCUSDT",
+    }),
+    requestRetry() {},
+  }), false);
+  assert.equal(flushed, 0);
+});
+
+test("synchronous publication recovery revalidates instead of trusting flush success", () => {
+  let reads = 0;
+  assert.equal(prepareDrawingMutationScopeWithSynchronousRecovery({
+    canRecoverCurrentScope: () => true,
+    flushCurrentSurface: () => true,
+    readState: () => {
+      reads += 1;
+      return {
+        activeScope: "BTCUSDT",
+        hasSeries: true,
+        previousScope: "BTCUSDT",
+        ready: false,
+        requestedScope: "BTCUSDT",
+        surfaceScope: "BTCUSDT",
+      };
+    },
+    requestRetry() {},
+  }), false);
+  assert.ok(reads >= 3);
 });
 
 test("only a post-boundary current-surface plan qualifies for in-place recovery", () => {

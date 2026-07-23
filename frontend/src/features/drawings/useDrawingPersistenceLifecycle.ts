@@ -663,6 +663,35 @@ export function prepareDrawingMutationScope(
   return ready;
 }
 
+/**
+ * A current-scope pointerdown must not be discarded merely because the first
+ * visible scene publication is still queued. Retry, synchronously publish the
+ * same validated surface, then re-read every scope credential before admitting
+ * the original event. Scope/series transitions remain fail closed.
+ */
+export function prepareDrawingMutationScopeWithSynchronousRecovery({
+  canRecoverCurrentScope,
+  flushCurrentSurface,
+  readState,
+  requestRetry,
+}: Readonly<{
+  canRecoverCurrentScope(): boolean;
+  flushCurrentSurface(): boolean;
+  readState(): DrawingMutationScopeState;
+  requestRetry(): void;
+}>): boolean {
+  let state = readState();
+  if (isDrawingMutationScopeReady(state)) return true;
+
+  requestRetry();
+  state = readState();
+  if (isDrawingMutationScopeReady(state)) return true;
+  if (!canRecoverCurrentScope()
+    || !isDrawingMutationScopeReady({ ...state, ready: true })) return false;
+  if (!flushCurrentSurface()) return false;
+  return isDrawingMutationScopeReady(readState());
+}
+
 export interface DrawingSceneHiddenTransitionOptions {
   /** Keep the scene binding alive long enough to publish an exact empty plan for export. */
   readonly exactExport?: boolean;
@@ -1573,7 +1602,7 @@ export function useDrawingPersistenceLifecycle({
     return sceneBridge.subscribePainted(listener);
   }, [sceneBridge]);
 
-  const prepareUserMutationScope = useCallback((): boolean => {
+  const readUserMutationScopeState = useCallback((): DrawingMutationScopeState => {
     const adapter = adapterGetterRef.current();
     const activeScope = authorityMode === "document"
       ? activeStoreRef.current.getSnapshot().scopeKey
@@ -1590,14 +1619,25 @@ export function useDrawingPersistenceLifecycle({
       sceneCanaryEnabled: engineMode.effective === "scene-canary"
         && sceneCanaryEnabledRef.current,
     });
-    const prepared = prepareDrawingMutationScope({
+    return {
       activeScope,
       hasSeries: adapter?.hasSeries?.() === true,
       previousScope: prevSymbolRef.current,
       ready: scopeReadyRef.current && scenePublicationReady,
       requestedScope: requestedScopeRef.current,
       surfaceScope: symbolRef.current,
-    }, requestScopeRetry);
+    };
+  }, [authorityMode, engineMode.effective, prevSymbolRef, sceneBridge, sceneRuntime, symbolRef]);
+
+  const prepareUserMutationScope = useCallback((): boolean => {
+    const prepared = prepareDrawingMutationScopeWithSynchronousRecovery({
+      canRecoverCurrentScope: () => scopeReadyRef.current,
+      flushCurrentSurface: () => (
+        sceneRuntime.flushMutationAdmission?.() ?? sceneRuntime.flushNow()
+      ),
+      readState: readUserMutationScopeState,
+      requestRetry: requestScopeRetry,
+    });
     // Close the fallback latch before a controller can mutate a detached
     // interaction proxy. This is intentionally conservative for selection and
     // visibility actions: after the first accepted user action, runtime faults
@@ -1605,7 +1645,7 @@ export function useDrawingPersistenceLifecycle({
     if (prepared && engineMode.effective === "scene-canary"
       && sceneCanaryEnabledRef.current) mutationStartedRef.current = true;
     return prepared;
-  }, [authorityMode, engineMode.effective, prevSymbolRef, requestScopeRetry, sceneBridge, sceneRuntime, symbolRef]);
+  }, [engineMode.effective, readUserMutationScopeState, requestScopeRetry, sceneRuntime]);
 
   // Scope transitions must be able to finish the old gesture against the old
   // store even after React has requested a new symbol. This path is private to

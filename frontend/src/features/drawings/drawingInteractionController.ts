@@ -19,7 +19,13 @@
  *   - Double-click text to edit
  *   - Clear all drawings
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
 import { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
@@ -1492,6 +1498,14 @@ export function useDrawing({
   const primitivesRef = useRef<DrawingPrimitive[]>([]); // (LineDrawingPrimitive | FreehandDrawingPrimitive | TextDrawingPrimitive)[]
   const savedDrawingGetterRef = useRef<(id: string) => SavedDrawing | null>(() => null);
   const sceneScreenBoxGetterRef = useRef<(id: string) => ScreenBox | null>(() => null);
+  const getSavedDrawingForSelection = useCallback(
+    (id: string) => savedDrawingGetterRef.current(id),
+    [],
+  );
+  const getScreenBoxForSelection = useCallback(
+    (id: string) => sceneScreenBoxGetterRef.current(id),
+    [],
+  );
 
   // ── Visibility toggle (hide all without deleting) ──
   const hiddenRef = useRef(false);
@@ -1520,8 +1534,8 @@ export function useDrawing({
     refreshSelectedTextUi,
   } = useDrawingSelection({
     primitivesRef,
-    getSavedDrawingById: (id) => savedDrawingGetterRef.current(id),
-    getScreenBoxById: (id) => sceneScreenBoxGetterRef.current(id),
+    getSavedDrawingById: getSavedDrawingForSelection,
+    getScreenBoxById: getScreenBoxForSelection,
     ...(interactionSurfaceMode === "overlay"
       ? { mutatePrimitiveVisualState: false }
       : { onSelectionChange: notifyDrawingSceneInvalidation }),

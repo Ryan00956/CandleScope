@@ -22,6 +22,7 @@ import {
   fundingRateSampleTimeMs,
   fundingRateTargetTimeMs,
   isFundingRateHistory,
+  isFundingRateRealtime,
   isFundingRateRealtimeUsable,
 } from "./fundingRateSemantics.js";
 
@@ -178,6 +179,29 @@ function formatFundingValue(value: number): string {
   return `${sign}${value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}%`;
 }
 
+export function resolveNextFundingSettlementTimeMs(
+  metrics: Pick<FundingMetricsInput, "fundingRealtimeHistory" | "fundingPreview">,
+  nowMs: number,
+): number | null {
+  const candidates = metrics.fundingPreview
+    ? [metrics.fundingPreview, ...[...metrics.fundingRealtimeHistory].reverse()]
+    : [...metrics.fundingRealtimeHistory].reverse();
+  for (const record of candidates) {
+    if (!isFundingRateRealtime(record)) continue;
+    const targetTimeMs = fundingRateTargetTimeMs(record);
+    if (targetTimeMs !== null && targetTimeMs > nowMs) return targetTimeMs;
+  }
+  return null;
+}
+
+function formatMarketMetricValue(value: number): string {
+  const absolute = Math.abs(value);
+  if (absolute >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
+  if (absolute >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (absolute >= 1_000) return `${(value / 1_000).toFixed(2)}K`;
+  return value.toFixed(3).replace(/\.?0+$/, "");
+}
+
 function formatFundingTime(value: unknown): string | null {
   const timeMs = finiteNumber(value);
   if (timeMs === null) return null;
@@ -246,6 +270,25 @@ function fundingPointMetadata(
     qualityLabel,
     appearance: fundingAppearance(record, carried, stale),
     accessibilityLabel: `资金费率 ${valueLabel}，${details.join("，")}`,
+  };
+}
+
+function openInterestPointMetadata(
+  record: MarketStateRecord,
+  point: IndicatorValuePoint,
+): IndicatorPanePointMetadata {
+  const provisional = record.data.is_final === false || record.data.sample_kind === "provisional";
+  const sourceLabel = provisional ? "交易所实时" : "交易所历史";
+  const qualityLabel = provisional ? "临时值" : isFinal(record) ? "最终值" : "历史观测";
+  const valueLabel = formatMarketMetricValue(point.value);
+  return {
+    time: point.time,
+    value: point.value,
+    valueLabel,
+    sourceLabel,
+    qualityLabel,
+    appearance: provisional ? "realtime" : "solid",
+    accessibilityLabel: `Open Interest ${valueLabel}，来源：${sourceLabel}，状态：${qualityLabel}`,
   };
 }
 
@@ -483,7 +526,7 @@ export function resolveOpenInterestPeriod(interval: unknown): string {
   return selected.period;
 }
 
-export function projectMetricRecordsToCandles(
+function projectMetricRecordCandidates(
   records: readonly MarketStateRecord[],
   bars: readonly KlineBar[],
   {
@@ -491,7 +534,7 @@ export function projectMetricRecordsToCandles(
     transform = (value) => value,
     finalWins = false,
   }: MetricProjectionOptions,
-): IndicatorValuePoint[] {
+): ProjectedCandidate[] {
   if (records.length === 0 || bars.length === 0) return [];
   const sortedBars = sortedIfNeeded(bars, (a, b) => a.time - b.time);
   const sortedRecords = sortedIfNeeded(records, (a, b) => (
@@ -540,7 +583,15 @@ export function projectMetricRecordsToCandles(
   // is already chart-time order.  Returning the unique candidates avoids both
   // the old O(k log k) sort and duplicate output when an upstream bar array
   // contains a repeated timestamp.
-  return Array.from(candidates.values(), ({ point }) => point);
+  return Array.from(candidates.values());
+}
+
+export function projectMetricRecordsToCandles(
+  records: readonly MarketStateRecord[],
+  bars: readonly KlineBar[],
+  options: MetricProjectionOptions,
+): IndicatorValuePoint[] {
+  return projectMetricRecordCandidates(records, bars, options).map(({ point }) => point);
 }
 
 export function buildFundingRatePane(
@@ -562,6 +613,7 @@ export function buildFundingRatePaneFromHistoryProjection(
   nowMs: number = Date.now(),
 ): IndicatorSubPane {
   const fundingProjection = mergeFundingProjection(history, metrics, nowMs);
+  const nextSettlementTimeMs = resolveNextFundingSettlementTimeMs(metrics, nowMs);
   const fundingLine: IndicatorLine = {
     id: "advanced-funding-rate-line",
     indicatorId: "advanced-market-data",
@@ -580,6 +632,12 @@ export function buildFundingRatePaneFromHistoryProjection(
     dataMarketPane: "funding-rate",
     legendItems: FUNDING_RATE_LEGEND,
     pointMetadata: fundingProjection.metadata,
+    ...(nextSettlementTimeMs === null ? {} : {
+      liveCountdown: {
+        label: "下次结算",
+        targetTimeMs: nextSettlementTimeMs,
+      },
+    }),
   };
 }
 
@@ -589,6 +647,13 @@ export function buildOpenInterestPane(
 ): IndicatorSubPane {
   const sortedBars = sortedIfNeeded(bars, (left, right) => left.time - right.time);
   const tailBar = sortedBars.at(-1);
+  const projected = projectMetricRecordCandidates(metrics.openInterestHistory, sortedBars, {
+    valueField: "open_interest",
+    finalWins: true,
+  });
+  const pointMetadataByTime = new Map(
+    projected.map(({ point, record }) => [point.time, openInterestPointMetadata(record, point)]),
+  );
   const openInterestLine: IndicatorLine = {
     id: "advanced-open-interest-line",
     indicatorId: "advanced-market-data",
@@ -597,10 +662,7 @@ export function buildOpenInterestPane(
     type: "line",
     color: "#60a5fa",
     lineWidth: 2,
-    data: projectMetricRecordsToCandles(metrics.openInterestHistory, sortedBars, {
-      valueField: "open_interest",
-      finalWins: true,
-    }),
+    data: projected.map(({ point }) => point),
   };
   let latestProvisionalOpenInterest: MarketStateRecord | undefined;
   for (let index = metrics.openInterestHistory.length - 1; index >= 0; index -= 1) {
@@ -618,6 +680,12 @@ export function buildOpenInterestPane(
     const previewPoint = { time: tailBar.time, value: provisionalOpenInterestValue };
     if (existingIndex >= 0) openInterestLine.data[existingIndex] = previewPoint;
     else openInterestLine.data.push(previewPoint);
+    if (latestProvisionalOpenInterest) {
+      pointMetadataByTime.set(
+        previewPoint.time,
+        openInterestPointMetadata(latestProvisionalOpenInterest, previewPoint),
+      );
+    }
   }
   return {
     id: "advanced-open-interest",
@@ -625,6 +693,9 @@ export function buildOpenInterestPane(
     lines: [openInterestLine],
     owner: { kind: "market-study", id: "market:open-interest" },
     dataMarketPane: "open-interest",
+    pointMetadata: [...pointMetadataByTime.values()].sort((left, right) => left.time - right.time),
+    pointMetadataFallback: "none",
+    missingPointText: "当前 K 线没有未平仓量观测",
   };
 }
 

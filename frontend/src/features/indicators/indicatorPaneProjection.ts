@@ -18,6 +18,11 @@ export interface IndicatorPanePointMetadata {
   accessibilityLabel: string;
 }
 
+export interface IndicatorPaneLiveCountdown {
+  label: string;
+  targetTimeMs: number;
+}
+
 export interface IndicatorSubPane {
   id: string;
   label: string;
@@ -34,6 +39,7 @@ export interface IndicatorSubPane {
     | "order-flow-delta";
   legendItems?: readonly IndicatorPaneLegendItem[];
   pointMetadata?: readonly IndicatorPanePointMetadata[];
+  liveCountdown?: IndicatorPaneLiveCountdown;
   pointMetadataFallback?: "latest" | "none";
   missingPointText?: string;
   statusText?: string | null;

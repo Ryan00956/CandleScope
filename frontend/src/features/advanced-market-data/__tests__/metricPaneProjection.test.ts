@@ -6,6 +6,7 @@ import {
   buildFundingRateHistoryProjection,
   buildFundingRatePaneFromHistoryProjection,
   projectMetricRecordsToCandles,
+  resolveNextFundingSettlementTimeMs,
   resolveOpenInterestPeriod,
 } from "../metricPaneProjection.js";
 import type {
@@ -117,6 +118,16 @@ test("final OI wins its as-of bucket and latest provisional OI covers the formin
     { time: epochSeconds(540), value: 30 },
   ]);
   assert.equal(panes[1]?.dataMarketPane, "open-interest");
+  assert.deepEqual(panes[1]?.pointMetadata?.map((point) => [
+    point.time,
+    point.value,
+    point.sourceLabel,
+    point.qualityLabel,
+  ]), [
+    [epochSeconds(360), 20, "交易所历史", "最终值"],
+    [epochSeconds(540), 30, "交易所实时", "临时值"],
+  ]);
+  assert.equal(panes[1]?.pointMetadataFallback, "none");
 });
 
 test("funding settlement is as-of aligned while preview overwrites only current tail", () => {
@@ -148,6 +159,46 @@ test("funding settlement is as-of aligned while preview overwrites only current 
     { time: epochSeconds(540), value: -0.02, color: "#fb7185" },
   ]);
   assert.equal(panes[0]?.dataMarketPane, "funding-rate");
+});
+
+test("funding countdown uses the current realtime target and disappears at settlement", () => {
+  const olderRealtime = record("funding_rate", 1_000, {
+    funding_rate: 0.0001,
+    observed_at_ms: 1_000,
+    next_funding_time_ms: 8_000,
+    sample_kind: "preview",
+  });
+  const preview = record("funding_rate", 2_000, {
+    funding_rate: 0.0002,
+    observed_at_ms: 2_000,
+    next_funding_time_ms: 10_000,
+    sample_kind: "preview",
+  });
+  const realtime = {
+    fundingRealtimeHistory: [olderRealtime, preview],
+    fundingPreview: preview,
+  };
+
+  assert.equal(resolveNextFundingSettlementTimeMs(realtime, 3_000), 10_000);
+  assert.equal(resolveNextFundingSettlementTimeMs(realtime, 10_000), null);
+  const pane = buildFundingRatePaneFromHistoryProjection({
+    bars: BARS,
+    intervalSeconds: 180,
+    points: [],
+    metadata: [],
+    settlementTimes: new Set(),
+  }, realtime, 3_000);
+  assert.deepEqual(pane.liveCountdown, {
+    label: "下次结算",
+    targetTimeMs: 10_000,
+  });
+  assert.equal(buildFundingRatePaneFromHistoryProjection({
+    bars: BARS,
+    intervalSeconds: 180,
+    points: [],
+    metadata: [],
+    settlementTimes: new Set(),
+  }, realtime, 10_000).liveCountdown, undefined);
 });
 
 test("funding hybrid trajectory is dense, source-aware, carried as-of, and settlement wins", () => {

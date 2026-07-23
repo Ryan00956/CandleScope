@@ -7823,6 +7823,7 @@ body {
 
 .advanced-market-pane-label[data-pane-collapsed='true'] .advanced-market-pane-value,
 .advanced-market-pane-label[data-pane-collapsed='true'] .advanced-market-pane-status,
+.advanced-market-pane-label[data-pane-collapsed='true'] .advanced-market-pane-countdown,
 .advanced-market-pane-label[data-pane-collapsed='true'] .advanced-market-pane-legend {
   display: none;
 }
@@ -7868,6 +7869,21 @@ body {
 .advanced-market-pane-source {
   color: var(--text-muted);
   font-weight: 500;
+}
+
+.advanced-market-pane-countdown {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.advanced-market-pane-countdown strong {
+  color: #fbbf24;
+  font-weight: 700;
 }
 
 .advanced-market-pane-legend {

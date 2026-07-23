@@ -1,4 +1,7 @@
-import type { IndicatorSubPane } from "../indicators/indicatorPaneProjection.js";
+import type {
+  IndicatorPanePointMetadata,
+  IndicatorSubPane,
+} from "../indicators/indicatorPaneProjection.js";
 import type { IndicatorValuePoint } from "../indicators/indicatorTypes.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import { createIntervalTimeline, type IntervalTimeline } from "../../utils/intervalTimeline.js";
@@ -174,9 +177,26 @@ function formatValue(value: number): string {
   return value.toFixed(3).replace(/\.?0+$/, "");
 }
 
+function orderFlowPointMetadata(
+  points: readonly IndicatorValuePoint[],
+  label: string,
+  qualityLabel: string,
+): IndicatorPanePointMetadata[] {
+  return points.map((point) => {
+    const valueLabel = formatValue(point.value);
+    return {
+      time: point.time,
+      value: point.value,
+      valueLabel,
+      sourceLabel: "K线代理",
+      qualityLabel,
+      appearance: "estimated",
+      accessibilityLabel: `${label} ${valueLabel}`,
+    };
+  });
+}
+
 function panes(state: ProjectionState): readonly IndicatorSubPane[] {
-  const latestCvd = state.cvd.at(-1);
-  const latestDelta = state.delta.at(-1);
   const hasGap = state.missing > 0 || state.discontinuities > 0;
   const coverageParts = [
     "K线代理",
@@ -207,16 +227,12 @@ function panes(state: ProjectionState): readonly IndicatorSubPane[] {
         description: "K线 taker volume 的连续前缀和；不是全历史绝对值",
         color: CVD_COLOR,
       }],
-      pointMetadata: latestCvd ? [{
-        time: latestCvd.time,
-        value: latestCvd.value,
-        valueLabel: formatValue(latestCvd.value),
-        sourceLabel: "K线代理",
-        qualityLabel: hasGap ? "最近连续段锚定 0" : "窗口锚定 0",
-        appearance: "estimated",
-        accessibilityLabel: `CVD ${formatValue(latestCvd.value)}`,
-      }] : [],
-      pointMetadataFallback: "latest",
+      pointMetadata: orderFlowPointMetadata(
+        state.cvd,
+        "CVD",
+        hasGap ? "最近连续段锚定 0" : "窗口锚定 0",
+      ),
+      pointMetadataFallback: "none",
       missingPointText: "当前 K 线源不提供可信订单流字段",
       statusText: coverage,
     },
@@ -253,16 +269,8 @@ function panes(state: ProjectionState): readonly IndicatorSubPane[] {
         { id: "buy", label: "主动买", appearance: "estimated", description: "Taker buy base volume", color: BUY_COLOR },
         { id: "sell", label: "主动卖", appearance: "estimated", description: "Taker sell base volume（图中为负轴）", color: SELL_COLOR },
       ],
-      pointMetadata: latestDelta ? [{
-        time: latestDelta.time,
-        value: latestDelta.value,
-        valueLabel: formatValue(latestDelta.value),
-        sourceLabel: "K线代理",
-        qualityLabel: "单根 K 线",
-        appearance: "estimated",
-        accessibilityLabel: `Volume Delta ${formatValue(latestDelta.value)}`,
-      }] : [],
-      pointMetadataFallback: "latest",
+      pointMetadata: orderFlowPointMetadata(state.delta, "Volume Delta", "单根 K 线"),
+      pointMetadataFallback: "none",
       missingPointText: "当前 K 线源不提供可信订单流字段",
       statusText: coverage,
     },

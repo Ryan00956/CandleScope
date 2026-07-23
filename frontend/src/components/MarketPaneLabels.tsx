@@ -1,8 +1,13 @@
-import { memo, useMemo, useSyncExternalStore } from "react";
+import { memo, useCallback, useMemo, useSyncExternalStore } from "react";
 import type {
   IndicatorPanePointMetadata,
   IndicatorSubPane,
 } from "../features/indicators/indicatorPaneProjection.js";
+import {
+  formatLiveCountdown,
+  getLiveCountdownNowMs,
+  subscribeLiveCountdown,
+} from "./liveCountdown.js";
 import type { PaneCrosshairStore } from "./paneCrosshairStore.js";
 
 interface MarketPaneLabelsProps {
@@ -45,6 +50,28 @@ const MarketPaneLabel = memo(function MarketPaneLabel({
     : crosshairTime !== null
       ? pane.missingPointText ?? pane.statusText ?? null
       : pane.statusText ?? null;
+  const countdownTargetTimeMs = pane.liveCountdown?.targetTimeMs ?? null;
+  const subscribeCountdown = useCallback((listener: () => void) => (
+    countdownTargetTimeMs !== null && countdownTargetTimeMs > getLiveCountdownNowMs()
+      ? subscribeLiveCountdown(listener)
+      : () => undefined
+  ), [countdownTargetTimeMs]);
+  const countdownNowMs = useSyncExternalStore(
+    subscribeCountdown,
+    getLiveCountdownNowMs,
+    getLiveCountdownNowMs,
+  );
+  const countdown = useMemo(
+    () => formatLiveCountdown(countdownTargetTimeMs, countdownNowMs),
+    [countdownNowMs, countdownTargetTimeMs],
+  );
+  const countdownLabel = countdown && pane.liveCountdown
+    ? `${pane.liveCountdown.label} ${countdown}`
+    : null;
+  const ariaLabel = [
+    displayPoint?.accessibilityLabel ?? auxiliaryText ?? pane.label,
+    countdownLabel,
+  ].filter((value): value is string => Boolean(value)).join("，");
 
   return (
     <div
@@ -53,7 +80,7 @@ const MarketPaneLabel = memo(function MarketPaneLabel({
       data-pane-id={pane.id}
       data-pane-collapsed={collapsed ? "true" : "false"}
       role="group"
-      aria-label={displayPoint?.accessibilityLabel ?? auxiliaryText ?? pane.label}
+      aria-label={ariaLabel}
     >
       <span className="advanced-market-pane-heading">{pane.label}</span>
       {displayPoint && (
@@ -69,6 +96,12 @@ const MarketPaneLabel = memo(function MarketPaneLabel({
       )}
       {auxiliaryText && (
         <span className="advanced-market-pane-status">{auxiliaryText}</span>
+      )}
+      {countdown && pane.liveCountdown && (
+        <span className="advanced-market-pane-countdown" title={countdownLabel ?? undefined}>
+          <span>{pane.liveCountdown.label}</span>
+          <strong>{countdown}</strong>
+        </span>
       )}
       {pane.legendItems && pane.legendItems.length > 0 && (
         <span className="advanced-market-pane-legend" aria-hidden="true">

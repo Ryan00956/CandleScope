@@ -36,6 +36,31 @@ test("forming K-line replacement replaces rather than double-adds CVD contributi
   assert.deepEqual(cvdValues(updated), [2, 5]);
 });
 
+test("CVD and Delta expose metadata for every plotted historical K-line", () => {
+  const projection = createKlineOrderFlowProjectionMemo();
+  const panes = projection.project({
+    bars: [bar(60, 2), bar(120, -1), bar(180, 4)],
+    enabled: true,
+    forceFull: true,
+    intervalSeconds: 60,
+  });
+  const cvd = panes.find((pane) => pane.id === "trade-flow-cvd");
+  const delta = panes.find((pane) => pane.id === "trade-flow-delta");
+
+  assert.deepEqual(cvd?.pointMetadata?.map((point) => [point.time, point.value]), [
+    [60, 2],
+    [120, 1],
+    [180, 5],
+  ]);
+  assert.deepEqual(delta?.pointMetadata?.map((point) => [point.time, point.value]), [
+    [60, 2],
+    [120, -1],
+    [180, 4],
+  ]);
+  assert.equal(cvd?.pointMetadataFallback, "none");
+  assert.equal(delta?.pointMetadataFallback, "none");
+});
+
 test("CVD restarts only at the latest contiguous valid suffix after a gap", () => {
   const projection = createKlineOrderFlowProjectionMemo();
   const panes = projection.project({

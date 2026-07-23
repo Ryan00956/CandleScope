@@ -2182,32 +2182,6 @@ body {
   background: var(--candle-down-light);
 }
 
-/* ── OHLCV 信息条 ────────────────────────────────────────── */
-.ohlcv-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.ohlcv-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.ohlcv-label {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.ohlcv-value {
-  color: var(--text-primary);
-}
-
 /* ── 时间周期工具栏 ──────────────────────────────────────── */
 .toolbar {
   display: flex;
@@ -7459,11 +7433,118 @@ body {
   letter-spacing: 0.3px;
 }
 
+.chart-main-legend {
+  position: absolute;
+  top: 6px;
+  left: 10px;
+  z-index: 10;
+  display: flex;
+  max-width: calc(100% - 250px);
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+  pointer-events: none;
+  user-select: none;
+}
+
+.chart-main-ohlcv,
+.chart-legend-values,
+.chart-pane-label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.chart-main-ohlcv {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+}
+
+.chart-main-ohlcv > span {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.chart-legend-key,
+.chart-legend-line-name {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.chart-legend-high {
+  color: var(--candle-up);
+}
+
+.chart-legend-low {
+  color: var(--candle-down);
+}
+
+.chart-legend-values {
+  min-width: 0;
+}
+
+.chart-main-indicator-row,
+.chart-main-indicator-row > .chart-legend-values {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: nowrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chart-main-indicator-row > .chart-legend-values {
+  gap: 4px 8px;
+  overflow: hidden;
+}
+
+.chart-legend-value {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.chart-legend-swatch {
+  width: 7px;
+  height: 2px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+}
+
+.chart-legend-number {
+  color: var(--text-primary);
+}
+
+.chart-pane-label {
+  gap: 4px 6px;
+}
+
+.chart-pane-label-heading {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.chart-pane-label-status {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
 .indicator-pane-label {
   max-width: calc(100% - 250px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.indicator-pane-label[data-pane-collapsed='true'] .chart-legend-values,
+.indicator-pane-label[data-pane-collapsed='true'] .chart-pane-label-status {
+  display: none;
 }
 
 /* TradingView-style native pane controls. The bar is an overlay only; pane
@@ -7830,9 +7911,6 @@ body {
     display: none;
   }
 
-  .ohlcv-bar {
-    gap: 7px;
-  }
 }
 
 @media (max-width: 1250px) {
@@ -7840,8 +7918,8 @@ body {
     padding-inline: 5px;
   }
 
-  .ohlcv-bar .ohlcv-item:nth-last-child(-n + 3) {
-    display: none;
+  .chart-main-legend {
+    max-width: calc(100% - 160px);
   }
 }
 

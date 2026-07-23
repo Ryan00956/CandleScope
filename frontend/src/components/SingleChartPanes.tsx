@@ -88,6 +88,8 @@ import {
   resolvePaneCaptureSize,
   subscribeCursorOverlayGeometryRefresh,
 } from "./singleChartPaneGeometry";
+import { IndicatorPaneLabels, MainChartLegend } from "./ChartPaneLegends";
+import { shouldUseLatestChartPaneLegend } from "./chartPaneLegendModel";
 import MarketPaneLabels from "./MarketPaneLabels";
 import PaneControlBar from "./PaneControlBar";
 import { createPaneCrosshairStoreLifecycle } from "./paneCrosshairStore";
@@ -355,6 +357,20 @@ interface PaneRenderState {
   fillSeriesStateRef: Parameters<typeof renderFillSeries>[0]["fillSeriesStateRef"];
   bgcolorPrimitiveRef: Parameters<typeof renderBgcolors>[0]["bgcolorPrimitiveRef"];
   bgcolorStateRef: Parameters<typeof renderBgcolors>[0]["bgcolorStateRef"];
+}
+
+function sameMainLegendCrosshairValue(
+  left: MainSeriesCrosshairValue | null,
+  right: MainSeriesCrosshairValue | null,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.time === right.time
+    && left.open === right.open
+    && left.high === right.high
+    && left.low === right.low
+    && left.close === right.close
+    && left.volume === right.volume;
 }
 
 interface ProjectionStoreWithConfiguration extends ProjectionStore {
@@ -1358,6 +1374,32 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     [],
   );
   const paneCrosshairStore = paneCrosshairStoreLifecycle.store;
+  const mainLegendCrosshairRef = useRef<MainSeriesCrosshairValue | null>(null);
+  const pendingMainLegendCrosshairRef = useRef<MainSeriesCrosshairValue | null>(null);
+  const mainLegendCrosshairFrameRef = useRef<number | null>(null);
+  const [mainLegendCrosshair, setMainLegendCrosshair] = useState<MainSeriesCrosshairValue | null>(null);
+  const publishMainLegendCrosshair = useCallback((value: MainSeriesCrosshairValue | null) => {
+    pendingMainLegendCrosshairRef.current = value;
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      if (!sameMainLegendCrosshairValue(mainLegendCrosshairRef.current, value)) {
+        mainLegendCrosshairRef.current = value;
+        setMainLegendCrosshair(value);
+      }
+      return;
+    }
+    if (mainLegendCrosshairFrameRef.current !== null) return;
+    mainLegendCrosshairFrameRef.current = window.requestAnimationFrame(() => {
+      mainLegendCrosshairFrameRef.current = null;
+      const next = pendingMainLegendCrosshairRef.current;
+      if (sameMainLegendCrosshairValue(mainLegendCrosshairRef.current, next)) return;
+      mainLegendCrosshairRef.current = next;
+      setMainLegendCrosshair(next);
+    });
+  }, []);
+  useEffect(() => () => {
+    const frame = mainLegendCrosshairFrameRef.current;
+    if (frame !== null && typeof window !== "undefined") window.cancelAnimationFrame(frame);
+  }, []);
   const [drawingSeriesGeneration, setDrawingSeriesGeneration] = useState(0);
   const [drawingCoordinateGeneration, setDrawingCoordinateGeneration] = useState(0);
   const drawingCoordinateGenerationRef = useRef(0);
@@ -1815,7 +1857,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => {
     onCrosshairMove?.(null);
     paneCrosshairStore.clear();
-  }, [datasetKey, interval, onCrosshairMove, paneCrosshairStore, symbol]);
+    publishMainLegendCrosshair(null);
+  }, [datasetKey, interval, onCrosshairMove, paneCrosshairStore, publishMainLegendCrosshair, symbol]);
 
   const dataTimeSet = resolveDataTimeSet(indicatorReconcileReady ? seriesStore : null);
   const derivedAuxiliaryIndex = useMemo(() => {
@@ -1873,6 +1916,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       return projectPaneDescriptorsToDisplay(sourcePaneDescriptors, derivedAuxiliaryIndex);
     },
     [derivedAuxiliaryIndex, sourcePaneDescriptors, usesDerivedAxis],
+  );
+  const mainLegendLines = useMemo(
+    () => sourcePaneDescriptors.find((pane) => pane.id === "main")?.lines || [],
+    [sourcePaneDescriptors],
+  );
+  const paneLegendLinesById = useMemo<ReadonlyMap<string, readonly AdapterIndicatorLine[]>>(
+    () => new Map(sourcePaneDescriptors.map((pane) => [pane.id, pane.lines])),
+    [sourcePaneDescriptors],
   );
   const activeSubPaneCount = activeSubPanes.length;
   activeSubPaneCountRef.current = activeSubPanes.length;
@@ -2391,6 +2442,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (isSyncingRef.current) return;
       if (param.time == null) {
         paneCrosshairStore.publish(null);
+        publishMainLegendCrosshair(null);
         onCrosshairMove?.(null);
         return;
       }
@@ -2399,15 +2451,21 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         : null;
       if (axisTime == null) {
         paneCrosshairStore.publish(null);
+        publishMainLegendCrosshair(null);
         onCrosshairMove?.(null);
         return;
       }
       const displayRow = displayRowMapRef.current.get(axisTime);
       const displayIndex = displayRowIndexMapRef.current.get(axisTime);
       const sourceTime = resolveSourceTime(axisTime, displayRow);
-      paneCrosshairStore.publish(sourceTime);
-      if (!onCrosshairMove) return;
       const sourceRow = sourceTime == null ? null : sourceRowMapRef.current.get(sourceTime);
+      if (shouldUseLatestChartPaneLegend(sourceTime, displayRow, sourceRow)) {
+        paneCrosshairStore.publish(null);
+        publishMainLegendCrosshair(null);
+        onCrosshairMove?.(null);
+        return;
+      }
+      paneCrosshairStore.publish(sourceTime);
       const includeVolume = initialDescriptor.axisMode === "time"
         || isLastDisplayTargetForSourceTime(displayRowsRef.current, displayIndex);
       const crosshairValue = buildMainSeriesCrosshairValue(
@@ -2416,10 +2474,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         { includeVolume, volumeRow: sourceRow },
       );
       if (!crosshairValue) {
-        onCrosshairMove(null);
+        publishMainLegendCrosshair(null);
+        onCrosshairMove?.(null);
         return;
       }
-      onCrosshairMove(crosshairValue);
+      publishMainLegendCrosshair(crosshairValue);
+      onCrosshairMove?.(crosshairValue);
     };
 
     const handleVisibleLogicalRangeChange = (range: VisibleLogicalRange) => {
@@ -2527,6 +2587,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
       } catch { /* chart may already be disposing */ }
       paneCrosshairStore.clear();
+      publishMainLegendCrosshair(null);
       onCrosshairMove?.(null);
       const drawingBoundary = resolveDrawingSurfaceChartTypeBoundary(
         initialChartType,
@@ -2558,7 +2619,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
       }
     };
-  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, tickMarkFormatter, timeFormatter, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishMainLegendCrosshair, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, tickMarkFormatter, timeFormatter, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -4376,16 +4437,20 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         style={{ cursor: cursorStyleForDrawingTool(effectiveDrawingTool) }}
       />
 
-      {activeSubPanes.filter((pane) => !pane.dataMarketPane).map((pane) => (
-        <div
-          key={`label-${pane.id}`}
-          className="chart-pane-label indicator-pane-label pane-overlay-anchor"
-          data-pane-id={pane.id}
-          data-pane-collapsed={collapsedPaneIds.includes(pane.id) ? "true" : "false"}
-        >
-          {pane.label}
-        </div>
-      ))}
+      <MainChartLegend
+        allowSourceCrosshairFallback={!usesDerivedAxis}
+        crosshair={mainLegendCrosshair}
+        crosshairStore={paneCrosshairStore}
+        lines={mainLegendLines}
+        seriesStore={seriesStore}
+      />
+
+      <IndicatorPaneLabels
+        collapsedPaneIds={collapsedPaneIds}
+        crosshairStore={paneCrosshairStore}
+        linesByPaneId={paneLegendLinesById}
+        panes={activeSubPanes}
+      />
 
       {activeSubPanes.some((pane) => Boolean(pane.dataMarketPane)) && (
         <MarketPaneLabels

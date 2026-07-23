@@ -98,8 +98,12 @@ export type NormalizedIndicatorSeriesEntry =
 export interface IndicatorLine {
   id?: string;
   indicatorId?: string;
+  localId?: string;
+  outputName?: string | null;
   name?: string;
+  title?: string;
   pane?: string;
+  overlay?: boolean;
   type?: string;
   color?: string;
   lineWidth?: number;

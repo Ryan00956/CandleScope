@@ -14,6 +14,7 @@ import type {
   PluginLiveConfirmationPreview,
   PluginLiveConfirmationReceipt,
   PluginLiveControlStatus,
+  PluginLiveExecutionRecord,
   PluginMarketProviderChannel,
   PluginPaperAccountContribution,
   PluginPaperExecutorContribution,
@@ -768,11 +769,18 @@ export function parsePluginLiveControlStatus(value: unknown): PluginLiveControlS
     new Set(["disabled", "unavailable", "disarmed", "armed", "killed"] as const),
     `${path}.mode`,
   );
+  const liveSubmitAvailable = boolean(
+    data.liveSubmitAvailable,
+    `${path}.liveSubmitAvailable`,
+  );
+  const liveCancelAvailable = boolean(
+    data.liveCancelAvailable,
+    `${path}.liveCancelAvailable`,
+  );
   if (
     data.schemaVersion !== "candlescope.live-control-status/1"
     || available !== new Set(["disarmed", "armed", "killed"]).has(mode)
-    || data.liveSubmitAvailable !== false
-    || data.liveCancelAvailable !== false
+    || liveSubmitAvailable !== liveCancelAvailable
     || data.liveTransferAvailable !== false
   ) fail(path);
   const counts = record(data.confirmationCounts, `${path}.confirmationCounts`);
@@ -803,8 +811,8 @@ export function parsePluginLiveControlStatus(value: unknown): PluginLiveControlS
     confirmationCounts,
     eventSequence: integer(data.eventSequence, `${path}.eventSequence`),
     eventSha256,
-    liveSubmitAvailable: false,
-    liveCancelAvailable: false,
+    liveSubmitAvailable,
+    liveCancelAvailable,
     liveTransferAvailable: false,
   };
 }
@@ -814,27 +822,41 @@ export function parsePluginLiveConfirmationPreview(
 ): PluginLiveConfirmationPreview {
   const path = "liveConfirmationPreview";
   const data = record(value, path);
-  exact(data, [
+  const commonFields = [
     "schemaVersion", "intentSha256", "pluginId", "connectorId",
     "publisherIdentity", "version", "clientOrderId", "instrumentId",
     "side", "orderType", "quantity", "limitPrice", "policyEpoch",
     "controlGeneration", "liveSubmitAvailable", "liveCancelAvailable",
-  ], [], path);
+  ];
+  const executionFields = [
+    "orderIntentSha256", "action", "executionState", "notional",
+    "riskDecisionSha256", "hardLimits",
+  ];
+  const execution = data.schemaVersion === "candlescope.live-confirmation-preview/2";
+  exact(data, execution ? [...commonFields, ...executionFields] : commonFields, [], path);
   const intentSha256 = string(data.intentSha256, `${path}.intentSha256`, 71);
   const clientOrderId = string(data.clientOrderId, `${path}.clientOrderId`, 32);
+  const liveSubmitAvailable = boolean(
+    data.liveSubmitAvailable,
+    `${path}.liveSubmitAvailable`,
+  );
+  const liveCancelAvailable = boolean(
+    data.liveCancelAvailable,
+    `${path}.liveCancelAvailable`,
+  );
   if (
-    data.schemaVersion !== "candlescope.live-confirmation-preview/1"
+    !new Set([
+      "candlescope.live-confirmation-preview/1",
+      "candlescope.live-confirmation-preview/2",
+    ]).has(String(data.schemaVersion))
     || !BUNDLE_DIGEST.test(intentSha256)
     || !/^[A-Za-z0-9]{32}$/.test(clientOrderId)
     || data.orderType !== "limit"
-    || data.liveSubmitAvailable !== false
-    || data.liveCancelAvailable !== false
   ) fail(path);
   const pluginId = string(data.pluginId, `${path}.pluginId`, 128);
   const connectorId = string(data.connectorId, `${path}.connectorId`, 128);
   if (!PLUGIN_ID.test(pluginId) || !PLUGIN_ID.test(connectorId)) fail(path);
-  return {
-    schemaVersion: "candlescope.live-confirmation-preview/1",
+  const common = {
     intentSha256,
     pluginId,
     connectorId,
@@ -843,13 +865,77 @@ export function parsePluginLiveConfirmationPreview(
     clientOrderId,
     instrumentId: string(data.instrumentId, `${path}.instrumentId`, 64),
     side: oneOf(data.side, new Set(["buy", "sell"] as const), `${path}.side`),
-    orderType: "limit",
+    orderType: "limit" as const,
     quantity: string(data.quantity, `${path}.quantity`, 64),
     limitPrice: string(data.limitPrice, `${path}.limitPrice`, 64),
     policyEpoch: integer(data.policyEpoch, `${path}.policyEpoch`),
     controlGeneration: integer(data.controlGeneration, `${path}.controlGeneration`),
-    liveSubmitAvailable: false,
-    liveCancelAvailable: false,
+    liveSubmitAvailable,
+    liveCancelAvailable,
+  };
+  if (!execution) {
+    if (liveSubmitAvailable || liveCancelAvailable) fail(path);
+    return {
+      schemaVersion: "candlescope.live-confirmation-preview/1",
+      ...common,
+    };
+  }
+  const orderIntentSha256 = string(
+    data.orderIntentSha256,
+    `${path}.orderIntentSha256`,
+    71,
+  );
+  const riskDecisionSha256 = string(
+    data.riskDecisionSha256,
+    `${path}.riskDecisionSha256`,
+    71,
+  );
+  const action = oneOf(
+    data.action,
+    new Set(["submit", "cancel"] as const),
+    `${path}.action`,
+  );
+  const executionState = oneOf(
+    data.executionState,
+    new Set(["not-started", "live", "partially_filled"] as const),
+    `${path}.executionState`,
+  );
+  const notional = string(data.notional, `${path}.notional`, 64);
+  const limits = record(data.hardLimits, `${path}.hardLimits`);
+  exact(limits, [
+    "instrumentId", "maxOrderNotional", "maxUnresolvedOrders",
+    "maxUnresolvedNotional",
+  ], [], `${path}.hardLimits`);
+  if (
+    !BUNDLE_DIGEST.test(orderIntentSha256)
+    || !BUNDLE_DIGEST.test(riskDecisionSha256)
+    || !PAPER_DECIMAL.test(notional)
+    || notional === "0"
+    || common.instrumentId !== "BTC-USDT"
+    || connectorId !== "candlescope.okx-demo-spot-execution"
+    || (action === "submit" && executionState !== "not-started")
+    || (action === "cancel" && !new Set(["live", "partially_filled"]).has(executionState))
+    || liveSubmitAvailable !== (action === "submit")
+    || liveCancelAvailable !== (action === "cancel")
+    || limits.instrumentId !== "BTC-USDT"
+    || limits.maxOrderNotional !== "100"
+    || limits.maxUnresolvedOrders !== 2
+    || limits.maxUnresolvedNotional !== "200"
+  ) fail(path);
+  return {
+    schemaVersion: "candlescope.live-confirmation-preview/2",
+    ...common,
+    orderIntentSha256,
+    action,
+    executionState,
+    notional,
+    riskDecisionSha256,
+    hardLimits: {
+      instrumentId: "BTC-USDT",
+      maxOrderNotional: "100",
+      maxUnresolvedOrders: 2,
+      maxUnresolvedNotional: "200",
+    },
   };
 }
 
@@ -858,15 +944,23 @@ export function parsePluginLiveConfirmationReceipt(
 ): PluginLiveConfirmationReceipt {
   const path = "liveConfirmationReceipt";
   const data = record(value, path);
-  exact(data, [
+  const commonFields = [
     "schemaVersion", "receiptRef", "receiptId", "intentSha256", "pluginId",
     "connectorId", "publisherIdentity", "version", "clientOrderId",
     "instrumentId", "side", "orderType", "quantity", "limitPrice",
     "policyEpoch", "controlGeneration", "state", "issuedAt", "expiresAt",
     "resolvedAt", "liveSubmitAvailable", "liveCancelAvailable",
-  ], [], path);
+  ];
+  const executionFields = [
+    "orderIntentSha256", "action", "executionState", "notional",
+    "riskDecisionSha256",
+  ];
+  const execution = data.schemaVersion === "candlescope.live-confirmation/2";
+  exact(data, execution ? [...commonFields, ...executionFields] : commonFields, [], path);
   const preview = parsePluginLiveConfirmationPreview({
-    schemaVersion: "candlescope.live-confirmation-preview/1",
+    schemaVersion: execution
+      ? "candlescope.live-confirmation-preview/2"
+      : "candlescope.live-confirmation-preview/1",
     intentSha256: data.intentSha256,
     pluginId: data.pluginId,
     connectorId: data.connectorId,
@@ -882,18 +976,36 @@ export function parsePluginLiveConfirmationReceipt(
     controlGeneration: data.controlGeneration,
     liveSubmitAvailable: data.liveSubmitAvailable,
     liveCancelAvailable: data.liveCancelAvailable,
+    ...(execution ? {
+      orderIntentSha256: data.orderIntentSha256,
+      action: data.action,
+      executionState: data.executionState,
+      notional: data.notional,
+      riskDecisionSha256: data.riskDecisionSha256,
+      hardLimits: {
+        instrumentId: "BTC-USDT",
+        maxOrderNotional: "100",
+        maxUnresolvedOrders: 2,
+        maxUnresolvedNotional: "200",
+      },
+    } : {}),
   });
   const receiptRef = string(data.receiptRef, `${path}.receiptRef`, 64);
   const receiptId = string(data.receiptId, `${path}.receiptId`, 32);
   if (
-    data.schemaVersion !== "candlescope.live-confirmation/1"
+    !new Set([
+      "candlescope.live-confirmation/1",
+      "candlescope.live-confirmation/2",
+    ]).has(String(data.schemaVersion))
     || !/^livecfm_[A-Za-z0-9_-]{43}$/.test(receiptRef)
     || !/^[0-9a-f]{32}$/.test(receiptId)
     || data.state !== "issued"
     || data.resolvedAt !== null
   ) fail(path);
   return {
-    schemaVersion: "candlescope.live-confirmation/1",
+    schemaVersion: execution
+      ? "candlescope.live-confirmation/2"
+      : "candlescope.live-confirmation/1",
     receiptRef,
     receiptId,
     intentSha256: preview.intentSha256,
@@ -913,8 +1025,144 @@ export function parsePluginLiveConfirmationReceipt(
     issuedAt: string(data.issuedAt, `${path}.issuedAt`, 64),
     expiresAt: string(data.expiresAt, `${path}.expiresAt`, 64),
     resolvedAt: null,
-    liveSubmitAvailable: false,
-    liveCancelAvailable: false,
+    liveSubmitAvailable: preview.liveSubmitAvailable,
+    liveCancelAvailable: preview.liveCancelAvailable,
+    ...(execution ? {
+      orderIntentSha256: preview.orderIntentSha256,
+      action: preview.action,
+      executionState: preview.executionState,
+      notional: preview.notional,
+      riskDecisionSha256: preview.riskDecisionSha256,
+    } : {}),
+  };
+}
+
+export function parsePluginLiveExecutionRecord(
+  value: unknown,
+): PluginLiveExecutionRecord {
+  const path = "liveExecution";
+  const data = record(value, path);
+  const optionalAction = "action" in data || "accepted" in data;
+  const fields = [
+    "schemaVersion", "pluginId", "connectorId", "publisherIdentity",
+    "version", "clientOrderId", "orderIntentSha256", "instrumentId",
+    "side", "orderType", "quantity", "limitPrice", "notional", "state",
+    "priorState", "submitAttemptCount", "cancelAttemptCount",
+    "venueOrderIdSha256", "lastReceiptId", "lastConfirmationSha256",
+    "lastRiskDecisionSha256", "lastErrorCode", "createdAt", "updatedAt",
+    "policyEpoch", "controlGeneration", "terminal", "reconciliationRequired",
+  ];
+  exact(data, optionalAction ? [...fields, "accepted", "action"] : fields, [], path);
+  const state = oneOf(
+    data.state,
+    new Set([
+      "submitting", "unknown", "rejected", "live", "partially_filled",
+      "filled", "canceled", "mmp_canceled", "canceling", "cancel_unknown",
+    ] as const),
+    `${path}.state`,
+  );
+  const terminalStates = new Set(["rejected", "filled", "canceled", "mmp_canceled"]);
+  const venueOrderIdSha256 = data.venueOrderIdSha256 === null
+    ? null
+    : string(data.venueOrderIdSha256, `${path}.venueOrderIdSha256`, 71);
+  const lastErrorCode = data.lastErrorCode === null
+    ? null
+    : string(data.lastErrorCode, `${path}.lastErrorCode`, 128);
+  const priorState = data.priorState === null
+    ? null
+    : oneOf(
+        data.priorState,
+        new Set(["live", "partially_filled"] as const),
+        `${path}.priorState`,
+      );
+  const orderIntentSha256 = string(
+    data.orderIntentSha256,
+    `${path}.orderIntentSha256`,
+    71,
+  );
+  const lastConfirmationSha256 = string(
+    data.lastConfirmationSha256,
+    `${path}.lastConfirmationSha256`,
+    71,
+  );
+  const lastRiskDecisionSha256 = string(
+    data.lastRiskDecisionSha256,
+    `${path}.lastRiskDecisionSha256`,
+    71,
+  );
+  const digestFields = [
+    orderIntentSha256,
+    lastConfirmationSha256,
+    lastRiskDecisionSha256,
+  ];
+  const quantity = string(data.quantity, `${path}.quantity`, 64);
+  const limitPrice = string(data.limitPrice, `${path}.limitPrice`, 64);
+  const notional = string(data.notional, `${path}.notional`, 64);
+  const terminal = boolean(data.terminal, `${path}.terminal`);
+  const reconciliationRequired = boolean(
+    data.reconciliationRequired,
+    `${path}.reconciliationRequired`,
+  );
+  if (
+    data.schemaVersion !== "candlescope.live-execution-record/1"
+    || data.connectorId !== "candlescope.okx-demo-spot-execution"
+    || data.instrumentId !== "BTC-USDT"
+    || data.orderType !== "limit"
+    || !digestFields.every((item) => BUNDLE_DIGEST.test(item))
+    || (venueOrderIdSha256 !== null && !BUNDLE_DIGEST.test(venueOrderIdSha256))
+    || !/^[A-Za-z0-9]{32}$/.test(string(data.clientOrderId, `${path}.clientOrderId`, 32))
+    || !/^[0-9a-f]{32}$/.test(string(data.lastReceiptId, `${path}.lastReceiptId`, 32))
+    || ![quantity, limitPrice, notional].every((item) => PAPER_DECIMAL.test(item) && item !== "0")
+    || terminal !== terminalStates.has(state)
+    || reconciliationRequired !== new Set(["unknown", "cancel_unknown"]).has(state)
+    || (new Set(["canceling", "cancel_unknown"]).has(state) !== (priorState !== null))
+    || (new Set([
+      "live", "partially_filled", "filled", "canceled", "mmp_canceled",
+      "canceling", "cancel_unknown",
+    ]).has(state) && venueOrderIdSha256 === null)
+    || (lastErrorCode !== null && !/^[A-Z][A-Z0-9_]{0,127}$/.test(lastErrorCode))
+  ) fail(path);
+  const action = optionalAction
+    ? oneOf(data.action, new Set(["submit", "cancel"] as const), `${path}.action`)
+    : undefined;
+  const accepted = optionalAction
+    ? boolean(data.accepted, `${path}.accepted`)
+    : undefined;
+  const parsed: PluginLiveExecutionRecord = {
+    schemaVersion: "candlescope.live-execution-record/1",
+    pluginId: string(data.pluginId, `${path}.pluginId`, 128),
+    connectorId: "candlescope.okx-demo-spot-execution",
+    publisherIdentity: string(data.publisherIdentity, `${path}.publisherIdentity`, 256),
+    version: string(data.version, `${path}.version`, 64),
+    clientOrderId: string(data.clientOrderId, `${path}.clientOrderId`, 32),
+    orderIntentSha256,
+    instrumentId: "BTC-USDT",
+    side: oneOf(data.side, new Set(["buy", "sell"] as const), `${path}.side`),
+    orderType: "limit",
+    quantity,
+    limitPrice,
+    notional,
+    state,
+    priorState,
+    submitAttemptCount: integer(data.submitAttemptCount, `${path}.submitAttemptCount`, 1, 1) as 1,
+    cancelAttemptCount: integer(data.cancelAttemptCount, `${path}.cancelAttemptCount`, 0, 10),
+    venueOrderIdSha256,
+    lastReceiptId: string(data.lastReceiptId, `${path}.lastReceiptId`, 32),
+    lastConfirmationSha256,
+    lastRiskDecisionSha256,
+    lastErrorCode,
+    createdAt: string(data.createdAt, `${path}.createdAt`, 64),
+    updatedAt: string(data.updatedAt, `${path}.updatedAt`, 64),
+    policyEpoch: integer(data.policyEpoch, `${path}.policyEpoch`),
+    controlGeneration: integer(data.controlGeneration, `${path}.controlGeneration`),
+    terminal,
+    reconciliationRequired,
+  };
+  if (!optionalAction) return parsed;
+  return {
+    ...parsed,
+    accepted: accepted as boolean,
+    action: action as "submit" | "cancel",
   };
 }
 

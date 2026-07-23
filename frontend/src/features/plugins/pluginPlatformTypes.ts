@@ -399,13 +399,15 @@ export interface PluginLiveControlStatus {
   };
   eventSequence: number;
   eventSha256: string | null;
-  liveSubmitAvailable: false;
-  liveCancelAvailable: false;
+  liveSubmitAvailable: boolean;
+  liveCancelAvailable: boolean;
   liveTransferAvailable: false;
 }
 
 export interface PluginLiveConfirmationPreview {
-  schemaVersion: "candlescope.live-confirmation-preview/1";
+  schemaVersion:
+    | "candlescope.live-confirmation-preview/1"
+    | "candlescope.live-confirmation-preview/2";
   intentSha256: string;
   pluginId: string;
   connectorId: string;
@@ -419,12 +421,25 @@ export interface PluginLiveConfirmationPreview {
   limitPrice: string;
   policyEpoch: number;
   controlGeneration: number;
-  liveSubmitAvailable: false;
-  liveCancelAvailable: false;
+  liveSubmitAvailable: boolean;
+  liveCancelAvailable: boolean;
+  orderIntentSha256?: string;
+  action?: "submit" | "cancel";
+  executionState?: "not-started" | "live" | "partially_filled";
+  notional?: string;
+  riskDecisionSha256?: string;
+  hardLimits?: {
+    instrumentId: "BTC-USDT";
+    maxOrderNotional: "100";
+    maxUnresolvedOrders: 2;
+    maxUnresolvedNotional: "200";
+  };
 }
 
 export interface PluginLiveConfirmationReceipt {
-  schemaVersion: "candlescope.live-confirmation/1";
+  schemaVersion:
+    | "candlescope.live-confirmation/1"
+    | "candlescope.live-confirmation/2";
   receiptRef: string;
   receiptId: string;
   intentSha256: string;
@@ -444,8 +459,58 @@ export interface PluginLiveConfirmationReceipt {
   issuedAt: string;
   expiresAt: string;
   resolvedAt: null;
-  liveSubmitAvailable: false;
-  liveCancelAvailable: false;
+  liveSubmitAvailable: boolean;
+  liveCancelAvailable: boolean;
+  orderIntentSha256?: string;
+  action?: "submit" | "cancel";
+  executionState?: "not-started" | "live" | "partially_filled";
+  notional?: string;
+  riskDecisionSha256?: string;
+}
+
+export type PluginLiveExecutionState =
+  | "submitting"
+  | "unknown"
+  | "rejected"
+  | "live"
+  | "partially_filled"
+  | "filled"
+  | "canceled"
+  | "mmp_canceled"
+  | "canceling"
+  | "cancel_unknown";
+
+export interface PluginLiveExecutionRecord {
+  schemaVersion: "candlescope.live-execution-record/1";
+  pluginId: string;
+  connectorId: "candlescope.okx-demo-spot-execution";
+  publisherIdentity: string;
+  version: string;
+  clientOrderId: string;
+  orderIntentSha256: string;
+  instrumentId: "BTC-USDT";
+  side: "buy" | "sell";
+  orderType: "limit";
+  quantity: string;
+  limitPrice: string;
+  notional: string;
+  state: PluginLiveExecutionState;
+  priorState: "live" | "partially_filled" | null;
+  submitAttemptCount: 1;
+  cancelAttemptCount: number;
+  venueOrderIdSha256: string | null;
+  lastReceiptId: string;
+  lastConfirmationSha256: string;
+  lastRiskDecisionSha256: string;
+  lastErrorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+  policyEpoch: number;
+  controlGeneration: number;
+  terminal: boolean;
+  reconciliationRequired: boolean;
+  accepted?: boolean;
+  action?: "submit" | "cancel";
 }
 
 export interface PluginPlatformRuntime {
@@ -517,6 +582,20 @@ export interface PluginPlatformRuntime {
       ttlSeconds?: number,
     ): Promise<PluginLiveConfirmationReceipt>;
     revokeLiveConfirmation(receiptRef: string, reason: string): Promise<void>;
+    submitLiveExecution(
+      accountRef: string,
+      shadowRef: string,
+      receipt: PluginLiveConfirmationReceipt,
+    ): Promise<PluginLiveExecutionRecord>;
+    cancelLiveExecution(
+      accountRef: string,
+      shadowRef: string,
+      receipt: PluginLiveConfirmationReceipt,
+    ): Promise<PluginLiveExecutionRecord>;
+    reconcileLiveExecution(
+      accountRef: string,
+      shadowRef: string,
+    ): Promise<PluginLiveExecutionRecord>;
     downloadLiveAudit(): Promise<void>;
   };
 }

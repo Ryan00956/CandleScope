@@ -5,6 +5,7 @@ import {
   parsePluginLiveConfirmationPreview,
   parsePluginLiveConfirmationReceipt,
   parsePluginLiveControlStatus,
+  parsePluginLiveExecutionRecord,
   parsePluginManagementDetail,
   parsePluginUiSnapshot,
 } from "../pluginPlatformParsers.js";
@@ -290,6 +291,14 @@ test("Live control parsers keep unavailable, armed, and exact intent states fail
     () => parsePluginLiveControlStatus({ ...liveControl(), liveSubmitAvailable: true }),
     /invalid/i,
   );
+  assert.equal(
+    parsePluginLiveControlStatus({
+      ...liveControl(),
+      liveSubmitAvailable: true,
+      liveCancelAvailable: true,
+    }).liveSubmitAvailable,
+    true,
+  );
   assert.throws(
     () => parsePluginLiveControlStatus({ ...liveControl("disabled"), available: true }),
     /invalid/i,
@@ -312,6 +321,92 @@ test("Live control parsers keep unavailable, armed, and exact intent states fail
       ...receipt,
       state: "consumed",
       resolvedAt: "2026-07-23T01:02:04Z",
+    }),
+    /invalid/i,
+  );
+});
+
+test("WP-F parsers accept only action-bound Demo receipts and redacted execution records", () => {
+  const preview = parsePluginLiveConfirmationPreview({
+    ...confirmationPreview(),
+    schemaVersion: "candlescope.live-confirmation-preview/2",
+    connectorId: "candlescope.okx-demo-spot-execution",
+    quantity: "0.001",
+    orderIntentSha256: `sha256:${"c".repeat(64)}`,
+    action: "submit",
+    executionState: "not-started",
+    notional: "42",
+    riskDecisionSha256: `sha256:${"d".repeat(64)}`,
+    hardLimits: {
+      instrumentId: "BTC-USDT",
+      maxOrderNotional: "100",
+      maxUnresolvedOrders: 2,
+      maxUnresolvedNotional: "200",
+    },
+    liveSubmitAvailable: true,
+    liveCancelAvailable: false,
+  });
+  assert.equal(preview.action, "submit");
+  const { hardLimits: _hardLimits, ...receiptPreview } = preview;
+  const receipt = parsePluginLiveConfirmationReceipt({
+    ...receiptPreview,
+    schemaVersion: "candlescope.live-confirmation/2",
+    receiptRef: `livecfm_${"R".repeat(43)}`,
+    receiptId: "e".repeat(32),
+    state: "issued",
+    issuedAt: "2026-07-23T01:02:03Z",
+    expiresAt: "2026-07-23T01:03:03Z",
+    resolvedAt: null,
+  });
+  assert.equal(receipt.action, "submit");
+  const execution = parsePluginLiveExecutionRecord({
+    schemaVersion: "candlescope.live-execution-record/1",
+    pluginId: "candlescope.okx-demo",
+    connectorId: "candlescope.okx-demo-spot-execution",
+    publisherIdentity: "publisher:test",
+    version: "1.0.0",
+    clientOrderId: "C".repeat(32),
+    orderIntentSha256: `sha256:${"c".repeat(64)}`,
+    instrumentId: "BTC-USDT",
+    side: "buy",
+    orderType: "limit",
+    quantity: "0.001",
+    limitPrice: "42000",
+    notional: "42",
+    state: "unknown",
+    priorState: null,
+    submitAttemptCount: 1,
+    cancelAttemptCount: 0,
+    venueOrderIdSha256: `sha256:${"f".repeat(64)}`,
+    lastReceiptId: "e".repeat(32),
+    lastConfirmationSha256: `sha256:${"b".repeat(64)}`,
+    lastRiskDecisionSha256: `sha256:${"d".repeat(64)}`,
+    lastErrorCode: null,
+    createdAt: "2026-07-23T01:02:03Z",
+    updatedAt: "2026-07-23T01:02:04Z",
+    policyEpoch: 2,
+    controlGeneration: 4,
+    terminal: false,
+    reconciliationRequired: true,
+    accepted: true,
+    action: "submit",
+  });
+  assert.equal(execution.state, "unknown");
+  assert.equal(execution.action, "submit");
+  assert.throws(
+    () => parsePluginLiveExecutionRecord({
+      ...execution,
+      venueOrderId: "123456789",
+    }),
+    /invalid/i,
+  );
+  assert.throws(
+    () => parsePluginLiveConfirmationPreview({
+      ...preview,
+      hardLimits: {
+        ...preview.hardLimits,
+        maxOrderNotional: "1000",
+      },
     }),
     /invalid/i,
   );

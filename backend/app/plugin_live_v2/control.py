@@ -275,9 +275,12 @@ class LiveControlLedger:
         *,
         broker_id: str,
         policy_epoch: int,
+        testnet_execution_enabled: bool = False,
     ) -> None:
         if _HEX_32.fullmatch(broker_id) is None:
             raise ValueError("broker_id is invalid")
+        if not isinstance(testnet_execution_enabled, bool):
+            raise TypeError("testnet_execution_enabled must be a boolean")
         if (
             isinstance(policy_epoch, bool)
             or not isinstance(policy_epoch, int)
@@ -287,6 +290,7 @@ class LiveControlLedger:
         self.root = Path(root).expanduser().resolve(strict=False)
         self.path = self.root / LIVE_CONTROL_FILENAME
         self.broker_id = broker_id
+        self.testnet_execution_enabled = testnet_execution_enabled
         for path in (
             self.path,
             self.path.with_name(f"{self.path.name}-wal"),
@@ -885,8 +889,8 @@ class LiveControlLedger:
             },
             "eventSequence": head["sequence"],
             "eventSha256": head["sha256"],
-            "liveSubmitAvailable": False,
-            "liveCancelAvailable": False,
+            "liveSubmitAvailable": self.testnet_execution_enabled,
+            "liveCancelAvailable": self.testnet_execution_enabled,
             "liveTransferAvailable": False,
         }
 

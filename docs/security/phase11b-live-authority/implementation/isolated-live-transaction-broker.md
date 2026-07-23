@@ -3,7 +3,7 @@
 ## Selected Design And Constraints
 
 2026-07-23 已选择 Option 3：独立 Live Transaction Broker。初始授权为 WP-A/WP-B，
-随后用户明确授权继续 WP-C、WP-D 与 WP-E：
+随后用户明确授权继续 WP-C、WP-D、WP-E 与 WP-F：
 
 - WP-A 建立 build-pinned first-party `PublisherEvidence`，精确绑定 plugin、
   connector、publisher、version、bundle SHA-256 与 manifest SHA-256。
@@ -17,19 +17,23 @@
   order-detail GET 的 query-only reconciliation；不增加 submit 或 cancel。
 - WP-E 只增加 Host-native control、intent-bound 单次确认回执、global kill/revoke、
   持久 Live 横幅和脱敏审计导出；不增加确认消费、submit、cancel 或资金动作。
-- `trade.submit`、`trade.cancel`、`network.connect` 和 Phase 12
-  `verified-publisher` 继续不可用。
+- WP-F 只增加 build-pinned OKX Demo Spot BTC-USDT limit submit/cancel/query、
+  固定风控、action-bound receipt consume 和独立 crash-consistent execution ledger。
+- 公开 SDK 的 `trade.submit`、`trade.cancel`、`network.connect` 和 Phase 12
+  `verified-publisher` 继续不可用；WP-F mutation 仅存在于 Host/Broker 私有边界。
 - 插件进程和插件 UI 永远看不到凭据明文、vault handle、认证 header、签名材料或
   Broker 私有 IPC。
 - Paper runtime、Paper 协议、Paper 数据与回滚路径保持独立。
 
 实施状态：WP-A 已独立提交为 `5d0128e`，WP-B 为 `8aba4e9`，WP-C 为 `3e4a2b9`，
-WP-D 为 `dd64740`；WP-E 技术验收完成，并随本阶段独立提交交付。验收记录分别见
+WP-D 为 `dd64740`，WP-E 为 `6b20125`；WP-F 技术验收完成，并随本阶段独立提交交付。
+验收记录分别见
 `docs/PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md`、
 `docs/PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md` 与
 `docs/PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md`；WP-D 记录见
 `docs/PLUGIN_PLATFORM_V2_PHASE11B_WPD_zh.md`，WP-E 记录见
-`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPE_zh.md`。WP-F 尚未授权。
+`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPE_zh.md`，WP-F 记录见
+`docs/PLUGIN_PLATFORM_V2_PHASE11B_WPF_zh.md`。WP-G 尚未授权。
 
 生产默认值保持关闭。没有匹配的内置 release lock 记录、Windows vault 不可用、协议
 握手失败、policy epoch 不一致或 Broker 退出时，结果都是 fail closed，而不是退回
@@ -75,6 +79,11 @@ journal 时拒绝 WP-C→WP-B 降级的保护；公开 SDK、Grant Store 和 man
 WP-E 增加独立 `live-control-v1.sqlite3`、一次性 receipt 和 hash-chain audit，
 Host management API、持久原生横幅/控制 modal、离线导出验证与显式归档工具；公开 SDK、
 插件 manifest、sandbox bridge 和 Live mutation allowlist 不变。
+
+WP-F 增加固定 OKX Demo execution connector、Read + Trade account proof、
+`live-execution-v1.sqlite3`、persist-before-send 状态机、Host execution management API、
+两层 typed confirmation、v2 audit 和 execution rollback archive；公开 SDK、manifest、
+sandbox bridge、普通 network gateway 和 production release lock 不变。
 
 现有 Grant Store、Capability Broker、integration network gateway 与 Paper Runtime
 不增加 Live permission，也不获得 credential use 权限。
@@ -123,15 +132,24 @@ Host management API、持久原生横幅/控制 modal、离线导出验证与显
      sandbox/SDK 不获得 control、receipt 或 audit。
    - 跑 schema/hash tamper、expiry/restart/race/flag-off、真实生产构建浏览器、回滚归档
      和全量回归，独立提交。
+6. **WP-F — Pinned OKX Demo Spot execution**
+   - 只允许 `BTC-USDT`、Spot cash、limit 的 submit/cancel 和按稳定 `clOrdId` query。
+   - 固定 `100 USDT` 单笔、2 个未决、`200 USDT` 未决总额，不允许插件修改。
+   - submit/cancel 各自绑定新的 receipt，并要求第二次 Host typed confirmation。
+   - execution ledger 在网络前记录 `submitting` / `canceling`，不确定 ack 或 crash
+     恢复为 `unknown` / `cancel_unknown`，绝不自动重试。
+   - 成功 mutation ack 不是终态；只有 query 更新 venue state。
+   - 跑 exact signing/body/header、风险上限、persist-before-send、crash/tamper、
+     Host API/UI、本地 fake venue 浏览器、归档和全量回归，独立提交。
 
-WP-F–WP-G 不在当前授权内，不创建 submit/cancel 或资金动作。WP-E 不暴露 receipt
-consume 方法。
+WP-G 不在当前授权内；不创建 production credential/lock、资金动作、通用第三方交易
+执行或自动策略下单。
 
 ## Compatibility And Migration
 
-WP-A/WP-B/WP-C/WP-D/WP-E 都是 additive internal contracts。现有 `.cspkg` schema、公开
-SDK、插件 RPC、activation registry 和 Paper 数据不迁移。旧安装继续按 digest-only 语义工作，
-但不能因此获得 Live 资格。
+WP-A/WP-B/WP-C/WP-D/WP-E/WP-F 都是 additive internal contracts。现有 `.cspkg`
+schema、公开 SDK、插件 RPC、activation registry 和 Paper 数据不迁移。旧安装继续按
+digest-only 语义工作，但不能因此获得 Live 资格。
 
 Live release lock 与普通 activation registry 分开；只有 Host build 内置记录可参与
 WP-A。未来 Phase 12 publisher signature 不能静默改写当前 evidence；它必须引入新
@@ -143,6 +161,9 @@ Credential records 只属于 Broker 私有根目录。格式升级必须先验�
 备份并显式确认删除只读 account metadata 后，通过受测工具降为 WP-B 可读的 v1。
 WP-E control store 与 WP-D journal 分离；关闭 WP-E 不打开 control store，回退代码前
 必须先 kill、导出并验证 audit、停止 Broker，再归档 control SQLite 三件套。
+WP-F execution store 同样独立；回退前必须先收敛或显式人工接管未决订单，再 kill、
+验证 v2 audit、停止 Broker 并归档 execution SQLite 三件套。旧 downgrade 工具发现
+WP-F store 时拒绝继续。
 
 ## Tactical Protections During Migration
 
@@ -152,9 +173,10 @@ WP-E control store 与 WP-D journal 分离；关闭 WP-E 不打开 control store
 - feature flag 默认 false；false 时不创建 Broker 进程、pipe、vault 目录或 handle。
 - 只有通过 WP-A 的 exact evidence 才能调用 credential put；`local-trusted`、
   `untrusted`、manifest display publisher 和普通 digest receipt 都不足以授权。
-- Broker method allowlist 以常量和架构测试双重锁定；只有 WP-C 专用模块可导入
-  `http`/`socket`；WP-D 复用同一专用模块且只增加一个固定 GET，其他网络 client 或
-  任何 order mutation 方法都会使测试失败。
+- Broker method allowlist 以常量和架构测试双重锁定；只有专用 OKX 模块可导入
+  `http`/`socket`。WP-C 固定两个 GET，WP-D 增加一个 order-detail GET，WP-F 只增加
+  exact submit/cancel POST；总 network method count 为 5，其他网络 client/path 或
+  mutation 都会使测试失败。
 - stdout 仅承载严格有界协议；stderr 有界且不包含 request params。
 - policy epoch 单调持久化；advance 后旧 handle/request 不能继续使用。
 - Broker crash 不触发 Host 内 fallback，不改变 Paper 状态。
@@ -216,10 +238,23 @@ WP-E：
 - 真实生产构建浏览器证明 Host modal/banner 层级、typed arm/kill、reload 持久 KILLED，
   且无 Live submit/cancel 交互面。
 
+WP-F：
+
+- exact Demo connector、Read + Trade no-Withdraw permission、path/header/body/signature
+  和五秒 `expTime` 通过。
+- 单笔、未决数量和未决名义价值上限逐项拒绝；receipt action/account/epoch/generation
+  mismatch 在网络前失败。
+- submit/cancel 都证明 receipt consume 和 execution state durable commit 先于唯一一次
+  fake connector call；transport、`50004` 和 crash window 保持未知且不重试。
+- exact execution schema/index/event chain/projection tamper、kill、v2 audit redaction、
+  downgrade/archive 和 secret canary 通过。
+- production frontend + real Host API + explicit fake venue 浏览器闭环证明
+  `unknown → live → cancel_unknown → canceled`，且 submit/cancel/query 为 1/1/2。
+
 回归门包括相关 backend tests、完整 `backend/tests`、frontend typecheck/test/build、
-SDK tests、`git diff --check`。WP-B 不需要浏览器或 testnet 来证明零网络 foundation，
-WP-D/WP-E 同样不以 mock 结果声称真实 OKX Demo 兼容；它们都必须保留 Phase 11A
-浏览器 smoke 和 Paper 回归。
+SDK tests、`git diff --check`。WP-B 不需要浏览器或 testnet 来证明零网络 foundation。
+WP-F 的本地 fake venue 浏览器证据只验证 Host/Broker 语义，不声称真实 OKX Demo
+兼容；真实 Demo smoke 需要用户凭据、订单选择和独立外部 mutation 授权。
 
 ## Performance And Resource Benchmarks
 
@@ -255,25 +290,31 @@ WP-B 在本机记录而不是预先声称以下预算已满足：
 8. 回滚 WP-E：先在 Host 执行 global kill 并下载/离线验证 audit，停止 Broker，再用
    `archive_live_control_v1.py --confirm-killed --confirm-remove-source` checkpoint、验证
    并归档 control SQLite 三件套，最后关闭 flag 并回退 WP-E 独立提交。
+9. 有序回滚 WP-F：先停止新 submit，query/cancel/query 收敛全部 Demo execution，
+   再 global kill、验证 v2 audit、停止 Broker，并用 `archive_live_execution_v1.py`
+   归档 execution SQLite 三件套。若事故要求先 kill，则保留 unresolved export 并显式
+   完成人工 venue review，不能再声称可在线 cancel。
 
-WP-C→WP-B 降级工具发现 WP-D journal 或 WP-E control store 时拒绝。WP-D/WP-E
-没有发送订单，因此不做 venue order cleanup；本阶段也没有真实 Demo key smoke。
+WP-C→WP-B 降级工具发现 WP-D journal、WP-E control store 或 WP-F execution store
+时拒绝。WP-F 本地浏览器使用显式 fake venue；本阶段没有真实 Demo key smoke。
 
 ## Acceptance Criteria
 
 - Option 3 选择、证据 revision、drift 与授权范围可追溯。
-- WP-A、WP-B、WP-C、WP-D 与 WP-E 是独立、可单独回退的提交。
+- WP-A、WP-B、WP-C、WP-D、WP-E 与 WP-F 是独立、可单独回退的提交。
 - 只有 exact build-pinned first-party release record 能产生 `PublisherEvidence`。
 - local/unsigned/mismatched publisher 在任何 credential handle 创建前被拒绝。
 - Broker 是独立进程且只有私有继承 IPC；协议版本和 policy epoch 强制执行。
 - credential API 只返回 opaque reference/metadata，secret canary 不越过 vault 边界。
 - WP-B 单独启用时零 network；WP-C 只允许两个固定认证 GET；WP-D 只增加一个固定
   order-detail GET 和三个 shadow 方法。
-- WP-E 只增加 Host control/confirmation/audit；receipt consume 与 order mutation
-  不在协议/API/SDK/iframe 中。
+- WP-E 只增加 Host control/confirmation/audit；WP-F 才允许 Broker 私有 receipt
+  consume 和两个固定 Demo mutation；公开 SDK/iframe 仍无 mutation。
+- WP-F 风控、persist-before-send、不确定态、查询收敛、kill、v2 audit 和回滚门通过。
 - stale epoch/replay 失败，Broker crash 不影响 Paper。
 - feature off 为零进程、零 pipe、零 vault 创建、零 handle。
-- `trade.submit`、`trade.cancel`、order mutation 和 verified publisher 仍不可用。
+- SDK `trade.submit`、`trade.cancel`、production order mutation、资金动作和 verified
+  publisher 仍不可用。
 - 聚焦、全量、frontend、SDK 和 diff hygiene 门通过，或明确记录真实 blocker。
 
 ## Open Decisions
@@ -285,4 +326,6 @@ WP-C→WP-B 降级工具发现 WP-D journal 或 WP-E control store 时拒绝。W
 - WP-D 已选择 SQLite/WAL、`synchronous=FULL` 与 query-before-result 两段 durable
   transaction；若未来更换存储必须新增 schema/migration，不得静默解释现有 journal。
 - WP-E 已冻结并实现原生 intent-bound confirmation 与 audit export 合同。
-- WP-F/WP-G 必须分别获得新的明确授权；测试通过不会自动打开 testnet 或 production。
+- WP-F 已冻结并实现单一 build-pinned Demo execution slice；真实 OKX Demo smoke
+  仍需用户凭据、测试订单和单独外部 mutation 授权。
+- WP-G 必须获得新的明确授权；WP-F 测试通过不会自动打开 production。

@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "candlescope.phase11b-wpf-browser-evidence/1",
+  "recordedAt": "2026-07-23T11:14:00Z",
+  "scope": "local-fake-only",
+  "realOkxDemoCalled": false,
+  "server": {
+    "port": 18132,
+    "frontend": "production-vite-build",
+    "executionBackend": "explicit-test-fake",
+    "connectorId": "candlescope.okx-demo-spot-execution"
+  },
+  "flow": [
+    "disarmed",
+    "armed",
+    "submit-receipt-issued-without-network",
+    "submit-unknown",
+    "query-live",
+    "cancel-receipt-issued-without-network",
+    "cancel-unknown",
+    "query-canceled"
+  ],
+  "fakeVenueCalls": {
+    "submit": 1,
+    "cancel": 1,
+    "query": 2
+  },
+  "finalExecutionStatus": {
+    "orderCount": 1,
+    "terminalCount": 1,
+    "unresolvedCount": 0,
+    "unresolvedNotional": "0",
+    "eventSequence": 6,
+    "eventSha256": "sha256:3aa7e53386cf8c882426593f33f23909a6436818c4078608678e7e8ff3bc9271"
+  },
+  "browser": {
+    "consoleErrors": 0,
+    "consoleWarnings": 0,
+    "screenshot": "output/playwright/phase11f-wpf-submit-query-cancel-query.png",
+    "screenshotSha256": "sha256:42b2edc53f4549de3dd5f00e240286e18dbb3e7d52ed7beaa2d82fa75573462d",
+    "screenshotTracked": false
+  },
+  "claims": {
+    "proves": [
+      "production Host UI and guarded management API flow",
+      "two independent typed confirmations per mutation",
+      "persisted acknowledgement remains unknown until query",
+      "local fake venue received each mutation exactly once"
+    ],
+    "doesNotProve": [
+      "real OKX Demo credentials",
+      "real OKX network compatibility",
+      "production trading",
+      "WP-G authorization"
+    ]
+  }
+}

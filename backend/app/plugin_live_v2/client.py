@@ -42,6 +42,10 @@ from .protocol import (
     METHOD_CREDENTIAL_DESCRIBE,
     METHOD_CREDENTIAL_PUT,
     METHOD_CREDENTIAL_REVOKE,
+    METHOD_EXECUTION_CANCEL,
+    METHOD_EXECUTION_DESCRIBE,
+    METHOD_EXECUTION_RECONCILE,
+    METHOD_EXECUTION_SUBMIT,
     METHOD_HEALTH,
     METHOD_POLICY_ADVANCE,
     METHOD_SHADOW_DESCRIBE,
@@ -479,7 +483,11 @@ def _shadow_description(value: dict[str, Any]) -> ShadowOrderDescription:
     )
 
 
-def _validated_control_status(value: dict[str, Any]) -> dict[str, Any]:
+def _validated_control_status(
+    value: dict[str, Any],
+    *,
+    execution_enabled: bool = False,
+) -> dict[str, Any]:
     expected = {
         "schemaVersion",
         "available",
@@ -526,8 +534,8 @@ def _validated_control_status(value: dict[str, Any]) -> dict[str, Any]:
                 is None
             )
         )
-        or value["liveSubmitAvailable"] is not False
-        or value["liveCancelAvailable"] is not False
+        or value["liveSubmitAvailable"] is not execution_enabled
+        or value["liveCancelAvailable"] is not execution_enabled
         or value["liveTransferAvailable"] is not False
     ):
         raise broker_error(
@@ -539,7 +547,7 @@ def _validated_control_status(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validated_confirmation_preview(value: dict[str, Any]) -> dict[str, Any]:
-    expected = {
+    common = {
         "schemaVersion",
         "intentSha256",
         "pluginId",
@@ -557,6 +565,17 @@ def _validated_confirmation_preview(value: dict[str, Any]) -> dict[str, Any]:
         "liveSubmitAvailable",
         "liveCancelAvailable",
     }
+    schema_version = value.get("schemaVersion")
+    expected = set(common)
+    if schema_version == "candlescope.live-confirmation-preview/2":
+        expected |= {
+            "orderIntentSha256",
+            "action",
+            "executionState",
+            "notional",
+            "riskDecisionSha256",
+            "hardLimits",
+        }
     _exact_result(value, expected, "Live confirmation preview")
     strings = (
         value["intentSha256"],
@@ -572,7 +591,11 @@ def _validated_confirmation_preview(value: dict[str, Any]) -> dict[str, Any]:
         value["limitPrice"],
     )
     if (
-        value["schemaVersion"] != "candlescope.live-confirmation-preview/1"
+        schema_version
+        not in {
+            "candlescope.live-confirmation-preview/1",
+            "candlescope.live-confirmation-preview/2",
+        }
         or not all(isinstance(item, str) and item for item in strings)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", value["intentSha256"])
         is None
@@ -588,19 +611,94 @@ def _validated_confirmation_preview(value: dict[str, Any]) -> dict[str, Any]:
                 value["controlGeneration"],
             )
         )
-        or value["liveSubmitAvailable"] is not False
-        or value["liveCancelAvailable"] is not False
     ):
         raise broker_error(
             "LIVE_BROKER_RESPONSE_INVALID",
             "Live confirmation preview values are invalid",
             fatal=True,
         )
+    if schema_version == "candlescope.live-confirmation-preview/1":
+        if (
+            value["liveSubmitAvailable"] is not False
+            or value["liveCancelAvailable"] is not False
+        ):
+            raise broker_error(
+                "LIVE_BROKER_RESPONSE_INVALID",
+                "Live confirmation preview values are invalid",
+                fatal=True,
+            )
+        return dict(value)
+    hard_limits = value["hardLimits"]
+    try:
+        canonical_positive_decimal(value["notional"], "execution notional")
+        canonical_positive_decimal(
+            hard_limits.get("maxOrderNotional")
+            if isinstance(hard_limits, dict)
+            else None,
+            "maximum order notional",
+        )
+        canonical_positive_decimal(
+            hard_limits.get("maxUnresolvedNotional")
+            if isinstance(hard_limits, dict)
+            else None,
+            "maximum unresolved notional",
+        )
+    except (TypeError, ValueError) as exc:
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "Live confirmation preview execution values are invalid",
+            fatal=True,
+        ) from exc
+    action = value["action"]
+    execution_state = value["executionState"]
+    if (
+        not isinstance(value["orderIntentSha256"], str)
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            value["orderIntentSha256"],
+        )
+        is None
+        or not isinstance(value["riskDecisionSha256"], str)
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            value["riskDecisionSha256"],
+        )
+        is None
+        or action not in {"submit", "cancel"}
+        or (
+            action == "submit"
+            and execution_state != "not-started"
+        )
+        or (
+            action == "cancel"
+            and execution_state not in {"live", "partially_filled"}
+        )
+        or not isinstance(hard_limits, dict)
+        or set(hard_limits)
+        != {
+            "instrumentId",
+            "maxOrderNotional",
+            "maxUnresolvedOrders",
+            "maxUnresolvedNotional",
+        }
+        or hard_limits["instrumentId"] != "BTC-USDT"
+        or hard_limits["maxOrderNotional"] != "100"
+        or hard_limits["maxUnresolvedOrders"] != 2
+        or hard_limits["maxUnresolvedNotional"] != "200"
+        or value["instrumentId"] != "BTC-USDT"
+        or value["liveSubmitAvailable"] is not (action == "submit")
+        or value["liveCancelAvailable"] is not (action == "cancel")
+    ):
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "Live confirmation preview execution values are invalid",
+            fatal=True,
+        )
     return dict(value)
 
 
 def _validated_confirmation(value: dict[str, Any], *, issued: bool) -> dict[str, Any]:
-    expected = {
+    common = {
         "schemaVersion",
         "receiptId",
         "intentSha256",
@@ -621,6 +719,16 @@ def _validated_confirmation(value: dict[str, Any], *, issued: bool) -> dict[str,
         "expiresAt",
         "resolvedAt",
     }
+    schema_version = value.get("schemaVersion")
+    expected = set(common)
+    if schema_version == "candlescope.live-confirmation/2":
+        expected |= {
+            "orderIntentSha256",
+            "action",
+            "executionState",
+            "notional",
+            "riskDecisionSha256",
+        }
     if issued:
         expected |= {
             "receiptRef",
@@ -629,7 +737,11 @@ def _validated_confirmation(value: dict[str, Any], *, issued: bool) -> dict[str,
         }
     _exact_result(value, expected, "Live confirmation receipt")
     if (
-        value["schemaVersion"] != "candlescope.live-confirmation/1"
+        schema_version
+        not in {
+            "candlescope.live-confirmation/1",
+            "candlescope.live-confirmation/2",
+        }
         or not isinstance(value["receiptId"], str)
         or re.fullmatch(r"[0-9a-f]{32}", value["receiptId"]) is None
         or not isinstance(value["intentSha256"], str)
@@ -675,14 +787,243 @@ def _validated_confirmation(value: dict[str, Any], *, issued: bool) -> dict[str,
                     value["receiptRef"],
                 )
                 is None
-                or value["liveSubmitAvailable"] is not False
-                or value["liveCancelAvailable"] is not False
             )
         )
     ):
         raise broker_error(
             "LIVE_BROKER_RESPONSE_INVALID",
             "Live confirmation receipt values are invalid",
+            fatal=True,
+        )
+    if schema_version == "candlescope.live-confirmation/1":
+        if issued and (
+            value["liveSubmitAvailable"] is not False
+            or value["liveCancelAvailable"] is not False
+        ):
+            raise broker_error(
+                "LIVE_BROKER_RESPONSE_INVALID",
+                "Live confirmation receipt values are invalid",
+                fatal=True,
+            )
+        return dict(value)
+    try:
+        canonical_positive_decimal(value["notional"], "execution notional")
+    except (TypeError, ValueError) as exc:
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "Live confirmation execution values are invalid",
+            fatal=True,
+        ) from exc
+    action = value["action"]
+    if (
+        not issued
+        or not isinstance(value["orderIntentSha256"], str)
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            value["orderIntentSha256"],
+        )
+        is None
+        or not isinstance(value["riskDecisionSha256"], str)
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            value["riskDecisionSha256"],
+        )
+        is None
+        or action not in {"submit", "cancel"}
+        or (
+            action == "submit"
+            and value["executionState"] != "not-started"
+        )
+        or (
+            action == "cancel"
+            and value["executionState"] not in {"live", "partially_filled"}
+        )
+        or value["liveSubmitAvailable"] is not (action == "submit")
+        or value["liveCancelAvailable"] is not (action == "cancel")
+    ):
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "Live confirmation execution values are invalid",
+            fatal=True,
+        )
+    return dict(value)
+
+
+_EXECUTION_STATES = frozenset(
+    {
+        "submitting",
+        "unknown",
+        "rejected",
+        "live",
+        "partially_filled",
+        "filled",
+        "canceled",
+        "mmp_canceled",
+        "canceling",
+        "cancel_unknown",
+    }
+)
+_EXECUTION_TERMINAL_STATES = frozenset(
+    {"rejected", "filled", "canceled", "mmp_canceled"}
+)
+
+
+def _validated_execution_record(
+    value: dict[str, Any],
+    *,
+    action: str | None = None,
+) -> dict[str, Any]:
+    expected = {
+        "schemaVersion",
+        "pluginId",
+        "connectorId",
+        "publisherIdentity",
+        "version",
+        "clientOrderId",
+        "orderIntentSha256",
+        "instrumentId",
+        "side",
+        "orderType",
+        "quantity",
+        "limitPrice",
+        "notional",
+        "state",
+        "priorState",
+        "submitAttemptCount",
+        "cancelAttemptCount",
+        "venueOrderIdSha256",
+        "lastReceiptId",
+        "lastConfirmationSha256",
+        "lastRiskDecisionSha256",
+        "lastErrorCode",
+        "createdAt",
+        "updatedAt",
+        "policyEpoch",
+        "controlGeneration",
+        "terminal",
+        "reconciliationRequired",
+    }
+    if action is not None:
+        expected |= {"accepted", "action"}
+    _exact_result(value, expected, "Live execution record")
+    state = value["state"]
+    prior_state = value["priorState"]
+    venue_digest = value["venueOrderIdSha256"]
+    digests = (
+        value["orderIntentSha256"],
+        value["lastConfirmationSha256"],
+        value["lastRiskDecisionSha256"],
+    )
+    try:
+        canonical_positive_decimal(value["quantity"], "execution quantity")
+        canonical_positive_decimal(
+            value["limitPrice"],
+            "execution limit price",
+        )
+        canonical_positive_decimal(value["notional"], "execution notional")
+    except (TypeError, ValueError) as exc:
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "Live execution numeric values are invalid",
+            fatal=True,
+        ) from exc
+    if (
+        value["schemaVersion"] != "candlescope.live-execution-record/1"
+        or value["connectorId"]
+        != "candlescope.okx-demo-spot-execution"
+        or value["instrumentId"] != "BTC-USDT"
+        or value["side"] not in {"buy", "sell"}
+        or value["orderType"] != "limit"
+        or state not in _EXECUTION_STATES
+        or not all(
+            isinstance(value[key], str) and value[key]
+            for key in (
+                "pluginId",
+                "publisherIdentity",
+                "version",
+                "createdAt",
+                "updatedAt",
+            )
+        )
+        or not isinstance(value["clientOrderId"], str)
+        or re.fullmatch(r"[A-Za-z0-9]{32}", value["clientOrderId"]) is None
+        or any(
+            not isinstance(item, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", item) is None
+            for item in digests
+        )
+        or not isinstance(value["lastReceiptId"], str)
+        or re.fullmatch(r"[0-9a-f]{32}", value["lastReceiptId"]) is None
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, int)
+            or item < 0
+            for item in (
+                value["submitAttemptCount"],
+                value["cancelAttemptCount"],
+                value["policyEpoch"],
+                value["controlGeneration"],
+            )
+        )
+        or value["submitAttemptCount"] != 1
+        or value["cancelAttemptCount"] > 10
+        or (
+            venue_digest is not None
+            and (
+                not isinstance(venue_digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", venue_digest)
+                is None
+            )
+        )
+        or (
+            state
+            in {
+                "live",
+                "partially_filled",
+                "filled",
+                "canceled",
+                "mmp_canceled",
+                "canceling",
+                "cancel_unknown",
+            }
+            and venue_digest is None
+        )
+        or (
+            state in {"canceling", "cancel_unknown"}
+            and prior_state not in {"live", "partially_filled"}
+        )
+        or (
+            state not in {"canceling", "cancel_unknown"}
+            and prior_state is not None
+        )
+        or (
+            value["lastErrorCode"] is not None
+            and (
+                not isinstance(value["lastErrorCode"], str)
+                or re.fullmatch(
+                    r"[A-Z][A-Z0-9_]{0,127}",
+                    value["lastErrorCode"],
+                )
+                is None
+            )
+        )
+        or value["terminal"] is not (
+            state in _EXECUTION_TERMINAL_STATES
+        )
+        or value["reconciliationRequired"] is not (
+            state in {"unknown", "cancel_unknown"}
+        )
+        or (
+            action is not None
+            and (
+                value["action"] != action
+                or not isinstance(value["accepted"], bool)
+            )
+        )
+    ):
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "Live execution record values are invalid",
             fatal=True,
         )
     return dict(value)
@@ -703,6 +1044,7 @@ class LiveBrokerController:
         read_only_accounts_enabled: bool = False,
         reconciliation_shadow_enabled: bool = False,
         native_control_enabled: bool = False,
+        testnet_execution_enabled: bool = False,
         request_timeout_seconds: float = DEFAULT_BROKER_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         if not isinstance(enabled, bool):
@@ -732,6 +1074,12 @@ class LiveBrokerController:
             raise ValueError(
                 "native_control_enabled requires reconciliation shadow"
             )
+        if not isinstance(testnet_execution_enabled, bool):
+            raise TypeError("testnet_execution_enabled must be a boolean")
+        if testnet_execution_enabled and not native_control_enabled:
+            raise ValueError(
+                "testnet_execution_enabled requires native Live control"
+            )
         if (
             isinstance(request_timeout_seconds, bool)
             or not isinstance(request_timeout_seconds, (int, float))
@@ -752,6 +1100,7 @@ class LiveBrokerController:
         self.read_only_accounts_enabled = read_only_accounts_enabled
         self.reconciliation_shadow_enabled = reconciliation_shadow_enabled
         self.native_control_enabled = native_control_enabled
+        self.testnet_execution_enabled = testnet_execution_enabled
         self.request_timeout_seconds = float(request_timeout_seconds)
         self._worker_path = Path(__file__).with_name("worker.py").resolve(
             strict=False
@@ -804,8 +1153,8 @@ class LiveBrokerController:
             },
             "eventSequence": 0,
             "eventSha256": None,
-            "liveSubmitAvailable": False,
-            "liveCancelAvailable": False,
+            "liveSubmitAvailable": self.testnet_execution_enabled,
+            "liveCancelAvailable": self.testnet_execution_enabled,
             "liveTransferAvailable": False,
         }
 
@@ -832,9 +1181,12 @@ class LiveBrokerController:
                 self.reconciliation_shadow_enabled
             ),
             "nativeControlEnabled": self.native_control_enabled,
+            "testnetExecutionEnabled": self.testnet_execution_enabled,
             "control": dict(self._control_status),
             "networkMethods": (
-                3
+                5
+                if self.testnet_execution_enabled
+                else 3
                 if self.reconciliation_shadow_enabled
                 else 2
                 if self.read_only_accounts_enabled
@@ -867,6 +1219,11 @@ class LiveBrokerController:
                     "control-on"
                     if self.native_control_enabled
                     else "control-off"
+                ),
+                (
+                    "execution-on"
+                    if self.testnet_execution_enabled
+                    else "execution-off"
                 ),
             ),
             working_directory=self._worker_path.parents[2],
@@ -936,6 +1293,9 @@ class LiveBrokerController:
                     "reconciliationShadowEnabled",
                     "journalCount",
                     "unresolvedCount",
+                    "testnetExecutionEnabled",
+                    "executionCount",
+                    "executionUnresolvedCount",
                 },
                 "foundation.bootstrap result",
             )
@@ -952,6 +1312,8 @@ class LiveBrokerController:
                 is not self.read_only_accounts_enabled
                 or result["reconciliationShadowEnabled"]
                 is not self.reconciliation_shadow_enabled
+                or result["testnetExecutionEnabled"]
+                is not self.testnet_execution_enabled
                 or isinstance(result["journalCount"], bool)
                 or not isinstance(result["journalCount"], int)
                 or result["journalCount"] < 0
@@ -959,11 +1321,26 @@ class LiveBrokerController:
                 or not isinstance(result["unresolvedCount"], int)
                 or result["unresolvedCount"] < 0
                 or result["unresolvedCount"] > result["journalCount"]
+                or isinstance(result["executionCount"], bool)
+                or not isinstance(result["executionCount"], int)
+                or result["executionCount"] < 0
+                or isinstance(result["executionUnresolvedCount"], bool)
+                or not isinstance(result["executionUnresolvedCount"], int)
+                or result["executionUnresolvedCount"] < 0
+                or result["executionUnresolvedCount"]
+                > result["executionCount"]
                 or (
                     not self.reconciliation_shadow_enabled
                     and (
                         result["journalCount"] != 0
                         or result["unresolvedCount"] != 0
+                    )
+                )
+                or (
+                    not self.testnet_execution_enabled
+                    and (
+                        result["executionCount"] != 0
+                        or result["executionUnresolvedCount"] != 0
                     )
                 )
             ):
@@ -977,7 +1354,10 @@ class LiveBrokerController:
                     METHOD_CONTROL_STATUS,
                     {},
                 )
-                self._control_status = _validated_control_status(control)
+                self._control_status = _validated_control_status(
+                    control,
+                    execution_enabled=self.testnet_execution_enabled,
+                )
             else:
                 self._control_status = self._unavailable_control_status()
             self._state = "ready"
@@ -1106,8 +1486,11 @@ class LiveBrokerController:
                     "pendingDeleteCount",
                     "readOnlyAccountsEnabled",
                     "reconciliationShadowEnabled",
+                    "testnetExecutionEnabled",
                     "journalCount",
                     "unresolvedCount",
+                    "executionCount",
+                    "executionUnresolvedCount",
                     "networkMethods",
                 },
                 "foundation.health result",
@@ -1118,6 +1501,8 @@ class LiveBrokerController:
                 result["pendingDeleteCount"],
                 result["journalCount"],
                 result["unresolvedCount"],
+                result["executionCount"],
+                result["executionUnresolvedCount"],
                 result["networkMethods"],
             )
             if (
@@ -1133,7 +1518,11 @@ class LiveBrokerController:
                 is not self.read_only_accounts_enabled
                 or result["reconciliationShadowEnabled"]
                 is not self.reconciliation_shadow_enabled
+                or result["testnetExecutionEnabled"]
+                is not self.testnet_execution_enabled
                 or result["unresolvedCount"] > result["journalCount"]
+                or result["executionUnresolvedCount"]
+                > result["executionCount"]
                 or (
                     not self.reconciliation_shadow_enabled
                     and (
@@ -1141,9 +1530,18 @@ class LiveBrokerController:
                         or result["unresolvedCount"] != 0
                     )
                 )
+                or (
+                    not self.testnet_execution_enabled
+                    and (
+                        result["executionCount"] != 0
+                        or result["executionUnresolvedCount"] != 0
+                    )
+                )
                 or result["networkMethods"]
                 != (
-                    3
+                    5
+                    if self.testnet_execution_enabled
+                    else 3
                     if self.reconciliation_shadow_enabled
                     else 2
                     if self.read_only_accounts_enabled
@@ -1503,11 +1901,21 @@ class LiveBrokerController:
                 "Host-native Live control is disabled",
             )
 
+    def _require_testnet_execution(self) -> None:
+        if not self.testnet_execution_enabled:
+            raise broker_error(
+                "LIVE_TESTNET_EXECUTION_DISABLED",
+                "OKX Demo Spot execution is disabled",
+            )
+
     async def control_status(self) -> dict[str, Any]:
         self._require_native_control()
         async with self._operation_lock:
             result = await self._exchange_locked(METHOD_CONTROL_STATUS, {})
-            self._control_status = _validated_control_status(result)
+            self._control_status = _validated_control_status(
+                result,
+                execution_enabled=self.testnet_execution_enabled,
+            )
             return dict(self._control_status)
 
     async def set_control_mode(
@@ -1538,7 +1946,10 @@ class LiveBrokerController:
                     "acknowledgeKill": acknowledge_kill,
                 },
             )
-            self._control_status = _validated_control_status(result)
+            self._control_status = _validated_control_status(
+                result,
+                execution_enabled=self.testnet_execution_enabled,
+            )
             return dict(self._control_status)
 
     async def kill_control(self, *, reason: str) -> dict[str, Any]:
@@ -1557,7 +1968,10 @@ class LiveBrokerController:
             )
             revocation = result.pop("revocation", None)
             revoked_count = result.pop("revokedConfirmationCount", None)
-            self._control_status = _validated_control_status(result)
+            self._control_status = _validated_control_status(
+                result,
+                execution_enabled=self.testnet_execution_enabled,
+            )
             if (
                 not isinstance(revocation, dict)
                 or revocation.get("advanced") is not True
@@ -1614,7 +2028,10 @@ class LiveBrokerController:
             returned_scope = result.pop("scopeType", None)
             revocation = result.pop("revocation", None)
             revoked_count = result.pop("revokedConfirmationCount", None)
-            self._control_status = _validated_control_status(result)
+            self._control_status = _validated_control_status(
+                result,
+                execution_enabled=self.testnet_execution_enabled,
+            )
             if (
                 returned_scope != scope_type
                 or not isinstance(revocation, dict)
@@ -1707,7 +2124,10 @@ class LiveBrokerController:
             )
             confirmation = _validated_confirmation(result, issued=True)
             status = await self._exchange_locked(METHOD_CONTROL_STATUS, {})
-            self._control_status = _validated_control_status(status)
+            self._control_status = _validated_control_status(
+                status,
+                execution_enabled=self.testnet_execution_enabled,
+            )
         return confirmation
 
     async def describe_confirmation(self, receipt_ref: str) -> dict[str, Any]:
@@ -1749,32 +2169,221 @@ class LiveBrokerController:
             )
             confirmation = _validated_confirmation(result, issued=False)
             status = await self._exchange_locked(METHOD_CONTROL_STATUS, {})
-            self._control_status = _validated_control_status(status)
+            self._control_status = _validated_control_status(
+                status,
+                execution_enabled=self.testnet_execution_enabled,
+            )
         return confirmation
+
+    @staticmethod
+    def _execution_request_values(
+        *,
+        account_ref: str,
+        shadow_ref: str,
+        receipt_ref: str,
+        expected_confirmation_sha256: str,
+        expected_policy_epoch: int,
+        expected_control_generation: int,
+    ) -> dict[str, Any]:
+        LiveBrokerController._opaque_live_refs(account_ref, shadow_ref)
+        if (
+            not isinstance(receipt_ref, str)
+            or re.fullmatch(r"livecfm_[A-Za-z0-9_-]{43}", receipt_ref)
+            is None
+            or not isinstance(expected_confirmation_sha256, str)
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                expected_confirmation_sha256,
+            )
+            is None
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, int)
+                or item < 0
+                for item in (
+                    expected_policy_epoch,
+                    expected_control_generation,
+                )
+            )
+        ):
+            raise ValueError("execution request values are invalid")
+        return {
+            "accountRef": account_ref,
+            "shadowRef": shadow_ref,
+            "receiptRef": receipt_ref,
+            "expectedConfirmationSha256": (
+                expected_confirmation_sha256
+            ),
+            "expectedPolicyEpoch": expected_policy_epoch,
+            "expectedControlGeneration": expected_control_generation,
+        }
+
+    async def describe_execution(
+        self,
+        *,
+        shadow_ref: str,
+    ) -> dict[str, Any]:
+        self._require_testnet_execution()
+        if (
+            not isinstance(shadow_ref, str)
+            or re.fullmatch(r"shdw_[A-Za-z0-9_-]{43}", shadow_ref) is None
+        ):
+            raise ValueError("shadow_ref is invalid")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_EXECUTION_DESCRIBE,
+                {"shadowRef": shadow_ref},
+            )
+        return _validated_execution_record(result)
+
+    async def submit_execution(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+        receipt_ref: str,
+        expected_confirmation_sha256: str,
+        expected_policy_epoch: int,
+        expected_control_generation: int,
+    ) -> dict[str, Any]:
+        self._require_testnet_execution()
+        params = self._execution_request_values(
+            account_ref=account_ref,
+            shadow_ref=shadow_ref,
+            receipt_ref=receipt_ref,
+            expected_confirmation_sha256=(
+                expected_confirmation_sha256
+            ),
+            expected_policy_epoch=expected_policy_epoch,
+            expected_control_generation=expected_control_generation,
+        )
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_EXECUTION_SUBMIT,
+                params,
+            )
+            execution = _validated_execution_record(
+                result,
+                action="submit",
+            )
+            status = await self._exchange_locked(METHOD_CONTROL_STATUS, {})
+            self._control_status = _validated_control_status(
+                status,
+                execution_enabled=True,
+            )
+        return execution
+
+    async def cancel_execution(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+        receipt_ref: str,
+        expected_confirmation_sha256: str,
+        expected_policy_epoch: int,
+        expected_control_generation: int,
+    ) -> dict[str, Any]:
+        self._require_testnet_execution()
+        params = self._execution_request_values(
+            account_ref=account_ref,
+            shadow_ref=shadow_ref,
+            receipt_ref=receipt_ref,
+            expected_confirmation_sha256=(
+                expected_confirmation_sha256
+            ),
+            expected_policy_epoch=expected_policy_epoch,
+            expected_control_generation=expected_control_generation,
+        )
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_EXECUTION_CANCEL,
+                params,
+            )
+            execution = _validated_execution_record(
+                result,
+                action="cancel",
+            )
+            status = await self._exchange_locked(METHOD_CONTROL_STATUS, {})
+            self._control_status = _validated_control_status(
+                status,
+                execution_enabled=True,
+            )
+        return execution
+
+    async def reconcile_execution(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+    ) -> dict[str, Any]:
+        self._require_testnet_execution()
+        self._opaque_live_refs(account_ref, shadow_ref)
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_EXECUTION_RECONCILE,
+                {
+                    "accountRef": account_ref,
+                    "shadowRef": shadow_ref,
+                },
+            )
+        _exact_result(
+            result,
+            {"schemaVersion", "execution", "shadow"},
+            "execution.reconcile result",
+        )
+        if (
+            result["schemaVersion"]
+            != "candlescope.live-execution-reconcile/1"
+            or not isinstance(result["execution"], dict)
+            or not isinstance(result["shadow"], dict)
+        ):
+            raise broker_error(
+                "LIVE_BROKER_RESPONSE_INVALID",
+                "Live execution reconciliation result is invalid",
+                fatal=True,
+            )
+        return {
+            "schemaVersion": result["schemaVersion"],
+            "execution": _validated_execution_record(
+                result["execution"]
+            ),
+            "shadow": _shadow_description(result["shadow"]),
+        }
 
     async def export_audit(self) -> dict[str, Any]:
         self._require_native_control()
         control_after = 0
         shadow_after = 0
+        execution_after = 0
         control_through = 0
         shadow_through = 0
+        execution_through = 0
         control_events: list[dict[str, Any]] = []
         shadow_events: list[dict[str, Any]] = []
+        execution_events: list[dict[str, Any]] = []
         broker_id_sha256: str | None = None
         control_head: dict[str, Any] | None = None
         shadow_head: dict[str, Any] | None = None
+        execution_head: dict[str, Any] | None = None
         control_status: dict[str, Any] | None = None
+        execution_status: dict[str, Any] | None = None
         async with self._operation_lock:
             while True:
+                page_params = {
+                    "controlAfterSequence": control_after,
+                    "shadowAfterSequence": shadow_after,
+                    "controlThroughSequence": control_through,
+                    "shadowThroughSequence": shadow_through,
+                    "limit": 16,
+                }
+                if self.testnet_execution_enabled:
+                    page_params |= {
+                        "executionAfterSequence": execution_after,
+                        "executionThroughSequence": execution_through,
+                    }
                 result = await self._exchange_locked(
                     METHOD_AUDIT_EXPORT_PAGE,
-                    {
-                        "controlAfterSequence": control_after,
-                        "shadowAfterSequence": shadow_after,
-                        "controlThroughSequence": control_through,
-                        "shadowThroughSequence": shadow_through,
-                        "limit": 16,
-                    },
+                    page_params,
                 )
                 expected = {
                     "schemaVersion",
@@ -1786,14 +2395,34 @@ class LiveBrokerController:
                     "controlEvents",
                     "shadowEvents",
                 }
+                if self.testnet_execution_enabled:
+                    expected |= {
+                        "executionStatus",
+                        "executionHead",
+                        "executionEvents",
+                    }
                 _exact_result(result, expected, "Live audit page")
                 if (
                     result["schemaVersion"]
-                    != "candlescope.live-audit-page/1"
+                    != (
+                        "candlescope.live-audit-page/2"
+                        if self.testnet_execution_enabled
+                        else "candlescope.live-audit-page/1"
+                    )
                     or not isinstance(result["controlEvents"], list)
                     or not isinstance(result["shadowEvents"], list)
                     or len(result["controlEvents"]) > 16
                     or len(result["shadowEvents"]) > 16
+                    or (
+                        self.testnet_execution_enabled
+                        and (
+                            not isinstance(
+                                result["executionEvents"],
+                                list,
+                            )
+                            or len(result["executionEvents"]) > 16
+                        )
+                    )
                 ):
                     raise broker_error(
                         "LIVE_BROKER_RESPONSE_INVALID",
@@ -1802,11 +2431,20 @@ class LiveBrokerController:
                     )
                 page_control_head = result["controlHead"]
                 page_shadow_head = result["shadowHead"]
+                page_execution_head = result.get("executionHead")
                 if (
                     not isinstance(page_control_head, dict)
                     or set(page_control_head) != {"sequence", "sha256"}
                     or not isinstance(page_shadow_head, dict)
                     or set(page_shadow_head) != {"sequence", "sha256"}
+                    or (
+                        self.testnet_execution_enabled
+                        and (
+                            not isinstance(page_execution_head, dict)
+                            or set(page_execution_head)
+                            != {"sequence", "sha256"}
+                        )
+                    )
                 ):
                     raise broker_error(
                         "LIVE_BROKER_RESPONSE_INVALID",
@@ -1817,16 +2455,42 @@ class LiveBrokerController:
                     broker_id_sha256 = result["brokerIdSha256"]
                     control_head = dict(page_control_head)
                     shadow_head = dict(page_shadow_head)
+                    execution_head = (
+                        dict(page_execution_head)
+                        if self.testnet_execution_enabled
+                        and isinstance(page_execution_head, dict)
+                        else None
+                    )
                     control_through = control_head["sequence"]
                     shadow_through = shadow_head["sequence"]
+                    execution_through = (
+                        execution_head["sequence"]
+                        if execution_head is not None
+                        else 0
+                    )
                     control_status = _validated_control_status(
-                        result["controlStatus"]
+                        result["controlStatus"],
+                        execution_enabled=self.testnet_execution_enabled,
+                    )
+                    execution_status = (
+                        dict(result["executionStatus"])
+                        if self.testnet_execution_enabled
+                        and isinstance(result["executionStatus"], dict)
+                        else None
                     )
                 elif (
                     result["brokerIdSha256"] != broker_id_sha256
                     or page_control_head != control_head
                     or page_shadow_head != shadow_head
                     or result["controlStatus"] != control_status
+                    or (
+                        self.testnet_execution_enabled
+                        and (
+                            page_execution_head != execution_head
+                            or result["executionStatus"]
+                            != execution_status
+                        )
+                    )
                 ):
                     raise broker_error(
                         "LIVE_AUDIT_EXPORT_SNAPSHOT_CHANGED",
@@ -1835,6 +2499,8 @@ class LiveBrokerController:
                     )
                 control_events.extend(result["controlEvents"])
                 shadow_events.extend(result["shadowEvents"])
+                if self.testnet_execution_enabled:
+                    execution_events.extend(result["executionEvents"])
                 if result["controlEvents"]:
                     last_control = result["controlEvents"][-1]
                     if not isinstance(last_control, dict):
@@ -1857,8 +2523,33 @@ class LiveBrokerController:
                         )
                     shadow_after = last_shadow["event"].get("sequence", -1)
                 if (
+                    self.testnet_execution_enabled
+                    and result["executionEvents"]
+                ):
+                    last_execution = result["executionEvents"][-1]
+                    if (
+                        not isinstance(last_execution, dict)
+                        or not isinstance(
+                            last_execution.get("event"),
+                            dict,
+                        )
+                    ):
+                        raise broker_error(
+                            "LIVE_BROKER_RESPONSE_INVALID",
+                            "Live execution audit event is invalid",
+                            fatal=True,
+                        )
+                    execution_after = last_execution["event"].get(
+                        "sequence",
+                        -1,
+                    )
+                if (
                     control_after == control_through
                     and shadow_after == shadow_through
+                    and (
+                        not self.testnet_execution_enabled
+                        or execution_after == execution_through
+                    )
                 ):
                     break
                 if (
@@ -1867,6 +2558,10 @@ class LiveBrokerController:
                 ) or (
                     not result["shadowEvents"]
                     and shadow_after < shadow_through
+                ) or (
+                    self.testnet_execution_enabled
+                    and not result["executionEvents"]
+                    and execution_after < execution_through
                 ):
                     raise broker_error(
                         "LIVE_BROKER_RESPONSE_INVALID",
@@ -1877,9 +2572,16 @@ class LiveBrokerController:
             assert control_head is not None
             assert shadow_head is not None
             assert control_status is not None
+            if self.testnet_execution_enabled:
+                assert execution_head is not None
+                assert execution_status is not None
             self._control_status = dict(control_status)
             body = {
-                "schemaVersion": "candlescope.live-audit-export/1",
+                "schemaVersion": (
+                    "candlescope.live-audit-export/2"
+                    if self.testnet_execution_enabled
+                    else "candlescope.live-audit-export/1"
+                ),
                 "generatedAt": datetime.now(UTC).isoformat().replace(
                     "+00:00", "Z"
                 ),
@@ -1890,6 +2592,15 @@ class LiveBrokerController:
                 "shadowHead": shadow_head,
                 "controlEvents": control_events,
                 "shadowEvents": shadow_events,
+                **(
+                    {
+                        "executionStatus": execution_status,
+                        "executionHead": execution_head,
+                        "executionEvents": execution_events,
+                    }
+                    if self.testnet_execution_enabled
+                    else {}
+                ),
                 "redaction": {
                     "opaqueHandlesIncluded": False,
                     "credentialMaterialIncluded": False,
@@ -1897,7 +2608,9 @@ class LiveBrokerController:
                     "rawVenueOrderIdsIncluded": False,
                     "rawNetworkResponsesIncluded": False,
                 },
-                "liveMutationMethodsAvailable": False,
+                "liveMutationMethodsAvailable": (
+                    self.testnet_execution_enabled
+                ),
             }
             exported = {
                 **body,

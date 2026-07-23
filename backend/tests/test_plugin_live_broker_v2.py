@@ -128,7 +128,7 @@ def _request(
     }
 
 
-def test_protocol_allowlist_adds_only_staged_read_and_control_surfaces() -> None:
+def test_protocol_allowlist_adds_only_staged_broker_surfaces() -> None:
     assert LIVE_BROKER_METHODS == {
         "foundation.bootstrap",
         "foundation.health",
@@ -150,18 +150,21 @@ def test_protocol_allowlist_adds_only_staged_read_and_control_surfaces() -> None
         "confirmation.issue",
         "confirmation.describe",
         "confirmation.revoke",
+        "execution.describe",
+        "execution.submit",
+        "execution.cancel",
+        "execution.reconcile",
         "audit.export.page",
         "foundation.shutdown",
     }
     forbidden = {
         "network",
         "http",
-        "query",
         "sign",
-        "submit",
-        "cancel",
-        "order",
-        "trade",
+        "transfer",
+        "withdraw",
+        "amend",
+        "batch",
     }
     assert not any(
         token in method
@@ -292,6 +295,7 @@ def test_feature_off_creates_no_process_pipe_vault_or_handle(
             "readOnlyAccountsEnabled": False,
             "reconciliationShadowEnabled": False,
             "nativeControlEnabled": False,
+            "testnetExecutionEnabled": False,
             "control": {
                 "schemaVersion": "candlescope.live-control-status/1",
                 "available": False,

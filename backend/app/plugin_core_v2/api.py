@@ -679,6 +679,141 @@ def create_core_plugin_router() -> APIRouter:
         except Exception as exc:
             _raise_api_error(exc)
 
+    @router.get("/manage/live/execution/{shadow_ref}")
+    async def describe_live_execution(
+        shadow_ref: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        if not platform.live_testnet_execution_enabled:
+            raise HTTPException(
+                status_code=404,
+                detail="Live Demo execution is disabled",
+            )
+        try:
+            return await platform.describe_live_execution(
+                shadow_ref=shadow_ref,
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    async def _live_execution_mutation(
+        request: Request,
+        *,
+        action_name: str,
+    ) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        if not platform.live_testnet_execution_enabled:
+            raise HTTPException(
+                status_code=404,
+                detail="Live Demo execution is disabled",
+            )
+        value = await _body(
+            request,
+            required={
+                "accountRef",
+                "shadowRef",
+                "receiptRef",
+                "expectedConfirmationSha256",
+                "expectedPolicyEpoch",
+                "expectedControlGeneration",
+            },
+        )
+        if (
+            not all(
+                isinstance(value[key], str)
+                for key in (
+                    "accountRef",
+                    "shadowRef",
+                    "receiptRef",
+                    "expectedConfirmationSha256",
+                )
+            )
+            or any(
+                isinstance(value[key], bool)
+                or not isinstance(value[key], int)
+                for key in (
+                    "expectedPolicyEpoch",
+                    "expectedControlGeneration",
+                )
+            )
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Live execution values are invalid",
+            )
+        trace_id = f"management-{request.state.plugin_user_action}"
+        arguments = {
+            "account_ref": value["accountRef"],
+            "shadow_ref": value["shadowRef"],
+            "receipt_ref": value["receiptRef"],
+            "expected_confirmation_sha256": value[
+                "expectedConfirmationSha256"
+            ],
+            "expected_policy_epoch": value["expectedPolicyEpoch"],
+            "expected_control_generation": value[
+                "expectedControlGeneration"
+            ],
+            "trace_id": trace_id,
+        }
+        if action_name == "submit":
+            return await platform.submit_live_execution(**arguments)
+        return await platform.cancel_live_execution(**arguments)
+
+    @router.post("/manage/live/execution/submit")
+    async def submit_live_execution(request: Request) -> dict[str, Any]:
+        try:
+            return await _live_execution_mutation(
+                request,
+                action_name="submit",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/live/execution/cancel")
+    async def cancel_live_execution(request: Request) -> dict[str, Any]:
+        try:
+            return await _live_execution_mutation(
+                request,
+                action_name="cancel",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/live/execution/reconcile")
+    async def reconcile_live_execution(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        if not platform.live_testnet_execution_enabled:
+            raise HTTPException(
+                status_code=404,
+                detail="Live Demo execution is disabled",
+            )
+        try:
+            value = await _body(
+                request,
+                required={"accountRef", "shadowRef"},
+            )
+            if not all(isinstance(value[key], str) for key in value):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Live execution references must be strings",
+                )
+            return await platform.reconcile_live_execution(
+                account_ref=value["accountRef"],
+                shadow_ref=value["shadowRef"],
+                trace_id=(
+                    f"management-{request.state.plugin_user_action}"
+                ),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
     @router.get("/manage/live/audit-export")
     async def export_live_audit(request: Request) -> Response:
         platform = await _guarded_platform(request)

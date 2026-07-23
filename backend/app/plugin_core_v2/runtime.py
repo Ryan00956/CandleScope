@@ -108,6 +108,7 @@ class CorePluginPlatform:
         live_account_readonly_enabled: bool = False,
         live_reconciliation_shadow_enabled: bool = False,
         live_native_control_enabled: bool = False,
+        live_testnet_execution_enabled: bool = False,
         network_resolver: Any | None = None,
         network_transport: Any | None = None,
     ) -> None:
@@ -128,6 +129,10 @@ class CorePluginPlatform:
             )
         if not isinstance(live_native_control_enabled, bool):
             raise ValueError("live_native_control_enabled must be a boolean")
+        if not isinstance(live_testnet_execution_enabled, bool):
+            raise ValueError(
+                "live_testnet_execution_enabled must be a boolean"
+            )
         if live_account_readonly_enabled and not live_broker_foundation_enabled:
             raise core_error(
                 "PLUGIN_LIVE_ACCOUNT_FOUNDATION_REQUIRED",
@@ -149,6 +154,14 @@ class CorePluginPlatform:
                 "PLUGIN_LIVE_CONTROL_SHADOW_REQUIRED",
                 "Phase 11B native Live control requires reconciliation shadow",
             )
+        if (
+            live_testnet_execution_enabled
+            and not live_native_control_enabled
+        ):
+            raise core_error(
+                "PLUGIN_LIVE_EXECUTION_CONTROL_REQUIRED",
+                "Phase 11B OKX Demo execution requires native Live control",
+            )
         if paper_trading_enabled and trust_level != "first-party-pinned":
             raise core_error(
                 "PLUGIN_PAPER_TRUST_REQUIRED",
@@ -160,6 +173,7 @@ class CorePluginPlatform:
                 or live_account_readonly_enabled
                 or live_reconciliation_shadow_enabled
                 or live_native_control_enabled
+                or live_testnet_execution_enabled
             )
             and trust_level != "first-party-pinned"
         ):
@@ -180,6 +194,9 @@ class CorePluginPlatform:
             live_reconciliation_shadow_enabled
         )
         self.live_native_control_enabled = live_native_control_enabled
+        self.live_testnet_execution_enabled = (
+            live_testnet_execution_enabled
+        )
         self.live_broker = LiveBrokerController(
             enabled=live_broker_foundation_enabled,
             root=self.root / "live-broker-v1",
@@ -188,6 +205,7 @@ class CorePluginPlatform:
                 live_reconciliation_shadow_enabled
             ),
             native_control_enabled=live_native_control_enabled,
+            testnet_execution_enabled=live_testnet_execution_enabled,
         )
 
         self.audit_log = AuditLog(self.root / "audit-v2" / "events")
@@ -1066,6 +1084,124 @@ class CorePluginPlatform:
                 "intentSha256": result["intentSha256"],
                 "policyEpoch": result["policyEpoch"],
                 "controlGeneration": result["controlGeneration"],
+            },
+        )
+        return result
+
+    async def describe_live_execution(
+        self,
+        *,
+        shadow_ref: str,
+    ) -> dict[str, Any]:
+        return await self.live_broker.describe_execution(
+            shadow_ref=shadow_ref,
+        )
+
+    async def submit_live_execution(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+        receipt_ref: str,
+        expected_confirmation_sha256: str,
+        expected_policy_epoch: int,
+        expected_control_generation: int,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        result = await self.live_broker.submit_execution(
+            account_ref=account_ref,
+            shadow_ref=shadow_ref,
+            receipt_ref=receipt_ref,
+            expected_confirmation_sha256=(
+                expected_confirmation_sha256
+            ),
+            expected_policy_epoch=expected_policy_epoch,
+            expected_control_generation=expected_control_generation,
+        )
+        self.audit_log.append(
+            category="live-execution",
+            action="demo-spot-submit",
+            outcome=(
+                "accepted" if result["accepted"] else "rejected"
+            ),
+            trace_id=trace_id,
+            plugin_id=result["pluginId"],
+            data={
+                "clientOrderId": result["clientOrderId"],
+                "orderIntentSha256": result["orderIntentSha256"],
+                "state": result["state"],
+                "notional": result["notional"],
+                "policyEpoch": result["policyEpoch"],
+                "controlGeneration": result["controlGeneration"],
+            },
+        )
+        return result
+
+    async def cancel_live_execution(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+        receipt_ref: str,
+        expected_confirmation_sha256: str,
+        expected_policy_epoch: int,
+        expected_control_generation: int,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        result = await self.live_broker.cancel_execution(
+            account_ref=account_ref,
+            shadow_ref=shadow_ref,
+            receipt_ref=receipt_ref,
+            expected_confirmation_sha256=(
+                expected_confirmation_sha256
+            ),
+            expected_policy_epoch=expected_policy_epoch,
+            expected_control_generation=expected_control_generation,
+        )
+        self.audit_log.append(
+            category="live-execution",
+            action="demo-spot-cancel",
+            outcome=(
+                "accepted" if result["accepted"] else "rejected"
+            ),
+            trace_id=trace_id,
+            plugin_id=result["pluginId"],
+            data={
+                "clientOrderId": result["clientOrderId"],
+                "orderIntentSha256": result["orderIntentSha256"],
+                "state": result["state"],
+                "policyEpoch": result["policyEpoch"],
+                "controlGeneration": result["controlGeneration"],
+            },
+        )
+        return result
+
+    async def reconcile_live_execution(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        result = await self.live_broker.reconcile_execution(
+            account_ref=account_ref,
+            shadow_ref=shadow_ref,
+        )
+        execution = result["execution"]
+        self.audit_log.append(
+            category="live-execution",
+            action="demo-spot-reconcile",
+            outcome=execution["state"],
+            trace_id=trace_id,
+            plugin_id=execution["pluginId"],
+            data={
+                "clientOrderId": execution["clientOrderId"],
+                "orderIntentSha256": execution["orderIntentSha256"],
+                "state": execution["state"],
+                "reconciliationRequired": execution[
+                    "reconciliationRequired"
+                ],
+                "policyEpoch": execution["policyEpoch"],
             },
         )
         return result

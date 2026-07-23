@@ -125,6 +125,7 @@ def run(
     read_only_accounts_enabled: bool,
     reconciliation_shadow_enabled: bool,
     native_control_enabled: bool,
+    testnet_execution_enabled: bool,
 ) -> int:
     service: LiveBrokerService | None = None
     with BrokerDirectoryLock(root):
@@ -138,6 +139,7 @@ def run(
                     reconciliation_shadow_enabled
                 ),
                 native_control_enabled=native_control_enabled,
+                testnet_execution_enabled=testnet_execution_enabled,
             )
             while True:
                 line = sys.stdin.buffer.readline(MAX_BROKER_MESSAGE_BYTES + 2)
@@ -194,10 +196,11 @@ def run(
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if (
-        len(arguments) != 6
+        len(arguments) != 7
         or arguments[3] not in {"accounts-off", "accounts-on"}
         or arguments[4] not in {"shadow-off", "shadow-on"}
         or arguments[5] not in {"control-off", "control-on"}
+        or arguments[6] not in {"execution-off", "execution-on"}
         or (
             arguments[4] == "shadow-on"
             and arguments[3] != "accounts-on"
@@ -205,6 +208,10 @@ def main(argv: list[str] | None = None) -> int:
         or (
             arguments[5] == "control-on"
             and arguments[4] != "shadow-on"
+        )
+        or (
+            arguments[6] == "execution-on"
+            and arguments[5] != "control-on"
         )
     ):
         print("LIVE_BROKER_ARGUMENTS_INVALID", file=sys.stderr, flush=True)
@@ -219,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             read_only_accounts_enabled=arguments[3] == "accounts-on",
             reconciliation_shadow_enabled=arguments[4] == "shadow-on",
             native_control_enabled=arguments[5] == "control-on",
+            testnet_execution_enabled=arguments[6] == "execution-on",
         )
     except LiveBrokerError as exc:
         print(exc.code, file=sys.stderr, flush=True)

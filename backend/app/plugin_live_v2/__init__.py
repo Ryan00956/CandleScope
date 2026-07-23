@@ -1,8 +1,12 @@
 """Fail-closed foundations for the Phase 11B isolated Live authority."""
 
-from .accounts import OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+from .accounts import (
+    OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID,
+    OKX_DEMO_SPOT_READONLY_CONNECTOR_ID,
+)
 from .audit_export import (
     LIVE_AUDIT_EXPORT_SCHEMA,
+    LIVE_AUDIT_EXPORT_SCHEMA_V2,
     LiveAuditExportError,
     verify_live_audit_export,
 )
@@ -16,6 +20,11 @@ from .client import (
     ShadowOrderHandle,
 )
 from .errors import LiveBrokerError
+from .execution import (
+    DEMO_EXECUTION_INSTRUMENT,
+    LIVE_EXECUTION_FILENAME,
+    LiveExecutionLedger,
+)
 from .protocol import (
     LIVE_BROKER_METHODS,
     LIVE_BROKER_PROTOCOL_VERSION,
@@ -51,15 +60,20 @@ __all__ = [
     "LIVE_BROKER_METHODS",
     "LIVE_BROKER_PROTOCOL_VERSION",
     "LIVE_AUDIT_EXPORT_SCHEMA",
+    "LIVE_AUDIT_EXPORT_SCHEMA_V2",
+    "LIVE_EXECUTION_FILENAME",
     "LIVE_RELEASE_LOCK_SCHEMA_VERSION",
     "LiveBrokerController",
     "LiveBrokerError",
     "LiveAuditExportError",
     "PUBLISHER_EVIDENCE_SCHEMA_VERSION",
     "OKX_DEMO_SPOT_READONLY_CONNECTOR_ID",
+    "OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID",
+    "DEMO_EXECUTION_INSTRUMENT",
     "FirstPartyLiveRelease",
     "FirstPartyLiveReleaseLock",
     "LivePublisherTrustStore",
+    "LiveExecutionLedger",
     "LiveTrustError",
     "PublisherEvidence",
     "ShadowOrderDescription",

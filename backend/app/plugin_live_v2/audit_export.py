@@ -10,6 +10,7 @@ from typing import Any
 
 
 LIVE_AUDIT_EXPORT_SCHEMA = "candlescope.live-audit-export/1"
+LIVE_AUDIT_EXPORT_SCHEMA_V2 = "candlescope.live-audit-export/2"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _OPAQUE_REF = re.compile(
     r"(?:cred|acct|shdw)_[A-Za-z0-9_-]{43}|livecfm_[A-Za-z0-9_-]{43}"
@@ -177,6 +178,7 @@ def verify_live_audit_export(value: Any) -> dict[str, Any]:
     """Validate the export digest, both source chains, and redaction contract."""
 
     data = dict(_mapping(value, "Live audit export"))
+    schema_version = data.get("schemaVersion")
     expected = {
         "schemaVersion",
         "generatedAt",
@@ -191,12 +193,20 @@ def verify_live_audit_export(value: Any) -> dict[str, Any]:
         "liveMutationMethodsAvailable",
         "exportSha256",
     }
+    if schema_version == LIVE_AUDIT_EXPORT_SCHEMA_V2:
+        expected |= {
+            "executionStatus",
+            "executionHead",
+            "executionEvents",
+        }
     _exact(data, expected, "Live audit export")
     if (
-        data["schemaVersion"] != LIVE_AUDIT_EXPORT_SCHEMA
+        schema_version
+        not in {LIVE_AUDIT_EXPORT_SCHEMA, LIVE_AUDIT_EXPORT_SCHEMA_V2}
         or not isinstance(data["generatedAt"], str)
         or not data["generatedAt"]
-        or data["liveMutationMethodsAvailable"] is not False
+        or data["liveMutationMethodsAvailable"]
+        is not (schema_version == LIVE_AUDIT_EXPORT_SCHEMA_V2)
     ):
         raise LiveAuditExportError("Live audit export metadata is invalid")
     _digest(data["brokerIdSha256"], "brokerIdSha256")
@@ -219,8 +229,10 @@ def verify_live_audit_export(value: Any) -> dict[str, Any]:
     if (
         control_status.get("schemaVersion")
         != "candlescope.live-control-status/1"
-        or control_status.get("liveSubmitAvailable") is not False
-        or control_status.get("liveCancelAvailable") is not False
+        or control_status.get("liveSubmitAvailable")
+        is not (schema_version == LIVE_AUDIT_EXPORT_SCHEMA_V2)
+        or control_status.get("liveCancelAvailable")
+        is not (schema_version == LIVE_AUDIT_EXPORT_SCHEMA_V2)
         or control_status.get("liveTransferAvailable") is not False
         or control_status.get("policyEpoch") != data["policyEpoch"]
     ):
@@ -244,6 +256,71 @@ def verify_live_audit_export(value: Any) -> dict[str, Any]:
         head=shadow_head,
         shadow=True,
     )
+    if schema_version == LIVE_AUDIT_EXPORT_SCHEMA_V2:
+        execution_status = _mapping(
+            data["executionStatus"],
+            "executionStatus",
+        )
+        expected_execution_status = {
+            "schemaVersion",
+            "available",
+            "environment",
+            "instrumentId",
+            "maxOrderNotional",
+            "maxUnresolvedOrders",
+            "maxUnresolvedNotional",
+            "orderCount",
+            "terminalCount",
+            "unresolvedCount",
+            "unresolvedNotional",
+            "eventSequence",
+            "eventSha256",
+            "liveSubmitAvailable",
+            "liveCancelAvailable",
+            "liveTransferAvailable",
+        }
+        _exact(
+            execution_status,
+            expected_execution_status,
+            "executionStatus",
+        )
+        execution_head = _head(data["executionHead"], "executionHead")
+        if (
+            execution_status["schemaVersion"]
+            != "candlescope.live-execution-status/1"
+            or execution_status["available"] is not True
+            or execution_status["environment"] != "demo"
+            or execution_status["instrumentId"] != "BTC-USDT"
+            or execution_status["maxOrderNotional"] != "100"
+            or execution_status["maxUnresolvedOrders"] != 2
+            or execution_status["maxUnresolvedNotional"] != "200"
+            or execution_status["liveSubmitAvailable"] is not True
+            or execution_status["liveCancelAvailable"] is not True
+            or execution_status["liveTransferAvailable"] is not False
+            or any(
+                _integer(execution_status[key], f"executionStatus.{key}") < 0
+                for key in (
+                    "orderCount",
+                    "terminalCount",
+                    "unresolvedCount",
+                    "eventSequence",
+                )
+            )
+            or execution_status["terminalCount"]
+            + execution_status["unresolvedCount"]
+            != execution_status["orderCount"]
+            or execution_status["eventSequence"] != execution_head[0]
+            or execution_status["eventSha256"] != execution_head[1]
+        ):
+            raise LiveAuditExportError(
+                "Live audit execution status is invalid"
+            )
+        _verify_source_chain(
+            data["executionEvents"],
+            label="executionEvents",
+            head=execution_head,
+            shadow=True,
+        )
     body = {key: data[key] for key in data if key != "exportSha256"}
     expected_digest = _sha256_text(_canonical_json(body))
     if data["exportSha256"] != expected_digest:
@@ -254,6 +331,7 @@ def verify_live_audit_export(value: Any) -> dict[str, Any]:
 
 __all__ = [
     "LIVE_AUDIT_EXPORT_SCHEMA",
+    "LIVE_AUDIT_EXPORT_SCHEMA_V2",
     "LiveAuditExportError",
     "verify_live_audit_export",
 ]

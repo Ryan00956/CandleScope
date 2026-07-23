@@ -4,6 +4,7 @@ import {
   parsePluginLiveConfirmationPreview,
   parsePluginLiveConfirmationReceipt,
   parsePluginLiveControlStatus,
+  parsePluginLiveExecutionRecord,
   parsePluginManagementDetail,
   parsePluginUiSnapshot,
 } from "./pluginPlatformParsers.js";
@@ -14,6 +15,7 @@ import type {
   PluginLiveConfirmationPreview,
   PluginLiveConfirmationReceipt,
   PluginLiveControlStatus,
+  PluginLiveExecutionRecord,
   PluginManagementDetail,
   PluginUiSnapshot,
 } from "./pluginPlatformTypes.js";
@@ -497,6 +499,78 @@ export async function revokeLiveConfirmation(
     body: { receiptRef, reason },
     action: "live-confirmation-revoke",
   });
+}
+
+function liveExecutionBody(
+  accountRef: string,
+  shadowRef: string,
+  receipt: PluginLiveConfirmationReceipt,
+): Record<string, unknown> {
+  if (
+    receipt.schemaVersion !== "candlescope.live-confirmation/2"
+    || !receipt.action
+  ) throw new PluginPlatformApiError("Demo execution requires an action-bound receipt", 400);
+  return {
+    accountRef,
+    shadowRef,
+    receiptRef: receipt.receiptRef,
+    expectedConfirmationSha256: receipt.intentSha256,
+    expectedPolicyEpoch: receipt.policyEpoch,
+    expectedControlGeneration: receipt.controlGeneration,
+  };
+}
+
+export async function submitLiveExecution(
+  accountRef: string,
+  shadowRef: string,
+  receipt: PluginLiveConfirmationReceipt,
+): Promise<PluginLiveExecutionRecord> {
+  if (receipt.action !== "submit") {
+    throw new PluginPlatformApiError("Receipt is not bound to Demo submit", 400);
+  }
+  return parsePluginLiveExecutionRecord(
+    await managementRequest("/manage/live/execution/submit", {
+      method: "POST",
+      body: liveExecutionBody(accountRef, shadowRef, receipt),
+      action: "live-demo-submit",
+    }),
+  );
+}
+
+export async function cancelLiveExecution(
+  accountRef: string,
+  shadowRef: string,
+  receipt: PluginLiveConfirmationReceipt,
+): Promise<PluginLiveExecutionRecord> {
+  if (receipt.action !== "cancel") {
+    throw new PluginPlatformApiError("Receipt is not bound to Demo cancel", 400);
+  }
+  return parsePluginLiveExecutionRecord(
+    await managementRequest("/manage/live/execution/cancel", {
+      method: "POST",
+      body: liveExecutionBody(accountRef, shadowRef, receipt),
+      action: "live-demo-cancel",
+    }),
+  );
+}
+
+export async function reconcileLiveExecution(
+  accountRef: string,
+  shadowRef: string,
+): Promise<PluginLiveExecutionRecord> {
+  const payload = object(
+    await managementRequest("/manage/live/execution/reconcile", {
+      method: "POST",
+      body: { accountRef, shadowRef },
+      action: "live-demo-reconcile",
+    }),
+    "Live execution reconciliation",
+  );
+  if (
+    Object.keys(payload).sort().join(",") !== "execution,schemaVersion,shadow"
+    || payload.schemaVersion !== "candlescope.live-execution-reconcile/1"
+  ) throw new PluginPlatformApiError("Live execution reconciliation response is invalid", 502);
+  return parsePluginLiveExecutionRecord(payload.execution);
 }
 
 export async function fetchLiveAuditExport(): Promise<Blob> {

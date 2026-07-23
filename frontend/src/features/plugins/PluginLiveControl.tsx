@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import type {
   PluginLiveConfirmationPreview,
   PluginLiveConfirmationReceipt,
+  PluginLiveExecutionRecord,
   PluginPlatformRuntime,
 } from "./pluginPlatformTypes.js";
 
@@ -41,9 +42,11 @@ function HostModal({
 }
 
 export function IntentFacts({ preview }: { preview: PluginLiveConfirmationPreview }) {
+  const execution = preview.schemaVersion === "candlescope.live-confirmation-preview/2";
   return (
     <dl className="live-intent-facts" data-live-intent-facts>
-      <dt>Environment</dt><dd>Live authority preview (execution unavailable in WP-E)</dd>
+      <dt>Environment</dt><dd>{execution ? "OKX Demo · Spot cash" : "Live authority preview (execution unavailable)"}</dd>
+      {preview.action && <><dt>Action</dt><dd>{preview.action.toUpperCase()}</dd></>}
       <dt>Instrument</dt><dd>{preview.instrumentId}</dd>
       <dt>Side</dt><dd>{preview.side.toUpperCase()}</dd>
       <dt>Order type</dt><dd>{preview.orderType}</dd>
@@ -54,6 +57,8 @@ export function IntentFacts({ preview }: { preview: PluginLiveConfirmationPrevie
       <dt>Publisher</dt><dd>{preview.publisherIdentity}</dd>
       <dt>Connector</dt><dd>{preview.connectorId}</dd>
       <dt>Intent SHA-256</dt><dd>{preview.intentSha256}</dd>
+      {preview.orderIntentSha256 && <><dt>Order intent SHA-256</dt><dd>{preview.orderIntentSha256}</dd></>}
+      {preview.notional && <><dt>Notional</dt><dd>{preview.notional} USDT</dd></>}
       <dt>Authority</dt><dd>epoch {preview.policyEpoch} · generation {preview.controlGeneration}</dd>
     </dl>
   );
@@ -80,7 +85,7 @@ function ExactIntentDialog({
   return (
     <HostModal title="Confirm exact Live intent" onClose={onClose} testId="live-intent-confirmation">
       <div className="live-warning-callout" role="alert">
-        This Host-native receipt is short-lived and single-use. WP-E still has no Live submit or cancel method.
+        This Host-native receipt is short-lived and single-use. Issuing it does not execute the action; execution requires a second explicit confirmation.
       </div>
       <IntentFacts preview={preview} />
       <label className="live-control-field">
@@ -177,18 +182,23 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
   const [shadowRef, setShadowRef] = useState("");
   const [preview, setPreview] = useState<PluginLiveConfirmationPreview | null>(null);
   const [receipt, setReceipt] = useState<PluginLiveConfirmationReceipt | null>(null);
+  const [execution, setExecution] = useState<PluginLiveExecutionRecord | null>(null);
+  const [executePending, setExecutePending] = useState(false);
   const [scopeType, setScopeType] = useState<"grant" | "plugin" | "publisher" | "credential">("plugin");
   const [subject, setSubject] = useState("");
   const [reason, setReason] = useState("operator-revoke");
   const [pending, setPending] = useState<PendingAction | null>(null);
   const management = runtime.view.managementAvailable;
+  const demoExecution = status.liveSubmitAvailable && status.liveCancelAvailable;
   const canPreview = management && status.mode === "armed" && accountRef.length > 0 && shadowRef.length > 0;
   const pendingContract = pending == null ? null : (
     pending.kind === "arm"
       ? {
           title: "Arm Live control",
           phrase: "ARM LIVE CONTROL",
-          detail: "Arming permits short-lived confirmation receipts only. WP-E has no execution method.",
+          detail: demoExecution
+            ? "Arming permits action-bound one-shot receipts for the pinned OKX Demo Spot execution slice."
+            : "Arming permits short-lived confirmation receipts only; no execution method is enabled.",
           run: () => runtime.actions.setLiveControlMode("armed", "host-native-user-arm", status.mode === "killed"),
         }
       : pending.kind === "disarm"
@@ -228,7 +238,11 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
             policy epoch {status.policyEpoch} · control generation {status.generation}
             {" · "}{status.outstandingConfirmationCount} outstanding receipt(s)
           </p>
-          <p>Live submit, cancel, transfer, and withdrawal remain unavailable in WP-E.</p>
+          <p>
+            {demoExecution
+              ? "OKX Demo Spot limit submit/cancel is enabled. Production, transfer, withdrawal, market, margin, amend, and batch actions remain unavailable."
+              : "Live submit, cancel, transfer, and withdrawal remain unavailable."}
+          </p>
         </section>
         {!management && <p role="alert">Trusted desktop management session unavailable. Controls are read-only.</p>}
         <div className="plugin-action-row live-control-primary-actions">
@@ -279,6 +293,7 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
             data-preview-live-confirmation
             onClick={() => {
               setPreview(null);
+              setReceipt(null);
               void runtime.actions.previewLiveConfirmation(accountRef, shadowRef).then(setPreview).catch(() => undefined);
             }}
           >
@@ -288,9 +303,50 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
             <div className="live-receipt-summary" data-live-receipt-issued>
               <strong>One-shot receipt issued</strong>
               <span>ID {receipt.receiptId} · expires {receipt.expiresAt}</span>
+              {receipt.schemaVersion === "candlescope.live-confirmation/2" && receipt.action && (
+                <>
+                  <span>Bound action: {receipt.action.toUpperCase()} · receipt issuance has not sent a network request.</span>
+                  <button
+                    type="button"
+                    className="live-danger-action"
+                    data-execute-live-action
+                    onClick={() => setExecutePending(true)}
+                  >
+                    {receipt.action === "submit" ? "Submit OKX Demo order" : "Cancel OKX Demo order"}
+                  </button>
+                </>
+              )}
               <button type="button" onClick={() => void runtime.actions.revokeLiveConfirmation(receipt.receiptRef, "host-native-receipt-revoke").then(() => setReceipt(null)).catch(() => undefined)}>
                 Revoke receipt
               </button>
+            </div>
+          )}
+          {execution && (
+            <div className="live-receipt-summary" data-live-execution-result>
+              <strong>OKX Demo execution: {execution.state}</strong>
+              <span>
+                {execution.clientOrderId} · {execution.notional} USDT
+                {execution.terminal ? " · terminal" : ""}
+              </span>
+              {execution.reconciliationRequired && (
+                <button
+                  type="button"
+                  data-reconcile-live-execution
+                  onClick={() => {
+                    void runtime.actions.reconcileLiveExecution(accountRef, shadowRef)
+                      .then((record) => {
+                        setExecution(record);
+                        setPreview(null);
+                      })
+                      .catch(() => undefined);
+                  }}
+                >
+                  Reconcile venue state
+                </button>
+              )}
+              {!execution.reconciliationRequired && !execution.terminal && (
+                <span>Load a fresh Host preview to review the next available action.</span>
+              )}
             </div>
           )}
         </section>
@@ -345,6 +401,28 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
           onConfirm={pendingContract.run}
         />
       )}
+      {executePending
+        && receipt?.schemaVersion === "candlescope.live-confirmation/2"
+        && receipt.action && (
+          <TypedActionDialog
+            title={receipt.action === "submit" ? "Submit OKX Demo order" : "Cancel OKX Demo order"}
+            phrase={receipt.action === "submit" ? "EXECUTE DEMO SUBMIT" : "EXECUTE DEMO CANCEL"}
+            detail={
+              receipt.action === "submit"
+                ? "This second confirmation sends one persisted BTC-USDT Spot limit order to OKX Demo. The Host will not retry an uncertain result."
+                : "This second confirmation sends one cancel request to OKX Demo. The acknowledgement is not final; reconcile afterward."
+            }
+            onClose={() => setExecutePending(false)}
+            onConfirm={async () => {
+              const result = receipt.action === "submit"
+                ? await runtime.actions.submitLiveExecution(accountRef, shadowRef, receipt)
+                : await runtime.actions.cancelLiveExecution(accountRef, shadowRef, receipt);
+              setExecution(result);
+              setReceipt(null);
+              setPreview(null);
+            }}
+          />
+        )}
     </>
   );
 }
@@ -364,7 +442,9 @@ export default function PluginLiveControl({ runtime }: { runtime: PluginPlatform
         <strong>LIVE AUTHORITY · {status.mode.toUpperCase()}</strong>
         <span>
           {status.mode === "armed"
-            ? "Receipt control armed; execution still unavailable"
+            ? status.liveSubmitAvailable
+              ? "Pinned OKX Demo execution armed"
+              : "Receipt control armed; execution unavailable"
             : status.mode === "killed"
               ? "Global kill active"
               : status.mode === "unavailable"

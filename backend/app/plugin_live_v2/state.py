@@ -243,7 +243,7 @@ class AccountBinding:
             or self.venue != "okx"
             or self.environment != "demo"
             or self.product_scope != "spot"
-            or self.permission != "read_only"
+            or self.permission not in {"read_only", "read_trade"}
             or self.account_mode != "spot"
             or self.position_mode not in {"net_mode", "long_short_mode"}
             or self.status not in {"active", "credential-revoked"}

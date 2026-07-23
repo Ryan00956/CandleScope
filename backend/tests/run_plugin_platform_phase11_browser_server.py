@@ -22,6 +22,11 @@ def main() -> int:
         action="store_true",
         help="enable the WP-E Host-native control fixture",
     )
+    parser.add_argument(
+        "--live-testnet-execution",
+        action="store_true",
+        help="enable the WP-F explicit fake-backend execution fixture",
+    )
     args = parser.parse_args()
 
     repository = Path(__file__).resolve().parents[2]
@@ -36,7 +41,12 @@ def main() -> int:
             "PHASE11_BROWSER_ORIGIN": args.origin,
             "PHASE11_BROWSER_MANAGEMENT_API_ORIGIN": f"http://localhost:{args.port}",
             "PHASE11_BROWSER_LIVE_NATIVE_CONTROL": (
-                "1" if args.live_native_control else "0"
+                "1"
+                if args.live_native_control or args.live_testnet_execution
+                else "0"
+            ),
+            "PHASE11_BROWSER_LIVE_TESTNET_EXECUTION": (
+                "1" if args.live_testnet_execution else "0"
             ),
         }
     )

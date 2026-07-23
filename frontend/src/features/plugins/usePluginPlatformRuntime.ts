@@ -19,6 +19,9 @@ import {
   setLiveControlMode,
   fetchLiveAuditExport,
   previewLiveConfirmation,
+  submitLiveExecution,
+  cancelLiveExecution,
+  reconcileLiveExecution,
   preparePluginUserFileSave,
   stagePluginUserFile,
   writePluginSettings,
@@ -200,7 +203,13 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     try {
       const status = await setLiveControlMode(mode, reason, acknowledgeKill);
       setLiveControl(status);
-      setNotice(mode === "armed" ? "Live control armed; no execution method is installed" : "Live control disarmed");
+      setNotice(
+        mode === "armed"
+          ? status.liveSubmitAvailable
+            ? "Live control armed for pinned OKX Demo execution"
+            : "Live control armed; no execution method is installed"
+          : "Live control disarmed",
+      );
     } catch (caught) {
       setNotice(errorMessage(caught));
       throw caught;
@@ -247,6 +256,52 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
         URL.revokeObjectURL(url);
       }
       setNotice("Redacted Live audit export downloaded");
+    } catch (caught) {
+      setNotice(errorMessage(caught));
+      throw caught;
+    }
+  }, []);
+
+  const submitLive = useCallback(async (
+    accountRef: string,
+    shadowRef: string,
+    receipt: Parameters<typeof submitLiveExecution>[2],
+  ) => {
+    try {
+      const execution = await submitLiveExecution(accountRef, shadowRef, receipt);
+      setNotice("OKX Demo submit acknowledged; reconcile before any next action");
+      await refresh();
+      return execution;
+    } catch (caught) {
+      setNotice(errorMessage(caught));
+      throw caught;
+    }
+  }, [refresh]);
+
+  const cancelLive = useCallback(async (
+    accountRef: string,
+    shadowRef: string,
+    receipt: Parameters<typeof cancelLiveExecution>[2],
+  ) => {
+    try {
+      const execution = await cancelLiveExecution(accountRef, shadowRef, receipt);
+      setNotice("OKX Demo cancel acknowledged; reconcile final venue state");
+      await refresh();
+      return execution;
+    } catch (caught) {
+      setNotice(errorMessage(caught));
+      throw caught;
+    }
+  }, [refresh]);
+
+  const reconcileLive = useCallback(async (
+    accountRef: string,
+    shadowRef: string,
+  ) => {
+    try {
+      const execution = await reconcileLiveExecution(accountRef, shadowRef);
+      setNotice(`OKX Demo execution reconciled: ${execution.state}`);
+      return execution;
     } catch (caught) {
       setNotice(errorMessage(caught));
       throw caught;
@@ -339,6 +394,9 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
           throw caught;
         }
       },
+      submitLiveExecution: submitLive,
+      cancelLiveExecution: cancelLive,
+      reconcileLiveExecution: reconcileLive,
       downloadLiveAudit,
     },
   }), [
@@ -368,6 +426,9 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     changeLiveControlMode,
     killLive,
     revokeLive,
+    submitLive,
+    cancelLive,
+    reconcileLive,
     downloadLiveAudit,
   ]);
 }

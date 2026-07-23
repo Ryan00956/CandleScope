@@ -738,7 +738,7 @@ frontend/src/features/plugins/
 | Phase 8：Sandbox UI | 已完成（`b0efcc4`） | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
 | Phase 9：网络/文件/HTTP gateway | 已完成（`9b4a638`） | 受控外部交互与命名空间 API | 集成型插件 |
 | Phase 10：数据提供器 | 已完成（本阶段提交） | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
-| Phase 11：账户与交易 | 11A、11B0、11B WP-A～WP-E 已完成；WP-F 未授权；Live 订单执行仍关闭 | publisher evidence、Broker、只读账户、durable shadow journal、Host-native control、paper/live executor、risk gate | 高风险交易插件 |
+| Phase 11：账户与交易 | 11A、11B0、11B WP-A～WP-F 已完成本地技术验收；真实 Demo smoke 未执行；production 关闭 | publisher evidence、Broker、账户绑定、durable shadow/execution journal、Host-native control、固定 Demo risk gate | 高风险交易插件 |
 | Phase 12：签名与 Marketplace | 未开始 | publisher、更新、撤销、SBOM | 可分发生态 |
 | Phase 13：v1 收敛与 GA | 未开始 | script runtime adapter、兼容周期、正式门禁 | 单一产品插件目录 |
 
@@ -1101,8 +1101,13 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 > 随后已完成默认关闭的 WP-E Host-native Live control、intent-bound 单次确认回执、
 > global kill/revoke、持久横幅和可离线验证的脱敏审计导出；执行证据见
 > [`PLUGIN_PLATFORM_V2_PHASE11B_WPE_zh.md`](PLUGIN_PLATFORM_V2_PHASE11B_WPE_zh.md)。
-> 这仍不表示 Live 交易已开始；submit/cancel/amend、`secrets.use`、
-> `trade.submit`、`trade.cancel` 与任何资金动作继续不可达。
+> 此后已完成默认关闭的 WP-F 单一 build-pinned OKX Demo Spot
+> `BTC-USDT` limit submit/cancel/query slice、固定风险上限、persist-before-send
+> execution ledger 和 Host 二次确认；执行证据见
+> [`PLUGIN_PLATFORM_V2_PHASE11B_WPF_zh.md`](PLUGIN_PLATFORM_V2_PHASE11B_WPF_zh.md)。
+> WP-F 只完成本地显式 fake venue 技术验收，没有真实 Demo credential/network smoke。
+> 公开 SDK 的 `secrets.use`、`trade.submit`、`trade.cancel`、production mutation、
+> amend、资金动作和 WP-G 继续不可达。
 
 - 仅 `first-party-pinned` 或 `verified-publisher`；
 - secret broker 对真实凭据提供不暴露明文的签名/代理能力；

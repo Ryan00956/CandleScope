@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from app.plugin_host.framing import JsonLineError, strict_json_loads
 
 from .accounts import (
+    OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID,
     OKX_DEMO_SPOT_READONLY_CONNECTOR_ID,
     ReadOnlyAccountProof,
 )
@@ -32,12 +33,15 @@ OKX_DEMO_PORT = 443
 OKX_ACCOUNT_CONFIG_PATH = "/api/v5/account/config"
 OKX_ACCOUNT_BALANCE_PATH = "/api/v5/account/balance"
 OKX_ORDER_QUERY_PATH = "/api/v5/trade/order"
+OKX_ORDER_SUBMIT_PATH = "/api/v5/trade/order"
+OKX_ORDER_CANCEL_PATH = "/api/v5/trade/cancel-order"
 OKX_READONLY_PATHS = frozenset(
     {OKX_ACCOUNT_CONFIG_PATH, OKX_ACCOUNT_BALANCE_PATH}
 )
 OKX_CREDENTIAL_SCHEMA_VERSION = 1
 MAX_OKX_CREDENTIAL_BYTES = 16 * 1024
 MAX_OKX_RESPONSE_BYTES = 1024 * 1024
+MAX_OKX_REQUEST_BYTES = 16 * 1024
 DEFAULT_OKX_TIMEOUT_SECONDS = 4.0
 
 _KEY = re.compile(r"^[A-Za-z0-9_+/=-]{8,256}$")
@@ -416,6 +420,113 @@ class OkxPinnedHttpsTransport:
             )
         return OkxHttpResponse(response.status, response_headers, body)
 
+    def post(
+        self,
+        target: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> OkxHttpResponse:
+        if target not in {OKX_ORDER_SUBMIT_PATH, OKX_ORDER_CANCEL_PATH}:
+            raise broker_error(
+                "LIVE_EXECUTION_PATH_DENIED",
+                "Demo execution path is not pinned",
+                fatal=True,
+            )
+        expected_headers = {
+            "Accept",
+            "Content-Type",
+            "OK-ACCESS-KEY",
+            "OK-ACCESS-PASSPHRASE",
+            "OK-ACCESS-SIGN",
+            "OK-ACCESS-TIMESTAMP",
+            "User-Agent",
+            "x-simulated-trading",
+        }
+        if target == OKX_ORDER_SUBMIT_PATH:
+            expected_headers.add("expTime")
+        if (
+            set(headers) != expected_headers
+            or headers.get("Accept") != "application/json"
+            or headers.get("Content-Type") != "application/json"
+            or headers.get("x-simulated-trading") != "1"
+            or not isinstance(body, bytes)
+            or not 1 <= len(body) <= MAX_OKX_REQUEST_BYTES
+        ):
+            raise broker_error(
+                "LIVE_EXECUTION_REQUEST_DENIED",
+                "Demo execution request does not match the pinned contract",
+                fatal=True,
+            )
+        if target == OKX_ORDER_SUBMIT_PATH:
+            expiry = headers.get("expTime")
+            if (
+                not isinstance(expiry, str)
+                or not expiry.isdigit()
+                or not 12 <= len(expiry) <= 14
+            ):
+                raise broker_error(
+                    "LIVE_EXECUTION_REQUEST_DENIED",
+                    "Demo submit expiry is invalid",
+                    fatal=True,
+                )
+        addresses = _validated_public_addresses(
+            self._resolver(OKX_DEMO_HOST, OKX_DEMO_PORT)
+        )
+        connection = _PinnedOkxHttpsConnection(
+            resolved_ip=addresses[0],
+            timeout_seconds=self._timeout_seconds,
+        )
+        try:
+            connection.request(
+                "POST",
+                target,
+                body=body,
+                headers=dict(headers),
+            )
+            response = connection.getresponse()
+            response_body = response.read(MAX_OKX_RESPONSE_BYTES + 1)
+            response_headers = tuple(response.getheaders())
+        except (
+            OSError,
+            TimeoutError,
+            ssl.SSLError,
+            http.client.HTTPException,
+        ) as exc:
+            raise broker_error(
+                "LIVE_EXECUTION_TRANSPORT_FAILED",
+                "Demo execution HTTPS request failed",
+                details={"errorType": type(exc).__name__},
+            ) from exc
+        finally:
+            connection.close()
+        if len(response_body) > MAX_OKX_RESPONSE_BYTES:
+            raise broker_error(
+                "LIVE_EXECUTION_RESPONSE_LIMIT",
+                "Demo execution response exceeded its hard limit",
+            )
+        if response.status != 200:
+            raise broker_error(
+                "LIVE_EXECUTION_HTTP_REJECTED",
+                "Demo execution endpoint returned a non-success status",
+                details={"status": response.status},
+            )
+        content_types = [
+            value
+            for key, value in response_headers
+            if key.casefold() == "content-type"
+        ]
+        if (
+            len(content_types) != 1
+            or content_types[0].split(";", 1)[0].strip().casefold()
+            != "application/json"
+        ):
+            raise broker_error(
+                "LIVE_EXECUTION_CONTENT_TYPE_REJECTED",
+                "Demo execution response is not JSON",
+            )
+        return OkxHttpResponse(response.status, response_headers, response_body)
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
@@ -536,7 +647,6 @@ def _signed_headers(
 
 
 class OkxDemoReadOnlyConnector:
-    connector_id = OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
     network_method_count = 2
 
     def __init__(
@@ -544,7 +654,23 @@ class OkxDemoReadOnlyConnector:
         *,
         transport: OkxHttpTransport | None = None,
         clock: Clock = _utc_now,
+        execution_scope: bool = False,
     ) -> None:
+        if not isinstance(execution_scope, bool):
+            raise TypeError("execution_scope must be a boolean")
+        self.connector_id = (
+            OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+            if execution_scope
+            else OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+        )
+        self._required_permissions = (
+            frozenset({"read_only", "trade"})
+            if execution_scope
+            else frozenset({"read_only"})
+        )
+        self._proof_permission = (
+            "read_trade" if execution_scope else "read_only"
+        )
         self._transport = transport or OkxPinnedHttpsTransport()
         self._clock = clock
 
@@ -596,11 +722,17 @@ class OkxDemoReadOnlyConnector:
         if (
             any(not item or item != item.strip() for item in permissions)
             or len(permissions) != len(set(permissions))
-            or set(permissions) != {"read_only"}
+            or set(permissions) != self._required_permissions
         ):
             raise broker_error(
                 "LIVE_ACCOUNT_PERMISSION_REJECTED",
-                "OKX credential must have read_only permission only",
+                (
+                    "OKX execution credential must have exact Read and Trade "
+                    "permissions without Withdraw"
+                    if self.connector_id
+                    == OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+                    else "OKX credential must have read_only permission only"
+                ),
             )
         if config.get("acctLv") != "1":
             raise broker_error(
@@ -658,7 +790,7 @@ class OkxDemoReadOnlyConnector:
             canonical_account_sha256=(
                 f"sha256:{hashlib.sha256(canonical).hexdigest()}"
             ),
-            permission="read_only",
+            permission=self._proof_permission,
             account_mode="spot",
             position_mode=position_mode,
             asset_count=len(assets),
@@ -667,7 +799,6 @@ class OkxDemoReadOnlyConnector:
 
 
 class OkxDemoOrderQueryConnector:
-    connector_id = OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
     network_method_count = 1
 
     def __init__(
@@ -675,7 +806,15 @@ class OkxDemoOrderQueryConnector:
         *,
         transport: OkxHttpTransport | None = None,
         clock: Clock = _utc_now,
+        execution_scope: bool = False,
     ) -> None:
+        if not isinstance(execution_scope, bool):
+            raise TypeError("execution_scope must be a boolean")
+        self.connector_id = (
+            OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+            if execution_scope
+            else OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+        )
         self._transport = transport or OkxPinnedHttpsTransport()
         self._clock = clock
 

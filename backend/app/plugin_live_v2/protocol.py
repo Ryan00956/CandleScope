@@ -10,7 +10,7 @@ from typing import Any
 from .errors import LiveBrokerError, broker_error
 
 
-LIVE_BROKER_PROTOCOL_VERSION = "candlescope.live-broker/4"
+LIVE_BROKER_PROTOCOL_VERSION = "candlescope.live-broker/5"
 MAX_BROKER_MESSAGE_BYTES = 128 * 1024
 MAX_BROKER_SEQUENCE = (1 << 53) - 1
 
@@ -34,6 +34,10 @@ METHOD_CONFIRMATION_PREVIEW = "confirmation.preview"
 METHOD_CONFIRMATION_ISSUE = "confirmation.issue"
 METHOD_CONFIRMATION_DESCRIBE = "confirmation.describe"
 METHOD_CONFIRMATION_REVOKE = "confirmation.revoke"
+METHOD_EXECUTION_DESCRIBE = "execution.describe"
+METHOD_EXECUTION_SUBMIT = "execution.submit"
+METHOD_EXECUTION_CANCEL = "execution.cancel"
+METHOD_EXECUTION_RECONCILE = "execution.reconcile"
 METHOD_AUDIT_EXPORT_PAGE = "audit.export.page"
 METHOD_SHUTDOWN = "foundation.shutdown"
 
@@ -59,6 +63,10 @@ LIVE_BROKER_METHODS = frozenset(
         METHOD_CONFIRMATION_ISSUE,
         METHOD_CONFIRMATION_DESCRIBE,
         METHOD_CONFIRMATION_REVOKE,
+        METHOD_EXECUTION_DESCRIBE,
+        METHOD_EXECUTION_SUBMIT,
+        METHOD_EXECUTION_CANCEL,
+        METHOD_EXECUTION_RECONCILE,
         METHOD_AUDIT_EXPORT_PAGE,
         METHOD_SHUTDOWN,
     }

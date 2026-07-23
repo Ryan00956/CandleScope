@@ -8,6 +8,7 @@ from typing import Protocol
 
 
 OKX_DEMO_SPOT_READONLY_CONNECTOR_ID = "candlescope.okx-demo-spot-readonly"
+OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID = "candlescope.okx-demo-spot-execution"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -25,13 +26,17 @@ class ReadOnlyAccountProof:
     observed_at: str
 
     def __post_init__(self) -> None:
-        if self.connector_id != OKX_DEMO_SPOT_READONLY_CONNECTOR_ID:
+        permission_by_connector = {
+            OKX_DEMO_SPOT_READONLY_CONNECTOR_ID: "read_only",
+            OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID: "read_trade",
+        }
+        if self.connector_id not in permission_by_connector:
             raise ValueError("read-only account connector identity is invalid")
         if (
             self.venue != "okx"
             or self.environment != "demo"
             or self.product_scope != "spot"
-            or self.permission != "read_only"
+            or self.permission != permission_by_connector[self.connector_id]
             or self.account_mode != "spot"
         ):
             raise ValueError("read-only account scope is invalid")

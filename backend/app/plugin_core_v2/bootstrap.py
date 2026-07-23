@@ -36,6 +36,9 @@ PLUGIN_PLATFORM_V2_LIVE_RECONCILIATION_SHADOW_ENV = (
 PLUGIN_PLATFORM_V2_LIVE_NATIVE_CONTROL_ENV = (
     "CANDLESCOPE_PLUGIN_PLATFORM_V2_LIVE_NATIVE_CONTROL_ENABLED"
 )
+PLUGIN_PLATFORM_V2_LIVE_TESTNET_EXECUTION_ENV = (
+    "CANDLESCOPE_PLUGIN_PLATFORM_V2_LIVE_TESTNET_EXECUTION_ENABLED"
+)
 
 
 def _environment_bool(environ: Mapping[str, str], name: str, *, default: bool) -> bool:
@@ -121,6 +124,11 @@ def build_core_plugin_platform_from_environment(
         live_native_control_enabled=_environment_bool(
             env,
             PLUGIN_PLATFORM_V2_LIVE_NATIVE_CONTROL_ENV,
+            default=False,
+        ),
+        live_testnet_execution_enabled=_environment_bool(
+            env,
+            PLUGIN_PLATFORM_V2_LIVE_TESTNET_EXECUTION_ENV,
             default=False,
         ),
     )

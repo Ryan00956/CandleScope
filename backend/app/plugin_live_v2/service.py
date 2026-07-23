@@ -6,6 +6,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import uuid
@@ -16,12 +17,22 @@ from pathlib import Path
 from typing import Any
 
 from .accounts import (
+    OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID,
     OKX_DEMO_SPOT_READONLY_CONNECTOR_ID,
     ReadOnlyAccountConnector,
     ReadOnlyAccountProof,
 )
 from .control import LiveControlLedger
 from .errors import LiveBrokerError, broker_error
+from .execution import (
+    DEMO_EXECUTION_INSTRUMENT,
+    DemoSpotExecutionConnector,
+    LiveExecutionLedger,
+    MAX_DEMO_ORDER_NOTIONAL,
+    MAX_DEMO_UNRESOLVED_NOTIONAL,
+    MAX_DEMO_UNRESOLVED_ORDERS,
+    execution_risk_decision,
+)
 from .protocol import (
     METHOD_ACCOUNT_DESCRIBE,
     METHOD_ACCOUNT_DISCOVER,
@@ -39,6 +50,10 @@ from .protocol import (
     METHOD_CREDENTIAL_DESCRIBE,
     METHOD_CREDENTIAL_PUT,
     METHOD_CREDENTIAL_REVOKE,
+    METHOD_EXECUTION_CANCEL,
+    METHOD_EXECUTION_DESCRIBE,
+    METHOD_EXECUTION_RECONCILE,
+    METHOD_EXECUTION_SUBMIT,
     METHOD_HEALTH,
     METHOD_POLICY_ADVANCE,
     METHOD_SHADOW_DESCRIBE,
@@ -51,6 +66,8 @@ from .protocol import (
 )
 from .journal import ShadowOrderJournal
 from .shadow import (
+    ORDER_QUERY_STATES,
+    OrderQueryProof,
     ReadOnlyOrderQueryConnector,
     ShadowOrderIntent,
 )
@@ -86,6 +103,16 @@ def _utc_now() -> str:
 
 def _sha256_text(value: str) -> str:
     return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _exact_params(
@@ -133,6 +160,8 @@ class LiveBrokerService:
         reconciliation_shadow_enabled: bool = False,
         reconciliation_connector: ReadOnlyOrderQueryConnector | None = None,
         native_control_enabled: bool = False,
+        testnet_execution_enabled: bool = False,
+        execution_connector: DemoSpotExecutionConnector | None = None,
     ) -> None:
         if not isinstance(read_only_accounts_enabled, bool):
             raise TypeError("read_only_accounts_enabled must be a boolean")
@@ -140,6 +169,8 @@ class LiveBrokerService:
             raise TypeError("reconciliation_shadow_enabled must be a boolean")
         if not isinstance(native_control_enabled, bool):
             raise TypeError("native_control_enabled must be a boolean")
+        if not isinstance(testnet_execution_enabled, bool):
+            raise TypeError("testnet_execution_enabled must be a boolean")
         if reconciliation_shadow_enabled and not read_only_accounts_enabled:
             raise ValueError(
                 "reconciliation_shadow_enabled requires read-only accounts"
@@ -147,6 +178,10 @@ class LiveBrokerService:
         if native_control_enabled and not reconciliation_shadow_enabled:
             raise ValueError(
                 "native_control_enabled requires reconciliation shadow"
+            )
+        if testnet_execution_enabled and not native_control_enabled:
+            raise ValueError(
+                "testnet_execution_enabled requires native Live control"
             )
         if account_connector is not None and not read_only_accounts_enabled:
             raise ValueError(
@@ -159,6 +194,10 @@ class LiveBrokerService:
             raise ValueError(
                 "reconciliation_connector requires reconciliation shadow"
             )
+        if execution_connector is not None and not testnet_execution_enabled:
+            raise ValueError(
+                "execution_connector requires testnet execution"
+            )
         self.root = Path(root).expanduser().resolve(strict=False)
         self.trust_store = LivePublisherTrustStore.from_path(release_lock_path)
         self.state_store = BrokerStateStore(
@@ -167,6 +206,18 @@ class LiveBrokerService:
             accounts_enabled=read_only_accounts_enabled,
         )
         self.state = self.state_store.load_or_create()
+        if (
+            not testnet_execution_enabled
+            and any(
+                account.permission == "read_trade"
+                for account in self.state.accounts
+            )
+        ):
+            raise broker_error(
+                "LIVE_EXECUTION_DOWNGRADE_REQUIRED",
+                "trade-capable account state requires kill before execution is disabled",
+                fatal=True,
+            )
         self.vault: CredentialVault
         if vault_backend == "fake":
             self.vault = FakeCredentialVault()
@@ -184,10 +235,17 @@ class LiveBrokerService:
         if read_only_accounts_enabled and account_connector is None:
             from .okx_readonly import OkxDemoReadOnlyConnector
 
-            account_connector = OkxDemoReadOnlyConnector()
+            account_connector = OkxDemoReadOnlyConnector(
+                execution_scope=testnet_execution_enabled
+            )
+        expected_connector_id = (
+            OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+            if testnet_execution_enabled
+            else OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+        )
         if account_connector is not None and (
             account_connector.connector_id
-            != OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+            != expected_connector_id
             or account_connector.network_method_count != 2
         ):
             raise broker_error(
@@ -198,15 +256,31 @@ class LiveBrokerService:
         if reconciliation_shadow_enabled and reconciliation_connector is None:
             from .okx_readonly import OkxDemoOrderQueryConnector
 
-            reconciliation_connector = OkxDemoOrderQueryConnector()
+            reconciliation_connector = OkxDemoOrderQueryConnector(
+                execution_scope=testnet_execution_enabled
+            )
         if reconciliation_connector is not None and (
             reconciliation_connector.connector_id
-            != OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+            != expected_connector_id
             or reconciliation_connector.network_method_count != 1
         ):
             raise broker_error(
                 "LIVE_SHADOW_CONNECTOR_REJECTED",
                 "reconciliation connector does not match the pinned contract",
+                fatal=True,
+            )
+        if testnet_execution_enabled and execution_connector is None:
+            from .okx_execution import OkxDemoSpotExecutionConnector
+
+            execution_connector = OkxDemoSpotExecutionConnector()
+        if execution_connector is not None and (
+            execution_connector.connector_id
+            != OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+            or execution_connector.network_method_count != 2
+        ):
+            raise broker_error(
+                "LIVE_EXECUTION_CONNECTOR_REJECTED",
+                "execution connector does not match the pinned Demo contract",
                 fatal=True,
             )
         self.read_only_accounts_enabled = read_only_accounts_enabled
@@ -219,13 +293,24 @@ class LiveBrokerService:
             else None
         )
         self.native_control_enabled = native_control_enabled
+        self.testnet_execution_enabled = testnet_execution_enabled
+        self.execution_connector = execution_connector
         self.control_ledger = (
             LiveControlLedger(
                 self.root,
                 broker_id=self.state.broker_id,
                 policy_epoch=self.state.policy_epoch,
+                testnet_execution_enabled=testnet_execution_enabled,
             )
             if native_control_enabled
+            else None
+        )
+        self.execution_ledger = (
+            LiveExecutionLedger(
+                self.root,
+                broker_id=self.state.broker_id,
+            )
+            if testnet_execution_enabled
             else None
         )
         self._session_id: str | None = None
@@ -253,12 +338,26 @@ class LiveBrokerService:
                 if self.reconciliation_connector is not None
                 else 0
             )
+            + (
+                self.execution_connector.network_method_count
+                if self.execution_connector is not None
+                else 0
+            )
         )
 
     def _shadow_summary(self) -> dict[str, int]:
         if self.shadow_journal is None:
             return {"journalCount": 0, "unresolvedCount": 0}
         return self.shadow_journal.summary()
+
+    def _execution_summary(self) -> dict[str, int]:
+        if self.execution_ledger is None:
+            return {"executionCount": 0, "executionUnresolvedCount": 0}
+        status = self.execution_ledger.status()
+        return {
+            "executionCount": status["orderCount"],
+            "executionUnresolvedCount": status["unresolvedCount"],
+        }
 
     def _reconcile_vault(self) -> None:
         available = self.vault.list_record_ids()
@@ -307,6 +406,7 @@ class LiveBrokerService:
         self._session_id = request.session_id
         self._expected_sequence = 2
         shadow = self._shadow_summary()
+        execution = self._execution_summary()
         return success_response(
             request.sequence,
             self.policy_epoch,
@@ -319,7 +419,9 @@ class LiveBrokerService:
                 "reconciliationShadowEnabled": (
                     self.reconciliation_shadow_enabled
                 ),
+                "testnetExecutionEnabled": self.testnet_execution_enabled,
                 **shadow,
+                **execution,
             },
         )
 
@@ -400,6 +502,14 @@ class LiveBrokerService:
             return self._describe_confirmation(request)
         if request.method == METHOD_CONFIRMATION_REVOKE:
             return self._revoke_confirmation(request)
+        if request.method == METHOD_EXECUTION_DESCRIBE:
+            return self._describe_execution(request)
+        if request.method == METHOD_EXECUTION_SUBMIT:
+            return self._submit_execution(request)
+        if request.method == METHOD_EXECUTION_CANCEL:
+            return self._cancel_execution(request)
+        if request.method == METHOD_EXECUTION_RECONCILE:
+            return self._reconcile_execution(request)
         if request.method == METHOD_AUDIT_EXPORT_PAGE:
             return self._audit_export_page(request)
         if request.method == METHOD_SHUTDOWN:
@@ -413,6 +523,7 @@ class LiveBrokerService:
     def _health(self, request: BrokerRequest) -> BrokerResponse:
         _exact_params(request.params, set(), "foundation.health params")
         shadow = self._shadow_summary()
+        execution = self._execution_summary()
         return success_response(
             request.sequence,
             self.policy_epoch,
@@ -430,7 +541,9 @@ class LiveBrokerService:
                 "reconciliationShadowEnabled": (
                     self.reconciliation_shadow_enabled
                 ),
+                "testnetExecutionEnabled": self.testnet_execution_enabled,
                 **shadow,
+                **execution,
                 "networkMethods": self._network_method_count(),
             },
         )
@@ -720,7 +833,11 @@ class LiveBrokerService:
             binding is None
             or binding.policy_epoch != self.policy_epoch
             or binding.connector_id
-            != OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+            != (
+                OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+                if self.testnet_execution_enabled
+                else OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+            )
         ):
             raise broker_error(
                 "LIVE_ACCOUNT_CREDENTIAL_UNAVAILABLE",
@@ -758,12 +875,17 @@ class LiveBrokerService:
         connector = self._require_account_connector()
         with self.vault.open_secret(binding.record_id) as secret:
             proof = connector.discover(secret)
+        expected_permission = (
+            "read_trade"
+            if self.testnet_execution_enabled
+            else "read_only"
+        )
         if (
             proof.connector_id != binding.connector_id
             or proof.venue != "okx"
             or proof.environment != "demo"
             or proof.product_scope != "spot"
-            or proof.permission != "read_only"
+            or proof.permission != expected_permission
         ):
             raise broker_error(
                 "LIVE_ACCOUNT_PROOF_REJECTED",
@@ -966,10 +1088,20 @@ class LiveBrokerService:
             request.params,
             "account.rebind credentialHandle",
         )
+        connector_upgrade = (
+            self.testnet_execution_enabled
+            and existing.connector_id
+            == OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+            and credential.connector_id
+            == OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+        )
         if (
             credential.handle_sha256 == existing.credential_handle_sha256
             or credential.plugin_id != existing.plugin_id
-            or credential.connector_id != existing.connector_id
+            or (
+                credential.connector_id != existing.connector_id
+                and not connector_upgrade
+            )
             or credential.publisher_identity != existing.publisher_identity
         ):
             raise broker_error(
@@ -988,12 +1120,14 @@ class LiveBrokerService:
         rebound = replace(
             existing,
             credential_handle_sha256=credential.handle_sha256,
+            connector_id=credential.connector_id,
             version=credential.version,
             bundle_sha256=credential.bundle_sha256,
             manifest_sha256=credential.manifest_sha256,
             release_record_sha256=credential.release_record_sha256,
             release_lock_sha256=credential.release_lock_sha256,
             position_mode=proof.position_mode,
+            permission=proof.permission,
             status="active",
             credential_generation=existing.credential_generation + 1,
             asset_count=proof.asset_count,
@@ -1108,9 +1242,6 @@ class LiveBrokerService:
         )
 
     def _reconcile_shadow(self, request: BrokerRequest) -> BrokerResponse:
-        journal = self._require_shadow_journal()
-        connector = self.reconciliation_connector
-        assert connector is not None
         _exact_params(
             request.params,
             {"accountRef", "shadowRef"},
@@ -1124,6 +1255,29 @@ class LiveBrokerService:
             request.params,
             "shadow.reconcile shadowRef",
         )
+        observed = self._perform_reconcile(
+            account_ref=account_ref,
+            account=account,
+            credential=credential,
+            shadow_ref=shadow_ref,
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            observed.metadata(),
+        )
+
+    def _perform_reconcile(
+        self,
+        *,
+        account_ref: str,
+        account: AccountBinding,
+        credential: CredentialBinding,
+        shadow_ref: str,
+    ) -> Any:
+        journal = self._require_shadow_journal()
+        connector = self.reconciliation_connector
+        assert connector is not None
         querying = journal.begin_reconcile(
             shadow_ref,
             account_ref=account_ref,
@@ -1138,13 +1292,26 @@ class LiveBrokerService:
                 )
         except LiveBrokerError as exc:
             journal.fail_reconcile(shadow_ref, error_code=exc.code)
+            execution = (
+                self.execution_ledger.find(shadow_ref)
+                if self.execution_ledger is not None
+                else None
+            )
+            if execution is not None:
+                self.execution_ledger.fail_query(
+                    shadow_ref,
+                    error_code=exc.code,
+                )
             raise
         observed = journal.complete_reconcile(shadow_ref, proof)
-        return success_response(
-            request.sequence,
-            self.policy_epoch,
-            observed.metadata(),
+        execution = (
+            self.execution_ledger.find(shadow_ref)
+            if self.execution_ledger is not None
+            else None
         )
+        if execution is not None:
+            self.execution_ledger.observe_query(shadow_ref, proof)
+        return observed
 
     def _require_control_ledger(self) -> LiveControlLedger:
         ledger = self.control_ledger
@@ -1152,6 +1319,19 @@ class LiveBrokerService:
             raise broker_error(
                 "LIVE_NATIVE_CONTROL_DISABLED",
                 "Host-native Live control is disabled",
+            )
+        return ledger
+
+    def _require_execution_ledger(self) -> LiveExecutionLedger:
+        ledger = self.execution_ledger
+        if (
+            not self.testnet_execution_enabled
+            or ledger is None
+            or self.execution_connector is None
+        ):
+            raise broker_error(
+                "LIVE_TESTNET_EXECUTION_DISABLED",
+                "OKX Demo Spot execution is disabled",
             )
         return ledger
 
@@ -1294,9 +1474,7 @@ class LiveBrokerService:
         self._current_account_credential(account)
         record = journal.describe(shadow_ref)
         if (
-            record.state != "prepared"
-            or record.reconcile_attempt_count != 0
-            or record.created_policy_epoch != self.policy_epoch
+            record.created_policy_epoch != self.policy_epoch
             or record.account_handle_sha256 != _sha256_text(account_ref)
             or record.canonical_account_sha256
             != account.canonical_account_sha256
@@ -1311,7 +1489,7 @@ class LiveBrokerService:
                 "LIVE_CONFIRMATION_INTENT_UNAVAILABLE",
                 "shadow intent is stale, reconciled, or bound to another account",
             )
-        return {
+        common = {
             "schemaVersion": "candlescope.live-confirmation-preview/1",
             "intentSha256": record.intent_sha256,
             "pluginId": record.plugin_id,
@@ -1328,6 +1506,153 @@ class LiveBrokerService:
             "controlGeneration": ledger.generation,
             "liveSubmitAvailable": False,
             "liveCancelAvailable": False,
+        }
+        if not self.testnet_execution_enabled:
+            if (
+                record.state != "prepared"
+                or record.reconcile_attempt_count != 0
+            ):
+                raise broker_error(
+                    "LIVE_CONFIRMATION_INTENT_UNAVAILABLE",
+                    "shadow intent is stale, reconciled, or bound to another account",
+                )
+            return common
+        execution_ledger = self._require_execution_ledger()
+        if (
+            account.connector_id
+            != OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+            or account.permission != "read_trade"
+            or record.connector_id
+            != OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+            or record.instrument_id != DEMO_EXECUTION_INSTRUMENT
+        ):
+            raise broker_error(
+                "LIVE_EXECUTION_ACCOUNT_UNAVAILABLE",
+                "confirmation account is not execution eligible",
+            )
+        execution = execution_ledger.find(shadow_ref)
+        if execution is not None:
+            if (
+                execution.order_intent_sha256 != record.intent_sha256
+                or execution.account_handle_sha256
+                != record.account_handle_sha256
+                or execution.canonical_account_sha256
+                != record.canonical_account_sha256
+                or execution.plugin_id != record.plugin_id
+                or execution.connector_id != record.connector_id
+                or execution.publisher_identity
+                != record.publisher_identity
+                or execution.client_order_id != record.client_order_id
+            ):
+                raise broker_error(
+                    "LIVE_EXECUTION_IDENTITY_MISMATCH",
+                    "execution record does not match the durable shadow",
+                    fatal=True,
+                )
+            if (
+                record.state in ORDER_QUERY_STATES
+                and execution.state != record.state
+                and record.venue_order_id is not None
+            ):
+                execution = execution_ledger.observe_query(
+                    shadow_ref,
+                    OrderQueryProof(
+                        connector_id=record.connector_id,
+                        instrument_id=record.instrument_id,
+                        client_order_id=record.client_order_id,
+                        venue_order_id=record.venue_order_id,
+                        state=record.state,
+                        accumulated_fill_size=record.accumulated_fill_size,
+                        average_price=record.average_price,
+                        observed_at=record.updated_at,
+                    ),
+                )
+        if execution is None:
+            if record.state != "prepared" or record.reconcile_attempt_count != 0:
+                raise broker_error(
+                    "LIVE_CONFIRMATION_ACTION_UNAVAILABLE",
+                    "only a never-dispatched prepared shadow can be submitted",
+                )
+            unresolved_count, unresolved_notional = (
+                execution_ledger.unresolved_summary()
+            )
+            notional, risk_sha256 = execution_risk_decision(
+                instrument_id=record.instrument_id,
+                side=record.side,
+                order_type=record.order_type,
+                quantity=record.quantity,
+                limit_price=record.limit_price,
+                unresolved_count=unresolved_count,
+                unresolved_notional=unresolved_notional,
+            )
+            action = "submit"
+            execution_state = "not-started"
+        else:
+            if (
+                execution.state not in {"live", "partially_filled"}
+                or record.state != execution.state
+                or record.venue_order_id is None
+            ):
+                raise broker_error(
+                    "LIVE_CONFIRMATION_ACTION_UNAVAILABLE",
+                    "execution requires reconciliation before another action",
+                    details={"executionState": execution.state},
+                )
+            action = "cancel"
+            execution_state = execution.state
+            notional = execution.notional
+            risk_sha256 = _sha256_text(
+                _canonical_json(
+                    {
+                        "schemaVersion": "candlescope.live-demo-cancel-risk/1",
+                        "allow": True,
+                        "action": "cancel",
+                        "environment": "demo",
+                        "instrumentId": execution.instrument_id,
+                        "clientOrderId": execution.client_order_id,
+                        "orderIntentSha256": execution.order_intent_sha256,
+                        "state": execution.state,
+                        "policyEpoch": self.policy_epoch,
+                        "controlGeneration": ledger.generation,
+                    }
+                )
+            )
+        confirmation_sha256 = _sha256_text(
+            _canonical_json(
+                {
+                    "schemaVersion": (
+                        "candlescope.live-execution-confirmation/1"
+                    ),
+                    "action": action,
+                    "accountHandleSha256": _sha256_text(account_ref),
+                    "shadowHandleSha256": _sha256_text(shadow_ref),
+                    "orderIntentSha256": record.intent_sha256,
+                    "executionState": execution_state,
+                    "riskDecisionSha256": risk_sha256,
+                    "policyEpoch": self.policy_epoch,
+                    "controlGeneration": ledger.generation,
+                }
+            )
+        )
+        return {
+            **common,
+            "schemaVersion": "candlescope.live-confirmation-preview/2",
+            "intentSha256": confirmation_sha256,
+            "orderIntentSha256": record.intent_sha256,
+            "action": action,
+            "executionState": execution_state,
+            "notional": notional,
+            "riskDecisionSha256": risk_sha256,
+            "hardLimits": {
+                "instrumentId": DEMO_EXECUTION_INSTRUMENT,
+                "maxOrderNotional": str(MAX_DEMO_ORDER_NOTIONAL),
+                "maxUnresolvedOrders": MAX_DEMO_UNRESOLVED_ORDERS,
+                "maxUnresolvedNotional": str(
+                    MAX_DEMO_UNRESOLVED_NOTIONAL
+                ),
+            },
+            "liveSubmitAvailable": action == "submit",
+            "liveCancelAvailable": action == "cancel",
         }
 
     def _preview_confirmation(self, request: BrokerRequest) -> BrokerResponse:
@@ -1423,8 +1748,28 @@ class LiveBrokerService:
             {
                 "receiptRef": receipt_ref,
                 **receipt.public_wire(),
-                "liveSubmitAvailable": False,
-                "liveCancelAvailable": False,
+                **(
+                    {
+                        "schemaVersion": "candlescope.live-confirmation/2",
+                        "orderIntentSha256": preview[
+                            "orderIntentSha256"
+                        ],
+                        "action": preview["action"],
+                        "executionState": preview["executionState"],
+                        "notional": preview["notional"],
+                        "riskDecisionSha256": preview[
+                            "riskDecisionSha256"
+                        ],
+                    }
+                    if self.testnet_execution_enabled
+                    else {}
+                ),
+                "liveSubmitAvailable": preview[
+                    "liveSubmitAvailable"
+                ],
+                "liveCancelAvailable": preview[
+                    "liveCancelAvailable"
+                ],
             },
         )
 
@@ -1469,18 +1814,366 @@ class LiveBrokerService:
             ledger.revoke(receipt_ref, reason=reason).public_wire(),
         )
 
-    def _audit_export_page(self, request: BrokerRequest) -> BrokerResponse:
+    def _execution_expected(
+        self,
+        params: Mapping[str, Any],
+        *,
+        label: str,
+        action: str,
+    ) -> tuple[
+        str,
+        str,
+        str,
+        AccountBinding,
+        CredentialBinding,
+        Any,
+        dict[str, Any],
+    ]:
+        account_ref, account, credential = self._shadow_account(
+            params,
+            f"{label} accountRef",
+        )
+        shadow_ref = self._shadow_ref(
+            params,
+            f"{label} shadowRef",
+        )
+        receipt_ref = _text(
+            params["receiptRef"],
+            f"{label} receiptRef",
+            maximum=64,
+        )
+        if account.permission != "read_trade" or (
+            account.connector_id
+            != OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+        ):
+            raise broker_error(
+                "LIVE_EXECUTION_ACCOUNT_UNAVAILABLE",
+                "execution account is not bound to the Demo Trade scope",
+            )
+        preview = self._confirmation_metadata(
+            account_ref=account_ref,
+            shadow_ref=shadow_ref,
+        )
+        expected_epoch = params["expectedPolicyEpoch"]
+        expected_generation = params["expectedControlGeneration"]
+        if (
+            preview.get("action") != action
+            or params["expectedConfirmationSha256"]
+            != preview["intentSha256"]
+            or isinstance(expected_epoch, bool)
+            or not isinstance(expected_epoch, int)
+            or expected_epoch != self.policy_epoch
+            or isinstance(expected_generation, bool)
+            or not isinstance(expected_generation, int)
+            or expected_generation != preview["controlGeneration"]
+        ):
+            raise broker_error(
+                "LIVE_EXECUTION_CONFIRMATION_STALE",
+                "execution confirmation preview is stale",
+            )
+        record = self._require_shadow_journal().describe(shadow_ref)
+        return (
+            account_ref,
+            shadow_ref,
+            receipt_ref,
+            account,
+            credential,
+            record,
+            preview,
+        )
+
+    def _consume_execution_receipt(
+        self,
+        *,
+        receipt_ref: str,
+        shadow_ref: str,
+        account_ref: str,
+        record: Any,
+        preview: dict[str, Any],
+    ) -> Any:
         ledger = self._require_control_ledger()
-        journal = self._require_shadow_journal()
+        return ledger.consume_for_execution(
+            receipt_ref,
+            shadow_ref=shadow_ref,
+            account_ref=account_ref,
+            intent_sha256=preview["intentSha256"],
+            plugin_id=record.plugin_id,
+            publisher_identity=record.publisher_identity,
+            connector_id=record.connector_id,
+            policy_epoch=self.policy_epoch,
+            control_generation=preview["controlGeneration"],
+        )
+
+    def _describe_execution(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_execution_ledger()
+        _exact_params(
+            request.params,
+            {"shadowRef"},
+            "execution.describe params",
+        )
+        shadow_ref = self._shadow_ref(
+            request.params,
+            "execution.describe shadowRef",
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            ledger.describe(shadow_ref).public_wire(),
+        )
+
+    def _submit_execution(self, request: BrokerRequest) -> BrokerResponse:
+        execution_ledger = self._require_execution_ledger()
+        connector = self.execution_connector
+        assert connector is not None
         _exact_params(
             request.params,
             {
-                "controlAfterSequence",
-                "shadowAfterSequence",
-                "controlThroughSequence",
-                "shadowThroughSequence",
-                "limit",
+                "accountRef",
+                "shadowRef",
+                "receiptRef",
+                "expectedConfirmationSha256",
+                "expectedPolicyEpoch",
+                "expectedControlGeneration",
             },
+            "execution.submit params",
+        )
+        (
+            account_ref,
+            shadow_ref,
+            receipt_ref,
+            account,
+            credential,
+            record,
+            preview,
+        ) = self._execution_expected(
+            request.params,
+            label="execution.submit",
+            action="submit",
+        )
+        receipt = self._consume_execution_receipt(
+            receipt_ref=receipt_ref,
+            shadow_ref=shadow_ref,
+            account_ref=account_ref,
+            record=record,
+            preview=preview,
+        )
+        started = execution_ledger.begin_submit(
+            shadow_ref=shadow_ref,
+            account_ref=account_ref,
+            metadata={
+                "canonicalAccountSha256": (
+                    account.canonical_account_sha256
+                ),
+                "credentialHandleSha256": (
+                    account.credential_handle_sha256
+                ),
+                "pluginId": record.plugin_id,
+                "connectorId": record.connector_id,
+                "publisherIdentity": record.publisher_identity,
+                "version": account.version,
+                "clientOrderId": record.client_order_id,
+                "orderIntentSha256": record.intent_sha256,
+                "instrumentId": record.instrument_id,
+                "side": record.side,
+                "orderType": record.order_type,
+                "quantity": record.quantity,
+                "limitPrice": record.limit_price,
+                "policyEpoch": self.policy_epoch,
+                "controlGeneration": preview["controlGeneration"],
+            },
+            receipt_id=receipt.receipt_id,
+            confirmation_sha256=preview["intentSha256"],
+            risk_decision_sha256=preview["riskDecisionSha256"],
+            notional=preview["notional"],
+        )
+        intent = ShadowOrderIntent(
+            idempotency_key="intent_" + "E" * 43,
+            instrument_id=started.instrument_id,
+            side=started.side,
+            order_type=started.order_type,
+            quantity=started.quantity,
+            limit_price=started.limit_price,
+        )
+        try:
+            with self.vault.open_secret(credential.record_id) as secret:
+                proof = connector.submit(
+                    secret,
+                    intent=intent,
+                    client_order_id=started.client_order_id,
+                )
+        except LiveBrokerError as exc:
+            execution_ledger.fail_submit(
+                shadow_ref,
+                error_code=exc.code,
+            )
+            raise
+        except (OSError, ValueError) as exc:
+            execution_ledger.fail_submit(
+                shadow_ref,
+                error_code="LIVE_EXECUTION_CONNECTOR_INVALID",
+            )
+            raise broker_error(
+                "LIVE_EXECUTION_CONNECTOR_INVALID",
+                "execution connector returned an invalid submit result",
+                fatal=True,
+                details={"errorType": type(exc).__name__},
+            ) from exc
+        completed = execution_ledger.complete_submit(shadow_ref, proof)
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            {
+                **completed.public_wire(),
+                "accepted": proof.accepted,
+                "action": "submit",
+            },
+        )
+
+    def _cancel_execution(self, request: BrokerRequest) -> BrokerResponse:
+        execution_ledger = self._require_execution_ledger()
+        connector = self.execution_connector
+        assert connector is not None
+        _exact_params(
+            request.params,
+            {
+                "accountRef",
+                "shadowRef",
+                "receiptRef",
+                "expectedConfirmationSha256",
+                "expectedPolicyEpoch",
+                "expectedControlGeneration",
+            },
+            "execution.cancel params",
+        )
+        (
+            account_ref,
+            shadow_ref,
+            receipt_ref,
+            account,
+            credential,
+            record,
+            preview,
+        ) = self._execution_expected(
+            request.params,
+            label="execution.cancel",
+            action="cancel",
+        )
+        receipt = self._consume_execution_receipt(
+            receipt_ref=receipt_ref,
+            shadow_ref=shadow_ref,
+            account_ref=account_ref,
+            record=record,
+            preview=preview,
+        )
+        started = execution_ledger.begin_cancel(
+            shadow_ref,
+            account_ref=account_ref,
+            credential_handle_sha256=(
+                account.credential_handle_sha256
+            ),
+            version=account.version,
+            receipt_id=receipt.receipt_id,
+            confirmation_sha256=preview["intentSha256"],
+            risk_decision_sha256=preview["riskDecisionSha256"],
+            policy_epoch=self.policy_epoch,
+            control_generation=preview["controlGeneration"],
+        )
+        try:
+            with self.vault.open_secret(credential.record_id) as secret:
+                proof = connector.cancel(
+                    secret,
+                    instrument_id=started.instrument_id,
+                    client_order_id=started.client_order_id,
+                )
+        except LiveBrokerError as exc:
+            execution_ledger.fail_cancel(
+                shadow_ref,
+                error_code=exc.code,
+            )
+            raise
+        except (OSError, ValueError) as exc:
+            execution_ledger.fail_cancel(
+                shadow_ref,
+                error_code="LIVE_EXECUTION_CONNECTOR_INVALID",
+            )
+            raise broker_error(
+                "LIVE_EXECUTION_CONNECTOR_INVALID",
+                "execution connector returned an invalid cancel result",
+                fatal=True,
+                details={"errorType": type(exc).__name__},
+            ) from exc
+        completed = execution_ledger.complete_cancel(shadow_ref, proof)
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            {
+                **completed.public_wire(),
+                "accepted": proof.accepted,
+                "action": "cancel",
+            },
+        )
+
+    def _reconcile_execution(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_execution_ledger()
+        _exact_params(
+            request.params,
+            {"accountRef", "shadowRef"},
+            "execution.reconcile params",
+        )
+        account_ref, account, credential = self._shadow_account(
+            request.params,
+            "execution.reconcile accountRef",
+        )
+        if (
+            account.permission != "read_trade"
+            or account.connector_id
+            != OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID
+        ):
+            raise broker_error(
+                "LIVE_EXECUTION_ACCOUNT_UNAVAILABLE",
+                "execution account is unavailable",
+            )
+        shadow_ref = self._shadow_ref(
+            request.params,
+            "execution.reconcile shadowRef",
+        )
+        ledger.describe(shadow_ref)
+        shadow = self._perform_reconcile(
+            account_ref=account_ref,
+            account=account,
+            credential=credential,
+            shadow_ref=shadow_ref,
+        )
+        execution = ledger.describe(shadow_ref)
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            {
+                "schemaVersion": "candlescope.live-execution-reconcile/1",
+                "execution": execution.public_wire(),
+                "shadow": shadow.metadata(),
+            },
+        )
+
+    def _audit_export_page(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_control_ledger()
+        journal = self._require_shadow_journal()
+        execution_ledger = self.execution_ledger
+        expected_params = {
+            "controlAfterSequence",
+            "shadowAfterSequence",
+            "controlThroughSequence",
+            "shadowThroughSequence",
+            "limit",
+        }
+        if execution_ledger is not None:
+            expected_params |= {
+                "executionAfterSequence",
+                "executionThroughSequence",
+            }
+        _exact_params(
+            request.params,
+            expected_params,
             "audit.export.page params",
         )
         values = tuple(request.params.values())
@@ -1503,17 +2196,42 @@ class LiveBrokerService:
         control_status = ledger.status()
         control_head = ledger.event_head()
         shadow_head = journal.event_head()
+        execution_head = (
+            execution_ledger.event_head()
+            if execution_ledger is not None
+            else None
+        )
         control_through = request.params["controlThroughSequence"]
         shadow_through = request.params["shadowThroughSequence"]
+        execution_through = (
+            request.params["executionThroughSequence"]
+            if execution_ledger is not None
+            else 0
+        )
         if control_through == 0:
             control_through = control_head["sequence"]
         if shadow_through == 0:
             shadow_through = shadow_head["sequence"]
         if (
+            execution_ledger is not None
+            and execution_head is not None
+            and execution_through == 0
+        ):
+            execution_through = execution_head["sequence"]
+        if (
             control_through > control_head["sequence"]
             or shadow_through > shadow_head["sequence"]
             or request.params["controlAfterSequence"] > control_through
             or request.params["shadowAfterSequence"] > shadow_through
+            or (
+                execution_ledger is not None
+                and execution_head is not None
+                and (
+                    execution_through > execution_head["sequence"]
+                    or request.params["executionAfterSequence"]
+                    > execution_through
+                )
+            )
         ):
             raise broker_error(
                 "LIVE_AUDIT_EXPORT_SNAPSHOT_REJECTED",
@@ -1529,11 +2247,44 @@ class LiveBrokerService:
             through_sequence=shadow_through,
             limit=limit,
         )
+        execution_events = (
+            execution_ledger.audit_events(
+                after_sequence=request.params[
+                    "executionAfterSequence"
+                ],
+                through_sequence=execution_through,
+                limit=limit,
+            )
+            if execution_ledger is not None
+            else None
+        )
+        execution_fields = (
+            {
+                "executionStatus": execution_ledger.status(),
+                "executionHead": {
+                    "sequence": execution_through,
+                    "sha256": (
+                        execution_head["sha256"]
+                        if execution_head is not None
+                        and execution_through
+                        == execution_head["sequence"]
+                        else None
+                    ),
+                },
+                "executionEvents": execution_events,
+            }
+            if execution_ledger is not None
+            else {}
+        )
         return success_response(
             request.sequence,
             self.policy_epoch,
             {
-                "schemaVersion": "candlescope.live-audit-page/1",
+                "schemaVersion": (
+                    "candlescope.live-audit-page/2"
+                    if execution_ledger is not None
+                    else "candlescope.live-audit-page/1"
+                ),
                 "brokerIdSha256": _sha256_text(self.state.broker_id),
                 "policyEpoch": self.policy_epoch,
                 "controlStatus": control_status,
@@ -1555,6 +2306,7 @@ class LiveBrokerService:
                 },
                 "controlEvents": control_events,
                 "shadowEvents": shadow_events,
+                **execution_fields,
             },
         )
 
@@ -1570,8 +2322,12 @@ class LiveBrokerService:
     def close(self) -> None:
         try:
             try:
-                if self.control_ledger is not None:
-                    self.control_ledger.close()
+                try:
+                    if self.execution_ledger is not None:
+                        self.execution_ledger.close()
+                finally:
+                    if self.control_ledger is not None:
+                        self.control_ledger.close()
             finally:
                 if self.shadow_journal is not None:
                     self.shadow_journal.close()

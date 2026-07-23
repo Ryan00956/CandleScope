@@ -104,9 +104,15 @@ class OrderQueryProof:
     observed_at: str
 
     def __post_init__(self) -> None:
-        from .accounts import OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+        from .accounts import (
+            OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID,
+            OKX_DEMO_SPOT_READONLY_CONNECTOR_ID,
+        )
 
-        if self.connector_id != OKX_DEMO_SPOT_READONLY_CONNECTOR_ID:
+        if self.connector_id not in {
+            OKX_DEMO_SPOT_READONLY_CONNECTOR_ID,
+            OKX_DEMO_SPOT_EXECUTION_CONNECTOR_ID,
+        }:
             raise ValueError("order query connector identity is invalid")
         if (
             not isinstance(self.instrument_id, str)

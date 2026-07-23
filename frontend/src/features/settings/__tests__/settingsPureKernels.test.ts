@@ -13,15 +13,14 @@ import { partialMock } from "../../../test/testHelpers.js";
 test("settings registry owns the complete ordered category contract", () => {
   assert.deepEqual(
     SETTINGS_CATEGORIES.map((category) => category.key),
-    ["appearance", "network", "exchanges", "data", "database", "about"],
+    ["appearance", "network", "exchanges", "data", "about"],
   );
   assert.equal(resolveSettingsTab("missing"), SETTINGS_CATEGORIES[0]);
 });
 
-test("settings action descriptors distinguish local, backend, and mock behavior", () => {
+test("settings action descriptors distinguish local and backend behavior", () => {
   assert.equal(SETTINGS_ACTION_TYPES.chartAppearance.type, "local_only");
   assert.equal(SETTINGS_ACTION_TYPES.proxySettings.type, "backend_endpoint");
-  assert.equal(SETTINGS_ACTION_TYPES.databaseTools.type, "mock");
 });
 
 test("settings panel view model merges only the matching view and action groups", () => {
@@ -35,7 +34,6 @@ test("settings panel view model merges only the matching view and action groups"
       cacheLimits: partialMock<SettingsRuntimeView["cacheLimits"]>({ showAdvanced: true }),
       cacheDiagnostics: partialMock<SettingsRuntimeView["cacheDiagnostics"]>({}),
       maintenance: partialMock<SettingsRuntimeView["maintenance"]>({ gapScanLoading: false }),
-      database: partialMock<SettingsRuntimeView["database"]>({}),
     }),
     actions: partialMock<SettingsRuntimeActions>({
       proxy: partialMock<SettingsRuntimeActions["proxy"]>({ onProxySave }),

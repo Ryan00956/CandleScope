@@ -818,8 +818,14 @@ def list_series_summaries(
     *,
     exchange: str | None = None,
     market_type: str | None = None,
+    read_only: bool = False,
 ) -> list[dict]:
-    """List stored series with bounds/count metadata."""
+    """List stored series with bounds/count metadata.
+
+    ``read_only`` is intended for diagnostics surfaces.  It opens the SQLite
+    file through a read-only URI, so a first-run inventory request cannot
+    create a database or change journal mode as a side effect.
+    """
     sql = """
         SELECT
             exchange,
@@ -850,8 +856,18 @@ def list_series_summaries(
         ORDER BY exchange ASC, market_type ASC, symbol ASC, interval ASC
     """
 
-    with _connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
+    if read_only:
+        db_path = Path(KLINES_DB_PATH)
+        if not db_path.exists():
+            return []
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=2.0, check_same_thread=False) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            rows = conn.execute(sql, params).fetchall()
+    else:
+        with _connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
 
     return [dict(r) for r in rows]
 

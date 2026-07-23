@@ -114,6 +114,25 @@ class ExchangeRegistry:
     def has(self, exchange: str) -> bool:
         return exchange.strip().lower() in self._plugins
 
+    def unregister(
+        self,
+        exchange: str,
+        *,
+        expected_plugin: ExchangePlugin | None = None,
+    ) -> bool:
+        """Remove only the expected dynamic plugin without disturbing replacements."""
+
+        key = exchange.strip().lower()
+        current = self._plugins.get(key)
+        if current is None:
+            return False
+        if expected_plugin is not None and current is not expected_plugin:
+            return False
+        self._plugins.pop(key, None)
+        self._capabilities.pop(key, None)
+        self._load_statuses.pop(key, None)
+        return True
+
     def get(self, exchange: str) -> ExchangeAdapter:
         return self.get_plugin(exchange).adapter()
 

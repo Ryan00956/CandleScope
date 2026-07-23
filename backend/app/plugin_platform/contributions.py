@@ -155,6 +155,17 @@ class ContributionRegistry:
         }
         return True
 
+    def forget_owner(self, *, plugin_id: str, entrypoint_id: str) -> bool:
+        """Forget a fully stopped owner so a replacement supervisor can start at generation 1."""
+
+        owner = (plugin_id, entrypoint_id)
+        self._items = {
+            full_id: item
+            for full_id, item in self._items.items()
+            if item.owner_key != owner
+        }
+        return self._owner_generations.pop(owner, None) is not None
+
     def resolve(self, full_id: str) -> RegisteredContribution:
         item = self._items.get(full_id)
         if item is None:

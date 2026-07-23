@@ -28,6 +28,8 @@ CORE_CONTRIBUTION_KINDS = frozenset(
         "chart-layer/1",
         "view/1",
         "http-endpoint/1",
+        "symbol-provider/1",
+        "market-data-provider/1",
     }
 )
 
@@ -72,6 +74,14 @@ _DOMAIN = re.compile(
 _MEDIA_TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,63}$")
 _FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$")
 _HTTP_METHODS = frozenset({"GET", "POST"})
+_EXCHANGE_ID = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+_MARKET_TYPE_ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_INTERVAL_ID = re.compile(r"^[1-9][0-9]{0,5}[smhdwM]$")
+_PROVIDER_DATA_PLANE = "candlescope.stream/1"
+_PROVIDER_CHANNEL_KINDS = frozenset({"kline", "full_depth"})
+_PROVIDER_QUALITY_LEVELS = frozenset(
+    {"authoritative", "verified", "best-effort", "synthetic"}
+)
 
 
 def _fail(message: str, *, plugin_id: str, contribution_id: str) -> None:
@@ -564,9 +574,460 @@ def _validate_file_inputs(
     return result
 
 
+def _provider_string(
+    value: Any,
+    *,
+    label: str,
+    plugin_id: str,
+    contribution_id: str,
+    maximum: int = 128,
+    pattern: re.Pattern[str] | None = None,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > maximum
+        or (pattern is not None and pattern.fullmatch(value) is None)
+    ):
+        _fail(
+            f"{label} must be a bounded canonical string",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return value
+
+
+def _provider_string_list(
+    value: Any,
+    *,
+    label: str,
+    plugin_id: str,
+    contribution_id: str,
+    minimum: int,
+    maximum: int,
+    pattern: re.Pattern[str] | None = None,
+) -> list[str]:
+    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
+        _fail(
+            f"{label} must contain {minimum} to {maximum} unique strings",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    result = [
+        _provider_string(
+            item,
+            label=label,
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+            maximum=64,
+            pattern=pattern,
+        )
+        for item in value
+    ]
+    if len(set(result)) != len(result):
+        _fail(
+            f"{label} must contain {minimum} to {maximum} unique strings",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return result
+
+
+def _validate_symbol_provider_configuration(
+    config: dict[str, Any], *, plugin_id: str, contribution_id: str
+) -> dict[str, Any]:
+    _exact_keys(
+        config,
+        allowed={
+            "exchange",
+            "displayName",
+            "marketTypes",
+            "maxPageSize",
+            "cacheTtlSeconds",
+        },
+        required={
+            "exchange",
+            "displayName",
+            "marketTypes",
+            "maxPageSize",
+            "cacheTtlSeconds",
+        },
+        label="symbol provider configuration",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    exchange = _provider_string(
+        config["exchange"],
+        label="provider exchange",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        maximum=64,
+        pattern=_EXCHANGE_ID,
+    )
+    display_name = _provider_string(
+        config["displayName"],
+        label="provider displayName",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        maximum=128,
+    )
+    raw_markets = config["marketTypes"]
+    if not isinstance(raw_markets, list) or not 1 <= len(raw_markets) <= 16:
+        _fail(
+            "provider marketTypes must contain 1 to 16 entries",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    markets: list[dict[str, str]] = []
+    for raw in raw_markets:
+        if not isinstance(raw, dict):
+            _fail(
+                "provider market type must be an object",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        _exact_keys(
+            raw,
+            allowed={"id", "productType", "label", "calendarId", "timezone"},
+            required={"id", "productType", "label", "calendarId", "timezone"},
+            label="provider market type",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+        markets.append(
+            {
+                key: _provider_string(
+                    raw[key],
+                    label=f"provider market type {key}",
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                    maximum=64,
+                    pattern=_MARKET_TYPE_ID if key == "id" else None,
+                )
+                for key in ("id", "productType", "label", "calendarId", "timezone")
+            }
+        )
+    if len({item["id"] for item in markets}) != len(markets):
+        _fail(
+            "provider marketTypes contain duplicate ids",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return {
+        "exchange": exchange,
+        "displayName": display_name,
+        "marketTypes": markets,
+        "maxPageSize": _bounded_int(
+            config["maxPageSize"],
+            minimum=1,
+            maximum=500,
+            label="provider maxPageSize",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        ),
+        "cacheTtlSeconds": _bounded_int(
+            config["cacheTtlSeconds"],
+            minimum=1,
+            maximum=86_400,
+            label="provider cacheTtlSeconds",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        ),
+    }
+
+
+def _validate_market_provider_channel(
+    value: Any, *, plugin_id: str, contribution_id: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        _fail(
+            "market-data provider channel must be an object",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    _exact_keys(
+        value,
+        allowed={
+            "kind",
+            "marketTypes",
+            "history",
+            "realtime",
+            "intervals",
+            "delivery",
+            "finality",
+            "corrections",
+            "snapshot",
+            "delta",
+            "sequence",
+            "resync",
+            "maxDepthLevels",
+            "maxPageSize",
+            "maxBatch",
+            "pollIntervalMs",
+            "ratePerMinute",
+            "maxConcurrent",
+        },
+        required={
+            "kind",
+            "marketTypes",
+            "history",
+            "realtime",
+            "intervals",
+            "delivery",
+            "finality",
+            "corrections",
+            "maxPageSize",
+            "maxBatch",
+            "pollIntervalMs",
+            "ratePerMinute",
+            "maxConcurrent",
+        },
+        label="market-data provider channel",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    kind = _provider_string(
+        value["kind"],
+        label="market-data provider channel kind",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        maximum=32,
+    )
+    if kind not in _PROVIDER_CHANNEL_KINDS:
+        _fail(
+            "market-data provider channel kind is unsupported",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    for key in ("history", "realtime", "corrections"):
+        if not isinstance(value[key], bool):
+            _fail(
+                f"market-data provider channel {key} must be boolean",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+    if not value["history"] and not value["realtime"]:
+        _fail(
+            "market-data provider channel must support history or realtime",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    market_types = _provider_string_list(
+        value["marketTypes"],
+        label="market-data provider marketTypes",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        minimum=1,
+        maximum=16,
+        pattern=_MARKET_TYPE_ID,
+    )
+    intervals = _provider_string_list(
+        value["intervals"],
+        label="market-data provider intervals",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        minimum=1 if kind == "kline" else 0,
+        maximum=64 if kind == "kline" else 0,
+        pattern=_INTERVAL_ID,
+    )
+    if kind == "kline":
+        if value["delivery"] != "append" or value["finality"] not in {
+            "explicit",
+            "inferred",
+        }:
+            _fail(
+                "kline providers require append delivery and declared finality",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        if any(
+            key in value
+            for key in ("snapshot", "delta", "sequence", "resync", "maxDepthLevels")
+        ):
+            _fail(
+                "kline providers contain full-depth-only fields",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+    else:
+        if value["history"] is not False or value["corrections"] is not False:
+            _fail(
+                "Phase 10 full-depth providers are realtime-only and not correctable",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        if not all(isinstance(value.get(key), bool) for key in ("snapshot", "delta")):
+            _fail(
+                "full-depth snapshot and delta flags must be boolean",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        if (
+            value["delivery"] != "ordered_delta"
+            or value["finality"] != "explicit"
+            or value["snapshot"] is not True
+            or value["delta"] is not True
+            or value.get("sequence") != "range"
+            or value.get("resync") != "snapshot_replay"
+        ):
+            _fail(
+                "full-depth providers require snapshot, ordered linked deltas, and snapshot replay",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+    result = {
+        "kind": kind,
+        "marketTypes": market_types,
+        "history": value["history"],
+        "realtime": value["realtime"],
+        "intervals": intervals,
+        "delivery": value["delivery"],
+        "finality": value["finality"],
+        "corrections": value["corrections"],
+    }
+    for key, minimum, maximum in (
+        ("maxPageSize", 1, 5_000),
+        ("maxBatch", 1, 256),
+        ("pollIntervalMs", 10, 60_000),
+        ("ratePerMinute", 1, 60_000),
+        ("maxConcurrent", 1, 32),
+    ):
+        result[key] = _bounded_int(
+            value[key],
+            minimum=minimum,
+            maximum=maximum,
+            label=f"market-data provider {key}",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    if kind == "full_depth":
+        result.update(
+            {
+                "snapshot": value["snapshot"],
+                "delta": value["delta"],
+                "sequence": value["sequence"],
+                "resync": value["resync"],
+                "maxDepthLevels": _bounded_int(
+                    value.get("maxDepthLevels"),
+                    minimum=1,
+                    maximum=5_000,
+                    label="market-data provider maxDepthLevels",
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                ),
+            }
+        )
+    return result
+
+
+def _validate_market_provider_configuration(
+    config: dict[str, Any], *, plugin_id: str, contribution_id: str
+) -> dict[str, Any]:
+    _exact_keys(
+        config,
+        allowed={"exchange", "dataPlane", "channels", "sourceQuality"},
+        required={"exchange", "dataPlane", "channels", "sourceQuality"},
+        label="market-data provider configuration",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    exchange = _provider_string(
+        config["exchange"],
+        label="provider exchange",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+        maximum=64,
+        pattern=_EXCHANGE_ID,
+    )
+    if config["dataPlane"] != _PROVIDER_DATA_PLANE:
+        _fail(
+            "market-data provider dataPlane is unsupported",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    raw_channels = config["channels"]
+    if not isinstance(raw_channels, list) or not 1 <= len(raw_channels) <= 16:
+        _fail(
+            "market-data provider channels must contain 1 to 16 entries",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    channels = [
+        _validate_market_provider_channel(
+            raw, plugin_id=plugin_id, contribution_id=contribution_id
+        )
+        for raw in raw_channels
+    ]
+    channel_keys = [
+        (item["kind"], market_type)
+        for item in channels
+        for market_type in item["marketTypes"]
+    ]
+    if len(set(channel_keys)) != len(channel_keys):
+        _fail(
+            "market-data provider channels overlap by kind and market type",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    quality = config["sourceQuality"]
+    if not isinstance(quality, dict):
+        _fail(
+            "market-data provider sourceQuality must be an object",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    _exact_keys(
+        quality,
+        allowed={"quality", "finality", "timestamp"},
+        required={"quality", "finality", "timestamp"},
+        label="market-data provider sourceQuality",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    normalized_quality = {
+        key: _provider_string(
+            quality[key],
+            label=f"market-data provider sourceQuality {key}",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+            maximum=32,
+        )
+        for key in ("quality", "finality", "timestamp")
+    }
+    if (
+        normalized_quality["quality"] not in _PROVIDER_QUALITY_LEVELS
+        or normalized_quality["finality"] not in {"explicit", "inferred"}
+        or normalized_quality["timestamp"] not in {"exchange", "provider", "host"}
+    ):
+        _fail(
+            "market-data provider sourceQuality is unsupported",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return {
+        "exchange": exchange,
+        "dataPlane": _PROVIDER_DATA_PLANE,
+        "channels": channels,
+        "sourceQuality": normalized_quality,
+    }
+
+
 def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str, Any]:
     config = dict(item.configuration)
-    if item.kind == "command/1":
+    if item.kind == "symbol-provider/1":
+        config = _validate_symbol_provider_configuration(
+            config,
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+    elif item.kind == "market-data-provider/1":
+        config = _validate_market_provider_configuration(
+            config,
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+    elif item.kind == "command/1":
         _exact_keys(
             config,
             allowed={"requiresUserAction", "inputSchema", "placements", "fileInputs"},
@@ -1448,6 +1909,54 @@ def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]
                 "view primaryCommand must reference a command in the same plugin",
                 plugin_id=manifest.plugin.id,
                 contribution_id=item.id,
+            )
+    symbol_providers = {
+        item.configuration["exchange"]: item
+        for item in result
+        if item.kind == "symbol-provider/1"
+    }
+    market_providers = {
+        item.configuration["exchange"]: item
+        for item in result
+        if item.kind == "market-data-provider/1"
+    }
+    provider_entries = [
+        item
+        for item in result
+        if item.kind in {"symbol-provider/1", "market-data-provider/1"}
+    ]
+    if (
+        len(symbol_providers)
+        != sum(item.kind == "symbol-provider/1" for item in provider_entries)
+        or len(market_providers)
+        != sum(item.kind == "market-data-provider/1" for item in provider_entries)
+        or set(symbol_providers) != set(market_providers)
+    ):
+        contribution = provider_entries[0] if provider_entries else None
+        if contribution is not None:
+            _fail(
+                "each provider exchange requires exactly one symbol and one market-data contribution",
+                plugin_id=manifest.plugin.id,
+                contribution_id=contribution.id,
+            )
+    for exchange, market_provider in market_providers.items():
+        symbol_provider = symbol_providers[exchange]
+        declared_markets = {
+            item["id"] for item in symbol_provider.configuration["marketTypes"]
+        }
+        channel_markets = {
+            market_type
+            for channel in market_provider.configuration["channels"]
+            for market_type in channel["marketTypes"]
+        }
+        if (
+            not channel_markets <= declared_markets
+            or market_provider.entrypoint_id != symbol_provider.entrypoint_id
+        ):
+            _fail(
+                "provider channels must use declared markets and the paired entrypoint",
+                plugin_id=manifest.plugin.id,
+                contribution_id=market_provider.id,
             )
     sandbox_views = {
         item.id: item

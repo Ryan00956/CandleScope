@@ -11,6 +11,7 @@ import type {
   PluginManagementDetail,
   PluginJsonSchema,
   PluginPlatformRuntime,
+  PluginProviderContribution,
   PluginSandboxViewContribution,
   PluginSettingsContribution,
   PluginViewContribution,
@@ -509,6 +510,53 @@ function PermissionRows({ runtime, detail, reload }: {
   );
 }
 
+function ProviderRows({ providers }: { providers: PluginProviderContribution[] }) {
+  if (!providers.length) return null;
+  return (
+    <>
+      <h4>Public market-data providers</h4>
+      <p>Host-owned ingestion only · public data · no account, secrets, or trading access.</p>
+      <div className="plugin-provider-list">
+        {providers.map((provider) => {
+          if (provider.kind === "symbol-provider/1") {
+            const config = provider.configuration;
+            return (
+              <article key={provider.id} data-plugin-provider-exchange={config.exchange}>
+                <div><strong>{config.displayName}</strong><span>{config.exchange} · symbols</span></div>
+                <p>
+                  Markets: {config.marketTypes.map((item) => item.id).join(", ")}
+                  {` · page ≤ ${config.maxPageSize} · cache ${config.cacheTtlSeconds}s`}
+                </p>
+              </article>
+            );
+          }
+          const config = provider.configuration;
+          return (
+            <article key={provider.id} data-plugin-provider-exchange={config.exchange}>
+              <div><strong>{config.exchange.toUpperCase()} market data</strong><span>{config.dataPlane}</span></div>
+              <p>
+                Source: {config.sourceQuality.quality} · finality {config.sourceQuality.finality}
+              </p>
+              <ul>
+                {config.channels.map((channel) => (
+                  <li key={channel.kind}>
+                    {channel.kind === "full_depth" ? "Full depth" : "Kline"}
+                    {` · ${[channel.history && "history", channel.realtime && "realtime"].filter(Boolean).join(" + ")}`}
+                    {channel.intervals.length ? ` · ${channel.intervals.join(", ")}` : ""}
+                    {` · ${channel.delivery} · ${channel.finality}`}
+                    {channel.corrections ? " · corrections" : ""}
+                    {` · ${channel.ratePerMinute}/min · concurrency ${channel.maxConcurrent}`}
+                  </li>
+                ))}
+              </ul>
+            </article>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
   const plugins = useMemo(
     () => runtime.view.catalog?.plugins ?? [],
@@ -589,6 +637,11 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
               </div>
               {!runtime.view.managementAvailable && <p>Read-only: trusted desktop management session was not provided.</p>}
               {loading && <p>Loading protected details…</p>}
+              <ProviderRows providers={selected.contributions.filter(
+                (item): item is PluginProviderContribution => (
+                  item.kind === "symbol-provider/1" || item.kind === "market-data-provider/1"
+                ),
+              )} />
               {detail && (
                 <>
                   <h4>Health</h4>

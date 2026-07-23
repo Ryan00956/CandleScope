@@ -116,6 +116,66 @@ export type PluginUiContribution =
   | PluginSettingsContribution
   | PluginViewContribution;
 
+export interface PluginSymbolProviderContribution extends ContributionBase {
+  kind: "symbol-provider/1";
+  configuration: {
+    exchange: string;
+    displayName: string;
+    marketTypes: Array<{
+      id: string;
+      productType: string;
+      label: string;
+      calendarId: string;
+      timezone: string;
+    }>;
+    maxPageSize: number;
+    cacheTtlSeconds: number;
+  };
+}
+
+export interface PluginMarketProviderChannel {
+  kind: "kline" | "full_depth";
+  marketTypes: string[];
+  history: boolean;
+  realtime: boolean;
+  intervals: string[];
+  delivery: "append" | "ordered_delta";
+  finality: "explicit" | "inferred";
+  corrections: boolean;
+  maxPageSize: number;
+  maxBatch: number;
+  pollIntervalMs: number;
+  ratePerMinute: number;
+  maxConcurrent: number;
+  snapshot?: boolean;
+  delta?: boolean;
+  sequence?: "range";
+  resync?: "snapshot_replay";
+  maxDepthLevels?: number;
+}
+
+export interface PluginMarketDataProviderContribution extends ContributionBase {
+  kind: "market-data-provider/1";
+  configuration: {
+    exchange: string;
+    dataPlane: "candlescope.stream/1";
+    channels: PluginMarketProviderChannel[];
+    sourceQuality: {
+      quality: "authoritative" | "verified" | "best-effort" | "synthetic";
+      finality: "explicit" | "inferred";
+      timestamp: "exchange" | "provider" | "host";
+    };
+  };
+}
+
+export type PluginProviderContribution =
+  | PluginSymbolProviderContribution
+  | PluginMarketDataProviderContribution;
+
+export type PluginCatalogContribution =
+  | PluginUiContribution
+  | PluginProviderContribution;
+
 export interface PluginCatalogPlugin {
   id: string;
   name: string;
@@ -137,7 +197,7 @@ export interface PluginCatalogPlugin {
       hasGrantedScope: boolean;
     }>;
   };
-  contributions: PluginUiContribution[];
+  contributions: PluginCatalogContribution[];
   runtime: {
     entrypoints: Array<{ entrypointId: string; state: string; generation: number }>;
   };

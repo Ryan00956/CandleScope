@@ -299,6 +299,15 @@ async def startup_event() -> None:
             from app.plugin_market_v2 import DataManagerConsumerPort
 
             plugin_platform_v2.bind_market_data(DataManagerConsumerPort(data_manager))
+        from app.api.v1.symbols import (
+            evict_exchange_metadata,
+            refresh_exchange_metadata,
+        )
+
+        plugin_platform_v2.bind_symbol_refresher(
+            refresh_exchange_metadata,
+            evictor=evict_exchange_metadata,
+        )
         await plugin_platform_v2.start()
     except BaseException:
         await plugin_platform_v2.stop()

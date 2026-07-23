@@ -383,10 +383,10 @@ Phase 1 将 contribution 冻结为统一数组，而不是按 `commands/views/se
 | `chart-layer/1` | v2 首批 | Render IR 图层、marker、object | 中 |
 | `event-subscriber/1` | v2 首批 | 订阅版本化公共事件 | 中 |
 | `job/1` | v2 首批 | 用户触发或宿主调度的后台任务 | 中 |
-| `http-endpoint/1` | 后续 | 插件命名空间下的 HTTP/stream handler | 中高 |
+| `http-endpoint/1` | Phase 9 | 插件命名空间下的 HTTP/stream handler | 中高 |
 | `script-runtime/1` | 兼容 | 承载现有脚本 runtime v1 | 中 |
-| `symbol-provider/1` | 后续 | 符号发现与 capability descriptor | 高 |
-| `market-data-provider/1` | 后续 | 历史/实时规范化数据源 | 高 |
+| `symbol-provider/1` | Phase 10 | 符号发现与 capability descriptor | 高 |
+| `market-data-provider/1` | Phase 10 | 历史/实时规范化数据源 | 高 |
 | `account-provider/1` | 最后 | 账户、余额、持仓只读投影 | 极高 |
 | `order-executor/1` | 最后 | 经宿主风控的下单/撤单执行 | 极高 |
 
@@ -736,8 +736,8 @@ frontend/src/features/plugins/
 | Phase 6：市场数据 consumer/图层 | 已完成（`8f18080`） | read/subscribe、Render IR layer | 扫描器、研究、图表工具 |
 | Phase 7：声明式前端 | 已完成（`151b93a`） | catalog、manager、native slots | 无任意 JS 的产品 UI |
 | Phase 8：Sandbox UI | 已完成（`b0efcc4`） | iframe assets、CSP、UI Bridge | 复杂自定义界面 |
-| Phase 9：网络/文件/HTTP gateway | 已完成（本阶段提交） | 受控外部交互与命名空间 API | 集成型插件 |
-| Phase 10：数据提供器 | 未开始 | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
+| Phase 9：网络/文件/HTTP gateway | 已完成（`9b4a638`） | 受控外部交互与命名空间 API | 集成型插件 |
+| Phase 10：数据提供器 | 已完成（本阶段提交） | symbols/history/realtime provider、stream v1 | 社区交易所/行情源 |
 | Phase 11：账户与交易 | 未开始 | secret broker、paper/live executor、risk gate | 高风险交易插件 |
 | Phase 12：签名与 Marketplace | 未开始 | publisher、更新、撤销、SBOM | 可分发生态 |
 | Phase 13：v1 收敛与 GA | 未开始 | script runtime adapter、兼容周期、正式门禁 | 单一产品插件目录 |
@@ -1035,6 +1035,10 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 
 ## 26. Phase 10：公开数据提供器与交易所插件
 
+> 2026-07-23 已完成实现与技术验收。严格 provider DTO、成对贡献、Host-owned ingestion、
+> history/realtime/full-depth、Mock `.cspkg`、真实冷库浏览器证据、Binance/OKX parity 与保留边界见
+> `PLUGIN_PLATFORM_V2_PHASE10_zh.md`。
+
 ### 范围
 
 把当前进程内 exchange plugin 思路投影为公开 sidecar contract，而不是让社区包导入
@@ -1047,6 +1051,7 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 - history pagination、rate-limit、reconnect、finality、source quality；
 - `candlescope.stream/1` 实际 data plane；
 - Host adapter 把 provider 输出送入现有 ingestion/normalization/Data Engine 真相路径；
+- manifest TTL 的 symbol singleflight cache、exact-owner eviction 与 disable → enable generation 回归；
 - Mock Exchange reference plugin；
 - 第一阶段不接真实账户和下单。
 
@@ -1057,6 +1062,7 @@ Phase 5 退出门已经达到，因此该阶段实现可称为“最小通用插
 - backfill pagination 和 rate limit 无请求放大；
 - order book snapshot/delta sequence gap 能可靠 resync；
 - provider crash/restart 不污染其他 exchange；
+- disable 清理 registry/cache，重新启用后新 supervisor generation 可重新注册并接受新订阅；
 - 真实冷数据库和真实浏览器只读 smoke 通过；
 - 与内置 Binance/OKX 相同 public contract 的 parity matrix 明确，而不是只看单元测试。
 

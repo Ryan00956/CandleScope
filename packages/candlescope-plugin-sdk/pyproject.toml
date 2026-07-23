@@ -48,6 +48,7 @@ candlescope-scheduled-notification = "candlescope_plugin_sdk.platform_v2.example
 candlescope-market-scanner = "candlescope_plugin_sdk.platform_v2.examples.market_scanner:main"
 candlescope-sandbox-view = "candlescope_plugin_sdk.platform_v2.examples.sandbox_view:main"
 candlescope-integration-gateway = "candlescope_plugin_sdk.platform_v2.examples.integration_gateway:main"
+candlescope-mock-exchange-provider = "candlescope_plugin_sdk.platform_v2.examples.mock_exchange_provider:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/candlescope_plugin_sdk"]

@@ -114,6 +114,31 @@ async def test_reactivation_is_monotonic_and_stale_removal_cannot_erase_new_owne
 
 
 @pytest.mark.anyio
+async def test_removed_owner_accepts_a_fresh_replacement_supervisor() -> None:
+    first = _hello_supervisor(auto_start=False)
+    manager = PluginManager((first,))
+    try:
+        await manager.activate("candlescope.hello-command", "main")
+        assert first.generation == 1
+        assert await manager.remove_plugin("candlescope.hello-command") == 1
+
+        replacement = _hello_supervisor(auto_start=False)
+        await manager.add_supervisors((replacement,))
+        await manager.activate("candlescope.hello-command", "main")
+
+        assert replacement.generation == 1
+        result = await manager.invoke(
+            FULL_HELLO_ID,
+            {"name": "replacement"},
+            user_action=True,
+            trace_id="phase10-replacement-generation",
+        )
+        assert result["message"] == "Hello, replacement!"
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.anyio
 async def test_cancelled_deferred_invoke_is_correlated_and_session_remains_usable() -> (
     None
 ):

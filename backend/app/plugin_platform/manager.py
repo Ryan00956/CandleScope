@@ -156,6 +156,9 @@ class PluginManager:
             for owner in owners:
                 supervisor = self._supervisors.pop(owner)
                 await supervisor.stop()
+                self.contributions.forget_owner(
+                    plugin_id=owner[0], entrypoint_id=owner[1]
+                )
                 self._activation_capabilities.pop(owner, None)
                 self._activation_failures.pop(owner, None)
             return len(owners)

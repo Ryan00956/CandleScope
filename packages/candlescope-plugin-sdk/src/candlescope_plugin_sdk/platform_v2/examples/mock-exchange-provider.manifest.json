@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 2,
+  "plugin": {
+    "id": "candlescope.mock-exchange-provider",
+    "name": "Mock Exchange Provider",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "pythonModule": "candlescope_plugin_sdk.platform_v2.examples.mock_exchange_provider",
+        "resourceProfile": "service",
+        "activationEvents": [
+          "onMarketSubscription"
+        ]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "symbols",
+      "kind": "symbol-provider/1",
+      "title": "Mock Symbols",
+      "entrypoint": "main",
+      "configuration": {
+        "exchange": "mock",
+        "displayName": "Mock Exchange",
+        "marketTypes": [
+          {
+            "id": "spot",
+            "productType": "spot",
+            "label": "Mock Spot",
+            "calendarId": "crypto.24x7.utc",
+            "timezone": "UTC"
+          }
+        ],
+        "maxPageSize": 100,
+        "cacheTtlSeconds": 30
+      }
+    },
+    {
+      "id": "market-data",
+      "kind": "market-data-provider/1",
+      "title": "Mock Market Data",
+      "entrypoint": "main",
+      "configuration": {
+        "exchange": "mock",
+        "dataPlane": "candlescope.stream/1",
+        "channels": [
+          {
+            "kind": "kline",
+            "marketTypes": [
+              "spot"
+            ],
+            "history": true,
+            "realtime": true,
+            "intervals": [
+              "1m",
+              "5m"
+            ],
+            "delivery": "append",
+            "finality": "explicit",
+            "corrections": true,
+            "maxPageSize": 500,
+            "maxBatch": 32,
+            "pollIntervalMs": 50,
+            "ratePerMinute": 600,
+            "maxConcurrent": 2
+          },
+          {
+            "kind": "full_depth",
+            "marketTypes": [
+              "spot"
+            ],
+            "history": false,
+            "realtime": true,
+            "intervals": [],
+            "delivery": "ordered_delta",
+            "finality": "explicit",
+            "corrections": false,
+            "snapshot": true,
+            "delta": true,
+            "sequence": "range",
+            "resync": "snapshot_replay",
+            "maxDepthLevels": 100,
+            "maxPageSize": 1,
+            "maxBatch": 32,
+            "pollIntervalMs": 50,
+            "ratePerMinute": 600,
+            "maxConcurrent": 2
+          }
+        ],
+        "sourceQuality": {
+          "quality": "synthetic",
+          "finality": "explicit",
+          "timestamp": "provider"
+        }
+      }
+    }
+  ],
+  "permissions": {
+    "required": [],
+    "optional": []
+  },
+  "probes": []
+}

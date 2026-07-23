@@ -16,7 +16,7 @@ from app.data_engine.market_data import (
 
 from .config import IngestionConfig
 from .metrics import LayerMetrics
-from .models import DataSource, RawMessage, SessionHealth, StreamDescriptor, StreamType
+from .models import DataSource, FeedMode, RawMessage, SessionHealth, StreamDescriptor, StreamType
 from .session_types import HealthCallback, MessageCallback, SessionLike
 from .transport import TransportError, TransportLayer
 
@@ -91,6 +91,10 @@ class SharedWsSessionAdapter:
     @property
     def health(self) -> SessionHealth:
         return self._health
+
+    @property
+    def feed_mode(self) -> FeedMode:
+        return FeedMode.WEBSOCKET
 
     @property
     def manages_recovery_while_http(self) -> bool:

@@ -247,3 +247,20 @@ def test_symbol_refresh_retains_disappeared_instrument_for_sync_lookup(monkeypat
     finally:
         symbols_api._symbol_cache.clear()
         symbols_api._cache_loaded_at = 0.0
+
+
+def test_symbol_cache_eviction_removes_only_the_unregistered_exchange(monkeypatch) -> None:
+    symbols_api._symbol_cache.clear()
+    symbols_api._symbol_cache[("mock", "spot")] = [{"symbol": "BTCUSDT"}]
+    symbols_api._symbol_cache[("mock", "futures")] = [{"symbol": "BTCUSDT"}]
+    symbols_api._symbol_cache[("binance", "spot")] = [{"symbol": "ETHUSDT"}]
+    symbols_api._cache_loaded_at = 10.0
+    monkeypatch.setattr(symbols_api.time, "time", lambda: 20.0)
+    try:
+        assert symbols_api.evict_exchange_metadata(" MOCK ") == 2
+        assert set(symbols_api._symbol_cache) == {("binance", "spot")}
+        assert symbols_api._cache_loaded_at == 20.0
+        assert symbols_api.evict_exchange_metadata("mock") == 0
+    finally:
+        symbols_api._symbol_cache.clear()
+        symbols_api._cache_loaded_at = 0.0

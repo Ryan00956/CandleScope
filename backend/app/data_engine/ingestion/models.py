@@ -41,6 +41,7 @@ class StreamType(str, enum.Enum):
 class FeedMode(str, enum.Enum):
     """Current data feed mechanism."""
     WEBSOCKET = "websocket"
+    PLUGIN_STREAM = "plugin_stream"
     HTTP_POLL = "http_poll"
     IDLE = "idle"           # not yet started or stopped
 
@@ -50,6 +51,7 @@ class DataSource(str, enum.Enum):
     WEBSOCKET = "websocket"
     HTTP = "http"
     HTTP_BACKFILL = "http_backfill"   # gap-fill fetches
+    PLUGIN = "plugin"
     MOCK = "mock"
 
 
@@ -219,6 +221,11 @@ class MarketEvent:
         - Others: None (no dedup)
         """
         if self.event_type == StreamType.KLINE:
+            if (
+                self.source == DataSource.PLUGIN
+                and self.data.get("is_correction", False)
+            ):
+                return None
             is_closed = self.data.get("is_closed", True)
             if not is_closed:
                 return None  # never dedup live kline updates

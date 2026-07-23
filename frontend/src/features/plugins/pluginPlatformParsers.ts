@@ -2,6 +2,7 @@ import type {
   JsonScalar,
   JsonValue,
   PluginCatalog,
+  PluginCatalogContribution,
   PluginCatalogPlugin,
   PluginChartLayer,
   PluginCommandFileInput,
@@ -10,9 +11,9 @@ import type {
   PluginFieldFormat,
   PluginJsonSchema,
   PluginManagementDetail,
+  PluginMarketProviderChannel,
   PluginPlacement,
   PluginSettingsContribution,
-  PluginUiContribution,
   PluginUiSnapshot,
   PluginViewContribution,
   PluginViewProjection,
@@ -27,6 +28,13 @@ const SANDBOX_ENTRY = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\.html$/;
 const COLOR = /^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$/;
 const MEDIA_TYPE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/;
 const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$/;
+const EXCHANGE_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const MARKET_TYPE_ID = /^[a-z][a-z0-9-]{0,31}$/;
+const INTERVAL_ID = /^[1-9][0-9]{0,5}[smhdwM]$/;
+const PROVIDER_QUALITY_LEVELS = new Set([
+  "authoritative", "verified", "best-effort", "synthetic",
+] as const);
+const PROVIDER_TIMESTAMP_OWNERS = new Set(["exchange", "provider", "host"] as const);
 const PLACEMENTS = new Set<PluginPlacement>(["commandPalette", "topToolbar", "chartContextMenu"]);
 const VIEW_SLOTS = new Set<PluginViewSlot>(["sidePanel", "bottomPanel", "statusArea"]);
 const VIEW_RENDERERS = new Set<PluginDeclarativeViewRenderer>(["table", "list", "detail", "status"]);
@@ -159,13 +167,137 @@ function contributionBase(value: RecordValue, path: string, pluginId: string) {
   };
 }
 
-function contribution(value: unknown, path: string, pluginId: string): PluginUiContribution | null {
+function providerStringList(
+  value: unknown,
+  path: string,
+  minimum: number,
+  maximum: number,
+  pattern = MARKET_TYPE_ID,
+): string[] {
+  const values = array(value, path, maximum).map((item, index) => {
+    const parsed = string(item, `${path}[${index}]`, 64);
+    if (!pattern.test(parsed)) fail(`${path}[${index}]`);
+    return parsed;
+  });
+  if (values.length < minimum || new Set(values).size !== values.length) fail(path);
+  return values;
+}
+
+function providerChannel(value: unknown, path: string): PluginMarketProviderChannel {
+  const data = record(value, path);
+  const kind = oneOf(data.kind, new Set(["kline", "full_depth"] as const), `${path}.kind`);
+  const common = [
+    "kind", "marketTypes", "history", "realtime", "intervals", "delivery",
+    "finality", "corrections", "maxPageSize", "maxBatch", "pollIntervalMs",
+    "ratePerMinute", "maxConcurrent",
+  ];
+  const depth = ["snapshot", "delta", "sequence", "resync", "maxDepthLevels"];
+  exact(data, kind === "full_depth" ? [...common, ...depth] : common, [], path);
+  const marketTypes = providerStringList(data.marketTypes, `${path}.marketTypes`, 1, 16);
+  const intervals = providerStringList(
+    data.intervals,
+    `${path}.intervals`,
+    kind === "kline" ? 1 : 0,
+    kind === "kline" ? 64 : 0,
+    INTERVAL_ID,
+  );
+  const history = boolean(data.history, `${path}.history`);
+  const realtime = boolean(data.realtime, `${path}.realtime`);
+  const corrections = boolean(data.corrections, `${path}.corrections`);
+  if (!history && !realtime) fail(path);
+  const delivery = oneOf(data.delivery, new Set(["append", "ordered_delta"] as const), `${path}.delivery`);
+  const finality = oneOf(data.finality, new Set(["explicit", "inferred"] as const), `${path}.finality`);
+  if (kind === "kline" && delivery !== "append") fail(`${path}.delivery`);
+  if (kind === "full_depth" && (
+    history || corrections || !realtime || delivery !== "ordered_delta" || finality !== "explicit"
+    || data.snapshot !== true || data.delta !== true || data.sequence !== "range"
+    || data.resync !== "snapshot_replay"
+  )) fail(path);
+  return {
+    kind,
+    marketTypes,
+    history,
+    realtime,
+    intervals,
+    delivery,
+    finality,
+    corrections,
+    maxPageSize: integer(data.maxPageSize, `${path}.maxPageSize`, 1, 5_000),
+    maxBatch: integer(data.maxBatch, `${path}.maxBatch`, 1, 256),
+    pollIntervalMs: integer(data.pollIntervalMs, `${path}.pollIntervalMs`, 10, 60_000),
+    ratePerMinute: integer(data.ratePerMinute, `${path}.ratePerMinute`, 1, 60_000),
+    maxConcurrent: integer(data.maxConcurrent, `${path}.maxConcurrent`, 1, 32),
+    ...(kind === "full_depth" ? {
+      snapshot: true,
+      delta: true,
+      sequence: "range" as const,
+      resync: "snapshot_replay" as const,
+      maxDepthLevels: integer(data.maxDepthLevels, `${path}.maxDepthLevels`, 1, 5_000),
+    } : {}),
+  };
+}
+
+function contribution(value: unknown, path: string, pluginId: string): PluginCatalogContribution | null {
   const data = record(value, path);
   const kind = string(data.kind, `${path}.kind`, 64);
-  if (!["command/1", "settings/1", "view/1"].includes(kind)) return null;
+  if (!["command/1", "settings/1", "view/1", "symbol-provider/1", "market-data-provider/1"].includes(kind)) return null;
   exact(data, ["id", "localId", "kind", "title", "entrypointId", "configuration", "available"], ["unavailableReason"], path);
   const base = contributionBase(data, path, pluginId);
   const config = record(data.configuration, `${path}.configuration`);
+  if (kind === "symbol-provider/1") {
+    exact(config, ["exchange", "displayName", "marketTypes", "maxPageSize", "cacheTtlSeconds"], [], `${path}.configuration`);
+    const exchange = string(config.exchange, `${path}.configuration.exchange`, 64);
+    if (!EXCHANGE_ID.test(exchange)) fail(`${path}.configuration.exchange`);
+    const marketTypes = array(config.marketTypes, `${path}.configuration.marketTypes`, 16).map((raw, index) => {
+      const market = record(raw, `${path}.configuration.marketTypes[${index}]`);
+      exact(market, ["id", "productType", "label", "calendarId", "timezone"], [], `${path}.configuration.marketTypes[${index}]`);
+      const id = string(market.id, `${path}.configuration.marketTypes[${index}].id`, 64);
+      if (!MARKET_TYPE_ID.test(id)) fail(`${path}.configuration.marketTypes[${index}].id`);
+      return {
+        id,
+        productType: string(market.productType, `${path}.configuration.marketTypes[${index}].productType`, 64),
+        label: string(market.label, `${path}.configuration.marketTypes[${index}].label`, 64),
+        calendarId: string(market.calendarId, `${path}.configuration.marketTypes[${index}].calendarId`, 64),
+        timezone: string(market.timezone, `${path}.configuration.marketTypes[${index}].timezone`, 64),
+      };
+    });
+    if (!marketTypes.length || new Set(marketTypes.map((item) => item.id)).size !== marketTypes.length) fail(`${path}.configuration.marketTypes`);
+    return {
+      ...base,
+      kind: "symbol-provider/1",
+      configuration: {
+        exchange,
+        displayName: string(config.displayName, `${path}.configuration.displayName`, 128),
+        marketTypes,
+        maxPageSize: integer(config.maxPageSize, `${path}.configuration.maxPageSize`, 1, 500),
+        cacheTtlSeconds: integer(config.cacheTtlSeconds, `${path}.configuration.cacheTtlSeconds`, 1, 86_400),
+      },
+    };
+  }
+  if (kind === "market-data-provider/1") {
+    exact(config, ["exchange", "dataPlane", "channels", "sourceQuality"], [], `${path}.configuration`);
+    const exchange = string(config.exchange, `${path}.configuration.exchange`, 64);
+    if (!EXCHANGE_ID.test(exchange) || config.dataPlane !== "candlescope.stream/1") fail(`${path}.configuration`);
+    const channels = array(config.channels, `${path}.configuration.channels`, 16).map((item, index) => providerChannel(item, `${path}.configuration.channels[${index}]`));
+    const channelKeys = channels.flatMap((item) => item.marketTypes.map((marketType) => `${item.kind}:${marketType}`));
+    if (!channels.length || new Set(channelKeys).size !== channelKeys.length) fail(`${path}.configuration.channels`);
+    const quality = record(config.sourceQuality, `${path}.configuration.sourceQuality`);
+    exact(quality, ["quality", "finality", "timestamp"], [], `${path}.configuration.sourceQuality`);
+    return {
+      ...base,
+      kind: "market-data-provider/1",
+      configuration: {
+        exchange,
+        dataPlane: "candlescope.stream/1",
+        channels,
+        sourceQuality: {
+          quality: oneOf(quality.quality, PROVIDER_QUALITY_LEVELS, `${path}.configuration.sourceQuality.quality`),
+          finality: oneOf(quality.finality, new Set(["explicit", "inferred"] as const), `${path}.configuration.sourceQuality.finality`),
+          timestamp: oneOf(quality.timestamp, PROVIDER_TIMESTAMP_OWNERS, `${path}.configuration.sourceQuality.timestamp`),
+        },
+      },
+    };
+  }
   if (kind === "command/1") {
     exact(config, ["placements"], ["requiresUserAction", "inputSchema", "fileInputs"], `${path}.configuration`);
     const placements = array(config.placements, `${path}.configuration.placements`, 3).map((item, index) => oneOf(item, PLACEMENTS, `${path}.configuration.placements[${index}]`));
@@ -328,7 +460,7 @@ function catalogPlugin(value: unknown, path: string, contributionIds: Set<string
   exact(permissions, ["activationReady", "requiredSatisfied", "permissions", "requiredPermissionIds"], [], `${path}.permissions`);
   const runtime = record(data.runtime, `${path}.runtime`);
   exact(runtime, ["entrypoints"], [], `${path}.runtime`);
-  const parsedContributions: PluginUiContribution[] = [];
+  const parsedContributions: PluginCatalogContribution[] = [];
   for (const [index, raw] of array(data.contributions, `${path}.contributions`, 256).entries()) {
     const rawData = record(raw, `${path}.contributions[${index}]`);
     const contributionId = string(rawData.id, `${path}.contributions[${index}].id`, 256);

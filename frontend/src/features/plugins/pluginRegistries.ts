@@ -28,7 +28,11 @@ export function buildPluginRegistries(catalog: PluginCatalog | null): PluginRegi
   const contributions: PluginUiContribution[] = catalog.plugins
     .filter((plugin) => plugin.available && plugin.enabled)
     .flatMap((plugin) => plugin.contributions)
-    .filter((item) => item.available);
+    .filter((item): item is PluginUiContribution => (
+      item.available
+      && item.kind !== "symbol-provider/1"
+      && item.kind !== "market-data-provider/1"
+    ));
   for (const item of contributions) {
     if (item.kind === "command/1") {
       for (const placement of item.configuration.placements) values[placement].push(item);

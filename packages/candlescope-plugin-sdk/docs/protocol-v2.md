@@ -6,12 +6,12 @@ CandleScope backend plugin entrypoints. It does not replace
 CandleScope internals.
 
 This document describes the Phase 1 control contract plus additive contracts
-shipped through Phase 9. The CandleScope product now supplies the Host,
+shipped through Phase 10. The CandleScope product now supplies the Host,
 installer, permission broker, core services, scoped read-only live market
 consumer, marker-only chart-layer registry, declarative/sandbox UI surfaces,
-and controlled integration gateways. Market-data providers and trading brokers
-remain independently gated. A Python process using this SDK is not thereby a
-security sandbox.
+controlled integration gateways, and public market-data providers. Account and
+trading brokers remain independently gated. A Python process using this SDK is
+not thereby a security sandbox.
 
 ## Stable identifiers
 
@@ -19,6 +19,7 @@ security sandbox.
 | --- | --- |
 | `candlescope.plugin/2` | Host-to-plugin lifecycle and contribution invocation |
 | `candlescope.host-api/1` | Plugin-to-Host capability calls through `host.call` |
+| `candlescope.stream/1` | Host-polled provider data plane for bounded public market streams |
 | `jsonl/1` | One bounded UTF-8 JSON-RPC frame per line |
 | manifest `schemaVersion: 2` | Static identity, entrypoints, contributions, permissions, and probes |
 
@@ -374,6 +375,48 @@ configuration and permission scopes. They do not change the frozen Phase 1
 manifest schema or expose Host Python objects, absolute paths, sockets, or
 credentials to SDK code.
 
+## Phase 10 public market-data providers
+
+A provider declares exactly one paired `symbol-provider/1` and
+`market-data-provider/1` for each exchange ID. Both contributions must use the
+same entrypoint. The symbol contribution owns canonical market types, symbol
+pagination, and cache TTL. The market-data contribution declares the
+`candlescope.stream/1` data plane, source quality, and bounded channel budgets.
+Phase 10 channels are limited to Kline and full depth:
+
+- Kline may declare history and/or realtime, explicit or inferred finality,
+  explicit correction support, fixed intervals, page/batch bounds, rate, and
+  concurrency;
+- full depth is realtime-only and requires a snapshot followed by linked
+  ordered deltas with range sequence IDs and `snapshot_replay` resync.
+
+The Host invokes provider contributions through the normal `invoke` method.
+The input operation is one of `symbols.list`, `history.read`, `stream.open`,
+`stream.poll`, or `stream.close`. Responses use the strict schemas
+`candlescope.provider-symbols-page/1`,
+`candlescope.provider-history-page/1`,
+`candlescope.provider-stream-open/1`,
+`candlescope.provider-stream-batch/1`, and
+`candlescope.provider-stream-close/1`. Every history page and stream batch
+carries `sourceQuality`; every Kline carries one of `forming`, `final`, or
+`corrected`. A corrected final bar must be emitted as `bar.amended`, not as a
+new open-time identity.
+
+Provider transport sequences are Host-checked and contiguous. The provider
+stream ID and activation generation bind every poll; a stale generation,
+non-advancing page cursor, duplicate/oversized batch, malformed finality, or
+order-book sequence gap fails closed. A stream failure closes that provider
+session and reconnects with `resync: true`; it does not replace or restart any
+other exchange adapter.
+
+The public contract deliberately does not expose CandleScope cache objects,
+SQLite, GapLedger, EventBus, DataManager, raw sockets, credentials, account
+state, or order execution. Provider rows are normalized by the Host and enter
+the existing ingestion, continuity, aggregation, backfill, and storage path.
+The packaged `candlescope-mock-exchange-provider` executable and
+`platform_v2.examples.mock_exchange_provider` module form the deterministic
+reference implementation.
+
 ## Error behavior
 
 Standard JSON-RPC parse/request/method/params/internal codes are retained.
@@ -398,6 +441,7 @@ Run the SDK examples after installation:
 candlescope-hello-command
 candlescope-market-scanner
 candlescope-integration-gateway
+candlescope-mock-exchange-provider
 ```
 
 Hello Command contributes one permission-free `command/1`, supports activation, invocation,
@@ -405,8 +449,9 @@ health, deferred cancellation, deactivation, and shutdown, and has a fixed
 transcript. Market Scanner is an integration reference for scoped read/storage/layer
 Host calls. Integration Gateway is the credential-free reference for Phase 9
 HTTPS, file, and endpoint contracts. An SDK executable alone still grants no
-capabilities; none of these examples proves product UI, untrusted OS sandboxing,
-secrets, trading, or marketplace trust.
+capabilities. Mock Exchange Provider is the deterministic Phase 10 reference
+for symbol/history/Kline/full-depth contracts. None of these examples proves
+untrusted OS sandboxing, secrets, trading, or marketplace trust.
 
 The reference server is deliberately synchronous and bounded. Phase 2 owns the
 production Host supervisor, async concurrent reader/writer, process generation,

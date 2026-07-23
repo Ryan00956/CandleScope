@@ -183,8 +183,6 @@ class TransportLayer:
         Returns a list of ``RawMessage`` with raw payloads.
         Raises ``TransportError`` if ALL endpoints fail.
         """
-        await self._ensure_http_session()
-
         desc = req.descriptor
         exchange = getattr(desc, "exchange", "binance")
         market_type = getattr(desc, "market_type", "spot")
@@ -194,6 +192,24 @@ class TransportLayer:
         req.quota_semaphore_held = False
 
         plugin = self._registry.get_plugin(exchange)
+        provider_fetch = getattr(plugin, "fetch_history", None)
+        if callable(provider_fetch):
+            try:
+                self._metrics.inc("plugin_requests_sent")
+                messages = await provider_fetch(req)
+                self._metrics.inc("plugin_requests_ok")
+                self._metrics.mark("plugin_last_success_at")
+                return messages
+            except TransportError:
+                raise
+            except Exception as exc:
+                self._metrics.inc("plugin_requests_failed")
+                self._metrics.mark("plugin_last_error_at")
+                raise TransportError(
+                    f"Provider fetch failed for {desc.key}: [{type(exc).__name__}] {exc}"
+                ) from exc
+
+        await self._ensure_http_session()
         protocol = plugin.protocol()
         spec = protocol.rest_request(req, config=self._cfg)
         if spec is None:
@@ -473,6 +489,9 @@ class TransportLayer:
         exchange = getattr(descriptor, "exchange", "binance")
         market_type = getattr(descriptor, "market_type", "spot")
         plugin = self._registry.get_plugin(exchange)
+        supports_provider_stream = getattr(plugin, "supports_provider_stream", None)
+        if callable(supports_provider_stream) and supports_provider_stream(descriptor):
+            return True
         protocol_support = getattr(plugin.protocol(), "supports_ws", None)
         if callable(protocol_support) and not protocol_support(descriptor):
             return False
@@ -484,6 +503,23 @@ class TransportLayer:
             if capability is not None:
                 return capability.supports_transport(TransportMode.WEBSOCKET)
         return capabilities.ws_connection_model != "polling_only"
+
+    def create_provider_session(
+        self,
+        descriptor: StreamDescriptor,
+    ) -> Any | None:
+        """Return a Host-owned sidecar session when this exchange is provider-backed."""
+
+        plugin = self._registry.get_plugin(descriptor.exchange)
+        create_session = getattr(plugin, "create_stream_session", None)
+        supports = getattr(plugin, "supports_provider_stream", None)
+        if (
+            not callable(create_session)
+            or not callable(supports)
+            or not supports(descriptor)
+        ):
+            return None
+        return create_session(self._cfg, descriptor)
 
     # ── Public: probe (used by L3 to test WS connectivity) ───
 

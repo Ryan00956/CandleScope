@@ -124,13 +124,19 @@ v2 格式不会自动迁移 v1 包；完整布局、固定 SHA-256、staged、�
 candlescope-hello-command
 candlescope-scheduled-notification
 candlescope-market-scanner
+candlescope-integration-gateway
+candlescope-mock-exchange-provider
 ```
 
-后者声明 `notification/1` 与 `job/1`，通过 `notifications.show` Host call 完成无 UI 定时
+`candlescope-scheduled-notification` 声明 `notification/1` 与 `job/1`，通过 `notifications.show` Host call 完成无 UI 定时
 通知。`candlescope-market-scanner` 演示 Phase 6 的链式 Host call、scope 内 live symbol/K 线
-读取、私有 document 存储和 marker-only `candlescope.render/1` 图层。插件仍不能获得
-`DataManager`、用 live handle 读取 replay、注入任意前端代码，网络、文件、secrets、账户和
-交易能力也仍不可用。
+读取、私有 document 存储和 marker-only `candlescope.render/1` 图层；
+`candlescope-integration-gateway` 演示 Phase 9 的 Host 代理 HTTPS、一次性用户文件 handle 与
+loopback namespaced endpoint；`candlescope-mock-exchange-provider` 演示 Phase 10 成对的
+`symbol-provider/1`、`market-data-provider/1`，以及有界历史和
+`candlescope.stream/1` K 线/全深度 session。provider 输出仍必须回到 Host 拥有的 ingestion 与
+存储路径。插件不能获得 `DataManager`、用 live handle 读取 replay、注入任意前端代码，也没有
+direct network/filesystem、secrets、账户或交易能力。
 
 ## 开发门禁
 
@@ -144,5 +150,6 @@ python scripts/package_smoke.py --dist-dir dist
 
 `package_smoke.py` 会把构建出的 wheel 离线安装到全新临时 venv，通过真实 console entry
 point 重放冻结的 v1 Hello Runtime 与 v2 Hello Command transcript，并确认 Scheduled
-Notification 与 Market Scanner 的模块、manifest resource 和 console entry point 已被打包。发布前应在 Python
+Notification、Market Scanner、Integration Gateway 与 Mock Exchange Provider 的模块、manifest
+resource 和 console entry point 已被打包。发布前应在 Python
 3.12 和 3.13 各运行一次。

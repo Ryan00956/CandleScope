@@ -90,6 +90,23 @@ def get_cached_symbol_metadata(
     return None
 
 
+def evict_exchange_metadata(exchange: str) -> int:
+    """Remove Host-owned symbol cache rows for one unregistered exchange."""
+
+    global _cache_loaded_at
+
+    normalized_exchange = exchange.strip().lower()
+    if not normalized_exchange:
+        raise ValueError("exchange is required for symbol cache eviction")
+    keys = [key for key in _symbol_cache if key[0] == normalized_exchange]
+    removed = sum(len(_symbol_cache[key]) for key in keys)
+    for key in keys:
+        _symbol_cache.pop(key, None)
+    if keys:
+        _cache_loaded_at = time.time()
+    return removed
+
+
 async def refresh_exchange_metadata(exchange: str = "") -> dict[str, int]:
     """Refresh symbol metadata from all or one registered exchange."""
     global _cache_loaded_at

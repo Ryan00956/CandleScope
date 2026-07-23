@@ -30,6 +30,7 @@ class BarInputSource(str, enum.Enum):
     """Where a BarInput originated."""
     REALTIME = "realtime"          # from ingestion WS/HTTP live feed
     BACKFILL = "backfill"          # from backfill engine historical data
+    CORRECTION = "correction"      # explicit provider amendment of a final bar
     MANUAL = "manual"              # user-injected data
     ADAPTER = "adapter"            # from a user-registered adapter
 

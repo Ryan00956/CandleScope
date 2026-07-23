@@ -176,6 +176,7 @@ candlescope-hello-command
 candlescope-scheduled-notification
 candlescope-market-scanner
 candlescope-integration-gateway
+candlescope-mock-exchange-provider
 ```
 
 The latter declares `notification/1` plus `job/1` and completes a no-UI
@@ -186,8 +187,12 @@ storage, and a marker-only `candlescope.render/1` chart layer. Plugins still
 cannot access `DataManager` or replay data through a live handle.
 `candlescope-integration-gateway` demonstrates Phase 9 credential-free,
 Host-mediated HTTPS, one-shot user-selected file handles, and a loopback-only
-namespaced HTTP endpoint. These contracts do not grant direct network or
-filesystem access, secrets, accounts, or trading APIs.
+namespaced HTTP endpoint. `candlescope-mock-exchange-provider` demonstrates the
+paired Phase 10 `symbol-provider/1` and `market-data-provider/1` contributions,
+bounded history plus `candlescope.stream/1` Kline/full-depth sessions. Provider
+output always returns to the Host-owned ingestion and storage path. These
+contracts do not grant direct network or filesystem access, secrets, accounts,
+or trading APIs.
 
 ## Development checks
 
@@ -201,8 +206,8 @@ python scripts/package_smoke.py --dist-dir dist
 
 `package_smoke.py` installs the wheel into a fresh offline venv, replays both
 the frozen v1 Hello Runtime transcript and the v2 Hello Command transcript, and
-checks that the Scheduled Notification, Market Scanner, and Integration Gateway
-modules, manifest resources, and console entry points were packaged. Run it once
+checks that the Scheduled Notification, Market Scanner, Integration Gateway, and
+Mock Exchange Provider modules, manifest resources, and console entry points were packaged. Run it once
 with Python 3.12 and once with Python 3.13 before promoting a release.
 
 Use `python -m build --no-isolation` only when the selected interpreter already

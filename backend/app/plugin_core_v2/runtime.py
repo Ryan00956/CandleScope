@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import math
 import time
+import uuid
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from app.plugin_installer_v2.registry import (
 from app.plugin_gateway_v2 import PluginIntegrationGateway
 from app.plugin_platform import PluginManager
 from app.plugin_market_v2.runtime import PluginMarketRuntime
+from app.plugin_provider_v2 import PluginProviderRuntime
 from app.plugin_security_v2 import (
     AuditLog,
     CapabilityBroker,
@@ -159,6 +161,7 @@ class CorePluginPlatform:
             resolve_contribution=self.resolve_contribution,
             deliver=self._deliver_market_batch,
         )
+        self.providers = PluginProviderRuntime(invoke=self._invoke_provider)
 
         self._registry = ActivationRegistry()
         self._records: dict[str, ActivationRecord] = {}
@@ -188,7 +191,7 @@ class CorePluginPlatform:
             self._started = True
             for record in self._registry.plugins:
                 if record.state == "active" and record.plugin_id in self._bundles:
-                    self._register_work(record.plugin_id)
+                    await self._register_work(record.plugin_id)
             for record in self._registry.plugins:
                 if (
                     record.state == "active"
@@ -211,6 +214,7 @@ class CorePluginPlatform:
                 await asyncio.gather(maintenance, return_exceptions=True)
             await self.jobs.stop()
             await self.events.stop()
+            await self.providers.stop()
             await self.market.stop()
             await self.integration.stop()
             plugin_ids = set(self._records)
@@ -423,13 +427,25 @@ class CorePluginPlatform:
             capability_broker=self.broker,
         )
 
-    def _register_work(self, plugin_id: str) -> None:
+    async def _register_work(self, plugin_id: str) -> None:
         record = self._records.get(plugin_id)
         if (
             record is None
             or record.state != "active"
             or not any(owner[0] == plugin_id for owner in self.manager.owner_keys())
         ):
+            return
+        try:
+            self.providers.register_plugin(self._plugin_contributions[plugin_id])
+            await self.providers.refresh_plugin_symbols(plugin_id)
+        except Exception as exc:
+            await self.providers.clear_plugin(
+                plugin_id, reason="provider-registration-failed"
+            )
+            self.authority.revoke_plugin(plugin_id)
+            self.settings.unbind_plugin(plugin_id)
+            await self.manager.remove_plugin(plugin_id)
+            self._load_failures[plugin_id] = self._failure_wire(exc)
             return
         grants = {
             item.permission_id: item for item in self._effective_grants[plugin_id]
@@ -525,6 +541,16 @@ class CorePluginPlatform:
             input_value,
             user_action=user_action,
             trace_id=trace_id,
+        )
+
+    async def _invoke_provider(
+        self, contribution: CoreContribution, input_value: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._invoke(
+            contribution,
+            input_value,
+            user_action=False,
+            trace_id="provider:" + uuid.uuid4().hex,
         )
 
     async def _invoke_integration_endpoint(
@@ -645,6 +671,16 @@ class CorePluginPlatform:
 
         self.market.bind(port)
 
+    def bind_symbol_refresher(
+        self,
+        refresher: Callable[[str], Any],
+        *,
+        evictor: Callable[[str], None] | None = None,
+    ) -> None:
+        """Bind Host symbol-cache refresh without granting plugins cache access."""
+
+        self.providers.bind_symbol_refresher(refresher, evictor=evictor)
+
     def publish_event(self, event_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._started:
             return {
@@ -715,6 +751,7 @@ class CorePluginPlatform:
         async with self._reconcile_lock:
             await self.jobs.unregister_plugin(plugin_id)
             await self.events.unregister_plugin(plugin_id)
+            await self.providers.clear_plugin(plugin_id, reason="plugin-reconcile")
             await self.market.clear_plugin(plugin_id, reason="plugin-reconcile")
             await self.integration.clear_plugin(plugin_id)
             self.authority.revoke_plugin(plugin_id)
@@ -734,7 +771,7 @@ class CorePluginPlatform:
             record = self._records.get(plugin_id)
             if self._started and record is not None and record.state == "active":
                 await self._add_live_plugin(plugin_id)
-                self._register_work(plugin_id)
+                await self._register_work(plugin_id)
             if self._started:
                 event_id = (
                     "candlescope.plugin.enabled/1"
@@ -1219,6 +1256,7 @@ class CorePluginPlatform:
             "jobs": self.jobs.snapshot(),
             "notifications": self.notifications.snapshot(),
             "market": self.market.diagnostics(),
+            "providers": self.providers.diagnostics(),
             "integration": self.integration.diagnostics(),
             "loadFailures": [
                 {
@@ -1244,6 +1282,14 @@ class DisabledCorePluginPlatform:
         return None
 
     def bind_market_data(self, port: Any) -> None:
+        return None
+
+    def bind_symbol_refresher(
+        self,
+        refresher: Callable[[str], Any],
+        *,
+        evictor: Callable[[str], None] | None = None,
+    ) -> None:
         return None
 
     def publish_event(self, event_id: str, payload: dict[str, Any]) -> dict[str, Any]:

@@ -107,6 +107,65 @@ function sandboxPlugin() {
   };
 }
 
+function providerPlugin() {
+  const id = "candlescope.mock-provider";
+  return {
+    ...plugin(id),
+    name: "Mock Exchange Provider",
+    contributions: [
+      {
+        id: `${id}.symbols`,
+        localId: "symbols",
+        kind: "symbol-provider/1",
+        title: "Mock Symbols",
+        entrypointId: "main",
+        configuration: {
+          exchange: "mock",
+          displayName: "Mock Exchange",
+          marketTypes: [{
+            id: "spot",
+            productType: "spot",
+            label: "Mock Spot",
+            calendarId: "crypto.24x7.utc",
+            timezone: "UTC",
+          }],
+          maxPageSize: 100,
+          cacheTtlSeconds: 30,
+        },
+        available: true,
+      },
+      {
+        id: `${id}.market-data`,
+        localId: "market-data",
+        kind: "market-data-provider/1",
+        title: "Mock Market Data",
+        entrypointId: "main",
+        configuration: {
+          exchange: "mock",
+          dataPlane: "candlescope.stream/1",
+          channels: [{
+            kind: "kline",
+            marketTypes: ["spot"],
+            history: true,
+            realtime: true,
+            intervals: ["1m", "5m"],
+            delivery: "append",
+            finality: "explicit",
+            corrections: true,
+            maxPageSize: 500,
+            maxBatch: 32,
+            pollIntervalMs: 50,
+            ratePerMinute: 600,
+            maxConcurrent: 2,
+          }],
+          sourceQuality: { quality: "synthetic", finality: "explicit", timestamp: "provider" },
+        },
+        available: true,
+      },
+    ],
+  };
+}
+
 test("catalog validator builds only active native registries", () => {
   const parsed = parsePluginCatalog(catalog());
   const registries = buildPluginRegistries(parsed);
@@ -114,6 +173,41 @@ test("catalog validator builds only active native registries", () => {
   assert.equal(registries.commandPalette[0]?.pluginId, "acme.scanner");
   assert.deepEqual(registries.topToolbar.map((item) => item.id), ["acme.scanner.scan"]);
   assert.deepEqual(registries.sidePanel.map((item) => item.id), ["acme.scanner.results"]);
+});
+
+test("catalog validates public providers while keeping them out of UI extension registries", () => {
+  const parsed = parsePluginCatalog(catalog([providerPlugin()]));
+  assert.deepEqual(parsed.plugins[0]?.contributions.map((item) => item.kind), [
+    "symbol-provider/1",
+    "market-data-provider/1",
+  ]);
+  const market = parsed.plugins[0]?.contributions[1];
+  assert.equal(market?.kind, "market-data-provider/1");
+  if (market?.kind !== "market-data-provider/1") assert.fail("provider missing");
+  assert.equal(market.configuration.dataPlane, "candlescope.stream/1");
+  assert.deepEqual(buildPluginRegistries(parsed), {
+    commandPalette: [],
+    topToolbar: [],
+    chartContextMenu: [],
+    settings: [],
+    sidePanel: [],
+    bottomPanel: [],
+    statusArea: [],
+  });
+
+  const invalid = providerPlugin();
+  invalid.contributions[1]!.configuration.dataPlane = "direct-socket";
+  assert.throws(() => parsePluginCatalog(catalog([invalid])), /configuration/);
+
+  const invalidQuality = providerPlugin();
+  const invalidQualitySource = invalidQuality.contributions[1]!.configuration.sourceQuality!;
+  invalidQualitySource.quality = "trusted";
+  assert.throws(() => parsePluginCatalog(catalog([invalidQuality])), /sourceQuality\.quality/);
+
+  const invalidTimestamp = providerPlugin();
+  const invalidTimestampSource = invalidTimestamp.contributions[1]!.configuration.sourceQuality!;
+  invalidTimestampSource.timestamp = "sidecar";
+  assert.throws(() => parsePluginCatalog(catalog([invalidTimestamp])), /sourceQuality\.timestamp/);
 });
 
 test("command file inputs require native user-action fields within declared bounds", () => {

@@ -29,6 +29,7 @@ import {
   runDrawingSurfaceDisposeBoundaryLifecycle,
   runDrawingSurfaceDisposeBarrier,
   scenePaintCoversDrawingHandoff,
+  shouldReturnToCursorAfterDrawingCompletion,
   shouldDeferDrawingCoordinateCleanupToChartTypeBoundary,
   subscribeDrawingPointerRectInvalidation,
   withDrawingExportCaptureScene,
@@ -92,6 +93,21 @@ test("pointerdown recaptures geometry after a passive hover cached the previous 
   assert.equal(pointerDownRect.left, 140);
   assert.equal(pointerDownRect.top, 180);
   assert.equal(rectReads, 2);
+});
+
+test("continuous drawing keeps a completed creation tool active", () => {
+  assert.equal(
+    shouldReturnToCursorAfterDrawingCompletion(false, "line-segment", "line-segment"),
+    true,
+  );
+  assert.equal(
+    shouldReturnToCursorAfterDrawingCompletion(true, "line-segment", "line-segment"),
+    false,
+  );
+  assert.equal(
+    shouldReturnToCursorAfterDrawingCompletion(false, "shape-rectangle", "line-segment"),
+    false,
+  );
 });
 
 test("pointer rect layout subscriptions refresh out of band and fully clean up", () => {

@@ -51,6 +51,7 @@ export interface UseDrawingTextEditOptions {
   dataToScreen: DrawingDataToScreen;
   activeToolRef: MutableRefObject<DrawingToolId | null>;
   onToolChangeRef: MutableRefObject<((tool: DrawingToolId | null) => void) | null | undefined>;
+  drawingContinuousEnabledRef: MutableRefObject<boolean>;
   setSelectedPrimId: Dispatch<SetStateAction<string | null>>;
   setSelectedTextUi: Dispatch<SetStateAction<SelectedTextUi>>;
 }
@@ -129,6 +130,7 @@ export function useDrawingTextEdit({
   dataToScreen,
   activeToolRef,
   onToolChangeRef,
+  drawingContinuousEnabledRef,
   setSelectedPrimId,
   setSelectedTextUi,
 }: UseDrawingTextEditOptions): DrawingTextEditRuntime {
@@ -178,13 +180,14 @@ export function useDrawingTextEdit({
     if (clearSelection) {
       deselectAll();
     }
-    // PPT behavior: leaving text edit mode also leaves the text *tool*.
-    if (exitTool && activeToolRef.current === "text") {
+    // Unless continuous drawing is enabled, leaving text edit mode also
+    // restores the passive cursor.
+    if (exitTool && !drawingContinuousEnabledRef.current && activeToolRef.current === "text") {
       onToolChangeRef.current?.(null);
     }
     refreshSelectedTextUi();
     return true;
-  }, [primitivesRef, selectedIdRef, getPrimitiveById, detachPrim, deselectAll, refreshSelectedTextUi, activeToolRef, onToolChangeRef, setSelectedPrimId, setSelectedTextUi]);
+  }, [primitivesRef, selectedIdRef, getPrimitiveById, detachPrim, deselectAll, refreshSelectedTextUi, activeToolRef, onToolChangeRef, drawingContinuousEnabledRef, setSelectedPrimId, setSelectedTextUi]);
 
   // ── Commit text editing ──
 
@@ -307,12 +310,12 @@ export function useDrawingTextEdit({
     } else if (prim && !removed) {
       selectPrimitive(prim.id);
     }
-    if (exitTool && activeToolRef.current === "text") {
+    if (exitTool && !drawingContinuousEnabledRef.current && activeToolRef.current === "text") {
       onToolChangeRef.current?.(null);
     }
     refreshSelectedTextUi();
     return persisted;
-  }, [primitivesRef, selectedIdRef, editingTextValue, getPrimitiveById, attachPrim, detachPrim, deselectAll, selectPrimitive, beforeTerminalMutation, persistDrawings, refreshSelectedTextUi, activeToolRef, onToolChangeRef, setSelectedPrimId, setSelectedTextUi]);
+  }, [primitivesRef, selectedIdRef, editingTextValue, getPrimitiveById, attachPrim, detachPrim, deselectAll, selectPrimitive, beforeTerminalMutation, persistDrawings, refreshSelectedTextUi, activeToolRef, onToolChangeRef, drawingContinuousEnabledRef, setSelectedPrimId, setSelectedTextUi]);
 
   // ── Start text editing for a specific text primitive ──
 

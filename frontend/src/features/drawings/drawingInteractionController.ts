@@ -532,6 +532,19 @@ export function runDrawingPointerTransientBarrier({
   return removePreview();
 }
 
+/**
+ * A completed drawing may only restore the cursor when the same creation tool
+ * is still selected. This prevents a late terminal event from overriding a
+ * deliberate tool change made during the gesture.
+ */
+export function shouldReturnToCursorAfterDrawingCompletion(
+  continuousDrawingEnabled: boolean,
+  activeTool: DrawingToolId | null,
+  completedTool: DrawingToolId,
+): boolean {
+  return !continuousDrawingEnabled && activeTool === completedTool;
+}
+
 /** Hiding stale credentials is fail-closed; showing them must await scope ownership. */
 export function canApplyDrawingVisibilityToCurrentPrimitives(
   scopeReady: boolean,
@@ -1195,6 +1208,7 @@ export interface UseDrawingOptions {
   fibInverted: boolean;
   positionSize: number;
   drawingSnapEnabled?: boolean;
+  drawingContinuousEnabled?: boolean;
   symbol: string;
   seriesReady: number;
   drawingChartType: string;
@@ -1486,6 +1500,7 @@ export function useDrawing({
   fibInverted,
   positionSize,
   drawingSnapEnabled = true,
+  drawingContinuousEnabled = false,
   symbol,
   seriesReady,
   drawingChartType,
@@ -1552,6 +1567,7 @@ export function useDrawing({
   const previewEntityRef = useRef<SavedDrawing | null>(null);
   const anchorDataRef = useRef<DrawingDataPoint | null>(null); // { logical, price } first click
   const pendingTwoPointToolRef = useRef<TwoPointCreationTool | null>(null);
+  const pendingToolExitAfterMouseUpRef = useRef<DrawingToolId | null>(null);
   const draggingRef = useRef<DrawingDragDescriptor | null>(null); // { id, pointIndex, startMouse, origPoints | origDataPoint }
 
   // ── Selection state + lifecycle (extracted) ──
@@ -1627,6 +1643,7 @@ export function useDrawing({
   const fibInvertedRef = useRef(fibInverted);
   const positionSizeRef = useRef(positionSize);
   const drawingSnapEnabledRef = useRef(drawingSnapEnabled);
+  const drawingContinuousEnabledRef = useRef(drawingContinuousEnabled);
 
   const symbolRef = useRef(symbol);
 
@@ -1645,7 +1662,21 @@ export function useDrawing({
     fibInvertedRef.current = fibInverted;
     positionSizeRef.current = positionSize;
     drawingSnapEnabledRef.current = drawingSnapEnabled;
-  }, [onToolChange, activeTool, penColor, penSize, textFontSize, textBold, textItalic, fibLevels, fibInverted, positionSize, drawingSnapEnabled]);
+    drawingContinuousEnabledRef.current = drawingContinuousEnabled;
+  }, [onToolChange, activeTool, penColor, penSize, textFontSize, textBold, textItalic, fibLevels, fibInverted, positionSize, drawingSnapEnabled, drawingContinuousEnabled]);
+
+  const exitDrawingToolAfterCreation = useCallback((completedTool: DrawingToolId) => {
+    if (!shouldReturnToCursorAfterDrawingCompletion(
+      drawingContinuousEnabledRef.current,
+      activeToolRef.current,
+      completedTool,
+    )) return;
+    try {
+      onToolChangeRef.current?.(null);
+    } catch {
+      // The drawing is already committed; a UI notification must not affect it.
+    }
+  }, []);
 
   // Track previous symbol so we can detect symbol switches and swap drawing sets
   const prevSymbolRef = useRef(symbol);
@@ -2145,6 +2176,7 @@ export function useDrawing({
     dataToScreen,
     activeToolRef,
     onToolChangeRef,
+    drawingContinuousEnabledRef,
     setSelectedPrimId,
     setSelectedTextUi,
   });
@@ -2155,6 +2187,7 @@ export function useDrawing({
     getActiveTool: () => activeToolRef.current,
     getSavedDrawingById: getSavedDrawing,
     getSelectedDrawingId: () => selectedIdRef.current,
+    isContinuousDrawingEnabled: () => drawingContinuousEnabledRef.current,
     onToolChange: (tool) => onToolChangeRef.current?.(tool),
     persistSceneCommands,
     deferCommittedScenePaint: deferCommittedTextScenePaint,
@@ -3716,9 +3749,11 @@ export function useDrawing({
           }
           selectPrimitive(saved.id);
           retainDynamicOverlayUntilPaint(receipt.ticket ?? null);
+          exitDrawingToolAfterCreation(tool);
           return;
         }
 
+        const primitiveCountBeforePlacement = primitivesRef.current.length;
         if (placePositionDrawing({
           tool, pos, e, primitivesRef,
           attachPrim,
@@ -3726,6 +3761,9 @@ export function useDrawing({
           selectPrimitive, persistDrawings,
           screenToDrawingData, getChartAdapter, chartContainerRef, drawingSnapEnabledRef, positionSizeRef,
         })) {
+          if (primitivesRef.current.length > primitiveCountBeforePlacement) {
+            exitDrawingToolAfterCreation(tool);
+          }
           return;
         }
       }
@@ -3792,9 +3830,11 @@ export function useDrawing({
             pendingTwoPointToolRef.current = null;
             selectPrimitive(finalDrawing.id);
             retainDynamicOverlayUntilPaint(receipt.ticket ?? null);
+            exitDrawingToolAfterCreation(tool);
             return;
           }
           if (interactionSurfaceMode !== "overlay") {
+            const primitiveCountBeforeCommit = primitivesRef.current.length;
             const handled = commitTwoPointDrawing({
               tool, pos, e, primitivesRef, anchorDataRef, previewRef,
               attachPrim,
@@ -3806,6 +3846,9 @@ export function useDrawing({
             if (handled) {
               if (!previewRef.current && !anchorDataRef.current) {
                 pendingTwoPointToolRef.current = null;
+              }
+              if (primitivesRef.current.length > primitiveCountBeforeCommit) {
+                exitDrawingToolAfterCreation(tool);
               }
               return;
             }
@@ -3938,8 +3981,10 @@ export function useDrawing({
             };
             beginOverlayEntityDrag(saved);
             renderOverlayDragDraft();
+            pendingToolExitAfterMouseUpRef.current = tool;
             return;
           }
+          const primitiveCountBeforeAxisLine = primitivesRef.current.length;
           if (beginAxisLineDrawing({
             tool, pos, e, primitivesRef, anchorDataRef, previewRef, draggingRef,
             attachPrim,
@@ -3947,6 +3992,9 @@ export function useDrawing({
             selectPrimitive, persistDrawings, removePreview, screenToDrawingData,
             drawingSnapEnabledRef, penColorRef, penSizeRef,
           })) {
+            if (primitivesRef.current.length > primitiveCountBeforeAxisLine) {
+              pendingToolExitAfterMouseUpRef.current = tool;
+            }
             return;
           }
         }
@@ -4004,7 +4052,7 @@ export function useDrawing({
         }
       }
     },
-    [flushActiveDrawingMove, capturePointerRect, getChartPos, isInsideDrawingPanePlot, captureOverlayFreehandBatch, interactionSurfaceMode, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, hitTestSelectedOverlayHandle, selectPrimitive, deselectAll, getPrimitiveById, getSavedDrawing, getSceneScreenBox, beginOverlayEntityDrag, beginSavedTextDrag, beginTextDrag, startEntityTextEditing, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, persistSceneCommands, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, ensureOverlayDragRegistry, getChartAdapter, getDynamicFramePresentation, getDynamicThemePalette, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, renderDynamicFeedback, renderOverlayDragDraft, retainDynamicOverlayUntilPaint],
+    [flushActiveDrawingMove, capturePointerRect, getChartPos, isInsideDrawingPanePlot, captureOverlayFreehandBatch, interactionSurfaceMode, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, hitTestSelectedOverlayHandle, selectPrimitive, deselectAll, getPrimitiveById, getSavedDrawing, getSceneScreenBox, beginOverlayEntityDrag, beginSavedTextDrag, beginTextDrag, startEntityTextEditing, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, persistSceneCommands, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, ensureOverlayDragRegistry, getChartAdapter, getDynamicFramePresentation, getDynamicThemePalette, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, renderDynamicFeedback, renderOverlayDragDraft, retainDynamicOverlayUntilPaint, exitDrawingToolAfterCreation],
   );
 
   // ════════════════════════════════════════════════════
@@ -4125,7 +4173,12 @@ export function useDrawing({
     // Do not flush a B-side pointer sample into an A-side gesture. The retrying
     // scope effect owns the old gesture and flushes its last legal A sample via
     // the private active-scope persistence path.
-    if (!prepareUserMutationScope()) return;
+    if (!prepareUserMutationScope()) {
+      pendingToolExitAfterMouseUpRef.current = null;
+      return;
+    }
+    const completedAxisLineTool = pendingToolExitAfterMouseUpRef.current;
+    pendingToolExitAfterMouseUpRef.current = null;
     const mouseupStartedAt = drawingPerfNow();
     flushActiveDrawingMove();
     let commands: readonly DrawingCommand[] | null = null;
@@ -4135,10 +4188,12 @@ export function useDrawing({
     let completedFreehandDraft: FreehandStrokeDraft | null = null;
     let completedFreehandPrimitive: FreehandDrawingPrimitive | null = null;
     let completedFreehandDrawing: SavedDrawing | null = null;
+    let completedFreehandTool: DrawingToolId | null = null;
     let completedDragCandidates: readonly DrawingPrimitive[] | null = null;
     let completedEntityDragDraft: SavedDrawing | null = null;
     // End freehand drawing
     if (isDrawingFreehandRef.current) {
+      const activeFreehandTool = activeToolRef.current;
       // ── Decimate stroke via RDP to reduce render cost ──
       const prim = currentFreehandRef.current;
       const draft = freehandDraftRef.current;
@@ -4216,6 +4271,9 @@ export function useDrawing({
         // A rejected/throwing persistence boundary can then perform checked
         // surface compensation or retain the descriptor for the next barrier.
         completedFreehand = true;
+        completedFreehandTool = activeFreehandTool === "pen" || activeFreehandTool === "highlighter"
+          ? activeFreehandTool
+          : null;
         completedFreehandDraft = draft;
         completedFreehandPrimitive = prim;
       } else {
@@ -4370,10 +4428,16 @@ export function useDrawing({
     if (completedDrag && (persisted || interactionSurfaceMode === "overlay")) {
       draggingRef.current = null;
     }
+    if (completedFreehand && persisted && completedFreehandTool) {
+      exitDrawingToolAfterCreation(completedFreehandTool);
+    }
+    if (completedAxisLineTool) {
+      exitDrawingToolAfterCreation(completedAxisLineTool);
+    }
     const durationMs = Math.max(0, drawingPerfNow() - mouseupStartedAt);
     drawingPerfCounters.recordMouseupSyncDuration(durationMs);
     drawingPerfCounters.gestureEnded();
-  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, interactionSurfaceMode, invalidateVisibleScene, persistDetachedDrawings, persistDrawings, persistSceneCommands, prepareUserMutationScope, dataToScreen, refreshSelectedTextUi, releaseOverlayDrag, retainDynamicOverlayUntilPaint, selectPrimitive, subscribeVisibleScenePaint]);
+  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, interactionSurfaceMode, invalidateVisibleScene, persistDetachedDrawings, persistDrawings, persistSceneCommands, prepareUserMutationScope, dataToScreen, refreshSelectedTextUi, releaseOverlayDrag, retainDynamicOverlayUntilPaint, selectPrimitive, subscribeVisibleScenePaint, exitDrawingToolAfterCreation]);
 
   const terminalizeExportInteraction = useCallback((): boolean => {
     if (editingTextIdRef.current) {

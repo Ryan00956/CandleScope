@@ -284,6 +284,7 @@ export interface SingleChartPanesProps {
   fibInverted?: boolean;
   positionSize?: number;
   drawingSnapEnabled?: boolean;
+  drawingContinuousEnabled?: boolean;
   onSelectedDrawingChange?: ((drawing: SelectedDrawingMeta | null) => void) | null;
   mainOverlayLines?: IndicatorLine[];
   subPanes?: IndicatorSubPane[];
@@ -1234,6 +1235,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   fibInverted = false,
   positionSize = 1000,
   drawingSnapEnabled = true,
+  drawingContinuousEnabled = false,
   onSelectedDrawingChange,
   mainOverlayLines = [],
   subPanes = [],
@@ -4728,6 +4730,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
               fibInverted,
               positionSize,
               drawingSnapEnabled,
+              drawingContinuousEnabled,
               drawingKey: surface.drawingKey,
               drawingSeriesGeneration: surface.seriesGeneration,
               drawingChartType: resolvedChartType,

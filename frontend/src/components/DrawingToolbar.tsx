@@ -26,6 +26,7 @@ import DrawingToolButton from "./drawing/DrawingToolButton.js";
 import DrawingVariantToolButton from "./drawing/DrawingVariantToolButton.js";
 import {
   CHART_TYPE_VARIANTS,
+  ContinuousDrawingIcon,
   CURSOR_VARIANTS,
   EraserIcon,
   FibonacciIcon,
@@ -58,6 +59,8 @@ export interface DrawingToolbarProps {
   onToggleDrawingsHidden(): void;
   drawingSnapEnabled?: boolean;
   onDrawingSnapEnabledChange?: (enabled: boolean) => void;
+  drawingContinuousEnabled?: boolean;
+  onDrawingContinuousEnabledChange?: (enabled: boolean) => void;
   textFontSize?: number;
   onTextFontSizeChange?: (size: number) => void;
   textBold?: boolean;
@@ -98,6 +101,8 @@ const DrawingToolbar = memo(function DrawingToolbar({
   onToggleDrawingsHidden,
   drawingSnapEnabled = true,
   onDrawingSnapEnabledChange,
+  drawingContinuousEnabled = false,
+  onDrawingContinuousEnabledChange,
   // Text settings
   textFontSize = 14,
   onTextFontSizeChange,
@@ -293,6 +298,9 @@ const DrawingToolbar = memo(function DrawingToolbar({
     : (drawingSnapEnabled
         ? "Snap enabled (hold Alt to disable temporarily)"
         : "Snap disabled");
+  const continuousDrawingTitle = drawingContinuousEnabled
+    ? "Continuous drawing enabled; stay on the selected tool after completing a drawing"
+    : "Continuous drawing disabled; return to the cursor after completing a drawing";
 
   return (
     <div
@@ -478,6 +486,17 @@ const DrawingToolbar = memo(function DrawingToolbar({
         title={drawingCapabilitiesDisabled
           ? drawingToolTitle
           : snapTitle}
+      />
+
+      <DrawingToolButton
+        active={drawingContinuousEnabled}
+        dataDrawingTool="continuous"
+        disabled={drawingCapabilitiesDisabled}
+        icon={ContinuousDrawingIcon}
+        onClick={() => onDrawingContinuousEnabledChange?.(!drawingContinuousEnabled)}
+        title={drawingCapabilitiesDisabled
+          ? drawingToolTitle
+          : continuousDrawingTitle}
       />
 
       {/* Divider */}

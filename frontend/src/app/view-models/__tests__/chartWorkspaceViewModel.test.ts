@@ -18,6 +18,8 @@ test("drawing engine tools stay inactive until pane pointer listeners are ready"
 interface ContextOverrides {
   advancedMarketActions?: object;
   chartSettings?: object;
+  drawingActions?: object;
+  drawingView?: object;
   indicatorActions?: object;
   marketActions?: object;
   marketStatus?: object;
@@ -29,6 +31,8 @@ interface ContextOverrides {
 function buildContext({
   advancedMarketActions = {},
   chartSettings = { chartType: "candlestick" },
+  drawingActions = {},
+  drawingView = {},
   indicatorActions = {},
   marketActions = {},
   marketStatus = {},
@@ -45,8 +49,8 @@ function buildContext({
       identityKey: "binance:spot:BTCUSDT",
       seriesStore: null,
     },
-    drawingActions: {},
-    drawingView: {},
+    drawingActions,
+    drawingView,
     exportActions: {},
     exportInProgress: false,
     exportView: {},
@@ -177,6 +181,23 @@ test("chart range handlers separate indicator coverage from user persistence", (
   mustBeDefined(model.chart.chartProps.onVisibleRangeChange)(range);
   assert.deepEqual(indicatorRanges, [range]);
   assert.deepEqual(persistedRanges, [range]);
+});
+
+test("continuous drawing preference is shared by the toolbar and drawing surface", () => {
+  const changes: boolean[] = [];
+  const model = buildChartWorkspaceViewModel(buildContext({
+    drawingActions: {
+      handleDrawingContinuousEnabledChange: (enabled: boolean) => { changes.push(enabled); },
+    },
+    drawingView: {
+      drawingContinuousEnabled: true,
+    },
+  }));
+
+  assert.equal(model.drawingToolbar.drawingContinuousEnabled, true);
+  assert.equal(model.chart.chartProps.drawingContinuousEnabled, true);
+  mustBeDefined(model.drawingToolbar.onDrawingContinuousEnabledChange)(false);
+  assert.deepEqual(changes, [false]);
 });
 
 test("latest-window recovery reaches the chart surface", () => {

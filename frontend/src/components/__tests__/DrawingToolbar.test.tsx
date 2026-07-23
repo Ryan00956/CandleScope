@@ -31,3 +31,21 @@ test("engine wait disables drawing tools without hiding chart, cursor, or export
   assert.doesNotMatch(buttonTag(html, 'title="Snap enabled'), /disabled=""/);
   assert.match(html, /title="Line color"/);
 });
+
+test("continuous drawing toggle exposes its selected state beside the snap toggle", () => {
+  const html = renderToStaticMarkup(
+    <DrawingToolbar
+      activeTool="line-segment"
+      drawingContinuousEnabled
+      penColor="#f59e0b"
+      penSize={2}
+      onClearAll={() => {}}
+      onToggleDrawingsHidden={() => {}}
+      onPositionSizeChange={() => {}}
+    />,
+  );
+
+  const button = buttonTag(html, 'data-drawing-tool="continuous"');
+  assert.match(button, /class="drawing-tool-btn active"/);
+  assert.match(button, /title="Continuous drawing enabled; stay on the selected tool after completing a drawing"/);
+});

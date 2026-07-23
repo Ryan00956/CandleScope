@@ -47,6 +47,7 @@ export interface DrawingEngineHostProps {
     fibInverted: boolean;
     positionSize: number;
     drawingSnapEnabled: boolean;
+    drawingContinuousEnabled: boolean;
     drawingKey: string;
     drawingSeriesGeneration: number;
     drawingChartType: string;
@@ -73,6 +74,7 @@ function DrawingEngineHost({
     fibInverted,
     positionSize,
     drawingSnapEnabled,
+    drawingContinuousEnabled,
     drawingKey,
     drawingSeriesGeneration,
     drawingChartType,
@@ -109,6 +111,7 @@ function DrawingEngineHost({
         fibInverted,
         positionSize,
         drawingSnapEnabled,
+        drawingContinuousEnabled,
         symbol: drawingKey,
         seriesReady: drawingSeriesGeneration,
         drawingChartType,

@@ -39,6 +39,16 @@ export default function PluginPlatformToolbar({ runtime }: { runtime: PluginPlat
           {settings.title}
         </button>
       ))}
+      {runtime.view.liveControl.mode !== "disabled" && (
+        <button
+          type="button"
+          data-live-control-button
+          className={`live-control-toolbar live-control-${runtime.view.liveControl.mode}`}
+          onClick={runtime.actions.openLiveControl}
+        >
+          LIVE {runtime.view.liveControl.mode.toUpperCase()}
+        </button>
+      )}
       <button type="button" data-plugin-manager onClick={runtime.actions.openManager}>
         Plugins
       </button>

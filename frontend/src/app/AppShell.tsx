@@ -10,6 +10,7 @@ import type { AppShellProps } from "./appShellContracts.js";
 import PluginPlatformSurfaces, { PluginUiErrorBoundary } from "../features/plugins/PluginPlatformSurfaces.js";
 import PluginPlatformToolbar from "../features/plugins/PluginPlatformToolbar.js";
 import PluginPlatformStatus from "../features/plugins/PluginPlatformStatus.js";
+import PluginLiveControl from "../features/plugins/PluginLiveControl.js";
 
 function AppShell({
   pageExportRef,
@@ -82,6 +83,9 @@ function AppShell({
       featureSurfaces={(
         <>
           <LazyFeatureSurfaces surfaces={model.lazySurfaces} />
+          <PluginUiErrorBoundary>
+            <PluginLiveControl runtime={plugins} />
+          </PluginUiErrorBoundary>
           <PluginPlatformSurfaces runtime={plugins} />
         </>
       )}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import math
 import time
 import uuid
@@ -106,6 +107,7 @@ class CorePluginPlatform:
         live_broker_foundation_enabled: bool = False,
         live_account_readonly_enabled: bool = False,
         live_reconciliation_shadow_enabled: bool = False,
+        live_native_control_enabled: bool = False,
         network_resolver: Any | None = None,
         network_transport: Any | None = None,
     ) -> None:
@@ -124,6 +126,8 @@ class CorePluginPlatform:
             raise ValueError(
                 "live_reconciliation_shadow_enabled must be a boolean"
             )
+        if not isinstance(live_native_control_enabled, bool):
+            raise ValueError("live_native_control_enabled must be a boolean")
         if live_account_readonly_enabled and not live_broker_foundation_enabled:
             raise core_error(
                 "PLUGIN_LIVE_ACCOUNT_FOUNDATION_REQUIRED",
@@ -137,6 +141,14 @@ class CorePluginPlatform:
                 "PLUGIN_LIVE_SHADOW_ACCOUNT_REQUIRED",
                 "Phase 11B reconciliation shadow requires read-only accounts",
             )
+        if (
+            live_native_control_enabled
+            and not live_reconciliation_shadow_enabled
+        ):
+            raise core_error(
+                "PLUGIN_LIVE_CONTROL_SHADOW_REQUIRED",
+                "Phase 11B native Live control requires reconciliation shadow",
+            )
         if paper_trading_enabled and trust_level != "first-party-pinned":
             raise core_error(
                 "PLUGIN_PAPER_TRUST_REQUIRED",
@@ -147,6 +159,7 @@ class CorePluginPlatform:
                 live_broker_foundation_enabled
                 or live_account_readonly_enabled
                 or live_reconciliation_shadow_enabled
+                or live_native_control_enabled
             )
             and trust_level != "first-party-pinned"
         ):
@@ -166,6 +179,7 @@ class CorePluginPlatform:
         self.live_reconciliation_shadow_enabled = (
             live_reconciliation_shadow_enabled
         )
+        self.live_native_control_enabled = live_native_control_enabled
         self.live_broker = LiveBrokerController(
             enabled=live_broker_foundation_enabled,
             root=self.root / "live-broker-v1",
@@ -173,6 +187,7 @@ class CorePluginPlatform:
             reconciliation_shadow_enabled=(
                 live_reconciliation_shadow_enabled
             ),
+            native_control_enabled=live_native_control_enabled,
         )
 
         self.audit_log = AuditLog(self.root / "audit-v2" / "events")
@@ -896,6 +911,168 @@ class CorePluginPlatform:
     ) -> dict[str, Any]:
         return await self.paper.set_kill_switch(enabled, trace_id=trace_id)
 
+    def live_control_public_status(self) -> dict[str, Any]:
+        """Return only the safe cached projection needed by the Host banner."""
+
+        return self.live_broker.control_status_cached()
+
+    async def refresh_live_control_status(self) -> dict[str, Any]:
+        return await self.live_broker.control_status()
+
+    async def set_live_control(
+        self,
+        mode: str,
+        *,
+        reason: str,
+        acknowledge_kill: bool,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        result = await self.live_broker.set_control_mode(
+            mode,
+            reason=reason,
+            acknowledge_kill=acknowledge_kill,
+        )
+        self.audit_log.append(
+            category="live-control",
+            action=f"control-{mode}",
+            outcome="applied",
+            trace_id=trace_id,
+            data={
+                "mode": result["mode"],
+                "generation": result["generation"],
+                "policyEpoch": result["policyEpoch"],
+            },
+        )
+        return result
+
+    async def kill_live_control(
+        self,
+        *,
+        reason: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        result = await self.live_broker.kill_control(reason=reason)
+        self.audit_log.append(
+            category="live-control",
+            action="global-kill",
+            outcome="applied",
+            trace_id=trace_id,
+            data={
+                "mode": result["mode"],
+                "generation": result["generation"],
+                "policyEpoch": result["policyEpoch"],
+                "revokedConfirmationCount": result[
+                    "revokedConfirmationCount"
+                ],
+            },
+        )
+        return result
+
+    async def revoke_live_authority(
+        self,
+        *,
+        scope_type: str,
+        subject: str,
+        reason: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        if not self.live_native_control_enabled:
+            return self.live_control_public_status()
+        result = await self.live_broker.revoke_authority(
+            scope_type=scope_type,
+            subject=subject,
+            reason=reason,
+        )
+        self.audit_log.append(
+            category="live-control",
+            action="authority-revoke",
+            outcome="applied",
+            trace_id=trace_id,
+            data={
+                "scopeType": scope_type,
+                "subjectSha256": "sha256:"
+                + hashlib.sha256(subject.encode("utf-8")).hexdigest(),
+                "generation": result["generation"],
+                "policyEpoch": result["policyEpoch"],
+            },
+        )
+        return result
+
+    async def preview_live_confirmation(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+    ) -> dict[str, Any]:
+        return await self.live_broker.preview_confirmation(
+            account_ref=account_ref,
+            shadow_ref=shadow_ref,
+        )
+
+    async def issue_live_confirmation(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+        expected_intent_sha256: str,
+        expected_policy_epoch: int,
+        expected_control_generation: int,
+        ttl_seconds: int,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        result = await self.live_broker.issue_confirmation(
+            account_ref=account_ref,
+            shadow_ref=shadow_ref,
+            expected_intent_sha256=expected_intent_sha256,
+            expected_policy_epoch=expected_policy_epoch,
+            expected_control_generation=expected_control_generation,
+            ttl_seconds=ttl_seconds,
+        )
+        self.audit_log.append(
+            category="live-control",
+            action="confirmation-issue",
+            outcome="issued",
+            trace_id=trace_id,
+            plugin_id=result["pluginId"],
+            data={
+                "receiptId": result["receiptId"],
+                "intentSha256": result["intentSha256"],
+                "policyEpoch": result["policyEpoch"],
+                "controlGeneration": result["controlGeneration"],
+                "expiresAt": result["expiresAt"],
+            },
+        )
+        return result
+
+    async def revoke_live_confirmation(
+        self,
+        *,
+        receipt_ref: str,
+        reason: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        result = await self.live_broker.revoke_confirmation(
+            receipt_ref,
+            reason=reason,
+        )
+        self.audit_log.append(
+            category="live-control",
+            action="confirmation-revoke",
+            outcome=result["state"],
+            trace_id=trace_id,
+            plugin_id=result["pluginId"],
+            data={
+                "receiptId": result["receiptId"],
+                "intentSha256": result["intentSha256"],
+                "policyEpoch": result["policyEpoch"],
+                "controlGeneration": result["controlGeneration"],
+            },
+        )
+        return result
+
+    async def export_live_audit(self) -> dict[str, Any]:
+        return await self.live_broker.export_audit()
+
     async def reconcile_plugin(self, plugin_id: str) -> None:
         async with self._reconcile_lock:
             await self.jobs.unregister_plugin(plugin_id)
@@ -1478,6 +1655,28 @@ class DisabledCorePluginPlatform:
             "registryRevision": 0,
             "views": [],
             "chartLayers": [],
+        }
+
+    def live_control_public_status(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": "candlescope.live-control-status/1",
+            "available": False,
+            "mode": "disabled",
+            "generation": 0,
+            "policyEpoch": 0,
+            "updatedAt": None,
+            "outstandingConfirmationCount": 0,
+            "confirmationCounts": {
+                "consumed": 0,
+                "expired": 0,
+                "issued": 0,
+                "revoked": 0,
+            },
+            "eventSequence": 0,
+            "eventSha256": None,
+            "liveSubmitAvailable": False,
+            "liveCancelAvailable": False,
+            "liveTransferAvailable": False,
         }
 
     def health_summary(self) -> dict[str, Any]:

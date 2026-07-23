@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchPluginCatalog,
+  fetchPluginLiveControlStatus,
   fetchPluginManagementDetail,
   fetchPluginUiSnapshot,
   downloadPluginUserFile,
   invokePluginCommand,
   installPluginBundle,
+  issueLiveConfirmation,
+  killLiveControl,
   mutatePluginPermission,
   mutatePluginState,
   pluginManagementAvailable,
   readPluginSettings,
+  revokeLiveAuthority,
+  revokeLiveConfirmation,
   setPaperKillSwitch,
+  setLiveControlMode,
+  fetchLiveAuditExport,
+  previewLiveConfirmation,
   preparePluginUserFileSave,
   stagePluginUserFile,
   writePluginSettings,
@@ -21,6 +29,7 @@ import type {
   JsonValue,
   PluginCatalog,
   PluginMarketIdentity,
+  PluginLiveControlStatus,
   PluginPlatformRuntime,
   PluginUiSnapshot,
 } from "./pluginPlatformTypes.js";
@@ -28,6 +37,27 @@ import type {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Plugin Platform operation failed";
 }
+
+const DISABLED_LIVE_CONTROL: PluginLiveControlStatus = {
+  schemaVersion: "candlescope.live-control-status/1",
+  available: false,
+  mode: "disabled",
+  generation: 0,
+  policyEpoch: 0,
+  updatedAt: null,
+  outstandingConfirmationCount: 0,
+  confirmationCounts: { consumed: 0, expired: 0, issued: 0, revoked: 0 },
+  eventSequence: 0,
+  eventSha256: null,
+  liveSubmitAvailable: false,
+  liveCancelAvailable: false,
+  liveTransferAvailable: false,
+};
+
+const UNAVAILABLE_LIVE_CONTROL: PluginLiveControlStatus = {
+  ...DISABLED_LIVE_CONTROL,
+  mode: "unavailable",
+};
 
 export function usePluginPlatformRuntime(identity: PluginMarketIdentity): PluginPlatformRuntime {
   const { exchange, interval, marketType, symbol } = identity;
@@ -40,6 +70,8 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
   const [openViewId, setOpenViewId] = useState<string | null>(null);
   const [openSettingsId, setOpenSettingsId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [liveControl, setLiveControl] = useState<PluginLiveControlStatus>(DISABLED_LIVE_CONTROL);
+  const [liveControlOpen, setLiveControlOpen] = useState(false);
   const managementAvailable = useMemo(() => pluginManagementAvailable(), []);
   const markerSourceRef = useRef<PluginMarkerSource | null>(null);
   const refreshSequenceRef = useRef(0);
@@ -48,9 +80,10 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
   const refresh = useCallback(async (): Promise<void> => {
     const sequence = ++refreshSequenceRef.current;
     try {
-      const [nextCatalog, initialSnapshot] = await Promise.all([
+      const [nextCatalog, initialSnapshot, nextLiveControl] = await Promise.all([
         fetchPluginCatalog(),
         fetchPluginUiSnapshot(),
+        fetchPluginLiveControlStatus(),
       ]);
       const nextSnapshot = initialSnapshot.registryRevision === nextCatalog.platform.registryRevision
         ? initialSnapshot
@@ -61,11 +94,15 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       if (sequence !== refreshSequenceRef.current) return;
       setCatalog(nextCatalog);
       setSnapshot(nextSnapshot);
+      setLiveControl(nextLiveControl);
       setError(null);
     } catch (caught) {
       if (sequence !== refreshSequenceRef.current) return;
       setCatalog(null);
       setSnapshot(null);
+      setLiveControl((current) => (
+        current.mode === "disabled" ? UNAVAILABLE_LIVE_CONTROL : { ...current, available: false, mode: "unavailable" }
+      ));
       setError(errorMessage(caught));
       throw caught;
     } finally {
@@ -155,6 +192,67 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     enabled ? "Paper kill switch enabled" : "Paper order submission resumed",
   ), [withRefresh]);
 
+  const changeLiveControlMode = useCallback(async (
+    mode: "armed" | "disarmed",
+    reason: string,
+    acknowledgeKill: boolean,
+  ) => {
+    try {
+      const status = await setLiveControlMode(mode, reason, acknowledgeKill);
+      setLiveControl(status);
+      setNotice(mode === "armed" ? "Live control armed; no execution method is installed" : "Live control disarmed");
+    } catch (caught) {
+      setNotice(errorMessage(caught));
+      throw caught;
+    }
+  }, []);
+
+  const killLive = useCallback(async (reason: string) => {
+    try {
+      const status = await killLiveControl(reason);
+      setLiveControl(status);
+      setNotice("Global Live kill applied; credentials, accounts, and receipts were revoked");
+    } catch (caught) {
+      setNotice(errorMessage(caught));
+      throw caught;
+    }
+  }, []);
+
+  const revokeLive = useCallback(async (
+    scopeType: "grant" | "plugin" | "publisher" | "credential",
+    subject: string,
+    reason: string,
+  ) => {
+    try {
+      const status = await revokeLiveAuthority(scopeType, subject, reason);
+      setLiveControl(status);
+      setNotice(`Live ${scopeType} authority revoked`);
+    } catch (caught) {
+      setNotice(errorMessage(caught));
+      throw caught;
+    }
+  }, []);
+
+  const downloadLiveAudit = useCallback(async () => {
+    try {
+      const blob = await fetchLiveAuditExport();
+      const url = URL.createObjectURL(blob);
+      try {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "candlescope-live-audit.json";
+        anchor.rel = "noopener";
+        anchor.click();
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+      setNotice("Redacted Live audit export downloaded");
+    } catch (caught) {
+      setNotice(errorMessage(caught));
+      throw caught;
+    }
+  }, []);
+
   return useMemo<PluginPlatformRuntime>(() => ({
     view: {
       catalog,
@@ -168,6 +266,8 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       openViewId,
       openSettingsId,
       notice,
+      liveControl,
+      liveControlOpen,
       markerSource: markerSourceRef.current!,
       marketIdentity: { exchange, interval, marketType, symbol },
     },
@@ -205,6 +305,41 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       changeState,
       decidePermission,
       setPaperKillSwitch: changePaperKillSwitch,
+      openLiveControl: () => setLiveControlOpen(true),
+      closeLiveControl: () => setLiveControlOpen(false),
+      setLiveControlMode: changeLiveControlMode,
+      killLiveControl: killLive,
+      revokeLiveAuthority: revokeLive,
+      previewLiveConfirmation: async (accountRef, shadowRef) => {
+        try {
+          return await previewLiveConfirmation(accountRef, shadowRef);
+        } catch (caught) {
+          setNotice(errorMessage(caught));
+          throw caught;
+        }
+      },
+      issueLiveConfirmation: async (accountRef, shadowRef, preview, ttlSeconds = 60) => {
+        try {
+          const receipt = await issueLiveConfirmation(accountRef, shadowRef, preview, ttlSeconds);
+          setNotice(`Intent confirmation issued until ${receipt.expiresAt}`);
+          await refresh();
+          return receipt;
+        } catch (caught) {
+          setNotice(errorMessage(caught));
+          throw caught;
+        }
+      },
+      revokeLiveConfirmation: async (receiptRef, reason) => {
+        try {
+          await revokeLiveConfirmation(receiptRef, reason);
+          setNotice("Live confirmation revoked");
+          await refresh();
+        } catch (caught) {
+          setNotice(errorMessage(caught));
+          throw caught;
+        }
+      },
+      downloadLiveAudit,
     },
   }), [
     catalog,
@@ -216,6 +351,8 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     interval,
     invokeCommand,
     loading,
+    liveControl,
+    liveControlOpen,
     managementAvailable,
     managerOpen,
     marketType,
@@ -228,5 +365,9 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     snapshot,
     symbol,
     withRefresh,
+    changeLiveControlMode,
+    killLive,
+    revokeLive,
+    downloadLiveAudit,
   ]);
 }

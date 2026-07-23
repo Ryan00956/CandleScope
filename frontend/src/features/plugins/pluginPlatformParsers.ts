@@ -11,6 +11,9 @@ import type {
   PluginFieldFormat,
   PluginJsonSchema,
   PluginManagementDetail,
+  PluginLiveConfirmationPreview,
+  PluginLiveConfirmationReceipt,
+  PluginLiveControlStatus,
   PluginMarketProviderChannel,
   PluginPaperAccountContribution,
   PluginPaperExecutorContribution,
@@ -748,6 +751,171 @@ export function parsePluginUiSnapshot(value: unknown): PluginUiSnapshot {
   const chartLayers = array(data.chartLayers, "ui.chartLayers", 256).map((item, index) => chartLayer(item, `ui.chartLayers[${index}]`));
   if (new Set(chartLayers.map((item) => item.id)).size !== chartLayers.length) fail("ui.chartLayers");
   return { schemaVersion: "candlescope.plugin-ui/1", registryRevision: integer(data.registryRevision, "ui.registryRevision"), views, chartLayers };
+}
+
+export function parsePluginLiveControlStatus(value: unknown): PluginLiveControlStatus {
+  const path = "liveControl";
+  const data = record(value, path);
+  exact(data, [
+    "schemaVersion", "available", "mode", "generation", "policyEpoch",
+    "updatedAt", "outstandingConfirmationCount", "confirmationCounts",
+    "eventSequence", "eventSha256", "liveSubmitAvailable",
+    "liveCancelAvailable", "liveTransferAvailable",
+  ], [], path);
+  const available = boolean(data.available, `${path}.available`);
+  const mode = oneOf(
+    data.mode,
+    new Set(["disabled", "unavailable", "disarmed", "armed", "killed"] as const),
+    `${path}.mode`,
+  );
+  if (
+    data.schemaVersion !== "candlescope.live-control-status/1"
+    || available !== new Set(["disarmed", "armed", "killed"]).has(mode)
+    || data.liveSubmitAvailable !== false
+    || data.liveCancelAvailable !== false
+    || data.liveTransferAvailable !== false
+  ) fail(path);
+  const counts = record(data.confirmationCounts, `${path}.confirmationCounts`);
+  exact(counts, ["consumed", "expired", "issued", "revoked"], [], `${path}.confirmationCounts`);
+  const confirmationCounts = {
+    consumed: integer(counts.consumed, `${path}.confirmationCounts.consumed`),
+    expired: integer(counts.expired, `${path}.confirmationCounts.expired`),
+    issued: integer(counts.issued, `${path}.confirmationCounts.issued`),
+    revoked: integer(counts.revoked, `${path}.confirmationCounts.revoked`),
+  };
+  const outstandingConfirmationCount = integer(
+    data.outstandingConfirmationCount,
+    `${path}.outstandingConfirmationCount`,
+  );
+  if (outstandingConfirmationCount !== confirmationCounts.issued) fail(path);
+  const eventSha256 = data.eventSha256 === null
+    ? null
+    : string(data.eventSha256, `${path}.eventSha256`, 71);
+  if (eventSha256 !== null && !BUNDLE_DIGEST.test(eventSha256)) fail(`${path}.eventSha256`);
+  return {
+    schemaVersion: "candlescope.live-control-status/1",
+    available,
+    mode,
+    generation: integer(data.generation, `${path}.generation`),
+    policyEpoch: integer(data.policyEpoch, `${path}.policyEpoch`),
+    updatedAt: data.updatedAt === null ? null : string(data.updatedAt, `${path}.updatedAt`, 64),
+    outstandingConfirmationCount,
+    confirmationCounts,
+    eventSequence: integer(data.eventSequence, `${path}.eventSequence`),
+    eventSha256,
+    liveSubmitAvailable: false,
+    liveCancelAvailable: false,
+    liveTransferAvailable: false,
+  };
+}
+
+export function parsePluginLiveConfirmationPreview(
+  value: unknown,
+): PluginLiveConfirmationPreview {
+  const path = "liveConfirmationPreview";
+  const data = record(value, path);
+  exact(data, [
+    "schemaVersion", "intentSha256", "pluginId", "connectorId",
+    "publisherIdentity", "version", "clientOrderId", "instrumentId",
+    "side", "orderType", "quantity", "limitPrice", "policyEpoch",
+    "controlGeneration", "liveSubmitAvailable", "liveCancelAvailable",
+  ], [], path);
+  const intentSha256 = string(data.intentSha256, `${path}.intentSha256`, 71);
+  const clientOrderId = string(data.clientOrderId, `${path}.clientOrderId`, 32);
+  if (
+    data.schemaVersion !== "candlescope.live-confirmation-preview/1"
+    || !BUNDLE_DIGEST.test(intentSha256)
+    || !/^[A-Za-z0-9]{32}$/.test(clientOrderId)
+    || data.orderType !== "limit"
+    || data.liveSubmitAvailable !== false
+    || data.liveCancelAvailable !== false
+  ) fail(path);
+  const pluginId = string(data.pluginId, `${path}.pluginId`, 128);
+  const connectorId = string(data.connectorId, `${path}.connectorId`, 128);
+  if (!PLUGIN_ID.test(pluginId) || !PLUGIN_ID.test(connectorId)) fail(path);
+  return {
+    schemaVersion: "candlescope.live-confirmation-preview/1",
+    intentSha256,
+    pluginId,
+    connectorId,
+    publisherIdentity: string(data.publisherIdentity, `${path}.publisherIdentity`, 256),
+    version: string(data.version, `${path}.version`, 64),
+    clientOrderId,
+    instrumentId: string(data.instrumentId, `${path}.instrumentId`, 64),
+    side: oneOf(data.side, new Set(["buy", "sell"] as const), `${path}.side`),
+    orderType: "limit",
+    quantity: string(data.quantity, `${path}.quantity`, 64),
+    limitPrice: string(data.limitPrice, `${path}.limitPrice`, 64),
+    policyEpoch: integer(data.policyEpoch, `${path}.policyEpoch`),
+    controlGeneration: integer(data.controlGeneration, `${path}.controlGeneration`),
+    liveSubmitAvailable: false,
+    liveCancelAvailable: false,
+  };
+}
+
+export function parsePluginLiveConfirmationReceipt(
+  value: unknown,
+): PluginLiveConfirmationReceipt {
+  const path = "liveConfirmationReceipt";
+  const data = record(value, path);
+  exact(data, [
+    "schemaVersion", "receiptRef", "receiptId", "intentSha256", "pluginId",
+    "connectorId", "publisherIdentity", "version", "clientOrderId",
+    "instrumentId", "side", "orderType", "quantity", "limitPrice",
+    "policyEpoch", "controlGeneration", "state", "issuedAt", "expiresAt",
+    "resolvedAt", "liveSubmitAvailable", "liveCancelAvailable",
+  ], [], path);
+  const preview = parsePluginLiveConfirmationPreview({
+    schemaVersion: "candlescope.live-confirmation-preview/1",
+    intentSha256: data.intentSha256,
+    pluginId: data.pluginId,
+    connectorId: data.connectorId,
+    publisherIdentity: data.publisherIdentity,
+    version: data.version,
+    clientOrderId: data.clientOrderId,
+    instrumentId: data.instrumentId,
+    side: data.side,
+    orderType: data.orderType,
+    quantity: data.quantity,
+    limitPrice: data.limitPrice,
+    policyEpoch: data.policyEpoch,
+    controlGeneration: data.controlGeneration,
+    liveSubmitAvailable: data.liveSubmitAvailable,
+    liveCancelAvailable: data.liveCancelAvailable,
+  });
+  const receiptRef = string(data.receiptRef, `${path}.receiptRef`, 64);
+  const receiptId = string(data.receiptId, `${path}.receiptId`, 32);
+  if (
+    data.schemaVersion !== "candlescope.live-confirmation/1"
+    || !/^livecfm_[A-Za-z0-9_-]{43}$/.test(receiptRef)
+    || !/^[0-9a-f]{32}$/.test(receiptId)
+    || data.state !== "issued"
+    || data.resolvedAt !== null
+  ) fail(path);
+  return {
+    schemaVersion: "candlescope.live-confirmation/1",
+    receiptRef,
+    receiptId,
+    intentSha256: preview.intentSha256,
+    pluginId: preview.pluginId,
+    connectorId: preview.connectorId,
+    publisherIdentity: preview.publisherIdentity,
+    version: preview.version,
+    clientOrderId: preview.clientOrderId,
+    instrumentId: preview.instrumentId,
+    side: preview.side,
+    orderType: "limit",
+    quantity: preview.quantity,
+    limitPrice: preview.limitPrice,
+    policyEpoch: preview.policyEpoch,
+    controlGeneration: preview.controlGeneration,
+    state: "issued",
+    issuedAt: string(data.issuedAt, `${path}.issuedAt`, 64),
+    expiresAt: string(data.expiresAt, `${path}.expiresAt`, 64),
+    resolvedAt: null,
+    liveSubmitAvailable: false,
+    liveCancelAvailable: false,
+  };
 }
 
 function paperStatus(value: unknown, path: string, withAvailable = false): PluginPaperStatus & { available?: boolean } {

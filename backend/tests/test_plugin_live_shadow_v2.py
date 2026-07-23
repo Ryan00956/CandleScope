@@ -108,11 +108,7 @@ def _activation(bundle: Any, root: Path) -> ActivationRecord:
     )
 
 
-@pytest.fixture(scope="module")
-def pinned_shadow_fixture(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> _PinnedShadowFixture:
-    root = tmp_path_factory.mktemp("live-shadow-pinned")
+def _build_pinned_shadow_fixture(root: Path) -> _PinnedShadowFixture:
     bundle = build_hello_platform_bundle(root / "bundle").bundle
     identity = bundle.manifest.plugin
     lock_path = root / "live-release-lock.json"
@@ -145,6 +141,15 @@ def pinned_shadow_fixture(
         trust_level="first-party-pinned",
     )
     return _PinnedShadowFixture(lock_path, trust, evidence)
+
+
+@pytest.fixture(scope="module")
+def pinned_shadow_fixture(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> _PinnedShadowFixture:
+    return _build_pinned_shadow_fixture(
+        tmp_path_factory.mktemp("live-shadow-pinned")
+    )
 
 
 def _request(

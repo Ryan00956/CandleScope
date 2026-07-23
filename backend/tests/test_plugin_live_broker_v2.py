@@ -128,7 +128,7 @@ def _request(
     }
 
 
-def test_protocol_allowlist_adds_only_read_only_account_and_shadow_surface() -> None:
+def test_protocol_allowlist_adds_only_staged_read_and_control_surfaces() -> None:
     assert LIVE_BROKER_METHODS == {
         "foundation.bootstrap",
         "foundation.health",
@@ -142,6 +142,15 @@ def test_protocol_allowlist_adds_only_read_only_account_and_shadow_surface() -> 
         "shadow.prepare",
         "shadow.describe",
         "shadow.reconcile",
+        "control.status",
+        "control.set",
+        "control.kill",
+        "authority.revoke",
+        "confirmation.preview",
+        "confirmation.issue",
+        "confirmation.describe",
+        "confirmation.revoke",
+        "audit.export.page",
         "foundation.shutdown",
     }
     forbidden = {
@@ -159,6 +168,7 @@ def test_protocol_allowlist_adds_only_read_only_account_and_shadow_surface() -> 
         for method in LIVE_BROKER_METHODS
         for token in forbidden
     )
+    assert "confirmation.consume" not in LIVE_BROKER_METHODS
 
 
 def test_broker_network_imports_are_isolated_to_okx_readonly_connector() -> None:
@@ -281,6 +291,27 @@ def test_feature_off_creates_no_process_pipe_vault_or_handle(
             "vaultBackend": None,
             "readOnlyAccountsEnabled": False,
             "reconciliationShadowEnabled": False,
+            "nativeControlEnabled": False,
+            "control": {
+                "schemaVersion": "candlescope.live-control-status/1",
+                "available": False,
+                "mode": "disabled",
+                "generation": 0,
+                "policyEpoch": 0,
+                "updatedAt": None,
+                "outstandingConfirmationCount": 0,
+                "confirmationCounts": {
+                    "consumed": 0,
+                    "expired": 0,
+                    "issued": 0,
+                    "revoked": 0,
+                },
+                "eventSequence": 0,
+                "eventSha256": None,
+                "liveSubmitAvailable": False,
+                "liveCancelAvailable": False,
+                "liveTransferAvailable": False,
+            },
             "networkMethods": 0,
         }
         await controller.stop()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import json
 import re
 import secrets
 from pathlib import Path
@@ -16,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.plugin_installer_v2.errors import PlatformInstallerBaseError
+from app.plugin_live_v2 import LiveBrokerError
 from app.plugin_paper_v2.errors import PaperTradingError
 from app.plugin_security_v2.errors import PlatformSecurityError
 from app.plugin_security_v2.management import LocalManagementGuard
@@ -225,6 +227,7 @@ def _raise_api_error(exc: Exception) -> None:
             PlatformInstallerBaseError,
             PlatformSecurityError,
             PaperTradingError,
+            LiveBrokerError,
         ),
     ):
         raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
@@ -243,6 +246,10 @@ def create_core_plugin_router() -> APIRouter:
     @router.get("/ui/snapshot")
     async def ui_snapshot(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(_platform(request).ui_snapshot)
+
+    @router.get("/live/control/status")
+    async def live_control_status(request: Request) -> dict[str, Any]:
+        return _platform(request).live_control_public_status()
 
     @router.get("/assets/{plugin_id}/{bundle_digest}/{asset_path:path}")
     async def sandbox_asset(
@@ -489,6 +496,219 @@ def create_core_plugin_router() -> APIRouter:
         except Exception as exc:
             _raise_api_error(exc)
 
+    @router.get("/manage/live/control/status")
+    async def protected_live_control_status(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            return await platform.refresh_live_control_status()
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/live/control")
+    async def set_live_control(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(
+                request,
+                required={"mode", "reason", "acknowledgeKill"},
+            )
+            if (
+                value["mode"] not in {"armed", "disarmed"}
+                or not isinstance(value["reason"], str)
+                or not isinstance(value["acknowledgeKill"], bool)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Live control values are invalid",
+                )
+            action = request.state.plugin_user_action
+            return await platform.set_live_control(
+                value["mode"],
+                reason=value["reason"],
+                acknowledge_kill=value["acknowledgeKill"],
+                trace_id=f"management-{action}",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/live/kill")
+    async def kill_live_control(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(request, required={"reason"})
+            if not isinstance(value["reason"], str):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Live kill reason must be a string",
+                )
+            action = request.state.plugin_user_action
+            return await platform.kill_live_control(
+                reason=value["reason"],
+                trace_id=f"management-{action}",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/live/revoke")
+    async def revoke_live_authority(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(
+                request,
+                required={"scopeType", "subject", "reason"},
+            )
+            if (
+                value["scopeType"]
+                not in {"grant", "plugin", "publisher", "credential"}
+                or not isinstance(value["subject"], str)
+                or not isinstance(value["reason"], str)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Live revoke values are invalid",
+                )
+            action = request.state.plugin_user_action
+            return await platform.revoke_live_authority(
+                scope_type=value["scopeType"],
+                subject=value["subject"],
+                reason=value["reason"],
+                trace_id=f"management-{action}",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/live/confirmations/preview")
+    async def preview_live_confirmation(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(
+                request,
+                required={"accountRef", "shadowRef"},
+            )
+            if not all(isinstance(value[key], str) for key in value):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Live confirmation references must be strings",
+                )
+            return await platform.preview_live_confirmation(
+                account_ref=value["accountRef"],
+                shadow_ref=value["shadowRef"],
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/live/confirmations/issue")
+    async def issue_live_confirmation(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(
+                request,
+                required={
+                    "accountRef",
+                    "shadowRef",
+                    "expectedIntentSha256",
+                    "expectedPolicyEpoch",
+                    "expectedControlGeneration",
+                    "ttlSeconds",
+                },
+            )
+            if (
+                not isinstance(value["accountRef"], str)
+                or not isinstance(value["shadowRef"], str)
+                or not isinstance(value["expectedIntentSha256"], str)
+                or any(
+                    isinstance(value[key], bool)
+                    or not isinstance(value[key], int)
+                    for key in (
+                        "expectedPolicyEpoch",
+                        "expectedControlGeneration",
+                        "ttlSeconds",
+                    )
+                )
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Live confirmation issue values are invalid",
+                )
+            action = request.state.plugin_user_action
+            return await platform.issue_live_confirmation(
+                account_ref=value["accountRef"],
+                shadow_ref=value["shadowRef"],
+                expected_intent_sha256=value["expectedIntentSha256"],
+                expected_policy_epoch=value["expectedPolicyEpoch"],
+                expected_control_generation=value[
+                    "expectedControlGeneration"
+                ],
+                ttl_seconds=value["ttlSeconds"],
+                trace_id=f"management-{action}",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/live/confirmations/revoke")
+    async def revoke_live_confirmation(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        try:
+            value = await _body(
+                request,
+                required={"receiptRef", "reason"},
+            )
+            if not all(isinstance(value[key], str) for key in value):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Live confirmation revoke values are invalid",
+                )
+            action = request.state.plugin_user_action
+            return await platform.revoke_live_confirmation(
+                receipt_ref=value["receiptRef"],
+                reason=value["reason"],
+                trace_id=f"management-{action}",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.get("/manage/live/audit-export")
+    async def export_live_audit(request: Request) -> Response:
+        platform = await _guarded_platform(request)
+        try:
+            value = await platform.export_live_audit()
+            body = json.dumps(
+                value,
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return Response(
+                content=body,
+                media_type="application/json",
+                headers={
+                    "Cache-Control": "no-store",
+                    "Content-Disposition": (
+                        'attachment; filename="candlescope-live-audit.json"'
+                    ),
+                    "Referrer-Policy": "no-referrer",
+                    "X-Content-Type-Options": "nosniff",
+                    "X-CandleScope-Content-SHA256": (
+                        "sha256:" + hashlib.sha256(body).hexdigest()
+                    ),
+                },
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
+
     @router.get("/manage/paper/status")
     async def paper_status(request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
@@ -600,6 +820,13 @@ def create_core_plugin_router() -> APIRouter:
     async def disable(plugin_id: str, request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
         try:
+            action = request.state.plugin_user_action
+            await platform.revoke_live_authority(
+                scope_type="plugin",
+                subject=plugin_id,
+                reason="plugin-disable",
+                trace_id=f"management-{action}",
+            )
             result = await asyncio.to_thread(platform.installer.disable, plugin_id)
             await platform.reconcile_plugin(plugin_id)
             return {"stateChange": result.to_wire()}
@@ -610,6 +837,13 @@ def create_core_plugin_router() -> APIRouter:
     async def rollback(plugin_id: str, request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
         try:
+            action = request.state.plugin_user_action
+            await platform.revoke_live_authority(
+                scope_type="plugin",
+                subject=plugin_id,
+                reason="plugin-rollback",
+                trace_id=f"management-{action}",
+            )
             result = await asyncio.to_thread(platform.installer.rollback, plugin_id)
             await platform.reconcile_plugin(plugin_id)
             return {"rollback": result.to_wire()}
@@ -620,6 +854,13 @@ def create_core_plugin_router() -> APIRouter:
     async def uninstall(plugin_id: str, request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
         try:
+            action = request.state.plugin_user_action
+            await platform.revoke_live_authority(
+                scope_type="plugin",
+                subject=plugin_id,
+                reason="plugin-uninstall",
+                trace_id=f"management-{action}",
+            )
             result = await asyncio.to_thread(platform.installer.uninstall, plugin_id)
             await platform.reconcile_plugin(plugin_id)
             return {"stateChange": result.to_wire()}
@@ -664,6 +905,13 @@ def create_core_plugin_router() -> APIRouter:
                     if decision == "deny"
                     else platform.installer.revoke_permission
                 )
+                if decision == "revoke":
+                    await platform.revoke_live_authority(
+                        scope_type="grant",
+                        subject=f"{plugin_id}:{permission_id}",
+                        reason="permission-revoke",
+                        trace_id=f"management-{action}",
+                    )
                 result = await asyncio.to_thread(
                     method,
                     plugin_id,

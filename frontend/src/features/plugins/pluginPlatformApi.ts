@@ -1,6 +1,9 @@
 import { API_BASE } from "../../services/apiConfig.js";
 import {
   parsePluginCatalog,
+  parsePluginLiveConfirmationPreview,
+  parsePluginLiveConfirmationReceipt,
+  parsePluginLiveControlStatus,
   parsePluginManagementDetail,
   parsePluginUiSnapshot,
 } from "./pluginPlatformParsers.js";
@@ -8,6 +11,9 @@ import type {
   JsonValue,
   PluginCatalog,
   PluginFileSelection,
+  PluginLiveConfirmationPreview,
+  PluginLiveConfirmationReceipt,
+  PluginLiveControlStatus,
   PluginManagementDetail,
   PluginUiSnapshot,
 } from "./pluginPlatformTypes.js";
@@ -141,6 +147,16 @@ export async function fetchPluginCatalog(signal?: AbortSignal): Promise<PluginCa
 export async function fetchPluginUiSnapshot(signal?: AbortSignal): Promise<PluginUiSnapshot> {
   const response = await fetch(`${publicPluginBase()}/ui/snapshot`, { ...(signal ? { signal } : {}) });
   return parsePluginUiSnapshot(await responseJson(response));
+}
+
+export async function fetchPluginLiveControlStatus(
+  signal?: AbortSignal,
+): Promise<PluginLiveControlStatus> {
+  const response = await fetch(
+    `${publicPluginBase()}/live/control/status`,
+    { ...(signal ? { signal } : {}) },
+  );
+  return parsePluginLiveControlStatus(await responseJson(response));
 }
 
 function actionId(prefix: string): string {
@@ -381,4 +397,135 @@ export async function setPaperKillSwitch(enabled: boolean): Promise<void> {
     body: { enabled },
     action: enabled ? "paper-kill-switch" : "paper-resume",
   });
+}
+
+export async function setLiveControlMode(
+  mode: "armed" | "disarmed",
+  reason: string,
+  acknowledgeKill: boolean,
+): Promise<PluginLiveControlStatus> {
+  return parsePluginLiveControlStatus(
+    await managementRequest("/manage/live/control", {
+      method: "POST",
+      body: { mode, reason, acknowledgeKill },
+      action: mode === "armed" ? "live-control-arm" : "live-control-disarm",
+    }),
+  );
+}
+
+const LIVE_CONTROL_STATUS_FIELDS = [
+  "schemaVersion", "available", "mode", "generation", "policyEpoch",
+  "updatedAt", "outstandingConfirmationCount", "confirmationCounts",
+  "eventSequence", "eventSha256", "liveSubmitAvailable",
+  "liveCancelAvailable", "liveTransferAvailable",
+] as const;
+
+function controlProjection(value: unknown, path: string): PluginLiveControlStatus {
+  const payload = object(value, path);
+  return parsePluginLiveControlStatus(
+    Object.fromEntries(
+      LIVE_CONTROL_STATUS_FIELDS.map((field) => [field, payload[field]]),
+    ),
+  );
+}
+
+export async function killLiveControl(
+  reason: string,
+): Promise<PluginLiveControlStatus> {
+  const payload = await managementRequest("/manage/live/kill", {
+    method: "POST",
+    body: { reason },
+    action: "live-control-kill",
+  });
+  return controlProjection(payload, "Live kill");
+}
+
+export async function revokeLiveAuthority(
+  scopeType: "grant" | "plugin" | "publisher" | "credential",
+  subject: string,
+  reason: string,
+): Promise<PluginLiveControlStatus> {
+  const payload = await managementRequest("/manage/live/revoke", {
+    method: "POST",
+    body: { scopeType, subject, reason },
+    action: `live-${scopeType}-revoke`,
+  });
+  return controlProjection(payload, "Live revoke");
+}
+
+export async function previewLiveConfirmation(
+  accountRef: string,
+  shadowRef: string,
+): Promise<PluginLiveConfirmationPreview> {
+  return parsePluginLiveConfirmationPreview(
+    await managementRequest("/manage/live/confirmations/preview", {
+      method: "POST",
+      body: { accountRef, shadowRef },
+      action: "live-confirmation-preview",
+    }),
+  );
+}
+
+export async function issueLiveConfirmation(
+  accountRef: string,
+  shadowRef: string,
+  preview: PluginLiveConfirmationPreview,
+  ttlSeconds = 60,
+): Promise<PluginLiveConfirmationReceipt> {
+  return parsePluginLiveConfirmationReceipt(
+    await managementRequest("/manage/live/confirmations/issue", {
+      method: "POST",
+      body: {
+        accountRef,
+        shadowRef,
+        expectedIntentSha256: preview.intentSha256,
+        expectedPolicyEpoch: preview.policyEpoch,
+        expectedControlGeneration: preview.controlGeneration,
+        ttlSeconds,
+      },
+      action: "live-confirmation-issue",
+    }),
+  );
+}
+
+export async function revokeLiveConfirmation(
+  receiptRef: string,
+  reason: string,
+): Promise<void> {
+  await managementRequest("/manage/live/confirmations/revoke", {
+    method: "POST",
+    body: { receiptRef, reason },
+    action: "live-confirmation-revoke",
+  });
+}
+
+export async function fetchLiveAuditExport(): Promise<Blob> {
+  const session = consumeManagementSession();
+  if (!session) throw new PluginPlatformApiError("Live audit export requires a trusted desktop session", 403);
+  const response = await fetch(`${session.apiBase}/manage/live/audit-export`, {
+    method: "GET",
+    headers: {
+      "X-CandleScope-Plugin-Session": session.sessionToken,
+    },
+    credentials: "omit",
+  });
+  if (!response.ok) {
+    await responseJson(response);
+    throw new PluginPlatformApiError("Live audit export failed", response.status);
+  }
+  const contentType = response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase();
+  const contentLength = Number(response.headers.get("Content-Length") ?? "0");
+  if (
+    contentType !== "application/json"
+    || !Number.isSafeInteger(contentLength)
+    || contentLength < 0
+    || contentLength > 16 * 1024 * 1024
+  ) throw new PluginPlatformApiError("Live audit export response is invalid", 502);
+  const blob = await response.blob();
+  if (
+    blob.size === 0
+    || blob.size > 16 * 1024 * 1024
+    || (contentLength > 0 && blob.size !== contentLength)
+  ) throw new PluginPlatformApiError("Live audit export length is invalid", 502);
+  return blob;
 }

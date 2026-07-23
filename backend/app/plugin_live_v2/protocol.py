@@ -10,7 +10,7 @@ from typing import Any
 from .errors import LiveBrokerError, broker_error
 
 
-LIVE_BROKER_PROTOCOL_VERSION = "candlescope.live-broker/3"
+LIVE_BROKER_PROTOCOL_VERSION = "candlescope.live-broker/4"
 MAX_BROKER_MESSAGE_BYTES = 128 * 1024
 MAX_BROKER_SEQUENCE = (1 << 53) - 1
 
@@ -26,6 +26,15 @@ METHOD_ACCOUNT_REBIND = "account.rebind"
 METHOD_SHADOW_PREPARE = "shadow.prepare"
 METHOD_SHADOW_DESCRIBE = "shadow.describe"
 METHOD_SHADOW_RECONCILE = "shadow.reconcile"
+METHOD_CONTROL_STATUS = "control.status"
+METHOD_CONTROL_SET = "control.set"
+METHOD_CONTROL_KILL = "control.kill"
+METHOD_AUTHORITY_REVOKE = "authority.revoke"
+METHOD_CONFIRMATION_PREVIEW = "confirmation.preview"
+METHOD_CONFIRMATION_ISSUE = "confirmation.issue"
+METHOD_CONFIRMATION_DESCRIBE = "confirmation.describe"
+METHOD_CONFIRMATION_REVOKE = "confirmation.revoke"
+METHOD_AUDIT_EXPORT_PAGE = "audit.export.page"
 METHOD_SHUTDOWN = "foundation.shutdown"
 
 LIVE_BROKER_METHODS = frozenset(
@@ -42,6 +51,15 @@ LIVE_BROKER_METHODS = frozenset(
         METHOD_SHADOW_PREPARE,
         METHOD_SHADOW_DESCRIBE,
         METHOD_SHADOW_RECONCILE,
+        METHOD_CONTROL_STATUS,
+        METHOD_CONTROL_SET,
+        METHOD_CONTROL_KILL,
+        METHOD_AUTHORITY_REVOKE,
+        METHOD_CONFIRMATION_PREVIEW,
+        METHOD_CONFIRMATION_ISSUE,
+        METHOD_CONFIRMATION_DESCRIBE,
+        METHOD_CONFIRMATION_REVOKE,
+        METHOD_AUDIT_EXPORT_PAGE,
         METHOD_SHUTDOWN,
     }
 )

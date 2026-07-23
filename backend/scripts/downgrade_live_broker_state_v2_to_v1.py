@@ -22,6 +22,7 @@ for source_root in (BACKEND_ROOT, SDK_SOURCE):
         sys.path.insert(0, source)
 
 from app.plugin_host.framing import strict_json_loads  # noqa: E402
+from app.plugin_live_v2.control import LIVE_CONTROL_FILENAME  # noqa: E402
 from app.plugin_live_v2.journal import SHADOW_JOURNAL_FILENAME  # noqa: E402
 from app.plugin_live_v2.state import (  # noqa: E402
     BROKER_STATE_SCHEMA_V1,
@@ -59,16 +60,17 @@ def downgrade_live_broker_state(
     broker_root = Path(root).expanduser().resolve(strict=False)
     state_path = broker_root / "broker-state-v1.json"
     backup = Path(backup_path).expanduser().resolve(strict=False)
-    shadow_paths = tuple(
-        broker_root / f"{SHADOW_JOURNAL_FILENAME}{suffix}"
+    post_wp_c_paths = tuple(
+        broker_root / f"{filename}{suffix}"
+        for filename in (SHADOW_JOURNAL_FILENAME, LIVE_CONTROL_FILENAME)
         for suffix in ("", "-wal", "-shm")
     )
     if any(
         path.exists() or path.is_symlink()
-        for path in shadow_paths
+        for path in post_wp_c_paths
     ):
         raise ValueError(
-            "WP-D shadow journal must be archived before Broker state downgrade"
+            "WP-D/WP-E stores must be archived before Broker state downgrade"
         )
     if backup == state_path:
         raise ValueError("backup path must differ from Broker state path")

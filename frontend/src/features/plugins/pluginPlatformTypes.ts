@@ -376,6 +376,78 @@ export interface PluginPaperStatus {
   }>;
 }
 
+export type PluginLiveControlMode =
+  | "disabled"
+  | "unavailable"
+  | "disarmed"
+  | "armed"
+  | "killed";
+
+export interface PluginLiveControlStatus {
+  schemaVersion: "candlescope.live-control-status/1";
+  available: boolean;
+  mode: PluginLiveControlMode;
+  generation: number;
+  policyEpoch: number;
+  updatedAt: string | null;
+  outstandingConfirmationCount: number;
+  confirmationCounts: {
+    consumed: number;
+    expired: number;
+    issued: number;
+    revoked: number;
+  };
+  eventSequence: number;
+  eventSha256: string | null;
+  liveSubmitAvailable: false;
+  liveCancelAvailable: false;
+  liveTransferAvailable: false;
+}
+
+export interface PluginLiveConfirmationPreview {
+  schemaVersion: "candlescope.live-confirmation-preview/1";
+  intentSha256: string;
+  pluginId: string;
+  connectorId: string;
+  publisherIdentity: string;
+  version: string;
+  clientOrderId: string;
+  instrumentId: string;
+  side: "buy" | "sell";
+  orderType: "limit";
+  quantity: string;
+  limitPrice: string;
+  policyEpoch: number;
+  controlGeneration: number;
+  liveSubmitAvailable: false;
+  liveCancelAvailable: false;
+}
+
+export interface PluginLiveConfirmationReceipt {
+  schemaVersion: "candlescope.live-confirmation/1";
+  receiptRef: string;
+  receiptId: string;
+  intentSha256: string;
+  pluginId: string;
+  connectorId: string;
+  publisherIdentity: string;
+  version: string;
+  clientOrderId: string;
+  instrumentId: string;
+  side: "buy" | "sell";
+  orderType: "limit";
+  quantity: string;
+  limitPrice: string;
+  policyEpoch: number;
+  controlGeneration: number;
+  state: "issued";
+  issuedAt: string;
+  expiresAt: string;
+  resolvedAt: null;
+  liveSubmitAvailable: false;
+  liveCancelAvailable: false;
+}
+
 export interface PluginPlatformRuntime {
   view: {
     catalog: PluginCatalog | null;
@@ -389,6 +461,8 @@ export interface PluginPlatformRuntime {
     openViewId: string | null;
     openSettingsId: string | null;
     notice: string | null;
+    liveControl: PluginLiveControlStatus;
+    liveControlOpen: boolean;
     markerSource: ExternalMarkerSource;
     marketIdentity: PluginMarketIdentity;
   };
@@ -419,6 +493,31 @@ export interface PluginPlatformRuntime {
       scope?: Record<string, JsonValue>,
     ): Promise<void>;
     setPaperKillSwitch(enabled: boolean): Promise<void>;
+    openLiveControl(): void;
+    closeLiveControl(): void;
+    setLiveControlMode(
+      mode: "armed" | "disarmed",
+      reason: string,
+      acknowledgeKill: boolean,
+    ): Promise<void>;
+    killLiveControl(reason: string): Promise<void>;
+    revokeLiveAuthority(
+      scopeType: "grant" | "plugin" | "publisher" | "credential",
+      subject: string,
+      reason: string,
+    ): Promise<void>;
+    previewLiveConfirmation(
+      accountRef: string,
+      shadowRef: string,
+    ): Promise<PluginLiveConfirmationPreview>;
+    issueLiveConfirmation(
+      accountRef: string,
+      shadowRef: string,
+      preview: PluginLiveConfirmationPreview,
+      ttlSeconds?: number,
+    ): Promise<PluginLiveConfirmationReceipt>;
+    revokeLiveConfirmation(receiptRef: string, reason: string): Promise<void>;
+    downloadLiveAudit(): Promise<void>;
   };
 }
 

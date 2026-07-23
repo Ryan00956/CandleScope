@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePluginCatalog, parsePluginManagementDetail, parsePluginUiSnapshot } from "../pluginPlatformParsers.js";
+import {
+  parsePluginCatalog,
+  parsePluginLiveConfirmationPreview,
+  parsePluginLiveConfirmationReceipt,
+  parsePluginLiveControlStatus,
+  parsePluginManagementDetail,
+  parsePluginUiSnapshot,
+} from "../pluginPlatformParsers.js";
 import { buildPluginRegistries } from "../pluginRegistries.js";
 
 function plugin(id = "acme.scanner", available = true) {
@@ -230,6 +237,85 @@ function paperPlugin() {
     ],
   };
 }
+
+function liveControl(mode: "disabled" | "unavailable" | "disarmed" | "armed" | "killed" = "armed") {
+  const available = ["disarmed", "armed", "killed"].includes(mode);
+  return {
+    schemaVersion: "candlescope.live-control-status/1",
+    available,
+    mode,
+    generation: available ? 4 : 0,
+    policyEpoch: available ? 2 : 0,
+    updatedAt: available ? "2026-07-23T01:02:03Z" : null,
+    outstandingConfirmationCount: available ? 1 : 0,
+    confirmationCounts: {
+      consumed: 2,
+      expired: 1,
+      issued: available ? 1 : 0,
+      revoked: 3,
+    },
+    eventSequence: available ? 8 : 0,
+    eventSha256: available ? `sha256:${"a".repeat(64)}` : null,
+    liveSubmitAvailable: false,
+    liveCancelAvailable: false,
+    liveTransferAvailable: false,
+  };
+}
+
+function confirmationPreview() {
+  return {
+    schemaVersion: "candlescope.live-confirmation-preview/1",
+    intentSha256: `sha256:${"b".repeat(64)}`,
+    pluginId: "candlescope.okx-demo",
+    connectorId: "candlescope.okx-demo-readonly",
+    publisherIdentity: "publisher:test",
+    version: "1.0.0",
+    clientOrderId: "C".repeat(32),
+    instrumentId: "BTC-USDT",
+    side: "buy",
+    orderType: "limit",
+    quantity: "1",
+    limitPrice: "42000",
+    policyEpoch: 2,
+    controlGeneration: 4,
+    liveSubmitAvailable: false,
+    liveCancelAvailable: false,
+  };
+}
+
+test("Live control parsers keep unavailable, armed, and exact intent states fail closed", () => {
+  assert.equal(parsePluginLiveControlStatus(liveControl()).mode, "armed");
+  assert.equal(parsePluginLiveControlStatus(liveControl("unavailable")).available, false);
+  assert.throws(
+    () => parsePluginLiveControlStatus({ ...liveControl(), liveSubmitAvailable: true }),
+    /invalid/i,
+  );
+  assert.throws(
+    () => parsePluginLiveControlStatus({ ...liveControl("disabled"), available: true }),
+    /invalid/i,
+  );
+  const preview = parsePluginLiveConfirmationPreview(confirmationPreview());
+  assert.equal(preview.intentSha256, `sha256:${"b".repeat(64)}`);
+  const receipt = parsePluginLiveConfirmationReceipt({
+    ...confirmationPreview(),
+    schemaVersion: "candlescope.live-confirmation/1",
+    receiptRef: `livecfm_${"R".repeat(43)}`,
+    receiptId: "d".repeat(32),
+    state: "issued",
+    issuedAt: "2026-07-23T01:02:03Z",
+    expiresAt: "2026-07-23T01:03:03Z",
+    resolvedAt: null,
+  });
+  assert.equal(receipt.state, "issued");
+  assert.throws(
+    () => parsePluginLiveConfirmationReceipt({
+      ...receipt,
+      state: "consumed",
+      resolvedAt: "2026-07-23T01:02:04Z",
+    }),
+    /invalid/i,
+  );
+});
 
 test("catalog validator builds only active native registries", () => {
   const parsed = parsePluginCatalog(catalog());

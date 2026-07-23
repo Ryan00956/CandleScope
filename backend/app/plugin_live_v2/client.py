@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import re
 import secrets
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,13 +22,23 @@ from app.plugin_host.framing import (
 )
 from app.plugin_host.process import ManagedSidecarProcess, SidecarProcessSpec
 
+from .audit_export import LiveAuditExportError, verify_live_audit_export
 from .errors import LiveBrokerError, broker_error
 from .protocol import (
     MAX_BROKER_MESSAGE_BYTES,
+    METHOD_AUDIT_EXPORT_PAGE,
     METHOD_ACCOUNT_DESCRIBE,
     METHOD_ACCOUNT_DISCOVER,
     METHOD_ACCOUNT_REBIND,
     METHOD_BOOTSTRAP,
+    METHOD_AUTHORITY_REVOKE,
+    METHOD_CONFIRMATION_DESCRIBE,
+    METHOD_CONFIRMATION_ISSUE,
+    METHOD_CONFIRMATION_PREVIEW,
+    METHOD_CONFIRMATION_REVOKE,
+    METHOD_CONTROL_KILL,
+    METHOD_CONTROL_SET,
+    METHOD_CONTROL_STATUS,
     METHOD_CREDENTIAL_DESCRIBE,
     METHOD_CREDENTIAL_PUT,
     METHOD_CREDENTIAL_REVOKE,
@@ -193,6 +205,16 @@ class ShadowOrderDescription:
 
 def _sha256_text(value: str) -> str:
     return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _exact_result(
@@ -457,6 +479,215 @@ def _shadow_description(value: dict[str, Any]) -> ShadowOrderDescription:
     )
 
 
+def _validated_control_status(value: dict[str, Any]) -> dict[str, Any]:
+    expected = {
+        "schemaVersion",
+        "available",
+        "mode",
+        "generation",
+        "policyEpoch",
+        "updatedAt",
+        "outstandingConfirmationCount",
+        "confirmationCounts",
+        "eventSequence",
+        "eventSha256",
+        "liveSubmitAvailable",
+        "liveCancelAvailable",
+        "liveTransferAvailable",
+    }
+    _exact_result(value, expected, "Live control status")
+    counts = value["confirmationCounts"]
+    if (
+        value["schemaVersion"] != "candlescope.live-control-status/1"
+        or value["available"] is not True
+        or value["mode"] not in {"disarmed", "armed", "killed"}
+        or not isinstance(value["updatedAt"], str)
+        or not value["updatedAt"]
+        or not isinstance(counts, dict)
+        or set(counts) != {"consumed", "expired", "issued", "revoked"}
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, int)
+            or item < 0
+            for item in (
+                value["generation"],
+                value["policyEpoch"],
+                value["outstandingConfirmationCount"],
+                value["eventSequence"],
+                *counts.values(),
+            )
+        )
+        or counts["issued"] != value["outstandingConfirmationCount"]
+        or (
+            value["eventSha256"] is not None
+            and (
+                not isinstance(value["eventSha256"], str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", value["eventSha256"])
+                is None
+            )
+        )
+        or value["liveSubmitAvailable"] is not False
+        or value["liveCancelAvailable"] is not False
+        or value["liveTransferAvailable"] is not False
+    ):
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "Live control status values are invalid",
+            fatal=True,
+        )
+    return dict(value)
+
+
+def _validated_confirmation_preview(value: dict[str, Any]) -> dict[str, Any]:
+    expected = {
+        "schemaVersion",
+        "intentSha256",
+        "pluginId",
+        "connectorId",
+        "publisherIdentity",
+        "version",
+        "clientOrderId",
+        "instrumentId",
+        "side",
+        "orderType",
+        "quantity",
+        "limitPrice",
+        "policyEpoch",
+        "controlGeneration",
+        "liveSubmitAvailable",
+        "liveCancelAvailable",
+    }
+    _exact_result(value, expected, "Live confirmation preview")
+    strings = (
+        value["intentSha256"],
+        value["pluginId"],
+        value["connectorId"],
+        value["publisherIdentity"],
+        value["version"],
+        value["clientOrderId"],
+        value["instrumentId"],
+        value["side"],
+        value["orderType"],
+        value["quantity"],
+        value["limitPrice"],
+    )
+    if (
+        value["schemaVersion"] != "candlescope.live-confirmation-preview/1"
+        or not all(isinstance(item, str) and item for item in strings)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", value["intentSha256"])
+        is None
+        or re.fullmatch(r"[A-Za-z0-9]{32}", value["clientOrderId"]) is None
+        or value["side"] not in {"buy", "sell"}
+        or value["orderType"] != "limit"
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, int)
+            or item < 0
+            for item in (
+                value["policyEpoch"],
+                value["controlGeneration"],
+            )
+        )
+        or value["liveSubmitAvailable"] is not False
+        or value["liveCancelAvailable"] is not False
+    ):
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "Live confirmation preview values are invalid",
+            fatal=True,
+        )
+    return dict(value)
+
+
+def _validated_confirmation(value: dict[str, Any], *, issued: bool) -> dict[str, Any]:
+    expected = {
+        "schemaVersion",
+        "receiptId",
+        "intentSha256",
+        "pluginId",
+        "connectorId",
+        "publisherIdentity",
+        "version",
+        "clientOrderId",
+        "instrumentId",
+        "side",
+        "orderType",
+        "quantity",
+        "limitPrice",
+        "policyEpoch",
+        "controlGeneration",
+        "state",
+        "issuedAt",
+        "expiresAt",
+        "resolvedAt",
+    }
+    if issued:
+        expected |= {
+            "receiptRef",
+            "liveSubmitAvailable",
+            "liveCancelAvailable",
+        }
+    _exact_result(value, expected, "Live confirmation receipt")
+    if (
+        value["schemaVersion"] != "candlescope.live-confirmation/1"
+        or not isinstance(value["receiptId"], str)
+        or re.fullmatch(r"[0-9a-f]{32}", value["receiptId"]) is None
+        or not isinstance(value["intentSha256"], str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", value["intentSha256"])
+        is None
+        or value["state"] not in {"issued", "consumed", "revoked", "expired"}
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, int)
+            or item < 0
+            for item in (
+                value["policyEpoch"],
+                value["controlGeneration"],
+            )
+        )
+        or not all(
+            isinstance(value[key], str) and value[key]
+            for key in (
+                "pluginId",
+                "connectorId",
+                "publisherIdentity",
+                "version",
+                "clientOrderId",
+                "instrumentId",
+                "side",
+                "orderType",
+                "quantity",
+                "limitPrice",
+                "issuedAt",
+                "expiresAt",
+            )
+        )
+        or (
+            value["resolvedAt"] is not None
+            and not isinstance(value["resolvedAt"], str)
+        )
+        or (
+            issued
+            and (
+                not isinstance(value["receiptRef"], str)
+                or re.fullmatch(
+                    r"livecfm_[A-Za-z0-9_-]{43}",
+                    value["receiptRef"],
+                )
+                is None
+                or value["liveSubmitAvailable"] is not False
+                or value["liveCancelAvailable"] is not False
+            )
+        )
+    ):
+        raise broker_error(
+            "LIVE_BROKER_RESPONSE_INVALID",
+            "Live confirmation receipt values are invalid",
+            fatal=True,
+        )
+    return dict(value)
+
+
 class LiveBrokerController:
     """Start no process when disabled; own exactly one private worker when enabled."""
 
@@ -471,6 +702,7 @@ class LiveBrokerController:
         allow_test_backend: bool = False,
         read_only_accounts_enabled: bool = False,
         reconciliation_shadow_enabled: bool = False,
+        native_control_enabled: bool = False,
         request_timeout_seconds: float = DEFAULT_BROKER_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         if not isinstance(enabled, bool):
@@ -494,6 +726,12 @@ class LiveBrokerController:
             raise ValueError(
                 "reconciliation_shadow_enabled requires read-only accounts"
             )
+        if not isinstance(native_control_enabled, bool):
+            raise TypeError("native_control_enabled must be a boolean")
+        if native_control_enabled and not reconciliation_shadow_enabled:
+            raise ValueError(
+                "native_control_enabled requires reconciliation shadow"
+            )
         if (
             isinstance(request_timeout_seconds, bool)
             or not isinstance(request_timeout_seconds, (int, float))
@@ -513,6 +751,7 @@ class LiveBrokerController:
         self.vault_backend = vault_backend
         self.read_only_accounts_enabled = read_only_accounts_enabled
         self.reconciliation_shadow_enabled = reconciliation_shadow_enabled
+        self.native_control_enabled = native_control_enabled
         self.request_timeout_seconds = float(request_timeout_seconds)
         self._worker_path = Path(__file__).with_name("worker.py").resolve(
             strict=False
@@ -525,6 +764,7 @@ class LiveBrokerController:
         self._last_error_code: str | None = None
         self._last_stderr_tail = ""
         self._restart_count = 0
+        self._control_status: dict[str, Any] = self._unavailable_control_status()
         self._operation_lock = asyncio.Lock()
 
     @property
@@ -547,6 +787,31 @@ class LiveBrokerController:
             else self._last_stderr_tail
         )
 
+    def _unavailable_control_status(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": "candlescope.live-control-status/1",
+            "available": False,
+            "mode": "unavailable" if self.native_control_enabled else "disabled",
+            "generation": 0,
+            "policyEpoch": self._policy_epoch,
+            "updatedAt": None,
+            "outstandingConfirmationCount": 0,
+            "confirmationCounts": {
+                "consumed": 0,
+                "expired": 0,
+                "issued": 0,
+                "revoked": 0,
+            },
+            "eventSequence": 0,
+            "eventSha256": None,
+            "liveSubmitAvailable": False,
+            "liveCancelAvailable": False,
+            "liveTransferAvailable": False,
+        }
+
+    def control_status_cached(self) -> dict[str, Any]:
+        return dict(self._control_status)
+
     def status(self) -> dict[str, Any]:
         process = self.process
         return {
@@ -566,6 +831,8 @@ class LiveBrokerController:
             "reconciliationShadowEnabled": (
                 self.reconciliation_shadow_enabled
             ),
+            "nativeControlEnabled": self.native_control_enabled,
+            "control": dict(self._control_status),
             "networkMethods": (
                 3
                 if self.reconciliation_shadow_enabled
@@ -595,6 +862,11 @@ class LiveBrokerController:
                     "shadow-on"
                     if self.reconciliation_shadow_enabled
                     else "shadow-off"
+                ),
+                (
+                    "control-on"
+                    if self.native_control_enabled
+                    else "control-off"
                 ),
             ),
             working_directory=self._worker_path.parents[2],
@@ -700,6 +972,14 @@ class LiveBrokerController:
                     "Broker bootstrap proof does not match the private session",
                     fatal=True,
                 )
+            if self.native_control_enabled:
+                control = await self._exchange_locked(
+                    METHOD_CONTROL_STATUS,
+                    {},
+                )
+                self._control_status = _validated_control_status(control)
+            else:
+                self._control_status = self._unavailable_control_status()
             self._state = "ready"
         except BaseException as exc:
             self._last_error_code = (
@@ -708,6 +988,7 @@ class LiveBrokerController:
                 else "LIVE_BROKER_START_FAILED"
             )
             self._state = "failed"
+            self._control_status = self._unavailable_control_status()
             await self._terminate_locked()
             raise
 
@@ -715,6 +996,7 @@ class LiveBrokerController:
         managed = self._managed
         self._managed = None
         self._session_id = None
+        self._control_status = self._unavailable_control_status()
         if managed is not None:
             await managed.terminate()
             self._last_stderr_tail = managed.stderr_tail
@@ -1213,6 +1495,422 @@ class LiveBrokerController:
                 },
             )
         return _shadow_description(result)
+
+    def _require_native_control(self) -> None:
+        if not self.native_control_enabled:
+            raise broker_error(
+                "LIVE_NATIVE_CONTROL_DISABLED",
+                "Host-native Live control is disabled",
+            )
+
+    async def control_status(self) -> dict[str, Any]:
+        self._require_native_control()
+        async with self._operation_lock:
+            result = await self._exchange_locked(METHOD_CONTROL_STATUS, {})
+            self._control_status = _validated_control_status(result)
+            return dict(self._control_status)
+
+    async def set_control_mode(
+        self,
+        mode: str,
+        *,
+        reason: str,
+        acknowledge_kill: bool = False,
+    ) -> dict[str, Any]:
+        self._require_native_control()
+        if mode not in {"armed", "disarmed"}:
+            raise ValueError("mode must be armed or disarmed")
+        if (
+            not isinstance(reason, str)
+            or not reason
+            or reason != reason.strip()
+            or len(reason) > 128
+        ):
+            raise ValueError("reason is invalid")
+        if not isinstance(acknowledge_kill, bool):
+            raise TypeError("acknowledge_kill must be a boolean")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_CONTROL_SET,
+                {
+                    "mode": mode,
+                    "reason": reason,
+                    "acknowledgeKill": acknowledge_kill,
+                },
+            )
+            self._control_status = _validated_control_status(result)
+            return dict(self._control_status)
+
+    async def kill_control(self, *, reason: str) -> dict[str, Any]:
+        self._require_native_control()
+        if (
+            not isinstance(reason, str)
+            or not reason
+            or reason != reason.strip()
+            or len(reason) > 128
+        ):
+            raise ValueError("reason is invalid")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_CONTROL_KILL,
+                {"reason": reason},
+            )
+            revocation = result.pop("revocation", None)
+            revoked_count = result.pop("revokedConfirmationCount", None)
+            self._control_status = _validated_control_status(result)
+            if (
+                not isinstance(revocation, dict)
+                or revocation.get("advanced") is not True
+                or isinstance(revoked_count, bool)
+                or not isinstance(revoked_count, int)
+                or revoked_count < 0
+            ):
+                raise broker_error(
+                    "LIVE_BROKER_RESPONSE_INVALID",
+                    "Live kill response is invalid",
+                    fatal=True,
+                )
+            return {
+                **self._control_status,
+                "revokedConfirmationCount": revoked_count,
+                "revocation": revocation,
+            }
+
+    async def revoke_authority(
+        self,
+        *,
+        scope_type: str,
+        subject: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        self._require_native_control()
+        if scope_type not in {
+            "grant",
+            "plugin",
+            "publisher",
+            "credential",
+        }:
+            raise ValueError("scope_type is invalid")
+        if (
+            not isinstance(subject, str)
+            or not subject
+            or subject != subject.strip()
+            or len(subject) > 256
+            or not isinstance(reason, str)
+            or not reason
+            or reason != reason.strip()
+            or len(reason) > 128
+        ):
+            raise ValueError("authority revoke values are invalid")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_AUTHORITY_REVOKE,
+                {
+                    "scopeType": scope_type,
+                    "subject": subject,
+                    "reason": reason,
+                },
+            )
+            returned_scope = result.pop("scopeType", None)
+            revocation = result.pop("revocation", None)
+            revoked_count = result.pop("revokedConfirmationCount", None)
+            self._control_status = _validated_control_status(result)
+            if (
+                returned_scope != scope_type
+                or not isinstance(revocation, dict)
+                or revocation.get("advanced") is not True
+                or isinstance(revoked_count, bool)
+                or not isinstance(revoked_count, int)
+                or revoked_count < 0
+            ):
+                raise broker_error(
+                    "LIVE_BROKER_RESPONSE_INVALID",
+                    "Live authority revoke response is invalid",
+                    fatal=True,
+                )
+            return {
+                **self._control_status,
+                "scopeType": returned_scope,
+                "revokedConfirmationCount": revoked_count,
+                "revocation": revocation,
+            }
+
+    @staticmethod
+    def _opaque_live_refs(account_ref: str, shadow_ref: str) -> None:
+        if (
+            not isinstance(account_ref, str)
+            or re.fullmatch(r"acct_[A-Za-z0-9_-]{43}", account_ref) is None
+            or not isinstance(shadow_ref, str)
+            or re.fullmatch(r"shdw_[A-Za-z0-9_-]{43}", shadow_ref) is None
+        ):
+            raise ValueError("Live account or shadow reference is invalid")
+
+    async def preview_confirmation(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+    ) -> dict[str, Any]:
+        self._require_native_control()
+        self._opaque_live_refs(account_ref, shadow_ref)
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_CONFIRMATION_PREVIEW,
+                {"accountRef": account_ref, "shadowRef": shadow_ref},
+            )
+        return _validated_confirmation_preview(result)
+
+    async def issue_confirmation(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+        expected_intent_sha256: str,
+        expected_policy_epoch: int,
+        expected_control_generation: int,
+        ttl_seconds: int = 60,
+    ) -> dict[str, Any]:
+        self._require_native_control()
+        self._opaque_live_refs(account_ref, shadow_ref)
+        if (
+            not isinstance(expected_intent_sha256, str)
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                expected_intent_sha256,
+            )
+            is None
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, int)
+                or item < 0
+                for item in (
+                    expected_policy_epoch,
+                    expected_control_generation,
+                )
+            )
+            or isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, int)
+            or not 15 <= ttl_seconds <= 120
+        ):
+            raise ValueError("confirmation issue values are invalid")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_CONFIRMATION_ISSUE,
+                {
+                    "accountRef": account_ref,
+                    "shadowRef": shadow_ref,
+                    "expectedIntentSha256": expected_intent_sha256,
+                    "expectedPolicyEpoch": expected_policy_epoch,
+                    "expectedControlGeneration": expected_control_generation,
+                    "ttlSeconds": ttl_seconds,
+                },
+            )
+            confirmation = _validated_confirmation(result, issued=True)
+            status = await self._exchange_locked(METHOD_CONTROL_STATUS, {})
+            self._control_status = _validated_control_status(status)
+        return confirmation
+
+    async def describe_confirmation(self, receipt_ref: str) -> dict[str, Any]:
+        self._require_native_control()
+        if (
+            not isinstance(receipt_ref, str)
+            or re.fullmatch(r"livecfm_[A-Za-z0-9_-]{43}", receipt_ref)
+            is None
+        ):
+            raise ValueError("receipt_ref is invalid")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_CONFIRMATION_DESCRIBE,
+                {"receiptRef": receipt_ref},
+            )
+        return _validated_confirmation(result, issued=False)
+
+    async def revoke_confirmation(
+        self,
+        receipt_ref: str,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        self._require_native_control()
+        if (
+            not isinstance(receipt_ref, str)
+            or re.fullmatch(r"livecfm_[A-Za-z0-9_-]{43}", receipt_ref)
+            is None
+            or not isinstance(reason, str)
+            or not reason
+            or reason != reason.strip()
+            or len(reason) > 128
+        ):
+            raise ValueError("confirmation revoke values are invalid")
+        async with self._operation_lock:
+            result = await self._exchange_locked(
+                METHOD_CONFIRMATION_REVOKE,
+                {"receiptRef": receipt_ref, "reason": reason},
+            )
+            confirmation = _validated_confirmation(result, issued=False)
+            status = await self._exchange_locked(METHOD_CONTROL_STATUS, {})
+            self._control_status = _validated_control_status(status)
+        return confirmation
+
+    async def export_audit(self) -> dict[str, Any]:
+        self._require_native_control()
+        control_after = 0
+        shadow_after = 0
+        control_through = 0
+        shadow_through = 0
+        control_events: list[dict[str, Any]] = []
+        shadow_events: list[dict[str, Any]] = []
+        broker_id_sha256: str | None = None
+        control_head: dict[str, Any] | None = None
+        shadow_head: dict[str, Any] | None = None
+        control_status: dict[str, Any] | None = None
+        async with self._operation_lock:
+            while True:
+                result = await self._exchange_locked(
+                    METHOD_AUDIT_EXPORT_PAGE,
+                    {
+                        "controlAfterSequence": control_after,
+                        "shadowAfterSequence": shadow_after,
+                        "controlThroughSequence": control_through,
+                        "shadowThroughSequence": shadow_through,
+                        "limit": 16,
+                    },
+                )
+                expected = {
+                    "schemaVersion",
+                    "brokerIdSha256",
+                    "policyEpoch",
+                    "controlStatus",
+                    "controlHead",
+                    "shadowHead",
+                    "controlEvents",
+                    "shadowEvents",
+                }
+                _exact_result(result, expected, "Live audit page")
+                if (
+                    result["schemaVersion"]
+                    != "candlescope.live-audit-page/1"
+                    or not isinstance(result["controlEvents"], list)
+                    or not isinstance(result["shadowEvents"], list)
+                    or len(result["controlEvents"]) > 16
+                    or len(result["shadowEvents"]) > 16
+                ):
+                    raise broker_error(
+                        "LIVE_BROKER_RESPONSE_INVALID",
+                        "Live audit page is invalid",
+                        fatal=True,
+                    )
+                page_control_head = result["controlHead"]
+                page_shadow_head = result["shadowHead"]
+                if (
+                    not isinstance(page_control_head, dict)
+                    or set(page_control_head) != {"sequence", "sha256"}
+                    or not isinstance(page_shadow_head, dict)
+                    or set(page_shadow_head) != {"sequence", "sha256"}
+                ):
+                    raise broker_error(
+                        "LIVE_BROKER_RESPONSE_INVALID",
+                        "Live audit page head is invalid",
+                        fatal=True,
+                    )
+                if control_head is None:
+                    broker_id_sha256 = result["brokerIdSha256"]
+                    control_head = dict(page_control_head)
+                    shadow_head = dict(page_shadow_head)
+                    control_through = control_head["sequence"]
+                    shadow_through = shadow_head["sequence"]
+                    control_status = _validated_control_status(
+                        result["controlStatus"]
+                    )
+                elif (
+                    result["brokerIdSha256"] != broker_id_sha256
+                    or page_control_head != control_head
+                    or page_shadow_head != shadow_head
+                    or result["controlStatus"] != control_status
+                ):
+                    raise broker_error(
+                        "LIVE_AUDIT_EXPORT_SNAPSHOT_CHANGED",
+                        "Live audit snapshot changed during export",
+                        fatal=True,
+                    )
+                control_events.extend(result["controlEvents"])
+                shadow_events.extend(result["shadowEvents"])
+                if result["controlEvents"]:
+                    last_control = result["controlEvents"][-1]
+                    if not isinstance(last_control, dict):
+                        raise broker_error(
+                            "LIVE_BROKER_RESPONSE_INVALID",
+                            "Live control audit event is invalid",
+                            fatal=True,
+                        )
+                    control_after = last_control.get("sequence", -1)
+                if result["shadowEvents"]:
+                    last_shadow = result["shadowEvents"][-1]
+                    if (
+                        not isinstance(last_shadow, dict)
+                        or not isinstance(last_shadow.get("event"), dict)
+                    ):
+                        raise broker_error(
+                            "LIVE_BROKER_RESPONSE_INVALID",
+                            "Live shadow audit event is invalid",
+                            fatal=True,
+                        )
+                    shadow_after = last_shadow["event"].get("sequence", -1)
+                if (
+                    control_after == control_through
+                    and shadow_after == shadow_through
+                ):
+                    break
+                if (
+                    not result["controlEvents"]
+                    and control_after < control_through
+                ) or (
+                    not result["shadowEvents"]
+                    and shadow_after < shadow_through
+                ):
+                    raise broker_error(
+                        "LIVE_BROKER_RESPONSE_INVALID",
+                        "Live audit page omitted source events",
+                        fatal=True,
+                    )
+            assert broker_id_sha256 is not None
+            assert control_head is not None
+            assert shadow_head is not None
+            assert control_status is not None
+            self._control_status = dict(control_status)
+            body = {
+                "schemaVersion": "candlescope.live-audit-export/1",
+                "generatedAt": datetime.now(UTC).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "brokerIdSha256": broker_id_sha256,
+                "policyEpoch": self._policy_epoch,
+                "controlStatus": control_status,
+                "controlHead": control_head,
+                "shadowHead": shadow_head,
+                "controlEvents": control_events,
+                "shadowEvents": shadow_events,
+                "redaction": {
+                    "opaqueHandlesIncluded": False,
+                    "credentialMaterialIncluded": False,
+                    "authenticationDataIncluded": False,
+                    "rawVenueOrderIdsIncluded": False,
+                    "rawNetworkResponsesIncluded": False,
+                },
+                "liveMutationMethodsAvailable": False,
+            }
+            exported = {
+                **body,
+                "exportSha256": _sha256_text(_canonical_json(body)),
+            }
+            try:
+                return verify_live_audit_export(exported)
+            except LiveAuditExportError as exc:
+                raise broker_error(
+                    "LIVE_AUDIT_EXPORT_INVALID",
+                    "Live audit export failed source-chain validation",
+                    fatal=True,
+                ) from exc
 
     async def advance_policy(self, *, reason: str) -> int:
         if (

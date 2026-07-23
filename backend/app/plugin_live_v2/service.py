@@ -20,12 +20,22 @@ from .accounts import (
     ReadOnlyAccountConnector,
     ReadOnlyAccountProof,
 )
+from .control import LiveControlLedger
 from .errors import LiveBrokerError, broker_error
 from .protocol import (
     METHOD_ACCOUNT_DESCRIBE,
     METHOD_ACCOUNT_DISCOVER,
     METHOD_ACCOUNT_REBIND,
     METHOD_BOOTSTRAP,
+    METHOD_AUDIT_EXPORT_PAGE,
+    METHOD_AUTHORITY_REVOKE,
+    METHOD_CONFIRMATION_DESCRIBE,
+    METHOD_CONFIRMATION_ISSUE,
+    METHOD_CONFIRMATION_PREVIEW,
+    METHOD_CONFIRMATION_REVOKE,
+    METHOD_CONTROL_KILL,
+    METHOD_CONTROL_SET,
+    METHOD_CONTROL_STATUS,
     METHOD_CREDENTIAL_DESCRIBE,
     METHOD_CREDENTIAL_PUT,
     METHOD_CREDENTIAL_REVOKE,
@@ -122,14 +132,21 @@ class LiveBrokerService:
         account_connector: ReadOnlyAccountConnector | None = None,
         reconciliation_shadow_enabled: bool = False,
         reconciliation_connector: ReadOnlyOrderQueryConnector | None = None,
+        native_control_enabled: bool = False,
     ) -> None:
         if not isinstance(read_only_accounts_enabled, bool):
             raise TypeError("read_only_accounts_enabled must be a boolean")
         if not isinstance(reconciliation_shadow_enabled, bool):
             raise TypeError("reconciliation_shadow_enabled must be a boolean")
+        if not isinstance(native_control_enabled, bool):
+            raise TypeError("native_control_enabled must be a boolean")
         if reconciliation_shadow_enabled and not read_only_accounts_enabled:
             raise ValueError(
                 "reconciliation_shadow_enabled requires read-only accounts"
+            )
+        if native_control_enabled and not reconciliation_shadow_enabled:
+            raise ValueError(
+                "native_control_enabled requires reconciliation shadow"
             )
         if account_connector is not None and not read_only_accounts_enabled:
             raise ValueError(
@@ -199,6 +216,16 @@ class LiveBrokerService:
         self.shadow_journal = (
             ShadowOrderJournal(self.root, broker_id=self.state.broker_id)
             if reconciliation_shadow_enabled
+            else None
+        )
+        self.native_control_enabled = native_control_enabled
+        self.control_ledger = (
+            LiveControlLedger(
+                self.root,
+                broker_id=self.state.broker_id,
+                policy_epoch=self.state.policy_epoch,
+            )
+            if native_control_enabled
             else None
         )
         self._session_id: str | None = None
@@ -357,6 +384,24 @@ class LiveBrokerService:
             return self._describe_shadow(request)
         if request.method == METHOD_SHADOW_RECONCILE:
             return self._reconcile_shadow(request)
+        if request.method == METHOD_CONTROL_STATUS:
+            return self._control_status(request)
+        if request.method == METHOD_CONTROL_SET:
+            return self._set_control(request)
+        if request.method == METHOD_CONTROL_KILL:
+            return self._kill_control(request)
+        if request.method == METHOD_AUTHORITY_REVOKE:
+            return self._revoke_authority(request)
+        if request.method == METHOD_CONFIRMATION_PREVIEW:
+            return self._preview_confirmation(request)
+        if request.method == METHOD_CONFIRMATION_ISSUE:
+            return self._issue_confirmation(request)
+        if request.method == METHOD_CONFIRMATION_DESCRIBE:
+            return self._describe_confirmation(request)
+        if request.method == METHOD_CONFIRMATION_REVOKE:
+            return self._revoke_confirmation(request)
+        if request.method == METHOD_AUDIT_EXPORT_PAGE:
+            return self._audit_export_page(request)
         if request.method == METHOD_SHUTDOWN:
             return self._shutdown(request)
         raise broker_error(
@@ -408,6 +453,14 @@ class LiveBrokerService:
                 details={"currentPolicyEpoch": self.policy_epoch},
             )
         _text(request.params["reason"], "policy.advance reason", maximum=128)
+        result = self._advance_policy_state(next_epoch)
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            result,
+        )
+
+    def _advance_policy_state(self, next_epoch: int) -> dict[str, Any]:
         record_ids = {item.record_id for item in self.state.credentials}
         account_count = len(self.state.accounts)
         pending = set(self.state.pending_deletes) | record_ids
@@ -422,16 +475,12 @@ class LiveBrokerService:
         self.state_store.write(updated)
         self.state = updated
         self._cleanup_pending_deletes()
-        return success_response(
-            request.sequence,
-            self.policy_epoch,
-            {
-                "advanced": True,
-                "revokedCredentialCount": len(record_ids),
-                "revokedAccountCount": account_count,
-                "pendingDeleteCount": len(self.state.pending_deletes),
-            },
-        )
+        return {
+            "advanced": True,
+            "revokedCredentialCount": len(record_ids),
+            "revokedAccountCount": account_count,
+            "pendingDeleteCount": len(self.state.pending_deletes),
+        }
 
     def _put_credential(self, request: BrokerRequest) -> BrokerResponse:
         _exact_params(
@@ -591,6 +640,24 @@ class LiveBrokerService:
             request.params,
             "credential.revoke credentialHandle",
         )
+        if self.control_ledger is not None:
+            next_epoch = self.policy_epoch + 1
+            self._advance_policy_state(next_epoch)
+            self.control_ledger.force_killed(
+                policy_epoch=next_epoch,
+                reason="credential-revoked",
+                event_type="authority-revoked",
+                scope_type="credential",
+                subject_sha256=_sha256_text(handle),
+            )
+            return success_response(
+                request.sequence,
+                self.policy_epoch,
+                {
+                    "revoked": True,
+                    "pendingDeleteCount": len(self.state.pending_deletes),
+                },
+            )
         binding = self._find_binding(handle)
         if binding is None:
             return success_response(
@@ -1079,6 +1146,418 @@ class LiveBrokerService:
             observed.metadata(),
         )
 
+    def _require_control_ledger(self) -> LiveControlLedger:
+        ledger = self.control_ledger
+        if not self.native_control_enabled or ledger is None:
+            raise broker_error(
+                "LIVE_NATIVE_CONTROL_DISABLED",
+                "Host-native Live control is disabled",
+            )
+        return ledger
+
+    def _control_status(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_control_ledger()
+        _exact_params(request.params, set(), "control.status params")
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            ledger.status(),
+        )
+
+    def _set_control(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_control_ledger()
+        _exact_params(
+            request.params,
+            {"mode", "reason", "acknowledgeKill"},
+            "control.set params",
+        )
+        mode = request.params["mode"]
+        acknowledge = request.params["acknowledgeKill"]
+        if mode not in {"armed", "disarmed"} or not isinstance(
+            acknowledge, bool
+        ):
+            raise broker_error(
+                "LIVE_CONTROL_PARAMS_INVALID",
+                "control mode or acknowledgement is invalid",
+            )
+        reason = _text(
+            request.params["reason"],
+            "control.set reason",
+            maximum=128,
+        )
+        status = ledger.set_mode(
+            mode,
+            policy_epoch=self.policy_epoch,
+            reason=reason,
+            acknowledge_kill=acknowledge,
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            status,
+        )
+
+    def _kill_control(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_control_ledger()
+        _exact_params(request.params, {"reason"}, "control.kill params")
+        reason = _text(
+            request.params["reason"],
+            "control.kill reason",
+            maximum=128,
+        )
+        next_epoch = self.policy_epoch + 1
+        revoked = self._advance_policy_state(next_epoch)
+        status = ledger.force_killed(
+            policy_epoch=next_epoch,
+            reason=reason,
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            {**status, "revocation": revoked},
+        )
+
+    def _revoke_authority(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_control_ledger()
+        _exact_params(
+            request.params,
+            {"scopeType", "subject", "reason"},
+            "authority.revoke params",
+        )
+        scope_type = request.params["scopeType"]
+        if scope_type not in {
+            "grant",
+            "plugin",
+            "publisher",
+            "credential",
+        }:
+            raise broker_error(
+                "LIVE_CONTROL_PARAMS_INVALID",
+                "authority revoke scope is invalid",
+            )
+        subject = _text(
+            request.params["subject"],
+            "authority.revoke subject",
+            maximum=256,
+        )
+        if (
+            scope_type == "credential"
+            and _CREDENTIAL_HANDLE.fullmatch(subject) is None
+        ):
+            raise broker_error(
+                "LIVE_CONTROL_PARAMS_INVALID",
+                "credential revoke subject is invalid",
+            )
+        reason = _text(
+            request.params["reason"],
+            "authority.revoke reason",
+            maximum=128,
+        )
+        next_epoch = self.policy_epoch + 1
+        revoked = self._advance_policy_state(next_epoch)
+        status = ledger.force_killed(
+            policy_epoch=next_epoch,
+            reason=reason,
+            event_type="authority-revoked",
+            scope_type=scope_type,
+            subject_sha256=_sha256_text(subject),
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            {**status, "scopeType": scope_type, "revocation": revoked},
+        )
+
+    def _confirmation_metadata(
+        self,
+        *,
+        account_ref: str,
+        shadow_ref: str,
+    ) -> dict[str, Any]:
+        ledger = self._require_control_ledger()
+        journal = self._require_shadow_journal()
+        if ledger.mode != "armed":
+            raise broker_error(
+                "LIVE_CONTROL_NOT_ARMED",
+                "Live control must be armed before confirmation review",
+            )
+        account = self._find_account(account_ref)
+        if (
+            account is None
+            or account.status != "active"
+            or account.policy_epoch != self.policy_epoch
+        ):
+            raise broker_error(
+                "LIVE_CONFIRMATION_ACCOUNT_UNAVAILABLE",
+                "confirmation account binding is unavailable",
+            )
+        self._current_account_credential(account)
+        record = journal.describe(shadow_ref)
+        if (
+            record.state != "prepared"
+            or record.reconcile_attempt_count != 0
+            or record.created_policy_epoch != self.policy_epoch
+            or record.account_handle_sha256 != _sha256_text(account_ref)
+            or record.canonical_account_sha256
+            != account.canonical_account_sha256
+            or record.credential_handle_sha256
+            != account.credential_handle_sha256
+            or record.plugin_id != account.plugin_id
+            or record.connector_id != account.connector_id
+            or record.publisher_identity != account.publisher_identity
+            or record.version != account.version
+        ):
+            raise broker_error(
+                "LIVE_CONFIRMATION_INTENT_UNAVAILABLE",
+                "shadow intent is stale, reconciled, or bound to another account",
+            )
+        return {
+            "schemaVersion": "candlescope.live-confirmation-preview/1",
+            "intentSha256": record.intent_sha256,
+            "pluginId": record.plugin_id,
+            "connectorId": record.connector_id,
+            "publisherIdentity": record.publisher_identity,
+            "version": record.version,
+            "clientOrderId": record.client_order_id,
+            "instrumentId": record.instrument_id,
+            "side": record.side,
+            "orderType": record.order_type,
+            "quantity": record.quantity,
+            "limitPrice": record.limit_price,
+            "policyEpoch": self.policy_epoch,
+            "controlGeneration": ledger.generation,
+            "liveSubmitAvailable": False,
+            "liveCancelAvailable": False,
+        }
+
+    def _preview_confirmation(self, request: BrokerRequest) -> BrokerResponse:
+        _exact_params(
+            request.params,
+            {"accountRef", "shadowRef"},
+            "confirmation.preview params",
+        )
+        account_ref = self._account_handle(
+            request.params,
+            "confirmation.preview accountRef",
+        )
+        shadow_ref = self._shadow_ref(
+            request.params,
+            "confirmation.preview shadowRef",
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            self._confirmation_metadata(
+                account_ref=account_ref,
+                shadow_ref=shadow_ref,
+            ),
+        )
+
+    def _issue_confirmation(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_control_ledger()
+        _exact_params(
+            request.params,
+            {
+                "accountRef",
+                "shadowRef",
+                "expectedIntentSha256",
+                "expectedPolicyEpoch",
+                "expectedControlGeneration",
+                "ttlSeconds",
+            },
+            "confirmation.issue params",
+        )
+        account_ref = self._account_handle(
+            request.params,
+            "confirmation.issue accountRef",
+        )
+        shadow_ref = self._shadow_ref(
+            request.params,
+            "confirmation.issue shadowRef",
+        )
+        preview = self._confirmation_metadata(
+            account_ref=account_ref,
+            shadow_ref=shadow_ref,
+        )
+        expected_epoch = request.params["expectedPolicyEpoch"]
+        expected_generation = request.params["expectedControlGeneration"]
+        if (
+            request.params["expectedIntentSha256"] != preview["intentSha256"]
+            or isinstance(expected_epoch, bool)
+            or not isinstance(expected_epoch, int)
+            or expected_epoch != preview["policyEpoch"]
+            or isinstance(expected_generation, bool)
+            or not isinstance(expected_generation, int)
+            or expected_generation != preview["controlGeneration"]
+        ):
+            raise broker_error(
+                "LIVE_CONFIRMATION_STALE",
+                "confirmation preview is stale",
+            )
+        metadata = {
+            key: preview[key]
+            for key in (
+                "intentSha256",
+                "pluginId",
+                "connectorId",
+                "publisherIdentity",
+                "version",
+                "clientOrderId",
+                "instrumentId",
+                "side",
+                "orderType",
+                "quantity",
+                "limitPrice",
+                "policyEpoch",
+            )
+        }
+        receipt_ref, receipt = ledger.issue(
+            shadow_ref=shadow_ref,
+            account_ref=account_ref,
+            metadata=metadata,
+            ttl_seconds=request.params["ttlSeconds"],
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            {
+                "receiptRef": receipt_ref,
+                **receipt.public_wire(),
+                "liveSubmitAvailable": False,
+                "liveCancelAvailable": False,
+            },
+        )
+
+    def _describe_confirmation(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_control_ledger()
+        _exact_params(
+            request.params,
+            {"receiptRef"},
+            "confirmation.describe params",
+        )
+        receipt_ref = _text(
+            request.params["receiptRef"],
+            "confirmation.describe receiptRef",
+            maximum=64,
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            ledger.describe(receipt_ref).public_wire(),
+        )
+
+    def _revoke_confirmation(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_control_ledger()
+        _exact_params(
+            request.params,
+            {"receiptRef", "reason"},
+            "confirmation.revoke params",
+        )
+        receipt_ref = _text(
+            request.params["receiptRef"],
+            "confirmation.revoke receiptRef",
+            maximum=64,
+        )
+        reason = _text(
+            request.params["reason"],
+            "confirmation.revoke reason",
+            maximum=128,
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            ledger.revoke(receipt_ref, reason=reason).public_wire(),
+        )
+
+    def _audit_export_page(self, request: BrokerRequest) -> BrokerResponse:
+        ledger = self._require_control_ledger()
+        journal = self._require_shadow_journal()
+        _exact_params(
+            request.params,
+            {
+                "controlAfterSequence",
+                "shadowAfterSequence",
+                "controlThroughSequence",
+                "shadowThroughSequence",
+                "limit",
+            },
+            "audit.export.page params",
+        )
+        values = tuple(request.params.values())
+        if not all(
+            isinstance(item, int)
+            and not isinstance(item, bool)
+            and item >= 0
+            for item in values
+        ):
+            raise broker_error(
+                "LIVE_AUDIT_EXPORT_PARAMS_INVALID",
+                "audit export page values are invalid",
+            )
+        limit = request.params["limit"]
+        if not 1 <= limit <= 16:
+            raise broker_error(
+                "LIVE_AUDIT_EXPORT_PARAMS_INVALID",
+                "audit export page limit is invalid",
+            )
+        control_status = ledger.status()
+        control_head = ledger.event_head()
+        shadow_head = journal.event_head()
+        control_through = request.params["controlThroughSequence"]
+        shadow_through = request.params["shadowThroughSequence"]
+        if control_through == 0:
+            control_through = control_head["sequence"]
+        if shadow_through == 0:
+            shadow_through = shadow_head["sequence"]
+        if (
+            control_through > control_head["sequence"]
+            or shadow_through > shadow_head["sequence"]
+            or request.params["controlAfterSequence"] > control_through
+            or request.params["shadowAfterSequence"] > shadow_through
+        ):
+            raise broker_error(
+                "LIVE_AUDIT_EXPORT_SNAPSHOT_REJECTED",
+                "audit export snapshot cursor is invalid",
+            )
+        control_events = ledger.audit_events(
+            after_sequence=request.params["controlAfterSequence"],
+            through_sequence=control_through,
+            limit=limit,
+        )
+        shadow_events = journal.audit_events(
+            after_sequence=request.params["shadowAfterSequence"],
+            through_sequence=shadow_through,
+            limit=limit,
+        )
+        return success_response(
+            request.sequence,
+            self.policy_epoch,
+            {
+                "schemaVersion": "candlescope.live-audit-page/1",
+                "brokerIdSha256": _sha256_text(self.state.broker_id),
+                "policyEpoch": self.policy_epoch,
+                "controlStatus": control_status,
+                "controlHead": {
+                    "sequence": control_through,
+                    "sha256": (
+                        control_head["sha256"]
+                        if control_through == control_head["sequence"]
+                        else None
+                    ),
+                },
+                "shadowHead": {
+                    "sequence": shadow_through,
+                    "sha256": (
+                        shadow_head["sha256"]
+                        if shadow_through == shadow_head["sequence"]
+                        else None
+                    ),
+                },
+                "controlEvents": control_events,
+                "shadowEvents": shadow_events,
+            },
+        )
+
     def _shutdown(self, request: BrokerRequest) -> BrokerResponse:
         _exact_params(request.params, set(), "foundation.shutdown params")
         self.shutdown_requested = True
@@ -1090,7 +1569,11 @@ class LiveBrokerService:
 
     def close(self) -> None:
         try:
-            if self.shadow_journal is not None:
-                self.shadow_journal.close()
+            try:
+                if self.control_ledger is not None:
+                    self.control_ledger.close()
+            finally:
+                if self.shadow_journal is not None:
+                    self.shadow_journal.close()
         finally:
             self.vault.close()

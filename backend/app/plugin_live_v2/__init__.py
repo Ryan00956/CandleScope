@@ -1,6 +1,11 @@
 """Fail-closed foundations for the Phase 11B isolated Live authority."""
 
 from .accounts import OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+from .audit_export import (
+    LIVE_AUDIT_EXPORT_SCHEMA,
+    LiveAuditExportError,
+    verify_live_audit_export,
+)
 from .client import (
     AccountDescription,
     AccountHandle,
@@ -45,9 +50,11 @@ __all__ = [
     "FIRST_PARTY_PINNED_TRUST_LEVEL",
     "LIVE_BROKER_METHODS",
     "LIVE_BROKER_PROTOCOL_VERSION",
+    "LIVE_AUDIT_EXPORT_SCHEMA",
     "LIVE_RELEASE_LOCK_SCHEMA_VERSION",
     "LiveBrokerController",
     "LiveBrokerError",
+    "LiveAuditExportError",
     "PUBLISHER_EVIDENCE_SCHEMA_VERSION",
     "OKX_DEMO_SPOT_READONLY_CONNECTOR_ID",
     "FirstPartyLiveRelease",
@@ -60,4 +67,5 @@ __all__ = [
     "ShadowOrderIntent",
     "WindowsDpapiCredentialVault",
     "load_first_party_live_release_lock",
+    "verify_live_audit_export",
 ]

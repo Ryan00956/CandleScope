@@ -1158,6 +1158,88 @@ class ShadowOrderJournal:
             "unresolvedCount": int(row["unresolved_count"] or 0),
         }
 
+    def event_head(self) -> dict[str, Any]:
+        row = self.connection.execute(
+            """
+            SELECT sequence, event_sha256
+            FROM journal_event ORDER BY sequence DESC LIMIT 1
+            """
+        ).fetchone()
+        return {
+            "sequence": 0 if row is None else row["sequence"],
+            "sha256": None if row is None else row["event_sha256"],
+        }
+
+    def audit_events(
+        self,
+        *,
+        after_sequence: int,
+        through_sequence: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded source-verifiable page without opaque handles."""
+
+        if (
+            isinstance(after_sequence, bool)
+            or not isinstance(after_sequence, int)
+            or after_sequence < 0
+            or isinstance(through_sequence, bool)
+            or not isinstance(through_sequence, int)
+            or through_sequence < after_sequence
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 64
+        ):
+            raise ValueError("shadow audit page is invalid")
+        values: list[dict[str, Any]] = []
+        for row in self.connection.execute(
+            """
+            SELECT * FROM journal_event
+            WHERE sequence > ? AND sequence <= ?
+            ORDER BY sequence LIMIT ?
+            """,
+            (after_sequence, through_sequence, limit),
+        ):
+            payload = strict_json_loads(
+                row["payload_json"].encode("utf-8"),
+                max_message_bytes=64 * 1024,
+            )
+            record_wire: dict[str, Any] | None = None
+            if row["event_type"] == "prepared":
+                record_row = self.connection.execute(
+                    "SELECT * FROM shadow_order WHERE record_id = ?",
+                    (row["record_id"],),
+                ).fetchone()
+                if record_row is None:
+                    raise ValueError("shadow audit record is unavailable")
+                record = self._record(record_row)
+                record_wire = {
+                    **record.metadata(),
+                    "recordId": record.record_id,
+                    "venueOrderIdSha256": (
+                        None
+                        if record.venue_order_id is None
+                        else _sha256_text(record.venue_order_id)
+                    ),
+                }
+                record_wire.pop("venueOrderId")
+            values.append(
+                {
+                    "event": {
+                        "schemaVersion": SHADOW_JOURNAL_SCHEMA_VERSION,
+                        "sequence": row["sequence"],
+                        "recordId": row["record_id"],
+                        "eventType": row["event_type"],
+                        "payload": payload,
+                        "occurredAt": row["occurred_at"],
+                        "previousSha256": row["previous_sha256"],
+                        "eventSha256": row["event_sha256"],
+                    },
+                    "record": record_wire,
+                }
+            )
+        return values
+
     def close(self) -> None:
         try:
             self.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")

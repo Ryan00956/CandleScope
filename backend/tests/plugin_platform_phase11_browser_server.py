@@ -1,4 +1,4 @@
-"""Real browser fixture for the guarded Phase 11A Paper workflow."""
+"""Real browser fixture for guarded Phase 11A Paper and optional WP-E control."""
 
 from __future__ import annotations
 
@@ -16,9 +16,17 @@ from fastapi.staticfiles import StaticFiles
 
 from app.plugin_core_v2.api import create_core_plugin_router
 from app.plugin_core_v2.runtime import CorePluginPlatform
+from app.plugin_live_v2 import (
+    OKX_DEMO_SPOT_READONLY_CONNECTOR_ID,
+    LiveBrokerController,
+    LivePublisherTrustStore,
+)
 from app.plugin_paper_v2 import PaperQuote
 from app.plugin_security_v2.management import LocalManagementGuard
-from tests.plugin_platform_bundle_testkit import build_paper_broker_bundle
+from tests.plugin_platform_bundle_testkit import (
+    build_hello_platform_bundle,
+    build_paper_broker_bundle,
+)
 
 
 ROOT = Path(os.environ["PHASE11_BROWSER_PLATFORM_ROOT"]).resolve()
@@ -29,6 +37,9 @@ MANAGEMENT_API_ORIGIN = os.environ.get(
 )
 SESSION_TOKEN = "phase11-browser-session-token-0123456789abcdef"
 CSRF_TOKEN = "phase11-browser-csrf-token-abcdef0123456789"
+LIVE_NATIVE_CONTROL = (
+    os.environ.get("PHASE11_BROWSER_LIVE_NATIVE_CONTROL", "0") == "1"
+)
 FRONTEND_DIST = Path(
     os.environ.get(
         "PHASE11_BROWSER_FRONTEND_DIST",
@@ -45,7 +56,50 @@ PLATFORM = CorePluginPlatform(
     host_version="0.4.0",
     trust_level="first-party-pinned",
     paper_trading_enabled=True,
+    live_broker_foundation_enabled=LIVE_NATIVE_CONTROL,
+    live_account_readonly_enabled=LIVE_NATIVE_CONTROL,
+    live_reconciliation_shadow_enabled=LIVE_NATIVE_CONTROL,
+    live_native_control_enabled=LIVE_NATIVE_CONTROL,
 )
+if LIVE_NATIVE_CONTROL:
+    live_bundle = build_hello_platform_bundle(
+        BUNDLE_DIRECTORY / "live-authority-release"
+    ).bundle
+    live_identity = live_bundle.manifest.plugin
+    live_release_lock = BUNDLE_DIRECTORY / "live-release-lock.json"
+    live_release_lock.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "connectors": [
+                    {
+                        "connectorId": (
+                            OKX_DEMO_SPOT_READONLY_CONNECTOR_ID
+                        ),
+                        "pluginId": live_identity.id,
+                        "version": live_identity.version,
+                        "publisher": live_identity.publisher,
+                        "bundleSha256": live_bundle.sha256,
+                        "manifestSha256": live_bundle.manifest_sha256,
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    live_trust_store = LivePublisherTrustStore.from_path(live_release_lock)
+    PLATFORM.live_broker = LiveBrokerController(
+        enabled=True,
+        root=ROOT / "live-broker-v1",
+        release_lock_path=live_release_lock,
+        trust_store=live_trust_store,
+        vault_backend="fake",
+        allow_test_backend=True,
+        read_only_accounts_enabled=True,
+        reconciliation_shadow_enabled=True,
+        native_control_enabled=True,
+    )
 INSTALLATION = PLATFORM.installer.install(
     BUNDLE_FIXTURE.bundle.path,
     expected_sha256=BUNDLE_FIXTURE.bundle.sha256,
@@ -220,6 +274,7 @@ async def healthz() -> dict[str, Any]:
         "sidecarRequests": supervisor["requests"] if supervisor else None,
         "sidecarRestarts": supervisor["restarts"] if supervisor else None,
         "auditEvents": len(PLATFORM.audit_log.read_all()),
+        "liveControl": PLATFORM.live_control_public_status(),
     }
 
 

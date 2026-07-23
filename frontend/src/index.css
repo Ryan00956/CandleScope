@@ -4841,12 +4841,189 @@ body {
 
 .plugin-platform-error { border-color: var(--candle-down); }
 
+.live-control-banner {
+  position: fixed;
+  z-index: 2100;
+  top: 54px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(720px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  border: 1px solid rgba(245, 158, 11, 0.78);
+  border-radius: 999px;
+  padding: 8px 16px;
+  background: rgba(120, 53, 15, 0.96);
+  color: #fff7ed;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.48);
+  font: inherit;
+  cursor: pointer;
+}
+
+.live-control-banner strong {
+  flex: 0 0 auto;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.live-control-banner span {
+  overflow: hidden;
+  color: rgba(255, 247, 237, 0.84);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-control-banner.live-control-armed {
+  border-color: rgba(239, 68, 68, 0.92);
+  background: rgba(127, 29, 29, 0.97);
+}
+
+.live-control-banner.live-control-killed {
+  border-color: rgba(248, 113, 113, 0.9);
+  background: rgba(69, 10, 10, 0.98);
+}
+
+.live-control-banner.live-control-unavailable {
+  border-color: rgba(248, 113, 113, 0.92);
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(69, 10, 10, 0.98) 0,
+    rgba(69, 10, 10, 0.98) 10px,
+    rgba(127, 29, 29, 0.98) 10px,
+    rgba(127, 29, 29, 0.98) 20px
+  );
+}
+
+.live-control-toolbar {
+  border-color: rgba(245, 158, 11, 0.72) !important;
+  color: #fbbf24 !important;
+}
+
+.live-control-toolbar.live-control-armed,
+.live-control-toolbar.live-control-killed,
+.live-control-toolbar.live-control-unavailable {
+  border-color: rgba(239, 68, 68, 0.8) !important;
+  color: #f87171 !important;
+}
+
+.live-host-modal-overlay { z-index: 2400; }
+.live-host-modal { width: min(880px, 94vw); }
+
+.live-control-summary,
+.live-control-section {
+  margin-bottom: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 14px;
+  background: rgba(15, 23, 42, 0.24);
+}
+
+.live-control-summary > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.live-control-summary strong {
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 3px 9px;
+  color: #fbbf24;
+  letter-spacing: 0.08em;
+}
+
+.live-control-summary.live-control-armed strong,
+.live-control-summary.live-control-killed strong,
+.live-control-summary.live-control-unavailable strong { color: #f87171; }
+.live-control-summary p,
+.live-control-section p { margin: 8px 0; color: var(--text-secondary); }
+.live-control-section h3 { margin: 0 0 8px; }
+
+.live-control-field {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0;
+  color: var(--text-secondary);
+}
+
+.live-control-field input,
+.live-control-field select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.live-warning-callout {
+  margin-bottom: 14px;
+  border: 1px solid rgba(239, 68, 68, 0.72);
+  border-radius: 9px;
+  padding: 12px;
+  background: rgba(127, 29, 29, 0.18);
+  color: #fecaca;
+}
+
+.live-intent-facts {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0 0 16px;
+}
+
+.live-intent-facts dt { color: var(--text-muted); }
+.live-intent-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
+.plugin-modal .live-danger-action {
+  border-color: rgba(239, 68, 68, 0.8);
+  background: rgba(127, 29, 29, 0.32);
+  color: #fecaca;
+}
+
+.live-control-primary-actions { align-items: center; }
+.live-revoke-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.5fr) minmax(180px, 1fr) minmax(180px, 1fr);
+  gap: 10px;
+}
+
+.live-receipt-summary {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  border: 1px solid rgba(34, 197, 94, 0.55);
+  border-radius: 9px;
+  padding: 12px;
+  background: rgba(22, 101, 52, 0.12);
+}
+
+.live-receipt-summary span {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 900px) {
   .plugin-command-layout,
   .plugin-manager-layout { grid-template-columns: 1fr; }
   .plugin-command-layout nav,
   .plugin-manager-layout nav { max-height: 180px; border-right: 0; border-bottom: 1px solid var(--border-color); padding: 0 0 10px; }
   .plugin-toolbar { max-width: 32vw; }
+  .live-control-banner { top: 48px; }
+  .live-control-banner span { display: none; }
+  .live-revoke-grid { grid-template-columns: 1fr; }
+  .live-intent-facts { grid-template-columns: 1fr; }
+  .live-intent-facts dd { margin-bottom: 5px; }
 }
 
 /* ── 指标按钮 ────────────────────────────────────────────── */

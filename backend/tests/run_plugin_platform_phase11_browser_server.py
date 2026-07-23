@@ -1,4 +1,4 @@
-"""Launch the Phase 11A browser fixture with repository-local sources."""
+"""Launch the Phase 11 browser fixture with repository-local sources."""
 
 from __future__ import annotations
 
@@ -17,6 +17,11 @@ def main() -> int:
     parser.add_argument("--origin", default="http://127.0.0.1:18131")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18131)
+    parser.add_argument(
+        "--live-native-control",
+        action="store_true",
+        help="enable the WP-E Host-native control fixture",
+    )
     args = parser.parse_args()
 
     repository = Path(__file__).resolve().parents[2]
@@ -30,6 +35,9 @@ def main() -> int:
             "PHASE11_BROWSER_BUNDLE_DIRECTORY": str(args.bundle_directory.resolve()),
             "PHASE11_BROWSER_ORIGIN": args.origin,
             "PHASE11_BROWSER_MANAGEMENT_API_ORIGIN": f"http://localhost:{args.port}",
+            "PHASE11_BROWSER_LIVE_NATIVE_CONTROL": (
+                "1" if args.live_native_control else "0"
+            ),
         }
     )
     for stream in (sys.stdout, sys.stderr):

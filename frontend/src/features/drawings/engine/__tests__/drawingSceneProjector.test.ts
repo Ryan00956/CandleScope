@@ -366,7 +366,7 @@ test("projects all nine kinds in canonical document z-order with typed geometry"
   ]);
   assert.equal(list.points instanceof Float64Array, true);
   assert.equal(list.entities.every((entity, index) => Number.isFinite(list.bboxes[index * 4])), true);
-  assert.deepEqual(list.entities.map((entity) => entity.handleCount), [8, 2, 5, 1, 8, 2, 2, 0, 0]);
+  assert.deepEqual(list.entities.map((entity) => entity.handleCount), [8, 2, 9, 1, 8, 2, 2, 0, 0]);
   assert.equal(adapter.spanInputs.length, 1);
   assert.equal(list.entities.find((entity) => entity.id === "axis")?.unboundedAxis, "horizontal");
   assert.deepEqual(list.entities.map((entity) => entity.renderSpec?.op ?? null), [
@@ -3081,8 +3081,14 @@ test("position panel and badges measure current-price and PnL text from the atom
     "80.0000  +33.33%  +333.33",
     "40.0000  -33.33%  -333.33",
   ]);
-  assert.deepEqual([...list.handles], [60, 60, 60, 80, 60, 40, 40, 60, 80, 60]);
-  assert.deepEqual(list.entities[0]?.handleNames, ["entry", "tp", "sl", "left", "right"]);
+  assert.deepEqual([...list.handles], [
+    60, 60, 60, 80, 60, 40, 40, 60, 80, 60,
+    40, 40, 80, 40, 40, 80, 80, 80,
+  ]);
+  assert.deepEqual(list.entities[0]?.handleNames, [
+    "entry", "tp", "sl", "left", "right",
+    "top-left", "top-right", "bottom-left", "bottom-right",
+  ]);
 });
 
 test("left-anchored position panel keeps a fixed gap while chart zoom changes position width", () => {

@@ -870,7 +870,10 @@ export function dynamicSelectionHandlesForSavedDrawing(
     return [];
   }
   if (saved.type === "position" && saved.timeRange) {
-    const positionZones: Array<"entry" | "tp" | "sl" | "left" | "right"> = ["entry"];
+    const positionZones: Array<
+      "entry" | "tp" | "sl" | "left" | "right"
+      | "top-left" | "top-right" | "bottom-left" | "bottom-right"
+    > = ["entry"];
     if (typeof saved.tpPrice === "number" && Number.isFinite(saved.tpPrice)) {
       positionZones.push("tp");
     }
@@ -878,6 +881,10 @@ export function dynamicSelectionHandlesForSavedDrawing(
       positionZones.push("sl");
     }
     positionZones.push("left", "right");
+    if (typeof saved.tpPrice === "number" && Number.isFinite(saved.tpPrice)
+      && typeof saved.slPrice === "number" && Number.isFinite(saved.slPrice)) {
+      positionZones.push("top-left", "top-right", "bottom-left", "bottom-right");
+    }
     if (sceneHandles?.length === positionZones.length) {
       return Object.freeze(sceneHandles.map((point, index) => {
         const zone = positionZones[index];
@@ -933,7 +940,34 @@ export function dynamicSelectionHandlesForSavedDrawing(
     });
     if (levelHandles.length === 0) return [];
     const ys = levelHandles.map((handle) => handle.point.y);
+    const top = Math.min(...ys);
+    const bottom = Math.max(...ys);
     const middleY = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const cornerHandles = typeof saved.tpPrice === "number" && Number.isFinite(saved.tpPrice)
+      && typeof saved.slPrice === "number" && Number.isFinite(saved.slPrice)
+      ? [
+        Object.freeze({
+          point: Object.freeze({ x: left, y: top }),
+          hit: Object.freeze({ zone: "top-left", pointIndex: -1 }),
+          radius: 10,
+        }),
+        Object.freeze({
+          point: Object.freeze({ x: right, y: top }),
+          hit: Object.freeze({ zone: "top-right", pointIndex: -1 }),
+          radius: 10,
+        }),
+        Object.freeze({
+          point: Object.freeze({ x: left, y: bottom }),
+          hit: Object.freeze({ zone: "bottom-left", pointIndex: -1 }),
+          radius: 10,
+        }),
+        Object.freeze({
+          point: Object.freeze({ x: right, y: bottom }),
+          hit: Object.freeze({ zone: "bottom-right", pointIndex: -1 }),
+          radius: 10,
+        }),
+      ] as const
+      : [];
     return Object.freeze([
       ...levelHandles,
       Object.freeze({
@@ -946,6 +980,7 @@ export function dynamicSelectionHandlesForSavedDrawing(
         hit: Object.freeze({ zone: "right", pointIndex: -1 }),
         radius: 10,
       }),
+      ...cornerHandles,
     ]);
   }
   if (saved.type === "axis-line" && saved.dataPoint) {
@@ -3568,6 +3603,34 @@ export function useDrawing({
             draggingRef.current = {
               id,
               type: "position-right",
+              startMouse: pos,
+              origTimeRange: { ...timeRange },
+            };
+          } else if (hit.zone === "top-left") {
+            draggingRef.current = {
+              id,
+              type: "position-top-left",
+              startMouse: pos,
+              origTimeRange: { ...timeRange },
+            };
+          } else if (hit.zone === "top-right") {
+            draggingRef.current = {
+              id,
+              type: "position-top-right",
+              startMouse: pos,
+              origTimeRange: { ...timeRange },
+            };
+          } else if (hit.zone === "bottom-left") {
+            draggingRef.current = {
+              id,
+              type: "position-bottom-left",
+              startMouse: pos,
+              origTimeRange: { ...timeRange },
+            };
+          } else if (hit.zone === "bottom-right") {
+            draggingRef.current = {
+              id,
+              type: "position-bottom-right",
               startMouse: pos,
               origTimeRange: { ...timeRange },
             };

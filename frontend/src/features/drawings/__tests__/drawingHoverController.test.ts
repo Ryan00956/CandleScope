@@ -81,6 +81,10 @@ test("cursor helpers map drawing hit zones to expected cursors", () => {
   assert.equal(cursorForPositionToolHit(partialHit({ type: "position", zone: "tp" })), "ns-resize");
   assert.equal(cursorForPositionToolHit(partialHit({ type: "position", zone: "panel" })), "grab");
   assert.equal(cursorForPositionToolHit(partialHit({ type: "position", zone: "left" })), "ew-resize");
+  assert.equal(cursorForPositionToolHit(partialHit({ type: "position", zone: "top-left" })), "nwse-resize");
+  assert.equal(cursorForPositionToolHit(partialHit({ type: "position", zone: "bottom-right" })), "nwse-resize");
+  assert.equal(cursorForPositionToolHit(partialHit({ type: "position", zone: "top-right" })), "nesw-resize");
+  assert.equal(cursorForPositionToolHit(partialHit({ type: "position", zone: "bottom-left" })), "nesw-resize");
   assert.equal(cursorForPositionToolHit(partialHit({ type: "position", zone: "body" })), "move");
   assert.equal(cursorForPositionToolHit(null), "crosshair");
 

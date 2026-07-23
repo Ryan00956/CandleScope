@@ -75,6 +75,8 @@ test("entity drag command preserves move versus resize intent for every descript
     [partialDescriptor({ type: "position-sl" }), "resize"],
     [partialDescriptor({ type: "position-left" }), "resize"],
     [partialDescriptor({ type: "position-right" }), "resize"],
+    [partialDescriptor({ type: "position-top-left" }), "resize"],
+    [partialDescriptor({ type: "position-bottom-right" }), "resize"],
     [partialDescriptor({ type: "axis-line" }), "move"],
     [partialDescriptor({ type: "shape", zone: "body" }), "move"],
     [partialDescriptor({ type: "shape", zone: "center" }), "move"],
@@ -363,6 +365,103 @@ test("position left and right drags replace only the visual endpoint", () => {
       sourceProjectionConfig: "dataset-a:renko:{}",
     },
   });
+});
+
+test("position corner drags resize the matching horizontal and risk-reward sides together", () => {
+  const dataToScreen = (point: DrawingDataPoint): ScreenPoint | null => (
+    typeof point.time === "number"
+      ? { x: point.time / 10, y: 300 - point.price }
+      : null
+  );
+  const coordinateCalls: DrawingCoordinateOptions[] = [];
+  const screenToDrawingData = (x: number, y: number, options?: DrawingCoordinateOptions) => {
+    if (options) coordinateCalls.push(options);
+    return { time: x * 10, price: 300 - y };
+  };
+  const long = drawingOfType(positionDrawing(), "position");
+  const short: Extract<SavedDrawing, { type: "position" }> = {
+    ...long,
+    id: "short-position",
+    direction: "short",
+    tpPrice: 90,
+    slPrice: 110,
+  };
+  const longRange = long.timeRange ?? { start: null, end: null };
+  const shortRange = short.timeRange ?? { start: null, end: null };
+
+  const topLeft = drawingOfType(apply({
+    id: "position",
+    type: "position-top-left",
+    startMouse: { x: 10, y: 190 },
+    origTimeRange: longRange,
+  }, long, {
+    pos: { x: 5, y: 180 },
+    dataToScreen,
+    screenToDrawingData,
+  }), "position");
+  const bottomRight = drawingOfType(apply({
+    id: "position",
+    type: "position-bottom-right",
+    startMouse: { x: 20, y: 205 },
+    origTimeRange: longRange,
+  }, long, {
+    pos: { x: 40, y: 220 },
+    dataToScreen,
+    screenToDrawingData,
+  }), "position");
+  const topRight = drawingOfType(apply({
+    id: "short-position",
+    type: "position-top-right",
+    startMouse: { x: 20, y: 190 },
+    origTimeRange: shortRange,
+  }, short, {
+    pos: { x: 40, y: 180 },
+    dataToScreen,
+    screenToDrawingData,
+  }), "position");
+  const bottomLeft = drawingOfType(apply({
+    id: "short-position",
+    type: "position-bottom-left",
+    startMouse: { x: 10, y: 210 },
+    origTimeRange: shortRange,
+  }, short, {
+    pos: { x: 5, y: 220 },
+    dataToScreen,
+    screenToDrawingData,
+  }), "position");
+  const invertedTopLeft = drawingOfType(apply({
+    id: "position",
+    type: "position-top-left",
+    startMouse: { x: 10, y: 95 },
+    origTimeRange: longRange,
+  }, long, {
+    pos: { x: 5, y: 80 },
+    dataToScreen: (point) => (
+      typeof point.time === "number" ? { x: point.time / 10, y: point.price } : null
+    ),
+    screenToDrawingData: (x, y, options) => {
+      if (options) coordinateCalls.push(options);
+      return { time: x * 10, price: y };
+    },
+  }), "position");
+
+  assert.deepEqual(topLeft.timeRange, { start: { time: 50 }, end: { time: 200 } });
+  assert.equal(topLeft.tpPrice, 120, "long visual top controls TP");
+  assert.deepEqual(bottomRight.timeRange, { start: { time: 100 }, end: { time: 400 } });
+  assert.equal(bottomRight.slPrice, 80, "long visual bottom controls SL");
+  assert.deepEqual(topRight.timeRange, { start: { time: 100 }, end: { time: 400 } });
+  assert.equal(topRight.slPrice, 120, "short visual top controls SL");
+  assert.deepEqual(bottomLeft.timeRange, { start: { time: 50 }, end: { time: 200 } });
+  assert.equal(bottomLeft.tpPrice, 80, "short visual bottom controls TP");
+  assert.deepEqual(invertedTopLeft.timeRange, { start: { time: 50 }, end: { time: 200 } });
+  assert.equal(invertedTopLeft.slPrice, 80, "visual top remains the top boundary on an inverted scale");
+  assert.deepEqual(coordinateCalls, [
+    { snap: true, time: true, price: true },
+    { snap: true, time: true, price: true },
+    { snap: true, time: true, price: true },
+    { snap: true, time: true, price: true },
+    { snap: true, time: true, price: true },
+  ]);
 });
 
 test("axis-line drags preserve or replace canonical anchor dimensions by subtype", () => {

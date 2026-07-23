@@ -54,6 +54,10 @@ export function drawingEntityGeometryCommandForDrag(
     case "position-sl":
     case "position-left":
     case "position-right":
+    case "position-top-left":
+    case "position-top-right":
+    case "position-bottom-left":
+    case "position-bottom-right":
       return "resize";
   }
 }
@@ -262,6 +266,56 @@ interface PositionVisualAnchorKeys {
   readonly startScreen: ScreenPoint;
 }
 
+type PositionCornerDrag = Extract<DrawingDragDescriptor, {
+  type:
+    | "position-top-left"
+    | "position-top-right"
+    | "position-bottom-left"
+    | "position-bottom-right";
+}>;
+
+function isPositionCornerDrag(
+  descriptor: DrawingDragDescriptor,
+): descriptor is PositionCornerDrag {
+  return descriptor.type === "position-top-left"
+    || descriptor.type === "position-top-right"
+    || descriptor.type === "position-bottom-left"
+    || descriptor.type === "position-bottom-right";
+}
+
+function positionCornerHorizontalSide(
+  type: PositionCornerDrag["type"],
+): "left" | "right" {
+  return type === "position-top-left" || type === "position-bottom-left"
+    ? "left"
+    : "right";
+}
+
+function positionCornerPriceTarget(
+  direction: "long" | "short",
+  type: PositionCornerDrag["type"],
+  timeRange: PositionTimeRange,
+  entryPrice: number,
+  tpPrice: number | null | undefined,
+  slPrice: number | null | undefined,
+  dataToScreen: DrawingDataToScreen,
+): "tp" | "sl" | null {
+  if (typeof tpPrice !== "number" || typeof slPrice !== "number"
+    || !Number.isFinite(tpPrice) || !Number.isFinite(slPrice)) return null;
+  const targetsTop = type === "position-top-left" || type === "position-top-right";
+  const fallbackTargetsTp = (direction === "long") === targetsTop;
+  const anchor = timeRange.start ?? timeRange.end;
+  const tpPoint = pointFromHorizontalAnchor(anchor, tpPrice);
+  const slPoint = pointFromHorizontalAnchor(anchor, slPrice);
+  const tpScreen = tpPoint ? dataToScreen(tpPoint) : null;
+  const slScreen = slPoint ? dataToScreen(slPoint) : null;
+  if (!finiteScreenPoint(tpScreen) || !finiteScreenPoint(slScreen)) {
+    return fallbackTargetsTp ? "tp" : "sl";
+  }
+  const targetsTp = (tpScreen.y <= slScreen.y) === targetsTop;
+  return targetsTp ? "tp" : "sl";
+}
+
 function positionVisualAnchorKeys(
   timeRange: PositionTimeRange,
   entryPrice: number,
@@ -356,6 +410,58 @@ function applyPositionDrag(options: DrawingEntityDragOptions): SavedDrawing | nu
       slPrice: descriptor.origSl === null ? null : descriptor.origSl + priceDelta,
       timeRange,
     });
+  }
+
+  if (isPositionCornerDrag(descriptor)) {
+    const originalRange = immutableTimeRange(descriptor.origTimeRange);
+    const currentRange = immutableTimeRange(drawing.timeRange);
+    if (drawing.direction !== "long" && drawing.direction !== "short") return null;
+    const dataPoint = immutableDataPoint(screenToDrawingData(pos.x, pos.y, {
+      snap,
+      time: true,
+      price: true,
+    }));
+    const candidate = anchorFromPoint(dataPoint);
+    const candidatePoint = pointFromHorizontalAnchor(candidate, drawing.entryPrice);
+    const candidateScreen = candidatePoint ? dataToScreen(candidatePoint) : null;
+    const visualKeys = originalRange
+      ? positionVisualAnchorKeys(originalRange, drawing.entryPrice, dataToScreen)
+      : null;
+    const side = positionCornerHorizontalSide(descriptor.type);
+    const fixedKey = side === "left" ? visualKeys?.rightKey : visualKeys?.leftKey;
+    const fixedScreen = fixedKey === "start"
+      ? visualKeys?.startScreen
+      : visualKeys?.endScreen;
+    const keepsMinimumWidth = side === "left"
+      ? candidateScreen != null && fixedScreen != null && candidateScreen.x < fixedScreen.x - 0.5
+      : candidateScreen != null && fixedScreen != null && candidateScreen.x > fixedScreen.x + 0.5;
+    if (!originalRange || !currentRange || !dataPoint || !candidate || !visualKeys
+      || !keepsMinimumWidth) return null;
+    const priceTarget = positionCornerPriceTarget(
+      drawing.direction,
+      descriptor.type,
+      originalRange,
+      drawing.entryPrice,
+      drawing.tpPrice,
+      drawing.slPrice,
+      dataToScreen,
+    );
+    if (!priceTarget) return null;
+
+    const timeRange = Object.freeze({
+      ...currentRange,
+      [side === "left" ? visualKeys.leftKey : visualKeys.rightKey]: candidate,
+    });
+    if (priceTarget === "tp") {
+      const tpPrice = drawing.direction === "long"
+        ? Math.max(dataPoint.price, drawing.entryPrice)
+        : Math.min(dataPoint.price, drawing.entryPrice);
+      return frozenUpdate(drawing, { timeRange, tpPrice });
+    }
+    const slPrice = drawing.direction === "long"
+      ? Math.min(dataPoint.price, drawing.entryPrice)
+      : Math.max(dataPoint.price, drawing.entryPrice);
+    return frozenUpdate(drawing, { timeRange, slPrice });
   }
 
   if (descriptor.type !== "position-tp"
@@ -539,6 +645,10 @@ export function applyDrawingEntityDrag(options: DrawingEntityDragOptions): Saved
       case "position-move":
       case "position-left":
       case "position-right":
+      case "position-top-left":
+      case "position-top-right":
+      case "position-bottom-left":
+      case "position-bottom-right":
       case "position-panel":
         return applyPositionDrag(options);
       case "axis-line":

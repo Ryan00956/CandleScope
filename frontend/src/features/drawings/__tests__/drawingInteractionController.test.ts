@@ -1201,8 +1201,9 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
   const positionHandles = dynamicSelectionHandlesForSavedDrawing(position, project);
   assert.deepEqual(positionHandles.map((handle) => handle.hit.zone), [
     "entry", "tp", "sl", "left", "right",
+    "top-left", "top-right", "bottom-left", "bottom-right",
   ]);
-  assert.deepEqual(positionHandles.slice(-2).map((handle) => handle.point.x), [8, 32]);
+  assert.deepEqual(positionHandles.slice(3, 5).map((handle) => handle.point.x), [8, 32]);
 
   const foldedSceneHandles = [
     { x: 50, y: 50 },
@@ -1210,6 +1211,10 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
     { x: 50, y: 70 },
     { x: 38, y: 40 },
     { x: 62, y: 40 },
+    { x: 38, y: 10 },
+    { x: 62, y: 10 },
+    { x: 38, y: 70 },
+    { x: 62, y: 70 },
   ];
   const foldedPositionHandles = dynamicSelectionHandlesForSavedDrawing(
     position,
@@ -1225,6 +1230,10 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
       ["sl", 50, 70],
       ["left", 38, 40],
       ["right", 62, 40],
+      ["top-left", 38, 10],
+      ["top-right", 62, 10],
+      ["bottom-left", 38, 70],
+      ["bottom-right", 62, 70],
     ],
   );
 
@@ -1326,6 +1335,10 @@ test("stale position scene handles fall back to current viewport projection", ()
       ["sl", 120, 410],
       ["left", 104, 395],
       ["right", 136, 395],
+      ["top-left", 104, 380],
+      ["top-right", 136, 380],
+      ["bottom-left", 104, 410],
+      ["bottom-right", 136, 410],
     ],
   );
 });
@@ -1379,6 +1392,11 @@ test("position handle hit testing shares the current viewport fallback geometry"
     x: 104,
     y: 395,
   })?.zone, "left");
+  assert.equal(hitTestSelectedOverlayDrawingHandle({
+    ...options,
+    x: 104,
+    y: 380,
+  })?.zone, "top-left");
   assert.equal(hitTestSelectedOverlayDrawingHandle({
     ...options,
     x: 20,

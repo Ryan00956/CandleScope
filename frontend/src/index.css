@@ -7465,6 +7465,14 @@ body {
   padding: 0;
 }
 
+.chart-main-ohlcv[data-candle-direction='up'] {
+  color: var(--candle-up);
+}
+
+.chart-main-ohlcv[data-candle-direction='down'] {
+  color: var(--candle-down);
+}
+
 .chart-main-ohlcv > span {
   display: inline-flex;
   gap: 3px;
@@ -7474,14 +7482,6 @@ body {
 .chart-legend-line-name {
   color: var(--text-muted);
   font-weight: 600;
-}
-
-.chart-legend-high {
-  color: var(--candle-up);
-}
-
-.chart-legend-low {
-  color: var(--candle-down);
 }
 
 .chart-legend-values {

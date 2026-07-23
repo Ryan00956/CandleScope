@@ -165,16 +165,16 @@ export const MainChartLegend = memo(function MainChartLegend({
   return (
     <div className="chart-main-legend pane-overlay-anchor" data-pane-id="main" role="group" aria-label={ariaLabel}>
       {mainData && (
-        <span className="chart-main-ohlcv">
+        <span className="chart-main-ohlcv" data-candle-direction={isUp ? "up" : "down"}>
           <span><span className="chart-legend-key">O</span>{formatPrice(mainData.open)}</span>
-          <span><span className="chart-legend-key">H</span><strong className="chart-legend-high">{formatPrice(mainData.high)}</strong></span>
-          <span><span className="chart-legend-key">L</span><strong className="chart-legend-low">{formatPrice(mainData.low)}</strong></span>
-          <span><span className="chart-legend-key">C</span><strong className={isUp ? "price-up" : "price-down"}>{formatPrice(mainData.close)}</strong></span>
+          <span><span className="chart-legend-key">H</span><strong>{formatPrice(mainData.high)}</strong></span>
+          <span><span className="chart-legend-key">L</span><strong>{formatPrice(mainData.low)}</strong></span>
+          <span><span className="chart-legend-key">C</span><strong>{formatPrice(mainData.close)}</strong></span>
           <span><span className="chart-legend-key">Vol</span>{formatVolume(mainData.volume)}</span>
           {marketSummary && (
             <span>
               <span className="chart-legend-key">涨跌</span>
-              <strong className={isUp ? "price-up" : "price-down"}>
+              <strong>
                 {isUp ? "+" : "-"}{formatPriceDiff(mainData.close - mainData.open)} / {isUp ? "+" : ""}{marketSummary.priceChange.toFixed(2)}%
               </strong>
             </span>

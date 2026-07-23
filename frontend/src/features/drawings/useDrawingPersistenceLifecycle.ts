@@ -336,6 +336,27 @@ export function drawingLegacyPrimitiveRuntimeEvidence(
   });
 }
 
+/**
+ * A document-only registry has no per-drawing surface ownership, so a stale
+ * document identity left by Fast Refresh or a surface teardown can be repaired
+ * by synchronously re-applying the canonical store snapshot. Keep the strict
+ * zero-primitive proof: a registry that cannot repair itself remains closed.
+ */
+export function synchronizeDocumentOnlySceneRegistry(
+  renderer: Pick<
+    LegacyPrimitiveRenderer,
+    "attachedCount" | "documentSnapshot" | "reconcile" | "snapshot"
+  >,
+  document: DrawingDocument,
+): boolean {
+  if (renderer.documentSnapshot() !== document && !renderer.reconcile(document)) {
+    return false;
+  }
+  return renderer.documentSnapshot() === document
+    && renderer.snapshot().length === 0
+    && renderer.attachedCount() === 0;
+}
+
 const drawingDocumentLoadPromises = new Map<
   string,
   Promise<DrawingDocumentLoadResult>
@@ -1350,19 +1371,11 @@ export function useDrawingPersistenceLifecycle({
         console.warn("Failed to commit drawing document:", dispatched.error);
         return false;
       }
-      const synchronized = !adoptRenderer
-        ? renderer.documentSnapshot() === dispatched.document
-        : renderer.reconcile(dispatched.document);
-      if (!adoptRenderer && !synchronized) {
-        console.warn("Document-only lifecycle barrier observed a stale scene registry");
-        scopeReadyRef.current = false;
-        return false;
-      }
-      if (adoptRenderer && (!synchronized
-        || renderer.documentSnapshot() !== dispatched.document
-        || renderer.snapshot().length !== 0
-        || renderer.attachedCount() !== 0)) {
-        console.warn("Document-only scene registry violated its zero-primitive synchronization invariant");
+      const synchronized = synchronizeDocumentOnlySceneRegistry(renderer, dispatched.document);
+      if (!synchronized) {
+        console.warn(adoptRenderer
+          ? "Document-only scene registry violated its zero-primitive synchronization invariant"
+          : "Document-only lifecycle barrier could not reconcile a stale scene registry");
         scopeReadyRef.current = false;
         return false;
       }

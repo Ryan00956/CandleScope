@@ -27,6 +27,7 @@ import {
   shouldKeepDrawingSceneSuspendedWhileHidden,
   shouldUseDrawingDocumentSceneRegistry,
   shouldProjectVisibleSceneEntity,
+  synchronizeDocumentOnlySceneRegistry,
   transitionDrawingSceneToHidden,
   visibleSceneSelectedId,
 } from "../useDrawingPersistenceLifecycle.js";
@@ -610,6 +611,73 @@ test("document-only renderer selection never invokes legacy construction or surf
     drawingLegacyPrimitiveRuntimeEvidence(true, null, []).zeroLegacyPrimitiveInvariant,
     false,
   );
+});
+
+test("document-only lifecycle barriers repair a stale registry without creating legacy primitives", () => {
+  const renderer = createDrawingPersistenceRenderer(true, {});
+  const fixture = lineFixture("document-only-lifecycle-line");
+  const stale = createDrawingDocument({
+    scopeKey: "document-only-lifecycle",
+    documentRevision: 4,
+  });
+  const canonical = createDrawingDocument({
+    scopeKey: "document-only-lifecycle",
+    documentRevision: 5,
+    entities: [createDrawingEntity(fixture.entity)],
+  });
+  assert.equal(renderer.reconcile(stale), true);
+  assert.strictEqual(renderer.documentSnapshot(), stale);
+
+  assert.equal(synchronizeDocumentOnlySceneRegistry(renderer, canonical), true);
+  assert.strictEqual(renderer.documentSnapshot(), canonical);
+  assert.equal(renderer.snapshot().length, 0);
+  assert.equal(renderer.attachedCount(), 0);
+});
+
+test("document-only lifecycle barriers leave an already canonical registry untouched", () => {
+  const canonical = createDrawingDocument({ scopeKey: "already-canonical-document-only" });
+  let reconcileCalls = 0;
+
+  assert.equal(synchronizeDocumentOnlySceneRegistry({
+    documentSnapshot: () => canonical,
+    reconcile: () => {
+      reconcileCalls += 1;
+      return false;
+    },
+    snapshot: () => [],
+    attachedCount: () => 0,
+  }, canonical), true);
+  assert.equal(reconcileCalls, 0);
+});
+
+test("document-only lifecycle barriers remain closed when the registry cannot reconcile", () => {
+  const renderer = createDrawingPersistenceRenderer(true, {});
+  renderer.dispose();
+  const canonical = createDrawingDocument({
+    scopeKey: "disposed-document-only-lifecycle",
+  });
+
+  assert.equal(synchronizeDocumentOnlySceneRegistry(renderer, canonical), false);
+  assert.equal(renderer.documentSnapshot(), null);
+});
+
+test("document-only lifecycle repair rejects a lying or non-empty registry", () => {
+  const stale = createDrawingDocument({ scopeKey: "adversarial-document-only", documentRevision: 1 });
+  const canonical = createDrawingDocument({ scopeKey: "adversarial-document-only", documentRevision: 2 });
+  const fixture = lineFixture("unexpected-legacy-instance");
+
+  assert.equal(synchronizeDocumentOnlySceneRegistry({
+    documentSnapshot: () => stale,
+    reconcile: () => true,
+    snapshot: () => [],
+    attachedCount: () => 0,
+  }, canonical), false);
+  assert.equal(synchronizeDocumentOnlySceneRegistry({
+    documentSnapshot: () => canonical,
+    reconcile: () => true,
+    snapshot: () => [fixture.primitive],
+    attachedCount: () => 0,
+  }, canonical), false);
 });
 
 test("legacy renderer selection retains materialization and attachment behavior", () => {

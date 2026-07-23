@@ -417,7 +417,13 @@ export function applyLineSeriesData(
     const start = Math.max(0, previousData.length - 1);
     for (let i = start; i < nextData.length; i += 1) {
       const point = nextData[i];
-      if (point) series.update(point);
+      if (point) {
+        // Lightweight Charts annotates update inputs with private time metadata.
+        // Indicator-cache views are intentionally frozen, so keep that mutation
+        // inside the chart-adapter boundary instead of handing the cache object
+        // to the library directly.
+        series.update({ ...point });
+      }
     }
     recordPerfEvent?.("chart.indicatorSeries.update", {
       ...detail,

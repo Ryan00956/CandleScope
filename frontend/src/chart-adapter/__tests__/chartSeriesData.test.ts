@@ -387,6 +387,41 @@ test("applyLineSeriesData trusts an explicit realtime tail hint without weakenin
   assert.deepEqual(calls, [["update", next[1]]]);
 });
 
+test("applyLineSeriesData shields frozen realtime points from chart-library mutation", () => {
+  const updated: Array<Record<string, unknown>> = [];
+  const series = structuralMock<NonNullable<Parameters<typeof applyLineSeriesData>[0]>>({
+    setData: () => assert.fail("a trusted tail update must not reset the series"),
+    update: (point: unknown) => {
+      // Lightweight Charts v5 writes this field while processing update data.
+      const mutablePoint = point as Record<string, unknown>;
+      mutablePoint._internal_originalTime = mutablePoint.time;
+      updated.push(mutablePoint);
+    },
+  });
+  const previous = [
+    { time: 10, value: 1 },
+    { time: 20, value: 2 },
+  ];
+  const frozenTail = Object.freeze({ time: 20, value: 3 });
+  const next = [
+    { time: 10, value: 1 },
+    frozenTail as { time: number; value: number },
+  ];
+
+  assert.equal(applyLineSeriesData(
+    series,
+    next,
+    previous,
+    {},
+    null,
+    { trustedTrailingUpdate: true },
+  ), "update");
+  assert.equal(updated.length, 1);
+  assert.notStrictEqual(updated[0], frozenTail);
+  assert.equal(updated[0]?._internal_originalTime, 20);
+  assert.equal("_internal_originalTime" in frozenTail, false);
+});
+
 test("applyLineSeriesData keeps a full reset when a trusted tail changes series shape", () => {
   let setDataCalls = 0;
   let updateCalls = 0;

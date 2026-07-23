@@ -275,9 +275,14 @@ export function createLightweightChartAdapter({
     paneElement: null,
     valid: false,
   });
-  const getDrawingPaneElement = (): HTMLElement | null => (
+  // A main-series replacement removes the old Lightweight Charts series before
+  // React commits the drawing host that owns the replacement. During that
+  // short hand-off window `SeriesApi#getPane()` throws `Value is null` rather
+  // than returning null. Geometry is optional for an invalidation, so fail
+  // closed and let the next frame refresh against the replacement series.
+  const getDrawingPaneElement = (): HTMLElement | null => safeCall(() => (
     getSeries()?.getPane?.()?.getHTMLElement?.() ?? null
-  ) as HTMLElement | null;
+  ) as HTMLElement | null, null);
   const refreshDrawingPaneGeometry = (
     container: HTMLElement | null = getRefValue(containerRef) ?? null,
     paneElement?: HTMLElement | null,

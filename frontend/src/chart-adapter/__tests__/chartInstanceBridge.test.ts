@@ -266,6 +266,44 @@ test("main-pane plot rect follows a reordered main pane and reports its DOM offs
   assert.deepEqual(priceScaleRequests, [["left", 2], ["left", 2]]);
 });
 
+test("drawing invalidation tolerates a disposed series and recovers for its replacement", () => {
+  const seriesRef: {
+    current: {
+      getPane?: () => { getHTMLElement?: () => { getBoundingClientRect: () => { top: number } } };
+    } | null;
+  } = {
+    current: {
+      getPane: () => {
+        throw new Error("Value is null");
+      },
+    },
+  };
+  const containerRef = {
+    current: {
+      getBoundingClientRect: () => ({ top: 100 }),
+    },
+  };
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: {} },
+    containerRef,
+    seriesRef,
+  });
+
+  assert.doesNotThrow(() => adapter.notifyDrawingFrameInvalidation());
+  assert.equal(adapter.drawingPaneToContainerY(24), 24);
+
+  seriesRef.current = {
+    getPane: () => ({
+      getHTMLElement: () => ({
+        getBoundingClientRect: () => ({ top: 420 }),
+      }),
+    }),
+  };
+  adapter.notifyDrawingFrameInvalidation();
+
+  assert.equal(adapter.drawingPaneToContainerY(24), 344);
+});
+
 test("main-pane plot rect fails closed for invalid public geometry without container fallback", () => {
   let pane: { width: number; height: number } | null = { width: 0, height: 320 };
   let leftPriceScaleWidth = 48;

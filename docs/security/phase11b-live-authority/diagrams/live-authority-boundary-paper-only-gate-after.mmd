@@ -1,0 +1,19 @@
+flowchart LR
+  subgraph Plugin["Plugin process boundary"]
+    Sidecar["Plugin sidecar"]
+  end
+
+  subgraph Host["Host process"]
+    Trust["Digest verifier<br/>manifest identity only"]
+    Deny["High-risk permission deny"]
+    Cap["Capability Broker"]
+    Paper["Paper Runtime"]
+    Audit["Hash-chained audit"]
+    UI["Native Paper UI"]
+  end
+
+  Bundle[".cspkg"] --> Trust --> Deny
+  Sidecar --> Cap --> Paper --> Audit
+  UI --> Paper
+  Deny -. "secrets.use and trade.* unavailable" .-> Blocked["No Live network action"]
+  Paper -. "simulation only" .-> Blocked

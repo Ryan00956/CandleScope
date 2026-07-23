@@ -1,0 +1,24 @@
+flowchart LR
+  subgraph Plugin["Plugin process boundary"]
+    Sidecar["Plugin sidecar"]
+  end
+
+  subgraph Host["Current Host process"]
+    Verifier["Digest and content verifier"]
+    Grants["Grant Store<br/>manifest publisher identity"]
+    Cap["Capability Broker"]
+    Paper["Paper Runtime<br/>Host ledger and risk"]
+    Network["Generic HTTPS Gateway<br/>public scoped requests"]
+    Audit["Hash-chained audit"]
+    UI["Native Plugin Manager"]
+  end
+
+  Bundle[".cspkg"] --> Verifier --> Grants
+  Sidecar -->|"capability handle"| Cap
+  Cap --> Paper
+  Cap --> Network
+  Paper --> Audit
+  Network --> Audit
+  UI --> Paper
+  Network -->|"no auth headers"| Public["Public HTTPS"]
+  Paper -. "no Live path" .-> Venue["Trading venue"]

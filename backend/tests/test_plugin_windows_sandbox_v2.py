@@ -279,7 +279,10 @@ async def test_stderr_overflow_kills_wrapper_and_its_appcontainer_job_tree(
         handle = kernel32.OpenProcess(0x00100000, False, child_pid)
         if handle:
             try:
-                assert kernel32.WaitForSingleObject(handle, 0) == 0
+                # Closing the runner's kill-on-close Job Object queues child
+                # termination, but Windows does not guarantee that the child
+                # handle is signalled in the same scheduler tick as the runner.
+                assert kernel32.WaitForSingleObject(handle, 2_000) == 0
             finally:
                 kernel32.CloseHandle(handle)
     finally:

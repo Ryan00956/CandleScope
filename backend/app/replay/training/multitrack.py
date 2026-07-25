@@ -175,6 +175,12 @@ class TrainingRunActor:
             self._playback_stop.set()
         return self._playback_task
 
+    def signal_ordered_stop(self) -> None:
+        """Trip the pause barrier without changing state before serialization."""
+
+        if self._playback_state == "PLAYING":
+            self._playback_stop.set()
+
     def update_ordered_profile(
         self,
         *,

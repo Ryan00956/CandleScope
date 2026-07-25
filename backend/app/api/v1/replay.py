@@ -296,6 +296,11 @@ class ReplayLaunchContextPayload(_StrictModel):
     watchlist_snapshot: ReplayWatchlistSnapshotPayload
 
 
+class VisibleHistoryLookbackPayload(_StrictModel):
+    mode: Literal["DURATION", "ALL_AVAILABLE"]
+    duration_ms: int | None = Field(default=None, ge=1, le=MAX_TIMESTAMP_MS)
+
+
 class TrainingRunCreatePayload(_StrictModel):
     protocol: Literal["replay.v2"]
     catalog_epoch: str = Field(min_length=71, max_length=71)
@@ -309,7 +314,17 @@ class TrainingRunCreatePayload(_StrictModel):
     base_interval: str = Field(min_length=1, max_length=128)
     display_interval: str = Field(min_length=1, max_length=128)
     requested_start_ms: int | None = Field(default=None, ge=0, le=MAX_TIMESTAMP_MS)
-    warmup_bars: int = Field(ge=1, le=REPLAY_SETTINGS.max_warmup_bars)
+    warmup_bars: int | None = Field(
+        default=None,
+        ge=1,
+        le=REPLAY_SETTINGS.max_warmup_bars,
+    )
+    indicator_warmup_bars: int | None = Field(
+        default=None,
+        ge=1,
+        le=REPLAY_SETTINGS.max_warmup_bars,
+    )
+    visible_history_lookback: VisibleHistoryLookbackPayload | None = None
     forward_cache_ms: int = Field(ge=1, le=_MAX_HORIZON_MS)
     random_seed: int | None = Field(default=None, ge=0, le=MAX_RANDOM_SEED)
     initial_equity: str = Field(min_length=1, max_length=128)

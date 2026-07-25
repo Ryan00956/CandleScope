@@ -39,6 +39,7 @@ from .models import (
     REPLAY_V2_PROTOCOL,
     ReplayLaunchContext,
     TrainingRunCreateRequest,
+    VisibleHistoryMode,
     ViewerState,
     validate_v2_counter,
 )
@@ -49,12 +50,18 @@ from .multitrack import (
     stable_market_event_order,
 )
 from .schema import (
+    DATA_POLICY_SCHEMA_VERSION,
     START_SELECTION_SCHEMA_VERSION,
     TRAINING_SCHEMA_ID,
+    data_policy_hash,
     migrate_training_schema,
     start_selection_hash,
 )
-from .segments import backfill_archive_segments, register_archive_segment
+from .segments import (
+    ResolvedHistoryPolicy,
+    backfill_archive_segments,
+    register_archive_segment,
+)
 
 
 _LIST_LIMIT_MAX = 100
@@ -279,6 +286,7 @@ class TrainingRunStore:
         dataset_blob: Mapping[str, object],
         actual_replay_start_ms: int,
         actual_replay_end_ms: int,
+        history_policy: ResolvedHistoryPolicy,
         historical_book_binding: PreparedHistoricalBookBinding | None = None,
     ) -> Callable[[sqlite3.Connection, int], None]:
         def write(connection: sqlite3.Connection, now_ms: int) -> None:
@@ -347,6 +355,13 @@ class TrainingRunStore:
                 parent_selection_hash=None,
                 now_ms=now_ms,
             )
+            self._insert_data_policy(
+                connection,
+                run_id=run_id,
+                policy=history_policy,
+                actual_replay_start_ms=actual_replay_start_ms,
+                now_ms=now_ms,
+            )
             self._insert_track(
                 connection,
                 run_id=run_id,
@@ -413,6 +428,7 @@ class TrainingRunStore:
                 dataset_blob=dataset_blob,
                 actual_replay_start_ms=actual_replay_start_ms,
                 actual_replay_end_ms=actual_replay_end_ms,
+                history_policy=history_policy,
                 now_ms=now_ms,
             )
             if request.book_mode.value == "BOOK_ASSISTED_REQUIRED":
@@ -625,6 +641,13 @@ class TrainingRunStore:
                 dataset_epoch=str(parent["dataset_epoch"]),
                 now_ms=now_ms,
             )
+            history_policy = self._copy_data_policy(
+                connection,
+                parent_run_id=parent_run_id,
+                child_run_id=child_run_id,
+                actual_replay_start_ms=actual_replay_start_ms,
+                now_ms=now_ms,
+            )
             self._insert_track(
                 connection,
                 run_id=child_run_id,
@@ -719,6 +742,7 @@ class TrainingRunStore:
                 dataset_blob=dataset_blob,
                 actual_replay_start_ms=actual_replay_start_ms,
                 actual_replay_end_ms=actual_replay_end_ms,
+                history_policy=history_policy,
                 now_ms=now_ms,
             )
             result_label = f"{parent['integrity_mode']}_FORKED_REVIEW"
@@ -1034,6 +1058,34 @@ class TrainingRunStore:
                 actual_end_ms=int(row["actual_replay_end_ms"]),
                 dataset_epoch=str(row["dataset_epoch"]),
                 parent_selection_hash=None,
+                now_ms=now_ms,
+            )
+            interval_ms = parse_interval_ms(str(config.get("base_interval", "")))
+            if interval_ms is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_UNAVAILABLE",
+                    "legacy replay base interval is unsupported",
+                    status_code=409,
+                )
+            legacy_warmup = int(config["warmup_bars"])
+            legacy_start_ms = int(row["actual_replay_start_ms"])
+            self._insert_data_policy(
+                connection,
+                run_id=run_id,
+                policy=ResolvedHistoryPolicy(
+                    indicator_warmup_bars=legacy_warmup,
+                    visible_history_mode=VisibleHistoryMode.DURATION,
+                    visible_history_lookback_ms=legacy_warmup * interval_ms,
+                    visible_history_rows=legacy_warmup,
+                    actual_visible_history_start_ms=(
+                        legacy_start_ms - legacy_warmup * interval_ms
+                    ),
+                    actual_replay_start_ms=legacy_start_ms,
+                    effective_warmup_bars=legacy_warmup,
+                    forward_cache_ms=int(config["horizon_ms"]),
+                    interval_ms=interval_ms,
+                ),
+                actual_replay_start_ms=legacy_start_ms,
                 now_ms=now_ms,
             )
             self._insert_track(
@@ -1374,16 +1426,15 @@ class TrainingRunStore:
                 """
                 SELECT r.adapter_session_id, r.time_disclosure_policy,
                        r.base_interval, r.display_interval, i.revealed,
-                       rule.rule_json,
                        d.actual_replay_start_ms, d.actual_replay_end_ms,
-                       d.synthetic_origin_ms
+                       d.synthetic_origin_ms,
+                       policy.effective_warmup_bars,
+                       policy.interval_ms AS policy_interval_ms
                 FROM replay_training_run AS r
                 JOIN replay_training_integrity AS i USING(run_id)
-                JOIN replay_training_rule AS rule
-                  ON rule.run_id = r.run_id
-                 AND rule.revision = r.active_rule_revision
                 JOIN replay_dataset_ref AS d
                   ON d.session_id = r.adapter_session_id
+                JOIN replay_training_data_policy AS policy USING(run_id)
                 WHERE r.run_id = ?
                 """,
                 (run_id,),
@@ -1398,22 +1449,13 @@ class TrainingRunStore:
                 if policy == "NONE"
                 else self._required_synthetic_origin(row["synthetic_origin_ms"])
             )
-            try:
-                rule = json.loads(str(row["rule_json"]))
-            except json.JSONDecodeError as exc:
-                raise TrainingRunError(
-                    "TRAINING_RUN_STORAGE_DEGRADED",
-                    "active training rule is invalid",
-                    status_code=503,
-                ) from exc
-            warmup = rule.get("warmup_bars", 0)
+            warmup = int(row["effective_warmup_bars"])
             interval_ms = parse_interval_ms(str(row["base_interval"]))
             display_interval_ms = parse_interval_ms(str(row["display_interval"]))
             if (
-                isinstance(warmup, bool)
-                or not isinstance(warmup, int)
-                or warmup < 0
+                warmup < 1
                 or interval_ms is None
+                or interval_ms != int(row["policy_interval_ms"])
                 or display_interval_ms is None
                 or display_interval_ms < interval_ms
             ):
@@ -2959,6 +3001,20 @@ class TrainingRunStore:
                         now_ms,
                     ),
                 )
+                policy_row = connection.execute(
+                    """
+                    SELECT * FROM replay_training_data_policy
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if policy_row is None:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "training data policy is missing",
+                        status_code=503,
+                    )
+                history_policy = self._data_policy_from_row(policy_row)
                 register_archive_segment(
                     connection,
                     run_id=run_id,
@@ -2969,6 +3025,7 @@ class TrainingRunStore:
                     dataset_blob=dataset_blob,
                     actual_replay_start_ms=actual_replay_start_ms,
                     actual_replay_end_ms=actual_replay_end_ms,
+                    history_policy=history_policy,
                     now_ms=now_ms,
                 )
                 run = connection.execute(
@@ -3597,6 +3654,7 @@ class TrainingRunStore:
                 """
                 SELECT
                     r.run_id,
+                    r.adapter_session_id AS primary_adapter_session_id,
                     t.adapter_session_id,
                     r.base_interval,
                     r.display_interval,
@@ -3607,6 +3665,7 @@ class TrainingRunStore:
                     t.market_type,
                     t.symbol,
                     t.source_kind,
+                    t.subscription_tier,
                     legacy.exchange AS legacy_exchange,
                     legacy.market_type AS legacy_market_type,
                     legacy.symbol AS legacy_symbol,
@@ -3618,12 +3677,24 @@ class TrainingRunStore:
                     t.revision,
                     s.config_json,
                     s.data_epoch AS session_data_epoch,
-                    s.degraded_reason
+                    s.degraded_reason,
+                    policy.schema_version,
+                    policy.indicator_warmup_bars,
+                    policy.visible_history_mode,
+                    policy.visible_history_lookback_ms,
+                    policy.visible_history_rows,
+                    policy.actual_visible_history_start_ms,
+                    policy.actual_replay_start_ms,
+                    policy.effective_warmup_bars,
+                    policy.forward_cache_ms,
+                    policy.interval_ms,
+                    policy.policy_hash
                 FROM replay_training_run AS r
                 JOIN replay_training_market_track AS t ON t.run_id = r.run_id
                 LEFT JOIN replay_training_track AS legacy
                   ON legacy.run_id = t.run_id AND legacy.track_id = t.track_id
                 JOIN replay_session AS s ON s.session_id = t.adapter_session_id
+                JOIN replay_training_data_policy AS policy USING(run_id)
                 WHERE t.adapter_session_id = ? AND t.track_id = ?
                 """,
                 (session_id, track_id),
@@ -3662,14 +3733,17 @@ class TrainingRunStore:
                 "training history track identity changed",
                 status_code=409,
             )
+        history_policy = self._data_policy_from_row(row)
         return {
             "run_id": str(row["run_id"]),
+            "primary_adapter_session_id": str(row["primary_adapter_session_id"]),
             "session_id": str(row["adapter_session_id"]),
             "track_id": str(row["track_id"]),
             "exchange": str(row["exchange"]),
             "market_type": str(row["market_type"]),
             "symbol": str(row["symbol"]),
             "source_kind": str(row["source_kind"]),
+            "subscription_tier": str(row["subscription_tier"]),
             "base_interval": str(row["base_interval"]),
             # Phase 3 keeps the adapter and frozen history at the base interval.
             # Mutable display selection belongs exclusively to ViewerState.
@@ -3683,6 +3757,10 @@ class TrainingRunStore:
             "revision": int(row["revision"]),
             "config": adapter_config,
             "degraded_reason": row["degraded_reason"],
+            "history_policy": {
+                **history_policy.to_dict(include_actual=True),
+                "policy_hash": history_policy.policy_hash,
+            },
         }
 
     @staticmethod
@@ -5332,6 +5410,136 @@ class TrainingRunStore:
                 now_ms,
             ),
         )
+
+    @staticmethod
+    def _insert_data_policy(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        policy: ResolvedHistoryPolicy,
+        actual_replay_start_ms: int,
+        now_ms: int,
+    ) -> None:
+        if not isinstance(policy, ResolvedHistoryPolicy):
+            raise TypeError("history_policy must be a ResolvedHistoryPolicy")
+        if policy.actual_replay_start_ms != actual_replay_start_ms:
+            raise TypeError("history policy does not match the frozen replay start")
+        digest = data_policy_hash(
+            indicator_warmup_bars=policy.indicator_warmup_bars,
+            visible_history_mode=policy.visible_history_mode.value,
+            visible_history_lookback_ms=policy.visible_history_lookback_ms,
+            visible_history_rows=policy.visible_history_rows,
+            actual_visible_history_start_ms=policy.actual_visible_history_start_ms,
+            actual_replay_start_ms=policy.actual_replay_start_ms,
+            effective_warmup_bars=policy.effective_warmup_bars,
+            forward_cache_ms=policy.forward_cache_ms,
+            interval_ms=policy.interval_ms,
+        )
+        if digest != policy.policy_hash:
+            raise TypeError("history policy hash implementation drifted")
+        connection.execute(
+            """
+            INSERT INTO replay_training_data_policy(
+                run_id, schema_version, indicator_warmup_bars,
+                visible_history_mode, visible_history_lookback_ms,
+                visible_history_rows, actual_visible_history_start_ms,
+                actual_replay_start_ms, effective_warmup_bars,
+                forward_cache_ms, interval_ms, policy_hash, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                DATA_POLICY_SCHEMA_VERSION,
+                policy.indicator_warmup_bars,
+                policy.visible_history_mode.value,
+                policy.visible_history_lookback_ms,
+                policy.visible_history_rows,
+                policy.actual_visible_history_start_ms,
+                policy.actual_replay_start_ms,
+                policy.effective_warmup_bars,
+                policy.forward_cache_ms,
+                policy.interval_ms,
+                digest,
+                now_ms,
+            ),
+        )
+
+    @staticmethod
+    def _data_policy_from_row(
+        row: Mapping[str, object],
+    ) -> ResolvedHistoryPolicy:
+        if str(row["schema_version"]) != DATA_POLICY_SCHEMA_VERSION:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training data policy schema is unsupported",
+                status_code=503,
+            )
+        try:
+            policy = ResolvedHistoryPolicy(
+                indicator_warmup_bars=int(row["indicator_warmup_bars"]),
+                visible_history_mode=VisibleHistoryMode(
+                    str(row["visible_history_mode"])
+                ),
+                visible_history_lookback_ms=(
+                    None
+                    if row["visible_history_lookback_ms"] is None
+                    else int(row["visible_history_lookback_ms"])
+                ),
+                visible_history_rows=int(row["visible_history_rows"]),
+                actual_visible_history_start_ms=int(
+                    row["actual_visible_history_start_ms"]
+                ),
+                actual_replay_start_ms=int(row["actual_replay_start_ms"]),
+                effective_warmup_bars=int(row["effective_warmup_bars"]),
+                forward_cache_ms=int(row["forward_cache_ms"]),
+                interval_ms=int(row["interval_ms"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training data policy is invalid",
+                status_code=503,
+            ) from exc
+        if policy.policy_hash != str(row["policy_hash"]):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training data policy failed its integrity check",
+                status_code=503,
+            )
+        return policy
+
+    @classmethod
+    def _copy_data_policy(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        parent_run_id: str,
+        child_run_id: str,
+        actual_replay_start_ms: int,
+        now_ms: int,
+    ) -> ResolvedHistoryPolicy:
+        row = connection.execute(
+            """
+            SELECT * FROM replay_training_data_policy
+            WHERE run_id = ?
+            """,
+            (parent_run_id,),
+        ).fetchone()
+        if row is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "parent training data policy is missing",
+                status_code=503,
+            )
+        policy = cls._data_policy_from_row(row)
+        cls._insert_data_policy(
+            connection,
+            run_id=child_run_id,
+            policy=policy,
+            actual_replay_start_ms=actual_replay_start_ms,
+            now_ms=now_ms,
+        )
+        return policy
 
     @classmethod
     def _copy_start_selection(

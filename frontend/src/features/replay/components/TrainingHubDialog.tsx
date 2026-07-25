@@ -234,14 +234,53 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           <input value={`${draft.baseInterval} / ${draft.displayInterval}`} readOnly />
         </label>
         <label>
-          预热 BAR
+          指标预热 BAR
           <input
             type="number"
             min={1}
-            value={draft.warmupBars}
-            onChange={(event) => patchDraft(runtime, { warmupBars: Number(event.target.value) })}
+            value={draft.indicatorWarmupBars}
+            onChange={(event) => patchDraft(runtime, {
+              indicatorWarmupBars: Number(event.target.value),
+            })}
           />
+          <small>只保证指标计算所需数据，不决定图表可向前滚动多远。</small>
         </label>
+        <label>
+          可见历史
+          <select
+            value={draft.visibleHistoryMode}
+            onChange={(event) => {
+              const mode = event.target.value as TrainingRunDraft["visibleHistoryMode"];
+              patchDraft(runtime, {
+                visibleHistoryMode: mode,
+                visibleHistoryLookbackMs: mode === "ALL_AVAILABLE"
+                  ? null
+                  : draft.visibleHistoryLookbackMs
+                    ?? draft.indicatorWarmupBars
+                      * (startWindow?.stepSeconds ?? 60)
+                      * 1_000,
+              });
+            }}
+          >
+            <option value="DURATION">固定时长</option>
+            <option value="ALL_AVAILABLE">当前连续数据段内全部可用</option>
+          </select>
+        </label>
+        {draft.visibleHistoryMode === "DURATION" && (
+          <label>
+            可见历史时长（ms）
+            <input
+              type="number"
+              min={(startWindow?.stepSeconds ?? 60) * 1_000}
+              step={(startWindow?.stepSeconds ?? 60) * 1_000}
+              value={draft.visibleHistoryLookbackMs ?? ""}
+              onChange={(event) => patchDraft(runtime, {
+                visibleHistoryLookbackMs: Number(event.target.value),
+              })}
+            />
+            <small>必须是基础周期的整数倍；与指标预热分别计算，冻结后不可变。</small>
+          </label>
+        )}
         <label>
           前向缓存（ms）
           <input
@@ -377,14 +416,32 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         ))}
         <p>入金、出金、费率、杠杆上限、Sandbox 固定资金费与不可逆时间揭示均写入审计事件；Challenge 仍全部锁定。</p>
       </fieldset>
-      <div className="training-hub-capability-boundary" aria-label="Phase 7 数据与能力边界">
-        <h3>Phase 7 按需数据段</h3>
+      <div className="training-hub-capability-boundary" aria-label="Phase 14 数据与能力边界">
+        <h3>Phase 14 按需数据策略</h3>
         {runtime.segmentPlan === null ? (
           <p>参数变更后会在提交前重新生成服务端 prepare plan；选择商品本身不会加载历史。</p>
         ) : (
           <ul>
             <li><strong>动作</strong> — {runtime.segmentPlan.prepare_action}</li>
             <li><strong>预计范围</strong> — {runtime.segmentPlan.estimated_rows} rows · {formatBytes(runtime.segmentPlan.estimated_size_bytes)}</li>
+            <li>
+              <strong>指标预热</strong> — {runtime.segmentPlan.history_policy.indicator_warmup_bars} rows
+            </li>
+            <li>
+              <strong>可见历史</strong> — {runtime.segmentPlan.history_policy.visible_history_lookback.mode}
+              {runtime.segmentPlan.history_policy.visible_history_lookback.duration_ms === null
+                ? " · 创建时按选中连续数据段解析"
+                : ` · ${runtime.segmentPlan.history_policy.visible_history_lookback.duration_ms} ms · ${runtime.segmentPlan.history_policy.visible_history_rows_estimate ?? "未对齐"} rows`}
+            </li>
+            <li>
+              <strong>实际冻结预热估算</strong> — {runtime.segmentPlan.history_policy.effective_warmup_bars_estimate} rows；
+              前向 {runtime.segmentPlan.history_policy.forward_rows_estimate} rows
+            </li>
+            <li>
+              <strong>数据预算</strong> — {runtime.segmentPlan.history_policy.accepted
+                ? `预校验通过（上限 ${runtime.segmentPlan.history_policy.max_dataset_rows} rows）`
+                : `拒绝：${runtime.segmentPlan.history_policy.blocked_reason ?? "UNKNOWN"}`}
+            </li>
             <li><strong>本地同源 READY 库存</strong> — {runtime.segmentPlan.existing_ready_segments} segments · {formatBytes(runtime.segmentPlan.existing_ready_bytes)}（创建时再核对范围）</li>
             <li><strong>失败策略</strong> — 校验失败 quarantine，禁止 Run 引用</li>
             <li><strong>后台下载</strong> — {runtime.segmentPlan.download_worker_enabled ? "显式启用" : "默认关闭"}</li>

@@ -219,7 +219,12 @@ async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Pa
         )
         assert page.status_code == 200
         payload = page.json()
-        assert payload["schema_version"] == "replay.history.v1"
+        assert payload["schema_version"] == "replay.history.v2"
+        assert payload["history_boundary_ms"] <= payload["revealed_boundary_ms"]
+        assert (
+            payload["history_policy"]["schema_version"]
+            == "replay.data-policy.v1"
+        )
         assert payload["session_id"] == "adapter-1"
         assert payload["track_id"] == "track-1"
         assert all(bar["close_time_ms"] <= boundary for bar in payload["bars"])

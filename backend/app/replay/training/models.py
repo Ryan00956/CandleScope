@@ -10,6 +10,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TypeVar
 
+from app.data_engine.interval_policy import parse_interval_ms
 from app.replay.models import (
     normalize_decimal_string,
     validate_identifier,
@@ -57,6 +58,11 @@ class ReplaySource(_StringEnum):
 class StartMode(_StringEnum):
     MANUAL = "MANUAL"
     RANDOM = "RANDOM"
+
+
+class VisibleHistoryMode(_StringEnum):
+    DURATION = "DURATION"
+    ALL_AVAILABLE = "ALL_AVAILABLE"
 
 
 class IntegrityMode(_StringEnum):
@@ -202,6 +208,7 @@ _ENUM_TYPES: tuple[tuple[str, type[_StringEnum]], ...] = (
     ("track_state", TrackState),
     ("source_kind", ReplaySource),
     ("start_mode", StartMode),
+    ("visible_history_mode", VisibleHistoryMode),
     ("integrity_mode", IntegrityMode),
     ("time_disclosure_policy", TimeDisclosurePolicy),
     ("subscription_tier", SubscriptionTier),
@@ -989,6 +996,53 @@ class ReplayLaunchContext:
 
 
 @dataclass(frozen=True, slots=True)
+class VisibleHistoryLookback:
+    mode: VisibleHistoryMode
+    duration_ms: int | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "mode",
+            coerce_enum(
+                VisibleHistoryMode,
+                self.mode,
+                field_name="visible_history_lookback.mode",
+            ),
+        )
+        if self.mode is VisibleHistoryMode.ALL_AVAILABLE:
+            if self.duration_ms is not None:
+                raise ValueError(
+                    "ALL_AVAILABLE visible history cannot include duration_ms"
+                )
+            return
+        if self.duration_ms is None:
+            raise ValueError("DURATION visible history requires duration_ms")
+        duration_ms = validate_v2_counter(
+            self.duration_ms,
+            field_name="visible_history_lookback.duration_ms",
+        )
+        if duration_ms < 1:
+            raise ValueError("visible history duration_ms must be positive")
+        object.__setattr__(self, "duration_ms", duration_ms)
+
+    @classmethod
+    def from_dict(cls, value: object) -> "VisibleHistoryLookback":
+        payload = expect_mapping(value, field_name="visible_history_lookback")
+        expect_exact_keys(payload, {"mode", "duration_ms"})
+        return cls(
+            mode=payload["mode"],  # type: ignore[arg-type]
+            duration_ms=payload["duration_ms"],  # type: ignore[arg-type]
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.mode.value,
+            "duration_ms": self.duration_ms,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingRunCreateRequest:
     """Replay training create contract mapped to one replay.v1 adapter session."""
 
@@ -1022,6 +1076,7 @@ class TrainingRunCreateRequest:
     funding_interval_ms: int | None = None
     allowed_mutations: tuple[str, ...] = ()
     launch_context: ReplayLaunchContext | None = None
+    visible_history_lookback: "VisibleHistoryLookback | None" = None
 
     def __post_init__(self) -> None:
         if self.protocol != REPLAY_V2_PROTOCOL:
@@ -1095,6 +1150,20 @@ class TrainingRunCreateRequest:
         object.__setattr__(self, "warmup_bars", warmup)
         object.__setattr__(self, "forward_cache_ms", forward_cache)
         object.__setattr__(self, "random_seed", random_seed)
+        visible_history = self.visible_history_lookback
+        if visible_history is None:
+            interval_ms = parse_interval_ms(self.base_interval)
+            if interval_ms is None:
+                raise ValueError("base_interval must be a fixed replay interval")
+            visible_history = VisibleHistoryLookback(
+                mode=VisibleHistoryMode.DURATION,
+                duration_ms=warmup * interval_ms,
+            )
+        elif not isinstance(visible_history, VisibleHistoryLookback):
+            raise TypeError(
+                "visible_history_lookback must be a VisibleHistoryLookback"
+            )
+        object.__setattr__(self, "visible_history_lookback", visible_history)
         for field_name in ("initial_equity", "max_leverage"):
             object.__setattr__(
                 self,
@@ -1195,7 +1264,6 @@ class TrainingRunCreateRequest:
             "base_interval",
             "display_interval",
             "requested_start_ms",
-            "warmup_bars",
             "forward_cache_ms",
             "initial_equity",
             "max_leverage",
@@ -1209,8 +1277,20 @@ class TrainingRunCreateRequest:
             "funding_mode",
             "allow_rule_changes",
         }
+        warmup_fields = {
+            field_name
+            for field_name in ("warmup_bars", "indicator_warmup_bars")
+            if field_name in payload and payload[field_name] is not None
+        }
+        if len(warmup_fields) != 1:
+            raise ValueError(
+                "exactly one of warmup_bars or indicator_warmup_bars is required"
+            )
         missing = required - set(payload)
         unknown = set(payload) - required - {
+            "warmup_bars",
+            "indicator_warmup_bars",
+            "visible_history_lookback",
             "random_seed",
             "allowed_mutations",
             "fixed_funding_rate",
@@ -1222,6 +1302,16 @@ class TrainingRunCreateRequest:
         if unknown:
             raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
         normalized = dict(payload)
+        normalized["warmup_bars"] = normalized.pop(
+            next(iter(warmup_fields))
+        )
+        normalized.pop("indicator_warmup_bars", None)
+        raw_visible_history = normalized.get("visible_history_lookback")
+        normalized["visible_history_lookback"] = (
+            None
+            if raw_visible_history is None
+            else VisibleHistoryLookback.from_dict(raw_visible_history)
+        )
         normalized.setdefault("random_seed", None)
         raw_allowed = normalized.get("allowed_mutations", ())
         if not isinstance(raw_allowed, (list, tuple)):
@@ -1243,6 +1333,12 @@ class TrainingRunCreateRequest:
             display_interval=self.display_interval,
         )
 
+    @property
+    def indicator_warmup_bars(self) -> int:
+        """Canonical Phase 14 name for the legacy internal warmup field."""
+
+        return self.warmup_bars
+
     def to_dict(self, *, redact_hidden_start: bool = False) -> dict[str, object]:
         hidden = self.time_disclosure_policy is not TimeDisclosurePolicy.NONE
         return {
@@ -1260,7 +1356,8 @@ class TrainingRunCreateRequest:
             "requested_start_ms": (
                 None if redact_hidden_start and hidden else self.requested_start_ms
             ),
-            "warmup_bars": self.warmup_bars,
+            "indicator_warmup_bars": self.warmup_bars,
+            "visible_history_lookback": self.visible_history_lookback.to_dict(),
             "forward_cache_ms": self.forward_cache_ms,
             "random_seed": (
                 None if redact_hidden_start and hidden else self.random_seed
@@ -1316,6 +1413,8 @@ __all__ = [
     "TrainingCursor",
     "TrainingRunCreateRequest",
     "TrainingRunContract",
+    "VisibleHistoryLookback",
+    "VisibleHistoryMode",
     "ViewerState",
     "ensure_time_disclosure_not_weakened",
     "validate_track_source",

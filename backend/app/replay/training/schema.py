@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from app.data_engine.interval_policy import parse_interval_ms
 from app.replay.canonical import canonical_json, canonical_sha256
 
 
 TRAINING_SCHEMA_VERSION = 9
 TRAINING_SCHEMA_ID = "replay.training.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
+DATA_POLICY_SCHEMA_VERSION = "replay.data-policy.v1"
 
 
 TRAINING_SCHEMA_V1 = """
@@ -776,6 +778,73 @@ CREATE TABLE IF NOT EXISTS replay_training_start_selection (
 """
 
 
+TRAINING_SCHEMA_PHASE14_ADDITIVE = """
+CREATE TABLE IF NOT EXISTS replay_training_data_policy (
+    run_id TEXT PRIMARY KEY
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.data-policy.v1'),
+    indicator_warmup_bars INTEGER NOT NULL
+        CHECK (indicator_warmup_bars >= 1),
+    visible_history_mode TEXT NOT NULL
+        CHECK (visible_history_mode IN ('DURATION', 'ALL_AVAILABLE')),
+    visible_history_lookback_ms INTEGER
+        CHECK (
+            visible_history_lookback_ms IS NULL
+            OR visible_history_lookback_ms >= 1
+        ),
+    visible_history_rows INTEGER NOT NULL
+        CHECK (visible_history_rows >= 0),
+    actual_visible_history_start_ms INTEGER NOT NULL
+        CHECK (actual_visible_history_start_ms >= 0),
+    actual_replay_start_ms INTEGER NOT NULL
+        CHECK (
+            actual_replay_start_ms >= actual_visible_history_start_ms
+        ),
+    effective_warmup_bars INTEGER NOT NULL
+        CHECK (effective_warmup_bars >= indicator_warmup_bars),
+    forward_cache_ms INTEGER NOT NULL CHECK (forward_cache_ms >= 1),
+    interval_ms INTEGER NOT NULL CHECK (interval_ms >= 1),
+    policy_hash TEXT NOT NULL
+        CHECK (
+            length(policy_hash) = 71
+            AND substr(policy_hash, 1, 7) = 'sha256:'
+        ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+);
+"""
+
+
+def data_policy_hash(
+    *,
+    indicator_warmup_bars: int,
+    visible_history_mode: str,
+    visible_history_lookback_ms: int | None,
+    visible_history_rows: int,
+    actual_visible_history_start_ms: int,
+    actual_replay_start_ms: int,
+    effective_warmup_bars: int,
+    forward_cache_ms: int,
+    interval_ms: int,
+) -> str:
+    return canonical_sha256(
+        {
+            "schema_version": DATA_POLICY_SCHEMA_VERSION,
+            "indicator_warmup_bars": indicator_warmup_bars,
+            "visible_history_lookback": {
+                "mode": visible_history_mode,
+                "duration_ms": visible_history_lookback_ms,
+            },
+            "visible_history_rows": visible_history_rows,
+            "actual_visible_history_start_ms": actual_visible_history_start_ms,
+            "actual_replay_start_ms": actual_replay_start_ms,
+            "effective_warmup_bars": effective_warmup_bars,
+            "forward_cache_ms": forward_cache_ms,
+            "interval_ms": interval_ms,
+        }
+    )
+
+
 def start_selection_hash(
     *,
     run_id: str,
@@ -907,6 +976,88 @@ def _backfill_launch_contexts(
         )
 
 
+def _backfill_data_policies(
+    connection: sqlite3.Connection,
+    *,
+    now_ms: int,
+) -> None:
+    """Give pre-Phase-14 runs the exact legacy history semantics.
+
+    Legacy ``warmup_bars`` simultaneously powered indicators and the visible
+    pre-start chart.  Preserve that contract without opening or rewriting the
+    immutable dataset blob.
+    """
+
+    rows = connection.execute(
+        """
+        SELECT r.run_id, s.config_json, d.actual_replay_start_ms
+        FROM replay_training_run AS r
+        JOIN replay_session AS s ON s.session_id = r.adapter_session_id
+        JOIN replay_dataset_ref AS d ON d.session_id = r.adapter_session_id
+        WHERE NOT EXISTS(
+            SELECT 1 FROM replay_training_data_policy AS policy
+            WHERE policy.run_id = r.run_id
+        )
+        ORDER BY r.run_id
+        """
+    ).fetchall()
+    for run_id, config_json, actual_replay_start_ms in rows:
+        config = json.loads(str(config_json))
+        if not isinstance(config, dict):
+            raise TypeError("legacy replay config must be an object")
+        interval = str(config.get("base_interval", ""))
+        interval_ms = parse_interval_ms(interval)
+        if interval_ms is None:
+            raise ValueError("legacy replay base_interval must be fixed")
+        warmup_bars = int(config["warmup_bars"])
+        forward_cache_ms = int(config["horizon_ms"])
+        actual_start = int(actual_replay_start_ms)
+        visible_lookback_ms = warmup_bars * interval_ms
+        visible_start = actual_start - visible_lookback_ms
+        if (
+            warmup_bars < 1
+            or forward_cache_ms < 1
+            or visible_start < 0
+        ):
+            raise ValueError("legacy replay history policy is invalid")
+        digest = data_policy_hash(
+            indicator_warmup_bars=warmup_bars,
+            visible_history_mode="DURATION",
+            visible_history_lookback_ms=visible_lookback_ms,
+            visible_history_rows=warmup_bars,
+            actual_visible_history_start_ms=visible_start,
+            actual_replay_start_ms=actual_start,
+            effective_warmup_bars=warmup_bars,
+            forward_cache_ms=forward_cache_ms,
+            interval_ms=interval_ms,
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_training_data_policy(
+                run_id, schema_version, indicator_warmup_bars,
+                visible_history_mode, visible_history_lookback_ms,
+                visible_history_rows, actual_visible_history_start_ms,
+                actual_replay_start_ms, effective_warmup_bars,
+                forward_cache_ms, interval_ms, policy_hash, created_at_ms
+            ) VALUES (?, ?, ?, 'DURATION', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(run_id),
+                DATA_POLICY_SCHEMA_VERSION,
+                warmup_bars,
+                visible_lookback_ms,
+                warmup_bars,
+                visible_start,
+                actual_start,
+                warmup_bars,
+                forward_cache_ms,
+                interval_ms,
+                digest,
+                now_ms,
+            ),
+        )
+
+
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
     """Create only v2-owned tables; never advance the replay.v1 schema row."""
 
@@ -928,8 +1079,6 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
             f"replay training schema {current} is newer than supported "
             f"{TRAINING_SCHEMA_VERSION}"
         )
-    if current == TRAINING_SCHEMA_VERSION:
-        return
     if current == 0:
         _execute_script(connection, TRAINING_SCHEMA_V1)
         current = 1
@@ -1051,6 +1200,11 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         current = 9
     if current != TRAINING_SCHEMA_VERSION:
         raise RuntimeError(f"no replay training schema migration path from {current}")
+    # Phase 14 deliberately remains schema v9.  This additive table is ignored
+    # safely by the Phase 13 binary, which keeps the documented rollback path
+    # open while new binaries fail closed when a policy row is missing.
+    _execute_script(connection, TRAINING_SCHEMA_PHASE14_ADDITIVE)
+    _backfill_data_policies(connection, now_ms=now_ms)
     connection.execute(
         """
         INSERT INTO replay_training_schema_version(singleton, version, applied_at_ms)
@@ -1071,9 +1225,11 @@ def _execute_script(connection: sqlite3.Connection, script: str) -> None:
 
 
 __all__ = [
+    "DATA_POLICY_SCHEMA_VERSION",
     "START_SELECTION_SCHEMA_VERSION",
     "TRAINING_SCHEMA_ID",
     "TRAINING_SCHEMA_VERSION",
+    "data_policy_hash",
     "migrate_training_schema",
     "start_selection_hash",
 ]

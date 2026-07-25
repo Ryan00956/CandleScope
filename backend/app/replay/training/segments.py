@@ -18,13 +18,17 @@ from app.replay.canonical import canonical_json, canonical_sha256
 from app.replay.storage.sqlite_store import ReplaySQLiteStore
 
 from .errors import TrainingRunError
-from .models import TrainingRunCreateRequest
+from .models import (
+    TrainingRunCreateRequest,
+    VisibleHistoryMode,
+)
 
 
 SEGMENT_PROTOCOL = "replay.data.segment.v1"
 REHYDRATION_PROTOCOL = "replay.data.rehydration.v1"
 PREPARE_PROTOCOL = "replay.data.prepare.v1"
 GC_PROTOCOL = "replay.data.gc.v1"
+DATA_POLICY_PROTOCOL = "replay.data-policy.v1"
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -84,14 +88,22 @@ def _archive_descriptor(
     actual_replay_start_ms: int,
     actual_replay_end_ms: int,
     base_interval_override: str | None = None,
+    history_policy: ResolvedHistoryPolicy | None = None,
+    range_start_ms_override: int | None = None,
 ) -> dict[str, object]:
     base_interval: str | None
+    embedded_history_start_ms: int | None = None
     if source_kind == "BAR":
         identity = _mapping(dataset_ref.get("identity"), "BAR dataset identity")
         schema_version = str(dataset_ref.get("schema_version", ""))
         dataset_epoch = str(dataset_ref.get("data_epoch", ""))
         base_interval = str(dataset_ref.get("interval", ""))
         row_count = _integer(dataset_ref.get("row_count", 0), "BAR row_count")
+        if dataset_ref.get("warmup_start_ms") is not None:
+            embedded_history_start_ms = _integer(
+                dataset_ref.get("warmup_start_ms"),
+                "BAR warmup_start_ms",
+            )
         adapter_kind = "V1_BAR_SNAPSHOT"
         source_manifest: dict[str, object] = {
             "repository_backend": dataset_ref.get("repository_backend"),
@@ -118,6 +130,13 @@ def _archive_descriptor(
             if bar_bundle.get("interval") is not None
             else None
         )
+        raw_rows = bar_bundle.get("rows")
+        if isinstance(raw_rows, list) and raw_rows:
+            first_row = _mapping(raw_rows[0], "aggregate-trade first BAR row")
+            embedded_history_start_ms = _integer(
+                first_row.get("open_time_ms"),
+                "aggregate-trade BAR warmup start",
+            )
         objects = trade_ref.get("objects")
         source_manifest = {
             "row_count": _integer(
@@ -144,13 +163,61 @@ def _archive_descriptor(
         if dataset_blob is None:
             raise ValueError("archive segment byte size is missing")
         snapshot_bytes = len(canonical_json(dataset_blob).encode("utf-8"))
+    policy_payload: dict[str, object] | None = None
+    if history_policy is not None:
+        if not isinstance(history_policy, ResolvedHistoryPolicy):
+            raise TypeError("history_policy must be a ResolvedHistoryPolicy")
+        if history_policy.actual_replay_start_ms != actual_replay_start_ms:
+            raise ValueError("archive history policy does not match replay start")
+        policy_start_ms = (
+            history_policy.actual_replay_start_ms
+            - history_policy.effective_warmup_bars * history_policy.interval_ms
+        )
+        if (
+            embedded_history_start_ms is not None
+            and embedded_history_start_ms != policy_start_ms
+        ):
+            raise ValueError("archive embedded history range does not match policy")
+        range_start_ms = policy_start_ms
+        policy_payload = {
+            **history_policy.to_dict(include_actual=True),
+            "policy_hash": history_policy.policy_hash,
+            "indicator_history_start_ms": (
+                history_policy.actual_replay_start_ms
+                - history_policy.indicator_warmup_bars
+                * history_policy.interval_ms
+            ),
+            "dataset_history_start_ms": policy_start_ms,
+        }
+    elif range_start_ms_override is not None:
+        range_start_ms = _integer(
+            range_start_ms_override,
+            "archive range_start_ms_override",
+        )
+        if (
+            embedded_history_start_ms is not None
+            and embedded_history_start_ms != range_start_ms
+        ):
+            raise ValueError("archive range override does not match embedded history")
+    elif embedded_history_start_ms is not None:
+        range_start_ms = embedded_history_start_ms
+    else:
+        # Compatibility for callers that do not own a Phase 14 policy.  The
+        # migration/backfill path always supplies an exact override.
+        range_start_ms = actual_replay_start_ms
+    if (
+        range_start_ms < 0
+        or range_start_ms > actual_replay_start_ms
+        or actual_replay_end_ms < actual_replay_start_ms
+    ):
+        raise ValueError("archive segment range is invalid")
     segment_id, identity_key = _segment_identity(
         source_kind=source_kind,
         exchange=exchange,
         market_type=market_type,
         symbol=symbol,
         base_interval=base_interval,
-        range_start_ms=actual_replay_start_ms,
+        range_start_ms=range_start_ms,
         range_end_ms=actual_replay_end_ms,
         schema_version=schema_version,
         dataset_epoch=dataset_epoch,
@@ -172,11 +239,13 @@ def _archive_descriptor(
         "dataset_epoch": dataset_epoch,
         "checksum_sha256": snapshot_checksum,
         "range": {
-            "start_ms": actual_replay_start_ms,
+            "start_ms": range_start_ms,
             "end_ms": actual_replay_end_ms,
         },
         "source": source_manifest,
     }
+    if policy_payload is not None:
+        manifest["history_policy"] = policy_payload
     return {
         "segment_id": segment_id,
         "identity_key": identity_key,
@@ -186,7 +255,7 @@ def _archive_descriptor(
         "market_type": market_type,
         "symbol": symbol,
         "base_interval": base_interval,
-        "range_start_ms": actual_replay_start_ms,
+        "range_start_ms": range_start_ms,
         "range_end_ms": actual_replay_end_ms,
         "schema_version": schema_version,
         "dataset_epoch": dataset_epoch,
@@ -211,6 +280,8 @@ def register_archive_segment(
     snapshot_checksum: str | None = None,
     snapshot_bytes: int | None = None,
     base_interval_override: str | None = None,
+    history_policy: ResolvedHistoryPolicy | None = None,
+    range_start_ms_override: int | None = None,
 ) -> str:
     """Register one immutable v1 dataset adapter inside its creating transaction."""
 
@@ -223,6 +294,8 @@ def register_archive_segment(
         actual_replay_start_ms=actual_replay_start_ms,
         actual_replay_end_ms=actual_replay_end_ms,
         base_interval_override=base_interval_override,
+        history_policy=history_policy,
+        range_start_ms_override=range_start_ms_override,
     )
     existing = connection.execute(
         "SELECT * FROM replay_data_segment WHERE identity_key = ?",
@@ -362,12 +435,15 @@ def backfill_archive_segments(connection: sqlite3.Connection, *, now_ms: int) ->
                d.snapshot_ref_json, d.snapshot_sha256,
                length(d.snapshot_blob) AS snapshot_bytes,
                d.actual_replay_start_ms, d.actual_replay_end_ms,
-               s.config_json
+               s.config_json,
+               policy.effective_warmup_bars AS policy_effective_warmup_bars,
+               policy.interval_ms AS policy_interval_ms
         FROM replay_training_pin AS p
         JOIN replay_training_run AS r USING(run_id)
         JOIN replay_training_market_track AS t ON t.run_id = p.run_id
         JOIN replay_dataset_ref AS d ON d.session_id = t.adapter_session_id
         JOIN replay_session AS s ON s.session_id = t.adapter_session_id
+        JOIN replay_training_data_policy AS policy USING(run_id)
         WHERE (
             (p.pin_id = 'primary-dataset' AND t.stable_ordinal = 1)
             OR p.pin_id = t.track_id || '-dataset'
@@ -407,6 +483,11 @@ def backfill_archive_segments(connection: sqlite3.Connection, *, now_ms: int) ->
                 str(config.get("base_interval"))
                 if isinstance(config, Mapping) and config.get("base_interval") is not None
                 else None
+            ),
+            range_start_ms_override=(
+                int(row["actual_replay_start_ms"])
+                - int(row["policy_effective_warmup_bars"])
+                * int(row["policy_interval_ms"])
             ),
         )
         inserted += 1
@@ -511,6 +592,158 @@ class SegmentPrepareSpec:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedHistoryPolicy:
+    indicator_warmup_bars: int
+    visible_history_mode: VisibleHistoryMode
+    visible_history_lookback_ms: int | None
+    visible_history_rows: int
+    actual_visible_history_start_ms: int
+    actual_replay_start_ms: int
+    effective_warmup_bars: int
+    forward_cache_ms: int
+    interval_ms: int
+
+    def __post_init__(self) -> None:
+        numeric = (
+            self.indicator_warmup_bars,
+            self.visible_history_rows,
+            self.actual_visible_history_start_ms,
+            self.actual_replay_start_ms,
+            self.effective_warmup_bars,
+            self.forward_cache_ms,
+            self.interval_ms,
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in numeric
+        ):
+            raise ValueError("resolved replay history policy counters are invalid")
+        if self.indicator_warmup_bars < 1 or self.interval_ms < 1:
+            raise ValueError("resolved replay history policy is empty")
+        if self.actual_visible_history_start_ms > self.actual_replay_start_ms:
+            raise ValueError("visible replay history begins after replay start")
+        if self.effective_warmup_bars < max(
+            self.indicator_warmup_bars,
+            self.visible_history_rows,
+        ):
+            raise ValueError("effective replay warmup does not cover its roles")
+        if self.visible_history_mode is VisibleHistoryMode.DURATION:
+            if (
+                self.visible_history_lookback_ms is None
+                or self.visible_history_lookback_ms
+                != self.visible_history_rows * self.interval_ms
+            ):
+                raise ValueError("duration replay history policy is misaligned")
+        elif self.visible_history_lookback_ms is not None:
+            raise ValueError("all-available replay history cannot include duration")
+
+    @property
+    def policy_hash(self) -> str:
+        return canonical_sha256(self.to_dict(include_actual=True))
+
+    def to_dict(self, *, include_actual: bool) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": DATA_POLICY_PROTOCOL,
+            "indicator_warmup_bars": self.indicator_warmup_bars,
+            "visible_history_lookback": {
+                "mode": self.visible_history_mode.value,
+                "duration_ms": self.visible_history_lookback_ms,
+            },
+            "visible_history_rows": self.visible_history_rows,
+            "effective_warmup_bars": self.effective_warmup_bars,
+            "forward_cache_ms": self.forward_cache_ms,
+            "interval_ms": self.interval_ms,
+        }
+        if include_actual:
+            payload.update(
+                {
+                    "actual_visible_history_start_ms": (
+                        self.actual_visible_history_start_ms
+                    ),
+                    "actual_replay_start_ms": self.actual_replay_start_ms,
+                }
+            )
+        return payload
+
+
+def resolve_history_policy(
+    request: TrainingRunCreateRequest,
+    selection: Mapping[str, object],
+    *,
+    max_dataset_rows: int,
+) -> ResolvedHistoryPolicy:
+    interval_ms = _integer(selection.get("interval_ms"), "selection interval_ms")
+    selected_start_ms = _integer(
+        selection.get("selected_start_ms"),
+        "selection selected_start_ms",
+    )
+    continuous_start_ms = _integer(
+        selection.get("continuous_history_start_ms"),
+        "selection continuous_history_start_ms",
+    )
+    visible = request.visible_history_lookback
+    assert visible is not None
+    if visible.mode is VisibleHistoryMode.DURATION:
+        assert visible.duration_ms is not None
+        if visible.duration_ms % interval_ms:
+            raise TrainingRunError(
+                "VISIBLE_HISTORY_INTERVAL_MISMATCH",
+                "visible history duration must be an exact base-interval multiple",
+                status_code=422,
+                details={"base_interval_ms": interval_ms},
+            )
+        visible_rows = visible.duration_ms // interval_ms
+        visible_start_ms = selected_start_ms - visible.duration_ms
+        if visible_start_ms < continuous_start_ms:
+            raise TrainingRunError(
+                "VISIBLE_HISTORY_COVERAGE_UNAVAILABLE",
+                "selected start does not have the requested contiguous visible history",
+                status_code=409,
+                details={
+                    "requested_rows": visible_rows,
+                    "available_rows": max(
+                        0,
+                        (selected_start_ms - continuous_start_ms) // interval_ms,
+                    ),
+                },
+            )
+    else:
+        visible_start_ms = continuous_start_ms
+        distance = selected_start_ms - visible_start_ms
+        if distance < 0 or distance % interval_ms:
+            raise TrainingRunError(
+                "VISIBLE_HISTORY_COVERAGE_UNAVAILABLE",
+                "all-available history boundary is not base-interval aligned",
+                status_code=409,
+            )
+        visible_rows = distance // interval_ms
+    effective = max(request.indicator_warmup_bars, visible_rows)
+    forward_rows = (request.forward_cache_ms + interval_ms - 1) // interval_ms
+    estimated_total = effective + forward_rows + 1
+    if estimated_total > max_dataset_rows:
+        raise TrainingRunError(
+            "VISIBLE_HISTORY_BUDGET_EXCEEDED",
+            "visible history and forward cache exceed the immutable dataset budget",
+            status_code=409,
+            details={
+                "estimated_rows": estimated_total,
+                "max_dataset_rows": max_dataset_rows,
+            },
+        )
+    return ResolvedHistoryPolicy(
+        indicator_warmup_bars=request.indicator_warmup_bars,
+        visible_history_mode=visible.mode,
+        visible_history_lookback_ms=visible.duration_ms,
+        visible_history_rows=visible_rows,
+        actual_visible_history_start_ms=visible_start_ms,
+        actual_replay_start_ms=selected_start_ms,
+        effective_warmup_bars=effective,
+        forward_cache_ms=request.forward_cache_ms,
+        interval_ms=interval_ms,
+    )
+
+
 class ReplaySegmentManager:
     """Own replay-only files while SQLite remains the serialization authority."""
 
@@ -555,15 +788,38 @@ class ReplaySegmentManager:
     async def plan_for_request(
         self,
         request: TrainingRunCreateRequest,
+        *,
+        max_dataset_rows: int,
     ) -> dict[str, object]:
         interval_ms = parse_interval_ms(request.base_interval)
         if interval_ms is None:
             raise ValueError("base_interval must be a fixed replay interval")
-        estimated_rows = (
-            request.warmup_bars
-            + (request.forward_cache_ms + interval_ms - 1) // interval_ms
-            + 2
-        )
+        visible = request.visible_history_lookback
+        assert visible is not None
+        block_reason: str | None = None
+        estimate_kind = "EXACT"
+        if visible.mode is VisibleHistoryMode.DURATION:
+            assert visible.duration_ms is not None
+            if visible.duration_ms % interval_ms:
+                visible_rows: int | None = None
+                effective_warmup = request.indicator_warmup_bars
+                block_reason = "VISIBLE_HISTORY_INTERVAL_MISMATCH"
+            else:
+                visible_rows = visible.duration_ms // interval_ms
+                effective_warmup = max(
+                    request.indicator_warmup_bars,
+                    visible_rows,
+                )
+        else:
+            visible_rows = None
+            effective_warmup = request.indicator_warmup_bars
+            estimate_kind = "SELECTION_DEPENDENT"
+        forward_rows = (
+            request.forward_cache_ms + interval_ms - 1
+        ) // interval_ms
+        estimated_rows = effective_warmup + forward_rows + 1
+        if block_reason is None and estimated_rows > max_dataset_rows:
+            block_reason = "VISIBLE_HISTORY_BUDGET_EXCEEDED"
         bytes_per_row = 320 if request.source_kind.value == "AGG_TRADE" else 240
         estimated_size = estimated_rows * bytes_per_row
 
@@ -605,6 +861,19 @@ class ReplaySegmentManager:
             },
             "estimated_size_bytes": estimated_size,
             "estimated_rows": estimated_rows,
+            "history_policy": {
+                "schema_version": DATA_POLICY_PROTOCOL,
+                "indicator_warmup_bars": request.indicator_warmup_bars,
+                "visible_history_lookback": visible.to_dict(),
+                "visible_history_rows_estimate": visible_rows,
+                "effective_warmup_bars_estimate": effective_warmup,
+                "forward_cache_ms": request.forward_cache_ms,
+                "forward_rows_estimate": forward_rows,
+                "estimate_kind": estimate_kind,
+                "max_dataset_rows": max_dataset_rows,
+                "accepted": block_reason is None,
+                "blocked_reason": block_reason,
+            },
             "prepare_action": action,
             "existing_ready_segments": ready_count,
             "existing_ready_bytes": ready_bytes,
@@ -1745,12 +2014,15 @@ class ReplaySegmentManager:
 
 
 __all__ = [
+    "DATA_POLICY_PROTOCOL",
     "GC_PROTOCOL",
     "PREPARE_PROTOCOL",
     "REHYDRATION_PROTOCOL",
     "SEGMENT_PROTOCOL",
     "ReplaySegmentManager",
+    "ResolvedHistoryPolicy",
     "SegmentPrepareSpec",
     "backfill_archive_segments",
     "register_archive_segment",
+    "resolve_history_policy",
 ]

@@ -83,7 +83,23 @@ function segmentPlanResponse(overrides: Record<string, unknown> = {}) {
       base_interval: "1m",
     },
     estimated_size_bytes: 394_560,
-    estimated_rows: 1_644,
+    estimated_rows: 1_641,
+    history_policy: {
+      schema_version: "replay.data-policy.v1",
+      indicator_warmup_bars: 200,
+      visible_history_lookback: {
+        mode: "DURATION",
+        duration_ms: 12_000_000,
+      },
+      visible_history_rows_estimate: 200,
+      effective_warmup_bars_estimate: 200,
+      forward_cache_ms: 86_400_000,
+      forward_rows_estimate: 1_440,
+      estimate_kind: "EXACT",
+      max_dataset_rows: 250_000,
+      accepted: true,
+      blocked_reason: null,
+    },
     prepare_action: "SNAPSHOT_LOCAL_BAR_RANGE",
     existing_ready_segments: 1,
     existing_ready_bytes: 380_000,
@@ -381,7 +397,11 @@ test("catalog drift stays rejected and an explicit revalidation reloads create c
   await lifecycle.openCreate();
   const draft = lifecycle.getSnapshot().draft;
   assert.ok(draft);
-  const preservedDraft = { ...draft, name: "保留这份训练", warmupBars: 300 };
+  const preservedDraft = {
+    ...draft,
+    name: "保留这份训练",
+    indicatorWarmupBars: 300,
+  };
   lifecycle.setDraft(preservedDraft);
   await lifecycle.createRun(preservedDraft);
   assert.equal(lifecycle.getSnapshot().error?.code, "CATALOG_EPOCH_MISMATCH");
@@ -389,7 +409,7 @@ test("catalog drift stays rejected and an explicit revalidation reloads create c
   assert.equal(catalogCalls, 3);
   assert.equal(lifecycle.getSnapshot().error, null);
   assert.equal(lifecycle.getSnapshot().draft?.name, "保留这份训练");
-  assert.equal(lifecycle.getSnapshot().draft?.warmupBars, 300);
+  assert.equal(lifecycle.getSnapshot().draft?.indicatorWarmupBars, 300);
 });
 
 test("create refreshes catalog epoch with the edited warmup and horizon before POST", async (context) => {
@@ -431,7 +451,11 @@ test("create refreshes catalog epoch with the edited warmup and horizon before P
   await lifecycle.openCreate();
   const draft = lifecycle.getSnapshot().draft;
   assert.ok(draft);
-  const edited = { ...draft, warmupBars: 300, forwardCacheMs: 43_200_000 };
+  const edited = {
+    ...draft,
+    indicatorWarmupBars: 300,
+    forwardCacheMs: 43_200_000,
+  };
   lifecycle.setDraft(edited);
   await lifecycle.createRun(edited);
   assert.deepEqual(catalogQueries.at(-1), {
@@ -581,7 +605,10 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /历史盘口.*连续、可 pin/);
   assert.match(html, /Phase 9 历史 L2/);
   assert.match(html, /Phase 6 合约账户已启用/);
-  assert.match(html, /Phase 7 按需数据段/);
+  assert.match(html, /Phase 14 按需数据策略/);
+  assert.match(html, /指标预热 BAR/);
+  assert.match(html, /可见历史时长/);
+  assert.match(html, /数据预算.*预校验通过/);
   assert.match(html, /SNAPSHOT_LOCAL_BAR_RANGE/);
   assert.match(html, /校验失败 quarantine/);
   assert.match(html, /后台下载.*默认关闭/);

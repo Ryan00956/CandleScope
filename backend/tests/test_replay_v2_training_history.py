@@ -117,7 +117,12 @@ async def test_history_pages_are_snapshot_bound_revealed_only_and_repository_fre
         )
 
         assert first["protocol"] == "replay.v2"
-        assert first["schema_version"] == "replay.history.v1"
+        assert first["schema_version"] == "replay.history.v2"
+        assert first["history_boundary_ms"] <= first["revealed_boundary_ms"]
+        assert (
+            first["history_policy"]["schema_version"]
+            == "replay.data-policy.v1"
+        )
         assert first["track_id"] == "track-1"
         assert first["data_epoch"] == data_epoch
         assert first["revealed_boundary_ms"] == boundary

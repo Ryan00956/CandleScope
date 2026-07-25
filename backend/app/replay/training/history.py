@@ -13,8 +13,8 @@ from app.replay.models import ReplaySessionConfig
 from .errors import TrainingRunError
 
 
-HISTORY_SCHEMA_VERSION = "replay.history.v1"
-HISTORY_EPOCH_SCHEMA_VERSION = "replay.history-epoch.v1"
+HISTORY_SCHEMA_VERSION = "replay.history.v2"
+HISTORY_EPOCH_SCHEMA_VERSION = "replay.history-epoch.v2"
 MAX_HISTORY_PAGE_BARS = 1_000
 
 
@@ -113,6 +113,8 @@ def _history_epoch(
     identity: Mapping[str, str],
     snapshot: BarDatasetSnapshot,
     data_epoch: str,
+    history_boundary_ms: int,
+    policy_hash: str,
 ) -> str:
     return canonical_sha256(
         {
@@ -124,6 +126,8 @@ def _history_epoch(
             "data_epoch": data_epoch,
             "bar_data_epoch": snapshot.data_epoch,
             "public_replay_start_ms": snapshot.replay_start_ms,
+            "history_boundary_ms": history_boundary_ms,
+            "policy_hash": policy_hash,
             "row_count": snapshot.row_count,
         }
     )
@@ -158,11 +162,12 @@ def build_history_page(
         )
 
     epochs = {
-        str(binding["run_dataset_epoch"]),
         str(binding["track_dataset_epoch"]),
         str(binding["session_data_epoch"]),
         str(persisted.get("data_epoch")),
     }
+    if binding["session_id"] == binding["primary_adapter_session_id"]:
+        epochs.add(str(binding["run_dataset_epoch"]))
     if len(epochs) != 1 or data_epoch not in epochs:
         raise _fail(
             "HISTORY_DATA_EPOCH_MISMATCH",
@@ -192,11 +197,70 @@ def build_history_page(
         ) from exc
     snapshot = _decode_bar_snapshot(persisted, config=config)
     identity = _assert_source_binding(binding, config, snapshot)
+    raw_policy = binding.get("history_policy")
+    if not isinstance(raw_policy, Mapping):
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training history policy is unavailable",
+            status_code=503,
+        )
+    required_policy_fields = {
+        "schema_version",
+        "indicator_warmup_bars",
+        "visible_history_lookback",
+        "visible_history_rows",
+        "actual_visible_history_start_ms",
+        "actual_replay_start_ms",
+        "effective_warmup_bars",
+        "forward_cache_ms",
+        "interval_ms",
+        "policy_hash",
+    }
+    if set(raw_policy) != required_policy_fields:
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training history policy is invalid",
+            status_code=503,
+        )
+    try:
+        actual_replay_start_ms = int(raw_policy["actual_replay_start_ms"])
+        actual_visible_history_start_ms = int(
+            raw_policy["actual_visible_history_start_ms"]
+        )
+    except (TypeError, ValueError) as exc:
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training history policy is invalid",
+            status_code=503,
+        ) from exc
+    history_boundary_ms = (
+        snapshot.replay_start_ms
+        + actual_visible_history_start_ms
+        - actual_replay_start_ms
+    )
+    if (
+        history_boundary_ms < 0
+        or history_boundary_ms > snapshot.replay_start_ms
+    ):
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training history boundary is invalid",
+            status_code=503,
+        )
+    policy_hash = str(raw_policy["policy_hash"])
+    if len(policy_hash) != 71 or not policy_hash.startswith("sha256:"):
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training history policy commitment is invalid",
+            status_code=503,
+        )
     history_epoch = _history_epoch(
         binding=binding,
         identity=identity,
         snapshot=snapshot,
         data_epoch=data_epoch,
+        history_boundary_ms=history_boundary_ms,
+        policy_hash=policy_hash,
     )
     if expected_history_epoch is not None and expected_history_epoch != history_epoch:
         raise _fail(
@@ -219,7 +283,8 @@ def build_history_page(
     eligible = [
         bar
         for bar in builder.closed_bars
-        if bar.open_time_ms < before_ms
+        if bar.open_time_ms >= history_boundary_ms
+        and bar.open_time_ms < before_ms
         and bar.close_time_ms <= revealed_boundary_ms
         and bar.last_base_open_ms <= revealed_boundary_ms
     ]
@@ -235,6 +300,15 @@ def build_history_page(
         "identity": identity,
         "data_epoch": data_epoch,
         "history_epoch": history_epoch,
+        "history_boundary_ms": history_boundary_ms,
+        "history_policy": {
+            key: value
+            for key, value in raw_policy.items()
+            if key not in {
+                "actual_visible_history_start_ms",
+                "actual_replay_start_ms",
+            }
+        },
         "revealed_boundary_ms": revealed_boundary_ms,
         "bars": [bar.to_dict() for bar in page],
         "next_before_ms": next_before_ms,

@@ -20,6 +20,26 @@ export interface ReplayHistoricalBookCapabilityPlan {
   readonly max_archive_bytes: number;
 }
 
+export interface ReplaySegmentHistoryPolicyPlan {
+  readonly schema_version: "replay.data-policy.v1";
+  readonly indicator_warmup_bars: number;
+  readonly visible_history_lookback: {
+    readonly mode: "DURATION" | "ALL_AVAILABLE";
+    readonly duration_ms: number | null;
+  };
+  readonly visible_history_rows_estimate: number | null;
+  readonly effective_warmup_bars_estimate: number;
+  readonly forward_cache_ms: number;
+  readonly forward_rows_estimate: number;
+  readonly estimate_kind: "EXACT" | "SELECTION_DEPENDENT";
+  readonly max_dataset_rows: number;
+  readonly accepted: boolean;
+  readonly blocked_reason:
+    | "VISIBLE_HISTORY_INTERVAL_MISMATCH"
+    | "VISIBLE_HISTORY_BUDGET_EXCEEDED"
+    | null;
+}
+
 
 export interface ReplaySegmentPreparePlan {
   readonly protocol: "replay.data.prepare.v1";
@@ -33,6 +53,7 @@ export interface ReplaySegmentPreparePlan {
   };
   readonly estimated_size_bytes: number;
   readonly estimated_rows: number;
+  readonly history_policy: ReplaySegmentHistoryPolicyPlan;
   readonly prepare_action: "SNAPSHOT_LOCAL_BAR_RANGE" | "VERIFY_LOCAL_AGG_TRADE";
   readonly existing_ready_segments: number;
   readonly existing_ready_bytes: number;
@@ -86,6 +107,10 @@ function count(value: unknown, fieldName: string): number {
   return value as number;
 }
 
+function nullableCount(value: unknown, fieldName: string): number | null {
+  return value === null ? null : count(value, fieldName);
+}
+
 export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPreparePlan {
   const payload = exactObject(value, "segment prepare plan", [
     "protocol",
@@ -94,6 +119,7 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     "identity",
     "estimated_size_bytes",
     "estimated_rows",
+    "history_policy",
     "prepare_action",
     "existing_ready_segments",
     "existing_ready_bytes",
@@ -110,6 +136,28 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     "symbol",
     "base_interval",
   ]);
+  const historyPolicy = exactObject(
+    payload.history_policy,
+    "segment prepare plan.history_policy",
+    [
+      "schema_version",
+      "indicator_warmup_bars",
+      "visible_history_lookback",
+      "visible_history_rows_estimate",
+      "effective_warmup_bars_estimate",
+      "forward_cache_ms",
+      "forward_rows_estimate",
+      "estimate_kind",
+      "max_dataset_rows",
+      "accepted",
+      "blocked_reason",
+    ],
+  );
+  const visibleHistory = exactObject(
+    historyPolicy.visible_history_lookback,
+    "segment prepare plan.history_policy.visible_history_lookback",
+    ["mode", "duration_ms"],
+  );
   const historicalBook = exactObject(
     payload.historical_book,
     "segment prepare plan.historical_book",
@@ -137,6 +185,57 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
   if (payload.prepare_action !== "SNAPSHOT_LOCAL_BAR_RANGE"
     && payload.prepare_action !== "VERIFY_LOCAL_AGG_TRADE") {
     throw new TypeError("segment prepare plan action is unsupported");
+  }
+  if (historyPolicy.schema_version !== "replay.data-policy.v1"
+    || (visibleHistory.mode !== "DURATION"
+      && visibleHistory.mode !== "ALL_AVAILABLE")
+    || (historyPolicy.estimate_kind !== "EXACT"
+      && historyPolicy.estimate_kind !== "SELECTION_DEPENDENT")
+    || typeof historyPolicy.accepted !== "boolean") {
+    throw new TypeError("segment history policy plan is unsupported");
+  }
+  const durationMs = nullableCount(
+    visibleHistory.duration_ms,
+    "segment history policy.duration_ms",
+  );
+  const visibleRows = nullableCount(
+    historyPolicy.visible_history_rows_estimate,
+    "segment history policy.visible_history_rows_estimate",
+  );
+  const blockedReason = historyPolicy.blocked_reason;
+  if ((blockedReason !== null
+      && blockedReason !== "VISIBLE_HISTORY_INTERVAL_MISMATCH"
+      && blockedReason !== "VISIBLE_HISTORY_BUDGET_EXCEEDED")
+    || (historyPolicy.accepted && blockedReason !== null)
+    || (!historyPolicy.accepted && blockedReason === null)
+    || (visibleHistory.mode === "DURATION"
+      && (durationMs === null || durationMs < 1
+        || (visibleRows === null
+          && blockedReason !== "VISIBLE_HISTORY_INTERVAL_MISMATCH")
+        || historyPolicy.estimate_kind !== "EXACT"))
+    || (visibleHistory.mode === "ALL_AVAILABLE"
+      && (durationMs !== null || visibleRows !== null
+        || historyPolicy.estimate_kind !== "SELECTION_DEPENDENT"))) {
+    throw new TypeError("segment history policy proof is inconsistent");
+  }
+  const indicatorWarmup = count(
+    historyPolicy.indicator_warmup_bars,
+    "segment history policy.indicator_warmup_bars",
+  );
+  const effectiveWarmup = count(
+    historyPolicy.effective_warmup_bars_estimate,
+    "segment history policy.effective_warmup_bars_estimate",
+  );
+  const forwardRows = count(
+    historyPolicy.forward_rows_estimate,
+    "segment history policy.forward_rows_estimate",
+  );
+  if (indicatorWarmup < 1
+    || effectiveWarmup < indicatorWarmup
+    || (visibleRows !== null && effectiveWarmup < visibleRows)
+    || count(payload.estimated_rows, "estimated_rows")
+      !== effectiveWarmup + forwardRows + 1) {
+    throw new TypeError("segment history policy row estimates are inconsistent");
   }
   if (payload.selection_loads_history !== false
     || payload.create_loads_only_selected_range !== true
@@ -182,6 +281,28 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     },
     estimated_size_bytes: count(payload.estimated_size_bytes, "estimated_size_bytes"),
     estimated_rows: count(payload.estimated_rows, "estimated_rows"),
+    history_policy: {
+      schema_version: "replay.data-policy.v1",
+      indicator_warmup_bars: indicatorWarmup,
+      visible_history_lookback: {
+        mode: visibleHistory.mode,
+        duration_ms: durationMs,
+      },
+      visible_history_rows_estimate: visibleRows,
+      effective_warmup_bars_estimate: effectiveWarmup,
+      forward_cache_ms: count(
+        historyPolicy.forward_cache_ms,
+        "segment history policy.forward_cache_ms",
+      ),
+      forward_rows_estimate: forwardRows,
+      estimate_kind: historyPolicy.estimate_kind,
+      max_dataset_rows: count(
+        historyPolicy.max_dataset_rows,
+        "segment history policy.max_dataset_rows",
+      ),
+      accepted: historyPolicy.accepted,
+      blocked_reason: blockedReason,
+    },
     prepare_action: payload.prepare_action,
     existing_ready_segments: count(payload.existing_ready_segments, "existing_ready_segments"),
     existing_ready_bytes: count(payload.existing_ready_bytes, "existing_ready_bytes"),

@@ -10,6 +10,7 @@ export const REPLAY_V2_ENUMS = Object.freeze({
   track_state: enumValues("DORMANT", "PREPARING", "READY", "DEGRADED", "ERROR"),
   source_kind: enumValues("BAR", "AGG_TRADE"),
   start_mode: enumValues("MANUAL", "RANDOM"),
+  visible_history_mode: enumValues("DURATION", "ALL_AVAILABLE"),
   integrity_mode: enumValues("CHALLENGE", "PRACTICE", "SANDBOX"),
   time_disclosure_policy: enumValues(
     "NONE",
@@ -113,6 +114,9 @@ export type ReplayV2RunState = EnumValue<typeof REPLAY_V2_ENUMS.run_state>;
 export type ReplayV2TrackState = EnumValue<typeof REPLAY_V2_ENUMS.track_state>;
 export type ReplayV2SourceKind = EnumValue<typeof REPLAY_V2_ENUMS.source_kind>;
 export type ReplayV2StartMode = EnumValue<typeof REPLAY_V2_ENUMS.start_mode>;
+export type ReplayVisibleHistoryMode = EnumValue<
+  typeof REPLAY_V2_ENUMS.visible_history_mode
+>;
 export type ReplayV2IntegrityMode = EnumValue<typeof REPLAY_V2_ENUMS.integrity_mode>;
 export type ReplayV2TimeDisclosurePolicy = EnumValue<
   typeof REPLAY_V2_ENUMS.time_disclosure_policy
@@ -1479,7 +1483,11 @@ export interface TrainingRunCreatePayload {
   readonly base_interval: string;
   readonly display_interval: string;
   readonly requested_start_ms: number | null;
-  readonly warmup_bars: number;
+  readonly indicator_warmup_bars: number;
+  readonly visible_history_lookback: {
+    readonly mode: ReplayVisibleHistoryMode;
+    readonly duration_ms: number | null;
+  };
   readonly forward_cache_ms: number;
   readonly random_seed: number | null;
   readonly initial_equity: string;

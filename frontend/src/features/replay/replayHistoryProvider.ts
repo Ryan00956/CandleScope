@@ -16,15 +16,31 @@ export interface ReplayHistoryIdentity {
   readonly display_interval: string;
 }
 
+export interface ReplayHistoryPolicy {
+  readonly schema_version: "replay.data-policy.v1";
+  readonly indicator_warmup_bars: number;
+  readonly visible_history_lookback: {
+    readonly mode: "DURATION" | "ALL_AVAILABLE";
+    readonly duration_ms: number | null;
+  };
+  readonly visible_history_rows: number;
+  readonly effective_warmup_bars: number;
+  readonly forward_cache_ms: number;
+  readonly interval_ms: number;
+  readonly policy_hash: ReplayDigest;
+}
+
 export interface ReplayHistoryPage {
   readonly protocol: "replay.v2";
-  readonly schema_version: "replay.history.v1";
+  readonly schema_version: "replay.history.v2";
   readonly run_id: string;
   readonly session_id: string;
   readonly track_id: string;
   readonly identity: ReplayHistoryIdentity;
   readonly data_epoch: ReplayDigest;
   readonly history_epoch: ReplayDigest;
+  readonly history_boundary_ms: number;
+  readonly history_policy: ReplayHistoryPolicy;
   readonly revealed_boundary_ms: number;
   readonly bars: readonly ReplayDisplayBar[];
   readonly next_before_ms: number;
@@ -122,6 +138,55 @@ function parseIdentity(value: unknown, path: string): ReplayHistoryIdentity {
   };
 }
 
+function parseHistoryPolicy(value: unknown, path: string): ReplayHistoryPolicy {
+  const source = record(value, path);
+  exact(source, [
+    "schema_version",
+    "indicator_warmup_bars",
+    "visible_history_lookback",
+    "visible_history_rows",
+    "effective_warmup_bars",
+    "forward_cache_ms",
+    "interval_ms",
+    "policy_hash",
+  ], path);
+  if (source.schema_version !== "replay.data-policy.v1") {
+    fail(`${path}.schema_version`, "is unsupported");
+  }
+  const visible = record(source.visible_history_lookback, `${path}.visible_history_lookback`);
+  exact(visible, ["mode", "duration_ms"], `${path}.visible_history_lookback`);
+  const mode = string(visible.mode, `${path}.visible_history_lookback.mode`);
+  if (mode !== "DURATION" && mode !== "ALL_AVAILABLE") {
+    fail(`${path}.visible_history_lookback.mode`, "is unsupported");
+  }
+  const durationMs = optionalInteger(
+    visible.duration_ms,
+    `${path}.visible_history_lookback.duration_ms`,
+  );
+  const indicatorWarmup = integer(source.indicator_warmup_bars, `${path}.indicator_warmup_bars`);
+  const visibleRows = integer(source.visible_history_rows, `${path}.visible_history_rows`);
+  const effectiveWarmup = integer(source.effective_warmup_bars, `${path}.effective_warmup_bars`);
+  const forwardCacheMs = integer(source.forward_cache_ms, `${path}.forward_cache_ms`);
+  const intervalMs = integer(source.interval_ms, `${path}.interval_ms`);
+  if (indicatorWarmup < 1 || intervalMs < 1 || forwardCacheMs < 1
+    || effectiveWarmup < indicatorWarmup || effectiveWarmup < visibleRows
+    || (mode === "DURATION"
+      && (durationMs === null || durationMs < 1 || durationMs !== visibleRows * intervalMs))
+    || (mode === "ALL_AVAILABLE" && durationMs !== null)) {
+    fail(path, "contains inconsistent history bounds");
+  }
+  return {
+    schema_version: "replay.data-policy.v1",
+    indicator_warmup_bars: indicatorWarmup,
+    visible_history_lookback: { mode, duration_ms: durationMs },
+    visible_history_rows: visibleRows,
+    effective_warmup_bars: effectiveWarmup,
+    forward_cache_ms: forwardCacheMs,
+    interval_ms: intervalMs,
+    policy_hash: digest(source.policy_hash, `${path}.policy_hash`),
+  };
+}
+
 function parseBar(value: unknown, path: string): ReplayDisplayBar {
   const source = record(value, path);
   exact(source, [
@@ -191,10 +256,11 @@ function parsePage(
   const source = record(value, "history");
   exact(source, [
     "protocol", "schema_version", "run_id", "session_id", "track_id", "identity", "data_epoch",
-    "history_epoch", "revealed_boundary_ms", "bars", "next_before_ms", "has_more",
+    "history_epoch", "history_boundary_ms", "history_policy", "revealed_boundary_ms",
+    "bars", "next_before_ms", "has_more",
   ], "history");
   if (source.protocol !== "replay.v2") fail("history.protocol", "must be replay.v2");
-  if (source.schema_version !== "replay.history.v1") fail("history.schema_version", "is unsupported");
+  if (source.schema_version !== "replay.history.v2") fail("history.schema_version", "is unsupported");
   const parsedSession = string(source.session_id, "history.session_id");
   const parsedTrack = string(source.track_id, "history.track_id");
   if (parsedSession !== sessionId || parsedTrack !== trackId) fail("history", "session or track identity drifted");
@@ -208,12 +274,18 @@ function parsePage(
   }
   const boundary = integer(source.revealed_boundary_ms, "history.revealed_boundary_ms");
   if (boundary !== request.revealedBoundaryMs) fail("history.revealed_boundary_ms", "does not match the request");
+  const historyBoundary = integer(source.history_boundary_ms, "history.history_boundary_ms");
+  if (historyBoundary > boundary) fail("history.history_boundary_ms", "exceeds the revealed boundary");
+  const historyPolicy = parseHistoryPolicy(source.history_policy, "history.history_policy");
   if (!Array.isArray(source.bars)) fail("history.bars", "must be an array");
   const bars = source.bars.map((item, index) => parseBar(item, `history.bars[${index}]`));
   let previousOpen = -1;
   for (const [index, item] of bars.entries()) {
     if (item.open_time_ms <= previousOpen) fail(`history.bars[${index}]`, "must be strictly increasing");
     if (item.open_time_ms >= request.beforeMs) fail(`history.bars[${index}]`, "is outside the before-page");
+    if (item.open_time_ms < historyBoundary) {
+      fail(`history.bars[${index}]`, "precedes the visible history boundary");
+    }
     if (item.close_time_ms > boundary || item.last_base_open_ms > boundary) {
       fail(`history.bars[${index}]`, "exceeds the revealed boundary");
     }
@@ -225,13 +297,15 @@ function parsePage(
   }
   return {
     protocol: "replay.v2",
-    schema_version: "replay.history.v1",
+    schema_version: "replay.history.v2",
     run_id: string(source.run_id, "history.run_id"),
     session_id: parsedSession,
     track_id: parsedTrack,
     identity: parsedIdentity,
     data_epoch: dataEpoch,
     history_epoch: historyEpoch,
+    history_boundary_ms: historyBoundary,
+    history_policy: historyPolicy,
     revealed_boundary_ms: boundary,
     bars,
     next_before_ms: nextBefore,

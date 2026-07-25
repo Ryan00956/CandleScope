@@ -153,6 +153,15 @@ class ReplayService:
             max_horizon_days=settings.max_horizon_days,
             max_dataset_rows=settings.max_bar_dataset_rows,
         )
+        self._training_history_catalog = ReplayCatalog(
+            self._repository,  # type: ignore[arg-type]
+            native_intervals=self._native_intervals,
+            now_ms=self._now_ms,
+            max_scan_rows=settings.trade_page_rows,
+            max_warmup_bars=settings.max_bar_dataset_rows,
+            max_horizon_days=settings.max_horizon_days,
+            max_dataset_rows=settings.max_bar_dataset_rows,
+        )
         self._dataset_builder = BarDatasetBuilder(
             self._repository,
             now_ms=self._now_ms,
@@ -343,11 +352,87 @@ class ReplayService:
             "entries": entries,
         }
 
+    async def select_training_window(
+        self,
+        config: ReplaySessionConfig,
+        *,
+        expected_catalog_epoch: str,
+    ) -> dict[str, object]:
+        """Freeze the start choice before Phase 14 expands visible history.
+
+        The public catalog remains bound to indicator warmup.  The returned
+        source fingerprint and exact selected start are then used to prove that
+        the larger internal snapshot did not re-randomize or cross source drift.
+        """
+
+        if not isinstance(config, ReplaySessionConfig):
+            raise TypeError("config must be ReplaySessionConfig")
+        self._ensure_available(blind_mode=config.blind_mode)
+        try:
+            catalog = await asyncio.to_thread(
+                self._catalog.build,
+                warmup_bars=config.warmup_bars,
+                horizon_ms=config.horizon_ms,
+                quality_mode=config.quality_mode,
+            )
+        except ReplayDomainError as exc:
+            raise self._blind_safe_dataset_error(config, exc) from exc
+        if catalog.catalog_epoch != expected_catalog_epoch:
+            # The client already supplied the opaque epoch, so reporting this
+            # comparison does not disclose source dates or a hidden start.
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "replay catalog changed after capability validation",
+                details={"reason": "CATALOG_EPOCH_MISMATCH"},
+            )
+        try:
+            identity = ReplaySeriesIdentity(
+                config.exchange,
+                config.market_type,
+                config.symbol,
+            )
+            entry = catalog.require_entry(identity)
+            window = (
+                self._catalog.select_random(entry, seed=config.random_seed)
+                if config.start_policy is StartPolicy.RANDOM_ELIGIBLE
+                else self._catalog.select_manual(
+                    entry,
+                    start_ms=self._required_manual_start(config),
+                )
+            )
+        except ReplayDomainError as exc:
+            raise self._blind_safe_dataset_error(config, exc) from exc
+        if entry.bounds is None:
+            raise self._blind_safe_dataset_error(
+                config,
+                ReplayDomainError(
+                    ReplayErrorCode.NO_ELIGIBLE_WINDOW,
+                    "training source has no exact history bounds",
+                ),
+            )
+        continuous_start_ms = entry.bounds.earliest_open_ms
+        for gap in entry.gap_summary.gaps:
+            if gap.end_ms < window.replay_start_ms:
+                continuous_start_ms = max(
+                    continuous_start_ms,
+                    gap.end_ms + window.interval_ms,
+                )
+        return {
+            "catalog_epoch": catalog.catalog_epoch,
+            "source_fingerprint": entry.source_fingerprint,
+            "selected_start_ms": window.replay_start_ms,
+            "continuous_history_start_ms": continuous_start_ms,
+            "interval_ms": window.interval_ms,
+        }
+
     async def create_session(
         self,
         config: ReplaySessionConfig,
         *,
         _expected_catalog_epoch: str | None = None,
+        _internal_forced_start_ms: int | None = None,
+        _internal_expected_source_fingerprint: str | None = None,
+        _internal_training_history: bool = False,
         _extension_factory: Callable[..., object] | None = None,
         _internal_execution_mode: str = PAPER_LINEAR_EXECUTION_MODE,
     ) -> dict[str, object]:
@@ -374,8 +459,13 @@ class ReplayService:
         await self._reserve_session_capacity(blind_mode=config.blind_mode)
         try:
             try:
+                catalog_owner = (
+                    self._training_history_catalog
+                    if _internal_training_history
+                    else self._catalog
+                )
                 catalog = await asyncio.to_thread(
-                    self._catalog.build,
+                    catalog_owner.build,
                     warmup_bars=config.warmup_bars,
                     horizon_ms=config.horizon_ms,
                     quality_mode=config.quality_mode,
@@ -395,6 +485,16 @@ class ReplayService:
                 config.exchange, config.market_type, config.symbol
             )
             entry = catalog.require_entry(identity)
+            if (
+                _internal_expected_source_fingerprint is not None
+                and entry.source_fingerprint
+                != _internal_expected_source_fingerprint
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "training source changed after start selection",
+                    details={"reason": "SOURCE_FINGERPRINT_MISMATCH"},
+                )
             if entry.selected_base_interval != config.base_interval:
                 raise ReplayDomainError(
                     ReplayErrorCode.UNSUPPORTED_INTERVAL,
@@ -405,14 +505,20 @@ class ReplayService:
                     },
                 )
             try:
-                window = (
-                    self._catalog.select_random(entry, seed=config.random_seed)
-                    if config.start_policy is StartPolicy.RANDOM_ELIGIBLE
-                    else self._catalog.select_manual(
+                if _internal_forced_start_ms is not None:
+                    window = catalog_owner.select_manual(
                         entry,
-                        start_ms=self._required_manual_start(config),
+                        start_ms=_internal_forced_start_ms,
                     )
-                )
+                else:
+                    window = (
+                        catalog_owner.select_random(entry, seed=config.random_seed)
+                        if config.start_policy is StartPolicy.RANDOM_ELIGIBLE
+                        else catalog_owner.select_manual(
+                            entry,
+                            start_ms=self._required_manual_start(config),
+                        )
+                    )
                 actual_dataset = await asyncio.to_thread(
                     self._dataset_builder.create, entry, window
                 )

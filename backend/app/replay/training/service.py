@@ -79,7 +79,10 @@ from .multitrack import (
     stable_market_event_order,
 )
 from .storage import TrainingRunStore
-from .segments import ReplaySegmentManager
+from .segments import (
+    ReplaySegmentManager,
+    resolve_history_policy,
+)
 from .trade_flow import ReplayTradeFlowAdapter
 
 if TYPE_CHECKING:
@@ -210,7 +213,10 @@ class TrainingRunService:
     ) -> dict[str, object]:
         if not isinstance(request, TrainingRunCreateRequest):
             raise TypeError("request must be TrainingRunCreateRequest")
-        plan = await self.segments.plan_for_request(request)
+        plan = await self.segments.plan_for_request(
+            request,
+            max_dataset_rows=self.replay_service.settings.max_bar_dataset_rows,
+        )
         return {
             **plan,
             "historical_book": await self.historical_books.plan_for_request(request),
@@ -833,6 +839,30 @@ class TrainingRunService:
         if not isinstance(request, TrainingRunCreateRequest):
             raise TypeError("request must be TrainingRunCreateRequest")
         request = self._authoritative_start_request(request)
+        selection_config = self._adapter_config(request)
+        try:
+            selection = await self.replay_service.select_training_window(
+                selection_config,
+                expected_catalog_epoch=request.catalog_epoch,
+            )
+        except ReplayDomainError as exc:
+            if exc.details.get("reason") == "CATALOG_EPOCH_MISMATCH":
+                raise TrainingRunError(
+                    "CATALOG_EPOCH_MISMATCH",
+                    "data capability changed after validation; refresh and try again",
+                    status_code=409,
+                ) from exc
+            raise TrainingRunError(
+                "TRAINING_RUN_CREATE_FAILED",
+                "training start could not be selected",
+                status_code=409,
+                details={"reason": exc.code.value},
+            ) from exc
+        history_policy = resolve_history_policy(
+            request,
+            selection,
+            max_dataset_rows=self.replay_service.settings.max_bar_dataset_rows,
+        )
         base_interval_ms = compatible_step_interval_ms(
             base_interval=request.base_interval,
             step_interval=request.display_interval,
@@ -871,7 +901,10 @@ class TrainingRunService:
                 virtual_time_ms=request.requested_start_ms,
             )
         run_id = self._identifier(self._run_id_factory(), field_name="run_id")
-        config = self._adapter_config(request)
+        config = self._adapter_config(
+            request,
+            warmup_bars=history_policy.effective_warmup_bars,
+        )
 
         def extension_factory(
             *,
@@ -908,13 +941,18 @@ class TrainingRunService:
                 dataset_blob=dataset_blob,
                 actual_replay_start_ms=actual_replay_start_ms,
                 actual_replay_end_ms=actual_replay_end_ms,
+                history_policy=history_policy,
                 historical_book_binding=bound_book,
             )
 
         try:
             await self.replay_service.create_session(
                 config,
-                _expected_catalog_epoch=request.catalog_epoch,
+                _internal_forced_start_ms=history_policy.actual_replay_start_ms,
+                _internal_expected_source_fingerprint=str(
+                    selection["source_fingerprint"]
+                ),
+                _internal_training_history=True,
                 _extension_factory=extension_factory,
                 _internal_execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
             )
@@ -1059,6 +1097,13 @@ class TrainingRunService:
             session_id=normalized_session,
             track_id=normalized_track,
         )
+        if binding.get("subscription_tier") == SubscriptionTier.NONE.value:
+            raise TrainingRunError(
+                "HISTORY_SUBSCRIPTION_REQUIRED",
+                "history is unavailable while the market track is unsubscribed",
+                status_code=409,
+                details={"required_tier": "WARM_OR_FULL"},
+            )
         persisted = await self.replay_service.store.load_dataset(normalized_session)
         if persisted is None:
             raise TrainingRunError(
@@ -1089,6 +1134,11 @@ class TrainingRunService:
         }:
             return await self._command_serialized(normalized, command)
         actor = self._run_actors.setdefault(normalized, TrainingRunActor(normalized))
+        if command.type is ReplayV2CommandType.PAUSE:
+            # A pause is a barrier, not ordinary queued work. Signal the
+            # server-owned loop before waiting for its serialization lock so a
+            # high playback rate cannot consume the remaining dataset first.
+            actor.signal_ordered_stop()
         async with actor.serialized():
             return await self._command_serialized(normalized, command)
 
@@ -1938,6 +1988,11 @@ class TrainingRunService:
         try:
             created = await self.replay_service.create_session(
                 config,
+                _internal_forced_start_ms=_stored_counter(
+                    binding["actual_replay_start_ms"],
+                    field_name="actual_replay_start_ms",
+                ),
+                _internal_training_history=True,
                 _extension_factory=extension_factory,
                 _internal_execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
             )
@@ -3072,6 +3127,48 @@ class TrainingRunService:
                                 step_interval=step_interval,
                                 count=units,
                             )
+                            base_interval_ms = compatible_step_interval_ms(
+                                base_interval=str(binding["base_interval"]),
+                                step_interval=str(binding["base_interval"]),
+                            )
+                            adapter_config = binding.get("adapter_config")
+                            if not isinstance(adapter_config, Mapping):
+                                raise TrainingRunError(
+                                    "TRAINING_RUN_STORAGE_DEGRADED",
+                                    "training adapter config is invalid",
+                                    status_code=503,
+                                )
+                            actual_start_ms = _stored_counter(
+                                binding["actual_replay_start_ms"],
+                                field_name="actual_replay_start_ms",
+                            )
+                            public_start_ms = (
+                                _stored_counter(
+                                    binding.get("synthetic_origin_ms"),
+                                    field_name="synthetic_origin_ms",
+                                )
+                                if adapter_config.get("blind_mode") is True
+                                else actual_start_ms
+                            )
+                            final_open_ms = (
+                                public_start_ms
+                                + _stored_counter(
+                                    binding["actual_replay_end_ms"],
+                                    field_name="actual_replay_end_ms",
+                                )
+                                - actual_start_ms
+                            )
+                            final_close_ms = final_open_ms + base_interval_ms - 1
+                            penultimate_close_ms = final_open_ms - 1
+                            if (
+                                current_time < penultimate_close_ms
+                                and target >= final_close_ms
+                            ):
+                                # Leave the terminal event for one final loop.
+                                # This creates a scheduling barrier where a
+                                # pending PAUSE can win without reducing steady
+                                # state playback batch throughput.
+                                target = penultimate_close_ms
                             consumed_wall_seconds = units / rate
                             timeout = 0.0
                     if target is not None:
@@ -5320,7 +5417,11 @@ class TrainingRunService:
         return payload
 
     @staticmethod
-    def _adapter_config(request: TrainingRunCreateRequest) -> ReplaySessionConfig:
+    def _adapter_config(
+        request: TrainingRunCreateRequest,
+        *,
+        warmup_bars: int | None = None,
+    ) -> ReplaySessionConfig:
         return ReplaySessionConfig(
             protocol=REPLAY_PROTOCOL,
             source_kind=(
@@ -5341,7 +5442,11 @@ class TrainingRunService:
                 else StartPolicy.RANDOM_ELIGIBLE
             ),
             requested_start_ms=request.requested_start_ms,
-            warmup_bars=request.warmup_bars,
+            warmup_bars=(
+                request.indicator_warmup_bars
+                if warmup_bars is None
+                else warmup_bars
+            ),
             horizon_ms=request.forward_cache_ms,
             random_seed=0 if request.random_seed is None else request.random_seed,
             quality_mode=QualityMode.EXACT,

@@ -110,7 +110,9 @@ function samePlanInputs(left: TrainingRunDraft, right: TrainingRunDraft): boolea
     && left.baseInterval === right.baseInterval
     && left.displayInterval === right.displayInterval
     && left.requestedStartMs === right.requestedStartMs
-    && left.warmupBars === right.warmupBars
+    && left.indicatorWarmupBars === right.indicatorWarmupBars
+    && left.visibleHistoryMode === right.visibleHistoryMode
+    && left.visibleHistoryLookbackMs === right.visibleHistoryLookbackMs
     && left.forwardCacheMs === right.forwardCacheMs;
 }
 
@@ -209,7 +211,7 @@ export class TrainingHubLifecycle {
       const [capabilities, catalog] = await Promise.all([
         this.api.capabilities(this.abortController.signal),
         this.api.catalog({
-          warmupBars: preservedDraft?.warmupBars ?? 200,
+          warmupBars: preservedDraft?.indicatorWarmupBars ?? 200,
           horizonMs: preservedDraft?.forwardCacheMs ?? 86_400_000,
           qualityMode: "exact",
           blindMode: preservedDraft === null
@@ -315,7 +317,7 @@ export class TrainingHubLifecycle {
     const token = ++this.requestToken;
     try {
       const catalog = await this.api.catalog({
-        warmupBars: draft.warmupBars,
+        warmupBars: draft.indicatorWarmupBars,
         horizonMs: draft.forwardCacheMs,
         qualityMode: "exact",
         blindMode: requiresBlindTrainingCatalog(draft),
@@ -470,7 +472,7 @@ export class TrainingHubLifecycle {
     const token = ++this.requestToken;
     try {
       const catalog = await this.api.catalog({
-        warmupBars: requestedDraft.warmupBars,
+        warmupBars: requestedDraft.indicatorWarmupBars,
         horizonMs: requestedDraft.forwardCacheMs,
         qualityMode: "exact",
         blindMode: expectedBlind,

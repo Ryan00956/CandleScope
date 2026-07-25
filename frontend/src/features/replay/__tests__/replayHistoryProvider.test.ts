@@ -47,13 +47,27 @@ function bar(openTimeMs: number) {
 function response(overrides: Record<string, unknown> = {}) {
   return {
     protocol: "replay.v2",
-    schema_version: "replay.history.v1",
+    schema_version: "replay.history.v2",
     run_id: "run-1",
     session_id: "adapter-1",
     track_id: "track-1",
     identity: IDENTITY,
     data_epoch: DATA_EPOCH,
     history_epoch: HISTORY_EPOCH,
+    history_boundary_ms: 1_800_000_000_000,
+    history_policy: {
+      schema_version: "replay.data-policy.v1",
+      indicator_warmup_bars: 200,
+      visible_history_lookback: {
+        mode: "DURATION",
+        duration_ms: 300_000,
+      },
+      visible_history_rows: 5,
+      effective_warmup_bars: 200,
+      forward_cache_ms: 86_400_000,
+      interval_ms: 60_000,
+      policy_hash: `sha256:${"c".repeat(64)}`,
+    },
     revealed_boundary_ms: BOUNDARY_MS,
     bars: [bar(1_800_000_120_000), bar(1_800_000_180_000)],
     next_before_ms: 1_800_000_120_000,

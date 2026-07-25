@@ -8,6 +8,7 @@ import type {
   ReplayV2SourceKind,
   ReplayV2StartMode,
   ReplayV2TimeDisclosurePolicy,
+  ReplayVisibleHistoryMode,
   TrainingRunCreatePayload,
 } from "./replayV2Types.js";
 import { intervalTiles, parseIntervalSeconds } from "../../utils/intervals.js";
@@ -32,7 +33,9 @@ export interface TrainingRunDraft {
   readonly baseInterval: string;
   readonly displayInterval: string;
   readonly requestedStartMs: number | null;
-  readonly warmupBars: number;
+  readonly indicatorWarmupBars: number;
+  readonly visibleHistoryMode: ReplayVisibleHistoryMode;
+  readonly visibleHistoryLookbackMs: number | null;
   readonly forwardCacheMs: number;
   readonly initialEquity: string;
   readonly maxLeverage: string;
@@ -88,6 +91,7 @@ export function createTrainingRunDraft(
       ));
   const symbol = launchContext?.symbol ?? entry?.identity.symbol ?? "BTCUSDT";
   const baseInterval = entry?.selected_base_interval ?? entry?.base_intervals[0] ?? "1m";
+  const baseIntervalMs = (parseIntervalSeconds(baseInterval) ?? 60) * 1_000;
   return {
     name: `${symbol} 训练`,
     sourceKind: "BAR",
@@ -99,7 +103,9 @@ export function createTrainingRunDraft(
     baseInterval,
     displayInterval: launchContext?.display_interval ?? baseInterval,
     requestedStartMs: null,
-    warmupBars: catalog.warmup_bars,
+    indicatorWarmupBars: catalog.warmup_bars,
+    visibleHistoryMode: "DURATION",
+    visibleHistoryLookbackMs: catalog.warmup_bars * baseIntervalMs,
     forwardCacheMs: catalog.horizon_ms,
     initialEquity: "10000",
     maxLeverage: "3",
@@ -241,12 +247,46 @@ export function evaluateTrainingRunDraft(
       errors.push("历史盘口尚未取得连续、可 pin 的 exact L2 能力证明");
     }
   }
-  if (draft.warmupBars < 1 || draft.warmupBars > capabilities.limits.max_warmup_bars) {
-    errors.push("预热 BAR 数超出服务端限制");
+  if (draft.indicatorWarmupBars < 1
+    || draft.indicatorWarmupBars > capabilities.limits.max_warmup_bars) {
+    errors.push("指标预热 BAR 数超出服务端限制");
+  }
+  const baseIntervalSeconds = parseIntervalSeconds(draft.baseInterval);
+  const baseIntervalMs = baseIntervalSeconds === null ? null : baseIntervalSeconds * 1_000;
+  let visibleRows: number | null = null;
+  if (draft.visibleHistoryMode === "DURATION") {
+    if (draft.visibleHistoryLookbackMs === null
+      || !Number.isSafeInteger(draft.visibleHistoryLookbackMs)
+      || draft.visibleHistoryLookbackMs < 1) {
+      errors.push("可见历史时长必须是正的安全整数毫秒");
+    } else if (baseIntervalMs === null
+      || draft.visibleHistoryLookbackMs % baseIntervalMs !== 0) {
+      errors.push("可见历史时长必须精确对齐基础周期");
+    } else {
+      visibleRows = draft.visibleHistoryLookbackMs / baseIntervalMs;
+    }
+  } else if (draft.visibleHistoryMode === "ALL_AVAILABLE") {
+    if (draft.visibleHistoryLookbackMs !== null) {
+      errors.push("全部可用历史不能同时指定固定时长");
+    }
+  } else {
+    errors.push("可见历史模式不受支持");
   }
   const maxForwardMs = capabilities.limits.max_horizon_days * 86_400_000;
   if (draft.forwardCacheMs < 1 || draft.forwardCacheMs > maxForwardMs) {
     errors.push("前向缓存窗口超出服务端限制");
+  }
+  if (baseIntervalMs !== null && visibleRows !== null) {
+    const forwardRows = Math.ceil(draft.forwardCacheMs / baseIntervalMs);
+    const totalRows = Math.max(draft.indicatorWarmupBars, visibleRows)
+      + forwardRows
+      + 1;
+    if (totalRows > capabilities.limits.max_bar_dataset_rows) {
+      errors.push("指标预热、可见历史与前向缓存合计超出不可变数据集上限");
+    }
+  }
+  if (segmentPlan?.history_policy.accepted === false) {
+    errors.push(`服务端拒绝当前历史策略：${segmentPlan.history_policy.blocked_reason ?? "UNKNOWN"}`);
   }
   if (entry && draft.startMode === "MANUAL" && draft.requestedStartMs !== null
     && !isEligibleReplayStart(entry, draft.requestedStartMs)) {
@@ -326,7 +366,11 @@ export function buildTrainingRunCreateRequest(
     base_interval: draft.baseInterval,
     display_interval: draft.displayInterval,
     requested_start_ms: draft.startMode === "MANUAL" ? draft.requestedStartMs : null,
-    warmup_bars: draft.warmupBars,
+    indicator_warmup_bars: draft.indicatorWarmupBars,
+    visible_history_lookback: {
+      mode: draft.visibleHistoryMode,
+      duration_ms: draft.visibleHistoryLookbackMs,
+    },
     forward_cache_ms: draft.forwardCacheMs,
     random_seed: null,
     initial_equity: draft.initialEquity,

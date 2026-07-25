@@ -6,6 +6,7 @@
     "track_state": ["DORMANT", "PREPARING", "READY", "DEGRADED", "ERROR"],
     "source_kind": ["BAR", "AGG_TRADE"],
     "start_mode": ["MANUAL", "RANDOM"],
+    "visible_history_mode": ["DURATION", "ALL_AVAILABLE"],
     "integrity_mode": ["CHALLENGE", "PRACTICE", "SANDBOX"],
     "time_disclosure_policy": [
       "NONE",

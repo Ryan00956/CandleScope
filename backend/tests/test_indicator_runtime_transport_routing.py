@@ -73,6 +73,10 @@ class _DataManager:
 
     def subscribe(self, **kwargs: Any) -> Any:
         callback = kwargs["callback"]
+        if "symbol" not in kwargs:
+            # Main owns one connection-level wildcard correction subscriber.
+            # This fake emits realtime only for a concrete series subscription.
+            return callback
         if self.emit_realtime:
             event = DataEvent(
                 event_type=DataEventType.BAR_CLOSED,

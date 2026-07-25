@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -817,6 +819,797 @@ def test_history_verification_only_gap_submits_and_waits_for_exact_request(
     assert payload["missing_ranges"] == []
 
 
+def test_empty_cold_history_waits_for_one_whole_chunk_then_returns_pending(
+    monkeypatch,
+) -> None:
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.stage = 0
+            self.query_calls: list[bool | None] = []
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+            **kwargs,
+        ) -> QueryResult:
+            self.query_calls.append(auto_backfill)
+            times = {
+                0: [],
+                1: [180],
+                2: [120, 180],
+            }[self.stage]
+            missing = {
+                0: (0, 180_000, 4),
+                1: (0, 120_000, 3),
+                2: (0, 60_000, 2),
+            }[self.stage]
+            bars = [
+                BarData(
+                    time=value,
+                    open=1,
+                    high=2,
+                    low=1,
+                    close=2,
+                    volume=10,
+                )
+                for value in times
+            ]
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=(QuerySource.STORAGE if bars else QuerySource.EMPTY),
+                total=len(bars),
+                backfill_triggered=True,
+                missing_ranges=[MissingRange(
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=missing[0],
+                    end_ms=missing[1],
+                    exchange=exchange,
+                    market_type=market_type,
+                    missing_bars=missing[2],
+                )],
+                metadata={
+                    "all_rows_final": bool(bars),
+                    "backfill_request_ids": ["cold-progress"],
+                },
+                history_state="pending",
+                complete=False,
+                retryable=True,
+            )
+
+    class _Coordinator:
+        def __init__(self, dm: _HistoryDataManager) -> None:
+            self.dm = dm
+            self.wait_revisions: list[int] = []
+            self.acquired: list[dict] = []
+            self.released: list[dict] = []
+            self.advanced: list[tuple[str, int]] = []
+
+        async def advance_demand_scope(self, scope: str, generation: int):
+            self.advanced.append((scope, generation))
+            return 0
+
+        async def acquire_demand(self, request_id: str, **kwargs):
+            self.acquired.append({"request_id": request_id, **kwargs})
+            return True
+
+        async def release_demand(self, request_id: str, **kwargs):
+            self.released.append({"request_id": request_id, **kwargs})
+            return False
+
+        async def wait_for_progress(self, request_id: str, *, after_revision: int):
+            self.wait_revisions.append(after_revision)
+            if after_revision == 0:
+                self.dm.stage = 1
+                return {
+                    "request_id": request_id,
+                    "revision": 1,
+                    "terminal": False,
+                    "completed_chunk_target_bars": 2,
+                }
+            self.dm.stage = 2
+            return {
+                "request_id": request_id,
+                "revision": 2,
+                "terminal": False,
+                "completed_chunk_target_bars": 2,
+            }
+
+    monkeypatch.setattr(
+        klines_api,
+        "_last_closed_open_ms",
+        lambda *args, **kwargs: 180_000,
+    )
+    dm = _HistoryDataManager()
+    coordinator = _Coordinator(dm)
+    response = _client_with_runtime(dm, coordinator).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "count_back": 4,
+            "max_wait_ms": 1_000,
+            "request_scope": "pane-a",
+            "request_generation": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert dm.query_calls == [None, False, False]
+    # The first one-bar publication is below the completed physical chunk's
+    # two-bar gate; the second publication can paint immediately.
+    assert coordinator.wait_revisions == [0, 1]
+    assert payload["count"] == 2
+    assert payload["verified_contiguous"] is False
+    assert payload["history_state"] == "pending"
+    assert payload["complete"] is False
+    assert coordinator.advanced == [("pane-a", 7)]
+    # Scope ownership is attached immediately after query (so max_wait=0 is
+    # still cancellable), then idempotently confirmed when polling starts.
+    assert len(coordinator.acquired) == 3
+    assert len(coordinator.released) == 1
+    assert coordinator.released[0]["owner_id"].startswith("http:")
+    assert coordinator.released[0]["cancel_if_unobserved"] is False
+
+
+def test_existing_partial_history_does_not_use_progressive_early_ready(
+    monkeypatch,
+) -> None:
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.stage = 1
+            self.query_calls = 0
+
+        def query(self, symbol, interval, *, exchange, market_type, **kwargs):
+            self.query_calls += 1
+            times = {
+                1: [180],
+                2: [120, 180],
+                4: [0, 60, 120, 180],
+            }[self.stage]
+            missing_ranges = []
+            if self.stage < 4:
+                missing_ranges = [MissingRange(
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=0,
+                    end_ms=(120_000 if self.stage == 1 else 60_000),
+                    exchange=exchange,
+                    market_type=market_type,
+                    missing_bars=(3 if self.stage == 1 else 2),
+                )]
+            return QueryResult(
+                bars=[BarData(
+                    time=value,
+                    open=1,
+                    high=2,
+                    low=1,
+                    close=2,
+                    volume=1,
+                ) for value in times],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(times),
+                backfill_triggered=True,
+                missing_ranges=missing_ranges,
+                metadata={
+                    "all_rows_final": True,
+                    "backfill_request_ids": ["existing-partial"],
+                },
+                history_state=("ready" if self.stage == 4 else "pending"),
+                complete=self.stage == 4,
+                retryable=self.stage != 4,
+            )
+
+    class _Coordinator:
+        def __init__(self, dm: _HistoryDataManager) -> None:
+            self.dm = dm
+            self.wait_revisions: list[int] = []
+
+        async def acquire_demand(self, *args, **kwargs):
+            return True
+
+        async def release_demand(self, *args, **kwargs):
+            return False
+
+        async def wait_for_progress(self, request_id: str, *, after_revision: int):
+            self.wait_revisions.append(after_revision)
+            if after_revision == 0:
+                self.dm.stage = 2
+                return {
+                    "revision": 1,
+                    "terminal": False,
+                    "completed_chunk_target_bars": 2,
+                }
+            self.dm.stage = 4
+            return {
+                "revision": 2,
+                "terminal": False,
+                "completed_chunk_target_bars": 2,
+            }
+
+    monkeypatch.setattr(
+        klines_api,
+        "_last_closed_open_ms",
+        lambda *args, **kwargs: 180_000,
+    )
+    dm = _HistoryDataManager()
+    coordinator = _Coordinator(dm)
+    response = _client_with_runtime(dm, coordinator).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "count_back": 4,
+            "max_wait_ms": 1_000,
+        },
+    )
+
+    assert response.status_code == 200
+    assert dm.query_calls == 3
+    assert coordinator.wait_revisions == [0, 1]
+    assert response.json()["count"] == 4
+    assert response.json()["verified_contiguous"] is True
+
+
+def test_poll_can_coalesce_nonterminal_progress_for_expensive_derived_query() -> None:
+    async def _run() -> None:
+        class _Coordinator:
+            def __init__(self) -> None:
+                self.wait_revisions: list[int] = []
+
+            def progress_for_request(self, request_id: str):
+                return {"revision": 0, "terminal": False}
+
+            async def wait_for_progress(self, request_id: str, *, after_revision: int):
+                self.wait_revisions.append(after_revision)
+                if after_revision < 2:
+                    return {
+                        "request_id": request_id,
+                        "revision": after_revision + 1,
+                        "terminal": False,
+                        "completed_chunk_target_bars": 10,
+                    }
+                return {
+                    "request_id": request_id,
+                    "revision": 3,
+                    "terminal": True,
+                    "completed_chunk_target_bars": 10,
+                }
+
+        coordinator = _Coordinator()
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(backfill_coordinator=coordinator),
+            ),
+            state=SimpleNamespace(),
+        )
+
+        async def _connected() -> bool:
+            return False
+
+        fake_request.is_disconnected = _connected
+        pending = QueryResult(
+            bars=[BarData(time=60, open=1, high=2, low=1, close=2, volume=1)],
+            metadata={"backfill_request_ids": ["derived-page"]},
+            backfill_triggered=True,
+            history_state="pending",
+            complete=False,
+            retryable=True,
+        )
+        ready = QueryResult(
+            bars=[BarData(time=60, open=1, high=2, low=1, close=2, volume=1)],
+            metadata={"backfill_request_ids": ["derived-page"]},
+            backfill_triggered=True,
+            history_state="ready",
+            complete=True,
+            retryable=False,
+        )
+        requeries = 0
+
+        async def _requery(_auto_backfill: bool):
+            nonlocal requeries
+            requeries += 1
+            return ready
+
+        returned = await klines_api._poll_backfill_storage(
+            fake_request,
+            pending,
+            timeout_seconds=1.0,
+            requery=_requery,
+            wait_through_partial_rows=True,
+            coalesce_nonterminal_progress=True,
+            ready=lambda candidate: bool(candidate.complete),
+        )
+
+        assert returned is ready
+        assert coordinator.wait_revisions == [0, 1, 2]
+        assert requeries == 1
+
+    asyncio.run(_run())
+
+
+def test_poll_disconnect_releases_http_and_scope_demand() -> None:
+    async def _run() -> None:
+        class _Coordinator:
+            def __init__(self) -> None:
+                self.acquired: list[dict] = []
+                self.released: list[dict] = []
+
+            async def acquire_demand(self, request_id: str, **kwargs):
+                self.acquired.append({"request_id": request_id, **kwargs})
+                return True
+
+            async def release_demand(self, request_id: str, **kwargs):
+                self.released.append({"request_id": request_id, **kwargs})
+                return True
+
+            async def wait_for_progress(self, request_id: str, **kwargs):
+                await asyncio.Event().wait()
+
+        coordinator = _Coordinator()
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(backfill_coordinator=coordinator),
+            ),
+            state=SimpleNamespace(),
+        )
+
+        async def _disconnected() -> bool:
+            return True
+
+        fake_request.is_disconnected = _disconnected
+        result = QueryResult(
+            metadata={"backfill_request_ids": ["disconnect-repair"]},
+            backfill_triggered=True,
+        )
+        requeries = 0
+
+        async def _requery(_auto_backfill: bool):
+            nonlocal requeries
+            requeries += 1
+            return result
+
+        returned = await klines_api._poll_backfill_storage(
+            fake_request,
+            result,
+            timeout_seconds=1.0,
+            requery=_requery,
+            demand_scope="pane-disconnect",
+            demand_generation=3,
+        )
+
+        assert returned is result
+        assert requeries == 0
+        assert len(coordinator.acquired) == 2
+        assert len(coordinator.released) == 2
+        assert all(item["cancel_if_unobserved"] for item in coordinator.released)
+        assert all(item["reason"] == "http_disconnected" for item in coordinator.released)
+        assert fake_request.state.backfill_wait_disconnected is True
+
+    asyncio.run(_run())
+
+
+def test_poll_cleanup_is_bounded_when_disconnect_probe_ignores_cancel() -> None:
+    async def _run() -> None:
+        release_probe = asyncio.Event()
+
+        class _Coordinator:
+            async def wait_for_progress(self, request_id: str, **kwargs):
+                return {"revision": 1, "terminal": True}
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(
+                backfill_coordinator=_Coordinator(),
+            )),
+            state=SimpleNamespace(),
+        )
+
+        async def _non_cooperative_disconnect() -> bool:
+            while not release_probe.is_set():
+                try:
+                    await release_probe.wait()
+                except asyncio.CancelledError:
+                    continue
+            return False
+
+        fake_request.is_disconnected = _non_cooperative_disconnect
+        result = QueryResult(
+            metadata={"backfill_request_ids": ["terminal-progress"]},
+            backfill_triggered=True,
+        )
+
+        async def _requery(_auto_backfill: bool):
+            return result
+
+        started = time.perf_counter()
+        returned = await klines_api._poll_backfill_storage(
+            fake_request,
+            result,
+            timeout_seconds=0.2,
+            requery=_requery,
+            ready=lambda _candidate: True,
+        )
+        elapsed = time.perf_counter() - started
+        release_probe.set()
+        await asyncio.sleep(0.02)
+
+        assert returned is result
+        assert elapsed < 0.75
+
+    asyncio.run(_run())
+
+
+def test_poll_cleanup_detaches_overdue_demand_mutation_without_cancelling() -> None:
+    async def _run() -> None:
+        release_gate = asyncio.Event()
+        release_done = asyncio.Event()
+
+        class _Coordinator:
+            def __init__(self) -> None:
+                self.release_cancellations = 0
+
+            async def acquire_demand(self, request_id: str, **kwargs):
+                return True
+
+            async def wait_for_progress(self, request_id: str, **kwargs):
+                return {"revision": 1, "terminal": True}
+
+            async def release_demand(self, request_id: str, **kwargs):
+                try:
+                    await release_gate.wait()
+                except asyncio.CancelledError:
+                    self.release_cancellations += 1
+                    raise
+                finally:
+                    release_done.set()
+                return True
+
+        coordinator = _Coordinator()
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(
+                backfill_coordinator=coordinator,
+            )),
+            state=SimpleNamespace(),
+        )
+
+        async def _connected() -> bool:
+            return False
+
+        fake_request.is_disconnected = _connected
+        result = QueryResult(
+            metadata={"backfill_request_ids": ["slow-release"]},
+            backfill_triggered=True,
+        )
+
+        async def _requery(_auto_backfill: bool):
+            return result
+
+        started = time.perf_counter()
+        returned = await klines_api._poll_backfill_storage(
+            fake_request,
+            result,
+            timeout_seconds=0.2,
+            requery=_requery,
+            ready=lambda _candidate: True,
+        )
+        elapsed = time.perf_counter() - started
+
+        assert returned is result
+        assert elapsed < 0.75
+        assert release_done.is_set() is False
+        assert coordinator.release_cancellations == 0
+        release_gate.set()
+        await asyncio.wait_for(release_done.wait(), timeout=1.0)
+        assert coordinator.release_cancellations == 0
+
+    asyncio.run(_run())
+
+
+def test_poll_deadline_is_bounded_when_progress_waiter_ignores_cancel() -> None:
+    async def _run() -> None:
+        release_waiter = asyncio.Event()
+
+        class _Coordinator:
+            async def wait_for_progress(self, request_id: str, **kwargs):
+                while not release_waiter.is_set():
+                    try:
+                        await release_waiter.wait()
+                    except asyncio.CancelledError:
+                        continue
+                return {"revision": 1, "terminal": True}
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(
+                backfill_coordinator=_Coordinator(),
+            )),
+            state=SimpleNamespace(),
+        )
+
+        async def _connected() -> bool:
+            return False
+
+        fake_request.is_disconnected = _connected
+        result = QueryResult(
+            metadata={"backfill_request_ids": ["lost-progress"]},
+            backfill_triggered=True,
+        )
+        requeries = 0
+
+        async def _requery(_auto_backfill: bool):
+            nonlocal requeries
+            requeries += 1
+            return result
+
+        started = time.perf_counter()
+        returned = await klines_api._poll_backfill_storage(
+            fake_request,
+            result,
+            timeout_seconds=0.05,
+            requery=_requery,
+        )
+        elapsed = time.perf_counter() - started
+        release_waiter.set()
+        await asyncio.sleep(0.02)
+
+        assert returned is result
+        assert requeries == 1
+        assert elapsed < 0.75
+
+    asyncio.run(_run())
+
+
+def test_poll_final_requery_is_bounded_when_query_ignores_cancel() -> None:
+    async def _run() -> None:
+        release_requery = asyncio.Event()
+        requery_started = asyncio.Event()
+
+        class _Coordinator:
+            async def wait_for_progress(self, request_id: str, **kwargs):
+                return {"revision": 1, "terminal": True}
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(
+                backfill_coordinator=_Coordinator(),
+            )),
+            state=SimpleNamespace(),
+        )
+
+        async def _connected() -> bool:
+            return False
+
+        fake_request.is_disconnected = _connected
+        result = QueryResult(
+            metadata={"backfill_request_ids": ["terminal-requery"]},
+            backfill_triggered=True,
+        )
+
+        async def _non_cooperative_requery(_auto_backfill: bool):
+            requery_started.set()
+            while not release_requery.is_set():
+                try:
+                    await release_requery.wait()
+                except asyncio.CancelledError:
+                    continue
+            return result
+
+        started = time.perf_counter()
+        returned = await klines_api._poll_backfill_storage(
+            fake_request,
+            result,
+            timeout_seconds=0.05,
+            requery=_non_cooperative_requery,
+        )
+        elapsed = time.perf_counter() - started
+        assert requery_started.is_set()
+        release_requery.set()
+        await asyncio.sleep(0.02)
+
+        assert returned is result
+        assert elapsed < 0.75
+
+    asyncio.run(_run())
+
+
+def test_late_stale_history_generation_is_rejected_before_query() -> None:
+    class _DataManager:
+        def __init__(self) -> None:
+            self.query_calls = 0
+            self.backfill_calls = 0
+
+        def query(self, *args, **kwargs):
+            self.query_calls += 1
+            raise AssertionError("stale generation must not query")
+
+        def request_backfill(self, *args, **kwargs):
+            self.backfill_calls += 1
+            raise AssertionError("stale generation must not submit")
+
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.advanced: list[tuple[str, int]] = []
+
+        def is_demand_generation_current(self, scope: str, generation: int) -> bool:
+            return generation >= 10
+
+        async def advance_demand_scope(self, scope: str, generation: int):
+            self.advanced.append((scope, generation))
+            return 0
+
+    dm = _DataManager()
+    coordinator = _Coordinator()
+    response = _client_with_runtime(dm, coordinator).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "count_back": 100,
+            "request_scope": "pane-late",
+            "request_generation": 9,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "stale_request_generation",
+        "request_scope": "pane-late",
+        "request_generation": 9,
+    }
+    assert coordinator.advanced == []
+    assert dm.query_calls == 0
+    assert dm.backfill_calls == 0
+
+
+def test_history_mid_query_generation_supersede_remains_409_and_carries_token() -> None:
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.current = 0
+
+        def is_demand_generation_current(self, scope: str, generation: int) -> bool:
+            return generation >= self.current
+
+        async def advance_demand_scope(self, scope: str, generation: int):
+            if generation > self.current:
+                self.current = generation
+            return 0
+
+    class _DataManager:
+        def __init__(self, coordinator: _Coordinator) -> None:
+            self.coordinator = coordinator
+            self.metadata: dict | None = None
+
+        def query(self, symbol, interval, **kwargs):
+            self.metadata = kwargs.get("backfill_metadata")
+            # Simulate generation 2 arriving while generation 1 is inside the
+            # storage worker. The post-query guard executes inside the broad
+            # endpoint try/except and must remain a 409.
+            self.coordinator.current = 2
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                source=QuerySource.EMPTY,
+                total=0,
+            )
+
+    coordinator = _Coordinator()
+    dm = _DataManager(coordinator)
+    response = _client_with_runtime(dm, coordinator).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "count_back": 100,
+            "max_wait_ms": 0,
+            "request_scope": "pane-mid-query",
+            "request_generation": 1,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "stale_request_generation"
+    assert dm.metadata is not None
+    assert dm.metadata["demand_scope"] == "pane-mid-query"
+    assert dm.metadata["demand_generation"] == 1
+    assert dm.metadata["demand_owner_id"].startswith("scope:pane-mid-query:1:")
+
+
+def test_history_handler_cancel_revokes_atomic_query_owner() -> None:
+    async def _run() -> None:
+        class _Coordinator:
+            def __init__(self) -> None:
+                self.current = 0
+                self.revoked: list[tuple[str, str]] = []
+
+            def is_demand_generation_current(self, scope: str, generation: int) -> bool:
+                return generation >= self.current
+
+            async def advance_demand_scope(self, scope: str, generation: int):
+                self.current = max(self.current, generation)
+                return 0
+
+            async def revoke_demand_owner(self, owner_id: str, *, reason: str):
+                self.revoked.append((owner_id, reason))
+                return 0
+
+        class _DataManager:
+            def __init__(self) -> None:
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.metadata: dict | None = None
+
+            def query(self, symbol, interval, **kwargs):
+                self.metadata = kwargs.get("backfill_metadata")
+                self.started.set()
+                self.release.wait(timeout=2.0)
+                return QueryResult(
+                    bars=[],
+                    symbol=symbol,
+                    interval=interval,
+                    source=QuerySource.EMPTY,
+                    total=0,
+                )
+
+        coordinator = _Coordinator()
+        dm = _DataManager()
+
+        class _Runtime:
+            def get_backfill_coordinator(self):
+                return coordinator
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(
+                data_manager=dm,
+                data_engine_runtime=_Runtime(),
+            )),
+            state=SimpleNamespace(),
+        )
+        task = asyncio.create_task(klines_api.get_klines_history(
+            fake_request,
+            symbol="BTCUSDT",
+            interval="89m",
+            days=7,
+            count_back=100,
+            exchange="binance",
+            market_type="spot",
+            request_scope="pane-cancel-query",
+            request_generation=1,
+            max_wait_ms=0,
+        ))
+        await asyncio.to_thread(dm.started.wait, 1.0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            dm.release.set()
+
+        assert dm.metadata is not None
+        owner_id = dm.metadata["demand_owner_id"]
+        assert dm.metadata["demand_scope"] == "pane-cancel-query"
+        assert dm.metadata["demand_generation"] == 1
+        assert coordinator.revoked == [(owner_id, "http_query_cancelled")]
+
+    asyncio.run(_run())
+
+
 def test_history_returns_promptly_when_completed_backfill_has_no_rows() -> None:
     class _HistoryDataManager:
         def __init__(self) -> None:
@@ -1154,11 +1947,12 @@ def test_history_query_triggers_data_manager_backfill_request_when_empty() -> No
     assert payload["count"] == 0
     assert payload["source"] == "empty"
     assert payload["backfill_triggered"] is True
-    assert len(calls) == 4
+    # Related intervals are speculative and are not admitted until the
+    # foreground page has trustworthy renderable rows.
+    assert len(calls) == 1
     symbol, interval, start_ms, end_ms, exchange, market_type = calls[0]
     assert (symbol, interval, exchange, market_type) == ("BTCUSDT", "1h", "binance", "spot")
     assert start_ms < end_ms
-    assert [call[1] for call in calls[1:]] == ["15m", "4h", "5m"]
 
 
 def test_history_count_back_overrides_days_window() -> None:
@@ -1507,25 +2301,69 @@ def test_history_endpoint_submits_initial_history_demand_metadata() -> None:
             "days": 0.001,
             "exchange": "binance",
             "market_type": "spot",
+            "request_scope": "pane-atomic",
+            "request_generation": 5,
         },
     )
 
     assert response.status_code == 200
-    assert len(calls) == 4
+    assert response.json()["intent"] == "viewport"
+    assert len(calls) == 1
     args, kwargs = calls[0]
     assert args[0:2] == ("BTCUSDT", "1h")
     assert kwargs["reason"] == "initial_history"
     assert kwargs["priority"] == 10
     assert kwargs["requester"] == "klines_history"
     assert kwargs["metadata"]["query_reason"] == "query_empty"
+    assert kwargs["metadata"]["demand_scope"] == "pane-atomic"
+    assert kwargs["metadata"]["demand_generation"] == 5
+    assert kwargs["metadata"]["demand_owner_id"].startswith(
+        "scope:pane-atomic:5:"
+    )
 
-    related = calls[1:]
-    assert [item[0][1] for item in related] == ["15m", "4h", "5m"]
-    assert all(item[1]["reason"] == "related_interval_warmup" for item in related)
-    assert all(item[1]["priority"] == 40 for item in related)
-    assert all(item[1]["requester"] == "klines_history_related" for item in related)
-    assert related[0][1]["metadata"]["focus_scope"] == "related"
-    assert related[0][1]["metadata"]["current_interval"] == "1h"
+    assert calls[1:] == []
+
+
+def test_history_endpoint_active_hydration_uses_background_demand_lane() -> None:
+    calls: list[tuple[tuple, dict]] = []
+    dm = DataManager()
+    dm.set_backfill_trigger(lambda *args, **kwargs: calls.append((args, kwargs)))
+    client = _client(dm)
+
+    response = client.get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "ETHUSDT",
+            "interval": "1h",
+            "days": 0.001,
+            "exchange": "binance",
+            "market_type": "spot",
+            "intent": "active_hydration",
+            "max_wait_ms": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent"] == "active_hydration"
+    assert len(calls) == 1
+    _args, kwargs = calls[0]
+    assert kwargs["reason"] == "active_history_hydration"
+    assert kwargs["priority"] == 90
+    assert kwargs["requester"] == "klines_history"
+
+
+def test_history_endpoint_rejects_unknown_intent() -> None:
+    response = _client(DataManager()).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "intent": "prefetch_everything",
+            "max_wait_ms": 0,
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_range_query_reports_exact_visible_gap() -> None:
@@ -2221,6 +3059,54 @@ def test_related_interval_warmup_uses_each_target_last_closed_open(
             "end_ms": 9_900_000,
         }
         assert kwargs["metadata"]["warmup_range"]["end_ms"] == expected_end_ms
+
+
+def test_related_warmup_carries_scope_lease_and_drops_stale_generation() -> None:
+    class _WarmupDataManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple, dict]] = []
+
+        def request_backfill(self, *args, **kwargs) -> None:
+            self.calls.append((args, kwargs))
+
+    class _Coordinator:
+        current = 4
+
+        def is_demand_generation_current(self, scope: str, generation: int) -> bool:
+            return generation >= self.current
+
+    dm = _WarmupDataManager()
+    coordinator = _Coordinator()
+    common = {
+        "symbol": "BTCUSDT",
+        "current_interval": "1h",
+        "start_ms": 0,
+        "end_ms": 10_000_000,
+        "exchange": "binance",
+        "market_type": "spot",
+        "coordinator": coordinator,
+        "demand_scope": "pane-warmup",
+        "demand_owner_id": "scope:pane-warmup:4:test-consumer",
+    }
+
+    _schedule_related_interval_warmup(
+        dm,
+        **common,
+        demand_generation=3,
+    )
+    assert dm.calls == []
+
+    _schedule_related_interval_warmup(
+        dm,
+        **common,
+        demand_generation=4,
+    )
+    assert len(dm.calls) == 3
+    for _, kwargs in dm.calls:
+        metadata = kwargs["metadata"]
+        assert metadata["demand_scope"] == "pane-warmup"
+        assert metadata["demand_generation"] == 4
+        assert metadata["demand_owner_id"] == "scope:pane-warmup:4:test-consumer"
 
 
 def test_continuity_endpoint_returns_storage_gap_report() -> None:

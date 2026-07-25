@@ -47,6 +47,7 @@ export interface DrawingEngineHostProps {
     fibInverted: boolean;
     positionSize: number;
     drawingSnapEnabled: boolean;
+    drawingContinuousEnabled: boolean;
     drawingKey: string;
     drawingSeriesGeneration: number;
     drawingChartType: string;
@@ -73,6 +74,7 @@ function DrawingEngineHost({
     fibInverted,
     positionSize,
     drawingSnapEnabled,
+    drawingContinuousEnabled,
     drawingKey,
     drawingSeriesGeneration,
     drawingChartType,
@@ -109,6 +111,7 @@ function DrawingEngineHost({
         fibInverted,
         positionSize,
         drawingSnapEnabled,
+        drawingContinuousEnabled,
         symbol: drawingKey,
         seriesReady: drawingSeriesGeneration,
         drawingChartType,
@@ -133,6 +136,7 @@ function DrawingEngineHost({
     } = drawing;
     const legacyPrimitiveEvidence = drawing.getLegacyPrimitiveRuntimeEvidence();
     const appliedInitialHiddenRef = useRef(false);
+    const interactionMarkerRef = useRef<HTMLSpanElement | null>(null);
     const [chartContainerWidth, setChartContainerWidth] = useState<number>(0);
 
     useEffect(() => {
@@ -171,6 +175,12 @@ function DrawingEngineHost({
     }, [onSelectedDrawingChange]);
 
     useEffect(() => {
+        // useDrawing's pointer-subscription effect is registered earlier in
+        // this component and therefore runs before this API publication. Only
+        // expose "ready" after that listener boundary has been crossed.
+        if (interactionMarkerRef.current) {
+            interactionMarkerRef.current.dataset.drawingEngine = "ready";
+        }
         onApiChange?.({
             clearAll,
             completeSurfaceDispose,
@@ -180,10 +190,6 @@ function DrawingEngineHost({
             updateSelectedDrawingStyle,
             prepareExport,
         });
-
-        return () => {
-            onApiChange?.(null);
-        };
     }, [
         clearAll,
         completeSurfaceDispose,
@@ -195,9 +201,19 @@ function DrawingEngineHost({
         updateSelectedDrawingStyle,
     ]);
 
+    useEffect(() => {
+        const interactionMarker = interactionMarkerRef.current;
+        return () => {
+            if (interactionMarker) {
+                interactionMarker.dataset.drawingEngine = "mounted";
+            }
+            onApiChange?.(null);
+        };
+    }, [onApiChange]);
+
     return (
         <>
-            <span data-drawing-engine="ready" hidden />
+            <span ref={interactionMarkerRef} data-drawing-engine="mounted" hidden />
             <span
                 data-drawing-interaction-mode={interactionSurfaceMode}
                 data-drawing-editing-text-id={drawing.editingTextId ?? ""}

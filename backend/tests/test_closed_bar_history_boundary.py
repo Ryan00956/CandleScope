@@ -250,9 +250,11 @@ def test_coordinator_clamps_or_completes_forming_requests_without_history_servic
             market_type="futures",
             request_id="closed-plus-forming",
         ))
-        assert len(engine.calls) == 1
-        assert engine.calls[0]["range_start_ms"] == previous_open
-        assert engine.calls[0]["range_end_ms"] == previous_open
+        assert len(engine.calls) == 3
+        assert {
+            (call["range_start_ms"], call["range_end_ms"])
+            for call in engine.calls
+        } == {(previous_open, previous_open)}
 
     asyncio.run(_run())
 

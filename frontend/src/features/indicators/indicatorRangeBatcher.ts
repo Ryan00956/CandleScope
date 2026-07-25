@@ -5,6 +5,8 @@ interface BatchableIndicatorRangeRequest {
   market_type?: string;
   symbol?: string;
   interval?: string;
+  requestScope?: string;
+  requestGeneration?: number;
   signal?: AbortSignal;
 }
 
@@ -21,6 +23,8 @@ interface IndicatorRangeBatcherOptions<TRequest, TPayload> {
     requests: Array<Omit<TRequest, "signal">>;
     signal: AbortSignal;
   }) => Promise<IndicatorBatchResponse<TPayload>>;
+  /** Briefly hold requests so effects committed in adjacent frames share one HTTP batch. */
+  coalesceWindowMs?: number;
   maxBatchSize?: number;
 }
 
@@ -50,6 +54,8 @@ function batchGroupKey(request: BatchableIndicatorRangeRequest): string {
     request?.marketType || request?.market_type || "spot",
     String(request?.symbol || "").toUpperCase(),
     request?.interval || "",
+    request?.requestScope || "",
+    request?.requestGeneration ?? "",
   ].join("|");
 }
 
@@ -67,13 +73,16 @@ export function createIndicatorRangeBatcher<
   TPayload = unknown,
 >({
   sendBatch,
+  coalesceWindowMs = 0,
   maxBatchSize = 32,
 }: IndicatorRangeBatcherOptions<TRequest, TPayload> = {}) {
   if (typeof sendBatch !== "function") throw new TypeError("sendBatch is required");
   const sendBatchRequest = sendBatch;
   const queued: Array<QueuedEntry<TRequest, TPayload>> = [];
   const activeBatches = new Set<ActiveBatch<TRequest, TPayload>>();
+  const activeGroupKeys = new Set<string>();
   let flushQueued = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
 
   function settleAborted(entry: QueuedEntry<TRequest, TPayload>): void {
@@ -83,6 +92,10 @@ export function createIndicatorRangeBatcher<
   }
 
   async function sendEntries(entries: Array<QueuedEntry<TRequest, TPayload>>): Promise<void> {
+    if (disposed) {
+      for (const entry of entries) settleAborted(entry);
+      return;
+    }
     const live = entries.filter((entry) => !entry.signal?.aborted && !entry.settled);
     for (const entry of entries) {
       if (entry.signal?.aborted) settleAborted(entry);
@@ -130,6 +143,25 @@ export function createIndicatorRangeBatcher<
     }
   }
 
+  async function sendGroup(
+    groupKey: string,
+    entries: Array<QueuedEntry<TRequest, TPayload>>,
+  ): Promise<void> {
+    activeGroupKeys.add(groupKey);
+    const size = Math.max(1, Math.floor(Number(maxBatchSize) || 32));
+    try {
+      // One physical request per K-line series at a time. A newer revision can
+      // abort the active request; work accumulated meanwhile is then sent as
+      // one replacement batch instead of racing it through storage.
+      for (let index = 0; index < entries.length; index += size) {
+        await sendEntries(entries.slice(index, index + size));
+      }
+    } finally {
+      activeGroupKeys.delete(groupKey);
+      if (!disposed && queued.length > 0) scheduleFlush();
+    }
+  }
+
   function flush(): void {
     flushQueued = false;
     if (disposed) {
@@ -144,12 +176,27 @@ export function createIndicatorRangeBatcher<
       group.push(entry);
       groups.set(key, group);
     }
-    const size = Math.max(1, Math.floor(Number(maxBatchSize) || 32));
-    for (const entries of groups.values()) {
-      for (let index = 0; index < entries.length; index += size) {
-        void sendEntries(entries.slice(index, index + size));
+    for (const [groupKey, entries] of groups) {
+      if (activeGroupKeys.has(groupKey)) {
+        queued.push(...entries);
+        continue;
       }
+      void sendGroup(groupKey, entries);
     }
+  }
+
+  function scheduleFlush(): void {
+    if (flushQueued || disposed) return;
+    flushQueued = true;
+    const delay = Math.max(0, Math.floor(Number(coalesceWindowMs) || 0));
+    if (delay > 0) {
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        flush();
+      }, delay);
+      return;
+    }
+    queueMicrotask(flush);
   }
 
   function schedule(request: TRequest): Promise<TPayload> {
@@ -167,18 +214,19 @@ export function createIndicatorRangeBatcher<
         return;
       }
       queued.push(entry);
-      if (!flushQueued) {
-        flushQueued = true;
-        queueMicrotask(flush);
-      }
+      scheduleFlush();
     });
   }
 
   function dispose(): void {
     disposed = true;
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = null;
+    flushQueued = false;
     for (const entry of queued.splice(0)) settleAborted(entry);
     for (const batch of activeBatches) batch.controller.abort();
     activeBatches.clear();
+    activeGroupKeys.clear();
   }
 
   function reset(): void {

@@ -39,6 +39,8 @@ export interface ScriptRuntimeCatalog {
 
 export interface IndicatorDefinition {
   id: string;
+  /** Explicit execution ownership. Existing indicators remain hosted by default. */
+  executionTarget?: "hosted" | "local";
   name?: string;
   engineName?: string | null;
   script?: string;
@@ -390,6 +392,8 @@ export interface IndicatorRangeRequest {
   start: number;
   end: number;
   reason?: string;
+  requestScope?: string;
+  requestGeneration?: number;
   signal?: AbortSignal;
 }
 
@@ -415,6 +419,23 @@ export interface IndicatorComputeRequest {
   interval?: string;
   marketType?: string;
   exchange?: string;
+}
+
+export interface IndicatorComputeBatchJob {
+  clientId: string;
+  jobKey: string;
+  request: IndicatorComputeRequest;
+}
+
+export interface IndicatorComputeBatchItem {
+  clientId: string;
+  jobKey: string;
+  payload: IndicatorPayloadEnvelope;
+}
+
+export interface IndicatorComputeBatchResponse {
+  ok: boolean;
+  results: IndicatorComputeBatchItem[];
 }
 
 export interface IndicatorPreset extends IndicatorDefinition {
@@ -536,6 +557,7 @@ export interface IndicatorCacheMetadata {
 
 export interface IndicatorCacheEntry {
   key: string;
+  contentVersion: number;
   dependencyKey: string;
   indicatorId: string;
   context: IndicatorCacheContext;
@@ -552,8 +574,21 @@ export interface IndicatorCacheEntry {
 
 export interface IndicatorCacheResult {
   indicatorId: string;
+  contentVersion: number;
   normalized: NormalizedIndicatorPayload;
   schema: IndicatorParameterSchema[];
+  outputCoverage: IndicatorCoverage | null;
+  coverage: IndicatorCoverage | null;
+  computedSegments: IndicatorRangeSegment[];
+  staleSegments: IndicatorRangeSegment[];
+  revision: IndicatorRevision | null;
+  lastUpdatedMs: number;
+}
+
+export interface IndicatorCacheResultMetadata {
+  key: string;
+  indicatorId: string;
+  contentVersion: number;
   outputCoverage: IndicatorCoverage | null;
   coverage: IndicatorCoverage | null;
   computedSegments: IndicatorRangeSegment[];

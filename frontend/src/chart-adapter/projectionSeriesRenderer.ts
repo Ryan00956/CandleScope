@@ -1,4 +1,5 @@
 import { createMainSeriesPointConverter } from "./mainSeriesModel.js";
+import { chartTimesEqual } from "./chartTime.js";
 import type {
   ChartSeriesInputRow,
   MainSeriesDataOptions,
@@ -126,6 +127,19 @@ function hasValidPreviousData(
   return previousData !== undefined
     && isArrayContainer(previousData)
     && previousData.length === patch?.previousLength;
+}
+
+function preservesTailTimeTopology(patch: ValidTailPatchShape & {
+  previousData: ChartSeriesInputRow[];
+}): boolean {
+  if (patch.deleteCount !== patch.insert.length) return false;
+  for (let index = 0; index < patch.insert.length; index += 1) {
+    if (!chartTimesEqual(
+      patch.previousData[patch.fromOutputIndex + index]?.time,
+      patch.insert[index]?.time,
+    )) return false;
+  }
+  return true;
 }
 
 function cacheCommittedPatchData(
@@ -297,7 +311,7 @@ export function renderMainSeriesProjectionPatch({
   }
 
   const tailMutationCount = patch.deleteCount + patch.insert.length;
-  const canMutateTail = !preserveViewport
+  const canMutateTail = (!preserveViewport || preservesTailTimeTopology(patch))
     && patch.fromOutputIndex > 0
     && patch.deleteCount > 0
     && tailMutationCount <= MAX_INCREMENTAL_TAIL_MUTATIONS

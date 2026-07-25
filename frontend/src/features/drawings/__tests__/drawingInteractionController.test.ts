@@ -9,6 +9,7 @@ import {
   acquireDrawingExportInteractionPresentation,
   canApplyDrawingVisibilityToCurrentPrimitives,
   cancelFreehandPrimitiveOnSurface,
+  clearSelectionForBlankDrawingCreationPointerDown,
   commitSavedDrawingAfterDynamicFrame,
   createDrawingPointerRectCache,
   createDrawingExportVisibilityIntentGate,
@@ -28,6 +29,8 @@ import {
   runDrawingSurfaceDisposeBoundaryLifecycle,
   runDrawingSurfaceDisposeBarrier,
   scenePaintCoversDrawingHandoff,
+  shouldPassThroughNativeChartPointer,
+  shouldReturnToCursorAfterDrawingCompletion,
   shouldDeferDrawingCoordinateCleanupToChartTypeBoundary,
   subscribeDrawingPointerRectInvalidation,
   withDrawingExportCaptureScene,
@@ -44,6 +47,7 @@ import {
   canRecoverDrawingVisibleSceneInPlace,
   isDrawingVisibleScenePublicationReady,
   prepareDrawingMutationScope,
+  prepareDrawingMutationScopeWithSynchronousRecovery,
   restorePrePresentationHiddenDrawingSceneRuntime,
 } from "../useDrawingPersistenceLifecycle.js";
 import type { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
@@ -90,6 +94,48 @@ test("pointerdown recaptures geometry after a passive hover cached the previous 
   assert.equal(pointerDownRect.left, 140);
   assert.equal(pointerDownRect.top, 180);
   assert.equal(rectReads, 2);
+});
+
+test("drawing readiness failures preserve native blank-chart panning only", () => {
+  const blockedDrawingState = {
+    drawingMutationReady: false,
+    editingText: false,
+    hasInteractionHit: false,
+    passiveCursor: true,
+  };
+
+  assert.equal(shouldPassThroughNativeChartPointer(blockedDrawingState), true);
+  assert.equal(shouldPassThroughNativeChartPointer({
+    ...blockedDrawingState,
+    passiveCursor: false,
+  }), false, "active drawing tools remain fail closed");
+  assert.equal(shouldPassThroughNativeChartPointer({
+    ...blockedDrawingState,
+    editingText: true,
+  }), false, "text editing retains the pointer");
+  assert.equal(shouldPassThroughNativeChartPointer({
+    ...blockedDrawingState,
+    hasInteractionHit: true,
+  }), false, "existing drawing hits retain the pointer");
+  assert.equal(shouldPassThroughNativeChartPointer({
+    ...blockedDrawingState,
+    drawingMutationReady: true,
+  }), false, "ready drawing state continues through the normal interaction path");
+});
+
+test("continuous drawing keeps a completed creation tool active", () => {
+  assert.equal(
+    shouldReturnToCursorAfterDrawingCompletion(false, "line-segment", "line-segment"),
+    true,
+  );
+  assert.equal(
+    shouldReturnToCursorAfterDrawingCompletion(true, "line-segment", "line-segment"),
+    false,
+  );
+  assert.equal(
+    shouldReturnToCursorAfterDrawingCompletion(false, "shape-rectangle", "line-segment"),
+    false,
+  );
 });
 
 test("pointer rect layout subscriptions refresh out of band and fully clean up", () => {
@@ -877,6 +923,75 @@ test("scene-canary mutation readiness waits for an accepted current-surface publ
   assert.equal(retries, 1);
 });
 
+test("current-scope first publication is synchronously recovered without losing pointerdown", () => {
+  let ready = false;
+  const calls: string[] = [];
+  const readState = () => ({
+    activeScope: "BTCUSDT",
+    hasSeries: true,
+    previousScope: "BTCUSDT",
+    ready,
+    requestedScope: "BTCUSDT",
+    surfaceScope: "BTCUSDT",
+  });
+
+  assert.equal(prepareDrawingMutationScopeWithSynchronousRecovery({
+    canRecoverCurrentScope: () => true,
+    flushCurrentSurface() {
+      calls.push("flush");
+      ready = true;
+      return true;
+    },
+    readState,
+    requestRetry() {
+      calls.push("retry");
+    },
+  }), true);
+  assert.deepEqual(calls, ["retry", "flush"]);
+});
+
+test("synchronous publication recovery never crosses a stale drawing scope", () => {
+  let flushed = 0;
+  assert.equal(prepareDrawingMutationScopeWithSynchronousRecovery({
+    canRecoverCurrentScope: () => true,
+    flushCurrentSurface() {
+      flushed += 1;
+      return true;
+    },
+    readState: () => ({
+      activeScope: "BTCUSDT",
+      hasSeries: true,
+      previousScope: "BTCUSDT",
+      ready: false,
+      requestedScope: "ETHUSDT",
+      surfaceScope: "BTCUSDT",
+    }),
+    requestRetry() {},
+  }), false);
+  assert.equal(flushed, 0);
+});
+
+test("synchronous publication recovery revalidates instead of trusting flush success", () => {
+  let reads = 0;
+  assert.equal(prepareDrawingMutationScopeWithSynchronousRecovery({
+    canRecoverCurrentScope: () => true,
+    flushCurrentSurface: () => true,
+    readState: () => {
+      reads += 1;
+      return {
+        activeScope: "BTCUSDT",
+        hasSeries: true,
+        previousScope: "BTCUSDT",
+        ready: false,
+        requestedScope: "BTCUSDT",
+        surfaceScope: "BTCUSDT",
+      };
+    },
+    requestRetry() {},
+  }), false);
+  assert.ok(reads >= 3);
+});
+
 test("only a post-boundary current-surface plan qualifies for in-place recovery", () => {
   const faulted = {
     attachedSurfaceGeneration: 7,
@@ -1130,8 +1245,9 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
   const positionHandles = dynamicSelectionHandlesForSavedDrawing(position, project);
   assert.deepEqual(positionHandles.map((handle) => handle.hit.zone), [
     "entry", "tp", "sl", "left", "right",
+    "top-left", "top-right", "bottom-left", "bottom-right",
   ]);
-  assert.deepEqual(positionHandles.slice(-2).map((handle) => handle.point.x), [8, 32]);
+  assert.deepEqual(positionHandles.slice(3, 5).map((handle) => handle.point.x), [8, 32]);
 
   const foldedSceneHandles = [
     { x: 50, y: 50 },
@@ -1139,6 +1255,10 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
     { x: 50, y: 70 },
     { x: 38, y: 40 },
     { x: 62, y: 40 },
+    { x: 38, y: 10 },
+    { x: 62, y: 10 },
+    { x: 38, y: 70 },
+    { x: 62, y: 70 },
   ];
   const foldedPositionHandles = dynamicSelectionHandlesForSavedDrawing(
     position,
@@ -1154,6 +1274,10 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
       ["sl", 50, 70],
       ["left", 38, 40],
       ["right", 62, 40],
+      ["top-left", 38, 10],
+      ["top-right", 62, 10],
+      ["bottom-left", 38, 70],
+      ["bottom-right", 62, 70],
     ],
   );
 
@@ -1162,6 +1286,67 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
     dataPoints: [{ time: 10, price: 10 }, { time: 20, price: 20 }],
   };
   assert.deepEqual(dynamicSelectionHandlesForSavedDrawing(freehand, project), []);
+});
+
+test("blank creation pointerdown clears stale selection without consuming the creation click", () => {
+  for (const tool of ["line-segment", "fibonacci", "shape-rectangle", "angle-measure"]) {
+    let selectedId: string | null = "previous-drawing";
+    let deselectCount = 0;
+    let anchorPending = false;
+    let createdCount = 0;
+
+    const pointerDown = () => {
+      clearSelectionForBlankDrawingCreationPointerDown(selectedId, () => {
+        deselectCount += 1;
+        selectedId = null;
+      });
+
+      if (anchorPending) {
+        anchorPending = false;
+        createdCount += 1;
+        selectedId = `${tool}-${createdCount}`;
+      } else {
+        anchorPending = true;
+      }
+    };
+
+    pointerDown();
+    assert.equal(anchorPending, true, `${tool}: deselecting click also sets the first anchor`);
+    assert.equal(deselectCount, 1, `${tool}: stale selection is cleared once`);
+
+    pointerDown();
+    assert.equal(createdCount, 1, `${tool}: second click completes the drawing`);
+
+    pointerDown();
+    assert.equal(anchorPending, true, `${tool}: next drawing starts on its first click`);
+    assert.equal(deselectCount, 2, `${tool}: completed drawing selection is cleared once`);
+
+    pointerDown();
+    assert.equal(createdCount, 2, `${tool}: continuous drawings remain two clicks each`);
+    assert.equal(deselectCount, 2, `${tool}: no selection transition on the second click`);
+  }
+
+  for (const tool of [
+    "line-horizontal",
+    "line-vertical",
+    "line-cross",
+    "position-long",
+    "position-short",
+  ]) {
+    let selectedId: string | null = "previous-drawing";
+    let deselectCount = 0;
+    let createdCount = 0;
+
+    clearSelectionForBlankDrawingCreationPointerDown(selectedId, () => {
+      deselectCount += 1;
+      selectedId = null;
+    });
+    createdCount += 1;
+
+    assert.equal(deselectCount, 1, `${tool}: stale selection is cleared`);
+    assert.equal(selectedId, null, `${tool}: selection is cleared before creation`);
+    assert.equal(createdCount, 1, `${tool}: the same click creates the one-point drawing`);
+  }
 });
 
 test("stale position scene handles fall back to current viewport projection", () => {
@@ -1194,6 +1379,10 @@ test("stale position scene handles fall back to current viewport projection", ()
       ["sl", 120, 410],
       ["left", 104, 395],
       ["right", 136, 395],
+      ["top-left", 104, 380],
+      ["top-right", 136, 380],
+      ["bottom-left", 104, 410],
+      ["bottom-right", 136, 410],
     ],
   );
 });
@@ -1247,6 +1436,11 @@ test("position handle hit testing shares the current viewport fallback geometry"
     x: 104,
     y: 395,
   })?.zone, "left");
+  assert.equal(hitTestSelectedOverlayDrawingHandle({
+    ...options,
+    x: 104,
+    y: 380,
+  })?.zone, "top-left");
   assert.equal(hitTestSelectedOverlayDrawingHandle({
     ...options,
     x: 20,

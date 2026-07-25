@@ -11,11 +11,15 @@ Core output type: ``MarketEvent`` — a unified, exchange-agnostic envelope
 for any kind of real-time market data (kline snapshots, trades, tickers,
 depth updates, etc.).
 """
+
 from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.exchanges.rate_limits import RateLimitReservation
 
 
 # ─── Enums ────────────────────────────────────────────────────
@@ -23,44 +27,48 @@ from typing import Any
 
 class StreamType(str, enum.Enum):
     """Supported market data stream types."""
-    KLINE = "kline"              # @kline_<interval>  (exchange-aggregated candles)
-    AGG_TRADE = "aggTrade"       # @aggTrade           (aggregated trades)
-    TRADE = "trade"              # @trade              (raw trades)
-    TICKER = "ticker"            # @ticker             (24h rolling ticker)
-    MINI_TICKER = "miniTicker"   # @miniTicker         (lightweight ticker)
-    DEPTH = "depth"              # @depth<levels>      (order-book depth)
-    FULL_DEPTH = "fullDepth"     # @depth              (snapshot + ordered deltas)
-    MARK_PRICE = "markPrice"     # USD-M mark/index/funding summary stream
+
+    KLINE = "kline"  # @kline_<interval>  (exchange-aggregated candles)
+    AGG_TRADE = "aggTrade"  # @aggTrade           (aggregated trades)
+    TRADE = "trade"  # @trade              (raw trades)
+    TICKER = "ticker"  # @ticker             (24h rolling ticker)
+    MINI_TICKER = "miniTicker"  # @miniTicker         (lightweight ticker)
+    DEPTH = "depth"  # @depth<levels>      (order-book depth)
+    FULL_DEPTH = "fullDepth"  # @depth              (snapshot + ordered deltas)
+    MARK_PRICE = "markPrice"  # USD-M mark/index/funding summary stream
     PREMIUM_INDEX = "premiumIndex"  # USD-M REST-only premium-index kline history
-    INDEX_PRICE = "indexPrice"   # logical projection of markPrice stream
-    FUNDING_RATE = "fundingRate" # logical projection + REST history
+    INDEX_PRICE = "indexPrice"  # logical projection of markPrice stream
+    FUNDING_RATE = "fundingRate"  # logical projection + REST history
     OPEN_INTEREST = "openInterest"  # REST snapshot/poll + REST history
-    LIQUIDATION = "forceOrder"   # USD-M lossy liquidation-order snapshot stream
+    LIQUIDATION = "forceOrder"  # USD-M lossy liquidation-order snapshot stream
 
 
 class FeedMode(str, enum.Enum):
     """Current data feed mechanism."""
+
     WEBSOCKET = "websocket"
     PLUGIN_STREAM = "plugin_stream"
     HTTP_POLL = "http_poll"
-    IDLE = "idle"           # not yet started or stopped
+    IDLE = "idle"  # not yet started or stopped
 
 
 class DataSource(str, enum.Enum):
     """Where a particular data point came from."""
+
     WEBSOCKET = "websocket"
     HTTP = "http"
-    HTTP_BACKFILL = "http_backfill"   # gap-fill fetches
+    HTTP_BACKFILL = "http_backfill"  # gap-fill fetches
     PLUGIN = "plugin"
     MOCK = "mock"
 
 
 class SessionHealth(str, enum.Enum):
     """Health status of a WebSocket session."""
+
     CONNECTED = "connected"
     CONNECTING = "connecting"
     RECONNECTING = "reconnecting"
-    UNHEALTHY = "unhealthy"          # exceeded failure threshold
+    UNHEALTHY = "unhealthy"  # exceeded failure threshold
     DISCONNECTED = "disconnected"
 
 
@@ -76,12 +84,13 @@ class StreamDescriptor:
         StreamDescriptor("BTCUSDT", StreamType.AGG_TRADE)
         StreamDescriptor("ETHUSDT", StreamType.TICKER)
     """
+
     symbol: str
     stream_type: StreamType
-    interval: str | None = None     # only for KLINE streams
+    interval: str | None = None  # only for KLINE streams
     depth_levels: int | None = None  # only for DEPTH streams (5, 10, 20)
     exchange: str = "binance"
-    market_type: str = "spot"       # "spot" or "futures"
+    market_type: str = "spot"  # "spot" or "futures"
     poll_interval_seconds: float | None = None  # REST-only stream cadence override
     update_interval_ms: int | None = None  # optional WebSocket update-speed override
 
@@ -119,17 +128,14 @@ class StreamDescriptor:
         if self.stream_type == StreamType.DEPTH and self.depth_levels:
             base = f"{symbol}@depth{self.depth_levels}"
             if self.update_interval_ms is not None:
-                is_binance_default = (
-                    self.exchange.strip().lower() == "binance"
-                    and (
-                        (
-                            self.market_type.strip().lower() == "futures"
-                            and self.update_interval_ms == 250
-                        )
-                        or (
-                            self.market_type.strip().lower() == "spot"
-                            and self.update_interval_ms == 1000
-                        )
+                is_binance_default = self.exchange.strip().lower() == "binance" and (
+                    (
+                        self.market_type.strip().lower() == "futures"
+                        and self.update_interval_ms == 250
+                    )
+                    or (
+                        self.market_type.strip().lower() == "spot"
+                        and self.update_interval_ms == 1000
                     )
                 )
                 if is_binance_default:
@@ -182,16 +188,17 @@ class MarketEvent:
     standardized format.  See ``normalize.py`` for the exact schema
     per ``StreamType``.
     """
-    event_type: StreamType          # kline / aggTrade / trade / ticker / ...
-    symbol: str                     # "BTCUSDT"
-    exchange: str                   # "binance"
-    event_time_ms: int              # event timestamp from exchange (ms)
-    received_at_ms: int             # local receive timestamp (ms)
-    source: DataSource              # websocket / http / http_backfill / mock
-    data: dict[str, Any]            # standardized payload (schema varies by event_type)
-    stream_key: str = ""            # pipeline key, e.g. "BTCUSDT@kline_1m"
-    sequence: int | None = None     # optional sequence/ID for dedup (trade_id, etc.)
-    market_type: str = "spot"       # "spot", "futures", "swap", ...
+
+    event_type: StreamType  # kline / aggTrade / trade / ticker / ...
+    symbol: str  # "BTCUSDT"
+    exchange: str  # "binance"
+    event_time_ms: int  # event timestamp from exchange (ms)
+    received_at_ms: int  # local receive timestamp (ms)
+    source: DataSource  # websocket / http / http_backfill / mock
+    data: dict[str, Any]  # standardized payload (schema varies by event_type)
+    stream_key: str = ""  # pipeline key, e.g. "BTCUSDT@kline_1m"
+    sequence: int | None = None  # optional sequence/ID for dedup (trade_id, etc.)
+    market_type: str = "spot"  # "spot", "futures", "swap", ...
 
     # ── Convenience ──
 
@@ -221,9 +228,8 @@ class MarketEvent:
         - Others: None (no dedup)
         """
         if self.event_type == StreamType.KLINE:
-            if (
-                self.source == DataSource.PLUGIN
-                and self.data.get("is_correction", False)
+            if self.source == DataSource.PLUGIN and self.data.get(
+                "is_correction", False
             ):
                 return None
             is_closed = self.data.get("is_closed", True)
@@ -266,13 +272,14 @@ class GapMarker:
       - Kline: open_time (ms)
       - Trade/AggTrade: trade ID
     """
-    stream_key: str          # pipeline key
+
+    stream_key: str  # pipeline key
     symbol: str
     stream_type: StreamType
-    gap_start: int           # last seen continuity_key before gap
-    gap_end: int             # first continuity_key after gap
-    expected_count: int      # how many events are missing (estimate)
-    filled: bool = False     # True if auto-fill succeeded
+    gap_start: int  # last seen continuity_key before gap
+    gap_end: int  # first continuity_key after gap
+    expected_count: int  # how many events are missing (estimate)
+    filled: bool = False  # True if auto-fill succeeded
 
     def to_dict(self) -> dict:
         return {
@@ -297,22 +304,22 @@ class RawMessage:
     Carries the original payload plus metadata about where it came from.
     L4 (Normalize) consumes this and produces MarketEvent.
     """
-    payload: dict | list          # raw JSON from exchange
+
+    payload: dict | list  # raw JSON from exchange
     source: DataSource
     stream_type: StreamType
-    received_at_ms: int           # local timestamp when we received it
-    endpoint: str = ""            # which URL / endpoint delivered this
+    received_at_ms: int  # local timestamp when we received it
+    endpoint: str = ""  # which URL / endpoint delivered this
     http_status: int | None = None
     http_headers: dict[str, str] | None = None
     http_body_code: str | None = None
     request_limit: int | None = None  # REST request context when the payload omits it
 
 
-
-
 @dataclass(slots=True)
 class TransportRequest:
     """A request descriptor for L1 Transport to execute."""
+
     descriptor: StreamDescriptor
     limit: int = 1
     start_ms: int | None = None
@@ -321,6 +328,14 @@ class TransportRequest:
     history: bool = False
     quota_acquired: bool = False
     quota_semaphore_held: bool = False
+    # Internal one-shot handoff for the exact Host quota reservation.  The
+    # transport clears this before I/O so reusing a request cannot complete an
+    # older reservation.
+    quota_reservation: RateLimitReservation | None = None
+    # Scheduler-managed and bounded snapshot callers must never sleep while
+    # holding their own worker slot.  They opt into an immediate typed defer
+    # and return the work to their delayed queue instead.
+    defer_on_rate_limit: bool = False
 
     # Convenience properties for backward compat
     @property
@@ -345,10 +360,11 @@ class IngestionEvent:
 
     Consumers receive this and check ``event_type`` to decide handling.
     """
-    event_type: str                         # "market_event" | "gap" | "status"
+
+    event_type: str  # "market_event" | "gap" | "status"
     market_event: MarketEvent | None = None
     gap: GapMarker | None = None
-    status: dict | None = None              # arbitrary status payload
+    status: dict | None = None  # arbitrary status payload
 
     def to_dict(self) -> dict:
         d: dict[str, Any] = {"event_type": self.event_type}

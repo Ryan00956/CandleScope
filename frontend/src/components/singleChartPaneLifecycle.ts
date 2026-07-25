@@ -1,4 +1,6 @@
 import type { ChartSurfaceVisibleRange } from "../chart-adapter/useChartSurfaceRuntime.js";
+import { linePointEquals } from "../chart-adapter/chartSeriesData.js";
+import type { IndicatorDataEntry } from "../chart-adapter/chartAdapterTypes.js";
 import type { ChartDataCommitMeta } from "../features/market-data/useChartDataRuntime.js";
 import type { SeriesWindowStore } from "../features/market-data/window/seriesWindowStore.js";
 
@@ -57,11 +59,44 @@ function finiteNumber(value: unknown): value is number {
 
 interface RequestMoreLeftOptions {
   canLoad?: boolean;
+  consumedInteractionGeneration?: number;
   hasData?: boolean;
   hasHandler?: boolean;
+  interactionGeneration?: number;
   rangeFrom?: number | null;
   triggerBars?: number | null;
   userInteracted?: boolean;
+}
+
+export interface LeftHistoryDemandDecision {
+  demanded: boolean;
+  shouldRequest: boolean;
+}
+
+export function resolveLeftHistoryDemand({
+  canLoad = false,
+  consumedInteractionGeneration = 0,
+  hasData = false,
+  hasHandler = false,
+  rangeFrom,
+  triggerBars,
+  userInteracted = false,
+  interactionGeneration = userInteracted ? 1 : 0,
+}: RequestMoreLeftOptions = {}): LeftHistoryDemandDecision {
+  const hasUnconsumedInteraction = Number.isSafeInteger(interactionGeneration)
+    && interactionGeneration > 0
+    && Number.isSafeInteger(consumedInteractionGeneration)
+    && interactionGeneration > consumedInteractionGeneration;
+  const demanded = Boolean(
+    userInteracted
+    && hasUnconsumedInteraction
+    && hasData
+    && hasHandler
+    && finiteNumber(rangeFrom)
+    && finiteNumber(triggerBars)
+    && rangeFrom <= triggerBars
+  );
+  return { demanded, shouldRequest: demanded && canLoad };
 }
 
 export function shouldRequestMoreLeft({
@@ -72,15 +107,69 @@ export function shouldRequestMoreLeft({
   triggerBars,
   userInteracted = false,
 }: RequestMoreLeftOptions = {}): boolean {
-  return Boolean(
-    userInteracted
-    && canLoad
-    && hasData
-    && hasHandler
-    && finiteNumber(rangeFrom)
-    && finiteNumber(triggerBars)
-    && rangeFrom <= triggerBars
-  );
+  return resolveLeftHistoryDemand({
+    canLoad,
+    hasData,
+    hasHandler,
+    ...(rangeFrom === undefined ? {} : { rangeFrom }),
+    ...(triggerBars === undefined ? {} : { triggerBars }),
+    userInteracted,
+  }).shouldRequest;
+}
+
+/**
+ * `rangeTo` is an index on Lightweight Charts' displayed horizontal axis.
+ * Derived representations (such as Renko) can have a different number of
+ * display points than their source K-lines, so this must be the display-axis
+ * count rather than the source-window count.
+ */
+export function shouldRequestRightWindowRestore({
+  logicalBarCount = 0,
+  canLoad = false,
+  consumedInteractionGeneration = 0,
+  hasHandler = false,
+  rangeTo,
+  rightTruncated = false,
+  triggerBars = 0,
+  userInteracted = false,
+  interactionGeneration = userInteracted ? 1 : 0,
+}: {
+  logicalBarCount?: number;
+  canLoad?: boolean;
+  consumedInteractionGeneration?: number;
+  hasHandler?: boolean;
+  interactionGeneration?: number;
+  rangeTo?: number | null;
+  rightTruncated?: boolean;
+  triggerBars?: number;
+  userInteracted?: boolean;
+} = {}): boolean {
+  if (
+    !userInteracted
+    || !canLoad
+    || !Number.isSafeInteger(interactionGeneration)
+    || !Number.isSafeInteger(consumedInteractionGeneration)
+    || interactionGeneration <= consumedInteractionGeneration
+    || !hasHandler
+    || !rightTruncated
+    || !Number.isSafeInteger(logicalBarCount)
+    || logicalBarCount <= 0
+    || !finiteNumber(rangeTo)
+    || !finiteNumber(triggerBars)
+  ) return false;
+  return rangeTo >= Math.max(0, logicalBarCount - 1 - Math.max(0, triggerBars));
+}
+
+export function sameIndicatorSeriesData(
+  left: readonly IndicatorDataEntry[] | null | undefined,
+  right: readonly IndicatorDataEntry[] | null | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (!linePointEquals(left[index], right[index])) return false;
+  }
+  return true;
 }
 
 export function resolveDataTimeSet(
@@ -106,6 +195,18 @@ export function hasCurrentDatasetOwnership({
   );
 }
 
+export function isIndicatorReconcileReady({
+  datasetKey,
+  datasetOwned = false,
+  readyDatasetKey,
+}: {
+  datasetKey?: string | null;
+  datasetOwned?: boolean;
+  readyDatasetKey?: string | null;
+} = {}): boolean {
+  return Boolean(datasetOwned && datasetKey && readyDatasetKey === datasetKey);
+}
+
 export function resolveIntervalTransitionReplayData<TData, TSeries>({
   currentData,
   currentGeneration,
@@ -128,6 +229,35 @@ export function resolveIntervalTransitionReplayData<TData, TSeries>({
     return currentData;
   }
   return fallbackData;
+}
+
+export function shouldReplayIntervalTransitionSeries({
+  currentCommittedProjectionGeneration,
+  currentProjectionGeneration,
+  currentSeries,
+  currentSeriesKey,
+  scheduledDatasetKey,
+  scheduledProjectionGeneration,
+  scheduledSeries,
+  targetPublicationPending = false,
+}: {
+  currentCommittedProjectionGeneration: number;
+  currentProjectionGeneration: number;
+  currentSeries?: unknown;
+  currentSeriesKey?: string | null;
+  scheduledDatasetKey?: string | null;
+  scheduledProjectionGeneration: number;
+  scheduledSeries?: unknown;
+  targetPublicationPending?: boolean;
+}): boolean {
+  if (targetPublicationPending || currentSeries !== scheduledSeries) return false;
+  const targetProjectionCommitted = Boolean(
+    scheduledDatasetKey
+    && currentSeriesKey === scheduledDatasetKey
+    && currentCommittedProjectionGeneration === currentProjectionGeneration
+    && currentCommittedProjectionGeneration > scheduledProjectionGeneration
+  );
+  return !targetProjectionCommitted;
 }
 
 export function buildVisibleRangeSnapshot({
@@ -173,6 +303,7 @@ export function shouldPublishUserViewportRange({
 
 const CHART_PAN_MIN_HORIZONTAL_DISTANCE_PX = 4;
 const MAIN_PANE_PLOT_EDGE_GUARD_PX = 4;
+const CHART_WHEEL_MIN_DELTA = 0.01;
 
 export function isMainPanePlotPointerStart({
   clientX,
@@ -219,18 +350,60 @@ export function shouldInvalidateDrawingFrameOnPointerRelease({
   pointerActive?: boolean;
 } = {}): boolean {
   if (!pointerActive) return false;
+  return !isConfirmedMainPaneHorizontalPan({
+    drawingToolActive,
+    logicalRangeChanged,
+    mainPanePlotStart,
+    maxHorizontalMovementPx,
+    maxVerticalMovementPx,
+    pointerActive,
+  });
+}
+
+export function isConfirmedMainPaneHorizontalPan({
+  drawingToolActive = false,
+  logicalRangeChanged = false,
+  mainPanePlotStart = false,
+  maxHorizontalMovementPx = 0,
+  maxVerticalMovementPx = 0,
+  pointerActive = false,
+}: {
+  drawingToolActive?: boolean;
+  logicalRangeChanged?: boolean;
+  mainPanePlotStart?: boolean;
+  maxHorizontalMovementPx?: number;
+  maxVerticalMovementPx?: number;
+  pointerActive?: boolean;
+} = {}): boolean {
+  if (!pointerActive) return false;
   const horizontalMovement = finiteNumber(maxHorizontalMovementPx)
     ? Math.abs(maxHorizontalMovementPx)
     : 0;
   const verticalMovement = finiteNumber(maxVerticalMovementPx)
     ? Math.abs(maxVerticalMovementPx)
     : 0;
-  const confirmedHorizontalPan = logicalRangeChanged
+  return logicalRangeChanged
     && !drawingToolActive
     && mainPanePlotStart
     && horizontalMovement >= CHART_PAN_MIN_HORIZONTAL_DISTANCE_PX
     && horizontalMovement > verticalMovement;
-  return !confirmedHorizontalPan;
+}
+
+export function shouldIssueHistoryTicketForWheel({
+  deltaX = 0,
+  deltaY = 0,
+  drawingToolActive = false,
+  mainPanePlotStart = false,
+}: {
+  deltaX?: number;
+  deltaY?: number;
+  drawingToolActive?: boolean;
+  mainPanePlotStart?: boolean;
+} = {}): boolean {
+  if (drawingToolActive || !mainPanePlotStart) return false;
+  const horizontalDelta = finiteNumber(deltaX) ? Math.abs(deltaX) : 0;
+  const verticalDelta = finiteNumber(deltaY) ? Math.abs(deltaY) : 0;
+  return Math.max(horizontalDelta, verticalDelta) >= CHART_WHEEL_MIN_DELTA;
 }
 
 export function shouldRestoreChartViewport({

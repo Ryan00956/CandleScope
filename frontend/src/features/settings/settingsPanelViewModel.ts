@@ -35,7 +35,6 @@ export function buildSettingsPanelViewModel({
         ...actions.maintenance,
       },
     },
-    database: view.database,
     about: {},
   };
 }

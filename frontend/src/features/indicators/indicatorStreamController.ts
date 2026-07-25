@@ -8,6 +8,7 @@ import {
   buildIndicatorWsSignature,
   dispatchIndicatorWsMessage,
   getVisibleHostedIndicators,
+  shouldResubscribeForHostedSeedCoverage,
 } from "./indicatorWsRuntime.js";
 import {
   IndicatorStreamConnection,
@@ -18,6 +19,7 @@ import {
   buildCurrentHostedIndicatorSignatures,
   isCurrentHostedIndicatorMessage,
 } from "./indicatorStreamIdentity.js";
+import { canFlushHostedSeedCoverageRefresh } from "./indicatorWindowDeltaRuntime.js";
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type {
@@ -45,6 +47,7 @@ export interface UseIndicatorStreamControllerOptions {
   chartDataReady: boolean;
   chartDataRef: MutableRefObject<KlineBar[]>;
   exchange: string;
+  historyWindowPending: boolean;
   getIndicatorResumeState?: (
     indicator: IndicatorDefinition,
   ) => Partial<IndicatorSubscriptionContext> | null;
@@ -62,6 +65,7 @@ export interface UseIndicatorStreamControllerOptions {
   realtimeEnabled: boolean;
   resetHostedSubscriptionReadiness?: () => void;
   setIndicatorError(indicatorId: string, error: string): void;
+  subscriptionUpdatesReady: boolean;
   symbol: string;
 }
 
@@ -91,6 +95,106 @@ interface StreamHandlerRefs {
   symbol: string;
 }
 
+interface HostedSeedCoverageState {
+  acknowledged: boolean;
+  historyLimit: number;
+  refreshPending: boolean;
+  signature: string;
+}
+
+function ensureHostedSeedCoverage(
+  coverageByClient: Map<string, HostedSeedCoverageState>,
+  subscriptions: readonly IndicatorStreamSubscription[],
+): void {
+  const clientIds = new Set<string>();
+  for (const subscription of subscriptions) {
+    clientIds.add(subscription.clientId);
+    const current = coverageByClient.get(subscription.clientId);
+    if (current?.signature === subscription.signature) continue;
+    coverageByClient.set(subscription.clientId, {
+      acknowledged: false,
+      historyLimit: subscription.message.historyLimit,
+      refreshPending: false,
+      signature: subscription.signature,
+    });
+  }
+  for (const clientId of coverageByClient.keys()) {
+    if (!clientIds.has(clientId)) coverageByClient.delete(clientId);
+  }
+}
+
+function indicatorDefinitionForHostedSeed(
+  subscription: IndicatorStreamSubscription,
+): IndicatorDefinition {
+  const definition: IndicatorDefinition = {
+    id: subscription.clientId,
+    params: subscription.message.params,
+  };
+  if (subscription.message.name) definition.engineName = subscription.message.name;
+  if (subscription.message.script !== undefined) {
+    definition.script = subscription.message.script;
+  }
+  return definition;
+}
+
+function planHostedSeedCoverageRefresh(
+  coverageByClient: Map<string, HostedSeedCoverageState>,
+  subscriptions: readonly IndicatorStreamSubscription[],
+  historyWindowPending: boolean,
+): boolean {
+  let shouldRefresh = false;
+  for (const subscription of subscriptions) {
+    const current = coverageByClient.get(subscription.clientId);
+    if (!current || current.signature !== subscription.signature) continue;
+    if (shouldResubscribeForHostedSeedCoverage(
+      indicatorDefinitionForHostedSeed(subscription),
+      current.historyLimit,
+      subscription.message.historyLimit,
+    )) {
+      current.refreshPending = true;
+    }
+    if (canFlushHostedSeedCoverageRefresh({
+      acknowledged: current.acknowledged,
+      historyWindowPending,
+      refreshPending: current.refreshPending,
+    })) shouldRefresh = true;
+  }
+  return shouldRefresh;
+}
+
+function markHostedSeedCoverageRefreshRequested(
+  coverageByClient: Map<string, HostedSeedCoverageState>,
+  subscriptions: readonly IndicatorStreamSubscription[],
+): void {
+  for (const subscription of subscriptions) {
+    const current = coverageByClient.get(subscription.clientId);
+    if (
+      !current
+      || current.signature !== subscription.signature
+      || !current.acknowledged
+      || !current.refreshPending
+    ) continue;
+    current.historyLimit = subscription.message.historyLimit;
+    current.refreshPending = false;
+  }
+}
+
+function markHostedSeedCoverageAcknowledged(
+  coverageByClient: Map<string, HostedSeedCoverageState>,
+  clientId: string,
+): void {
+  const current = coverageByClient.get(clientId);
+  if (current) current.acknowledged = true;
+}
+
+function markHostedSeedCoverageUnacknowledged(
+  coverageByClient: Map<string, HostedSeedCoverageState>,
+): void {
+  for (const current of coverageByClient.values()) {
+    current.acknowledged = false;
+  }
+}
+
 export function useIndicatorStreamController({
   activeIndicators,
   activeIndicatorsRef,
@@ -108,6 +212,7 @@ export function useIndicatorStreamController({
   chartDataReady,
   chartDataRef,
   exchange,
+  historyWindowPending,
   getIndicatorResumeState,
   handleIndicatorRecomputed,
   handleIndicatorSubscriptionPending,
@@ -117,10 +222,23 @@ export function useIndicatorStreamController({
   realtimeEnabled,
   resetHostedSubscriptionReadiness,
   setIndicatorError,
+  subscriptionUpdatesReady,
   symbol,
 }: UseIndicatorStreamControllerOptions): IndicatorStreamController {
   const connectionRef = useRef<IndicatorStreamConnection | null>(null);
   const recomputedRangeSignaturesRef = useRef<Set<string>>(new Set());
+  const hostedSeedCoverageRef = useRef<Map<string, HostedSeedCoverageState>>(
+    new Map(),
+  );
+  const historyWindowPendingRef = useRef(historyWindowPending);
+  const subscriptionUpdatesReadyRef = useRef(subscriptionUpdatesReady);
+  const readySubscriptionsRef = useRef<IndicatorStreamSubscription[]>([]);
+  useLayoutEffect(() => {
+    historyWindowPendingRef.current = historyWindowPending;
+  }, [historyWindowPending]);
+  useLayoutEffect(() => {
+    subscriptionUpdatesReadyRef.current = subscriptionUpdatesReady;
+  }, [subscriptionUpdatesReady]);
 
   const getHostedSubscriptionContext = useCallback(() => ({
     candleDownColor: candleDownColorRef.current,
@@ -222,6 +340,7 @@ export function useIndicatorStreamController({
   const hasWsHostedIndicators = getVisibleHostedIndicators(activeIndicators).length > 0;
   const indicatorWsSignature = buildIndicatorWsSignature(activeIndicators);
   const chartHistoryFirstTime = chartDataMeta?.firstTime ?? chartData?.[0]?.time ?? null;
+  const chartHistoryLength = chartData?.length || 0;
   const chartDataVersion = chartDataMeta?.version ?? 0;
   const chartDataStatus = chartDataMeta?.status || "idle";
   const currentHostedSignatureKey = JSON.stringify([
@@ -262,12 +381,33 @@ export function useIndicatorStreamController({
     symbol,
   ]);
 
+  const syncConnectionSubscriptions = useCallback((
+    connection: IndicatorStreamConnection,
+    force = false,
+  ): boolean => {
+    if (!subscriptionUpdatesReadyRef.current) return false;
+    const subscriptions = buildDesiredSubscriptionsRef.current();
+    readySubscriptionsRef.current = subscriptions;
+    const coverageByClient = hostedSeedCoverageRef.current;
+    ensureHostedSeedCoverage(coverageByClient, subscriptions);
+    const shouldRefreshSeed = planHostedSeedCoverageRefresh(
+      coverageByClient,
+      subscriptions,
+      historyWindowPendingRef.current,
+    );
+    const synced = connection.setSubscriptions(subscriptions);
+    if (!force && !shouldRefreshSeed) return synced;
+    const resubscribed = connection.forceResubscribe();
+    if (shouldRefreshSeed && resubscribed) {
+      markHostedSeedCoverageRefreshRequested(coverageByClient, subscriptions);
+    }
+    return resubscribed || synced;
+  }, []);
+
   const syncHostedSubscriptions = useCallback((force = false): boolean => {
     const connection = connectionRef.current;
-    if (!connection) return false;
-    const synced = connection.setSubscriptions(buildDesiredSubscriptionsRef.current());
-    return force ? connection.forceResubscribe() || synced : synced;
-  }, []);
+    return connection ? syncConnectionSubscriptions(connection, force) : false;
+  }, [syncConnectionSubscriptions]);
 
   const requestRecomputedRange = useCallback((
     indicatorId: string,
@@ -310,6 +450,7 @@ export function useIndicatorStreamController({
       url: getIndicatorStreamUrl(),
       onConnectionReset: () => {
         recomputedRangeSignaturesRef.current.clear();
+        markHostedSeedCoverageUnacknowledged(hostedSeedCoverageRef.current);
         handlerRefs.current.resetHostedSubscriptionReadiness?.();
       },
       onError: (error) => {
@@ -355,6 +496,13 @@ export function useIndicatorStreamController({
               closedThrough: dataRevision?.closedThrough ?? dataRevision?.closed_through ?? null,
             });
             handlers.handleIndicatorSubscribed?.(indicatorId, payload);
+            const subscriptions = buildDesiredSubscriptionsRef.current();
+            ensureHostedSeedCoverage(hostedSeedCoverageRef.current, subscriptions);
+            markHostedSeedCoverageAcknowledged(
+              hostedSeedCoverageRef.current,
+              indicatorId,
+            );
+            syncConnectionSubscriptions(connection);
           },
           onValues: handlers.applyWsValues,
           onError: (indicatorId, payload) => {
@@ -383,12 +531,19 @@ export function useIndicatorStreamController({
       },
     });
     connectionRef.current = connection;
-    connection.setSubscriptions(buildDesiredSubscriptionsRef.current());
+    const initialSubscriptions = subscriptionUpdatesReadyRef.current
+      ? buildDesiredSubscriptionsRef.current()
+      : readySubscriptionsRef.current;
+    readySubscriptionsRef.current = initialSubscriptions;
+    ensureHostedSeedCoverage(hostedSeedCoverageRef.current, initialSubscriptions);
+    markHostedSeedCoverageUnacknowledged(hostedSeedCoverageRef.current);
+    connection.setSubscriptions(initialSubscriptions);
     connection.start();
 
     return () => {
       connection.close();
       if (connectionRef.current === connection) connectionRef.current = null;
+      readySubscriptionsRef.current = [];
     };
   }, [
     chartDataReady,
@@ -399,6 +554,7 @@ export function useIndicatorStreamController({
     realtimeEnabled,
     symbol,
     requestRecomputedRange,
+    syncConnectionSubscriptions,
   ]);
 
   useEffect(() => {
@@ -411,9 +567,12 @@ export function useIndicatorStreamController({
     chartDataStatus,
     chartDataVersion,
     chartHistoryFirstTime,
+    chartHistoryLength,
+    historyWindowPending,
     hasWsHostedIndicators,
     indicatorWsSignature,
     realtimeEnabled,
+    subscriptionUpdatesReady,
     syncHostedSubscriptions,
   ]);
 

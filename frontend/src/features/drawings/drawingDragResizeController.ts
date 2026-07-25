@@ -80,6 +80,15 @@ interface PositionEdgeDrag extends DragBase {
   origTimeRange: PositionTimeRange;
 }
 
+interface PositionCornerDrag extends DragBase {
+  type:
+    | "position-top-left"
+    | "position-top-right"
+    | "position-bottom-left"
+    | "position-bottom-right";
+  origTimeRange: PositionTimeRange;
+}
+
 interface PositionPanelDrag extends DragBase {
   type: "position-panel";
   origInfoPanelOffset: PositionInfoPanelOffset;
@@ -109,6 +118,7 @@ export type DrawingDragDescriptor = TextHandleDrag
   | PositionPriceDrag
   | PositionMoveDrag
   | PositionEdgeDrag
+  | PositionCornerDrag
   | PositionPanelDrag
   | AxisLineDrag
   | ShapeDrag
@@ -140,6 +150,10 @@ export function drawingGeometryCommandForDrag(
     case "position-sl":
     case "position-left":
     case "position-right":
+    case "position-top-left":
+    case "position-top-right":
+    case "position-bottom-left":
+    case "position-bottom-right":
       return "resize";
   }
 }
@@ -165,6 +179,46 @@ interface PositionVisualAnchorKeys {
   leftKey: "start" | "end";
   rightKey: "start" | "end";
   startScreen: ScreenPoint;
+}
+
+function isPositionCornerDrag(
+  dragging: DrawingDragDescriptor,
+): dragging is PositionCornerDrag {
+  return dragging.type === "position-top-left"
+    || dragging.type === "position-top-right"
+    || dragging.type === "position-bottom-left"
+    || dragging.type === "position-bottom-right";
+}
+
+function positionCornerHorizontalSide(
+  type: PositionCornerDrag["type"],
+): "left" | "right" {
+  return type === "position-top-left" || type === "position-bottom-left"
+    ? "left"
+    : "right";
+}
+
+/** The visual top/bottom side targets TP or SL according to position direction. */
+function positionCornerPriceTarget(
+  direction: "long" | "short",
+  type: PositionCornerDrag["type"],
+  timeRange: PositionTimeRange,
+  tpPrice: number | null,
+  slPrice: number | null,
+  dataToScreen: DrawingDataToScreen,
+): "tp" | "sl" | null {
+  if (tpPrice == null || slPrice == null
+    || !Number.isFinite(tpPrice) || !Number.isFinite(slPrice)) return null;
+  const targetsTop = type === "position-top-left" || type === "position-top-right";
+  const fallbackTargetsTp = (direction === "long") === targetsTop;
+  const anchor = timeRange.start ?? timeRange.end;
+  const tpPoint = dataPointFromHorizontalAnchor(anchor, tpPrice);
+  const slPoint = dataPointFromHorizontalAnchor(anchor, slPrice);
+  const tpScreen = tpPoint ? dataToScreen(tpPoint) : null;
+  const slScreen = slPoint ? dataToScreen(slPoint) : null;
+  if (!tpScreen || !slScreen) return fallbackTargetsTp ? "tp" : "sl";
+  const targetsTp = (tpScreen.y <= slScreen.y) === targetsTop;
+  return targetsTp ? "tp" : "sl";
 }
 
 function horizontalAnchorFromDataPoint(
@@ -366,11 +420,12 @@ export function applyTextAndPositionDrag({
     return true;
   }
 
-  // ── POSITION TOOL: dragging TP/SL/entry/edges/info panel ──
-  if (dragging && (dragging.type === "position-tp" || dragging.type === "position-sl" || dragging.type === "position-move" || dragging.type === "position-left" || dragging.type === "position-right" || dragging.type === "position-panel")) {
+  // ── POSITION TOOL: dragging TP/SL/entry/edges/corners/info panel ──
+  if (dragging && (dragging.type === "position-tp" || dragging.type === "position-sl" || dragging.type === "position-move" || dragging.type === "position-left" || dragging.type === "position-right" || isPositionCornerDrag(dragging) || dragging.type === "position-panel")) {
     const { id, type } = dragging;
     const prim = primitivesRef.current.find((p) => p.id === id);
     if (!prim || !(prim instanceof PositionDrawingPrimitive)) return true;
+    const cornerDrag = isPositionCornerDrag(dragging) ? dragging : null;
 
     if (type === "position-panel") {
       const { startMouse, origInfoPanelOffset } = dragging;
@@ -449,14 +504,66 @@ export function applyTextAndPositionDrag({
       return true;
     }
 
+    const adjustsHorizontalRange = type === "position-left"
+      || type === "position-right"
+      || cornerDrag !== null;
     const dataPoint = screenToDrawingData(pos.x, pos.y, {
       snap: drawingSnapEnabledRef.current && !e.altKey,
-      time: type === "position-left" || type === "position-right",
-      price: type !== "position-left" && type !== "position-right",
+      time: adjustsHorizontalRange,
+      price: !adjustsHorizontalRange || cornerDrag !== null,
     });
     if (!dataPoint) return true;
 
-    if (type === "position-tp") {
+    if (cornerDrag) {
+      const side = positionCornerHorizontalSide(cornerDrag.type);
+      const priceTarget = positionCornerPriceTarget(
+        prim.direction,
+        cornerDrag.type,
+        cornerDrag.origTimeRange,
+        prim.tpPrice,
+        prim.slPrice,
+        dataToScreen,
+      );
+      const candidate = horizontalAnchorFromDataPoint(dataPoint);
+      const candidatePoint = dataPointFromHorizontalAnchor(candidate, prim.entryPrice);
+      const candidateScreen = candidatePoint ? dataToScreen(candidatePoint) : null;
+      const visualKeys = positionVisualAnchorKeys(
+        cornerDrag.origTimeRange,
+        prim.entryPrice,
+        dataToScreen,
+      );
+      const fixedKey = side === "left" ? visualKeys?.rightKey : visualKeys?.leftKey;
+      const fixedScreen = fixedKey === "start"
+        ? visualKeys?.startScreen
+        : visualKeys?.endScreen;
+      const keepsMinimumWidth = side === "left"
+        ? candidateScreen != null && fixedScreen != null && candidateScreen.x < fixedScreen.x - 0.5
+        : candidateScreen != null && fixedScreen != null && candidateScreen.x > fixedScreen.x + 0.5;
+      if (!candidate || !visualKeys || !priceTarget || !keepsMinimumWidth) return true;
+
+      const timeRange = {
+        ...prim.timeRange,
+        [side === "left" ? visualKeys.leftKey : visualKeys.rightKey]: candidate,
+      };
+      const nextPrice = Number(dataPoint.price);
+      if (!Number.isFinite(nextPrice)) return true;
+      const nextTp = priceTarget === "tp"
+        ? (prim.direction === "long"
+          ? Math.max(nextPrice, prim.entryPrice)
+          : Math.min(nextPrice, prim.entryPrice))
+        : prim.tpPrice;
+      const nextSl = priceTarget === "sl"
+        ? (prim.direction === "long"
+          ? Math.min(nextPrice, prim.entryPrice)
+          : Math.max(nextPrice, prim.entryPrice))
+        : prim.slPrice;
+      prim.setGeometry({
+        entryPrice: prim.entryPrice,
+        tpPrice: nextTp,
+        slPrice: nextSl,
+        timeRange,
+      });
+    } else if (type === "position-tp") {
       const isLong = prim.direction === "long";
       let newTp = dataPoint.price;
       // Clamp: TP cannot cross entry

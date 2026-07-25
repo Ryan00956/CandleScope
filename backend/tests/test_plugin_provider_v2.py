@@ -35,7 +35,11 @@ from app.data_engine.ingestion.normalize import NormalizeLayer
 from app.data_engine.ingestion.transport import TransportLayer
 from app.data_engine.storage import AsyncKlinesRepoAdapter, KlinesRepoAdapter
 from app.data_engine.storage import klines_repo
-from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.exchanges import (
+    RateLimitAdmission,
+    bootstrap_default_adapters,
+    get_exchange_registry,
+)
 from app.plugin_core_v2 import CorePluginError
 from app.plugin_core_v2.contracts import core_contributions
 from app.plugin_core_v2.runtime import CorePluginPlatform
@@ -106,6 +110,34 @@ class _MockSidecar:
                 [100.0 + index, 1.0] for index in range(101)
             ]
         return result
+
+
+class _ProviderResponseAccounting:
+    def __init__(self) -> None:
+        self.responses: list[dict[str, object]] = []
+
+    async def inspect(
+        self,
+        rule: object,
+        request: object,
+    ) -> RateLimitAdmission:
+        return RateLimitAdmission(
+            allowed=True,
+            bucket_key=str(getattr(rule, "bucket_key", "provider:test")),
+            cost=1,
+            reason=None,
+            retry_after_seconds=0,
+            retry_at_monotonic=None,
+            retry_at_ms=None,
+            rule_name=str(getattr(rule, "name", "provider_test")),
+        )
+
+    async def acquire_nowait(self, rule: object, request: object) -> None:
+        return None
+
+    def record_response(self, rule: object, **kwargs: object) -> bool:
+        self.responses.append(dict(kwargs))
+        return False
 
 
 def _contributions():
@@ -563,6 +595,9 @@ async def test_installed_mock_provider_runs_in_real_supervised_sidecar(
                 transport=transport,
                 ingestion_config=IngestionConfig(proxy_mode="none"),
             )
+            response_accounting = _ProviderResponseAccounting()
+            transport._rate_limits = response_accounting  # type: ignore[assignment]
+            backfill.fetcher._rate_limit_manager = response_accounting  # type: ignore[assignment]
             start_ms = 1_700_000_040_000
             requests_before = platform.manager.supervisor(
                 installed.plugin_id, "main"
@@ -589,6 +624,11 @@ async def test_installed_mock_provider_runs_in_real_supervised_sidecar(
                 installed.plugin_id, "main"
             ).snapshot()["requests"]
             assert requests_after - requests_before == 3
+            assert response_accounting.responses == [
+                {"status_code": 200},
+                {"status_code": 200},
+                {"status_code": 200},
+            ]
         finally:
             klines_repo.KLINES_DB_PATH = previous_db
 

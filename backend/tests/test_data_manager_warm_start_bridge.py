@@ -410,7 +410,7 @@ def test_warm_start_marks_full_subscription_base_backfill_priority() -> None:
             "spot",
         )
         assert kwargs["reason"] == "full_subscription_warmup"
-        assert kwargs["priority"] == 60
+        assert kwargs["priority"] == 110
         assert kwargs["requester"] == "warm_start_custom_seed"
         assert kwargs["metadata"]["focus_scope"] == "subscription"
         assert kwargs["metadata"]["subscription_tier"] == "full"

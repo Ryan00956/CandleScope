@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, Protocol
 
 from .base import ExchangeAdapter
+from .archive import HistoricalArchiveProvider
 from .models import ExchangeCapabilities
 from .pagination import HistoricalPaginationPolicy, ReverseTimePaginationPolicy
 from .protocol import AdapterBackedProtocol, ExchangeProtocol
@@ -57,6 +58,12 @@ class ExchangePlugin(Protocol):
     def price_stream_type(self, market_type: str = "spot") -> Any:
         ...
 
+    def history_archive_provider(
+        self,
+        config: Any | None = None,
+    ) -> HistoricalArchiveProvider | None:
+        ...
+
 
 class DefaultSymbolNormalizer:
     """Default symbol normalizer for exchanges whose canonical symbols are user-facing."""
@@ -85,6 +92,9 @@ class BuiltinExchangePlugin:
         pagination_policy_factory: Callable[[Any | None], HistoricalPaginationPolicy] | None = None,
         realtime_policy: RealtimePolicy | None = None,
         price_stream_type_factory: Callable[[str], Any] | None = None,
+        history_archive_provider_factory: Callable[
+            [Any | None], HistoricalArchiveProvider | None
+        ] | None = None,
     ) -> None:
         self._adapter = adapter
         self.id = adapter.id
@@ -96,6 +106,7 @@ class BuiltinExchangePlugin:
         self._pagination_policy_factory = pagination_policy_factory
         self._realtime_policy = realtime_policy or RealtimePolicy()
         self._price_stream_type_factory = price_stream_type_factory
+        self._history_archive_provider_factory = history_archive_provider_factory
 
     def adapter(self) -> ExchangeAdapter:
         return self._adapter
@@ -133,3 +144,11 @@ class BuiltinExchangePlugin:
         from app.data_engine.ingestion.models import StreamType
 
         return StreamType.TICKER
+
+    def history_archive_provider(
+        self,
+        config: Any | None = None,
+    ) -> HistoricalArchiveProvider | None:
+        if self._history_archive_provider_factory is None:
+            return None
+        return self._history_archive_provider_factory(config)

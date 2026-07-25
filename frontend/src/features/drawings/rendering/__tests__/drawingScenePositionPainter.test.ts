@@ -147,6 +147,10 @@ function positionFixture({
   }
   handles.push(10, 100, 120, 100);
   handleNames.push("left", "right");
+  if (includeTp && includeSl) {
+    handles.push(10, 40, 120, 40, 10, 160, 120, 160);
+    handleNames.push("top-left", "top-right", "bottom-left", "bottom-right");
+  }
 
   const entity = {
     id: "position",
@@ -290,6 +294,20 @@ for (const ratio of [1, 1.5, 2]) {
       24 * ratio,
       2 * ratio,
     ]), "left edge affordance");
+    assert.ok(findCall(calls, "roundRect", [
+      6 * ratio,
+      36 * ratio,
+      8 * ratio,
+      8 * ratio,
+      ratio,
+    ]), "top-left corner resize handle");
+    assert.ok(findCall(calls, "roundRect", [
+      116 * ratio,
+      156 * ratio,
+      8 * ratio,
+      8 * ratio,
+      ratio,
+    ]), "bottom-right corner resize handle");
     assert.ok(findCall(calls, "moveTo", [65 * ratio, 36 * ratio]), "long TP arrow points up");
     assert.ok(findCall(calls, "moveTo", [65 * ratio, 164 * ratio]), "long SL arrow points down");
   });

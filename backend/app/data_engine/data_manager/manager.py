@@ -669,6 +669,15 @@ class DataManager:
         self._started = False
         logger.info("DataManager shutting down...")
 
+        related_warmup_scheduler = getattr(
+            self,
+            "_related_interval_warmup_scheduler",
+            None,
+        )
+        cancel_related_warmup = getattr(related_warmup_scheduler, "cancel", None)
+        if callable(cancel_related_warmup):
+            cancel_related_warmup()
+
         # Stop TTL task
         if self._ttl_task is not None:
             self._ttl_task.cancel()
@@ -737,6 +746,7 @@ class DataManager:
         auto_backfill: bool | None = None,
         backfill_reason: str | None = None,
         backfill_requester: str = "query",
+        backfill_metadata: dict[str, Any] | None = None,
     ) -> QueryResult:
         """Query K-line bars.
 
@@ -777,6 +787,7 @@ class DataManager:
             result,
             reason=backfill_reason,
             requester=backfill_requester,
+            backfill_metadata=backfill_metadata,
             submit=(
                 self.query_engine.auto_backfill_default
                 if auto_backfill is None
@@ -831,6 +842,7 @@ class DataManager:
         backfill_reason: str | None = "visible_load_more",
         backfill_requester: str = "query_before",
         auto_backfill: bool | None = None,
+        backfill_metadata: dict[str, Any] | None = None,
     ) -> QueryResult:
         """Get bars before a timestamp (for pagination / load-more)."""
         market_type = self._normalize_market_type(market_type)
@@ -855,6 +867,7 @@ class DataManager:
             result,
             reason=backfill_reason,
             requester=backfill_requester,
+            backfill_metadata=backfill_metadata,
             submit=(
                 self.query_engine.auto_backfill_default
                 if auto_backfill is None
@@ -869,6 +882,7 @@ class DataManager:
         reason: str | None = None,
         requester: str = "query",
         submit: bool = True,
+        backfill_metadata: dict[str, Any] | None = None,
     ) -> QueryResult:
         """Submit QueryEngine-detected missing ranges via DataManager."""
         if not result.missing_ranges:
@@ -880,11 +894,33 @@ class DataManager:
         suppressions: list[dict[str, Any]] = []
         actionable_missing: list[MissingRange] = []
         for missing in list(result.missing_ranges):
+            repair_interval = missing.interval
+            repair_start_ms = missing.start_ms
+            repair_end_ms = missing.end_ms
+            derived_target: dict[str, Any] | None = None
+            if (
+                result.interval != missing.interval
+                and result.metadata.get("derived_from") == missing.interval
+            ):
+                derived_target = self.query_engine.custom_intervals.project_base_repair_to_target(
+                    symbol=missing.symbol,
+                    target_interval=result.interval,
+                    base_interval=missing.interval,
+                    start_ms=missing.start_ms,
+                    end_ms=missing.end_ms,
+                    exchange=missing.exchange,
+                    market_type=missing.market_type,
+                )
+                if derived_target is not None:
+                    repair_interval = str(derived_target["interval"])
+                    repair_start_ms = int(derived_target["start_ms"])
+                    repair_end_ms = int(derived_target["end_ms"])
+
             suppression = self.get_backfill_suppression(
                 missing.symbol,
-                missing.interval,
-                missing.start_ms,
-                missing.end_ms,
+                repair_interval,
+                repair_start_ms,
+                repair_end_ms,
                 missing.exchange,
                 missing.market_type,
             )
@@ -897,6 +933,9 @@ class DataManager:
                     "market_type": missing.market_type,
                     "requested_start_ms": missing.start_ms,
                     "requested_end_ms": missing.end_ms,
+                    "repair_interval": repair_interval,
+                    "repair_start_ms": repair_start_ms,
+                    "repair_end_ms": repair_end_ms,
                 })
                 continue
             actionable_missing.append(missing)
@@ -905,32 +944,31 @@ class DataManager:
             demand_reason = reason or self._semantic_reason_for_missing(missing.reason)
             metadata = {
                 "query_reason": missing.reason,
+                "requires_trusted_finality": (
+                    derived_target is not None
+                    or missing.reason == "query_untrusted_finality"
+                ),
                 "requested_range": {
-                    "start_ms": missing.start_ms,
-                    "end_ms": missing.end_ms,
+                    "start_ms": repair_start_ms,
+                    "end_ms": repair_end_ms,
                 },
             }
-            if (
-                result.interval != missing.interval
-                and result.metadata.get("derived_from") == missing.interval
-            ):
-                target = self.query_engine.custom_intervals.project_base_repair_to_target(
-                    symbol=missing.symbol,
-                    target_interval=result.interval,
-                    base_interval=missing.interval,
-                    start_ms=missing.start_ms,
-                    end_ms=missing.end_ms,
-                    exchange=missing.exchange,
-                    market_type=missing.market_type,
-                )
-                if target is not None:
-                    metadata["derived_repair_targets"] = [target]
+            if backfill_metadata:
+                metadata.update(dict(backfill_metadata))
+            if derived_target is not None:
+                metadata.update({
+                    "derived_from": missing.interval,
+                    "base_missing_range": {
+                        "start_ms": missing.start_ms,
+                        "end_ms": missing.end_ms,
+                    },
+                })
             try:
                 request_id = self._call_backfill_trigger(
                     missing.symbol,
-                    missing.interval,
-                    missing.start_ms,
-                    missing.end_ms,
+                    repair_interval,
+                    repair_start_ms,
+                    repair_end_ms,
                     missing.exchange,
                     missing.market_type,
                     reason=demand_reason,

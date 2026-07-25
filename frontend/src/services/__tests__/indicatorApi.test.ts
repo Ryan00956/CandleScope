@@ -5,6 +5,7 @@ import type * as IndicatorApiModule from "../indicatorApi.js";
 
 let server: ViteDevServer;
 let computeIndicator: typeof IndicatorApiModule.computeIndicator;
+let computeIndicatorBatch: typeof IndicatorApiModule.computeIndicatorBatch;
 let computeIndicatorRange: typeof IndicatorApiModule.computeIndicatorRange;
 let computeIndicatorRangeBatch: typeof IndicatorApiModule.computeIndicatorRangeBatch;
 let fetchScriptRuntimes: typeof IndicatorApiModule.fetchScriptRuntimes;
@@ -20,6 +21,7 @@ test.before(async () => {
   ) as typeof IndicatorApiModule;
   ({
     computeIndicator,
+    computeIndicatorBatch,
     computeIndicatorRange,
     computeIndicatorRangeBatch,
     fetchScriptRuntimes,
@@ -57,6 +59,8 @@ test("range preserves a typed HTTP 202 payload and forwards AbortSignal", async 
     name: "VOL",
     start: 100,
     end: 200,
+    requestScope: "chart:test:pane-1",
+    requestGeneration: 7,
     signal: controller.signal,
   });
   assert.equal(payload.code, "INDICATOR_RANGE_NOT_READY");
@@ -64,11 +68,10 @@ test("range preserves a typed HTTP 202 payload and forwards AbortSignal", async 
   assert.equal(capturedOptions?.signal, controller.signal);
   const body = capturedOptions?.body;
   if (typeof body !== "string") throw new Error("Expected serialized request body");
-  const serialized = JSON.parse(body) as unknown;
-  assert.equal(
-    (serialized as { language?: unknown }).language,
-    "community-lang",
-  );
+  const serialized = JSON.parse(body) as Record<string, unknown>;
+  assert.equal(serialized.language, "community-lang");
+  assert.equal(serialized.requestScope, "chart:test:pane-1");
+  assert.equal(serialized.requestGeneration, 7);
 });
 
 test("runtime discovery parses descriptor-declared community languages", async (context) => {
@@ -161,6 +164,8 @@ test("batch serializes requests while keeping signal in fetch options", async (c
       interval: "1m",
       start: 100,
       end: 200,
+      requestScope: "chart:test:pane-1",
+      requestGeneration: 7,
     }],
     signal: controller.signal,
   });
@@ -176,6 +181,8 @@ test("batch serializes requests while keeping signal in fetch options", async (c
       interval: "1m",
       start: 100,
       end: 200,
+      requestScope: "chart:test:pane-1",
+      requestGeneration: 7,
     }],
   });
 });
@@ -221,4 +228,123 @@ test("batch rejects malformed nested payload envelopes", async (context) => {
     computeIndicatorRangeBatch({ requests: [] }),
     /indicator\.rangeBatch\.results\[0\]\.payload/,
   );
+});
+
+test("local compute batch serializes shared OHLCV once, forwards language, and validates job identities", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let capturedOptions: RequestInit | undefined;
+  const ohlcv = [{ time: 100, open: 1, high: 2, low: 0, close: 1, volume: 3 }];
+  globalThis.fetch = async (_url, options) => {
+    capturedOptions = options;
+    return new Response(JSON.stringify({
+      ok: true,
+      results: [
+        { clientId: "ma", jobKey: "job-ma", payload: { ok: true } },
+        { clientId: "rsi", jobKey: "job-rsi", payload: { ok: true } },
+      ],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  await computeIndicatorBatch({
+    jobs: [
+      {
+        clientId: "ma",
+        jobKey: "job-ma",
+        request: {
+          mode: "script",
+          language: "community-lang",
+          script: "plot(close)",
+          params: { period: 20 },
+          ohlcv,
+          exchange: "binance",
+          marketType: "spot",
+          symbol: "BTCUSDT",
+          interval: "1m",
+        },
+      },
+      {
+        clientId: "rsi",
+        jobKey: "job-rsi",
+        request: {
+          mode: "builtin",
+          name: "RSI",
+          params: { period: 14 },
+          ohlcv,
+          exchange: "binance",
+          marketType: "spot",
+          symbol: "BTCUSDT",
+          interval: "1m",
+        },
+      },
+    ],
+  });
+  const body = capturedOptions?.body;
+  if (typeof body !== "string") throw new Error("Expected serialized request body");
+  const parsed = JSON.parse(body) as Record<string, unknown>;
+  assert.deepEqual(parsed.ohlcv, ohlcv);
+  assert.equal(JSON.stringify(parsed).match(/"ohlcv"/g)?.length, 1);
+  assert.deepEqual(parsed.context, {
+    exchange: "binance",
+    marketType: "spot",
+    symbol: "BTCUSDT",
+    interval: "1m",
+  });
+  const requests = parsed.requests as Array<Record<string, unknown>>;
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]?.language, "community-lang");
+});
+
+test("local compute batch fails closed on an unexpected response identity", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const ohlcv = [{ time: 100, open: 1, high: 2, low: 0, close: 1, volume: 3 }];
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ok: true,
+    results: [{ clientId: "other", jobKey: "job-ma", payload: { ok: true } }],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  await assert.rejects(computeIndicatorBatch({
+    jobs: [{
+      clientId: "ma",
+      jobKey: "job-ma",
+      request: {
+        mode: "builtin",
+        name: "MA",
+        ohlcv,
+        exchange: "binance",
+        marketType: "spot",
+        symbol: "BTCUSDT",
+        interval: "1m",
+      },
+    }],
+  }), /unexpected job identity/);
+});
+
+test("local compute batch rejects identities outside the bounded backend contract", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let fetched = false;
+  globalThis.fetch = async () => {
+    fetched = true;
+    throw new Error("fetch must not run");
+  };
+  const ohlcv = [{ time: 100, open: 1, high: 2, low: 0, close: 1, volume: 3 }];
+
+  await assert.rejects(computeIndicatorBatch({
+    jobs: [{
+      clientId: "ma",
+      jobKey: "x".repeat(257),
+      request: {
+        mode: "builtin",
+        name: "MA",
+        ohlcv,
+        exchange: "binance",
+        marketType: "spot",
+        symbol: "BTCUSDT",
+        interval: "1m",
+      },
+    }],
+  }), /at most 256 characters/);
+  assert.equal(fetched, false);
 });

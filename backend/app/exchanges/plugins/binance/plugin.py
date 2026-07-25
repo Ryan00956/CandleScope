@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.data_engine.ingestion.models import StreamType
+from app.exchanges.pagination import BinanceHistoricalPaginationPolicy
 from app.exchanges.plugin import BuiltinExchangePlugin
 from app.exchanges.rate_limits import (
     HistoricalRequest,
@@ -28,7 +29,9 @@ class BinancePlugin(BuiltinExchangePlugin):
             normalizer_factory=self._normalizer,
             symbol_normalizer=BinanceSymbolNormalizer(),
             rate_limit_policy_factory=self._rate_limit_policy,
+            pagination_policy_factory=self._pagination_policy,
             price_stream_type_factory=self._price_stream_type,
+            history_archive_provider_factory=self._history_archive_provider,
         )
 
     @staticmethod
@@ -90,6 +93,18 @@ class BinancePlugin(BuiltinExchangePlugin):
             },
             endpoint_rules=(
                 RateLimitRule(
+                    name="binance_spot_exchange_info",
+                    bucket_key="binance:spot:request_weight:ip",
+                    endpoint="/api/v3/exchangeInfo",
+                    market_types=("spot",),
+                    algorithm="header_weight",
+                    capacity=spot_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=lambda _request: 20,
+                    max_concurrency=spot_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
                     name="binance_spot_klines",
                     bucket_key="binance:spot:request_weight:ip",
                     endpoint="/api/v3/klines",
@@ -99,6 +114,18 @@ class BinancePlugin(BuiltinExchangePlugin):
                     refill_interval_seconds=60.0,
                     cost=lambda request: 2,
                     max_concurrency=spot_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
+                    name="binance_futures_exchange_info",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/exchangeInfo",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=lambda _request: 1,
+                    max_concurrency=futures_concurrency,
                     cooldown_seconds=backoff,
                 ),
                 RateLimitRule(
@@ -197,6 +224,19 @@ class BinancePlugin(BuiltinExchangePlugin):
     @staticmethod
     def _price_stream_type(market_type: str = "spot") -> StreamType:
         return StreamType.MINI_TICKER
+
+    @staticmethod
+    def _pagination_policy(
+        config: Any | None = None,
+    ) -> BinanceHistoricalPaginationPolicy:
+        return BinanceHistoricalPaginationPolicy()
+
+    @staticmethod
+    def _history_archive_provider(config: Any | None = None):
+        del config
+        from .archive import BinanceKlineArchiveProvider
+
+        return BinanceKlineArchiveProvider()
 
 
 def create_plugin() -> BinancePlugin:

@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import aiohttp
-
 from app.core.config import (
     BINANCE_BASE_URL,
     BINANCE_BASE_URLS,
@@ -16,6 +14,7 @@ from app.core.config import (
 from app.core.market import VALID_INTERVALS
 from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
 from app.data_engine.market_data.kline_metrics import KLINE_DERIVED_FIELDS
+from app.exchanges.catalog_http import fetch_catalog_json
 from app.exchanges.models import (
     CRYPTO_24X7_CALENDAR_ID,
     ExchangeCapabilities,
@@ -679,26 +678,15 @@ class BinanceExchangeAdapter:
         base_urls: list[str],
         path: str,
     ) -> dict[str, Any]:
-        proxy = get_effective_proxy()
-        last_err: Exception | None = None
-
-        for base in base_urls:
-            url = f"{base}{path}"
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        url,
-                        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-                        proxy=proxy,
-                    ) as resp:
-                        if resp.status != 200:
-                            logger.warning("exchangeInfo %s returned HTTP %s", base, resp.status)
-                            continue
-                        return await resp.json()
-            except Exception as exc:
-                last_err = exc
-                logger.warning("exchangeInfo fetch failed from %s: %s", base, exc)
-
-        raise RuntimeError(
-            f"Failed to load exchange info for {self.id} from all endpoints: {last_err}"
+        market_type = "futures" if path.startswith("/fapi/") else "spot"
+        payload = await fetch_catalog_json(
+            exchange=self.id,
+            market_type=market_type,
+            base_urls=base_urls,
+            path=path,
+            timeout_seconds=REQUEST_TIMEOUT,
+            proxy=get_effective_proxy(),
         )
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Invalid exchange info payload for {self.id}:{market_type}")
+        return payload

@@ -4,7 +4,6 @@ import type {
 } from "./settingsTypes.js";
 
 export const SETTINGS_ACTION_TYPE = {
-  MOCK: "mock",
   LOCAL_ONLY: "local_only",
   BACKEND_ENDPOINT: "backend_endpoint",
 } as const satisfies Record<string, SettingsActionType>;
@@ -34,10 +33,5 @@ export const SETTINGS_ACTION_TYPES = {
     type: SETTINGS_ACTION_TYPE.BACKEND_ENDPOINT,
     label: "真实 backend endpoint",
     description: "Storage repair and gap scan actions call backend maintenance endpoints.",
-  },
-  databaseTools: {
-    type: SETTINGS_ACTION_TYPE.MOCK,
-    label: "mock",
-    description: "Database inventory, scan, backfill, and delete actions use the current mock database tool service.",
   },
 } as const satisfies Record<string, SettingsActionDescriptor>;

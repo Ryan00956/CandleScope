@@ -394,6 +394,9 @@ Common variables:
 | `CORS_ORIGINS` | comma-separated frontend origins |
 | `INGESTION_*` | realtime ingestion endpoints, timeout, proxy, WS/fallback tuning |
 | `BACKFILL_*` | historical repair intervals, fetch limits, dedup, publish mode |
+| `HISTORY_ARCHIVE_ENABLED` | official historical ZIP routing, default `1` |
+| `HISTORY_ARCHIVE_CACHE_MAX_BYTES` | persistent archive LRU cap, default 10 GiB |
+| `OKX_HISTORY_ARCHIVE_ENABLED` | guarded OKX website archive support, default `0` |
 | `BAR_AGG_*` | aggregation source mode, alignment, finalization, event throttling |
 | `PYNE_*` | Pyne security, executor mode, timeouts, output limits |
 | `INDICATOR_HTTP_TIMEOUT_SECONDS` | HTTP indicator compute wait cap |

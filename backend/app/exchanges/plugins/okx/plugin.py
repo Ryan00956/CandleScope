@@ -27,6 +27,7 @@ class OkxPlugin(BuiltinExchangePlugin):
             rate_limit_policy_factory=self._rate_limit_policy,
             pagination_policy_factory=self._pagination_policy,
             realtime_policy=RealtimePolicy(update_mode=RealtimeUpdateMode.BASE_INTERVAL_FANOUT),
+            history_archive_provider_factory=self._history_archive_provider,
         )
 
     @staticmethod
@@ -58,11 +59,32 @@ class OkxPlugin(BuiltinExchangePlugin):
             getattr(config, "fetch_okx_candles_requests_per_2s", 40),
             safety_factor,
         )
+        instruments_capacity = effective_rate_limit_capacity(20, safety_factor)
         return RateLimitPolicy(
             default_concurrency=concurrency,
             default_delay_seconds=delay,
             default_retry_429_backoff_seconds=backoff,
             endpoint_rules=(
+                RateLimitRule(
+                    name="okx_spot_public_instruments",
+                    bucket_key="okx:public-instruments:spot:ip",
+                    endpoint="/api/v5/public/instruments",
+                    market_types=("spot",),
+                    capacity=instruments_capacity,
+                    refill_interval_seconds=2.0,
+                    max_concurrency=concurrency,
+                    cooldown_seconds=max(backoff, 2.0),
+                ),
+                RateLimitRule(
+                    name="okx_futures_public_instruments",
+                    bucket_key="okx:public-instruments:futures:ip",
+                    endpoint="/api/v5/public/instruments",
+                    market_types=("futures",),
+                    capacity=instruments_capacity,
+                    refill_interval_seconds=2.0,
+                    max_concurrency=concurrency,
+                    cooldown_seconds=max(backoff, 2.0),
+                ),
                 RateLimitRule(
                     name="okx_history_candles",
                     bucket_key="okx:history-candles:ip",
@@ -89,6 +111,13 @@ class OkxPlugin(BuiltinExchangePlugin):
     @staticmethod
     def _pagination_policy(config: Any | None = None) -> OkxHistoricalPaginationPolicy:
         return OkxHistoricalPaginationPolicy()
+
+    @staticmethod
+    def _history_archive_provider(config: Any | None = None):
+        del config
+        from .archive import OkxKlineArchiveProvider
+
+        return OkxKlineArchiveProvider()
 
 
 def create_plugin() -> OkxPlugin:

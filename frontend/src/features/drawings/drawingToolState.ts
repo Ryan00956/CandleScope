@@ -52,6 +52,7 @@ export interface DrawingToolStateRuntime {
     positionSize: number;
     drawingsHidden: boolean;
     drawingSnapEnabled: boolean;
+    drawingContinuousEnabled: boolean;
     selectedDrawing: SelectedDrawingMeta | null;
   };
   actions: {
@@ -66,6 +67,7 @@ export interface DrawingToolStateRuntime {
     handleFibInvertedChange(value: boolean): void;
     handlePositionSizeChange(size: number): void;
     handleDrawingSnapEnabledChange(enabled: boolean): void;
+    handleDrawingContinuousEnabledChange(enabled: boolean): void;
     handleSelectedDrawingChange(drawing: SelectedDrawingMeta | null): void;
     setSelectedDrawing: Dispatch<SetStateAction<SelectedDrawingMeta | null>>;
   };
@@ -86,6 +88,10 @@ export function useDrawingToolState(): DrawingToolStateRuntime {
   const [positionSize, setPositionSize] = useState(() => loadNumberPreference("candlescope-position-size", 1000));
   const [drawingsHidden, setDrawingsHidden] = useState(false);
   const [drawingSnapEnabled, setDrawingSnapEnabled] = useState(() => loadBooleanPreference("candlescope-drawing-snap-enabled", true));
+  const [drawingContinuousEnabled, setDrawingContinuousEnabled] = useState(() => loadBooleanPreference(
+    "candlescope-drawing-continuous-enabled",
+    false,
+  ));
   const [selectedDrawing, setSelectedDrawing] = useState<SelectedDrawingMeta | null>(null);
 
   const setDrawingTool = useCallback((nextTool: DrawingToolId | null) => {
@@ -116,6 +122,11 @@ export function useDrawingToolState(): DrawingToolStateRuntime {
     savePreference("candlescope-drawing-snap-enabled", String(enabled));
   }, []);
 
+  const handleDrawingContinuousEnabledChange = useCallback((enabled: boolean) => {
+    setDrawingContinuousEnabled(enabled);
+    savePreference("candlescope-drawing-continuous-enabled", String(enabled));
+  }, []);
+
   const handleSelectedDrawingChange = useCallback((drawing: SelectedDrawingMeta | null) => {
     setSelectedDrawing(drawing);
     if (!drawing) return;
@@ -136,6 +147,7 @@ export function useDrawingToolState(): DrawingToolStateRuntime {
       positionSize,
       drawingsHidden,
       drawingSnapEnabled,
+      drawingContinuousEnabled,
       selectedDrawing,
     },
     actions: {
@@ -150,6 +162,7 @@ export function useDrawingToolState(): DrawingToolStateRuntime {
       handleFibInvertedChange,
       handlePositionSizeChange,
       handleDrawingSnapEnabledChange,
+      handleDrawingContinuousEnabledChange,
       handleSelectedDrawingChange,
       setSelectedDrawing,
     },

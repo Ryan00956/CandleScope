@@ -69,6 +69,30 @@ test("does not combine different K-line series", async () => {
   batcher.dispose();
 });
 
+test("does not combine different chart demand generations", async () => {
+  const calls: BatchInput[] = [];
+  const batcher = createIndicatorRangeBatcher({
+    sendBatch: async (input) => {
+      calls.push(input);
+      return { results: input.requests.map((item) => ({ payload: { clientId: item.clientId } })) };
+    },
+  });
+
+  await Promise.all([
+    batcher.schedule(request("old", {
+      requestScope: "chart:test:pane-1",
+      requestGeneration: 3,
+    })),
+    batcher.schedule(request("current", {
+      requestScope: "chart:test:pane-1",
+      requestGeneration: 4,
+    })),
+  ]);
+
+  assert.equal(calls.length, 2);
+  batcher.dispose();
+});
+
 test("drops an item aborted before the microtask flush", async () => {
   const calls: BatchInput[] = [];
   const controller = new AbortController();
@@ -122,5 +146,49 @@ test("can batch again after a dispose and lifecycle reset", async () => {
     ["ma", "vol"],
   );
   assert.deepEqual(resumed.map((item) => item.clientId), ["ma", "vol"]);
+  batcher.dispose();
+});
+
+test("coalesces adjacent-frame requests inside the configured window", async () => {
+  const calls: BatchInput[] = [];
+  const batcher = createIndicatorRangeBatcher({
+    coalesceWindowMs: 20,
+    sendBatch: async (input) => {
+      calls.push(input);
+      return { results: input.requests.map((item) => ({ payload: { clientId: item.clientId } })) };
+    },
+  });
+
+  const first = batcher.schedule(request("ma"));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const second = batcher.schedule(request("vol"));
+
+  assert.deepEqual((await Promise.all([first, second])).map((item) => item.clientId), ["ma", "vol"]);
+  assert.equal(calls.length, 1);
+  batcher.dispose();
+});
+
+test("serializes batches for the same K-line series", async () => {
+  const calls: BatchInput[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const firstPending = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const batcher = createIndicatorRangeBatcher({
+    sendBatch: async (input) => {
+      calls.push(input);
+      if (calls.length === 1) await firstPending;
+      return { results: input.requests.map((item) => ({ payload: { clientId: item.clientId } })) };
+    },
+  });
+
+  const first = batcher.schedule(request("ma"));
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = batcher.schedule(request("vol"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 1);
+
+  mustBeDefined(releaseFirst)();
+  assert.equal((await first).clientId, "ma");
+  assert.equal((await second).clientId, "vol");
+  assert.equal(calls.length, 2);
   batcher.dispose();
 });

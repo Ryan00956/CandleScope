@@ -22,6 +22,7 @@ from app.data_engine.ingestion.models import (
     StreamDescriptor,
     StreamType,
 )
+from app.exchanges import RateLimitAdmission, RateLimitDeferred
 
 from .events import HubRecord, MarketStateEvent
 from .hub import MarketEventHub, MarketHubSubscription
@@ -58,6 +59,7 @@ class _IngestionFactory(Protocol):
         end_ms: int | None = None,
         from_id: int | None = None,
         history: bool = False,
+        defer_on_rate_limit: bool = False,
     ) -> list[MarketEvent]: ...
 
 
@@ -95,6 +97,15 @@ class FullOrderBookAttachment:
     current: dict[MarketStreamKey, HubRecord]
 
 
+class FullOrderBookRateLimited(RuntimeError):
+    """Raised by bounded HTTP waiters while the upstream circuit is open."""
+
+    def __init__(self, *, retry_at_ms: int, bucket_key: str | None = None) -> None:
+        self.retry_at_ms = int(retry_at_ms)
+        self.bucket_key = bucket_key
+        super().__init__("full order-book upstream is rate limited")
+
+
 @dataclass(frozen=True, slots=True)
 class _DeltaEnvelope:
     event: MarketEvent
@@ -130,6 +141,9 @@ class _FullBookActor:
     resyncs: int = 0
     upstream_health: str = "unknown"
     upstream_broken: bool = False
+    rate_limit_retry_at_ms: int | None = None
+    rate_limit_bucket: str | None = None
+    rate_limit_reason: str | None = None
 
 
 class FullOrderBookService:
@@ -222,6 +236,7 @@ class FullOrderBookService:
             "resyncs_succeeded": 0,
             "resyncs_failed": 0,
             "snapshot_fetch_attempts": 0,
+            "snapshot_fetch_deferred": 0,
             "snapshot_fetch_timeouts": 0,
             "snapshot_fetch_errors": 0,
             "snapshot_results_discarded": 0,
@@ -236,6 +251,7 @@ class FullOrderBookService:
             "ingestion_gaps": 0,
             "upstream_health_breaks": 0,
             "upstream_health_connected": 0,
+            "deltas_discarded_while_rate_limited": 0,
             "events_after_stop": 0,
             "physical_stops_attempted": 0,
             "physical_stops_succeeded": 0,
@@ -424,6 +440,8 @@ class FullOrderBookService:
             current = self.current(validated, require_live=True)
             if current is not None:
                 return current
+            stale = self.current(validated, require_live=False)
+            self._raise_if_rate_limited(stale)
             deadline = asyncio.get_running_loop().time() + timeout
             while True:
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -435,10 +453,23 @@ class FullOrderBookService:
                 )
                 if record is None:
                     raise RuntimeError("full order-book state subscription closed")
+                self._raise_if_rate_limited(record)
                 if self._is_current_live_record(validated, record):
                     return record
         finally:
             await subscription.close()
+
+    @staticmethod
+    def _raise_if_rate_limited(record: HubRecord | None) -> None:
+        if record is None or not bool(record.event.data.get("rate_limited")):
+            return
+        retry_at_ms = record.event.data.get("retry_at_ms")
+        if retry_at_ms is None or int(retry_at_ms) <= int(time.time() * 1000):
+            return
+        raise FullOrderBookRateLimited(
+            retry_at_ms=int(retry_at_ms),
+            bucket_key=record.event.data.get("rate_limit_bucket"),
+        )
 
     def attach(
         self,
@@ -522,6 +553,13 @@ class FullOrderBookService:
                     "resyncs": actor.resyncs,
                     "upstream_health": actor.upstream_health,
                     "upstream_broken": actor.upstream_broken,
+                    "rate_limited": bool(
+                        actor.rate_limit_retry_at_ms is not None
+                        and actor.rate_limit_retry_at_ms > now_ms
+                    ),
+                    "retry_at_ms": actor.rate_limit_retry_at_ms,
+                    "rate_limit_bucket": actor.rate_limit_bucket,
+                    "rate_limit_reason": actor.rate_limit_reason,
                     "stop_state": actor.stop_state,
                 }
                 for key, actor in sorted(
@@ -619,6 +657,23 @@ class FullOrderBookService:
             self._drain_actor_queue(actor)
 
     async def _bootstrap(self, actor: _FullBookActor) -> None:
+        admission = await self._snapshot_rate_limit_admission(actor)
+        if admission is not None and not admission.allowed:
+            await self._rate_limit_deferred(actor, admission)
+            return
+
+        recovered_from_rate_limit = actor.rate_limit_retry_at_ms is not None
+        actor.rate_limit_retry_at_ms = None
+        actor.rate_limit_bucket = None
+        actor.rate_limit_reason = None
+        # Deltas observed while an IP circuit was open cannot be bridged to a
+        # snapshot obtained after recovery. Start a clean continuity epoch.
+        if recovered_from_rate_limit:
+            self._drain_actor_queue(actor)
+            # Replace the replayed circuit-open record before starting REST.
+            # Otherwise a bounded waiter attaching during this recovery
+            # window can receive a stale 429 even though admission succeeded.
+            self._publish_stale(actor, "upstream_recovering")
         version = actor.resync_version
         actor.resync_requested = False
         actor.state = "resyncing"
@@ -635,6 +690,7 @@ class FullOrderBookService:
                 _descriptor(actor.key),
                 limit=self._snapshot_limit,
                 history=False,
+                defer_on_rate_limit=True,
             ),
             name=(
                 f"full-book-snapshot-{actor.key.exchange}-"
@@ -687,6 +743,9 @@ class FullOrderBookService:
             try:
                 events = fetch_task.result()
                 snapshot = self._snapshot_event(actor, events)
+            except RateLimitDeferred as exc:
+                await self._rate_limit_deferred(actor, exc.admission)
+                return
             except (TypeError, ValueError) as exc:
                 self._metrics["snapshot_fetch_errors"] += 1
                 await self._sync_failed(actor, f"snapshot_invalid:{type(exc).__name__}")
@@ -742,6 +801,75 @@ class FullOrderBookService:
         finally:
             if not fetch_task.done():
                 self._discard_snapshot_task(fetch_task)
+
+    async def _snapshot_rate_limit_admission(
+        self,
+        actor: _FullBookActor,
+    ) -> RateLimitAdmission | None:
+        inspect = getattr(self._factory, "market_rate_limit_admission", None)
+        if not callable(inspect):
+            return None
+        try:
+            return await inspect(
+                _descriptor(actor.key),
+                limit=self._snapshot_limit,
+                history=False,
+            )
+        except RateLimitDeferred as exc:
+            return exc.admission
+        except Exception:
+            # The physical fetch remains the authoritative check.  Failure of
+            # this optional fast-path must not kill the ordered actor.
+            logger.warning(
+                "Full order-book quota inspection failed for %s",
+                actor.key.topic,
+                exc_info=True,
+            )
+            return None
+
+    async def _rate_limit_deferred(
+        self,
+        actor: _FullBookActor,
+        admission: RateLimitAdmission,
+    ) -> None:
+        retry_at_ms = admission.retry_at_ms or (
+            int(time.time() * 1000)
+            + max(1, int(admission.retry_after_seconds * 1000))
+        )
+        actor.rate_limit_retry_at_ms = int(retry_at_ms)
+        actor.rate_limit_bucket = admission.bucket_key
+        actor.rate_limit_reason = admission.reason
+        self._metrics["snapshot_fetch_deferred"] += 1
+        self._drain_actor_queue(actor)
+        self._request_resync(
+            actor,
+            "upstream_rate_limited",
+            generation=actor.generation,
+        )
+        if admission.retry_at_monotonic is not None:
+            # Monotonic time is authoritative for local scheduling. Wall
+            # clock ``retry_at_ms`` is transport metadata only and may jump.
+            retry_at_monotonic = admission.retry_at_monotonic
+        else:
+            delay = max(
+                0.001,
+                (retry_at_ms - int(time.time() * 1000)) / 1000,
+            )
+            retry_at_monotonic = time.monotonic() + delay
+        # Some Windows event loops can deliver a short timer slightly before
+        # its monotonic deadline. Re-check here so an early wake does not
+        # become another admission/defer cycle and another public stale event.
+        while not actor.stop_event.is_set():
+            remaining = retry_at_monotonic - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(
+                    actor.stop_event.wait(),
+                    timeout=max(0.001, remaining),
+                )
+            except TimeoutError:
+                continue
 
     def _drain_deltas_to_engine(
         self,
@@ -862,6 +990,16 @@ class FullOrderBookService:
             )
             return
         self._metrics["deltas_offered"] += 1
+        if (
+            actor.rate_limit_retry_at_ms is not None
+            and actor.rate_limit_retry_at_ms > int(time.time() * 1000)
+        ):
+            # Without a contemporaneous REST snapshot these deltas can never
+            # establish a valid bridge. Keeping minutes of them only converts
+            # an upstream cooldown into a local queue-overflow incident.
+            self._metrics["deltas_discarded_while_rate_limited"] += 1
+            actor.last_delta_at_ms = event.received_at_ms
+            return
         envelope = _DeltaEnvelope(event, generation, actor.resync_version)
         try:
             actor.queue.put_nowait(envelope)
@@ -969,6 +1107,13 @@ class FullOrderBookService:
             "live": False,
             "stale": True,
             "stale_reason": actor.stale_reason,
+            "rate_limited": bool(
+                actor.rate_limit_retry_at_ms is not None
+                and actor.rate_limit_retry_at_ms > now_ms
+            ),
+            "retry_at_ms": actor.rate_limit_retry_at_ms,
+            "rate_limit_bucket": actor.rate_limit_bucket,
+            "rate_limit_reason": actor.rate_limit_reason,
             "generation": actor.generation,
             "resync_version": actor.resync_version,
             "engine_epoch": actor.engine_epoch,
@@ -1001,6 +1146,10 @@ class FullOrderBookService:
             "live": True,
             "stale": False,
             "stale_reason": None,
+            "rate_limited": False,
+            "retry_at_ms": None,
+            "rate_limit_bucket": None,
+            "rate_limit_reason": None,
             "generation": actor.generation,
             "resync_version": actor.resync_version,
             "engine_epoch": actor.engine_epoch,
@@ -1042,6 +1191,9 @@ class FullOrderBookService:
             return
         actor.state = "live"
         actor.stale_reason = ""
+        actor.rate_limit_retry_at_ms = None
+        actor.rate_limit_bucket = None
+        actor.rate_limit_reason = None
         actor.last_live_at_ms = snapshot.received_at_ms
         actor.last_update_id = snapshot.last_update_id
         actor.backoff_seconds = self._initial_resync_backoff_seconds

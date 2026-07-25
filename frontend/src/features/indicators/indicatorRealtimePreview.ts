@@ -12,7 +12,6 @@ import type {
   IndicatorDefinition,
   IndicatorLine,
   IndicatorPayloadEnvelope,
-  IndicatorValuePoint,
 } from "./indicatorTypes.js";
 
 export interface ProvisionalIndicatorPreview {
@@ -93,7 +92,16 @@ export function applyRealtimeIndicatorValuesToLines({
   const nextLines = targetLines.map((line) => {
     const value = resolveWsValue(line, values, isSingleLine);
     if (value === undefined) return line;
-    const point: IndicatorValuePoint = { time: barTime, value: Number(value) };
+    // `null` is the wire representation of an indicator value that has not
+    // warmed up yet. Preserve it through upsertLinePoint so an existing
+    // forming point is removed instead of coercing `Number(null)` to zero.
+    const point: { time: number; value: unknown; color?: string } = {
+      time: barTime,
+      value,
+    };
+    const hasFinitePointValue = value !== null
+      && value !== undefined
+      && Number.isFinite(Number(value));
     const histogramColor = resolveRealtimeHistogramColor({
       bar,
       downColor: candleDownColor,
@@ -107,7 +115,7 @@ export function applyRealtimeIndicatorValuesToLines({
     const data = upsertLinePoint(line.data, point);
     if (data === line.data) return line;
     changed = true;
-    const renderUpdate: "tail" | "full" = Number.isFinite(point.value)
+    const renderUpdate: "tail" | "full" = hasFinitePointValue
       && (previousLastTime === undefined || barTime >= previousLastTime)
       ? "tail"
       : "full";

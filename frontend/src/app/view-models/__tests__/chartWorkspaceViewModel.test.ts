@@ -2,15 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildChartWorkspaceViewModel } from "../chartWorkspaceViewModel.js";
+import { drawingToolWhenInteractionReady } from "../../drawingInteractionReadiness.js";
 import { mustBeDefined, structuralMock } from "../../../test/testHelpers.js";
 
 type WorkspaceContext = Parameters<typeof buildChartWorkspaceViewModel>[0];
 
+test("drawing engine tools stay inactive until pane pointer listeners are ready", () => {
+  assert.equal(drawingToolWhenInteractionReady("pen", false), null);
+  assert.equal(drawingToolWhenInteractionReady("line-segment", false), null);
+  assert.equal(drawingToolWhenInteractionReady("pen", true), "pen");
+  assert.equal(drawingToolWhenInteractionReady("cursor-crosshair", false), "cursor-crosshair");
+  assert.equal(drawingToolWhenInteractionReady(null, false), null);
+});
+
 interface ContextOverrides {
   advancedMarketActions?: object;
   chartSettings?: object;
+  drawingActions?: object;
+  drawingView?: object;
   indicatorActions?: object;
   marketActions?: object;
+  marketStatus?: object;
   settingsActions?: object;
   tradeFlowActions?: object;
   watchlistView?: object;
@@ -19,8 +31,11 @@ interface ContextOverrides {
 function buildContext({
   advancedMarketActions = {},
   chartSettings = { chartType: "candlestick" },
+  drawingActions = {},
+  drawingView = {},
   indicatorActions = {},
   marketActions = {},
+  marketStatus = {},
   settingsActions = {},
   tradeFlowActions = {},
   watchlistView = {},
@@ -34,8 +49,8 @@ function buildContext({
       identityKey: "binance:spot:BTCUSDT",
       seriesStore: null,
     },
-    drawingActions: {},
-    drawingView: {},
+    drawingActions,
+    drawingView,
     exportActions: {},
     exportInProgress: false,
     exportView: {},
@@ -43,7 +58,7 @@ function buildContext({
     indicatorComputing: false,
     indicatorView: {},
     marketActions,
-    marketStatus: {},
+    marketStatus,
     marketView: {},
     priceScaleActions: {},
     priceScaleView: {},
@@ -166,6 +181,41 @@ test("chart range handlers separate indicator coverage from user persistence", (
   mustBeDefined(model.chart.chartProps.onVisibleRangeChange)(range);
   assert.deepEqual(indicatorRanges, [range]);
   assert.deepEqual(persistedRanges, [range]);
+});
+
+test("continuous drawing preference is shared by the toolbar and drawing surface", () => {
+  const changes: boolean[] = [];
+  const model = buildChartWorkspaceViewModel(buildContext({
+    drawingActions: {
+      handleDrawingContinuousEnabledChange: (enabled: boolean) => { changes.push(enabled); },
+    },
+    drawingView: {
+      drawingContinuousEnabled: true,
+    },
+  }));
+
+  assert.equal(model.drawingToolbar.drawingContinuousEnabled, true);
+  assert.equal(model.chart.chartProps.drawingContinuousEnabled, true);
+  mustBeDefined(model.drawingToolbar.onDrawingContinuousEnabledChange)(false);
+  assert.deepEqual(changes, [false]);
+});
+
+test("latest-window recovery reaches the chart surface", () => {
+  const restoreLatestWindow = async () => true;
+  const model = buildChartWorkspaceViewModel(buildContext({
+    marketActions: { restoreLatestWindow },
+  }));
+
+  assert.equal(model.chart.chartProps.onNeedMoreRight, restoreLatestWindow);
+});
+
+test("latest-window recovery is gated while left history owns the runtime", () => {
+  const model = buildChartWorkspaceViewModel(buildContext({
+    marketActions: { restoreLatestWindow: async () => true },
+    marketStatus: { canRestoreLatestWindow: false },
+  }));
+
+  assert.equal(model.chart.chartProps.canRestoreLatestWindow, false);
 });
 
 test("watchlist workspace receives the stable external price store handle", () => {

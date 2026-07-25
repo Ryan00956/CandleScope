@@ -57,6 +57,7 @@ function createTimers() {
 function subscription(
   signature = "vol:v1",
   symbol = "BTCUSDT",
+  historyLimit = 100,
 ): IndicatorStreamSubscription {
   return {
     clientId: "vol",
@@ -72,7 +73,7 @@ function subscription(
       displayName: "VOL",
       name: "VOL",
       params: {},
-      historyLimit: 100,
+      historyLimit,
     },
   };
 }
@@ -117,6 +118,35 @@ test("first forming preview is delivered before its subscribe acknowledgement", 
     "indicator.preview",
     "indicator.subscribed",
   ]);
+  controller.close();
+});
+
+test("an explicit same-signature seed refresh sends the newer history limit without reconnecting", () => {
+  const sockets: FakeSocket[] = [];
+  const controller = new IndicatorStreamConnection({
+    url: "ws://example/indicators",
+    socketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    subscriptionAckTimeoutMs: 0,
+  });
+
+  controller.setSubscriptions([subscription("boll:v1", "BTCUSDT", 20)]);
+  controller.start();
+  const socket = sockets[0] as FakeSocket;
+  socket.open();
+  socket.message({ type: "indicator.subscribed", clientId: "vol", interval: "1d" });
+
+  controller.setSubscriptions([subscription("boll:v1", "BTCUSDT", 2_000)]);
+  assert.equal(socket.closed, false);
+  assert.equal(socket.sent.length, 1);
+
+  assert.equal(controller.forceResubscribe(), true);
+  assert.equal(socket.closed, false);
+  assert.equal(socket.sent.length, 2);
+  assert.equal(wireMessage(socket, 1).historyLimit, 2_000);
   controller.close();
 });
 

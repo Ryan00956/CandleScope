@@ -55,6 +55,8 @@ export interface DrawingEntityTextEditControllerOptions {
   readonly dataToScreen: DrawingDataToScreen;
   readonly deselectAll: () => void;
   readonly getActiveTool: () => DrawingToolId | null;
+  /** Allows a completed text edit to keep the text tool active for repeated placement. */
+  readonly isContinuousDrawingEnabled?: () => boolean;
   readonly getSavedDrawingById: (id: string) => SavedDrawing | null;
   readonly getSelectedDrawingId: () => string | null;
   readonly onToolChange: (tool: DrawingToolId | null) => void;
@@ -214,7 +216,9 @@ export function createDrawingEntityTextEditController(
   };
 
   const exitTextTool = (shouldExit: boolean): void => {
-    if (shouldExit && options.getActiveTool() === "text") {
+    if (shouldExit
+      && options.isContinuousDrawingEnabled?.() !== true
+      && options.getActiveTool() === "text") {
       invokeSafely(() => options.onToolChange(null));
     }
   };

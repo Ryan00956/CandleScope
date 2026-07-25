@@ -204,6 +204,41 @@ class BackfillConfig:
     fetch_max_total_bars: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_MAX_TOTAL_BARS", 100_000),
     )
+    # Official exchange K-line archives are the default bulk-history lane.
+    # Small/partial/current ranges continue to use REST.
+    history_archive_enabled: bool = field(
+        default_factory=lambda: _env_bool("HISTORY_ARCHIVE_ENABLED", True),
+    )
+    history_archive_okx_enabled: bool = field(
+        default_factory=lambda: _env_bool("OKX_HISTORY_ARCHIVE_ENABLED", False),
+    )
+    history_archive_cache_dir: str = field(
+        default_factory=lambda: _env_str(
+            "HISTORY_ARCHIVE_CACHE_DIR",
+            str(_default_history_archive_cache_dir()),
+        ),
+    )
+    history_archive_cache_max_bytes: int = field(
+        default_factory=lambda: _env_int(
+            "HISTORY_ARCHIVE_CACHE_MAX_BYTES",
+            10 * 1024**3,
+        ),
+    )
+    history_archive_min_rest_pages: int = field(
+        default_factory=lambda: _env_int("HISTORY_ARCHIVE_MIN_REST_PAGES", 3),
+    )
+    history_archive_download_concurrency: int = field(
+        default_factory=lambda: _env_int("HISTORY_ARCHIVE_DOWNLOAD_CONCURRENCY", 2),
+    )
+    history_archive_revalidate_seconds: int = field(
+        default_factory=lambda: _env_int("HISTORY_ARCHIVE_REVALIDATE_SECONDS", 86_400),
+    )
+    history_archive_max_download_bytes: int = field(
+        default_factory=lambda: _env_int(
+            "HISTORY_ARCHIVE_MAX_DOWNLOAD_BYTES",
+            256 * 1024**2,
+        ),
+    )
 
     # ── Reconciler ───────────────────────────────────────────
     # Deduplication strategy when writing to storage:
@@ -266,3 +301,9 @@ class BackfillConfig:
         """Return a JSON-serializable snapshot of current configuration."""
         from dataclasses import asdict
         return asdict(self)
+
+
+def _default_history_archive_cache_dir():
+    from app.core.config import HISTORY_ARCHIVE_CACHE_DIR
+
+    return HISTORY_ARCHIVE_CACHE_DIR

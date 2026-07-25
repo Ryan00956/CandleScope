@@ -18,6 +18,7 @@ from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.engine import indicator_code_hash
 from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.types import IndicatorKey
+from app.indicator.range_result_service import IndicatorRangeRevisionChangedError
 
 
 class _QueryResult:
@@ -112,6 +113,53 @@ async def test_compute_mode_builtin_accepts_engine_marker_without_name() -> None
 
     assert payload["ok"] is True
     assert payload["lines"][0]["name"] == "MA(7)"
+
+
+def test_compute_batch_preserves_non_pyne_language_to_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_service = object()
+    observed: list[tuple[str | None, object | None]] = []
+
+    async def _compute_script(req, *, runtime_service=None):
+        observed.append((req.language, runtime_service))
+        return {"ok": True, "schemaVersion": 1, "lines": []}
+
+    monkeypatch.setattr(indicators_api, "_compute_script", _compute_script)
+    monkeypatch.setattr(
+        indicators_api,
+        "_resolve_indicator_runtime_service",
+        lambda _request: runtime_service,
+    )
+    app = FastAPI()
+    app.include_router(indicators_api.router, prefix="/api/v1")
+
+    response = TestClient(app).post(
+        "/api/v1/indicators/compute/batch",
+        json={
+            "schemaVersion": 1,
+            "context": {
+                "exchange": "binance",
+                "marketType": "spot",
+                "symbol": "BTCUSDT",
+                "interval": "1m",
+            },
+            "ohlcv": _bars(1),
+            "requests": [
+                {
+                    "jobKey": "pine-job",
+                    "clientId": "pine-client",
+                    "mode": "script",
+                    "language": "pine",
+                    "script": "indicator('Close')",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert observed == [("pine", runtime_service)]
 
 
 @pytest.mark.anyio
@@ -353,9 +401,127 @@ def test_indicator_range_http_reports_not_ready_for_missing_target_range() -> No
     )
 
     payload = response.json()
+    assert response.status_code == 202
     assert payload["ok"] is False
     assert payload["code"] == "INDICATOR_RANGE_NOT_READY"
-    assert payload["detail"]["retryAfterMs"] == 3000
+    assert payload["detail"]["retryMode"] == "event"
+    assert payload["detail"]["backfillRequestIds"] == []
+    assert "retryAfterMs" not in payload["detail"]
+    assert payload["dataRevision"]["revisionToken"]
+
+
+def test_indicator_range_runtime_failure_is_not_misreported_as_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bars = [BarData.from_dict(item) for item in _bars(5)]
+
+    async def _fail_compute(**_kwargs):
+        raise RuntimeError("indicator execution failed")
+
+    monkeypatch.setattr(
+        indicators_api,
+        "compute_indicator_range_payload_async",
+        _fail_compute,
+    )
+    client = _indicator_client(_RangeDataManager(bars))
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ma-runtime-error",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["code"] == "INDICATOR_RANGE_COMPUTE_FAILED"
+    assert payload["ok"] is False
+    assert "retryMode" not in payload.get("detail", {})
+
+
+def test_indicator_range_revision_race_is_event_driven_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bars = [BarData.from_dict(item) for item in _bars(5)]
+
+    async def _revision_changed(**_kwargs):
+        raise IndicatorRangeRevisionChangedError("revision changed during compute")
+
+    monkeypatch.setattr(
+        indicators_api,
+        "compute_indicator_range_payload_async",
+        _revision_changed,
+    )
+    client = _indicator_client(_RangeDataManager(bars))
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ma-revision-race",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["code"] == "INDICATOR_RANGE_NOT_READY"
+    assert payload["detail"]["retryMode"] == "event"
+    assert "retryAfterMs" not in payload["detail"]
+    assert payload["dataRevision"]["revisionToken"]
+
+
+@pytest.mark.parametrize(("interval", "step_seconds"), [("1m", 60), ("89m", 5_340)])
+def test_indicator_range_warmup_gap_is_read_only_and_does_not_block_target(
+    interval: str,
+    step_seconds: int,
+) -> None:
+    bars = [
+        BarData.from_dict({
+            **item,
+            "time": 1_700_000_000 + index * step_seconds,
+        })
+        for index, item in enumerate(_bars(10))
+    ]
+
+    class MissingWarmup:
+        start_ms = (bars[0].time - 2 * step_seconds) * 1000
+        end_ms = (bars[0].time - step_seconds) * 1000
+
+    class DataManager:
+        def __init__(self) -> None:
+            self.query_kwargs: list[dict] = []
+
+        def query(self, *args, **kwargs):
+            self.query_kwargs.append(dict(kwargs))
+            return _QueryResult(bars, [MissingWarmup()])
+
+    data_manager = DataManager()
+    client = _indicator_client(data_manager)
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": f"ma-warmup-{interval}",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": interval,
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert len(data_manager.query_kwargs) == 1
+    query = data_manager.query_kwargs[0]
+    assert query["auto_backfill"] is False
+    assert "backfill_metadata" not in query
+    assert query["start_ms"] == MissingWarmup.start_ms
+    assert query["end_ms"] == bars[-1].time * 1000
 
 
 def test_indicator_range_http_reports_empty_for_forming_only_target_range() -> None:
@@ -443,6 +609,37 @@ def test_indicator_range_http_rejects_oversized_pyne_before_query(
     payload = response.json()
     assert payload["ok"] is False
     assert payload["code"] == "INDICATOR_RANGE_LIMIT"
+    assert dm.query_calls == 0
+
+
+def test_indicator_range_http_rejects_extreme_builtin_warmup_before_query() -> None:
+    class CountingRangeDataManager(_RangeDataManager):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.query_calls = 0
+
+        def query(self, *args, **kwargs):
+            self.query_calls += 1
+            raise AssertionError("oversized builtin warmup must not query K-lines")
+
+    dm = CountingRangeDataManager()
+    client = _indicator_client(dm)
+    start = 1_700_000_000
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ema-extreme-warmup",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "EMA",
+        "params": {"period": 10_000},
+        "start": start,
+        "end": start + 59 * 60,
+    })
+
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RANGE_LIMIT"
+    assert "Too many indicator bars" in payload["error"]
     assert dm.query_calls == 0
 
 

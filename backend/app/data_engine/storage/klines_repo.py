@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 import time
 import logging
+import threading
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +31,12 @@ _CALENDAR_REGISTRY = CalendarRegistry()
 _ALWAYS_OPEN_CALENDAR = (
     _CALENDAR_REGISTRY.get("crypto.24x7.utc") or AlwaysOpenCalendar()
 )
+# SQLite already serializes writers, but this explicit process-wide guard
+# prevents several archive reconciliation tasks from occupying storage-worker
+# threads while waiting on the same database write lock.  The guard lives in
+# synchronous code, so cancellation cannot release ownership before the
+# physical transaction has committed or rolled back.
+_ARCHIVE_IMPORT_WRITE_LOCK = threading.Lock()
 
 KlineBarComponents = tuple[
     Any,
@@ -188,8 +196,43 @@ def init_klines_storage() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_klines_lookup
             ON klines(exchange, market_type, symbol, interval, open_time);
+
+            CREATE TABLE IF NOT EXISTS history_archive_imports (
+                object_key TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                market_type TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                interval TEXT NOT NULL,
+                granularity TEXT NOT NULL,
+                period TEXT NOT NULL,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                provider_checksum TEXT,
+                source_url TEXT NOT NULL,
+                row_count INTEGER NOT NULL,
+                revision_changed INTEGER NOT NULL DEFAULT 0,
+                import_version TEXT NOT NULL DEFAULT 'history-archive-import.v1',
+                imported_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_history_archive_import_series
+            ON history_archive_imports(
+                exchange, market_type, symbol, interval, start_ms, end_ms
+            );
             """
         )
+        receipt_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(history_archive_imports)"
+            ).fetchall()
+        }
+        if "import_version" not in receipt_columns:
+            conn.execute(
+                "ALTER TABLE history_archive_imports ADD COLUMN import_version "
+                "TEXT NOT NULL DEFAULT 'history-archive-import.v1'"
+            )
 
 
 def dataframe_to_rows(df: Any) -> list[dict]:
@@ -258,39 +301,351 @@ def upsert_klines(
         for r in rows
     ]
 
+    write_guard = (
+        _ARCHIVE_IMPORT_WRITE_LOCK
+        if str(source).startswith("backfill_archive_")
+        else nullcontext()
+    )
+    with write_guard:
+        with _connect() as conn:
+            incoming_rank_sql = source_rank_sql("excluded.source")
+            stored_rank_sql = source_rank_sql("klines.source")
+            changes_before = conn.total_changes
+            conn.executemany(
+                f"""
+                INSERT INTO klines (
+                    exchange, market_type, symbol, interval, open_time,
+                    close_time, open, high, low, close, volume, quote_volume,
+                    trades, taker_buy_base, taker_buy_quote,
+                    source, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(exchange, market_type, symbol, interval, open_time) DO UPDATE SET
+                    close_time = excluded.close_time,
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume,
+                    quote_volume = excluded.quote_volume,
+                    trades = excluded.trades,
+                    taker_buy_base = excluded.taker_buy_base,
+                    taker_buy_quote = excluded.taker_buy_quote,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                WHERE {incoming_rank_sql} >= {stored_rank_sql}
+                """,
+                payload,
+            )
+            affected = conn.total_changes - changes_before
+            conn.commit()
+
+    return int(affected)
+
+
+def import_history_archive(
+    symbol: str,
+    interval: str,
+    rows: list[dict],
+    receipt: dict[str, Any],
+    source: str = "backfill_archive_verified",
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+) -> dict[str, Any]:
+    """Atomically import one archive object and persist its receipt.
+
+    The receipt is also the idempotency key.  A matching digest with complete
+    storage coverage is a no-op; a changed digest replaces same/lower-rank
+    rows and invalidates overlapping locally aggregated bars in this same
+    SQLite transaction.
+    """
+    if not str(source).startswith("backfill_archive_"):
+        raise ValueError("history archive import requires an archive source")
+    object_key = str(receipt.get("object_key") or "").strip()
+    content_sha256 = str(receipt.get("content_sha256") or "").strip().lower()
+    import_version = str(
+        receipt.get("import_version") or "history-archive-import.v1"
+    )
+    if not object_key or len(content_sha256) != 64:
+        raise ValueError("history archive receipt is missing its object digest")
+    if (
+        str(receipt.get("exchange")) != exchange
+        or str(receipt.get("market_type")) != market_type
+        or str(receipt.get("symbol")) != symbol
+        or str(receipt.get("interval")) != interval
+    ):
+        raise ValueError("history archive receipt identity does not match rows")
+    if int(receipt.get("row_count") or 0) != len(rows):
+        raise ValueError("history archive receipt row count does not match rows")
+    if not rows:
+        raise ValueError("history archive object cannot be empty")
+
+    now_ms = int(time.time() * 1000)
+    start_ms = int(receipt["start_ms"])
+    end_ms = int(receipt["end_ms"])
+    payload = [
+        (
+            exchange,
+            market_type,
+            symbol,
+            interval,
+            row["open_time"],
+            row["close_time"],
+            row["open"],
+            row["high"],
+            row["low"],
+            row["close"],
+            row["volume"],
+            row["quote_volume"],
+            row["trades"],
+            row["taker_buy_base"],
+            row["taker_buy_quote"],
+            source,
+            now_ms,
+            now_ms,
+        )
+        for row in rows
+    ]
+
+    with _ARCHIVE_IMPORT_WRITE_LOCK:
+        with _connect() as conn:
+            existing = conn.execute(
+                "SELECT content_sha256, import_version, row_count "
+                "FROM history_archive_imports WHERE object_key = ?",
+                (object_key,),
+            ).fetchone()
+            if (
+                existing is not None
+                and str(existing["content_sha256"]).lower() == content_sha256
+                and str(existing["import_version"]) == import_version
+                and int(existing["row_count"]) == len(rows)
+            ):
+                stored_count = int(conn.execute(
+                    "SELECT COUNT(*) FROM klines "
+                    "WHERE exchange = ? AND market_type = ? AND symbol = ? "
+                    "AND interval = ? AND open_time >= ? AND open_time <= ?",
+                    (
+                        exchange,
+                        market_type,
+                        symbol,
+                        interval,
+                        start_ms,
+                        end_ms,
+                    ),
+                ).fetchone()[0])
+                if stored_count >= len(rows):
+                    return {
+                        "written": 0,
+                        "imported": False,
+                        "skipped": True,
+                        "invalidated": 0,
+                        "revision_changed": False,
+                    }
+
+            digest_changed = bool(
+                existing is not None
+                and str(existing["content_sha256"]).lower() != content_sha256
+            )
+            revision_changed = digest_changed or bool(
+                receipt.get("revision_changed")
+            )
+            invalidated = 0
+            if revision_changed:
+                changes_before = conn.total_changes
+                conn.execute(
+                    """
+                    DELETE FROM klines
+                    WHERE exchange = ? AND market_type = ? AND symbol = ?
+                      AND source = 'backfill_aggregated'
+                      AND open_time <= ?
+                      AND COALESCE(close_time, open_time) >= ?
+                    """,
+                    (exchange, market_type, symbol, end_ms, start_ms),
+                )
+                invalidated = conn.total_changes - changes_before
+
+            incoming_rank_sql = source_rank_sql("excluded.source")
+            stored_rank_sql = source_rank_sql("klines.source")
+            changes_before = conn.total_changes
+            conn.executemany(
+                f"""
+                INSERT INTO klines (
+                    exchange, market_type, symbol, interval, open_time,
+                    close_time, open, high, low, close, volume, quote_volume,
+                    trades, taker_buy_base, taker_buy_quote,
+                    source, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(exchange, market_type, symbol, interval, open_time) DO UPDATE SET
+                    close_time = excluded.close_time,
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume,
+                    quote_volume = excluded.quote_volume,
+                    trades = excluded.trades,
+                    taker_buy_base = excluded.taker_buy_base,
+                    taker_buy_quote = excluded.taker_buy_quote,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                WHERE {incoming_rank_sql} >= {stored_rank_sql}
+                """,
+                payload,
+            )
+            written = conn.total_changes - changes_before
+            conn.execute(
+                """
+                INSERT INTO history_archive_imports (
+                    object_key, provider_id, exchange, market_type, symbol,
+                    interval, granularity, period, start_ms, end_ms,
+                    content_sha256, provider_checksum, source_url, row_count,
+                    revision_changed, import_version, imported_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(object_key) DO UPDATE SET
+                    provider_id = excluded.provider_id,
+                    exchange = excluded.exchange,
+                    market_type = excluded.market_type,
+                    symbol = excluded.symbol,
+                    interval = excluded.interval,
+                    granularity = excluded.granularity,
+                    period = excluded.period,
+                    start_ms = excluded.start_ms,
+                    end_ms = excluded.end_ms,
+                    content_sha256 = excluded.content_sha256,
+                    provider_checksum = excluded.provider_checksum,
+                    source_url = excluded.source_url,
+                    row_count = excluded.row_count,
+                    revision_changed = excluded.revision_changed,
+                    import_version = excluded.import_version,
+                    imported_at_ms = excluded.imported_at_ms
+                """,
+                (
+                    object_key,
+                    str(receipt["provider_id"]),
+                    exchange,
+                    market_type,
+                    symbol,
+                    interval,
+                    str(receipt["granularity"]),
+                    str(receipt["period"]),
+                    start_ms,
+                    end_ms,
+                    content_sha256,
+                    (
+                        str(receipt["provider_checksum"])
+                        if receipt.get("provider_checksum")
+                        else None
+                    ),
+                    str(receipt["source_url"]),
+                    len(rows),
+                    1 if revision_changed else 0,
+                    import_version,
+                    now_ms,
+                ),
+            )
+            conn.commit()
+
+    return {
+        "written": int(written),
+        "imported": True,
+        "skipped": False,
+        "invalidated": int(invalidated),
+        "revision_changed": revision_changed,
+    }
+
+
+def record_history_archive_imports(receipts: list[dict[str, Any]]) -> int:
+    """Persist advisory archive receipts after their K-line transaction commits."""
+    if not receipts:
+        return 0
+    now_ms = int(time.time() * 1000)
+    payload = [
+        (
+            str(item["object_key"]),
+            str(item["provider_id"]),
+            str(item["exchange"]),
+            str(item["market_type"]),
+            str(item["symbol"]),
+            str(item["interval"]),
+            str(item["granularity"]),
+            str(item["period"]),
+            int(item["start_ms"]),
+            int(item["end_ms"]),
+            str(item["content_sha256"]),
+            (
+                str(item["provider_checksum"])
+                if item.get("provider_checksum")
+                else None
+            ),
+            str(item["source_url"]),
+            int(item["row_count"]),
+            1 if item.get("revision_changed") else 0,
+            str(item.get("import_version") or "history-archive-import.v1"),
+            now_ms,
+        )
+        for item in receipts
+    ]
     with _connect() as conn:
-        incoming_rank_sql = source_rank_sql("excluded.source")
-        stored_rank_sql = source_rank_sql("klines.source")
-        changes_before = conn.total_changes
         conn.executemany(
-            f"""
-            INSERT INTO klines (
-                exchange, market_type, symbol, interval, open_time,
-                close_time, open, high, low, close, volume, quote_volume,
-                trades, taker_buy_base, taker_buy_quote,
-                source, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(exchange, market_type, symbol, interval, open_time) DO UPDATE SET
-                close_time = excluded.close_time,
-                open = excluded.open,
-                high = excluded.high,
-                low = excluded.low,
-                close = excluded.close,
-                volume = excluded.volume,
-                quote_volume = excluded.quote_volume,
-                trades = excluded.trades,
-                taker_buy_base = excluded.taker_buy_base,
-                taker_buy_quote = excluded.taker_buy_quote,
-                source = excluded.source,
-                updated_at = excluded.updated_at
-            WHERE {incoming_rank_sql} >= {stored_rank_sql}
+            """
+            INSERT INTO history_archive_imports (
+                object_key, provider_id, exchange, market_type, symbol,
+                interval, granularity, period, start_ms, end_ms,
+                content_sha256, provider_checksum, source_url, row_count,
+                revision_changed, import_version, imported_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(object_key) DO UPDATE SET
+                provider_id = excluded.provider_id,
+                exchange = excluded.exchange,
+                market_type = excluded.market_type,
+                symbol = excluded.symbol,
+                interval = excluded.interval,
+                granularity = excluded.granularity,
+                period = excluded.period,
+                start_ms = excluded.start_ms,
+                end_ms = excluded.end_ms,
+                content_sha256 = excluded.content_sha256,
+                provider_checksum = excluded.provider_checksum,
+                source_url = excluded.source_url,
+                row_count = excluded.row_count,
+                revision_changed = excluded.revision_changed,
+                import_version = excluded.import_version,
+                imported_at_ms = excluded.imported_at_ms
             """,
             payload,
         )
-        affected = conn.total_changes - changes_before
         conn.commit()
+    return len(payload)
 
-    return int(affected)
+
+def invalidate_archive_dependents(receipts: list[dict[str, Any]]) -> int:
+    """Remove stale locally-derived bars after an official archive revision."""
+    revised = [item for item in receipts if item.get("revision_changed")]
+    if not revised:
+        return 0
+    deleted = 0
+    with _connect() as conn:
+        for item in revised:
+            before = conn.total_changes
+            conn.execute(
+                """
+                DELETE FROM klines
+                WHERE exchange = ? AND market_type = ? AND symbol = ?
+                  AND source = 'backfill_aggregated'
+                  AND open_time <= ?
+                  AND COALESCE(close_time, open_time) >= ?
+                """,
+                (
+                    str(item["exchange"]),
+                    str(item["market_type"]),
+                    str(item["symbol"]),
+                    int(item["end_ms"]),
+                    int(item["start_ms"]),
+                ),
+            )
+            deleted += conn.total_changes - before
+        conn.commit()
+    return int(deleted)
 
 
 def query_klines(
@@ -463,8 +818,14 @@ def list_series_summaries(
     *,
     exchange: str | None = None,
     market_type: str | None = None,
+    read_only: bool = False,
 ) -> list[dict]:
-    """List stored series with bounds/count metadata."""
+    """List stored series with bounds/count metadata.
+
+    ``read_only`` is intended for diagnostics surfaces.  It opens the SQLite
+    file through a read-only URI, so a first-run inventory request cannot
+    create a database or change journal mode as a side effect.
+    """
     sql = """
         SELECT
             exchange,
@@ -495,8 +856,18 @@ def list_series_summaries(
         ORDER BY exchange ASC, market_type ASC, symbol ASC, interval ASC
     """
 
-    with _connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
+    if read_only:
+        db_path = Path(KLINES_DB_PATH)
+        if not db_path.exists():
+            return []
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=2.0, check_same_thread=False) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            rows = conn.execute(sql, params).fetchall()
+    else:
+        with _connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
 
     return [dict(r) for r in rows]
 
@@ -1299,6 +1670,39 @@ class AsyncKlinesRepoAdapter:
                 exchange=resolved_exchange, market_type=resolved_market_type,
             )
         return await run_storage(_sync)
+
+    async def record_history_archive_imports(
+        self,
+        receipts: list[dict[str, Any]],
+    ) -> int:
+        return await run_storage(record_history_archive_imports, receipts)
+
+    async def import_history_archive(
+        self,
+        symbol: str,
+        interval: str,
+        rows: list[dict],
+        receipt: dict[str, Any],
+        source: str = "backfill_archive_verified",
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> dict[str, Any]:
+        return await run_storage(
+            import_history_archive,
+            symbol,
+            interval,
+            rows,
+            receipt,
+            source,
+            exchange=exchange or self._exchange,
+            market_type=market_type or self._market_type,
+        )
+
+    async def invalidate_archive_dependents(
+        self,
+        receipts: list[dict[str, Any]],
+    ) -> int:
+        return await run_storage(invalidate_archive_dependents, receipts)
 
     async def count_bars(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,

@@ -46,7 +46,68 @@ test("applyRange prepends older rows", () => {
 
   assert.equal(delta.type, WINDOW_DELTA_TYPES.PREPEND);
   assert.equal(delta.addedLeft, 2);
+  assert.equal(delta.retainedIncomingRows, 2);
+  assert.deepEqual(delta.changedRanges, [{ start: 60, end: 120, type: "prepend" }]);
   assert.deepEqual(store.snapshot().map((row) => row.time), [60, 120, 180, 240]);
+});
+
+test("a full historical window retains prepended rows and trims the right edge", () => {
+  const store = new SeriesWindowStore({ intervalSeconds: 1, maxBars: 10_000 });
+  store.replace(rows(Array.from({ length: 10_000 }, (_, index) => index + 501)));
+
+  const delta = store.applyRange(rows(Array.from({ length: 500 }, (_, index) => index + 1)));
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.PREPEND);
+  assert.equal(delta.trimmedLeft, 0);
+  assert.equal(delta.trimmedRight, 500);
+  assert.equal(delta.retainedIncomingRows, 500);
+  assert.deepEqual(delta.changedRanges, [{ start: 1, end: 500, type: "prepend" }]);
+  assert.equal(store.barCount, 10_000);
+  assert.equal(store.first()?.time, 1);
+  assert.equal(store.last()?.time, 10_000);
+  assert.equal(store.rightTruncated, true);
+});
+
+test("right truncation stays retryable until a successful replacement", () => {
+  const store = new SeriesWindowStore({ intervalSeconds: 1, maxBars: 3 });
+  store.replace(rows([4, 5, 6]));
+  store.applyRange(rows([1, 2, 3]));
+
+  assert.equal(store.rightTruncated, true);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+
+  // A failed reload does not mutate the store. The next right-edge gesture
+  // can therefore retry the same atomic replacement.
+  assert.equal(store.rightTruncated, true);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+
+  store.replace(rows([4, 5, 6]), { source: "right-window-restore" });
+  assert.equal(store.rightTruncated, false);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [4, 5, 6]);
+});
+
+test("prepend retention reports incoming rows discarded beyond the window budget", () => {
+  const store = new SeriesWindowStore({ intervalSeconds: 1, maxBars: 3 });
+  store.replace(rows([5, 6, 7]));
+
+  const delta = store.applyRange(rows([1, 2, 3, 4]));
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.PREPEND);
+  assert.equal(delta.trimmedRight, 4);
+  assert.equal(delta.retainedIncomingRows, 3);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+});
+
+test("an inclusive before-page boundary still slides the full window left", () => {
+  const store = new SeriesWindowStore({ intervalSeconds: 1, maxBars: 3 });
+  store.replace(rows([3, 4, 5]));
+
+  const delta = store.applyRange(rows([1, 2, 3]));
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.PREPEND);
+  assert.equal(delta.trimmedRight, 2);
+  assert.equal(store.rightTruncated, true);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
 });
 
 test("applyRange mid-merges overlapping rows", () => {
@@ -58,8 +119,37 @@ test("applyRange mid-merges overlapping rows", () => {
   ]);
 
   assert.equal(delta.type, WINDOW_DELTA_TYPES.MID_MERGE);
+  assert.deepEqual(delta.changedRanges, [
+    { start: 120, end: 180, type: "mid-merge" },
+  ]);
   assert.deepEqual(store.snapshot().map((row) => row.time), [60, 120, 180, 240]);
   assert.equal(mustBeDefined(store.snapshot()[1]).close, 500);
+});
+
+test("a large identical patch emits only its actually prepended row", () => {
+  const store = new SeriesWindowStore({ intervalSeconds: 60 });
+  store.replace(rows([120, 180, 240, 300]));
+  const delta = store.applyRange(rows([60, 120, 180, 240, 300]));
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.PREPEND);
+  assert.deepEqual(delta.changedRanges, [{ start: 60, end: 60, type: "prepend" }]);
+});
+
+test("changed ranges split across unchanged rows and retained segment gaps", () => {
+  const store = new SeriesWindowStore({ intervalSeconds: 60 });
+  store.replace(rows([60, 120, 180, 300, 360]));
+  const delta = store.applyRange([
+    { ...rows([60])[0], close: 999 },
+    mustBeDefined(rows([120])[0]),
+    { ...rows([180])[0], close: 999 },
+    { ...rows([300])[0], close: 999 },
+  ]);
+
+  assert.deepEqual(delta.changedRanges, [
+    { start: 60, end: 60, type: "mid-merge" },
+    { start: 180, end: 180, type: "mid-merge" },
+    { start: 300, end: 300, type: "mid-merge" },
+  ]);
 });
 
 test("applyRange noops when incoming rows are already present", () => {

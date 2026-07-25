@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import DataWorkbenchModal from '../data-workbench/DataWorkbenchModal.js';
 import SettingsPanelHost from './SettingsPanelHost.js';
 import SettingsModalStyles from './SettingsModalStyles.js';
 import { buildSettingsPanelViewModel } from './settingsPanelViewModel.js';
@@ -25,6 +26,7 @@ export default function SettingsModal({
     trimChartDataCacheEntries = null,
 }: SettingsModalProps) {
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
+    const [dataWorkbenchOpen, setDataWorkbenchOpen] = useState(false);
   const settingsRuntime = useSettingsRuntime({
         isOpen,
     settings,
@@ -44,6 +46,7 @@ export default function SettingsModal({
     const activeCatObj = resolveSettingsTab(activeCategory);
 
     return (
+      <>
         <div className="st-overlay" onClick={onClose}>
             <div className="st-panel" onClick={(event: MouseEvent<HTMLDivElement>) => event.stopPropagation()}>
                 {/* Sidebar */}
@@ -77,11 +80,23 @@ export default function SettingsModal({
                         <button className="st-close-x" onClick={onClose}>✕</button>
                     </div>
                     <div className="st-content-body">
-                        <SettingsPanelHost activeCategory={activeCategory} panelModel={panelModel} />
+                        <SettingsPanelHost
+                            activeCategory={activeCategory}
+                            onOpenDataWorkbench={() => setDataWorkbenchOpen(true)}
+                            panelModel={panelModel}
+                        />
                     </div>
                 </main>
             </div>
             <SettingsModalStyles />
         </div>
+        <DataWorkbenchModal
+            currentExchange={currentExchange}
+            currentMarketType={currentMarketType}
+            currentSymbol={currentSymbol}
+            isOpen={dataWorkbenchOpen}
+            onClose={() => setDataWorkbenchOpen(false)}
+        />
+      </>
     );
 }

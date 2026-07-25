@@ -1223,8 +1223,10 @@ function buildReplayMarketDataRuntime(
     status: {
       hasMoreLeft: false,
       loadingMoreLeft: false,
+      initialHistoryPending: false,
       activeChartReady: snapshot.store.hasAuthoritativeSnapshot && store.seriesStore.barCount > 0,
       canLoadMoreLeft: false,
+      canRestoreLatestWindow: false,
       barCount: store.seriesStore.barCount,
       cacheDiagnostics: () => ({
         owner: "replay",
@@ -1235,6 +1237,7 @@ function buildReplayMarketDataRuntime(
       }),
       trimCacheEntries: () => ({ owner: "replay", removedCount: 0 }),
       indicatorRangeRequests: [],
+      requestDemand: null,
     },
   };
 }

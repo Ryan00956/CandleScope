@@ -16,7 +16,7 @@ import time
 from typing import Any
 
 import aiohttp
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import KLINES_DB_PATH
@@ -253,6 +253,149 @@ def _storage_series_snapshot() -> dict:
         "by_market": by_market,
         "largest_series": largest_series,
     }
+
+
+def _normalize_inventory_filter(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _build_storage_inventory_snapshot(
+    *,
+    exchange: str | None,
+    market_type: str | None,
+    symbol: str | None,
+    interval: str | None,
+    limit: int,
+) -> dict:
+    """Build a strictly read-only inventory snapshot for the data workbench."""
+    series = list_series_summaries(read_only=True)
+
+    def matches(item: dict) -> bool:
+        if exchange and item.get("exchange") != exchange:
+            return False
+        if market_type and item.get("market_type") != market_type:
+            return False
+        if symbol and str(item.get("symbol") or "").upper() != symbol:
+            return False
+        if interval and item.get("interval") != interval:
+            return False
+        return True
+
+    matched = [item for item in series if matches(item)]
+    matched.sort(
+        key=lambda item: (
+            -int(item.get("total_count", 0) or 0),
+            str(item.get("exchange") or ""),
+            str(item.get("market_type") or ""),
+            str(item.get("symbol") or ""),
+            str(item.get("interval") or ""),
+        )
+    )
+    returned = matched[:limit]
+    storage_files = _storage_file_snapshot()
+
+    return {
+        "snapshot": storage_files,
+        "inventory": {
+            "total_series": len(series),
+            "total_rows": sum(int(item.get("total_count", 0) or 0) for item in series),
+            "matching_series": len(matched),
+            "matching_rows": sum(int(item.get("total_count", 0) or 0) for item in matched),
+            "returned_series": len(returned),
+            "truncated": len(returned) < len(matched),
+        },
+        "series": [
+            {
+                "exchange": str(item.get("exchange") or ""),
+                "market_type": str(item.get("market_type") or ""),
+                "symbol": str(item.get("symbol") or ""),
+                "interval": str(item.get("interval") or ""),
+                "earliest_open_ms": item.get("earliest_open_time"),
+                "latest_open_ms": item.get("latest_open_time"),
+                "total_count": int(item.get("total_count", 0) or 0),
+            }
+            for item in returned
+        ],
+    }
+
+
+async def _storage_integrity_snapshot(request: Request) -> dict:
+    """Return known gap-ledger state without running any scan or repair."""
+    backfill_coordinator = _get_backfill_coordinator(request)
+    if backfill_coordinator is None:
+        return {
+            "available": False,
+            "reason": "BackfillCoordinator 尚未初始化，不能将完整性状态视为正常",
+        }
+
+    try:
+        snapshot_async = getattr(backfill_coordinator, "snapshot_async", None)
+        snapshot = (
+            await snapshot_async()
+            if callable(snapshot_async)
+            else backfill_coordinator.snapshot()
+        )
+        if not isinstance(snapshot, dict):
+            raise TypeError("BackfillCoordinator returned an invalid snapshot")
+    except Exception as exc:
+        logger.exception("Storage integrity snapshot failed")
+        return {
+            "available": False,
+            "reason": f"无法读取 gap ledger: {exc}",
+        }
+
+    try:
+        ledger_health = snapshot.get("gap_ledger_health") or {}
+        open_gaps = snapshot.get("gap_ledger_open") or []
+        if not isinstance(ledger_health, dict) or not isinstance(open_gaps, list):
+            raise TypeError("gap ledger snapshot has an invalid shape")
+
+        def non_negative_int(value: Any) -> int:
+            parsed = int(value or 0)
+            if parsed < 0:
+                raise ValueError("gap ledger count cannot be negative")
+            return parsed
+
+        def optional_non_negative_int(value: Any) -> int | None:
+            if value is None:
+                return None
+            return non_negative_int(value)
+
+        def count_map(value: Any) -> dict[str, int]:
+            if not isinstance(value, dict):
+                raise TypeError("gap ledger count map has an invalid shape")
+            return {str(key): non_negative_int(count) for key, count in value.items()}
+
+        gap_samples: list[dict] = []
+        for item in open_gaps:
+            if not isinstance(item, dict):
+                raise TypeError("gap ledger sample has an invalid shape")
+            gap_samples.append({
+                "exchange": str(item.get("exchange") or ""),
+                "market_type": str(item.get("market_type") or ""),
+                "symbol": str(item.get("symbol") or ""),
+                "interval": str(item.get("interval") or ""),
+                "status": str(item.get("status") or "unknown"),
+                "missing_bars": non_negative_int(item.get("missing_count")),
+                "first_seen_at_ms": optional_non_negative_int(item.get("first_seen_at")),
+                "last_checked_at_ms": optional_non_negative_int(item.get("last_checked_at")),
+            })
+        return {
+            "available": True,
+            "open_gap_count": non_negative_int(ledger_health.get("open_total", len(open_gaps))),
+            "open_gap_by_status": count_map(ledger_health.get("by_status") or {}),
+            "open_gap_age_buckets": count_map(ledger_health.get("age_buckets") or {}),
+            "oldest_open_gap_at_ms": optional_non_negative_int(ledger_health.get("oldest_open_at")),
+            "gap_samples": gap_samples,
+            "sample_limit": non_negative_int(ledger_health.get("sample_limit", len(gap_samples))),
+        }
+    except (TypeError, ValueError) as exc:
+        logger.warning("Storage integrity snapshot is invalid: %s", exc)
+        return {
+            "available": False,
+            "reason": f"gap ledger 返回了无效状态: {exc}",
+        }
 
 
 async def _build_cache_diagnostics(request: Request) -> dict:
@@ -595,6 +738,58 @@ async def storage_health(request: Request) -> dict:
         "oldest_open_gap_at": ledger_health.get("oldest_open_at"),
         "backfill": snapshot,
         "backfill_engine": engine_snapshot,
+    }
+
+
+@router.get("/storage/inventory")
+async def storage_inventory(
+    request: Request,
+    exchange: str | None = None,
+    market_type: str | None = None,
+    symbol: str | None = None,
+    interval: str | None = None,
+    limit: int = Query(default=500, ge=1, le=1_000),
+) -> dict:
+    """Return a live, read-only SQLite inventory and known gap-ledger state.
+
+    This endpoint intentionally performs no backfill, repair, delete, or
+    compaction work.  When the integrity service is unavailable its state is
+    reported as unavailable instead of being inferred as healthy.
+    """
+    normalized_exchange = _normalize_exchange(exchange) if exchange else None
+    normalized_market_type = _normalize_market_type(market_type) if market_type else None
+    normalized_symbol = _normalize_inventory_filter(symbol)
+    if normalized_symbol:
+        normalized_symbol = normalized_symbol.upper()
+    normalized_interval = _normalize_inventory_filter(interval)
+    try:
+        inventory = await run_storage(
+            _build_storage_inventory_snapshot,
+            exchange=normalized_exchange,
+            market_type=normalized_market_type,
+            symbol=normalized_symbol,
+            interval=normalized_interval,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.exception("Storage inventory failed")
+        raise HTTPException(status_code=500, detail=f"Storage inventory failed: {exc}") from exc
+
+    integrity = await _storage_integrity_snapshot(request)
+    snapshot = inventory.get("snapshot") or {}
+    return {
+        "status": "ok",
+        "mode": "live",
+        "read_only": True,
+        "captured_at_ms": int(snapshot.get("captured_at_ms", time.time() * 1000) or 0),
+        "filters": {
+            "exchange": normalized_exchange,
+            "market_type": normalized_market_type,
+            "symbol": normalized_symbol,
+            "interval": normalized_interval,
+        },
+        **inventory,
+        "integrity": integrity,
     }
 
 

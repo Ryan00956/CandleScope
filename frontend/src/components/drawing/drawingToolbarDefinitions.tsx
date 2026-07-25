@@ -202,6 +202,15 @@ const MagnetIcon = (
   </svg>
 );
 
+const ContinuousDrawingIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M7 7h9a4 4 0 0 1 4 4v1" />
+    <path d="M17 5l2 2-2 2" />
+    <path d="M17 17H8a4 4 0 0 1-4-4v-1" />
+    <path d="M7 19l-2-2 2-2" />
+  </svg>
+);
+
 const CandlestickChartIcon = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <line x1="6" y1="4" x2="6" y2="20" />
@@ -407,6 +416,7 @@ const CHART_TYPE_VARIANTS: ToolbarVariant<MainChartType>[] = [
 
 export {
   CHART_TYPE_VARIANTS,
+  ContinuousDrawingIcon,
   CURSOR_TOOL_IDS,
   CURSOR_VARIANTS,
   EraserIcon,

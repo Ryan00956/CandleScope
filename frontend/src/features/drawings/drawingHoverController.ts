@@ -94,6 +94,8 @@ export function cursorForPositionToolHit(hit: HoverDrawingHit | null | undefined
   if (hit.zone === "tp" || hit.zone === "sl") return "ns-resize";
   if (hit.zone === "panel") return "grab";
   if (hit.zone === "left" || hit.zone === "right") return "ew-resize";
+  if (hit.zone === "top-left" || hit.zone === "bottom-right") return "nwse-resize";
+  if (hit.zone === "top-right" || hit.zone === "bottom-left") return "nesw-resize";
   if (hit.zone === "entry" || hit.zone === "body") return "move";
   return "crosshair";
 }

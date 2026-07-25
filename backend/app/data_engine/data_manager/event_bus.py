@@ -20,7 +20,9 @@ Design constraints:
   * Callbacks should still be reasonably fast, but a slow callback no longer
     blocks producers or other subscribers.
   * Queue-based subscribers that fall behind keep only the latest pending
-    ``BAR_UPDATED`` event per topic; final/correction events remain ordered.
+    ``BAR_UPDATED`` event per topic.  Closed bars, historical amendments, and
+    completed backfill parents use lossless bounded delivery so they are never
+    silently discarded behind live previews.
 
 Usage::
 
@@ -70,6 +72,13 @@ logger = logging.getLogger("data_manager.event_bus")
 MiddlewareHook = Callable[[DataEvent], Awaitable[DataEvent | None]]
 
 
+_LOSSLESS_FINALITY_TYPES: frozenset[DataEventType] = frozenset({
+    DataEventType.BAR_CLOSED,
+    DataEventType.BAR_AMENDED,
+    DataEventType.BACKFILL_COMPLETED,
+})
+
+
 @dataclass(slots=True)
 class _QueuedEvent:
     event: DataEvent
@@ -77,13 +86,26 @@ class _QueuedEvent:
 
 
 class _SubscriberQueue(asyncio.Queue[_QueuedEvent | None]):
-    """Bounded subscriber queue with latest-only forming-bar coalescing."""
+    """Hard-bounded live queue with lossless correction backpressure.
+
+    ``BAR_UPDATED`` is preview state and may be coalesced or evicted while it
+    is still pending.  ``BAR_CLOSED``, ``BAR_AMENDED``, and
+    ``BACKFILL_COMPLETED`` are durable finality/invalidation barriers: dropping
+    one can leave an indicator permanently stale.  When the configured
+    capacity contains no preview that can be evicted, :class:`DataEventBus`
+    applies asynchronous per-subscriber backpressure.  The queue therefore
+    remains hard-bounded without blocking the event loop or silently losing a
+    finality barrier.
+    """
 
     def __init__(self, maxsize: int = 0) -> None:
         super().__init__(maxsize=maxsize)
         self._latest_forming: dict[SeriesKey, _QueuedEvent] = {}
+        self._closed = False
 
     def offer(self, event: DataEvent) -> str:
+        if self._closed:
+            return "closed"
         if event.event_type == DataEventType.BAR_UPDATED:
             pending = self._latest_forming.get(event.key)
             if pending is not None:
@@ -102,7 +124,88 @@ class _SubscriberQueue(asyncio.Queue[_QueuedEvent | None]):
                 self._latest_forming.pop(event.key, None)
             return "queued"
         except asyncio.QueueFull:
+            if event.event_type in _LOSSLESS_FINALITY_TYPES:
+                # Prefer reclaiming every pending live preview before asking
+                # the publisher coroutine to wait for bounded capacity.
+                # Removing previews is safe because their latest state is
+                # replaceable; correction barriers are not.
+                while self.full() and self._evict_oldest_forming_update():
+                    pass
+                try:
+                    self.put_nowait(item)
+                except asyncio.QueueFull:
+                    return "critical_full"
+                # The correction now follows any older forming update for the
+                # same series, so that slot must no longer be replaceable by a
+                # later preview.
+                self._latest_forming.pop(event.key, None)
+                return "queued"
             return "full"
+
+    async def put_lossless(self, event: DataEvent) -> bool:
+        """Wait asynchronously for bounded capacity and enqueue a correction."""
+        item = _QueuedEvent(event=event, enqueued_at=time.perf_counter())
+        while self.full() and not self._closed:
+            putter = self._get_loop().create_future()
+            self._putters.append(putter)
+            try:
+                await putter
+            except BaseException:
+                putter.cancel()
+                try:
+                    self._putters.remove(putter)
+                except ValueError:
+                    pass
+                if not self.full() and not putter.cancelled():
+                    self._wakeup_next(self._putters)
+                raise
+        if self._closed:
+            return False
+        super().put_nowait(item)
+        self._latest_forming.pop(event.key, None)
+        return True
+
+    def close_nowait(self) -> None:
+        """Discard a detached subscriber's backlog and enqueue one sentinel."""
+        self._closed = True
+        while True:
+            try:
+                super().get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # A producer may be asynchronously backpressured on a full critical
+        # queue while this subscriber is detached.  Wake every waiter so it can
+        # observe ``_closed`` and finish instead of leaking an emit task.
+        while self._putters:
+            putter = self._putters.popleft()
+            if not putter.done():
+                putter.set_result(None)
+        self._latest_forming.clear()
+        # Queue consumers in this module do not use join()/task_done().  Reset
+        # the inherited bookkeeping as part of terminal cleanup so a detached
+        # queue cannot retain stale unfinished state either.
+        self._unfinished_tasks = 0
+        self._finished.set()
+        super().put_nowait(None)
+
+    def _evict_oldest_forming_update(self) -> bool:
+        """Remove one pending live preview while preserving all other order."""
+        for index, pending in enumerate(self._queue):
+            if (
+                pending is None
+                or pending.event.event_type != DataEventType.BAR_UPDATED
+            ):
+                continue
+            del self._queue[index]
+            if self._latest_forming.get(pending.event.key) is pending:
+                self._latest_forming.pop(pending.event.key, None)
+            if self._unfinished_tasks > 0:
+                self._unfinished_tasks -= 1
+                if self._unfinished_tasks == 0:
+                    self._finished.set()
+            self._wakeup_next(self._putters)
+            return True
+        return False
 
     def get_nowait(self) -> _QueuedEvent | None:
         item = super().get_nowait()
@@ -126,6 +229,7 @@ class _CallbackSubscription:
     max_lag_ms: float = 0.0
     last_lag_ms: float = 0.0
     coalesced: int = 0
+    backpressured: int = 0
 
 
 @dataclass(slots=True)
@@ -138,6 +242,7 @@ class _QueueSubscription:
     max_lag_ms: float = 0.0
     last_lag_ms: float = 0.0
     coalesced: int = 0
+    backpressured: int = 0
 
 
 class DataEventBus:
@@ -323,6 +428,7 @@ class DataEventBus:
                 self._record_queue_lag(sub, item.enqueued_at)
                 yield item.event
         finally:
+            removed = None
             with self._protection_lock:
                 removed = self._queue_subs.pop(handle.id, None)
                 if removed is not None:
@@ -333,6 +439,8 @@ class DataEventBus:
                     )
                 if removed is not None and self._on_subscription_change is not None:
                     self._on_subscription_change()
+            if removed is not None:
+                self._put_sentinel(removed.queue)
             logger.debug(
                 "Iterator subscription removed: id=%s", handle.id,
             )
@@ -345,9 +453,11 @@ class DataEventBus:
         The event flows through the middleware chain first.  If any
         middleware returns ``None``, the event is suppressed.
 
-        Then it is delivered to callback and iterator subscribers via
-        non-blocking queue puts. Slow callbacks are isolated to their own
-        queues and do not block this emit call.
+        Then it is delivered to callback and iterator subscribers via bounded
+        queues. Live previews use non-blocking puts; lossless historical
+        corrections apply asynchronous backpressure when a subscriber's queue
+        contains no replaceable preview. Slow callbacks never block the event
+        loop, although their publisher coroutine may wait for bounded capacity.
         """
         # Apply config-level filters
         if not self._should_emit(event):
@@ -368,6 +478,7 @@ class DataEventBus:
         self._events_emitted += 1
 
         callback_subs, queue_subs = self._matching_subscriptions(event.key)
+        lossless_puts: list[Awaitable[bool]] = []
 
         # Callback subscribers
         for sub_id, sub in callback_subs:
@@ -380,6 +491,9 @@ class DataEventBus:
             offer = sub.queue.offer(event)
             if offer == "coalesced":
                 sub.coalesced += 1
+            elif offer == "critical_full":
+                sub.backpressured += 1
+                lossless_puts.append(sub.queue.put_lossless(event))
             elif offer == "full":
                 sub.dropped += 1
                 self._events_dropped += 1
@@ -395,12 +509,21 @@ class DataEventBus:
             offer = sub.queue.offer(event)
             if offer == "coalesced":
                 sub.coalesced += 1
+            elif offer == "critical_full":
+                sub.backpressured += 1
+                lossless_puts.append(sub.queue.put_lossless(event))
             elif offer == "full":
                 sub.dropped += 1
                 self._events_dropped += 1
                 logger.warning(
                     "Queue subscriber %s full, dropping event", sub_id,
                 )
+
+        if lossless_puts:
+            # Capacity waits are concurrent across subscribers.  A slow
+            # consumer backpressures this publisher coroutine, but never blocks
+            # the asyncio loop or causes other subscribers to wait serially.
+            await asyncio.gather(*lossless_puts)
 
     async def emit_many(self, events: list[DataEvent]) -> None:
         """Emit multiple events in sequence."""
@@ -640,19 +763,7 @@ class DataEventBus:
 
     @staticmethod
     def _put_sentinel(queue: _SubscriberQueue) -> None:
-        try:
-            queue.put_nowait(None)
-            return
-        except asyncio.QueueFull:
-            pass
-        try:
-            queue.get_nowait()
-        except asyncio.QueueEmpty:
-            pass
-        try:
-            queue.put_nowait(None)
-        except asyncio.QueueFull:
-            pass
+        queue.close_nowait()
 
     @staticmethod
     def _record_queue_lag(
@@ -674,6 +785,7 @@ class DataEventBus:
             "delivered": sub.delivered,
             "dropped": sub.dropped,
             "coalesced": sub.coalesced,
+            "backpressured": sub.backpressured,
             "avg_lag_ms": round(avg, 2),
             "max_lag_ms": round(sub.max_lag_ms, 2),
             "last_lag_ms": round(sub.last_lag_ms, 2),

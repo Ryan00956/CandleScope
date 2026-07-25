@@ -35,3 +35,40 @@ test("visible pane annotations retain hidden series as renderer inputs", () => {
   assert.equal(projected.subPanes[0]?.id, "separate-pine-1");
   assert.equal(projected.subPanes[0]?.lines[0]?.visible, false);
 });
+
+test("marker-only separate output materializes a placeholder-backed pane", () => {
+  const projected = buildIndicatorPaneData([{
+    id: "pine-marker-only",
+    name: "Marker only",
+    visible: true,
+    lines: [],
+  }], {
+    markers: [{
+      indicatorId: "pine-marker-only",
+      pane: "separate",
+      data: [{ time: 10, value: 42 }],
+    }],
+  });
+
+  assert.equal(projected.subPanes.length, 1);
+  assert.equal(projected.subPanes[0]?.id, "separate-pine-marker-only");
+  assert.deepEqual(projected.subPanes[0]?.lines, []);
+});
+
+test("hline-only separate output materializes a placeholder-backed pane", () => {
+  const projected = buildIndicatorPaneData([{
+    id: "pine-hline-only",
+    name: "Hline only",
+    visible: true,
+  }], {
+    hlines: [{
+      indicatorId: "pine-hline-only",
+      pane: "separate",
+      price: 50,
+    }],
+  });
+
+  assert.equal(projected.subPanes.length, 1);
+  assert.equal(projected.subPanes[0]?.id, "separate-pine-hline-only");
+  assert.deepEqual(projected.subPanes[0]?.lines, []);
+});

@@ -3,6 +3,10 @@ import test from "node:test";
 
 import { loadSymbolFavorites } from "../symbolFavoritesStore.js";
 import { filterSymbols } from "../symbolSearchFilter.js";
+import {
+  symbolCatalogNeedsRetry,
+  symbolCatalogRetryDelayMs,
+} from "../symbolCatalogRuntime.js";
 
 function withFavoritesStorage(raw: string, run: () => void): void {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -23,6 +27,32 @@ test("symbol favorites storage rejects damaged shapes and invalid entries", () =
   withFavoritesStorage(JSON.stringify(["spot:BTCUSDT", 4, null, ""]), () => {
     assert.deepEqual(loadSymbolFavorites(), ["spot:BTCUSDT"]);
   });
+});
+
+test("symbol catalog recovery retries quickly and caps its polling interval", () => {
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 20].map(symbolCatalogRetryDelayMs),
+    [1_000, 2_000, 4_000, 8_000, 15_000, 15_000],
+  );
+});
+
+test("symbol catalog keeps retrying partial results until every market is current", () => {
+  assert.equal(symbolCatalogNeedsRetry({
+    stale: true,
+    symbols: [{ symbol: "BTCUSDT" }],
+    markets: {
+      "binance:spot": { stale: false, refreshing: false },
+      "okx:spot": { stale: true, refreshing: true },
+    },
+  }), true);
+  assert.equal(symbolCatalogNeedsRetry({
+    stale: false,
+    symbols: [{ symbol: "BTCUSDT" }, { symbol: "BTC-USDT" }],
+    markets: {
+      "binance:spot": { stale: false, refreshing: false },
+      "okx:spot": { stale: false, refreshing: false },
+    },
+  }), false);
 });
 
 test("symbol filter combines market, exchange, quote, search, and favorites", () => {

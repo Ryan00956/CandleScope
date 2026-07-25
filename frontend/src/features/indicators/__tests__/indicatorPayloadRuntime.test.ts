@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   clearIndicatorLineData,
   normalizeIndicatorPayload,
+  normalizeParsedIndicatorPayload,
   replaceIndicatorItemsRange,
   replaceIndicatorLinesRange,
   upsertLinePoint,
@@ -219,6 +220,26 @@ test("unified histogram metadata survives payload parsing and normalization", ()
   assert.equal(line.base, 25);
   assert.equal(line.trackPrice, true);
   assert.equal(line.visible, false);
+});
+
+test("normalizeParsedIndicatorPayload reuses already-validated point arrays", () => {
+  const parsed = parseIndicatorPayloadEnvelope({
+    ok: true,
+    lines: [{
+      outputName: "basis",
+      data: [{ time: 10, value: 2 }],
+    }],
+    markers: [{
+      id: "cross",
+      data: [{ time: 10, text: "x" }],
+    }],
+  });
+
+  const normalized = normalizeParsedIndicatorPayload(parsed, "ma");
+
+  assert.strictEqual(normalized.lines[0]?.data, parsed.lines[0]?.data);
+  assert.strictEqual(normalized.markers[0]?.data, parsed.markers[0]?.data);
+  assert.equal(normalized.markers[0]?.indicatorId, "ma");
 });
 
 test("normalizeIndicatorPayload rejects malformed line points", () => {

@@ -676,6 +676,44 @@ test("chart-frame synchronization replaces a stale freehand viewport without wai
   runtime.dispose();
 });
 
+test("mutation admission publishes a restored freehand scene before its worker round-trip", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter(frame());
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan) => {
+      published.push(plan);
+      return true;
+    },
+  });
+
+  assert.equal(runtime.flushMutationAdmission?.(), true);
+  assert.equal(published.length, 1);
+  assert.equal(published[0]?.freehandRaster, undefined);
+  assert.equal(runtime.snapshot().publicationReady, true);
+  assert.equal(transport.renderRequests().length, 0,
+    "the waiting pointerdown must not block on a first worker result");
+
+  assert.equal(runtime.invalidate("worker-enhancement"), true);
+  assert.equal(runtime.flushNow(), true);
+  assert.equal(transport.renderRequests().length, 1,
+    "ordinary invalidation keeps the worker enhancement path");
+  runtime.dispose();
+});
+
 test("quiet exact pass keeps first visible publication worker-owned and accepts only latest viewport", () => {
   const transport = new RuntimeWorkerTransport();
   const store = createDrawingDocumentStore(freehandDocument());

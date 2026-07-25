@@ -289,6 +289,9 @@ python scripts/bench_concurrency.py --base-url http://127.0.0.1:18080
 | `CORS_ORIGINS` | 逗号分隔的前端 origins |
 | `INGESTION_*` | 实时接入 endpoints、timeout、proxy、WS/fallback 参数 |
 | `BACKFILL_*` | 历史修复 intervals、fetch limits、dedup、publish mode |
+| `HISTORY_ARCHIVE_ENABLED` | 官方历史 ZIP 路由，默认 `1` |
+| `HISTORY_ARCHIVE_CACHE_MAX_BYTES` | 持久归档 LRU 上限，默认 10 GiB |
+| `OKX_HISTORY_ARCHIVE_ENABLED` | 受保护的 OKX 网页归档支持，默认 `0` |
 | `BAR_AGG_*` | 聚合 source mode、alignment、finalization、event throttling |
 | `PYNE_*` | Pyne security、executor mode、timeouts、output limits |
 | `INDICATOR_HTTP_TIMEOUT_SECONDS` | HTTP 指标计算等待上限 |

@@ -77,6 +77,58 @@ test("chart view update synchronizes the plan before paint without requesting a 
   assert.equal(primitive.publishPlan(first), false);
 });
 
+test("scene primitive retries one missed first paint without delaying the direct update", () => {
+  let updates = 0;
+  const retryFrame: { callback: (() => void) | null } = { callback: null };
+  const primitive = new DrawingScenePrimitive({
+    requestPaintRetryFrame(callback) {
+      retryFrame.callback = callback;
+      return 17;
+    },
+    cancelPaintRetryFrame() {},
+  });
+  primitive.attached({
+    series: {},
+    chart: {},
+    requestUpdate() { updates += 1; },
+  } as unknown as DrawingAttachedParameter);
+  const plan = createDrawingScreenDisplayList(stamp, []);
+
+  assert.equal(primitive.publishPlan(plan), true);
+  assert.equal(updates, 1, "the first LWC update remains immediate");
+  const retry = retryFrame.callback;
+  assert.ok(retry);
+  retry();
+  assert.equal(updates, 2, "a missing exact paint receives one recovery update");
+  retry();
+  assert.equal(updates, 2, "the recovery must not recursively schedule itself");
+});
+
+test("scene primitive cancels the recovery when the first chart frame paints", () => {
+  let updates = 0;
+  const retryFrame: { callback: (() => void) | null } = { callback: null };
+  const primitive = new DrawingScenePrimitive({
+    requestPaintRetryFrame(callback) {
+      retryFrame.callback = callback;
+      return 23;
+    },
+    cancelPaintRetryFrame() {},
+  });
+  primitive.attached({
+    series: {},
+    chart: {},
+    requestUpdate() { updates += 1; },
+  } as unknown as DrawingAttachedParameter);
+  const plan = createDrawingScreenDisplayList(stamp, []);
+
+  assert.equal(primitive.publishPlan(plan), true);
+  const retry = retryFrame.callback;
+  assert.ok(retry);
+  drawScenePrimitive(primitive);
+  retry();
+  assert.equal(updates, 1, "a successful first paint must not add a second update");
+});
+
 function attachScenePrimitive(primitive: DrawingScenePrimitive): void {
   primitive.attached({
     series: {},

@@ -20,6 +20,7 @@
     positionSize,
     drawingsHidden,
     drawingSnapEnabled,
+    drawingContinuousEnabled,
     selectedDrawing,
   },
   actions: {
@@ -32,6 +33,7 @@
     handleClearDrawing,
     handleToggleDrawingsHidden,
     handleDrawingSnapEnabledChange,
+    handleDrawingContinuousEnabledChange,
     handleSelectedDrawingChange,
     handleSelectedDrawingStyleChange,
     prepareExport,

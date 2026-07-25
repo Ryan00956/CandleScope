@@ -1,19 +1,13 @@
-import { memo, useSyncExternalStore } from "react";
+import { memo } from "react";
 import type { ReactNode } from "react";
 import SymbolSearch from "../features/symbol-search/SymbolSearch.js";
 import { markPerf } from "../runtime/performance/perfMarks";
 import { loadSettingsModal } from "./lazySurfaceLoaders.js";
 import {
-  getCrosshairSnapshot,
-  subscribeCrosshairData,
-} from "../features/market-data/crosshairDisplayStore";
-import {
   buildMarketSummary,
   formatPrice,
-  formatPriceDiff,
-  formatVolume,
 } from "../features/market-data/marketDataView";
-import type { CrosshairData, MarketSummary } from "../features/market-data/klineContracts.js";
+import type { MarketSummary } from "../features/market-data/klineContracts.js";
 import type { MarketDisplayData } from "../features/market-data/marketDataView.js";
 import type { SymbolSearchProps } from "../features/symbol-search/SymbolSearch.js";
 import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
@@ -44,16 +38,6 @@ export interface TopBarProps {
   extensionControls?: ReactNode;
 }
 
-function isCompleteMarketDisplayData(
-  value: CrosshairData | null,
-): value is CrosshairData & MarketDisplayData {
-  return value != null
-    && typeof value.open === "number"
-    && typeof value.high === "number"
-    && typeof value.low === "number"
-    && typeof value.close === "number";
-}
-
 function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, replayEntry, extensionControls }: TopBarProps) {
   const {
     currentSymbol,
@@ -72,14 +56,7 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
     onToggleAlertPanel,
     activeIndicatorCount,
   } = controls;
-  const crosshairData = useSyncExternalStore(
-    subscribeCrosshairData,
-    getCrosshairSnapshot,
-    getCrosshairSnapshot,
-  );
-  const { displayData, isUp, priceChange, amplitude } = buildMarketSummary(
-    isCompleteMarketDisplayData(crosshairData) ? crosshairData : marketSummary.displayData,
-  );
+  const { displayData, isUp, priceChange } = buildMarketSummary(marketSummary.displayData);
   const advancedSummary = useAdvancedMarketSummary(advancedMarketData);
   const basisText = advancedSummary.basis == null
     ? "--"
@@ -204,49 +181,6 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
         </div>
       )}
 
-      {displayData && (
-        <div className="ohlcv-bar">
-          <div className="ohlcv-item">
-            <span className="ohlcv-label">O</span>
-            <span className="ohlcv-value">{formatPrice(displayData.open)}</span>
-          </div>
-          <div className="ohlcv-item">
-            <span className="ohlcv-label">H</span>
-            <span className="ohlcv-value" style={{ color: "var(--candle-up)" }}>
-              {formatPrice(displayData.high)}
-            </span>
-          </div>
-          <div className="ohlcv-item">
-            <span className="ohlcv-label">L</span>
-            <span className="ohlcv-value" style={{ color: "var(--candle-down)" }}>
-              {formatPrice(displayData.low)}
-            </span>
-          </div>
-          <div className="ohlcv-item">
-            <span className="ohlcv-label">C</span>
-            <span className={`ohlcv-value ${isUp ? "price-up" : "price-down"}`}>
-              {formatPrice(displayData.close)}
-            </span>
-          </div>
-          <div className="ohlcv-item">
-            <span className="ohlcv-label">Vol</span>
-            <span className="ohlcv-value">{formatVolume(displayData.volume)}</span>
-          </div>
-          <div className="ohlcv-item">
-            <span className="ohlcv-label">涨跌</span>
-            <span
-              className="ohlcv-value"
-              style={{ color: isUp ? "var(--candle-up)" : "var(--candle-down)" }}
-            >
-              {isUp ? "+" : "-"}{formatPriceDiff(displayData.close - displayData.open)} / {isUp ? "+" : ""}{priceChange.toFixed(2)}%
-            </span>
-          </div>
-          <div className="ohlcv-item">
-            <span className="ohlcv-label">振幅</span>
-            <span className="ohlcv-value">{amplitude}%</span>
-          </div>
-        </div>
-      )}
     </header>
   );
 }

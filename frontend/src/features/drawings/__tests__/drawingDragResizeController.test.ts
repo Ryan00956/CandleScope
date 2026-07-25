@@ -49,6 +49,7 @@ test("drag descriptors preserve move versus resize command semantics", () => {
     { type: "text-handle" },
     { type: "position-tp" },
     { type: "position-left" },
+    { type: "position-top-left" },
     { type: "shape", zone: "se" },
     { type: "fibonacci", pointIndex: 0 },
   ];
@@ -565,6 +566,39 @@ test("position edge drag replaces one endpoint with canonical lineage", () => {
   assert.equal(updates, 1);
 });
 
+test("position corner drag updates the horizontal edge and matching price level atomically", () => {
+  const primitive = positionPrimitive();
+  let updates = 0;
+  primitive._requestUpdate = () => { updates += 1; };
+
+  assert.equal(dragPosition(primitive, {
+    id: primitive.id,
+    type: "position-top-left",
+    startMouse: { x: 10, y: 190 },
+    origTimeRange: primitive.timeRange,
+  }, {
+    pos: { x: 5, y: 180 },
+    dataToScreen: (point) => ({
+      x: typeof point.time === "number" ? point.time / 10 : 0,
+      y: 300 - point.price,
+    }),
+    screenToDrawingData: (x, y, options) => {
+      assert.deepEqual(options, { snap: true, time: true, price: true });
+      return derivedPoint(x * 10, 2, 300 - y);
+    },
+  }), true);
+
+  assert.deepEqual(primitive.timeRange.start, {
+    time: 50,
+    sourceOrdinal: 2,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:{}",
+  });
+  assert.equal(primitive.tpPrice, 120, "long visual top controls TP");
+  assert.equal(primitive.slPrice, 95);
+  assert.equal(updates, 1);
+});
+
 test("position edge drag maps visual sides to legacy reversed anchors", () => {
   const primitive = new PositionDrawingPrimitive({
     id: "reversed-position",
@@ -647,8 +681,10 @@ test("compact position hit testing keeps price lines, body, and both edges reach
   assert.deepEqual(primitive.hitTestGeometry(43, 80), { zone: "left", pointIndex: -1 });
   assert.deepEqual(primitive.hitTestGeometry(65, 80), { zone: "right", pointIndex: -1 });
   assert.deepEqual(primitive.hitTestGeometry(54, 80), { zone: "body", pointIndex: -1 });
-  assert.deepEqual(primitive.hitTestGeometry(42, 60), { zone: "tp", pointIndex: -1 });
-  assert.deepEqual(primitive.hitTestGeometry(66, 140), { zone: "sl", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(42, 60), { zone: "top-left", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(66, 60), { zone: "top-right", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(42, 140), { zone: "bottom-left", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(66, 140), { zone: "bottom-right", pointIndex: -1 });
   assert.deepEqual(primitive.hitTestGeometry(54, 100), { zone: "entry", pointIndex: -1 });
 });
 

@@ -5,7 +5,10 @@ import {
   buildHostedSubscriptionMessage,
   dispatchIndicatorWsMessage,
   parseIndicatorWsMessage,
+  resolveHostedSubscriptionHistoryLimit,
+  resolveHostedSubscriptionSeedHistoryLimit,
   resolveIndicatorSubscriptionCachePolicy,
+  shouldResubscribeForHostedSeedCoverage,
 } from "../indicatorWsRuntime.js";
 import { malformedFixture, mustBeDefined } from "../../../test/testHelpers.js";
 
@@ -135,6 +138,27 @@ test("script subscriptions forward arbitrary descriptor language ids", () => {
 
   assert.equal(message.kind, "script");
   assert.equal(message.language, "community-lang");
+});
+
+test("an insufficient BOLL seed refreshes once when chart coverage reaches its closed-bar warmup", () => {
+  const boll = { id: "boll", engineName: "BOLL", params: { period: 20 } };
+
+  // The backend excludes the forming bar, so a 20-period BOLL needs a 21-bar
+  // request to guarantee twenty closed seed bars.
+  assert.equal(resolveHostedSubscriptionSeedHistoryLimit(boll), 21);
+  assert.equal(shouldResubscribeForHostedSeedCoverage(boll, 20, 20), false);
+  assert.equal(shouldResubscribeForHostedSeedCoverage(boll, 20, 21), true);
+  assert.equal(shouldResubscribeForHostedSeedCoverage(boll, 21, 22), false);
+  assert.equal(shouldResubscribeForHostedSeedCoverage(boll, 21, 2_000), false);
+  assert.equal(
+    shouldResubscribeForHostedSeedCoverage(
+      { id: "vol", engineName: "VOL", params: {} },
+      1,
+      2_000,
+    ),
+    false,
+  );
+  assert.equal(resolveHostedSubscriptionHistoryLimit(20_001), 2_000);
 });
 
 test("indicator.subscribed dispatches revision and resume acknowledgement", () => {

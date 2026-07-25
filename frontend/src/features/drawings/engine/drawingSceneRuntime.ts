@@ -272,6 +272,12 @@ export interface DrawingSceneRuntime {
   invalidate(reason?: string): boolean;
   /** Replace a stale scene plan inside the chart's current pre-paint phase. */
   synchronizeChartFrame(): boolean;
+  /**
+   * Publish the current, fully validated surface synchronously when a user
+   * gesture is waiting on scene admission. Unlike a normal first publication,
+   * this may use the main-thread display list before the worker enhancement.
+   */
+  flushMutationAdmission?(): boolean;
   requestParity(): boolean;
   waitForExactPaint(
     request: DrawingSceneExactPaintRequest,
@@ -1638,6 +1644,40 @@ export function createDrawingSceneRuntime({
     }
   };
 
+  const flushMutationAdmission = (): boolean => {
+    if (disposed
+      || faulted
+      || mode !== "scene-canary"
+      || !binding
+      || !registry
+      || publishingFromChartUpdate) return false;
+
+    let document: DrawingDocument;
+    let frame: DrawingFrameSnapshot | null;
+    try {
+      document = binding.store.getSnapshot();
+      if (binding.renderer.documentSnapshot() !== document) return false;
+      frame = binding.adapter.captureDrawingFrame();
+    } catch (error) {
+      onError?.(error);
+      return false;
+    }
+    if (!frame || !binding.adapter.isDrawingFrameCurrent(frame)) return false;
+
+    // Mutation admission is the one first-publication path where waiting for a
+    // worker round-trip would discard a real user pointerdown. The normal
+    // worker submission still follows on later invalidations; this synchronous
+    // plan crosses the same binding/frame/surface validation as every publish.
+    if (!invalidateScene("mutation-admission")) return false;
+    const input = createRenderInput(binding, document, frame);
+    publishingFromChartUpdate = true;
+    try {
+      return scheduler.flushNow(input);
+    } finally {
+      publishingFromChartUpdate = false;
+    }
+  };
+
   const acceptScenePainted = (stamp: DrawingRenderRevisionStamp): void => {
     if (exactRequestedAt === null || !pendingExactPaintStamp) return;
     if (drawingRenderRevisionKey(stamp)
@@ -1845,6 +1885,7 @@ export function createDrawingSceneRuntime({
       return !faulted && mode !== "legacy" && binding !== null && invalidateScene(reason);
     },
     synchronizeChartFrame,
+    flushMutationAdmission,
     requestParity() {
       if (mode !== "shadow" || !binding?.compareParity || disposed) return false;
       clearParityDelay();

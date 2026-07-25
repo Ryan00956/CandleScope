@@ -25,6 +25,11 @@ export interface IndicatorPanePointMetadata {
   accessibilityLabel: string;
 }
 
+export interface IndicatorPaneLiveCountdown {
+  label: string;
+  targetTimeMs: number;
+}
+
 export interface IndicatorSubPane {
   id: string;
   label: string;
@@ -41,6 +46,7 @@ export interface IndicatorSubPane {
     | "order-flow-delta";
   legendItems?: readonly IndicatorPaneLegendItem[];
   pointMetadata?: readonly IndicatorPanePointMetadata[];
+  liveCountdown?: IndicatorPaneLiveCountdown;
   pointMetadataFallback?: "latest" | "none";
   missingPointText?: string;
   statusText?: string | null;
@@ -95,6 +101,25 @@ function paneHasVisibleAuxiliaryOutput(
   )) ?? false;
 }
 
+function auxiliaryPanesForIndicator(
+  auxiliary: IndicatorPaneAuxiliaryData,
+  indicatorId: string,
+): Set<string> {
+  const panes = new Set<string>();
+  for (const items of [
+    auxiliary.markers,
+    auxiliary.hlines,
+    auxiliary.bgcolors,
+  ]) {
+    for (const item of items || []) {
+      if (item.indicatorId !== indicatorId) continue;
+      const pane = item.pane || "main";
+      if (pane !== "main") panes.add(pane);
+    }
+  }
+  return panes;
+}
+
 export function buildIndicatorPaneData(
   indicators: IndicatorDefinition[] = [],
   auxiliary: IndicatorPaneAuxiliaryData = {},
@@ -103,10 +128,10 @@ export function buildIndicatorPaneData(
   const paneMap = new Map<string, IndicatorSubPane>();
 
   for (const indicator of indicators) {
-    if (!indicator.visible || !indicator.lines || indicator.lines.length === 0) continue;
+    if (!indicator.visible) continue;
 
     const linesByPane = new Map<string, IndicatorLine[]>();
-    for (const line of indicator.lines) {
+    for (const line of indicator.lines || []) {
       const pane = line.pane || "main";
       const lineWithId = { ...line, indicatorId: indicator.id };
 
@@ -118,6 +143,9 @@ export function buildIndicatorPaneData(
       const paneLines = linesByPane.get(pane) || [];
       paneLines.push(lineWithId);
       linesByPane.set(pane, paneLines);
+    }
+    for (const pane of auxiliaryPanesForIndicator(auxiliary, indicator.id)) {
+      if (!linesByPane.has(pane)) linesByPane.set(pane, []);
     }
 
     for (const [pane, lines] of linesByPane) {

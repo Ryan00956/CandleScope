@@ -1419,6 +1419,7 @@ class PluginMarketplaceService:
     def apply(self, plugin_id: str) -> dict[str, Any]:
         with security_lock(self.lock_path):
             candidate, release, _publisher, path = self._verified_candidate(plugin_id)
+            activation_savepoint = self.installer.capture_activation_state(plugin_id)
             result = self.installer.install(
                 path,
                 expected_sha256=release.artifact.sha256,
@@ -1427,7 +1428,33 @@ class PluginMarketplaceService:
             )
             candidate["phase"] = "activation-staged"
             candidate["permissionDiff"] = result.permission_diff
-            self._replace_candidate_in_state(self._state(), candidate)
+            try:
+                self._replace_candidate_in_state(self._state(), candidate)
+            except BaseException as state_error:
+                if result.changed:
+                    try:
+                        self.installer.restore_activation_state(
+                            activation_savepoint,
+                            expected_activation_id=result.activation_id,
+                            expected_grant_record_sha256=(result.grant_record_sha256),
+                        )
+                    except BaseException as compensation_error:
+                        raise MarketplaceError(
+                            "PLUGIN_MARKETPLACE_APPLY_COMPENSATION_FAILED",
+                            "marketplace candidate commit failed and activation rollback did not complete",
+                            details={
+                                "pluginId": plugin_id,
+                                "activationId": result.activation_id,
+                                "stateError": (
+                                    f"{type(state_error).__name__}: {state_error}"
+                                )[:1024],
+                                "compensationError": (
+                                    f"{type(compensation_error).__name__}: "
+                                    f"{compensation_error}"
+                                )[:1024],
+                            },
+                        ) from compensation_error
+                raise
         return {
             "candidate": candidate,
             "installation": result.to_wire(),

@@ -1214,12 +1214,16 @@ class CorePluginPlatform:
         account_id: str,
         idempotency_key: str,
         trace_id: str,
+        target_operation: str = "orders.submit",
+        order_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.paper.recover(
             broker_id=broker_id,
             account_id=account_id,
             idempotency_key=idempotency_key,
             trace_id=trace_id,
+            target_operation=target_operation,
+            order_id=order_id,
             user_action=True,
         )
 

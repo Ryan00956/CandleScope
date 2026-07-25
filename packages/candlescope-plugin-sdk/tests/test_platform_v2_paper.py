@@ -8,6 +8,7 @@ from candlescope_plugin_sdk.platform_v2 import (
     PAPER_EXECUTOR_ACK_V1,
     HOST_API_V1,
     OrderIntent,
+    PaperRecoverRequest,
     PlatformContractError,
     PlatformJsonLineServer,
     validate_paper_account_snapshot,
@@ -167,6 +168,40 @@ def test_reference_executor_unknown_submit_requires_explicit_recovery() -> None:
         )["status"]
         == "accepted"
     )
+
+
+def test_cancel_recovery_binds_the_cancel_intent_and_exact_order() -> None:
+    server = _server()
+    cancelled = _invoke(
+        server,
+        "executor",
+        {
+            "operation": "orders.cancel",
+            "brokerId": "fixture-paper",
+            "accountId": "paper-main",
+            "orderId": "paper-order-1",
+            "idempotencyKey": "cancel-1",
+        },
+    )
+    assert cancelled["status"] == "accepted"
+    request = PaperRecoverRequest.from_invoke(
+        {
+            "operation": "orders.recover",
+            "brokerId": "fixture-paper",
+            "accountId": "paper-main",
+            "idempotencyKey": "cancel-1",
+            "targetOperation": "orders.cancel",
+            "orderId": "paper-order-1",
+        }
+    )
+    recovered = _invoke(server, "executor", request.to_wire())
+    assert recovered["status"] == "accepted"
+    assert recovered["executorOrderId"] == "paper-order-1"
+
+    invalid = request.to_wire()
+    invalid.pop("orderId")
+    with pytest.raises(PlatformContractError, match="requires exactly one orderId"):
+        PaperRecoverRequest.from_invoke(invalid)
 
 
 def test_account_snapshot_is_exact_and_rejects_negative_balances() -> None:

@@ -113,7 +113,12 @@ def _v1_compatibility(platform: CorePluginPlatform) -> Any:
     return compatibility
 
 
-async def _body(request: Request, *, required: set[str]) -> dict[str, Any]:
+async def _body(
+    request: Request,
+    *,
+    required: set[str],
+    optional: set[str] | None = None,
+) -> dict[str, Any]:
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
@@ -133,7 +138,12 @@ async def _body(request: Request, *, required: set[str]) -> dict[str, Any]:
         value = loads_strict(raw)
     except PlatformContractError as exc:
         raise HTTPException(status_code=400, detail="body must be strict JSON") from exc
-    if not isinstance(value, dict) or set(value) != required:
+    optional = optional or set()
+    if (
+        not isinstance(value, dict)
+        or not required <= set(value)
+        or bool(set(value) - required - optional)
+    ):
         raise HTTPException(status_code=400, detail="request body shape is invalid")
     return value
 
@@ -1192,11 +1202,22 @@ def create_core_plugin_router() -> APIRouter:
         platform = await _guarded_platform(request)
         try:
             value = await _body(
-                request, required={"brokerId", "accountId", "idempotencyKey"}
+                request,
+                required={"brokerId", "accountId", "idempotencyKey"},
+                optional={"targetOperation", "orderId"},
             )
             if not all(isinstance(value[key], str) for key in value):
                 raise HTTPException(
                     status_code=400, detail="paper recovery identifiers must be strings"
+                )
+            target_operation = value.get("targetOperation", "orders.submit")
+            order_id = value.get("orderId")
+            if target_operation not in {"orders.submit", "orders.cancel"} or (
+                target_operation == "orders.cancel"
+            ) != (order_id is not None):
+                raise HTTPException(
+                    status_code=400,
+                    detail="paper recovery target is invalid",
                 )
             action = request.state.plugin_user_action
             return await platform.recover_paper_order(
@@ -1204,6 +1225,8 @@ def create_core_plugin_router() -> APIRouter:
                 account_id=value["accountId"],
                 idempotency_key=value["idempotencyKey"],
                 trace_id=f"management-{action}",
+                target_operation=target_operation,
+                order_id=order_id,
             )
         except HTTPException:
             raise

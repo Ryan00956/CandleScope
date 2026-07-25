@@ -146,12 +146,29 @@ test("runtime catalog enables the safe Pine editor from its descriptor", () => {
   });
 });
 
-test("runtime catalog defaults to the host-selected language", () => {
+test("runtime catalog defaults only when no language was requested", () => {
   const catalog = parseScriptRuntimeCatalog(payload);
-  const language = resolveAvailableScriptLanguage(catalog, "missing-language");
+  const language = resolveAvailableScriptLanguage(catalog, "");
 
   assert.equal(language?.id, "pyne");
   assert.equal(resolveScriptEditorProfile(catalog, language!).monacoLanguage, "python");
+});
+
+test("runtime catalog fails closed for a missing saved language", () => {
+  const catalog = parseScriptRuntimeCatalog(payload);
+
+  assert.equal(
+    resolveAvailableScriptLanguage(catalog, "missing-language"),
+    null,
+  );
+});
+
+test("runtime catalog fails closed for an unavailable saved language", () => {
+  const unavailablePayload = structuredClone(payload);
+  unavailablePayload.languages[1]!.available = false;
+  const catalog = parseScriptRuntimeCatalog(unavailablePayload);
+
+  assert.equal(resolveAvailableScriptLanguage(catalog, "pine"), null);
 });
 
 test("runtime catalog rejects a routed language with an unknown runtime", () => {

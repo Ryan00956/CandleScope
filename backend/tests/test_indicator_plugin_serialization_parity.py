@@ -162,6 +162,81 @@ def test_structured_render_ir_preserves_parameters_and_fill_compatibility() -> N
     assert payload["fills"][0]["seriesIds"] == ["fast", "slow"]
 
 
+def test_structured_annotations_do_not_hide_public_series() -> None:
+    result = ExecuteBatchResult(
+        ok=True,
+        output=RenderOutput(
+            series=(
+                LineSeries(
+                    id="price",
+                    title="Price",
+                    pane="main",
+                    points=(LinePoint(1700000000, 202.0),),
+                    style={"color": "#22c55e"},
+                ),
+            ),
+            collections=RenderCollections(
+                markers=(
+                    {
+                        "id": "entry",
+                        "pane": "main",
+                        "data": [
+                            {
+                                "time": 1700000000,
+                                "shape": "circle",
+                                "position": "above",
+                            }
+                        ],
+                    },
+                ),
+            ),
+        ),
+    )
+
+    payload = serialize_plugin_runtime_result(result)
+
+    assert [line["id"] for line in payload["lines"]] == ["price"]
+    assert payload["lines"][0]["data"] == [{"time": 1700000000, "value": 202.0}]
+    assert [series["localId"] for series in payload["series"]] == ["price"]
+    assert payload["markers"][0]["id"] == "entry"
+
+
+def test_duplicate_public_and_structured_series_id_is_rendered_once() -> None:
+    result = ExecuteBatchResult(
+        ok=True,
+        output=RenderOutput(
+            series=(
+                LineSeries(
+                    id="shared",
+                    title="Public",
+                    pane="main",
+                    points=(LinePoint(1700000000, 1.0),),
+                    style={"color": "#111111"},
+                ),
+            ),
+            collections=RenderCollections(
+                lines=(
+                    {
+                        "id": "shared",
+                        "title": "Structured",
+                        "pane": "main",
+                        "color": "#222222",
+                        "data": [{"time": 1700000000, "value": 2.0}],
+                    },
+                ),
+            ),
+        ),
+    )
+
+    payload = serialize_plugin_runtime_result(result)
+
+    assert len(payload["lines"]) == 1
+    assert payload["lines"][0]["id"] == "shared"
+    assert payload["lines"][0]["name"] == "Structured"
+    assert payload["lines"][0]["data"] == [{"time": 1700000000, "value": 2.0}]
+    assert len(payload["series"]) == 1
+
+
 def test_empty_structured_collections_preserve_a_meta_only_legacy_result() -> None:
     output_meta = {"title": "Empty", "overlay": False}
     result_meta = {**output_meta, "securityMode": "safe"}
@@ -203,6 +278,9 @@ def test_structured_histogram_preserves_identity_width_and_per_bar_color() -> No
                         "pane": "separate",
                         "linewidth": 4,
                         "linestyle": "dotted",
+                        "base": 25.0,
+                        "trackPrice": True,
+                        "visible": False,
                         "colorData": color_data,
                         "per_bar_color": True,
                         "data": [{"time": 1700000000, "value": 2.5}],
@@ -223,6 +301,9 @@ def test_structured_histogram_preserves_identity_width_and_per_bar_color() -> No
             "pane": "separate",
             "lineWidth": 4,
             "lineStyle": 1,
+            "base": 25.0,
+            "trackPrice": True,
+            "visible": False,
             "colorData": color_data,
             "per_bar_color": True,
             "data": [{"time": 1700000000, "value": 2.5}],
@@ -231,3 +312,6 @@ def test_structured_histogram_preserves_identity_width_and_per_bar_color() -> No
     assert payload["series"][0]["localId"] == "pine-plot-7"
     assert payload["series"][0]["style"]["lineWidth"] == 4
     assert payload["series"][0]["style"]["colorData"] == color_data
+    assert payload["series"][0]["style"]["base"] == 25.0
+    assert payload["series"][0]["style"]["trackPrice"] is True
+    assert payload["series"][0]["style"]["visible"] is False

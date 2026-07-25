@@ -746,70 +746,94 @@ class GrantStore:
         publisher_identity: str | None = None,
         trace_id: str | None = None,
     ) -> GrantMutationResult:
+        with security_lock(self.lock_path, self.lock_timeout_seconds):
+            return self._reconcile_locked(
+                manifest,
+                bundle_sha256=bundle_sha256,
+                manifest_sha256=manifest_sha256,
+                publisher_identity=publisher_identity,
+                trace_id=trace_id,
+            )
+
+    def _reconcile_locked(
+        self,
+        manifest: PluginManifest,
+        *,
+        bundle_sha256: str,
+        manifest_sha256: str,
+        publisher_identity: str | None = None,
+        trace_id: str | None = None,
+    ) -> GrantMutationResult:
+        """Reconcile while the caller owns ``lock_path``.
+
+        The installer uses this entrypoint to keep its activation journal,
+        Grant Store mutation, and registry replacement inside one lock interval.
+        Other callers must use :meth:`reconcile`.
+        """
+
         identity, major, digest, manifest_digest = self._binding(
             manifest, bundle_sha256, manifest_sha256, publisher_identity
         )
         trace = trace_id or f"grant-reconcile-{uuid.uuid4().hex}"
-        with security_lock(self.lock_path, self.lock_timeout_seconds):
-            document = self.load()
-            previous = document.by_id().get(manifest.plugin.id)
-            if previous is not None and self._record_matches_manifest(
-                previous,
-                manifest,
-                identity=identity,
-                major=major,
-                bundle_sha256=digest,
-                manifest_sha256=manifest_digest,
-            ):
-                return GrantMutationResult(
-                    manifest.plugin.id,
-                    None,
-                    None,
-                    False,
-                    document.revision,
-                    self._required_satisfied(previous),
-                    None,
-                )
-            diff = self._permission_diff(
-                document,
-                manifest,
-                bundle_sha256=digest,
-                manifest_sha256=manifest_digest,
-                publisher_identity=identity,
-            )
-            record = self._reconciled_record(
-                previous,
-                manifest,
-                identity=identity,
-                major=major,
-                bundle_sha256=digest,
-                manifest_sha256=manifest_digest,
-            )
-            updated = document.replace(record)
-            event = self.audit_log.append(
-                category="permission",
-                action="reconcile",
-                outcome="recorded",
-                trace_id=trace,
-                plugin_id=manifest.plugin.id,
-                data={
-                    "fromRevision": document.revision,
-                    "toRevision": updated.revision,
-                    "bundleSha256": digest,
-                    "manifestSha256": manifest_digest,
-                    "permissionDiff": diff.to_wire(),
-                },
-            )
-            atomic_write_json(self.path, updated.to_wire())
+        document = self.load()
+        previous = document.by_id().get(manifest.plugin.id)
+        if previous is not None and self._record_matches_manifest(
+            previous,
+            manifest,
+            identity=identity,
+            major=major,
+            bundle_sha256=digest,
+            manifest_sha256=manifest_digest,
+        ):
             return GrantMutationResult(
                 manifest.plugin.id,
                 None,
                 None,
-                True,
-                updated.revision,
-                self._required_satisfied(record),
-                event.event_id,
+                False,
+                document.revision,
+                self._required_satisfied(previous),
+                None,
             )
+        diff = self._permission_diff(
+            document,
+            manifest,
+            bundle_sha256=digest,
+            manifest_sha256=manifest_digest,
+            publisher_identity=identity,
+        )
+        record = self._reconciled_record(
+            previous,
+            manifest,
+            identity=identity,
+            major=major,
+            bundle_sha256=digest,
+            manifest_sha256=manifest_digest,
+        )
+        updated = document.replace(record)
+        event = self.audit_log.append(
+            category="permission",
+            action="reconcile",
+            outcome="recorded",
+            trace_id=trace,
+            plugin_id=manifest.plugin.id,
+            data={
+                "fromRevision": document.revision,
+                "toRevision": updated.revision,
+                "bundleSha256": digest,
+                "manifestSha256": manifest_digest,
+                "permissionDiff": diff.to_wire(),
+            },
+        )
+        atomic_write_json(self.path, updated.to_wire())
+        return GrantMutationResult(
+            manifest.plugin.id,
+            None,
+            None,
+            True,
+            updated.revision,
+            self._required_satisfied(record),
+            event.event_id,
+        )
 
     def _mutate_permission(
         self,

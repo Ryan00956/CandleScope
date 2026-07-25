@@ -59,8 +59,15 @@ def build_marketplace_bundle(
     *,
     version: str = "0.1.0",
     dependency_license: str = "Apache-2.0",
+    required_permission: bool = False,
+    required_symbols: tuple[str, ...] = ("BTCUSDT",),
 ) -> PlatformBundleFixture:
-    fixture = build_hello_platform_bundle(directory / "base", version=version)
+    fixture = build_hello_platform_bundle(
+        directory / "base",
+        version=version,
+        required_permission=required_permission,
+        required_symbols=required_symbols,
+    )
     sbom_path = fixture.source_directory / "sbom" / "cyclonedx.json"
     sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
     sbom["metadata"] = {

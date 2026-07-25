@@ -23,6 +23,7 @@ PAPER_ORDER_TYPES = frozenset({"market", "limit"})
 PAPER_ORDER_SIDES = frozenset({"buy", "sell"})
 PAPER_EXECUTOR_STATUSES = frozenset({"accepted", "rejected", "unknown"})
 PAPER_ORDER_STATUSES = frozenset({"pending", "open", "filled", "cancelled", "rejected", "unknown"})
+PAPER_RECOVERY_TARGET_OPERATIONS = frozenset({"orders.submit", "orders.cancel"})
 
 _BROKER_ID = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _MARKET_TYPE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -302,6 +303,8 @@ class PaperRecoverRequest:
     broker_id: str
     account_id: str
     idempotency_key: str
+    target_operation: str = "orders.submit"
+    order_id: str | None = None
 
     @classmethod
     def from_invoke(cls, value: Any) -> "PaperRecoverRequest":
@@ -309,14 +312,53 @@ class PaperRecoverRequest:
             value,
             "paper.recover.input",
             required=frozenset({"operation", "brokerId", "accountId", "idempotencyKey"}),
+            optional=frozenset({"targetOperation", "orderId"}),
         )
         if data["operation"] != "orders.recover":
             raise contract_error("paper recover operation is invalid", path="operation")
+        target_operation = _string(
+            data.get("targetOperation", "orders.submit"),
+            "targetOperation",
+            maximum=32,
+        )
+        if target_operation not in PAPER_RECOVERY_TARGET_OPERATIONS:
+            raise contract_error(
+                "paper recovery target operation is invalid",
+                path="targetOperation",
+            )
+        order_id = (
+            _string(data["orderId"], "orderId", pattern=_OPAQUE_ID)
+            if data.get("orderId") is not None
+            else None
+        )
+        if (target_operation == "orders.cancel") != (order_id is not None):
+            raise contract_error(
+                "cancel recovery requires exactly one orderId",
+                path="orderId",
+            )
         return cls(
             _string(data["brokerId"], "brokerId", maximum=64, pattern=_BROKER_ID),
             _string(data["accountId"], "accountId", pattern=_OPAQUE_ID),
             _string(data["idempotencyKey"], "idempotencyKey", pattern=_OPAQUE_ID),
+            target_operation,
+            order_id,
         )
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "operation": "orders.recover",
+            "brokerId": self.broker_id,
+            "accountId": self.account_id,
+            "idempotencyKey": self.idempotency_key,
+            **(
+                {
+                    "targetOperation": self.target_operation,
+                    "orderId": self.order_id,
+                }
+                if self.target_operation == "orders.cancel"
+                else {}
+            ),
+        }
 
 
 def parse_paper_operation(
@@ -560,6 +602,7 @@ __all__ = [
     "PAPER_ORDER_STATUSES",
     "PAPER_ORDER_TYPES",
     "PAPER_PROTOCOL_V1",
+    "PAPER_RECOVERY_TARGET_OPERATIONS",
     "PaperAccountSnapshotRequest",
     "PaperCancelRequest",
     "PaperRecoverRequest",

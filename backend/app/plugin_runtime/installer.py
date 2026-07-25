@@ -600,85 +600,134 @@ class PluginInstaller:
         auto_start: bool = False,
         required: bool = False,
     ) -> InstallResult:
-        bundle = verify_plugin_bundle(
-            bundle_path,
-            expected_sha256=normalize_expected_sha256(expected_sha256),
-        )
-        runtime_id = bundle.manifest.runtime_id
-        python_version = self._python_version()
-        if not bundle.manifest.python_requirement.supports(python_version):
-            requirement = bundle.manifest.python_requirement.raw
+        return self.install_many(
+            ((bundle_path, expected_sha256),),
+            enabled=enabled,
+            auto_start=auto_start,
+            required=required,
+        )[0]
+
+    def install_many(
+        self,
+        bundles: Sequence[tuple[Path | str, str]],
+        *,
+        enabled: bool = True,
+        auto_start: bool = False,
+        required: bool = False,
+    ) -> tuple[InstallResult, ...]:
+        """Stage every bundle, then publish all activation entries in one replace."""
+
+        if not bundles:
             raise PluginInstallerError(
-                f"plugin requires Python {requirement}, found {python_version[0]}.{python_version[1]}",
-                runtime_id=runtime_id,
+                "batch installation requires at least one bundle"
             )
+        verified = tuple(
+            verify_plugin_bundle(
+                bundle_path,
+                expected_sha256=normalize_expected_sha256(expected_sha256),
+            )
+            for bundle_path, expected_sha256 in bundles
+        )
+        runtime_ids = [bundle.manifest.runtime_id for bundle in verified]
+        if len(runtime_ids) != len(set(runtime_ids)):
+            raise PluginInstallerError(
+                "batch installation contains duplicate runtime IDs"
+            )
+        python_version = self._python_version()
+        for bundle in verified:
+            runtime_id = bundle.manifest.runtime_id
+            if not bundle.manifest.python_requirement.supports(python_version):
+                requirement = bundle.manifest.python_requirement.raw
+                raise PluginInstallerError(
+                    f"plugin requires Python {requirement}, found {python_version[0]}.{python_version[1]}",
+                    runtime_id=runtime_id,
+                )
         if required and (not enabled or not auto_start):
             raise PluginInstallerError(
                 "required plugins must be enabled with auto-start",
-                runtime_id=runtime_id,
             )
         if not enabled and auto_start:
             raise PluginInstallerError(
                 "disabled plugins cannot use auto-start",
-                runtime_id=runtime_id,
             )
 
-        receipt = InstallationReceipt.from_bundle(bundle)
-        final_path = self._installation_path(runtime_id, receipt.installation_id)
-        reused = False
         with _installation_lock(self.lock_path, self.lock_timeout_seconds):
             registry = self._load_registry()
-            if final_path.exists():
-                installed_receipt = self._load_receipt(final_path)
-                self._assert_receipt_matches_bundle(installed_receipt, receipt)
-                self._verify_managed_environment(final_path, installed_receipt)
-                reused = True
-            else:
-                self._create_installation(bundle, receipt, final_path)
+            updated = registry
+            results: list[InstallResult] = []
+            changes: list[tuple[RuntimeProcessSpec | None, RuntimeProcessSpec]] = []
+            for bundle in verified:
+                runtime_id = bundle.manifest.runtime_id
+                receipt = InstallationReceipt.from_bundle(bundle)
+                final_path = self._installation_path(
+                    runtime_id, receipt.installation_id
+                )
+                reused = False
+                if final_path.exists():
+                    installed_receipt = self._load_receipt(final_path)
+                    self._assert_receipt_matches_bundle(installed_receipt, receipt)
+                    self._verify_managed_environment(final_path, installed_receipt)
+                    reused = True
+                else:
+                    self._create_installation(bundle, receipt, final_path)
 
-            current = registry.by_id().get(runtime_id)
-            if current is not None and current.managed is not None:
-                candidate = self._build_spec(
+                current = updated.by_id().get(runtime_id)
+                if current is not None and current.managed is not None:
+                    candidate = self._build_spec(
+                        receipt,
+                        final_path,
+                        activation_id=current.managed.activation_id,
+                        enabled=enabled,
+                        auto_start=auto_start,
+                        required=required,
+                    )
+                    if candidate == current:
+                        results.append(
+                            InstallResult(
+                                runtime_id=runtime_id,
+                                version=receipt.manifest.version,
+                                installation_id=receipt.installation_id,
+                                activation_id=current.managed.activation_id,
+                                changed=False,
+                                reused_installation=reused,
+                                installation_path=final_path,
+                                registry_path=self.registry_path,
+                            )
+                        )
+                        continue
+
+                activation_id = uuid.uuid4().hex
+                activated = self._build_spec(
                     receipt,
                     final_path,
-                    activation_id=current.managed.activation_id,
+                    activation_id=activation_id,
                     enabled=enabled,
                     auto_start=auto_start,
                     required=required,
                 )
-                if candidate == current:
-                    return InstallResult(
+                changes.append((current, activated))
+                updated = self._replace_plugin(updated, activated)
+                results.append(
+                    InstallResult(
                         runtime_id=runtime_id,
                         version=receipt.manifest.version,
                         installation_id=receipt.installation_id,
-                        activation_id=current.managed.activation_id,
-                        changed=False,
+                        activation_id=activation_id,
+                        changed=True,
                         reused_installation=reused,
                         installation_path=final_path,
                         registry_path=self.registry_path,
                     )
+                )
 
-            activation_id = uuid.uuid4().hex
-            activated = self._build_spec(
-                receipt,
-                final_path,
-                activation_id=activation_id,
-                enabled=enabled,
-                auto_start=auto_start,
-                required=required,
-            )
-            self._record_activation(current, activated)
-            self._write_registry(self._replace_plugin(registry, activated))
-            return InstallResult(
-                runtime_id=runtime_id,
-                version=receipt.manifest.version,
-                installation_id=receipt.installation_id,
-                activation_id=activation_id,
-                changed=True,
-                reused_installation=reused,
-                installation_path=final_path,
-                registry_path=self.registry_path,
-            )
+            # Activation history can contain an unreferenced attempted activation
+            # after a storage fault, but no runtime becomes visible until this
+            # single atomic registry replacement succeeds.
+            for before, after in changes:
+                self._record_activation(before, after)
+            if changes:
+                self._write_registry(updated)
+            return tuple(results)
 
     def check(self, runtime_id: str) -> CheckResult:
         runtime_id = _string(runtime_id, "runtime ID", maximum=64)

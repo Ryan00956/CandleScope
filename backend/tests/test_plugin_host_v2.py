@@ -431,6 +431,178 @@ async def test_bidirectional_host_call_supports_reentrant_host_requests() -> Non
 
 
 @pytest.mark.anyio
+async def test_host_call_context_rejects_concurrent_replay() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    handled: list[HostCallRequest] = []
+
+    async def broker(
+        call: HostCallRequest,
+        grant: CapabilityGrant,
+    ) -> dict[str, Any]:
+        assert call.method == grant.permission_id
+        handled.append(call)
+        entered.set()
+        await release.wait()
+        return {"shown": True}
+
+    supervisor = _supervisor(
+        "host-call",
+        manifest=_host_call_manifest(),
+        host_apis=(HOST_API_V1,),
+        host_call_handler=broker,
+        request_timeout_seconds=1.0,
+    )
+    manager = PluginManager((supervisor,))
+    pending: asyncio.Task[dict[str, Any]] | None = None
+    try:
+        await manager.activate(
+            "candlescope.host-call",
+            "main",
+            capabilities=(
+                CapabilityGrant(
+                    handle="cap-notify",
+                    permission_id="notifications.show",
+                ),
+            ),
+        )
+        pending = asyncio.create_task(
+            manager.invoke(
+                "candlescope.host-call.hello",
+                {},
+                user_action=True,
+                trace_id="phase4-host-call-replay",
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        with pytest.raises(PlatformHostRequestError) as replay:
+            await supervisor._handle_host_call(handled[0])
+        assert replay.value.code == "CAPABILITY_HANDLE_INVALID"
+        assert len(handled) == 1
+
+        release.set()
+        result = await pending
+        assert result["notified"] is True
+        assert len(handled) == 1
+    finally:
+        release.set()
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_cancelled_invoke_cancels_its_pending_host_call() -> None:
+    entered = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    committed = False
+
+    async def broker(
+        call: HostCallRequest,
+        grant: CapabilityGrant,
+    ) -> dict[str, Any]:
+        nonlocal committed
+        assert call.method == grant.permission_id
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            handler_cancelled.set()
+            raise
+        committed = True
+        return {"shown": True}
+
+    supervisor = _supervisor(
+        "host-call",
+        manifest=_host_call_manifest(),
+        host_apis=(HOST_API_V1,),
+        host_call_handler=broker,
+        request_timeout_seconds=1.0,
+    )
+    manager = PluginManager((supervisor,))
+    await manager.activate(
+        "candlescope.host-call",
+        "main",
+        capabilities=(
+            CapabilityGrant(
+                handle="cap-notify",
+                permission_id="notifications.show",
+            ),
+        ),
+    )
+    pending = asyncio.create_task(
+        manager.invoke(
+            "candlescope.host-call.hello",
+            {},
+            user_action=True,
+            trace_id="phase4-cancel-host-call",
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        pending.cancel()
+        outcome = await asyncio.gather(pending, return_exceptions=True)
+        assert isinstance(outcome[0], asyncio.CancelledError)
+        await asyncio.wait_for(handler_cancelled.wait(), timeout=1.0)
+        assert committed is False
+        assert await supervisor.health_check() == {"status": "ready"}
+        assert supervisor.snapshot()["state"] == "active"
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_legitimate_host_call_chain_remains_sequentially_available() -> None:
+    calls: list[HostCallRequest] = []
+
+    async def broker(
+        call: HostCallRequest,
+        grant: CapabilityGrant,
+    ) -> dict[str, Any]:
+        assert call.method == grant.permission_id
+        calls.append(call)
+        return {"shown": True, "call": len(calls)}
+
+    supervisor = _supervisor(
+        "host-call-chain",
+        manifest=_host_call_manifest(),
+        host_apis=(HOST_API_V1,),
+        host_call_handler=broker,
+        request_timeout_seconds=1.0,
+    )
+    manager = PluginManager((supervisor,))
+    try:
+        await manager.activate(
+            "candlescope.host-call",
+            "main",
+            capabilities=(
+                CapabilityGrant(
+                    handle="cap-notify",
+                    permission_id="notifications.show",
+                ),
+            ),
+        )
+        result = await manager.invoke(
+            "candlescope.host-call.hello",
+            {},
+            user_action=True,
+            trace_id="phase4-host-call-chain",
+        )
+        assert result == {
+            "notified": True,
+            "receipt": {"shown": True, "call": 2},
+            "token": "notify:phase4-host-call-chain:chain",
+        }
+        assert len(calls) == 2
+        assert calls[0].request_context == calls[1].request_context
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.anyio
 async def test_unknown_or_revoked_capability_handle_fails_without_killing_session() -> (
     None
 ):

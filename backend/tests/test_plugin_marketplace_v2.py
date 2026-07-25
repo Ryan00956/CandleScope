@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.plugin_installer_v2 import PlatformPluginInstaller
+from app.plugin_installer_v2.registry import load_activation_registry
 from app.plugin_marketplace_v2 import (
     MarketplaceError,
     PinnedMarketplaceFetcher,
@@ -243,6 +244,76 @@ def test_verified_backend_apply_requires_os_sandbox_before_probe(tmp_path) -> No
     )
     with pytest.raises(Exception, match="OS sandbox"):
         service.apply(fixture.bundle.manifest.plugin.id)
+    assert service.status()["candidates"][0]["phase"] == "verified-staged"
+
+
+def test_apply_state_write_failure_restores_previous_active_activation(
+    tmp_path,
+) -> None:
+    initial = build_marketplace_bundle(
+        tmp_path / "initial",
+        version="0.1.0",
+        required_permission=True,
+    )
+    update = build_marketplace_bundle(
+        tmp_path / "update",
+        version="0.2.0",
+        required_permission=True,
+        required_symbols=("BTCUSDT", "ETHUSDT"),
+    )
+    builder = SignedMarketplaceBuilder.create()
+    builder.add_release(initial.bundle)
+    builder.add_release(update.bundle)
+    installer, service = _service(tmp_path, builder)
+    installer.execution_trust_resolver = lambda _bundle: "local-trusted"
+    service.import_index(builder.index_bytes(), marketplace_id=MARKETPLACE_ID)
+    installed = installer.install(
+        initial.bundle.path,
+        expected_sha256=initial.bundle.sha256,
+        enabled=True,
+    )
+    assert installed.state == "staged"
+    installer.grant_permission(
+        installed.plugin_id,
+        "market.bars.read",
+        scope={"symbols": ["BTCUSDT"]},
+    )
+    assert installer.enable(installed.plugin_id).state == "active"
+    service.prepare(
+        update.bundle.manifest.plugin.id,
+        version=update.bundle.manifest.plugin.version,
+        artifact_bytes=update.bundle.path.read_bytes(),
+    )
+    active_before = load_activation_registry(installer.registry_path).by_id()[
+        initial.bundle.manifest.plugin.id
+    ]
+    grants_before = installer.permission_summary(initial.bundle.manifest.plugin.id)[0]
+    original_commit_state = service._commit_state
+
+    def fail_candidate_commit(_state) -> None:
+        raise OSError("simulated marketplace candidate state write failure")
+
+    service._commit_state = fail_candidate_commit
+    try:
+        with pytest.raises(
+            OSError, match="simulated marketplace candidate state write failure"
+        ):
+            service.apply(update.bundle.manifest.plugin.id)
+    finally:
+        service._commit_state = original_commit_state
+
+    active = load_activation_registry(installer.registry_path).by_id()[
+        initial.bundle.manifest.plugin.id
+    ]
+    assert active == active_before
+    restored_grant = installer.permission_summary(initial.bundle.manifest.plugin.id)[0]
+    assert restored_grant["permissions"][0]["decision"] == "granted"
+    assert restored_grant["permissions"][0]["grantedScope"] == {"symbols": ["BTCUSDT"]}
+    assert {
+        key: value for key, value in restored_grant.items() if key != "storeRevision"
+    } == {key: value for key, value in grants_before.items() if key != "storeRevision"}
+    assert active.version == "0.1.0"
+    assert active.state == "active"
     assert service.status()["candidates"][0]["phase"] == "verified-staged"
 
 

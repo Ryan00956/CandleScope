@@ -111,6 +111,16 @@ export default function IndicatorEditor({
     [runtimeCatalog, selectedLanguage],
   );
   const languageReady = Boolean(selectedLanguage?.available && editorProfile);
+  const requestedLanguageId = (language || indicator?.language || "").trim();
+  const requestedLanguage = runtimeCatalog?.languages.find(
+    (candidate) => candidate.id === requestedLanguageId,
+  ) ?? null;
+  const displayedLanguage = selectedLanguage ?? requestedLanguage;
+  const missingRequestedLanguage = Boolean(
+    runtimeCatalog
+      && requestedLanguageId
+      && !requestedLanguage,
+  );
   const pineHostCapabilities = useMemo(
     () => optionalRecord(selectedRuntime?.meta.hostCapabilities),
     [selectedRuntime],
@@ -265,7 +275,7 @@ export default function IndicatorEditor({
           <span className="indicator-editor-title" style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', letterSpacing: '0.5px' }}>
             {readOnly
               ? "内置指标参考实现"
-              : `${selectedLanguage?.name || "脚本运行时"} 指标编辑器`}
+              : `${displayedLanguage?.name || requestedLanguageId || "脚本运行时"} 指标编辑器`}
           </span>
           <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{name}</span>
         </div>
@@ -353,17 +363,22 @@ export default function IndicatorEditor({
         <div className="indicator-editor-code-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '8px', marginTop: '-8px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 500 }}>
-              {selectedLanguage?.name || "脚本运行时"} 脚本
+              {displayedLanguage?.name || requestedLanguageId || "脚本运行时"} 脚本
             </span>
             {!readOnly && (
               <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
                 语言
                 <select
-                  value={selectedLanguage?.id || ""}
+                  value={selectedLanguage?.id || requestedLanguageId}
                   onChange={handleLanguageChange}
                   disabled={!runtimeCatalog || runtimeCatalog.languages.length === 0}
                   style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '4px 8px', fontSize: '12px' }}
                 >
+                  {missingRequestedLanguage && (
+                    <option value={requestedLanguageId} disabled>
+                      {requestedLanguageId}（当前不可用）
+                    </option>
+                  )}
                   {runtimeCatalog?.languages.map((descriptor) => (
                     <option
                       key={`${descriptor.runtimeId || "legacy"}:${descriptor.id}`}
@@ -454,7 +469,13 @@ export default function IndicatorEditor({
           <span style={{ color: 'var(--text-muted)' }}>内置指标由 IndicatorEngine 计算；这里仅展示参考实现，修改代码不会影响图表。需要改代码时请先复制为自定义指标。</span>
         ) : !languageReady ? (
           <span style={{ color: 'var(--candle-down)' }}>
-            {runtimeCatalogError ? "❌ 无法发现可用脚本运行时" : "⏳ 正在发现脚本运行时..."}
+            {runtimeCatalogError
+              ? "❌ 无法发现可用脚本运行时"
+              : runtimeCatalog && requestedLanguageId
+                ? `❌ 保存的脚本语言 ${requestedLanguageId} 当前不可用；请选择可用语言后才能运行或保存`
+                : runtimeCatalog
+                  ? "❌ 当前没有可用脚本运行时"
+                  : "⏳ 正在发现脚本运行时..."}
           </span>
         ) : previewState?.error ? (
           <span style={{ color: 'var(--candle-down)', whiteSpace: 'pre-wrap' }}>❌ {previewState.error}</span>

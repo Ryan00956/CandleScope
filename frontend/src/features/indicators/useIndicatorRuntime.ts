@@ -1917,8 +1917,19 @@ export function useIndicatorRuntime(
   ]);
 
   const paneData = useMemo(
-    () => buildIndicatorPaneData(activeIndicators),
-    [activeIndicators],
+    () => buildIndicatorPaneData(activeIndicators, {
+      markers: outputState.markers,
+      fills: outputState.fills,
+      hlines: outputState.hlines,
+      bgcolors: outputState.bgcolors,
+    }),
+    [
+      activeIndicators,
+      outputState.bgcolors,
+      outputState.fills,
+      outputState.hlines,
+      outputState.markers,
+    ],
   );
 
   const view = useMemo(() => ({

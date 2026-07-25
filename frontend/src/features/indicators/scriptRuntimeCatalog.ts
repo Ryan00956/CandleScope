@@ -37,7 +37,7 @@ export function resolveAvailableScriptLanguage(
     const match = catalog.languages.find(
       (language) => language.id === requested && language.available,
     );
-    if (match) return match;
+    return match ?? null;
   }
   return catalog.languages.find(
     (language) => language.id === catalog.defaultLanguage && language.available,

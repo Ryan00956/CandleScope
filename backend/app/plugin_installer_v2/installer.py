@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,8 +24,14 @@ from candlescope_plugin_sdk.platform_v2 import (
 )
 
 from app.plugin_security_v2 import AuditLog, GrantStore
-from app.plugin_security_v2.grants import GrantMutationResult, PermissionDiff
+from app.plugin_security_v2.grants import (
+    GrantDocument,
+    GrantMutationResult,
+    PermissionDiff,
+    PluginGrantRecord,
+)
 from app.plugin_security_v2.sandbox import SandboxPolicy
+from app.plugin_security_v2.storage import security_lock
 
 from .bundle import (
     DEFAULT_HOST_VERSION,
@@ -50,10 +57,14 @@ from .registry import (
 
 RECEIPT_SCHEMA_VERSION = 2
 HISTORY_SCHEMA_VERSION = 2
+STATE_TRANSACTION_SCHEMA_VERSION = 1
 MAX_STATE_JSON_BYTES = 4 * 1024 * 1024
+MAX_STATE_TRANSACTION_JSON_BYTES = 24 * 1024 * 1024
 DEFAULT_INSTALL_LOCK_TIMEOUT_SECONDS = 30.0
 DEFAULT_COMMAND_OUTPUT_BYTES = 1024 * 1024
 PROBE_RUNNER = Path(__file__).with_name("probe_runner.py").resolve()
+_STATE_TRANSACTION_ID = re.compile(r"^state-[0-9a-f]{32}$")
+_PLUGIN_ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$")
 
 _SAFE_ENVIRONMENT_KEYS = frozenset(
     {
@@ -97,12 +108,17 @@ def _json_bytes(value: Any) -> bytes:
         ) from exc
 
 
-def _read_json(path: Path, label: str) -> Mapping[str, Any]:
+def _read_json(
+    path: Path,
+    label: str,
+    *,
+    maximum_bytes: int = MAX_STATE_JSON_BYTES,
+) -> Mapping[str, Any]:
     try:
         if path.is_symlink() or not path.is_file():
             raise PlatformInstallerError(f"{label} must be a regular file")
         size = path.stat().st_size
-        if not 0 < size <= MAX_STATE_JSON_BYTES:
+        if not 0 < size <= maximum_bytes:
             raise PlatformInstallerError(f"{label} has an invalid size")
         value = loads_strict(path.read_bytes())
     except PlatformInstallerError:
@@ -110,6 +126,11 @@ def _read_json(path: Path, label: str) -> Mapping[str, Any]:
     except (OSError, PlatformContractError) as exc:
         raise PlatformInstallerError(f"unable to read {label}: {exc}") from exc
     return _mapping(value, label)
+
+
+def _grant_record_sha256(record: PluginGrantRecord | None) -> str:
+    payload = canonical_dumps(record.to_wire() if record is not None else None)
+    return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
 
 def _fsync_directory(path: Path) -> None:
@@ -472,6 +493,7 @@ class InstallResult:
     registry_path: Path
     permission_diff: dict[str, Any]
     grant_store_revision: int
+    grant_record_sha256: str
     activation_ready: bool
 
     def to_wire(self) -> dict[str, Any]:
@@ -489,6 +511,37 @@ class InstallResult:
             "permissionDiff": dict(self.permission_diff),
             "grantStoreRevision": self.grant_store_revision,
             "activationReady": self.activation_ready,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationStateSnapshot:
+    """Host-only savepoint for compensating one immediately preceding install."""
+
+    registry_path: Path
+    grant_store_path: Path
+    plugin_id: str
+    registry_present: bool
+    activation: ActivationRecord | None
+    grant_store_present: bool
+    grant: PluginGrantRecord | None
+
+
+@dataclass(frozen=True, slots=True)
+class _StateRecoveryTarget:
+    """Exact durable state that an interrupted transaction must converge to."""
+
+    registry_present: bool
+    registry: ActivationRegistry
+    grant_store_present: bool
+    grants: GrantDocument
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "registryPresent": self.registry_present,
+            "registry": self.registry.to_wire(),
+            "grantStorePresent": self.grant_store_present,
+            "grants": self.grants.to_wire(),
         }
 
 
@@ -634,6 +687,14 @@ class PlatformPluginInstaller:
         self.execution_trust_resolver = execution_trust_resolver
         self.probe_sandbox_factory = probe_sandbox_factory
         self.probe_python_runtime_factory = probe_python_runtime_factory
+        if self.state_transaction_path.exists():
+            with _installation_lock(self.lock_path, self.lock_timeout_seconds):
+                self._assert_root_safe()
+                with security_lock(
+                    self.grant_store.lock_path,
+                    self.grant_store.lock_timeout_seconds,
+                ):
+                    self._recover_state_transaction()
 
     @property
     def installs_directory(self) -> Path:
@@ -654,6 +715,10 @@ class PlatformPluginInstaller:
     @property
     def lock_path(self) -> Path:
         return self.root / ".installer-v2.lock"
+
+    @property
+    def state_transaction_path(self) -> Path:
+        return self.root / "activation-grant-transaction-v1.json"
 
     def _installation_path(self, plugin_id: str, installation_id: str) -> Path:
         return self.installs_directory / plugin_id / installation_id
@@ -698,6 +763,325 @@ class PlatformPluginInstaller:
             raise PlatformInstallerError(
                 "v2 registry directory must not be a symbolic link"
             )
+        if self.state_transaction_path.exists() and (
+            self.state_transaction_path.is_symlink()
+            or not self.state_transaction_path.is_file()
+        ):
+            raise PlatformInstallerError(
+                "activation/grant transaction journal must be a regular file"
+            )
+
+    def _begin_state_transaction(
+        self,
+        *,
+        operation: str,
+        plugin_id: str,
+        registry: ActivationRegistry,
+        recovery_target: _StateRecoveryTarget | None = None,
+    ) -> dict[str, Any]:
+        if self.state_transaction_path.exists():
+            self._recover_state_transaction()
+        grants_present = self.grant_store.path.exists()
+        grants = self.grant_store.load()
+        target = recovery_target or _StateRecoveryTarget(
+            registry_present=self.registry_path.exists(),
+            registry=registry,
+            grant_store_present=grants_present,
+            grants=grants,
+        )
+        transaction = {
+            "schemaVersion": STATE_TRANSACTION_SCHEMA_VERSION,
+            "transactionId": f"state-{uuid.uuid4().hex}",
+            "operation": operation,
+            "pluginId": plugin_id,
+            "createdAt": _utc_now(),
+            "beforeRegistryPresent": self.registry_path.exists(),
+            "beforeRegistry": registry.to_wire(),
+            "beforeGrantsPresent": grants_present,
+            "beforeGrants": grants.to_wire(),
+            "afterRegistry": None,
+            "recoveryTarget": target.to_wire(),
+        }
+        _atomic_write_json(
+            self.state_transaction_path,
+            transaction,
+            replace_existing=False,
+        )
+        return transaction
+
+    def _set_state_transaction_after(
+        self,
+        transaction: dict[str, Any],
+        registry: ActivationRegistry,
+    ) -> None:
+        transaction["afterRegistry"] = registry.to_wire()
+        _atomic_write_json(self.state_transaction_path, transaction)
+
+    def _finish_state_transaction(self) -> None:
+        try:
+            self.state_transaction_path.unlink()
+            _fsync_directory(self.state_transaction_path.parent)
+        except OSError as exc:
+            raise PlatformInstallerError(
+                f"unable to remove activation/grant transaction journal: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _grant_plugins_without(
+        document: GrantDocument,
+        plugin_id: str,
+    ) -> dict[str, Any]:
+        return {
+            item.plugin_id: item.to_wire()
+            for item in document.plugins
+            if item.plugin_id != plugin_id
+        }
+
+    @staticmethod
+    def _activation_plugins_without(
+        registry: ActivationRegistry,
+        plugin_id: str,
+    ) -> dict[str, Any]:
+        return {
+            item.plugin_id: item.to_wire()
+            for item in registry.plugins
+            if item.plugin_id != plugin_id
+        }
+
+    def _record_state_compensation(
+        self,
+        transaction: Mapping[str, Any],
+        *,
+        before_registry: ActivationRegistry,
+        before_grants: GrantDocument,
+        after_registry: ActivationRegistry | None,
+    ) -> None:
+        plugin_id = transaction["pluginId"]
+        transaction_id = transaction["transactionId"]
+        attempted = (
+            after_registry.by_id().get(plugin_id)
+            if after_registry is not None
+            else None
+        )
+        receipt = {
+            "schemaVersion": STATE_TRANSACTION_SCHEMA_VERSION,
+            "transactionId": transaction_id,
+            "pluginId": plugin_id,
+            "operation": transaction["operation"],
+            "createdAt": transaction["createdAt"],
+            "outcome": "compensated",
+            "beforeRegistryRevision": before_registry.revision,
+            "attemptedRegistryRevision": (
+                after_registry.revision if after_registry is not None else None
+            ),
+            "beforeGrantRevision": before_grants.revision,
+            "attemptedActivationId": (
+                attempted.activation_id if attempted is not None else None
+            ),
+            "uncommittedHistoryPolicy": "retained-audit-only",
+            "retainedEvidence": [
+                "activation-history",
+                "rollback-audit",
+                "grant-reconcile-audit",
+            ],
+        }
+        path = self._state_compensation_path(plugin_id, transaction_id)
+        if path.exists():
+            if _read_json(path, "state compensation receipt") != receipt:
+                raise PlatformInstallerError(
+                    "state compensation receipt conflicts with transaction journal",
+                    plugin_id=plugin_id,
+                )
+            return
+        _atomic_write_json(path, receipt, replace_existing=False)
+
+    def _recover_state_transaction(self) -> None:
+        if not self.state_transaction_path.exists():
+            return
+        transaction = _read_json(
+            self.state_transaction_path,
+            "activation/grant transaction journal",
+            maximum_bytes=MAX_STATE_TRANSACTION_JSON_BYTES,
+        )
+        expected = {
+            "schemaVersion",
+            "transactionId",
+            "operation",
+            "pluginId",
+            "createdAt",
+            "beforeRegistryPresent",
+            "beforeRegistry",
+            "beforeGrantsPresent",
+            "beforeGrants",
+            "afterRegistry",
+            "recoveryTarget",
+        }
+        if (
+            set(transaction) != expected
+            or transaction.get("schemaVersion") != STATE_TRANSACTION_SCHEMA_VERSION
+            or transaction.get("operation") not in {"install", "restore", "rollback"}
+            or not isinstance(transaction.get("transactionId"), str)
+            or _STATE_TRANSACTION_ID.fullmatch(transaction["transactionId"]) is None
+            or not isinstance(transaction.get("pluginId"), str)
+            or _PLUGIN_ID.fullmatch(transaction["pluginId"]) is None
+            or not isinstance(transaction.get("createdAt"), str)
+            or not isinstance(transaction.get("beforeRegistryPresent"), bool)
+            or not isinstance(transaction.get("beforeGrantsPresent"), bool)
+            or not isinstance(transaction.get("recoveryTarget"), dict)
+            or set(transaction["recoveryTarget"])
+            != {
+                "registryPresent",
+                "registry",
+                "grantStorePresent",
+                "grants",
+            }
+            or not isinstance(
+                transaction["recoveryTarget"].get("registryPresent"), bool
+            )
+            or not isinstance(
+                transaction["recoveryTarget"].get("grantStorePresent"), bool
+            )
+        ):
+            raise PlatformInstallerError(
+                "activation/grant transaction journal schema is invalid"
+            )
+        plugin_id = transaction["pluginId"]
+        try:
+            before_registry = ActivationRegistry.from_wire(
+                transaction["beforeRegistry"]
+            )
+            before_grants = GrantDocument.from_wire(transaction["beforeGrants"])
+            after_value = transaction["afterRegistry"]
+            after_registry = (
+                ActivationRegistry.from_wire(after_value)
+                if after_value is not None
+                else None
+            )
+            recovery_value = transaction["recoveryTarget"]
+            recovery_registry = ActivationRegistry.from_wire(recovery_value["registry"])
+            recovery_grants = GrantDocument.from_wire(recovery_value["grants"])
+        except Exception as exc:
+            if isinstance(exc, PlatformInstallerError):
+                raise
+            raise PlatformInstallerError(
+                f"activation/grant transaction journal state is invalid: {exc}"
+            ) from exc
+        if (
+            (
+                not transaction["recoveryTarget"]["registryPresent"]
+                and bool(recovery_registry.plugins)
+            )
+            or (
+                not transaction["recoveryTarget"]["grantStorePresent"]
+                and bool(recovery_grants.plugins)
+            )
+            or self._activation_plugins_without(
+                recovery_registry,
+                plugin_id,
+            )
+            != self._activation_plugins_without(before_registry, plugin_id)
+            or self._grant_plugins_without(
+                recovery_grants,
+                plugin_id,
+            )
+            != self._grant_plugins_without(before_grants, plugin_id)
+            or (
+                transaction["operation"] != "restore"
+                and (
+                    transaction["recoveryTarget"]["registryPresent"]
+                    != transaction["beforeRegistryPresent"]
+                    or recovery_registry.to_wire() != before_registry.to_wire()
+                    or transaction["recoveryTarget"]["grantStorePresent"]
+                    != transaction["beforeGrantsPresent"]
+                    or recovery_grants.to_wire() != before_grants.to_wire()
+                )
+            )
+        ):
+            raise PlatformInstallerError(
+                "activation/grant transaction recovery target is invalid",
+                plugin_id=plugin_id,
+            )
+
+        current_registry = load_activation_registry(self.registry_path)
+        allowed_registries = [before_registry.to_wire()]
+        if after_registry is not None:
+            allowed_registries.append(after_registry.to_wire())
+        allowed_registries.append(recovery_registry.to_wire())
+        if current_registry.to_wire() not in allowed_registries:
+            raise PlatformInstallerError(
+                "activation registry drifted during transaction recovery",
+                plugin_id=plugin_id,
+            )
+        current_grants = self.grant_store.load()
+        if self._grant_plugins_without(
+            current_grants, plugin_id
+        ) != self._grant_plugins_without(before_grants, plugin_id):
+            raise PlatformInstallerError(
+                "unrelated grants drifted during transaction recovery",
+                plugin_id=plugin_id,
+            )
+
+        recovery_registry_present = transaction["recoveryTarget"]["registryPresent"]
+        if (
+            current_registry.to_wire() != recovery_registry.to_wire()
+            or self.registry_path.exists() != recovery_registry_present
+        ):
+            if recovery_registry_present:
+                _atomic_write_json(self.registry_path, recovery_registry.to_wire())
+            else:
+                try:
+                    self.registry_path.unlink(missing_ok=True)
+                    _fsync_directory(self.registry_path.parent)
+                except OSError as exc:
+                    raise PlatformInstallerError(
+                        f"unable to restore activation registry: {exc}",
+                        plugin_id=plugin_id,
+                    ) from exc
+
+        recovery_grants_present = transaction["recoveryTarget"]["grantStorePresent"]
+        if (
+            current_grants.to_wire() != recovery_grants.to_wire()
+            or self.grant_store.path.exists() != recovery_grants_present
+        ):
+            if recovery_grants_present:
+                _atomic_write_json(self.grant_store.path, recovery_grants.to_wire())
+            else:
+                try:
+                    self.grant_store.path.unlink(missing_ok=True)
+                    _fsync_directory(self.grant_store.path.parent)
+                except OSError as exc:
+                    raise PlatformInstallerError(
+                        f"unable to restore Grant Store: {exc}",
+                        plugin_id=plugin_id,
+                    ) from exc
+        self._record_state_compensation(
+            transaction,
+            before_registry=before_registry,
+            before_grants=before_grants,
+            after_registry=after_registry,
+        )
+        self._finish_state_transaction()
+
+    def _compensate_state_transaction(
+        self,
+        *,
+        plugin_id: str,
+        original: BaseException,
+    ) -> None:
+        try:
+            self._recover_state_transaction()
+        except BaseException as compensation_error:
+            raise PlatformInstallerError(
+                "activation/grant transaction compensation failed",
+                plugin_id=plugin_id,
+                details={
+                    "originalError": (f"{type(original).__name__}: {original}")[:1024],
+                    "compensationError": (
+                        f"{type(compensation_error).__name__}: {compensation_error}"
+                    )[:1024],
+                    "journalPath": str(self.state_transaction_path),
+                },
+            ) from compensation_error
 
     def _copy_bundle(self, bundle: VerifiedPlatformBundle, destination: Path) -> None:
         digest = hashlib.sha256()
@@ -1238,6 +1622,18 @@ class PlatformPluginInstaller:
     def _rollback_audit_path(self, plugin_id: str, rollback_id: str) -> Path:
         return self.history_directory / plugin_id / "rollbacks" / f"{rollback_id}.json"
 
+    def _state_compensation_path(
+        self,
+        plugin_id: str,
+        transaction_id: str,
+    ) -> Path:
+        return (
+            self.history_directory
+            / plugin_id
+            / "compensations"
+            / f"{transaction_id}.json"
+        )
+
     def _commit_registry_change(
         self,
         registry: ActivationRegistry,
@@ -1290,70 +1686,106 @@ class PlatformPluginInstaller:
         final_path = self._installation_path(plugin_id, bundle.installation_id)
         with _installation_lock(self.lock_path, self.lock_timeout_seconds):
             self._assert_root_safe()
-            registry = load_activation_registry(self.registry_path)
+            with security_lock(
+                self.grant_store.lock_path,
+                self.grant_store.lock_timeout_seconds,
+            ):
+                self._recover_state_transaction()
             reused = final_path.exists()
             if reused:
                 self._verify_installation(final_path)
             else:
                 self._create_installation(bundle, final_path)
-            permission_diff = self.grant_store.permission_diff(
-                bundle.manifest,
-                bundle_sha256=bundle.sha256,
-                manifest_sha256=bundle.manifest_sha256,
-                publisher_identity=self._publisher_identity(bundle),
-            )
-            grant_reconciliation = self.grant_store.reconcile(
-                bundle.manifest,
-                bundle_sha256=bundle.sha256,
-                manifest_sha256=bundle.manifest_sha256,
-                publisher_identity=self._publisher_identity(bundle),
-            )
-            activation_ready = self.grant_store.activation_ready(
-                bundle.manifest,
-                bundle_sha256=bundle.sha256,
-                manifest_sha256=bundle.manifest_sha256,
-                publisher_identity=self._publisher_identity(bundle),
-            )
-            current = registry.by_id().get(plugin_id)
-            candidate = self._new_record(
-                bundle,
-                final_path,
-                enabled=enabled,
-                activation_ready=activation_ready,
-                force_staged=force_staged,
-            )
-            if current is not None and self._same_activation_intent(current, candidate):
-                return InstallResult(
-                    plugin_id,
-                    bundle.installation_id,
-                    current.activation_id,
-                    current.state,
-                    current.enabled,
-                    current.restart_required,
-                    False,
-                    True,
-                    final_path,
-                    self.registry_path,
-                    permission_diff.to_wire(),
-                    grant_reconciliation.store_revision,
-                    activation_ready,
+            with security_lock(
+                self.grant_store.lock_path,
+                self.grant_store.lock_timeout_seconds,
+            ):
+                self._recover_state_transaction()
+                registry = load_activation_registry(self.registry_path)
+                transaction = self._begin_state_transaction(
+                    operation="install",
+                    plugin_id=plugin_id,
+                    registry=registry,
                 )
-            self._commit_registry_change(registry, plugin_id, current, candidate)
-            return InstallResult(
-                plugin_id,
-                bundle.installation_id,
-                candidate.activation_id,
-                candidate.state,
-                candidate.enabled,
-                candidate.restart_required,
-                True,
-                reused,
-                final_path,
-                self.registry_path,
-                permission_diff.to_wire(),
-                grant_reconciliation.store_revision,
-                activation_ready,
-            )
+                try:
+                    publisher_identity = self._publisher_identity(bundle)
+                    permission_diff = self.grant_store.permission_diff(
+                        bundle.manifest,
+                        bundle_sha256=bundle.sha256,
+                        manifest_sha256=bundle.manifest_sha256,
+                        publisher_identity=publisher_identity,
+                    )
+                    grant_reconciliation = self.grant_store._reconcile_locked(
+                        bundle.manifest,
+                        bundle_sha256=bundle.sha256,
+                        manifest_sha256=bundle.manifest_sha256,
+                        publisher_identity=publisher_identity,
+                    )
+                    activation_ready = self.grant_store.activation_ready(
+                        bundle.manifest,
+                        bundle_sha256=bundle.sha256,
+                        manifest_sha256=bundle.manifest_sha256,
+                        publisher_identity=publisher_identity,
+                    )
+                    grant_record_sha256 = _grant_record_sha256(
+                        self.grant_store.load().by_id().get(plugin_id)
+                    )
+                    current = registry.by_id().get(plugin_id)
+                    candidate = self._new_record(
+                        bundle,
+                        final_path,
+                        enabled=enabled,
+                        activation_ready=activation_ready,
+                        force_staged=force_staged,
+                    )
+                    if current is not None and self._same_activation_intent(
+                        current, candidate
+                    ):
+                        self._finish_state_transaction()
+                        return InstallResult(
+                            plugin_id,
+                            bundle.installation_id,
+                            current.activation_id,
+                            current.state,
+                            current.enabled,
+                            current.restart_required,
+                            grant_reconciliation.changed,
+                            True,
+                            final_path,
+                            self.registry_path,
+                            permission_diff.to_wire(),
+                            grant_reconciliation.store_revision,
+                            grant_record_sha256,
+                            activation_ready,
+                        )
+                    updated = registry.replace(plugin_id, candidate)
+                    self._set_state_transaction_after(transaction, updated)
+                    self._commit_registry_change(
+                        registry, plugin_id, current, candidate
+                    )
+                    self._finish_state_transaction()
+                    return InstallResult(
+                        plugin_id,
+                        bundle.installation_id,
+                        candidate.activation_id,
+                        candidate.state,
+                        candidate.enabled,
+                        candidate.restart_required,
+                        True,
+                        reused,
+                        final_path,
+                        self.registry_path,
+                        permission_diff.to_wire(),
+                        grant_reconciliation.store_revision,
+                        grant_record_sha256,
+                        activation_ready,
+                    )
+                except BaseException as exc:
+                    self._compensate_state_transaction(
+                        plugin_id=plugin_id,
+                        original=exc,
+                    )
+                    raise
 
     def _publisher_identity(self, bundle: VerifiedPlatformBundle) -> str:
         if self.publisher_identity_resolver is None:
@@ -1385,6 +1817,145 @@ class PlatformPluginInstaller:
             installation, expected_record=record
         )
         return record, bundle
+
+    def capture_activation_state(self, plugin_id: str) -> ActivationStateSnapshot:
+        """Capture one plugin's activation and grants for immediate CAS undo."""
+
+        with _installation_lock(self.lock_path, self.lock_timeout_seconds):
+            self._assert_root_safe()
+            with security_lock(
+                self.grant_store.lock_path,
+                self.grant_store.lock_timeout_seconds,
+            ):
+                self._recover_state_transaction()
+                registry = load_activation_registry(self.registry_path)
+                grants = self.grant_store.load()
+                return ActivationStateSnapshot(
+                    registry_path=self.registry_path,
+                    grant_store_path=self.grant_store.path,
+                    plugin_id=plugin_id,
+                    registry_present=self.registry_path.exists(),
+                    activation=registry.by_id().get(plugin_id),
+                    grant_store_present=self.grant_store.path.exists(),
+                    grant=grants.by_id().get(plugin_id),
+                )
+
+    def restore_activation_state(
+        self,
+        snapshot: ActivationStateSnapshot,
+        *,
+        expected_activation_id: str,
+        expected_grant_record_sha256: str,
+    ) -> None:
+        """Undo one just-installed activation without re-evaluating old grants."""
+
+        if (
+            not isinstance(snapshot, ActivationStateSnapshot)
+            or snapshot.registry_path != self.registry_path
+            or snapshot.grant_store_path != self.grant_store.path
+        ):
+            raise PlatformInstallerError(
+                "activation savepoint does not belong to this installer"
+            )
+        if (
+            not isinstance(expected_grant_record_sha256, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_grant_record_sha256)
+            is None
+        ):
+            raise PlatformInstallerError(
+                "expected Grant Store record digest is invalid"
+            )
+        plugin_id = snapshot.plugin_id
+        with _installation_lock(self.lock_path, self.lock_timeout_seconds):
+            self._assert_root_safe()
+            with security_lock(
+                self.grant_store.lock_path,
+                self.grant_store.lock_timeout_seconds,
+            ):
+                self._recover_state_transaction()
+                registry = load_activation_registry(self.registry_path)
+                current = registry.by_id().get(plugin_id)
+                if current is None or current.activation_id != expected_activation_id:
+                    raise PlatformInstallerError(
+                        "current activation changed before savepoint restore",
+                        plugin_id=plugin_id,
+                        details={
+                            "expectedActivationId": expected_activation_id,
+                            "actualActivationId": (
+                                current.activation_id if current is not None else None
+                            ),
+                        },
+                    )
+                grants = self.grant_store.load()
+                current_grant_sha256 = _grant_record_sha256(
+                    grants.by_id().get(plugin_id)
+                )
+                if current_grant_sha256 != expected_grant_record_sha256:
+                    raise PlatformInstallerError(
+                        "current Grant Store record changed before savepoint restore",
+                        plugin_id=plugin_id,
+                        details={
+                            "expectedGrantRecordSha256": (expected_grant_record_sha256),
+                            "actualGrantRecordSha256": current_grant_sha256,
+                        },
+                    )
+                grant_values = grants.by_id()
+                if snapshot.grant is None:
+                    grant_values.pop(plugin_id, None)
+                else:
+                    grant_values[plugin_id] = snapshot.grant
+                restored_grants = GrantDocument(
+                    revision=grants.revision + 1,
+                    plugins=tuple(grant_values[key] for key in sorted(grant_values)),
+                )
+                restored_registry = registry.replace(
+                    plugin_id,
+                    snapshot.activation,
+                )
+                recovery_target = _StateRecoveryTarget(
+                    registry_present=(
+                        bool(restored_registry.plugins) or snapshot.registry_present
+                    ),
+                    registry=restored_registry,
+                    grant_store_present=(
+                        bool(restored_grants.plugins) or snapshot.grant_store_present
+                    ),
+                    grants=restored_grants,
+                )
+                transaction = self._begin_state_transaction(
+                    operation="restore",
+                    plugin_id=plugin_id,
+                    registry=registry,
+                    recovery_target=recovery_target,
+                )
+                try:
+                    self._set_state_transaction_after(
+                        transaction,
+                        restored_registry,
+                    )
+                    if not restored_grants.plugins and not snapshot.grant_store_present:
+                        self.grant_store.path.unlink(missing_ok=True)
+                        _fsync_directory(self.grant_store.path.parent)
+                    else:
+                        _atomic_write_json(
+                            self.grant_store.path,
+                            restored_grants.to_wire(),
+                        )
+                    if not restored_registry.plugins and not snapshot.registry_present:
+                        self.registry_path.unlink(missing_ok=True)
+                        _fsync_directory(self.registry_path.parent)
+                    else:
+                        _atomic_write_json(
+                            self.registry_path,
+                            restored_registry.to_wire(),
+                        )
+                    self._finish_state_transaction()
+                except BaseException as exc:
+                    self._compensate_state_transaction(
+                        plugin_id=plugin_id,
+                        original=exc,
+                    )
+                    raise
 
     def permission_summary(
         self, plugin_id: str | None = None
@@ -1674,6 +2245,12 @@ class PlatformPluginInstaller:
 
     def rollback(self, plugin_id: str) -> RollbackResult:
         with _installation_lock(self.lock_path, self.lock_timeout_seconds):
+            self._assert_root_safe()
+            with security_lock(
+                self.grant_store.lock_path,
+                self.grant_store.lock_timeout_seconds,
+            ):
+                self._recover_state_transaction()
             registry = load_activation_registry(self.registry_path)
             current = registry.by_id().get(plugin_id)
             if current is None:
@@ -1720,52 +2297,76 @@ class PlatformPluginInstaller:
                 target_bundle, _receipt, probe = self._verify_installation(
                     installation, expected_record=target
                 )
-                self.grant_store.reconcile(
-                    target_bundle.manifest,
-                    **self._grant_arguments(target_bundle),
+            with security_lock(
+                self.grant_store.lock_path,
+                self.grant_store.lock_timeout_seconds,
+            ):
+                self._recover_state_transaction()
+                transaction_state = self._begin_state_transaction(
+                    operation="rollback",
+                    plugin_id=plugin_id,
+                    registry=registry,
                 )
-                if target.state == "active" and not self.grant_store.activation_ready(
-                    target_bundle.manifest,
-                    **self._grant_arguments(target_bundle),
-                ):
-                    target = replace(
-                        target,
-                        activation_id=f"activation-{uuid.uuid4().hex}",
-                        activated_at=_utc_now(),
-                        state="staged",
-                        enabled=False,
-                        restart_required=True,
+                try:
+                    if target is not None:
+                        grant_arguments = self._grant_arguments(target_bundle)
+                        self.grant_store._reconcile_locked(
+                            target_bundle.manifest,
+                            **grant_arguments,
+                        )
+                        if (
+                            target.state == "active"
+                            and not self.grant_store.activation_ready(
+                                target_bundle.manifest,
+                                **grant_arguments,
+                            )
+                        ):
+                            target = replace(
+                                target,
+                                activation_id=f"activation-{uuid.uuid4().hex}",
+                                activated_at=_utc_now(),
+                                state="staged",
+                                enabled=False,
+                                restart_required=True,
+                            )
+                            security_adjusted = True
+                    updated = registry.replace(plugin_id, target)
+                    self._set_state_transaction_after(transaction_state, updated)
+                    rollback_id = f"rollback-{uuid.uuid4().hex}"
+                    audit = {
+                        "schemaVersion": HISTORY_SCHEMA_VERSION,
+                        "rollbackId": rollback_id,
+                        "pluginId": plugin_id,
+                        "createdAt": _utc_now(),
+                        "from": current.to_wire(),
+                        "to": target.to_wire() if target is not None else None,
+                        "freshProcessProbe": probe,
+                    }
+                    _atomic_write_json(
+                        self._rollback_audit_path(plugin_id, rollback_id),
+                        audit,
+                        replace_existing=False,
                     )
-                    security_adjusted = True
-            rollback_id = f"rollback-{uuid.uuid4().hex}"
-            audit = {
-                "schemaVersion": HISTORY_SCHEMA_VERSION,
-                "rollbackId": rollback_id,
-                "pluginId": plugin_id,
-                "createdAt": _utc_now(),
-                "from": current.to_wire(),
-                "to": target.to_wire() if target is not None else None,
-                "freshProcessProbe": probe,
-            }
-            _atomic_write_json(
-                self._rollback_audit_path(plugin_id, rollback_id),
-                audit,
-                replace_existing=False,
-            )
-            if security_adjusted:
-                self._commit_registry_change(
-                    registry,
-                    plugin_id,
-                    current,
-                    target,
-                )
-            else:
-                updated = registry.replace(plugin_id, target)
-                _atomic_write_json(self.registry_path, updated.to_wire())
-            return RollbackResult(
-                plugin_id,
-                current.activation_id,
-                target.activation_id if target is not None else None,
-                target is None,
-                self.registry_path,
-            )
+                    if security_adjusted:
+                        self._commit_registry_change(
+                            registry,
+                            plugin_id,
+                            current,
+                            target,
+                        )
+                    else:
+                        _atomic_write_json(self.registry_path, updated.to_wire())
+                    self._finish_state_transaction()
+                    return RollbackResult(
+                        plugin_id,
+                        current.activation_id,
+                        target.activation_id if target is not None else None,
+                        target is None,
+                        self.registry_path,
+                    )
+                except BaseException as exc:
+                    self._compensate_state_transaction(
+                        plugin_id=plugin_id,
+                        original=exc,
+                    )
+                    raise

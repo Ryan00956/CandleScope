@@ -81,6 +81,13 @@ GrantedHostCallHandler = Callable[
 
 
 @dataclass(frozen=True, slots=True)
+class _UserActionCredential:
+    """An internal, single-use permit minted only by the Host invocation path."""
+
+    nonce: str
+
+
+@dataclass(frozen=True, slots=True)
 class EntrypointProcessSpec:
     plugin_id: str
     entrypoint_id: str
@@ -227,6 +234,9 @@ class EntrypointSupervisor:
         self._highest_generation = 0
         self._instance_id: str | None = None
         self._grants: dict[str, CapabilityGrant] = {}
+        self._active_invocation_contexts: set[RequestContext] = set()
+        self._active_host_calls: dict[RequestContext, asyncio.Task[Any]] = {}
+        self._user_action_credentials: dict[RequestContext, _UserActionCredential] = {}
         self._restart_times: deque[float] = deque()
         self._launch_attempts = 0
         self._start_count = 0
@@ -288,6 +298,7 @@ class EntrypointSupervisor:
         self._generation = 0
         self._instance_id = None
         self._grants.clear()
+        self._clear_invocations()
         transport = PlatformV2Transport(
             self.spec.process_spec(),
             plugin_id=self.plugin_id,
@@ -582,14 +593,90 @@ class EntrypointSupervisor:
                 exc.message,
                 details={"contractCode": exc.code, "path": exc.path},
             ) from exc
-        result = await self._request(
-            METHOD_INVOKE,
-            invocation.to_wire(),
-            generation=generation,
-            timeout=self.spec.request_timeout_seconds,
-        )
+        self._begin_invocation(request_context)
+        try:
+            result = await self._request(
+                METHOD_INVOKE,
+                invocation.to_wire(),
+                generation=generation,
+                timeout=self.spec.request_timeout_seconds,
+            )
+        finally:
+            self._end_invocation(request_context)
         self._ensure_generation_current(generation)
         return result
+
+    def _begin_invocation(self, request_context: RequestContext) -> None:
+        if request_context in self._active_invocation_contexts:
+            raise self._request_error(
+                "PLUGIN_PLATFORM_REQUEST_CONTEXT_IN_USE",
+                "request context is already bound to an active Host invocation",
+            )
+        self._active_invocation_contexts.add(request_context)
+        if request_context.user_action:
+            self._user_action_credentials[request_context] = _UserActionCredential(
+                nonce=uuid4().hex
+            )
+
+    def _end_invocation(self, request_context: RequestContext) -> None:
+        self._active_invocation_contexts.discard(request_context)
+        self._user_action_credentials.pop(request_context, None)
+        task = self._active_host_calls.pop(request_context, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def _clear_invocations(self) -> None:
+        current = asyncio.current_task()
+        for task in tuple(self._active_host_calls.values()):
+            if task is not current:
+                task.cancel()
+        self._active_host_calls.clear()
+        self._active_invocation_contexts.clear()
+        self._user_action_credentials.clear()
+
+    def _request_context_error(
+        self,
+        call: HostCallRequest,
+        message: str,
+        *,
+        reason: str,
+        code: str = "CAPABILITY_HANDLE_INVALID",
+    ) -> PlatformHostRequestError:
+        authority = self._capability_authority
+        instance_id = self._instance_id
+        if authority is not None and instance_id is not None:
+            authority.record_request_context_denied(
+                call,
+                plugin_id=self.plugin_id,
+                entrypoint_id=self.entrypoint_id,
+                instance_id=instance_id,
+                generation=self._generation,
+                reason=reason,
+            )
+        return self._request_error(code, message)
+
+    def _consume_user_action_credential(self, call: HostCallRequest) -> bool:
+        """Consume the Host-issued permit before a user-action side effect begins."""
+
+        credential = self._user_action_credentials.pop(call.request_context, None)
+        if credential is None:
+            raise self._request_context_error(
+                call,
+                "host.call requires a current, unconsumed Host user-action credential",
+                reason="user-action-credential",
+                code="CAPABILITY_USER_ACTION_REQUIRED",
+            )
+        # Keep the opaque nonce in the credential rather than the sidecar wire
+        # context. Its existence proves this invocation was Host-minted; removal
+        # above makes the permit one-shot even across sequential host.call chains.
+        if not credential.nonce:
+            raise self._request_context_error(
+                call,
+                "host.call user-action credential is invalid",
+                reason="user-action-credential",
+                code="CAPABILITY_USER_ACTION_REQUIRED",
+            )
+        return True
 
     def _ensure_generation_current(self, generation: int) -> None:
         self._refresh_transport_failure()
@@ -715,6 +802,7 @@ class EntrypointSupervisor:
         self._generation = 0
         self._instance_id = None
         self._grants.clear()
+        self._clear_invocations()
         if self._transport is not None:
             self._transport.set_active_generation(0)
         self._state = STATE_HANDSHAKEN
@@ -774,6 +862,7 @@ class EntrypointSupervisor:
                     self._generation = 0
                     self._instance_id = None
                     self._grants.clear()
+                    self._clear_invocations()
                     self._state = STATE_STOPPED if self.spec.enabled else STATE_DISABLED
 
     async def _handle_host_call(
@@ -798,42 +887,70 @@ class EntrypointSupervisor:
                 "CAPABILITY_HANDLE_INVALID",
                 "host.call contribution is not active",
             )
-        grant = self._grants.get(call.capability_handle)
-        if grant is None:
-            raise self._request_error(
-                "CAPABILITY_HANDLE_INVALID",
-                "host.call used an unknown or revoked capability handle",
+        if call.request_context not in self._active_invocation_contexts:
+            raise self._request_context_error(
+                call,
+                "host.call request context is not bound to an active Host invocation",
+                reason="request-context",
             )
-        if self._capability_authority is not None:
-            instance_id = self._instance_id
-            broker = self._capability_broker
-            if instance_id is None or broker is None:
+        task = asyncio.current_task()
+        if task is None or call.request_context in self._active_host_calls:
+            raise self._request_context_error(
+                call,
+                "host.call request context already has an in-flight capability call",
+                reason="request-context-in-flight",
+            )
+        self._active_host_calls[call.request_context] = task
+        grant = self._grants.get(call.capability_handle)
+        try:
+            if grant is None:
+                raise self._request_error(
+                    "CAPABILITY_HANDLE_INVALID",
+                    "host.call used an unknown or revoked capability handle",
+                )
+            if self._capability_authority is not None:
+                instance_id = self._instance_id
+                broker = self._capability_broker
+                if instance_id is None or broker is None:
+                    raise self._request_error(
+                        "CAPABILITY_HANDLE_INVALID",
+                        "no capability broker is configured for this entrypoint",
+                    )
+                try:
+                    lease = self._capability_authority.validate(
+                        call,
+                        grant,
+                        plugin_id=self.plugin_id,
+                        entrypoint_id=self.entrypoint_id,
+                        instance_id=instance_id,
+                        generation=self._generation,
+                    )
+                    user_action_authorized = False
+                    if broker.requires_user_action(call.method):
+                        user_action_authorized = self._consume_user_action_credential(
+                            call
+                        )
+                    return await broker.handle(
+                        call,
+                        grant,
+                        lease,
+                        user_action_authorized=user_action_authorized,
+                    )
+                except PlatformSecurityError as exc:
+                    raise self._request_error(
+                        exc.code,
+                        exc.message,
+                        details=exc.details,
+                    ) from exc
+            if self._host_call_handler is None:
                 raise self._request_error(
                     "CAPABILITY_HANDLE_INVALID",
                     "no capability broker is configured for this entrypoint",
                 )
-            try:
-                lease = self._capability_authority.validate(
-                    call,
-                    grant,
-                    plugin_id=self.plugin_id,
-                    entrypoint_id=self.entrypoint_id,
-                    instance_id=instance_id,
-                    generation=self._generation,
-                )
-                return await broker.handle(call, grant, lease)
-            except PlatformSecurityError as exc:
-                raise self._request_error(
-                    exc.code,
-                    exc.message,
-                    details=exc.details,
-                ) from exc
-        if self._host_call_handler is None:
-            raise self._request_error(
-                "CAPABILITY_HANDLE_INVALID",
-                "no capability broker is configured for this entrypoint",
-            )
-        return await self._host_call_handler(call, grant)
+            return await self._host_call_handler(call, grant)
+        finally:
+            if self._active_host_calls.get(call.request_context) is task:
+                self._active_host_calls.pop(call.request_context, None)
 
     def _revoke_capabilities(
         self,
@@ -970,6 +1087,7 @@ class EntrypointSupervisor:
         self._generation = 0
         self._instance_id = None
         self._grants.clear()
+        self._clear_invocations()
 
     def _record_failure(self, error: PlatformHostError) -> None:
         token = (self._highest_generation or self._launch_attempts, error.code)
@@ -999,6 +1117,7 @@ class EntrypointSupervisor:
             self._generation = 0
             self._instance_id = None
             self._grants.clear()
+            self._clear_invocations()
 
     def _request_error(
         self,

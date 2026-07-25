@@ -18,6 +18,9 @@ from app.first_party_plugin_bootstrap import (
     ensure_first_party_plugins_from_environment,
     load_official_plugin_releases,
 )
+from app.plugin_runtime.errors import PluginBundleError
+from app.plugin_runtime.registry import load_runtime_registry
+from tests.plugin_runtime_bundle_testkit import build_hello_bundle
 
 
 OFFICIAL_SHA256 = (
@@ -337,11 +340,18 @@ def test_multi_runtime_bootstrap_verifies_then_installs_in_runtime_order(
         def list_plugins(self) -> tuple[dict[str, Any], ...]:
             return ()
 
-        def install(self, path: Path, **_kwargs: Any) -> Any:
-            installs.append(path.name)
-            return SimpleNamespace(
-                changed=True,
-                installation_path=tmp_path / "installed" / path.stem,
+        def install_many(
+            self,
+            bundles: tuple[tuple[Path, str], ...],
+            **_kwargs: Any,
+        ) -> tuple[Any, ...]:
+            installs.extend(path.name for path, _sha256 in bundles)
+            return tuple(
+                SimpleNamespace(
+                    changed=True,
+                    installation_path=tmp_path / "installed" / path.stem,
+                )
+                for path, _sha256 in bundles
             )
 
     result = ensure_first_party_plugins_from_environment(
@@ -407,6 +417,40 @@ def test_multi_runtime_bootstrap_verifies_every_bundle_before_install(
         )
 
     assert installs == []
+
+
+def test_multi_runtime_internal_bundle_failure_never_partially_activates(
+    tmp_path: Path,
+) -> None:
+    pine_fixture = build_hello_bundle(
+        tmp_path / "pine-source",
+        version="0.2.0",
+        runtime_id="candlescope.pine-compat",
+    )
+    pine_payload = pine_fixture.bundle.path.read_bytes()
+    pyne_payload = b"outer-digest-valid but not a plugin bundle"
+    pine = _release(pine_payload, runtime_id="candlescope.pine-compat")
+    pyne = _release(pyne_payload)
+    lock = _write_lock(tmp_path / "releases.json", pine, pyne)
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / pine.filename).write_bytes(pine_payload)
+    (bundles / pyne.filename).write_bytes(pyne_payload)
+    registry = tmp_path / "plugins" / "runtime-registry.json"
+
+    with pytest.raises(PluginBundleError):
+        ensure_first_party_plugins_from_environment(
+            host_name="CandleScope",
+            host_version="0.3.0",
+            environ={
+                "LOCALAPPDATA": str(tmp_path / "local-app-data"),
+                "CANDLESCOPE_RUNTIME_REGISTRY": str(registry),
+                "CANDLESCOPE_OFFICIAL_PLUGIN_BUNDLE": str(bundles),
+            },
+            release_lock_path=lock,
+        )
+
+    assert load_runtime_registry(registry, allow_missing=True).plugins == ()
 
 
 def test_default_routes_fail_closed_when_a_first_party_release_is_missing(

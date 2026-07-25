@@ -124,6 +124,9 @@ export interface IndicatorLine {
   scale?: string;
   valueFormat?: "notional" | string;
   zIndex?: number;
+  visible?: boolean;
+  base?: number;
+  trackPrice?: boolean;
   colorData?: IndicatorColorPoint[] | null;
   /** Internal renderer hint. Historical snapshot/patch/range paths reset it. */
   renderUpdate?: "tail" | "full" | null;
@@ -247,6 +250,9 @@ export interface IndicatorUnifiedSeries {
     lineWidth: number;
     lineStyle: number;
     colorData?: IndicatorColorPoint[];
+    visible?: boolean;
+    base?: number;
+    trackPrice?: boolean;
   };
   scale?: string;
   zIndex?: number;

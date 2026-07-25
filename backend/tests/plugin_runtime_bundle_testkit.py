@@ -56,7 +56,12 @@ def _record_hash(data: bytes) -> str:
     return f"sha256={digest.decode('ascii')}"
 
 
-def build_hello_wheel(directory: Path, *, version: str = "0.1.0") -> Path:
+def build_hello_wheel(
+    directory: Path,
+    *,
+    version: str = "0.1.0",
+    runtime_id: str = "hello-runtime",
+) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     filename = f"candlescope_plugin_sdk-{version}-py3-none-any.whl"
     output = directory / filename
@@ -69,6 +74,8 @@ def build_hello_wheel(directory: Path, *, version: str = "0.1.0") -> Path:
             "examples/hello_runtime.py",
         }:
             data = data.replace(b'"0.2.0"', f'"{version}"'.encode("ascii"))
+        if relative == "examples/hello_runtime.py":
+            data = data.replace(b'"hello-runtime"', f'"{runtime_id}"'.encode("ascii"))
         entries[f"candlescope_plugin_sdk/{relative}"] = data
 
     dist_info = f"candlescope_plugin_sdk-{version}.dist-info"
@@ -101,7 +108,7 @@ def build_hello_wheel(directory: Path, *, version: str = "0.1.0") -> Path:
     return output
 
 
-def hello_probe() -> dict[str, Any]:
+def hello_probe(*, runtime_id: str = "hello-runtime") -> dict[str, Any]:
     context = MarketContext(
         exchange="binance",
         market_type="spot",
@@ -134,6 +141,8 @@ def hello_probe() -> dict[str, Any]:
         bars=bars,
     )
     runtime = HelloRuntime()
+    execution = runtime.execute_batch(execute_request).to_wire()
+    execution["output"]["meta"]["runtime"] = runtime_id
     return {
         "source": source,
         "context": context.to_wire(),
@@ -141,9 +150,7 @@ def hello_probe() -> dict[str, Any]:
         "params": {},
         "options": {},
         "analysisSha256": canonical_sha256(runtime.analyze(analyze_request).to_wire()),
-        "executionSha256": canonical_sha256(
-            runtime.execute_batch(execute_request).to_wire()
-        ),
+        "executionSha256": canonical_sha256(execution),
     }
 
 
@@ -152,14 +159,15 @@ def hello_manifest(
     *,
     version: str = "0.1.0",
     analysis_sha256: str | None = None,
+    runtime_id: str = "hello-runtime",
 ) -> dict[str, Any]:
-    probe = hello_probe()
+    probe = hello_probe(runtime_id=runtime_id)
     if analysis_sha256 is not None:
         probe["analysisSha256"] = analysis_sha256
     return {
         "schemaVersion": 1,
         "plugin": {
-            "id": "hello-runtime",
+            "id": runtime_id,
             "name": "Hello Runtime",
             "version": version,
             "package": "candlescope-plugin-sdk",
@@ -186,9 +194,14 @@ def build_hello_bundle(
     version: str = "0.1.0",
     analysis_sha256: str | None = None,
     output_name: str | None = None,
+    runtime_id: str = "hello-runtime",
 ) -> HelloBundleFixture:
     directory.mkdir(parents=True, exist_ok=True)
-    wheel_path = build_hello_wheel(directory / "wheelhouse", version=version)
+    wheel_path = build_hello_wheel(
+        directory / "wheelhouse",
+        version=version,
+        runtime_id=runtime_id,
+    )
     manifest_path = directory / f"manifest-{version}.json"
     manifest_path.write_text(
         json.dumps(
@@ -196,12 +209,13 @@ def build_hello_bundle(
                 wheel_path,
                 version=version,
                 analysis_sha256=analysis_sha256,
+                runtime_id=runtime_id,
             ),
             indent=2,
         ),
         encoding="utf-8",
     )
-    output = directory / (output_name or f"hello-runtime-{version}.cspkg")
+    output = directory / (output_name or f"{runtime_id}-{version}.cspkg")
     bundle = build_plugin_bundle(manifest_path, (wheel_path,), output)
     return HelloBundleFixture(
         bundle=bundle,

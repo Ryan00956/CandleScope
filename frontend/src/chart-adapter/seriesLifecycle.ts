@@ -230,10 +230,10 @@ export function buildIndicatorSeriesOptions(
     lineWidth: isHistogram ? undefined : (line?.lineWidth || 2),
     lineStyle: isHistogram ? undefined : (line?.lineStyle || 0),
     title: "",
-    visible: true,
+    visible: line?.visible !== false,
     priceScaleId: "right",
     lastValueVisible: false,
-    priceLineVisible: false,
+    priceLineVisible: line?.trackPrice === true,
   };
 
   if (!isHistogram) {
@@ -242,6 +242,17 @@ export function buildIndicatorSeriesOptions(
 
   if (isHistogram && line?.pane === "volume") {
     options.priceFormat = { type: "volume" };
+  }
+
+  if (isHistogram) {
+    // applyOptions is partial: omitting `base` keeps the previous value on a
+    // reused histogram. Always publish the LWC default so a plugin can remove
+    // a formerly explicit histbase without leaking stale rendering state.
+    options.base = (
+      typeof line?.base === "number" && Number.isFinite(line.base)
+        ? line.base
+        : 0
+    );
   }
 
   if (line?.valueFormat === "notional") {
@@ -276,6 +287,20 @@ export function buildIndicatorSeriesOptions(
   }
 
   return options;
+}
+
+export function selectIndicatorPaneAnnotationTarget(
+  entries: readonly {
+    lineConfig?: IndicatorSeriesDefinition | null;
+    paneId?: string;
+    series: IndicatorSeriesHandle;
+  }[],
+  paneId: string,
+  fallback: IndicatorSeriesHandle | null = null,
+): IndicatorSeriesHandle | null {
+  return entries.find((entry) => (
+    entry.paneId === paneId && entry.lineConfig?.visible !== false
+  ))?.series ?? fallback;
 }
 
 export function formatIndicatorNotional(value: number): string {

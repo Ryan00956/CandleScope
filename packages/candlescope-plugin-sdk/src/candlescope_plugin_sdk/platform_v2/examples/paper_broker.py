@@ -39,6 +39,7 @@ class PaperBrokerPlugin(BasePlatformPlugin):
         self._manifest = paper_broker_manifest()
         self._generation = 0
         self._submissions: dict[str, dict[str, str]] = {}
+        self._cancellations: dict[str, dict[str, str]] = {}
 
     def manifest(self) -> PluginManifest:
         return self._manifest
@@ -136,6 +137,20 @@ class PaperBrokerPlugin(BasePlatformPlugin):
         )
 
     def _cancel(self, request: PaperCancelRequest) -> dict[str, Any]:
+        existing = self._cancellations.get(request.idempotency_key)
+        if existing is not None and existing["orderId"] != request.order_id:
+            return self._ack(
+                operation="orders.cancel",
+                broker_id=request.broker_id,
+                account_id=request.account_id,
+                idempotency_key=request.idempotency_key,
+                status="rejected",
+                reason_code="FIXTURE_CANCEL_IDEMPOTENCY_CONFLICT",
+            )
+        self._cancellations.setdefault(
+            request.idempotency_key,
+            {"orderId": request.order_id},
+        )
         return self._ack(
             operation="orders.cancel",
             broker_id=request.broker_id,
@@ -146,7 +161,18 @@ class PaperBrokerPlugin(BasePlatformPlugin):
         )
 
     def _recover(self, request: PaperRecoverRequest) -> dict[str, Any]:
-        record = self._submissions.get(request.idempotency_key)
+        records = (
+            self._cancellations
+            if request.target_operation == "orders.cancel"
+            else self._submissions
+        )
+        record = records.get(request.idempotency_key)
+        if (
+            record is not None
+            and request.target_operation == "orders.cancel"
+            and record["orderId"] != request.order_id
+        ):
+            record = None
         if record is None:
             return self._ack(
                 operation="orders.recover",
@@ -154,7 +180,11 @@ class PaperBrokerPlugin(BasePlatformPlugin):
                 account_id=request.account_id,
                 idempotency_key=request.idempotency_key,
                 status="rejected",
-                reason_code="FIXTURE_UNKNOWN_SUBMISSION",
+                reason_code=(
+                    "FIXTURE_UNKNOWN_CANCEL"
+                    if request.target_operation == "orders.cancel"
+                    else "FIXTURE_UNKNOWN_SUBMISSION"
+                ),
             )
         return self._ack(
             operation="orders.recover",
@@ -162,7 +192,11 @@ class PaperBrokerPlugin(BasePlatformPlugin):
             account_id=request.account_id,
             idempotency_key=request.idempotency_key,
             status="accepted",
-            executor_order_id=record["executorOrderId"],
+            executor_order_id=(
+                record["orderId"]
+                if request.target_operation == "orders.cancel"
+                else record["executorOrderId"]
+            ),
         )
 
     def invoke(self, request: InvokeRequest) -> InvocationOutcome:

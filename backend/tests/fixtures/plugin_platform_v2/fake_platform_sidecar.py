@@ -24,6 +24,7 @@ from candlescope_plugin_sdk.platform_v2 import (  # noqa: E402
     InvokeRequest,
     PlatformJsonLineServer,
     PluginManifest,
+    RequestContext,
     RpcError,
     RpcFailure,
     RpcSuccess,
@@ -56,6 +57,7 @@ class HostCallingPlugin(BasePlatformPlugin):
     def __init__(self) -> None:
         self._manifest = host_call_manifest()
         self._capability_handle = "cap-notify"
+        self._request_context: RequestContext | None = None
 
     def manifest(self) -> PluginManifest:
         return self._manifest
@@ -69,6 +71,7 @@ class HostCallingPlugin(BasePlatformPlugin):
                 self._capability_handle = capability.handle
 
     def invoke(self, request: InvokeRequest) -> HostCallInvocation:
+        self._request_context = request.request_context
         return HostCallInvocation(
             token=f"notify:{request.request_context.trace_id}",
             call=HostCallRequest(
@@ -83,9 +86,20 @@ class HostCallingPlugin(BasePlatformPlugin):
         self,
         token: str,
         response: RpcSuccess | RpcFailure,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | HostCallInvocation:
         if isinstance(response, RpcFailure):
             return {"notified": False, "error": response.error.code, "token": token}
+        if MODE == "host-call-chain" and not token.endswith(":chain"):
+            assert self._request_context is not None
+            return HostCallInvocation(
+                token=f"{token}:chain",
+                call=HostCallRequest(
+                    capability_handle=self._capability_handle,
+                    method="notifications.show",
+                    params={"message": "Second chained notification"},
+                    request_context=self._request_context,
+                ),
+            )
         return {"notified": True, "receipt": response.result, "token": token}
 
 
@@ -110,7 +124,13 @@ def main() -> int:
         return 97
     plugin: BasePlatformPlugin = (
         HostCallingPlugin()
-        if MODE in {"host-call", "accept-missing-host-api"}
+        if MODE
+        in {
+            "host-call",
+            "host-call-chain",
+            "host-call-forged-user-action",
+            "accept-missing-host-api",
+        }
         else HelloCommandPlugin()
     )
     server = PlatformJsonLineServer(plugin)
@@ -146,6 +166,10 @@ def main() -> int:
             return 23
 
         responses = [dict(item) for item in server.handle_line(line)]
+        if method == "invoke" and MODE == "host-call-forged-user-action":
+            for response in responses:
+                if response.get("method") == "host.call":
+                    response["params"]["requestContext"]["userAction"] = True
         if first and MODE == "accept-missing-host-api" and method == "handshake":
             responses = [
                 RpcSuccess(

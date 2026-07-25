@@ -287,6 +287,15 @@ activation, response-size, and runtime in-flight budgets. Market Scanner uses
 this to read settings, symbols, each scoped series, private storage, and a chart
 layer without receiving any Host Python object.
 
+`requestContext.userAction` is contextual information sent by the Host, never a
+capability credential supplied by the sidecar. For a Host method that requires a
+user action, the Host mints an internal, invocation-bound one-shot credential
+only for a real user invocation and consumes it before the side effect begins.
+Echoing or changing `userAction` cannot mint that credential; a second
+user-action side effect in the same host-call chain requires a new user
+invocation. Non-user-action methods remain available to bounded sequential
+chains.
+
 The SDK validates correlation and static ownership. The CandleScope Host must
 still validate that the opaque handle binds the exact plugin, publisher,
 installation digest, entrypoint, process instance, generation, permission
@@ -438,14 +447,20 @@ outcome, or account state. `accounts.snapshot`, `orders.submit`,
 
 The Host serializes submit/cancel/fill races, binds each idempotency key to the
 canonical intent hash, persists pending state before invocation, and never
-blindly replays an unknown submission. Recovery is explicit. Quotes are
-Host-published, time-bounded, and exact-ID matched, so future or stale prices
-fail before sidecar invocation. The Host owns the ledger, reservation/fill
-rules, immutable audit events, and a persisted global kill switch. Disabling a
-plugin or revoking either Paper grant removes the active broker before the next
-action. This mode is available only when the product explicitly enables Paper
-trading under `first-party-pinned`; saved grants become ineffective if that
-policy is absent on restart.
+blindly replays an unknown submission or cancellation. Recovery is explicit.
+The legacy `orders.recover` shape targets `orders.submit`; cancel recovery adds
+`"targetOperation": "orders.cancel"` and the exact `orderId`, using the cancel
+idempotency key. An accepted cancel-recovery acknowledgement means the
+cancellation completed, a rejected acknowledgement restores the pre-cancel
+order state, and `unknown` remains fail-closed. Submission recovery is rejected
+while the same order has an unresolved cancel. Quotes are Host-published,
+time-bounded, and exact-ID matched, so future or stale prices fail before
+sidecar invocation. The Host owns the ledger, reservation/fill rules, immutable
+audit events, and a persisted global kill switch. Disabling a plugin or revoking
+either Paper grant removes the active broker before the next action. This mode
+is available only when the product explicitly enables Paper trading under
+`first-party-pinned`; saved grants become ineffective if that policy is absent
+on restart.
 
 ## Error behavior
 

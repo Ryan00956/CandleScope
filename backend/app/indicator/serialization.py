@@ -147,6 +147,24 @@ def _build_series(
                         if line.get("colorData")
                         else {}
                     ),
+                    **(
+                        {"visible": line["visible"]}
+                        if isinstance(line.get("visible"), bool)
+                        else {}
+                    ),
+                    **(
+                        {"trackPrice": line["trackPrice"]}
+                        if isinstance(line.get("trackPrice"), bool)
+                        else {}
+                    ),
+                    **(
+                        {"base": line["base"]}
+                        if (
+                            isinstance(line.get("base"), (int, float))
+                            and not isinstance(line.get("base"), bool)
+                        )
+                        else {}
+                    ),
                 },
                 "scale": line.get("scale") or "right",
                 "zIndex": line.get("zIndex", 10),
@@ -396,6 +414,14 @@ def _flat_lines_from_render_collections(
         }
         if "id" in item:
             line["id"] = item["id"]
+        if isinstance(item.get("visible"), bool):
+            line["visible"] = item["visible"]
+        if isinstance(item.get("trackPrice"), bool):
+            line["trackPrice"] = item["trackPrice"]
+        if isinstance(item.get("base"), (int, float)) and not isinstance(
+            item.get("base"), bool
+        ):
+            line["base"] = item["base"]
         if item.get("per_bar_color"):
             line["per_bar_color"] = True
         lines.append(line)
@@ -413,12 +439,81 @@ def _flat_lines_from_render_collections(
         }
         if "id" in item:
             line["id"] = item["id"]
+        if isinstance(item.get("visible"), bool):
+            line["visible"] = item["visible"]
+        if isinstance(item.get("trackPrice"), bool):
+            line["trackPrice"] = item["trackPrice"]
+        if isinstance(item.get("base"), (int, float)) and not isinstance(
+            item.get("base"), bool
+        ):
+            line["base"] = item["base"]
         if item.get("colorData"):
             line["colorData"] = item["colorData"]
         if item.get("per_bar_color"):
             line["per_bar_color"] = True
         lines.append(line)
     return lines
+
+
+def _flat_lines_from_render_series(result: ExecuteBatchResult) -> list[dict[str, Any]]:
+    """Build the stable flat-series view from public RenderOutput.series."""
+    if result.output is None:
+        return []
+    lines: list[dict[str, Any]] = []
+    for item in result.output.series:
+        style = dict(item.style)
+        line = {
+            "id": item.id,
+            "outputName": item.id,
+            "name": item.title,
+            "title": item.title,
+            "type": item.series_type,
+            "pane": item.pane,
+            "scale": item.scale,
+            "data": [point.to_wire() for point in item.points],
+            "color": style.get("color", "#f59e0b"),
+            "lineWidth": style.get("lineWidth", 2),
+            "lineStyle": style.get("lineStyle", 0),
+            "zIndex": style.get("zIndex", 10),
+        }
+        if style.get("colorData"):
+            line["colorData"] = style["colorData"]
+        if isinstance(style.get("visible"), bool):
+            line["visible"] = style["visible"]
+        if isinstance(style.get("trackPrice"), bool):
+            line["trackPrice"] = style["trackPrice"]
+        if isinstance(style.get("base"), (int, float)) and not isinstance(
+            style.get("base"), bool
+        ):
+            line["base"] = style["base"]
+        lines.append(line)
+    return lines
+
+
+def _merge_flat_render_lines(
+    public_series: list[dict[str, Any]],
+    structured_series: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge both legal Render IR series sources without rendering an id twice.
+
+    Structured entries retain precedence for duplicate explicit ids because
+    compatibility collections can carry richer renderer-specific metadata than
+    the public LineSeries projection.
+    """
+    merged: list[dict[str, Any]] = []
+    index_by_id: dict[str, int] = {}
+    for line in (*public_series, *structured_series):
+        explicit_id = line.get("id")
+        identity = (
+            str(explicit_id) if explicit_id is not None and str(explicit_id) else None
+        )
+        if identity is not None and identity in index_by_id:
+            merged[index_by_id[identity]] = line
+            continue
+        if identity is not None:
+            index_by_id[identity] = len(merged)
+        merged.append(line)
+    return merged
 
 
 def _structured_render_payload(result: ExecuteBatchResult) -> dict[str, Any] | None:
@@ -462,33 +557,13 @@ def serialize_plugin_runtime_result(result: ExecuteBatchResult) -> dict[str, Any
         return payload
 
     structured = _structured_render_payload(result)
-    lines: list[dict[str, Any]] = []
-    if structured is not None:
-        lines = _flat_lines_from_render_collections(structured)
-    else:
-        for item in result.output.series:
-            style = dict(item.style)
-            lines.append(
-                {
-                    "id": item.id,
-                    "outputName": item.id,
-                    "name": item.title,
-                    "title": item.title,
-                    "type": item.series_type,
-                    "pane": item.pane,
-                    "scale": item.scale,
-                    "data": [point.to_wire() for point in item.points],
-                    "color": style.pop("color", "#f59e0b"),
-                    "lineWidth": style.pop("lineWidth", 2),
-                    "lineStyle": style.pop("lineStyle", 0),
-                    "zIndex": style.pop("zIndex", 10),
-                    **(
-                        {"colorData": style["colorData"]}
-                        if style.get("colorData")
-                        else {}
-                    ),
-                }
-            )
+    public_series = _flat_lines_from_render_series(result)
+    structured_series = (
+        _flat_lines_from_render_collections(structured)
+        if structured is not None
+        else []
+    )
+    lines = _merge_flat_render_lines(public_series, structured_series)
     payload: dict[str, Any] = {
         "schemaVersion": INDICATOR_PAYLOAD_SCHEMA_VERSION,
         "ok": True,

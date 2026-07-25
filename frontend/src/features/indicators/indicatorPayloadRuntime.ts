@@ -180,6 +180,11 @@ function normalizeSeriesToLines(
       pane: item.pane || "main",
       overlay: item.pane !== "separate" && item.pane !== "volume",
       colorData: style.colorData || null,
+      ...(style.visible !== undefined ? { visible: style.visible } : {}),
+      ...(style.base !== undefined ? { base: style.base } : {}),
+      ...(style.trackPrice !== undefined
+        ? { trackPrice: style.trackPrice }
+        : {}),
       data: item.data || [],
     };
   });

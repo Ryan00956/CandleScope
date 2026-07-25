@@ -414,6 +414,28 @@ class CapabilityHandleAuthority:
             },
         )
 
+    def record_request_context_denied(
+        self,
+        call: HostCallRequest,
+        *,
+        plugin_id: str,
+        entrypoint_id: str,
+        instance_id: str,
+        generation: int,
+        reason: str,
+    ) -> None:
+        """Audit a Host-owned invocation-correlation rejection without leaking a handle."""
+
+        self._audit_validation_denied(
+            call,
+            plugin_id=plugin_id,
+            entrypoint_id=entrypoint_id,
+            instance_id=instance_id,
+            generation=generation,
+            handle_fingerprint=_fingerprint(call.capability_handle),
+            reason=reason,
+        )
+
     def revoke_handle(self, handle: str, *, trace_id: str | None = None) -> bool:
         fingerprint = _fingerprint(handle)
         lease = self._leases.pop(fingerprint, None)
@@ -563,12 +585,22 @@ class CapabilityBroker:
             raise ValueError("capability method is already registered")
         self._policies[policy.method] = policy
 
+    def requires_user_action(self, method: str) -> bool:
+        """Return whether the registered Host method consumes a Host action permit."""
+
+        policy = self._policies.get(method)
+        return bool(policy is not None and policy.require_user_action)
+
     async def handle(
         self,
         call: HostCallRequest,
         grant: CapabilityGrant,
         lease: CapabilityLease,
+        *,
+        user_action_authorized: bool = False,
     ) -> dict[str, Any]:
+        if not isinstance(user_action_authorized, bool):
+            raise TypeError("user_action_authorized must be a boolean")
         started = self._clock()
         try:
             policy = self._policies.get(call.method)
@@ -584,10 +616,10 @@ class CapabilityBroker:
                     "Host method does not belong to the supplied capability",
                     plugin_id=lease.plugin_id,
                 )
-            if policy.require_user_action and not call.request_context.user_action:
+            if policy.require_user_action and not user_action_authorized:
                 raise security_error(
                     "CAPABILITY_USER_ACTION_REQUIRED",
-                    "Host method requires a current user action",
+                    "Host method requires an unconsumed Host user-action credential",
                     plugin_id=lease.plugin_id,
                 )
             request_bytes = len(canonical_dumps(call.params).encode("utf-8"))

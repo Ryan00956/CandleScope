@@ -606,17 +606,33 @@ def ensure_first_party_plugins_from_environment(
                 opener=opener,
             )
 
-    # Every pending bundle is downloaded and verified before the first registry
-    # mutation. Installation is then deterministic in runtime-id order.
-    for release in pending:
-        bundle_path, downloaded = resolved_bundles[release.runtime_id]
-        installed = installer.install(
-            bundle_path,
-            expected_sha256=release.sha256,
+    # Every pending bundle is downloaded and outer-verified first. For multiple
+    # runtimes the installer also completes every internal bundle/environment/
+    # protocol probe before one atomic registry replacement publishes the set.
+    if len(pending) > 1:
+        installed_values = installer.install_many(
+            tuple(
+                (resolved_bundles[release.runtime_id][0], release.sha256)
+                for release in pending
+            ),
             enabled=True,
             auto_start=True,
             required=True,
         )
+    else:
+        installed_values = tuple(
+            installer.install(
+                resolved_bundles[release.runtime_id][0],
+                expected_sha256=release.sha256,
+                enabled=True,
+                auto_start=True,
+                required=True,
+            )
+            for release in pending
+        )
+
+    for release, installed in zip(pending, installed_values, strict=True):
+        _bundle_path, downloaded = resolved_bundles[release.runtime_id]
         results[release.runtime_id] = FirstPartyPluginBootstrapItemResult(
             status="installed" if installed.changed else "ready",
             runtime_id=release.runtime_id,

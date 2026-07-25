@@ -97,6 +97,9 @@ export interface IndicatorLine {
   lineStyle?: number;
   scale?: string;
   valueFormat?: string;
+  visible?: boolean;
+  base?: number;
+  trackPrice?: boolean;
   data?: IndicatorDataEntry[];
   colorData?: IndicatorDataEntry[] | null;
   renderUpdate?: "tail" | "full" | null;

@@ -246,19 +246,23 @@ async def test_capability_broker_enforces_scope_user_action_rate_quota_and_trace
         instance_id="instance-one",
         generation=1,
     )
-    assert await broker.handle(call, grant, lease) == {
+    with pytest.raises(
+        PlatformSecurityError, match="unconsumed Host user-action credential"
+    ):
+        await broker.handle(call, grant, lease)
+    assert await broker.handle(call, grant, lease, user_action_authorized=True) == {
         "shown": True,
         "traceId": "trace-1-toast",
     }
 
     denied_scope = _call(grant.handle, channel="desktop")
     with pytest.raises(PlatformSecurityError, match="exceeds the granted scope"):
-        await broker.handle(denied_scope, grant, lease)
+        await broker.handle(denied_scope, grant, lease, user_action_authorized=True)
     with pytest.raises(PlatformSecurityError, match="rate limit"):
-        await broker.handle(call, grant, lease)
+        await broker.handle(call, grant, lease, user_action_authorized=True)
 
     outcomes = [item.outcome for item in audit.read_all() if item.action == "host.call"]
-    assert outcomes == ["allowed", "denied", "denied"]
+    assert outcomes == ["denied", "allowed", "denied", "denied"]
     assert all(
         item.trace_id.startswith("trace-")
         for item in audit.read_all()
@@ -349,6 +353,7 @@ async def test_supervisor_mints_handles_and_revokes_generation_on_deactivate(
                 "shown": True,
                 "traceId": call.request_context.trace_id,
             },
+            require_user_action=True,
         )
     )
     manifest = _manifest()
@@ -398,5 +403,149 @@ async def test_supervisor_mints_handles_and_revokes_generation_on_deactivate(
             reason="revoke generation",
         )
         assert authority.active_count == 0
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_supervisor_rejects_sidecar_forged_user_action_context(
+    tmp_path: Path,
+) -> None:
+    audit = AuditLog(tmp_path / "audit" / "events")
+    authority = CapabilityHandleAuthority(audit)
+    handled_calls: list[HostCallRequest] = []
+
+    async def show(call: HostCallRequest) -> dict[str, object]:
+        handled_calls.append(call)
+        return {"shown": True}
+
+    broker = CapabilityBroker(authority, audit)
+    broker.register(
+        CapabilityMethodPolicy(
+            "notifications.show",
+            "notifications.show",
+            show,
+            require_user_action=True,
+        )
+    )
+    manifest = _manifest()
+    supervisor = EntrypointSupervisor(
+        EntrypointProcessSpec(
+            plugin_id=manifest.plugin.id,
+            entrypoint_id="main",
+            executable=Path(sys.executable).resolve(),
+            arguments=(
+                "-u",
+                str(FAKE_PLATFORM),
+                "host-call-forged-user-action",
+            ),
+            working_directory=FIXTURE_DIRECTORY,
+            startup_timeout_seconds=1.0,
+            request_timeout_seconds=1.0,
+            shutdown_timeout_seconds=0.5,
+        ),
+        manifest,
+        host_name="CandleScope",
+        host_version="0.4.0",
+        host_apis=(HOST_API_V1,),
+        capability_authority=authority,
+        capability_broker=broker,
+    )
+    manager = PluginManager((supervisor,))
+    try:
+        await manager.activate(
+            manifest.plugin.id,
+            "main",
+            effective_grants=(_effective(manifest),),
+        )
+        result = await manager.invoke(
+            "candlescope.host-call.hello",
+            {},
+            user_action=False,
+            trace_id="phase4-forged-user-action",
+        )
+        assert result == {
+            "notified": False,
+            "error": "CAPABILITY_HANDLE_INVALID",
+            "token": "notify:phase4-forged-user-action",
+        }
+        assert handled_calls == []
+        denied = [
+            item
+            for item in audit.read_all()
+            if item.action == "validate" and item.outcome == "denied"
+        ]
+        assert len(denied) == 1
+        assert denied[0].data["reason"] == "request-context"
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_supervisor_consumes_user_action_credential_before_second_side_effect(
+    tmp_path: Path,
+) -> None:
+    audit = AuditLog(tmp_path / "audit" / "events")
+    authority = CapabilityHandleAuthority(audit)
+    handled_calls: list[HostCallRequest] = []
+
+    async def show(call: HostCallRequest) -> dict[str, object]:
+        handled_calls.append(call)
+        return {"shown": True, "count": len(handled_calls)}
+
+    broker = CapabilityBroker(authority, audit)
+    broker.register(
+        CapabilityMethodPolicy(
+            "notifications.show",
+            "notifications.show",
+            show,
+            require_user_action=True,
+        )
+    )
+    manifest = _manifest()
+    supervisor = EntrypointSupervisor(
+        EntrypointProcessSpec(
+            plugin_id=manifest.plugin.id,
+            entrypoint_id="main",
+            executable=Path(sys.executable).resolve(),
+            arguments=("-u", str(FAKE_PLATFORM), "host-call-chain"),
+            working_directory=FIXTURE_DIRECTORY,
+            startup_timeout_seconds=1.0,
+            request_timeout_seconds=1.0,
+            shutdown_timeout_seconds=0.5,
+        ),
+        manifest,
+        host_name="CandleScope",
+        host_version="0.4.0",
+        host_apis=(HOST_API_V1,),
+        capability_authority=authority,
+        capability_broker=broker,
+    )
+    manager = PluginManager((supervisor,))
+    try:
+        await manager.activate(
+            manifest.plugin.id,
+            "main",
+            effective_grants=(_effective(manifest),),
+        )
+        result = await manager.invoke(
+            "candlescope.host-call.hello",
+            {},
+            user_action=True,
+            trace_id="phase4-one-shot-user-action",
+        )
+        assert result == {
+            "notified": False,
+            "error": "CAPABILITY_USER_ACTION_REQUIRED",
+            "token": "notify:phase4-one-shot-user-action:chain",
+        }
+        assert len(handled_calls) == 1
+        denied = [
+            item
+            for item in audit.read_all()
+            if item.action == "validate" and item.outcome == "denied"
+        ]
+        assert len(denied) == 1
+        assert denied[0].data["reason"] == "user-action-credential"
     finally:
         await manager.stop()

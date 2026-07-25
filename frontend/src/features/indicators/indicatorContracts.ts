@@ -382,10 +382,19 @@ function parseIndicatorLine(value: unknown, path: string): IndicatorLine {
     `${path}.zIndex`,
   );
   const overlay = optionalIndicatorBoolean(record.overlay, `${path}.overlay`);
+  const visible = optionalIndicatorBoolean(record.visible, `${path}.visible`);
+  const base = optionalIndicatorFiniteNumber(record.base, `${path}.base`);
+  const trackPrice = optionalIndicatorBoolean(
+    record.trackPrice ?? record.track_price,
+    `${path}.trackPrice`,
+  );
   if (lineWidth !== undefined) line.lineWidth = lineWidth;
   if (lineStyle !== undefined) line.lineStyle = lineStyle;
   if (zIndex !== undefined) line.zIndex = zIndex;
   if (overlay !== undefined) line.overlay = overlay;
+  if (visible !== undefined) line.visible = visible;
+  if (base !== undefined) line.base = base;
+  if (trackPrice !== undefined) line.trackPrice = trackPrice;
   if (record.colorData !== undefined || record.color_data !== undefined) {
     line.colorData = parseOptionalArray(
       record.colorData ?? record.color_data,
@@ -406,6 +415,15 @@ function parseIndicatorUnifiedSeries(
     style.colorData ?? style.color_data,
     `${path}.style.colorData`,
     parseIndicatorColorPoint,
+  );
+  const visible = optionalIndicatorBoolean(
+    style.visible,
+    `${path}.style.visible`,
+  );
+  const base = optionalIndicatorFiniteNumber(style.base, `${path}.style.base`);
+  const trackPrice = optionalIndicatorBoolean(
+    style.trackPrice ?? style.track_price,
+    `${path}.style.trackPrice`,
   );
   const series: IndicatorUnifiedSeries = {
     id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
@@ -436,6 +454,9 @@ function parseIndicatorUnifiedSeries(
           `${path}.style.lineStyle`,
         ) ?? 0,
       ...(colorData.length > 0 ? { colorData } : {}),
+      ...(visible !== undefined ? { visible } : {}),
+      ...(base !== undefined ? { base } : {}),
+      ...(trackPrice !== undefined ? { trackPrice } : {}),
     },
   };
   const indicatorId =

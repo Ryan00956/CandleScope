@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -88,6 +90,16 @@ def test_install_quick_repeat_upgrade_and_power_safe_rollback(tmp_path: Path) ->
     assert repeated.activation_id == first.activation_id
     assert installer.registry_path.read_bytes() == registry_before_repeat
     assert venv_marker.stat().st_mtime_ns == marker_before_repeat
+    installer.grant_store.path.unlink()
+    grants_reconciled = installer.install(
+        first_bundle.bundle.path,
+        expected_sha256=first_bundle.bundle.sha256,
+        enabled=True,
+    )
+    assert grants_reconciled.changed is True
+    assert grants_reconciled.activation_id == first.activation_id
+    assert installer.registry_path.read_bytes() == registry_before_repeat
+    grants_before_failed_upgrade = installer.grant_store.path.read_bytes()
 
     original_replace = installer_module._replace_file
 
@@ -96,6 +108,12 @@ def test_install_quick_repeat_upgrade_and_power_safe_rollback(tmp_path: Path) ->
             raise OSError("simulated power loss before registry replace")
         original_replace(source, destination)
 
+    original_compensation = installer._compensate_state_transaction
+
+    def simulate_process_loss(**_kwargs: object) -> None:
+        return None
+
+    installer._compensate_state_transaction = simulate_process_loss  # type: ignore[method-assign]
     installer_module._replace_file = fail_registry_replace
     try:
         with pytest.raises(PlatformInstallerError, match="atomically write"):
@@ -106,10 +124,36 @@ def test_install_quick_repeat_upgrade_and_power_safe_rollback(tmp_path: Path) ->
             )
     finally:
         installer_module._replace_file = original_replace
+        installer._compensate_state_transaction = original_compensation  # type: ignore[method-assign]
     assert installer.registry_path.read_bytes() == registry_before_repeat
+    assert installer.grant_store.path.read_bytes() != grants_before_failed_upgrade
+    assert installer.state_transaction_path.is_file()
+
+    installer = PlatformPluginInstaller(root=root)
+    assert not installer.state_transaction_path.exists()
+    assert installer.grant_store.path.read_bytes() == grants_before_failed_upgrade
     assert load_activation_registry(installer.registry_path).by_id()[
         first.plugin_id
     ].version == ("0.1.0")
+    compensation_receipts = sorted(
+        (installer.history_directory / first.plugin_id / "compensations").glob("*.json")
+    )
+    assert len(compensation_receipts) == 1
+    compensated_upgrade = json.loads(
+        compensation_receipts[0].read_text(encoding="utf-8")
+    )
+    assert compensated_upgrade["outcome"] == "compensated"
+    assert compensated_upgrade["uncommittedHistoryPolicy"] == "retained-audit-only"
+    assert (
+        installer.history_directory
+        / first.plugin_id
+        / "activations"
+        / f"{compensated_upgrade['attemptedActivationId']}.json"
+    ).is_file()
+    assert installer.rollback_status(first.plugin_id) == {
+        "available": True,
+        "target": {"state": "uninstalled", "version": None},
+    }
 
     upgraded = installer.install(
         second_bundle.bundle.path,
@@ -126,6 +170,7 @@ def test_install_quick_repeat_upgrade_and_power_safe_rollback(tmp_path: Path) ->
         == "0.2.0"
     )
     registry_before_power_loss = installer.registry_path.read_bytes()
+    grants_before_failed_rollback = installer.grant_store.path.read_bytes()
     installer_module._replace_file = fail_registry_replace
     try:
         with pytest.raises(PlatformInstallerError, match="atomically write"):
@@ -133,12 +178,27 @@ def test_install_quick_repeat_upgrade_and_power_safe_rollback(tmp_path: Path) ->
     finally:
         installer_module._replace_file = original_replace
     assert installer.registry_path.read_bytes() == registry_before_power_loss
+    assert installer.grant_store.path.read_bytes() == grants_before_failed_rollback
     assert (
         load_activation_registry(installer.registry_path)
         .by_id()[first.plugin_id]
         .version
         == "0.2.0"
     )
+    assert (
+        len(
+            tuple(
+                (installer.history_directory / first.plugin_id / "compensations").glob(
+                    "*.json"
+                )
+            )
+        )
+        == 2
+    )
+    assert installer.rollback_status(first.plugin_id) == {
+        "available": True,
+        "target": {"state": "active", "version": "0.1.0"},
+    }
 
     rolled_back = installer.rollback(first.plugin_id)
     assert rolled_back.from_activation_id == upgraded.activation_id
@@ -161,6 +221,150 @@ def test_install_quick_repeat_upgrade_and_power_safe_rollback(tmp_path: Path) ->
         first.plugin_id not in load_activation_registry(installer.registry_path).by_id()
     )
     assert legacy_registry.read_bytes() == legacy_bytes
+
+
+def test_failed_install_compensation_preserves_concurrent_grant_mutation(
+    tmp_path: Path,
+) -> None:
+    initial = build_hello_platform_bundle(
+        tmp_path / "initial",
+        version="0.1.0",
+        required_permission=True,
+    )
+    installer = PlatformPluginInstaller(root=tmp_path / "managed")
+    installed = installer.install(
+        initial.bundle.path,
+        expected_sha256=initial.bundle.sha256,
+    )
+    installer.grant_permission(
+        installed.plugin_id,
+        "market.bars.read",
+        scope={"symbols": ["BTCUSDT"]},
+    )
+    installer.enable(installed.plugin_id)
+    active_before = load_activation_registry(installer.registry_path).by_id()[
+        installed.plugin_id
+    ]
+
+    entered_commit = threading.Event()
+    release_commit = threading.Event()
+    original_commit = installer._commit_registry_change
+
+    def fail_update_commit(registry, plugin_id, before, after):
+        if after is not None and after.activation_id != active_before.activation_id:
+            entered_commit.set()
+            assert release_commit.wait(timeout=10)
+            raise OSError("simulated registry failure after grant reconciliation")
+        return original_commit(registry, plugin_id, before, after)
+
+    installer._commit_registry_change = fail_update_commit  # type: ignore[method-assign]
+    mutation_started = threading.Event()
+    grant_arguments = {
+        "bundle_sha256": initial.bundle.sha256,
+        "manifest_sha256": initial.bundle.manifest_sha256,
+        "publisher_identity": installer._publisher_identity(initial.bundle),
+    }
+
+    def deny_current_grant():
+        mutation_started.set()
+        return installer.grant_store.deny(
+            initial.bundle.manifest,
+            permission_id="market.bars.read",
+            **grant_arguments,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            upgrade = executor.submit(
+                installer.install,
+                initial.bundle.path,
+                expected_sha256=initial.bundle.sha256,
+            )
+            assert entered_commit.wait(timeout=10)
+            mutation = executor.submit(deny_current_grant)
+            assert mutation_started.wait(timeout=5)
+            assert mutation.done() is False
+            release_commit.set()
+            with pytest.raises(
+                OSError,
+                match="simulated registry failure after grant reconciliation",
+            ):
+                upgrade.result(timeout=10)
+            assert mutation.result(timeout=10).changed is True
+    finally:
+        release_commit.set()
+        installer._commit_registry_change = original_commit  # type: ignore[method-assign]
+
+    assert not installer.state_transaction_path.exists()
+    summary = installer.permission_summary(installed.plugin_id)[0]
+    assert summary["permissions"][0]["decision"] == "denied"
+    active = load_activation_registry(installer.registry_path).by_id()[
+        installed.plugin_id
+    ]
+    assert active == active_before
+
+
+def test_interrupted_activation_restore_recovers_to_the_original_savepoint(
+    tmp_path: Path,
+) -> None:
+    initial = build_hello_platform_bundle(
+        tmp_path / "initial",
+        version="0.1.0",
+    )
+    update = build_hello_platform_bundle(
+        tmp_path / "update",
+        version="0.2.0",
+    )
+    root = tmp_path / "managed"
+    installer = PlatformPluginInstaller(root=root)
+    installed = installer.install(
+        initial.bundle.path,
+        expected_sha256=initial.bundle.sha256,
+        enabled=True,
+    )
+    savepoint = installer.capture_activation_state(installed.plugin_id)
+    upgraded = installer.install(
+        update.bundle.path,
+        expected_sha256=update.bundle.sha256,
+        enabled=True,
+    )
+
+    original_replace = installer_module._replace_file
+    original_compensation = installer._compensate_state_transaction
+
+    def fail_restore_registry_replace(source: Path, destination: Path) -> None:
+        if destination == installer.registry_path:
+            raise OSError("simulated power loss during activation restore")
+        original_replace(source, destination)
+
+    def simulate_process_loss(**_kwargs: object) -> None:
+        return None
+
+    installer_module._replace_file = fail_restore_registry_replace
+    installer._compensate_state_transaction = simulate_process_loss  # type: ignore[method-assign]
+    try:
+        with pytest.raises(PlatformInstallerError, match="atomically write"):
+            installer.restore_activation_state(
+                savepoint,
+                expected_activation_id=upgraded.activation_id,
+                expected_grant_record_sha256=upgraded.grant_record_sha256,
+            )
+    finally:
+        installer_module._replace_file = original_replace
+        installer._compensate_state_transaction = original_compensation  # type: ignore[method-assign]
+
+    assert installer.state_transaction_path.is_file()
+    assert load_activation_registry(installer.registry_path).by_id()[
+        installed.plugin_id
+    ].version == ("0.2.0")
+
+    recovered = PlatformPluginInstaller(root=root)
+    assert not recovered.state_transaction_path.exists()
+    assert (
+        load_activation_registry(recovered.registry_path).by_id()[installed.plugin_id]
+        == savepoint.activation
+    )
+    assert recovered.grant_store.load().by_id()[installed.plugin_id] == savepoint.grant
 
 
 def test_failed_second_entrypoint_never_creates_partial_activation(

@@ -339,6 +339,49 @@ async def test_appcontainer_forwards_interactive_jsonl_without_waiting_for_eof(
         await managed.terminate()
 
 
+def test_runner_exits_cleanly_while_parent_stdin_remains_open(
+    compiled_probe: tuple[Path, Path],
+    sandbox_policy: SandboxPolicy,
+) -> None:
+    installation, executable = compiled_probe
+    prepared = prepare_sandbox_launch(
+        sandbox_policy,
+        (str(executable), "exit-without-reading-stdin"),
+        installation,
+    )
+    process = subprocess.Popen(
+        list(prepared.command),
+        cwd=prepared.working_directory,
+        env=prepared.environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+    )
+    try:
+        assert process.stdin is not None
+        assert process.stdin.closed is False
+        return_code = process.wait(timeout=10)
+        assert process.stdin.closed is False
+        stdout = process.stdout.read() if process.stdout is not None else ""
+        stderr = process.stderr.read() if process.stderr is not None else ""
+        assert return_code == 2, (stdout, stderr)
+        assert "CANDLESCOPE_SANDBOX_LAUNCH_ERROR" not in stderr
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+    status = json.loads(prepared.status_path.read_text(encoding="utf-8"))
+    assert status["status"] == "exited"
+    assert status["exitCode"] == 2
+
+
 @pytest.mark.anyio
 async def test_stderr_overflow_kills_wrapper_and_its_appcontainer_job_tree(
     compiled_probe: tuple[Path, Path],

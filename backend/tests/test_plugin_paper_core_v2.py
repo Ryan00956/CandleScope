@@ -151,6 +151,33 @@ async def test_real_paper_bundle_runs_guarded_host_owned_order_flow(
             assert repeated.status_code == 200
             assert repeated.json()["idempotentReplay"] is True
 
+            invalid_cancel_recovery = await client.post(
+                "/api/v2/plugins/manage/paper/orders/recover",
+                headers=guard.trusted_headers(user_action="paper-recover-invalid"),
+                json={
+                    "brokerId": "fixture-paper",
+                    "accountId": "paper-main",
+                    "idempotencyKey": "api-cancel-recover-invalid",
+                    "targetOperation": "orders.cancel",
+                },
+            )
+            assert invalid_cancel_recovery.status_code == 400
+            missing_cancel_recovery = await client.post(
+                "/api/v2/plugins/manage/paper/orders/recover",
+                headers=guard.trusted_headers(user_action="paper-recover-cancel"),
+                json={
+                    "brokerId": "fixture-paper",
+                    "accountId": "paper-main",
+                    "idempotencyKey": "api-cancel-recover-missing",
+                    "targetOperation": "orders.cancel",
+                    "orderId": submitted.json()["order"]["orderId"],
+                },
+            )
+            assert missing_cancel_recovery.status_code == 409
+            assert missing_cancel_recovery.json()["detail"]["code"] == (
+                "PLUGIN_PAPER_CANCEL_RECOVERY_NOT_FOUND"
+            )
+
             account = await client.get(
                 "/api/v2/plugins/manage/paper/accounts/fixture-paper/paper-main",
                 headers=guard.trusted_headers(),

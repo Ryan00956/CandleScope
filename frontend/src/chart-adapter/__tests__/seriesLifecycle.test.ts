@@ -9,6 +9,7 @@ import {
   removeSeriesEntries,
   replaceMainSeries,
   resyncSeriesTimeScaleIndexes,
+  selectIndicatorPaneAnnotationTarget,
   shouldPreferIndicatorSetData,
 } from "../seriesLifecycle.js";
 import { chartSeriesTypes } from "../lightweightChartSurface.js";
@@ -132,6 +133,65 @@ test("only volume-pane histograms use volume number formatting", () => {
   assert.equal(
     buildIndicatorSeriesOptions({ type: "histogram", pane: "separate" }).priceFormat,
     undefined,
+  );
+});
+
+test("indicator series options preserve hidden state, histogram base, and track price", () => {
+  const options = buildIndicatorSeriesOptions({
+    type: "histogram",
+    pane: "separate",
+    base: 25,
+    trackPrice: true,
+    visible: false,
+  });
+
+  assert.equal(options.visible, false);
+  assert.equal(options.base, 25);
+  assert.equal(options.priceLineVisible, true);
+});
+
+test("reused histograms reset an omitted base to the Lightweight Charts default", () => {
+  const initial = buildIndicatorSeriesOptions({
+    type: "histogram",
+    base: 25,
+  });
+  const update = buildIndicatorSeriesOptions({
+    type: "histogram",
+  });
+
+  assert.equal(initial.base, 25);
+  assert.equal(update.base, 0);
+  assert.equal({ ...initial, ...update }.base, 0);
+});
+
+test("pane annotations prefer a visible series and fall back when all plots are hidden", () => {
+  const hidden = structuralMock<IndicatorSeries>({});
+  const visible = structuralMock<IndicatorSeries>({});
+  const fallback = structuralMock<IndicatorSeries>({});
+  const entries = [
+    {
+      paneId: "separate-pine-1",
+      lineConfig: { visible: false },
+      series: hidden,
+    },
+    {
+      paneId: "separate-pine-1",
+      lineConfig: { visible: true },
+      series: visible,
+    },
+  ];
+
+  assert.equal(
+    selectIndicatorPaneAnnotationTarget(entries, "separate-pine-1", fallback),
+    visible,
+  );
+  assert.equal(
+    selectIndicatorPaneAnnotationTarget(
+      entries.slice(0, 1),
+      "separate-pine-1",
+      fallback,
+    ),
+    fallback,
   );
 });
 

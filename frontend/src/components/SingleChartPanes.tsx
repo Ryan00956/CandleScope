@@ -36,6 +36,7 @@ import {
   removeSeriesEntries,
   replaceMainSeries,
   resyncSeriesTimeScaleIndexes,
+  selectIndicatorPaneAnnotationTarget,
   shouldPreferIndicatorSetData,
 } from "../chart-adapter/seriesLifecycle";
 import {
@@ -3660,7 +3661,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       const paneApi = chart.panes?.()?.[pane.paneIndex] || null;
       const targetSeries = pane.id === "main"
         ? mainSeriesRef.current
-        : indicatorSeriesRef.current.find((entry) => entry.paneId === pane.id)?.series;
+        : selectIndicatorPaneAnnotationTarget(
+          indicatorSeriesRef.current,
+          pane.id,
+          panePlaceholderSeriesRef.current.seriesByPane.get(pane.paneIndex)?.series
+            ?? null,
+        );
 
       renderBgcolors({
         chart,

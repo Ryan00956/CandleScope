@@ -207,9 +207,28 @@ class PluginPaperRuntime:
                 raise paper_error(
                     "PLUGIN_PAPER_STATE_INVALID", "Paper idempotency record is invalid"
                 )
-            if record.get("status") == "pending":
+            recovery = record.get("recovery")
+            if recovery is not None and (
+                not isinstance(recovery, dict)
+                or set(recovery) != {"status", "attempt"}
+                or recovery.get("status") not in {"pending", "unknown", "completed"}
+                or isinstance(recovery.get("attempt"), bool)
+                or not isinstance(recovery.get("attempt"), int)
+                or recovery["attempt"] < 1
+            ):
+                raise paper_error(
+                    "PLUGIN_PAPER_STATE_INVALID",
+                    "Paper recovery attempt is invalid",
+                )
+            submission_pending = record.get("status") == "pending"
+            recovery_pending = (
+                isinstance(recovery, dict) and recovery.get("status") == "pending"
+            )
+            if submission_pending or recovery_pending:
                 recovered_pending = True
                 record["status"] = "unknown"
+                if recovery_pending:
+                    recovery["status"] = "unknown"
                 result = record.get("result")
                 if isinstance(result, dict) and isinstance(result.get("order"), dict):
                     result["order"]["status"] = "unknown"
@@ -228,6 +247,62 @@ class PluginPaperRuntime:
                     )
                     if isinstance(order, dict):
                         order["status"] = "unknown"
+        for record in value["cancelIdempotency"].values():
+            if not isinstance(record, dict):
+                raise paper_error(
+                    "PLUGIN_PAPER_STATE_INVALID",
+                    "Paper cancel idempotency record is invalid",
+                )
+            recovery = record.get("recovery")
+            if recovery is not None and (
+                not isinstance(recovery, dict)
+                or set(recovery) != {"status", "attempt"}
+                or recovery.get("status") not in {"pending", "unknown", "completed"}
+                or isinstance(recovery.get("attempt"), bool)
+                or not isinstance(recovery.get("attempt"), int)
+                or recovery["attempt"] < 1
+            ):
+                raise paper_error(
+                    "PLUGIN_PAPER_STATE_INVALID",
+                    "Paper cancel recovery attempt is invalid",
+                )
+            cancel_pending = record.get("status") == "pending"
+            recovery_pending = (
+                isinstance(recovery, dict) and recovery.get("status") == "pending"
+            )
+            if not cancel_pending and not recovery_pending:
+                continue
+            broker_id = record.get("brokerId")
+            account_id = record.get("accountId")
+            order_id = record.get("orderId")
+            result = record.get("result")
+            account = (
+                value["accounts"].get(self._account_key(broker_id, account_id))
+                if isinstance(broker_id, str) and isinstance(account_id, str)
+                else None
+            )
+            order = (
+                account.get("orders", {}).get(order_id)
+                if isinstance(account, dict) and isinstance(order_id, str)
+                else None
+            )
+            if not isinstance(order, dict) or not isinstance(result, dict):
+                raise paper_error(
+                    "PLUGIN_PAPER_STATE_INVALID",
+                    "Pending Paper cancel record is invalid",
+                )
+            recovered_pending = True
+            record["status"] = "unknown"
+            if recovery_pending:
+                recovery["status"] = "unknown"
+            order["status"] = "unknown"
+            result["order"] = self._public_order(order)
+            self._sync_submission_order_in_state(
+                value,
+                broker_id,
+                account_id,
+                order,
+            )
         if recovered_pending:
             atomic_write_json(self.state_path, value)
         return value
@@ -480,13 +555,18 @@ class PluginPaperRuntime:
             )
         }
 
-    def _sync_submission_order(
-        self, broker_id: str, account_id: str, order: dict[str, Any]
+    @classmethod
+    def _sync_submission_order_in_state(
+        cls,
+        state: dict[str, Any],
+        broker_id: str,
+        account_id: str,
+        order: dict[str, Any],
     ) -> None:
-        record_key = self._idempotency_key(
+        record_key = cls._idempotency_key(
             broker_id, account_id, order["idempotencyKey"]
         )
-        record = self._state["idempotency"].get(record_key)
+        record = state["idempotency"].get(record_key)
         if record is None or record.get("orderId") != order["orderId"]:
             raise paper_error(
                 "PLUGIN_PAPER_STATE_INVALID",
@@ -498,6 +578,36 @@ class PluginPaperRuntime:
             raise paper_error(
                 "PLUGIN_PAPER_STATE_INVALID",
                 "Paper submission result is invalid",
+            )
+        result["order"] = cls._public_order(order)
+
+    def _sync_submission_order(
+        self, broker_id: str, account_id: str, order: dict[str, Any]
+    ) -> None:
+        self._sync_submission_order_in_state(
+            self._state,
+            broker_id,
+            account_id,
+            order,
+        )
+
+    def _mark_cancel_unknown(
+        self,
+        *,
+        record: dict[str, Any],
+        broker_id: str,
+        account_id: str,
+        order: dict[str, Any],
+    ) -> None:
+        record["status"] = "unknown"
+        order["status"] = "unknown"
+        order["updatedAtMs"] = self._clock_ms()
+        self._sync_submission_order(broker_id, account_id, order)
+        result = record.get("result")
+        if not isinstance(result, dict):
+            raise paper_error(
+                "PLUGIN_PAPER_STATE_INVALID",
+                "Paper cancel result is invalid",
             )
         result["order"] = self._public_order(order)
 
@@ -998,6 +1108,29 @@ class PluginPaperRuntime:
                     expected_account_id=intent.account_id,
                     expected_idempotency_key=intent.idempotency_key,
                 )
+            except asyncio.CancelledError:
+                order["status"] = "unknown"
+                order["updatedAtMs"] = self._clock_ms()
+                record["status"] = "unknown"
+                result["order"] = self._public_order(order)
+                self._persist()
+                audit_id = self._audit(
+                    action="submit",
+                    outcome="unknown",
+                    trace_id=trace_id,
+                    plugin_id=broker.plugin_id,
+                    data={
+                        "brokerId": intent.broker_id,
+                        "accountId": intent.account_id,
+                        "orderId": order_id,
+                        "idempotencyKey": intent.idempotency_key,
+                        "intentSha256": fingerprint,
+                        "quoteId": quote.quote_id,
+                    },
+                )
+                result["auditEventId"] = audit_id
+                self._persist()
+                raise
             except Exception:
                 ack = {"status": "unknown", "executorOrderId": None, "reasonCode": None}
             status = ack["status"]
@@ -1073,6 +1206,21 @@ class PluginPaperRuntime:
                         "Paper cancel idempotency key was reused",
                         plugin_id=broker.plugin_id,
                     )
+                if existing.get("status") == "pending":
+                    pending_order = account["orders"].get(existing.get("orderId"))
+                    if not isinstance(pending_order, dict):
+                        raise paper_error(
+                            "PLUGIN_PAPER_STATE_INVALID",
+                            "Pending Paper cancel order is missing",
+                            plugin_id=broker.plugin_id,
+                        )
+                    self._mark_cancel_unknown(
+                        record=existing,
+                        broker_id=broker_id,
+                        account_id=account_id,
+                        order=pending_order,
+                    )
+                    self._persist()
                 return {**existing["result"], "idempotentReplay": True}
             if len(self._state["cancelIdempotency"]) >= MAX_IDEMPOTENCY_RECORDS:
                 raise paper_error(
@@ -1108,11 +1256,31 @@ class PluginPaperRuntime:
                 }
                 self._state["cancelIdempotency"][record_key] = {
                     "fingerprint": fingerprint,
+                    "status": "no-op",
+                    "brokerId": broker_id,
+                    "accountId": account_id,
+                    "orderId": order_id,
                     "result": result,
                 }
                 self._persist()
                 return result
             previous_status = order["status"]
+            result = {
+                "order": self._public_order(order),
+                "idempotentReplay": False,
+                "auditEventId": None,
+            }
+            record = {
+                "fingerprint": fingerprint,
+                "status": "pending",
+                "brokerId": broker_id,
+                "accountId": account_id,
+                "orderId": order_id,
+                "previousStatus": previous_status,
+                "result": result,
+            }
+            self._state["cancelIdempotency"][record_key] = record
+            self._persist()
             try:
                 raw = await self._invoke(
                     broker.executor_contribution,
@@ -1133,6 +1301,29 @@ class PluginPaperRuntime:
                     expected_account_id=account_id,
                     expected_idempotency_key=idempotency_key,
                 )
+            except asyncio.CancelledError:
+                self._mark_cancel_unknown(
+                    record=record,
+                    broker_id=broker_id,
+                    account_id=account_id,
+                    order=order,
+                )
+                self._persist()
+                audit_id = self._audit(
+                    action="cancel",
+                    outcome="unknown",
+                    trace_id=trace_id,
+                    plugin_id=broker.plugin_id,
+                    data={
+                        "brokerId": broker_id,
+                        "accountId": account_id,
+                        "orderId": order_id,
+                        "idempotencyKey": idempotency_key,
+                    },
+                )
+                result["auditEventId"] = audit_id
+                self._persist()
+                raise
             except Exception:
                 ack = {"status": "unknown", "reasonCode": None}
             if ack["status"] == "accepted":
@@ -1145,6 +1336,8 @@ class PluginPaperRuntime:
             order["updatedAtMs"] = self._clock_ms()
             outcome = "rejected" if ack["status"] == "rejected" else order["status"]
             self._sync_submission_order(broker_id, account_id, order)
+            record["status"] = outcome
+            result["order"] = self._public_order(order)
             self._persist()
             audit_id = self._audit(
                 action="cancel",
@@ -1158,17 +1351,179 @@ class PluginPaperRuntime:
                     "idempotencyKey": idempotency_key,
                 },
             )
-            result = {
-                "order": self._public_order(order),
-                "idempotentReplay": False,
-                "auditEventId": audit_id,
-            }
-            self._state["cancelIdempotency"][record_key] = {
-                "fingerprint": fingerprint,
-                "result": result,
-            }
+            result["auditEventId"] = audit_id
             self._persist()
-            return result
+            return dict(result)
+
+    def _unresolved_cancel_for_order(
+        self,
+        *,
+        broker_id: str,
+        account_id: str,
+        order_id: str,
+    ) -> dict[str, Any] | None:
+        for record in self._state["cancelIdempotency"].values():
+            if (
+                isinstance(record, dict)
+                and record.get("brokerId") == broker_id
+                and record.get("accountId") == account_id
+                and record.get("orderId") == order_id
+                and record.get("status") in {"pending", "unknown"}
+            ):
+                return record
+        return None
+
+    async def _recover_cancel_locked(
+        self,
+        request: PaperRecoverRequest,
+        *,
+        broker: _PaperBroker,
+        account: dict[str, Any],
+        trace_id: str,
+        user_action: bool,
+    ) -> dict[str, Any]:
+        assert request.target_operation == "orders.cancel"
+        assert request.order_id is not None
+        record_key = self._idempotency_key(
+            request.broker_id,
+            request.account_id,
+            request.idempotency_key,
+        )
+        record = self._state["cancelIdempotency"].get(record_key)
+        if record is None:
+            raise paper_error(
+                "PLUGIN_PAPER_CANCEL_RECOVERY_NOT_FOUND",
+                "Paper cancellation has no recovery record",
+                plugin_id=broker.plugin_id,
+            )
+        if record.get("orderId") != request.order_id:
+            raise paper_error(
+                "PLUGIN_PAPER_IDEMPOTENCY_CONFLICT",
+                "Paper cancel recovery order does not match its idempotency record",
+                plugin_id=broker.plugin_id,
+            )
+        order = account["orders"].get(request.order_id)
+        if not isinstance(order, dict):
+            raise paper_error(
+                "PLUGIN_PAPER_STATE_INVALID",
+                "Paper cancel recovery order is missing",
+                plugin_id=broker.plugin_id,
+            )
+        result = record.get("result")
+        if not isinstance(result, dict):
+            raise paper_error(
+                "PLUGIN_PAPER_STATE_INVALID",
+                "Paper cancel recovery result is invalid",
+                plugin_id=broker.plugin_id,
+            )
+        if record.get("status") not in {"pending", "unknown"}:
+            return {**result, "idempotentReplay": True}
+        previous_status = record.get("previousStatus")
+        if previous_status not in {"open", "unknown"}:
+            raise paper_error(
+                "PLUGIN_PAPER_STATE_INVALID",
+                "Paper cancel recovery has an invalid previous order status",
+                plugin_id=broker.plugin_id,
+            )
+        previous_recovery = record.get("recovery")
+        previous_attempt = (
+            previous_recovery.get("attempt", 0)
+            if isinstance(previous_recovery, dict)
+            else 0
+        )
+        if (
+            isinstance(previous_attempt, bool)
+            or not isinstance(previous_attempt, int)
+            or previous_attempt < 0
+        ):
+            raise paper_error(
+                "PLUGIN_PAPER_STATE_INVALID",
+                "Paper cancel recovery attempt counter is invalid",
+                plugin_id=broker.plugin_id,
+            )
+        recovery = {
+            "status": "pending",
+            "attempt": previous_attempt + 1,
+        }
+        record["recovery"] = recovery
+        self._persist()
+        try:
+            raw = await self._invoke(
+                broker.executor_contribution,
+                request.to_wire(),
+                user_action,
+                trace_id,
+            )
+            ack = validate_paper_executor_ack(
+                raw,
+                expected_operation="orders.recover",
+                expected_broker_id=request.broker_id,
+                expected_account_id=request.account_id,
+                expected_idempotency_key=request.idempotency_key,
+            )
+        except asyncio.CancelledError:
+            recovery["status"] = "unknown"
+            self._mark_cancel_unknown(
+                record=record,
+                broker_id=request.broker_id,
+                account_id=request.account_id,
+                order=order,
+            )
+            self._persist()
+            audit_id = self._audit(
+                action="recover",
+                outcome="unknown",
+                trace_id=trace_id,
+                plugin_id=broker.plugin_id,
+                data={
+                    "brokerId": request.broker_id,
+                    "accountId": request.account_id,
+                    "orderId": request.order_id,
+                    "idempotencyKey": request.idempotency_key,
+                    "targetOperation": request.target_operation,
+                },
+            )
+            result["auditEventId"] = audit_id
+            self._persist()
+            raise
+        except Exception:
+            ack = {"status": "unknown", "reasonCode": None}
+        if ack["status"] == "accepted":
+            self._release_reservation(account, order)
+            order["status"] = "cancelled"
+            outcome = "cancelled"
+        elif ack["status"] == "rejected":
+            order["status"] = previous_status
+            outcome = "rejected"
+        else:
+            order["status"] = "unknown"
+            outcome = "unknown"
+        order["updatedAtMs"] = self._clock_ms()
+        recovery["status"] = "unknown" if ack["status"] == "unknown" else "completed"
+        self._sync_submission_order(
+            request.broker_id,
+            request.account_id,
+            order,
+        )
+        record["status"] = outcome
+        result["order"] = self._public_order(order)
+        self._persist()
+        audit_id = self._audit(
+            action="recover",
+            outcome=outcome,
+            trace_id=trace_id,
+            plugin_id=broker.plugin_id,
+            data={
+                "brokerId": request.broker_id,
+                "accountId": request.account_id,
+                "orderId": request.order_id,
+                "idempotencyKey": request.idempotency_key,
+                "targetOperation": request.target_operation,
+            },
+        )
+        result["auditEventId"] = audit_id
+        self._persist()
+        return dict(result)
 
     async def recover(
         self,
@@ -1177,6 +1532,8 @@ class PluginPaperRuntime:
         account_id: str,
         idempotency_key: str,
         trace_id: str,
+        target_operation: str = "orders.submit",
+        order_id: str | None = None,
         user_action: bool = True,
     ) -> dict[str, Any]:
         request = PaperRecoverRequest.from_invoke(
@@ -1185,6 +1542,14 @@ class PluginPaperRuntime:
                 "brokerId": broker_id,
                 "accountId": account_id,
                 "idempotencyKey": idempotency_key,
+                **(
+                    {
+                        "targetOperation": target_operation,
+                        "orderId": order_id,
+                    }
+                    if target_operation == "orders.cancel" or order_id is not None
+                    else {}
+                ),
             }
         )
         broker_id = request.broker_id
@@ -1193,6 +1558,14 @@ class PluginPaperRuntime:
         async with self._lock:
             broker = self._broker(broker_id)
             account = self._account(broker, broker_id, account_id)
+            if request.target_operation == "orders.cancel":
+                return await self._recover_cancel_locked(
+                    request,
+                    broker=broker,
+                    account=account,
+                    trace_id=trace_id,
+                    user_action=user_action,
+                )
             record_key = self._idempotency_key(broker_id, account_id, idempotency_key)
             record = self._state["idempotency"].get(record_key)
             if record is None:
@@ -1208,8 +1581,45 @@ class PluginPaperRuntime:
                     "Paper recovery order is missing",
                     plugin_id=broker.plugin_id,
                 )
+            unresolved_cancel = self._unresolved_cancel_for_order(
+                broker_id=broker_id,
+                account_id=account_id,
+                order_id=order["orderId"],
+            )
+            if unresolved_cancel is not None:
+                raise paper_error(
+                    "PLUGIN_PAPER_CANCEL_RECOVERY_REQUIRED",
+                    "Paper cancellation must be recovered before submission recovery",
+                    plugin_id=broker.plugin_id,
+                    details={
+                        "orderId": order["orderId"],
+                        "targetOperation": "orders.cancel",
+                    },
+                )
             if order["status"] not in {"pending", "unknown"}:
                 return {**record["result"], "idempotentReplay": True}
+            previous_recovery = record.get("recovery")
+            previous_attempt = (
+                previous_recovery.get("attempt", 0)
+                if isinstance(previous_recovery, dict)
+                else 0
+            )
+            if (
+                isinstance(previous_attempt, bool)
+                or not isinstance(previous_attempt, int)
+                or previous_attempt < 0
+            ):
+                raise paper_error(
+                    "PLUGIN_PAPER_STATE_INVALID",
+                    "Paper recovery attempt counter is invalid",
+                    plugin_id=broker.plugin_id,
+                )
+            recovery = {
+                "status": "pending",
+                "attempt": previous_attempt + 1,
+            }
+            record["recovery"] = recovery
+            self._persist()
             try:
                 raw = await self._invoke(
                     broker.executor_contribution,
@@ -1229,6 +1639,27 @@ class PluginPaperRuntime:
                     expected_account_id=account_id,
                     expected_idempotency_key=idempotency_key,
                 )
+            except asyncio.CancelledError:
+                recovery["status"] = "unknown"
+                order["status"] = "unknown"
+                order["updatedAtMs"] = self._clock_ms()
+                self._sync_submission_order(broker_id, account_id, order)
+                self._persist()
+                audit_id = self._audit(
+                    action="recover",
+                    outcome="unknown",
+                    trace_id=trace_id,
+                    plugin_id=broker.plugin_id,
+                    data={
+                        "brokerId": broker_id,
+                        "accountId": account_id,
+                        "orderId": order["orderId"],
+                        "idempotencyKey": idempotency_key,
+                    },
+                )
+                record["result"]["auditEventId"] = audit_id
+                self._persist()
+                raise
             except Exception:
                 ack = {"status": "unknown", "reasonCode": None}
             if ack["status"] == "accepted":
@@ -1242,6 +1673,9 @@ class PluginPaperRuntime:
             else:
                 order["status"] = "unknown"
                 order["updatedAtMs"] = self._clock_ms()
+            recovery["status"] = (
+                "unknown" if ack["status"] == "unknown" else "completed"
+            )
             self._sync_submission_order(broker_id, account_id, order)
             self._persist()
             audit_id = self._audit(

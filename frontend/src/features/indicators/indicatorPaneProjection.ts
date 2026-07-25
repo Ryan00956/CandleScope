@@ -1,4 +1,11 @@
-import type { IndicatorDefinition, IndicatorLine } from "./indicatorTypes.js";
+import type {
+  IndicatorBgColor,
+  IndicatorDefinition,
+  IndicatorFill,
+  IndicatorHLine,
+  IndicatorLine,
+  IndicatorMarker,
+} from "./indicatorTypes.js";
 
 export interface IndicatorPaneLegendItem {
   id: string;
@@ -44,8 +51,53 @@ export interface IndicatorPaneData {
   subPanes: IndicatorSubPane[];
 }
 
+export interface IndicatorPaneAuxiliaryData {
+  markers?: readonly IndicatorMarker[];
+  fills?: readonly IndicatorFill[];
+  hlines?: readonly IndicatorHLine[];
+  bgcolors?: readonly IndicatorBgColor[];
+}
+
+function itemBelongsToIndicatorPane(
+  item: { indicatorId?: string; pane?: string },
+  indicatorId: string,
+  pane: string,
+): boolean {
+  return item.indicatorId === indicatorId && (item.pane || "main") === pane;
+}
+
+function paneHasVisibleAuxiliaryOutput(
+  auxiliary: IndicatorPaneAuxiliaryData,
+  indicatorId: string,
+  pane: string,
+  lines: readonly IndicatorLine[],
+): boolean {
+  if (auxiliary.markers?.some((item) =>
+    itemBelongsToIndicatorPane(item, indicatorId, pane))) {
+    return true;
+  }
+  if (auxiliary.hlines?.some((item) =>
+    itemBelongsToIndicatorPane(item, indicatorId, pane))) {
+    return true;
+  }
+  if (auxiliary.bgcolors?.some((item) =>
+    itemBelongsToIndicatorPane(item, indicatorId, pane))) {
+    return true;
+  }
+
+  const lineIds = new Set(lines.flatMap((line) => line.id ? [line.id] : []));
+  return auxiliary.fills?.some((fill) => (
+    fill.indicatorId === indicatorId
+    && typeof fill.plot1_id === "string"
+    && typeof fill.plot2_id === "string"
+    && lineIds.has(fill.plot1_id)
+    && lineIds.has(fill.plot2_id)
+  )) ?? false;
+}
+
 export function buildIndicatorPaneData(
   indicators: IndicatorDefinition[] = [],
+  auxiliary: IndicatorPaneAuxiliaryData = {},
 ): IndicatorPaneData {
   const overlayLines: IndicatorLine[] = [];
   const paneMap = new Map<string, IndicatorSubPane>();
@@ -53,6 +105,7 @@ export function buildIndicatorPaneData(
   for (const indicator of indicators) {
     if (!indicator.visible || !indicator.lines || indicator.lines.length === 0) continue;
 
+    const linesByPane = new Map<string, IndicatorLine[]>();
     for (const line of indicator.lines) {
       const pane = line.pane || "main";
       const lineWithId = { ...line, indicatorId: indicator.id };
@@ -62,16 +115,32 @@ export function buildIndicatorPaneData(
         continue;
       }
 
-      const paneId = `${pane}-${indicator.id}`;
-      if (!paneMap.has(paneId)) {
-        paneMap.set(paneId, {
-          id: paneId,
-          label: indicator.name || indicator.id,
-          lines: [],
-          owner: { kind: "indicator", id: indicator.id },
-        });
+      const paneLines = linesByPane.get(pane) || [];
+      paneLines.push(lineWithId);
+      linesByPane.set(pane, paneLines);
+    }
+
+    for (const [pane, lines] of linesByPane) {
+      const hasVisibleSeries = lines.some((line) => line.visible !== false);
+      if (
+        !hasVisibleSeries
+        && !paneHasVisibleAuxiliaryOutput(
+          auxiliary,
+          indicator.id,
+          pane,
+          lines,
+        )
+      ) {
+        continue;
       }
-      paneMap.get(paneId)?.lines.push(lineWithId);
+
+      const paneId = `${pane}-${indicator.id}`;
+      paneMap.set(paneId, {
+        id: paneId,
+        label: indicator.name || indicator.id,
+        lines,
+        owner: { kind: "indicator", id: indicator.id },
+      });
     }
   }
 

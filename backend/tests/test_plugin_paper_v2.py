@@ -224,19 +224,210 @@ async def test_unknown_cancel_retains_one_reservation_until_explicit_recovery(
         "locked"
     ] == "10"
 
+    with pytest.raises(
+        PaperTradingError,
+        match="cancellation must be recovered before submission recovery",
+    ):
+        await runtime.recover(
+            broker_id="fixture-paper",
+            account_id="paper-main",
+            idempotency_key="cancel-unknown",
+            trace_id="cancel-unknown-submit-recover",
+        )
     recovered = await runtime.recover(
         broker_id="fixture-paper",
         account_id="paper-main",
-        idempotency_key="cancel-unknown",
+        idempotency_key="cancel-unknown-1",
+        target_operation="orders.cancel",
+        order_id=opened["order"]["orderId"],
         trace_id="cancel-unknown-recover",
+    )
+    assert recovered["order"]["status"] == "cancelled"
+    snapshot = await runtime.account_snapshot("fixture-paper", "paper-main")
+    assert {item["asset"]: item for item in snapshot["balances"]}["USDT"][
+        "locked"
+    ] == "0"
+    assert [item["operation"] for item in calls].count("orders.cancel") == 1
+    assert [item["operation"] for item in calls].count("orders.recover") == 1
+    assert calls[-1]["targetOperation"] == "orders.cancel"
+    assert calls[-1]["orderId"] == opened["order"]["orderId"]
+
+
+@_async_test
+async def test_rejected_cancel_recovery_restores_the_pre_cancel_order(tmp_path) -> None:
+    now_ms = [1_700_000_000_000]
+    runtime, _ = _runtime(tmp_path, now_ms=now_ms, unknown_cancel=True)
+    await runtime.publish_quote(
+        PaperQuote("quote-1", "BTCUSDT", "spot", "100", "101", now_ms[0])
+    )
+    opened = await runtime.submit(
+        _intent("cancel-rejected", order_type="limit", limit_price="100"),
+        trace_id="cancel-rejected-open",
+    )
+    unknown = await runtime.cancel(
+        broker_id="fixture-paper",
+        account_id="paper-main",
+        order_id=opened["order"]["orderId"],
+        idempotency_key="cancel-rejected-1",
+        trace_id="cancel-rejected",
+    )
+    assert unknown["order"]["status"] == "unknown"
+
+    async def reject_recovery(contribution, payload, user_action, trace_id):
+        return _ack(payload, "rejected")
+
+    runtime._invoke = reject_recovery
+    recovered = await runtime.recover(
+        broker_id="fixture-paper",
+        account_id="paper-main",
+        idempotency_key="cancel-rejected-1",
+        target_operation="orders.cancel",
+        order_id=opened["order"]["orderId"],
+        trace_id="cancel-rejected-recover",
     )
     assert recovered["order"]["status"] == "open"
     snapshot = await runtime.account_snapshot("fixture-paper", "paper-main")
     assert {item["asset"]: item for item in snapshot["balances"]}["USDT"][
         "locked"
     ] == "10"
-    assert [item["operation"] for item in calls].count("orders.cancel") == 1
-    assert [item["operation"] for item in calls].count("orders.recover") == 1
+
+
+@_async_test
+async def test_cancelled_cancel_is_persisted_unknown_and_never_replayed(
+    tmp_path,
+) -> None:
+    now_ms = [1_700_000_000_000]
+    runtime, _ = _runtime(tmp_path, now_ms=now_ms)
+    await runtime.publish_quote(
+        PaperQuote("quote-1", "BTCUSDT", "spot", "100", "101", now_ms[0])
+    )
+    opened = await runtime.submit(
+        _intent("cancel-task", order_type="limit", limit_price="100"),
+        trace_id="cancel-task-open",
+    )
+    cancel_entered = asyncio.Event()
+    cancel_calls: list[dict[str, Any]] = []
+
+    async def wait_during_cancel(contribution, payload, user_action, trace_id):
+        cancel_calls.append(payload)
+        cancel_entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    runtime._invoke = wait_during_cancel
+    task = asyncio.create_task(
+        runtime.cancel(
+            broker_id="fixture-paper",
+            account_id="paper-main",
+            order_id=opened["order"]["orderId"],
+            idempotency_key="cancel-task-1",
+            trace_id="cancel-task",
+        )
+    )
+    await asyncio.wait_for(cancel_entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    state = read_json(runtime.state_path, "Paper test state")
+    cancel_record = next(iter(state["cancelIdempotency"].values()))
+    assert cancel_record["status"] == "unknown"
+    assert cancel_record["result"]["order"]["status"] == "unknown"
+    account = next(iter(state["accounts"].values()))
+    assert account["orders"][opened["order"]["orderId"]]["status"] == "unknown"
+    submission = next(iter(state["idempotency"].values()))
+    assert submission["status"] == "unknown"
+    assert len(cancel_calls) == 1
+
+    restarted, replay_calls = _runtime(tmp_path, now_ms=now_ms)
+    replayed = await restarted.cancel(
+        broker_id="fixture-paper",
+        account_id="paper-main",
+        order_id=opened["order"]["orderId"],
+        idempotency_key="cancel-task-1",
+        trace_id="cancel-task-replay",
+    )
+    assert replayed["idempotentReplay"] is True
+    assert replayed["order"]["status"] == "unknown"
+    assert replay_calls == []
+
+
+@_async_test
+async def test_pending_cancel_becomes_unknown_after_restart_and_requires_recovery(
+    tmp_path,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    now_ms = [1_700_000_000_000]
+    runtime, _ = _runtime(tmp_path, now_ms=now_ms)
+    await runtime.publish_quote(
+        PaperQuote("quote-1", "BTCUSDT", "spot", "100", "101", now_ms[0])
+    )
+    opened = await runtime.submit(
+        _intent("cancel-crash", order_type="limit", limit_price="100"),
+        trace_id="cancel-crash-open",
+    )
+    crash_calls: list[dict[str, Any]] = []
+
+    async def crash_after_cancel(contribution, payload, user_action, trace_id):
+        crash_calls.append(payload)
+        raise SimulatedProcessCrash
+
+    runtime._invoke = crash_after_cancel
+    with pytest.raises(SimulatedProcessCrash):
+        await runtime.cancel(
+            broker_id="fixture-paper",
+            account_id="paper-main",
+            order_id=opened["order"]["orderId"],
+            idempotency_key="cancel-crash-1",
+            trace_id="cancel-crash",
+        )
+    pending_state = read_json(runtime.state_path, "Paper test state")
+    assert next(iter(pending_state["cancelIdempotency"].values()))["status"] == (
+        "pending"
+    )
+    assert len(crash_calls) == 1
+
+    restarted, recovery_calls = _runtime(tmp_path, now_ms=now_ms)
+    recovered_state = read_json(restarted.state_path, "Paper test state")
+    cancel_record = next(iter(recovered_state["cancelIdempotency"].values()))
+    assert cancel_record["status"] == "unknown"
+    assert cancel_record["result"]["order"]["status"] == "unknown"
+    account = next(iter(recovered_state["accounts"].values()))
+    assert account["orders"][opened["order"]["orderId"]]["status"] == "unknown"
+    submission = next(iter(recovered_state["idempotency"].values()))
+    assert submission["status"] == "unknown"
+
+    replayed = await restarted.cancel(
+        broker_id="fixture-paper",
+        account_id="paper-main",
+        order_id=opened["order"]["orderId"],
+        idempotency_key="cancel-crash-1",
+        trace_id="cancel-crash-replay",
+    )
+    assert replayed["idempotentReplay"] is True
+    assert replayed["order"]["status"] == "unknown"
+    assert recovery_calls == []
+
+    with pytest.raises(PaperTradingError, match="cancellation must be recovered"):
+        await restarted.recover(
+            broker_id="fixture-paper",
+            account_id="paper-main",
+            idempotency_key="cancel-crash",
+            trace_id="cancel-crash-submit-recover",
+        )
+    recovered = await restarted.recover(
+        broker_id="fixture-paper",
+        account_id="paper-main",
+        idempotency_key="cancel-crash-1",
+        target_operation="orders.cancel",
+        order_id=opened["order"]["orderId"],
+        trace_id="cancel-crash-recover",
+    )
+    assert recovered["order"]["status"] == "cancelled"
+    assert [item["operation"] for item in recovery_calls] == ["orders.recover"]
+    assert recovery_calls[0]["targetOperation"] == "orders.cancel"
 
 
 @_async_test
@@ -328,6 +519,205 @@ async def test_unknown_submit_never_replays_and_explicit_recovery_executes_once(
         len([item for item in recovery_calls if item["operation"] == "orders.recover"])
         == 1
     )
+
+
+@_async_test
+async def test_cancelled_submit_becomes_unknown_without_replaying_sidecar(
+    tmp_path,
+) -> None:
+    now_ms = [1_700_000_000_000]
+    runtime, _ = _runtime(tmp_path, now_ms=now_ms)
+    await runtime.publish_quote(
+        PaperQuote("quote-1", "BTCUSDT", "spot", "100", "100.5", now_ms[0])
+    )
+    submit_entered = asyncio.Event()
+    submit_calls: list[dict[str, Any]] = []
+
+    async def wait_during_submit(contribution, payload, user_action, trace_id):
+        submit_calls.append(payload)
+        submit_entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    runtime._invoke = wait_during_submit
+    task = asyncio.create_task(
+        runtime.submit(_intent("submit-task"), trace_id="submit-task")
+    )
+    await asyncio.wait_for(submit_entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    state = read_json(runtime.state_path, "Paper test state")
+    record = next(iter(state["idempotency"].values()))
+    assert record["status"] == "unknown"
+    assert record["result"]["order"]["status"] == "unknown"
+    replayed = await runtime.submit(
+        _intent("submit-task"),
+        trace_id="submit-task-replay",
+    )
+    assert replayed["idempotentReplay"] is True
+    assert replayed["order"]["status"] == "unknown"
+    assert len(submit_calls) == 1
+
+
+@_async_test
+async def test_cancelled_recovery_persists_unknown_attempt_until_explicit_retry(
+    tmp_path,
+) -> None:
+    now_ms = [1_700_000_000_000]
+    runtime, _ = _runtime(tmp_path, now_ms=now_ms)
+    await runtime.publish_quote(
+        PaperQuote("quote-1", "BTCUSDT", "spot", "100", "100.5", now_ms[0])
+    )
+    await runtime.submit(
+        _intent("unknown-recover-task"),
+        trace_id="recover-task-submit",
+    )
+    recover_entered = asyncio.Event()
+    recover_calls: list[dict[str, Any]] = []
+
+    async def wait_during_recover(contribution, payload, user_action, trace_id):
+        recover_calls.append(payload)
+        recover_entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    runtime._invoke = wait_during_recover
+    task = asyncio.create_task(
+        runtime.recover(
+            broker_id="fixture-paper",
+            account_id="paper-main",
+            idempotency_key="unknown-recover-task",
+            trace_id="recover-task",
+        )
+    )
+    await asyncio.wait_for(recover_entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    state = read_json(runtime.state_path, "Paper test state")
+    record = next(iter(state["idempotency"].values()))
+    assert record["status"] == "unknown"
+    assert record["recovery"] == {"status": "unknown", "attempt": 1}
+    assert record["result"]["order"]["status"] == "unknown"
+    assert len(recover_calls) == 1
+
+    restarted, retry_calls = _runtime(tmp_path, now_ms=now_ms)
+    replayed = await restarted.submit(
+        _intent("unknown-recover-task"),
+        trace_id="recover-task-no-auto-retry",
+    )
+    assert replayed["order"]["status"] == "unknown"
+    assert retry_calls == []
+    recovered = await restarted.recover(
+        broker_id="fixture-paper",
+        account_id="paper-main",
+        idempotency_key="unknown-recover-task",
+        trace_id="recover-task-explicit-retry",
+    )
+    assert recovered["order"]["status"] == "filled"
+    repeated = await restarted.recover(
+        broker_id="fixture-paper",
+        account_id="paper-main",
+        idempotency_key="unknown-recover-task",
+        trace_id="recover-task-terminal-replay",
+    )
+    assert repeated["idempotentReplay"] is True
+    assert [item["operation"] for item in retry_calls] == ["orders.recover"]
+    final_state = read_json(restarted.state_path, "Paper test state")
+    final_record = next(iter(final_state["idempotency"].values()))
+    assert final_record["recovery"] == {"status": "completed", "attempt": 2}
+
+
+@_async_test
+async def test_pending_recovery_becomes_unknown_after_process_restart(
+    tmp_path,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    now_ms = [1_700_000_000_000]
+    runtime, _ = _runtime(tmp_path, now_ms=now_ms)
+    await runtime.publish_quote(
+        PaperQuote("quote-1", "BTCUSDT", "spot", "100", "100.5", now_ms[0])
+    )
+    await runtime.submit(
+        _intent("unknown-recover-crash"),
+        trace_id="recover-crash-submit",
+    )
+    crash_calls: list[dict[str, Any]] = []
+
+    async def crash_during_recover(contribution, payload, user_action, trace_id):
+        crash_calls.append(payload)
+        raise SimulatedProcessCrash
+
+    runtime._invoke = crash_during_recover
+    with pytest.raises(SimulatedProcessCrash):
+        await runtime.recover(
+            broker_id="fixture-paper",
+            account_id="paper-main",
+            idempotency_key="unknown-recover-crash",
+            trace_id="recover-crash",
+        )
+    pending_state = read_json(runtime.state_path, "Paper test state")
+    pending_record = next(iter(pending_state["idempotency"].values()))
+    assert pending_record["recovery"] == {"status": "pending", "attempt": 1}
+    assert len(crash_calls) == 1
+
+    restarted, retry_calls = _runtime(tmp_path, now_ms=now_ms)
+    recovered_state = read_json(restarted.state_path, "Paper test state")
+    recovered_record = next(iter(recovered_state["idempotency"].values()))
+    assert recovered_record["status"] == "unknown"
+    assert recovered_record["recovery"] == {"status": "unknown", "attempt": 1}
+    assert retry_calls == []
+    await restarted.submit(
+        _intent("unknown-recover-crash"),
+        trace_id="recover-crash-no-auto-retry",
+    )
+    assert retry_calls == []
+    recovered = await restarted.recover(
+        broker_id="fixture-paper",
+        account_id="paper-main",
+        idempotency_key="unknown-recover-crash",
+        trace_id="recover-crash-explicit-retry",
+    )
+    assert recovered["order"]["status"] == "filled"
+    assert [item["operation"] for item in retry_calls] == ["orders.recover"]
+
+
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        {},
+        {"status": "pending"},
+        {"status": "invalid", "attempt": 1},
+        {"status": "unknown", "attempt": 0},
+        {"status": "completed", "attempt": True},
+        {"status": "completed", "attempt": 1, "extra": "field"},
+    ],
+)
+@_async_test
+async def test_recovery_state_requires_exact_valid_attempt_shape(
+    tmp_path,
+    recovery,
+) -> None:
+    now_ms = [1_700_000_000_000]
+    runtime, _ = _runtime(tmp_path, now_ms=now_ms)
+    await runtime.publish_quote(
+        PaperQuote("quote-1", "BTCUSDT", "spot", "100", "100.5", now_ms[0])
+    )
+    await runtime.submit(
+        _intent("unknown-invalid-recovery"),
+        trace_id="invalid-recovery-submit",
+    )
+    state = read_json(runtime.state_path, "Paper test state")
+    next(iter(state["idempotency"].values()))["recovery"] = recovery
+    atomic_write_json(runtime.state_path, state)
+
+    with pytest.raises(PaperTradingError, match="recovery attempt is invalid"):
+        _runtime(tmp_path, now_ms=now_ms)
 
 
 @_async_test

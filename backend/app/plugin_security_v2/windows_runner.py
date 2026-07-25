@@ -29,6 +29,9 @@ WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 258
 ERROR_BROKEN_PIPE = 109
 ERROR_NO_DATA = 232
+ERROR_OPERATION_ABORTED = 995
+STD_INPUT_HANDLE = -10
+THREAD_TERMINATE = 0x0001
 
 PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x00020009
@@ -223,6 +226,16 @@ def _configure_apis() -> tuple[Any, Any, Any]:
     kernel32.GetExitCodeProcess.restype = wintypes.BOOL
     kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
     kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel32.GetStdHandle.restype = wintypes.HANDLE
+    kernel32.OpenThread.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    kernel32.CancelSynchronousIo.argtypes = [wintypes.HANDLE]
+    kernel32.CancelSynchronousIo.restype = wintypes.BOOL
     kernel32.ReadFile.argtypes = [
         wintypes.HANDLE,
         ctypes.c_void_p,
@@ -432,19 +445,37 @@ def _read_handle(kernel32: Any, handle: wintypes.HANDLE, stream: BinaryIO) -> No
         stream.flush()
 
 
-def _write_handle(kernel32: Any, handle: wintypes.HANDLE, stream: BinaryIO) -> None:
+def _write_handle(
+    kernel32: Any,
+    handle: wintypes.HANDLE,
+    source_handle: wintypes.HANDLE,
+    stop: threading.Event,
+) -> None:
+    buffer = ctypes.create_string_buffer(65_536)
+    count = wintypes.DWORD()
     written = wintypes.DWORD()
-    read_available = getattr(stream, "read1", stream.read)
     try:
-        while True:
-            chunk = read_available(65_536)
-            if not chunk:
+        while not stop.is_set():
+            if not kernel32.ReadFile(
+                source_handle,
+                buffer,
+                len(buffer),
+                ctypes.byref(count),
+                None,
+            ):
+                if ctypes.get_last_error() in {
+                    ERROR_BROKEN_PIPE,
+                    ERROR_NO_DATA,
+                    ERROR_OPERATION_ABORTED,
+                }:
+                    break
                 break
-            buffer = ctypes.create_string_buffer(chunk)
+            if count.value == 0 or stop.is_set():
+                break
             if not kernel32.WriteFile(
                 handle,
                 buffer,
-                len(chunk),
+                count.value,
                 ctypes.byref(written),
                 None,
             ):
@@ -453,6 +484,31 @@ def _write_handle(kernel32: Any, handle: wintypes.HANDLE, stream: BinaryIO) -> N
                 break
     finally:
         kernel32.CloseHandle(handle)
+
+
+def _stop_stdin_forwarding(
+    kernel32: Any,
+    thread: threading.Thread,
+    stop: threading.Event,
+) -> None:
+    stop.set()
+    if not thread.is_alive():
+        return
+    native_id = thread.native_id
+    if native_id is None:
+        return
+    # The first cancellation can race with the worker between its stop check and
+    # ReadFile. A short join followed by one more cancellation closes that gap.
+    for timeout in (0.05, 1.0):
+        if not thread.is_alive():
+            return
+        thread_handle = kernel32.OpenThread(THREAD_TERMINATE, False, native_id)
+        if thread_handle:
+            try:
+                kernel32.CancelSynchronousIo(thread_handle)
+            finally:
+                kernel32.CloseHandle(thread_handle)
+        thread.join(timeout=timeout)
 
 
 def _directory_size(path: Path) -> int:
@@ -499,6 +555,8 @@ def run(config_path: Path) -> int:
     sid = ctypes.c_void_p()
     process_info = PROCESS_INFORMATION()
     violation: str | None = None
+    stdin_stop = threading.Event()
+    stdin_thread: threading.Thread | None = None
     started = time.monotonic()
     try:
         result = userenv.DeriveAppContainerSidFromAppContainerName(
@@ -613,9 +671,12 @@ def run(config_path: Path) -> int:
             kernel32.CloseHandle(child_handle)
             handles.remove(child_handle)
 
+        source_stdin = kernel32.GetStdHandle(wintypes.DWORD(STD_INPUT_HANDLE))
+        if not source_stdin or source_stdin == wintypes.HANDLE(-1).value:
+            raise _last_error("GetStdHandle(STD_INPUT_HANDLE)")
         stdin_thread = threading.Thread(
             target=_write_handle,
-            args=(kernel32, parent_stdin_write, sys.stdin.buffer),
+            args=(kernel32, parent_stdin_write, source_stdin, stdin_stop),
             daemon=True,
         )
         threads = (
@@ -663,6 +724,7 @@ def run(config_path: Path) -> int:
             process_info.hProcess, ctypes.byref(exit_code)
         ):
             raise _last_error("GetExitCodeProcess")
+        _stop_stdin_forwarding(kernel32, stdin_thread, stdin_stop)
         for thread in threads[1:]:
             thread.join(timeout=1.0)
         _write_status(
@@ -711,6 +773,8 @@ def run(config_path: Path) -> int:
         )
         return 247
     finally:
+        if stdin_thread is not None:
+            _stop_stdin_forwarding(kernel32, stdin_thread, stdin_stop)
         if attribute_list is not None:
             kernel32.DeleteProcThreadAttributeList(attribute_list)
         for handle in reversed(handles):

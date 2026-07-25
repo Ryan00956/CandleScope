@@ -21,6 +21,7 @@ import {
 import {
   parseReplayEquityResponse,
   parseReplayIntegrityResponse,
+  parseReplayPublicTimeBatchResponse,
   parseReplayReviewForkResponse,
   parseReplayReviewResponse,
   parseReplayTrainingReportResponse,
@@ -28,6 +29,7 @@ import {
 import type {
   ReplayEquityResponse,
   ReplayIntegrityResponse,
+  ReplayPublicTimeBatchResponse,
   ReplayReviewForkResponse,
   ReplayReviewResponse,
   ReplayTrainingReportResponse,
@@ -340,6 +342,29 @@ export class ReplayV2ApiClient {
       `/runs/${safeSegment(runId, "run id")}/integrity`,
       parseReplayIntegrityResponse,
       signal ? { signal } : {},
+    );
+  }
+
+  publicTimesRun(
+    runId: string,
+    timelineMs: readonly number[],
+    signal?: AbortSignal,
+  ): Promise<ReplayPublicTimeBatchResponse> {
+    if (timelineMs.length < 1 || timelineMs.length > 2_000
+      || timelineMs.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+      throw new ReplayV2ApiError(
+        "REPLAY_V2_PROTOCOL_ERROR",
+        "public time batch is invalid",
+      );
+    }
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/public-times`,
+      parseReplayPublicTimeBatchResponse,
+      {
+        method: "POST",
+        body: JSON.stringify({ timeline_ms: timelineMs }),
+        ...(signal ? { signal } : {}),
+      },
     );
   }
 

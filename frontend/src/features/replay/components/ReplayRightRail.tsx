@@ -59,9 +59,15 @@ export interface ReplayRightRailProps {
     readonly sourceBarCount: number;
     readonly disabledCapabilities: readonly string[];
   };
+  readonly formatTime?: (valueMs: number) => string;
 }
 
-export function ReplayPaperTradingDock({ runtime, viewer, indicatorStatus }: ReplayRightRailProps) {
+export function ReplayPaperTradingDock({
+  runtime,
+  viewer,
+  indicatorStatus,
+  formatTime,
+}: ReplayRightRailProps) {
   const [activeTab, setActiveTab] = useState<RailTab>("trade");
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
   const [orderType, setOrderType] = useState<"MARKET" | "LIMIT" | "STOP_MARKET" | "TAKE_PROFIT_MARKET">("MARKET");
@@ -115,10 +121,11 @@ export function ReplayPaperTradingDock({ runtime, viewer, indicatorStatus }: Rep
       : viewer.actions.submitTrade(type, payload);
     void result.catch(() => undefined);
   };
-  const time = (value: number) => formatReplayPublicTime(value, {
-    blindMode: config?.blind_mode ?? true,
-    originMs: store.replayStartMs,
-  });
+  const time = (value: number) => formatTime?.(value)
+    ?? formatReplayPublicTime(value, {
+      blindMode: config?.blind_mode ?? true,
+      originMs: store.replayStartMs,
+    });
 
   return (
     <>

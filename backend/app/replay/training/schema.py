@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from app.replay.canonical import canonical_json, canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 8
+TRAINING_SCHEMA_VERSION = 9
 TRAINING_SCHEMA_ID = "replay.training.v1"
+START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
 
 
 TRAINING_SCHEMA_V1 = """
@@ -738,6 +740,132 @@ CREATE TABLE IF NOT EXISTS replay_training_launch_context (
 """
 
 
+TRAINING_SCHEMA_V9 = """
+CREATE TABLE IF NOT EXISTS replay_training_start_selection (
+    run_id TEXT PRIMARY KEY
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.start-selection.v1'),
+    start_mode TEXT NOT NULL CHECK (start_mode IN ('MANUAL', 'RANDOM')),
+    seed_source TEXT NOT NULL
+        CHECK (seed_source IN ('SERVER', 'MANUAL', 'LEGACY_CLIENT', 'FORK')),
+    random_seed INTEGER
+        CHECK (
+            random_seed IS NULL
+            OR (random_seed >= 0 AND random_seed <= 9007199254740991)
+        ),
+    actual_start_ms INTEGER NOT NULL CHECK (actual_start_ms >= 0),
+    actual_end_ms INTEGER NOT NULL
+        CHECK (actual_end_ms >= actual_start_ms),
+    dataset_epoch TEXT NOT NULL,
+    parent_selection_hash TEXT
+        CHECK (
+            parent_selection_hash IS NULL
+            OR (
+                length(parent_selection_hash) = 71
+                AND substr(parent_selection_hash, 1, 7) = 'sha256:'
+            )
+        ),
+    selection_hash TEXT NOT NULL
+        CHECK (
+            length(selection_hash) = 71
+            AND substr(selection_hash, 1, 7) = 'sha256:'
+        ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+);
+"""
+
+
+def start_selection_hash(
+    *,
+    run_id: str,
+    start_mode: str,
+    seed_source: str,
+    random_seed: int | None,
+    actual_start_ms: int,
+    actual_end_ms: int,
+    dataset_epoch: str,
+    parent_selection_hash: str | None,
+) -> str:
+    return canonical_sha256(
+        {
+            "schema_version": START_SELECTION_SCHEMA_VERSION,
+            "run_id": run_id,
+            "start_mode": start_mode,
+            "seed_source": seed_source,
+            "random_seed": random_seed,
+            "actual_start_ms": actual_start_ms,
+            "actual_end_ms": actual_end_ms,
+            "dataset_epoch": dataset_epoch,
+            "parent_selection_hash": parent_selection_hash,
+        }
+    )
+
+
+def _backfill_start_selections(
+    connection: sqlite3.Connection,
+    *,
+    now_ms: int,
+) -> None:
+    rows = connection.execute(
+        """
+        SELECT r.run_id, r.start_mode, r.dataset_epoch, s.config_json,
+               d.actual_replay_start_ms, d.actual_replay_end_ms
+        FROM replay_training_run AS r
+        JOIN replay_session AS s ON s.session_id = r.adapter_session_id
+        JOIN replay_dataset_ref AS d ON d.session_id = r.adapter_session_id
+        ORDER BY r.run_id
+        """
+    ).fetchall()
+    for (
+        run_id,
+        start_mode,
+        dataset_epoch,
+        config_json,
+        actual_start_ms,
+        actual_end_ms,
+    ) in rows:
+        mode = str(start_mode)
+        config = json.loads(str(config_json))
+        random_seed = (
+            int(config["random_seed"])
+            if mode == "RANDOM" and config.get("random_seed") is not None
+            else None
+        )
+        seed_source = "LEGACY_CLIENT" if mode == "RANDOM" else "MANUAL"
+        digest = start_selection_hash(
+            run_id=str(run_id),
+            start_mode=mode,
+            seed_source=seed_source,
+            random_seed=random_seed,
+            actual_start_ms=int(actual_start_ms),
+            actual_end_ms=int(actual_end_ms),
+            dataset_epoch=str(dataset_epoch),
+            parent_selection_hash=None,
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_training_start_selection(
+                run_id, schema_version, start_mode, seed_source, random_seed,
+                actual_start_ms, actual_end_ms, dataset_epoch,
+                parent_selection_hash, selection_hash, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                str(run_id),
+                START_SELECTION_SCHEMA_VERSION,
+                mode,
+                seed_source,
+                random_seed,
+                int(actual_start_ms),
+                int(actual_end_ms),
+                str(dataset_epoch),
+                digest,
+                now_ms,
+            ),
+        )
+
+
 def _backfill_launch_contexts(
     connection: sqlite3.Connection,
     *,
@@ -917,6 +1045,10 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         _execute_script(connection, TRAINING_SCHEMA_V8)
         _backfill_launch_contexts(connection, now_ms=now_ms)
         current = 8
+    if current == 8:
+        _execute_script(connection, TRAINING_SCHEMA_V9)
+        _backfill_start_selections(connection, now_ms=now_ms)
+        current = 9
     if current != TRAINING_SCHEMA_VERSION:
         raise RuntimeError(f"no replay training schema migration path from {current}")
     connection.execute(
@@ -939,7 +1071,9 @@ def _execute_script(connection: sqlite3.Connection, script: str) -> None:
 
 
 __all__ = [
+    "START_SELECTION_SCHEMA_VERSION",
     "TRAINING_SCHEMA_ID",
     "TRAINING_SCHEMA_VERSION",
     "migrate_training_schema",
+    "start_selection_hash",
 ]

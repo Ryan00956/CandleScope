@@ -41,6 +41,31 @@ export interface ReplayPublicTime {
   readonly label: string;
 }
 
+export interface ReplayPublicTimeBatchItem {
+  readonly input_timeline_ms: number;
+  readonly public_time: ReplayPublicTime;
+}
+
+export interface ReplayPublicTimeBatchResponse {
+  readonly protocol: "replay.v2";
+  readonly run_id: string;
+  readonly policy: ReplayV2TimeDisclosurePolicy;
+  readonly items: readonly ReplayPublicTimeBatchItem[];
+}
+
+export interface ReplayStartSelection {
+  readonly schema_version: "replay.start-selection.v1";
+  readonly start_mode: "MANUAL" | "RANDOM";
+  readonly seed_source: "SERVER" | "MANUAL" | "LEGACY_CLIENT" | "FORK";
+  readonly seed_disclosed: boolean;
+  readonly random_seed: number | null;
+  readonly dataset_epoch: `sha256:${string}`;
+  readonly parent_selection_hash: `sha256:${string}` | null;
+  readonly selection_hash: `sha256:${string}`;
+  readonly public_start: ReplayPublicTime;
+  readonly public_end: ReplayPublicTime;
+}
+
 export interface ReplayIntegrityMutation {
   readonly action_sequence: number;
   readonly event_id: string;
@@ -69,6 +94,7 @@ export interface ReplayIntegrityResponse {
   readonly active_rule_revision: number;
   readonly active_rule_hash: `sha256:${string}`;
   readonly active_rule: Readonly<Record<string, ReplayV2Json>>;
+  readonly start_selection: ReplayStartSelection;
   readonly public_time: ReplayPublicTime;
   readonly mutations: readonly ReplayIntegrityMutation[];
 }
@@ -143,6 +169,7 @@ export interface ReplayTrainingReportResponse {
   readonly revealed: boolean;
   readonly report: ReplayReportResponse["report"];
   readonly integrity: ReplayIntegrityResponse;
+  readonly public_time_index: ReplayPublicTimeBatchResponse;
   readonly actual_history?: NonNullable<ReplayReportResponse["actual_history"]>;
 }
 
@@ -179,6 +206,13 @@ function identifier(value: unknown, field: string): string {
 function counter(value: unknown, field: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new TypeError(`${field} must be a non-negative safe integer`);
+  }
+  return value as number;
+}
+
+function safeInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value)) {
+    throw new TypeError(`${field} must be a safe integer`);
   }
   return value as number;
 }
@@ -239,9 +273,107 @@ export function parseReplayPublicTime(value: unknown, field = "public_time"): Re
   return {
     policy: enumValue(source.policy, TIME_POLICIES, `${field}.policy`),
     timeline_ms: counter(source.timeline_ms, `${field}.timeline_ms`),
-    relative_ms: counter(source.relative_ms, `${field}.relative_ms`),
+    relative_ms: safeInteger(source.relative_ms, `${field}.relative_ms`),
     sequence: counter(source.sequence, `${field}.sequence`),
     label: stringValue(source.label, `${field}.label`, 64),
+  };
+}
+
+export function parseReplayPublicTimeBatchResponse(
+  value: unknown,
+  {
+    maxItems = 2_000,
+    allowEmpty = false,
+  }: {
+    readonly maxItems?: number;
+    readonly allowEmpty?: boolean;
+  } = {},
+): ReplayPublicTimeBatchResponse {
+  const source = exactObject(value, "public_times", [
+    "protocol", "run_id", "policy", "items",
+  ]);
+  if (source.protocol !== "replay.v2") {
+    throw new TypeError("public_times.protocol is unsupported");
+  }
+  if (!Array.isArray(source.items)
+    || (!allowEmpty && source.items.length < 1)
+    || source.items.length > maxItems) {
+    throw new TypeError("public_times.items must be a bounded non-empty array");
+  }
+  const policy = enumValue(source.policy, TIME_POLICIES, "public_times.policy");
+  const items = source.items.map((value, index): ReplayPublicTimeBatchItem => {
+    const field = `public_times.items[${index}]`;
+    const item = exactObject(value, field, ["input_timeline_ms", "public_time"]);
+    const input = counter(item.input_timeline_ms, `${field}.input_timeline_ms`);
+    const publicTime = parseReplayPublicTime(item.public_time, `${field}.public_time`);
+    if (publicTime.policy !== policy) {
+      throw new TypeError(`${field} contradicts the batch policy`);
+    }
+    return { input_timeline_ms: input, public_time: publicTime };
+  });
+  return {
+    protocol: "replay.v2",
+    run_id: identifier(source.run_id, "public_times.run_id"),
+    policy,
+    items,
+  };
+}
+
+function parseStartSelection(value: unknown): ReplayStartSelection {
+  const source = exactObject(value, "integrity.start_selection", [
+    "schema_version", "start_mode", "seed_source", "seed_disclosed",
+    "random_seed", "dataset_epoch", "parent_selection_hash", "selection_hash",
+    "public_start", "public_end",
+  ]);
+  if (source.schema_version !== "replay.start-selection.v1") {
+    throw new TypeError("integrity.start_selection schema is unsupported");
+  }
+  const seedDisclosed = boolValue(
+    source.seed_disclosed,
+    "integrity.start_selection.seed_disclosed",
+  );
+  const randomSeed = source.random_seed === null
+    ? null
+    : counter(source.random_seed, "integrity.start_selection.random_seed");
+  if (seedDisclosed !== (randomSeed !== null)) {
+    throw new TypeError("integrity.start_selection seed disclosure is inconsistent");
+  }
+  return {
+    schema_version: "replay.start-selection.v1",
+    start_mode: enumValue(
+      source.start_mode,
+      ["MANUAL", "RANDOM"] as const,
+      "integrity.start_selection.start_mode",
+    ),
+    seed_source: enumValue(
+      source.seed_source,
+      ["SERVER", "MANUAL", "LEGACY_CLIENT", "FORK"] as const,
+      "integrity.start_selection.seed_source",
+    ),
+    seed_disclosed: seedDisclosed,
+    random_seed: randomSeed,
+    dataset_epoch: digest(
+      source.dataset_epoch,
+      "integrity.start_selection.dataset_epoch",
+    ),
+    parent_selection_hash: source.parent_selection_hash === null
+      ? null
+      : digest(
+        source.parent_selection_hash,
+        "integrity.start_selection.parent_selection_hash",
+      ),
+    selection_hash: digest(
+      source.selection_hash,
+      "integrity.start_selection.selection_hash",
+    ),
+    public_start: parseReplayPublicTime(
+      source.public_start,
+      "integrity.start_selection.public_start",
+    ),
+    public_end: parseReplayPublicTime(
+      source.public_end,
+      "integrity.start_selection.public_end",
+    ),
   };
 }
 
@@ -273,7 +405,7 @@ export function parseReplayIntegrityResponse(value: unknown): ReplayIntegrityRes
     "protocol", "run_id", "integrity_mode", "configured_time_disclosure_policy",
     "effective_time_disclosure_policy", "strict_eligible", "start_time_known", "revealed",
     "allowed_mutations", "result_label", "active_rule_revision", "active_rule_hash",
-    "active_rule", "public_time", "mutations",
+    "active_rule", "start_selection", "public_time", "mutations",
   ]);
   if (source.protocol !== "replay.v2") throw new TypeError("integrity.protocol is unsupported");
   if (!Array.isArray(source.allowed_mutations)) throw new TypeError("integrity.allowed_mutations must be an array");
@@ -310,6 +442,7 @@ export function parseReplayIntegrityResponse(value: unknown): ReplayIntegrityRes
     active_rule_revision: counter(source.active_rule_revision, "integrity.active_rule_revision"),
     active_rule_hash: digest(source.active_rule_hash, "integrity.active_rule_hash"),
     active_rule: jsonObject(source.active_rule, "integrity.active_rule"),
+    start_selection: parseStartSelection(source.start_selection),
     public_time: parseReplayPublicTime(source.public_time, "integrity.public_time"),
     mutations: source.mutations.map(parseMutation),
   };
@@ -436,7 +569,7 @@ export function parseReplayTrainingReportResponse(value: unknown): ReplayTrainin
   const hasActual = Object.hasOwn(source, "actual_history");
   const exact = exactObject(source, "training_report", [
     "protocol", "run_id", "data_fidelity", "execution_fidelity", "revealed", "report",
-    "integrity", ...(hasActual ? ["actual_history"] : []),
+    "integrity", "public_time_index", ...(hasActual ? ["actual_history"] : []),
   ]);
   if (exact.protocol !== "replay.v2") throw new TypeError("training_report.protocol is unsupported");
   const runId = identifier(exact.run_id, "training_report.run_id");
@@ -450,8 +583,16 @@ export function parseReplayTrainingReportResponse(value: unknown): ReplayTrainin
     ...(hasActual ? { actual_history: exact.actual_history } : {}),
   }, "training_report");
   const integrity = parseReplayIntegrityResponse(exact.integrity);
+  const publicTimeIndex = parseReplayPublicTimeBatchResponse(
+    exact.public_time_index,
+    { maxItems: 20_000, allowEmpty: true },
+  );
   if (integrity.run_id !== runId || integrity.revealed !== parsed.revealed) {
     throw new TypeError("training report integrity does not reconcile");
+  }
+  if (publicTimeIndex.run_id !== runId
+    || publicTimeIndex.policy !== integrity.effective_time_disclosure_policy) {
+    throw new TypeError("training report public-time index does not reconcile");
   }
   return {
     protocol: "replay.v2",
@@ -461,6 +602,7 @@ export function parseReplayTrainingReportResponse(value: unknown): ReplayTrainin
     revealed: parsed.revealed,
     report: parsed.report,
     integrity,
+    public_time_index: publicTimeIndex,
     ...(parsed.actual_history ? { actual_history: parsed.actual_history } : {}),
   };
 }

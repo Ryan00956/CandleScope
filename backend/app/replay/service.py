@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -118,6 +119,9 @@ class ReplayService:
         now_ms: Callable[[], int] = lambda: int(time.time() * 1_000),
         session_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
         training_run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+        training_random_seed_factory: Callable[[], int] = (
+            lambda: secrets.randbits(53)
+        ),
         native_intervals: Callable[[ReplaySeriesIdentity], Sequence[str]] | None = None,
     ) -> None:
         if not settings.enabled:
@@ -134,6 +138,7 @@ class ReplayService:
             TrainingRunService(
                 replay_service=self,
                 run_id_factory=training_run_id_factory,
+                random_seed_factory=training_random_seed_factory,
             )
             if settings.product_v2_available
             else None

@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_11_COMMITTED / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；当前 Phase 11 提交已完成全量测试、生产构建和真实浏览器验收，但没有重新生成该 HEAD 的发布清单，所以不得继承或宣称 Phase 10 的发布 PASS。仓库发布开关继续默认关闭；提交 PASS 不授权生产启用，真实容量、告警、支持清单、观察窗与显式决策仍未完成。
+状态：`PHASE_12_PASS / PHASE_13_NEXT / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11 已独立提交，Phase 12 已完成实现与验收，Phase 13–18 按本文恢复的原始路线逐阶段实施。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -21,6 +21,8 @@ Phase 9 父提交：`ad233cfe5abe49565ffd5852b540a78453498a64`（2026-07-22）
 Phase 10 父提交：`afd802a1617daf6a05f25a1b9318fbc3da341b5c`（2026-07-22）
 
 Phase 11 父提交：`382923ecabaab153a47e1d145ca96eb8d9a8cb67`（2026-07-24）
+
+Phase 12 父提交：`5c095a27bd08802a92004a9fdeb6d68e247e393b`（2026-07-25）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -720,9 +722,17 @@ flowchart LR
     P8 --> P10["P10 发布收口"]
     P7 --> P9["P9 可选历史 L2"]
     P9 -.->|不阻塞 core| P10
+    P10 --> P11["P11 实时页入口与启动归档"]
+    P11 --> P12["P12 起点与七级时间披露收口"]
+    P12 --> P13["P13 四种推进基准与完整控制"]
+    P13 --> P14["P14 分段历史与自动准备"]
+    P14 --> P15["P15 真正的 checkpoint 快进"]
+    P15 --> P16["P16 交易所级账户 fidelity"]
+    P16 --> P17["P17 规则变更与完整复盘"]
+    P17 --> P18["P18 存储、真实数据与发布收口"]
 ```
 
-Phase 9 是可选后续能力，不阻塞 v2 core 发布；Phase 10 必须在历史 L2 关闭状态下也完整通过。
+Phase 9 是可选历史 L2 基础，不单独授权发布；Phase 10 是旧基线的发布证明，Phase 11–17 的新增能力必须在 Phase 18 重新聚合，不能沿用旧 clean-HEAD PASS。
 
 ---
 
@@ -1306,7 +1316,149 @@ Phase 11 不新增启用开关。关闭既有
 
 ---
 
-## 23. 停止条件
+## 23. Phase 12：起点选择与七级时间披露收口
+
+### 背景审计
+
+Phase 4 已有七级服务端 `actual -> public` 投影、盲化 synthetic timeline、完整性标签和 reveal 审计；Phase 11 已把实时页身份与自选快照原子归档。但当前链路仍有三个不能带入后续阶段的缺口：
+
+1. `random_seed` 由前端固定为 `42` 后提交，盲化 run 的公开 adapter config 与 active rule 仍可携带它；拿到同一 catalog 的客户端可据此重建随机起点。
+2. Hub 的手动起点仍是毫秒数字输入，没有 UTC 日期时间选择、最早合格起点、随机候选窗口说明和 eligible-range 校验；盲/非盲 catalog 在策略变化时也不会立即同步。
+3. 训练图表、订单、成交和日志只按 `blind_mode` 布尔值显示“全部相对时间”。服务端虽然有七级标签，但轴、十字线、ARIA 和导出没有使用同一个权威投影。
+
+### 范围与实现计划
+
+1. 随机种子改为服务端生成的非负 JavaScript-safe 53-bit 值；客户端字段只为兼容旧请求而可选，服务端不得采用客户端值。
+2. replay.training schema additive 升级，原子保存开始方式、种子来源、私有权威种子、实际数据起点/终点、dataset epoch 和 canonical selection commitment。既有 v8 Run、legacy migration 和 Review Fork 都必须有确定的回填/复制语义。
+3. 盲化且未 reveal 时，公开 snapshot、integrity、report、journal、错误和列表不得返回权威种子或实际起点；私有 adapter config 与 start-selection 记录保留恢复所需真值。
+4. Hub 使用 UTC `datetime-local`，展示历史最早值、最早/最晚合格起点、候选窗口数量和“使用最早合格起点”动作；手动值必须命中 compact eligible range 且按 base interval 对齐。
+5. 随机且隐藏时间时只读取 blind catalog，只展示候选数量；手动开始或 `NONE` 策略可读取非盲 catalog。开始方式或披露策略变化必须取消旧请求并重新绑定 catalog epoch。
+6. 新增有界、只读、run-scoped 的公开时间批量投影；请求只携带已经公开的 actor timeline，响应逐点返回服务端生成的七级标签，禁止返回实际时间旁路。
+7. 图表时间轴、十字线、当前时间、订单、成交、盘口、日志、ARIA live region 和训练报告导出统一消费公开时间投影。标签尚未到达时只能降级为更严格的纯相对时间，不能本地猜测隐藏日历字段。
+8. 训练报告携带有界 public-time index；未 reveal 的 JSON/CSV 只含 synthetic timeline 与允许标签，reveal 后才允许 actual history。
+
+### 测试与退出门槛
+
+- 七级策略逐一覆盖当前时间、历史 BAR、订单/成交/日志、图表 formatter、ARIA、JSON/CSV；每一级只出现允许的低位时间单位。
+- HTTP、WebSocket、DOM、URL、`localStorage`、`IndexedDB`、console、错误 envelope 和未揭示导出扫描不到实际起点、服务端种子或被隐藏的日历片段。
+- 两个同请求 Run 使用注入的不同服务端种子能得到相应确定起点；重启恢复、Fork 和 schema v8 -> v9 后 selection commitment 不漂移。
+- 手动 UTC 输入、最早按钮、gap、错位、边界、catalog epoch 变化和 blind/non-blind 切换都有前后端契约测试。
+- backend 全量、frontend `npm run check`、真实浏览器七级矩阵、SQLite `quick_check/foreign_key_check`、默认开关和提交级回滚全部 PASS 后独立提交。
+
+### 回滚
+
+新 start-selection 表和报告字段均为 additive。回滚运行时代码后旧 build 忽略新表；不得删除已生成种子或把已 reveal Run 重新标为 strict。
+
+---
+
+## 24. Phase 13：完整控制合同与四种推进基准
+
+### 背景与范围
+
+Phase 3 已提供 `STEP_DISPLAY/STEP_BASE/STEP_EVENT/ADVANCE_BY/ADVANCE_TO` 的第一版适配，但 UI 与协议仍以命令名而不是统一推进基准表达。Phase 13 冻结四个公开 advance basis：
+
+- `DISPLAY_BAR`：当前展示周期收口后再推进完整展示 K；
+- `BASE_BAR`：按交易所支持的最小历史 K 连续推进；
+- `SOURCE_EVENT`：按 BAR 或 aggTrade 源事件推进；
+- `VIRTUAL_TIME`：按服务端虚拟时间推进。
+
+每种基准支持服务端限制内任意正整数 `n`；时间推进只接受 base interval 的整数倍；`advance-to` 绑定当前 cursor/revision。AGG_TRADE 支持有界任意虚拟播放倍率，BAR 不伪装逐笔连续性。
+
+### 退出门槛
+
+- 1m/15m forming bar、1m -> 15m 切换后首次推进、暂停/恢复、重启、逐次推进与批量推进的领域状态 hash 完全一致。
+- 四种 basis 在 BAR/AGG、display switch、同毫秒事件、空档和 session end 上有 reference matrix。
+- UI 只显示当前 source 可证明的基准和单位；超限、非整数倍、日历不确定性全部 fail closed。
+- 独立全量测试、浏览器控制矩阵和 commit 完成后才进入 Phase 14。
+
+---
+
+## 25. Phase 14：分段历史与自动准备
+
+### 背景与范围
+
+把历史长度从单一 `warmup_bars/horizon_ms` 拆成三个正交合同：
+
+- `indicator_warmup_bars`：仅供指标状态初始化；
+- `visible_history_lookback`：`ALL_AVAILABLE` 或有界时长；
+- `forward_cache_ms`：起点之后的预取窗口。
+
+BAR/AGG 都使用不可变 segment manifest；provider 实现下载、校验、pin、进度、取消、重试和 quarantine。开始点左侧继续复用 replay-aware backfill，但可一直到用户选定的历史边界，不能改变 Run、dataset epoch 或开始点。
+
+### 退出门槛
+
+- 左侧历史到达选择边界且 Run identity/state hash 不变。
+- `NONE` 轨道零历史读取，`WARM` 只准备不推进，`FULL` 才连续维护。
+- provider 中断、checksum/schema/identity/range 错误、重试、并发 single-flight 和重启恢复全部有真实文件/数据库证据。
+- Hub 明确显示三个长度的含义、预计下载量和安全取消结果。
+
+---
+
+## 26. Phase 15：真正的 checkpoint 快进
+
+### 背景与范围
+
+Phase 8 的 `AGGREGATE_SCAN` 仍逐事件执行，只减少中间投影，不是产品目标中的真正跳转。Phase 15 建立可用 checkpoint candidate 和精确 period summary：在完全没有订单、持仓、funding、risk、book 或其他路径依赖时，使用 `checkpoint + summaries + tail` 物化最终状态；任何路径依赖存在时必须全量扫描或阻止。
+
+### 退出门槛
+
+- 每一个优化计划的完整状态、event/ledger chain、cursor 和 hash 与 full-event reference 相同。
+- summary 身份绑定 source checksum、规则版本、区间和算法版本；任一漂移拒绝复用。
+- 有仓位、挂单、条件单、资金费、爆仓风险、规则生效点或 BOOK 依赖时从不选择 summary skip。
+- 使用真实 BAR/AGG 数据冻结 1 天/7 天目标、CPU/RSS/IO 预算与取消边界，不用合成空账户成绩代替。
+
+---
+
+## 27. Phase 16：交易所级账户 fidelity
+
+### 背景与范围
+
+为 mark、index、funding、费率、合约规格、价格/数量过滤和 maintenance tiers 建立版本化、按虚拟时间生效的数据合同。明确区分“模拟账户强平”与“历史市场爆仓事件”。扩展真实历史 L2 provider，但没有完整输入时只能标记 `APPROX` 或 `UNSUPPORTED`，不能推断为交易所 exact。
+
+### 退出门槛
+
+- 任一必需 mark/funding/spec/tier 输入缺失即 fail closed；只有完整、对齐、已 pin 的历史输入可标 `HISTORICAL_EXACT`。
+- cross/isolated、资金费、维护保证金跨档、强平、费用和破产状态均可由账本独立重算。
+- 模拟强平与市场 liquidation feed 在 schema、UI、报告和 capability 上不可混淆。
+- BOOK 仍不在没有 queue proof 时宣称 queue-exact。
+
+---
+
+## 28. Phase 17：规则变更与完整复盘
+
+### 背景与范围
+
+新增 Run Rules 面板；手续费、杠杆上限和 funding 规则变更只在指定服务端虚拟时间生效，历史成交与账本不追溯。把商品切换、周期、绘图、viewport 和 watchlist tier 记录为可复放的语义动作。
+
+### 退出门槛
+
+- ReviewMode 同步恢复图表、持仓、订单、规则 revision 和关键用户操作，不写原 Run。
+- 从 Review 继续训练必须创建 Fork；任何“继续”都不能改变已完成原存档。
+- 规则生效边界前/时/后、暂停/重启/快进/Fork 的状态 hash 与账本一致。
+- 高频 viewport/drawing 操作有有界采样，关键语义动作不丢失。
+
+---
+
+## 29. Phase 18：存储管理、真实数据与发布收口
+
+### 背景与范围
+
+交付用户可见存储页，展示 segment/archive 使用量、Run/position/review/recovery 保护理由、预算和 GC dry-run；执行 GC 必须复核 plan hash。按 BAR、AGG、BOOK 分阶段 rollout，使用真实来源数据完成容量、告警、恢复、回滚和支持清单。
+
+### 最终退出门槛
+
+1. 仓库默认开关保持关闭，直到真实数据 soak、容量预算、监控告警、支持交易所/市场/周期清单和 rollback observation 全部 PASS。
+2. 重新运行并扩展 Phase 10 clean-HEAD release suite，绑定 Phase 18 完整 HEAD；旧 manifest 不可复用。
+3. BAR、AGG、BOOK 分别有精确 capability/support/fidelity 清单；BOOK 可继续默认关闭且不得阻塞 BAR/AGG core。
+4. 真实多商品持仓、订单、funding、快进、重启、Review/Fork、下载/rehydration/GC 和 4h 浏览器 soak 全部通过。
+5. rollback 后存档数、pin、archive、账本和数据库 aggregate hash 不减少；旧 build 安全忽略 additive schema。
+6. 形成显式 `ENABLE / HOLD` 决策；本地测试通过本身不等于生产启用。
+
+Phase 18 完成并独立提交后，才允许结束 Phase 11–18 Goal。
+
+---
+
+## 30. 停止条件
 
 出现以下任一情况立即停止当前 Phase，不进入下一阶段：
 
@@ -1327,7 +1479,7 @@ Phase 11 不新增启用开关。关闭既有
 
 ---
 
-## 24. v2 完成定义
+## 31. v2 完成定义
 
 只有同时满足以下条件，才能宣布“回放训练 v2 完成”：
 
@@ -1343,13 +1495,14 @@ Phase 11 不新增启用开关。关闭既有
 - 交易与训练操作、资金曲线和复盘可持久化；
 - segment pin/rehydration/GC 不破坏存档；
 - v1 数据、回归、默认关闭和 rollback 保证都没有退化；
-- Phase 10 的 clean-HEAD release gates 全部 PASS。
+- Phase 12–17 的各自独立提交与门禁全部 PASS；
+- Phase 18 对完整 HEAD 重建的 clean-HEAD release gates、真实数据容量、告警、支持清单和回滚观察全部 PASS。
 
 历史 L2/BOOK_ASSISTED 不是 v2 core 完成条件；未完成时保持 capability 关闭和明确不支持。
 
 ---
 
-## 25. Phase 执行记录模板
+## 32. Phase 执行记录模板
 
 每完成一个 Phase，在文末追加一条记录。不能只写“测试通过”。
 
@@ -1801,4 +1954,35 @@ Final-review hardening: 开关关闭时不再构造或读取 live launch context
 Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0、RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_HISTORICAL_BOOK_ENABLED=0、REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0、REPLAY_SEGMENT_AUTO_GC_ENABLED=0、REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0。
 Known limitations: 本 Phase 只闭合 live -> Hub -> archived Run -> isolated replay 入口，不新增历史 funding/mark、生产 L2、queue model、自动下载/GC 或生产启用。自选快照上限为 32 分组/100 项；跨交易所或不同市场类型项目仍显示 NONE，首个多商品闭环的既有同结算范围门禁不变。未生成当前 HEAD 的 clean-HEAD release manifest，也未重跑 Phase 10 正式 4h soak/发布聚合，因此不构成新版本发布授权。
 Decision: PASS（提交与验收）；停止在 Phase 11，等待显式后续 Phase 或 release 决策。
+```
+
+### Phase 12 执行记录
+
+```text
+Phase: 12 - authoritative start selection and seven-level time disclosure
+Date: 2026-07-26
+Commit: 当前 Phase 12 提交（以 Git HEAD 为准）
+Parent commit: 5c095a27bd08802a92004a9fdeb6d68e247e393b
+Executor: Codex
+Scope: 把 RANDOM 起点的种子所有权移到服务端并持久保存不可变 selection commitment；为 MANUAL 起点提供 UTC 日期时间、目录边界、eligible-range 对齐与最早合格起点；把七级服务端公开时间投影统一接入图表轴/十字线、当前时间、订单、成交、盘口、日志和 JSON/CSV 报告。隐藏标签未到达时只允许更严格的纯相对时间，reveal 后 synthetic timeline 映射回真实 UTC。
+Files changed: backend v2 create/API、ReplayService/actor、training model/service/schema/store 与 Phase 12 回归；frontend catalog/parser/types、Hub model/lifecycle/dialog、公开时间 formatter/runtime/API、训练页面/右栏/报告导出与回归；本执行记录。
+Schema/protocol changes: replay.training schema 由 8 additive 升至 9，新增 replay_training_start_selection，冻结 replay.start-selection.v1。记录 start_mode、seed_source、私有 random_seed、实际数据边界、dataset_epoch、parent hash 与 canonical selection hash；v8 Run 确定回填 LEGACY_CLIENT，Fork 复制 selection 并链接 parent hash，未改写 replay.v1 config。v2 create 的 random_seed 仅为可空兼容字段，服务端忽略客户端值；新增有界 POST /runs/{run_id}/public-times。
+Commands run:
+  backend targeted: python -m pytest backend/tests/test_replay_v2_training_phase12.py -q
+  backend full: python -m pytest backend/tests -q
+  frontend targeted: npx tsx --test "src/features/replay/__tests__/replayV2Phase12.test.tsx"
+  frontend full: npm run check
+  browser: Playwright CLI + Chrome 150，隔离 replay DB、只读历史源快照、live :15175 / backend :18082
+  database: SQLite mode=ro PRAGMA quick_check、foreign_key_check 与 start-selection/dataset binding 查询
+  repository: git diff --check、Git Bash reverse-apply check、默认开关和最终差异审查
+Targeted tests: backend Phase 12 11 passed；frontend Phase 12 6 passed，覆盖七级标签 parser/fallback、reveal 映射、UTC picker、eligible 对齐、blind/visible catalog 重绑、客户端无种子和 selection commitment/bounds 篡改。
+Global tests: backend 2031 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2416 passed，architecture/typecheck/ESLint/Vite production build 全部通过。
+Browser evidence: 从实时页打开页面内 Hub，RANDOM + HIDE_ALL 只显示候选窗口数且不显示实际边界；切到 MANUAL 自动重绑 visible catalog，UTC datetime-local、历史最早值、eligible 数量和最早按钮可用；切回 RANDOM 立即恢复 blind catalog。创建的 1m base / 1h display Run 显示 4 根聚合 K 与 D+1 T+00:00:00，公开投影状态 ready、5 个标签；最终两个 public-times 批次均为 HTTP 200，应用 console errors=0。补充 clean-profile 扫描只有既有 favicon.ico 404。
+No-lookahead/time-disclosure evidence: 未 reveal 的 HIDE_ALL 页面正文、DOM HTML、URL、localStorage、sessionStorage 与 IndexedDB 均扫描不到私有种子、真实起止 epoch 或起点 ISO 日期；clean profile 只存在 candlescope-drawings-v2 的 1 个空 store，forbidden hits=0。integrity/report/session/422 error envelope 四类 HTTP payload 同一 forbidden-token 扫描为 0，报告无 actual_history；公开 integrity/config 不返回权威种子，adapter snapshot 的兼容 seed 为 0。轴对齐需要的起点前 display bucket 在 pinned warmup + display-alignment 边界内允许，越出数据集仍 422 fail-closed。
+Database evidence: 隔离验收库 quick_check=ok、foreign_key_check=0；selection seed_source=SERVER、revealed=0，selection_hash=sha256:1accc9735aa7be51e6750c65228ca34e9e98a6b1efabb8b0cdc839ec53582c82，dataset_epoch=sha256:379f92ae5674dc04f0214d65a3427eef810af83c09d2c0fdeb22a87352f1d1c6。私有种子与实际边界仅存在恢复所需的 replay-owned SQLite 记录；读取 integrity 时重新计算 commitment 并同时核对冻结数据集起止边界，hash 或边界被篡改均 503 fail-closed。
+Defects caught by acceptance: 真实 1h 图首次投影时，最早显示 bucket 比 200 根 1m warmup 更早 4 小时，原边界返回 422；边界补入至多一个 display bucket 对齐余量，并以 200/422 回归锁定。另修复 reveal 后 cache miss 误显示 synthetic 2000 年 UTC、报告条目解析类型未收窄和 catalog 重绑时提交按钮误报“正在原子创建”。
+Rollback evidence: v8 -> v9 additive migration 测试确认旧 replay_session.config_json 字节不变；新表/响应字段可由旧 build 忽略。完整未提交 Phase 12 diff 经 Git Bash `git apply --check --reverse --whitespace=error-all` 相对父 tree 通过；仓库默认开关仍全部为 0。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0、RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_HISTORICAL_BOOK_ENABLED=0、REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0、REPLAY_SEGMENT_AUTO_GC_ENABLED=0、REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0。
+Known limitations: 本 Phase 不改变推进合同、分段下载、真正 checkpoint 快进、交易所账户 fidelity、完整动作复盘或 GC/发布状态；这些分别属于 Phase 13–18。没有生成当前 HEAD 的 clean-HEAD release manifest，也未授权生产启用。
+Decision: PASS（实现、自动回归、真实浏览器、数据库与回滚预检）；独立提交后进入 Phase 13，release 继续 HOLD。
 ```

@@ -90,11 +90,28 @@ export function buildReplayTrainingReportExport(
     report: response.report,
     warnings: response.report.warnings,
     integrity: response.integrity,
+    public_time_index: response.public_time_index,
   };
 }
 
 export function replayTrainingReportToCsv(response: ReplayTrainingReportResponse): string {
   const { report, integrity } = response;
+  const publicLabels = new Map(response.public_time_index.items.map((item) => [
+    item.input_timeline_ms,
+    item.public_time.label,
+  ]));
+  const withPublicTime = <T extends object>(value: T) => {
+    const record = value as Record<string, unknown>;
+    const time = Object.entries(record).find(([key, item]) => (
+      key.endsWith("_time_ms") && typeof item === "number"
+    ))?.[1];
+    return {
+      ...value,
+      ...(typeof time === "number" && publicLabels.has(time)
+        ? { public_time_label: publicLabels.get(time) }
+        : {}),
+    };
+  };
   const rows: unknown[][] = [
     ["section", "key", "value", "detail"],
     ["run", "run_id", response.run_id, ""],
@@ -117,8 +134,8 @@ export function replayTrainingReportToCsv(response: ReplayTrainingReportResponse
     ["summary", "profit_factor", report.profit_factor, ""],
     ["summary", "ambiguous_bar_count", report.ambiguous_bar_count, ""],
     ...report.warnings.map((warning) => ["warning", warning.code, warning.message, warning.order_ids.join("|")]),
-    ...report.orders.map((order) => ["order", order.order_id, order.status, order]),
-    ...report.fills.map((fill) => ["fill", fill.fill_id, fill.reason, fill]),
+    ...report.orders.map((order) => ["order", order.order_id, order.status, withPublicTime(order)]),
+    ...report.fills.map((fill) => ["fill", fill.fill_id, fill.reason, withPublicTime(fill)]),
     ...report.closed_trades.map((trade) => ["closed_trade", trade.trade_id, trade.realized_pnl, trade]),
     ...integrity.mutations.map((mutation) => [
       "mutation",

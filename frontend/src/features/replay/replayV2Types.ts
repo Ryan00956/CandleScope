@@ -1395,7 +1395,7 @@ export interface TrainingRunCreatePayload {
   readonly requested_start_ms: number | null;
   readonly warmup_bars: number;
   readonly forward_cache_ms: number;
-  readonly random_seed: number;
+  readonly random_seed: number | null;
   readonly initial_equity: string;
   readonly max_leverage: string;
   readonly maker_fee_bps: string;

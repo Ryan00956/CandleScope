@@ -12,6 +12,7 @@ from typing import cast
 from app.replay.canonical import canonical_json, canonical_sha256
 from app.replay.broker.models import decimal_to_string
 from app.replay.storage.sqlite_store import ReplaySQLiteStore
+from app.data_engine.interval_policy import parse_interval_ms
 
 from .errors import TrainingRunError
 from .historical_book import (
@@ -47,7 +48,12 @@ from .multitrack import (
     global_ordering_hash,
     stable_market_event_order,
 )
-from .schema import TRAINING_SCHEMA_ID, migrate_training_schema
+from .schema import (
+    START_SELECTION_SCHEMA_VERSION,
+    TRAINING_SCHEMA_ID,
+    migrate_training_schema,
+    start_selection_hash,
+)
 from .segments import backfill_archive_segments, register_archive_segment
 
 
@@ -56,6 +62,7 @@ _COMPATIBILITY_FILTERS = {"READY", "LEGACY_ADAPTER", "LEGACY_V1", "UNAVAILABLE"}
 _STATES = {"PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"}
 _SOURCES = {"BAR", "AGG_TRADE"}
 _VIEW_EVENT_LIMIT = 2_048
+_PUBLIC_TIME_BATCH_LIMIT = 20_000
 _EQUITY_RESOLUTIONS: tuple[tuple[str, int, int], ...] = (
     ("EVENT", 0, 2_048),
     ("1M", 60_000, 4_096),
@@ -326,6 +333,20 @@ class TrainingRunStore:
                 context=request.resolved_launch_context(),
                 now_ms=now_ms,
             )
+            self._insert_start_selection(
+                connection,
+                run_id=run_id,
+                start_mode=request.start_mode.value,
+                seed_source=(
+                    "SERVER" if request.start_mode.value == "RANDOM" else "MANUAL"
+                ),
+                random_seed=request.random_seed,
+                actual_start_ms=actual_replay_start_ms,
+                actual_end_ms=actual_replay_end_ms,
+                dataset_epoch=str(session_state["data_epoch"]),
+                parent_selection_hash=None,
+                now_ms=now_ms,
+            )
             self._insert_track(
                 connection,
                 run_id=run_id,
@@ -593,6 +614,15 @@ class TrainingRunStore:
                 connection,
                 parent_run_id=parent_run_id,
                 child_run_id=child_run_id,
+                now_ms=now_ms,
+            )
+            self._copy_start_selection(
+                connection,
+                parent_run_id=parent_run_id,
+                child_run_id=child_run_id,
+                actual_start_ms=actual_replay_start_ms,
+                actual_end_ms=actual_replay_end_ms,
+                dataset_epoch=str(parent["dataset_epoch"]),
                 now_ms=now_ms,
             )
             self._insert_track(
@@ -895,7 +925,8 @@ class TrainingRunStore:
                 return str(existing["run_id"]), False
             row = connection.execute(
                 """
-                SELECT s.*, d.data_epoch AS dataset_epoch
+                SELECT s.*, d.data_epoch AS dataset_epoch,
+                       d.actual_replay_start_ms, d.actual_replay_end_ms
                 FROM replay_session AS s
                 LEFT JOIN replay_dataset_ref AS d USING(session_id)
                 WHERE s.session_id = ?
@@ -922,10 +953,17 @@ class TrainingRunStore:
             symbol = str(config.get("symbol") or "UNKNOWN")
             run_name = _safe_name(name, fallback=f"Legacy {symbol}")
             requested_start = None if blind else config.get("requested_start_ms")
+            public_config = {
+                **config,
+                "requested_start_ms": requested_start,
+                "random_seed": (
+                    None if blind else config.get("random_seed")
+                ),
+            }
             rule = {
                 "schema": "replay.training.legacy-rule.v1",
                 "legacy_protocol": "replay.v1",
-                "config": {**config, "requested_start_ms": requested_start},
+                "config": public_config,
                 "broker_config": broker,
             }
             cursor = {
@@ -977,6 +1015,25 @@ class TrainingRunStore:
                     symbol=symbol,
                     display_interval=str(config.get("display_interval") or "unknown"),
                 ),
+                now_ms=now_ms,
+            )
+            self._insert_start_selection(
+                connection,
+                run_id=run_id,
+                start_mode=start_mode,
+                seed_source=(
+                    "LEGACY_CLIENT" if start_mode == "RANDOM" else "MANUAL"
+                ),
+                random_seed=(
+                    int(config["random_seed"])
+                    if start_mode == "RANDOM"
+                    and config.get("random_seed") is not None
+                    else None
+                ),
+                actual_start_ms=int(row["actual_replay_start_ms"]),
+                actual_end_ms=int(row["actual_replay_end_ms"]),
+                dataset_epoch=str(row["dataset_epoch"]),
+                parent_selection_hash=None,
                 now_ms=now_ms,
             )
             self._insert_track(
@@ -1151,18 +1208,52 @@ class TrainingRunStore:
                        r.virtual_time_ms, r.source_sequence,
                        i.strict_eligible, i.start_time_known, i.revealed,
                        i.allowed_mutations_json, i.result_label,
-                       rule.rule_hash, rule.rule_json
+                       rule.rule_hash, rule.rule_json,
+                       selection.schema_version AS selection_schema_version,
+                       selection.start_mode AS selection_start_mode,
+                       selection.seed_source AS selection_seed_source,
+                       selection.random_seed AS selection_random_seed,
+                       selection.actual_start_ms AS selection_actual_start_ms,
+                       selection.actual_end_ms AS selection_actual_end_ms,
+                       selection.dataset_epoch AS selection_dataset_epoch,
+                       selection.parent_selection_hash,
+                       selection.selection_hash
                 FROM replay_training_run AS r
                 JOIN replay_training_integrity AS i USING(run_id)
                 JOIN replay_training_rule AS rule
                   ON rule.run_id = r.run_id
                  AND rule.revision = r.active_rule_revision
+                JOIN replay_training_start_selection AS selection USING(run_id)
                 WHERE r.run_id = ?
                 """,
                 (run_id,),
             ).fetchone()
             if row is None:
                 return None
+            expected_selection_hash = start_selection_hash(
+                run_id=str(row["run_id"]),
+                start_mode=str(row["selection_start_mode"]),
+                seed_source=str(row["selection_seed_source"]),
+                random_seed=(
+                    None
+                    if row["selection_random_seed"] is None
+                    else int(row["selection_random_seed"])
+                ),
+                actual_start_ms=int(row["selection_actual_start_ms"]),
+                actual_end_ms=int(row["selection_actual_end_ms"]),
+                dataset_epoch=str(row["selection_dataset_epoch"]),
+                parent_selection_hash=(
+                    None
+                    if row["parent_selection_hash"] is None
+                    else str(row["parent_selection_hash"])
+                ),
+            )
+            if expected_selection_hash != str(row["selection_hash"]):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "training start selection commitment failed validation",
+                    status_code=503,
+                )
             actions = connection.execute(
                 """
                 SELECT * FROM replay_run_action_event
@@ -1178,6 +1269,24 @@ class TrainingRunStore:
                 revealed=bool(row["revealed"]),
                 public_time_ms=int(row["virtual_time_ms"]),
                 sequence=int(row["source_sequence"]),
+            )
+            revealed = bool(row["revealed"])
+            configured_policy = str(row["time_disclosure_policy"])
+            active_rule = self._redact_active_rule(
+                json.loads(str(row["rule_json"])),
+                hidden=configured_policy != "NONE" and not revealed,
+            )
+            start_public_time, end_public_time = self._selection_public_bounds(
+                connection,
+                session_id=str(row["adapter_session_id"]),
+                policy=configured_policy,
+                revealed=revealed,
+                actual_start_ms=int(row["selection_actual_start_ms"]),
+                actual_end_ms=int(row["selection_actual_end_ms"]),
+            )
+            disclose_seed = (
+                row["selection_random_seed"] is not None
+                and (configured_policy == "NONE" or revealed)
             )
             return {
                 "protocol": REPLAY_V2_PROTOCOL,
@@ -1196,7 +1305,23 @@ class TrainingRunStore:
                 "result_label": str(row["result_label"]),
                 "active_rule_revision": int(row["active_rule_revision"]),
                 "active_rule_hash": str(row["rule_hash"]),
-                "active_rule": json.loads(str(row["rule_json"])),
+                "active_rule": active_rule,
+                "start_selection": {
+                    "schema_version": str(row["selection_schema_version"]),
+                    "start_mode": str(row["selection_start_mode"]),
+                    "seed_source": str(row["selection_seed_source"]),
+                    "seed_disclosed": disclose_seed,
+                    "random_seed": (
+                        int(row["selection_random_seed"])
+                        if disclose_seed
+                        else None
+                    ),
+                    "dataset_epoch": str(row["selection_dataset_epoch"]),
+                    "parent_selection_hash": row["parent_selection_hash"],
+                    "selection_hash": str(row["selection_hash"]),
+                    "public_start": start_public_time,
+                    "public_end": end_public_time,
+                },
                 "public_time": public_time,
                 "mutations": [self._action_from_row(action) for action in actions],
             }
@@ -1206,6 +1331,135 @@ class TrainingRunStore:
             raise TrainingRunError(
                 "TRAINING_RUN_NOT_FOUND",
                 "training integrity record does not exist",
+                status_code=404,
+            )
+        return result
+
+    async def public_times(
+        self,
+        run_id: str,
+        *,
+        timeline_ms: tuple[int, ...],
+        max_items: int,
+    ) -> dict[str, object]:
+        if (
+            isinstance(max_items, bool)
+            or not isinstance(max_items, int)
+            or not 1 <= max_items <= _PUBLIC_TIME_BATCH_LIMIT
+        ):
+            raise TypeError("max_items is outside the public-time storage bound")
+        if not isinstance(timeline_ms, tuple) or not 1 <= len(timeline_ms) <= max_items:
+            raise TrainingRunError(
+                "TRAINING_RUN_INVALID",
+                f"public time batch must contain between 1 and {max_items} values",
+                status_code=422,
+            )
+        normalized: list[int] = []
+        for index, value in enumerate(timeline_ms):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                or value > 253_402_300_799_999
+            ):
+                raise TrainingRunError(
+                    "TRAINING_RUN_INVALID",
+                    f"timeline_ms[{index}] is not a valid timestamp",
+                    status_code=422,
+                )
+            normalized.append(value)
+
+        def read(connection: sqlite3.Connection) -> dict[str, object] | None:
+            row = connection.execute(
+                """
+                SELECT r.adapter_session_id, r.time_disclosure_policy,
+                       r.base_interval, r.display_interval, i.revealed,
+                       rule.rule_json,
+                       d.actual_replay_start_ms, d.actual_replay_end_ms,
+                       d.synthetic_origin_ms
+                FROM replay_training_run AS r
+                JOIN replay_training_integrity AS i USING(run_id)
+                JOIN replay_training_rule AS rule
+                  ON rule.run_id = r.run_id
+                 AND rule.revision = r.active_rule_revision
+                JOIN replay_dataset_ref AS d
+                  ON d.session_id = r.adapter_session_id
+                WHERE r.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            policy = str(row["time_disclosure_policy"])
+            revealed = bool(row["revealed"])
+            actual_origin = int(row["actual_replay_start_ms"])
+            public_origin = (
+                actual_origin
+                if policy == "NONE"
+                else self._required_synthetic_origin(row["synthetic_origin_ms"])
+            )
+            try:
+                rule = json.loads(str(row["rule_json"]))
+            except json.JSONDecodeError as exc:
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "active training rule is invalid",
+                    status_code=503,
+                ) from exc
+            warmup = rule.get("warmup_bars", 0)
+            interval_ms = parse_interval_ms(str(row["base_interval"]))
+            display_interval_ms = parse_interval_ms(str(row["display_interval"]))
+            if (
+                isinstance(warmup, bool)
+                or not isinstance(warmup, int)
+                or warmup < 0
+                or interval_ms is None
+                or display_interval_ms is None
+                or display_interval_ms < interval_ms
+            ):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "training time bounds are invalid",
+                    status_code=503,
+                )
+            lower = (
+                public_origin
+                - warmup * interval_ms
+                - (display_interval_ms - interval_ms)
+            )
+            upper = public_origin + int(row["actual_replay_end_ms"]) - actual_origin
+            if lower < 0 or any(value < lower or value > upper for value in normalized):
+                raise TrainingRunError(
+                    "TRAINING_RUN_INVALID",
+                    "public time request is outside the pinned training dataset",
+                    status_code=422,
+                )
+            items = [
+                {
+                    "input_timeline_ms": value,
+                    "public_time": self._project_public_time(
+                        actual_origin_ms=actual_origin,
+                        public_origin_ms=public_origin,
+                        policy=policy,
+                        revealed=revealed,
+                        public_time_ms=value,
+                        sequence=index,
+                    ),
+                }
+                for index, value in enumerate(normalized)
+            ]
+            return {
+                "protocol": REPLAY_V2_PROTOCOL,
+                "run_id": run_id,
+                "policy": "NONE" if revealed else policy,
+                "items": items,
+            }
+
+        result = await self.base_store.run_extension_read(read)
+        if result is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training run does not exist",
                 status_code=404,
             )
         return result
@@ -4995,6 +5249,159 @@ class TrainingRunStore:
         )
 
     @staticmethod
+    def _insert_start_selection(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        start_mode: str,
+        seed_source: str,
+        random_seed: int | None,
+        actual_start_ms: int,
+        actual_end_ms: int,
+        dataset_epoch: str,
+        parent_selection_hash: str | None,
+        now_ms: int,
+    ) -> None:
+        if start_mode not in {"MANUAL", "RANDOM"}:
+            raise TypeError("training start selection mode is invalid")
+        if seed_source not in {"SERVER", "MANUAL", "LEGACY_CLIENT", "FORK"}:
+            raise TypeError("training start selection seed source is invalid")
+        if seed_source == "MANUAL" and start_mode != "MANUAL":
+            raise TypeError("manual seed source requires a manual start")
+        if seed_source in {"SERVER", "LEGACY_CLIENT"} and start_mode != "RANDOM":
+            raise TypeError("random seed source requires a random start")
+        if start_mode == "MANUAL" and random_seed is not None:
+            raise TypeError("manual start selection cannot persist a random seed")
+        if start_mode == "RANDOM" and random_seed is None:
+            raise TypeError("random start selection must persist its private seed")
+        if (
+            random_seed is not None
+            and (
+                isinstance(random_seed, bool)
+                or not isinstance(random_seed, int)
+                or not 0 <= random_seed <= 9_007_199_254_740_991
+            )
+        ):
+            raise TypeError("training start selection seed is invalid")
+        if (
+            isinstance(actual_start_ms, bool)
+            or not isinstance(actual_start_ms, int)
+            or actual_start_ms < 0
+            or isinstance(actual_end_ms, bool)
+            or not isinstance(actual_end_ms, int)
+            or actual_end_ms < actual_start_ms
+        ):
+            raise TypeError("training start selection bounds are invalid")
+        if not isinstance(dataset_epoch, str) or not dataset_epoch:
+            raise TypeError("training start selection dataset epoch is invalid")
+        if parent_selection_hash is not None and (
+            not isinstance(parent_selection_hash, str)
+            or len(parent_selection_hash) != 71
+            or not parent_selection_hash.startswith("sha256:")
+        ):
+            raise TypeError("parent start selection hash is invalid")
+        digest = start_selection_hash(
+            run_id=run_id,
+            start_mode=start_mode,
+            seed_source=seed_source,
+            random_seed=random_seed,
+            actual_start_ms=actual_start_ms,
+            actual_end_ms=actual_end_ms,
+            dataset_epoch=dataset_epoch,
+            parent_selection_hash=parent_selection_hash,
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_training_start_selection(
+                run_id, schema_version, start_mode, seed_source, random_seed,
+                actual_start_ms, actual_end_ms, dataset_epoch,
+                parent_selection_hash, selection_hash, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                START_SELECTION_SCHEMA_VERSION,
+                start_mode,
+                seed_source,
+                random_seed,
+                actual_start_ms,
+                actual_end_ms,
+                dataset_epoch,
+                parent_selection_hash,
+                digest,
+                now_ms,
+            ),
+        )
+
+    @classmethod
+    def _copy_start_selection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        parent_run_id: str,
+        child_run_id: str,
+        actual_start_ms: int,
+        actual_end_ms: int,
+        dataset_epoch: str,
+        now_ms: int,
+    ) -> None:
+        row = connection.execute(
+            """
+            SELECT * FROM replay_training_start_selection
+            WHERE run_id = ?
+            """,
+            (parent_run_id,),
+        ).fetchone()
+        if row is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "parent start selection commitment is missing",
+                status_code=503,
+            )
+        expected_hash = start_selection_hash(
+            run_id=parent_run_id,
+            start_mode=str(row["start_mode"]),
+            seed_source=str(row["seed_source"]),
+            random_seed=(
+                None if row["random_seed"] is None else int(row["random_seed"])
+            ),
+            actual_start_ms=int(row["actual_start_ms"]),
+            actual_end_ms=int(row["actual_end_ms"]),
+            dataset_epoch=str(row["dataset_epoch"]),
+            parent_selection_hash=row["parent_selection_hash"],
+        )
+        if expected_hash != str(row["selection_hash"]):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "parent start selection commitment failed validation",
+                status_code=503,
+            )
+        if (
+            int(row["actual_start_ms"]) != actual_start_ms
+            or int(row["actual_end_ms"]) != actual_end_ms
+            or str(row["dataset_epoch"]) != dataset_epoch
+        ):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "forked dataset does not match the parent start selection",
+                status_code=503,
+            )
+        cls._insert_start_selection(
+            connection,
+            run_id=child_run_id,
+            start_mode=str(row["start_mode"]),
+            seed_source="FORK",
+            random_seed=(
+                None if row["random_seed"] is None else int(row["random_seed"])
+            ),
+            actual_start_ms=actual_start_ms,
+            actual_end_ms=actual_end_ms,
+            dataset_epoch=dataset_epoch,
+            parent_selection_hash=str(row["selection_hash"]),
+            now_ms=now_ms,
+        )
+
+    @staticmethod
     def _launch_context_projection(row: Mapping[str, object]) -> dict[str, object]:
         raw_json = row["launch_context_json"]
         raw_hash = row["launch_context_hash"]
@@ -6289,6 +6696,136 @@ class TrainingRunStore:
         return "CHALLENGE_VISIBLE_TIME"
 
     @staticmethod
+    def _required_synthetic_origin(value: object) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+        ):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "hidden training synthetic origin is missing",
+                status_code=503,
+            )
+        return value
+
+    @staticmethod
+    def _redact_active_rule(
+        value: object,
+        *,
+        hidden: bool,
+    ) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "active training rule must be an object",
+                status_code=503,
+            )
+        rule = dict(value)
+        if not hidden:
+            return rule
+        for field_name in ("requested_start_ms", "random_seed"):
+            if field_name in rule:
+                rule[field_name] = None
+        nested = rule.get("config")
+        if isinstance(nested, Mapping):
+            public_config = dict(nested)
+            public_config["requested_start_ms"] = None
+            public_config["random_seed"] = None
+            rule["config"] = public_config
+        return rule
+
+    @staticmethod
+    def _project_public_time(
+        *,
+        actual_origin_ms: int,
+        public_origin_ms: int,
+        policy: str,
+        revealed: bool,
+        public_time_ms: int,
+        sequence: int,
+    ) -> dict[str, object]:
+        effective_policy = "NONE" if revealed else policy
+        actual_time_ms = actual_origin_ms + public_time_ms - public_origin_ms
+        return dict(
+            project_public_time(
+                actual_time_ms=actual_time_ms,
+                public_time_ms=(
+                    actual_time_ms
+                    if effective_policy == "NONE"
+                    else public_time_ms
+                ),
+                actual_origin_ms=actual_origin_ms,
+                public_origin_ms=(
+                    actual_origin_ms
+                    if effective_policy == "NONE"
+                    else public_origin_ms
+                ),
+                policy=effective_policy,
+                sequence=sequence,
+            )
+        )
+
+    @classmethod
+    def _selection_public_bounds(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        policy: str,
+        revealed: bool,
+        actual_start_ms: int,
+        actual_end_ms: int,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        dataset = connection.execute(
+            """
+            SELECT actual_replay_start_ms, actual_replay_end_ms,
+                   synthetic_origin_ms
+            FROM replay_dataset_ref WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if dataset is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training dataset time binding is missing",
+                status_code=503,
+            )
+        actual_origin = int(dataset["actual_replay_start_ms"])
+        if (
+            actual_origin != actual_start_ms
+            or int(dataset["actual_replay_end_ms"]) != actual_end_ms
+        ):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training start selection and dataset bounds disagree",
+                status_code=503,
+            )
+        public_origin = (
+            actual_origin
+            if policy == "NONE"
+            else cls._required_synthetic_origin(dataset["synthetic_origin_ms"])
+        )
+        return (
+            cls._project_public_time(
+                actual_origin_ms=actual_origin,
+                public_origin_ms=public_origin,
+                policy=policy,
+                revealed=revealed,
+                public_time_ms=public_origin,
+                sequence=0,
+            ),
+            cls._project_public_time(
+                actual_origin_ms=actual_origin,
+                public_origin_ms=public_origin,
+                policy=policy,
+                revealed=revealed,
+                public_time_ms=public_origin + actual_end_ms - actual_origin,
+                sequence=1,
+            ),
+        )
+
+    @staticmethod
     def _public_time(
         connection: sqlite3.Connection,
         *,
@@ -6306,27 +6843,26 @@ class TrainingRunStore:
             (session_id,),
         ).fetchone()
         if dataset is None:
-            raise TypeError("training dataset time binding is missing")
-        actual_origin = int(dataset["actual_replay_start_ms"])
-        synthetic_origin = dataset["synthetic_origin_ms"]
-        effective_policy = "NONE" if revealed else policy
-        if policy == "NONE":
-            actual_time = public_time_ms
-            public_origin = actual_origin
-        else:
-            if synthetic_origin is None:
-                raise TypeError("hidden training synthetic origin is missing")
-            public_origin = int(synthetic_origin)
-            actual_time = actual_origin + public_time_ms - public_origin
-        return dict(
-            project_public_time(
-                actual_time_ms=actual_time,
-                public_time_ms=(actual_time if effective_policy == "NONE" else public_time_ms),
-                actual_origin_ms=actual_origin,
-                public_origin_ms=(actual_origin if effective_policy == "NONE" else public_origin),
-                policy=effective_policy,
-                sequence=sequence,
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training dataset time binding is missing",
+                status_code=503,
             )
+        actual_origin = int(dataset["actual_replay_start_ms"])
+        public_origin = (
+            actual_origin
+            if policy == "NONE"
+            else TrainingRunStore._required_synthetic_origin(
+                dataset["synthetic_origin_ms"]
+            )
+        )
+        return TrainingRunStore._project_public_time(
+            actual_origin_ms=actual_origin,
+            public_origin_ms=public_origin,
+            policy=policy,
+            revealed=revealed,
+            public_time_ms=public_time_ms,
+            sequence=sequence,
         )
 
     @classmethod

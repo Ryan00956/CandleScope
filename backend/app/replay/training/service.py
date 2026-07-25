@@ -49,6 +49,7 @@ from .models import (
     FastForwardPlan,
     FundingMode,
     IntegrityMode,
+    REPLAY_V2_PROTOCOL,
     ReplaySource,
     ReplayV2CommandType,
     StartMode,
@@ -105,6 +106,9 @@ class TrainingRunService:
         *,
         replay_service: "ReplayService",
         run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+        random_seed_factory: Callable[[], int] = (
+            lambda: uuid.uuid4().int % (1 << 53)
+        ),
     ) -> None:
         self.replay_service = replay_service
         self.store = TrainingRunStore(replay_service.store)
@@ -123,6 +127,7 @@ class TrainingRunService:
             ),
         )
         self._run_id_factory = run_id_factory
+        self._random_seed_factory = random_seed_factory
         self._fast_forward_planner = FastForwardPlanner()
         self._trade_flow_adapter = ReplayTradeFlowAdapter()
         self._advance_jobs: dict[tuple[str, str], dict[str, object]] = {}
@@ -567,6 +572,27 @@ class TrainingRunService:
     async def integrity(self, run_id: str) -> dict[str, object]:
         return await self.store.integrity(self._identifier(run_id, field_name="run_id"))
 
+    async def public_times(
+        self,
+        run_id: str,
+        *,
+        timeline_ms: tuple[int, ...],
+    ) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        if not isinstance(timeline_ms, tuple):
+            raise TypeError("timeline_ms must be a tuple")
+        if not 1 <= len(timeline_ms) <= 2_000:
+            raise TrainingRunError(
+                "TRAINING_RUN_INVALID",
+                "public time batch must contain between 1 and 2000 values",
+                status_code=422,
+            )
+        return await self.store.public_times(
+            normalized,
+            timeline_ms=timeline_ms,
+            max_items=2_000,
+        )
+
     async def equity(
         self,
         run_id: str,
@@ -595,6 +621,44 @@ class TrainingRunService:
         normalized = self._identifier(run_id, field_name="run_id")
         binding = await self.store.run_binding(normalized)
         report = await self.replay_service.report(str(binding["adapter_session_id"]))
+        timeline_ms: set[int] = set()
+
+        def collect(value: object, *, key: str | None = None) -> None:
+            if isinstance(value, Mapping):
+                for child_key, child in value.items():
+                    collect(child, key=str(child_key))
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    collect(child, key=key)
+            elif (
+                key is not None
+                and key.endswith("_time_ms")
+                and not isinstance(value, bool)
+                and isinstance(value, int)
+            ):
+                if value not in timeline_ms and len(timeline_ms) >= 20_000:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "training report exceeds the public-time projection bound",
+                        status_code=503,
+                    )
+                timeline_ms.add(value)
+
+        collect(report["report"])
+        integrity = await self.store.integrity(normalized)
+        if timeline_ms:
+            public_time_index = await self.store.public_times(
+                normalized,
+                timeline_ms=tuple(sorted(timeline_ms)),
+                max_items=20_000,
+            )
+        else:
+            public_time_index = {
+                "protocol": REPLAY_V2_PROTOCOL,
+                "run_id": normalized,
+                "policy": integrity["effective_time_disclosure_policy"],
+                "items": [],
+            }
         return {
             "protocol": "replay.v2",
             "run_id": normalized,
@@ -602,7 +666,8 @@ class TrainingRunService:
             "execution_fidelity": report["execution_fidelity"],
             "revealed": report["revealed"],
             "report": report["report"],
-            "integrity": await self.store.integrity(normalized),
+            "integrity": integrity,
+            "public_time_index": public_time_index,
             **(
                 {"actual_history": report["actual_history"]}
                 if report.get("revealed") and "actual_history" in report
@@ -697,6 +762,7 @@ class TrainingRunService:
     async def create_run(self, request: TrainingRunCreateRequest) -> dict[str, object]:
         if not isinstance(request, TrainingRunCreateRequest):
             raise TypeError("request must be TrainingRunCreateRequest")
+        request = self._authoritative_start_request(request)
         base_interval_ms = compatible_step_interval_ms(
             base_interval=request.base_interval,
             step_interval=request.display_interval,
@@ -4654,7 +4720,7 @@ class TrainingRunService:
             requested_start_ms=request.requested_start_ms,
             warmup_bars=request.warmup_bars,
             horizon_ms=request.forward_cache_ms,
-            random_seed=request.random_seed,
+            random_seed=0 if request.random_seed is None else request.random_seed,
             quality_mode=QualityMode.EXACT,
             blind_mode=(
                 request.time_disclosure_policy is not TimeDisclosurePolicy.NONE
@@ -4681,6 +4747,25 @@ class TrainingRunService:
                 f"{field_name} is invalid",
                 status_code=422,
             ) from exc
+
+    def _authoritative_start_request(
+        self,
+        request: TrainingRunCreateRequest,
+    ) -> TrainingRunCreateRequest:
+        if request.start_mode is StartMode.MANUAL:
+            return replace(request, random_seed=None)
+        try:
+            seed = validate_v2_counter(
+                self._random_seed_factory(),
+                field_name="server random_seed",
+            )
+        except (TypeError, ValueError, RuntimeError, StopIteration) as exc:
+            raise TrainingRunError(
+                "TRAINING_RANDOM_SEED_UNAVAILABLE",
+                "server could not generate an authoritative random start seed",
+                status_code=503,
+            ) from exc
+        return replace(request, random_seed=seed)
 
 
 __all__ = ["TrainingRunService"]

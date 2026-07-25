@@ -923,10 +923,61 @@ function parseCatalogEntry(value: unknown, path: string, blind: boolean): Replay
   exact(source, keys, path);
   const identitySource = record(source.identity, `${path}.identity`);
   exact(identitySource, ["exchange", "market_type", "symbol"], `${path}.identity`);
-  const bounds = source.bounds === null ? null : jsonRecord(source.bounds, `${path}.bounds`);
-  const eligibleRanges = array(source.eligible_ranges, `${path}.eligible_ranges`, jsonRecord);
-  if (blind && bounds !== null) fail(`${path}.bounds`, "blind catalog bounds must be null");
-  if (blind && eligibleRanges.length !== 0) fail(`${path}.eligible_ranges`, "blind catalog ranges must be empty");
+  if (blind && source.bounds !== null) {
+    fail(`${path}.bounds`, "blind catalog bounds must be null");
+  }
+  if (blind && Array.isArray(source.eligible_ranges)
+    && source.eligible_ranges.length !== 0) {
+    fail(`${path}.eligible_ranges`, "blind catalog ranges must be empty");
+  }
+  const bounds = source.bounds === null ? null : (() => {
+    const item = record(source.bounds, `${path}.bounds`);
+    exact(item, [
+      "earliest_open_ms",
+      "latest_source_open_ms",
+      "latest_closed_open_ms",
+      "total_count",
+    ], `${path}.bounds`);
+    const parsed = {
+      earliest_open_ms: timestamp(item.earliest_open_ms, `${path}.bounds.earliest_open_ms`),
+      latest_source_open_ms: timestamp(item.latest_source_open_ms, `${path}.bounds.latest_source_open_ms`),
+      latest_closed_open_ms: timestamp(item.latest_closed_open_ms, `${path}.bounds.latest_closed_open_ms`),
+      total_count: integer(item.total_count, `${path}.bounds.total_count`, 0),
+    };
+    if (parsed.latest_source_open_ms < parsed.earliest_open_ms
+      || parsed.latest_closed_open_ms < parsed.earliest_open_ms
+      || parsed.latest_closed_open_ms > parsed.latest_source_open_ms) {
+      fail(`${path}.bounds`, "catalog bounds are not monotonic");
+    }
+    return parsed;
+  })();
+  const eligibleRanges = array(source.eligible_ranges, `${path}.eligible_ranges`, (item, itemPath) => {
+    const range = record(item, itemPath);
+    exact(range, [
+      "interval",
+      "interval_ms",
+      "first_start_ms",
+      "last_start_ms",
+      "count",
+      "warmup_bars",
+      "replay_bars",
+    ], itemPath);
+    const parsed = {
+      interval: identifier(range.interval, `${itemPath}.interval`),
+      interval_ms: integer(range.interval_ms, `${itemPath}.interval_ms`, 1),
+      first_start_ms: timestamp(range.first_start_ms, `${itemPath}.first_start_ms`),
+      last_start_ms: timestamp(range.last_start_ms, `${itemPath}.last_start_ms`),
+      count: integer(range.count, `${itemPath}.count`, 1),
+      warmup_bars: integer(range.warmup_bars, `${itemPath}.warmup_bars`, 0),
+      replay_bars: integer(range.replay_bars, `${itemPath}.replay_bars`, 1),
+    };
+    if (parsed.last_start_ms < parsed.first_start_ms
+      || parsed.last_start_ms - parsed.first_start_ms
+        !== (parsed.count - 1) * parsed.interval_ms) {
+      fail(itemPath, "eligible range count does not match its aligned bounds");
+    }
+    return parsed;
+  });
   return {
     identity: {
       exchange: identifier(identitySource.exchange, `${path}.identity.exchange`),

@@ -311,7 +311,7 @@ class TrainingRunCreatePayload(_StrictModel):
     requested_start_ms: int | None = Field(default=None, ge=0, le=MAX_TIMESTAMP_MS)
     warmup_bars: int = Field(ge=1, le=REPLAY_SETTINGS.max_warmup_bars)
     forward_cache_ms: int = Field(ge=1, le=_MAX_HORIZON_MS)
-    random_seed: int = Field(ge=0, le=MAX_RANDOM_SEED)
+    random_seed: int | None = Field(default=None, ge=0, le=MAX_RANDOM_SEED)
     initial_equity: str = Field(min_length=1, max_length=128)
     max_leverage: str = Field(min_length=1, max_length=128)
     maker_fee_bps: str = Field(min_length=1, max_length=128)
@@ -353,6 +353,10 @@ class ReplayV2CommandPayload(_StrictModel):
 
 class ReplayReviewPayload(_StrictModel):
     event_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ReplayPublicTimeBatchPayload(_StrictModel):
+    timeline_ms: list[int] = Field(min_length=1, max_length=2_000)
 
 
 class ReplayForkPayload(_StrictModel):
@@ -816,6 +820,21 @@ async def replay_v2_training_integrity(
     run_id: str,
 ) -> dict[str, object]:
     return await _training_service(request).integrity(run_id)
+
+
+@router.post(
+    "/runs/{run_id}/public-times",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def replay_v2_training_public_times(
+    request: Request,
+    run_id: str,
+    payload: ReplayPublicTimeBatchPayload,
+) -> dict[str, object]:
+    return await _training_service(request).public_times(
+        run_id,
+        timeline_ms=tuple(payload.timeline_ms),
+    )
 
 
 @router.get("/runs/{run_id}/equity")

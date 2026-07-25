@@ -21,9 +21,10 @@ import { buildReplayCapabilityModel } from "./replayCapabilityModel.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
 import { handleReplayShortcut } from "./replayShortcuts.js";
 import { returnToTrainingHub } from "./trainingHubNavigation.js";
-import { formatReplayPublicTime, replayEffectiveTrainingState, replayOwnsController } from "./replayUiModel.js";
+import { replayEffectiveTrainingState, replayOwnsController } from "./replayUiModel.js";
 import { useReplayHistoryRuntime } from "./useReplayHistoryRuntime.js";
 import { useReplayIntegrityRuntime } from "./useReplayIntegrityRuntime.js";
+import { useReplayPublicTimeRuntime } from "./useReplayPublicTimeRuntime.js";
 import type { ReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 import type { ReplayViewerRuntime } from "./useReplayViewerRuntime.js";
@@ -102,15 +103,39 @@ export default function ReplayTrainingPageShell({
     runtime.store.controllerClientId,
   );
   const capabilities = useMemo(() => buildReplayCapabilityModel(config?.source_kind ?? "BAR"), [config?.source_kind]);
-  const fallbackPublicTime = formatReplayPublicTime(runtime.store.virtualTimeMs, {
-    blindMode: config?.blind_mode ?? true,
-    originMs: runtime.store.replayStartMs,
+  const publicTimeline = (() => {
+    const values = viewer.seriesStore.snapshot().map((bar) => Number(bar.time) * 1_000);
+    if (runtime.store.virtualTimeMs !== null) values.push(runtime.store.virtualTimeMs);
+    for (const order of runtime.store.orders) values.push(order.created_time_ms);
+    for (const fill of runtime.store.fills) values.push(fill.event_time_ms);
+    for (const entry of runtime.store.journal) values.push(entry.virtual_time_ms);
+    for (const track of viewer.marketTracks?.tracks ?? []) {
+      if (track.historical_book?.as_of_virtual_time_ms !== null
+        && track.historical_book?.as_of_virtual_time_ms !== undefined) {
+        values.push(track.historical_book.as_of_virtual_time_ms);
+      }
+    }
+    return values;
+  })();
+  const publicTimePolicy = integrityRuntime.integrity?.effective_time_disclosure_policy
+    ?? (config?.blind_mode === false ? "NONE" : "HIDE_ALL");
+  const publicTimeRuntime = useReplayPublicTimeRuntime({
+    runId: integrityRuntime.runId,
+    policy: publicTimePolicy,
+    originMs: integrityRuntime.integrity?.start_selection.public_start.timeline_ms
+      ?? runtime.store.replayStartMs,
+    timelineOriginMs: runtime.store.replayStartMs,
+    timelineMs: publicTimeline,
   });
-  const publicTime = integrityRuntime.integrity?.public_time.label ?? fallbackPublicTime;
-  const formatChartTime = useCallback((timeSeconds: number) => formatReplayPublicTime(timeSeconds * 1_000, {
-    blindMode: config?.blind_mode ?? true,
-    originMs: runtime.store.replayStartMs,
-  }), [config?.blind_mode, runtime.store.replayStartMs]);
+  const publicTime = integrityRuntime.integrity?.public_time.label
+    ?? (runtime.store.virtualTimeMs === null
+      ? "--"
+      : publicTimeRuntime.formatTime(runtime.store.virtualTimeMs));
+  const formatPublicTime = publicTimeRuntime.formatTime;
+  const formatChartTime = useCallback(
+    (timeSeconds: number) => formatPublicTime(timeSeconds * 1_000),
+    [formatPublicTime],
+  );
   const returnToHub = useCallback(async () => {
     const sessionId = runtime.store.sessionId;
     if (sessionId === null || returningToHub) return;
@@ -374,6 +399,7 @@ export default function ReplayTrainingPageShell({
               actions={workspace.actions}
               upColor={settings.upColor}
               downColor={settings.downColor}
+              formatTime={publicTimeRuntime.formatTime}
             />
           ) : null}
         />
@@ -402,6 +428,10 @@ export default function ReplayTrainingPageShell({
             "data-replay-view-revision": viewer.viewerState?.semantic_view_revision ?? "",
             "data-replay-time-disclosure-policy": integrityRuntime.integrity?.effective_time_disclosure_policy ?? "",
             "data-replay-result-label": integrityRuntime.integrity?.result_label ?? "",
+            "data-replay-public-time-projections": publicTimeRuntime.projectedCount,
+            "data-replay-public-time-state": publicTimeRuntime.error === null
+              ? (publicTimeRuntime.loading ? "loading" : "ready")
+              : "relative-fallback",
             "data-replay-review-read-only": integrityRuntime.review?.read_only === true ? "true" : "false",
           }}
           left={<>

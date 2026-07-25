@@ -1,6 +1,11 @@
 import type { ReplayCatalogEntry } from "../replayTypes.js";
 import type { TrainingRunDraft } from "../trainingHubModel.js";
 import {
+  formatUtcReplayStartInput,
+  parseUtcReplayStartInput,
+  replayStartWindow,
+} from "../trainingHubModel.js";
+import {
   REPLAY_POLICY_MUTATIONS,
   type ReplayPolicyMutation,
 } from "../replayIntegrityModel.js";
@@ -68,9 +73,19 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
       </section>
     );
   }
-  const busy = runtime.operation === "create" || runtime.operation === "plan";
+  const busy = runtime.operation === "create"
+    || runtime.operation === "plan"
+    || runtime.operation === "create-context";
+  const busyLabel = runtime.operation === "create"
+    ? "正在原子创建…"
+    : runtime.operation === "create-context"
+      ? "正在校验时间目录…"
+      : "正在校验数据…";
   const historicalBook = runtime.segmentPlan?.historical_book ?? null;
   const historicalBookExact = historicalBook?.capability_state === "AVAILABLE_EXACT";
+  const startWindow = evaluation.selectedEntry === null
+    ? null
+    : replayStartWindow(evaluation.selectedEntry);
   const toggleMutation = (mutation: ReplayPolicyMutation, checked: boolean) => {
     const next = checked
       ? [...draft.allowedMutations, mutation]
@@ -137,27 +152,44 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             })}
           >
             <option value="RANDOM">随机合格窗口</option>
-            <option value="MANUAL">手动毫秒时间</option>
+            <option value="MANUAL">手动选择 UTC 时间</option>
           </select>
         </label>
         {draft.startMode === "MANUAL" && (
           <>
             <label>
-              请求开始时间（ms）
+              开始时间（UTC）
               <input
-                type="number"
-                min={0}
-                value={draft.requestedStartMs ?? ""}
+                type="datetime-local"
+                min={formatUtcReplayStartInput(startWindow?.earliestEligibleMs ?? null)}
+                max={formatUtcReplayStartInput(startWindow?.latestEligibleMs ?? null)}
+                step={startWindow?.stepSeconds ?? 60}
+                value={formatUtcReplayStartInput(draft.requestedStartMs)}
                 onChange={(event) => patchDraft(runtime, {
-                  requestedStartMs: event.target.value === "" ? null : Number(event.target.value),
+                  requestedStartMs: parseUtcReplayStartInput(event.target.value),
                 })}
               />
             </label>
+            <button
+              type="button"
+              disabled={startWindow?.earliestEligibleMs == null}
+              onClick={() => patchDraft(runtime, {
+                requestedStartMs: startWindow?.earliestEligibleMs ?? null,
+              })}
+            >
+              使用最早合格起点
+            </button>
             <p className="training-hub-field-warning" role="note">
               手动起点属于已知时间；即使隐藏显示，也不会获得严格 Challenge 结果标签。
             </p>
           </>
         )}
+        <p className="training-hub-field-note" role="note">
+          {startWindow?.eligibleWindowCount ?? 0} 个合格随机窗口
+          {startWindow?.earliestHistoryMs == null
+            ? "；盲化目录不会披露历史边界"
+            : `；历史最早 ${formatUtcReplayStartInput(startWindow.earliestHistoryMs)} UTC`}
+        </p>
         <label>
           完整性模式
           <select
@@ -401,7 +433,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         disabled={!evaluation.canSubmit || busy}
         onClick={() => void runtime.actions.createRun(draft)}
       >
-        {busy ? "正在原子创建…" : "创建并进入训练"}
+        {busy ? busyLabel : "创建并进入训练"}
       </button>
     </section>
   );

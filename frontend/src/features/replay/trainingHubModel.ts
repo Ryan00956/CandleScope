@@ -10,7 +10,7 @@ import type {
   ReplayV2TimeDisclosurePolicy,
   TrainingRunCreatePayload,
 } from "./replayV2Types.js";
-import { intervalTiles } from "../../utils/intervals.js";
+import { intervalTiles, parseIntervalSeconds } from "../../utils/intervals.js";
 import type { ReplaySegmentPreparePlan } from "./replaySegmentTypes.js";
 import {
   REPLAY_POLICY_MUTATIONS,
@@ -34,7 +34,6 @@ export interface TrainingRunDraft {
   readonly requestedStartMs: number | null;
   readonly warmupBars: number;
   readonly forwardCacheMs: number;
-  readonly randomSeed: number;
   readonly initialEquity: string;
   readonly maxLeverage: string;
   readonly makerFeeBps: string;
@@ -102,7 +101,6 @@ export function createTrainingRunDraft(
     requestedStartMs: null,
     warmupBars: catalog.warmup_bars,
     forwardCacheMs: catalog.horizon_ms,
-    randomSeed: 42,
     initialEquity: "10000",
     maxLeverage: "3",
     makerFeeBps: "2",
@@ -130,6 +128,81 @@ function matchingEntry(
   ));
 }
 
+export interface ReplayStartWindow {
+  readonly earliestHistoryMs: number | null;
+  readonly earliestEligibleMs: number | null;
+  readonly latestEligibleMs: number | null;
+  readonly eligibleWindowCount: number;
+  readonly stepSeconds: number;
+}
+
+export function replayStartWindow(entry: ReplayCatalogEntry): ReplayStartWindow {
+  const ranges = entry.eligible_ranges;
+  const intervalSeconds = parseIntervalSeconds(
+    entry.selected_base_interval ?? entry.base_intervals[0],
+  ) ?? 60;
+  return {
+    earliestHistoryMs: entry.bounds?.earliest_open_ms ?? null,
+    earliestEligibleMs: ranges.length === 0
+      ? null
+      : Math.min(...ranges.map((range) => range.first_start_ms)),
+    latestEligibleMs: ranges.length === 0
+      ? null
+      : Math.max(...ranges.map((range) => range.last_start_ms)),
+    eligibleWindowCount: entry.eligible_window_count,
+    stepSeconds: intervalSeconds,
+  };
+}
+
+export function isEligibleReplayStart(
+  entry: ReplayCatalogEntry,
+  startMs: number,
+): boolean {
+  if (!Number.isSafeInteger(startMs) || startMs < 0) return false;
+  return entry.eligible_ranges.some((range) => (
+    startMs >= range.first_start_ms
+    && startMs <= range.last_start_ms
+    && (startMs - range.first_start_ms) % range.interval_ms === 0
+  ));
+}
+
+export function requiresBlindTrainingCatalog(
+  draft: Pick<TrainingRunDraft, "startMode" | "timeDisclosurePolicy">,
+): boolean {
+  return draft.startMode === "RANDOM" && draft.timeDisclosurePolicy !== "NONE";
+}
+
+export function formatUtcReplayStartInput(value: number | null): string {
+  if (value === null || !Number.isSafeInteger(value) || value < 0) return "";
+  try {
+    return new Date(value).toISOString().slice(0, 19);
+  } catch {
+    return "";
+  }
+}
+
+export function parseUtcReplayStartInput(value: string): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (match === null) return null;
+  const [, yearToken, monthToken, dayToken, hourToken, minuteToken, secondToken = "0"] = match;
+  const parts = [yearToken, monthToken, dayToken, hourToken, minuteToken, secondToken]
+    .map((part) => Number(part));
+  const [year, month, day, hour, minute, second] = parts;
+  if ([year, month, day, hour, minute, second].some((part) => !Number.isInteger(part))
+    || year === undefined || month === undefined || day === undefined
+    || hour === undefined || minute === undefined || second === undefined) return null;
+  const result = Date.UTC(year, month - 1, day, hour, minute, second);
+  if (!Number.isSafeInteger(result) || result < 0) return null;
+  const instant = new Date(result);
+  if (instant.getUTCFullYear() !== year
+    || instant.getUTCMonth() !== month - 1
+    || instant.getUTCDate() !== day
+    || instant.getUTCHours() !== hour
+    || instant.getUTCMinutes() !== minute
+    || instant.getUTCSeconds() !== second) return null;
+  return result;
+}
+
 export function evaluateTrainingRunDraft(
   draft: TrainingRunDraft,
   capabilities: ReplayCapabilities,
@@ -155,7 +228,7 @@ export function evaluateTrainingRunDraft(
     errors.push("当前显示周期不能由服务端选定的基础周期精确拼接");
   }
   if (draft.startMode === "MANUAL" && draft.requestedStartMs === null) {
-    errors.push("手动开始需要明确的毫秒时间");
+    errors.push("手动开始需要明确的 UTC 时间");
   }
   if (draft.startMode === "RANDOM" && draft.requestedStartMs !== null) {
     errors.push("随机开始不能携带真实开始时间");
@@ -175,8 +248,9 @@ export function evaluateTrainingRunDraft(
   if (draft.forwardCacheMs < 1 || draft.forwardCacheMs > maxForwardMs) {
     errors.push("前向缓存窗口超出服务端限制");
   }
-  if (!Number.isSafeInteger(draft.randomSeed) || draft.randomSeed < 0) {
-    errors.push("随机种子必须是非负安全整数");
+  if (entry && draft.startMode === "MANUAL" && draft.requestedStartMs !== null
+    && !isEligibleReplayStart(entry, draft.requestedStartMs)) {
+    errors.push("手动开始时间必须落在服务端合格窗口且对齐基础周期");
   }
   if (draft.name.trim().length < 1 || draft.name.trim().length > 80) {
     errors.push("名称必须为 1–80 个字符");
@@ -194,8 +268,8 @@ export function evaluateTrainingRunDraft(
   ] as const) {
     if (!NON_NEGATIVE_DECIMAL.test(value)) errors.push(`${label}必须是非负规范十进制字符串`);
   }
-  if (draft.timeDisclosurePolicy !== "NONE" && !catalog.blind_mode) {
-    errors.push("隐藏时间训练必须使用盲化能力目录");
+  if (catalog.blind_mode !== requiresBlindTrainingCatalog(draft)) {
+    errors.push("当前能力目录与开始方式/时间披露策略不匹配");
   }
   if (draft.fundingMode === "HISTORICAL_EXACT") {
     errors.push("当前数据集没有对齐的历史 funding 与 mark，不能创建 HISTORICAL_EXACT");
@@ -254,7 +328,7 @@ export function buildTrainingRunCreateRequest(
     requested_start_ms: draft.startMode === "MANUAL" ? draft.requestedStartMs : null,
     warmup_bars: draft.warmupBars,
     forward_cache_ms: draft.forwardCacheMs,
-    random_seed: draft.randomSeed,
+    random_seed: null,
     initial_equity: draft.initialEquity,
     max_leverage: draft.maxLeverage,
     maker_fee_bps: draft.makerFeeBps,

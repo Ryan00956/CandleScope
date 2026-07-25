@@ -133,6 +133,52 @@ function blindCatalog() {
   });
 }
 
+function visibleCatalog() {
+  const epoch = `sha256:${"a".repeat(64)}`;
+  const startMs = 1_710_000_000_000;
+  return parseReplayCatalog({
+    protocol: "replay.v1",
+    catalog_epoch: epoch,
+    warmup_bars: 200,
+    horizon_ms: 86_400_000,
+    quality_mode: "exact",
+    blind_mode: false,
+    entries: [{
+      identity: { exchange: "binance", market_type: "spot", symbol: "BTCUSDT" },
+      base_intervals: ["1m"],
+      selected_base_interval: "1m",
+      eligible_window_count: 1,
+      quality: "EXACT_BAR_COVERAGE",
+      limitations: [],
+      catalog_epoch: epoch,
+      bounds: {
+        earliest_open_ms: startMs - 200 * 60_000,
+        latest_source_open_ms: startMs + 1_440 * 60_000,
+        latest_closed_open_ms: startMs + 1_440 * 60_000,
+        total_count: 1_641,
+      },
+      gap_summary: {
+        gaps: [],
+        gap_count: 0,
+        missing_bars: 0,
+        scanned_bars: 1_641,
+        scan_calls: 1,
+        calendar_id: "continuous",
+      },
+      source_fingerprint: `sha256:${"b".repeat(64)}`,
+      eligible_ranges: [{
+        interval: "1m",
+        interval_ms: 60_000,
+        first_start_ms: startMs,
+        last_start_ms: startMs,
+        count: 1,
+        warmup_bars: 200,
+        replay_bars: 1_440,
+      }],
+    }],
+  });
+}
+
 async function settle(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -454,7 +500,7 @@ test("Phase 6 create model enables isolated Sandbox funding but rejects historic
 
 test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
-  const catalog = blindCatalog();
+  const catalog = visibleCatalog();
   const draft = {
     ...createTrainingRunDraft(catalog),
     startMode: "MANUAL" as const,

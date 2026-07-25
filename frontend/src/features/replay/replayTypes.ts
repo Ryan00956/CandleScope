@@ -221,13 +221,30 @@ export interface ReplaySeriesIdentity {
   readonly symbol: string;
 }
 
+export interface ReplayCatalogBounds {
+  readonly earliest_open_ms: ReplayTimestampMs;
+  readonly latest_source_open_ms: ReplayTimestampMs;
+  readonly latest_closed_open_ms: ReplayTimestampMs;
+  readonly total_count: number;
+}
+
+export interface ReplayEligibleWindowRange {
+  readonly interval: string;
+  readonly interval_ms: number;
+  readonly first_start_ms: ReplayTimestampMs;
+  readonly last_start_ms: ReplayTimestampMs;
+  readonly count: number;
+  readonly warmup_bars: number;
+  readonly replay_bars: number;
+}
+
 export interface ReplayCatalogEntry {
   readonly identity: ReplaySeriesIdentity;
   readonly base_intervals: readonly string[];
   readonly selected_base_interval: string | null;
-  readonly bounds: Readonly<Record<string, ReplayJson>> | null;
+  readonly bounds: ReplayCatalogBounds | null;
   readonly gap_summary?: Readonly<Record<string, ReplayJson>>;
-  readonly eligible_ranges: readonly Readonly<Record<string, ReplayJson>>[];
+  readonly eligible_ranges: readonly ReplayEligibleWindowRange[];
   readonly eligible_window_count: number;
   readonly quality: ReplayDataFidelity | null;
   readonly source_fingerprint?: ReplayDigest;

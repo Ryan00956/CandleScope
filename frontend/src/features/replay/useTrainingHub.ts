@@ -8,6 +8,8 @@ import {
   buildTrainingRunCreateRequest,
   createTrainingRunDraft,
   evaluateTrainingRunDraft,
+  replayStartWindow,
+  requiresBlindTrainingCatalog,
 } from "./trainingHubModel.js";
 import type { TrainingRunDraft, TrainingRunDraftEvaluation } from "./trainingHubModel.js";
 import type {
@@ -210,7 +212,9 @@ export class TrainingHubLifecycle {
           warmupBars: preservedDraft?.warmupBars ?? 200,
           horizonMs: preservedDraft?.forwardCacheMs ?? 86_400_000,
           qualityMode: "exact",
-          blindMode: preservedDraft?.timeDisclosurePolicy !== "NONE",
+          blindMode: preservedDraft === null
+            ? true
+            : requiresBlindTrainingCatalog(preservedDraft),
         }, this.abortController.signal),
       ]);
       if (!this.accept(token)) return;
@@ -259,6 +263,10 @@ export class TrainingHubLifecycle {
       )
       : null;
     this.publish();
+    if (this.catalog !== null
+      && this.catalog.blind_mode !== requiresBlindTrainingCatalog(draft)) {
+      void this.rebindCreateCatalog(draft);
+    }
   }
 
   async refreshCreatePlan(): Promise<void> {
@@ -310,7 +318,7 @@ export class TrainingHubLifecycle {
         warmupBars: draft.warmupBars,
         horizonMs: draft.forwardCacheMs,
         qualityMode: "exact",
-        blindMode: draft.timeDisclosurePolicy !== "NONE",
+        blindMode: requiresBlindTrainingCatalog(draft),
       }, this.abortController.signal);
       if (!this.accept(token)) return;
       evaluation = evaluateTrainingRunDraft(
@@ -450,6 +458,58 @@ export class TrainingHubLifecycle {
       { ...payload, book_mode: draft.bookMode },
       this.abortController.signal,
     );
+  }
+
+  private async rebindCreateCatalog(requestedDraft: TrainingRunDraft): Promise<void> {
+    if (this.disposed || this.capabilities === null) return;
+    const expectedBlind = requiresBlindTrainingCatalog(requestedDraft);
+    this.operation = "create-context";
+    this.error = null;
+    this.segmentPlan = null;
+    this.publish();
+    const token = ++this.requestToken;
+    try {
+      const catalog = await this.api.catalog({
+        warmupBars: requestedDraft.warmupBars,
+        horizonMs: requestedDraft.forwardCacheMs,
+        qualityMode: "exact",
+        blindMode: expectedBlind,
+      }, this.abortController.signal);
+      if (!this.accept(token)) return;
+      const current = this.draft;
+      if (current === null || requiresBlindTrainingCatalog(current) !== expectedBlind) return;
+      let reboundDraft = current;
+      if (current.startMode === "MANUAL" && current.requestedStartMs === null) {
+        const entry = catalog.entries.find((candidate) => (
+          candidate.identity.exchange === current.exchange
+          && candidate.identity.market_type === current.marketType
+          && candidate.identity.symbol === current.symbol
+        ));
+        const earliest = entry === undefined
+          ? null
+          : replayStartWindow(entry).earliestEligibleMs;
+        if (earliest !== null) reboundDraft = { ...current, requestedStartMs: earliest };
+      }
+      this.catalog = catalog;
+      this.draft = reboundDraft;
+      this.evaluation = evaluateTrainingRunDraft(
+        reboundDraft,
+        this.capabilities,
+        catalog,
+      );
+      this.segmentPlan = await this.loadSegmentPlan(reboundDraft, catalog);
+      if (!this.accept(token)) return;
+      this.evaluation = evaluateTrainingRunDraft(
+        reboundDraft,
+        this.capabilities,
+        catalog,
+        this.segmentPlan,
+      );
+      this.operation = null;
+      this.publish();
+    } catch (error) {
+      this.fail(token, error);
+    }
   }
 
   private accept(token: number): boolean {

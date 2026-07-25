@@ -997,7 +997,7 @@ class TrainingRunCreateRequest:
     requested_start_ms: int | None
     warmup_bars: int
     forward_cache_ms: int
-    random_seed: int
+    random_seed: int | None
     initial_equity: str
     max_leverage: str
     maker_fee_bps: str
@@ -1074,7 +1074,11 @@ class TrainingRunCreateRequest:
         forward_cache = validate_v2_counter(
             self.forward_cache_ms, field_name="forward_cache_ms"
         )
-        random_seed = validate_v2_counter(self.random_seed, field_name="random_seed")
+        random_seed = (
+            None
+            if self.random_seed is None
+            else validate_v2_counter(self.random_seed, field_name="random_seed")
+        )
         if warmup < 1:
             raise ValueError("warmup_bars must be positive")
         if forward_cache < 1:
@@ -1184,7 +1188,6 @@ class TrainingRunCreateRequest:
             "requested_start_ms",
             "warmup_bars",
             "forward_cache_ms",
-            "random_seed",
             "initial_equity",
             "max_leverage",
             "maker_fee_bps",
@@ -1199,6 +1202,7 @@ class TrainingRunCreateRequest:
         }
         missing = required - set(payload)
         unknown = set(payload) - required - {
+            "random_seed",
             "allowed_mutations",
             "fixed_funding_rate",
             "funding_interval_ms",
@@ -1209,6 +1213,7 @@ class TrainingRunCreateRequest:
         if unknown:
             raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
         normalized = dict(payload)
+        normalized.setdefault("random_seed", None)
         raw_allowed = normalized.get("allowed_mutations", ())
         if not isinstance(raw_allowed, (list, tuple)):
             raise TypeError("allowed_mutations must be an array")
@@ -1248,7 +1253,9 @@ class TrainingRunCreateRequest:
             ),
             "warmup_bars": self.warmup_bars,
             "forward_cache_ms": self.forward_cache_ms,
-            "random_seed": self.random_seed,
+            "random_seed": (
+                None if redact_hidden_start and hidden else self.random_seed
+            ),
             "initial_equity": self.initial_equity,
             "max_leverage": self.max_leverage,
             "maker_fee_bps": self.maker_fee_bps,

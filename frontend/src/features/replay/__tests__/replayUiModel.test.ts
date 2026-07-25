@@ -178,6 +178,30 @@ test("v2 training exports preserve integrity policy and hide actual history unti
       active_rule_revision: 1,
       active_rule_hash: replayDigest("e"),
       active_rule: {},
+      start_selection: {
+        schema_version: "replay.start-selection.v1",
+        start_mode: "RANDOM",
+        seed_source: "SERVER",
+        seed_disclosed: false,
+        random_seed: null,
+        dataset_epoch: replayDigest("1"),
+        parent_selection_hash: null,
+        selection_hash: replayDigest("2"),
+        public_start: {
+          policy: "HIDE_ALL",
+          timeline_ms: 86_400_000,
+          relative_ms: 0,
+          sequence: 0,
+          label: "D+1 T+00:00:00",
+        },
+        public_end: {
+          policy: "HIDE_ALL",
+          timeline_ms: 172_800_000,
+          relative_ms: 86_400_000,
+          sequence: 1,
+          label: "D+2 T+00:00:00",
+        },
+      },
       public_time: {
         policy: "HIDE_ALL",
         timeline_ms: 86_400_000,
@@ -186,6 +210,12 @@ test("v2 training exports preserve integrity policy and hide actual history unti
         label: "D+1 T+00:00:00",
       },
       mutations: [],
+    },
+    public_time_index: {
+      protocol: "replay.v2",
+      run_id: "run-0001",
+      policy: "HIDE_ALL",
+      items: [],
     },
   } satisfies ReplayTrainingReportResponse;
   const exported = buildReplayTrainingReportExport(response);

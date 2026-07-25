@@ -18,6 +18,7 @@ export interface ReplayRightMarketRailProps {
   readonly actions: ReplayWorkspacePreferenceActions;
   readonly upColor: string;
   readonly downColor: string;
+  readonly formatTime: (valueMs: number) => string;
 }
 
 function ReplayRightMarketRail({
@@ -28,6 +29,7 @@ function ReplayRightMarketRail({
   actions,
   upColor,
   downColor,
+  formatTime,
 }: ReplayRightMarketRailProps) {
   const selectedTrackId = viewer.viewerState?.selected_track_id ?? null;
   const selectedTrack = viewer.marketTracks?.tracks.find(
@@ -63,7 +65,12 @@ function ReplayRightMarketRail({
         <div className="replay-market-dock-body">
           {preferences.activeDock === "capabilities" && <ReplayCapabilitySurface capabilities={capabilities} />}
           {preferences.activeDock === "paper" && (
-            <ReplayPaperTradingDock runtime={runtime} viewer={viewer} indicatorStatus={indicators.status} />
+            <ReplayPaperTradingDock
+              runtime={runtime}
+              viewer={viewer}
+              indicatorStatus={indicators.status}
+              formatTime={formatTime}
+            />
           )}
           {preferences.activeDock === "activity" && (
             <div className="replay-activity-summary" data-replay-panel="activity">
@@ -78,7 +85,7 @@ function ReplayRightMarketRail({
         </div>
       )}
     </section>
-  ), [actions, capabilities, indicators.status, preferences, runtime, viewer]);
+  ), [actions, capabilities, formatTime, indicators.status, preferences, runtime, viewer]);
 
   return (
     <MarketRightRailFrame

@@ -3472,11 +3472,18 @@ class ReplaySessionActor:
             materialize=False,
             component_state=component_state,
         )
+        public_config = self.config.to_dict()
+        if self.config.blind_mode and not self._revealed:
+            # The authoritative seed selects the hidden catalog window and is
+            # therefore private until an irreversible reveal.  The actor still
+            # persists and recovers the real config; only the public projection
+            # uses the stable numeric redaction required by replay.v1 parsers.
+            public_config["random_seed"] = 0
         return {
             "protocol": REPLAY_PROTOCOL,
             **snapshot.to_dict(),
             "status_reason": self._status_reason,
-            "config": self.config.to_dict(),
+            "config": public_config,
             "components": component_state,
             "journal": [dict(entry) for entry in self._journal_entries],
             "revealed": self._revealed,

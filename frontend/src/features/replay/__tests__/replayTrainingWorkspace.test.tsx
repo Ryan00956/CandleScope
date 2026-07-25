@@ -66,23 +66,37 @@ test("v2 session route is flag-gated and leaves the v1 shell as the rollback pat
   assert.match(composition, /entry\.kind === "session"/);
 });
 
-test("Phase 3 workspace projects ViewerState and exposes only source-valid replay grains", () => {
+test("Phase 13 workspace projects ViewerState and exposes capability-driven advance bases", () => {
   const workspace = source("src/features/replay/ReplayTrainingPageShell.tsx");
   const composition = source("src/features/replay/ReplayApp.tsx");
   const controls = source("src/features/replay/components/ReplayControlBar.tsx");
+  const viewerRuntime = source("src/features/replay/useReplayViewerRuntime.ts");
   assert.match(composition, /useReplayViewerRuntime\(replay\)/);
   assert.match(composition, /useReplayIndicatorRuntime\(replay, viewer\.seriesStore\)/);
   assert.match(workspace, /seriesStore=\{viewer\.seriesStore\}/);
   assert.match(workspace, /setDisplayInterval/);
   assert.doesNotMatch(workspace, /Phase 2 interval is read-only|Phase 3 才开放重采样/);
-  assert.match(controls, /data-replay-action="step-display"/);
-  assert.match(controls, /data-replay-action="step-base"/);
-  assert.match(controls, /viewer !== undefined && tradeTape/);
-  assert.match(controls, /data-replay-action="step-event"/);
+  assert.match(controls, /globalClock\?\.supported_bases/);
+  assert.match(controls, /globalClock\?\.playback_bases/);
+  assert.match(controls, /data-replay-action="advance-display"/);
+  assert.match(controls, /data-replay-action="advance-base"/);
+  assert.match(controls, /data-replay-action="advance-source-event"/);
+  assert.match(controls, /phase3Command\("advance"/);
+  assert.match(controls, /下一聚合成交/);
+  assert.doesNotMatch(controls, /phase3Command\("step_(?:display|base|event)"/);
   assert.match(controls, /data-replay-action="cancel-advance"/);
+  assert.match(viewerRuntime, /type === "advance"/);
+  assert.match(viewerRuntime, /const canonicalAdvance = active\?\.type === "advance"/);
+  assert.doesNotMatch(viewerRuntime, /canonicalVirtualAdvance/);
+  assert.match(viewerRuntime, /payload\.basis === "DISPLAY_BAR"/);
+  assert.match(viewerRuntime, /defaultReplayV2Api\.advanceProgress/);
+  assert.match(viewerRuntime, /"cancel_advance"/);
   assert.match(workspace, /const effectiveState = replayEffectiveTrainingState\(/);
   assert.match(controls, /const effectiveState = replayEffectiveTrainingState\(/);
-  assert.match(workspace, /viewer\.actions\.submitControl\("play", \{\}\)/);
+  assert.match(workspace, /viewer\.actions\.submitControl\("play", \{/);
+  assert.match(workspace, /basis: globalClock\.basis/);
+  assert.match(workspace, /viewer\.actions\.submitControl\("advance", \{/);
+  assert.doesNotMatch(workspace, /submitControl\("step_display"|submitControl\("advance_by"/);
   assert.match(workspace, /viewer\.actions\.submitControl\("pause", \{\}\)/);
   assert.match(workspace, /"data-replay-session-state": effectiveState/);
   assert.match(workspace, /"data-replay-adapter-state": runtime\.store\.state/);

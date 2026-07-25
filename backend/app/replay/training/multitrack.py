@@ -11,7 +11,7 @@ from typing import AsyncIterator
 from app.replay.canonical import canonical_sha256
 from app.replay.models import validate_identifier, validate_timestamp_ms
 
-from .models import validate_v2_counter
+from .models import AdvanceBasis, coerce_enum, validate_v2_counter
 
 
 GLOBAL_ORDERING_VERSION = "replay.global-order.v1"
@@ -105,7 +105,11 @@ class TrainingRunActor:
         self.run_id = validate_identifier(run_id, field_name="run_id")
         self._lock = asyncio.Lock()
         self._playback_state = "PAUSED"
-        self._playback_speed: int | str = 1
+        self._playback_basis: AdvanceBasis | None = None
+        self._playback_rate = 1
+        self._playback_display_interval: str | None = None
+        self._playback_viewer_revision: int | None = None
+        self._playback_profile_revision = 0
         self._playback_client_id: str | None = None
         self._playback_reason: str | None = None
         self._playback_generation = 0
@@ -122,7 +126,10 @@ class TrainingRunActor:
         self,
         *,
         client_instance_id: str,
-        speed: int | str,
+        basis: AdvanceBasis,
+        rate: int,
+        display_interval: str | None,
+        viewer_revision: int | None,
     ) -> tuple[int, asyncio.Event]:
         """Start one server-owned playback generation while serialized."""
 
@@ -131,7 +138,12 @@ class TrainingRunActor:
         self._playback_generation += 1
         self._playback_tick = 0
         self._playback_state = "PLAYING"
-        self._playback_speed = speed
+        self._set_playback_profile(
+            basis=basis,
+            rate=rate,
+            display_interval=display_interval,
+            viewer_revision=viewer_revision,
+        )
         self._playback_client_id = validate_identifier(
             client_instance_id,
             field_name="client_instance_id",
@@ -163,8 +175,36 @@ class TrainingRunActor:
             self._playback_stop.set()
         return self._playback_task
 
+    def update_ordered_profile(
+        self,
+        *,
+        basis: AdvanceBasis,
+        rate: int,
+        display_interval: str | None,
+        viewer_revision: int | None,
+    ) -> None:
+        self._set_playback_profile(
+            basis=basis,
+            rate=rate,
+            display_interval=display_interval,
+            viewer_revision=viewer_revision,
+        )
+
     def update_ordered_speed(self, speed: int | str) -> None:
-        self._playback_speed = speed
+        """Compatibility adapter for pre-Phase-13 callers."""
+
+        if speed == "MAX":
+            normalized = 10_000
+        elif isinstance(speed, bool) or not isinstance(speed, int):
+            raise ValueError("ordered playback speed is invalid")
+        else:
+            normalized = speed
+        self._set_playback_profile(
+            basis=self._playback_basis or AdvanceBasis.BASE_BAR,
+            rate=normalized,
+            display_interval=self._playback_display_interval,
+            viewer_revision=self._playback_viewer_revision,
+        )
 
     def next_playback_tick(self, generation: int) -> int:
         if generation != self._playback_generation or self._playback_state != "PLAYING":
@@ -195,13 +235,56 @@ class TrainingRunActor:
 
     def playback_snapshot(self) -> dict[str, object]:
         return {
+            "contract": "replay.playback.v1",
             "mode": "ORDERED",
             "state": self._playback_state,
-            "speed": self._playback_speed,
+            "basis": (
+                None if self._playback_basis is None else self._playback_basis.value
+            ),
+            "rate": self._playback_rate,
+            "speed": self._playback_rate,
+            "display_interval": self._playback_display_interval,
+            "viewer_revision": self._playback_viewer_revision,
+            "profile_revision": self._playback_profile_revision,
             "reason": self._playback_reason,
             "generation": self._playback_generation,
             "tick": self._playback_tick,
         }
+
+    def _set_playback_profile(
+        self,
+        *,
+        basis: AdvanceBasis,
+        rate: int,
+        display_interval: str | None,
+        viewer_revision: int | None,
+    ) -> None:
+        normalized_basis = coerce_enum(
+            AdvanceBasis,
+            basis,
+            field_name="playback basis",
+        )
+        normalized_rate = validate_v2_counter(rate, field_name="playback rate")
+        if not 1 <= normalized_rate <= 10_000:
+            raise ValueError("playback rate must be between 1 and 10000")
+        if normalized_basis is AdvanceBasis.DISPLAY_BAR:
+            if not isinstance(display_interval, str) or not display_interval:
+                raise ValueError("display playback requires an interval")
+            revision = validate_v2_counter(
+                viewer_revision,
+                field_name="viewer_revision",
+            )
+        else:
+            if display_interval is not None or viewer_revision is not None:
+                raise ValueError(
+                    "non-display playback cannot carry a display binding"
+                )
+            revision = None
+        self._playback_basis = normalized_basis
+        self._playback_rate = normalized_rate
+        self._playback_display_interval = display_interval
+        self._playback_viewer_revision = revision
+        self._playback_profile_revision += 1
 
     @property
     def playback_task(self) -> asyncio.Task[None] | None:

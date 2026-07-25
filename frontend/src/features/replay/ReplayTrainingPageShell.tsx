@@ -97,8 +97,9 @@ export default function ReplayTrainingPageShell({
   const config = runtime.store.sessionConfig;
   const active = runtime.phase === "ACTIVE" && config !== null && runtime.store.hasAuthoritativeSnapshot;
   const ownsController = replayOwnsController(runtime.store, runtime.clientInstanceId);
+  const globalClock = viewer.marketTracks?.global_clock ?? null;
   const effectiveState = replayEffectiveTrainingState(
-    viewer.marketTracks?.global_clock.state,
+    globalClock?.state,
     runtime.store.state,
     runtime.store.controllerClientId,
   );
@@ -171,16 +172,33 @@ export default function ReplayTrainingPageShell({
           return true;
         }
         if (action === "toggle-play" && effectiveState === "PAUSED") {
-          void viewer.actions.submitControl("play", {}).catch(() => undefined);
+          if (globalClock === null || !globalClock.playback_bases.includes(globalClock.basis)) {
+            return false;
+          }
+          void viewer.actions.submitControl("play", {
+            basis: globalClock.basis,
+            rate: globalClock.rate,
+          }).catch(() => undefined);
           return true;
         }
         if (action === "step" && effectiveState === "PAUSED") {
-          void viewer.actions.submitControl("step_display", { count: 1 }).catch(() => undefined);
+          if (globalClock === null || !globalClock.supported_bases.includes("DISPLAY_BAR")) {
+            return false;
+          }
+          void viewer.actions.submitControl("advance", {
+            basis: "DISPLAY_BAR",
+            count: 1,
+          }).catch(() => undefined);
           return true;
         }
         if (action === "advance-window" && effectiveState === "PAUSED") {
-          const baseMs = (parseIntervalSeconds(config?.base_interval ?? "1m") ?? 60) * 1_000;
-          void viewer.actions.submitControl("advance_by", { ms: baseMs * 5 }).catch(() => undefined);
+          if (globalClock === null || !globalClock.supported_bases.includes("BASE_BAR")) {
+            return false;
+          }
+          void viewer.actions.submitControl("advance", {
+            basis: "BASE_BAR",
+            count: 5,
+          }).catch(() => undefined);
           return true;
         }
         return false;
@@ -188,7 +206,7 @@ export default function ReplayTrainingPageShell({
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [config?.base_interval, effectiveState, ownsController, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, viewer.actions, viewer.controlPending, viewer.viewerPending]);
+  }, [effectiveState, globalClock, ownsController, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, viewer.actions, viewer.controlPending, viewer.viewerPending]);
 
   const interval = (viewer.viewerState?.display_interval ?? config?.base_interval ?? "1m") as IntervalString;
   const displayIntervals = useMemo(() => {

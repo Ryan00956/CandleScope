@@ -64,12 +64,22 @@ function marketTracksResponse() {
       },
     },
     global_clock: {
+      contract: "replay.playback.v1",
       mode: "ORDERED",
       state: "PAUSED",
+      basis: "BASE_BAR",
+      rate: 1,
       speed: 1,
+      display_interval: null,
+      viewer_revision: null,
+      profile_revision: 0,
       reason: null,
       generation: 0,
       tick: 0,
+      supported_bases: ["DISPLAY_BAR", "BASE_BAR", "SOURCE_EVENT", "VIRTUAL_TIME"],
+      playback_bases: ["DISPLAY_BAR", "BASE_BAR", "SOURCE_EVENT"],
+      max_count: 100_000,
+      virtual_time_quantum_ms: 60_000,
     },
     viewer_state: viewerState(),
     tracks: [
@@ -150,6 +160,41 @@ test("Phase 5 market-track parser keeps tier, public price, and force reasons st
     ...marketTracksResponse(),
     tracks: [{ ...marketTracksResponse().tracks[0], cursor: null, subscription_tier: "FULL" }],
   }), /FULL.*cursor|cursor.*FULL/);
+});
+
+test("Phase 13 global clock parser freezes basis, rate, limits, and display binding", () => {
+  const parsed = parseReplayMarketTracksResponse(marketTracksResponse());
+  assert.equal(parsed.global_clock.contract, "replay.playback.v1");
+  assert.equal(parsed.global_clock.basis, "BASE_BAR");
+  assert.equal(parsed.global_clock.rate, 1);
+  assert.deepEqual(parsed.global_clock.playback_bases, [
+    "DISPLAY_BAR",
+    "BASE_BAR",
+    "SOURCE_EVENT",
+  ]);
+
+  const payload = marketTracksResponse();
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    global_clock: { ...payload.global_clock, speed: 5 },
+  }), /rate\/speed/);
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    global_clock: {
+      ...payload.global_clock,
+      basis: "DISPLAY_BAR",
+      display_interval: null,
+      viewer_revision: null,
+    },
+  }), /display binding/);
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    global_clock: {
+      ...payload.global_clock,
+      playback_bases: ["DISPLAY_BAR", "BASE_BAR", "SOURCE_EVENT", "VIRTUAL_TIME"],
+      supported_bases: ["DISPLAY_BAR", "BASE_BAR", "SOURCE_EVENT"],
+    },
+  }), /capabilities/);
 });
 
 test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation domains strict", () => {

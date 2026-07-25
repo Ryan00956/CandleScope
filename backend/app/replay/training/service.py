@@ -36,15 +36,27 @@ from app.replay.models import (
 from .errors import TrainingRunError
 from .commands import ReplayV2Command
 from .control import (
+    ADVANCE_CONTRACT_VERSION,
+    MAX_CONTROL_COUNT,
+    PLAYBACK_CONTRACT_VERSION,
+    advance_basis,
     aligned_step_target_ms,
     compatible_step_interval_ms,
     control_count,
+    control_rate,
+    default_playback_basis,
+    discrete_playback_units,
+    fixed_interval_ms,
+    supported_advance_bases,
+    supported_playback_bases,
     validate_bar_duration_ms,
+    virtual_duration_ms,
 )
 from .history import build_history_page
 from .historical_book import HistoricalBookArchiveManager, HistoricalBookProjection
 from .fast_forward import FastForwardContext, FastForwardDecision, FastForwardPlanner
 from .models import (
+    AdvanceBasis,
     BookMode,
     FastForwardPlan,
     FundingMode,
@@ -511,6 +523,12 @@ class TrainingRunService:
             )
         selected_session = await self.replay_service.get_session(selected_session_id)
         selected_snapshot = self._snapshot(selected_session)
+        selected_config = _stored_mapping(
+            selected_snapshot.get("config"),
+            field_name="selected adapter config",
+        )
+        source_kind = str(selected.get("source_kind"))
+        base_interval = str(selected_config.get("base_interval"))
         full_count = sum(
             1
             for track in tracks
@@ -544,11 +562,19 @@ class TrainingRunService:
             if actor_clock is not None
             else 0
         )
+        actor_profile_revision = (
+            _stored_counter(
+                actor_clock.get("profile_revision", 0),
+                field_name="global_clock.profile_revision",
+            )
+            if actor_clock is not None
+            else 0
+        )
         preserve_actor_terminal = (
             actor_clock is not None
-            and actor_generation > 0
+            and (actor_generation > 0 or actor_profile_revision > 0)
             and (
-                actor_clock.get("state") in {"PLAYING", "ENDED", "ERROR"}
+                actor_clock.get("state") in {"PLAYING", "PAUSED", "ENDED", "ERROR"}
                 or actor_clock.get("reason") == "CONTROLLER_LEASE_LOST"
             )
         )
@@ -559,14 +585,58 @@ class TrainingRunService:
         ):
             global_clock = dict(actor_clock)
         else:
+            adapter_speed = selected_snapshot["speed"]
+            rate = (
+                int(adapter_speed)
+                if isinstance(adapter_speed, int) and not isinstance(adapter_speed, bool)
+                else 1
+            )
             global_clock = {
+                "contract": PLAYBACK_CONTRACT_VERSION,
                 "mode": "ORDERED" if contract_clock or full_count > 1 else "ADAPTER",
                 "state": selected_snapshot["state"],
-                "speed": selected_snapshot["speed"],
+                "basis": default_playback_basis(source_kind).value,
+                "rate": rate,
+                "speed": rate,
+                "display_interval": None,
+                "viewer_revision": None,
+                "profile_revision": actor_profile_revision,
                 "reason": None,
                 "generation": actor_generation,
                 "tick": actor_tick,
             }
+        supported = supported_advance_bases(
+            source_kind=source_kind,
+            full_track_count=full_count,
+        )
+        playback_supported = supported_playback_bases(
+            source_kind=source_kind,
+            full_track_count=full_count,
+        )
+        effective_basis = advance_basis(global_clock.get("basis"))
+        if effective_basis not in playback_supported:
+            effective_basis = default_playback_basis(source_kind)
+            global_clock["basis"] = effective_basis.value
+            global_clock["display_interval"] = None
+            global_clock["viewer_revision"] = None
+        global_clock.update(
+            {
+                "contract": PLAYBACK_CONTRACT_VERSION,
+                "supported_bases": [basis.value for basis in supported],
+                "playback_bases": [
+                    basis.value for basis in playback_supported
+                ],
+                "max_count": MAX_CONTROL_COUNT,
+                "virtual_time_quantum_ms": (
+                    fixed_interval_ms(
+                        base_interval,
+                        field_name="base_interval",
+                    )
+                    if source_kind == "BAR"
+                    else 1
+                ),
+            }
+        )
         return {**dict(projection), "global_clock": global_clock}
 
     async def integrity(self, run_id: str) -> dict[str, object]:
@@ -1331,6 +1401,7 @@ class TrainingRunService:
             ReplayV2CommandType.STEP_EVENT,
             ReplayV2CommandType.STEP_BASE,
             ReplayV2CommandType.STEP_DISPLAY,
+            ReplayV2CommandType.ADVANCE,
             ReplayV2CommandType.ADVANCE_BY,
             ReplayV2CommandType.ADVANCE_TO,
         }:
@@ -1364,6 +1435,7 @@ class TrainingRunService:
             ReplayV2CommandType.STEP_EVENT,
             ReplayV2CommandType.STEP_BASE,
             ReplayV2CommandType.STEP_DISPLAY,
+            ReplayV2CommandType.ADVANCE,
             ReplayV2CommandType.ADVANCE_BY,
             ReplayV2CommandType.ADVANCE_TO,
             ReplayV2CommandType.END,
@@ -1406,6 +1478,11 @@ class TrainingRunService:
                     for key, value in translated_plan.items()
                     if key
                     in {
+                        "contract",
+                        "basis",
+                        "count",
+                        "duration_ms",
+                        "legacy_alias",
                         "grain",
                         "display_interval",
                         "viewer_revision",
@@ -1470,6 +1547,7 @@ class TrainingRunService:
             ReplayV2CommandType.STEP_EVENT,
             ReplayV2CommandType.STEP_BASE,
             ReplayV2CommandType.STEP_DISPLAY,
+            ReplayV2CommandType.ADVANCE,
         }:
             await self._guard_historical_book_current(
                 run_id=normalized_run,
@@ -2287,13 +2365,25 @@ class TrainingRunService:
         }
         if command.type in direct_types:
             if command.type is ReplayV2CommandType.PLAY:
-                self._exact_payload(command.payload, set())
                 if actor.playback_is_active():
                     raise TrainingRunError(
                         "REPLAY_CONTROL_INVALID",
                         "ordered playback is already running",
                         status_code=409,
                     )
+                (
+                    basis,
+                    rate,
+                    display_interval,
+                    viewer_revision,
+                    legacy_profile,
+                ) = await self._playback_profile(
+                    command=command,
+                    binding=binding,
+                    selected_snapshot=selected_snapshot,
+                    full_track_count=len(ordered),
+                    actor=actor,
+                )
                 for track in ordered:
                     await self._ensure_track_controller(
                         session_id=self._track_session_id(track),
@@ -2311,10 +2401,12 @@ class TrainingRunService:
                             status_code=409,
                             details={"track_id": track["track_id"]},
                         )
-                speed = selected_snapshot.get("speed", 1)
                 generation, stop = actor.begin_ordered_playback(
                     client_instance_id=command.client_instance_id,
-                    speed=speed if isinstance(speed, (int, str)) else 1,
+                    basis=basis,
+                    rate=rate,
+                    display_interval=display_interval,
+                    viewer_revision=viewer_revision,
                 )
                 task = asyncio.create_task(
                     self._run_ordered_playback(
@@ -2337,6 +2429,8 @@ class TrainingRunService:
                     data={
                         "full_track_count": len(ordered),
                         "ordering_version": GLOBAL_ORDERING_VERSION,
+                        "playback_contract": PLAYBACK_CONTRACT_VERSION,
+                        "legacy_profile": legacy_profile,
                         "global_clock": actor.playback_snapshot(),
                     },
                 )
@@ -2367,6 +2461,109 @@ class TrainingRunService:
                 )
                 result["state"] = "PAUSED"
                 return result
+            if command.type is ReplayV2CommandType.SET_SPEED:
+                if not command.payload:
+                    self._exact_payload(command.payload, {"speed"})
+                (
+                    basis,
+                    rate,
+                    display_interval,
+                    viewer_revision,
+                    legacy_profile,
+                ) = await self._playback_profile(
+                    command=command,
+                    binding=binding,
+                    selected_snapshot=selected_snapshot,
+                    full_track_count=len(ordered),
+                    actor=actor,
+                )
+                for track in ordered:
+                    await self._ensure_track_controller(
+                        session_id=self._track_session_id(track),
+                        client_instance_id=command.client_instance_id,
+                        command_id=command.command_id,
+                    )
+                selected_result: Mapping[str, object] | None = None
+                if legacy_profile:
+                    adapter_speed = command.payload["speed"]
+                    try:
+                        for track in ordered:
+                            session_id = self._track_session_id(track)
+                            session = await self.replay_service.get_session(session_id)
+                            snapshot = self._snapshot(session)
+                            adapter = ReplayCommand(
+                                protocol=REPLAY_PROTOCOL,
+                                command_id=self._multi_command_id(
+                                    command.command_id,
+                                    str(track["track_id"]),
+                                    CommandType.SET_SPEED.value,
+                                    _stored_counter(
+                                        snapshot["revision"],
+                                        field_name="revision",
+                                    ),
+                                ),
+                                client_instance_id=command.client_instance_id,
+                                expected_revision=_stored_counter(
+                                    snapshot["revision"],
+                                    field_name="revision",
+                                ),
+                                type=CommandType.SET_SPEED,
+                                payload={"speed": adapter_speed},
+                            )
+                            acknowledged = await self.replay_service.command(
+                                session_id,
+                                adapter,
+                            )
+                            if session_id == selected_session_id:
+                                selected_result = acknowledged
+                    except ReplayDomainError as exc:
+                        await self._fail_closed_multi_track(
+                            run_id=command.run_id,
+                            tracks=ordered,
+                            failed_track=track,
+                            client_instance_id=command.client_instance_id,
+                            reason=exc.code.value,
+                        )
+                        raise TrainingRunError(
+                            "MULTI_TRACK_PAUSED",
+                            "a required FULL market track rejected the global control",
+                            status_code=409,
+                            details={
+                                "reason": exc.code.value,
+                                "track_id": track["track_id"],
+                            },
+                        ) from exc
+                actor.update_ordered_profile(
+                    basis=basis,
+                    rate=rate,
+                    display_interval=display_interval,
+                    viewer_revision=viewer_revision,
+                )
+                if selected_result is None:
+                    selected = await self.replay_service.get_session(
+                        selected_session_id
+                    )
+                    selected_result = self._snapshot(selected)
+                snapshot = (
+                    selected_result
+                    if "cursor" in selected_result
+                    else self._snapshot(selected_result)
+                )
+                viewer = await self.store.get_viewer_state(command.run_id)
+                return self._result_payload(
+                    command=command,
+                    session_id=selected_session_id,
+                    snapshot=snapshot,
+                    viewer=viewer.to_dict(),
+                    data={
+                        "full_track_count": len(ordered),
+                        "ordering_version": GLOBAL_ORDERING_VERSION,
+                        "playback_contract": PLAYBACK_CONTRACT_VERSION,
+                        "legacy_profile": legacy_profile,
+                        "profile_only": not legacy_profile,
+                        "global_clock": actor.playback_snapshot(),
+                    },
+                )
             if command.type is ReplayV2CommandType.ACQUIRE_CONTROLLER:
                 v1_type = CommandType.ACQUIRE_CONTROLLER
                 payload = dict(self._exact_payload(command.payload, {"takeover"}))
@@ -2374,9 +2571,6 @@ class TrainingRunService:
                 self._exact_payload(command.payload, set())
                 v1_type = CommandType.ACQUIRE_CONTROLLER
                 payload = {"takeover": True}
-            elif command.type is ReplayV2CommandType.SET_SPEED:
-                v1_type = CommandType.SET_SPEED
-                payload = dict(self._exact_payload(command.payload, {"speed"}))
             else:
                 self._exact_payload(command.payload, set())
                 v1_type = (
@@ -2388,7 +2582,6 @@ class TrainingRunService:
             if command.type is ReplayV2CommandType.RELEASE_CONTROLLER:
                 actor.request_ordered_pause(reason="CONTROLLER_RELEASED")
             if command.type in {
-                ReplayV2CommandType.SET_SPEED,
                 ReplayV2CommandType.RELEASE_CONTROLLER,
             }:
                 for track in ordered:
@@ -2439,8 +2632,6 @@ class TrainingRunService:
                     status_code=409,
                     details={"reason": exc.code.value, "track_id": track["track_id"]},
                 ) from exc
-            if command.type is ReplayV2CommandType.SET_SPEED:
-                actor.update_ordered_speed(payload["speed"])  # type: ignore[arg-type]
             if selected_result is None:
                 selected = await self.replay_service.get_session(selected_session_id)
                 selected_result = self._snapshot(selected)
@@ -2465,8 +2656,33 @@ class TrainingRunService:
 
         current_time = self._cursor_time(selected_snapshot)
         fast_forward_plan: dict[str, object] | None = None
+        control_plan: dict[str, object] | None = None
         advance_job: dict[str, object] | None = None
         advance_key: tuple[str, str] | None = None
+        if command.type is ReplayV2CommandType.ADVANCE:
+            requested_basis = advance_basis(command.payload.get("basis"))
+            if requested_basis is AdvanceBasis.SOURCE_EVENT:
+                normalized = self._exact_payload(
+                    command.payload,
+                    {"basis", "count"},
+                )
+                control_count(normalized["count"])
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_UNSUPPORTED",
+                    "SOURCE_EVENT is unavailable with multiple FULL tracks because a same-time cohort must commit atomically",
+                    status_code=409,
+                    details={
+                        "basis": requested_basis.value,
+                        "full_track_count": len(ordered),
+                        "playback_bases": [
+                            item.value
+                            for item in supported_playback_bases(
+                                source_kind=str(binding["source_kind"]),
+                                full_track_count=len(ordered),
+                            )
+                        ],
+                    },
+                )
         if command.type is ReplayV2CommandType.STEP_EVENT:
             step_event_payload = self._exact_payload(command.payload, {"count"})
             count = control_count(step_event_payload["count"])
@@ -2493,31 +2709,70 @@ class TrainingRunService:
                 snapshot=selected_snapshot,
             )
             target = plan.get("target_virtual_time_ms")
-            if command.type is ReplayV2CommandType.STEP_BASE and target is None:
-                step_base_payload = self._exact_payload(command.payload, {"count"})
+            if (
+                target is None
+                and (
+                    command.type is ReplayV2CommandType.STEP_BASE
+                    or (
+                        command.type is ReplayV2CommandType.ADVANCE
+                        and plan.get("basis") == AdvanceBasis.BASE_BAR.value
+                    )
+                )
+            ):
+                if command.type is ReplayV2CommandType.STEP_BASE:
+                    step_base_payload = self._exact_payload(
+                        command.payload,
+                        {"count"},
+                    )
+                    count = control_count(step_base_payload["count"])
+                else:
+                    count = control_count(plan.get("count"))
                 target = aligned_step_target_ms(
                     current_virtual_time_ms=current_time,
                     base_interval=str(binding["base_interval"]),
                     step_interval=str(binding["base_interval"]),
-                    count=control_count(step_base_payload["count"]),
+                    count=count,
                 )
+                plan["target_virtual_time_ms"] = target
+            control_plan = dict(plan)
             if not isinstance(target, int):
                 raise TrainingRunError(
                     "REPLAY_CONTROL_UNSUPPORTED",
                     "multi-track control requires an exact global target",
                     status_code=409,
                 )
-            if command.type in {
+            cancelable_scan = command.type in {
                 ReplayV2CommandType.ADVANCE_BY,
                 ReplayV2CommandType.ADVANCE_TO,
-            }:
+            } or (
+                command.type is ReplayV2CommandType.ADVANCE
+                and plan.get("basis") == AdvanceBasis.VIRTUAL_TIME.value
+            )
+            if cancelable_scan:
                 decision = self._plan_fast_forward(
                     binding=binding,
                     snapshot=selected_snapshot,
                     tracks=ordered,
                     target_virtual_time_ms=target,
                 )
-                fast_forward_plan = decision.to_dict()
+                fast_forward_plan = {
+                    **decision.to_dict(),
+                    **{
+                        key: value
+                        for key, value in plan.items()
+                        if key
+                        in {
+                            "contract",
+                            "basis",
+                            "count",
+                            "duration_ms",
+                            "legacy_alias",
+                            "display_interval",
+                            "viewer_revision",
+                            "target_virtual_time_ms",
+                        }
+                    },
+                }
                 if decision.plan is FastForwardPlan.BLOCKED:
                     raise TrainingRunError(
                         "REPLAY_FAST_FORWARD_BLOCKED",
@@ -2623,8 +2878,8 @@ class TrainingRunService:
                     else {}
                 ),
                 **(
-                    {"plan": fast_forward_plan}
-                    if fast_forward_plan is not None
+                    {"plan": fast_forward_plan or control_plan}
+                    if fast_forward_plan is not None or control_plan is not None
                     else {}
                 ),
             },
@@ -2642,6 +2897,11 @@ class TrainingRunService:
         actor = self._run_actors[run_id]
         event_loop = asyncio.get_running_loop()
         last_advance_wall = event_loop.time()
+        initial_clock = actor.playback_snapshot()
+        last_profile_revision = _stored_counter(
+            initial_clock["profile_revision"],
+            field_name="global_clock.profile_revision",
+        )
         terminal_state = "PAUSED"
         terminal_reason: str | None = None
         try:
@@ -2697,23 +2957,45 @@ class TrainingRunService:
                         terminal_reason = "CONTROLLER_LEASE_LOST"
                         break
                     current_time = self._cursor_time(selected_snapshot)
-                    speed = actor.playback_snapshot()["speed"]
-                    if speed == "MAX":
-                        target = await self._ordered_batch_target(
-                            tracks,
-                            max_events=128,
+                    cursor = _stored_mapping(
+                        selected_snapshot.get("cursor"),
+                        field_name="adapter cursor",
+                    )
+                    if cursor.get("at_end") is True:
+                        terminal_state = "ENDED"
+                        terminal_reason = "SOURCE_EXHAUSTED"
+                        break
+                    clock = actor.playback_snapshot()
+                    profile_revision = _stored_counter(
+                        clock["profile_revision"],
+                        field_name="global_clock.profile_revision",
+                    )
+                    now_wall = event_loop.time()
+                    if profile_revision != last_profile_revision:
+                        last_advance_wall = now_wall
+                        last_profile_revision = profile_revision
+                    elapsed_seconds = max(0.0, now_wall - last_advance_wall)
+                    basis = advance_basis(clock.get("basis"))
+                    rate = control_rate(clock.get("rate"))
+                    source_kind = str(binding["source_kind"])
+                    allowed = supported_playback_bases(
+                        source_kind=source_kind,
+                        full_track_count=len(tracks),
+                    )
+                    if basis not in allowed:
+                        raise TrainingRunError(
+                            "REPLAY_CONTROL_UNSUPPORTED",
+                            "active playback basis no longer matches the FULL-track topology",
+                            status_code=409,
+                            details={
+                                "basis": basis.value,
+                                "playback_bases": [
+                                    item.value for item in allowed
+                                ],
+                            },
                         )
-                        if target is None:
-                            terminal_state = "ENDED"
-                            terminal_reason = "SOURCE_EXHAUSTED"
-                            break
-                    else:
-                        if isinstance(speed, bool) or not isinstance(speed, int):
-                            raise TrainingRunError(
-                                "REPLAY_CONTROL_INVALID",
-                                "ordered playback speed is invalid",
-                                status_code=409,
-                            )
+                    consumed_wall_seconds = 0.0
+                    if basis is AdvanceBasis.VIRTUAL_TIME:
                         try:
                             next_time = await self._next_global_event_time(tracks)
                         except TrainingRunError as exc:
@@ -2724,27 +3006,75 @@ class TrainingRunService:
                             break
                         elapsed_ms = max(
                             0,
-                            int(
-                                (event_loop.time() - last_advance_wall) * 1_000 * speed
-                            ),
+                            int(elapsed_seconds * 1_000 * rate),
                         )
                         if current_time + elapsed_ms < next_time:
                             timeout = min(
                                 0.25,
-                                max(0.001, (next_time - current_time) / speed / 1_000),
+                                max(
+                                    0.001,
+                                    (next_time - current_time)
+                                    / rate
+                                    / 1_000,
+                                ),
                             )
                             target = None
                         else:
                             target = max(next_time, current_time + elapsed_ms)
+                            consumed_wall_seconds = elapsed_seconds
+                            timeout = 0.0
+                    else:
+                        units = discrete_playback_units(
+                            elapsed_seconds,
+                            rate=rate,
+                        )
+                        if units == 0:
+                            target = None
+                            timeout = min(
+                                0.25,
+                                max(
+                                    0.001,
+                                    (1 / rate) - elapsed_seconds,
+                                ),
+                            )
+                        elif basis is AdvanceBasis.SOURCE_EVENT:
+                            if len(tracks) != 1:
+                                raise TrainingRunError(
+                                    "REPLAY_CONTROL_UNSUPPORTED",
+                                    "SOURCE_EVENT playback requires exactly one FULL track",
+                                    status_code=409,
+                                )
+                            target = await self._ordered_batch_target(
+                                tracks,
+                                max_events=units,
+                            )
+                            if target is None:
+                                terminal_state = "ENDED"
+                                terminal_reason = "SOURCE_EXHAUSTED"
+                                break
+                            consumed_wall_seconds = units / rate
+                            timeout = 0.0
+                        else:
+                            step_interval = (
+                                clock.get("display_interval")
+                                if basis is AdvanceBasis.DISPLAY_BAR
+                                else str(binding["base_interval"])
+                            )
+                            if not isinstance(step_interval, str):
+                                raise TrainingRunError(
+                                    "TRAINING_RUN_STORAGE_DEGRADED",
+                                    "display playback profile has no interval",
+                                    status_code=503,
+                                )
+                            target = aligned_step_target_ms(
+                                current_virtual_time_ms=current_time,
+                                base_interval=str(binding["base_interval"]),
+                                step_interval=step_interval,
+                                count=units,
+                            )
+                            consumed_wall_seconds = units / rate
                             timeout = 0.0
                     if target is not None:
-                        cursor = selected_snapshot.get("cursor")
-                        if not isinstance(cursor, Mapping):
-                            raise TrainingRunError(
-                                "TRAINING_RUN_STORAGE_DEGRADED",
-                                "adapter cursor is invalid",
-                                status_code=503,
-                            )
                         tick = actor.next_playback_tick(generation)
                         internal = ReplayV2Command(
                             protocol="replay.v2",
@@ -2777,7 +3107,10 @@ class TrainingRunService:
                             tracks=tracks,
                             target_virtual_time_ms=target,
                         )
-                        last_advance_wall = event_loop.time()
+                        if consumed_wall_seconds > 0:
+                            last_advance_wall += consumed_wall_seconds
+                        else:
+                            last_advance_wall = event_loop.time()
                         timeout = 0.0
                 if timeout > 0:
                     try:
@@ -4443,6 +4776,179 @@ class TrainingRunService:
             },
         }
 
+    async def _validate_display_binding(
+        self,
+        *,
+        command: ReplayV2Command,
+        base_interval: str,
+        display_interval: object,
+        viewer_revision: object,
+    ) -> tuple[str, int]:
+        if (
+            not isinstance(display_interval, str)
+            or isinstance(viewer_revision, bool)
+            or not isinstance(viewer_revision, int)
+            or viewer_revision < 0
+        ):
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "display control binding is invalid",
+                status_code=422,
+            )
+        compatible_step_interval_ms(
+            base_interval=base_interval,
+            step_interval=display_interval,
+        )
+        submitted_view = await self.store.viewer_state_at_revision(
+            command.run_id,
+            viewer_revision,
+        )
+        if submitted_view.display_interval != display_interval:
+            raise TrainingRunError(
+                "VIEWER_REVISION_CONFLICT",
+                "display interval does not match the bound viewer revision",
+                status_code=409,
+            )
+        return display_interval, viewer_revision
+
+    async def _display_advance_target(
+        self,
+        *,
+        command: ReplayV2Command,
+        base_interval: str,
+        current_time: int,
+        count: int,
+        display_interval: object,
+        viewer_revision: object,
+    ) -> tuple[int, str, int]:
+        interval, revision = await self._validate_display_binding(
+            command=command,
+            base_interval=base_interval,
+            display_interval=display_interval,
+            viewer_revision=viewer_revision,
+        )
+        return (
+            aligned_step_target_ms(
+                current_virtual_time_ms=current_time,
+                base_interval=base_interval,
+                step_interval=interval,
+                count=count,
+            ),
+            interval,
+            revision,
+        )
+
+    @staticmethod
+    def _legacy_playback_rate(value: object) -> int:
+        return control_rate(
+            10_000 if value == "MAX" else value,
+            field_name="rate",
+        )
+
+    async def _playback_profile(
+        self,
+        *,
+        command: ReplayV2Command,
+        binding: Mapping[str, object],
+        selected_snapshot: Mapping[str, object],
+        full_track_count: int,
+        actor: TrainingRunActor,
+    ) -> tuple[AdvanceBasis, int, str | None, int | None, bool]:
+        """Validate one canonical profile or resolve a legacy default.
+
+        The returned boolean marks the old empty-PLAY / speed-only contract.
+        It is used only to preserve adapter compatibility; the public clock is
+        always normalized to replay.playback.v1.
+        """
+
+        source_kind = str(binding["source_kind"])
+        base_interval = str(binding["base_interval"])
+        allowed = supported_playback_bases(
+            source_kind=source_kind,
+            full_track_count=full_track_count,
+        )
+        payload = command.payload
+        legacy = not payload or set(payload) == {"speed"}
+        if legacy:
+            actor_profile = actor.playback_snapshot()
+            profile_revision = actor_profile.get("profile_revision")
+            candidate_basis: AdvanceBasis
+            if (
+                isinstance(profile_revision, int)
+                and not isinstance(profile_revision, bool)
+                and profile_revision > 0
+                and actor_profile.get("basis") is not None
+            ):
+                candidate_basis = advance_basis(actor_profile["basis"])
+            else:
+                candidate_basis = default_playback_basis(source_kind)
+            basis = (
+                candidate_basis
+                if candidate_basis in allowed
+                else default_playback_basis(source_kind)
+            )
+            if set(payload) == {"speed"}:
+                rate = self._legacy_playback_rate(payload["speed"])
+            elif (
+                isinstance(profile_revision, int)
+                and not isinstance(profile_revision, bool)
+                and profile_revision > 0
+            ):
+                rate = control_rate(actor_profile.get("rate"))
+            else:
+                rate = self._legacy_playback_rate(
+                    selected_snapshot.get("speed", 1)
+                )
+            display_interval = (
+                actor_profile.get("display_interval")
+                if basis is AdvanceBasis.DISPLAY_BAR
+                else None
+            )
+            viewer_revision = (
+                actor_profile.get("viewer_revision")
+                if basis is AdvanceBasis.DISPLAY_BAR
+                else None
+            )
+            if basis is AdvanceBasis.DISPLAY_BAR:
+                display_interval, viewer_revision = (
+                    await self._validate_display_binding(
+                        command=command,
+                        base_interval=base_interval,
+                        display_interval=display_interval,
+                        viewer_revision=viewer_revision,
+                    )
+                )
+            return basis, rate, display_interval, viewer_revision, True
+
+        basis = advance_basis(payload.get("basis"))
+        if basis not in allowed:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_UNSUPPORTED",
+                "playback basis is unavailable for the current source and FULL-track topology",
+                status_code=409,
+                details={
+                    "basis": basis.value,
+                    "playback_bases": [item.value for item in allowed],
+                    "full_track_count": full_track_count,
+                },
+            )
+        expected = {"basis", "rate"}
+        if basis is AdvanceBasis.DISPLAY_BAR:
+            expected.update({"display_interval", "viewer_revision"})
+        normalized = self._exact_payload(payload, expected)
+        rate = control_rate(normalized["rate"])
+        if basis is AdvanceBasis.DISPLAY_BAR:
+            display_interval, viewer_revision = await self._validate_display_binding(
+                command=command,
+                base_interval=base_interval,
+                display_interval=normalized["display_interval"],
+                viewer_revision=normalized["viewer_revision"],
+            )
+        else:
+            display_interval = None
+            viewer_revision = None
+        return basis, rate, display_interval, viewer_revision, False
+
     async def _translate_control(
         self,
         *,
@@ -4462,6 +4968,7 @@ class TrainingRunService:
         current_time = int(cursor["virtual_time_ms"])
         command_type = command.type
         plan: dict[str, object] = {
+            "contract": ADVANCE_CONTRACT_VERSION,
             "mode": "DIRECT_ADAPTER",
             "cancelable": False,
             "source_kind": source_kind,
@@ -4496,6 +5003,107 @@ class TrainingRunService:
                 {"open_order_disposition", "position_disposition"},
             )
             return CommandType.END_SESSION, dict(payload), plan
+        if command_type is ReplayV2CommandType.ADVANCE:
+            payload = command.payload
+            basis = advance_basis(payload.get("basis"))
+            allowed = supported_advance_bases(
+                source_kind=source_kind,
+                full_track_count=1,
+            )
+            if basis not in allowed:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_UNSUPPORTED",
+                    "advance basis is unavailable for the current source",
+                    status_code=409,
+                    details={
+                        "basis": basis.value,
+                        "supported_bases": [item.value for item in allowed],
+                    },
+                )
+            if basis is AdvanceBasis.DISPLAY_BAR:
+                normalized = self._exact_payload(
+                    payload,
+                    {"basis", "count", "display_interval", "viewer_revision"},
+                )
+                count = control_count(normalized["count"])
+                target, interval, viewer_revision = await self._display_advance_target(
+                    command=command,
+                    base_interval=base_interval,
+                    current_time=current_time,
+                    count=count,
+                    display_interval=normalized["display_interval"],
+                    viewer_revision=normalized["viewer_revision"],
+                )
+                return (
+                    CommandType.ADVANCE_BY,
+                    {"ms": target - current_time},
+                    {
+                        **plan,
+                        "basis": basis.value,
+                        "count": count,
+                        "display_interval": interval,
+                        "viewer_revision": viewer_revision,
+                        "target_virtual_time_ms": target,
+                    },
+                )
+            if basis is AdvanceBasis.BASE_BAR:
+                normalized = self._exact_payload(payload, {"basis", "count"})
+                count = control_count(normalized["count"])
+                if source_kind == "BAR":
+                    return (
+                        CommandType.STEP,
+                        {"count": count},
+                        {**plan, "basis": basis.value, "count": count},
+                    )
+                target = aligned_step_target_ms(
+                    current_virtual_time_ms=current_time,
+                    base_interval=base_interval,
+                    step_interval=base_interval,
+                    count=count,
+                )
+                return (
+                    CommandType.ADVANCE_BY,
+                    {"ms": target - current_time},
+                    {
+                        **plan,
+                        "basis": basis.value,
+                        "count": count,
+                        "target_virtual_time_ms": target,
+                    },
+                )
+            if basis is AdvanceBasis.SOURCE_EVENT:
+                normalized = self._exact_payload(payload, {"basis", "count"})
+                count = control_count(normalized["count"])
+                return (
+                    CommandType.STEP,
+                    {"count": count},
+                    {**plan, "basis": basis.value, "count": count},
+                )
+            normalized = self._exact_payload(payload, {"basis", "duration_ms"})
+            duration = virtual_duration_ms(
+                normalized["duration_ms"],
+                source_kind=source_kind,
+                base_interval=base_interval,
+            )
+            if current_time > MAX_TIMESTAMP_MS - duration:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "advance target exceeds the timestamp range",
+                    status_code=422,
+                )
+            target = current_time + duration
+            return (
+                CommandType.ADVANCE_BY,
+                {"ms": duration},
+                {
+                    **plan,
+                    "basis": basis.value,
+                    "duration_ms": duration,
+                    "mode": "FULL_EVENT_SCAN",
+                    "cancelable": True,
+                    "target_virtual_time_ms": target,
+                },
+            )
         if command_type is ReplayV2CommandType.STEP_EVENT:
             if source_kind != "AGG_TRADE":
                 raise TrainingRunError(
@@ -4505,12 +5113,32 @@ class TrainingRunService:
                 )
             payload = self._exact_payload(command.payload, {"count"})
             count = control_count(payload["count"])
-            return CommandType.STEP, {"count": count}, {**plan, "grain": "EVENT"}
+            return (
+                CommandType.STEP,
+                {"count": count},
+                {
+                    **plan,
+                    "basis": AdvanceBasis.SOURCE_EVENT.value,
+                    "count": count,
+                    "grain": "EVENT",
+                    "legacy_alias": command_type.value,
+                },
+            )
         if command_type is ReplayV2CommandType.STEP_BASE:
             payload = self._exact_payload(command.payload, {"count"})
             count = control_count(payload["count"])
             if source_kind == "BAR":
-                return CommandType.STEP, {"count": count}, {**plan, "grain": "BASE"}
+                return (
+                    CommandType.STEP,
+                    {"count": count},
+                    {
+                        **plan,
+                        "basis": AdvanceBasis.BASE_BAR.value,
+                        "count": count,
+                        "grain": "BASE",
+                        "legacy_alias": command_type.value,
+                    },
+                )
             target = aligned_step_target_ms(
                 current_virtual_time_ms=current_time,
                 base_interval=base_interval,
@@ -4520,7 +5148,14 @@ class TrainingRunService:
             return (
                 CommandType.ADVANCE_BY,
                 {"ms": target - current_time},
-                {**plan, "grain": "BASE", "target_virtual_time_ms": target},
+                {
+                    **plan,
+                    "basis": AdvanceBasis.BASE_BAR.value,
+                    "count": count,
+                    "grain": "BASE",
+                    "legacy_alias": command_type.value,
+                    "target_virtual_time_ms": target,
+                },
             )
         if command_type is ReplayV2CommandType.STEP_DISPLAY:
             payload = self._exact_payload(
@@ -4528,41 +5163,23 @@ class TrainingRunService:
                 {"count", "display_interval", "viewer_revision"},
             )
             count = control_count(payload["count"])
-            interval = payload["display_interval"]
-            viewer_revision = payload["viewer_revision"]
-            if (
-                not isinstance(interval, str)
-                or isinstance(viewer_revision, bool)
-                or not isinstance(viewer_revision, int)
-                or viewer_revision < 0
-            ):
-                raise TrainingRunError(
-                    "REPLAY_CONTROL_INVALID",
-                    "display step binding is invalid",
-                    status_code=422,
-                )
-            submitted_view = await self.store.viewer_state_at_revision(
-                command.run_id,
-                viewer_revision,
-            )
-            if submitted_view.display_interval != interval:
-                raise TrainingRunError(
-                    "VIEWER_REVISION_CONFLICT",
-                    "display interval does not match the bound viewer revision",
-                    status_code=409,
-                )
-            target = aligned_step_target_ms(
-                current_virtual_time_ms=current_time,
+            target, interval, viewer_revision = await self._display_advance_target(
+                command=command,
                 base_interval=base_interval,
-                step_interval=interval,
+                current_time=current_time,
                 count=count,
+                display_interval=payload["display_interval"],
+                viewer_revision=payload["viewer_revision"],
             )
             return (
                 CommandType.ADVANCE_BY,
                 {"ms": target - current_time},
                 {
                     **plan,
+                    "basis": AdvanceBasis.DISPLAY_BAR.value,
+                    "count": count,
                     "grain": "DISPLAY",
+                    "legacy_alias": command_type.value,
                     "display_interval": interval,
                     "viewer_revision": viewer_revision,
                     "target_virtual_time_ms": target,
@@ -4598,6 +5215,9 @@ class TrainingRunService:
                 {"ms": duration},
                 {
                     **plan,
+                    "basis": AdvanceBasis.VIRTUAL_TIME.value,
+                    "duration_ms": duration,
+                    "legacy_alias": command_type.value,
                     "mode": "FULL_EVENT_SCAN",
                     "cancelable": True,
                     "target_virtual_time_ms": target,
@@ -4628,6 +5248,9 @@ class TrainingRunService:
                 {"ms": duration},
                 {
                     **plan,
+                    "basis": AdvanceBasis.VIRTUAL_TIME.value,
+                    "duration_ms": duration,
+                    "legacy_alias": command_type.value,
                     "mode": "FULL_EVENT_SCAN",
                     "cancelable": True,
                     "target_virtual_time_ms": target,

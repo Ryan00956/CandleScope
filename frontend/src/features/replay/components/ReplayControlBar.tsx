@@ -6,12 +6,23 @@ import {
   replayProgress,
 } from "../replayUiModel.js";
 import type { ReplaySpeed } from "../replayTypes.js";
-import type { ReplayV2Json } from "../replayV2Types.js";
+import type {
+  ReplayV2AdvanceBasis,
+  ReplayV2Json,
+} from "../replayV2Types.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 import type { ReplayPhase3ControlType, ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 import { parseIntervalSeconds } from "../../../utils/intervals.js";
 
 const SPEEDS: readonly ReplaySpeed[] = [1, 5, 15, 30, 60, 120, 300, 600, "MAX"];
+const PLAYBACK_RATES = [1, 2, 5, 10, 30, 60, 120, 600, 1_000, 10_000] as const;
+
+const BASIS_LABELS: Readonly<Record<ReplayV2AdvanceBasis, string>> = {
+  DISPLAY_BAR: "展示 K",
+  BASE_BAR: "最小周期 K",
+  SOURCE_EVENT: "源事件",
+  VIRTUAL_TIME: "历史虚拟时间",
+};
 
 function fastForwardPlan(value: ReplayV2Json | undefined): {
   readonly mode: string;
@@ -51,6 +62,9 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const [showEnd, setShowEnd] = useState(false);
   const [openOrderDisposition, setOpenOrderDisposition] = useState<"expire" | "cancel" | "preserve">("expire");
   const [positionDisposition, setPositionDisposition] = useState<"keep" | "mark_close">("keep");
+  const [requestedAdvanceBasis, setRequestedAdvanceBasis] = useState<ReplayV2AdvanceBasis | null>(null);
+  const [advanceAmount, setAdvanceAmount] = useState(1);
+  const [requestedPlaybackRate, setRequestedPlaybackRate] = useState<number | null>(null);
   const endDialogRef = useRef<HTMLElement | null>(null);
   const endTriggerRef = useRef<HTMLButtonElement | null>(null);
   const store = runtime.store;
@@ -67,7 +81,8 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
     store.state,
     store.controllerClientId,
   );
-  const effectiveSpeed = viewer?.marketTracks?.global_clock.speed ?? store.speed ?? 1;
+  const globalClock = viewer?.marketTracks?.global_clock ?? null;
+  const effectiveSpeed = globalClock?.rate ?? store.speed ?? 1;
   const forkPending = runtime.forkPending;
   const multiTrackForkBlocked = (viewer?.marketTracks?.tracks.length ?? 1) > 1;
   const disabled = pending !== null || phase3Pending !== null || forkPending
@@ -80,6 +95,17 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
     ? Math.min(1, Math.max(0, phase3Ratio / 1_000_000))
     : domainProgress;
   const baseIntervalMs = Math.max(1, (parseIntervalSeconds(config?.base_interval ?? "1m") ?? 60) * 1_000);
+  const supportedBases = globalClock?.supported_bases ?? [];
+  const playbackBases = globalClock?.playback_bases ?? [];
+  const advanceBasis = requestedAdvanceBasis !== null
+    && supportedBases.includes(requestedAdvanceBasis)
+    ? requestedAdvanceBasis
+    : globalClock?.basis ?? "BASE_BAR";
+  const playbackRate = requestedPlaybackRate ?? globalClock?.rate ?? 1;
+  const maxAdvanceCount = globalClock?.max_count ?? 100_000;
+  const virtualTimeQuantumMs = globalClock?.virtual_time_quantum_ms ?? baseIntervalMs;
+  const basisCanPlay = playbackBases.includes(advanceBasis);
+  const canonicalAdvancePending = phase3Pending === "advance";
   const fallbackPublicTime = formatReplayPublicTime(store.virtualTimeMs, {
     blindMode: config?.blind_mode ?? true,
     originMs: store.replayStartMs,
@@ -94,6 +120,19 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   ) => {
     if (viewer !== undefined) void viewer.actions.submitControl(type, payload).catch(() => undefined);
   };
+  const submitCanonicalAdvance = (
+    basis: ReplayV2AdvanceBasis,
+    amount: number,
+  ) => {
+    const bounded = Math.min(maxAdvanceCount, Math.max(1, Math.trunc(amount)));
+    phase3Command("advance", basis === "VIRTUAL_TIME"
+      ? { basis, duration_ms: bounded * virtualTimeQuantumMs }
+      : { basis, count: bounded });
+  };
+  const canonicalPlaybackPayload = (): Readonly<Record<string, ReplayV2Json>> => ({
+    basis: advanceBasis,
+    rate: playbackRate,
+  });
 
   useEffect(() => {
     if (!showEnd) return undefined;
@@ -206,26 +245,55 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             {pending === "step" ? "单步中…" : "单步 →"}
           </button>
         ) : (<>
-          <button type="button" data-replay-action="step-display" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => phase3Command("step_display", { count: 1 })}>
-            {phase3Pending === "step_display" ? "展示步进中…" : `下一展示 K (${viewer.viewerState?.display_interval ?? "--"}) →`}
-          </button>
-          <button type="button" data-replay-action="step-base" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => phase3Command("step_base", { count: 1 })}>
-            {phase3Pending === "step_base" ? "基础步进中…" : `基础 K (${config?.base_interval ?? "--"})`}
-          </button>
+          {supportedBases.includes("DISPLAY_BAR") && (
+            <button type="button" data-replay-action="advance-display" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => submitCanonicalAdvance("DISPLAY_BAR", 1)}>
+              {canonicalAdvancePending ? "推进中…" : `下一展示 K (${viewer.viewerState?.display_interval ?? "--"}) →`}
+            </button>
+          )}
+          {supportedBases.includes("BASE_BAR") && (
+            <button type="button" data-replay-action="advance-base" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => submitCanonicalAdvance("BASE_BAR", 1)}>
+              {canonicalAdvancePending ? "推进中…" : `下一最小周期 K (${config?.base_interval ?? "--"})`}
+            </button>
+          )}
+          {supportedBases.includes("SOURCE_EVENT") && (
+            <button type="button" data-replay-action="advance-source-event" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => submitCanonicalAdvance("SOURCE_EVENT", 1)}>
+              {canonicalAdvancePending ? "推进中…" : tradeTape ? "下一聚合成交" : "下一源 K"}
+            </button>
+          )}
         </>)}
-        {viewer !== undefined && tradeTape && (
-          <button type="button" data-replay-action="step-event" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => phase3Command("step_event", { count: 1 })}>
-            {phase3Pending === "step_event" ? "成交步进中…" : "下一成交"}
-          </button>
+        {viewer !== undefined && (
+          <label className="replay-speed-control">
+            推进基准
+            <select
+              data-replay-action="advance-basis"
+              value={advanceBasis}
+              disabled={disabled || effectiveState === "PLAYING" || effectiveState === "ENDED"}
+              onChange={(event) => setRequestedAdvanceBasis(event.target.value as ReplayV2AdvanceBasis)}
+            >
+              {supportedBases.map((basis) => (
+                <option key={basis} value={basis}>
+                  {basis === "SOURCE_EVENT"
+                    ? (tradeTape ? "聚合成交源事件" : "BAR 源事件")
+                    : BASIS_LABELS[basis]}
+                  {!playbackBases.includes(basis) ? "（仅手动）" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
         )}
         <button
           type="button"
           data-replay-action={effectiveState === "PLAYING" ? "pause" : "play"}
-          disabled={disabled || !["PAUSED", "PLAYING"].includes(effectiveState ?? "")}
+          disabled={
+            disabled
+            || !["PAUSED", "PLAYING"].includes(effectiveState ?? "")
+            || (viewer !== undefined && effectiveState !== "PLAYING" && !basisCanPlay)
+          }
+          title={viewer !== undefined && !basisCanPlay ? "这个基准只允许手动推进" : undefined}
           onClick={() => {
             const type = effectiveState === "PLAYING" ? "pause" : "play";
             if (viewer === undefined) command(type);
-            else phase3Command(type);
+            else phase3Command(type, type === "play" ? canonicalPlaybackPayload() : {});
           }}
         >
           {pending === "pause" || phase3Pending === "pause" ? "正在暂停…" : pending === "play" || phase3Pending === "play" ? "正在播放…" : effectiveState === "PLAYING" ? "暂停 ‖" : "播放 ▶"}
@@ -235,11 +303,40 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             {pending === "advance_by" ? "推进中…" : "前进 5m ⇥"}
           </button>
         ) : (
-          <button type="button" data-replay-action="advance-by" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => phase3Command("advance_by", { ms: baseIntervalMs * 5 })}>
-            {phase3Pending === "advance_by" ? "推进中…" : "前进 5 个基础 K ⇥"}
-          </button>
+          <>
+            <label className="replay-speed-control">
+              {advanceBasis === "VIRTUAL_TIME"
+                ? (virtualTimeQuantumMs === 1 ? "历史毫秒数" : `${config?.base_interval ?? "基础周期"} 时间单位数`)
+                : `${BASIS_LABELS[advanceBasis]}数量`}
+              <input
+                data-replay-action="advance-amount"
+                type="number"
+                min={1}
+                max={maxAdvanceCount}
+                step={1}
+                value={advanceAmount}
+                disabled={disabled || effectiveState !== "PAUSED"}
+                onChange={(event) => setAdvanceAmount(Math.min(
+                  maxAdvanceCount,
+                  Math.max(1, Math.trunc(Number(event.target.value) || 1)),
+                ))}
+              />
+            </label>
+            <button
+              type="button"
+              data-replay-action="advance"
+              disabled={disabled || effectiveState !== "PAUSED"}
+              onClick={() => submitCanonicalAdvance(advanceBasis, advanceAmount)}
+            >
+              {canonicalAdvancePending ? "推进中…" : `推进 ${advanceAmount} ${BASIS_LABELS[advanceBasis]} ⇥`}
+            </button>
+          </>
         )}
-        {viewer !== undefined && (phase3Pending === "advance_by" || phase3Pending === "advance_to") && (
+        {viewer !== undefined && (
+          phase3Pending === "advance_by"
+          || phase3Pending === "advance_to"
+          || phase3Pending === "advance"
+        ) && (
           <button
             type="button"
             data-replay-action="cancel-advance"
@@ -247,23 +344,46 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             onClick={() => void viewer.actions.cancelAdvance().catch(() => undefined)}
           >取消推进</button>
         )}
-        <label className="replay-speed-control">
-          速度
-          <select
-            data-replay-action="speed"
-            value={String(effectiveSpeed)}
-            disabled={disabled || effectiveState === "ENDED"}
-            onChange={(event) => {
-              const speed = event.target.value === "MAX"
-                ? "MAX"
-                : Number(event.target.value) as ReplaySpeed;
-              if (viewer === undefined) command("set_speed", { speed });
-              else phase3Command("set_speed", { speed });
-            }}
-          >
-            {SPEEDS.map((speed) => <option key={String(speed)} value={String(speed)}>{speed === "MAX" ? "MAX" : `${speed}×`}</option>)}
-          </select>
-        </label>
+        {viewer === undefined ? (
+          <label className="replay-speed-control">
+            速度
+            <select
+              data-replay-action="speed"
+              value={String(effectiveSpeed)}
+              disabled={disabled || effectiveState === "ENDED"}
+              onChange={(event) => {
+                const speed = event.target.value === "MAX"
+                  ? "MAX"
+                  : Number(event.target.value) as ReplaySpeed;
+                command("set_speed", { speed });
+              }}
+            >
+              {SPEEDS.map((speed) => <option key={String(speed)} value={String(speed)}>{speed === "MAX" ? "MAX" : `${speed}×`}</option>)}
+            </select>
+          </label>
+        ) : (
+          <label className="replay-speed-control">
+            播放速率
+            <select
+              data-replay-action="playback-rate"
+              value={String(playbackRate)}
+              disabled={disabled || effectiveState === "ENDED" || !basisCanPlay}
+              onChange={(event) => {
+                const rate = Number(event.target.value);
+                setRequestedPlaybackRate(rate);
+                phase3Command("set_speed", { basis: advanceBasis, rate });
+              }}
+            >
+              {PLAYBACK_RATES.map((rate) => (
+                <option key={rate} value={rate}>
+                  {advanceBasis === "VIRTUAL_TIME"
+                    ? `${rate}× 历史时间`
+                    : `${rate} ${advanceBasis === "SOURCE_EVENT" && tradeTape ? "聚合成交" : BASIS_LABELS[advanceBasis]}/秒`}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <div
           className="replay-progress"
           data-replay-progress={progress === null ? "unknown" : progress.toFixed(4)}

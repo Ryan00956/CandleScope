@@ -25,6 +25,7 @@ export type ReplayPhase3ControlType = Extract<ReplayV2CommandType,
   | "step_event"
   | "step_base"
   | "step_display"
+  | "advance"
   | "advance_by"
   | "advance_to"
   | "end"
@@ -197,7 +198,15 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
 
   useEffect(() => {
     const active = controlPending;
-    if (active === null || (active.type !== "advance_by" && active.type !== "advance_to")) return;
+    const canonicalAdvance = active?.type === "advance";
+    if (
+      active === null
+      || (
+        active.type !== "advance_by"
+        && active.type !== "advance_to"
+        && !canonicalAdvance
+      )
+    ) return;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
@@ -255,7 +264,12 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
     const viewer = viewerRef.current;
     if (viewer === null) throw new Error("ViewerState is unavailable");
-    const boundPayload = type === "step_display"
+    const canonicalDisplayBinding = (
+      type === "advance"
+      || type === "play"
+      || type === "set_speed"
+    ) && payload.basis === "DISPLAY_BAR";
+    const boundPayload = type === "step_display" || canonicalDisplayBinding
       ? {
           ...payload,
           display_interval: viewer.display_interval,
@@ -315,7 +329,15 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
 
   const cancelAdvance = useCallback(async (): Promise<ReplayV2CommandResult> => {
     const active = controlRef.current;
-    if (active === null || (active.type !== "advance_by" && active.type !== "advance_to")) {
+    const canonicalAdvance = active?.type === "advance";
+    if (
+      active === null
+      || (
+        active.type !== "advance_by"
+        && active.type !== "advance_to"
+        && !canonicalAdvance
+      )
+    ) {
       throw new Error("no cancelable advance is active");
     }
     const command = buildCommand(

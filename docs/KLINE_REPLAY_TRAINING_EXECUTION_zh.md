@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_12_PASS / PHASE_13_NEXT / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11 已独立提交，Phase 12 已完成实现与验收，Phase 13–18 按本文恢复的原始路线逐阶段实施。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
+状态：`PHASE_13_PASS / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11、12 已独立提交，Phase 13 本 changeset 已通过退出门禁，Phase 14–18 仍须按本文恢复的原始路线逐阶段实施。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -1353,7 +1353,7 @@ Phase 4 已有七级服务端 `actual -> public` 投影、盲化 synthetic timel
 
 ## 24. Phase 13：完整控制合同与四种推进基准
 
-### 背景与范围
+### 背景审计
 
 Phase 3 已提供 `STEP_DISPLAY/STEP_BASE/STEP_EVENT/ADVANCE_BY/ADVANCE_TO` 的第一版适配，但 UI 与协议仍以命令名而不是统一推进基准表达。Phase 13 冻结四个公开 advance basis：
 
@@ -1362,14 +1362,42 @@ Phase 3 已提供 `STEP_DISPLAY/STEP_BASE/STEP_EVENT/ADVANCE_BY/ADVANCE_TO` 的�
 - `SOURCE_EVENT`：按 BAR 或 aggTrade 源事件推进；
 - `VIRTUAL_TIME`：按服务端虚拟时间推进。
 
-每种基准支持服务端限制内任意正整数 `n`；时间推进只接受 base interval 的整数倍；`advance-to` 绑定当前 cursor/revision。AGG_TRADE 支持有界任意虚拟播放倍率，BAR 不伪装逐笔连续性。
+仓库审计确认：
+
+1. `ReplayV2Command` 已绑定 expected run revision、virtual cursor 和 source sequence；`STEP_DISPLAY` 还绑定提交时的 display interval/viewer revision，Phase 3 的对齐算法和切周期竞态证据可复用。
+2. `PLAY` 当前 payload 为空，`SET_SPEED` 只有无单位的 `speed`。TOUCH_OR_TAPE 运行即使只有一条 FULL 轨也进入 ordered playback；其数值速度被解释为历史虚拟时间倍率。BAR base=1m 的 1× 因而可能约 60 秒才产生一根基础 K，不符合“每秒几根 K”的产品语义。
+3. 控制坞只有固定的下一展示 K、下一基础 K、下一成交和“前进 5 个基础 K”；用户不能选择基准、任意正整数或看见服务端允许范围。前端根据 source 字段猜能力，没有服务端公开控制 capability。
+4. 单 FULL 轨可以精确消费一个 BAR 或 aggTrade source event；多 FULL 轨在同毫秒可能形成必须原子提交的稳定 cohort。当前全局推进会一次消费整个 cohort，不能诚实把它宣称为“恰好一个 SOURCE_EVENT”。Phase 13 在多轨明确禁用该基准，不把 cohort 偷换成 event。
+5. BAR 虚拟时长必须为 base interval 的整数倍；AGG_TRADE 的事件时间是连续毫秒时间，既有 500ms 精确推进属于产品合同，必须保留。两种 source 的差异由服务端 capability 明示。
+
+### 冻结合同与实现计划
+
+1. 新增 additive `advance_basis` enum 与 canonical `advance` 命令，冻结 `replay.advance.v1`。`DISPLAY_BAR/BASE_BAR/SOURCE_EVENT` 使用有界正整数 `count`；`VIRTUAL_TIME` 使用正整数 `duration_ms`。DISPLAY payload 必须携带提交时的 display interval/viewer revision。
+2. `advance_to` 的绝对目标继续由 command envelope 绑定 expected cursor/revision；BAR 检查目标差值为 base 整数倍，AGG 保留有界任意正毫秒目标。Phase 3 的 `step_* / advance_by` 作为兼容 alias 保留，但服务端结果统一返回 canonical basis、请求单位、目标和 legacy alias，不再成为新 UI 合同。
+3. global clock 公开 `replay.playback.v1` profile：basis、rate、display binding、支持基准、最大 count 和虚拟时长 quantum。BAR 的自动播放只允许 DISPLAY_BAR、BASE_BAR 或单轨 SOURCE_EVENT，rate 单位为每秒多少个离散单位；AGG 可额外选择 VIRTUAL_TIME，rate 单位为历史虚拟时间倍率。
+4. canonical `play` 与播放中的 `set_speed` 必须携带同一 basis/profile；速度只改变壁钟调度，不进入领域 hash。暂停在已提交 source-event/cohort 边界形成 barrier；刷新读取服务端 global clock，不能由浏览器本地计时推进。
+5. 单轨 SOURCE_EVENT 对 BAR 与 AGG 都精确消费 `count` 个源事件；多轨 capability 删除 SOURCE_EVENT，直接命令也 409 fail-closed。DISPLAY/BASE/VIRTUAL_TIME 多轨继续通过稳定全局事件序推进。
+6. 控制坞改为服务端 capability 驱动的基准选择、正整数单位/时长输入、一次推进、播放/暂停和速率；快速按钮也提交 canonical advance。BAR 文案明确离散 K，AGG 文案明确聚合成交而非 raw trade。
+7. 不新增数据库 schema；命令日志继续保存完整 canonical payload，旧 v1 command enum、actor config、存档和默认关闭开关不改写。
 
 ### 退出门槛
 
 - 1m/15m forming bar、1m -> 15m 切换后首次推进、暂停/恢复、重启、逐次推进与批量推进的领域状态 hash 完全一致。
-- 四种 basis 在 BAR/AGG、display switch、同毫秒事件、空档和 session end 上有 reference matrix。
+- 四种 basis 在 BAR/AGG、display switch、同毫秒事件、空档和 session end 上有 reference matrix；BAR SOURCE_EVENT=BASE source event，AGG SOURCE_EVENT=aggregate trade。
+- BAR base/display 每秒速率与 AGG virtual-time 倍率使用可控 wall-clock 测试证明单位正确；不同 rate 的最终 cursor/account/ledger/state hash 相同。
+- 多 FULL 轨 SOURCE_EVENT capability 不出现且直接请求明确拒绝；其余基准保持全局 cursor 与稳定总序，不发生部分轨推进。
 - UI 只显示当前 source 可证明的基准和单位；超限、非整数倍、日历不确定性全部 fail closed。
-- 独立全量测试、浏览器控制矩阵和 commit 完成后才进入 Phase 14。
+- 后端全量、frontend `npm run check`、真实浏览器 BAR/AGG 控制矩阵、暂停 barrier、SQLite command/result 恢复、默认开关和 reverse-apply 全部 PASS，独立 commit 后才进入 Phase 14。
+
+### 执行记录（2026-07-26）
+
+1. 后端冻结了 `replay.advance.v1` 与 `replay.playback.v1`，四种 basis、正整数/count 或 duration 合同、BAR base quantum、AGG 毫秒虚拟时间、单 FULL 轨 SOURCE_EVENT 以及多 FULL 轨明确拒绝均由同一 capability 与执行路径驱动。旧 `step_* / advance_by / advance_to / speed` 仍可读取和执行，但结果带 canonical plan 与 `legacy_alias`。
+2. ordered actor 持有服务端 playback profile；BAR 离散速率按每秒单位调度，AGG 虚拟时间按历史时间倍率调度。`set_speed` 的 canonical profile 变更不进入 adapter/domain hash；pause 在已提交事件边界串行化并保留重启后的 PAUSED 默认 profile。
+3. 控制坞和键盘快捷键只提交 canonical `advance/play/pause/set_speed`；服务端 capability 决定可选 basis、速率单位、最大 count 和 quantum。规范 advance 的四种 basis 均进入统一进度与取消通道，BAR/AGG 文案分别明确“源 K”和“聚合成交”，未把 aggTrade 宣称为 raw fill。
+4. 自动化证据：Phase 13/合同定向后端 `32 passed`，Phase 3/5 兼容矩阵 `39 passed`，后端全量 `2036 passed`；前端 replay 定向 `195 passed`，最终 `npm run check` 的 architecture、typecheck、lint、`2417 passed` 与 production build 全部通过。变更后端文件的 Ruff 检查通过。
+5. 真实 headed Chromium 使用隔离数据库与本地 BAR/AGG 冻结归档验收。BAR 浏览器请求为 `play {basis: BASE_BAR, rate: 1}`，pause barrier 落在 `tick=15 / source_sequence=15 / virtual_time_ms=1700002139999`；暂停后相隔 1.2 秒的两次服务端读取三者完全一致。BAR 的 DISPLAY_BAR 15m 推进保留 viewer revision；AGG 的 SOURCE_EVENT 精确消费一条聚合成交，随后 VIRTUAL_TIME 1ms 精确推进 1ms。页面只有既有 favicon 404 与两个非标准 slider CSS warning，没有应用异常。
+6. 浏览器截图保存在 ignored evidence 目录 `output/playwright/phase13-20260726/`。SQLite `quick_check=ok`、`foreign_key_check` 零行，training schema 仍为 v9；命令表持久化了 canonical DISPLAY_BAR、SOURCE_EVENT、VIRTUAL_TIME、play 与 pause 的请求/结果，重读可恢复 `replay.advance.v1` plan 和 global clock。
+7. 仓库默认 `REPLAY_ENABLED=0`、`REPLAY_PRODUCT_V2_ENABLED=0`、segment worker/auto-GC、fast-forward optimization、historical book 与前端 v2 flag 均保持关闭。最终 diff check、提交级 reverse-apply 与独立 Phase 13 commit 是本阶段最后交付动作。
 
 ---
 

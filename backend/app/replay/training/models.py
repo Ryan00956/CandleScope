@@ -132,6 +132,13 @@ class ExecutionModelV2(_StringEnum):
     TOUCH_OR_TAPE_V2 = "TOUCH_OR_TAPE_V2"
 
 
+class AdvanceBasis(_StringEnum):
+    DISPLAY_BAR = "DISPLAY_BAR"
+    BASE_BAR = "BASE_BAR"
+    SOURCE_EVENT = "SOURCE_EVENT"
+    VIRTUAL_TIME = "VIRTUAL_TIME"
+
+
 class ReplayV2CommandType(_StringEnum):
     ACQUIRE_CONTROLLER = "acquire_controller"
     HEARTBEAT_CONTROLLER = "heartbeat_controller"
@@ -143,6 +150,7 @@ class ReplayV2CommandType(_StringEnum):
     STEP_EVENT = "step_event"
     STEP_BASE = "step_base"
     STEP_DISPLAY = "step_display"
+    ADVANCE = "advance"
     ADVANCE_BY = "advance_by"
     ADVANCE_TO = "advance_to"
     CANCEL_ADVANCE = "cancel_advance"
@@ -204,6 +212,7 @@ _ENUM_TYPES: tuple[tuple[str, type[_StringEnum]], ...] = (
     ("margin_mode", MarginMode),
     ("funding_mode", FundingMode),
     ("execution_model", ExecutionModelV2),
+    ("advance_basis", AdvanceBasis),
     ("command_type", ReplayV2CommandType),
     ("event_type", ReplayV2EventType),
 )
@@ -1274,6 +1283,7 @@ class TrainingRunCreateRequest:
 
 
 __all__ = [
+    "AdvanceBasis",
     "BookMode",
     "CapabilityKind",
     "CapabilityState",

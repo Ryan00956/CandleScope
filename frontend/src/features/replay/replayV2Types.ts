@@ -53,6 +53,12 @@ export const REPLAY_V2_ENUMS = Object.freeze({
   margin_mode: enumValues("CROSS", "ISOLATED"),
   funding_mode: enumValues("OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"),
   execution_model: enumValues("TOUCH_OR_TAPE_V2"),
+  advance_basis: enumValues(
+    "DISPLAY_BAR",
+    "BASE_BAR",
+    "SOURCE_EVENT",
+    "VIRTUAL_TIME",
+  ),
   command_type: enumValues(
     "acquire_controller",
     "heartbeat_controller",
@@ -64,6 +70,7 @@ export const REPLAY_V2_ENUMS = Object.freeze({
     "step_event",
     "step_base",
     "step_display",
+    "advance",
     "advance_by",
     "advance_to",
     "cancel_advance",
@@ -113,6 +120,7 @@ export type ReplayV2TimeDisclosurePolicy = EnumValue<
 export type ReplayV2SubscriptionTier = EnumValue<typeof REPLAY_V2_ENUMS.subscription_tier>;
 export type ReplayV2CapabilityKind = EnumValue<typeof REPLAY_V2_ENUMS.capability_kind>;
 export type ReplayV2CapabilityState = EnumValue<typeof REPLAY_V2_ENUMS.capability_state>;
+export type ReplayV2AdvanceBasis = EnumValue<typeof REPLAY_V2_ENUMS.advance_basis>;
 export type ReplayV2CommandType = EnumValue<typeof REPLAY_V2_ENUMS.command_type>;
 export type ReplayV2EventType = EnumValue<typeof REPLAY_V2_ENUMS.event_type>;
 export type ReplayV2MarginMode = EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
@@ -257,12 +265,22 @@ export interface ReplayTrainingPortfolioPosition {
 }
 
 export interface ReplayGlobalClock {
+  readonly contract: "replay.playback.v1";
   readonly mode: "ADAPTER" | "ORDERED";
   readonly state: ReplayV2RunState;
-  readonly speed: number | "MAX";
+  readonly basis: ReplayV2AdvanceBasis;
+  readonly rate: number;
+  readonly speed: number;
+  readonly display_interval: string | null;
+  readonly viewer_revision: number | null;
+  readonly profile_revision: number;
   readonly reason: string | null;
   readonly generation: number;
   readonly tick: number;
+  readonly supported_bases: readonly ReplayV2AdvanceBasis[];
+  readonly playback_bases: readonly ReplayV2AdvanceBasis[];
+  readonly max_count: number;
+  readonly virtual_time_quantum_ms: number;
 }
 
 export interface ReplayLaunchWatchlistItem {
@@ -1088,13 +1106,26 @@ export function parseReplayLaunchContext(value: unknown): ReplayLaunchContext {
 
 function parseReplayGlobalClock(value: unknown): ReplayGlobalClock {
   const clock = exactObject(value, "global clock", [
+    "contract",
     "mode",
     "state",
+    "basis",
+    "rate",
     "speed",
+    "display_interval",
+    "viewer_revision",
+    "profile_revision",
     "reason",
     "generation",
     "tick",
+    "supported_bases",
+    "playback_bases",
+    "max_count",
+    "virtual_time_quantum_ms",
   ]);
+  if (clock.contract !== "replay.playback.v1") {
+    throw new TypeError("global clock contract is unsupported");
+  }
   if (clock.mode !== "ADAPTER" && clock.mode !== "ORDERED") {
     throw new TypeError("global clock mode is unsupported");
   }
@@ -1103,24 +1134,79 @@ function parseReplayGlobalClock(value: unknown): ReplayGlobalClock {
     REPLAY_V2_ENUMS.run_state,
     "global clock state",
   );
-  const speed = clock.speed;
-  if (speed !== "MAX" && (
-    typeof speed !== "number"
-    || !Number.isSafeInteger(speed)
-    || ![1, 5, 15, 30, 60, 120, 300, 600].includes(speed)
-  )) {
-    throw new TypeError("global clock speed is unsupported");
+  const basis = enumValue(
+    clock.basis,
+    REPLAY_V2_ENUMS.advance_basis,
+    "global clock basis",
+  );
+  const rate = counter(clock.rate, "global clock rate");
+  if (rate < 1 || rate > 10_000 || clock.speed !== rate) {
+    throw new TypeError("global clock rate/speed alias is unsupported");
+  }
+  const displayInterval = clock.display_interval === null
+    ? null
+    : identifier(clock.display_interval, "global clock display_interval");
+  const viewerRevision = clock.viewer_revision === null
+    ? null
+    : counter(clock.viewer_revision, "global clock viewer_revision");
+  if (
+    (basis === "DISPLAY_BAR")
+      !== (displayInterval !== null && viewerRevision !== null)
+  ) {
+    throw new TypeError("global clock display binding does not match its basis");
   }
   if (clock.reason !== null && typeof clock.reason !== "string") {
     throw new TypeError("global clock reason must be a string or null");
   }
+  if (!Array.isArray(clock.supported_bases) || !Array.isArray(clock.playback_bases)) {
+    throw new TypeError("global clock basis capabilities must be arrays");
+  }
+  const supportedBases = clock.supported_bases.map((item) => enumValue(
+    item,
+    REPLAY_V2_ENUMS.advance_basis,
+    "global clock supported basis",
+  ));
+  const playbackBases = clock.playback_bases.map((item) => enumValue(
+    item,
+    REPLAY_V2_ENUMS.advance_basis,
+    "global clock playback basis",
+  ));
+  if (
+    new Set(supportedBases).size !== supportedBases.length
+    || new Set(playbackBases).size !== playbackBases.length
+    || playbackBases.some((item) => !supportedBases.includes(item))
+    || !playbackBases.includes(basis)
+  ) {
+    throw new TypeError("global clock basis capabilities are inconsistent");
+  }
+  const maxCount = counter(clock.max_count, "global clock max_count");
+  const quantum = counter(
+    clock.virtual_time_quantum_ms,
+    "global clock virtual_time_quantum_ms",
+  );
+  if (maxCount < 1 || quantum < 1) {
+    throw new TypeError("global clock limits must be positive");
+  }
   return {
+    contract: "replay.playback.v1",
     mode: clock.mode,
     state,
-    speed,
+    basis,
+    rate,
+    speed: rate,
+    display_interval: displayInterval,
+    viewer_revision: viewerRevision,
+    profile_revision: counter(
+      clock.profile_revision,
+      "global clock profile_revision",
+    ),
     reason: clock.reason,
     generation: counter(clock.generation, "global clock generation"),
     tick: counter(clock.tick, "global clock tick"),
+    supported_bases: supportedBases,
+    playback_bases: playbackBases,
+    max_count: maxCount,
+    virtual_time_quantum_ms: quantum,
   };
 }
 

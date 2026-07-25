@@ -49,6 +49,7 @@
     "margin_mode": ["CROSS", "ISOLATED"],
     "funding_mode": ["OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"],
     "execution_model": ["TOUCH_OR_TAPE_V2"],
+    "advance_basis": ["DISPLAY_BAR", "BASE_BAR", "SOURCE_EVENT", "VIRTUAL_TIME"],
     "command_type": [
       "acquire_controller",
       "heartbeat_controller",
@@ -60,6 +61,7 @@
       "step_event",
       "step_base",
       "step_display",
+      "advance",
       "advance_by",
       "advance_to",
       "cancel_advance",
@@ -158,8 +160,8 @@
       "source_sequence": 0,
       "revision": 0
     },
-    "type": "step_base",
-    "payload": {"count": 1}
+    "type": "advance",
+    "payload": {"basis": "BASE_BAR", "count": 1}
   },
   "sample_event": {
     "protocol": "replay.v2",

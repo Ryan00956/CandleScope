@@ -1,5 +1,6 @@
 import type { ReplayCapabilities, ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
 import type {
+  ReplayLaunchContext,
   ReplayV2BookMode,
   ReplayV2IntegrityMode,
   ReplayV2FundingMode,
@@ -9,6 +10,7 @@ import type {
   ReplayV2TimeDisclosurePolicy,
   TrainingRunCreatePayload,
 } from "./replayV2Types.js";
+import { intervalTiles } from "../../utils/intervals.js";
 import type { ReplaySegmentPreparePlan } from "./replaySegmentTypes.js";
 import {
   REPLAY_POLICY_MUTATIONS,
@@ -74,20 +76,29 @@ function firstEntry(catalog: ReplayCatalog): ReplayCatalogEntry | undefined {
     ?? catalog.entries[0];
 }
 
-export function createTrainingRunDraft(catalog: ReplayCatalog): TrainingRunDraft {
-  const entry = firstEntry(catalog);
-  const symbol = entry?.identity.symbol ?? "BTCUSDT";
+export function createTrainingRunDraft(
+  catalog: ReplayCatalog,
+  launchContext?: ReplayLaunchContext,
+): TrainingRunDraft {
+  const entry = launchContext === undefined
+    ? firstEntry(catalog)
+    : catalog.entries.find((candidate) => (
+        candidate.identity.exchange === launchContext.exchange
+        && candidate.identity.market_type === launchContext.market_type
+        && candidate.identity.symbol === launchContext.symbol
+      ));
+  const symbol = launchContext?.symbol ?? entry?.identity.symbol ?? "BTCUSDT";
   const baseInterval = entry?.selected_base_interval ?? entry?.base_intervals[0] ?? "1m";
   return {
     name: `${symbol} 训练`,
     sourceKind: "BAR",
     startMode: "RANDOM",
-    exchange: entry?.identity.exchange ?? "binance",
-    marketType: entry?.identity.market_type ?? "spot",
+    exchange: launchContext?.exchange ?? entry?.identity.exchange ?? "binance",
+    marketType: launchContext?.market_type ?? entry?.identity.market_type ?? "spot",
     symbol,
     settlementAsset: symbol.endsWith("USDT") ? "USDT" : "USDT",
     baseInterval,
-    displayInterval: baseInterval,
+    displayInterval: launchContext?.display_interval ?? baseInterval,
     requestedStartMs: null,
     warmupBars: catalog.warmup_bars,
     forwardCacheMs: catalog.horizon_ms,
@@ -139,6 +150,9 @@ export function evaluateTrainingRunDraft(
   }
   if (entry?.selected_base_interval !== draft.baseInterval) {
     errors.push("基础周期必须使用服务端选定的精确周期");
+  }
+  if (!intervalTiles(draft.baseInterval, draft.displayInterval)) {
+    errors.push("当前显示周期不能由服务端选定的基础周期精确拼接");
   }
   if (draft.startMode === "MANUAL" && draft.requestedStartMs === null) {
     errors.push("手动开始需要明确的毫秒时间");
@@ -220,6 +234,7 @@ export function buildTrainingRunCreateRequest(
   draft: TrainingRunDraft,
   evaluation: TrainingRunDraftEvaluation,
   catalog: ReplayCatalog,
+  launchContext?: ReplayLaunchContext,
 ): TrainingRunCreatePayload {
   if (!evaluation.canSubmit || evaluation.selectedEntry === null) {
     throw new TypeError("training run draft is not ready to submit");
@@ -260,5 +275,14 @@ export function buildTrainingRunCreateRequest(
     allowed_mutations: draft.integrityMode === "SANDBOX"
       ? REPLAY_POLICY_MUTATIONS
       : draft.allowedMutations,
+    ...(launchContext === undefined ? {} : {
+      launch_context: {
+        ...launchContext,
+        exchange: draft.exchange,
+        market_type: draft.marketType,
+        symbol: draft.symbol,
+        display_interval: draft.displayInterval,
+      },
+    }),
   };
 }

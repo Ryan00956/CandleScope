@@ -161,6 +161,57 @@ def test_catalog_cache_is_bound_to_source_fingerprint_and_closed_boundary() -> N
     assert catalog.diagnostics()["cache_misses"] == 2
 
 
+def test_catalog_epoch_ignores_volatile_ephemeral_rows_but_not_replay_bases() -> None:
+    repo, identity, case = _fixture_repo()
+    start_ms = int(case["start_ms"])
+    now_ms = [int(case["now_ms"])]
+    repo.add_rows(
+        identity,
+        "1s",
+        [
+            make_bar(
+                start_ms + offset * 1_000,
+                interval_ms=1_000,
+                price=str(200 + offset),
+            )
+            for offset in range(4)
+        ],
+    )
+    catalog = ReplayCatalog(
+        repo,
+        native_intervals=lambda identity: ("1s", "1m", "5m"),
+        now_ms=lambda: now_ms[0],
+        max_scan_rows=4,
+        cache_ttl_seconds=60.0,
+    )
+    kwargs = {
+        "warmup_bars": int(case["warmup_bars"]),
+        "horizon_ms": int(case["horizon_ms"]),
+    }
+
+    first = catalog.build(**kwargs)
+    now_ms[0] += 1_000
+    repo.rows[(identity.exchange, identity.market_type, identity.symbol, "1s")].append(
+        make_bar(start_ms + 4_000, interval_ms=1_000, price="204")
+    )
+    second = catalog.build(**kwargs)
+
+    assert second is first
+    assert second.catalog_epoch == first.catalog_epoch
+
+    interval_ms = int(case["interval_ms"])
+    repo.rows[(identity.exchange, identity.market_type, identity.symbol, "1m")].append(
+        make_bar(
+            start_ms + 13 * interval_ms,
+            interval_ms=interval_ms,
+            price="313",
+        )
+    )
+    third = catalog.build(**kwargs)
+    assert third is not first
+    assert third.catalog_epoch != first.catalog_epoch
+
+
 def test_catalog_rejects_non_native_misaligned_and_insufficient_series() -> None:
     case = _case()
     identity_payload = case["identity"]

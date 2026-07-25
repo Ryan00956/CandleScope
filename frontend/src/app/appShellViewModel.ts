@@ -23,6 +23,7 @@ function buildAppShellViewModelContext({
   exportFlow,
   alerts,
   replayEntry,
+  onOpenReplayLauncher,
 }: AppShellRuntimeInputs): AppShellViewModelContext {
   const sessionView = session.view;
   const marketView = marketData.view;
@@ -68,6 +69,7 @@ function buildAppShellViewModelContext({
     marketDisplay,
     displayData: marketDisplay.displayData,
     replayEntry,
+    onOpenReplayLauncher,
   };
 }
 

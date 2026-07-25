@@ -11,6 +11,7 @@ import {
 } from "./trainingHubModel.js";
 import type { TrainingRunDraft, TrainingRunDraftEvaluation } from "./trainingHubModel.js";
 import type {
+  ReplayLaunchContext,
   ReplayV2RunState,
   ReplayV2SourceKind,
   TrainingRunCard,
@@ -76,6 +77,7 @@ export interface TrainingHubApiBoundary {
 export interface TrainingHubLifecycleOptions {
   readonly api?: TrainingHubApiBoundary;
   readonly navigateToSession?: (sessionId: string) => void;
+  readonly launchContext?: ReplayLaunchContext;
 }
 
 type Listener = () => void;
@@ -113,6 +115,7 @@ function samePlanInputs(left: TrainingRunDraft, right: TrainingRunDraft): boolea
 export class TrainingHubLifecycle {
   private readonly api: TrainingHubApiBoundary;
   private readonly navigateToSession: (sessionId: string) => void;
+  private readonly launchContext: ReplayLaunchContext | undefined;
   private readonly listeners = new Set<Listener>();
   private phase: TrainingHubPhase = "IDLE";
   private items: readonly TrainingRunCard[] = [];
@@ -135,9 +138,11 @@ export class TrainingHubLifecycle {
   constructor({
     api = defaultReplayV2Api,
     navigateToSession = defaultNavigateToSession,
+    launchContext,
   }: TrainingHubLifecycleOptions = {}) {
     this.api = api;
     this.navigateToSession = navigateToSession;
+    this.launchContext = launchContext;
     this.snapshot = this.buildSnapshot();
   }
 
@@ -179,7 +184,7 @@ export class TrainingHubLifecycle {
     this.createOpen = true;
     this.error = null;
     if (!forceReload && this.capabilities !== null && this.catalog !== null) {
-      this.draft ??= createTrainingRunDraft(this.catalog);
+      this.draft ??= createTrainingRunDraft(this.catalog, this.launchContext);
       this.evaluation = evaluateTrainingRunDraft(
         this.draft,
         this.capabilities,
@@ -211,7 +216,10 @@ export class TrainingHubLifecycle {
       if (!this.accept(token)) return;
       this.capabilities = capabilities;
       this.catalog = catalog;
-      this.draft = preservedDraft ?? createTrainingRunDraft(catalog);
+      this.draft = preservedDraft ?? createTrainingRunDraft(
+        catalog,
+        this.launchContext,
+      );
       this.evaluation = evaluateTrainingRunDraft(this.draft, capabilities, catalog);
       this.segmentPlan = await this.loadSegmentPlan(
         this.draft,
@@ -335,7 +343,12 @@ export class TrainingHubLifecycle {
         return;
       }
       const result = await this.api.createRun(
-        buildTrainingRunCreateRequest(draft, evaluation, catalog),
+        buildTrainingRunCreateRequest(
+          draft,
+          evaluation,
+          catalog,
+          this.launchContext,
+        ),
         this.abortController.signal,
       );
       if (!this.accept(token)) return;
@@ -431,6 +444,7 @@ export class TrainingHubLifecycle {
       planningDraft,
       planningEvaluation,
       catalog,
+      this.launchContext,
     );
     return this.api.segmentPlan(
       { ...payload, book_mode: draft.bookMode },
@@ -509,11 +523,12 @@ class TrainingHubEffectGuard {
 export function useTrainingHub(
   options: TrainingHubLifecycleOptions = {},
 ): TrainingHubRuntime {
-  const { api, navigateToSession } = options;
+  const { api, navigateToSession, launchContext } = options;
   const lifecycle = useMemo(() => new TrainingHubLifecycle({
     ...(api === undefined ? {} : { api }),
     ...(navigateToSession === undefined ? {} : { navigateToSession }),
-  }), [api, navigateToSession]);
+    ...(launchContext === undefined ? {} : { launchContext }),
+  }), [api, launchContext, navigateToSession]);
   const guard = useMemo(() => new TrainingHubEffectGuard(), []);
   useEffect(() => guard.mount(lifecycle), [guard, lifecycle]);
   const snapshot = useSyncExternalStore(

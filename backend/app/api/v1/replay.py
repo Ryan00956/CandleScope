@@ -268,6 +268,34 @@ class ReplayCommandPayload(_StrictModel):
     payload: dict[str, object]
 
 
+class ReplayLaunchWatchlistItemPayload(_StrictModel):
+    exchange: str = Field(min_length=1, max_length=128)
+    market_type: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=128)
+
+
+class ReplayLaunchWatchlistGroupPayload(_StrictModel):
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=80)
+    color: str = Field(min_length=1, max_length=32)
+    items: list[ReplayLaunchWatchlistItemPayload] = Field(max_length=100)
+
+
+class ReplayWatchlistSnapshotPayload(_StrictModel):
+    schema_version: Literal["replay.watchlist-snapshot.v1"]
+    groups: list[ReplayLaunchWatchlistGroupPayload] = Field(max_length=32)
+
+
+class ReplayLaunchContextPayload(_StrictModel):
+    schema_version: Literal["replay.launch-context.v1"]
+    source: Literal["LIVE_PAGE", "DIRECT_HUB"]
+    exchange: str = Field(min_length=1, max_length=128)
+    market_type: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=128)
+    display_interval: str = Field(min_length=1, max_length=128)
+    watchlist_snapshot: ReplayWatchlistSnapshotPayload
+
+
 class TrainingRunCreatePayload(_StrictModel):
     protocol: Literal["replay.v2"]
     catalog_epoch: str = Field(min_length=71, max_length=71)
@@ -298,6 +326,7 @@ class TrainingRunCreatePayload(_StrictModel):
     funding_interval_ms: int | None = Field(default=None, ge=60_000, le=2_592_000_000)
     allow_rule_changes: bool
     allowed_mutations: list[str] = Field(default_factory=list, max_length=6)
+    launch_context: ReplayLaunchContextPayload | None = None
 
 
 class TrainingRunMigrationPayload(_StrictModel):

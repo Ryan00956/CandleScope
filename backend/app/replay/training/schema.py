@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 
+from app.replay.canonical import canonical_json, canonical_sha256
 
-TRAINING_SCHEMA_VERSION = 7
+
+TRAINING_SCHEMA_VERSION = 8
 TRAINING_SCHEMA_ID = "replay.training.v1"
 
 
@@ -718,6 +720,65 @@ ON replay_historical_book_gc_audit(created_at_ms DESC, audit_id DESC);
 """
 
 
+TRAINING_SCHEMA_V8 = """
+CREATE TABLE IF NOT EXISTS replay_training_launch_context (
+    run_id TEXT PRIMARY KEY
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.launch-context.v1'),
+    source TEXT NOT NULL CHECK (source IN ('LIVE_PAGE', 'DIRECT_HUB')),
+    context_json TEXT NOT NULL,
+    context_hash TEXT NOT NULL
+        CHECK (
+            length(context_hash) = 71
+            AND substr(context_hash, 1, 7) = 'sha256:'
+        ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+);
+"""
+
+
+def _backfill_launch_contexts(
+    connection: sqlite3.Connection,
+    *,
+    now_ms: int,
+) -> None:
+    rows = connection.execute(
+        """
+        SELECT run_id, exchange, market_type, last_symbol, display_interval
+        FROM replay_training_run
+        ORDER BY run_id
+        """
+    ).fetchall()
+    for run_id, exchange, market_type, symbol, display_interval in rows:
+        context = {
+            "schema_version": "replay.launch-context.v1",
+            "source": "DIRECT_HUB",
+            "exchange": str(exchange),
+            "market_type": str(market_type),
+            "symbol": str(symbol),
+            "display_interval": str(display_interval),
+            "watchlist_snapshot": {
+                "schema_version": "replay.watchlist-snapshot.v1",
+                "groups": [],
+            },
+        }
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_training_launch_context(
+                run_id, schema_version, source, context_json,
+                context_hash, created_at_ms
+            ) VALUES (?, 'replay.launch-context.v1', 'DIRECT_HUB', ?, ?, ?)
+            """,
+            (
+                str(run_id),
+                canonical_json(context),
+                canonical_sha256(context),
+                now_ms,
+            ),
+        )
+
+
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
     """Create only v2-owned tables; never advance the replay.v1 schema row."""
 
@@ -852,6 +913,10 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     if current == 6:
         _execute_script(connection, TRAINING_SCHEMA_V7)
         current = 7
+    if current == 7:
+        _execute_script(connection, TRAINING_SCHEMA_V8)
+        _backfill_launch_contexts(connection, now_ms=now_ms)
+        current = 8
     if current != TRAINING_SCHEMA_VERSION:
         raise RuntimeError(f"no replay training schema migration path from {current}")
     connection.execute(

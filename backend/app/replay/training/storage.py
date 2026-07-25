@@ -36,6 +36,7 @@ from .models import (
     CapabilityKind,
     CapabilityState,
     REPLAY_V2_PROTOCOL,
+    ReplayLaunchContext,
     TrainingRunCreateRequest,
     ViewerState,
     validate_v2_counter,
@@ -319,6 +320,12 @@ class TrainingRunStore:
                     "now_ms": now_ms,
                 },
             )
+            self._insert_launch_context(
+                connection,
+                run_id=run_id,
+                context=request.resolved_launch_context(),
+                now_ms=now_ms,
+            )
             self._insert_track(
                 connection,
                 run_id=run_id,
@@ -581,6 +588,12 @@ class TrainingRunStore:
                     "compatibility": "READY",
                     "now_ms": now_ms,
                 },
+            )
+            self._copy_launch_context(
+                connection,
+                parent_run_id=parent_run_id,
+                child_run_id=child_run_id,
+                now_ms=now_ms,
             )
             self._insert_track(
                 connection,
@@ -955,6 +968,17 @@ class TrainingRunStore:
                 },
             )
             now_ms = self.base_store._validated_now_ms()
+            self._insert_launch_context(
+                connection,
+                run_id=run_id,
+                context=ReplayLaunchContext.direct_hub(
+                    exchange=str(config.get("exchange") or "unknown"),
+                    market_type=str(config.get("market_type") or "unknown"),
+                    symbol=symbol,
+                    display_interval=str(config.get("display_interval") or "unknown"),
+                ),
+                now_ms=now_ms,
+            )
             self._insert_track(
                 connection,
                 run_id=run_id,
@@ -1867,13 +1891,17 @@ class TrainingRunStore:
                 tuple[sqlite3.Row, ...],
                 dict[str, object],
                 dict[str, sqlite3.Row],
+                dict[str, object],
             ] | None:
             run = connection.execute(
                 """
                 SELECT r.run_id, r.initial_equity, r.source_kind, r.book_mode,
+                       launch.context_json AS launch_context_json,
+                       launch.context_hash AS launch_context_hash,
                        viewer.*
                 FROM replay_training_run AS r
                 JOIN replay_training_viewer_state AS viewer USING(run_id)
+                LEFT JOIN replay_training_launch_context AS launch USING(run_id)
                 WHERE r.run_id = ?
                 """,
                 (run_id,),
@@ -1913,7 +1941,8 @@ class TrainingRunStore:
                 initial_equity=str(run["initial_equity"]),
                 tracks=track_payloads,
             )
-            return run, rows, portfolio, book_rows
+            launch_context = self._launch_context_projection(run)
+            return run, rows, portfolio, book_rows, launch_context
 
         result = await self.base_store.run_extension_read(read)
         if result is None:
@@ -1922,7 +1951,7 @@ class TrainingRunStore:
                 "training run does not exist",
                 status_code=404,
             )
-        run, rows, portfolio, book_rows = result
+        run, rows, portfolio, book_rows, launch_context = result
         tracks = [self._market_track_from_row(row) for row in rows]
         for track in tracks:
             track["historical_book"] = self._historical_book_projection(
@@ -1935,6 +1964,7 @@ class TrainingRunStore:
             "protocol": REPLAY_V2_PROTOCOL,
             "run_id": run_id,
             "ordering_version": GLOBAL_ORDERING_VERSION,
+            "launch_context": launch_context,
             "viewer_state": viewer.to_dict(),
             "tracks": tracks,
             "portfolio": portfolio,
@@ -4892,6 +4922,104 @@ class TrainingRunStore:
             """,
             dict(values),
         )
+
+    @staticmethod
+    def _insert_launch_context(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        context: ReplayLaunchContext,
+        now_ms: int,
+    ) -> None:
+        payload = context.to_dict()
+        connection.execute(
+            """
+            INSERT INTO replay_training_launch_context(
+                run_id, schema_version, source, context_json,
+                context_hash, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                context.schema_version,
+                context.source,
+                canonical_json(payload),
+                canonical_sha256(payload),
+                now_ms,
+            ),
+        )
+
+    @classmethod
+    def _copy_launch_context(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        parent_run_id: str,
+        child_run_id: str,
+        now_ms: int,
+    ) -> None:
+        row = connection.execute(
+            """
+            SELECT context_json, context_hash
+            FROM replay_training_launch_context
+            WHERE run_id = ?
+            """,
+            (parent_run_id,),
+        ).fetchone()
+        if row is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "parent launch context is missing",
+                status_code=503,
+            )
+        try:
+            raw = json.loads(str(row["context_json"]))
+            context = ReplayLaunchContext.from_dict(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "parent launch context is invalid",
+                status_code=503,
+            ) from exc
+        if canonical_sha256(context.to_dict()) != str(row["context_hash"]):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "parent launch context failed its integrity check",
+                status_code=503,
+            )
+        cls._insert_launch_context(
+            connection,
+            run_id=child_run_id,
+            context=context,
+            now_ms=now_ms,
+        )
+
+    @staticmethod
+    def _launch_context_projection(row: Mapping[str, object]) -> dict[str, object]:
+        raw_json = row["launch_context_json"]
+        raw_hash = row["launch_context_hash"]
+        if raw_json is None or raw_hash is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "stored replay launch context is missing",
+                status_code=503,
+            )
+        try:
+            context = ReplayLaunchContext.from_dict(json.loads(str(raw_json)))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "stored replay launch context is invalid",
+                status_code=503,
+            ) from exc
+        payload = context.to_dict()
+        if canonical_sha256(payload) != str(raw_hash):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "stored replay launch context failed its integrity check",
+                status_code=503,
+            )
+        return payload
 
     @staticmethod
     def _insert_track(

@@ -631,9 +631,25 @@ class ReplayCatalog:
         *,
         now_ms: int,
     ) -> str:
+        fingerprint_series = []
         closed_boundaries = []
         for summary in summaries:
             interval = str(summary["interval"])
+            if is_ephemeral_interval(interval):
+                # Ephemeral series can never become replay base intervals. Keep
+                # their stable presence in the catalog identity set, but do not
+                # let live per-second row counts invalidate an otherwise
+                # unchanged exact historical catalog between prepare/create.
+                fingerprint_series.append(
+                    {
+                        "exchange": summary["exchange"],
+                        "market_type": summary["market_type"],
+                        "symbol": summary["symbol"],
+                        "interval": interval,
+                    }
+                )
+                continue
+            fingerprint_series.append(dict(summary))
             closed_boundaries.append(
                 {
                     "identity": {
@@ -648,7 +664,7 @@ class ReplayCatalog:
         return canonical_sha256(
             {
                 "schema_version": "replay-catalog-source-fingerprint.v1",
-                "series": list(summaries),
+                "series": fingerprint_series,
                 "native_intervals": [
                     {
                         "identity": identity.to_dict(),

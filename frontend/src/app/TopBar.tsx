@@ -1,7 +1,10 @@
 import { memo, useSyncExternalStore } from "react";
 import SymbolSearch from "../features/symbol-search/SymbolSearch.js";
 import { markPerf } from "../runtime/performance/perfMarks";
-import { loadSettingsModal } from "./lazySurfaceLoaders.js";
+import {
+  loadReplayLauncherDialog,
+  loadSettingsModal,
+} from "./lazySurfaceLoaders.js";
 import {
   getCrosshairSnapshot,
   subscribeCrosshairData,
@@ -41,6 +44,7 @@ export interface TopBarProps {
   };
   advancedMarketData: AdvancedMarketRuntimeView;
   replayEntry: ReplayEntryCapabilityView;
+  onOpenReplayLauncher(): void;
 }
 
 function isCompleteMarketDisplayData(
@@ -53,7 +57,14 @@ function isCompleteMarketDisplayData(
     && typeof value.close === "number";
 }
 
-function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, replayEntry }: TopBarProps) {
+function TopBar({
+  symbolSearch,
+  controls,
+  marketSummary,
+  advancedMarketData,
+  replayEntry,
+  onOpenReplayLauncher,
+}: TopBarProps) {
   const {
     currentSymbol,
     currentMarketType,
@@ -89,15 +100,17 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
       source="live"
       navigation={<>
         {replayEntry.state === "enabled" && (
-        <a
+        <button
           className="replay-entry-link"
           data-replay-entry="enabled"
-          href={replayEntry.href}
-          target="_blank"
-          rel="noopener noreferrer"
+          type="button"
+          onPointerEnter={loadReplayLauncherDialog}
+          onMouseEnter={loadReplayLauncherDialog}
+          onFocus={loadReplayLauncherDialog}
+          onClick={onOpenReplayLauncher}
         >
-          K 线回放 ↗
-        </a>
+          K 线回放
+        </button>
         )}
         {(replayEntry.state === "checking" || replayEntry.state === "disabled") && (
         <button
@@ -107,7 +120,7 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData, rep
           disabled
           title={replayEntry.reason}
         >
-          K 线回放 ↗
+          K 线回放
         </button>
         )}
       </>}

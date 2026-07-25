@@ -77,6 +77,7 @@ export interface AppShellRuntimeInputs {
   exportFlow: ExportRuntime;
   alerts: AlertsShellRuntime;
   replayEntry: ReplayEntryCapabilityView;
+  onOpenReplayLauncher(): void;
 }
 
 export interface AppShellViewModelContext {
@@ -116,6 +117,7 @@ export interface AppShellViewModelContext {
   marketDisplay: MarketDataRuntimeContract["view"]["display"];
   displayData: MarketDataRuntimeContract["view"]["display"]["displayData"];
   replayEntry: ReplayEntryCapabilityView;
+  onOpenReplayLauncher(): void;
 }
 
 export interface AppShellViewModel {

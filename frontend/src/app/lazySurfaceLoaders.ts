@@ -9,3 +9,9 @@ export function loadIndicatorPanel(): Promise<typeof import("../features/indicat
 export function loadAlertsPanel(): Promise<typeof import("../components/alerts/AlertsPanel")> {
   return import("../components/alerts/AlertsPanel");
 }
+
+export function loadReplayLauncherDialog(): Promise<
+  typeof import("../features/replay-launcher/ReplayLauncherDialog")
+> {
+  return import("../features/replay-launcher/ReplayLauncherDialog");
+}

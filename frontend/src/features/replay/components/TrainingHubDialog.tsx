@@ -9,10 +9,14 @@ import type {
   ReplayV2SourceKind,
   TrainingRunCompatibility,
 } from "../replayV2Types.js";
+import { replayCatalogIdentity } from "../replayUiModel.js";
 import type { TrainingHubRuntime } from "../useTrainingHub.js";
 
 export interface TrainingHubDialogProps {
   readonly runtime: TrainingHubRuntime;
+  readonly presentation?: "page" | "modal";
+  readonly onRequestClose?: () => void;
+  readonly launchLabel?: string;
 }
 
 function patchDraft(
@@ -23,8 +27,10 @@ function patchDraft(
   runtime.actions.setDraft({ ...runtime.draft, ...patch });
 }
 
-function chooseCatalogEntry(runtime: TrainingHubRuntime, symbol: string): void {
-  const entry = runtime.catalog?.entries.find((candidate) => candidate.identity.symbol === symbol);
+function chooseCatalogEntry(runtime: TrainingHubRuntime, identity: string): void {
+  const entry = runtime.catalog?.entries.find(
+    (candidate) => replayCatalogIdentity(candidate) === identity,
+  );
   if (entry === undefined || runtime.draft === null) return;
   const interval = entry.selected_base_interval ?? entry.base_intervals[0] ?? "1m";
   patchDraft(runtime, {
@@ -38,7 +44,7 @@ function chooseCatalogEntry(runtime: TrainingHubRuntime, symbol: string): void {
 
 function CatalogOption({ entry }: { readonly entry: ReplayCatalogEntry }) {
   return (
-    <option value={entry.identity.symbol}>
+    <option value={replayCatalogIdentity(entry)}>
       {entry.identity.exchange} · {entry.identity.market_type} · {entry.identity.symbol}
     </option>
   );
@@ -93,7 +99,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         <label>
           商品
           <select
-            value={draft.symbol}
+            value={`${draft.exchange}:${draft.marketType}:${draft.symbol}`}
             onChange={(event) => chooseCatalogEntry(runtime, event.target.value)}
           >
             {runtime.catalog.entries.map((entry) => (
@@ -401,29 +407,42 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
   );
 }
 
-export default function TrainingHubDialog({ runtime }: TrainingHubDialogProps) {
+export default function TrainingHubDialog({
+  runtime,
+  presentation = "page",
+  onRequestClose,
+  launchLabel,
+}: TrainingHubDialogProps) {
   const busy = runtime.operation !== null;
+  const modal = presentation === "modal";
   return (
     <main
-      className="training-hub-page"
+      className={`training-hub-page ${modal ? "training-hub-modal-surface" : ""}`}
       role="dialog"
-      aria-modal="false"
+      aria-modal={modal}
       aria-labelledby="training-hub-title"
       data-training-hub-phase={runtime.phase}
+      data-training-hub-presentation={presentation}
     >
       <section className="training-hub-shell">
         <header className="training-hub-heading">
           <div>
             <span className="training-hub-kicker">SERVER-AUTHORITATIVE ARCHIVE WORKBENCH</span>
             <h1 id="training-hub-title">训练存档大厅</h1>
-            <p>这里只读取轻量存档摘要；历史数据集在进入具体训练前不会加载。</p>
+            <p>
+              {launchLabel ?? "这里只读取轻量存档摘要；历史数据集在进入具体训练前不会加载。"}
+            </p>
           </div>
           <div className="training-hub-heading-actions">
             <button type="button" onClick={runtime.actions.refresh} disabled={busy}>刷新</button>
             <button type="button" onClick={() => void runtime.actions.openCreate()} disabled={busy}>
               新建训练
             </button>
-            <a href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
+            {modal ? (
+              <button type="button" onClick={onRequestClose}>关闭</button>
+            ) : (
+              <a href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
+            )}
           </div>
         </header>
 

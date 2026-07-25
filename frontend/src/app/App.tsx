@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useMemo, useRef, useState } from "react";
 import { useChartSurfaceRuntime } from "../chart-adapter/useChartSurfaceRuntime";
 import { loadUserPrefs, updateUserPref } from "../features/chart-session/chartSessionModel";
 import { useChartSession } from "../features/chart-session/useChartSession";
@@ -16,8 +16,10 @@ import { useTradeFlowRuntime } from "../features/trade-flow/useTradeFlowRuntime"
 import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime";
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime";
 import { useReplayEntryCapability } from "../features/replay/useReplayEntryCapability";
+import { buildLiveReplayLaunchContext } from "../features/replay-launcher/replayLaunchContext";
 import AppProviders from "./AppProviders";
 import AppShell from "./AppShell";
+import { loadReplayLauncherDialog } from "./lazySurfaceLoaders";
 import type {
   AlertsShellRuntime,
   IndicatorShellRuntime,
@@ -25,6 +27,8 @@ import type {
   SettingsShellRuntime,
 } from "./appShellContracts.js";
 import "../index.css";
+
+const ReplayLauncherDialog = lazy(loadReplayLauncherDialog);
 
 export default function App() {
   const replayEntry = useReplayEntryCapability();
@@ -58,6 +62,7 @@ export default function App() {
 
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);
   const [showAlertsPanel, setShowAlertsPanel] = useState(false);
+  const [showReplayLauncher, setShowReplayLauncher] = useState(false);
   const openIndicatorPanel = useCallback(() => setShowIndicatorPanel(true), []);
   const closeIndicatorPanel = useCallback(() => setShowIndicatorPanel(false), []);
   const toggleIndicatorPanel = useCallback(() => setShowIndicatorPanel((prev) => !prev), []);
@@ -66,6 +71,8 @@ export default function App() {
   const openAlertsPanel = useCallback(() => setShowAlertsPanel(true), []);
   const closeAlertsPanel = useCallback(() => setShowAlertsPanel(false), []);
   const toggleAlertsPanel = useCallback(() => setShowAlertsPanel((prev) => !prev), []);
+  const openReplayLauncher = useCallback(() => setShowReplayLauncher(true), []);
+  const closeReplayLauncher = useCallback(() => setShowReplayLauncher(false), []);
   const indicators = useIndicatorRuntime({
     session: chartSession,
     marketData,
@@ -91,6 +98,24 @@ export default function App() {
       customIntervalRecords: chartSession.view.customIntervalRecords,
     },
   });
+  const replayLaunchContext = useMemo(() => (
+    showReplayLauncher
+      ? buildLiveReplayLaunchContext({
+          exchange: chartSession.view.exchange,
+          marketType: chartSession.view.marketType,
+          symbol: chartSession.view.symbol,
+          displayInterval: chartSession.view.interval,
+          watchlists: watchlist.view.watchlists,
+        })
+      : null
+  ), [
+    chartSession.view.exchange,
+    chartSession.view.interval,
+    chartSession.view.marketType,
+    chartSession.view.symbol,
+    showReplayLauncher,
+    watchlist.view.watchlists,
+  ]);
   const orderBook = useOrderBookRuntime({
     identity: {
       exchange: chartSession.view.exchange,
@@ -226,23 +251,34 @@ export default function App() {
 
   return (
     <AppProviders>
-      <AppShell
-        pageExportRef={pageExportRef}
-        chartSurfaceRef={chartSurface.ref}
-        session={chartSession}
-        marketData={marketData}
-        advancedMarketData={advancedMarketData}
-        drawings={drawings}
-        indicators={indicatorRuntime}
-        settings={settingsRuntime}
-        priceScale={priceScaleRuntime}
-        watchlist={watchlist}
-        orderBook={orderBook}
-        tradeFlow={tradeFlow}
-        exportFlow={exportFlow}
-        alerts={alertsRuntime}
-        replayEntry={replayEntry}
-      />
+      <>
+        <AppShell
+          pageExportRef={pageExportRef}
+          chartSurfaceRef={chartSurface.ref}
+          session={chartSession}
+          marketData={marketData}
+          advancedMarketData={advancedMarketData}
+          drawings={drawings}
+          indicators={indicatorRuntime}
+          settings={settingsRuntime}
+          priceScale={priceScaleRuntime}
+          watchlist={watchlist}
+          orderBook={orderBook}
+          tradeFlow={tradeFlow}
+          exportFlow={exportFlow}
+          alerts={alertsRuntime}
+          replayEntry={replayEntry}
+          onOpenReplayLauncher={openReplayLauncher}
+        />
+        {showReplayLauncher && replayLaunchContext !== null && (
+          <Suspense fallback={null}>
+            <ReplayLauncherDialog
+              launchContext={replayLaunchContext}
+              onRequestClose={closeReplayLauncher}
+            />
+          </Suspense>
+        )}
+      </>
     </AppProviders>
   );
 }

@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_10_PASS`，其唯一权威是仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 的 `passed=true`；缺失、HEAD 不同或任一 artifact hash 漂移时本状态自动视为 `PENDING/FAIL`。产品合同第 17 节 28 个场景已冻结为可机读证据矩阵；全量后端/前端、v1 live+replay smoke、v2 短 smoke、正式 1m/1-2-4-8/segment/fast-forward/book benchmark、v2 live+replay 4 小时与 100 次 archive lifecycle、键盘/焦点/ARIA/reduced-motion、运行时与旧 build 回滚、提交级反向应用均由 clean-HEAD 工具 fail closed 汇总。仓库六个发布开关继续默认关闭；本地 PASS 不授权生产启用，真实容量、告警、支持清单、观察窗与显式决策仍未完成。
+状态：`PHASE_11_COMMITTED / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；当前 Phase 11 提交已完成全量测试、生产构建和真实浏览器验收，但没有重新生成该 HEAD 的发布清单，所以不得继承或宣称 Phase 10 的发布 PASS。仓库发布开关继续默认关闭；提交 PASS 不授权生产启用，真实容量、告警、支持清单、观察窗与显式决策仍未完成。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -19,6 +19,8 @@ Phase 8 父提交：`41d6fc1049493b1ccaec5c8deb8a64b788277d14`（2026-07-22）
 Phase 9 父提交：`ad233cfe5abe49565ffd5852b540a78453498a64`（2026-07-22）
 
 Phase 10 父提交：`afd802a1617daf6a05f25a1b9318fbc3da341b5c`（2026-07-22）
+
+Phase 11 父提交：`382923ecabaab153a47e1d145ca96eb8d9a8cb67`（2026-07-24）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -1263,7 +1265,48 @@ test(replay): close replay v2 product and release gates
 
 ---
 
-## 22. 停止条件
+## 22. Phase 11：实时页启动训练与归档启动上下文
+
+### 目标
+
+把回放入口放回正常实时行情工作流，但不让实时页面拥有回放 runtime：
+
+- 顶栏点击“回放”后打开页面内训练存档弹窗，共用现有 Training Hub；
+- 新建训练精确带入当前 `exchange / market_type / symbol / display_interval`；
+- 创建时冻结结构化自选分组快照，训练存档之后不再读取实时页 `localStorage`；
+- 创建成功后打开独立 `replay.html?session=...`，原实时页面和订阅保持独立；
+- 只有主商品创建 `FULL` 轨道；快照内其他商品只展示为 `NONE`，用户激活后才按既有规则创建轨道；
+- 直接访问 Hub、旧客户端不传启动上下文、既有 v7 数据库升级都保持兼容。
+
+### 持久化与一致性边界
+
+- 新增 `replay.launch-context.v1` 与 `replay.watchlist-snapshot.v1`；
+- replay.training schema additive 升至 v8，启动上下文与 Run 在同一事务写入；
+- `context_json` 使用 canonical SHA-256 单独校验，不改变既有 rule hash 语义；
+- 旧 Run 在 v7 -> v8 时回填 `DIRECT_HUB` 上下文和空分组；
+- 上下文主商品身份与创建请求必须完全一致；前端商品选择使用完整复合身份，不能只按 symbol 匹配；
+- 不能作为回放基础周期的临时序列保留稳定身份存在性，但其逐秒计数和闭合边界不能抖动历史目录 epoch；可用历史基础周期变化仍使 epoch fail closed。
+
+### 浏览器退出门槛
+
+1. 实时页当前商品、市场类型和展示周期在弹窗中精确预选。
+2. 创建后原实时页仍打开，回放页是独立 target，弹窗正确关闭。
+3. 回放页从 Run 归档读取分组快照，不读取 live watchlist storage。
+4. 主商品为 `FULL`，未激活快照商品为 `NONE`，不会因展示自选而提前加载数据。
+5. 回放 target 的 fetch/WebSocket 只能访问 replay API；开发态 Vite HMR 不计为市场订阅。
+6. Chrome popup 返回值与拦截状态必须区分：用户手势中预留隔离页，失败自动关闭，真正被拦截才显示备用链接。
+7. 后端全量、前端 `npm run check`、SQLite 上下文 hash/轨道投影和真实浏览器控制台全部通过。
+
+### 回滚
+
+Phase 11 不新增启用开关。关闭既有
+`REPLAY_ENABLED`、`REPLAY_PRODUCT_V2_ENABLED`、
+`VITE_REPLAY_ENTRY_ENABLED`、`VITE_REPLAY_PRODUCT_V2_ENABLED`
+后入口与 v2 runtime 继续不可达；v8 表为 additive，旧 build 可忽略。
+
+---
+
+## 23. 停止条件
 
 出现以下任一情况立即停止当前 Phase，不进入下一阶段：
 
@@ -1284,7 +1327,7 @@ test(replay): close replay v2 product and release gates
 
 ---
 
-## 23. v2 完成定义
+## 24. v2 完成定义
 
 只有同时满足以下条件，才能宣布“回放训练 v2 完成”：
 
@@ -1306,7 +1349,7 @@ test(replay): close replay v2 product and release gates
 
 ---
 
-## 24. Phase 执行记录模板
+## 25. Phase 执行记录模板
 
 每完成一个 Phase，在文末追加一条记录。不能只写“测试通过”。
 
@@ -1728,4 +1771,34 @@ Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_E
 Evidence binding: 所有发布 artifact 必须位于仓库外含完整 git_head 的目录；每份 JSON 自带相同 release_evidence.git_head/git_dirty=false。release-manifest 重新计算 artifact bytes/SHA-256、执行提交回滚并再次确认 clean HEAD；它是 PASS 的唯一权威。
 Known limitations: 没有生产历史 L2 数据、自动 L2 下载或真实 queue model；本地基准与离线浏览器 fixture 不能代替真实数据容量、监控告警、支持清单和生产观察窗。BOOK_ASSISTED 仍只声明连续性门禁且 queue_exact=false。发布开关保持关闭，生产启用需要另一个明确决策。
 Decision: 仅当外部同 HEAD release-manifest.json 为 passed=true 时 PASS；完成后停止在 Phase 10，不自动启用生产，也不进入未定义的下一 Phase。
+```
+
+### Phase 11 执行记录
+
+```text
+Phase: 11 - live-page launcher and archived launch context
+Date: 2026-07-25
+Commit: 当前 Phase 11 提交（以 Git HEAD 为准）
+Parent commit: 382923ecabaab153a47e1d145ca96eb8d9a8cb67
+Executor: Codex
+Scope: 在实时行情顶栏增加懒加载页面内 ReplayLauncherDialog，共用 Training Hub 的新建/加载流程；新建训练带入完整市场身份、显示周期和结构化自选快照，成功后打开独立 replay.html target。回放自选只读取 Run 归档，主轨 FULL，其他快照项目 NONE。未把 replay runtime、历史 bars 或 live subscription 所有权放入实时页面。
+Files changed: backend launch-context/watchlist 模型、training schema v8/store/API/catalog 指纹与 Phase 11/catalog 回归；frontend live launcher、共享 Hub modal presentation、App/TopBar wiring、完整商品身份选择、Run 归档自选、严格 parser/CSS/测试；产品合同入口旅程修订与本执行记录。
+Schema/protocol changes: replay.training schema 由 7 additive 升至 8，新增 replay_training_launch_context；冻结 replay.launch-context.v1 与 replay.watchlist-snapshot.v1。旧 create payload 的 launch_context 仍可省略并合成 DIRECT_HUB；旧 v7 Run 回填空分组。上下文 hash 与 rule hash 分离。
+Commands run:
+  backend targeted: python -m pytest backend/tests/test_replay_catalog.py -q；Phase 1/11 与 Phase 1–11 replay training matrix
+  backend full: python -m pytest backend/tests -q
+  frontend targeted: npx tsx --test "src/features/replay-launcher/**/*.test.{ts,tsx}" "src/features/replay/**/*.test.{ts,tsx}"
+  frontend full: npm run check
+  browser: Playwright CLI + Chrome 150，隔离 replay DB、只读历史源快照、live :15176 / backend :18083
+  database: SQLite mode=ro 查询最新 Run、启动上下文 canonical hash 和 market-track 投影
+  repository: git diff --check、默认开关和最终差异审查
+Targeted tests: backend Phase 1 + Phase 11 共 16 passed，`test_replay_v2_training_*.py` matrix 145 passed，catalog 7 passed；frontend Phase 11 专项 3 passed，replay/launcher matrix 187 passed。
+Global tests: backend 2020 passed、4 个既有 FastAPI on_event deprecation warnings；frontend 2410 passed，architecture/typecheck/ESLint/Vite production build 全部通过。
+Browser evidence: 实时页从 localStorage 恢复 binance/spot/BTCUSDT/15m 和“主流币/OKX 观察”两个分组；弹窗商品值为 binance:spot:BTCUSDT，基础/显示周期为 1m/15m。创建后 live URL 和 15m 状态不变，modalClosed=true；独立 replay target 恢复 15m，主轨 BTCUSDT=FULL、ETHUSDT=NONE，归档分组完整。回放 target 只请求 replay capabilities/session/commands/viewer/tracks/integrity/equity 和 replay WebSocket；另有 Vite HMR 根 WebSocket，无 live market API。最新回放页 console errors=0。
+Database evidence: 最新 Run 的 exchange/market/symbol/base/display 为 binance/spot/BTCUSDT/1m/15m；replay_training_launch_context source=LIVE_PAGE，两个结构化分组和连字符 OKX 商品完整保存；stored_hash 与重新计算 canonical hash 一致。replay_training_market_track 只有 stable_ordinal=1 的 BTCUSDT FULL，没有为快照项目提前创建轨道。
+Defects caught by acceptance: 修复 symbol-only 下拉导致 spot BTCUSDT 错显为 futures；修复不可作为回放 base 的临时 1s 序列使 catalog epoch 每秒抖动、live create 永久 409；修复 noopener 成功开页却返回 null 导致误报 popup blocked。三项均补了自动回归。
+Final-review hardening: 开关关闭时不再构造或读取 live launch context；市场身份允许 OKX 等安全连字符但仍拒绝控制字符；launcher 关闭后恢复原焦点；缺失、损坏或 hash 不符的归档启动上下文明确 503 fail-closed；旧存档异步迁移也同步预留 replay target；重复的最长分组 ID 改为有界唯一 fallback。均有自动回归覆盖。
+Runtime defaults: REPLAY_ENABLED=0、REPLAY_PRODUCT_V2_ENABLED=0、VITE_REPLAY_ENTRY_ENABLED=0、VITE_REPLAY_PRODUCT_V2_ENABLED=0、RAW_AGG_TRADE_ARCHIVE_ENABLED=0、REPLAY_HISTORICAL_BOOK_ENABLED=0、REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0、REPLAY_SEGMENT_AUTO_GC_ENABLED=0、REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0。
+Known limitations: 本 Phase 只闭合 live -> Hub -> archived Run -> isolated replay 入口，不新增历史 funding/mark、生产 L2、queue model、自动下载/GC 或生产启用。自选快照上限为 32 分组/100 项；跨交易所或不同市场类型项目仍显示 NONE，首个多商品闭环的既有同结算范围门禁不变。未生成当前 HEAD 的 clean-HEAD release manifest，也未重跑 Phase 10 正式 4h soak/发布聚合，因此不构成新版本发布授权。
+Decision: PASS（提交与验收）；停止在 Phase 11，等待显式后续 Phase 或 release 决策。
 ```

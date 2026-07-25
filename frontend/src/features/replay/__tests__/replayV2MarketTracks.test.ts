@@ -42,6 +42,27 @@ function marketTracksResponse() {
     protocol: "replay.v2",
     run_id: "run-1",
     ordering_version: "replay.global-order.v1",
+    launch_context: {
+      schema_version: "replay.launch-context.v1",
+      source: "LIVE_PAGE",
+      exchange: "binance",
+      market_type: "spot",
+      symbol: "BTCUSDT",
+      display_interval: "1m",
+      watchlist_snapshot: {
+        schema_version: "replay.watchlist-snapshot.v1",
+        groups: [
+          {
+            id: "default",
+            name: "Watchlist",
+            color: "#3b82f6",
+            items: [
+              { exchange: "binance", market_type: "spot", symbol: "ETHUSDT" },
+            ],
+          },
+        ],
+      },
+    },
     global_clock: {
       mode: "ORDERED",
       state: "PAUSED",
@@ -266,9 +287,14 @@ test("Phase 5 replay watchlist is backed only by replay.v2 track commands", () =
     "utf8",
   );
   assert.match(watchlist, /viewer\.marketTracks/);
+  assert.match(watchlist, /launch_context\.watchlist_snapshot\.groups/);
+  assert.match(watchlist, /data-replay-watchlist-source="run-archive"/);
   assert.match(watchlist, /selectTrack|addAndSelectTrack/);
   assert.match(watchlist, /forced_full_reasons/);
-  assert.doesNotMatch(watchlist, /updateSubscriptionTier|useWatchlistRuntime|livePrice/);
+  assert.doesNotMatch(
+    watchlist,
+    /updateSubscriptionTier|useWatchlistRuntime|livePrice|localStorage|candlescope-watchlists/,
+  );
   const paper = readFileSync(
     resolve(testDirectory, "../components/ReplayRightRail.tsx"),
     "utf8",

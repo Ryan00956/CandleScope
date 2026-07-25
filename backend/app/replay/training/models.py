@@ -19,8 +19,13 @@ from app.replay.models import (
 
 REPLAY_V2_PROTOCOL = "replay.v2"
 REPLAY_V2_SCHEMA_VERSION = "replay.contract.v2.phase0"
+REPLAY_LAUNCH_CONTEXT_SCHEMA_VERSION = "replay.launch-context.v1"
+REPLAY_WATCHLIST_SNAPSHOT_SCHEMA_VERSION = "replay.watchlist-snapshot.v1"
+MAX_REPLAY_WATCHLIST_GROUPS = 32
+MAX_REPLAY_WATCHLIST_ITEMS = 100
 MAX_V2_COUNTER = (1 << 53) - 1
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_MARKET_IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
 class _StringEnum(str, Enum):
@@ -692,6 +697,288 @@ def validate_track_source(
         raise ValueError("track source_kind must match TrainingRun source_kind")
 
 
+def _display_string(
+    value: object,
+    *,
+    field_name: str,
+    max_length: int,
+) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > max_length
+        or any(ord(char) < 32 or ord(char) == 127 for char in normalized)
+    ):
+        raise ValueError(
+            f"{field_name} must contain 1-{max_length} display-safe characters"
+        )
+    return normalized
+
+
+def _market_identity_string(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if not _MARKET_IDENTITY.fullmatch(value):
+        raise ValueError(
+            f"{field_name} must contain 1-128 market identity characters"
+        )
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayLaunchWatchlistItem:
+    exchange: str
+    market_type: str
+    symbol: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("exchange", "market_type", "symbol"):
+            object.__setattr__(
+                self,
+                field_name,
+                _market_identity_string(
+                    getattr(self, field_name),
+                    field_name=field_name,
+                ),
+            )
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ReplayLaunchWatchlistItem":
+        payload = expect_mapping(value, field_name="launch watchlist item")
+        expect_exact_keys(payload, {"exchange", "market_type", "symbol"})
+        return cls(
+            exchange=payload["exchange"],  # type: ignore[arg-type]
+            market_type=payload["market_type"],  # type: ignore[arg-type]
+            symbol=payload["symbol"],  # type: ignore[arg-type]
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "exchange": self.exchange,
+            "market_type": self.market_type,
+            "symbol": self.symbol,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayLaunchWatchlistGroup:
+    id: str
+    name: str
+    color: str
+    items: tuple[ReplayLaunchWatchlistItem, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "id",
+            validate_identifier(self.id, field_name="watchlist group id"),
+        )
+        object.__setattr__(
+            self,
+            "name",
+            _display_string(
+                self.name,
+                field_name="watchlist group name",
+                max_length=80,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "color",
+            _display_string(
+                self.color,
+                field_name="watchlist group color",
+                max_length=32,
+            ),
+        )
+        if not isinstance(self.items, (tuple, list)):
+            raise TypeError("watchlist group items must be an array")
+        normalized = tuple(self.items)
+        if any(not isinstance(item, ReplayLaunchWatchlistItem) for item in normalized):
+            raise TypeError("watchlist group items must be launch watchlist items")
+        identities = tuple(
+            (item.exchange, item.market_type, item.symbol) for item in normalized
+        )
+        if len(set(identities)) != len(identities):
+            raise ValueError("watchlist group items must be unique")
+        object.__setattr__(self, "items", normalized)
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ReplayLaunchWatchlistGroup":
+        payload = expect_mapping(value, field_name="launch watchlist group")
+        expect_exact_keys(payload, {"id", "name", "color", "items"})
+        raw_items = payload["items"]
+        if not isinstance(raw_items, Sequence) or isinstance(
+            raw_items, (str, bytes, bytearray)
+        ):
+            raise TypeError("watchlist group items must be an array")
+        return cls(
+            id=payload["id"],  # type: ignore[arg-type]
+            name=payload["name"],  # type: ignore[arg-type]
+            color=payload["color"],  # type: ignore[arg-type]
+            items=tuple(ReplayLaunchWatchlistItem.from_dict(item) for item in raw_items),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "color": self.color,
+            "items": [item.to_dict() for item in self.items],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayWatchlistSnapshot:
+    schema_version: str
+    groups: tuple[ReplayLaunchWatchlistGroup, ...]
+
+    def __post_init__(self) -> None:
+        if self.schema_version != REPLAY_WATCHLIST_SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError(
+                "watchlist snapshot schema_version must be "
+                f"{REPLAY_WATCHLIST_SNAPSHOT_SCHEMA_VERSION}"
+            )
+        if not isinstance(self.groups, (tuple, list)):
+            raise TypeError("watchlist snapshot groups must be an array")
+        normalized = tuple(self.groups)
+        if any(not isinstance(group, ReplayLaunchWatchlistGroup) for group in normalized):
+            raise TypeError("watchlist snapshot groups must be launch watchlist groups")
+        if len(normalized) > MAX_REPLAY_WATCHLIST_GROUPS:
+            raise ValueError(
+                f"watchlist snapshot cannot exceed {MAX_REPLAY_WATCHLIST_GROUPS} groups"
+            )
+        if sum(len(group.items) for group in normalized) > MAX_REPLAY_WATCHLIST_ITEMS:
+            raise ValueError(
+                f"watchlist snapshot cannot exceed {MAX_REPLAY_WATCHLIST_ITEMS} items"
+            )
+        group_ids = tuple(group.id for group in normalized)
+        if len(set(group_ids)) != len(group_ids):
+            raise ValueError("watchlist snapshot group ids must be unique")
+        object.__setattr__(self, "groups", normalized)
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ReplayWatchlistSnapshot":
+        payload = expect_mapping(value, field_name="watchlist snapshot")
+        expect_exact_keys(payload, {"schema_version", "groups"})
+        raw_groups = payload["groups"]
+        if not isinstance(raw_groups, Sequence) or isinstance(
+            raw_groups, (str, bytes, bytearray)
+        ):
+            raise TypeError("watchlist snapshot groups must be an array")
+        return cls(
+            schema_version=payload["schema_version"],  # type: ignore[arg-type]
+            groups=tuple(ReplayLaunchWatchlistGroup.from_dict(group) for group in raw_groups),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "groups": [group.to_dict() for group in self.groups],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayLaunchContext:
+    schema_version: str
+    source: str
+    exchange: str
+    market_type: str
+    symbol: str
+    display_interval: str
+    watchlist_snapshot: ReplayWatchlistSnapshot
+
+    def __post_init__(self) -> None:
+        if self.schema_version != REPLAY_LAUNCH_CONTEXT_SCHEMA_VERSION:
+            raise ValueError(
+                "launch context schema_version must be "
+                f"{REPLAY_LAUNCH_CONTEXT_SCHEMA_VERSION}"
+            )
+        if self.source not in {"LIVE_PAGE", "DIRECT_HUB"}:
+            raise ValueError("launch context source is unsupported")
+        for field_name in ("exchange", "market_type", "symbol"):
+            object.__setattr__(
+                self,
+                field_name,
+                _market_identity_string(
+                    getattr(self, field_name),
+                    field_name=field_name,
+                ),
+            )
+        object.__setattr__(
+            self,
+            "display_interval",
+            validate_identifier(
+                self.display_interval,
+                field_name="display_interval",
+            ),
+        )
+        if not isinstance(self.watchlist_snapshot, ReplayWatchlistSnapshot):
+            raise TypeError("watchlist_snapshot must be a ReplayWatchlistSnapshot")
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ReplayLaunchContext":
+        payload = expect_mapping(value, field_name="replay launch context")
+        expect_exact_keys(
+            payload,
+            {
+                "schema_version",
+                "source",
+                "exchange",
+                "market_type",
+                "symbol",
+                "display_interval",
+                "watchlist_snapshot",
+            },
+        )
+        return cls(
+            schema_version=payload["schema_version"],  # type: ignore[arg-type]
+            source=payload["source"],  # type: ignore[arg-type]
+            exchange=payload["exchange"],  # type: ignore[arg-type]
+            market_type=payload["market_type"],  # type: ignore[arg-type]
+            symbol=payload["symbol"],  # type: ignore[arg-type]
+            display_interval=payload["display_interval"],  # type: ignore[arg-type]
+            watchlist_snapshot=ReplayWatchlistSnapshot.from_dict(
+                payload["watchlist_snapshot"]
+            ),
+        )
+
+    @classmethod
+    def direct_hub(
+        cls,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        display_interval: str,
+    ) -> "ReplayLaunchContext":
+        return cls(
+            schema_version=REPLAY_LAUNCH_CONTEXT_SCHEMA_VERSION,
+            source="DIRECT_HUB",
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            display_interval=display_interval,
+            watchlist_snapshot=ReplayWatchlistSnapshot(
+                schema_version=REPLAY_WATCHLIST_SNAPSHOT_SCHEMA_VERSION,
+                groups=(),
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "source": self.source,
+            "exchange": self.exchange,
+            "market_type": self.market_type,
+            "symbol": self.symbol,
+            "display_interval": self.display_interval,
+            "watchlist_snapshot": self.watchlist_snapshot.to_dict(),
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class TrainingRunCreateRequest:
     """Replay training create contract mapped to one replay.v1 adapter session."""
@@ -725,6 +1012,7 @@ class TrainingRunCreateRequest:
     fixed_funding_rate: str | None = None
     funding_interval_ms: int | None = None
     allowed_mutations: tuple[str, ...] = ()
+    launch_context: ReplayLaunchContext | None = None
 
     def __post_init__(self) -> None:
         if self.protocol != REPLAY_V2_PROTOCOL:
@@ -754,14 +1042,16 @@ class TrainingRunCreateRequest:
                 field_name,
                 coerce_enum(enum_type, getattr(self, field_name), field_name=field_name),
             )
-        for field_name in (
-            "exchange",
-            "market_type",
-            "symbol",
-            "settlement_asset",
-            "base_interval",
-            "display_interval",
-        ):
+        for field_name in ("exchange", "market_type", "symbol"):
+            object.__setattr__(
+                self,
+                field_name,
+                _market_identity_string(
+                    getattr(self, field_name),
+                    field_name=field_name,
+                ),
+            )
+        for field_name in ("settlement_asset", "base_interval", "display_interval"):
             object.__setattr__(
                 self,
                 field_name,
@@ -863,6 +1153,18 @@ class TrainingRunCreateRequest:
             raise ValueError(
                 "fixed funding fields are available only for SANDBOX_FIXED"
             )
+        if self.launch_context is not None:
+            if not isinstance(self.launch_context, ReplayLaunchContext):
+                raise TypeError("launch_context must be a ReplayLaunchContext or null")
+            if (
+                self.launch_context.exchange != self.exchange
+                or self.launch_context.market_type != self.market_type
+                or self.launch_context.symbol != self.symbol
+                or self.launch_context.display_interval != self.display_interval
+            ):
+                raise ValueError(
+                    "launch_context primary identity must match the training request"
+                )
 
     @classmethod
     def from_dict(cls, value: object) -> "TrainingRunCreateRequest":
@@ -900,6 +1202,7 @@ class TrainingRunCreateRequest:
             "allowed_mutations",
             "fixed_funding_rate",
             "funding_interval_ms",
+            "launch_context",
         }
         if missing:
             raise ValueError(f"missing field(s): {', '.join(sorted(missing))}")
@@ -910,7 +1213,21 @@ class TrainingRunCreateRequest:
         if not isinstance(raw_allowed, (list, tuple)):
             raise TypeError("allowed_mutations must be an array")
         normalized["allowed_mutations"] = tuple(raw_allowed)
+        raw_launch_context = normalized.get("launch_context")
+        normalized["launch_context"] = (
+            None
+            if raw_launch_context is None
+            else ReplayLaunchContext.from_dict(raw_launch_context)
+        )
         return cls(**normalized)  # type: ignore[arg-type]
+
+    def resolved_launch_context(self) -> ReplayLaunchContext:
+        return self.launch_context or ReplayLaunchContext.direct_hub(
+            exchange=self.exchange,
+            market_type=self.market_type,
+            symbol=self.symbol,
+            display_interval=self.display_interval,
+        )
 
     def to_dict(self, *, redact_hidden_start: bool = False) -> dict[str, object]:
         hidden = self.time_disclosure_policy is not TimeDisclosurePolicy.NONE
@@ -963,6 +1280,12 @@ __all__ = [
     "REPLAY_V2_ENUMS",
     "REPLAY_V2_PROTOCOL",
     "REPLAY_V2_SCHEMA_VERSION",
+    "REPLAY_LAUNCH_CONTEXT_SCHEMA_VERSION",
+    "REPLAY_WATCHLIST_SNAPSHOT_SCHEMA_VERSION",
+    "ReplayLaunchContext",
+    "ReplayLaunchWatchlistGroup",
+    "ReplayLaunchWatchlistItem",
+    "ReplayWatchlistSnapshot",
     "ReplaySource",
     "ReplayV2CommandType",
     "ReplayV2EventType",

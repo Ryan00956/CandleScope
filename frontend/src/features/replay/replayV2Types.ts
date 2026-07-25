@@ -265,10 +265,39 @@ export interface ReplayGlobalClock {
   readonly tick: number;
 }
 
+export interface ReplayLaunchWatchlistItem {
+  readonly exchange: string;
+  readonly market_type: string;
+  readonly symbol: string;
+}
+
+export interface ReplayLaunchWatchlistGroup {
+  readonly id: string;
+  readonly name: string;
+  readonly color: string;
+  readonly items: readonly ReplayLaunchWatchlistItem[];
+}
+
+export interface ReplayWatchlistSnapshot {
+  readonly schema_version: "replay.watchlist-snapshot.v1";
+  readonly groups: readonly ReplayLaunchWatchlistGroup[];
+}
+
+export interface ReplayLaunchContext {
+  readonly schema_version: "replay.launch-context.v1";
+  readonly source: "LIVE_PAGE" | "DIRECT_HUB";
+  readonly exchange: string;
+  readonly market_type: string;
+  readonly symbol: string;
+  readonly display_interval: string;
+  readonly watchlist_snapshot: ReplayWatchlistSnapshot;
+}
+
 export interface ReplayMarketTracksResponse {
   readonly protocol: typeof REPLAY_V2_PROTOCOL;
   readonly run_id: string;
   readonly ordering_version: "replay.global-order.v1";
+  readonly launch_context: ReplayLaunchContext;
   readonly viewer_state: ReplayViewerState;
   readonly tracks: readonly ReplayTrainingMarketTrack[];
   readonly portfolio: ReplayTrainingPortfolio;
@@ -349,6 +378,7 @@ export interface ReplayAdvanceProgressResponse {
 }
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const MARKET_IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const POSITIVE_CANONICAL_DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/;
 const CANONICAL_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/;
 const MAX_TIMESTAMP_MS = 253_402_300_799_999;
@@ -388,6 +418,13 @@ function enumValue<const T extends readonly string[]>(
 function identifier(value: unknown, fieldName: string): string {
   if (typeof value !== "string" || !IDENTIFIER.test(value)) {
     throw new TypeError(`${fieldName} must be a safe identifier`);
+  }
+  return value;
+}
+
+function marketIdentity(value: unknown, fieldName: string): string {
+  if (typeof value !== "string" || !MARKET_IDENTITY.test(value)) {
+    throw new TypeError(`${fieldName} must be a market identity`);
   }
   return value;
 }
@@ -925,6 +962,7 @@ export function parseReplayMarketTracksResponse(value: unknown): ReplayMarketTra
     "protocol",
     "run_id",
     "ordering_version",
+    "launch_context",
     "viewer_state",
     "tracks",
     "portfolio",
@@ -942,10 +980,16 @@ export function parseReplayMarketTracksResponse(value: unknown): ReplayMarketTra
   const runId = identifier(response.run_id, "market tracks response.run_id");
   const viewer = parseReplayViewerState(response.viewer_state);
   const tracks = response.tracks.map(parseReplayTrainingMarketTrack);
+  const launchContext = parseReplayLaunchContext(response.launch_context);
+  const primaryTrack = tracks.find((track) => track.stable_ordinal === 1) ?? null;
   if (
     viewer.run_id !== runId
     || tracks.some((track) => track.run_id !== runId)
     || !tracks.some((track) => track.track_id === viewer.selected_track_id)
+    || primaryTrack === null
+    || primaryTrack.exchange !== launchContext.exchange
+    || primaryTrack.market_type !== launchContext.market_type
+    || primaryTrack.symbol !== launchContext.symbol
   ) {
     throw new TypeError("market tracks response run/viewer identity is inconsistent");
   }
@@ -953,10 +997,92 @@ export function parseReplayMarketTracksResponse(value: unknown): ReplayMarketTra
     protocol: REPLAY_V2_PROTOCOL,
     run_id: runId,
     ordering_version: "replay.global-order.v1",
+    launch_context: launchContext,
     viewer_state: viewer,
     tracks,
     portfolio: parseReplayTrainingPortfolio(response.portfolio),
     global_clock: parseReplayGlobalClock(response.global_clock),
+  };
+}
+
+export function parseReplayLaunchContext(value: unknown): ReplayLaunchContext {
+  const context = exactObject(value, "replay launch context", [
+    "schema_version",
+    "source",
+    "exchange",
+    "market_type",
+    "symbol",
+    "display_interval",
+    "watchlist_snapshot",
+  ]);
+  if (
+    context.schema_version !== "replay.launch-context.v1"
+    || (context.source !== "LIVE_PAGE" && context.source !== "DIRECT_HUB")
+  ) {
+    throw new TypeError("replay launch context contract is unsupported");
+  }
+  const snapshot = exactObject(context.watchlist_snapshot, "watchlist snapshot", [
+    "schema_version",
+    "groups",
+  ]);
+  if (
+    snapshot.schema_version !== "replay.watchlist-snapshot.v1"
+    || !Array.isArray(snapshot.groups)
+    || snapshot.groups.length > 32
+  ) {
+    throw new TypeError("watchlist snapshot contract is unsupported");
+  }
+  let itemCount = 0;
+  const groupIds = new Set<string>();
+  const groups = snapshot.groups.map((value, groupIndex) => {
+    const field = `watchlist snapshot.groups[${groupIndex}]`;
+    const group = exactObject(value, field, ["id", "name", "color", "items"]);
+    const id = identifier(group.id, `${field}.id`);
+    if (groupIds.has(id)) throw new TypeError("watchlist snapshot group ids must be unique");
+    groupIds.add(id);
+    if (!Array.isArray(group.items)) throw new TypeError(`${field}.items must be an array`);
+    const identities = new Set<string>();
+    const items = group.items.map((value, itemIndex) => {
+      const itemField = `${field}.items[${itemIndex}]`;
+      const item = exactObject(value, itemField, ["exchange", "market_type", "symbol"]);
+      const parsed = {
+        exchange: marketIdentity(item.exchange, `${itemField}.exchange`),
+        market_type: marketIdentity(item.market_type, `${itemField}.market_type`),
+        symbol: marketIdentity(item.symbol, `${itemField}.symbol`),
+      };
+      const key = `${parsed.exchange}\u0000${parsed.market_type}\u0000${parsed.symbol}`;
+      if (identities.has(key)) {
+        throw new TypeError("watchlist snapshot group items must be unique");
+      }
+      identities.add(key);
+      itemCount += 1;
+      return parsed;
+    });
+    return {
+      id,
+      name: displayString(group.name, `${field}.name`, 80),
+      color: displayString(group.color, `${field}.color`, 32),
+      items,
+    };
+  });
+  if (itemCount > 100) throw new TypeError("watchlist snapshot cannot exceed 100 items");
+  return {
+    schema_version: "replay.launch-context.v1",
+    source: context.source,
+    exchange: marketIdentity(context.exchange, "replay launch context.exchange"),
+    market_type: marketIdentity(
+      context.market_type,
+      "replay launch context.market_type",
+    ),
+    symbol: marketIdentity(context.symbol, "replay launch context.symbol"),
+    display_interval: identifier(
+      context.display_interval,
+      "replay launch context.display_interval",
+    ),
+    watchlist_snapshot: {
+      schema_version: "replay.watchlist-snapshot.v1",
+      groups,
+    },
   };
 }
 
@@ -1291,6 +1417,7 @@ export interface TrainingRunCreatePayload {
     | "change_funding_policy"
     | "reveal_time"
   >[];
+  readonly launch_context?: ReplayLaunchContext | null;
 }
 
 function displayString(value: unknown, fieldName: string, maxLength = 256): string {

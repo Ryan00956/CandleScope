@@ -304,6 +304,7 @@ async def test_ended_session_is_reclaimed_after_stream_snapshot_and_remains_reco
 
 async def test_controller_free_idle_session_ttl_reclaims_and_lazy_recovers(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "idle-reclaim.db"
     now = [NOW_MS]
@@ -323,10 +324,22 @@ async def test_controller_free_idle_session_ttl_reclaims_and_lazy_recovers(
     await service.start()
     first = await service.create_session(replay_config())
     first_id = str(first["session_id"])
-    first_task = service._sessions[first_id].actor.task
+    first_actor = service._sessions[first_id].actor
+    first_task = first_actor.task
+    original_mutation_hook = first_actor._mutation_hook
+    assert original_mutation_hook is not None
+
+    async def delayed_mutation_hook(mutation) -> None:
+        # The reaper is a durability boundary, not an interactive request.
+        # A valid mutation write just over one second must not poison the
+        # actor and require a later retry.
+        await asyncio.sleep(1.05)
+        await original_mutation_hook(mutation)
+
+    monkeypatch.setattr(first_actor, "_mutation_hook", delayed_mutation_hook)
 
     now[0] += 1_001
-    for _ in range(20):
+    for _ in range(60):
         if first_id not in service._sessions:
             break
         await asyncio.sleep(0.05)

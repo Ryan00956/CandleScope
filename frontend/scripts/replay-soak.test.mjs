@@ -6,10 +6,12 @@ import {
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
   isAuthoritativeReplayStatus,
+  replayBackendHealth,
   replayCatalogQueryFromCreatePayload,
   replaySpeedAction,
   replaySpeedRequestState,
   replayStepAction,
+  replaySubscriberReleaseState,
   replayTrainingTargetSpeed,
   restoreCommandReadinessAfterReconnect,
 } from "./replay-soak.mjs";
@@ -288,4 +290,54 @@ test("replay soak distinguishes speed dispatch, pending work, and authoritative 
     replaySpeedRequestState({ ...authoritative, revision: 653 }, 600, false, 652),
     "acknowledged",
   );
+});
+
+test("replay soak treats an evicted actor as zero retained subscribers", () => {
+  const payload = {
+    replay: {
+      sessions: {
+        active: { subscribers: 2 },
+      },
+    },
+  };
+  assert.deepEqual(replaySubscriberReleaseState(payload, "missing", 1), {
+    actor: null,
+    ready: true,
+    state: "actor-evicted",
+    subscriberCount: 0,
+  });
+  assert.deepEqual(replaySubscriberReleaseState(payload, "active", 1), {
+    actor: { subscribers: 2 },
+    ready: false,
+    state: "actor-active",
+    subscriberCount: 2,
+  });
+  assert.equal(replaySubscriberReleaseState({}, "missing", 1).ready, false);
+});
+
+test("replay soak fails closed on backend lifecycle and persistence failures", () => {
+  const healthy = {
+    replay: {
+      persistence: {
+        degraded: false,
+        transaction_failures: 0,
+      },
+      reaper_failures: 0,
+      recovery_failures: 0,
+      shutdown_failures: 0,
+    },
+  };
+  assert.equal(replayBackendHealth(healthy).passed, true);
+  assert.equal(replayBackendHealth({
+    ...healthy,
+    replay: { ...healthy.replay, reaper_failures: 1 },
+  }).passed, false);
+  assert.equal(replayBackendHealth({
+    ...healthy,
+    replay: {
+      ...healthy.replay,
+      persistence: { degraded: true, transaction_failures: 0 },
+    },
+  }).passed, false);
+  assert.equal(replayBackendHealth({}).passed, false);
 });

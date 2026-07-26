@@ -1543,13 +1543,74 @@ function actorDiagnostics(payload, sessionId) {
   return payload?.replay?.sessions?.[sessionId] || null;
 }
 
+function replaySubscriberReleaseState(payload, sessionId, maximum) {
+  const sessions = payload?.replay?.sessions;
+  if (sessions === null || typeof sessions !== "object" || Array.isArray(sessions)) {
+    return {
+      actor: null,
+      ready: false,
+      state: "invalid-diagnostics",
+      subscriberCount: null,
+    };
+  }
+  if (!Object.hasOwn(sessions, sessionId)) {
+    return {
+      actor: null,
+      ready: true,
+      state: "actor-evicted",
+      subscriberCount: 0,
+    };
+  }
+  const actor = sessions[sessionId];
+  const subscriberCount = Number(actor?.subscribers);
+  return {
+    actor,
+    ready: Number.isFinite(subscriberCount) && subscriberCount <= maximum,
+    state: Number.isFinite(subscriberCount) ? "actor-active" : "invalid-subscriber-count",
+    subscriberCount: Number.isFinite(subscriberCount) ? subscriberCount : null,
+  };
+}
+
+function replayBackendHealth(payload) {
+  const replay = payload?.replay;
+  const persistence = replay?.persistence;
+  const checks = {
+    diagnostics_contract: replay !== null
+      && typeof replay === "object"
+      && persistence !== null
+      && typeof persistence === "object",
+    persistence_not_degraded: persistence?.degraded === false,
+    persistence_transactions_clean: Number(persistence?.transaction_failures) === 0,
+    reaper_clean: Number(replay?.reaper_failures) === 0,
+    recovery_clean: Number(replay?.recovery_failures) === 0,
+    shutdown_clean: Number(replay?.shutdown_failures) === 0,
+  };
+  return {
+    checks,
+    passed: Object.values(checks).every(Boolean),
+    counters: {
+      persistenceDegraded: persistence?.degraded ?? null,
+      persistenceTransactionFailures: persistence?.transaction_failures ?? null,
+      reaperFailures: replay?.reaper_failures ?? null,
+      recoveryFailures: replay?.recovery_failures ?? null,
+      shutdownFailures: replay?.shutdown_failures ?? null,
+    },
+  };
+}
+
+function assertReplayBackendHealthy(payload, label) {
+  const health = replayBackendHealth(payload);
+  assert(health.passed, `${label} replay backend health failed`, health);
+  return health;
+}
+
 async function waitForSubscriberCount(diagnosticsUrl, sessionId, maximum, timeoutMs) {
   const started = Date.now();
   let last = null;
   while (Date.now() - started < timeoutMs) {
     const payload = await readJson(diagnosticsUrl);
-    last = actorDiagnostics(payload, sessionId);
-    if (last && Number(last.subscribers) <= maximum) return { payload, actor: last };
+    last = replaySubscriberReleaseState(payload, sessionId, maximum);
+    if (last.ready) return { payload, ...last };
     await wait(100);
   }
   throw new Error(`Replay subscriber count did not return to <=${maximum}: ${JSON.stringify(last)}`);
@@ -1560,6 +1621,7 @@ async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, sessi
   const page = await createTarget(debugBase);
   const capture = captureTarget(page.cdp);
   let navigation = null;
+  let result = null;
   try {
     const url = `${frontendOrigin}/replay.html?session=${encodeURIComponent(sessionId)}`;
     navigation = await page.cdp.send("Page.navigate", { url });
@@ -1591,7 +1653,7 @@ async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, sessi
     );
     const afterMetrics = await browserMetrics(page.cdp);
     assert(capture.exceptions.length === 0, "lifecycle target raised runtime exception", capture.exceptions);
-    return {
+    result = {
       elapsedMs: Date.now() - opened,
       before,
       after,
@@ -1601,6 +1663,7 @@ async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, sessi
       targetCountDuring,
       consoleErrors: capture.consoleErrors,
     };
+    return result;
   } catch (error) {
     await capture.settle();
     const diagnostics = {
@@ -1635,7 +1698,18 @@ async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, sessi
   } finally {
     await page.cdp.send("Page.close").catch(() => undefined);
     page.cdp.close();
-    await waitForSubscriberCount(diagnosticsUrl, sessionId, 1, timeoutMs);
+    const subscriberRelease = await waitForSubscriberCount(
+      diagnosticsUrl,
+      sessionId,
+      1,
+      timeoutMs,
+    );
+    if (result !== null) {
+      result.subscriberRelease = {
+        state: subscriberRelease.state,
+        subscriberCount: subscriberRelease.subscriberCount,
+      };
+    }
   }
 }
 
@@ -1969,6 +2043,10 @@ async function main() {
       backend: await readJson(diagnosticsUrl),
       status: playing,
     };
+    initialMetrics.backendHealth = assertReplayBackendHealthy(
+      initialMetrics.backend,
+      "initial",
+    );
     const startedAtMs = Date.now();
     const plannedEndMs = startedAtMs + args.durationMs;
     const samples = [{ elapsedMs: 0, ...initialMetrics }];
@@ -2062,6 +2140,11 @@ async function main() {
             sessionId,
             timeoutMs: args.timeoutMs,
           });
+          const backendAfterCycle = await readJson(diagnosticsUrl);
+          cycle.backendHealth = assertReplayBackendHealthy(
+            backendAfterCycle,
+            `lifecycle cycle ${cycleIndex + 1}`,
+          );
         } catch (error) {
           phaseDiagnostics = {
             cycle: cycleIndex + 1,
@@ -2090,6 +2173,10 @@ async function main() {
           backend: await readJson(diagnosticsUrl),
           status,
         };
+        sample.backendHealth = assertReplayBackendHealthy(
+          sample.backend,
+          `soak sample ${samples.length}`,
+        );
         samples.push(sample);
         nextSampleAt = Date.now() + args.sampleMs;
         if (now >= plannedEndMs && cycleIndex >= args.cycles) break;
@@ -2110,6 +2197,10 @@ async function main() {
       backend: await readJson(diagnosticsUrl),
       status: finalSoakStatus,
     };
+    finalMetrics.backendHealth = assertReplayBackendHealthy(
+      finalMetrics.backend,
+      "final",
+    );
     samples.push(finalMetrics);
 
     if (finalSoakStatus.state === "PLAYING") {
@@ -2286,6 +2377,8 @@ async function main() {
         .every((item) => item.itemsAfterFinish === 0),
       replay_runtime_clean: replayCapture.exceptions.length === 0 && replayCapture.consoleErrors.length === 0,
       lifecycle_runtime_clean: cycles.every((cycle) => cycle.consoleErrors.length === 0),
+      backend_runtime_clean: samples.every((sample) => sample.backendHealth?.passed === true)
+        && cycles.every((cycle) => cycle.backendHealth?.passed === true),
       live_runtime_isolated: !liveCapture.webSockets.some((url) => /\/stream\/replay\//.test(url)),
       live_offline_backfill_quiet: backendLogCounts.backfillFailures === 0,
     };
@@ -2424,7 +2517,9 @@ export {
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
   isAuthoritativeReplayStatus,
+  replayBackendHealth,
   replaySpeedRequestState,
+  replaySubscriberReleaseState,
   restoreCommandReadinessAfterReconnect,
 };
 

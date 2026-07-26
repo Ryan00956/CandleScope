@@ -88,6 +88,7 @@ from .training.service import TrainingRunService
 
 SYNTHETIC_TIME_ANCHOR_MS = 946_684_800_000
 _DATASET_POOL_MAX_BYTES = 512 * 1024 * 1024
+_EVICTION_SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
 TRADE_SESSION_DATASET_SCHEMA_VERSION = "replay-trade-session-dataset.v1"
 TRADE_SESSION_REF_SCHEMA_VERSION = "replay-trade-session-ref.v1"
 _TaskResult = TypeVar("_TaskResult")
@@ -2269,7 +2270,9 @@ class ReplayService:
         reason: str,
     ) -> None:
         try:
-            await handle.actor.shutdown(step_timeout=1.0)
+            await handle.actor.shutdown(
+                step_timeout=_EVICTION_SHUTDOWN_STEP_TIMEOUT_SECONDS
+            )
         except BaseException:
             async with self._lifecycle_lock:
                 if self._sessions.get(session_id) is handle:

@@ -12,6 +12,7 @@ import type {
 } from "../replayV2Types.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 import type { ReplayPhase3ControlType, ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
+import { replayAdvanceIsCancelable } from "../useReplayViewerRuntime.js";
 import { parseIntervalSeconds } from "../../../utils/intervals.js";
 
 const SPEEDS: readonly ReplaySpeed[] = [1, 5, 15, 30, 60, 120, 300, 600, "MAX"];
@@ -116,6 +117,9 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const virtualTimeQuantumMs = globalClock?.virtual_time_quantum_ms ?? baseIntervalMs;
   const basisCanPlay = playbackBases.includes(advanceBasis);
   const canonicalAdvancePending = phase3Pending === "advance";
+  const cancelableAdvancePending = replayAdvanceIsCancelable(
+    viewer?.controlPending ?? null,
+  );
   const fallbackPublicTime = formatReplayPublicTime(store.virtualTimeMs, {
     blindMode: config?.blind_mode ?? true,
     originMs: store.replayStartMs,
@@ -345,11 +349,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             </button>
           </>
         )}
-        {viewer !== undefined && (
-          phase3Pending === "advance_by"
-          || phase3Pending === "advance_to"
-          || phase3Pending === "advance"
-        ) && (
+        {viewer !== undefined && cancelableAdvancePending && (
           <button
             type="button"
             data-replay-action="cancel-advance"

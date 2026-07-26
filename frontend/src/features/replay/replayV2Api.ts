@@ -19,6 +19,7 @@ import {
   parseTrainingRunListResponse,
   parseTrainingRunMutationResponse,
   parseTrainingRunReturnResponse,
+  parseReplayAccountAuditResponse,
   parseReplayAdvanceProgressResponse,
   parseReplayMarketTracksResponse,
   parseReplayV2CommandResult,
@@ -42,6 +43,7 @@ import type {
 } from "./replayIntegrityModel.js";
 import type {
   ReplayAdvanceProgressResponse,
+  ReplayAccountAuditResponse,
   ReplayMarketTracksResponse,
   ReplayV2Command,
   ReplayV2CommandResult,
@@ -255,6 +257,17 @@ export class ReplayV2ApiClient {
       `/runs/${safeSegment(runId, "run id")}/tracks`,
       parseReplayMarketTracksResponse,
       signal ? { signal } : {},
+    );
+  }
+
+  auditAccount(
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<ReplayAccountAuditResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/account-audit`,
+      parseReplayAccountAuditResponse,
+      { method: "POST", ...(signal ? { signal } : {}) },
     );
   }
 

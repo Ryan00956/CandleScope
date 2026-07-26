@@ -217,6 +217,26 @@ test("v2 training exports preserve integrity policy and hide actual history unti
       policy: "HIDE_ALL",
       items: [],
     },
+    modelled_account: {
+      schema_version: "replay.training.portfolio.v1",
+      fidelity: "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER",
+      settlement_account_shared: true,
+      initial_equity: "10000",
+      equity: "10000",
+      cash_balance: "10000",
+      available_equity: "10000",
+      reserved_margin: "0",
+      margin_used: "0",
+      realized_pnl: "0",
+      unrealized_pnl: "0",
+      fees_paid: "0",
+      positions: [],
+    },
+    account_audit: null,
+    liquidation_channel_contract: {
+      simulated_account: "MODELLED_ACCOUNT_NOT_MARKET_LIQUIDATION_FEED",
+      historical_market: "INDEPENDENT_FEED_OR_UNSUPPORTED",
+    },
   } satisfies ReplayTrainingReportResponse;
   const exported = buildReplayTrainingReportExport(response);
   assert.equal(exported.protocol, "replay.v2");

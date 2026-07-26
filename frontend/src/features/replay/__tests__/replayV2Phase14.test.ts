@@ -86,6 +86,23 @@ function plan(overrides: Record<string, unknown> = {}) {
       ready_archive_bytes: 0,
       max_archive_bytes: 1_099_511_627_776,
     },
+    account_history: {
+      protocol: "replay.account-history.archive.v1",
+      feature_enabled: false,
+      requested_mode: "APPROX_PROXY",
+      capability_state: "UNSUPPORTED_NO_HISTORY",
+      reason: "FEATURE_DISABLED",
+      fidelity: "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT",
+      supported_contract_model: "LINEAR_QUOTE_SETTLED_V1",
+      supported_position_mode: "ONE_WAY",
+      supported_margin_asset_mode: "SINGLE_QUOTE",
+      historical_funding_exact: false,
+      public_kline_proxy_accepted: false,
+      ready_archive_bytes: 0,
+      max_archive_bytes: 137_438_953_472,
+      coverage: null,
+      account_history_ref: null,
+    },
   };
 }
 

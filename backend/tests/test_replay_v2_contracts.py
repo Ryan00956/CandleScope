@@ -60,8 +60,9 @@ def test_replay_v2_golden_matches_python_enum_and_schema_registry() -> None:
 def test_replay_v2_phase8_package_keeps_optimization_inside_training() -> None:
     training_root = ROOT / "backend" / "app" / "replay" / "training"
     assert {path.name for path in training_root.glob("*.py")} == {
-        "__init__.py",
-        "account.py",
+            "__init__.py",
+            "account.py",
+            "account_history.py",
         "commands.py",
         "control.py",
         "disclosure.py",
@@ -185,6 +186,8 @@ def test_replay_v2_flags_are_strict_default_off_and_nested_under_replay(
     assert default.replay_segment_download_worker_enabled is False
     assert default.replay_segment_auto_gc_enabled is False
     assert default.replay_fast_forward_optimization_enabled is False
+    assert default.replay_account_history_enabled is False
+    assert default.replay_account_history_max_archive_bytes == 128 * 1024**3
 
     nested_off = load_replay_settings(
         {"REPLAY_PRODUCT_V2_ENABLED": "1"},
@@ -211,6 +214,7 @@ def test_replay_v2_flags_are_strict_default_off_and_nested_under_replay(
         "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED",
         "REPLAY_SEGMENT_AUTO_GC_ENABLED",
         "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED",
+        "REPLAY_ACCOUNT_HISTORY_ENABLED",
     ):
         with pytest.raises(ValueError, match=variable):
             load_replay_settings(

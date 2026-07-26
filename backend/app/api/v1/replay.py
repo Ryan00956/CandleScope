@@ -34,6 +34,7 @@ from app.replay.training.errors import TrainingRunError
 from app.replay.training.commands import ReplayV2Command
 from app.replay.training.models import (
     REPLAY_V2_PROTOCOL,
+    AccountDataMode,
     BookMode,
     FundingMode,
     IntegrityMode,
@@ -301,6 +302,13 @@ class VisibleHistoryLookbackPayload(_StrictModel):
     duration_ms: int | None = Field(default=None, ge=1, le=MAX_TIMESTAMP_MS)
 
 
+class AccountHistoryRefPayload(_StrictModel):
+    schema_version: Literal["replay.account-history-ref.v1"]
+    archive_id: str = Field(min_length=1, max_length=128)
+    dataset_epoch: str = Field(min_length=71, max_length=71)
+    checksum_sha256: str = Field(min_length=71, max_length=71)
+
+
 class TrainingRunCreatePayload(_StrictModel):
     protocol: Literal["replay.v2"]
     catalog_epoch: str = Field(min_length=71, max_length=71)
@@ -337,6 +345,8 @@ class TrainingRunCreatePayload(_StrictModel):
     book_mode: BookMode
     margin_mode: MarginMode
     funding_mode: FundingMode
+    account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
+    account_history_ref: AccountHistoryRefPayload | None = None
     fixed_funding_rate: str | None = Field(default=None, min_length=1, max_length=128)
     funding_interval_ms: int | None = Field(default=None, ge=60_000, le=2_592_000_000)
     allow_rule_changes: bool
@@ -571,6 +581,19 @@ async def list_replay_v2_data_segments(request: Request) -> dict[str, object]:
 @router.get("/runs/historical-books")
 async def list_replay_v2_historical_books(request: Request) -> dict[str, object]:
     return await _training_service(request).list_historical_book_archives()
+
+
+@router.get("/runs/account-history")
+async def list_replay_v2_account_history(request: Request) -> dict[str, object]:
+    return await _training_service(request).list_account_history_archives()
+
+
+@router.post("/runs/{run_id}/account-audit")
+async def audit_replay_v2_account(
+    run_id: str,
+    request: Request,
+) -> dict[str, object]:
+    return await _training_service(request).audit_account(run_id)
 
 
 @router.post(

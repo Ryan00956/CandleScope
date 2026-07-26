@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import type {
+  ReplayAccountAuditResponse,
   ReplayV2Command,
   ReplayV2CommandResult,
   ReplayV2CommandType,
@@ -39,6 +40,17 @@ export type ReplayPhase5TradeType = Extract<ReplayV2CommandType,
   | "allocate_isolated_margin"
 >;
 
+export function replayAdvanceIsCancelable(
+  command: ReplayV2Command | null,
+): boolean {
+  return command?.type === "advance_by"
+    || command?.type === "advance_to"
+    || (
+      command?.type === "advance"
+      && command.payload.basis === "VIRTUAL_TIME"
+    );
+}
+
 export interface ReplayViewerRuntime {
   readonly viewerState: ReplayViewerState | null;
   readonly marketTracks: ReplayMarketTracksResponse | null;
@@ -73,6 +85,7 @@ export interface ReplayViewerRuntime {
       type: ReplayPhase5TradeType,
       payload: Readonly<Record<string, ReplayV2Json>>,
     ): Promise<ReplayV2CommandResult>;
+    auditAccount(): Promise<ReplayAccountAuditResponse>;
     resyncHistoricalBook(): Promise<void>;
     preparePeriodSummaries(): Promise<void>;
     reload(): void;
@@ -228,15 +241,8 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
 
   useEffect(() => {
     const active = controlPending;
-    const canonicalAdvance = active?.type === "advance";
-    if (
-      active === null
-      || (
-        active.type !== "advance_by"
-        && active.type !== "advance_to"
-        && !canonicalAdvance
-      )
-    ) return;
+    if (!replayAdvanceIsCancelable(active)) return;
+    if (active === null) return;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
@@ -359,17 +365,10 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
 
   const cancelAdvance = useCallback(async (): Promise<ReplayV2CommandResult> => {
     const active = controlRef.current;
-    const canonicalAdvance = active?.type === "advance";
-    if (
-      active === null
-      || (
-        active.type !== "advance_by"
-        && active.type !== "advance_to"
-        && !canonicalAdvance
-      )
-    ) {
+    if (!replayAdvanceIsCancelable(active)) {
       throw new Error("no cancelable advance is active");
     }
+    if (active === null) throw new Error("no cancelable advance is active");
     const command = buildCommand(
       "cancel_advance",
       { advance_command_id: active.command_id },
@@ -506,6 +505,25 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     }
   }, [failClosedAndRefreshMarketTracks, refreshMarketTracks]);
 
+  const auditAccount = useCallback(async (): Promise<ReplayAccountAuditResponse> => {
+    const runId = viewerRef.current?.run_id;
+    if (runId === undefined) throw new Error("ViewerState is unavailable");
+    if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    setViewerPending(true);
+    setError(null);
+    try {
+      const audit = await defaultReplayV2Api.auditAccount(runId);
+      await refreshMarketTracks(runId);
+      return audit;
+    } catch (cause) {
+      await failClosedAndRefreshMarketTracks(runId);
+      setError(cause instanceof Error ? cause.message : "独立账户审计失败");
+      throw cause;
+    } finally {
+      setViewerPending(false);
+    }
+  }, [failClosedAndRefreshMarketTracks, refreshMarketTracks]);
+
   const preparePeriodSummaries = useCallback(async (): Promise<void> => {
     const runId = viewerRef.current?.run_id;
     if (runId === undefined) throw new Error("ViewerState is unavailable");
@@ -550,6 +568,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       setSubscriptionTier,
       addAndSelectTrack,
       submitTrade,
+      auditAccount,
       resyncHistoricalBook,
       preparePeriodSummaries,
       reload: () => setReloadRevision((value) => value + 1),

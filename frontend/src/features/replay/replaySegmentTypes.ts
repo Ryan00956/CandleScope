@@ -1,4 +1,10 @@
-import type { ReplayV2SourceKind, TrainingRunCreatePayload } from "./replayV2Types.js";
+import { parseReplayAccountHistoryRef } from "./replayV2Types.js";
+import type {
+  ReplayAccountHistoryRef,
+  ReplayV2AccountDataMode,
+  ReplayV2SourceKind,
+  TrainingRunCreatePayload,
+} from "./replayV2Types.js";
 
 
 export interface ReplayHistoricalBookCapabilityPlan {
@@ -40,6 +46,30 @@ export interface ReplaySegmentHistoryPolicyPlan {
     | null;
 }
 
+export interface ReplayAccountHistoryCapabilityPlan {
+  readonly protocol: "replay.account-history.archive.v1";
+  readonly feature_enabled: boolean;
+  readonly requested_mode: ReplayV2AccountDataMode;
+  readonly capability_state:
+    | "AVAILABLE_EXACT"
+    | "UNSUPPORTED_NO_HISTORY"
+    | "UNSUPPORTED_SOURCE_MODE"
+    | "DEGRADED";
+  readonly reason: string;
+  readonly fidelity: "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT";
+  readonly supported_contract_model: "LINEAR_QUOTE_SETTLED_V1";
+  readonly supported_position_mode: "ONE_WAY";
+  readonly supported_margin_asset_mode: "SINGLE_QUOTE";
+  readonly historical_funding_exact: boolean;
+  readonly public_kline_proxy_accepted: false;
+  readonly ready_archive_bytes: number;
+  readonly max_archive_bytes: number;
+  readonly coverage: {
+    readonly range_start_ms: number;
+    readonly range_end_ms: number;
+  } | null;
+  readonly account_history_ref: ReplayAccountHistoryRef | null;
+}
 
 export interface ReplaySegmentPreparePlan {
   readonly protocol: "replay.data.prepare.v1";
@@ -63,6 +93,7 @@ export interface ReplaySegmentPreparePlan {
   readonly auto_gc_enabled: boolean;
   readonly failure_policy: "QUARANTINE_AND_FAIL_CLOSED";
   readonly historical_book: ReplayHistoricalBookCapabilityPlan;
+  readonly account_history: ReplayAccountHistoryCapabilityPlan;
 }
 
 export interface ReplaySegmentPlanApi {
@@ -129,6 +160,7 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     "auto_gc_enabled",
     "failure_policy",
     "historical_book",
+    "account_history",
   ]);
   const identity = exactObject(payload.identity, "segment prepare plan.identity", [
     "exchange",
@@ -174,6 +206,27 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
       "execution_fidelity",
       "ready_archive_bytes",
       "max_archive_bytes",
+    ],
+  );
+  const accountHistory = exactObject(
+    payload.account_history,
+    "segment prepare plan.account_history",
+    [
+      "protocol",
+      "feature_enabled",
+      "requested_mode",
+      "capability_state",
+      "reason",
+      "fidelity",
+      "supported_contract_model",
+      "supported_position_mode",
+      "supported_margin_asset_mode",
+      "historical_funding_exact",
+      "public_kline_proxy_accepted",
+      "ready_archive_bytes",
+      "max_archive_bytes",
+      "coverage",
+      "account_history_ref",
     ],
   );
   if (payload.protocol !== "replay.data.prepare.v1" || payload.state !== "PREPARE_ON_CREATE") {
@@ -269,6 +322,71 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     || historicalBook.pinnable !== exact) {
     throw new TypeError("historical book exact capability proof is inconsistent");
   }
+  if (accountHistory.protocol !== "replay.account-history.archive.v1"
+    || typeof accountHistory.feature_enabled !== "boolean"
+    || (accountHistory.requested_mode !== "APPROX_PROXY"
+      && accountHistory.requested_mode !== "HISTORICAL_EXACT")
+    || ![
+      "AVAILABLE_EXACT",
+      "UNSUPPORTED_NO_HISTORY",
+      "UNSUPPORTED_SOURCE_MODE",
+      "DEGRADED",
+    ].includes(String(accountHistory.capability_state))
+    || accountHistory.fidelity !== "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
+    || accountHistory.supported_contract_model !== "LINEAR_QUOTE_SETTLED_V1"
+    || accountHistory.supported_position_mode !== "ONE_WAY"
+    || accountHistory.supported_margin_asset_mode !== "SINGLE_QUOTE"
+    || typeof accountHistory.historical_funding_exact !== "boolean"
+    || accountHistory.public_kline_proxy_accepted !== false) {
+    throw new TypeError("account-history capability plan is unsupported");
+  }
+  const accountCapability = accountHistory.capability_state as (
+    ReplayAccountHistoryCapabilityPlan["capability_state"]
+  );
+  const accountCoverage = accountHistory.coverage === null
+    ? null
+    : exactObject(
+        accountHistory.coverage,
+        "segment prepare plan.account_history.coverage",
+        ["range_start_ms", "range_end_ms"],
+      );
+  const parsedCoverage = accountCoverage === null
+    ? null
+    : {
+        range_start_ms: count(
+          accountCoverage.range_start_ms,
+          "account history.coverage.range_start_ms",
+        ),
+        range_end_ms: count(
+          accountCoverage.range_end_ms,
+          "account history.coverage.range_end_ms",
+        ),
+      };
+  const accountReference = accountHistory.account_history_ref === null
+    ? null
+    : parseReplayAccountHistoryRef(
+        accountHistory.account_history_ref,
+        "segment prepare plan.account_history.account_history_ref",
+      );
+  const accountReadyBytes = count(
+    accountHistory.ready_archive_bytes,
+    "account history.ready_archive_bytes",
+  );
+  const accountMaxBytes = count(
+    accountHistory.max_archive_bytes,
+    "account history.max_archive_bytes",
+  );
+  const accountExact = accountCapability === "AVAILABLE_EXACT";
+  if (
+    accountReadyBytes > accountMaxBytes
+    || (parsedCoverage !== null
+      && parsedCoverage.range_end_ms < parsedCoverage.range_start_ms)
+    || (accountExact !== (parsedCoverage !== null && accountReference !== null))
+    || (accountExact && !accountHistory.feature_enabled)
+    || (!accountExact && accountReadyBytes !== 0)
+  ) {
+    throw new TypeError("account-history exact capability proof is inconsistent");
+  }
   return {
     protocol: "replay.data.prepare.v1",
     state: "PREPARE_ON_CREATE",
@@ -330,6 +448,23 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
         historicalBook.max_archive_bytes,
         "historical book.max_archive_bytes",
       ),
+    },
+    account_history: {
+      protocol: "replay.account-history.archive.v1",
+      feature_enabled: accountHistory.feature_enabled,
+      requested_mode: accountHistory.requested_mode,
+      capability_state: accountCapability,
+      reason: displayString(accountHistory.reason, "account history.reason"),
+      fidelity: "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT",
+      supported_contract_model: "LINEAR_QUOTE_SETTLED_V1",
+      supported_position_mode: "ONE_WAY",
+      supported_margin_asset_mode: "SINGLE_QUOTE",
+      historical_funding_exact: accountHistory.historical_funding_exact,
+      public_kline_proxy_accepted: false,
+      ready_archive_bytes: accountReadyBytes,
+      max_archive_bytes: accountMaxBytes,
+      coverage: parsedCoverage,
+      account_history_ref: accountReference,
     },
   };
 }

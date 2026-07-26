@@ -87,6 +87,7 @@ export function ReplayPaperTradingDock({
     && store.state !== "ENDED";
   const portfolio = viewer?.marketTracks?.portfolio ?? null;
   const contract = contractPortfolio(portfolio);
+  const accountHistory = contract?.account_history ?? null;
   const selectedTrackId = viewer?.viewerState?.selected_track_id ?? "track-1";
   const selectedTrack = viewer?.marketTracks?.tracks.find((item) => item.track_id === selectedTrackId);
   const historicalBook = selectedTrack?.historical_book ?? null;
@@ -129,14 +130,22 @@ export function ReplayPaperTradingDock({
 
   return (
     <>
-      <header className="replay-rail-account-strip" data-replay-account-model={contract?.account_model ?? "PAPER_LINEAR_V1"}>
+      <header
+        className="replay-rail-account-strip"
+        data-replay-account-model={contract?.account_model ?? "PAPER_LINEAR_V1"}
+        data-replay-account-history-mode={accountHistory?.mode ?? "LEGACY"}
+      >
         <div>
           <small>{contract === null ? "Legacy paper account" : "TOUCH_OR_TAPE_V2"}</small>
           <strong>{portfolio?.equity ?? store.account?.equity ?? "--"} {settlementAsset}</strong>
         </div>
         <span data-account-status={contract?.status ?? "ACTIVE"}>{contract?.status ?? "ACTIVE"}</span>
         {contract !== null && (
-          <em>{historicalBook?.mode === "BOOK_ASSISTED_REQUIRED" ? "BOOK_ASSISTED · " : ""}不含盘口排队</em>
+          <em>
+            {accountHistory?.mode === "HISTORICAL_EXACT" ? "EXACT ACCOUNT INPUTS · " : "APPROX ACCOUNT · "}
+            {historicalBook?.mode === "BOOK_ASSISTED_REQUIRED" ? "BOOK_ASSISTED · " : ""}
+            不含盘口排队
+          </em>
         )}
       </header>
 
@@ -408,12 +417,75 @@ export function ReplayPaperTradingDock({
             <p>Funding：{contract === null ? "legacy" : recordText(contract.fidelity, "funding")}</p>
             <p>强平：{contract === null ? "unsupported" : recordText(contract.fidelity, "liquidation")}</p>
             <p>账本重算差异：{contract === null ? "n/a" : recordText(contract.ledger, "reconciliation_delta")}</p>
-            <small>当前代理 mark 只用于近似模拟账户风险；不是交易所历史权威 mark。</small>
+            <small>
+              {accountHistory?.mode === "HISTORICAL_EXACT"
+                ? "Mark/index、版本化交易规则与可选 funding 来自已固定并校验的归档；账户强平仍是本训练账户模型的计算事件。"
+                : "当前代理 mark 只用于近似模拟账户风险；不是交易所历史权威 mark。"}
+            </small>
+          </section>
+
+          {accountHistory !== null && (
+            <section
+              className="replay-rail-section replay-fidelity-panel"
+              data-replay-panel="account-history"
+              data-account-history-status={accountHistory.status}
+            >
+              <h2>账户历史与独立审计</h2>
+              <p><strong>{accountHistory.mode}</strong> · {accountHistory.status}</p>
+              <p>{accountHistory.fidelity}</p>
+              <p>Archive set proof：<code>{accountHistory.archive_proof_hash ?? "none"}</code></p>
+              <p>
+                Auditor：
+                <strong data-account-auditor-status={accountHistory.auditor.status}>
+                  {accountHistory.auditor.status}
+                </strong>
+                {accountHistory.auditor.proof_hash === null
+                  ? ""
+                  : ` · ${accountHistory.auditor.proof_hash}`}
+              </p>
+              {viewer !== undefined && (
+                <button
+                  type="button"
+                  data-replay-action="audit-account"
+                  disabled={viewer.viewerPending}
+                  onClick={() => void viewer.actions.auditAccount().catch(() => undefined)}
+                >
+                  重新运行独立账户审计
+                </button>
+              )}
+              {accountHistory.auditor.differences.length > 0 && (
+                <div className="replay-command-error" role="alert">
+                  审计发现 {accountHistory.auditor.differences.length} 项差异；Run 不应被视为可验证 exact 结果。
+                </div>
+              )}
+              {accountHistory.bindings.map((binding) => (
+                <article className="replay-list-card" key={`${binding.track_id}:${binding.archive_id}`}>
+                  <strong>{binding.track_id} · {binding.status}</strong>
+                  <span>Mark {binding.mark_price ?? "--"} · Index {binding.index_price ?? "--"}</span>
+                  <span>event #{binding.last_event_sequence} · generation {binding.archive_generation}</span>
+                  <code>{binding.archive_id}</code>
+                  <small>{binding.proof_hash}</small>
+                </article>
+              ))}
+              {accountHistory.mode === "APPROX_PROXY" && (
+                <small>未绑定历史账户归档；该结果明确保持 APPROX。</small>
+              )}
+            </section>
+          )}
+
+          <section
+            className="replay-rail-section replay-capability-boundary"
+            data-replay-panel="historical-market-liquidations"
+            data-replay-domain="historical-market-liquidation"
+          >
+            <h2>历史市场爆仓</h2>
+            <strong>{contract?.liquidation_channels.historical_market.fidelity ?? "UNSUPPORTED_NO_HISTORY"}</strong>
+            <p>这是独立市场数据域，不会用训练账户的模拟强平事件代替或冒充。</p>
           </section>
 
           <section className="replay-rail-section" data-replay-panel="simulated-liquidations" data-replay-domain="simulated-account-liquidation">
             <h2>模拟账户强平 · {contract?.liquidations.length ?? 0}</h2>
-            <small>与“历史市场爆仓”数据严格分域；这里仅展示训练账户领域事件。</small>
+            <small>{contract?.liquidation_channels.simulated_account.fidelity ?? "AVAILABLE_APPROX_SIMULATED_ACCOUNT"} · 与“历史市场爆仓”严格分域。</small>
             {contract === null || contract.liquidations.length === 0 ? (
               <p className="replay-empty">暂无模拟账户强平</p>
             ) : contract.liquidations.map((event, index) => (

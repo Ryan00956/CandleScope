@@ -122,6 +122,23 @@ function segmentPlanResponse(overrides: Record<string, unknown> = {}) {
       ready_archive_bytes: 0,
       max_archive_bytes: 1_099_511_627_776,
     },
+    account_history: {
+      protocol: "replay.account-history.archive.v1",
+      feature_enabled: false,
+      requested_mode: "APPROX_PROXY",
+      capability_state: "UNSUPPORTED_NO_HISTORY",
+      reason: "FEATURE_DISABLED",
+      fidelity: "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT",
+      supported_contract_model: "LINEAR_QUOTE_SETTLED_V1",
+      supported_position_mode: "ONE_WAY",
+      supported_margin_asset_mode: "SINGLE_QUOTE",
+      historical_funding_exact: false,
+      public_kline_proxy_accepted: false,
+      ready_archive_bytes: 0,
+      max_archive_bytes: 137_438_953_472,
+      coverage: null,
+      account_history_ref: null,
+    },
     ...overrides,
   };
 }
@@ -474,7 +491,8 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog);
   assert.equal(evaluation.canSubmit, true);
   assert.deepEqual(evaluation.unsupported, {
-    funding: "HISTORICAL_EXACT 缺少对齐的历史 funding 与 mark，创建时 fail closed",
+    account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact",
+    funding: "HISTORICAL_EXACT 仅在精确账户归档含完整 funding 与同刻 mark 时可用",
     historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队",
     rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
     isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
@@ -485,6 +503,8 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(request.time_disclosure_policy, "HIDE_ALL");
   assert.equal(request.integrity_mode, "CHALLENGE");
   assert.equal(request.funding_mode, "OFF");
+  assert.equal(request.account_data_mode, "APPROX_PROXY");
+  assert.equal(request.account_history_ref, null);
   assert.equal(request.fixed_funding_rate, null);
   assert.equal(request.funding_interval_ms, null);
   assert.equal(request.book_mode, "OFF");
@@ -519,7 +539,7 @@ test("Phase 6 create model enables isolated Sandbox funding but rejects historic
     catalog,
   );
   assert.equal(exact.canSubmit, false);
-  assert.match(exact.errors.join("\n"), /历史 funding.*mark|funding.*mark/);
+  assert.match(exact.errors.join("\n"), /精确资金费.*精确账户历史/);
 });
 
 test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan", () => {
@@ -604,7 +624,9 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /Practice 可审计变更白名单/);
   assert.match(html, /历史盘口.*连续、可 pin/);
   assert.match(html, /Phase 9 历史 L2/);
-  assert.match(html, /Phase 6 合约账户已启用/);
+  assert.match(html, /Phase 16 精确账户历史/);
+  assert.match(html, /公开 K 线代理.*拒绝/);
+  assert.match(html, /Phase 6 合约账户基础/);
   assert.match(html, /Phase 14 按需数据策略/);
   assert.match(html, /指标预热 BAR/);
   assert.match(html, /可见历史时长/);

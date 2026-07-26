@@ -213,6 +213,7 @@ test("create contract exposes all seven policies and explicit integrity allowlis
     marketSlippageBps: "1",
     marginMode: "CROSS" as const,
     fundingMode: "OFF" as const,
+    accountDataMode: "APPROX_PROXY" as const,
     fixedFundingRate: "0.0001",
     fundingIntervalMs: 28_800_000,
     bookMode: "OFF" as const,

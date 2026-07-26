@@ -107,13 +107,16 @@ function samePlanInputs(left: TrainingRunDraft, right: TrainingRunDraft): boolea
     && left.exchange === right.exchange
     && left.marketType === right.marketType
     && left.symbol === right.symbol
+    && left.settlementAsset === right.settlementAsset
     && left.baseInterval === right.baseInterval
     && left.displayInterval === right.displayInterval
     && left.requestedStartMs === right.requestedStartMs
     && left.indicatorWarmupBars === right.indicatorWarmupBars
     && left.visibleHistoryMode === right.visibleHistoryMode
     && left.visibleHistoryLookbackMs === right.visibleHistoryLookbackMs
-    && left.forwardCacheMs === right.forwardCacheMs;
+    && left.forwardCacheMs === right.forwardCacheMs
+    && left.accountDataMode === right.accountDataMode
+    && left.fundingMode === right.fundingMode;
 }
 
 export class TrainingHubLifecycle {
@@ -443,7 +446,14 @@ export class TrainingHubLifecycle {
     catalog: ReplayCatalog,
   ): Promise<ReplaySegmentPreparePlan | null> {
     if (this.api.segmentPlan === undefined || this.capabilities === null) return null;
-    const planningDraft: TrainingRunDraft = { ...draft, bookMode: "OFF" };
+    const planningDraft: TrainingRunDraft = {
+      ...draft,
+      bookMode: "OFF",
+      accountDataMode: "APPROX_PROXY",
+      fundingMode: draft.fundingMode === "HISTORICAL_EXACT"
+        ? "OFF"
+        : draft.fundingMode,
+    };
     const planningEvaluation = evaluateTrainingRunDraft(
       planningDraft,
       this.capabilities,
@@ -457,7 +467,19 @@ export class TrainingHubLifecycle {
       this.launchContext,
     );
     return this.api.segmentPlan(
-      { ...payload, book_mode: draft.bookMode },
+      {
+        ...payload,
+        book_mode: draft.bookMode,
+        funding_mode: draft.fundingMode,
+        account_data_mode: draft.accountDataMode,
+        account_history_ref: null,
+        fixed_funding_rate: draft.fundingMode === "SANDBOX_FIXED"
+          ? draft.fixedFundingRate
+          : null,
+        funding_interval_ms: draft.fundingMode === "SANDBOX_FIXED"
+          ? draft.fundingIntervalMs
+          : null,
+      },
       this.abortController.signal,
     );
   }

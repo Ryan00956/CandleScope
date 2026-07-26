@@ -7720,6 +7720,20 @@ body {
 .replay-rail-tabs button.active { color: #dbeafe; background: rgba(37, 99, 235, .22); }
 .replay-rail-section { padding: 13px; border-bottom: 1px solid #1e293b; }
 .replay-rail-section h2 { margin: 0 0 10px; color: #f1f5f9; font-size: 13px; }
+.replay-rail-section[data-replay-domain="simulated-account-liquidation"] {
+  border-left: 3px solid #f59e0b;
+  background: rgba(120, 53, 15, .12);
+}
+.replay-rail-section[data-replay-domain="simulated-account-liquidation"] h2 {
+  color: #fde68a;
+}
+.replay-rail-section[data-replay-domain="historical-market-liquidation"] {
+  border-left: 3px solid #38bdf8;
+  background: rgba(3, 105, 161, .09);
+}
+.replay-rail-section[data-replay-domain="historical-market-liquidation"] h2 {
+  color: #bae6fd;
+}
 .replay-metrics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
 .replay-metrics-grid div { min-width: 0; padding: 7px; border-radius: 5px; background: #111c2f; }
 .replay-metrics-grid dt { color: #64748b; font-size: 10px; }

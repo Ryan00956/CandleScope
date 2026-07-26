@@ -86,8 +86,10 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   assert.doesNotMatch(controls, /phase3Command\("step_(?:display|base|event)"/);
   assert.match(controls, /data-replay-action="cancel-advance"/);
   assert.match(viewerRuntime, /type === "advance"/);
-  assert.match(viewerRuntime, /const canonicalAdvance = active\?\.type === "advance"/);
-  assert.doesNotMatch(viewerRuntime, /canonicalVirtualAdvance/);
+  assert.match(viewerRuntime, /export function replayAdvanceIsCancelable/);
+  assert.match(viewerRuntime, /command\.payload\.basis === "VIRTUAL_TIME"/);
+  assert.match(viewerRuntime, /if \(!replayAdvanceIsCancelable\(active\)\) return/);
+  assert.match(controls, /const cancelableAdvancePending = replayAdvanceIsCancelable/);
   assert.match(viewerRuntime, /payload\.basis === "DISPLAY_BAR"/);
   assert.match(viewerRuntime, /defaultReplayV2Api\.advanceProgress/);
   assert.match(viewerRuntime, /"cancel_advance"/);

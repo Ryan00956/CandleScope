@@ -32,6 +32,7 @@ _REPLAY_BUDGETS: dict[str, int] = {
     "REPLAY_CONTROLLER_TTL_SECONDS": 10,
     "REPLAY_IDLE_TTL_SECONDS": 3_600,
     "REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES": 1_099_511_627_776,
+    "REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES": 137_438_953_472,
 }
 
 
@@ -58,6 +59,8 @@ class ReplaySettings:
     replay_fast_forward_optimization_enabled: bool = False
     replay_historical_book_enabled: bool = False
     replay_historical_book_max_archive_bytes: int = 1_099_511_627_776
+    replay_account_history_enabled: bool = False
+    replay_account_history_max_archive_bytes: int = 137_438_953_472
 
     @property
     def product_v2_available(self) -> bool:
@@ -152,6 +155,12 @@ def load_replay_settings(
         replay_historical_book_max_archive_bytes=values[
             "REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES"
         ],
+        replay_account_history_enabled=_strict_replay_bool(
+            environment, "REPLAY_ACCOUNT_HISTORY_ENABLED", "0"
+        ),
+        replay_account_history_max_archive_bytes=values[
+            "REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES"
+        ],
     )
 
 # Server
@@ -184,6 +193,10 @@ REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED = (
 REPLAY_HISTORICAL_BOOK_ENABLED = REPLAY_SETTINGS.replay_historical_book_enabled
 REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES = (
     REPLAY_SETTINGS.replay_historical_book_max_archive_bytes
+)
+REPLAY_ACCOUNT_HISTORY_ENABLED = REPLAY_SETTINGS.replay_account_history_enabled
+REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES = (
+    REPLAY_SETTINGS.replay_account_history_max_archive_bytes
 )
 REPLAY_DB_PATH = REPLAY_SETTINGS.db_path
 REPLAY_MAX_ACTIVE_SESSIONS = REPLAY_SETTINGS.max_active_sessions

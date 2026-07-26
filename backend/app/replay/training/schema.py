@@ -944,6 +944,195 @@ ON replay_training_advance_intent(run_id, status, updated_at_ms DESC);
 """
 
 
+TRAINING_SCHEMA_PHASE16_ADDITIVE = """
+CREATE TABLE IF NOT EXISTS replay_account_history_archive (
+    archive_id TEXT PRIMARY KEY,
+    identity_key TEXT NOT NULL UNIQUE,
+    protocol TEXT NOT NULL
+        CHECK (protocol = 'replay.account-history.archive.v1'),
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.account-history.linear.v1'),
+    exchange TEXT NOT NULL,
+    market_type TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    settlement_asset TEXT NOT NULL,
+    range_start_ms INTEGER NOT NULL CHECK (range_start_ms >= 0),
+    range_end_ms INTEGER NOT NULL CHECK (range_end_ms >= range_start_ms),
+    dataset_epoch TEXT NOT NULL
+        CHECK (
+            length(dataset_epoch) = 71
+            AND substr(dataset_epoch, 1, 7) = 'sha256:'
+        ),
+    checksum_sha256 TEXT NOT NULL
+        CHECK (
+            length(checksum_sha256) = 71
+            AND substr(checksum_sha256, 1, 7) = 'sha256:'
+        ),
+    proof_hash TEXT NOT NULL
+        CHECK (
+            length(proof_hash) = 71
+            AND substr(proof_hash, 1, 7) = 'sha256:'
+        ),
+    event_chain_tail TEXT NOT NULL
+        CHECK (
+            length(event_chain_tail) = 71
+            AND substr(event_chain_tail, 1, 7) = 'sha256:'
+        ),
+    rule_count INTEGER NOT NULL CHECK (rule_count >= 1),
+    mark_count INTEGER NOT NULL CHECK (mark_count >= 2),
+    funding_count INTEGER NOT NULL CHECK (funding_count >= 0),
+    event_count INTEGER NOT NULL CHECK (event_count >= rule_count + mark_count),
+    max_mark_gap_ms INTEGER NOT NULL CHECK (max_mark_gap_ms >= 1),
+    byte_size INTEGER NOT NULL CHECK (byte_size >= 1),
+    health TEXT NOT NULL
+        CHECK (health IN ('READY', 'QUARANTINED', 'EVICTED')),
+    local_path TEXT,
+    trusted_source_path TEXT NOT NULL,
+    trusted_origin TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    quarantine_reason TEXT,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    last_used_at_ms INTEGER NOT NULL CHECK (last_used_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    CHECK (
+        (health = 'EVICTED' AND local_path IS NULL)
+        OR
+        (health != 'EVICTED' AND local_path IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_account_history_archive_lookup
+ON replay_account_history_archive(
+    exchange, market_type, symbol, settlement_asset,
+    health, range_start_ms, range_end_ms
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_account_history (
+    run_id TEXT PRIMARY KEY
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    account_data_mode TEXT NOT NULL
+        CHECK (account_data_mode IN ('APPROX_PROXY', 'HISTORICAL_EXACT')),
+    status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'DEGRADED', 'PAUSED')),
+    fidelity TEXT NOT NULL,
+    archive_proof_hash TEXT
+        CHECK (
+            archive_proof_hash IS NULL
+            OR (
+                length(archive_proof_hash) = 71
+                AND substr(archive_proof_hash, 1, 7) = 'sha256:'
+            )
+        ),
+    degraded_reason TEXT,
+    auditor_status TEXT NOT NULL
+        CHECK (auditor_status IN ('NOT_RUN', 'PASS', 'FAIL')),
+    auditor_proof_hash TEXT
+        CHECK (
+            auditor_proof_hash IS NULL
+            OR (
+                length(auditor_proof_hash) = 71
+                AND substr(auditor_proof_hash, 1, 7) = 'sha256:'
+            )
+        ),
+    auditor_differences_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    CHECK (
+        (account_data_mode = 'APPROX_PROXY' AND archive_proof_hash IS NULL)
+        OR
+        (account_data_mode = 'HISTORICAL_EXACT' AND archive_proof_hash IS NOT NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS replay_account_history_ref (
+    archive_id TEXT NOT NULL
+        REFERENCES replay_account_history_archive(archive_id) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    binding_generation INTEGER NOT NULL CHECK (binding_generation >= 1),
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    bound_range_start_ms INTEGER NOT NULL CHECK (bound_range_start_ms >= 0),
+    bound_range_end_ms INTEGER NOT NULL
+        CHECK (bound_range_end_ms >= bound_range_start_ms),
+    dataset_epoch TEXT NOT NULL,
+    checksum_sha256 TEXT NOT NULL,
+    archive_generation INTEGER NOT NULL CHECK (archive_generation >= 1),
+    event_chain_tail TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    released_at_ms INTEGER CHECK (released_at_ms IS NULL OR released_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, binding_generation)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_replay_account_history_ref_active
+ON replay_account_history_ref(run_id, track_id)
+WHERE active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_replay_account_history_ref_archive
+ON replay_account_history_ref(archive_id, active);
+
+CREATE TABLE IF NOT EXISTS replay_account_history_projection (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    archive_id TEXT NOT NULL
+        REFERENCES replay_account_history_archive(archive_id) ON DELETE RESTRICT,
+    archive_generation INTEGER NOT NULL CHECK (archive_generation >= 1),
+    last_event_sequence INTEGER NOT NULL CHECK (last_event_sequence >= 0),
+    last_rule_sequence INTEGER NOT NULL CHECK (last_rule_sequence >= 0),
+    last_mark_sequence INTEGER NOT NULL CHECK (last_mark_sequence >= 0),
+    last_funding_sequence INTEGER NOT NULL CHECK (last_funding_sequence >= 0),
+    as_of_actual_time_ms INTEGER NOT NULL CHECK (as_of_actual_time_ms >= 0),
+    as_of_virtual_time_ms INTEGER NOT NULL CHECK (as_of_virtual_time_ms >= 0),
+    current_rule_json TEXT,
+    current_rule_hash TEXT,
+    mark_price TEXT,
+    index_price TEXT,
+    input_chain_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('READY', 'DEGRADED')),
+    degraded_reason TEXT,
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id)
+);
+
+CREATE TABLE IF NOT EXISTS replay_account_history_applied_event (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    archive_id TEXT NOT NULL,
+    archive_event_sequence INTEGER NOT NULL
+        CHECK (archive_event_sequence >= 1),
+    event_time_ms INTEGER NOT NULL CHECK (event_time_ms >= 0),
+    event_phase INTEGER NOT NULL CHECK (event_phase IN (10, 30, 40)),
+    event_kind TEXT NOT NULL CHECK (event_kind IN ('RULE', 'MARK_INDEX', 'FUNDING')),
+    component_sequence INTEGER NOT NULL CHECK (component_sequence >= 1),
+    archive_event_hash TEXT NOT NULL,
+    applied_payload_hash TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, archive_event_sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_account_history_applied_order
+ON replay_account_history_applied_event(
+    run_id, event_time_ms, event_phase, track_id, archive_event_sequence
+);
+
+CREATE TABLE IF NOT EXISTS replay_account_history_audit (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    audit_sequence INTEGER NOT NULL CHECK (audit_sequence >= 1),
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.account-audit.v1'),
+    status TEXT NOT NULL CHECK (status IN ('PASS', 'FAIL')),
+    proof_hash TEXT NOT NULL,
+    differences_json TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, audit_sequence)
+);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -1337,6 +1526,10 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     # Phase 15 remains additive at schema v9 so a Phase 14 binary can ignore
     # derived summaries and durable advance intents without rewriting them.
     _execute_script(connection, TRAINING_SCHEMA_PHASE15_ADDITIVE)
+    # Phase 16 keeps schema v9 for a whole-commit rollback to Phase 15. Exact
+    # account archives and their projections are additive and old binaries
+    # cannot accidentally interpret them as proxy account data.
+    _execute_script(connection, TRAINING_SCHEMA_PHASE16_ADDITIVE)
     connection.execute(
         """
         INSERT INTO replay_training_schema_version(singleton, version, applied_at_ms)

@@ -58,9 +58,16 @@ from .control import (
     virtual_duration_ms,
 )
 from .history import build_history_page
+from .account_history import (
+    FUNDING_EVENT_PHASE,
+    MARK_INDEX_EVENT_PHASE,
+    RULE_EVENT_PHASE,
+    AccountHistoryArchiveManager,
+)
 from .historical_book import HistoricalBookArchiveManager, HistoricalBookProjection
 from .fast_forward import FastForwardContext, FastForwardDecision, FastForwardPlanner
 from .models import (
+    AccountDataMode,
     AdvanceBasis,
     BookMode,
     FastForwardPlan,
@@ -146,6 +153,13 @@ class TrainingRunService:
                 replay_service.settings.replay_historical_book_max_archive_bytes
             ),
         )
+        self.account_history = AccountHistoryArchiveManager(
+            replay_service.store,
+            enabled=replay_service.settings.replay_account_history_enabled,
+            max_archive_bytes=(
+                replay_service.settings.replay_account_history_max_archive_bytes
+            ),
+        )
         self._run_id_factory = run_id_factory
         self._random_seed_factory = random_seed_factory
         self._fast_forward_planner = FastForwardPlanner()
@@ -158,6 +172,7 @@ class TrainingRunService:
         await self.store.start()
         await self.segments.start()
         await self.historical_books.start()
+        await self.account_history.start()
 
     async def shutdown(self) -> frozenset[str]:
         """Stop server-owned ordered playback before replay.v1 actors close."""
@@ -226,7 +241,37 @@ class TrainingRunService:
         return {
             **plan,
             "historical_book": await self.historical_books.plan_for_request(request),
+            "account_history": await self.account_history.plan_for_request(request),
         }
+
+    async def list_account_history_archives(self) -> dict[str, object]:
+        return await self.account_history.list_archives()
+
+    async def audit_account(self, run_id: str) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        projection = await self.store.get_market_tracks(normalized)
+        portfolio = projection.get("portfolio")
+        authoritative: Mapping[str, Mapping[str, object]] | None = None
+        if (
+            isinstance(portfolio, Mapping)
+            and isinstance(portfolio.get("account_history"), Mapping)
+            and portfolio["account_history"].get("mode") == "HISTORICAL_EXACT"  # type: ignore[union-attr]
+        ):
+            raw_tracks = projection.get("tracks")
+            if not isinstance(raw_tracks, list):
+                raise TypeError("exact account tracks projection is invalid")
+            authoritative = await self.account_history.authoritative_projections(
+                run_id=normalized,
+                tracks=tuple(
+                    track
+                    for track in raw_tracks
+                    if isinstance(track, Mapping)
+                ),
+            )
+        return await self.store.audit_account(
+            normalized,
+            authoritative_projections=authoritative,
+        )
 
     async def list_data_segments(
         self, *, run_id: str | None = None
@@ -960,6 +1005,17 @@ class TrainingRunService:
                 "policy": integrity["effective_time_disclosure_policy"],
                 "items": [],
             }
+        market_projection = await self.store.get_market_tracks(normalized)
+        portfolio = market_projection.get("portfolio")
+        account_audit = None
+        if (
+            isinstance(portfolio, Mapping)
+            and isinstance(portfolio.get("account_history"), Mapping)
+            and portfolio["account_history"].get("mode") == "HISTORICAL_EXACT"  # type: ignore[union-attr]
+        ):
+            account_audit = await self.audit_account(normalized)
+            market_projection = await self.store.get_market_tracks(normalized)
+            portfolio = market_projection.get("portfolio")
         return {
             "protocol": "replay.v2",
             "run_id": normalized,
@@ -969,6 +1025,12 @@ class TrainingRunService:
             "report": report["report"],
             "integrity": integrity,
             "public_time_index": public_time_index,
+            "modelled_account": portfolio,
+            "account_audit": account_audit,
+            "liquidation_channel_contract": {
+                "simulated_account": "MODELLED_ACCOUNT_NOT_MARKET_LIQUIDATION_FEED",
+                "historical_market": "INDEPENDENT_FEED_OR_UNSUPPORTED",
+            },
             **(
                 {"actual_history": report["actual_history"]}
                 if report.get("revealed") and "actual_history" in report
@@ -1006,6 +1068,25 @@ class TrainingRunService:
         normalized = self._identifier(run_id, field_name="run_id")
         normalized_event = self._identifier(event_id, field_name="event_id")
         market_tracks = await self.store.get_market_tracks(normalized)
+        portfolio = market_tracks.get("portfolio")
+        history = (
+            portfolio.get("account_history")
+            if isinstance(portfolio, Mapping)
+            else None
+        )
+        if isinstance(history, Mapping) and history.get("mode") == "HISTORICAL_EXACT":
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_REVIEW_FORK_UNSUPPORTED",
+                "Phase 16 exact-account Review is read-only; forking requires a "
+                "future archive-cursor-aware snapshot contract",
+                status_code=409,
+                details={
+                    "review_supported": True,
+                    "fork_supported": False,
+                    "original_run_mutated": False,
+                    "fallback_applied": False,
+                },
+            )
         tracks = market_tracks.get("tracks")
         if isinstance(tracks, list) and len(tracks) > 1:
             raise TrainingRunError(
@@ -1092,16 +1173,38 @@ class TrainingRunService:
             base_interval=request.base_interval,
             step_interval=request.display_interval,
         )
-        if request.funding_mode is FundingMode.HISTORICAL_EXACT:
+        if (
+            request.funding_mode is FundingMode.HISTORICAL_EXACT
+            and request.account_data_mode is not AccountDataMode.HISTORICAL_EXACT
+        ):
             raise TrainingRunError(
                 "HISTORICAL_FUNDING_UNAVAILABLE",
-                "historical exact funding requires aligned funding and mark coverage",
+                "historical exact funding requires exact account-history inputs",
                 status_code=409,
                 details={
                     "funding_rate": "UNSUPPORTED_NO_HISTORY",
                     "historical_mark": "UNSUPPORTED_NO_HISTORY",
                     "fallback_applied": False,
                 },
+            )
+        account_history_binding = None
+        if request.account_data_mode is AccountDataMode.HISTORICAL_EXACT:
+            if request.start_mode is not StartMode.MANUAL:
+                raise TrainingRunError(
+                    "ACCOUNT_HISTORY_MANUAL_START_REQUIRED",
+                    "historical exact account data requires a manual start",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            account_history_binding = await self.account_history.prepare_binding(
+                request=request,
+                bound_range_start_ms=history_policy.actual_replay_start_ms,
+                bound_range_end_ms=(
+                    history_policy.actual_replay_start_ms
+                    + request.forward_cache_ms
+                ),
+                actual_time_ms=history_policy.actual_replay_start_ms,
+                virtual_time_ms=history_policy.actual_replay_start_ms,
             )
         historical_book_binding = None
         if request.book_mode is BookMode.BOOK_ASSISTED_REQUIRED:
@@ -1143,6 +1246,7 @@ class TrainingRunService:
             actual_replay_end_ms: int,
         ):
             bound_book = historical_book_binding
+            bound_account = account_history_binding
             if bound_book is not None:
                 cursor = session_state.get("cursor")
                 if not isinstance(cursor, Mapping):
@@ -1153,6 +1257,18 @@ class TrainingRunService:
                         bound_book.projection,
                         actual_time_ms=actual_replay_start_ms,
                         virtual_time_ms=int(cursor["virtual_time_ms"]),
+                    ),
+                )
+            if bound_account is not None:
+                cursor = session_state.get("cursor")
+                if not isinstance(cursor, Mapping):
+                    raise TypeError("training adapter cursor must be an object")
+                bound_account = replace(
+                    bound_account,
+                    projection=replace(
+                        bound_account.projection,
+                        as_of_actual_time_ms=actual_replay_start_ms,
+                        as_of_virtual_time_ms=int(cursor["virtual_time_ms"]),
                     ),
                 )
             return self.store.initial_run_writer(
@@ -1168,6 +1284,7 @@ class TrainingRunService:
                 actual_replay_end_ms=actual_replay_end_ms,
                 history_policy=history_policy,
                 historical_book_binding=bound_book,
+                account_history_binding=bound_account,
             )
 
         try:
@@ -1391,6 +1508,27 @@ class TrainingRunService:
             return replayed
 
         binding = await self.store.run_binding(normalized_run)
+        if (
+            str(binding.get("account_data_mode"))
+            == AccountDataMode.HISTORICAL_EXACT.value
+            and (
+                not self.account_history.enabled
+                or str(binding.get("account_history_status")) != "ACTIVE"
+            )
+        ):
+            raise TrainingRunError(
+                (
+                    "ACCOUNT_HISTORY_DISABLED"
+                    if not self.account_history.enabled
+                    else "ACCOUNT_HISTORY_ARCHIVE_DEGRADED"
+                ),
+                "exact account inputs are unavailable; the Run remains paused",
+                status_code=409,
+                details={
+                    "compatibility": binding["compatibility"],
+                    "fallback_applied": False,
+                },
+            )
         if binding["compatibility"] != "READY":
             if (
                 str(binding.get("book_mode", "OFF"))
@@ -1785,9 +1923,25 @@ class TrainingRunService:
             ReplayV2CommandType.SET_SPEED,
             ReplayV2CommandType.RELEASE_CONTROLLER,
         }
+        exact_account_ordered_types = contract_ordered_types | {
+            ReplayV2CommandType.STEP_EVENT,
+            ReplayV2CommandType.STEP_BASE,
+            ReplayV2CommandType.STEP_DISPLAY,
+            ReplayV2CommandType.ADVANCE,
+            ReplayV2CommandType.ADVANCE_BY,
+            ReplayV2CommandType.ADVANCE_TO,
+        }
+        exact_account_clock = (
+            binding.get("account_data_mode")
+            == AccountDataMode.HISTORICAL_EXACT.value
+        )
         multi_track_command = (
             len(full_tracks) > 1
             or (contract_clock and command.type in contract_ordered_types)
+            or (
+                exact_account_clock
+                and command.type in exact_account_ordered_types
+            )
             or (
             command.type is ReplayV2CommandType.END and len(all_tracks) > 1
             )
@@ -2305,6 +2459,39 @@ class TrainingRunService:
             display_interval=base_config.base_interval,
         )
         historical_book_binding = None
+        account_history_binding = None
+        if (
+            str(binding.get("account_data_mode"))
+            == AccountDataMode.HISTORICAL_EXACT.value
+            and requested_tier in {SubscriptionTier.WARM, SubscriptionTier.FULL}
+        ):
+            actual_time_ms = self._actual_event_time_ms(
+                binding,
+                target_virtual_time_ms,
+            )
+            account_history_binding = (
+                await self.account_history.prepare_track_binding(
+                    exchange=str(track["exchange"]),
+                    market_type=str(track["market_type"]),
+                    symbol=str(track["symbol"]),
+                    settlement_asset=str(track["settlement_asset"]),
+                    source_kind=str(track["source_kind"]),
+                    bound_range_start_ms=_stored_counter(
+                        binding["actual_replay_start_ms"],
+                        field_name="actual_replay_start_ms",
+                    ),
+                    bound_range_end_ms=_stored_counter(
+                        binding["actual_replay_end_ms"],
+                        field_name="actual_replay_end_ms",
+                    ),
+                    actual_time_ms=actual_time_ms,
+                    virtual_time_ms=target_virtual_time_ms,
+                    require_funding=(
+                        str(binding.get("funding_mode"))
+                        == FundingMode.HISTORICAL_EXACT.value
+                    ),
+                )
+            )
         if (
             str(binding.get("book_mode")) == BookMode.BOOK_ASSISTED_REQUIRED.value
             and requested_tier is SubscriptionTier.FULL
@@ -2333,6 +2520,7 @@ class TrainingRunService:
             track_id=str(track["track_id"]),
             requested_tier=requested_tier.value,
             historical_book_binding=historical_book_binding,
+            account_history_binding=account_history_binding,
         )
         try:
             created = await self.replay_service.create_session(
@@ -2431,6 +2619,11 @@ class TrainingRunService:
                 status_code=409,
             )
         if command.type is ReplayV2CommandType.PLACE_ORDER:
+            self._assert_exact_account_order_filters(
+                payload=payload,
+                selected_track=selected,
+                portfolio=projection.get("portfolio"),
+            )
             self._assert_shared_settlement_reservation(
                 payload=payload,
                 selected_track=selected,
@@ -2457,6 +2650,7 @@ class TrainingRunService:
                 status_code=exc.http_status,
                 details=exc.details,
             ) from exc
+        await self.store.finalize_account_history(command.run_id)
         adapter_data = dict(
             _stored_mapping(
                 acknowledged.get("data"),
@@ -2489,6 +2683,131 @@ class TrainingRunService:
                 "simulated_account_liquidations": liquidation_count,
             },
         )
+
+    @staticmethod
+    def _assert_exact_account_order_filters(
+        *,
+        payload: Mapping[str, object],
+        selected_track: Mapping[str, object],
+        portfolio: object,
+    ) -> None:
+        if not isinstance(portfolio, Mapping):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "run portfolio projection is invalid",
+                status_code=503,
+            )
+        history = portfolio.get("account_history")
+        if not isinstance(history, Mapping) or history.get("mode") != "HISTORICAL_EXACT":
+            return
+        if history.get("status") != "ACTIVE":
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_ARCHIVE_DEGRADED",
+                "exact account inputs are not active",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        raw_rules = portfolio.get("instrument_rules")
+        if not isinstance(raw_rules, list):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "exact instrument-rule projection is invalid",
+                status_code=503,
+            )
+        selected_id = str(selected_track["track_id"])
+        active = next(
+            (
+                item
+                for item in raw_rules
+                if isinstance(item, Mapping)
+                and item.get("track_id") == selected_id
+            ),
+            None,
+        )
+        if not isinstance(active, Mapping) or not isinstance(
+            active.get("rule"), Mapping
+        ):
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_RULE_MISSING",
+                "selected exact account track has no active historical rule",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        rule = active["rule"]
+        assert isinstance(rule, Mapping)
+        try:
+            quantity = Decimal(str(payload["quantity"]))
+            step = Decimal(str(rule["quantity_step"]))
+            minimum = Decimal(str(rule["min_quantity"]))
+            maximum = Decimal(str(rule["max_quantity"]))
+            if quantity < minimum or quantity > maximum or quantity % step != 0:
+                raise TrainingRunError(
+                    "ACCOUNT_HISTORY_QUANTITY_FILTER",
+                    "order quantity violates the active historical exchange rule",
+                    status_code=422,
+                    details={
+                        "rule_revision": active.get("revision"),
+                        "min_quantity": str(minimum),
+                        "max_quantity": str(maximum),
+                        "quantity_step": str(step),
+                    },
+                )
+            for field_name in ("limit_price", "stop_price"):
+                raw = payload.get(field_name)
+                if raw is None:
+                    continue
+                price = Decimal(str(raw))
+                tick = Decimal(str(rule["price_tick"]))
+                if price <= 0 or price % tick != 0:
+                    raise TrainingRunError(
+                        "ACCOUNT_HISTORY_PRICE_FILTER",
+                        f"{field_name} violates the active historical price tick",
+                        status_code=422,
+                        details={
+                            "rule_revision": active.get("revision"),
+                            "price_tick": str(tick),
+                        },
+                    )
+            position = selected_track.get("position")
+            if not isinstance(position, Mapping):
+                raise TypeError("selected exact position is invalid")
+            reference = (
+                payload.get("limit_price")
+                or payload.get("stop_price")
+                or position.get("mark_price")
+            )
+            price = Decimal(str(reference))
+            contract_size = Decimal(str(rule["contract_size"]))
+            notional = quantity * price * contract_size
+            if payload.get("reduce_only") is not True:
+                minimum_notional = Decimal(str(rule["min_notional"]))
+                maximum_notional = Decimal(str(rule["max_notional"]))
+                existing_notional = Decimal(str(position.get("notional", "0")))
+                if (
+                    notional < minimum_notional
+                    or notional > maximum_notional
+                    or existing_notional + notional > maximum_notional
+                ):
+                    raise TrainingRunError(
+                        "ACCOUNT_HISTORY_NOTIONAL_FILTER",
+                        "order notional violates the active historical exchange rule",
+                        status_code=422,
+                        details={
+                            "rule_revision": active.get("revision"),
+                            "min_notional": str(minimum_notional),
+                            "max_notional": str(maximum_notional),
+                            "order_notional": str(notional),
+                        },
+                    )
+        except TrainingRunError:
+            raise
+        except (InvalidOperation, KeyError, TypeError, ZeroDivisionError) as exc:
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_RULE_INVALID",
+                "active historical order filters are invalid",
+                status_code=409,
+                details={"fallback_applied": False},
+            ) from exc
 
     async def _reconcile_liquidations(
         self,
@@ -2643,11 +2962,42 @@ class TrainingRunService:
             )
         price_value = payload.get("limit_price") or payload.get("stop_price")
         if price_value is None:
-            price_value = selected_track.get("public_price")
+            position = selected_track.get("position")
+            price_value = (
+                position.get("mark_price")
+                if isinstance(position, Mapping)
+                else selected_track.get("public_price")
+            )
         try:
             quantity = Decimal(str(payload["quantity"]))
             price = Decimal(str(price_value))
             leverage = Decimal(str(config["max_leverage"]))
+            contract_size = Decimal(1)
+            history = portfolio.get("account_history")
+            if isinstance(history, Mapping) and history.get("mode") == "HISTORICAL_EXACT":
+                rules = portfolio.get("instrument_rules")
+                if not isinstance(rules, list):
+                    raise TypeError("exact instrument rules are missing")
+                active = next(
+                    (
+                        item
+                        for item in rules
+                        if isinstance(item, Mapping)
+                        and item.get("track_id") == selected_track.get("track_id")
+                    ),
+                    None,
+                )
+                if not isinstance(active, Mapping) or not isinstance(
+                    active.get("rule"), Mapping
+                ):
+                    raise TypeError("exact active instrument rule is missing")
+                exact_rule = active["rule"]
+                assert isinstance(exact_rule, Mapping)
+                contract_size = Decimal(str(exact_rule["contract_size"]))
+                leverage = min(
+                    leverage,
+                    Decimal(str(exact_rule["max_leverage"])),
+                )
             if portfolio.get("margin_mode") == "ISOLATED":
                 allocations = portfolio.get("isolated_allocations")
                 track_account = selected_track.get("account")
@@ -2675,7 +3025,7 @@ class TrainingRunService:
                     )
             else:
                 available = Decimal(str(portfolio["available_equity"]))
-            reservation = (quantity * price / leverage).quantize(
+            reservation = (quantity * price * contract_size / leverage).quantize(
                 Decimal("0.00000001"),
                 rounding=ROUND_CEILING,
             )
@@ -3098,7 +3448,11 @@ class TrainingRunService:
                 )
             total_events: list[StableMarketEvent] = []
             for _ in range(count):
-                next_time = await self._next_global_event_time(ordered)
+                next_time = await self._next_global_event_time(
+                    run_id=command.run_id,
+                    binding=binding,
+                    tracks=ordered,
+                )
                 wave = await self._advance_full_tracks_to(
                     command=command,
                     binding=binding,
@@ -3401,7 +3755,11 @@ class TrainingRunService:
                     consumed_wall_seconds = 0.0
                     if basis is AdvanceBasis.VIRTUAL_TIME:
                         try:
-                            next_time = await self._next_global_event_time(tracks)
+                            next_time = await self._next_global_event_time(
+                                run_id=run_id,
+                                binding=binding,
+                                tracks=tracks,
+                            )
                         except TrainingRunError as exc:
                             if exc.code != "REPLAY_CONTROL_UNAVAILABLE":
                                 raise
@@ -3756,6 +4114,18 @@ class TrainingRunService:
         target_virtual_time_ms: int,
         job: dict[str, object] | None = None,
     ) -> tuple[StableMarketEvent, ...]:
+        await self.account_history.guard_run(
+            run_id=command.run_id,
+            tracks=tracks,
+        )
+        pending_account_events = await self.store.pending_account_global_events(
+            command.run_id
+        )
+        if pending_account_events:
+            await self.store.record_global_events(
+                command.run_id,
+                pending_account_events,
+            )
         prepared_book: tuple[tuple[str, HistoricalBookProjection], ...] = ()
         if str(binding.get("book_mode", "OFF")) == BookMode.BOOK_ASSISTED_REQUIRED.value:
             prepared_book = await self.historical_books.prepare_run_projection(
@@ -3825,7 +4195,41 @@ class TrainingRunService:
                     status_code=409,
                 )
             current = next(iter(times))
-            if current >= target_virtual_time_ms:
+            target_actual_time_ms = self._actual_event_time_ms(
+                binding,
+                target_virtual_time_ms,
+            )
+            next_account_actual = await self.account_history.next_event_time(
+                run_id=command.run_id,
+                tracks=tracks,
+                target_actual_time_ms=target_actual_time_ms,
+                guarded=True,
+            )
+            next_account_virtual = (
+                None
+                if next_account_actual is None
+                else self._virtual_event_time_ms(
+                    binding,
+                    next_account_actual,
+                )
+            )
+            if (
+                next_account_virtual is not None
+                and next_account_virtual < current
+            ):
+                raise TrainingRunError(
+                    "ACCOUNT_HISTORY_CURSOR_BEHIND_MARKET",
+                    "account timeline fell behind the committed market cursor",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            if (
+                current >= target_virtual_time_ms
+                and (
+                    next_account_virtual is None
+                    or next_account_virtual > current
+                )
+            ):
                 if prepared_book:
                     await self.historical_books.commit_run_projection(
                         run_id=command.run_id,
@@ -3834,10 +4238,39 @@ class TrainingRunService:
                 if job is not None:
                     job["status"] = "COMPLETED"
                     job["current_virtual_time_ms"] = current
+                await self.store.audit_account(command.run_id)
                 return tuple(all_events)
-            wave_time = min(next_times) if next_times else target_virtual_time_ms
+            candidate_times = [*next_times, target_virtual_time_ms]
+            if next_account_virtual is not None:
+                candidate_times.append(next_account_virtual)
+            wave_time = min(candidate_times)
             wave_events: list[StableMarketEvent] = []
+            actual_wave_time = self._actual_event_time_ms(binding, wave_time)
+            account_events = await self.account_history.events_at(
+                run_id=command.run_id,
+                tracks=tracks,
+                actual_time_ms=actual_wave_time,
+                guarded=True,
+            )
+            pre_account_events = tuple(
+                item
+                for item in account_events
+                if item[1].event_phase == RULE_EVENT_PHASE
+            )
+            post_account_events = tuple(
+                item
+                for item in account_events
+                if item[1].event_phase
+                in {MARK_INDEX_EVENT_PHASE, FUNDING_EVENT_PHASE}
+            )
             try:
+                wave_events.extend(
+                    await self.store.apply_account_history_events(
+                        command.run_id,
+                        events=pre_account_events,
+                        virtual_time_ms=wave_time,
+                    )
+                )
                 for track, before in snapshots:
                     before_cursor = before.get("cursor")
                     if not isinstance(before_cursor, Mapping):
@@ -3883,6 +4316,17 @@ class TrainingRunService:
                                 source_sequence=sequence,
                             )
                         )
+                wave_events.extend(
+                    await self.store.apply_account_history_events(
+                        command.run_id,
+                        events=post_account_events,
+                        virtual_time_ms=wave_time,
+                    )
+                )
+                await self.store.finalize_account_history(
+                    command.run_id,
+                    write_audit=False,
+                )
             except (ReplayDomainError, TrainingRunError) as exc:
                 await self._fail_closed_multi_track(
                     run_id=command.run_id,
@@ -3926,6 +4370,7 @@ class TrainingRunService:
                 cancel = job.get("cancel")
                 if isinstance(cancel, asyncio.Event) and cancel.is_set():
                     job["status"] = "CANCELLED"
+                    await self.store.audit_account(command.run_id)
                     return tuple(all_events)
             await asyncio.sleep(0)
         raise TrainingRunError(
@@ -3949,6 +4394,26 @@ class TrainingRunService:
             )
             + virtual_time_ms
             - _stored_counter(synthetic_origin, field_name="synthetic_origin_ms")
+        )
+
+    @staticmethod
+    def _virtual_event_time_ms(
+        binding: Mapping[str, object],
+        actual_time_ms: int,
+    ) -> int:
+        synthetic_origin = binding.get("synthetic_origin_ms")
+        if synthetic_origin is None:
+            return actual_time_ms
+        return (
+            _stored_counter(
+                synthetic_origin,
+                field_name="synthetic_origin_ms",
+            )
+            + actual_time_ms
+            - _stored_counter(
+                binding["actual_replay_start_ms"],
+                field_name="actual_replay_start_ms",
+            )
         )
 
     async def _guard_historical_book_current(
@@ -3993,6 +4458,9 @@ class TrainingRunService:
 
     async def _next_global_event_time(
         self,
+        *,
+        run_id: str,
+        binding: Mapping[str, object],
         tracks: tuple[Mapping[str, object], ...],
     ) -> int:
         candidates: list[int] = []
@@ -4008,6 +4476,18 @@ class TrainingRunService:
                 plan["last_event_time_ms"], int
             ):
                 candidates.append(int(plan["last_event_time_ms"]))
+        next_account_actual = await self.account_history.next_event_time(
+            run_id=run_id,
+            tracks=tracks,
+            target_actual_time_ms=_stored_counter(
+                binding["actual_replay_end_ms"],
+                field_name="actual_replay_end_ms",
+            ),
+        )
+        if next_account_actual is not None:
+            candidates.append(
+                self._virtual_event_time_ms(binding, next_account_actual)
+            )
         if not candidates:
             raise TrainingRunError(
                 "REPLAY_CONTROL_UNAVAILABLE",
@@ -4684,6 +5164,11 @@ class TrainingRunService:
             dependencies.add("MULTI_TRACK_GLOBAL_ORDER")
         if str(binding.get("funding_mode")) != "OFF":
             dependencies.add("FUNDING_SCHEDULE")
+        if (
+            str(binding.get("account_data_mode"))
+            == AccountDataMode.HISTORICAL_EXACT.value
+        ):
+            dependencies.add("ACCOUNT_HISTORY_TIMELINE")
         if str(binding.get("account_status")) != "ACTIVE":
             dependencies.add("ACCOUNT_RISK_STATE")
         if str(binding.get("book_mode", "OFF")) != "OFF":
@@ -4764,6 +5249,15 @@ class TrainingRunService:
         snapshot: Mapping[str, object],
         target_virtual_time_ms: int,
     ) -> Mapping[str, object]:
+        if (
+            str(binding.get("account_data_mode"))
+            == AccountDataMode.HISTORICAL_EXACT.value
+        ):
+            return {
+                "status": "BLOCKED",
+                "reason_code": "ACCOUNT_HISTORY_TIMELINE_REFERENCE_PATH_REQUIRED",
+                "summary": None,
+            }
         if not bool(
             self.replay_service.settings.replay_fast_forward_optimization_enabled
         ):

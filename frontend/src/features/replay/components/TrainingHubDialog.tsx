@@ -83,6 +83,8 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
       : "正在校验数据…";
   const historicalBook = runtime.segmentPlan?.historical_book ?? null;
   const historicalBookExact = historicalBook?.capability_state === "AVAILABLE_EXACT";
+  const accountHistory = runtime.segmentPlan?.account_history ?? null;
+  const accountHistoryExact = accountHistory?.capability_state === "AVAILABLE_EXACT";
   const startWindow = evaluation.selectedEntry === null
     ? null
     : replayStartWindow(evaluation.selectedEntry);
@@ -198,7 +200,9 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               const integrityMode = event.target.value as TrainingRunDraft["integrityMode"];
               patchDraft(runtime, {
                 integrityMode,
-                fundingMode: integrityMode === "SANDBOX" ? draft.fundingMode : "OFF",
+                fundingMode: integrityMode === "SANDBOX" || draft.fundingMode !== "SANDBOX_FIXED"
+                  ? draft.fundingMode
+                  : "OFF",
                 allowedMutations: integrityMode === "CHALLENGE"
                   ? []
                   : integrityMode === "SANDBOX"
@@ -319,6 +323,25 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           </select>
         </label>
         <label>
+          账户数据
+          <select
+            value={draft.accountDataMode}
+            onChange={(event) => {
+              const accountDataMode = event.target.value as TrainingRunDraft["accountDataMode"];
+              patchDraft(runtime, {
+                accountDataMode,
+                fundingMode: accountDataMode === "HISTORICAL_EXACT"
+                  ? draft.fundingMode === "SANDBOX_FIXED" ? "OFF" : draft.fundingMode
+                  : draft.fundingMode === "HISTORICAL_EXACT" ? "OFF" : draft.fundingMode,
+              });
+            }}
+          >
+            <option value="APPROX_PROXY">APPROX_PROXY · 已揭示价格代理模拟账户</option>
+            <option value="HISTORICAL_EXACT">HISTORICAL_EXACT · 固定历史 mark/index/规则</option>
+          </select>
+          <small>Exact 必须手动起点，并由服务端返回不可变 archive ref；不会接受公开 K 线代理。</small>
+        </label>
+        <label>
           资金费模式
           <select
             value={draft.fundingMode}
@@ -330,8 +353,13 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             <option value="SANDBOX_FIXED" disabled={draft.integrityMode !== "SANDBOX"}>
               SANDBOX_FIXED · 近似练习
             </option>
-            <option value="HISTORICAL_EXACT" disabled>
-              HISTORICAL_EXACT · 缺历史 mark/funding
+            <option
+              value="HISTORICAL_EXACT"
+              disabled={draft.accountDataMode !== "HISTORICAL_EXACT"
+                || !accountHistoryExact
+                || !accountHistory?.historical_funding_exact}
+            >
+              HISTORICAL_EXACT · 归档结算
             </option>
           </select>
         </label>
@@ -469,10 +497,25 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             <li><strong>Queue exact</strong> — 否</li>
           </ul>
         )}
-        <h3>Phase 6 合约账户已启用</h3>
+        <h3>Phase 16 精确账户历史</h3>
+        {accountHistory === null ? (
+          <p>尚无当前参数的服务端校验结果；HISTORICAL_EXACT 保持 fail closed。</p>
+        ) : (
+          <ul data-account-history-capability={accountHistory.capability_state}>
+            <li><strong>能力</strong> — {accountHistory.capability_state} · {accountHistory.reason}</li>
+            <li><strong>模型</strong> — {accountHistory.supported_contract_model} · {accountHistory.supported_position_mode} · {accountHistory.supported_margin_asset_mode}</li>
+            <li><strong>Mark / index / 规则</strong> — {accountHistoryExact ? "固定归档 exact" : "不可用"}</li>
+            <li><strong>Funding</strong> — {accountHistory.historical_funding_exact ? "完整历史结算可用" : "无完整 exact 结算"}</li>
+            <li><strong>公开 K 线代理</strong> — {accountHistory.public_kline_proxy_accepted ? "接受" : "拒绝"}</li>
+            <li><strong>本地 READY</strong> — {formatBytes(accountHistory.ready_archive_bytes)} / {formatBytes(accountHistory.max_archive_bytes)}</li>
+            <li><strong>Archive ref</strong> — <code>{accountHistory.account_history_ref?.archive_id ?? "none"}</code></li>
+          </ul>
+        )}
+        <h3>Phase 6 合约账户基础</h3>
         <p>Run 仍固定使用 TOUCH_OR_TAPE_V2；BOOK_ASSISTED 只增加连续 L2 能力门禁与报告区分，当前已揭示参考价立即 taker，后续触价挂单 maker，并持续标注“不含盘口排队”。</p>
         <h3>能力与 fidelity 边界</h3>
         <ul>
+          <li><strong>账户历史</strong> — {evaluation.unsupported.account_history}</li>
           <li><strong>资金费</strong> — {evaluation.unsupported.funding}</li>
           <li><strong>历史盘口</strong> — {evaluation.unsupported.historical_l2}</li>
           <li><strong>动态规则</strong> — {evaluation.unsupported.rule_changes}</li>

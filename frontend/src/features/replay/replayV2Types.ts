@@ -35,10 +35,13 @@ export const REPLAY_V2_ENUMS = Object.freeze({
     "FUNDING",
     "ORDER_BOOK",
     "SIMULATED_LIQUIDATION",
+    "HISTORICAL_MARK_INDEX",
+    "HISTORICAL_INSTRUMENT_RULE",
   ),
   capability_state: enumValues(
     "AVAILABLE_EXACT",
     "AVAILABLE_APPROX",
+    "AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT",
     "UNSUPPORTED_NO_HISTORY",
     "UNSUPPORTED_SOURCE_MODE",
     "LOADING",
@@ -53,6 +56,7 @@ export const REPLAY_V2_ENUMS = Object.freeze({
   book_mode: enumValues("OFF", "BOOK_ASSISTED_REQUIRED"),
   margin_mode: enumValues("CROSS", "ISOLATED"),
   funding_mode: enumValues("OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"),
+  account_data_mode: enumValues("APPROX_PROXY", "HISTORICAL_EXACT"),
   execution_model: enumValues("TOUCH_OR_TAPE_V2"),
   advance_basis: enumValues(
     "DISPLAY_BAR",
@@ -129,6 +133,9 @@ export type ReplayV2CommandType = EnumValue<typeof REPLAY_V2_ENUMS.command_type>
 export type ReplayV2EventType = EnumValue<typeof REPLAY_V2_ENUMS.event_type>;
 export type ReplayV2MarginMode = EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
 export type ReplayV2FundingMode = EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
+export type ReplayV2AccountDataMode = EnumValue<
+  typeof REPLAY_V2_ENUMS.account_data_mode
+>;
 export type ReplayV2BookMode = EnumValue<typeof REPLAY_V2_ENUMS.book_mode>;
 
 export interface ReplayV2Cursor {
@@ -201,6 +208,63 @@ export interface ReplayHistoricalBookProjection {
   readonly message: string;
 }
 
+export interface ReplayAccountHistoryRef {
+  readonly schema_version: "replay.account-history-ref.v1";
+  readonly archive_id: string;
+  readonly dataset_epoch: `sha256:${string}`;
+  readonly checksum_sha256: `sha256:${string}`;
+}
+
+export interface ReplayAccountHistoryBindingProjection {
+  readonly track_id: string;
+  readonly archive_id: string;
+  readonly dataset_epoch: `sha256:${string}`;
+  readonly checksum_sha256: `sha256:${string}`;
+  readonly proof_hash: `sha256:${string}`;
+  readonly event_chain_tail: `sha256:${string}`;
+  readonly archive_generation: number;
+  readonly last_event_sequence: number;
+  readonly as_of_actual_time_ms: number;
+  readonly as_of_virtual_time_ms: number;
+  readonly mark_price: string | null;
+  readonly index_price: string | null;
+  readonly status: "READY" | "DEGRADED";
+}
+
+export interface ReplayAccountHistoryProjection {
+  readonly mode: ReplayV2AccountDataMode;
+  readonly status: "ACTIVE" | "DEGRADED";
+  readonly fidelity:
+    | "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT"
+    | "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT";
+  readonly archive_proof_hash: `sha256:${string}` | null;
+  readonly bindings: readonly ReplayAccountHistoryBindingProjection[];
+  readonly auditor: {
+    readonly status: "NOT_RUN" | "PASS" | "FAIL";
+    readonly proof_hash: `sha256:${string}` | null;
+    readonly differences: readonly Readonly<Record<string, ReplayV2Json>>[];
+  };
+}
+
+export interface ReplayAccountAuditResponse {
+  readonly schema_version: "replay.account-audit.v1";
+  readonly status: "PASS" | "FAIL";
+  readonly proof_hash: `sha256:${string}`;
+  readonly differences: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly snapshot: Readonly<Record<string, ReplayV2Json>>;
+}
+
+export interface ReplayLiquidationChannelProjection {
+  readonly label: string;
+  readonly source:
+    | "MODELLED_ACCOUNT"
+    | "INDEPENDENT_MARKET_LIQUIDATION_FEED";
+  readonly fidelity:
+    | "AVAILABLE_APPROX_SIMULATED_ACCOUNT"
+    | "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
+    | "UNSUPPORTED_NO_HISTORY";
+}
+
 export interface ReplayTrainingPortfolioV1 {
   readonly schema_version: "replay.training.portfolio.v1";
   readonly fidelity: "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER";
@@ -249,6 +313,11 @@ export interface ReplayTrainingContractPortfolio {
   readonly isolated_allocations: Readonly<Record<string, ReplayV2Json>>;
   readonly next_funding_time_ms: number | null;
   readonly liquidations: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly account_history: ReplayAccountHistoryProjection;
+  readonly liquidation_channels: {
+    readonly simulated_account: ReplayLiquidationChannelProjection;
+    readonly historical_market: ReplayLiquidationChannelProjection;
+  };
   readonly ledger: Readonly<Record<string, ReplayV2Json>>;
   readonly fidelity: Readonly<Record<string, ReplayV2Json>>;
 }
@@ -789,7 +858,248 @@ function parseHistoricalBookProjection(value: unknown): ReplayHistoricalBookProj
   };
 }
 
-function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
+export function parseReplayAccountHistoryRef(
+  value: unknown,
+  fieldName = "account_history_ref",
+): ReplayAccountHistoryRef {
+  const reference = exactObject(value, fieldName, [
+    "schema_version",
+    "archive_id",
+    "dataset_epoch",
+    "checksum_sha256",
+  ]);
+  if (reference.schema_version !== "replay.account-history-ref.v1") {
+    throw new TypeError(`${fieldName}.schema_version is unsupported`);
+  }
+  return {
+    schema_version: "replay.account-history-ref.v1",
+    archive_id: identifier(reference.archive_id, `${fieldName}.archive_id`),
+    dataset_epoch: digest(reference.dataset_epoch, `${fieldName}.dataset_epoch`),
+    checksum_sha256: digest(reference.checksum_sha256, `${fieldName}.checksum_sha256`),
+  };
+}
+
+export function parseReplayAccountAuditResponse(
+  value: unknown,
+): ReplayAccountAuditResponse {
+  const audit = exactObject(value, "account audit", [
+    "schema_version",
+    "status",
+    "proof_hash",
+    "differences",
+    "snapshot",
+  ]);
+  if (audit.schema_version !== "replay.account-audit.v1") {
+    throw new TypeError("account audit schema is unsupported");
+  }
+  const status = enumValue(audit.status, enumValues("PASS", "FAIL"), "account audit.status");
+  if (!Array.isArray(audit.differences)) {
+    throw new TypeError("account audit.differences must be an array");
+  }
+  const differences = audit.differences.map((item, index) => jsonObject(
+    item,
+    `account audit.differences[${index}]`,
+  ));
+  const snapshot = jsonObject(audit.snapshot, "account audit.snapshot");
+  if (snapshot.schema_version !== "replay.account-audit.v1"
+    || (status === "PASS" && differences.length !== 0)
+    || (status === "FAIL" && differences.length === 0)) {
+    throw new TypeError("account audit proof is inconsistent");
+  }
+  return {
+    schema_version: "replay.account-audit.v1",
+    status,
+    proof_hash: digest(audit.proof_hash, "account audit.proof_hash"),
+    differences,
+    snapshot,
+  };
+}
+
+function parseReplayAccountHistoryProjection(
+  value: unknown,
+): ReplayAccountHistoryProjection {
+  const history = exactObject(value, "portfolio.account_history", [
+    "mode",
+    "status",
+    "fidelity",
+    "archive_proof_hash",
+    "bindings",
+    "auditor",
+  ]);
+  const mode = enumValue(
+    history.mode,
+    REPLAY_V2_ENUMS.account_data_mode,
+    "portfolio.account_history.mode",
+  );
+  const status = enumValue(
+    history.status,
+    enumValues("ACTIVE", "DEGRADED"),
+    "portfolio.account_history.status",
+  );
+  const fidelity = enumValue(
+    history.fidelity,
+    enumValues(
+      "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT",
+      "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT",
+    ),
+    "portfolio.account_history.fidelity",
+  );
+  if (!Array.isArray(history.bindings)) {
+    throw new TypeError("portfolio.account_history.bindings must be an array");
+  }
+  const bindings = history.bindings.map((value, index) => {
+    const field = `portfolio.account_history.bindings[${index}]`;
+    const binding = exactObject(value, field, [
+      "track_id",
+      "archive_id",
+      "dataset_epoch",
+      "checksum_sha256",
+      "proof_hash",
+      "event_chain_tail",
+      "archive_generation",
+      "last_event_sequence",
+      "as_of_actual_time_ms",
+      "as_of_virtual_time_ms",
+      "mark_price",
+      "index_price",
+      "status",
+    ]);
+    return {
+      track_id: identifier(binding.track_id, `${field}.track_id`),
+      archive_id: identifier(binding.archive_id, `${field}.archive_id`),
+      dataset_epoch: digest(binding.dataset_epoch, `${field}.dataset_epoch`),
+      checksum_sha256: digest(binding.checksum_sha256, `${field}.checksum_sha256`),
+      proof_hash: digest(binding.proof_hash, `${field}.proof_hash`),
+      event_chain_tail: digest(binding.event_chain_tail, `${field}.event_chain_tail`),
+      archive_generation: counter(binding.archive_generation, `${field}.archive_generation`),
+      last_event_sequence: counter(binding.last_event_sequence, `${field}.last_event_sequence`),
+      as_of_actual_time_ms: counter(binding.as_of_actual_time_ms, `${field}.as_of_actual_time_ms`),
+      as_of_virtual_time_ms: counter(binding.as_of_virtual_time_ms, `${field}.as_of_virtual_time_ms`),
+      mark_price: binding.mark_price === null
+        ? null
+        : canonicalDecimal(binding.mark_price, `${field}.mark_price`),
+      index_price: binding.index_price === null
+        ? null
+        : canonicalDecimal(binding.index_price, `${field}.index_price`),
+      status: enumValue(binding.status, enumValues("READY", "DEGRADED"), `${field}.status`),
+    } satisfies ReplayAccountHistoryBindingProjection;
+  });
+  const auditor = exactObject(history.auditor, "portfolio.account_history.auditor", [
+    "status",
+    "proof_hash",
+    "differences",
+  ]);
+  const auditorStatus = enumValue(
+    auditor.status,
+    enumValues("NOT_RUN", "PASS", "FAIL"),
+    "portfolio.account_history.auditor.status",
+  );
+  const auditorProof = auditor.proof_hash === null
+    ? null
+    : digest(auditor.proof_hash, "portfolio.account_history.auditor.proof_hash");
+  if (!Array.isArray(auditor.differences)) {
+    throw new TypeError("portfolio.account_history.auditor.differences must be an array");
+  }
+  const differences = auditor.differences.map((item, index) => jsonObject(
+    item,
+    `portfolio.account_history.auditor.differences[${index}]`,
+  ));
+  const archiveProof = history.archive_proof_hash === null
+    ? null
+    : digest(history.archive_proof_hash, "portfolio.account_history.archive_proof_hash");
+  if (
+    (auditorStatus === "NOT_RUN" && (auditorProof !== null || differences.length > 0))
+    || (auditorStatus === "PASS" && (auditorProof === null || differences.length > 0))
+    || (auditorStatus === "FAIL" && (auditorProof === null || differences.length === 0))
+  ) {
+    throw new TypeError("portfolio account auditor proof is inconsistent");
+  }
+  if (
+    (mode === "HISTORICAL_EXACT"
+      && (fidelity !== "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
+        || archiveProof === null
+        || bindings.length < 1))
+    || (mode === "APPROX_PROXY"
+      && (fidelity !== "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT"
+        || archiveProof !== null
+        || bindings.length !== 0))
+  ) {
+    throw new TypeError("portfolio account-history fidelity proof is inconsistent");
+  }
+  return {
+    mode,
+    status,
+    fidelity,
+    archive_proof_hash: archiveProof,
+    bindings,
+    auditor: {
+      status: auditorStatus,
+      proof_hash: auditorProof,
+      differences,
+    },
+  };
+}
+
+function parseReplayLiquidationChannels(
+  value: unknown,
+  accountMode: ReplayV2AccountDataMode,
+): ReplayTrainingContractPortfolio["liquidation_channels"] {
+  const channels = exactObject(value, "portfolio.liquidation_channels", [
+    "simulated_account",
+    "historical_market",
+  ]);
+  const parseChannel = (
+    value: unknown,
+    field: string,
+  ): ReplayLiquidationChannelProjection => {
+    const channel = exactObject(value, field, ["label", "source", "fidelity"]);
+    if (typeof channel.label !== "string" || channel.label.length < 1 || channel.label.length > 64) {
+      throw new TypeError(`${field}.label must be a bounded string`);
+    }
+    return {
+      label: channel.label,
+      source: enumValue(
+        channel.source,
+        enumValues("MODELLED_ACCOUNT", "INDEPENDENT_MARKET_LIQUIDATION_FEED"),
+        `${field}.source`,
+      ),
+      fidelity: enumValue(
+        channel.fidelity,
+        enumValues(
+          "AVAILABLE_APPROX_SIMULATED_ACCOUNT",
+          "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT",
+          "UNSUPPORTED_NO_HISTORY",
+        ),
+        `${field}.fidelity`,
+      ),
+    };
+  };
+  const simulated = parseChannel(
+    channels.simulated_account,
+    "portfolio.liquidation_channels.simulated_account",
+  );
+  const historical = parseChannel(
+    channels.historical_market,
+    "portfolio.liquidation_channels.historical_market",
+  );
+  const expectedSimulatedFidelity = accountMode === "HISTORICAL_EXACT"
+    ? "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
+    : "AVAILABLE_APPROX_SIMULATED_ACCOUNT";
+  if (
+    simulated.source !== "MODELLED_ACCOUNT"
+    || simulated.fidelity !== expectedSimulatedFidelity
+    || historical.source !== "INDEPENDENT_MARKET_LIQUIDATION_FEED"
+    || historical.fidelity !== "UNSUPPORTED_NO_HISTORY"
+  ) {
+    throw new TypeError("portfolio liquidation channels are conflated or inconsistent");
+  }
+  return {
+    simulated_account: simulated,
+    historical_market: historical,
+  };
+}
+
+export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
   if (
     typeof value === "object"
     && value !== null
@@ -826,6 +1136,8 @@ function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
       "isolated_allocations",
       "next_funding_time_ms",
       "liquidations",
+      "account_history",
+      "liquidation_channels",
       "ledger",
       "fidelity",
     ]);
@@ -848,6 +1160,11 @@ function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
     const rawFills = objectList(portfolio.fills, "portfolio.fills");
     const rawRules = objectList(portfolio.instrument_rules, "portfolio.instrument_rules");
     const rawLiquidations = objectList(portfolio.liquidations, "portfolio.liquidations");
+    const accountHistory = parseReplayAccountHistoryProjection(portfolio.account_history);
+    const liquidationChannels = parseReplayLiquidationChannels(
+      portfolio.liquidation_channels,
+      accountHistory.mode,
+    );
     const positions = rawPositions.map((position, index) => {
       const field = `portfolio.positions[${index}]`;
       const item = exactObject(position, field, [
@@ -922,6 +1239,8 @@ function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
         ? null
         : counter(portfolio.next_funding_time_ms, "portfolio.next_funding_time_ms"),
       liquidations: objectArray(rawLiquidations, "portfolio.liquidations"),
+      account_history: accountHistory,
+      liquidation_channels: liquidationChannels,
       ledger: jsonObject(portfolio.ledger, "portfolio.ledger"),
       fidelity: jsonObject(portfolio.fidelity, "portfolio.fidelity"),
     };
@@ -1500,6 +1819,8 @@ export interface TrainingRunCreatePayload {
   readonly book_mode: ReplayV2BookMode;
   readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
   readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
+  readonly account_data_mode: ReplayV2AccountDataMode;
+  readonly account_history_ref: ReplayAccountHistoryRef | null;
   readonly fixed_funding_rate: string | null;
   readonly funding_interval_ms: number | null;
   readonly allow_rule_changes: boolean;

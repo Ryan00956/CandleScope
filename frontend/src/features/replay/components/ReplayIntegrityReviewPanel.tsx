@@ -179,7 +179,35 @@ export default function ReplayIntegrityReviewPanel({
                 <div><span>Realized PnL</span><strong>{report.report.realized_pnl}</strong></div>
                 <div><span>Fees</span><strong>{report.report.fees_paid}</strong></div>
                 <div><span>Trades</span><strong>{report.report.trade_count}</strong></div>
+                {report.modelled_account.schema_version === "replay.training.portfolio.v2" && (
+                  <>
+                    <div>
+                      <span>Account inputs</span>
+                      <strong>{report.modelled_account.account_history.mode}</strong>
+                    </div>
+                    <div>
+                      <span>Account audit</span>
+                      <strong data-account-auditor-status={report.modelled_account.account_history.auditor.status}>
+                        {report.modelled_account.account_history.auditor.status}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>模拟账户强平</span>
+                      <strong>{report.modelled_account.liquidations.length}</strong>
+                    </div>
+                    <div>
+                      <span>历史市场爆仓</span>
+                      <strong>{report.modelled_account.liquidation_channels.historical_market.fidelity}</strong>
+                    </div>
+                  </>
+                )}
               </div>
+              {report.account_audit !== null && (
+                <p>
+                  独立账户审计：<strong>{report.account_audit.status}</strong>
+                  {" · "}<code>{report.account_audit.proof_hash}</code>
+                </p>
+              )}
             </section>
           )}
 

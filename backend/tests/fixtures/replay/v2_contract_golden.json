@@ -30,11 +30,14 @@
       "BASIS",
       "FUNDING",
       "ORDER_BOOK",
-      "SIMULATED_LIQUIDATION"
+      "SIMULATED_LIQUIDATION",
+      "HISTORICAL_MARK_INDEX",
+      "HISTORICAL_INSTRUMENT_RULE"
     ],
     "capability_state": [
       "AVAILABLE_EXACT",
       "AVAILABLE_APPROX",
+      "AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT",
       "UNSUPPORTED_NO_HISTORY",
       "UNSUPPORTED_SOURCE_MODE",
       "LOADING",
@@ -49,6 +52,7 @@
     "book_mode": ["OFF", "BOOK_ASSISTED_REQUIRED"],
     "margin_mode": ["CROSS", "ISOLATED"],
     "funding_mode": ["OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"],
+    "account_data_mode": ["APPROX_PROXY", "HISTORICAL_EXACT"],
     "execution_model": ["TOUCH_OR_TAPE_V2"],
     "advance_basis": ["DISPLAY_BAR", "BASE_BAR", "SOURCE_EVENT", "VIRTUAL_TIME"],
     "command_type": [

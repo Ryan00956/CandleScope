@@ -97,7 +97,12 @@ function marketTracksResponse() {
         subscription_tier: "WARM",
         cursor: { virtual_time_ms: 1_710_000_239_999, source_sequence: 4, revision: 5 },
         forced_full_reasons: [],
-        capabilities: { OHLCV: "AVAILABLE_EXACT" },
+        capabilities: {
+          OHLCV: "AVAILABLE_EXACT",
+          HISTORICAL_MARK_INDEX: "AVAILABLE_EXACT",
+          HISTORICAL_INSTRUMENT_RULE: "AVAILABLE_EXACT",
+          SIMULATED_LIQUIDATION: "AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT",
+        },
         public_price: "104.5",
         position: { quantity: "0" },
         open_order_count: 0,
@@ -247,6 +252,30 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
         state: "COMPLETED",
         fidelity: "REVEALED_BAR_CLOSE_PROXY",
       }],
+      account_history: {
+        mode: "APPROX_PROXY",
+        status: "ACTIVE",
+        fidelity: "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT",
+        archive_proof_hash: null,
+        bindings: [],
+        auditor: {
+          status: "NOT_RUN",
+          proof_hash: null,
+          differences: [],
+        },
+      },
+      liquidation_channels: {
+        simulated_account: {
+          label: "模拟账户强平",
+          source: "MODELLED_ACCOUNT",
+          fidelity: "AVAILABLE_APPROX_SIMULATED_ACCOUNT",
+        },
+        historical_market: {
+          label: "历史市场爆仓",
+          source: "INDEPENDENT_MARKET_LIQUIDATION_FEED",
+          fidelity: "UNSUPPORTED_NO_HISTORY",
+        },
+      },
       ledger: {
         chain_version: "replay.training.contract-ledger.v1",
         entry_count: 3,

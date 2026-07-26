@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_15_PASS / PHASE_14_COMMITTED / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–14 已独立提交，Phase 15 已完成实现与门禁并等待本阶段独立提交，Phase 16–18 仍须逐阶段完成。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
+状态：`PHASE_16_PASS / PHASE_15_COMMITTED / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–15 已独立提交，Phase 16 已完成实现与门禁并等待本阶段独立提交，Phase 17–18 仍须逐阶段完成。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -25,6 +25,12 @@ Phase 11 父提交：`382923ecabaab153a47e1d145ca96eb8d9a8cb67`（2026-07-24）
 Phase 12 父提交：`5c095a27bd08802a92004a9fdeb6d68e247e393b`（2026-07-25）
 
 Phase 13 父提交：`37833c641c230b1a82b27cfdbf4e2e17382a6755`（2026-07-26）
+
+Phase 14 父提交：`bc4883fb9c380104aa5739c33fb37dd95336383f`（2026-07-26）
+
+Phase 15 父提交：`5c38d27627fa9e1766ded216754c3406b833397a`（2026-07-26）
+
+Phase 16 父提交：`f6cbc99c8fb1036550d2461ba888a8bed16f8941`（2026-07-26）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -1520,16 +1526,62 @@ Phase 8 冻结了四态 planner、进度/取消和 exact reducer reference，但
 
 ## 27. Phase 16：交易所级账户 fidelity
 
-### 背景与范围
+### 背景审计
 
-为 mark、index、funding、费率、合约规格、价格/数量过滤和 maintenance tiers 建立版本化、按虚拟时间生效的数据合同。明确区分“模拟账户强平”与“历史市场爆仓事件”。扩展真实历史 L2 provider，但没有完整输入时只能标记 `APPROX` 或 `UNSUPPORTED`，不能推断为交易所 exact。
+Phase 6 已有 `TOUCH_OR_TAPE_V2`、Decimal fee policy、CROSS/ISOLATED、逐仓分配、沙盒固定 funding、maintenance tier、模拟强平和 hash-chained cash ledger；11 个后端基线与 20 个 Hub/market-track 前端基线在 Phase 15 HEAD 通过。但它仍不是历史账户 exact：
 
-### 退出门槛
+1. `instrument_rule_from_broker_config()` 由首根价格精度、训练金额和用户杠杆合成 filters/tier；没有交易所当时的 contract size、数量/价格过滤、max leverage、maintenance bracket 或规则生效点。
+2. position mark、未实现盈亏、maintenance 与强平触发仍使用已揭示 BAR close/aggTrade 代理；portfolio 固定报告 `AVAILABLE_APPROX_SIMULATION_RULES`、`REVEALED_PRICE_PROXY_NOT_HISTORICAL_MARK`。
+3. `HISTORICAL_EXACT` 在创建服务和前端被硬拒绝；当前 SQLite funding history 只有费率，不能证明与同一存档的 mark、index、spec 和 tier 对齐。
+4. 账户同步挂在 adapter mutation summary 上，多事件命令只保证最终 adapter commit；独立 mark/funding/rule 事件尚未进入 TrainingRun 稳定总序，也没有自己的 durable cursor/chain。
+5. fees/funding/liquidation 虽有账本行，但没有一个生产级独立 auditor 从原始规则、持仓、settlement 和完整 ledger chain 重算全部账户结果；v1 adapter report 也没有绑定账户 archive proof。
+6. `SIMULATED_LIQUIDATION` 与 `MARKET_LIQUIDATIONS` 已是不同 capability key，但 Right Rail、导出和报告仍需持续显示数据源与 modelled-account 边界，不能把模拟强平称作历史市场爆仓。
+7. Binance 官方公共接口证明了为什么不能自动升级：funding history 给出结算时间、费率和对应 mark；mark/index 历史接口只给 K 线；`exchangeInfo` 明确是 current rules，notional/leverage bracket 又是签名 USER_DATA。它们可用于 `APPROX` 或采集校验，不能单独重建过去的逐事件 mark、spec/tier 版本链。
 
-- 任一必需 mark/funding/spec/tier 输入缺失即 fail closed；只有完整、对齐、已 pin 的历史输入可标 `HISTORICAL_EXACT`。
-- cross/isolated、资金费、维护保证金跨档、强平、费用和破产状态均可由账本独立重算。
-- 模拟强平与市场 liquidation feed 在 schema、UI、报告和 capability 上不可混淆。
-- BOOK 仍不在没有 queue proof 时宣称 queue-exact。
+### 冻结合同与实现计划
+
+1. 增加默认关闭的 `REPLAY_ACCOUNT_HISTORY_ENABLED=0` 和独立容量上限。exact 唯一入口是 operator-captured、replay-owned 的不可变 SQLite archive：`replay.account-history.archive.v1` / `replay.account-history.linear.v1`。首版只支持 one-way、linear、quote-settled 合约；inverse、multi-asset/portfolio margin、hedge-mode 双向仓位、options 与 ADL 明确 `UNSUPPORTED_SOURCE_MODE`。
+2. archive 必须精确声明 exchange/market/symbol/settlement asset、range、dataset epoch、source/provenance、`capture_mode=OPERATOR_CAPTURED`、公式/舍入版本、mark 最大间隔，并包含严格列顺序的 `instrument_rule`、`mark_index_event` 和 `funding_event`。导入器只接受显式 operator verification；public K-line proxy、synthetic/derived/reconstructed K-line 即使内部 hash 自洽也拒绝升级为 exact。所有数值是 canonical Decimal；sequence/time 单调、rule 区间连续、mark/index 覆盖无超限 gap、funding mark 与同一历史链一致，且 file SHA-256、逐事件 hash chain、row count 和 declared range 全部验证后才复制进 replay-owned object store。
+3. 新建 `account_data_mode = APPROX_PROXY | HISTORICAL_EXACT` 与 opaque `account_history_ref(archive_id,dataset_epoch,checksum)`。Hub plan 返回能力、覆盖、bytes 和 ref；create 必须回传同一 ref，防止 plan/create TOCTOU。exact 首版要求 MANUAL start；RANDOM、缺 ref、ref 漂移、任一必需 component 不完整均拒绝，绝不自动退回 proxy。`funding_mode=HISTORICAL_EXACT` 只能与 exact account archive 组合；funding OFF 仍可使用 exact mark/spec/tier。
+4. registry/ref/projection/audit 表都是 additive replay.v2 所有物。Run/Track 绑定复制并 pin 已验证 object，保存 archive generation/checksum、bound range、rule/mark/funding cursor 和 input-chain hash；进程恢复重新验证对象与 cursor。feature 被关闭、对象消失/篡改、gap、规则或范围不匹配时，相关 FULL track 与整个 Run 进入 `DEGRADED/PAUSED`，清空 exact capability，禁止 proxy fallback。
+5. 冻结同毫秒总序为：规则生效 `phase=10` -> 已有市场 source event `phase=20` -> mark/index `phase=30` -> funding settlement `phase=40` -> 模拟风险/强平。推进器把 account-only 时刻加入 global wave，所有 FULL tracks 先对齐同一虚拟时钟；每个 archive event 只在 durable cursor 之后应用一次。响应丢失/重启会先补齐至当前 adapter cursor，不能让后续市场事件越过未提交账户事件。
+6. exact mark 不写回 replay.v1 broker 内核；training account 以 position quantity/entry/realized cash 为基础，按 pinned contract size 与权威 mark 重算 notional、unrealized PnL、initial/reserved/maintenance margin、equity 和 risk ratio。下一次 adapter projection 也必须重新套用同一权威 mark，不能被 proxy 覆盖。
+7. 下单前由服务端 active historical rule 二次校验 price tick、quantity step、min/max quantity、min/max notional、contract size 与有效杠杆上限；训练上限与交易所规则取较小者。规则只从 effective virtual time 向后生效，旧 fill 保留原 rule revision；配置 fee policy 仍明确标为用户配置 exact，不伪装成用户在交易所的历史 VIP fee。
+8. historical funding 使用真实 settlement time、该时刻仓位、archive funding rate/mark、contract size 与冻结舍入公式，按 `(run,track,settlement)` 幂等入账；缺一项立即暂停。sandbox funding 保持独立 `AVAILABLE_APPROX_SANDBOX_FIXED`，OFF 不产生现金流。
+9. CROSS/ISOLATED liquidation 使用 exact mark 与 active maintenance tier，但名称固定为“模拟账户强平”。平仓继续经过 touch/tape 或下一阶段 book-assisted 执行，所以 fidelity 为 `HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT`，不声称重建交易所保险基金、ADL、真实排队或用户私有账户。历史市场爆仓流继续使用独立 `MARKET_LIQUIDATIONS` capability；没有独立 feed 时永远是 `UNSUPPORTED_NO_HISTORY`。
+10. 增加独立 account auditor：从初始资本、完整 ledger chain、fill fee revisions、funding rows、liquidation rows、active rules、positions 与 authoritative marks 重算 cash/equity/margin/maintenance/status；输出零差异、proof hash 和失败字段。Run report、Right Rail 与导出同时展示 archive proof、component fidelity、auditor 结果以及“模拟账户强平 / 历史市场爆仓”两条互不混用的通道。
+11. exact Run 添加商品或把商品升级为 WARM/FULL 前，必须先找到覆盖同一 range 的 archive 并原子绑定；有仓位/订单/风险的轨道仍强制 FULL。Phase 15 summary 不理解账户历史 timeline，因此 `HISTORICAL_EXACT` Run 一律不选择 checkpoint skip，先保持逐事件/account-event reference path。
+12. Phase 16 不改变历史 L2 的连续性或 queue 结论：`BOOK_ASSISTED_REQUIRED` 仍由独立 book archive 管理；即使账户输入 exact，没有 queue proof 也只能是 `TOUCH_OR_TAPE_V2` 或 `BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE`。Phase 17 才负责盘口产品闭环。
+
+### 测试与退出门槛
+
+- archive verifier 对合法 fixture 给出稳定 identity/proof；列漂移、非 canonical Decimal、sequence/time gap、mark stale gap、缺 index、rule/tier 断档、funding/mark 不一致、event-chain/file checksum 篡改和超预算全部 quarantine/fail closed。
+- plan -> create 绑定同一 opaque ref；默认 flag off、随机开始、旧 ref、覆盖不足、不同 symbol/settlement、公共 K 线 proxy archive 均不能创建 exact，且 approximate 旧 Run 行为与 Phase 6 golden 不变。
+- BAR 与 AGG 分别证明 rule -> market -> mark/index -> funding 的同毫秒稳定顺序、无未来读取、account-only wave、暂停/继续、倍速/快进、response loss、进程重启和相同 command retry 等价；多 FULL 商品不能分叉时钟。
+- price/qty/notional/contract-size/leverage 过滤和规则跨版本生效有 Decimal golden；旧订单/fill 不追溯，费用 revision、maker/taker 角色与 ledger chain 可重算。
+- CROSS/ISOLATED 增减仓、部分平仓、多商品、maintenance 跨档、funding 前/时/后、强平、liquidation fee、破产与重启重复保护全部由独立 auditor 得到零差异；任一输入被删除或篡改后立即 DEGRADED，不沿用旧 mark。
+- simulated liquidation 与 historical market liquidation 在 schema/capability/UI/report/CSV 中名称、来源、颜色和 fidelity 不同；BOOK/queue 仍不升级。
+- exact archive pin、fork/Review 支持边界、migration、SQLite quick/foreign-key/WAL、容量与 1/2/4/8 FULL positioned track 性能有证据；不允许用空账户或 proxy 数据替代。
+- scoped Ruff、Phase 6/8/10–16 回归、后端全量、frontend `npm run check`、真实 headed browser 的 exact create -> 下单 -> funding -> simulated liquidation -> reload/audit，以及提交级 reverse-apply、Phase 15 detached baseline 和独立 commit 全部 PASS，才进入 Phase 17。
+
+### 回滚
+
+关闭 `REPLAY_ACCOUNT_HISTORY_ENABLED` 后禁止新建/推进 exact Run，已有 exact Run 显式 DEGRADED/PAUSED；approximate、sandbox、v1 adapter、Phase 15 summary 和历史 book 行为不变。archive registry/ref/projection/audit 表及已 pin 对象保留，不删除缓存、不逆写账本。完整 Phase 16 commit 必须能反向回到 Phase 15 树。
+
+### 执行记录（2026-07-26）
+
+1. 新增默认关闭的 `REPLAY_ACCOUNT_HISTORY_ENABLED=0`、默认 128 GiB 独立预算、严格 operator importer 与 replay-owned object store。冻结 `replay.account-history.archive.v1` / `replay.account-history.linear.v1`，只接受 `OPERATOR_VERIFIED_CAPTURE` 的 one-way linear quote-settled 单结算资产归档；公共 K 线代理、derived/synthetic/reconstructed 来源、identity/range/Decimal/规则连续性/mark-index gap/funding/事件链/file checksum 任一不合格均拒绝或 quarantine。物理 training schema 保持 additive v9，新建 archive/ref/projection/applied-event/audit、账户绑定、规则、funding、global event 与 liquidation 等表；未改写 replay.v1 schema/hash。
+2. `account_data_mode=APPROX_PROXY | HISTORICAL_EXACT`、opaque `AccountHistoryRef`、plan/create TOCTOU 绑定和 exact-only MANUAL 起点已贯通 API、Hub 与报告。`HISTORICAL_EXACT` 不允许 Sandbox funding 或隐式 proxy fallback；对象消失、feature off、checksum/generation/cursor/coverage 漂移会把 Run fail closed 为 DEGRADED/PAUSED。商品新增或升级 FULL 前必须先绑定同范围 exact archive；Phase 15 summary 对 exact account 一律保持 reference path。
+3. 账户时序按 rule=10 -> market=20 -> mark/index=30 -> funding=40 -> risk 冻结，并把 account-only 时刻加入单一组合虚拟时钟。权威 mark/rule/funding 不写回 v1 broker：training account 按 pinned contract size、历史 filters、leverage/tier、CROSS/ISOLATED 与 Decimal 公式重算；funding 以 `(run, track, settlement)` 幂等入账；强平仍明确为 `HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT`，与独立 `MARKET_LIQUIDATIONS/UNSUPPORTED_NO_HISTORY` 通道分离。
+4. 独立 auditor 会重新打开不可变 archive，从初始权益、fills、maker/taker fee revisions、realized PnL、ledger、funding、逐仓分配、规则/tier、marks、positions 与 liquidation rows 重算账户，而不是信任运行时投影；projection/ledger/archive 任一篡改都得到字段级差异并 fail closed。Right Rail 增加显式“重新运行独立账户审计”，JSON/CSV/report 同时保存 archive proof、auditor proof、账户输入 fidelity 与两类爆仓域。
+5. correctness 回归覆盖 BAR/AGG_TRADE、规则同刻顺序、response loss/retry/restart、多 FULL 单时钟、规则跨版本、contract size、price/qty/notional/leverage filters、maker/taker fee、CROSS/ISOLATED、部分平仓、funding 前/时/后、maintenance tier、破产价、liquidation fee、重复保护、archive pin/fork/review/migration、对象与投影篡改及 feature-off。修正了重复 contract-size realized PnL 缩放、破产价分母遗漏 contract size、rule hash 口径和 audit 前 archive guard。
+6. 新增正式 `backend/scripts/import_replay_account_history.py`，浏览器 fixture 先用该 CLI 导入归档；CLI 回归验证 public inventory 不泄露 trusted path，而 SQLite 保存 `trusted_origin=OPERATOR_VERIFIED_CAPTURE`。合法浏览器 archive 为 905,216 B、2 条 rule、3,739 条 mark、534 条 funding、4,275 条总事件，checksum=`sha256:506745c6417ca366e1d5917f0b7fbe711f436cb957a3acc41fd6f6ebf691cf16`，proof=`sha256:7c0f7091ff990365a6f4d06bba101c543abb426a4a755c3fcc767516001f4634`。
+7. 1/2/4/8 个 positioned FULL track、每档 20 次真实 `ReplayService + SQLite + Decimal + auditor` 容量门禁全部 PASS。step p50/p95/max 分别为 48.623/58.147/58.556、79.527/96.471/98.029、147.942/163.188/171.290、274.724/300.174/303.676 ms；冻结 p95 上限 500 ms。最大 RSS 增量 6,746,112 B，低于 64 MiB；语义、账本、funding、global order、SQLite quick/FK 全绿。ignored evidence 的 canonical evidence hash=`sha256:9d4434ae60d7d66bfb7ebc82ff5e4ffc71ea4f04afc91a005722c580478803e6`。
+8. headed Chromium 在 1440×900、全新 replay/candlescope DB、拒绝连接的 upstream 环境完成页面 Hub exact create -> UI MARKET long 0.2 -> 历史 funding `-6` -> 后续 exact mark 模拟强平 -> reload -> 显式独立 audit -> report。机器结果为 `PHASE16_PASS`：1 次强平、auditor `PASS`、`VERIFIED_PINNED_ARCHIVE`、427 个动态请求、非 replay API=0、意外 HTTP=0、console/page error=0。截图 SHA-256=`5157a672134a4b1fc56212cf12b495cf38759f85e3fb82efe6a79309482b7417`，flow log SHA-256=`96d469f25e1ce33d8085f3551ba35b09bbf30a8efd8462da047efaf26f1eb87e`，证据位于 ignored `output/playwright/phase16-20260726/`。
+9. 真实浏览器揭示并修复两个运行时契约缺口：后端实际 exact capability 包含 historical mark/index、instrument rule 与 exact-input/modelled-account 状态，严格前端 parser/golden 已同步；精确账户的 `advance(BASE_BAR)` 是不可取消离散推进，前端不再错误轮询不存在的 advance job 或展示取消按钮，只有 `advance_by`、`advance_to`、`advance(VIRTUAL_TIME)` 进入 progress/cancel 合同。后者补入纯函数回归，最终浏览器不再产生 `/advances/{id}` 404。
+10. 最终浏览器 `replay.db` 为 954,368 B、SHA-256=`b895718beb235c80e3feea113a50115e02f239ad156b3d53afd500dc35bb26c3`，training schema=9，包含 1 Run、2 orders、2 fills、1 historical funding、1 completed modelled liquidation、7 global events 和 5 次 auditor PASS/零差异；`replay.db` 与 33,603-row `candlescope.db` 均 `quick_check=ok`、foreign-key 零行、无 WAL/SHM，`:18088/:15181` 均释放。
+11. 自动门禁最终为：Phase 6 + Phase 16 + capacity `27 passed`；Phase 13 workspace/Phase 16 frontend `14 passed`；后端全量受控复跑 `2076 passed`，仅 4 条既有 FastAPI `on_event` 弃用警告；frontend 最终 `npm run check` 的 architecture、两个 TypeScript project、ESLint、`2435 passed` 与 production build 全部通过。首次后端全量的既有 100 ms shutdown 边界抖动经隔离 10/10 与完整复跑消失；既有 drawing 1 ms 文案竞态隔离 20/20 通过，最终默认并发全量连续两次通过。Phase 16 Python scope Ruff、compileall、Git whitespace 均 PASS；全仓 Ruff 仍是父提交已有的 36 项，未借本阶段改动。
+12. Phase 15 父提交 `f6cbc99c8fb1036550d2461ba888a8bed16f8941` 的 detached Phase 15 回归 13/13 通过并清理 worktree。默认 replay/v2、frontend entry/v2、segment worker/GC、raw archive、historical book、summary optimization 和 account history 开关继续关闭；128 GiB 只是关闭能力的容量上限，不触发导入、下载或 GC。完整 485,354 B staged patch 通过 `git apply --reverse --check --whitespace=error-all`，第一次封存 SHA-256=`ed22b10ad640dd07a3afe609bccd9b4f022958976733b74c716a31d89b6c5b34`；加入本结果行后的最终 patch 再次执行同一门禁。Decision：实现、自动回归、容量、真实浏览器、SQLite、父基线和 reverse-apply 均 PASS；Phase 16 独立提交成功后才进入 Phase 17，release 继续 HOLD。
 
 ---
 

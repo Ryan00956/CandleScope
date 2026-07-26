@@ -268,6 +268,8 @@ def test_replay_settings_defaults_match_frozen_resource_budget(tmp_path: Path) -
     assert settings.event_subscriber_queue == 256
     assert settings.controller_ttl_seconds == 10
     assert settings.idle_ttl_seconds == 3_600
+    assert settings.replay_account_history_enabled is False
+    assert settings.replay_account_history_max_archive_bytes == 128 * 1024**3
 
 
 @pytest.mark.parametrize(
@@ -286,6 +288,7 @@ def test_replay_settings_defaults_match_frozen_resource_budget(tmp_path: Path) -
         "REPLAY_EVENT_SUBSCRIBER_QUEUE",
         "REPLAY_CONTROLLER_TTL_SECONDS",
         "REPLAY_IDLE_TTL_SECONDS",
+        "REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES",
     ],
 )
 def test_replay_settings_reject_each_non_positive_budget(name: str, tmp_path: Path) -> None:
@@ -334,6 +337,7 @@ def test_replay_settings_reject_invalid_bool_and_unsafe_ranges(tmp_path: Path) -
         ("REPLAY_EVENT_SUBSCRIBER_QUEUE", 257),
         ("REPLAY_CONTROLLER_TTL_SECONDS", 11),
         ("REPLAY_IDLE_TTL_SECONDS", 3_601),
+        ("REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES", 128 * 1024**3 + 1),
     ],
 )
 def test_replay_settings_cannot_widen_frozen_safety_limits(

@@ -1,6 +1,8 @@
 import type { ReplayCapabilities, ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
 import type {
   ReplayLaunchContext,
+  ReplayAccountHistoryRef,
+  ReplayV2AccountDataMode,
   ReplayV2BookMode,
   ReplayV2IntegrityMode,
   ReplayV2FundingMode,
@@ -44,6 +46,7 @@ export interface TrainingRunDraft {
   readonly marketSlippageBps: string;
   readonly marginMode: ReplayV2MarginMode;
   readonly fundingMode: ReplayV2FundingMode;
+  readonly accountDataMode: ReplayV2AccountDataMode;
   readonly fixedFundingRate: string;
   readonly fundingIntervalMs: number;
   readonly bookMode: ReplayV2BookMode;
@@ -53,7 +56,8 @@ export interface TrainingRunDraft {
 }
 
 export interface TrainingHubUnsupportedCapabilities {
-  readonly funding: "HISTORICAL_EXACT 缺少对齐的历史 funding 与 mark，创建时 fail closed";
+  readonly account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact";
+  readonly funding: "HISTORICAL_EXACT 仅在精确账户归档含完整 funding 与同刻 mark 时可用";
   readonly historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队";
   readonly rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更";
   readonly isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金";
@@ -63,11 +67,13 @@ export interface TrainingRunDraftEvaluation {
   readonly canSubmit: boolean;
   readonly errors: readonly string[];
   readonly selectedEntry: ReplayCatalogEntry | null;
+  readonly accountHistoryRef: ReplayAccountHistoryRef | null;
   readonly unsupported: TrainingHubUnsupportedCapabilities;
 }
 
 export const PHASE_6_BOUNDARIES: TrainingHubUnsupportedCapabilities = Object.freeze({
-  funding: "HISTORICAL_EXACT 缺少对齐的历史 funding 与 mark，创建时 fail closed",
+  account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact",
+  funding: "HISTORICAL_EXACT 仅在精确账户归档含完整 funding 与同刻 mark 时可用",
   historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队",
   rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
   isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
@@ -114,6 +120,7 @@ export function createTrainingRunDraft(
     marketSlippageBps: "1",
     marginMode: "CROSS",
     fundingMode: "OFF",
+    accountDataMode: "APPROX_PROXY",
     fixedFundingRate: "0.0001",
     fundingIntervalMs: 28_800_000,
     bookMode: "OFF",
@@ -311,8 +318,33 @@ export function evaluateTrainingRunDraft(
   if (catalog.blind_mode !== requiresBlindTrainingCatalog(draft)) {
     errors.push("当前能力目录与开始方式/时间披露策略不匹配");
   }
+  const accountHistoryPlan = segmentPlan?.account_history ?? null;
+  let accountHistoryRef: ReplayAccountHistoryRef | null = null;
+  if (draft.accountDataMode === "HISTORICAL_EXACT") {
+    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
+      errors.push("精确账户历史必须使用明确的手动开始时间");
+    }
+    if (draft.fundingMode === "SANDBOX_FIXED") {
+      errors.push("精确账户历史不能混用 Sandbox 合成资金费");
+    }
+    if (accountHistoryPlan === null) {
+      errors.push("尚未按当前参数校验精确账户历史归档");
+    } else if (accountHistoryPlan.requested_mode !== "HISTORICAL_EXACT"
+      || accountHistoryPlan.capability_state !== "AVAILABLE_EXACT"
+      || accountHistoryPlan.account_history_ref === null) {
+      errors.push(`精确账户历史不可用：${accountHistoryPlan.reason}`);
+    } else {
+      accountHistoryRef = accountHistoryPlan.account_history_ref;
+    }
+  }
   if (draft.fundingMode === "HISTORICAL_EXACT") {
-    errors.push("当前数据集没有对齐的历史 funding 与 mark，不能创建 HISTORICAL_EXACT");
+    if (draft.accountDataMode !== "HISTORICAL_EXACT") {
+      errors.push("历史精确资金费必须同时选择精确账户历史");
+    } else if (accountHistoryPlan === null
+      || accountHistoryPlan.capability_state !== "AVAILABLE_EXACT"
+      || !accountHistoryPlan.historical_funding_exact) {
+      errors.push("当前精确账户归档没有完整 funding 与同刻 mark");
+    }
   } else if (draft.fundingMode === "SANDBOX_FIXED") {
     if (draft.integrityMode !== "SANDBOX") {
       errors.push("固定资金费只允许用于 Sandbox 近似练习");
@@ -340,6 +372,7 @@ export function evaluateTrainingRunDraft(
     canSubmit: errors.length === 0,
     errors,
     selectedEntry: entry ?? null,
+    accountHistoryRef,
     unsupported: PHASE_6_BOUNDARIES,
   };
 }
@@ -383,6 +416,10 @@ export function buildTrainingRunCreateRequest(
     book_mode: draft.bookMode,
     margin_mode: draft.marginMode,
     funding_mode: draft.fundingMode,
+    account_data_mode: draft.accountDataMode,
+    account_history_ref: draft.accountDataMode === "HISTORICAL_EXACT"
+      ? evaluation.accountHistoryRef
+      : null,
     fixed_funding_rate: draft.fundingMode === "SANDBOX_FIXED"
       ? draft.fixedFundingRate
       : null,

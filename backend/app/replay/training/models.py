@@ -22,6 +22,7 @@ REPLAY_V2_PROTOCOL = "replay.v2"
 REPLAY_V2_SCHEMA_VERSION = "replay.contract.v2.phase0"
 REPLAY_LAUNCH_CONTEXT_SCHEMA_VERSION = "replay.launch-context.v1"
 REPLAY_WATCHLIST_SNAPSHOT_SCHEMA_VERSION = "replay.watchlist-snapshot.v1"
+REPLAY_ACCOUNT_HISTORY_REF_SCHEMA_VERSION = "replay.account-history-ref.v1"
 MAX_REPLAY_WATCHLIST_GROUPS = 32
 MAX_REPLAY_WATCHLIST_ITEMS = 100
 MAX_V2_COUNTER = (1 << 53) - 1
@@ -100,11 +101,16 @@ class CapabilityKind(_StringEnum):
     FUNDING = "FUNDING"
     ORDER_BOOK = "ORDER_BOOK"
     SIMULATED_LIQUIDATION = "SIMULATED_LIQUIDATION"
+    HISTORICAL_MARK_INDEX = "HISTORICAL_MARK_INDEX"
+    HISTORICAL_INSTRUMENT_RULE = "HISTORICAL_INSTRUMENT_RULE"
 
 
 class CapabilityState(_StringEnum):
     AVAILABLE_EXACT = "AVAILABLE_EXACT"
     AVAILABLE_APPROX = "AVAILABLE_APPROX"
+    AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT = (
+        "AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT"
+    )
     UNSUPPORTED_NO_HISTORY = "UNSUPPORTED_NO_HISTORY"
     UNSUPPORTED_SOURCE_MODE = "UNSUPPORTED_SOURCE_MODE"
     LOADING = "LOADING"
@@ -132,6 +138,11 @@ class FundingMode(_StringEnum):
     OFF = "OFF"
     HISTORICAL_EXACT = "HISTORICAL_EXACT"
     SANDBOX_FIXED = "SANDBOX_FIXED"
+
+
+class AccountDataMode(_StringEnum):
+    APPROX_PROXY = "APPROX_PROXY"
+    HISTORICAL_EXACT = "HISTORICAL_EXACT"
 
 
 class ExecutionModelV2(_StringEnum):
@@ -218,6 +229,7 @@ _ENUM_TYPES: tuple[tuple[str, type[_StringEnum]], ...] = (
     ("book_mode", BookMode),
     ("margin_mode", MarginMode),
     ("funding_mode", FundingMode),
+    ("account_data_mode", AccountDataMode),
     ("execution_model", ExecutionModelV2),
     ("advance_basis", AdvanceBasis),
     ("command_type", ReplayV2CommandType),
@@ -1043,6 +1055,53 @@ class VisibleHistoryLookback:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountHistoryRef:
+    schema_version: str
+    archive_id: str
+    dataset_epoch: str
+    checksum_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != REPLAY_ACCOUNT_HISTORY_REF_SCHEMA_VERSION:
+            raise ValueError(
+                "account history ref schema_version is unsupported"
+            )
+        object.__setattr__(
+            self,
+            "archive_id",
+            validate_identifier(self.archive_id, field_name="account_history_ref.archive_id"),
+        )
+        for field_name in ("dataset_epoch", "checksum_sha256"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+                raise ValueError(
+                    f"account_history_ref.{field_name} must be a sha256 digest"
+                )
+
+    @classmethod
+    def from_dict(cls, value: object) -> "AccountHistoryRef":
+        payload = expect_mapping(value, field_name="account_history_ref")
+        expect_exact_keys(
+            payload,
+            {
+                "schema_version",
+                "archive_id",
+                "dataset_epoch",
+                "checksum_sha256",
+            },
+        )
+        return cls(**payload)  # type: ignore[arg-type]
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "schema_version": self.schema_version,
+            "archive_id": self.archive_id,
+            "dataset_epoch": self.dataset_epoch,
+            "checksum_sha256": self.checksum_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingRunCreateRequest:
     """Replay training create contract mapped to one replay.v1 adapter session."""
 
@@ -1072,6 +1131,8 @@ class TrainingRunCreateRequest:
     margin_mode: MarginMode
     funding_mode: FundingMode
     allow_rule_changes: bool
+    account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
+    account_history_ref: "AccountHistoryRef | None" = None
     fixed_funding_rate: str | None = None
     funding_interval_ms: int | None = None
     allowed_mutations: tuple[str, ...] = ()
@@ -1100,6 +1161,7 @@ class TrainingRunCreateRequest:
             ("book_mode", BookMode),
             ("margin_mode", MarginMode),
             ("funding_mode", FundingMode),
+            ("account_data_mode", AccountDataMode),
         ):
             object.__setattr__(
                 self,
@@ -1235,6 +1297,20 @@ class TrainingRunCreateRequest:
             raise ValueError(
                 "fixed funding fields are available only for SANDBOX_FIXED"
             )
+        if self.account_history_ref is not None and not isinstance(
+            self.account_history_ref,
+            AccountHistoryRef,
+        ):
+            raise TypeError("account_history_ref must be an AccountHistoryRef or null")
+        if self.account_data_mode is AccountDataMode.APPROX_PROXY:
+            if self.account_history_ref is not None:
+                raise ValueError(
+                    "APPROX_PROXY account data cannot carry an exact history ref"
+                )
+        elif self.funding_mode is FundingMode.SANDBOX_FIXED:
+            raise ValueError(
+                "HISTORICAL_EXACT account data cannot use synthetic Sandbox funding"
+            )
         if self.launch_context is not None:
             if not isinstance(self.launch_context, ReplayLaunchContext):
                 raise TypeError("launch_context must be a ReplayLaunchContext or null")
@@ -1295,6 +1371,8 @@ class TrainingRunCreateRequest:
             "allowed_mutations",
             "fixed_funding_rate",
             "funding_interval_ms",
+            "account_data_mode",
+            "account_history_ref",
             "launch_context",
         }
         if missing:
@@ -1322,6 +1400,13 @@ class TrainingRunCreateRequest:
             None
             if raw_launch_context is None
             else ReplayLaunchContext.from_dict(raw_launch_context)
+        )
+        normalized.setdefault("account_data_mode", AccountDataMode.APPROX_PROXY.value)
+        raw_account_history_ref = normalized.get("account_history_ref")
+        normalized["account_history_ref"] = (
+            None
+            if raw_account_history_ref is None
+            else AccountHistoryRef.from_dict(raw_account_history_ref)
         )
         return cls(**normalized)  # type: ignore[arg-type]
 
@@ -1372,6 +1457,12 @@ class TrainingRunCreateRequest:
             "book_mode": self.book_mode.value,
             "margin_mode": self.margin_mode.value,
             "funding_mode": self.funding_mode.value,
+            "account_data_mode": self.account_data_mode.value,
+            "account_history_ref": (
+                None
+                if self.account_history_ref is None
+                else self.account_history_ref.to_dict()
+            ),
             "fixed_funding_rate": self.fixed_funding_rate,
             "funding_interval_ms": self.funding_interval_ms,
             "allow_rule_changes": self.allow_rule_changes,
@@ -1380,6 +1471,8 @@ class TrainingRunCreateRequest:
 
 
 __all__ = [
+    "AccountDataMode",
+    "AccountHistoryRef",
     "AdvanceBasis",
     "BookMode",
     "CapabilityKind",
@@ -1395,6 +1488,7 @@ __all__ = [
     "REPLAY_V2_PROTOCOL",
     "REPLAY_V2_SCHEMA_VERSION",
     "REPLAY_LAUNCH_CONTEXT_SCHEMA_VERSION",
+    "REPLAY_ACCOUNT_HISTORY_REF_SCHEMA_VERSION",
     "REPLAY_WATCHLIST_SNAPSHOT_SCHEMA_VERSION",
     "ReplayLaunchContext",
     "ReplayLaunchWatchlistGroup",

@@ -6,7 +6,7 @@ import base64
 import json
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import cast
 
 from app.replay.canonical import canonical_json, canonical_sha256
@@ -23,6 +23,14 @@ from app.replay.storage.sqlite_store import ReplaySQLiteStore
 from app.data_engine.interval_policy import parse_interval_ms
 
 from .errors import TrainingRunError
+from .account_history import (
+    ACCOUNT_AUDIT_SCHEMA_VERSION,
+    AccountHistoryEvent,
+    PreparedAccountHistoryBinding,
+    account_rule_component_hash,
+    bind_account_history_archive,
+    runtime_instrument_rule,
+)
 from .historical_book import (
     BOOK_EXECUTION_FIDELITY,
     PreparedHistoricalBookBinding,
@@ -40,6 +48,7 @@ from .account import (
     initial_ledger_hash,
     instrument_rule_from_broker_config,
     ledger_chain_hash,
+    round_to_step,
 )
 from .models import (
     CapabilityKind,
@@ -279,6 +288,21 @@ class TrainingRunStore:
             migrate_training_schema(connection, now_ms=now)
             connection.execute(
                 """
+                INSERT OR IGNORE INTO replay_training_account_history(
+                    run_id, account_data_mode, status, fidelity,
+                    archive_proof_hash, degraded_reason, auditor_status,
+                    auditor_proof_hash, auditor_differences_json,
+                    created_at_ms, updated_at_ms
+                )
+                SELECT run_id, 'APPROX_PROXY', 'ACTIVE',
+                       'REVEALED_PRICE_PROXY_MODELLED_ACCOUNT',
+                       NULL, NULL, 'NOT_RUN', NULL, '[]', ?, ?
+                FROM replay_training_run
+                """,
+                (now, now),
+            )
+            connection.execute(
+                """
                 UPDATE replay_training_fast_forward_summary_set
                 SET status = 'FAILED', active = 0,
                     error_code = 'PROCESS_RESTARTED',
@@ -309,6 +333,7 @@ class TrainingRunStore:
         actual_replay_end_ms: int,
         history_policy: ResolvedHistoryPolicy,
         historical_book_binding: PreparedHistoricalBookBinding | None = None,
+        account_history_binding: PreparedAccountHistoryBinding | None = None,
     ) -> Callable[[sqlite3.Connection, int], None]:
         def write(connection: sqlite3.Connection, now_ms: int) -> None:
             cursor = session_state.get("cursor")
@@ -405,6 +430,27 @@ class TrainingRunStore:
                 virtual_time_ms=int(cursor["virtual_time_ms"]),
                 now_ms=now_ms,
             )
+            if request.account_data_mode.value == "HISTORICAL_EXACT":
+                if account_history_binding is None:
+                    raise TypeError(
+                        "exact account run is missing its verified archive binding"
+                    )
+                bind_account_history_archive(
+                    connection,
+                    run_id=run_id,
+                    track_id="track-1",
+                    binding=account_history_binding,
+                    bound_range_start_ms=actual_replay_start_ms,
+                    bound_range_end_ms=actual_replay_end_ms,
+                    source_kind=request.source_kind.value,
+                    now_ms=now_ms,
+                )
+            else:
+                self._insert_approx_account_history(
+                    connection,
+                    run_id=run_id,
+                    now_ms=now_ms,
+                )
             self._insert_viewer_state(
                 connection,
                 ViewerState(
@@ -420,6 +466,13 @@ class TrainingRunStore:
                 now_ms=now_ms,
             )
             self._insert_rule(connection, run_id=run_id, rule=rule, now_ms=now_ms)
+            if request.account_data_mode.value == "HISTORICAL_EXACT":
+                self._apply_exact_mark_projection(
+                    connection,
+                    run_id=run_id,
+                    track_id="track-1",
+                    now_ms=now_ms,
+                )
             self._insert_initial_action(
                 connection,
                 run_id=run_id,
@@ -541,6 +594,2212 @@ class TrainingRunStore:
 
         return write
 
+    @staticmethod
+    def _insert_approx_account_history(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        now_ms: int,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO replay_training_account_history(
+                run_id, account_data_mode, status, fidelity,
+                archive_proof_hash, degraded_reason, auditor_status,
+                auditor_proof_hash, auditor_differences_json,
+                created_at_ms, updated_at_ms
+            ) VALUES (?, 'APPROX_PROXY', 'ACTIVE',
+                      'REVEALED_PRICE_PROXY_MODELLED_ACCOUNT',
+                      NULL, NULL, 'NOT_RUN', NULL, '[]', ?, ?)
+            ON CONFLICT(run_id) DO NOTHING
+            """,
+            (run_id, now_ms, now_ms),
+        )
+
+    @classmethod
+    def _apply_exact_mark_projection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        track_id: str,
+        now_ms: int,
+    ) -> None:
+        """Overlay the pinned mark without mutating the replay.v1 broker kernel."""
+
+        projection = connection.execute(
+            """
+            SELECT projection.*, history.status AS history_status,
+                   history.account_data_mode
+            FROM replay_account_history_projection AS projection
+            JOIN replay_training_account_history AS history USING(run_id)
+            WHERE projection.run_id = ? AND projection.track_id = ?
+            """,
+            (run_id, track_id),
+        ).fetchone()
+        if (
+            projection is None
+            or projection["account_data_mode"] != "HISTORICAL_EXACT"
+        ):
+            return
+        if (
+            projection["history_status"] != "ACTIVE"
+            or projection["status"] != "READY"
+            or projection["mark_price"] is None
+        ):
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_ARCHIVE_DEGRADED",
+                "authoritative account mark is unavailable",
+                status_code=409,
+                details={"track_id": track_id, "fallback_applied": False},
+            )
+        track = connection.execute(
+            """
+            SELECT * FROM replay_training_market_track
+            WHERE run_id = ? AND track_id = ?
+            """,
+            (run_id, track_id),
+        ).fetchone()
+        if track is None:
+            raise TypeError("exact account market track is missing")
+        rule_row = connection.execute(
+            """
+            SELECT revision, rule_json FROM replay_training_instrument_rule
+            WHERE run_id = ? AND track_id = ?
+              AND effective_virtual_time_ms <= COALESCE(?, 0)
+            ORDER BY effective_virtual_time_ms DESC, revision DESC LIMIT 1
+            """,
+            (run_id, track_id, track["virtual_time_ms"]),
+        ).fetchone()
+        if rule_row is None:
+            raise TypeError("exact account instrument rule is missing")
+        rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
+        try:
+            position = json.loads(str(track["position_json"]))
+            account = json.loads(str(track["account_json"]))
+            open_orders = json.loads(str(track["open_orders_json"]))
+        except json.JSONDecodeError as exc:
+            raise TypeError("exact account track projection JSON is invalid") from exc
+        if (
+            not isinstance(position, dict)
+            or not isinstance(account, dict)
+            or not isinstance(open_orders, list)
+        ):
+            raise TypeError("exact account track projection is invalid")
+        try:
+            mark = Decimal(str(projection["mark_price"]))
+            quantity = Decimal(str(position.get("quantity", "0")))
+            contract_size = Decimal(rule.contract_size)
+            run_row = connection.execute(
+                """
+                SELECT initial_equity FROM replay_training_run WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise TypeError("exact account training run is missing")
+            exact_realized = sum(
+                (
+                    Decimal(str(row["cash_delta"]))
+                    for row in connection.execute(
+                        """
+                        SELECT cash_delta
+                        FROM replay_training_contract_ledger
+                        WHERE run_id = ? AND track_id = ?
+                          AND kind = 'BROKER_REALIZED_PNL'
+                        """,
+                        (run_id, track_id),
+                    ).fetchall()
+                ),
+                Decimal(0),
+            )
+            broker_fees = Decimal(0)
+            for fill_row in connection.execute(
+                """
+                SELECT fill_json FROM replay_training_contract_fill
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchall():
+                fill = json.loads(str(fill_row["fill_json"]))
+                if not isinstance(fill, Mapping):
+                    raise TypeError("exact account fill projection is invalid")
+                broker_fees += Decimal(str(fill["fee"]))
+            entry_raw = position.get("entry_price")
+            entry = None if entry_raw is None else Decimal(str(entry_raw))
+            notional = abs(quantity) * mark * contract_size
+            unrealized = (
+                Decimal(0)
+                if quantity == 0 or entry is None
+                else (mark - entry) * quantity * contract_size
+            )
+            policy_row = connection.execute(
+                """
+                SELECT rule_json FROM replay_training_rule AS rule
+                JOIN replay_training_run AS run
+                  ON run.run_id = rule.run_id
+                 AND run.active_rule_revision = rule.revision
+                WHERE run.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if policy_row is None:
+                raise TypeError("training rule policy is missing")
+            policy = json.loads(str(policy_row["rule_json"]))
+            configured_max = Decimal(str(policy["max_leverage"]))
+            leverage = min(configured_max, Decimal(rule.max_leverage))
+            if leverage <= 0:
+                raise ValueError("effective leverage must be positive")
+            margin_used = notional / leverage
+            reserved = Decimal(0)
+            terminal = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
+            for raw in open_orders:
+                if not isinstance(raw, Mapping) or raw.get("status") in terminal:
+                    continue
+                order_quantity = Decimal(str(raw.get("remaining_quantity") or raw.get("quantity") or "0"))
+                reference = raw.get("limit_price") or raw.get("stop_price") or mark
+                reserved += (
+                    abs(order_quantity)
+                    * Decimal(str(reference))
+                    * contract_size
+                    / leverage
+                )
+            cash = (
+                Decimal(str(run_row["initial_equity"]))
+                + exact_realized
+                - broker_fees
+            )
+            equity = cash + unrealized
+            available = equity - margin_used - reserved
+        except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_PROJECTION_INVALID",
+                "authoritative mark could not reconcile the modelled account",
+                status_code=409,
+                details={"track_id": track_id, "fallback_applied": False},
+            ) from exc
+        position.update(
+            {
+                "mark_price": decimal_to_string(mark, field_name="exact mark"),
+                "notional": decimal_to_string(
+                    notional, field_name="exact position notional"
+                ),
+                "realized_pnl": decimal_to_string(
+                    exact_realized, field_name="exact realized pnl"
+                ),
+                "unrealized_pnl": decimal_to_string(
+                    unrealized, field_name="exact unrealized pnl"
+                ),
+            }
+        )
+        account.update(
+            {
+                "cash_balance": decimal_to_string(
+                    cash, field_name="exact account cash"
+                ),
+                "equity": decimal_to_string(
+                    equity, field_name="exact account equity"
+                ),
+                "available_equity": decimal_to_string(
+                    available, field_name="exact account available"
+                ),
+                "margin_used": decimal_to_string(
+                    margin_used, field_name="exact margin used"
+                ),
+                "reserved_margin": decimal_to_string(
+                    reserved, field_name="exact reserved margin"
+                ),
+                "realized_pnl": decimal_to_string(
+                    exact_realized, field_name="exact account realized pnl"
+                ),
+                "unrealized_pnl": decimal_to_string(
+                    unrealized, field_name="exact account unrealized pnl"
+                ),
+                "fees_paid": decimal_to_string(
+                    broker_fees, field_name="exact broker fees"
+                ),
+            }
+        )
+        capabilities = json.loads(str(track["capabilities_json"]))
+        if not isinstance(capabilities, dict):
+            raise TypeError("exact account capabilities are invalid")
+        capabilities.update(
+            {
+                "HISTORICAL_MARK_INDEX": "AVAILABLE_EXACT",
+                "HISTORICAL_INSTRUMENT_RULE": "AVAILABLE_EXACT",
+                "SIMULATED_LIQUIDATION": "AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT",
+            }
+        )
+        connection.execute(
+            """
+            UPDATE replay_training_market_track
+            SET position_json = ?, account_json = ?, capabilities_json = ?,
+                updated_at_ms = ?
+            WHERE run_id = ? AND track_id = ?
+            """,
+            (
+                canonical_json(position),
+                canonical_json(account),
+                canonical_json(capabilities),
+                now_ms,
+                run_id,
+                track_id,
+            ),
+        )
+
+    async def apply_account_history_events(
+        self,
+        run_id: str,
+        *,
+        events: Sequence[tuple[str, AccountHistoryEvent]],
+        virtual_time_ms: int,
+    ) -> tuple[StableMarketEvent, ...]:
+        """Apply one ordered account-input phase with durable idempotency."""
+
+        materialized = tuple(events)
+        if not materialized:
+            return ()
+
+        def write(connection: sqlite3.Connection) -> tuple[StableMarketEvent, ...]:
+            mode = connection.execute(
+                """
+                SELECT * FROM replay_training_account_history WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if (
+                mode is None
+                or mode["account_data_mode"] != "HISTORICAL_EXACT"
+                or mode["status"] != "ACTIVE"
+            ):
+                raise TrainingRunError(
+                    "ACCOUNT_HISTORY_ARCHIVE_DEGRADED",
+                    "exact account history is not active",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            now_ms = self.base_store._validated_now_ms()
+            stable: list[StableMarketEvent] = []
+            for track_id, event in materialized:
+                stable_event = StableMarketEvent(
+                    actual_event_time_ms=event.event_time_ms,
+                    event_phase=event.event_phase,
+                    market_track_stable_id=f"account:{track_id}",
+                    source_sequence=event.event_sequence,
+                )
+                stable.append(stable_event)
+                existing = connection.execute(
+                    """
+                    SELECT 1 FROM replay_account_history_applied_event
+                    WHERE run_id = ? AND track_id = ?
+                      AND archive_event_sequence = ?
+                    """,
+                    (run_id, track_id, event.event_sequence),
+                ).fetchone()
+                if existing is not None:
+                    continue
+                projection = connection.execute(
+                    """
+                    SELECT projection.*, track.source_kind,
+                           track.source_sequence,
+                           ref.bound_range_start_ms,
+                           ref.bound_range_end_ms
+                    FROM replay_account_history_projection AS projection
+                    JOIN replay_training_market_track AS track
+                      ON track.run_id = projection.run_id
+                     AND track.track_id = projection.track_id
+                    JOIN replay_account_history_ref AS ref
+                      ON ref.run_id = projection.run_id
+                     AND ref.track_id = projection.track_id
+                     AND ref.archive_id = projection.archive_id
+                     AND ref.active = 1
+                    WHERE projection.run_id = ? AND projection.track_id = ?
+                    """,
+                    (run_id, track_id),
+                ).fetchone()
+                if projection is None or projection["status"] != "READY":
+                    raise TrainingRunError(
+                        "ACCOUNT_HISTORY_BINDING_MISSING",
+                        "exact account projection is missing",
+                        status_code=409,
+                        details={
+                            "track_id": track_id,
+                            "fallback_applied": False,
+                        },
+                    )
+                expected_sequence = int(projection["last_event_sequence"]) + 1
+                if event.event_sequence != expected_sequence:
+                    raise TrainingRunError(
+                        "ACCOUNT_HISTORY_EVENT_GAP",
+                        "account event sequence is not contiguous",
+                        status_code=409,
+                        details={
+                            "track_id": track_id,
+                            "expected_sequence": expected_sequence,
+                            "actual_sequence": event.event_sequence,
+                            "fallback_applied": False,
+                        },
+                    )
+                if event.previous_hash != projection["input_chain_hash"]:
+                    raise TrainingRunError(
+                        "ACCOUNT_HISTORY_EVENT_CHAIN_MISMATCH",
+                        "account event no longer follows the pinned input chain",
+                        status_code=409,
+                        details={"track_id": track_id, "fallback_applied": False},
+                    )
+                if event.event_kind == "RULE":
+                    runtime_rule = runtime_instrument_rule(
+                        event.payload,
+                        track_id=track_id,
+                        source_kind=str(projection["source_kind"]),
+                        actual_replay_start_ms=event.event_time_ms,
+                        virtual_replay_start_ms=virtual_time_ms,
+                    )
+                    revision = int(
+                        connection.execute(
+                            """
+                            SELECT COALESCE(MAX(revision), 0) + 1
+                            FROM replay_training_instrument_rule
+                            WHERE run_id = ? AND track_id = ?
+                            """,
+                            (run_id, track_id),
+                        ).fetchone()[0]
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO replay_training_instrument_rule(
+                            run_id, track_id, revision,
+                            effective_virtual_time_ms, rule_json, rule_hash,
+                            fidelity, created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            track_id,
+                            revision,
+                            virtual_time_ms,
+                            canonical_json(runtime_rule),
+                            canonical_sha256(runtime_rule),
+                            "HISTORICAL_EXACT_VERSIONED_EXCHANGE_RULE",
+                            now_ms,
+                        ),
+                    )
+                elif event.event_kind == "MARK_INDEX":
+                    pass
+                elif event.event_kind == "FUNDING":
+                    account = connection.execute(
+                        """
+                        SELECT account.*, run.settlement_asset
+                        FROM replay_training_contract_account AS account
+                        JOIN replay_training_run AS run USING(run_id)
+                        WHERE run_id = ?
+                        """,
+                        (run_id,),
+                    ).fetchone()
+                    if account is None:
+                        raise TypeError("contract account is missing")
+                    if account["funding_mode"] == "HISTORICAL_EXACT":
+                        self._settle_exact_funding_event(
+                            connection,
+                            run_id=run_id,
+                            track_id=track_id,
+                            event=event,
+                            virtual_time_ms=virtual_time_ms,
+                            source_sequence=int(
+                                projection["source_sequence"] or 0
+                            ),
+                            settlement_asset=str(account["settlement_asset"]),
+                            now_ms=now_ms,
+                        )
+                else:
+                    raise TrainingRunError(
+                        "ACCOUNT_HISTORY_EVENT_UNSUPPORTED",
+                        "account archive event kind is unsupported",
+                        status_code=409,
+                    )
+                last_rule = (
+                    event.component_sequence
+                    if event.event_kind == "RULE"
+                    else int(projection["last_rule_sequence"])
+                )
+                last_mark = (
+                    event.component_sequence
+                    if event.event_kind == "MARK_INDEX"
+                    else int(projection["last_mark_sequence"])
+                )
+                last_funding = (
+                    event.component_sequence
+                    if event.event_kind == "FUNDING"
+                    else int(projection["last_funding_sequence"])
+                )
+                rule_json = (
+                    canonical_json(event.payload)
+                    if event.event_kind == "RULE"
+                    else projection["current_rule_json"]
+                )
+                rule_hash = (
+                    account_rule_component_hash(event.payload)
+                    if event.event_kind == "RULE"
+                    else projection["current_rule_hash"]
+                )
+                mark_price = (
+                    event.payload["mark_price"]
+                    if event.event_kind == "MARK_INDEX"
+                    else projection["mark_price"]
+                )
+                index_price = (
+                    event.payload["index_price"]
+                    if event.event_kind == "MARK_INDEX"
+                    else projection["index_price"]
+                )
+                connection.execute(
+                    """
+                    UPDATE replay_account_history_projection
+                    SET last_event_sequence = ?, last_rule_sequence = ?,
+                        last_mark_sequence = ?, last_funding_sequence = ?,
+                        as_of_actual_time_ms = ?, as_of_virtual_time_ms = ?,
+                        current_rule_json = ?, current_rule_hash = ?,
+                        mark_price = ?, index_price = ?, input_chain_hash = ?,
+                        status = 'READY', degraded_reason = NULL,
+                        updated_at_ms = ?
+                    WHERE run_id = ? AND track_id = ?
+                    """,
+                    (
+                        event.event_sequence,
+                        last_rule,
+                        last_mark,
+                        last_funding,
+                        event.event_time_ms,
+                        virtual_time_ms,
+                        rule_json,
+                        rule_hash,
+                        mark_price,
+                        index_price,
+                        event.event_hash,
+                        now_ms,
+                        run_id,
+                        track_id,
+                    ),
+                )
+                applied_hash = canonical_sha256(
+                    {
+                        "run_id": run_id,
+                        "track_id": track_id,
+                        "virtual_time_ms": virtual_time_ms,
+                        "event": {
+                            "archive_id": event.archive_id,
+                            "event_sequence": event.event_sequence,
+                            "event_time_ms": event.event_time_ms,
+                            "event_phase": event.event_phase,
+                            "event_kind": event.event_kind,
+                            "component_sequence": event.component_sequence,
+                            "event_hash": event.event_hash,
+                            "payload": dict(event.payload),
+                        },
+                    }
+                )
+                connection.execute(
+                    """
+                    INSERT INTO replay_account_history_applied_event(
+                        run_id, track_id, archive_id, archive_event_sequence,
+                        event_time_ms, event_phase, event_kind,
+                        component_sequence, archive_event_hash,
+                        applied_payload_hash, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        track_id,
+                        event.archive_id,
+                        event.event_sequence,
+                        event.event_time_ms,
+                        event.event_phase,
+                        event.event_kind,
+                        event.component_sequence,
+                        event.event_hash,
+                        applied_hash,
+                        now_ms,
+                    ),
+                )
+            return stable_market_event_order(stable)
+
+        return await self.base_store.run_extension_write(write)
+
+    @classmethod
+    def _settle_exact_funding_event(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        track_id: str,
+        event: AccountHistoryEvent,
+        virtual_time_ms: int,
+        source_sequence: int,
+        settlement_asset: str,
+        now_ms: int,
+    ) -> None:
+        existing = connection.execute(
+            """
+            SELECT 1 FROM replay_training_funding_settlement
+            WHERE run_id = ? AND track_id = ? AND settlement_time_ms = ?
+            """,
+            (run_id, track_id, virtual_time_ms),
+        ).fetchone()
+        if existing is not None:
+            return
+        track = connection.execute(
+            """
+            SELECT position_json FROM replay_training_market_track
+            WHERE run_id = ? AND track_id = ?
+            """,
+            (run_id, track_id),
+        ).fetchone()
+        rule_row = connection.execute(
+            """
+            SELECT revision, rule_json FROM replay_training_instrument_rule
+            WHERE run_id = ? AND track_id = ?
+              AND effective_virtual_time_ms <= ?
+            ORDER BY effective_virtual_time_ms DESC, revision DESC LIMIT 1
+            """,
+            (run_id, track_id, virtual_time_ms),
+        ).fetchone()
+        if track is None or rule_row is None:
+            raise TypeError("exact funding inputs are missing")
+        position = json.loads(str(track["position_json"]))
+        if not isinstance(position, dict):
+            raise TypeError("exact funding position is invalid")
+        rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
+        quantity = Decimal(str(position.get("quantity", "0")))
+        mark = Decimal(str(event.payload["mark_price"]))
+        rate = Decimal(str(event.payload["funding_rate"]))
+        raw = -(quantity * mark * Decimal(rule.contract_size) * rate)
+        rounded = round_to_step(
+            abs(raw),
+            Decimal(rule.quote_step),
+            upward=True,
+        )
+        cash_delta = rounded.copy_sign(raw) if raw else Decimal(0)
+        ledger_sequence = cls._append_contract_ledger(
+            connection,
+            run_id=run_id,
+            posting_id=f"exact-funding:{track_id}:{event.event_time_ms}",
+            track_id=track_id,
+            kind="FUNDING_SETTLEMENT",
+            cash_delta=cash_delta,
+            asset=settlement_asset,
+            virtual_time_ms=virtual_time_ms,
+            source_sequence=source_sequence,
+            fidelity="HISTORICAL_EXACT_ARCHIVE_FUNDING",
+            rule_revision=int(rule_row["revision"]),
+            reference_type="ACCOUNT_ARCHIVE_EVENT",
+            reference_id=f"{event.archive_id}:{event.event_sequence}",
+            metadata={
+                "archive_id": event.archive_id,
+                "archive_event_sequence": event.event_sequence,
+                "actual_settlement_time_ms": event.event_time_ms,
+                "rate": str(event.payload["funding_rate"]),
+                "mark_price": str(event.payload["mark_price"]),
+                "contract_size": rule.contract_size,
+                "rounding": "ABS_CEILING_QUOTE_STEP_THEN_SIGN",
+            },
+            now_ms=now_ms,
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_training_funding_settlement(
+                run_id, track_id, settlement_time_ms, position_quantity,
+                mark_price, funding_rate, cash_delta, fidelity,
+                ledger_sequence, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                track_id,
+                virtual_time_ms,
+                decimal_to_string(quantity, field_name="funding quantity"),
+                str(event.payload["mark_price"]),
+                str(event.payload["funding_rate"]),
+                decimal_to_string(cash_delta, field_name="funding cash delta"),
+                "HISTORICAL_EXACT_ARCHIVE_FUNDING",
+                ledger_sequence,
+                now_ms,
+            ),
+        )
+        account = connection.execute(
+            """
+            SELECT overlay_cash FROM replay_training_contract_account
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        overlay = Decimal(str(account["overlay_cash"])) + cash_delta
+        connection.execute(
+            """
+            UPDATE replay_training_contract_account
+            SET overlay_cash = ?, updated_at_ms = ? WHERE run_id = ?
+            """,
+            (
+                decimal_to_string(overlay, field_name="overlay cash"),
+                now_ms,
+                run_id,
+            ),
+        )
+
+    async def pending_account_global_events(
+        self,
+        run_id: str,
+    ) -> tuple[StableMarketEvent, ...]:
+        def read(connection: sqlite3.Connection) -> tuple[StableMarketEvent, ...]:
+            rows = connection.execute(
+                """
+                SELECT applied.track_id, applied.archive_event_sequence,
+                       applied.event_time_ms, applied.event_phase
+                FROM replay_account_history_applied_event AS applied
+                LEFT JOIN replay_training_global_event AS global_event
+                  ON global_event.run_id = applied.run_id
+                 AND global_event.track_id = 'account:' || applied.track_id
+                 AND global_event.source_sequence =
+                     applied.archive_event_sequence
+                WHERE applied.run_id = ? AND global_event.global_sequence IS NULL
+                ORDER BY applied.event_time_ms, applied.event_phase,
+                         applied.track_id, applied.archive_event_sequence
+                """,
+                (run_id,),
+            ).fetchall()
+            return tuple(
+                StableMarketEvent(
+                    actual_event_time_ms=int(row["event_time_ms"]),
+                    event_phase=int(row["event_phase"]),
+                    market_track_stable_id=f"account:{row['track_id']}",
+                    source_sequence=int(row["archive_event_sequence"]),
+                )
+                for row in rows
+            )
+
+        return await self.base_store.run_extension_read(read)
+
+    async def audit_account(
+        self,
+        run_id: str,
+        *,
+        authoritative_projections: (
+            Mapping[str, Mapping[str, object]] | None
+        ) = None,
+    ) -> dict[str, object]:
+        def write(connection: sqlite3.Connection) -> dict[str, object]:
+            return self._write_account_audit(
+                connection,
+                run_id=run_id,
+                now_ms=self.base_store._validated_now_ms(),
+                authoritative_projections=authoritative_projections,
+            )
+
+        return await self.base_store.run_extension_write(write)
+
+    async def finalize_account_history(
+        self,
+        run_id: str,
+        *,
+        write_audit: bool = True,
+    ) -> dict[str, object] | None:
+        """Reapply authoritative marks, run risk, and emit an independent audit."""
+
+        def write(connection: sqlite3.Connection) -> dict[str, object] | None:
+            history = connection.execute(
+                """
+                SELECT account_data_mode, status
+                FROM replay_training_account_history WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if history is None or history["account_data_mode"] != "HISTORICAL_EXACT":
+                return None
+            if history["status"] != "ACTIVE":
+                raise TrainingRunError(
+                    "ACCOUNT_HISTORY_ARCHIVE_DEGRADED",
+                    "exact account history is not active",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            now_ms = self.base_store._validated_now_ms()
+            rows = connection.execute(
+                """
+                SELECT track_id FROM replay_training_market_track
+                WHERE run_id = ? AND subscription_tier = 'FULL'
+                ORDER BY stable_ordinal, track_id
+                """,
+                (run_id,),
+            ).fetchall()
+            for row in rows:
+                self._apply_exact_mark_projection(
+                    connection,
+                    run_id=run_id,
+                    track_id=str(row["track_id"]),
+                    now_ms=now_ms,
+                )
+            self._detect_contract_liquidations(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+            )
+            if not write_audit:
+                return None
+            return self._write_account_audit(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+            )
+
+        return await self.base_store.run_extension_write(write)
+
+    @classmethod
+    def _audit_exact_account_state(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run: sqlite3.Row,
+        account: sqlite3.Row,
+        ledger_rows: Sequence[sqlite3.Row],
+        portfolio: Mapping[str, object],
+        differences: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """Independently rebuild exact account state from immutable source records."""
+
+        run_id = str(run["run_id"])
+
+        def add_difference(
+            field: str,
+            expected: object,
+            actual: object,
+        ) -> None:
+            differences.append(
+                {
+                    "field": field,
+                    "expected": expected,
+                    "actual": actual,
+                }
+            )
+
+        def compare_decimal(
+            field: str,
+            expected: Decimal,
+            actual: object,
+        ) -> None:
+            expected_value = decimal_to_string(expected, field_name=field)
+            try:
+                actual_decimal = Decimal(str(actual))
+            except (InvalidOperation, TypeError, ValueError):
+                add_difference(field, expected_value, actual)
+                return
+            if actual_decimal != expected:
+                add_difference(field, expected_value, actual)
+
+        rule_rows = connection.execute(
+            """
+            SELECT * FROM replay_training_instrument_rule
+            WHERE run_id = ? ORDER BY track_id, revision
+            """,
+            (run_id,),
+        ).fetchall()
+        rules: dict[tuple[str, int], InstrumentRule] = {}
+        rule_times: dict[tuple[str, int], int] = {}
+        for row in rule_rows:
+            key = (str(row["track_id"]), int(row["revision"]))
+            try:
+                rule = InstrumentRule.from_mapping(
+                    json.loads(str(row["rule_json"]))
+                )
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                add_difference(
+                    f"instrument_rule[{key[0]}:{key[1]}]",
+                    "VALID_VERSIONED_RULE",
+                    f"INVALID:{type(exc).__name__}",
+                )
+                continue
+            rules[key] = rule
+            rule_times[key] = int(row["effective_virtual_time_ms"])
+            if rule.rule_hash != row["rule_hash"]:
+                add_difference(
+                    f"instrument_rule[{key[0]}:{key[1]}].rule_hash",
+                    rule.rule_hash,
+                    row["rule_hash"],
+                )
+
+        policy_rows = connection.execute(
+            """
+            SELECT * FROM replay_training_fee_policy
+            WHERE run_id = ? ORDER BY revision
+            """,
+            (run_id,),
+        ).fetchall()
+        policies: dict[int, sqlite3.Row] = {}
+        for row in policy_rows:
+            revision = int(row["revision"])
+            policies[revision] = row
+            policy_payload = {
+                "schema_version": "replay.training.fee-policy.v1",
+                "run_id": run_id,
+                "revision": revision,
+                "effective_virtual_time_ms": int(
+                    row["effective_virtual_time_ms"]
+                ),
+                "maker_fee_bps": str(row["maker_fee_bps"]),
+                "taker_fee_bps": str(row["taker_fee_bps"]),
+                "fidelity": str(row["fidelity"]),
+            }
+            policy_hash = canonical_sha256(policy_payload)
+            if policy_hash != row["policy_hash"]:
+                add_difference(
+                    f"fee_policy[{revision}].policy_hash",
+                    policy_hash,
+                    row["policy_hash"],
+                )
+
+        ledger_by_posting = {
+            str(row["posting_id"]): row for row in ledger_rows
+        }
+        ledger_by_sequence = {
+            int(row["ledger_sequence"]): row for row in ledger_rows
+        }
+        expected_postings: set[str] = set()
+        initial = Decimal(str(run["initial_equity"]))
+        settlement_asset = str(run["settlement_asset"])
+        initial_posting = ledger_by_posting.get("initial-capital")
+        if initial_posting is None:
+            add_difference("ledger.initial-capital", "PRESENT", "MISSING")
+        else:
+            expected_postings.add("initial-capital")
+            compare_decimal(
+                "ledger.initial-capital.cash_delta",
+                initial,
+                initial_posting["cash_delta"],
+            )
+            if initial_posting["asset"] != settlement_asset:
+                add_difference(
+                    "ledger.initial-capital.asset",
+                    settlement_asset,
+                    initial_posting["asset"],
+                )
+
+        fill_rows = connection.execute(
+            """
+            SELECT * FROM replay_training_contract_fill
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchall()
+        fills: list[tuple[sqlite3.Row, Mapping[str, object]]] = []
+        for row in fill_rows:
+            try:
+                raw = json.loads(str(row["fill_json"]))
+            except json.JSONDecodeError as exc:
+                add_difference(
+                    f"fill[{row['track_id']}:{row['fill_id']}].json",
+                    "VALID_JSON_OBJECT",
+                    f"INVALID:{type(exc).__name__}",
+                )
+                continue
+            if not isinstance(raw, Mapping):
+                add_difference(
+                    f"fill[{row['track_id']}:{row['fill_id']}].json",
+                    "JSON_OBJECT",
+                    type(raw).__name__,
+                )
+                continue
+            fills.append((row, raw))
+        fills.sort(
+            key=lambda item: (
+                int(item[1].get("event_time_ms", 0)),
+                int(item[1].get("source_sequence", 0)),
+                str(item[0]["track_id"]),
+                str(item[0]["fill_id"]),
+            )
+        )
+
+        position_state: dict[str, dict[str, Decimal | None]] = {}
+        broker_fees_by_track: dict[str, Decimal] = {}
+        configured_fees = Decimal(0)
+        realized_total = Decimal(0)
+        realized_by_fill: dict[tuple[str, str], Decimal] = {}
+
+        def apply_fill(
+            *,
+            state: dict[str, Decimal | None],
+            side: str,
+            quantity: Decimal,
+            price: Decimal,
+            contract_size: Decimal,
+        ) -> Decimal:
+            old_quantity = cast(Decimal, state["quantity"])
+            old_entry = cast(Decimal | None, state["entry_price"])
+            delta = quantity if side == "BUY" else -quantity
+            new_quantity = old_quantity + delta
+            realized = Decimal(0)
+            with localcontext() as context:
+                context.prec = 60
+                if old_quantity == 0:
+                    new_entry: Decimal | None = price
+                elif old_quantity * delta > 0:
+                    if old_entry is None:
+                        raise TypeError("non-flat audited position has no entry")
+                    new_entry = (
+                        abs(old_quantity) * old_entry + abs(delta) * price
+                    ) / abs(new_quantity)
+                else:
+                    if old_entry is None:
+                        raise TypeError("non-flat audited position has no entry")
+                    closed = min(abs(old_quantity), abs(delta))
+                    realized = (
+                        (price - old_entry)
+                        * closed
+                        * (Decimal(1) if old_quantity > 0 else Decimal(-1))
+                        * contract_size
+                    )
+                    if new_quantity == 0:
+                        new_entry = None
+                    elif old_quantity * new_quantity > 0:
+                        new_entry = old_entry
+                    else:
+                        new_entry = price
+            state["quantity"] = new_quantity
+            state["entry_price"] = new_entry
+            state["realized_pnl"] = (
+                cast(Decimal, state["realized_pnl"]) + realized
+            )
+            return realized
+
+        for row, raw in fills:
+            track_id = str(row["track_id"])
+            fill_id = str(row["fill_id"])
+            field_prefix = f"fill[{track_id}:{fill_id}]"
+            rule_revision = int(row["rule_revision"])
+            fee_revision = int(row["fee_policy_revision"])
+            rule = rules.get((track_id, rule_revision))
+            policy = policies.get(fee_revision)
+            if rule is None:
+                add_difference(
+                    f"{field_prefix}.rule_revision",
+                    "EXISTING_RULE",
+                    rule_revision,
+                )
+                continue
+            if policy is None:
+                add_difference(
+                    f"{field_prefix}.fee_policy_revision",
+                    "EXISTING_POLICY",
+                    fee_revision,
+                )
+                continue
+            try:
+                quantity = Decimal(str(raw["quantity"]))
+                price = Decimal(str(raw["price"]))
+                broker_notional = Decimal(str(raw["notional"]))
+                contract_size = Decimal(rule.contract_size)
+                account_notional = quantity * price * contract_size
+                if broker_notional != quantity * price:
+                    compare_decimal(
+                        f"{field_prefix}.notional",
+                        quantity * price,
+                        raw["notional"],
+                    )
+                compare_decimal(
+                    f"{field_prefix}.account_notional",
+                    account_notional,
+                    raw.get("account_notional"),
+                )
+                if raw.get("contract_size") != rule.contract_size:
+                    add_difference(
+                        f"{field_prefix}.contract_size",
+                        rule.contract_size,
+                        raw.get("contract_size"),
+                    )
+                configured_fee = fee_for_notional(
+                    notional=account_notional,
+                    liquidity=str(raw["liquidity"]),
+                    maker_bps=str(policy["maker_fee_bps"]),
+                    taker_bps=str(policy["taker_fee_bps"]),
+                    quote_step=rule.quote_step,
+                )
+                compare_decimal(
+                    f"{field_prefix}.configured_fee",
+                    configured_fee,
+                    row["configured_fee"],
+                )
+                configured_fees += configured_fee
+                broker_fee = Decimal(str(raw["fee"]))
+                broker_fees_by_track[track_id] = (
+                    broker_fees_by_track.get(track_id, Decimal(0))
+                    + broker_fee
+                )
+                state = position_state.setdefault(
+                    track_id,
+                    {
+                        "quantity": Decimal(0),
+                        "entry_price": None,
+                        "realized_pnl": Decimal(0),
+                    },
+                )
+                realized = apply_fill(
+                    state=state,
+                    side=str(raw["side"]),
+                    quantity=quantity,
+                    price=price,
+                    contract_size=contract_size,
+                )
+                realized_total += realized
+                realized_by_fill[(track_id, fill_id)] = realized
+            except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+                add_difference(
+                    field_prefix,
+                    "VALID_REPLAY_FILL",
+                    f"INVALID:{type(exc).__name__}",
+                )
+                continue
+
+            fee_posting_id = f"fee:{track_id}:{fill_id}"
+            fee_posting = ledger_by_posting.get(fee_posting_id)
+            if fee_posting is None:
+                add_difference(
+                    f"ledger[{fee_posting_id}]",
+                    "PRESENT",
+                    "MISSING",
+                )
+            else:
+                expected_postings.add(fee_posting_id)
+                compare_decimal(
+                    f"ledger[{fee_posting_id}].cash_delta",
+                    -configured_fee,
+                    fee_posting["cash_delta"],
+                )
+                if int(fee_posting["rule_revision"]) != rule_revision:
+                    add_difference(
+                        f"ledger[{fee_posting_id}].rule_revision",
+                        rule_revision,
+                        int(fee_posting["rule_revision"]),
+                    )
+
+        realized_ledger_by_fill: dict[
+            tuple[str, str], list[sqlite3.Row]
+        ] = {}
+        for row in ledger_rows:
+            if row["kind"] != "BROKER_REALIZED_PNL":
+                continue
+            try:
+                metadata = json.loads(str(row["metadata_json"]))
+            except json.JSONDecodeError:
+                metadata = None
+            fill_id = (
+                metadata.get("fill_id")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if isinstance(fill_id, str) and isinstance(row["track_id"], str):
+                realized_ledger_by_fill.setdefault(
+                    (str(row["track_id"]), fill_id),
+                    [],
+                ).append(row)
+        for key, realized in realized_by_fill.items():
+            postings = realized_ledger_by_fill.get(key, [])
+            if realized == 0:
+                if postings:
+                    add_difference(
+                        f"realized_ledger[{key[0]}:{key[1]}].count",
+                        0,
+                        len(postings),
+                    )
+                continue
+            if len(postings) != 1:
+                add_difference(
+                    f"realized_ledger[{key[0]}:{key[1]}].count",
+                    1,
+                    len(postings),
+                )
+                continue
+            posting = postings[0]
+            posting_id = str(posting["posting_id"])
+            expected_postings.add(posting_id)
+            compare_decimal(
+                f"ledger[{posting_id}].cash_delta",
+                realized,
+                posting["cash_delta"],
+            )
+
+        funding_total = Decimal(0)
+        funding_rows = connection.execute(
+            """
+            SELECT * FROM replay_training_funding_settlement
+            WHERE run_id = ? ORDER BY settlement_time_ms, track_id
+            """,
+            (run_id,),
+        ).fetchall()
+        for row in funding_rows:
+            track_id = str(row["track_id"])
+            field_prefix = (
+                f"funding[{track_id}:{int(row['settlement_time_ms'])}]"
+            )
+            ledger = ledger_by_sequence.get(int(row["ledger_sequence"]))
+            if ledger is None:
+                add_difference(
+                    f"{field_prefix}.ledger_sequence",
+                    "LINKED_LEDGER_ENTRY",
+                    int(row["ledger_sequence"]),
+                )
+                continue
+            posting_id = str(ledger["posting_id"])
+            expected_postings.add(posting_id)
+            rule = rules.get((track_id, int(ledger["rule_revision"])))
+            if rule is None:
+                add_difference(
+                    f"{field_prefix}.rule_revision",
+                    "EXISTING_RULE",
+                    int(ledger["rule_revision"]),
+                )
+                continue
+            try:
+                quantity = Decimal(str(row["position_quantity"]))
+                mark = Decimal(str(row["mark_price"]))
+                rate = Decimal(str(row["funding_rate"]))
+                raw_delta = (
+                    -quantity * mark * Decimal(rule.contract_size) * rate
+                )
+                rounded = round_to_step(
+                    abs(raw_delta),
+                    Decimal(rule.quote_step),
+                    upward=True,
+                )
+                expected_delta = (
+                    rounded.copy_sign(raw_delta)
+                    if raw_delta
+                    else Decimal(0)
+                )
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                add_difference(
+                    field_prefix,
+                    "VALID_EXACT_FUNDING",
+                    f"INVALID:{type(exc).__name__}",
+                )
+                continue
+            compare_decimal(
+                f"{field_prefix}.cash_delta",
+                expected_delta,
+                row["cash_delta"],
+            )
+            compare_decimal(
+                f"ledger[{posting_id}].cash_delta",
+                expected_delta,
+                ledger["cash_delta"],
+            )
+            if ledger["kind"] != "FUNDING_SETTLEMENT":
+                add_difference(
+                    f"ledger[{posting_id}].kind",
+                    "FUNDING_SETTLEMENT",
+                    ledger["kind"],
+                )
+            funding_total += expected_delta
+
+        allocation_state: dict[str, Decimal] = {}
+        for row in ledger_rows:
+            if row["kind"] not in {"MARGIN_ALLOCATION", "MARGIN_RELEASE"}:
+                continue
+            expected_postings.add(str(row["posting_id"]))
+            compare_decimal(
+                f"ledger[{row['posting_id']}].cash_delta",
+                Decimal(0),
+                row["cash_delta"],
+            )
+            track_id = row["track_id"]
+            if not isinstance(track_id, str):
+                add_difference(
+                    f"ledger[{row['posting_id']}].track_id",
+                    "TRACK_ID",
+                    track_id,
+                )
+                continue
+            try:
+                metadata = json.loads(str(row["metadata_json"]))
+            except json.JSONDecodeError:
+                metadata = None
+            target = (
+                metadata.get("new_allocation")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if target is None:
+                allocation_state.pop(track_id, None)
+                continue
+            try:
+                amount = Decimal(str(target))
+            except (InvalidOperation, TypeError, ValueError):
+                add_difference(
+                    f"ledger[{row['posting_id']}].new_allocation",
+                    "DECIMAL",
+                    target,
+                )
+                continue
+            if amount == 0:
+                allocation_state.pop(track_id, None)
+            else:
+                allocation_state[track_id] = amount
+
+        liquidation_total = Decimal(0)
+        liquidation_rows = connection.execute(
+            """
+            SELECT * FROM replay_training_liquidation_event
+            WHERE run_id = ? ORDER BY trigger_virtual_time_ms, liquidation_id
+            """,
+            (run_id,),
+        ).fetchall()
+        pending_liquidations = 0
+        bankrupt = False
+        for row in liquidation_rows:
+            liquidation_id = str(row["liquidation_id"])
+            track_id = str(row["track_id"])
+            field_prefix = f"liquidation[{liquidation_id}]"
+            rule_candidates = [
+                (key, rule)
+                for key, rule in rules.items()
+                if key[0] == track_id
+                and rule_times[key] <= int(row["trigger_virtual_time_ms"])
+            ]
+            rule = (
+                None
+                if not rule_candidates
+                else max(
+                    rule_candidates,
+                    key=lambda item: (rule_times[item[0]], item[0][1]),
+                )[1]
+            )
+            if rule is None:
+                add_difference(
+                    f"{field_prefix}.rule",
+                    "ACTIVE_RULE",
+                    "MISSING",
+                )
+                continue
+            try:
+                notional = Decimal(str(row["position_notional"]))
+                expected_maintenance = rule.maintenance_margin(notional)
+                expected_fee = rule.liquidation_fee(notional)
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                add_difference(
+                    field_prefix,
+                    "VALID_LIQUIDATION_INPUTS",
+                    f"INVALID:{type(exc).__name__}",
+                )
+                continue
+            compare_decimal(
+                f"{field_prefix}.maintenance_margin",
+                expected_maintenance,
+                row["maintenance_margin"],
+            )
+            compare_decimal(
+                f"{field_prefix}.liquidation_fee",
+                expected_fee,
+                row["liquidation_fee"],
+            )
+            try:
+                trigger_state: dict[str, Decimal | None] = {
+                    "quantity": Decimal(0),
+                    "entry_price": None,
+                    "realized_pnl": Decimal(0),
+                }
+                close_order_id = row["close_order_id"]
+                for fill_row, raw_fill in fills:
+                    if str(fill_row["track_id"]) != track_id:
+                        continue
+                    if (
+                        isinstance(close_order_id, str)
+                        and raw_fill.get("order_id") == close_order_id
+                    ):
+                        continue
+                    if int(raw_fill.get("event_time_ms", 0)) > int(
+                        row["trigger_virtual_time_ms"]
+                    ):
+                        continue
+                    fill_rule = rules.get(
+                        (track_id, int(fill_row["rule_revision"]))
+                    )
+                    if fill_rule is None:
+                        raise TypeError("liquidation fill rule is missing")
+                    apply_fill(
+                        state=trigger_state,
+                        side=str(raw_fill["side"]),
+                        quantity=Decimal(str(raw_fill["quantity"])),
+                        price=Decimal(str(raw_fill["price"])),
+                        contract_size=Decimal(fill_rule.contract_size),
+                    )
+                trigger_quantity = cast(
+                    Decimal, trigger_state["quantity"]
+                )
+                trigger_entry = cast(
+                    Decimal | None, trigger_state["entry_price"]
+                )
+                if trigger_quantity == 0 or trigger_entry is None:
+                    raise ValueError(
+                        "liquidation trigger has no reconstructed position"
+                    )
+                compare_decimal(
+                    f"{field_prefix}.position_quantity",
+                    trigger_quantity,
+                    row["position_quantity"],
+                )
+                trigger_mark = Decimal(str(row["mark_price"]))
+                trigger_notional = (
+                    abs(trigger_quantity)
+                    * trigger_mark
+                    * Decimal(rule.contract_size)
+                )
+                compare_decimal(
+                    f"{field_prefix}.position_notional",
+                    trigger_notional,
+                    row["position_notional"],
+                )
+                if account["margin_mode"] == "CROSS":
+                    liquidation_allocation = Decimal(
+                        str(row["account_equity_before"])
+                    )
+                else:
+                    liquidation_allocation = Decimal(0)
+                    for ledger_row in ledger_rows:
+                        if (
+                            ledger_row["track_id"] != track_id
+                            or ledger_row["kind"]
+                            not in {"MARGIN_ALLOCATION", "MARGIN_RELEASE"}
+                            or int(ledger_row["virtual_time_ms"])
+                            > int(row["trigger_virtual_time_ms"])
+                        ):
+                            continue
+                        metadata = json.loads(
+                            str(ledger_row["metadata_json"])
+                        )
+                        target = (
+                            metadata.get("new_allocation")
+                            if isinstance(metadata, Mapping)
+                            else None
+                        )
+                        liquidation_allocation = (
+                            Decimal(0)
+                            if target is None
+                            else Decimal(str(target))
+                        )
+                expected_bankruptcy = trigger_entry - (
+                    liquidation_allocation
+                    / (
+                        abs(trigger_quantity)
+                        * Decimal(rule.contract_size)
+                    )
+                ) * (
+                    Decimal(1)
+                    if trigger_quantity > 0
+                    else Decimal(-1)
+                )
+                expected_bankruptcy = max(
+                    Decimal(0), expected_bankruptcy
+                )
+                compare_decimal(
+                    f"{field_prefix}.bankruptcy_price",
+                    expected_bankruptcy,
+                    row["bankruptcy_price"],
+                )
+            except (
+                InvalidOperation,
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                add_difference(
+                    f"{field_prefix}.bankruptcy_reconstruction",
+                    "RECONSTRUCTABLE_FROM_FILLS_AND_MARGIN",
+                    f"INVALID:{type(exc).__name__}",
+                )
+            if row["state"] == "PENDING":
+                pending_liquidations += 1
+            elif row["state"] == "COMPLETED":
+                posting_id = f"liquidation-fee:{liquidation_id}"
+                posting = ledger_by_posting.get(posting_id)
+                if posting is None:
+                    add_difference(
+                        f"ledger[{posting_id}]",
+                        "PRESENT",
+                        "MISSING",
+                    )
+                else:
+                    expected_postings.add(posting_id)
+                    compare_decimal(
+                        f"ledger[{posting_id}].cash_delta",
+                        -expected_fee,
+                        posting["cash_delta"],
+                    )
+                liquidation_total -= expected_fee
+                try:
+                    bankrupt = bankrupt or (
+                        row["account_equity_after"] is not None
+                        and Decimal(str(row["account_equity_after"])) < 0
+                    )
+                except (InvalidOperation, TypeError, ValueError):
+                    add_difference(
+                        f"{field_prefix}.account_equity_after",
+                        "DECIMAL_OR_NULL",
+                        row["account_equity_after"],
+                    )
+
+        for row in ledger_rows:
+            posting_id = str(row["posting_id"])
+            if row["kind"] == "POLICY_REVISION":
+                expected_postings.add(posting_id)
+                compare_decimal(
+                    f"ledger[{posting_id}].cash_delta",
+                    Decimal(0),
+                    row["cash_delta"],
+                )
+            if posting_id not in expected_postings and Decimal(
+                str(row["cash_delta"])
+            ) != 0:
+                add_difference(
+                    f"ledger[{posting_id}].source_link",
+                    "SOURCE_BACKED_POSTING",
+                    str(row["kind"]),
+                )
+
+        raw_tracks = connection.execute(
+            """
+            SELECT * FROM replay_training_market_track
+            WHERE run_id = ? ORDER BY stable_ordinal, track_id
+            """,
+            (run_id,),
+        ).fetchall()
+        projections = {
+            str(row["track_id"]): row
+            for row in connection.execute(
+                """
+                SELECT * FROM replay_account_history_projection
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchall()
+        }
+        active_rule_policy = connection.execute(
+            """
+            SELECT rule.rule_json FROM replay_training_rule AS rule
+            JOIN replay_training_run AS active
+              ON active.run_id = rule.run_id
+             AND active.active_rule_revision = rule.revision
+            WHERE active.run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        configured_max_leverage = Decimal(
+            str(json.loads(str(active_rule_policy["rule_json"]))["max_leverage"])
+        )
+        expected_unrealized = Decimal(0)
+        expected_margin = Decimal(0)
+        expected_reserved = Decimal(0)
+        expected_maintenance = Decimal(0)
+        per_track: list[dict[str, object]] = []
+        for track in raw_tracks:
+            track_id = str(track["track_id"])
+            if track["subscription_tier"] != "FULL":
+                continue
+            state = position_state.get(
+                track_id,
+                {
+                    "quantity": Decimal(0),
+                    "entry_price": None,
+                    "realized_pnl": Decimal(0),
+                },
+            )
+            quantity = cast(Decimal, state["quantity"])
+            entry = cast(Decimal | None, state["entry_price"])
+            realized = cast(Decimal, state["realized_pnl"])
+            current_rules = [
+                (key, rule)
+                for key, rule in rules.items()
+                if key[0] == track_id
+                and rule_times[key] <= int(track["virtual_time_ms"] or 0)
+            ]
+            active_rule = (
+                None
+                if not current_rules
+                else max(
+                    current_rules,
+                    key=lambda item: (rule_times[item[0]], item[0][1]),
+                )[1]
+            )
+            projection = projections.get(track_id)
+            if active_rule is None or projection is None:
+                add_difference(
+                    f"track[{track_id}].exact_inputs",
+                    "ACTIVE_RULE_AND_MARK_PROJECTION",
+                    "MISSING",
+                )
+                continue
+            if projection["status"] != "READY" or projection["mark_price"] is None:
+                add_difference(
+                    f"track[{track_id}].mark",
+                    "READY_AUTHORITATIVE_MARK",
+                    f"{projection['status']}:{projection['mark_price']}",
+                )
+                continue
+            mark = Decimal(str(projection["mark_price"]))
+            contract_size = Decimal(active_rule.contract_size)
+            notional = abs(quantity) * mark * contract_size
+            unrealized = (
+                Decimal(0)
+                if quantity == 0 or entry is None
+                else (mark - entry) * quantity * contract_size
+            )
+            leverage = min(
+                configured_max_leverage,
+                Decimal(active_rule.max_leverage),
+            )
+            margin = notional / leverage
+            maintenance = active_rule.maintenance_margin(notional)
+            open_orders = json.loads(str(track["open_orders_json"]))
+            reserved = Decimal(0)
+            if not isinstance(open_orders, list):
+                add_difference(
+                    f"track[{track_id}].open_orders",
+                    "JSON_ARRAY",
+                    type(open_orders).__name__,
+                )
+                open_orders = []
+            for order in open_orders:
+                if not isinstance(order, Mapping) or order.get("status") in {
+                    "FILLED",
+                    "CANCELED",
+                    "REJECTED",
+                    "EXPIRED",
+                }:
+                    continue
+                order_quantity = Decimal(
+                    str(
+                        order.get("remaining_quantity")
+                        or order.get("quantity")
+                        or "0"
+                    )
+                )
+                reference = (
+                    order.get("limit_price")
+                    or order.get("stop_price")
+                    or mark
+                )
+                reserved += (
+                    abs(order_quantity)
+                    * Decimal(str(reference))
+                    * contract_size
+                    / leverage
+                )
+            expected_unrealized += unrealized
+            expected_margin += margin
+            expected_reserved += reserved
+            expected_maintenance += maintenance
+            expected_track_cash = (
+                initial
+                + realized
+                - broker_fees_by_track.get(track_id, Decimal(0))
+            )
+            position = json.loads(str(track["position_json"]))
+            track_account = json.loads(str(track["account_json"]))
+            if not isinstance(position, Mapping) or not isinstance(
+                track_account, Mapping
+            ):
+                add_difference(
+                    f"track[{track_id}].projection",
+                    "POSITION_AND_ACCOUNT_OBJECTS",
+                    "INVALID",
+                )
+                continue
+            compare_decimal(
+                f"track[{track_id}].position.quantity",
+                quantity,
+                position.get("quantity"),
+            )
+            expected_entry = (
+                None
+                if entry is None
+                else decimal_to_string(entry, field_name="audited entry")
+            )
+            if (
+                position.get("entry_price") is not None
+                or expected_entry is not None
+            ) and str(position.get("entry_price")) != str(expected_entry):
+                add_difference(
+                    f"track[{track_id}].position.entry_price",
+                    expected_entry,
+                    position.get("entry_price"),
+                )
+            for field, expected, actual in (
+                ("mark_price", mark, position.get("mark_price")),
+                ("notional", notional, position.get("notional")),
+                ("realized_pnl", realized, position.get("realized_pnl")),
+                (
+                    "unrealized_pnl",
+                    unrealized,
+                    position.get("unrealized_pnl"),
+                ),
+                (
+                    "cash_balance",
+                    expected_track_cash,
+                    track_account.get("cash_balance"),
+                ),
+                (
+                    "equity",
+                    expected_track_cash + unrealized,
+                    track_account.get("equity"),
+                ),
+                ("margin_used", margin, track_account.get("margin_used")),
+                (
+                    "reserved_margin",
+                    reserved,
+                    track_account.get("reserved_margin"),
+                ),
+                (
+                    "available_equity",
+                    expected_track_cash + unrealized - margin - reserved,
+                    track_account.get("available_equity"),
+                ),
+                (
+                    "realized_pnl",
+                    realized,
+                    track_account.get("realized_pnl"),
+                ),
+                (
+                    "unrealized_pnl",
+                    unrealized,
+                    track_account.get("unrealized_pnl"),
+                ),
+                (
+                    "fees_paid",
+                    broker_fees_by_track.get(track_id, Decimal(0)),
+                    track_account.get("fees_paid"),
+                ),
+            ):
+                compare_decimal(
+                    f"track[{track_id}].{field}",
+                    expected,
+                    actual,
+                )
+            per_track.append(
+                {
+                    "track_id": track_id,
+                    "quantity": decimal_to_string(
+                        quantity, field_name="audited quantity"
+                    ),
+                    "entry_price": expected_entry,
+                    "mark_price": decimal_to_string(
+                        mark, field_name="audited mark"
+                    ),
+                    "realized_pnl": decimal_to_string(
+                        realized, field_name="audited realized pnl"
+                    ),
+                    "unrealized_pnl": decimal_to_string(
+                        unrealized, field_name="audited unrealized pnl"
+                    ),
+                    "notional": decimal_to_string(
+                        notional, field_name="audited notional"
+                    ),
+                    "margin_used": decimal_to_string(
+                        margin, field_name="audited margin"
+                    ),
+                    "maintenance_margin": decimal_to_string(
+                        maintenance, field_name="audited maintenance"
+                    ),
+                }
+            )
+
+        expected_cash = (
+            initial
+            + realized_total
+            - configured_fees
+            + funding_total
+            + liquidation_total
+        )
+        expected_equity = expected_cash + expected_unrealized
+        expected_available = (
+            expected_equity - expected_margin - expected_reserved
+            if account["margin_mode"] == "CROSS"
+            else expected_equity
+            - sum(allocation_state.values(), Decimal(0))
+        )
+        expected_overlay = (
+            sum(broker_fees_by_track.values(), Decimal(0))
+            - configured_fees
+            + funding_total
+            + liquidation_total
+        )
+        expected_status = (
+            "LIQUIDATING"
+            if pending_liquidations
+            else "BANKRUPT"
+            if bankrupt
+            else "ACTIVE"
+        )
+        compare_decimal(
+            "contract_account.overlay_cash",
+            expected_overlay,
+            account["overlay_cash"],
+        )
+        expected_allocations = {
+            key: decimal_to_string(value, field_name="audited allocation")
+            for key, value in sorted(allocation_state.items())
+        }
+        try:
+            actual_allocations = json.loads(str(account["isolated_margin_json"]))
+        except json.JSONDecodeError:
+            actual_allocations = "INVALID_JSON"
+        if expected_allocations != actual_allocations:
+            add_difference(
+                "contract_account.isolated_margin",
+                expected_allocations,
+                actual_allocations,
+            )
+        if account["status"] != expected_status:
+            add_difference(
+                "contract_account.status",
+                expected_status,
+                account["status"],
+            )
+        for field, expected in (
+            ("cash_balance", expected_cash),
+            ("equity", expected_equity),
+            ("available_equity", expected_available),
+            ("reserved_margin", expected_reserved),
+            ("margin_used", expected_margin),
+            ("maintenance_margin", expected_maintenance),
+            ("realized_pnl", realized_total),
+            ("unrealized_pnl", expected_unrealized),
+            ("fees_paid", configured_fees),
+            ("funding_cashflow", funding_total),
+            ("liquidation_fees_paid", -liquidation_total),
+        ):
+            compare_decimal(
+                f"portfolio.{field}",
+                expected,
+                portfolio.get(field),
+            )
+        if portfolio.get("status") != expected_status:
+            add_difference(
+                "portfolio.status",
+                expected_status,
+                portfolio.get("status"),
+            )
+        return {
+            "initial_equity": decimal_to_string(
+                initial, field_name="audited initial equity"
+            ),
+            "cash_balance": decimal_to_string(
+                expected_cash, field_name="audited cash balance"
+            ),
+            "equity": decimal_to_string(
+                expected_equity, field_name="audited equity"
+            ),
+            "available_equity": decimal_to_string(
+                expected_available, field_name="audited available equity"
+            ),
+            "reserved_margin": decimal_to_string(
+                expected_reserved, field_name="audited reserved margin"
+            ),
+            "margin_used": decimal_to_string(
+                expected_margin, field_name="audited margin used"
+            ),
+            "maintenance_margin": decimal_to_string(
+                expected_maintenance,
+                field_name="audited maintenance margin",
+            ),
+            "realized_pnl": decimal_to_string(
+                realized_total, field_name="audited realized pnl"
+            ),
+            "unrealized_pnl": decimal_to_string(
+                expected_unrealized, field_name="audited unrealized pnl"
+            ),
+            "configured_fees": decimal_to_string(
+                configured_fees, field_name="audited configured fees"
+            ),
+            "funding_cashflow": decimal_to_string(
+                funding_total, field_name="audited funding"
+            ),
+            "liquidation_fees_paid": decimal_to_string(
+                -liquidation_total, field_name="audited liquidation fees"
+            ),
+            "status": expected_status,
+            "isolated_allocations": expected_allocations,
+            "positions": per_track,
+            "source_counts": {
+                "fills": len(fills),
+                "funding_settlements": len(funding_rows),
+                "liquidations": len(liquidation_rows),
+                "instrument_rules": len(rule_rows),
+                "fee_policies": len(policy_rows),
+                "ledger_entries": len(ledger_rows),
+            },
+        }
+
+    @classmethod
+    def _write_account_audit(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        now_ms: int,
+        authoritative_projections: (
+            Mapping[str, Mapping[str, object]] | None
+        ) = None,
+    ) -> dict[str, object]:
+        run = connection.execute(
+            """
+            SELECT run.*, history.account_data_mode, history.status AS history_status
+            FROM replay_training_run AS run
+            JOIN replay_training_account_history AS history USING(run_id)
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        account = connection.execute(
+            """
+            SELECT * FROM replay_training_contract_account WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if run is None or account is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training account does not exist",
+                status_code=404,
+            )
+        differences: list[dict[str, object]] = []
+        ledger_rows = connection.execute(
+            """
+            SELECT * FROM replay_training_contract_ledger
+            WHERE run_id = ? ORDER BY ledger_sequence
+            """,
+            (run_id,),
+        ).fetchall()
+        previous = initial_ledger_hash(
+            run_id=run_id,
+            initial_equity=str(run["initial_equity"]),
+            asset=str(run["settlement_asset"]),
+        )
+        ledger_total = Decimal(0)
+        for expected, row in enumerate(ledger_rows, 1):
+            posting = {
+                "posting_id": row["posting_id"],
+                "track_id": row["track_id"],
+                "kind": row["kind"],
+                "cash_delta": row["cash_delta"],
+                "asset": row["asset"],
+                "virtual_time_ms": row["virtual_time_ms"],
+                "source_sequence": row["source_sequence"],
+                "fidelity": row["fidelity"],
+                "rule_revision": row["rule_revision"],
+                "reference_type": row["reference_type"],
+                "reference_id": row["reference_id"],
+                "metadata": json.loads(str(row["metadata_json"])),
+            }
+            expected_hash = ledger_chain_hash(
+                previous_hash=previous,
+                ledger_sequence=expected,
+                posting=posting,
+            )
+            if int(row["ledger_sequence"]) != expected:
+                differences.append(
+                    {
+                        "field": "ledger_sequence",
+                        "expected": expected,
+                        "actual": int(row["ledger_sequence"]),
+                    }
+                )
+            if row["previous_hash"] != previous:
+                differences.append(
+                    {
+                        "field": f"ledger[{expected}].previous_hash",
+                        "expected": previous,
+                        "actual": row["previous_hash"],
+                    }
+                )
+            if row["entry_hash"] != expected_hash:
+                differences.append(
+                    {
+                        "field": f"ledger[{expected}].entry_hash",
+                        "expected": expected_hash,
+                        "actual": row["entry_hash"],
+                    }
+                )
+            previous = str(row["entry_hash"])
+            ledger_total += Decimal(str(row["cash_delta"]))
+        if previous != account["ledger_tail_hash"]:
+            differences.append(
+                {
+                    "field": "ledger_tail_hash",
+                    "expected": previous,
+                    "actual": account["ledger_tail_hash"],
+                }
+            )
+        tracks = [
+            cls._market_track_from_row(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM replay_training_market_track
+                WHERE run_id = ? ORDER BY stable_ordinal, track_id
+                """,
+                (run_id,),
+            ).fetchall()
+        ]
+        portfolio = cls._contract_portfolio_projection(
+            connection,
+            run_id=run_id,
+            initial_equity=str(run["initial_equity"]),
+            tracks=tracks,
+        )
+        if Decimal(str(portfolio["cash_balance"])) != ledger_total:
+            differences.append(
+                {
+                    "field": "cash_balance",
+                    "expected": decimal_to_string(
+                        ledger_total, field_name="audited cash"
+                    ),
+                    "actual": portfolio["cash_balance"],
+                }
+            )
+        independent_state: dict[str, object] | None = None
+        projection_verification = "NOT_APPLICABLE"
+        if run["account_data_mode"] == "HISTORICAL_EXACT":
+            projection_verification = (
+                "VERIFIED_PINNED_ARCHIVE"
+                if authoritative_projections is not None
+                else "IN_PROCESS_HASH_CHAIN"
+            )
+            projections = connection.execute(
+                """
+                SELECT projection.*, ref.event_chain_tail,
+                       archive.proof_hash, archive.health
+                FROM replay_account_history_projection AS projection
+                JOIN replay_account_history_ref AS ref
+                  ON ref.run_id = projection.run_id
+                 AND ref.track_id = projection.track_id
+                 AND ref.archive_id = projection.archive_id
+                 AND ref.active = 1
+                JOIN replay_account_history_archive AS archive
+                  ON archive.archive_id = projection.archive_id
+                WHERE projection.run_id = ?
+                ORDER BY projection.track_id
+                """,
+                (run_id,),
+            ).fetchall()
+            full_count = sum(
+                1 for track in tracks if track["subscription_tier"] == "FULL"
+            )
+            if len(projections) != full_count:
+                differences.append(
+                    {
+                        "field": "exact_projection_count",
+                        "expected": full_count,
+                        "actual": len(projections),
+                    }
+                )
+            for projection in projections:
+                if (
+                    projection["status"] != "READY"
+                    or projection["health"] != "READY"
+                ):
+                    differences.append(
+                        {
+                            "field": f"projection[{projection['track_id']}].status",
+                            "expected": "READY",
+                            "actual": (
+                                f"{projection['status']}/{projection['health']}"
+                            ),
+                        }
+                    )
+                if authoritative_projections is not None:
+                    expected = authoritative_projections.get(
+                        str(projection["track_id"])
+                    )
+                    if expected is None:
+                        differences.append(
+                            {
+                                "field": (
+                                    f"projection[{projection['track_id']}]."
+                                    "authoritative_archive"
+                                ),
+                                "expected": "PINNED_ARCHIVE_PROJECTION",
+                                "actual": "MISSING",
+                            }
+                        )
+                    else:
+                        for field in (
+                            "archive_id",
+                            "archive_generation",
+                            "last_event_sequence",
+                            "last_rule_sequence",
+                            "last_mark_sequence",
+                            "last_funding_sequence",
+                            "as_of_actual_time_ms",
+                            "as_of_virtual_time_ms",
+                            "current_rule_json",
+                            "current_rule_hash",
+                            "mark_price",
+                            "index_price",
+                            "input_chain_hash",
+                        ):
+                            if projection[field] != expected.get(field):
+                                differences.append(
+                                    {
+                                        "field": (
+                                            f"projection[{projection['track_id']}]."
+                                            f"{field}"
+                                        ),
+                                        "expected": expected.get(field),
+                                        "actual": projection[field],
+                                    }
+                                )
+                applied = connection.execute(
+                    """
+                    SELECT event_hash FROM (
+                        SELECT archive_event_hash AS event_hash,
+                               archive_event_sequence
+                        FROM replay_account_history_applied_event
+                        WHERE run_id = ? AND track_id = ?
+                    ) ORDER BY archive_event_sequence DESC LIMIT 1
+                    """,
+                    (run_id, projection["track_id"]),
+                ).fetchone()
+                if (
+                    applied is not None
+                    and applied["event_hash"] != projection["input_chain_hash"]
+                ):
+                    differences.append(
+                        {
+                            "field": (
+                                f"projection[{projection['track_id']}]."
+                                "input_chain_hash"
+                            ),
+                            "expected": applied["event_hash"],
+                            "actual": projection["input_chain_hash"],
+                        }
+                    )
+            if (
+                authoritative_projections is not None
+                and len(authoritative_projections) != len(projections)
+            ):
+                differences.append(
+                    {
+                        "field": "authoritative_projection_count",
+                        "expected": len(projections),
+                        "actual": len(authoritative_projections),
+                    }
+                )
+            independent_state = cls._audit_exact_account_state(
+                connection,
+                run=run,
+                account=account,
+                ledger_rows=ledger_rows,
+                portfolio=portfolio,
+                differences=differences,
+            )
+        funding_orphans = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM replay_training_funding_settlement AS funding
+                LEFT JOIN replay_training_contract_ledger AS ledger
+                  ON ledger.run_id = funding.run_id
+                 AND ledger.ledger_sequence = funding.ledger_sequence
+                WHERE funding.run_id = ? AND (
+                    ledger.ledger_sequence IS NULL
+                    OR ledger.kind != 'FUNDING_SETTLEMENT'
+                    OR ledger.cash_delta != funding.cash_delta
+                )
+                """,
+                (run_id,),
+            ).fetchone()[0]
+        )
+        if funding_orphans:
+            differences.append(
+                {
+                    "field": "funding_ledger_links",
+                    "expected": 0,
+                    "actual": funding_orphans,
+                }
+            )
+        snapshot = {
+            "schema_version": ACCOUNT_AUDIT_SCHEMA_VERSION,
+            "run_id": run_id,
+            "account_data_mode": str(run["account_data_mode"]),
+            "history_status": str(run["history_status"]),
+            "ledger_entry_count": len(ledger_rows),
+            "ledger_tail_hash": str(account["ledger_tail_hash"]),
+            "ledger_cash_total": decimal_to_string(
+                ledger_total, field_name="ledger cash total"
+            ),
+            "portfolio": {
+                key: portfolio[key]
+                for key in (
+                    "cash_balance",
+                    "equity",
+                    "available_equity",
+                    "margin_used",
+                    "maintenance_margin",
+                    "funding_cashflow",
+                    "liquidation_fees_paid",
+                    "status",
+                )
+            },
+            "authoritative_projection_verification": projection_verification,
+            "independent_exact_state": independent_state,
+            "differences": differences,
+        }
+        status = "PASS" if not differences else "FAIL"
+        proof_hash = canonical_sha256(snapshot)
+        sequence = int(
+            connection.execute(
+                """
+                SELECT COALESCE(MAX(audit_sequence), 0) + 1
+                FROM replay_account_history_audit WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()[0]
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_account_history_audit(
+                run_id, audit_sequence, schema_version, status, proof_hash,
+                differences_json, snapshot_json, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                sequence,
+                ACCOUNT_AUDIT_SCHEMA_VERSION,
+                status,
+                proof_hash,
+                canonical_json(differences),
+                canonical_json(snapshot),
+                now_ms,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE replay_training_account_history
+            SET auditor_status = ?, auditor_proof_hash = ?,
+                auditor_differences_json = ?, updated_at_ms = ?
+            WHERE run_id = ?
+            """,
+            (
+                status,
+                proof_hash,
+                canonical_json(differences),
+                now_ms,
+                run_id,
+            ),
+        )
+        return {
+            "schema_version": ACCOUNT_AUDIT_SCHEMA_VERSION,
+            "status": status,
+            "proof_hash": proof_hash,
+            "differences": differences,
+            "snapshot": snapshot,
+        }
+
     def fork_run_writer(
         self,
         *,
@@ -646,6 +2905,11 @@ class TrainingRunStore:
                     "compatibility": "READY",
                     "now_ms": now_ms,
                 },
+            )
+            self._insert_approx_account_history(
+                connection,
+                run_id=child_run_id,
+                now_ms=now_ms,
             )
             self._copy_launch_context(
                 connection,
@@ -1051,6 +3315,11 @@ class TrainingRunStore:
                 },
             )
             now_ms = self.base_store._validated_now_ms()
+            self._insert_approx_account_history(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+            )
             self._insert_launch_context(
                 connection,
                 run_id=run_id,
@@ -1207,6 +3476,9 @@ class TrainingRunStore:
                         r.allow_rule_changes, r.active_rule_revision,
                         account.account_model, account.margin_mode,
                         account.funding_mode, account.status AS account_status,
+                       history.account_data_mode,
+                       history.status AS account_history_status,
+                       history.archive_proof_hash,
                        i.allowed_mutations_json, i.revealed,
                        i.strict_eligible, i.start_time_known, i.result_label,
                        dataset.actual_replay_start_ms,
@@ -1223,6 +3495,7 @@ class TrainingRunStore:
                   ON dataset.session_id = r.adapter_session_id
                 JOIN replay_training_integrity AS i USING(run_id)
                 JOIN replay_training_contract_account AS account USING(run_id)
+                JOIN replay_training_account_history AS history USING(run_id)
                 WHERE r.run_id = ?
                 """,
                 (run_id,),
@@ -1270,6 +3543,9 @@ class TrainingRunStore:
             "margin_mode": str(row["margin_mode"]),
             "funding_mode": str(row["funding_mode"]),
             "account_status": str(row["account_status"]),
+            "account_data_mode": str(row["account_data_mode"]),
+            "account_history_status": str(row["account_history_status"]),
+            "account_archive_proof_hash": row["archive_proof_hash"],
         }
 
     async def integrity(self, run_id: str) -> dict[str, object]:
@@ -3929,6 +6205,7 @@ class TrainingRunStore:
         track_id: str,
         requested_tier: str,
         historical_book_binding: PreparedHistoricalBookBinding | None = None,
+        account_history_binding: PreparedAccountHistoryBinding | None = None,
     ) -> Callable[..., Callable[[sqlite3.Connection, int], None]]:
         def extension_factory(
             *,
@@ -4064,15 +6341,48 @@ class TrainingRunStore:
                         bound_range_end_ms=actual_replay_end_ms,
                         now_ms=now_ms,
                     )
-                self._insert_contract_track_rule(
-                    connection,
-                    run_id=run_id,
-                    track_id=track_id,
-                    source_kind=str(row["source_kind"]),
-                    broker_config=broker_config,
-                    effective_virtual_time_ms=int(cursor["virtual_time_ms"]),
-                    now_ms=now_ms,
-                )
+                history = connection.execute(
+                    """
+                    SELECT account_data_mode
+                    FROM replay_training_account_history WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if (
+                    history is not None
+                    and history["account_data_mode"] == "HISTORICAL_EXACT"
+                    and requested_tier in {"WARM", "FULL"}
+                ):
+                    if account_history_binding is None:
+                        raise TypeError(
+                            "exact account track is missing its archive binding"
+                        )
+                    bind_account_history_archive(
+                        connection,
+                        run_id=run_id,
+                        track_id=track_id,
+                        binding=account_history_binding,
+                        bound_range_start_ms=actual_replay_start_ms,
+                        bound_range_end_ms=actual_replay_end_ms,
+                        source_kind=str(row["source_kind"]),
+                        now_ms=now_ms,
+                    )
+                    self._apply_exact_mark_projection(
+                        connection,
+                        run_id=run_id,
+                        track_id=track_id,
+                        now_ms=now_ms,
+                    )
+                else:
+                    self._insert_contract_track_rule(
+                        connection,
+                        run_id=run_id,
+                        track_id=track_id,
+                        source_kind=str(row["source_kind"]),
+                        broker_config=broker_config,
+                        effective_virtual_time_ms=int(cursor["virtual_time_ms"]),
+                        now_ms=now_ms,
+                    )
 
             return write
 
@@ -4184,6 +6494,33 @@ class TrainingRunStore:
                     "training run does not exist",
                     status_code=404,
                 )
+            history = connection.execute(
+                """
+                SELECT account_data_mode, status
+                FROM replay_training_account_history WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if (
+                history is not None
+                and history["account_data_mode"] == "HISTORICAL_EXACT"
+                and subscription_tier != "NONE"
+            ):
+                account_ref = connection.execute(
+                    """
+                    SELECT 1 FROM replay_account_history_ref
+                    WHERE run_id = ? AND track_id = ? AND active = 1
+                    LIMIT 1
+                    """,
+                    (run_id, track_id),
+                ).fetchone()
+                if history["status"] != "ACTIVE" or account_ref is None:
+                    raise TrainingRunError(
+                        "ACCOUNT_HISTORY_BINDING_MISSING",
+                        "exact account WARM/FULL track requires a pinned archive",
+                        status_code=409,
+                        details={"fallback_applied": False},
+                    )
             if run["book_mode"] == "BOOK_ASSISTED_REQUIRED":
                 if subscription_tier == "FULL":
                     active = connection.execute(
@@ -5054,6 +7391,18 @@ class TrainingRunStore:
                 "training run execution contract is missing",
                 status_code=503,
             )
+        account_history = connection.execute(
+            """
+            SELECT * FROM replay_training_account_history WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        account_data_mode = (
+            "APPROX_PROXY"
+            if account_history is None
+            else str(account_history["account_data_mode"])
+        )
+        exact_account = account_data_mode == "HISTORICAL_EXACT"
         execution_fidelity = (
             BOOK_EXECUTION_FIDELITY
             if run_contract["book_mode"] == "BOOK_ASSISTED_REQUIRED"
@@ -5278,6 +7627,40 @@ class TrainingRunStore:
             }
             for row in ledger_rows[-100:]
         ]
+        archive_bindings = [
+            {
+                "track_id": str(row["track_id"]),
+                "archive_id": str(row["archive_id"]),
+                "dataset_epoch": str(row["dataset_epoch"]),
+                "checksum_sha256": str(row["checksum_sha256"]),
+                "proof_hash": str(row["proof_hash"]),
+                "event_chain_tail": str(row["event_chain_tail"]),
+                "archive_generation": int(row["archive_generation"]),
+                "last_event_sequence": int(row["last_event_sequence"]),
+                "as_of_actual_time_ms": int(row["as_of_actual_time_ms"]),
+                "as_of_virtual_time_ms": int(row["as_of_virtual_time_ms"]),
+                "mark_price": row["mark_price"],
+                "index_price": row["index_price"],
+                "status": str(row["status"]),
+            }
+            for row in connection.execute(
+                """
+                SELECT projection.*, ref.dataset_epoch, ref.checksum_sha256,
+                       ref.event_chain_tail, archive.proof_hash
+                FROM replay_account_history_projection AS projection
+                JOIN replay_account_history_ref AS ref
+                  ON ref.run_id = projection.run_id
+                 AND ref.track_id = projection.track_id
+                 AND ref.archive_id = projection.archive_id
+                 AND ref.active = 1
+                JOIN replay_account_history_archive AS archive
+                  ON archive.archive_id = projection.archive_id
+                WHERE projection.run_id = ?
+                ORDER BY projection.track_id
+                """,
+                (run_id,),
+            ).fetchall()
+        ]
         return {
             "schema_version": CONTRACT_ACCOUNT_SCHEMA_VERSION,
             "account_model": CONTRACT_ACCOUNT_MODEL,
@@ -5343,6 +7726,60 @@ class TrainingRunStore:
             },
             "next_funding_time_ms": account["next_funding_time_ms"],
             "liquidations": liquidations,
+            "account_history": {
+                "mode": account_data_mode,
+                "status": (
+                    "ACTIVE"
+                    if account_history is None
+                    else str(account_history["status"])
+                ),
+                "fidelity": (
+                    "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT"
+                    if account_history is None
+                    else str(account_history["fidelity"])
+                ),
+                "archive_proof_hash": (
+                    None
+                    if account_history is None
+                    else account_history["archive_proof_hash"]
+                ),
+                "bindings": archive_bindings,
+                "auditor": {
+                    "status": (
+                        "NOT_RUN"
+                        if account_history is None
+                        else str(account_history["auditor_status"])
+                    ),
+                    "proof_hash": (
+                        None
+                        if account_history is None
+                        else account_history["auditor_proof_hash"]
+                    ),
+                    "differences": (
+                        []
+                        if account_history is None
+                        else json.loads(
+                            str(account_history["auditor_differences_json"])
+                        )
+                    ),
+                },
+            },
+            "liquidation_channels": {
+                "simulated_account": {
+                    "label": "模拟账户强平",
+                    "source": "MODELLED_ACCOUNT",
+                    "fidelity": (
+                        "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
+                        if exact_account
+                        else "AVAILABLE_APPROX_SIMULATED_ACCOUNT"
+                    ),
+                },
+                "historical_market": {
+                    "label": "历史市场爆仓",
+                    "source": "INDEPENDENT_MARKET_LIQUIDATION_FEED",
+                    "fidelity": "UNSUPPORTED_NO_HISTORY",
+                },
+            },
             "ledger": {
                 "chain_version": "replay.training.contract-ledger.v1",
                 "entry_count": len(ledger_rows),
@@ -5358,15 +7795,31 @@ class TrainingRunStore:
                 "entries": ledger_tail,
             },
             "fidelity": {
-                "instrument_rules": "AVAILABLE_APPROX_SIMULATION_RULES",
+                "instrument_rules": (
+                    "HISTORICAL_EXACT_VERSIONED_EXCHANGE_RULE"
+                    if exact_account
+                    else "AVAILABLE_APPROX_SIMULATION_RULES"
+                ),
                 "fees": CONFIGURED_FEE_FIDELITY,
                 "funding": (
                     "OFF"
                     if str(account["funding_mode"]) == "OFF"
-                    else SANDBOX_FUNDING_FIDELITY
+                    else (
+                        "HISTORICAL_EXACT_ARCHIVE_FUNDING"
+                        if exact_account
+                        else SANDBOX_FUNDING_FIDELITY
+                    )
                 ),
-                "mark": "REVEALED_PRICE_PROXY_NOT_HISTORICAL_MARK",
-                "liquidation": "AVAILABLE_APPROX_SIMULATED_ACCOUNT",
+                "mark": (
+                    "HISTORICAL_EXACT_ARCHIVE_MARK"
+                    if exact_account
+                    else "REVEALED_PRICE_PROXY_NOT_HISTORICAL_MARK"
+                ),
+                "liquidation": (
+                    "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
+                    if exact_account
+                    else "AVAILABLE_APPROX_SIMULATED_ACCOUNT"
+                ),
             },
         }
 
@@ -7080,7 +9533,8 @@ class TrainingRunStore:
                 ).fetchone()
                 if policy is None:
                     raise TypeError("versioned fee policy is missing")
-                notional = Decimal(str(raw["notional"]))
+                broker_notional = Decimal(str(raw["notional"]))
+                notional = broker_notional * Decimal(rule.contract_size)
                 configured_fee = fee_for_notional(
                     notional=notional,
                     liquidity=str(raw["liquidity"]),
@@ -7101,7 +9555,17 @@ class TrainingRunStore:
                         run_id,
                         track_id,
                         fill_id,
-                        canonical_json(raw),
+                        canonical_json(
+                            {
+                                **dict(raw),
+                                "account_notional": decimal_to_string(
+                                    notional,
+                                    field_name="account fill notional",
+                                ),
+                                "contract_size": rule.contract_size,
+                                "rule_fidelity": rule.rule_fidelity,
+                            }
+                        ),
                         rule_revision,
                         int(policy["revision"]),
                         decimal_to_string(configured_fee, field_name="configured fee"),
@@ -7142,13 +9606,20 @@ class TrainingRunStore:
                 if kind in {"INITIAL_CAPITAL", "FEE"}:
                     continue
                 entry_id = str(raw.get("entry_id"))
+                cash_delta = Decimal(str(raw["amount"]))
+                if (
+                    kind == "REALIZED_PNL"
+                    and rule.rule_fidelity
+                    == "HISTORICAL_EXACT_VERSIONED_EXCHANGE_RULE"
+                ):
+                    cash_delta *= Decimal(rule.contract_size)
                 cls._append_contract_ledger(
                     connection,
                     run_id=run_id,
                     posting_id=f"broker:{track_id}:{entry_id}",
                     track_id=track_id,
                     kind=f"BROKER_{kind}",
-                    cash_delta=Decimal(str(raw["amount"])),
+                    cash_delta=cash_delta,
                     asset=str(raw["currency"]),
                     virtual_time_ms=int(raw.get("event_time_ms", virtual_time_ms)),
                     source_sequence=int(raw.get("source_sequence", source_sequence)),
@@ -7160,6 +9631,8 @@ class TrainingRunStore:
                         "transaction_id": raw.get("transaction_id"),
                         "order_id": raw.get("order_id"),
                         "fill_id": raw.get("fill_id"),
+                        "broker_amount": str(raw["amount"]),
+                        "contract_size": rule.contract_size,
                     },
                     now_ms=now_ms,
                 )
@@ -7481,7 +9954,9 @@ class TrainingRunStore:
                 if str(account["margin_mode"]) == "CROSS"
                 else Decimal(str(isolated.get(str(track["track_id"]), "0")))
             )
-            bankruptcy = entry - (allocation / abs(quantity)) * (
+            bankruptcy = entry - (
+                allocation / (abs(quantity) * Decimal(rule.contract_size))
+            ) * (
                 Decimal(1) if quantity > 0 else Decimal(-1)
             )
             bankruptcy = max(Decimal(0), bankruptcy)
@@ -7550,6 +10025,45 @@ class TrainingRunStore:
             (session_id,),
         ).fetchone()
         if track is None:
+            return
+        history_guard = connection.execute(
+            """
+            SELECT account_data_mode, status, degraded_reason
+            FROM replay_training_account_history WHERE run_id = ?
+            """,
+            (track["run_id"],),
+        ).fetchone()
+        if (
+            history_guard is not None
+            and history_guard["account_data_mode"] == "HISTORICAL_EXACT"
+            and history_guard["status"] != "ACTIVE"
+        ):
+            # Never let an adapter pause/checkpoint overwrite the last exact
+            # mark after its immutable input has degraded.
+            connection.execute(
+                """
+                UPDATE replay_training_run
+                SET state = 'PAUSED', compatibility = 'DEGRADED',
+                    updated_at_ms = ?, saved_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (now_ms, now_ms, track["run_id"]),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_market_track
+                SET state = 'DEGRADED',
+                    degraded_reason = COALESCE(degraded_reason, ?),
+                    updated_at_ms = ?
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (
+                    history_guard["degraded_reason"],
+                    now_ms,
+                    track["run_id"],
+                    track["track_id"],
+                ),
+            )
             return
         account = component_state.get("account")
         equity = account.get("equity") if isinstance(account, Mapping) else None
@@ -7701,16 +10215,35 @@ class TrainingRunStore:
             component_state=component_state,
             now_ms=now_ms,
         )
+        account_history = connection.execute(
+            """
+            SELECT account_data_mode, status
+            FROM replay_training_account_history WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        exact_account = (
+            account_history is not None
+            and account_history["account_data_mode"] == "HISTORICAL_EXACT"
+        )
+        if exact_account:
+            self._apply_exact_mark_projection(
+                connection,
+                run_id=run_id,
+                track_id=track_id,
+                now_ms=now_ms,
+            )
         self._settle_contract_funding(
             connection,
             run_id=run_id,
             now_ms=now_ms,
         )
-        self._detect_contract_liquidations(
-            connection,
-            run_id=run_id,
-            now_ms=now_ms,
-        )
+        if not exact_account:
+            self._detect_contract_liquidations(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+            )
         account_model = connection.execute(
             """
             SELECT account_model FROM replay_training_contract_account

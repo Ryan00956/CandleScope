@@ -1,7 +1,11 @@
-import type {
-  ReplayV2IntegrityMode,
-  ReplayV2Json,
-  ReplayV2TimeDisclosurePolicy,
+import {
+  parseReplayAccountAuditResponse,
+  parseReplayTrainingPortfolio,
+  type ReplayAccountAuditResponse,
+  type ReplayTrainingPortfolio,
+  type ReplayV2IntegrityMode,
+  type ReplayV2Json,
+  type ReplayV2TimeDisclosurePolicy,
 } from "./replayV2Types.js";
 import {
   parseReplayReportResponse,
@@ -170,6 +174,12 @@ export interface ReplayTrainingReportResponse {
   readonly report: ReplayReportResponse["report"];
   readonly integrity: ReplayIntegrityResponse;
   readonly public_time_index: ReplayPublicTimeBatchResponse;
+  readonly modelled_account: ReplayTrainingPortfolio;
+  readonly account_audit: ReplayAccountAuditResponse | null;
+  readonly liquidation_channel_contract: {
+    readonly simulated_account: "MODELLED_ACCOUNT_NOT_MARKET_LIQUIDATION_FEED";
+    readonly historical_market: "INDEPENDENT_FEED_OR_UNSUPPORTED";
+  };
   readonly actual_history?: NonNullable<ReplayReportResponse["actual_history"]>;
 }
 
@@ -569,7 +579,8 @@ export function parseReplayTrainingReportResponse(value: unknown): ReplayTrainin
   const hasActual = Object.hasOwn(source, "actual_history");
   const exact = exactObject(source, "training_report", [
     "protocol", "run_id", "data_fidelity", "execution_fidelity", "revealed", "report",
-    "integrity", "public_time_index", ...(hasActual ? ["actual_history"] : []),
+    "integrity", "public_time_index", "modelled_account", "account_audit",
+    "liquidation_channel_contract", ...(hasActual ? ["actual_history"] : []),
   ]);
   if (exact.protocol !== "replay.v2") throw new TypeError("training_report.protocol is unsupported");
   const runId = identifier(exact.run_id, "training_report.run_id");
@@ -594,6 +605,23 @@ export function parseReplayTrainingReportResponse(value: unknown): ReplayTrainin
     || publicTimeIndex.policy !== integrity.effective_time_disclosure_policy) {
     throw new TypeError("training report public-time index does not reconcile");
   }
+  const modelledAccount = parseReplayTrainingPortfolio(exact.modelled_account);
+  const accountAudit = exact.account_audit === null
+    ? null
+    : parseReplayAccountAuditResponse(exact.account_audit);
+  const liquidationChannels = exactObject(
+    exact.liquidation_channel_contract,
+    "training_report.liquidation_channel_contract",
+    ["simulated_account", "historical_market"],
+  );
+  if (liquidationChannels.simulated_account
+      !== "MODELLED_ACCOUNT_NOT_MARKET_LIQUIDATION_FEED"
+    || liquidationChannels.historical_market !== "INDEPENDENT_FEED_OR_UNSUPPORTED"
+    || (modelledAccount.schema_version === "replay.training.portfolio.v2"
+      && modelledAccount.account_history.mode === "HISTORICAL_EXACT"
+      && accountAudit === null)) {
+    throw new TypeError("training report account/liquidation audit contract is inconsistent");
+  }
   return {
     protocol: "replay.v2",
     run_id: runId,
@@ -603,6 +631,12 @@ export function parseReplayTrainingReportResponse(value: unknown): ReplayTrainin
     report: parsed.report,
     integrity,
     public_time_index: publicTimeIndex,
+    modelled_account: modelledAccount,
+    account_audit: accountAudit,
+    liquidation_channel_contract: {
+      simulated_account: "MODELLED_ACCOUNT_NOT_MARKET_LIQUIDATION_FEED",
+      historical_market: "INDEPENDENT_FEED_OR_UNSUPPORTED",
+    },
     ...(parsed.actual_history ? { actual_history: parsed.actual_history } : {}),
   };
 }

@@ -91,6 +91,9 @@ export function buildReplayTrainingReportExport(
     warnings: response.report.warnings,
     integrity: response.integrity,
     public_time_index: response.public_time_index,
+    modelled_account: response.modelled_account,
+    account_audit: response.account_audit,
+    liquidation_channel_contract: response.liquidation_channel_contract,
   };
 }
 
@@ -110,8 +113,11 @@ export function replayTrainingReportToCsv(response: ReplayTrainingReportResponse
       ...(typeof time === "number" && publicLabels.has(time)
         ? { public_time_label: publicLabels.get(time) }
         : {}),
-    };
+      };
   };
+  const contractAccount = response.modelled_account.schema_version === "replay.training.portfolio.v2"
+    ? response.modelled_account
+    : null;
   const rows: unknown[][] = [
     ["section", "key", "value", "detail"],
     ["run", "run_id", response.run_id, ""],
@@ -133,6 +139,29 @@ export function replayTrainingReportToCsv(response: ReplayTrainingReportResponse
     ["summary", "win_rate", report.win_rate, ""],
     ["summary", "profit_factor", report.profit_factor, ""],
     ["summary", "ambiguous_bar_count", report.ambiguous_bar_count, ""],
+    ...(contractAccount === null ? [] : [
+      ["modelled_account", "account_data_mode", contractAccount.account_history.mode, contractAccount.account_history.fidelity],
+      ["modelled_account", "history_status", contractAccount.account_history.status, contractAccount.account_history.archive_proof_hash],
+      ["modelled_account", "auditor_status", contractAccount.account_history.auditor.status, contractAccount.account_history.auditor.proof_hash],
+      ["modelled_account", "funding_cashflow", contractAccount.funding_cashflow, contractAccount.fidelity.funding],
+      ["modelled_account", "simulated_account_liquidation", contractAccount.liquidations.length, contractAccount.liquidation_channels.simulated_account],
+      ["market_data", "historical_market_liquidation", contractAccount.liquidation_channels.historical_market.fidelity, contractAccount.liquidation_channels.historical_market],
+      ...contractAccount.account_history.bindings.map((binding) => [
+        "account_history_binding",
+        binding.track_id,
+        binding.archive_id,
+        binding,
+      ]),
+      ...contractAccount.account_history.auditor.differences.map((difference) => [
+        "account_audit_difference",
+        String(difference.field ?? "unknown"),
+        "FAIL",
+        difference,
+      ]),
+    ]),
+    ...(response.account_audit === null ? [] : [
+      ["account_audit", "status", response.account_audit.status, response.account_audit.proof_hash],
+    ]),
     ...report.warnings.map((warning) => ["warning", warning.code, warning.message, warning.order_ids.join("|")]),
     ...report.orders.map((order) => ["order", order.order_id, order.status, withPublicTime(order)]),
     ...report.fills.map((fill) => ["fill", fill.fill_id, fill.reason, withPublicTime(fill)]),

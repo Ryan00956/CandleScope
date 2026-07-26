@@ -51,6 +51,33 @@ export function replayAdvanceIsCancelable(
     );
 }
 
+export interface ReplayViewerProjectionScheduler {
+  readonly schedule: () => void;
+  readonly cancel: () => void;
+}
+
+export function createReplayViewerProjectionScheduler(
+  rebuild: () => void,
+  requestFrame: (callback: FrameRequestCallback) => number = requestAnimationFrame,
+  cancelFrame: (handle: number) => void = cancelAnimationFrame,
+): ReplayViewerProjectionScheduler {
+  let pendingFrame: number | null = null;
+  return {
+    schedule: () => {
+      if (pendingFrame !== null) return;
+      pendingFrame = requestFrame(() => {
+        pendingFrame = null;
+        rebuild();
+      });
+    },
+    cancel: () => {
+      if (pendingFrame === null) return;
+      cancelFrame(pendingFrame);
+      pendingFrame = null;
+    },
+  };
+}
+
 export interface ReplayViewerRuntime {
   readonly viewerState: ReplayViewerState | null;
   readonly marketTracks: ReplayMarketTracksResponse | null;
@@ -237,8 +264,12 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       }
     };
     rebuild();
-    const unsubscribe = sourceStore.subscribe(rebuild);
-    return () => { unsubscribe(); };
+    const projectionScheduler = createReplayViewerProjectionScheduler(rebuild);
+    const unsubscribe = sourceStore.subscribe(projectionScheduler.schedule);
+    return () => {
+      unsubscribe();
+      projectionScheduler.cancel();
+    };
   }, [baseInterval, displayInterval, seriesStore, sourceStore]);
 
   useEffect(() => {

@@ -12,6 +12,7 @@ import {
   loadReplayWorkspacePreferences,
   saveReplayWorkspacePreferences,
 } from "../replayWorkspacePreferences.js";
+import { createReplayViewerProjectionScheduler } from "../useReplayViewerRuntime.js";
 
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
@@ -184,6 +185,43 @@ test("viewer projection subscription is stable across equivalent runtime snapsho
     /\[baseInterval, displayInterval, seriesStore, sourceStore\]/,
   );
   assert.doesNotMatch(runtime, /\[config, seriesStore, sourceStore, viewerState\]/);
+});
+
+test("viewer projection coalesces source bursts to one rebuild per browser frame", () => {
+  const callbacks = new Map<number, FrameRequestCallback>();
+  const canceled: number[] = [];
+  let nextHandle = 1;
+  let rebuilds = 0;
+  const scheduler = createReplayViewerProjectionScheduler(
+    () => { rebuilds += 1; },
+    (callback) => {
+      const handle = nextHandle;
+      nextHandle += 1;
+      callbacks.set(handle, callback);
+      return handle;
+    },
+    (handle) => {
+      canceled.push(handle);
+      callbacks.delete(handle);
+    },
+  );
+
+  scheduler.schedule();
+  scheduler.schedule();
+  scheduler.schedule();
+  assert.deepEqual([...callbacks.keys()], [1]);
+  assert.equal(rebuilds, 0);
+  callbacks.get(1)?.(0);
+  callbacks.delete(1);
+  assert.equal(rebuilds, 1);
+
+  scheduler.schedule();
+  assert.deepEqual([...callbacks.keys()], [2]);
+  scheduler.cancel();
+  assert.deepEqual(canceled, [2]);
+  assert.equal(callbacks.size, 0);
+  scheduler.cancel();
+  assert.deepEqual(canceled, [2]);
 });
 
 test("workspace preferences inherit live layout once and then persist only inside the run scope", () => {

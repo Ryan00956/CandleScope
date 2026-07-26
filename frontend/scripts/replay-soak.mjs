@@ -873,18 +873,40 @@ function isCatalogEpochMismatch(error) {
   );
 }
 
+export function replayCatalogQueryFromCreatePayload(createPayload) {
+  const warmupBars = createPayload?.indicator_warmup_bars;
+  const horizonMs = createPayload?.forward_cache_ms;
+  const disclosurePolicy = createPayload?.time_disclosure_policy;
+  assert(
+    Number.isSafeInteger(warmupBars) && warmupBars >= 1,
+    "v2 lifecycle create payload is missing indicator_warmup_bars",
+    createPayload,
+  );
+  assert(
+    Number.isSafeInteger(horizonMs) && horizonMs >= 1,
+    "v2 lifecycle create payload is missing forward_cache_ms",
+    createPayload,
+  );
+  assert(
+    typeof disclosurePolicy === "string" && disclosurePolicy.length > 0,
+    "v2 lifecycle create payload is missing time_disclosure_policy",
+    createPayload,
+  );
+  return new URLSearchParams({
+    warmup_bars: String(warmupBars),
+    horizon_ms: String(horizonMs),
+    quality_mode: "exact",
+    blind_mode: String(disclosurePolicy !== "NONE"),
+  });
+}
+
 async function createV2ArchiveRun({
   backendOrigin,
   createPayload,
   index,
   requestJson = readJson,
 }) {
-  const catalogQuery = new URLSearchParams({
-    warmup_bars: String(createPayload.warmup_bars),
-    horizon_ms: String(createPayload.forward_cache_ms),
-    quality_mode: "exact",
-    blind_mode: String(createPayload.time_disclosure_policy !== "NONE"),
-  });
+  const catalogQuery = replayCatalogQueryFromCreatePayload(createPayload);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const catalog = await requestJson(
       `${backendOrigin}/api/v1/replay/catalog?${catalogQuery}`,

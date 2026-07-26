@@ -6,6 +6,7 @@ import {
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
   isAuthoritativeReplayStatus,
+  replayCatalogQueryFromCreatePayload,
   replaySpeedAction,
   replayStepAction,
   restoreCommandReadinessAfterReconnect,
@@ -25,7 +26,7 @@ const createPayload = {
   market_type: "spot",
   symbol: "BTCUSDT",
   base_interval: "1m",
-  warmup_bars: 200,
+  indicator_warmup_bars: 200,
   forward_cache_ms: 86_400_000,
   time_disclosure_policy: "HIDE_ALL",
   random_seed: 7,
@@ -163,8 +164,34 @@ test("v2 lifecycle refreshes exactly once for catalog epoch drift", async () => 
   assert.equal(result.catalogEpoch, `sha256:${"2".repeat(64)}`);
   assert.equal(calls.length, 4);
   assert.equal(
+    new URL(calls[2].url).searchParams.get("warmup_bars"),
+    "200",
+  );
+  assert.equal(calls[2].url.includes("undefined"), false);
+  assert.equal(
     JSON.parse(calls[3].options.body).catalog_epoch,
     result.catalogEpoch,
+  );
+});
+
+test("v2 lifecycle catalog query binds the Phase 14 history-policy fields", () => {
+  assert.equal(
+    replayCatalogQueryFromCreatePayload(createPayload).toString(),
+    "warmup_bars=200&horizon_ms=86400000&quality_mode=exact&blind_mode=true",
+  );
+  assert.throws(
+    () => replayCatalogQueryFromCreatePayload({
+      ...createPayload,
+      indicator_warmup_bars: undefined,
+    }),
+    /indicator_warmup_bars/,
+  );
+  assert.throws(
+    () => replayCatalogQueryFromCreatePayload({
+      ...createPayload,
+      forward_cache_ms: undefined,
+    }),
+    /forward_cache_ms/,
   );
 });
 

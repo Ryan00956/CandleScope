@@ -54,7 +54,8 @@ test("v2 workspace owns the same source-neutral market slots without legacy repl
   assert.match(workspace, /ReplayRightMarketRail/);
   assert.match(workspace, /ReplayBottomControlDock/);
   assert.doesNotMatch(workspace, /ReplayRightRail/);
-  assert.doesNotMatch(workspace, /replay-chart-toolbar/);
+  assert.match(workspace, /ReviewMode 只读图表工具/);
+  assert.match(workspace, /review === null \? viewer\.seriesStore : reviewSeriesStore/);
   assert.doesNotMatch(workspace, /<header\s+className="top-bar replay-top-bar"/);
 });
 
@@ -73,7 +74,8 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   const viewerRuntime = source("src/features/replay/useReplayViewerRuntime.ts");
   assert.match(composition, /useReplayViewerRuntime\(replay\)/);
   assert.match(composition, /useReplayIndicatorRuntime\(replay, viewer\.seriesStore\)/);
-  assert.match(workspace, /seriesStore=\{viewer\.seriesStore\}/);
+  assert.match(workspace, /seriesStore=\{displayedSeriesStore\}/);
+  assert.match(workspace, /review === null \? viewer\.seriesStore : reviewSeriesStore/);
   assert.match(workspace, /setDisplayInterval/);
   assert.doesNotMatch(workspace, /Phase 2 interval is read-only|Phase 3 才开放重采样/);
   assert.match(controls, /globalClock\?\.supported_bases/);
@@ -100,8 +102,8 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   assert.match(workspace, /viewer\.actions\.submitControl\("advance", \{/);
   assert.doesNotMatch(workspace, /submitControl\("step_display"|submitControl\("advance_by"/);
   assert.match(workspace, /viewer\.actions\.submitControl\("pause", \{\}\)/);
-  assert.match(workspace, /"data-replay-session-state": effectiveState/);
-  assert.match(workspace, /"data-replay-adapter-state": runtime\.store\.state/);
+  assert.match(workspace, /"data-replay-session-state": review === null \? effectiveState/);
+  assert.match(workspace, /"data-replay-adapter-state": review === null \? runtime\.store\.state/);
   assert.match(workspace, /"data-replay-generation": runtime\.store\.generation/);
 });
 

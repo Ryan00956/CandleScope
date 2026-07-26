@@ -9,6 +9,7 @@ import type { ReplayIntegrityRuntime } from "../useReplayIntegrityRuntime.js";
 export interface ReplayIntegrityReviewPanelProps {
   readonly runtime: ReplayRuntime;
   readonly integrityRuntime: ReplayIntegrityRuntime;
+  readonly trainingState?: string | null;
 }
 
 function AuditValue({ value }: { readonly value: Readonly<Record<string, unknown>> }) {
@@ -18,11 +19,21 @@ function AuditValue({ value }: { readonly value: Readonly<Record<string, unknown
 export default function ReplayIntegrityReviewPanel({
   runtime,
   integrityRuntime,
+  trainingState = null,
 }: ReplayIntegrityReviewPanelProps) {
   const [amount, setAmount] = useState("100");
   const [reason, setReason] = useState("training adjustment");
+  const [makerFeeBps, setMakerFeeBps] = useState("");
+  const [takerFeeBps, setTakerFeeBps] = useState("");
+  const [maxLeverage, setMaxLeverage] = useState("");
+  const [fundingMode, setFundingMode] = useState<"OFF" | "SANDBOX_FIXED">("OFF");
+  const [fixedFundingRate, setFixedFundingRate] = useState("0.0001");
+  const [fundingIntervalMs, setFundingIntervalMs] = useState("28800000");
+  const [markerText, setMarkerText] = useState("");
+  const [playbackRate, setPlaybackRate] = useState<"0.25" | "0.5" | "1" | "2" | "4" | "8">("1");
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const integrity = integrityRuntime.integrity;
+  const rules = integrityRuntime.rules;
   const review = integrityRuntime.review;
   const report = integrityRuntime.report;
   const ownsController = replayOwnsController(runtime.store, runtime.clientInstanceId);
@@ -47,15 +58,37 @@ export default function ReplayIntegrityReviewPanel({
     : review.events.some((event) => event.event_id === selectedEventId)
       ? selectedEventId
       : review.selected_event_id;
-  const canCapital = ownsController && !busy && runtime.store.state !== "ENDED";
-  const canReveal = ownsController && !busy && integrity !== null && !integrity.revealed
+  const canCapital = ownsController && !busy && runtime.store.state !== "ENDED"
+    && review === null;
+  const canMutateRules = ownsController && !busy && runtime.store.state !== "ENDED"
+    && review === null;
+  const fundingInterval = Number(fundingIntervalMs);
+  const fundingPolicyValid = fundingMode === "OFF" || (
+    integrity?.integrity_mode === "SANDBOX"
+    && Number.isSafeInteger(fundingInterval)
+    && fundingInterval >= 60_000
+    && fundingInterval <= 30 * 86_400_000
+    && fixedFundingRate.length > 0
+  );
+  const canReveal = ownsController && !busy && review === null
+    && integrity !== null && !integrity.revealed
     && (runtime.store.state === "ENDED" || allowed.has("reveal_time"));
+  const reviewOriginalState = trainingState ?? runtime.store.state;
+  const reviewStartReady = reviewOriginalState === "PAUSED"
+    || reviewOriginalState === "ENDED";
   const submitCapital = (kind: "deposit" | "withdraw") => {
     const action = kind === "deposit"
       ? integrityRuntime.actions.deposit
       : integrityRuntime.actions.withdraw;
     void action(amount, reason).catch(() => undefined);
   };
+  const budget = review?.budget ?? integrityRuntime.budget;
+  const budgetPressure = budget === null ? 0 : Math.max(
+    budget.critical_events / budget.critical_event_limit,
+    budget.viewport_samples / budget.viewport_sample_limit,
+    budget.anchor_used_bytes / budget.anchor_limit_bytes,
+    budget.artifact_used_bytes / budget.artifact_limit_bytes,
+  );
 
   return (
     <section
@@ -68,7 +101,7 @@ export default function ReplayIntegrityReviewPanel({
     >
       <header className="replay-integrity-heading">
         <div>
-          <span className="training-hub-kicker">SERVER-AUTHORITATIVE · PHASE 6</span>
+          <span className="training-hub-kicker">SERVER-AUTHORITATIVE · PHASE 17</span>
           <h2 id="replay-integrity-title">完整性与复盘</h2>
         </div>
         <button type="button" disabled={busy} onClick={() => void integrityRuntime.actions.refresh()}>
@@ -139,9 +172,104 @@ export default function ReplayIntegrityReviewPanel({
                 >不可逆揭示时间</button>
               )}
               {integrity.revealed && <p className="replay-revealed">时间已揭示；该状态不可回退。</p>}
-              <p>费率、杠杆上限与 Sandbox 固定资金费经版本化 Run command 变更并写入本审计流；本面板当前直接提供资金与时间披露操作。</p>
+              <p>所有动作由服务端按当前组合 VirtualTime 原子生效；ReviewMode 内完全锁定原 Run。</p>
             </section>
           </div>
+
+          <section className="replay-run-rules" aria-labelledby="replay-run-rules-title">
+            <div className="replay-integrity-section-heading">
+              <div>
+                <h3 id="replay-run-rules-title">Run Rules</h3>
+                <p>交易所规则不可变；用户杠杆上限是独立 overlay，实际值取二者较小值。</p>
+              </div>
+              <span>{rules === null ? "LOADING" : `${rules.history.length} revisions`}</span>
+            </div>
+            {rules !== null && (
+              <>
+                <div className="replay-rule-current">
+                  <div><span>Maker / Taker</span><strong>{rules.fee_policy.maker_fee_bps} / {rules.fee_policy.taker_fee_bps} bps</strong></div>
+                  <div><span>用户杠杆上限</span><strong>{rules.leverage_policy.max_leverage}×</strong></div>
+                  <div><span>资金费</span><strong>{rules.funding_policy.funding_mode}</strong></div>
+                  <div><span>交易所规则</span><strong>{rules.instrument_rules.length} immutable</strong></div>
+                </div>
+                <div className="replay-rule-forms">
+                  <form onSubmit={(event) => {
+                    event.preventDefault();
+                    void integrityRuntime.actions.changeFeePolicy(
+                      makerFeeBps || rules.fee_policy.maker_fee_bps,
+                      takerFeeBps || rules.fee_policy.taker_fee_bps,
+                      reason,
+                    ).catch(() => undefined);
+                  }}>
+                    <strong>手续费 revision</strong>
+                    <label>Maker bps<input inputMode="decimal" value={makerFeeBps} placeholder={rules.fee_policy.maker_fee_bps} onChange={(event) => setMakerFeeBps(event.target.value)} /></label>
+                    <label>Taker bps<input inputMode="decimal" value={takerFeeBps} placeholder={rules.fee_policy.taker_fee_bps} onChange={(event) => setTakerFeeBps(event.target.value)} /></label>
+                    <button type="submit" disabled={!canMutateRules || !allowed.has("change_fee_policy")}>提交</button>
+                  </form>
+                  <form onSubmit={(event) => {
+                    event.preventDefault();
+                    void integrityRuntime.actions.changeLeverageCap(
+                      maxLeverage || rules.leverage_policy.max_leverage,
+                      reason,
+                    ).catch(() => undefined);
+                  }}>
+                    <strong>杠杆 overlay</strong>
+                    <label>最高倍数<input inputMode="decimal" value={maxLeverage} placeholder={rules.leverage_policy.max_leverage} onChange={(event) => setMaxLeverage(event.target.value)} /></label>
+                    <span>{Object.entries(rules.effective_leverage_by_track).map(([track, value]) => `${track}=${value}×`).join(" · ")}</span>
+                    <button type="submit" disabled={!canMutateRules || !allowed.has("change_leverage_cap")}>提交</button>
+                  </form>
+                  <form onSubmit={(event) => {
+                    event.preventDefault();
+                    if (!fundingPolicyValid) return;
+                    void integrityRuntime.actions.changeFundingPolicy(
+                      fundingMode,
+                      fundingMode === "OFF" ? null : fixedFundingRate,
+                      fundingMode === "OFF" ? null : fundingInterval,
+                      reason,
+                    ).catch(() => undefined);
+                  }}>
+                    <strong>Sandbox 资金费</strong>
+                    <label>模式<select value={fundingMode} onChange={(event) => setFundingMode(event.target.value as "OFF" | "SANDBOX_FIXED")}><option value="OFF">OFF</option><option value="SANDBOX_FIXED">SANDBOX_FIXED</option></select></label>
+                    <label>费率<input inputMode="decimal" disabled={fundingMode === "OFF"} value={fixedFundingRate} onChange={(event) => setFixedFundingRate(event.target.value)} /></label>
+                    <label>周期 ms<input inputMode="numeric" disabled={fundingMode === "OFF"} value={fundingIntervalMs} onChange={(event) => setFundingIntervalMs(event.target.value)} /></label>
+                    <button
+                      type="submit"
+                      title={fundingPolicyValid ? "提交服务端规则 revision" : "固定资金费仅支持 Sandbox，周期须为 60,000 ms 到 30 天"}
+                      disabled={!canMutateRules || !allowed.has("change_funding_policy") || !fundingPolicyValid}
+                    >提交</button>
+                  </form>
+                </div>
+                <label className="replay-rule-reason">规则变更原因<input value={reason} maxLength={500} onChange={(event) => setReason(event.target.value)} /></label>
+                <div className="replay-rule-history" aria-label="规则历史">
+                  {rules.history.map((revision) => (
+                    <article key={`${revision.kind}-${revision.revision}-${revision.policy_hash}`}>
+                      <strong>{revision.kind} r{revision.revision}</strong>
+                      <span>{revision.public_time.label}</span>
+                      <span>{revision.reason}</span>
+                      <code>{revision.command_id ?? "creation"}</code>
+                      <code>{revision.policy_hash}</code>
+                    </article>
+                  ))}
+                </div>
+              </>
+            )}
+          </section>
+
+          <section className="replay-review-budget" aria-labelledby="replay-review-budget-title" data-budget-warning={budgetPressure >= 0.85 ? "true" : "false"}>
+            <div className="replay-integrity-section-heading">
+              <h3 id="replay-review-budget-title">完整复盘预算</h3>
+              <strong>{budget === null ? "--" : `${Math.round(budgetPressure * 100)}% peak`}</strong>
+            </div>
+            {budget !== null && (
+              <div className="replay-budget-grid">
+                <span>关键事件 {budget.critical_events} / {budget.critical_event_limit}</span>
+                <span>Viewport {budget.viewport_samples} / {budget.viewport_sample_limit}</span>
+                <span>Anchor {Math.round(budget.anchor_used_bytes / 1_048_576)} / {Math.round(budget.anchor_limit_bytes / 1_048_576)} MiB</span>
+                <span>Artifact {Math.round(budget.artifact_used_bytes / 1_048_576)} / {Math.round(budget.artifact_limit_bytes / 1_048_576)} MiB</span>
+              </div>
+            )}
+            {budgetPressure >= 0.85 && <p role="alert">复盘证据预算接近上限；达到硬上限后服务端会拒绝关键动作，不会静默丢事件。</p>}
+          </section>
 
           <section className="replay-integrity-audit" aria-labelledby="replay-audit-title">
             <div className="replay-integrity-section-heading">
@@ -213,41 +341,110 @@ export default function ReplayIntegrityReviewPanel({
 
           <section className="replay-review" aria-labelledby="replay-review-title" data-review-read-only={String(review?.read_only ?? false)}>
             <div className="replay-integrity-section-heading">
-              <div><h3 id="replay-review-title">ReviewMode</h3><p>只读事件跳转；原 run 的游标与状态哈希不变。</p></div>
-              <button type="button" disabled={busy} onClick={() => void integrityRuntime.actions.startReview()}>
-                {review === null ? "开始只读复盘" : "刷新复盘"}
+              <div><h3 id="replay-review-title">ReviewMode</h3><p>独立持久游标、只读组合和 run-scoped 绘图；原 Run 不 seek。</p></div>
+              <button
+                type="button"
+                disabled={busy || (review === null && !reviewStartReady)}
+                title={review === null && !reviewStartReady
+                  ? "先暂停训练，确保 ReviewMode 的原 Run 不再推进"
+                  : "ReviewMode 只移动独立持久游标"}
+                onClick={() => {
+                if (review === null) void integrityRuntime.actions.startReview();
+                else integrityRuntime.actions.closeReview();
+              }}
+              >
+                {review === null ? "开始只读复盘" : "退出只读复盘"}
               </button>
             </div>
+            {review === null && (
+              <form className="replay-marker-form" onSubmit={(event) => {
+                event.preventDefault();
+                void integrityRuntime.actions.addMarker(markerText).then(() => {
+                  setMarkerText("");
+                }).catch(() => undefined);
+              }}>
+                <label>手工复盘标记<input value={markerText} maxLength={500} placeholder="例如：突破确认后开仓" onChange={(event) => setMarkerText(event.target.value)} /></label>
+                <button type="submit" disabled={busy || markerText.trim().length === 0}>记录到不可变时间线</button>
+              </form>
+            )}
             {review !== null && (
-              <div className="replay-review-controls">
-                <label>
-                  持久事件
-                  <select value={effectiveSelectedEventId ?? review.selected_event_id} onChange={(event) => setSelectedEventId(event.target.value)}>
-                    {review.events.map((event) => (
-                      <option key={event.event_id} value={event.event_id}>
-                        {event.public_time.label} · {event.event_type} · seq {event.source_sequence}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  disabled={busy || effectiveSelectedEventId === null}
-                  onClick={() => effectiveSelectedEventId !== null && void integrityRuntime.actions.startReview(effectiveSelectedEventId)}
-                >只读跳转</button>
-                <button
-                  type="button"
-                  disabled={busy || effectiveSelectedEventId === null}
-                  onClick={() => effectiveSelectedEventId !== null && void integrityRuntime.actions.forkReview(effectiveSelectedEventId)}
-                >从该 checkpoint Fork</button>
-                <code>original {review.original_state_hash}</code>
-                <code>selected {review.selected_state_hash}</code>
-              </div>
+              <>
+                <div className="replay-review-controls" role="group" aria-label="ReviewMode 播放控制">
+                  <button type="button" disabled={busy} onClick={() => void integrityRuntime.actions.controlReview("PREVIOUS")}>上一事件</button>
+                  <button type="button" disabled={busy} onClick={() => void integrityRuntime.actions.controlReview("NEXT")}>下一事件</button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void integrityRuntime.actions.controlReview(
+                      review.playback_state === "PLAYING" ? "PAUSE" : "PLAY",
+                      { playbackRate },
+                    )}
+                  >{review.playback_state === "PLAYING" ? "暂停" : "播放"}</button>
+                  <label>速度
+                    <select value={playbackRate} onChange={(event) => setPlaybackRate(event.target.value as typeof playbackRate)}>
+                      {(["0.25", "0.5", "1", "2", "4", "8"] as const).map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    持久事件
+                    <select value={effectiveSelectedEventId ?? review.selected_event_id} onChange={(event) => setSelectedEventId(event.target.value)}>
+                      {review.events.map((event) => (
+                        <option key={event.event_id} value={event.event_id}>
+                          #{event.timeline_sequence} · {event.public_time.label} · {event.category}/{event.event_type}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    disabled={busy || effectiveSelectedEventId === null}
+                    onClick={() => effectiveSelectedEventId !== null && void integrityRuntime.actions.controlReview("JUMP", { eventId: effectiveSelectedEventId })}
+                  >跳转</button>
+                  <button
+                    type="button"
+                    disabled={busy || effectiveSelectedEventId === null}
+                    onClick={() => effectiveSelectedEventId !== null && void integrityRuntime.actions.forkReview(effectiveSelectedEventId)}
+                  >从该事件创建新训练</button>
+                </div>
+                <div className="replay-review-proof" data-review-verified={String(review.immutability_proof.verified)}>
+                  <strong>原 Run 未变化 · VERIFIED</strong>
+                  <code>original {review.original_state_hash}</code>
+                  <code>selected {review.selected_state_hash}</code>
+                  <code>account {review.immutability_proof.original_account_hash}</code>
+                  <code>ledger {review.immutability_proof.original_ledger_tail_hash}</code>
+                </div>
+                <div className="replay-review-projection" aria-label="选中事件只读投影">
+                  <div><span>Timeline</span><strong>#{review.selected_timeline_sequence} · cursor r{review.cursor_revision}</strong></div>
+                  <div><span>Viewer</span><strong>{String(review.projection.viewer_state.selected_track_id)} · {String(review.projection.viewer_state.display_interval)}</strong></div>
+                  <div><span>Orders / Fills</span><strong>{review.projection.orders.length} / {review.projection.fills.length}</strong></div>
+                  <div><span>Ledger / Liquidations</span><strong>{review.projection.ledger.length} / {review.projection.liquidations.length}</strong></div>
+                  <div><span>Rules</span><strong>fee r{review.projection.rules.fee_policy.revision} · leverage r{review.projection.rules.leverage_policy.revision} · funding r{review.projection.rules.funding_policy.revision}</strong></div>
+                  <div><span>Drawing</span><strong>r{review.projection.drawing_revision} · {review.projection.drawing_document_hash ?? "empty"}</strong></div>
+                </div>
+                <div className="replay-review-timeline" aria-label="不可变复盘时间线">
+                  {review.events.map((event) => (
+                    <button
+                      type="button"
+                      key={event.event_id}
+                      className={event.event_id === review.selected_event_id ? "active" : ""}
+                      data-review-event-category={event.category}
+                      onClick={() => void integrityRuntime.actions.controlReview("JUMP", { eventId: event.event_id })}
+                      disabled={busy}
+                    >
+                      <strong>#{event.timeline_sequence} {event.event_type}</strong>
+                      <span>{event.public_time.label} · {event.category}</span>
+                      {event.detail?.text !== undefined && <span>{String(event.detail.text)}</span>}
+                    </button>
+                  ))}
+                </div>
+              </>
             )}
             {integrityRuntime.forked !== null && (
               <div className="replay-review-fork-result" role="status">
-                <strong>精确 Fork 已创建</strong>
+                <strong>新训练已从不可变事件创建</strong>
                 <code>{integrityRuntime.forked.run.state_hash}</code>
+                <span>{integrityRuntime.forked.tracks.length} tracks · event #{integrityRuntime.forked.parent_timeline_sequence}</span>
+                {integrityRuntime.forked.account_audit !== null && <span>Exact account auditor: {String(integrityRuntime.forked.account_audit.status ?? "--")}</span>}
                 <a href={`/replay.html?session=${encodeURIComponent(integrityRuntime.forked.run.adapter_session_id)}`}>
                   打开子训练
                 </a>

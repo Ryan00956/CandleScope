@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_16_PASS / PHASE_15_COMMITTED / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–15 已独立提交，Phase 16 已完成实现与门禁并等待本阶段独立提交，Phase 17–18 仍须逐阶段完成。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
+状态：`PHASE_17_COMMITTED / PHASE_18_NOT_STARTED / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–17 已独立提交，Phase 18 尚未开始。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -31,6 +31,8 @@ Phase 14 父提交：`bc4883fb9c380104aa5739c33fb37dd95336383f`（2026-07-26）
 Phase 15 父提交：`5c38d27627fa9e1766ded216754c3406b833397a`（2026-07-26）
 
 Phase 16 父提交：`f6cbc99c8fb1036550d2461ba888a8bed16f8941`（2026-07-26）
+
+Phase 17 父提交：`24f105d97f410671682c39695e90c810b1628889`（2026-07-26）
 
 产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
 
@@ -1587,16 +1589,70 @@ Phase 6 已有 `TOUCH_OR_TAPE_V2`、Decimal fee policy、CROSS/ISOLATED、逐仓
 
 ## 28. Phase 17：规则变更与完整复盘
 
-### 背景与范围
+### 背景审计（Phase 16 HEAD）
 
-新增 Run Rules 面板；手续费、杠杆上限和 funding 规则变更只在指定服务端虚拟时间生效，历史成交与账本不追溯。把商品切换、周期、绘图、viewport 和 watchlist tier 记录为可复放的语义动作。
+Phase 4 已有完整性模式、资金调整审计、多分辨率权益曲线、`replay_run_view_event` 和 checkpoint 型 Review/Fork 骨架；Phase 6 已有 fee、leverage、sandbox funding 的服务端命令与 Decimal 账本；Phase 11–16 又补齐归档启动上下文、多轨全局时钟、真正快进和精确账户输入。但逐层审计确认这些能力仍不能组成“完整复盘”：
 
-### 退出门槛
+| 链路 | 当前事实 | Phase 17 必须关闭的缺口 |
+|---|---|---|
+| 规则变更 | 三类命令在后端存在；fee 与 instrument rule 有版本表，funding 只改账户行并写零现金 ledger。前端只用一句文字说明，没有 Run Rules 操作面板或完整历史。 | funding 没有独立 revision history；规则动作未统一进入 integrity/review；leverage 直接复制并改写 instrument rule，会把用户上限混同为交易所规则；缺少前/时/后、重启与 Fork 证明。 |
+| 视图动作 | `replay_run_view_event` 对每个 `semantic_key` 只保留最后一行，10,000 次 viewport 会合并成 1 行。 | 该表只能表达“当前最后值”，不能恢复中间商品、周期、tier、绘图或 viewport；旧行 LRU 删除也不能用于关键语义事件。 |
+| ViewerState | 商品、周期和 tier 已有不可变 `replay_training_viewer_event` revision。 | Review 没有读取 revision 历史，也没有把 ViewerState 与账户/图表同步到同一 review cursor。 |
+| 绘图 | 绘图文档由浏览器 IndexedDB/localStorage 和 session-lifetime store 管理，scope 仍以 adapter session 为基底。 | 原 Run 的绘图没有服务端审计、内容 hash、重启连续性或 Review 只读投影；Fork 也不会继承选定时刻的绘图。 |
+| ReviewMode | `start_review` 只枚举 core 当前仍 active 的 initial + 最近 checkpoint；`replay_review_session` 只记录一次选择。 | core 默认只保留 initial + 32 个 recent checkpoint；Review 不含订单/持仓/rule/view/drawing 投影，没有可推进的独立 review cursor，也不是真正的只读播放器。 |
+| Fork | 单轨 approximate Run 可从活动 core checkpoint Fork。 | 多轨明确 409；Phase 16 exact account 明确 409；Fork 复制父 Run 当前 active rule/view，而不是选中事件的 as-of 状态；这些例外违反“从这里继续只能创建新 Run”的产品合同。 |
+| 自动事件 | fills、funding、liquidation、equity 与 source/global event 都持久化。 | 它们尚未合并为稳定 review 总序，最大回撤、开平仓、资金费和爆仓不能成为同步跳转目标。 |
 
-- ReviewMode 同步恢复图表、持仓、订单、规则 revision 和关键用户操作，不写原 Run。
-- 从 Review 继续训练必须创建 Fork；任何“继续”都不能改变已完成原存档。
-- 规则生效边界前/时/后、暂停/重启/快进/Fork 的状态 hash 与账本一致。
-- 高频 viewport/drawing 操作有有界采样，关键语义动作不丢失。
+这次实现不得用扩大 core recent-checkpoint 数量来伪装完整历史，也不得让 Review 临时 seek 原 actor。core checkpoint 仍服务恢复；Review 使用独立、additive、run-owned 的时间线和内容寻址快照。历史 L2 继续沿用 Phase 9 的连续性门禁与 `queue_exact=false`，本 Phase 不新增 queue-position 或 partial-fill 宣称。
+
+### 冻结产品与协议合同
+
+1. 新增 `replay.run-rules.v1`。服务端返回当前 fee policy、用户 leverage cap、funding policy、逐轨不可变 instrument rule，以及按统一语义序排列的历史。每个 revision 必须包含 `command_id / old / new / reason / effective cursor / public time / policy hash / fidelity`。
+2. 规则只在服务端接受命令时的**当前组合 VirtualTime** 原子生效。本 Phase 不接受客户端回填过去时刻，也不实现未来预约生效；旧 fill、fee、funding、maintenance、liquidation 和 ledger 永不重写。响应重试由 command ID 幂等。
+3. `CHALLENGE` 全部拒绝；`PRACTICE` 仅允许创建时 allowlist；`SANDBOX` 仍受安全校验。`HISTORICAL_EXACT` 的归档 instrument rule 永不被用户改写：leverage change 是独立 user-cap overlay，实际允许值为 `min(exchange rule, user cap)`；自定义 funding 只允许 sandbox approximate account，不能污染 exact archive fidelity。
+4. 新增 `replay.review.timeline.v1`。所有关键领域动作、订单、成交、资金费、爆仓、规则 revision、ViewerState revision、用户标记和绘图文档提交进入不可变总序；viewport 等手势进入独立 sampled 类别。event ID、sequence、cursor、state hash、rule/view revision 和内容 hash 均由服务端产生。
+5. core actor 每次已接受命令的 durable checkpoint 在同一 SQLite 事务被内容寻址保存为 review anchor；多轨 frame 引用同一全局时刻每条活动轨的 anchor。core recent ring 后续淘汰不影响 Review/Fork。直接规则/view 命令复用最近 exact anchor，并以自身 timeline sequence 区分。
+6. Review session 拥有持久、独立的 `review_cursor` 和选中 event；jump/previous/next/play 只更新 review session。每次操作前后都核对原 Run 的 cursor、state hash、账户 hash、ledger tail 与 ViewerState revision 未变，否则 fail closed。
+7. 每个选择返回一个严格投影：已揭示图表 prefix、组合/持仓/订单/fill/ledger、当前规则集合、权益、ViewerState、关键语义动作和绘图文档。真实时间仍只经 Phase 12 服务端公开投影输出；Review 响应、DOM、ARIA、浏览器存储与导出不得形成新泄漏。
+8. “从这里继续”总是创建新的 child TrainingRun。单轨、多轨、approx 和 exact-account 都从选中 frame 的 actor anchors、规则/账户/view/drawing as-of 状态构建；child 记录 parent run/event/timeline sequence/dataset identities。原 Run 不恢复、不 seek、不追加“继续”命令。
+9. 绘图以 run-scoped canonical document record 记录，不上传 pointer move。浏览器在权威 drawing document commit 后 debounce，发送内容 hash 与有界 canonical snapshot；相同内容去重。Review 使用独立只读 drawing scope，退出后恢复原 active scope；Fork 把选中 hash 复制为 child 初始文档。
+10. 高频 viewport 只保存服务端有界样本：每 Run 最多 2,048 个 viewport bucket，重复 key/bucket 增加 sample count 并更新最后值。关键语义事件不进入该 LRU；关键事件硬上限 8,192，drawing/review artifact 原始总预算 128 MiB。接近上限时 UI 提前提示；达到上限后新关键动作 fail closed，不能静默丢弃后继续标记“可完整复盘”。
+11. review actor anchor 使用独立 512 MiB/Run 硬预算并记录 byte count。只有关键命令和全局 checkpoint 保存 anchor；普通 source tick 不逐条复制。开/平仓、fill、funding、liquidation、最大回撤和手工标记必须映射到可重建 frame；市场-only 采样可按多分辨率压缩，但关键事件不可删除。
+12. schema 继续采用 additive replay.training v9 表，Phase 16 binary 可安全忽略。新表和 segment refs 归 Review/Fork 使用；Phase 18 才提供用户可见存储管理和 GC，Phase 17 不自动删除已有复盘证据。
+
+### 实现顺序
+
+1. 先加 additive schema、严格模型、hash/预算帮助器和旧 v9 确定回填；为 core store 增加 transaction-local review capture hook，不改变 replay.v1 公共协议。
+2. 修正规则模型：fee/leverage/funding 独立版本、统一动作审计、as-of 查询和 exact-rule/user-cap 分离；交付后端 rules API 与边界测试。
+3. 建立不可变 review timeline、actor-anchor registry、自动领域事件索引、view/drawing 语义记录和独立 review cursor；所有响应执行 public-time/redaction 检查。
+4. 实现 as-of 投影与单/多轨、approx/exact Fork；增加 lineage、账户独立审计与原 Run immutability proof。
+5. 前端交付 Run Rules 面板、规则历史、ReviewMode 时间线/只读同步视图/Fork，以及 drawing document recorder 和 viewport 状态；错误与预算必须用户可见。
+6. 完成定向、全量、容量、迁移、真实浏览器、no-lookahead、数据库、父基线和 reverse-apply 门禁，写执行记录并独立 commit 后才进入 Phase 18。
+
+### 必测与退出门槛
+
+- fee/leverage/funding 在生效边界前/时/后的 fill、fee、funding、maintenance 与 ledger golden；暂停、重启、快进和重复 command 结果相同且旧账本字节/hash 不变。
+- exact-account leverage overlay 不改 archive rule hash；custom funding 拒绝且无半写；approx sandbox funding revision 可恢复。
+- 100,000 次 viewport/drawing offer 后 viewport 行数和内存有界；关键商品/周期/tier/drawing commit 数、sequence 和 hash 不丢，超预算明确 fail closed。
+- ReviewMode 可定位开仓、fill、平仓、funding、爆仓、最大回撤、规则变更和手工标记，并同步恢复图表、持仓、订单、规则 revision、ViewerState 与绘图；原 Run 的 cursor/state/account/ledger/view hash 全程不变。
+- 从任一可见 review event 继续都只创建 child；单轨、多轨和 exact-account child 的数据 identity、global ordering、账户 auditor、规则/账本和选中 state hash 一致，原 Run 无新增领域命令。
+- 关闭 replay/v2、historical book 或 account-history 开关仍按既有合同 fail closed；Review 不能借开关变化回退 live/approx。
+- 后端全量、frontend `npm run check`、真实 headed Chromium 的 rules -> trade -> advance -> drawing/viewport -> reload -> Review jumps -> multi/exact Fork、SQLite quick/FK/WAL、no-live/no-lookahead、容量、detached Phase 16 baseline、提交级 reverse-apply全部 PASS。
+- 独立 Phase 17 commit 后状态才可更新为 `PHASE_17_COMMITTED`；未生成 Phase 18 clean-HEAD manifest，release 继续 HOLD。
+
+### 执行记录（2026-07-26）
+
+1. additive replay.training v9 新增 run-rules revision、review timeline/event-anchor/actor-anchor、独立 cursor、drawing/marker、viewport sample 与 fork-lineage 表；旧 v9 数据库确定回填 initial frame，Phase 16 binary 可忽略新表。core durable write 通过同一 SQLite 事务的 review capture hook 生成内容寻址 anchor，market-only source tick 不复制 anchor，recent checkpoint ring 淘汰和进程重启后仍可 Review/Fork。
+2. fee、user leverage-cap overlay 与 sandbox funding 形成独立 revision chain；逐轨 exchange instrument rule 和 exact-account archive hash 保持不可变，实际杠杆取 exchange rule 与 user cap 较小值。CHALLENGE、exact custom funding、过期 revision、重复/冲突 command、预算越界都 fail closed 且无半写；旧 fill、fee、funding、maintenance、liquidation 和 ledger hash 不被重写。
+3. 服务端不可变总序现已覆盖 command、rule、order、fill、position、funding、liquidation、最大回撤、ViewerState、marker 和 drawing。Review cursor 的 previous/next/jump/play 只更新独立 review session；每次投影核对原 Run cursor/state/account/ledger/view proof。单轨、多轨、approx、exact-account 和已 pin historical-book Run 均只从选中 as-of frame 创建 child，复制 dataset/book/account identity、规则、账户、viewer 与 drawing，并记录 parent event lineage；原 actor 不 seek、不恢复、不追加继续命令。
+4. run-scoped drawing recorder 只在权威文档 commit 后 debounce 上传 canonical snapshot。后端严格验证根/实体/geometry/style keys、kind 对应、safe integer、Decimal wrapper、重复 ID、二进制 float、私有/actual/archive 字段、嵌套节点、entity/freehand/2 MiB request 与 128 MiB artifact 预算；hash mismatch 和所有非法输入统一返回 `REVIEW_DRAWING_INVALID`，事务不留下 document 或 timeline 半写。非 secure WSL 浏览器 origin 缺少 WebCrypto 时使用已用标准 UTF-8 vectors 交叉验证的确定性 SHA-256 fallback。
+5. 前端交付 Run Rules 操作面板和完整历史、预算提示、marker、drawing/viewport recorder、严格 public parser、ReviewMode 时间线与持久游标、closed-prefix 图表、只读组合/工具栏、不可变证明和 Fork 结果。Review 页面不挂载下单动作，也不回退 live/private trading runtime；退出后恢复活动 Run 的 drawing scope。
+6. 后端定向 Phase 17 + training API 为 `24 passed`；其中 100,000 次 viewport offer 在 2.15 s 内聚合为最多 2,048 行、sample count 保真，并同时验证 critical-event、artifact 与 512 MiB anchor 预算回滚。anchor ring 淘汰/重启、same-cursor as-of、规则边界、funding/liquidation/max-drawdown、book pin、exact overlay、迁移和 drawing 原子边界均通过。后端全量为 `2090 passed`，仅 4 条既有 FastAPI `on_event` 弃用警告。
+7. 前端 Phase 17 定向为 `6 passed`；完整 `npm run check` 的 architecture、两个 TypeScript project、ESLint、`2441 passed` 与 production build 全部通过。变更 Python scope Ruff、compileall、Git whitespace 均 PASS。
+8. fresh `runtime-pass14` 的真实 headed Chromium 返回 `PHASE17_PASS`：approx 多轨 Run 完成三类规则 r2、真实下单/fill、推进、marker、drawing r1、reload、Review previous/next/jump 与 2-track Fork；exact futures Run 完成 independent account audit 和 exact Fork。共 1,247 个网络请求，non-replay API、live market traffic、unexpected HTTP、console error、page error 均为 0；multi child 与 exact Review/Fork 均生成 1440×900 证据图。
+9. 浏览器最终 `replay.db` 为 1,904,640 B、SHA-256=`804f428b16c53f254e60783c5de7d07b225bbacdb77ee38365e83a198aeb3db1`；`quick_check=ok`、`integrity_check=ok`、foreign-key 零行、WAL checkpoint=`0|0|0`，关闭后无 WAL/SHM，验收端口全部释放。
+10. detached Phase 16 父提交 `24f105d97f410671682c39695e90c810b1628889` 的 Phase 16 主回归 `15 passed`，worktree 已在确认 clean 后移除。默认 replay/v2、frontend entry/v2、raw archive、historical book、segment worker/GC、summary optimization 和 account history 开关继续关闭；本阶段不执行自动 GC，也不把历史 L2 连续性升级为 queue exact。Decision：实现、容量、全量回归、真实浏览器、SQLite、no-live/no-lookahead 与父基线均 PASS；Phase 17 独立提交后才进入 Phase 18，release 继续 HOLD。
+11. 完整 staged Phase 17 patch 通过 `git diff --cached --check` 与 `git apply --reverse --check --whitespace=error-all`；加入本结果行并重新暂存后，再对最终 staged patch 执行同一门禁。独立提交是进入 Phase 18 的唯一边界，旧 Phase 10 release manifest 不继承。
 
 ---
 

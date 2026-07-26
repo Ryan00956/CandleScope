@@ -10,7 +10,10 @@ import IntervalSelector from "../../components/IntervalSelector.js";
 import SingleChartPanes from "../../components/SingleChartPanes.js";
 import { loadUserPrefs } from "../chart-session/chartSessionModel.js";
 import { useDrawingRuntime } from "../drawings/useDrawingRuntime.js";
+import { createEmptyDrawingDocument } from "../drawings/core/drawingDocument.js";
+import { drawingDocumentSessionRegistry } from "../drawings/core/drawingDocumentStore.js";
 import { useChartSettingsRuntime } from "../settings/chartAppearanceSettings.js";
+import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import { groupIntervalsByDuration, parseIntervalSeconds } from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import ReplayBottomControlDock from "./components/ReplayBottomControlDock.js";
@@ -18,7 +21,13 @@ import ReplayIntegrityReviewPanel from "./components/ReplayIntegrityReviewPanel.
 import ReplayRightMarketRail from "./components/ReplayRightMarketRail.js";
 import ReplaySessionDialog from "./components/ReplaySessionDialog.js";
 import { buildReplayCapabilityModel } from "./replayCapabilityModel.js";
+import { defaultReplayApi } from "./replayApi.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
+import {
+  applyReplayHistoryPage,
+  ReplayHistoryProvider,
+} from "./replayHistoryProvider.js";
+import { rebuildReplayViewerSeries } from "./replayViewerProjection.js";
 import { handleReplayShortcut } from "./replayShortcuts.js";
 import { returnToTrainingHub } from "./trainingHubNavigation.js";
 import { replayEffectiveTrainingState, replayOwnsController } from "./replayUiModel.js";
@@ -29,6 +38,12 @@ import type { ReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 import type { ReplayViewerRuntime } from "./useReplayViewerRuntime.js";
 import { useReplayWorkspacePreferences } from "./replayWorkspacePreferences.js";
+import {
+  replayReviewDocumentHash,
+  replayReviewDrawingDocument,
+  replayReviewDrawingRecord,
+} from "./replayReviewDrawing.js";
+import type { ReplayReviewResponse } from "./replayIntegrityModel.js";
 
 
 export interface ReplayTrainingPageShellProps {
@@ -37,6 +52,44 @@ export interface ReplayTrainingPageShellProps {
   readonly chartSurfaceRef: RefObject<ChartSurfaceHandle | null>;
   readonly chartSurfaceActions: ChartSurfaceActions;
   readonly viewer: ReplayViewerRuntime;
+}
+
+function ReplayReviewRightRail({ review }: { readonly review: ReplayReviewResponse }) {
+  const selectedTrackId = String(review.projection.viewer_state.selected_track_id ?? "");
+  const selected = review.projection.tracks.find((track) => track.track_id === selectedTrackId)
+    ?? review.projection.tracks[0]
+    ?? null;
+  const position = selected?.position;
+  const positionRecord = position !== null && typeof position === "object"
+    && !Array.isArray(position)
+    ? position as Readonly<Record<string, unknown>>
+    : null;
+  const account = selected?.account;
+  const accountRecord = account !== null && typeof account === "object"
+    && !Array.isArray(account)
+    ? account as Readonly<Record<string, unknown>>
+    : null;
+  return (
+    <aside
+      className="replay-review-right-rail"
+      aria-label="ReviewMode 只读组合"
+      data-review-track-id={selectedTrackId}
+    >
+      <span className="training-hub-kicker">REVIEW · READ ONLY</span>
+      <h3>{String(selected?.symbol ?? "--")}</h3>
+      <dl>
+        <div><dt>公开时间</dt><dd>{review.events.find((event) => event.event_id === review.selected_event_id)?.public_time.label ?? "--"}</dd></div>
+        <div><dt>权益</dt><dd>{String(review.projection.domain.equity ?? "--")}</dd></div>
+        <div><dt>仓位</dt><dd>{String(positionRecord?.quantity ?? "--")}</dd></div>
+        <div><dt>未实现盈亏</dt><dd>{String(positionRecord?.unrealized_pnl ?? "--")}</dd></div>
+        <div><dt>可用权益</dt><dd>{String(accountRecord?.available_equity ?? "--")}</dd></div>
+        <div><dt>订单 / 成交</dt><dd>{review.projection.orders.length} / {review.projection.fills.length}</dd></div>
+        <div><dt>账本</dt><dd>{review.projection.ledger.length}</dd></div>
+        <div><dt>绘图版本</dt><dd>r{review.projection.drawing_revision}</dd></div>
+      </dl>
+      <p>该侧栏来自选中事件投影，不读取活动 Run 的当前组合。</p>
+    </aside>
+  );
 }
 
 function ReplayStatePanel({ runtime }: { readonly runtime: ReplayRuntime }) {
@@ -93,6 +146,36 @@ export default function ReplayTrainingPageShell({
   const drawings = useDrawingRuntime({ chartSurfaceActions, session: null });
   const history = useReplayHistoryRuntime(runtime);
   const integrityRuntime = useReplayIntegrityRuntime(runtime, viewer);
+  const review = integrityRuntime.review;
+  const liveDrawingScopeBase = integrityRuntime.runId === null
+    ? `replay-run:pending`
+    : `replay-run:${integrityRuntime.runId}`;
+  const reviewDrawingScopeBase = review === null
+    ? null
+    : `replay-review:${review.review_id}`;
+  const reviewDrawingDocument = review?.drawing_document ?? null;
+  const reviewDrawingCursorRevision = review?.cursor_revision ?? null;
+  const reviewSelectedTrackId = review === null
+    ? null
+    : String(review.projection.viewer_state.selected_track_id ?? "");
+  const reviewProjectedTrack = reviewSelectedTrackId === null
+    ? undefined
+    : review?.projection.tracks.find((item) => (
+      item.track_id === reviewSelectedTrackId
+    ));
+  const reviewProjectedExchange = reviewProjectedTrack?.exchange;
+  const reviewProjectedMarketType = reviewProjectedTrack?.market_type;
+  const reviewProjectedSourceKind = reviewProjectedTrack?.source_kind;
+  const reviewProjectedSymbol = reviewProjectedTrack?.symbol;
+  const reviewProjectedInterval = review?.projection.viewer_state.display_interval;
+  const reviewCursorVirtualTimeMs = review?.projection.cursor.virtual_time_ms ?? null;
+  const drawingScopeBase = reviewDrawingScopeBase ?? liveDrawingScopeBase;
+  const reviewSeriesStore = useMemo(() => new SeriesWindowStore(), []);
+  const [reviewChartLoading, setReviewChartLoading] = useState(false);
+  const [reviewChartError, setReviewChartError] = useState<string | null>(null);
+  const [reviewChartBounded, setReviewChartBounded] = useState(false);
+  const [liveDrawingError, setLiveDrawingError] = useState<string | null>(null);
+  const [reviewDrawingError, setReviewDrawingError] = useState<string | null>(null);
   const workspace = useReplayWorkspacePreferences(runtime.store.sessionId ?? "pending");
   const config = runtime.store.sessionConfig;
   const active = runtime.phase === "ACTIVE" && config !== null && runtime.store.hasAuthoritativeSnapshot;
@@ -149,7 +232,219 @@ export default function ReplayTrainingPageShell({
       setReturningToHub(false);
     }
   }, [returningToHub, runtime.store.sessionId]);
+
+  useEffect(() => {
+    setLiveDrawingError(null);
+    const runId = integrityRuntime.runId;
+    if (runId === null || !integrityRuntime.drawingLoaded) return;
+    const current = integrityRuntime.currentDrawing;
+    if (current === null) {
+      setLiveDrawingError("服务端绘图证据已标记完成但缺少当前文档响应");
+      return;
+    }
+    const scopeKey = `replay-run:${runId}__main`;
+    const store = drawingDocumentSessionRegistry.getStore(scopeKey);
+    try {
+      if (current.document !== null && !store.dirty) {
+        const document = replayReviewDrawingDocument(current.document, scopeKey);
+        const loaded = store.loadDocument(document);
+        if (!loaded.ok) throw new Error(loaded.error);
+      }
+      drawingDocumentSessionRegistry.markLoaded(scopeKey, store);
+    } catch (cause) {
+      setLiveDrawingError(
+        cause instanceof Error ? cause.message : "Run 绘图文档恢复失败",
+      );
+    }
+  }, [
+    integrityRuntime.currentDrawing,
+    integrityRuntime.drawingLoaded,
+    integrityRuntime.runId,
+  ]);
+
+  useEffect(() => {
+    const runId = integrityRuntime.runId;
+    const currentDrawing = integrityRuntime.currentDrawing;
+    if (runId === null
+      || !integrityRuntime.drawingLoaded
+      || currentDrawing === null
+      || liveDrawingError !== null) return;
+    const scopeKey = `replay-run:${runId}__main`;
+    const store = drawingDocumentSessionRegistry.getStore(scopeKey);
+    const recordDrawing = integrityRuntime.actions.recordDrawing;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+    const schedule = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        const snapshot = store.getSnapshot();
+        const revision = snapshot.documentRevision;
+        void (async () => {
+          const document = replayReviewDrawingRecord(snapshot, runId);
+          const hash = await replayReviewDocumentHash(document);
+          if (disposed) return;
+          if (store.getSnapshot().documentRevision !== revision) {
+            schedule();
+            return;
+          }
+          await recordDrawing(document, hash, snapshot.entities.size);
+          if (!disposed) store.acknowledgePersisted(scopeKey, revision);
+        })().catch((cause) => {
+          if (disposed) return;
+          setLiveDrawingError(
+            cause instanceof Error
+              ? `Run 绘图证据提交失败：${cause.message}`
+              : "Run 绘图证据提交失败",
+          );
+        });
+      }, 500);
+    };
+    const unsubscribe = store.subscribe(() => schedule());
+    if ((store.dirty || currentDrawing.document === null)
+      && store.getSnapshot().documentRevision > 0) schedule();
+    return () => {
+      disposed = true;
+      unsubscribe();
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [
+    integrityRuntime.actions.recordDrawing,
+    integrityRuntime.currentDrawing,
+    integrityRuntime.drawingLoaded,
+    integrityRuntime.runId,
+    liveDrawingError,
+  ]);
+
+  useEffect(() => {
+    setReviewDrawingError(null);
+    if (reviewDrawingCursorRevision === null || reviewDrawingScopeBase === null) return;
+    try {
+      const scopeKey = `${reviewDrawingScopeBase}__main`;
+      const store = drawingDocumentSessionRegistry.getStore(scopeKey);
+      const document = reviewDrawingDocument === null
+        ? createEmptyDrawingDocument(scopeKey)
+        : replayReviewDrawingDocument(reviewDrawingDocument, scopeKey);
+      const loaded = store.loadDocument(document);
+      if (!loaded.ok) throw new Error(loaded.error);
+      drawingDocumentSessionRegistry.markLoaded(scopeKey, store);
+    } catch (cause) {
+      setReviewDrawingError(
+        cause instanceof Error ? cause.message : "Review 绘图文档恢复失败",
+      );
+    }
+  }, [
+    reviewDrawingCursorRevision,
+    reviewDrawingDocument,
+    reviewDrawingScopeBase,
+  ]);
+
+  useEffect(() => {
+    if (reviewSelectedTrackId === null || reviewCursorVirtualTimeMs === null) {
+      setReviewChartLoading(false);
+      setReviewChartError(null);
+      setReviewChartBounded(false);
+      return;
+    }
+    const track = viewer.marketTracks?.tracks.find((item) => (
+      item.track_id === reviewSelectedTrackId
+    ));
+    if (typeof reviewProjectedExchange !== "string"
+      || typeof reviewProjectedMarketType !== "string"
+      || typeof reviewProjectedSymbol !== "string"
+      || typeof reviewProjectedSourceKind !== "string"
+      || typeof reviewProjectedInterval !== "string"
+      || parseIntervalSeconds(reviewProjectedInterval) === null
+      || track?.adapter_session_id === null
+      || track?.adapter_session_id === undefined) {
+      setReviewChartLoading(false);
+      setReviewChartBounded(false);
+      setReviewChartError("选中 Review 轨道缺少严格身份、周期或冻结 adapter session，图表按 fail-closed 隐藏。");
+      reviewSeriesStore.replace([], { source: "replay-review-unavailable" });
+      return;
+    }
+    const adapterSessionId = track.adapter_session_id;
+    const abort = new AbortController();
+    const source = new SeriesWindowStore();
+    let provider: ReplayHistoryProvider | null = null;
+    setReviewChartLoading(true);
+    setReviewChartError(null);
+    setReviewChartBounded(false);
+    void (async () => {
+      const session = await defaultReplayApi.getSession(
+        adapterSessionId,
+        abort.signal,
+      );
+      const config = session.snapshot.config;
+      if (config.exchange !== reviewProjectedExchange
+        || config.market_type !== reviewProjectedMarketType
+        || config.symbol !== reviewProjectedSymbol
+        || config.source_kind.toUpperCase() !== reviewProjectedSourceKind) {
+        throw new Error("Review 轨道身份与冻结 adapter session 不一致");
+      }
+      provider = new ReplayHistoryProvider({
+        sessionId: adapterSessionId,
+        trackId: reviewSelectedTrackId,
+        identity: {
+          exchange: config.exchange,
+          market_type: config.market_type,
+          symbol: config.symbol,
+          source_kind: config.source_kind === "agg_trade" ? "AGG_TRADE" : "BAR",
+          base_interval: config.base_interval,
+          display_interval: config.display_interval,
+        },
+      });
+      const revealedBoundaryMs = reviewCursorVirtualTimeMs;
+      let beforeMs = Math.min(Number.MAX_SAFE_INTEGER, revealedBoundaryMs + 1);
+      let bounded = false;
+      for (let pageIndex = 0; pageIndex < 20; pageIndex += 1) {
+        const page = await provider.loadBefore({
+          beforeMs,
+          revealedBoundaryMs,
+          dataEpoch: session.snapshot.data_epoch,
+          limit: 1_000,
+        });
+        applyReplayHistoryPage(source, page);
+        if (!page.has_more || page.bars.length === 0) break;
+        if (pageIndex === 19) bounded = true;
+        beforeMs = page.next_before_ms;
+      }
+      if (abort.signal.aborted) return;
+      rebuildReplayViewerSeries(
+        reviewSeriesStore,
+        source,
+        config.base_interval,
+        reviewProjectedInterval,
+      );
+      setReviewChartBounded(bounded);
+    })().catch((cause: unknown) => {
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
+      reviewSeriesStore.replace([], { source: "replay-review-fail-closed" });
+      setReviewChartError(
+        cause instanceof Error ? cause.message : "Review 图表前缀加载失败",
+      );
+    }).finally(() => {
+      if (!abort.signal.aborted) setReviewChartLoading(false);
+    });
+    return () => {
+      abort.abort();
+      provider?.cancel();
+    };
+  }, [
+    reviewCursorVirtualTimeMs,
+    reviewProjectedInterval,
+    reviewProjectedExchange,
+    reviewProjectedMarketType,
+    reviewProjectedSourceKind,
+    reviewProjectedSymbol,
+    reviewSelectedTrackId,
+    reviewSeriesStore,
+    viewer.marketTracks,
+  ]);
+
+  const displayedSeriesStore = review === null ? viewer.seriesStore : reviewSeriesStore;
   const handleVisibleRangeChange = useCallback((range: ChartSurfaceVisibleRange) => {
+    if (integrityRuntime.review !== null) return;
     runtime.marketData.actions.onVisibleRangeChange(range);
     const value: Record<string, number> = {};
     if (range.logical !== undefined) {
@@ -159,12 +454,13 @@ export default function ReplayTrainingPageShell({
     if (range.barSpacing !== undefined) value.bar_spacing_ppm = Math.round(range.barSpacing * 1_000_000);
     if (range.rightOffset !== undefined) value.right_offset_ppm = Math.round(range.rightOffset * 1_000_000);
     integrityRuntime.actions.offerViewAction("VISIBLE_RANGE", "main-chart-range", value);
-  }, [integrityRuntime.actions, runtime.marketData.actions]);
+  }, [integrityRuntime.actions, integrityRuntime.review, runtime.marketData.actions]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       handleReplayShortcut(event, (action) => {
-        if (!ownsController || runtime.store.connectionState !== "connected"
+        if (integrityRuntime.review !== null
+          || !ownsController || runtime.store.connectionState !== "connected"
           || runtime.pendingCommand !== null || viewer.controlPending !== null
           || viewer.viewerPending || runtime.forkPending) return false;
         if (action === "toggle-play" && effectiveState === "PLAYING") {
@@ -206,9 +502,23 @@ export default function ReplayTrainingPageShell({
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [effectiveState, globalClock, ownsController, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, viewer.actions, viewer.controlPending, viewer.viewerPending]);
+  }, [effectiveState, globalClock, integrityRuntime.review, ownsController, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, viewer.actions, viewer.controlPending, viewer.viewerPending]);
 
   const interval = (viewer.viewerState?.display_interval ?? config?.base_interval ?? "1m") as IntervalString;
+  const reviewSelectedTrack = review?.projection.tracks.find((track) => (
+    track.track_id === review.projection.viewer_state.selected_track_id
+  ));
+  const projectedInterval = review?.projection.viewer_state.display_interval;
+  const displayedInterval = (
+    review !== null
+      && typeof projectedInterval === "string"
+      && parseIntervalSeconds(projectedInterval) !== null
+      ? projectedInterval
+      : interval
+  ) as IntervalString;
+  const displayedSymbol = review !== null && typeof reviewSelectedTrack?.symbol === "string"
+    ? reviewSelectedTrack.symbol
+    : config?.symbol ?? "--";
   const displayIntervals = useMemo(() => {
     const base = (config?.base_interval ?? "1m") as IntervalString;
     const baseSeconds = parseIntervalSeconds(base);
@@ -234,34 +544,71 @@ export default function ReplayTrainingPageShell({
     label: value,
     isCustom: false,
   }))), [displayIntervals]);
-  const viewerLast = viewer.seriesStore.last();
-  const viewerFirst = viewer.seriesStore.first();
-  const viewerBarCount = viewer.seriesStore.barCount;
+  const viewerLast = displayedSeriesStore.last();
+  const viewerFirst = displayedSeriesStore.first();
+  const viewerBarCount = displayedSeriesStore.barCount;
   const viewerDataMeta = {
     ...runtime.marketData.view.meta,
-    version: Number(viewer.seriesStore.version),
-    status: viewer.loading ? "loading" : "ready",
-    source: "replay-viewer-rebuild",
-    seriesKey: viewer.seriesStore.seriesKey,
-    interval,
+    version: Number(displayedSeriesStore.version),
+    status: review === null
+      ? (viewer.loading ? "loading" : "ready")
+      : (reviewChartLoading ? "loading" : "ready"),
+    source: review === null ? "replay-viewer-rebuild" : "replay-review-closed-prefix",
+    seriesKey: displayedSeriesStore.seriesKey,
+    interval: displayedInterval,
     bars: viewerBarCount,
     firstTime: viewerFirst?.time ?? null,
     lastTime: viewerLast?.time ?? null,
   };
   const last = viewerLast ?? runtime.store.lastPrice;
   const isUp = Number(last?.close ?? 0) >= Number(last?.open ?? 0);
-  const chart = active && viewerBarCount > 0 && config !== null ? (
+  const chart = active && review === null && liveDrawingError !== null ? (
+    <div className="chart-area" data-replay-state="drawing-error">
+      <div className="error-overlay">
+        <div className="error-icon">!</div>
+        <div className="error-message">
+          <strong>Run 绘图证据已 fail closed</strong><br />
+          {liveDrawingError}
+          <small>不会用 IndexedDB、其他 Run 或 live 绘图替代服务端文档。</small>
+        </div>
+      </div>
+    </div>
+  ) : active && review !== null && (reviewChartError !== null || reviewDrawingError !== null) ? (
+    <div className="chart-area" data-replay-state="review-error">
+      <div className="error-overlay">
+        <div className="error-icon">!</div>
+        <div className="error-message">
+          <strong>ReviewMode 已 fail closed</strong><br />
+          {reviewChartError ?? reviewDrawingError}
+          <small>不会用当前 Run、live 数据或其他绘图作用域填补缺口。</small>
+        </div>
+      </div>
+    </div>
+  ) : active && review !== null && reviewChartLoading ? (
+    <div className="chart-area" data-replay-state="review-loading">
+      <div className="error-overlay">
+        <div className="replay-loading-spinner" />
+        <div className="error-message">
+          <strong>正在重建只读图表前缀</strong><br />
+          仅请求选中事件之前的冻结历史。
+        </div>
+      </div>
+    </div>
+  ) : active && viewerBarCount > 0 && config !== null ? (
     <SingleChartPanes
       ref={chartSurfaceRef}
-      seriesStore={viewer.seriesStore}
-      symbol={config.symbol}
-      drawingKeyBase={`replay:${runtime.store.sessionId ?? "unknown"}`}
-      interval={interval}
-      loading={runtime.marketData.view.loading || viewer.loading || history.loading}
+      seriesStore={displayedSeriesStore}
+      symbol={displayedSymbol}
+      drawingKeyBase={drawingScopeBase}
+      interval={displayedInterval}
+      loading={review === null
+        && (runtime.marketData.view.loading || viewer.loading || history.loading)}
       onCrosshairMove={runtime.marketData.actions.onCrosshairMove}
-      onNeedMoreLeft={history.loadMoreLeft}
-      canLoadMoreLeft={history.hasMore}
-      datasetKey={String(viewer.seriesStore.seriesKey ?? "replay-viewer-uninitialized")}
+      onNeedMoreLeft={review === null ? history.loadMoreLeft : null}
+      canLoadMoreLeft={review === null && history.hasMore}
+      datasetKey={review === null
+        ? String(displayedSeriesStore.seriesKey ?? "replay-viewer-uninitialized")
+        : `review:${review.review_id}:${review.selected_timeline_sequence}`}
       upColor={settings.upColor}
       downColor={settings.downColor}
       chartType={settings.chartType}
@@ -283,8 +630,8 @@ export default function ReplayTrainingPageShell({
       tickMarkFormatter={formatChartTime}
       dataMeta={viewerDataMeta}
       onVisibleRangeChange={handleVisibleRangeChange}
-      drawingTool={drawings.view.drawingTool}
-      onDrawingToolChange={drawings.actions.setDrawingTool}
+      drawingTool={review === null ? drawings.view.drawingTool : null}
+      onDrawingToolChange={review === null ? drawings.actions.setDrawingTool : null}
       penColor={drawings.view.penColor}
       penSize={drawings.view.penSize}
       textFontSize={drawings.view.textFontSize}
@@ -295,7 +642,7 @@ export default function ReplayTrainingPageShell({
       positionSize={drawings.view.positionSize}
       drawingSnapEnabled={drawings.view.drawingSnapEnabled}
       onSelectedDrawingChange={drawings.actions.handleSelectedDrawingChange}
-      mainOverlayLines={[...indicators.mainOverlayLines]}
+      mainOverlayLines={review === null ? [...indicators.mainOverlayLines] : []}
       invertScale={priceScale.invert}
       priceScaleMode={priceScale.mode}
     />
@@ -303,7 +650,14 @@ export default function ReplayTrainingPageShell({
     <div className="chart-area" data-replay-state="empty"><div className="error-overlay"><div className="error-message"><strong>尚无已揭示 BAR</strong><br />服务端 snapshot 为空；不会使用 live/mock 数据填充。</div></div></div>
   ) : <ReplayStatePanel runtime={runtime} />;
 
-  const drawingToolbar = (
+  const drawingToolbar = review !== null ? (
+    <div className="drawing-toolbar replay-chart-toolbar" aria-label="ReviewMode 只读图表工具">
+      <span>REVIEW · READ ONLY</span>
+      <span>CLOSED PREFIX · NO FUTURE BAR</span>
+      <span>绘图 r{review.projection.drawing_revision}</span>
+      {reviewChartBounded && <span role="status">左侧历史已按 20,000 bars 上限截断</span>}
+    </div>
+  ) : (
     <DrawingToolbar
       activeTool={drawings.view.drawingTool}
       onToolChange={drawings.actions.setDrawingTool}
@@ -346,11 +700,17 @@ export default function ReplayTrainingPageShell({
           navigation={<span className="replay-mode-badge">REPLAY TRAINING</span>}
           identity={config && (
             <button className="replay-identity-readonly" type="button" title="活动 run 的来源身份不可变；请新建或 Fork。">
-              {config.exchange} · {config.market_type} · {config.symbol} · base {config.base_interval}
+              {review === null
+                ? `${config.exchange} · ${config.market_type} · ${config.symbol} · base ${config.base_interval}`
+                : `REVIEW · ${String(
+                  review.projection.tracks.find((track) => (
+                    track.track_id === review.projection.viewer_state.selected_track_id
+                  ))?.symbol ?? config.symbol,
+                )} · ${String(review.projection.viewer_state.display_interval ?? interval)}`}
             </button>
           )}
           controls={<>
-            <button className="indicator-toggle-btn active" type="button" title="本地指标仅使用已揭示前缀">📊<span className="indicator-badge">{indicators.status.sourceBarCount}</span></button>
+            <button className="indicator-toggle-btn active" type="button" disabled={review !== null} title={review === null ? "本地指标仅使用已揭示前缀" : "ReviewMode 禁用活动 Run 指标，防止未来值进入只读投影"}>📊<span className="indicator-badge">{review === null ? indicators.status.sourceBarCount : "R/O"}</span></button>
             <button className="indicator-toggle-btn alert-toggle-btn" type="button" disabled title={capabilities.ALERTS.state}>🔔</button>
           </>}
           quote={last && (
@@ -377,21 +737,23 @@ export default function ReplayTrainingPageShell({
             </div>
           )}
           trailing={<>
-            {active && runtime.store.sessionId !== null && <button className="replay-return-hub" type="button" disabled={returningToHub} title={returnToHubError ?? "服务端暂停并写入 checkpoint 后返回存档大厅"} onClick={() => void returnToHub()}>{returningToHub ? "正在保存…" : "存档大厅"}</button>}
+            {active && runtime.store.sessionId !== null && <button className="replay-return-hub" type="button" disabled={returningToHub || review !== null} title={review !== null ? "先退出只读 ReviewMode" : returnToHubError ?? "服务端暂停并写入 checkpoint 后返回存档大厅"} onClick={() => void returnToHub()}>{returningToHub ? "正在保存…" : "存档大厅"}</button>}
             <a className="replay-live-link" href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
           </>}
         />
       )}
       intervalSelector={(
         <IntervalSelector
-          interval={interval}
-          capabilityReady={config !== null && viewer.viewerState !== null && !viewer.viewerPending}
+          interval={displayedInterval}
+          capabilityReady={review === null && config !== null && viewer.viewerState !== null && !viewer.viewerPending}
           capabilityLoading={config === null || viewer.loading || viewer.viewerPending}
           nativeIntervals={nativeIntervals}
           intervalGroups={intervalGroups}
           customIntervalRecords={[]}
           savedCustomIntervals={[]}
-          onSelectInterval={(next) => { void viewer.actions.setDisplayInterval(next).catch(() => undefined); }}
+          onSelectInterval={(next) => {
+            if (review === null) void viewer.actions.setDisplayInterval(next).catch(() => undefined);
+          }}
           onCreateCustomInterval={() => ({ ok: false, message: "Phase 3 仅开放可证明的固定周期倍数" })}
           onRemoveCustomInterval={() => undefined}
           onRestoreCustomInterval={() => undefined}
@@ -399,7 +761,9 @@ export default function ReplayTrainingPageShell({
           onClearCustomIntervals={() => undefined}
           intervalNotice={{
             type: viewer.error ? "error" : "info",
-            text: viewer.error ?? `ViewerState r${viewer.viewerState?.semantic_view_revision ?? "--"} · ${publicTime}`,
+            text: review === null
+              ? viewer.error ?? `ViewerState r${viewer.viewerState?.semantic_view_revision ?? "--"} · ${publicTime}`
+              : `Review ViewerState r${String(review.projection.viewer_state.semantic_view_revision ?? "--")} · ${review.events.find((event) => event.event_id === review.selected_event_id)?.public_time.label ?? "--"}`,
           }}
         />
       )}
@@ -409,20 +773,20 @@ export default function ReplayTrainingPageShell({
           exportOverlay={null}
           chart={chart}
           rightRail={active ? (
-            <ReplayRightMarketRail
-              runtime={runtime}
-              viewer={viewer}
-              indicators={indicators}
-              preferences={workspace.preferences}
-              actions={workspace.actions}
-              upColor={settings.upColor}
-              downColor={settings.downColor}
-              formatTime={publicTimeRuntime.formatTime}
-            />
+            review !== null ? <ReplayReviewRightRail review={review} /> : <ReplayRightMarketRail
+                runtime={runtime}
+                viewer={viewer}
+                indicators={indicators}
+                preferences={workspace.preferences}
+                actions={workspace.actions}
+                upColor={settings.upColor}
+                downColor={settings.downColor}
+                formatTime={publicTimeRuntime.formatTime}
+              />
           ) : null}
         />
       )}
-      featureSurfaces={active ? <><ReplayIntegrityReviewPanel runtime={runtime} integrityRuntime={integrityRuntime} /><ReplayBottomControlDock runtime={runtime} viewer={viewer} publicTimeLabel={publicTime} /></> : null}
+      featureSurfaces={active ? <><ReplayIntegrityReviewPanel runtime={runtime} integrityRuntime={integrityRuntime} trainingState={effectiveState} />{review === null && <ReplayBottomControlDock runtime={runtime} viewer={viewer} publicTimeLabel={publicTime} />}</> : null}
       statusBar={(
         <MarketStatusBar
           source="replay"
@@ -430,20 +794,22 @@ export default function ReplayTrainingPageShell({
           connectionStatus={runtime.store.connectionState}
           dataAttributes={{
             "data-replay-generation": runtime.store.generation,
-            "data-replay-session-state": effectiveState ?? "",
-            "data-replay-adapter-state": runtime.store.state ?? "",
-            "data-replay-source-sequence": runtime.store.sourceSequence,
+            "data-replay-session-state": review === null ? effectiveState ?? "" : "REVIEW",
+            "data-replay-adapter-state": review === null ? runtime.store.state ?? "" : review.playback_state,
+            "data-replay-source-sequence": review?.projection.cursor.source_sequence ?? runtime.store.sourceSequence,
             "data-replay-revision": runtime.store.revision,
-            "data-replay-state-hash": runtime.store.stateHash ?? "",
-            "data-replay-cursor-ms": runtime.store.virtualTimeMs ?? "",
+            "data-replay-state-hash": review?.selected_state_hash ?? runtime.store.stateHash ?? "",
+            "data-replay-cursor-ms": review?.projection.cursor.virtual_time_ms ?? runtime.store.virtualTimeMs ?? "",
             "data-replay-max-bar-ms": viewerLast?.time === undefined ? "" : Number(viewerLast.time) * 1_000,
             "data-replay-last-bar-closed": String(viewerLast?.replayClosed ?? ""),
-            "data-replay-order-count": runtime.store.orders.length,
-            "data-replay-fill-count": runtime.store.fills.length,
+            "data-replay-order-count": review?.projection.orders.length ?? runtime.store.orders.length,
+            "data-replay-fill-count": review?.projection.fills.length ?? runtime.store.fills.length,
             "data-replay-revealed": String(runtime.store.revealed),
             "data-replay-history-epoch": history.historyEpoch ?? "",
-            "data-replay-view-interval": interval,
-            "data-replay-view-revision": viewer.viewerState?.semantic_view_revision ?? "",
+            "data-replay-view-interval": displayedInterval,
+            "data-replay-view-revision": review === null
+              ? viewer.viewerState?.semantic_view_revision ?? ""
+              : String(review.projection.viewer_state.semantic_view_revision ?? ""),
             "data-replay-time-disclosure-policy": integrityRuntime.integrity?.effective_time_disclosure_policy ?? "",
             "data-replay-result-label": integrityRuntime.integrity?.result_label ?? "",
             "data-replay-public-time-projections": publicTimeRuntime.projectedCount,
@@ -451,17 +817,22 @@ export default function ReplayTrainingPageShell({
               ? (publicTimeRuntime.loading ? "loading" : "ready")
               : "relative-fallback",
             "data-replay-review-read-only": integrityRuntime.review?.read_only === true ? "true" : "false",
+            "data-replay-review-timeline-sequence": review?.selected_timeline_sequence ?? "",
+            "data-replay-review-chart-fidelity": review === null ? "" : "CLOSED_PREFIX_ONLY",
+            "data-replay-review-original-verified": review?.immutability_proof.verified === true ? "true" : "",
           }}
           left={<>
             <span><span className={`status-dot ${runtime.store.connectionState === "connected" ? "connected" : "loading"}`} />K 线回放 · REPLAY</span>
-            <span>{effectiveState ?? runtime.phase}</span>
+            <span>{review === null ? effectiveState ?? runtime.phase : `REVIEW ${review.playback_state}`}</span>
             <span>{viewerBarCount} display bars</span>
-            {history.loading && <span>Loading older replay data…</span>}
-            {!history.hasMore && !history.loading && <span>No more frozen history</span>}
-            {history.error && <span className="replay-history-error">{history.error}</span>}
+            {review === null && history.loading && <span>Loading older replay data…</span>}
+            {review === null && !history.hasMore && !history.loading && <span>No more frozen history</span>}
+            {review === null && history.error && <span className="replay-history-error">{history.error}</span>}
+            {review !== null && <span>immutable event #{review.selected_timeline_sequence}</span>}
+            {review !== null && reviewChartBounded && <span>20,000-bar review prefix bound</span>}
           </>}
           right={<>
-            <span>Controller: {ownsController ? "本页" : runtime.store.controllerClientId ? "其他页面" : "无"}</span>
+            <span>{review === null ? `Controller: ${ownsController ? "本页" : runtime.store.controllerClientId ? "其他页面" : "无"}` : "Original controller isolated"}</span>
             <span>{config?.source_kind.toUpperCase() ?? "BAR"} · {config?.quality_mode.toUpperCase() ?? "EXACT"}</span>
             <span>无 live feeds · replay.v2 shell / replay.v1 adapter</span>
           </>}

@@ -35,6 +35,171 @@ function replayCatalog() {
   });
 }
 
+function phase17ReviewResponse() {
+  const hash = `sha256:${"8".repeat(64)}`;
+  const accountHash = `sha256:${"4".repeat(64)}`;
+  const ledgerHash = `sha256:${"5".repeat(64)}`;
+  const viewerHash = `sha256:${"6".repeat(64)}`;
+  const publicTime = {
+    policy: "HIDE_ALL",
+    timeline_ms: 946_684_800_000,
+    relative_ms: 0,
+    sequence: 0,
+    label: "D+1 T+00:00:00",
+  };
+  const cursor = { virtual_time_ms: 946_684_800_000, source_sequence: 0 };
+  const baseRule = {
+    revision: 1,
+    effective_cursor: cursor,
+    public_time: publicTime,
+    fidelity: "USER_CONFIGURED_AUDITED",
+    reason: "training creation",
+    command_id: null,
+    old: null,
+  };
+  const feePolicy = {
+    ...baseRule,
+    kind: "FEE_POLICY",
+    maker_fee_bps: "1",
+    taker_fee_bps: "4",
+    policy_hash: `sha256:${"a".repeat(64)}`,
+    new: { maker_fee_bps: "1", taker_fee_bps: "4" },
+  };
+  const leveragePolicy = {
+    ...baseRule,
+    kind: "LEVERAGE_CAP",
+    max_leverage: "10",
+    policy_hash: `sha256:${"b".repeat(64)}`,
+    new: { max_leverage: "10" },
+  };
+  const fundingPolicy = {
+    ...baseRule,
+    kind: "FUNDING_POLICY",
+    funding_mode: "OFF",
+    fixed_funding_rate: null,
+    funding_interval_ms: null,
+    policy_hash: `sha256:${"c".repeat(64)}`,
+    new: {
+      funding_mode: "OFF",
+      fixed_funding_rate: null,
+      funding_interval_ms: null,
+    },
+  };
+  const rules = {
+    protocol: "replay.v2",
+    schema_version: "replay.run-rules.v1",
+    run_id: "run-1",
+    effective_cursor: cursor,
+    fee_policy: feePolicy,
+    leverage_policy: leveragePolicy,
+    funding_policy: fundingPolicy,
+    instrument_rules: [{
+      track_id: "track-1",
+      revision: 1,
+      effective_virtual_time_ms: 946_684_800_000,
+      rule: { exchange_max_leverage: "20" },
+      rule_hash: `sha256:${"d".repeat(64)}`,
+      fidelity: "EXCHANGE_ARCHIVE_EXACT",
+      immutable_exchange_rule: true,
+    }],
+    effective_leverage_by_track: { "track-1": "10" },
+    history: [feePolicy, leveragePolicy, fundingPolicy],
+  };
+  const projection = {
+    schema_version: "replay.review.timeline.v1",
+    run_id: "run-1",
+    cursor,
+    tracks: [{
+      track_id: "track-1",
+      exchange: "binance",
+      market_type: "spot",
+      symbol: "BTCUSDT",
+      source_kind: "BAR",
+      position: {},
+      account: {},
+    }],
+    orders: [],
+    fills: [],
+    ledger: [],
+    markers: [],
+    liquidations: [],
+    books: [],
+    account: {
+      account_model: "PERPETUAL_LINEAR",
+      ledger_tail_hash: ledgerHash,
+    },
+    account_hash: accountHash,
+    rules,
+    viewer_state: {
+      run_id: "run-1",
+      selected_track_id: "track-1",
+      display_interval: "1m",
+      semantic_view_revision: 1,
+    },
+    viewer_hash: viewerHash,
+    drawing_document_hash: null,
+    drawing_revision: 0,
+    domain: { equity: "10000", order_count: 0, fill_count: 0 },
+  };
+  return {
+    protocol: "replay.v2",
+    schema_version: "replay.review.timeline.v1",
+    review_id: "review-1",
+    run_id: "run-1",
+    read_only: true,
+    selected_event_id: "checkpoint-7",
+    selected_timeline_sequence: 1,
+    selected_state_hash: hash,
+    original_state_hash: hash,
+    original_cursor: cursor,
+    dataset_epoch: `sha256:${"9".repeat(64)}`,
+    cursor_revision: 1,
+    playback_state: "PAUSED",
+    playback_rate: "1",
+    projection,
+    drawing_document: null,
+    immutability_proof: {
+      original_account_hash: accountHash,
+      original_ledger_tail_hash: ledgerHash,
+      original_viewer_revision: 1,
+      original_viewer_hash: viewerHash,
+      verified: true,
+    },
+    budget: {
+      critical_events: 1,
+      critical_event_limit: 8_192,
+      viewport_samples: 0,
+      viewport_sample_limit: 2_048,
+      anchor_used_bytes: 4_096,
+      anchor_limit_bytes: 512 * 1_024 * 1_024,
+      artifact_used_bytes: 2_048,
+      artifact_limit_bytes: 128 * 1_024 * 1_024,
+    },
+    events: [{
+      event_id: "checkpoint-7",
+      event_type: "INITIAL_CHECKPOINT",
+      category: "SYSTEM",
+      timeline_sequence: 1,
+      checkpoint_id: 7,
+      source_sequence: 0,
+      event_sequence: 1,
+      state_hash: hash,
+      account_hash: accountHash,
+      ledger_tail_hash: ledgerHash,
+      viewer_revision: 1,
+      anchor_set_hash: `sha256:${"2".repeat(64)}`,
+      event_hash: `sha256:${"3".repeat(64)}`,
+      public_time: publicTime,
+      detail: null,
+    }],
+    jump_targets: [{
+      event_id: "checkpoint-7",
+      event_type: "INITIAL_CHECKPOINT",
+      category: "SYSTEM",
+    }],
+  };
+}
+
 
 test("Phase 4 integrity parser keeps only public time and audited mutation values", () => {
   const response = parseReplayIntegrityResponse({
@@ -146,30 +311,11 @@ test("equity parser and polyline remain bounded and Decimal-backed", () => {
 
 
 test("review parser preserves read-only original hash and exact checkpoint selection", () => {
-  const hash = `sha256:${"8".repeat(64)}`;
-  const review = parseReplayReviewResponse({
-    protocol: "replay.v2",
-    review_id: "review-1",
-    run_id: "run-1",
-    read_only: true,
-    selected_event_id: "checkpoint-7",
-    selected_state_hash: hash,
-    original_state_hash: hash,
-    original_cursor: { virtual_time_ms: 946684800000, source_sequence: 0 },
-    dataset_epoch: `sha256:${"9".repeat(64)}`,
-    events: [{
-      event_id: "checkpoint-7",
-      event_type: "INITIAL_CHECKPOINT",
-      checkpoint_id: 7,
-      source_sequence: 0,
-      event_sequence: 1,
-      state_hash: hash,
-      public_time: { policy: "HIDE_ALL", timeline_ms: 946684800000, relative_ms: 0, sequence: 0, label: "D+1 T+00:00:00" },
-    }],
-    jump_targets: [{ event_id: "checkpoint-7", event_type: "INITIAL_CHECKPOINT" }],
-  });
+  const review = parseReplayReviewResponse(phase17ReviewResponse());
   assert.equal(review.read_only, true);
   assert.equal(review.events[0]?.state_hash, review.original_state_hash);
+  assert.equal(review.projection.rules.instrument_rules[0]?.immutable_exchange_rule, true);
+  assert.equal(review.budget.anchor_limit_bytes, 512 * 1_024 * 1_024);
 });
 
 

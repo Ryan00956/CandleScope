@@ -386,8 +386,9 @@ test("Phase 5 replay watchlist is backed only by replay.v2 track commands", () =
     resolve(testDirectory, "../components/ReplayIntegrityReviewPanel.tsx"),
     "utf8",
   );
-  assert.match(integrity, /SERVER-AUTHORITATIVE · PHASE 6/);
-  assert.match(integrity, /版本化 Run command/);
+  assert.match(integrity, /SERVER-AUTHORITATIVE · PHASE 17/);
+  assert.match(integrity, /Run Rules/);
+  assert.match(integrity, /ReviewMode/);
   assert.doesNotMatch(integrity, /REPLAY_POLICY_UNSUPPORTED/);
   const controls = readFileSync(
     resolve(testDirectory, "../components/ReplayControlBar.tsx"),

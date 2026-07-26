@@ -73,6 +73,7 @@ def test_replay_v2_phase8_package_keeps_optimization_inside_training() -> None:
         "history.py",
         "models.py",
         "multitrack.py",
+        "review.py",
         "schema.py",
         "segments.py",
         "service.py",

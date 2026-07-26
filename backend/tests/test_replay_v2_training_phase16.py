@@ -1517,18 +1517,13 @@ async def test_exact_isolated_margin_and_review_fork_boundary(
         assert closed["data"]["portfolio"]["account_history"]["auditor"]["status"] == "PASS"
         review = await service.training.start_review(run_id, event_id=None)  # type: ignore[union-attr]
         assert review["run_id"] == run_id
-        with pytest.raises(TrainingRunError) as blocked:
-            await service.training.fork_run(  # type: ignore[union-attr]
-                run_id,
-                event_id="phase16-fork-probe",
-            )
-        assert blocked.value.code == "ACCOUNT_HISTORY_REVIEW_FORK_UNSUPPORTED"
-        assert blocked.value.details == {
-            "review_supported": True,
-            "fork_supported": False,
-            "original_run_mutated": False,
-            "fallback_applied": False,
-        }
+        forked = await service.training.fork_run(  # type: ignore[union-attr]
+            run_id,
+            event_id=str(review["selected_event_id"]),
+        )
+        assert forked["parent_run_id"] == run_id
+        assert forked["account_audit"]["status"] == "PASS"
+        assert forked["run"]["run_id"] != run_id
     finally:
         await service.shutdown(step_timeout=1.0)
 

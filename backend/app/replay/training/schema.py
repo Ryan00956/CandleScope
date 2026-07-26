@@ -15,6 +15,8 @@ START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
 DATA_POLICY_SCHEMA_VERSION = "replay.data-policy.v1"
 PERIOD_SUMMARY_SET_SCHEMA_VERSION = "replay.period-summary-set.v1"
 ADVANCE_INTENT_SCHEMA_VERSION = "replay.advance-intent.v1"
+RUN_RULES_SCHEMA_VERSION = "replay.run-rules.v1"
+REVIEW_TIMELINE_SCHEMA_VERSION = "replay.review.timeline.v1"
 
 
 TRAINING_SCHEMA_V1 = """
@@ -1133,6 +1135,233 @@ CREATE TABLE IF NOT EXISTS replay_account_history_audit (
 """
 
 
+TRAINING_SCHEMA_PHASE17_ADDITIVE = """
+CREATE TABLE IF NOT EXISTS replay_training_leverage_policy (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    effective_virtual_time_ms INTEGER NOT NULL CHECK (effective_virtual_time_ms >= 0),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    max_leverage TEXT NOT NULL,
+    policy_hash TEXT NOT NULL
+        CHECK (length(policy_hash) = 71 AND substr(policy_hash, 1, 7) = 'sha256:'),
+    fidelity TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    command_id TEXT,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, revision),
+    UNIQUE (run_id, command_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_leverage_policy_effective
+ON replay_training_leverage_policy(
+    run_id, effective_virtual_time_ms DESC, source_sequence DESC, revision DESC
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_funding_policy (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    effective_virtual_time_ms INTEGER NOT NULL CHECK (effective_virtual_time_ms >= 0),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    funding_mode TEXT NOT NULL
+        CHECK (funding_mode IN ('OFF', 'HISTORICAL_EXACT', 'SANDBOX_FIXED')),
+    fixed_funding_rate TEXT,
+    funding_interval_ms INTEGER
+        CHECK (funding_interval_ms IS NULL OR funding_interval_ms >= 60000),
+    policy_hash TEXT NOT NULL
+        CHECK (length(policy_hash) = 71 AND substr(policy_hash, 1, 7) = 'sha256:'),
+    fidelity TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    command_id TEXT,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, revision),
+    UNIQUE (run_id, command_id),
+    CHECK (
+        (funding_mode = 'SANDBOX_FIXED'
+            AND fixed_funding_rate IS NOT NULL
+            AND funding_interval_ms IS NOT NULL)
+        OR
+        (funding_mode != 'SANDBOX_FIXED'
+            AND fixed_funding_rate IS NULL
+            AND funding_interval_ms IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_funding_policy_effective
+ON replay_training_funding_policy(
+    run_id, effective_virtual_time_ms DESC, source_sequence DESC, revision DESC
+);
+
+CREATE TABLE IF NOT EXISTS replay_review_actor_anchor (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    anchor_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    adapter_session_id TEXT NOT NULL
+        REFERENCES replay_session(session_id) ON DELETE RESTRICT,
+    checkpoint_id INTEGER NOT NULL CHECK (checkpoint_id >= 1),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    event_sequence INTEGER NOT NULL CHECK (event_sequence >= 0),
+    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
+    state_hash TEXT NOT NULL,
+    dataset_epoch TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    payload_sha256 TEXT NOT NULL
+        CHECK (length(payload_sha256) = 71 AND substr(payload_sha256, 1, 7) = 'sha256:'),
+    payload_bytes INTEGER NOT NULL CHECK (payload_bytes >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, anchor_id),
+    UNIQUE (run_id, track_id, checkpoint_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_review_actor_anchor_cursor
+ON replay_review_actor_anchor(
+    run_id, virtual_time_ms, source_sequence, track_id, checkpoint_id
+);
+
+CREATE TABLE IF NOT EXISTS replay_review_marker (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    marker_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 500),
+    content_hash TEXT NOT NULL
+        CHECK (length(content_hash) = 71 AND substr(content_hash, 1, 7) = 'sha256:'),
+    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, marker_id),
+    UNIQUE (run_id, command_id)
+);
+
+CREATE TABLE IF NOT EXISTS replay_review_timeline_event (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    timeline_sequence INTEGER NOT NULL CHECK (timeline_sequence >= 1),
+    event_id TEXT NOT NULL,
+    category TEXT NOT NULL
+        CHECK (category IN (
+            'INITIAL', 'COMMAND', 'ORDER', 'FILL', 'POSITION',
+            'FUNDING', 'LIQUIDATION', 'RULE', 'VIEWER',
+            'DRAWING', 'MARKER', 'EQUITY', 'SYSTEM'
+        )),
+    event_type TEXT NOT NULL,
+    command_id TEXT,
+    track_id TEXT,
+    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    event_sequence INTEGER NOT NULL CHECK (event_sequence >= 0),
+    state_hash TEXT NOT NULL,
+    account_hash TEXT NOT NULL,
+    ledger_tail_hash TEXT NOT NULL,
+    viewer_revision INTEGER NOT NULL CHECK (viewer_revision >= 0),
+    public_time_json TEXT NOT NULL,
+    projection_json TEXT NOT NULL,
+    anchor_set_hash TEXT NOT NULL
+        CHECK (length(anchor_set_hash) = 71 AND substr(anchor_set_hash, 1, 7) = 'sha256:'),
+    previous_event_hash TEXT NOT NULL
+        CHECK (
+            length(previous_event_hash) = 71
+            AND substr(previous_event_hash, 1, 7) = 'sha256:'
+        ),
+    event_hash TEXT NOT NULL
+        CHECK (length(event_hash) = 71 AND substr(event_hash, 1, 7) = 'sha256:'),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, timeline_sequence),
+    UNIQUE (run_id, event_id),
+    UNIQUE (run_id, event_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_review_timeline_jump
+ON replay_review_timeline_event(
+    run_id, category, virtual_time_ms, source_sequence, timeline_sequence
+);
+
+CREATE TABLE IF NOT EXISTS replay_review_event_anchor (
+    run_id TEXT NOT NULL,
+    timeline_sequence INTEGER NOT NULL CHECK (timeline_sequence >= 1),
+    track_id TEXT NOT NULL,
+    anchor_id TEXT NOT NULL,
+    PRIMARY KEY (run_id, timeline_sequence, track_id),
+    FOREIGN KEY (run_id, timeline_sequence)
+        REFERENCES replay_review_timeline_event(run_id, timeline_sequence)
+        ON DELETE CASCADE,
+    FOREIGN KEY (run_id, anchor_id)
+        REFERENCES replay_review_actor_anchor(run_id, anchor_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS replay_review_viewport_sample (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    bucket_key TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL
+        CHECK (length(content_hash) = 71 AND substr(content_hash, 1, 7) = 'sha256:'),
+    sample_count INTEGER NOT NULL CHECK (sample_count >= 1),
+    first_public_time_json TEXT NOT NULL,
+    last_public_time_json TEXT NOT NULL,
+    last_used_at_ms INTEGER NOT NULL CHECK (last_used_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, bucket_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_review_viewport_lru
+ON replay_review_viewport_sample(run_id, last_used_at_ms, bucket_key);
+
+CREATE TABLE IF NOT EXISTS replay_review_drawing_document (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    document_hash TEXT NOT NULL
+        CHECK (length(document_hash) = 71 AND substr(document_hash, 1, 7) = 'sha256:'),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    command_id TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    document_bytes INTEGER NOT NULL CHECK (document_bytes >= 2),
+    entity_count INTEGER NOT NULL CHECK (entity_count >= 0),
+    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, document_hash),
+    UNIQUE (run_id, revision),
+    UNIQUE (run_id, command_id)
+);
+
+CREATE TABLE IF NOT EXISTS replay_review_cursor (
+    review_id TEXT PRIMARY KEY
+        REFERENCES replay_review_session(review_id) ON DELETE CASCADE,
+    timeline_sequence INTEGER NOT NULL CHECK (timeline_sequence >= 1),
+    playback_state TEXT NOT NULL CHECK (playback_state IN ('PAUSED', 'PLAYING')),
+    playback_rate TEXT NOT NULL,
+    original_account_hash TEXT NOT NULL,
+    original_ledger_tail_hash TEXT NOT NULL,
+    original_viewer_revision INTEGER NOT NULL CHECK (original_viewer_revision >= 0),
+    original_viewer_hash TEXT NOT NULL,
+    cursor_revision INTEGER NOT NULL CHECK (cursor_revision >= 1),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS replay_review_fork_lineage (
+    child_run_id TEXT PRIMARY KEY
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    parent_run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE RESTRICT,
+    parent_event_id TEXT NOT NULL,
+    parent_timeline_sequence INTEGER NOT NULL CHECK (parent_timeline_sequence >= 1),
+    anchor_set_hash TEXT NOT NULL
+        CHECK (length(anchor_set_hash) = 71 AND substr(anchor_set_hash, 1, 7) = 'sha256:'),
+    parent_projection_hash TEXT NOT NULL
+        CHECK (
+            length(parent_projection_hash) = 71
+            AND substr(parent_projection_hash, 1, 7) = 'sha256:'
+        ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -1376,6 +1605,105 @@ def _backfill_data_policies(
         )
 
 
+def _backfill_phase17_policies(
+    connection: sqlite3.Connection,
+    *,
+    now_ms: int,
+) -> None:
+    """Seed independent user-cap and funding histories for existing v9 runs."""
+
+    rows = connection.execute(
+        """
+        SELECT r.run_id, r.virtual_time_ms, r.source_sequence,
+               rule.rule_json, account.funding_mode,
+               account.fixed_funding_rate, account.funding_interval_ms,
+               history.account_data_mode, dataset.actual_replay_start_ms
+        FROM replay_training_run AS r
+        JOIN replay_training_rule AS rule
+          ON rule.run_id = r.run_id AND rule.revision = 1
+        JOIN replay_training_contract_account AS account USING(run_id)
+        LEFT JOIN replay_training_account_history AS history USING(run_id)
+        JOIN replay_dataset_ref AS dataset
+          ON dataset.session_id = r.adapter_session_id
+        ORDER BY r.run_id
+        """
+    ).fetchall()
+    for row in rows:
+        run_id = str(row["run_id"])
+        rule = json.loads(str(row["rule_json"]))
+        if not isinstance(rule, dict) or not isinstance(rule.get("max_leverage"), str):
+            raise RuntimeError(
+                f"replay training run {run_id} has no canonical max_leverage"
+            )
+        leverage = {
+            "schema_version": RUN_RULES_SCHEMA_VERSION,
+            "kind": "LEVERAGE_CAP",
+            "run_id": run_id,
+            "revision": 1,
+            "effective_virtual_time_ms": int(row["actual_replay_start_ms"]),
+            "source_sequence": 0,
+            "max_leverage": str(rule["max_leverage"]),
+            "fidelity": "CONFIGURED_USER_CAP_EXACT",
+        }
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_training_leverage_policy(
+                run_id, revision, effective_virtual_time_ms, source_sequence,
+                max_leverage, policy_hash, fidelity, reason, command_id,
+                created_at_ms
+            ) VALUES (?, 1, ?, ?, ?, ?, ?, 'creation policy', NULL, ?)
+            """,
+            (
+                run_id,
+                row["actual_replay_start_ms"],
+                0,
+                rule["max_leverage"],
+                canonical_sha256(leverage),
+                "CONFIGURED_USER_CAP_EXACT",
+                now_ms,
+            ),
+        )
+        mode = str(row["funding_mode"])
+        exact = str(row["account_data_mode"] or "APPROX_PROXY") == "HISTORICAL_EXACT"
+        fidelity = (
+            "HISTORICAL_EXACT_ARCHIVE_POLICY"
+            if exact and mode == "HISTORICAL_EXACT"
+            else "CONFIGURED_FUNDING_POLICY_EXACT"
+        )
+        funding = {
+            "schema_version": RUN_RULES_SCHEMA_VERSION,
+            "kind": "FUNDING_POLICY",
+            "run_id": run_id,
+            "revision": 1,
+            "effective_virtual_time_ms": int(row["actual_replay_start_ms"]),
+            "source_sequence": 0,
+            "funding_mode": mode,
+            "fixed_funding_rate": row["fixed_funding_rate"],
+            "funding_interval_ms": row["funding_interval_ms"],
+            "fidelity": fidelity,
+        }
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_training_funding_policy(
+                run_id, revision, effective_virtual_time_ms, source_sequence,
+                funding_mode, fixed_funding_rate, funding_interval_ms,
+                policy_hash, fidelity, reason, command_id, created_at_ms
+            ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'creation policy', NULL, ?)
+            """,
+            (
+                run_id,
+                row["actual_replay_start_ms"],
+                0,
+                mode,
+                row["fixed_funding_rate"],
+                row["funding_interval_ms"],
+                canonical_sha256(funding),
+                fidelity,
+                now_ms,
+            ),
+        )
+
+
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
     """Create only v2-owned tables; never advance the replay.v1 schema row."""
 
@@ -1530,6 +1858,11 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     # account archives and their projections are additive and old binaries
     # cannot accidentally interpret them as proxy account data.
     _execute_script(connection, TRAINING_SCHEMA_PHASE16_ADDITIVE)
+    # Phase 17 remains an additive v9 extension.  Old binaries ignore the
+    # independent rule/review tables; new binaries fail closed if their
+    # content-addressed evidence cannot be captured.
+    _execute_script(connection, TRAINING_SCHEMA_PHASE17_ADDITIVE)
+    _backfill_phase17_policies(connection, now_ms=now_ms)
     connection.execute(
         """
         INSERT INTO replay_training_schema_version(singleton, version, applied_at_ms)
@@ -1553,6 +1886,8 @@ __all__ = [
     "ADVANCE_INTENT_SCHEMA_VERSION",
     "DATA_POLICY_SCHEMA_VERSION",
     "PERIOD_SUMMARY_SET_SCHEMA_VERSION",
+    "REVIEW_TIMELINE_SCHEMA_VERSION",
+    "RUN_RULES_SCHEMA_VERSION",
     "START_SELECTION_SCHEMA_VERSION",
     "TRAINING_SCHEMA_ID",
     "TRAINING_SCHEMA_VERSION",

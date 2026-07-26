@@ -48,6 +48,7 @@ from app.replay.training.service import TrainingRunService
 
 
 MAX_REPLAY_REQUEST_BYTES = 64 * 1024
+MAX_REPLAY_DRAWING_REQUEST_BYTES = 2_100_000
 _MAX_HORIZON_MS = REPLAY_SETTINGS.max_horizon_days * 86_400_000
 
 
@@ -380,6 +381,27 @@ class ReplayReviewPayload(_StrictModel):
     event_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class ReplayDrawingDocumentPayload(_StrictModel):
+    protocol: Literal["replay.review.drawing-document.v1"]
+    command_id: str = Field(min_length=1, max_length=128)
+    document_hash: str = Field(min_length=71, max_length=71)
+    document: dict[str, object]
+    entity_count: int = Field(ge=0, le=512)
+
+
+class ReplayReviewMarkerPayload(_StrictModel):
+    protocol: Literal["replay.review.marker.v1"]
+    command_id: str = Field(min_length=1, max_length=128)
+    text: str = Field(min_length=1, max_length=500)
+
+
+class ReplayReviewControlPayload(_StrictModel):
+    action: Literal["JUMP", "NEXT", "PREVIOUS", "PLAY", "PAUSE"]
+    event_id: str | None = Field(default=None, min_length=1, max_length=128)
+    expected_cursor_revision: int = Field(ge=1, le=MAX_COUNTER)
+    playback_rate: str | None = Field(default=None, min_length=1, max_length=8)
+
+
 class ReplayPublicTimeBatchPayload(_StrictModel):
     timeline_ms: list[int] = Field(min_length=1, max_length=2_000)
 
@@ -411,23 +433,38 @@ class ReplayHistoricalBookGcRunPayload(ReplayHistoricalBookGcPlanPayload):
 
 
 async def enforce_replay_request_limit(request: Request) -> None:
-    _validate_declared_replay_length(request)
+    limit_bytes = _replay_request_limit(request)
+    _validate_declared_replay_length(request, limit_bytes=limit_bytes)
     cached = getattr(request, "_body", None)
     if cached is not None:
-        if len(cached) > MAX_REPLAY_REQUEST_BYTES:
-            raise _request_too_large()
+        if len(cached) > limit_bytes:
+            raise _request_too_large(limit_bytes=limit_bytes)
         return
     chunks: list[bytes] = []
     received = 0
     async for chunk in request.stream():
         received += len(chunk)
-        if received > MAX_REPLAY_REQUEST_BYTES:
-            raise _request_too_large()
+        if received > limit_bytes:
+            raise _request_too_large(limit_bytes=limit_bytes)
         chunks.append(chunk)
     request._body = b"".join(chunks)
 
 
-def _validate_declared_replay_length(request: Request) -> None:
+def _replay_request_limit(request: Request) -> int:
+    if (
+        request.method == "POST"
+        and request.url.path.endswith("/drawings")
+        and "/replay/runs/" in request.url.path
+    ):
+        return MAX_REPLAY_DRAWING_REQUEST_BYTES
+    return MAX_REPLAY_REQUEST_BYTES
+
+
+def _validate_declared_replay_length(
+    request: Request,
+    *,
+    limit_bytes: int,
+) -> None:
     raw_length = request.headers.get("content-length")
     if raw_length is None:
         return
@@ -438,15 +475,15 @@ def _validate_declared_replay_length(request: Request) -> None:
             ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
             "replay request Content-Length is invalid",
         ) from exc
-    if length < 0 or length > MAX_REPLAY_REQUEST_BYTES:
-        raise _request_too_large()
+    if length < 0 or length > limit_bytes:
+        raise _request_too_large(limit_bytes=limit_bytes)
 
 
-def _request_too_large() -> ReplayDomainError:
+def _request_too_large(*, limit_bytes: int) -> ReplayDomainError:
     return ReplayDomainError(
         ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
         "replay request body exceeds the bounded size limit",
-        details={"limit_bytes": MAX_REPLAY_REQUEST_BYTES},
+        details={"limit_bytes": limit_bytes},
     )
 
 
@@ -908,6 +945,56 @@ async def replay_v2_training_equity(
     )
 
 
+@router.get("/runs/{run_id}/rules")
+async def replay_v2_training_rules(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).rules(run_id)
+
+
+@router.get("/runs/{run_id}/drawings/current")
+async def replay_v2_training_current_drawing_document(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).current_drawing_document(run_id)
+
+
+@router.post(
+    "/runs/{run_id}/drawings",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def replay_v2_training_drawing_document(
+    request: Request,
+    run_id: str,
+    payload: ReplayDrawingDocumentPayload,
+) -> dict[str, object]:
+    return await _training_service(request).record_drawing_document(
+        run_id,
+        command_id=payload.command_id,
+        document_hash=payload.document_hash,
+        document=payload.document,
+        entity_count=payload.entity_count,
+    )
+
+
+@router.post(
+    "/runs/{run_id}/markers",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def replay_v2_training_review_marker(
+    request: Request,
+    run_id: str,
+    payload: ReplayReviewMarkerPayload,
+) -> dict[str, object]:
+    return await _training_service(request).record_review_marker(
+        run_id,
+        command_id=payload.command_id,
+        text=payload.text,
+    )
+
+
 @router.get("/runs/{run_id}/journal")
 async def replay_v2_training_journal(
     request: Request,
@@ -936,6 +1023,26 @@ async def review_replay_v2_run(
     return await _training_service(request).start_review(
         run_id,
         event_id=payload.event_id,
+    )
+
+
+@router.post(
+    "/runs/{run_id}/reviews/{review_id}/cursor",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def control_replay_v2_review(
+    request: Request,
+    run_id: str,
+    review_id: str,
+    payload: ReplayReviewControlPayload,
+) -> dict[str, object]:
+    return await _training_service(request).control_review(
+        run_id,
+        review_id,
+        action=payload.action,
+        event_id=payload.event_id,
+        expected_cursor_revision=payload.expected_cursor_revision,
+        playback_rate=payload.playback_rate,
     )
 
 

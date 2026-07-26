@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import secrets
@@ -1079,6 +1080,52 @@ class ReplayService:
                 self._metrics["forks"] = int(self._metrics["forks"] or 0) + 1
                 result["forked_from_session_id"] = session_id
                 result["forked_from_checkpoint_id"] = checkpoint_id
+                return result
+        except ReplayDomainError as exc:
+            if blind_mode:
+                raise self._blind_safe_dataset_error(True, exc) from exc
+            raise
+        except Exception as exc:
+            if blind_mode:
+                raise self._blind_unexpected_dataset_error() from exc
+            raise
+
+    async def fork_session_from_checkpoint_blob(
+        self,
+        session_id: str,
+        *,
+        checkpoint: bytes,
+        extension_factory: Callable[..., object] | None = None,
+    ) -> dict[str, object]:
+        """Fork from a checksum-verified ReviewMode anchor, not the recent ring."""
+
+        blind_mode = False
+        checkpoint_bytes = bytes(checkpoint)
+        try:
+            # Decode before reserving capacity so malformed persisted evidence
+            # cannot create a partial child session.
+            CheckpointCodec().decode(checkpoint_bytes)
+            async with self._lease_handle(session_id) as source:
+                blind_mode = source.config.blind_mode
+                await self._reserve_session_capacity(blind_mode=blind_mode)
+                try:
+                    result = await self._create_from_dataset(
+                        config=source.config,
+                        actual_dataset=source.actual_dataset,
+                        restore_checkpoint=checkpoint_bytes,
+                        forked=True,
+                        synthetic_origin_ms=source.synthetic_origin_ms,
+                        broker_config=source.broker_config,
+                        trade_dataset_ref=source.trade_dataset_ref,
+                        extension_factory=extension_factory,
+                    )
+                finally:
+                    self._release_session_capacity_reservation()
+                self._metrics["forks"] = int(self._metrics["forks"] or 0) + 1
+                result["forked_from_session_id"] = session_id
+                result["forked_from_anchor_sha256"] = (
+                    f"sha256:{hashlib.sha256(checkpoint_bytes).hexdigest()}"
+                )
                 return result
         except ReplayDomainError as exc:
             if blind_mode:

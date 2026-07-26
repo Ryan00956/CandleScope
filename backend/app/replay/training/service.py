@@ -918,6 +918,54 @@ class TrainingRunService:
     async def integrity(self, run_id: str) -> dict[str, object]:
         return await self.store.integrity(self._identifier(run_id, field_name="run_id"))
 
+    async def rules(self, run_id: str) -> dict[str, object]:
+        return await self.store.run_rules(
+            self._identifier(run_id, field_name="run_id")
+        )
+
+    async def current_drawing_document(self, run_id: str) -> dict[str, object]:
+        return await self.store.current_drawing_document(
+            self._identifier(run_id, field_name="run_id")
+        )
+
+    async def record_drawing_document(
+        self,
+        run_id: str,
+        *,
+        command_id: str,
+        document_hash: str,
+        document: Mapping[str, object],
+        entity_count: int,
+    ) -> dict[str, object]:
+        return await self.store.record_drawing_document(
+            run_id=self._identifier(run_id, field_name="run_id"),
+            command_id=self._identifier(command_id, field_name="command_id"),
+            document_hash=self._digest(
+                document_hash,
+                field_name="document_hash",
+            ),
+            document=document,
+            entity_count=validate_v2_counter(
+                entity_count,
+                field_name="entity_count",
+            ),
+        )
+
+    async def record_review_marker(
+        self,
+        run_id: str,
+        *,
+        command_id: str,
+        text: str,
+    ) -> dict[str, object]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        return await self.store.record_review_marker(
+            run_id=self._identifier(run_id, field_name="run_id"),
+            command_id=self._identifier(command_id, field_name="command_id"),
+            text=text,
+        )
+
     async def public_times(
         self,
         run_id: str,
@@ -1038,6 +1086,21 @@ class TrainingRunService:
             ),
         }
 
+    async def _assert_review_original_quiescent(self, run_id: str) -> None:
+        market_tracks = await self.get_market_tracks(run_id)
+        global_clock = _stored_mapping(
+            market_tracks.get("global_clock"),
+            field_name="review global clock",
+        )
+        state = str(global_clock.get("state"))
+        if state not in {"PAUSED", "ENDED"}:
+            raise TrainingRunError(
+                "REVIEW_REQUIRES_PAUSED_RUN",
+                "pause the training run before entering ReviewMode",
+                status_code=409,
+                details={"state": state},
+            )
+
     async def start_review(
         self,
         run_id: str,
@@ -1045,6 +1108,7 @@ class TrainingRunService:
         event_id: str | None,
     ) -> dict[str, object]:
         normalized = self._identifier(run_id, field_name="run_id")
+        await self._assert_review_original_quiescent(normalized)
         normalized_event = (
             None
             if event_id is None
@@ -1059,6 +1123,35 @@ class TrainingRunService:
             event_id=normalized_event,
         )
 
+    async def control_review(
+        self,
+        run_id: str,
+        review_id: str,
+        *,
+        action: str,
+        event_id: str | None,
+        expected_cursor_revision: int,
+        playback_rate: str | None,
+    ) -> dict[str, object]:
+        normalized_run_id = self._identifier(run_id, field_name="run_id")
+        await self._assert_review_original_quiescent(normalized_run_id)
+        normalized_event = (
+            None
+            if event_id is None
+            else self._identifier(event_id, field_name="event_id")
+        )
+        return await self.store.control_review(
+            run_id=normalized_run_id,
+            review_id=self._identifier(review_id, field_name="review_id"),
+            action=action,
+            event_id=normalized_event,
+            expected_cursor_revision=validate_v2_counter(
+                expected_cursor_revision,
+                field_name="expected_cursor_revision",
+            ),
+            playback_rate=playback_rate,
+        )
+
     async def fork_run(
         self,
         run_id: str,
@@ -1068,35 +1161,38 @@ class TrainingRunService:
         normalized = self._identifier(run_id, field_name="run_id")
         normalized_event = self._identifier(event_id, field_name="event_id")
         market_tracks = await self.store.get_market_tracks(normalized)
-        portfolio = market_tracks.get("portfolio")
-        history = (
-            portfolio.get("account_history")
-            if isinstance(portfolio, Mapping)
-            else None
-        )
-        if isinstance(history, Mapping) and history.get("mode") == "HISTORICAL_EXACT":
+        event = await self.store.checkpoint_for_event(normalized, normalized_event)
+        anchors = event.get("anchors")
+        if not isinstance(anchors, list) or not anchors:
             raise TrainingRunError(
-                "ACCOUNT_HISTORY_REVIEW_FORK_UNSUPPORTED",
-                "Phase 16 exact-account Review is read-only; forking requires a "
-                "future archive-cursor-aware snapshot contract",
-                status_code=409,
-                details={
-                    "review_supported": True,
-                    "fork_supported": False,
-                    "original_run_mutated": False,
-                    "fallback_applied": False,
-                },
+                "REVIEW_ANCHOR_UNAVAILABLE",
+                "review event has no immutable actor anchors",
+                status_code=503,
             )
         tracks = market_tracks.get("tracks")
-        if isinstance(tracks, list) and len(tracks) > 1:
+        if not isinstance(tracks, list) or not tracks:
             raise TrainingRunError(
-                "MULTI_TRACK_FORK_UNAVAILABLE",
-                "multi-market runs remain v2-only and cannot collapse into one v1 fork",
-                status_code=409,
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "parent market tracks are unavailable",
+                status_code=503,
             )
-        event = await self.store.checkpoint_for_event(normalized, normalized_event)
+        parent_track_by_id = {
+            str(track["track_id"]): track
+            for track in tracks
+            if isinstance(track, Mapping)
+        }
+        primary_anchor = next(
+            (
+                anchor
+                for anchor in anchors
+                if isinstance(anchor, Mapping) and anchor.get("track_id") == "track-1"
+            ),
+            anchors[0],
+        )
+        if not isinstance(primary_anchor, Mapping):
+            raise TypeError("primary review anchor is invalid")
         checkpoint_id = validate_v2_counter(
-            event["checkpoint_id"],
+            primary_anchor["checkpoint_id"],
             field_name="review checkpoint_id",
         )
         child_run_id = self._identifier(self._run_id_factory(), field_name="run_id")
@@ -1105,11 +1201,17 @@ class TrainingRunService:
             parent_run_id=normalized,
             parent_event_id=normalized_event,
             parent_checkpoint_id=checkpoint_id,
+            parent_timeline_sequence=validate_v2_counter(
+                event["timeline_sequence"],
+                field_name="review timeline_sequence",
+            ),
+            parent_anchor_set_hash=str(event["anchor_set_hash"]),
         )
+        child_sessions: list[str] = []
         try:
-            forked = await self.replay_service.fork_session_at_checkpoint(
-                str(event["adapter_session_id"]),
-                checkpoint_id=checkpoint_id,
+            forked = await self.replay_service.fork_session_from_checkpoint_blob(
+                str(primary_anchor["adapter_session_id"]),
+                checkpoint=bytes(primary_anchor["payload"]),
                 extension_factory=extension_factory,
             )
         except ReplayDomainError as exc:
@@ -1120,25 +1222,117 @@ class TrainingRunService:
                 details={"reason": exc.code.value},
             ) from exc
         snapshot = forked["snapshot"]
+        child_sessions.append(str(forked["session_id"]))
         if (
             not isinstance(snapshot, Mapping)
-            or snapshot.get("state_hash") != event["state_hash"]
+            or snapshot.get("state_hash") != primary_anchor["state_hash"]
         ):
+            await self.replay_service.discard_session(child_sessions[0])
             raise TrainingRunError(
                 "REVIEW_FORK_MISMATCH",
                 "forked run state does not match the selected review event",
                 status_code=409,
             )
+        try:
+            secondary_anchors = sorted(
+                (
+                    anchor
+                    for anchor in anchors
+                    if isinstance(anchor, Mapping)
+                    and anchor.get("track_id") != primary_anchor["track_id"]
+                ),
+                key=lambda item: str(item["track_id"]),
+            )
+            for anchor in secondary_anchors:
+                parent_track_id = str(anchor["track_id"])
+                parent_track = parent_track_by_id.get(parent_track_id)
+                if parent_track is None:
+                    raise TrainingRunError(
+                        "REVIEW_FORK_MISMATCH",
+                        "review anchor references an unknown market track",
+                        status_code=409,
+                    )
+                reserved = await self.store.reserve_market_track(
+                    run_id=child_run_id,
+                    exchange=str(parent_track["exchange"]),
+                    market_type=str(parent_track["market_type"]),
+                    symbol=str(parent_track["symbol"]),
+                    settlement_asset=str(parent_track["settlement_asset"]),
+                    source_kind=str(parent_track["source_kind"]),
+                    subscription_tier="FULL",
+                )
+                child_track_id = str(reserved["track_id"])
+                attach = self.store.attach_market_track_writer(
+                    run_id=child_run_id,
+                    track_id=child_track_id,
+                    requested_tier="FULL",
+                    review_parent_run_id=normalized,
+                    review_parent_track_id=parent_track_id,
+                    review_parent_event_id=normalized_event,
+                )
+                attached = (
+                    await self.replay_service.fork_session_from_checkpoint_blob(
+                        str(anchor["adapter_session_id"]),
+                        checkpoint=bytes(anchor["payload"]),
+                        extension_factory=attach,
+                    )
+                )
+                child_sessions.append(str(attached["session_id"]))
+                attached_snapshot = attached.get("snapshot")
+                if (
+                    not isinstance(attached_snapshot, Mapping)
+                    or attached_snapshot.get("state_hash") != anchor["state_hash"]
+                ):
+                    raise TrainingRunError(
+                        "REVIEW_FORK_MISMATCH",
+                        "secondary forked actor does not match its review anchor",
+                        status_code=409,
+                    )
+            await self.store.checkpoint_market_tracks(child_run_id)
+            portfolio = market_tracks.get("portfolio")
+            history = (
+                portfolio.get("account_history")
+                if isinstance(portfolio, Mapping)
+                else None
+            )
+            account_audit = None
+            if (
+                isinstance(history, Mapping)
+                and history.get("mode") == "HISTORICAL_EXACT"
+            ):
+                account_audit = await self.audit_account(child_run_id)
+                if account_audit.get("status") != "PASS":
+                    raise TrainingRunError(
+                        "REVIEW_FORK_ACCOUNT_AUDIT_FAILED",
+                        "exact-account child failed its independent audit",
+                        status_code=409,
+                        details={
+                            "fallback_applied": False,
+                            "differences": account_audit.get("differences", []),
+                        },
+                    )
+        except BaseException:
+            for session_id in reversed(child_sessions):
+                try:
+                    await self.replay_service.discard_session(session_id)
+                except BaseException:
+                    pass
+            raise
         card = await self.store.get_run(child_run_id)
+        child_tracks = await self.store.get_market_tracks(child_run_id)
         return {
             "protocol": "replay.v2",
             "parent_run_id": normalized,
             "parent_event_id": normalized_event,
+            "parent_timeline_sequence": event["timeline_sequence"],
+            "anchor_set_hash": event["anchor_set_hash"],
             "run": {
                 **card,
                 "dataset_epoch": event["dataset_epoch"],
                 "state_hash": snapshot["state_hash"],
             },
+            "tracks": child_tracks["tracks"],
+            "account_audit": account_audit,
         }
 
     async def create_run(self, request: TrainingRunCreateRequest) -> dict[str, object]:
@@ -6622,6 +6816,28 @@ class TrainingRunService:
                 f"{field_name} is invalid",
                 status_code=422,
             ) from exc
+
+    @staticmethod
+    def _digest(value: object, *, field_name: str) -> str:
+        if (
+            not isinstance(value, str)
+            or len(value) != 71
+            or not value.startswith("sha256:")
+        ):
+            raise TrainingRunError(
+                "TRAINING_RUN_INVALID",
+                f"{field_name} is invalid",
+                status_code=422,
+            )
+        try:
+            int(value[7:], 16)
+        except ValueError as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_INVALID",
+                f"{field_name} is invalid",
+                status_code=422,
+            ) from exc
+        return value
 
     def _authoritative_start_request(
         self,

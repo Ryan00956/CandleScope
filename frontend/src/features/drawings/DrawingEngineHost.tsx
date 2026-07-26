@@ -200,6 +200,8 @@ function DrawingEngineHost({
             <span data-drawing-engine="ready" hidden />
             <span
                 data-drawing-interaction-mode={interactionSurfaceMode}
+                data-drawing-active-tool={activeTool ?? ""}
+                data-drawing-scope={drawingKey}
                 data-drawing-editing-text-id={drawing.editingTextId ?? ""}
                 data-drawing-editing-text-position={drawing.editingTextPos
                     ? `${drawing.editingTextPos.x},${drawing.editingTextPos.y}`

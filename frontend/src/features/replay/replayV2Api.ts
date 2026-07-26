@@ -26,19 +26,29 @@ import {
   parseReplayViewerStateResponse,
 } from "./replayV2Types.js";
 import {
+  parseReplayCurrentDrawingDocumentResponse,
+  parseReplayDrawingDocumentResponse,
   parseReplayEquityResponse,
   parseReplayIntegrityResponse,
   parseReplayPublicTimeBatchResponse,
+  parseReplayReviewControlResponse,
   parseReplayReviewForkResponse,
+  parseReplayReviewMarkerResponse,
   parseReplayReviewResponse,
+  parseReplayRunRulesResponse,
   parseReplayTrainingReportResponse,
 } from "./replayIntegrityModel.js";
 import type {
+  ReplayCurrentDrawingDocumentResponse,
+  ReplayDrawingDocumentResponse,
   ReplayEquityResponse,
   ReplayIntegrityResponse,
   ReplayPublicTimeBatchResponse,
+  ReplayReviewControlResponse,
   ReplayReviewForkResponse,
+  ReplayReviewMarkerResponse,
   ReplayReviewResponse,
+  ReplayRunRulesResponse,
   ReplayTrainingReportResponse,
 } from "./replayIntegrityModel.js";
 import type {
@@ -426,6 +436,70 @@ export class ReplayV2ApiClient {
     );
   }
 
+  rulesRun(runId: string, signal?: AbortSignal): Promise<ReplayRunRulesResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/rules`,
+      parseReplayRunRulesResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  currentDrawingRun(
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<ReplayCurrentDrawingDocumentResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/drawings/current`,
+      parseReplayCurrentDrawingDocumentResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  recordDrawingRun(
+    runId: string,
+    payload: {
+      readonly command_id: string;
+      readonly document_hash: `sha256:${string}`;
+      readonly document: Readonly<Record<string, unknown>>;
+      readonly entity_count: number;
+    },
+    signal?: AbortSignal,
+  ): Promise<ReplayDrawingDocumentResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/drawings`,
+      parseReplayDrawingDocumentResponse,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          protocol: "replay.review.drawing-document.v1",
+          ...payload,
+        }),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  recordMarkerRun(
+    runId: string,
+    text: string,
+    commandId: string,
+    signal?: AbortSignal,
+  ): Promise<ReplayReviewMarkerResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/markers`,
+      parseReplayReviewMarkerResponse,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          protocol: "replay.review.marker.v1",
+          command_id: commandId,
+          text,
+        }),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
   reviewRun(
     runId: string,
     eventId: string | null = null,
@@ -437,6 +511,28 @@ export class ReplayV2ApiClient {
       {
         method: "POST",
         body: JSON.stringify({ event_id: eventId }),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  controlReviewRun(
+    runId: string,
+    reviewId: string,
+    payload: {
+      readonly action: "JUMP" | "PREVIOUS" | "NEXT" | "PLAY" | "PAUSE";
+      readonly event_id: string | null;
+      readonly expected_cursor_revision: number;
+      readonly playback_rate: "0.25" | "0.5" | "1" | "2" | "4" | "8" | null;
+    },
+    signal?: AbortSignal,
+  ): Promise<ReplayReviewControlResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/reviews/${safeSegment(reviewId, "review id")}/cursor`,
+      parseReplayReviewControlResponse,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
         ...(signal ? { signal } : {}),
       },
     );

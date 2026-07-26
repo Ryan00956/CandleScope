@@ -2314,7 +2314,17 @@ class ReplaySessionActor:
                     state_hash=state_hash,
                 )
             )
-            if checkpoint and self._checkpoint_due()
+            if checkpoint
+            and (
+                self._checkpoint_due()
+                or (
+                    rollback is not None
+                    and self._review_checkpoint_required(
+                        rollback.component_state,
+                        component_state,
+                    )
+                )
+            )
             else None
         )
         try:
@@ -3383,6 +3393,52 @@ class ReplaySessionActor:
             or self._clock.virtual_time_ms - self._last_checkpoint_virtual_ms
             >= self._checkpoint_virtual_ms
         )
+
+    @staticmethod
+    def _review_checkpoint_required(
+        before: Mapping[str, object],
+        after: Mapping[str, object],
+    ) -> bool:
+        """Persist automatic domain transitions without checkpointing market ticks."""
+
+        def append_only_tail(value: object) -> dict[str, object]:
+            if not isinstance(value, (list, tuple)):
+                return {"count": 0, "tail": None}
+            return {
+                "count": len(value),
+                "tail": None if not value else value[-1],
+            }
+
+        def material(state: Mapping[str, object]) -> dict[str, object]:
+            position = state.get("position")
+            position_material: dict[str, object] = {}
+            if isinstance(position, Mapping):
+                for field in (
+                    "side",
+                    "quantity",
+                    "entry_price",
+                    "realized_pnl",
+                ):
+                    if field in position:
+                        position_material[field] = position[field]
+            ledger = state.get("ledger")
+            ledger_material = (
+                {
+                    "tail_hash": ledger.get("tail_hash"),
+                    "next_entry": ledger.get("next_entry"),
+                }
+                if isinstance(ledger, Mapping)
+                else {}
+            )
+            return {
+                "orders": state.get("orders", ()),
+                "fills": append_only_tail(state.get("fills")),
+                "ledger": ledger_material,
+                "journal": append_only_tail(state.get("journal")),
+                "position": position_material,
+            }
+
+        return canonical_sha256(material(before)) != canonical_sha256(material(after))
 
     def _maybe_checkpoint(self) -> None:
         if self._checkpoint_due():

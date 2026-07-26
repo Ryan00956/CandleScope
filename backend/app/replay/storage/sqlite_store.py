@@ -38,6 +38,18 @@ SessionMutationWriter = Callable[
     ],
     None,
 ]
+SessionReviewWriter = Callable[
+    [
+        sqlite3.Connection,
+        str,
+        Mapping[str, object],
+        Mapping[str, object],
+        Mapping[str, object],
+        bytes | None,
+        int,
+    ],
+    None,
+]
 
 
 def _blob_sha256(value: bytes) -> str:
@@ -107,6 +119,7 @@ class ReplaySQLiteStore:
         self._degraded_reason: str | None = None
         self._session_summary_writer: SessionSummaryWriter | None = None
         self._session_mutation_writer: SessionMutationWriter | None = None
+        self._session_review_writer: SessionReviewWriter | None = None
         self._metrics = {
             "transactions": 0,
             "transaction_failures": 0,
@@ -237,6 +250,15 @@ class ReplaySQLiteStore:
             )
             if extension_write is not None:
                 extension_write(connection, now)
+            self._write_session_review(
+                connection,
+                session_id,
+                {"kind": "INITIAL"},
+                state,
+                component_state or {},
+                checkpoint_bytes,
+                now_ms=now,
+            )
 
         await self._write_async(write)
 
@@ -376,6 +398,20 @@ class ReplaySQLiteStore:
                 component_state or {},
                 now_ms=now,
             )
+            self._write_session_review(
+                connection,
+                session_id,
+                {
+                    "kind": "COMMAND",
+                    "accepted": accepted,
+                    "command": command_payload,
+                    "result": result,
+                },
+                state,
+                component_state or {},
+                None if checkpoint is None else bytes(checkpoint),
+                now_ms=now,
+            )
             row = self._load_command_row(connection, session_id, command_id)
             assert row is not None
             return row
@@ -504,6 +540,15 @@ class ReplaySQLiteStore:
                 component_state or {},
                 now_ms=now,
             )
+            self._write_session_review(
+                connection,
+                session_id,
+                {"kind": "SOURCE_EVENT", "source_event": event_payload},
+                state,
+                component_state or {},
+                None if checkpoint is None else bytes(checkpoint),
+                now_ms=now,
+            )
 
         await self._write_async(write)
 
@@ -560,6 +605,15 @@ class ReplaySQLiteStore:
                 session_id,
                 state,
                 component_state or {},
+                now_ms=now,
+            )
+            self._write_session_review(
+                connection,
+                session_id,
+                {"kind": "STATE", "state_kind": kind, "payload": dict(payload)},
+                state,
+                component_state or {},
+                bytes(checkpoint),
                 now_ms=now,
             )
 
@@ -861,6 +915,13 @@ class ReplaySQLiteStore:
             raise RuntimeError("replay session mutation writer is already registered")
         self._session_mutation_writer = writer
 
+    def register_session_review_writer(self, writer: SessionReviewWriter) -> None:
+        """Register one content-addressed review projection in v1 transactions."""
+
+        if self._session_review_writer is not None and self._session_review_writer != writer:
+            raise RuntimeError("replay session review writer is already registered")
+        self._session_review_writer = writer
+
     async def run_extension_write(self, operation):
         """Run a trusted additive-schema write under the replay transaction lock."""
 
@@ -981,6 +1042,30 @@ class ReplaySQLiteStore:
             result,
             state,
             component_state,
+            now_ms,
+        )
+
+    def _write_session_review(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        context: Mapping[str, object],
+        state: Mapping[str, object],
+        component_state: Mapping[str, object],
+        checkpoint: bytes | None,
+        *,
+        now_ms: int,
+    ) -> None:
+        writer = self._session_review_writer
+        if writer is None:
+            return
+        writer(
+            connection,
+            session_id,
+            context,
+            state,
+            component_state,
+            checkpoint,
             now_ms,
         )
 

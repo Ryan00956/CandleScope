@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 import app.api.v1.replay as replay_api
 from app.api.v1.replay import router
+from app.replay.canonical import canonical_sha256
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
 from tests.fixtures.replay.service_fakes import (
@@ -140,6 +141,243 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         assert returned.status_code == 200
         assert returned.json()["checkpointed"] is True
         assert returned.json()["state"] == "PAUSED"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_phase17_rules_drawing_marker_review_control_and_fork_routes(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "phase17-api.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        run = created.json()["run"]
+        run_id = run["run_id"]
+        session_id = run["adapter_session_id"]
+
+        rules = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run_id}/rules",
+        )
+        assert rules.status_code == 200
+        assert rules.json()["schema_version"] == "replay.run-rules.v1"
+        assert rules.json()["instrument_rules"][0]["immutable_exchange_rule"] is True
+        empty_drawing = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run_id}/drawings/current",
+        )
+        assert empty_drawing.status_code == 200
+        assert empty_drawing.json()["document"] is None
+        assert empty_drawing.json()["revision"] == 0
+
+        document = {
+            "documentSchemaVersion": 1,
+            "scopeKey": f"replay-run:{run_id}",
+            "documentRevision": 1,
+            "updatedAt": 1,
+            "entities": [],
+        }
+        invalid_drawing = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run_id}/drawings",
+            json={
+                "protocol": "replay.v2",
+                "command_id": "phase17-api-drawing-invalid",
+                "document_hash": canonical_sha256(document),
+                "document": document,
+                "entity_count": 0,
+            },
+        )
+        assert invalid_drawing.status_code == 422
+        binary_float_drawing = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run_id}/drawings",
+            json={
+                "protocol": "replay.review.drawing-document.v1",
+                "command_id": "phase17-api-drawing-float",
+                "document_hash": "sha256:" + ("0" * 64),
+                "document": {
+                    **document,
+                    "entities": [
+                        {
+                            "id": "line-float",
+                            "kind": "line",
+                            "geometryRevision": 1,
+                            "styleRevision": 1,
+                            "geometry": {"kind": "line"},
+                            "style": {"kind": "line", "lineWidth": 2.5},
+                            "bounds": {"kind": "deferred"},
+                        }
+                    ],
+                },
+                "entity_count": 1,
+            },
+        )
+        assert binary_float_drawing.status_code == 422
+        assert binary_float_drawing.json()["error"]["code"] == (
+            "REVIEW_DRAWING_INVALID"
+        )
+        drawing = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run_id}/drawings",
+            json={
+                "protocol": "replay.review.drawing-document.v1",
+                "command_id": "phase17-api-drawing",
+                "document_hash": canonical_sha256(document),
+                "document": document,
+                "entity_count": 0,
+            },
+        )
+        assert drawing.status_code == 200
+        assert drawing.json()["schema_version"] == (
+            "replay.review.drawing-document.v1"
+        )
+        hydrated_drawing = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/{run_id}/drawings/current",
+        )
+        assert hydrated_drawing.status_code == 200
+        assert hydrated_drawing.json()["document"] == document
+        assert hydrated_drawing.json()["document_hash"] == canonical_sha256(document)
+
+        marker = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run_id}/markers",
+            json={
+                "protocol": "replay.review.marker.v1",
+                "command_id": "phase17-api-marker",
+                "text": "API review marker",
+            },
+        )
+        assert marker.status_code == 200
+        assert marker.json()["timeline_sequence"] > 0
+
+        before = await service.get_session(session_id)
+        review = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run_id}/review",
+            json={"event_id": None},
+        )
+        assert review.status_code == 200
+        review_body = review.json()
+        assert review_body["read_only"] is True
+        assert review_body["immutability_proof"]["verified"] is True
+        assert "archive_id" not in json.dumps(review_body)
+
+        previous = await _request(
+            app,
+            "POST",
+            (
+                f"/api/v1/replay/runs/{run_id}/reviews/"
+                f"{review_body['review_id']}/cursor"
+            ),
+            json={
+                "action": "PREVIOUS",
+                "event_id": None,
+                "expected_cursor_revision": review_body["cursor_revision"],
+                "playback_rate": None,
+            },
+        )
+        assert previous.status_code == 200
+        assert previous.json()["read_only"] is True
+        assert previous.json()["cursor_revision"] == 2
+
+        playing = await _request(
+            app,
+            "POST",
+            (
+                f"/api/v1/replay/runs/{run_id}/reviews/"
+                f"{review_body['review_id']}/cursor"
+            ),
+            json={
+                "action": "PLAY",
+                "event_id": None,
+                "expected_cursor_revision": previous.json()["cursor_revision"],
+                "playback_rate": "2",
+            },
+        )
+        assert playing.status_code == 200
+        assert playing.json()["playback_state"] == "PLAYING"
+
+        forked = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run_id}/fork",
+            json={"event_id": review_body["selected_event_id"]},
+        )
+        assert forked.status_code == 201
+        assert forked.json()["parent_run_id"] == run_id
+        assert forked.json()["parent_timeline_sequence"] == (
+            review_body["selected_timeline_sequence"]
+        )
+        assert len(forked.json()["tracks"]) == 1
+        after = await service.get_session(session_id)
+        assert after["snapshot"]["state_hash"] == before["snapshot"]["state_hash"]
+        assert after["snapshot"]["cursor"] == before["snapshot"]["cursor"]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_phase17_drawing_route_uses_the_canonical_document_budget(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "phase17-large-drawing-api.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        run_id = str(created.json()["run"]["run_id"])
+        document = {
+            "documentSchemaVersion": 1,
+            "scopeKey": f"replay-run:{run_id}",
+            "documentRevision": 1,
+            "updatedAt": 1,
+            "entities": [
+                {
+                    "id": "large-text",
+                    "kind": "text",
+                    "geometryRevision": 1,
+                    "styleRevision": 1,
+                    "geometry": {"kind": "text"},
+                    "style": {"kind": "text", "text": "x" * 70_000},
+                    "bounds": {"kind": "deferred"},
+                }
+            ],
+        }
+        response = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run_id}/drawings",
+            json={
+                "protocol": "replay.review.drawing-document.v1",
+                "command_id": "phase17-large-drawing",
+                "document_hash": canonical_sha256(document),
+                "document": document,
+                "entity_count": 1,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["entity_count"] == 1
     finally:
         await service.shutdown(step_timeout=1.0)
 

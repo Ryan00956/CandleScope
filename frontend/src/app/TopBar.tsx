@@ -19,6 +19,7 @@ import type { CrosshairData, MarketSummary } from "../features/market-data/kline
 import type { MarketDisplayData } from "../features/market-data/marketDataView.js";
 import type { SymbolSearchProps } from "../features/symbol-search/SymbolSearch.js";
 import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
+import { REPLAY_PRODUCT_V2_ENABLED } from "../features/replay/replayProductFlag.js";
 import type { ReplayEntryCapabilityView } from "../features/replay/useReplayEntryCapability.js";
 import { useAdvancedMarketSummary } from "../features/advanced-market-data/useAdvancedMarketSnapshots.js";
 import MarketTopBarFrame from "./MarketTopBarFrame.js";
@@ -99,7 +100,7 @@ function TopBar({
     <MarketTopBarFrame
       source="live"
       navigation={<>
-        {replayEntry.state === "enabled" && (
+        {replayEntry.state === "enabled" && REPLAY_PRODUCT_V2_ENABLED && (
         <button
           className="replay-entry-link"
           data-replay-entry="enabled"
@@ -111,6 +112,17 @@ function TopBar({
         >
           K 线回放
         </button>
+        )}
+        {replayEntry.state === "enabled" && !REPLAY_PRODUCT_V2_ENABLED && (
+        <a
+          className="replay-entry-link"
+          data-replay-entry="enabled"
+          href={replayEntry.href}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          K 线回放 ↗
+        </a>
         )}
         {(replayEntry.state === "checking" || replayEntry.state === "disabled") && (
         <button

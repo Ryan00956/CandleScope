@@ -1,3 +1,13 @@
+import {
+  REPLAY_PRODUCT_V2_ENABLED,
+  replayV2ProductFlagEnabled,
+} from "./replayProductFlag.js";
+
+export {
+  REPLAY_PRODUCT_V2_ENABLED,
+  replayV2ProductFlagEnabled,
+};
+
 export const REPLAY_V2_PROTOCOL = "replay.v2" as const;
 export const REPLAY_V2_SCHEMA_VERSION = "replay.contract.v2.phase0" as const;
 
@@ -2000,15 +2010,3 @@ export function parseTrainingRunReturnResponse(value: unknown): TrainingRunRetur
     released: boolValue(payload.released, "return to Hub.released"),
   };
 }
-
-const replayV2EnvironmentFlag: unknown = (import.meta as {
-  readonly env?: { readonly VITE_REPLAY_PRODUCT_V2_ENABLED?: unknown };
-}).env?.VITE_REPLAY_PRODUCT_V2_ENABLED;
-
-export function replayV2ProductFlagEnabled(value: string | boolean | undefined): boolean {
-  return value === true || value === "1" || value === "true";
-}
-
-export const REPLAY_PRODUCT_V2_ENABLED = replayV2ProductFlagEnabled(
-  typeof replayV2EnvironmentFlag === "string" ? replayV2EnvironmentFlag : undefined,
-);

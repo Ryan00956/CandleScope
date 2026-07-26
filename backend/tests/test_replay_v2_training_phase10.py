@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,26 @@ def test_release_artifacts_must_be_external_and_partitioned_by_full_head(
         release_common.require_external_head_path(
             ROOT / "output" / head / "checks.json", head
         )
+
+
+def test_windows_npm_command_resolves_path_batch_shim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    npm_cmd = r"F:\node\npm.cmd"
+    monkeypatch.setattr(release_common.shutil, "which", lambda value: npm_cmd)
+
+    assert release_common._resolve_windows_command("npm") == npm_cmd
+    assert release_common._resolve_windows_command(r"C:\explicit\npm.cmd") == (
+        r"C:\explicit\npm.cmd"
+    )
+    if release_common.os.name == "nt":
+        assert release_common.npm_command("npm", "run", "check") == [
+            release_common.os.environ.get("ComSpec", "cmd.exe"),
+            "/d",
+            "/s",
+            "/c",
+            subprocess.list2cmdline([npm_cmd, "run", "check"]),
+        ]
 
 
 def test_bound_json_rejects_wrong_head_schema_dirty_or_failed(tmp_path: Path) -> None:

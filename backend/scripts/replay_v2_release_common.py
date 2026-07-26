@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -124,8 +125,16 @@ def parse_json_output(value: str) -> Mapping[str, object]:
     return parsed
 
 
+def _resolve_windows_command(candidate: str) -> str:
+    if "/" in candidate or "\\" in candidate:
+        return candidate
+    return shutil.which(candidate) or candidate
+
+
 def npm_command(npm: str, *arguments: str) -> list[str]:
     candidate = str(Path(npm).expanduser()) if ("/" in npm or "\\" in npm) else npm
+    if os.name == "nt":
+        candidate = _resolve_windows_command(candidate)
     if os.name == "nt" and candidate.lower().endswith((".cmd", ".bat")):
         command_line = subprocess.list2cmdline([candidate, *arguments])
         return [os.environ.get("ComSpec", "cmd.exe"), "/d", "/s", "/c", command_line]

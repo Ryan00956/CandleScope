@@ -1720,12 +1720,37 @@ async function main() {
 
     const beforeSpeed = await replayStatus(replay.cdp);
     const speedAction = replaySpeedAction(args.productV2);
-    const primarySpeedChanged = await evaluate(replay.cdp, `(() => { const select = document.querySelector('[data-replay-action="${speedAction}"]'); if (!(select instanceof HTMLSelectElement)) return false; select.value = "1"; select.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`);
-    assert(primarySpeedChanged, "primary replay speed control was unavailable", {
+    const primarySpeed = await evaluate(replay.cdp, `(() => {
+      const select = document.querySelector('[data-replay-action="${speedAction}"]');
+      if (!(select instanceof HTMLSelectElement)) return null;
+      const previous = select.value;
+      if (previous !== "1") {
+        select.value = "1";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      return { previous, current: select.value, changed: previous !== "1" };
+    })()`);
+    assert(
+      primarySpeed?.current === "1",
+      "primary replay speed control was unavailable or rejected 1x",
+      {
+        primarySpeed,
+        action: speedAction,
+        productV2: args.productV2,
+      },
+    );
+    if (primarySpeed.changed) {
+      await waitForReplayStatus(
+        replay.cdp,
+        `(value) => value.revision > ${beforeSpeed.revision}`,
+        args.timeoutMs,
+        "1x speed ack",
+      );
+    }
+    assert(primarySpeed !== null, "primary replay speed state is missing", {
       action: speedAction,
       productV2: args.productV2,
     });
-    await waitForReplayStatus(replay.cdp, `(value) => value.revision > ${beforeSpeed.revision}`, args.timeoutMs, "1x speed ack");
     await waitForValue(
       replay.cdp,
       `(() => { const button = document.querySelector('[data-replay-action="play"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`,

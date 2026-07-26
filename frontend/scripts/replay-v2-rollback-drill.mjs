@@ -413,6 +413,8 @@ async function waitForReplayStatus(cdp, predicateSource, timeoutMs, label) {
       sourceSequence: Number(status.dataset.replaySourceSequence || 0),
       revision: Number(status.dataset.replayRevision || 0),
       stateHash: status.dataset.replayStateHash || "",
+      clockRate: Number(status.dataset.replayClockRate || 0),
+      controlPending: status.dataset.replayControlPending || "",
       cursorMs: Number(status.dataset.replayCursorMs || 0),
       bars: Number((status.innerText.match(/([0-9]+) (?:display )?bars/) || [])[1] || 0),
     };
@@ -448,9 +450,35 @@ async function waitForLiveReady(cdp, timeoutMs) {
   );
 }
 
-async function openReplayFromLive({ liveCdp, debugBase, timeoutMs }) {
+async function openReplayFromLive({
+  liveCdp,
+  debugBase,
+  productV2,
+  timeoutMs,
+}) {
   const targetsBefore = await readJson(`${debugBase}/json/list`);
   await click(liveCdp, '[data-replay-entry="enabled"]', timeoutMs);
+  if (productV2) {
+    await waitForValue(
+      liveCdp,
+      `document.querySelector('[data-replay-launcher="live-modal"]') !== null`,
+      timeoutMs,
+      "live v2 launcher modal",
+    );
+    await clickButtonByText(liveCdp, "新建训练", timeoutMs);
+    await waitForValue(
+      liveCdp,
+      `(() => {
+        const button = [...document.querySelectorAll("button")].find(
+          (item) => item.textContent?.trim() === "创建并进入训练",
+        );
+        return button instanceof HTMLButtonElement && !button.disabled;
+      })()`,
+      timeoutMs,
+      "live v2 create plan readiness",
+    );
+    await clickButtonByText(liveCdp, "创建并进入训练", timeoutMs);
+  }
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const targets = await readJson(`${debugBase}/json/list`);
@@ -679,19 +707,43 @@ async function main() {
     await waitForValue(live.cdp, `document.querySelector('[data-replay-entry="enabled"]') !== null`, args.timeoutMs, "enabled replay entry");
     await waitForLiveReady(live.cdp, args.timeoutMs);
     const liveBefore = await liveSnapshot(live.cdp);
-    assert(liveBefore.replayEntry === "K 线回放 ↗", "enabled build did not expose replay entry", liveBefore);
+    assert(
+      liveBefore.replayEntry === (args.productV2 ? "K 线回放" : "K 线回放 ↗"),
+      "enabled build did not expose the selected replay entry mode",
+      liveBefore,
+    );
 
-    const replay = await openReplayFromLive({ liveCdp: live.cdp, debugBase, timeoutMs: args.timeoutMs });
+    const replay = await openReplayFromLive({
+      liveCdp: live.cdp,
+      debugBase,
+      productV2: args.productV2,
+      timeoutMs: args.timeoutMs,
+    });
     connections.push(replay.cdp);
     const replayCapture = trackBrowser("current-replay", replay.cdp);
-    await clickButtonByText(replay.cdp, "新建训练", args.timeoutMs);
-    await clickButtonByText(replay.cdp, "创建并进入训练", args.timeoutMs);
+    assert(await evaluate(replay.cdp, "window.opener === null"), "current replay target retained window.opener");
+    if (!args.productV2) {
+      await clickButtonByText(replay.cdp, "新建训练", args.timeoutMs);
+      await clickButtonByText(replay.cdp, "创建并进入训练", args.timeoutMs);
+    }
     const initial = await waitForReplayStatus(replay.cdp, `(value) => value.connection === "connected" && value.state === "PAUSED" && value.bars > 0`, args.timeoutMs, "initial replay snapshot");
     const sessionUrl = await evaluate(replay.cdp, "location.href");
     const sessionId = new URL(sessionUrl).searchParams.get("session");
     assert(sessionId, "replay session URL lost its session id");
-    await evaluate(replay.cdp, `(() => { const select = document.querySelector('[data-replay-action="speed"]'); if (!(select instanceof HTMLSelectElement)) return false; select.value = "60"; select.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`);
-    await waitForReplayStatus(replay.cdp, `(value) => value.revision > ${initial.revision}`, args.timeoutMs, "speed ack");
+    const speedAction = args.productV2 ? "playback-rate" : "speed";
+    const speedChanged = await evaluate(replay.cdp, `(() => { const select = document.querySelector('[data-replay-action="${speedAction}"]'); if (!(select instanceof HTMLSelectElement)) return false; select.value = "60"; select.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`);
+    assert(speedChanged, "rollback replay speed control was unavailable", {
+      speedAction,
+      productV2: args.productV2,
+    });
+    await waitForReplayStatus(
+      replay.cdp,
+      args.productV2
+        ? `(value) => value.clockRate === 60 && value.controlPending === ""`
+        : `(value) => value.revision > ${initial.revision}`,
+      args.timeoutMs,
+      "speed ack",
+    );
     await waitForValue(replay.cdp, `(() => { const button = document.querySelector('[data-replay-action="play"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "play readiness");
     await click(replay.cdp, '[data-replay-action="play"]', args.timeoutMs);
     const playing = await waitForReplayStatus(replay.cdp, `(value) => value.state === "PLAYING"`, args.timeoutMs, "active replay before rollback");

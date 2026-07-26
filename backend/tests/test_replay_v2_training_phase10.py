@@ -170,6 +170,9 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
         "old_build_preserved_replay_db",
         "queryReplayStorageSnapshot",
         "old_build_preserved_storage_semantics",
+        'data-replay-launcher="live-modal"',
+        "playback-rate",
+        "value.clockRate === 60",
     ):
         assert needle in rollback
     assert "--live-window" in smoke

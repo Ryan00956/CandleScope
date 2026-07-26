@@ -126,7 +126,7 @@ def _validate_default_flags() -> dict[str, str]:
         / "frontend/src/features/replay/useReplayEntryCapability.ts"
     ).read_text(encoding="utf-8")
     product_source = (
-        REPOSITORY_ROOT / "frontend/src/features/replay/replayV2Types.ts"
+        REPOSITORY_ROOT / "frontend/src/features/replay/replayProductFlag.ts"
     ).read_text(encoding="utf-8")
     readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
     flags = {

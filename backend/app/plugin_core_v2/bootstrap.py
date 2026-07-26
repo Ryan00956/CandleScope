@@ -113,7 +113,7 @@ def build_core_plugin_platform_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> CorePluginPlatform | DisabledCorePluginPlatform:
     env = os.environ if environ is None else environ
-    if not _environment_bool(env, PLUGIN_PLATFORM_V2_ENABLED_ENV, default=False):
+    if not _environment_bool(env, PLUGIN_PLATFORM_V2_ENABLED_ENV, default=True):
         return DisabledCorePluginPlatform()
     root_value = env.get(PLUGIN_PLATFORM_V2_ROOT_ENV)
     if root_value is not None and not root_value.strip():

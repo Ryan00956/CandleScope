@@ -464,6 +464,11 @@ Community Live `trade.submit`/`trade.cancel`, real Demo/real-money testing, and
 WP-G remain unavailable. See the
 [`Phase 12 execution record`](docs/PLUGIN_PLATFORM_V2_PHASE12_zh.md).
 
+The base Plugin Platform v2 is enabled by default. Set
+`CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED=0` only to disable it or perform an
+emergency rollback. Marketplace, Paper, and every Live Broker capability remain
+independent and default off.
+
 Phase 8 adds the independently buildable
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README.md).
 It pins the public `pine-compat-runtime` v0.2.0 Release wheel, contains no Pine

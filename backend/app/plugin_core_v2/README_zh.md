@@ -28,12 +28,15 @@ immutable installation/activation registry 和 Phase 4 的 Grant Store/capabilit
 
 ## 生命周期
 
-产品默认是零状态关闭：
+基础插件平台现在默认启用；无需设置环境变量。需要紧急关闭或执行回滚时显式设置：
 
 ```powershell
-$env:CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED='1'
-$env:CANDLESCOPE_PLUGIN_PLATFORM_V2_ROOT='C:\managed\candlescope-plugin-platform-v2'
+$env:CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED='0'
 ```
+
+默认数据目录是 `%LOCALAPPDATA%\CandleScope\plugin-platform-v2`。受控部署可用
+`CANDLESCOPE_PLUGIN_PLATFORM_V2_ROOT` 覆盖该目录。Marketplace、Paper 和 Live Broker
+仍是相互独立、默认关闭的能力。
 
 Paper 还必须同时显式设置：
 
@@ -70,11 +73,11 @@ config/balance 两个认证 GET 和 discover/describe/rebind 三个私有方法�
 query、通用签名、submit 或 cancel。两个开关默认/推荐值均为 `0`；production release
 lock 当前为空。
 
-未设置 `CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED` 时，`app.main` 只挂载返回空 catalog 的
-disabled facade，不读取 registry、不创建 supervisor、不注册 event/job，也不启动插件进程。
-显式启用后，组合根只对 registry 中 `active` 且 grant 完整的 installation 建立惰性
-supervisor。disabled/staged 插件只经过静态 bundle/receipt/content/launch binding 校验，绝不
-执行其代码。
+未设置 `CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED` 时，`app.main` 启动基础插件平台。
+显式设置为 `0` 时只挂载返回空 catalog 的 disabled facade，不读取 registry、不创建
+supervisor、不注册 event/job，也不启动插件进程。平台启用后，组合根只对 registry 中
+`active` 且 grant 完整的 installation 建立惰性 supervisor。disabled/staged 插件只经过
+静态 bundle/receipt/content/launch binding 校验，绝不执行其代码。
 
 普通插件只因 command、event delivery 或 job execution 激活。`onStartup` 还必须同时出现在
 `CANDLESCOPE_PLUGIN_PLATFORM_V2_STARTUP_ALLOWLIST`。disable、uninstall、rollback 或 grant

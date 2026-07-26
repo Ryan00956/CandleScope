@@ -184,13 +184,23 @@ def test_declarative_view_contract_rejects_unknown_slots_and_command_references(
         core_contributions(PluginManifest.from_wire(unknown_command))
 
 
-def test_environment_bootstrap_is_disabled_by_default_and_fail_closed(
+def test_environment_bootstrap_is_enabled_by_default_and_can_be_disabled(
     tmp_path: Path,
 ) -> None:
+    enabled_by_default = build_core_plugin_platform_from_environment(
+        host_name="CandleScope",
+        host_version="0.4.0",
+        environ={"LOCALAPPDATA": str(tmp_path / "local")},
+    )
+    assert isinstance(enabled_by_default, CorePluginPlatform)
+    assert enabled_by_default.root == (
+        tmp_path / "local" / "CandleScope" / "plugin-platform-v2"
+    ).resolve()
+
     disabled = build_core_plugin_platform_from_environment(
         host_name="CandleScope",
         host_version="0.4.0",
-        environ={},
+        environ={"CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED": "0"},
     )
     assert isinstance(disabled, DisabledCorePluginPlatform)
     assert disabled.health_summary() == {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -95,6 +96,7 @@ class _RoutingService:
 def _patch_startup_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     host: _Host,
+    platform_root: Path,
     routing: _RoutingService | None = None,
 ) -> _RoutingService:
     import app.plugin_runtime as plugin_runtime_module
@@ -105,12 +107,12 @@ def _patch_startup_dependencies(
 
     for name in (
         "CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED",
-        "CANDLESCOPE_PLUGIN_PLATFORM_V2_ROOT",
         "CANDLESCOPE_PLUGIN_PLATFORM_V2_TRUST",
         "CANDLESCOPE_PLUGIN_PLATFORM_V2_MANAGEMENT_ORIGINS",
         "CANDLESCOPE_PLUGIN_PLATFORM_V2_STARTUP_ALLOWLIST",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CANDLESCOPE_PLUGIN_PLATFORM_V2_ROOT", str(platform_root))
 
     monkeypatch.setattr(main_module, "EventLoopLagMonitor", _LagMonitor)
     monkeypatch.setattr(main_module, "init_klines_storage", lambda: None)
@@ -149,9 +151,10 @@ def _patch_startup_dependencies(
 @pytest.mark.anyio
 async def test_application_lifecycle_owns_plugin_host_and_health_summary(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     host = _Host()
-    routing = _patch_startup_dependencies(monkeypatch, host)
+    routing = _patch_startup_dependencies(monkeypatch, host, tmp_path / "plugins")
 
     async def _init_data_manager() -> None:
         main_module.app.state.data_manager = None
@@ -165,16 +168,13 @@ async def test_application_lifecycle_owns_plugin_host_and_health_summary(
         assert main_module.app.state.plugin_runtime_host is host
         assert main_module.app.state.indicator_runtime_service is routing
         assert main_module.app.state.plugin_v1_compatibility.indicator_source is routing
-        assert (
-            main_module.app.state.plugin_platform_v2.health_summary()["status"]
-            == "disabled"
-        )
+        assert main_module.app.state.plugin_platform_v2.health_summary()["status"] == "ok"
         health = await main_module.health_check()
         assert health["plugin_runtimes"] == host.health_summary()
         assert health["plugin_platform_v2"] == {
-            "status": "disabled",
-            "enabled": False,
-            "started": False,
+            "status": "ok",
+            "enabled": True,
+            "started": True,
             "installed": 0,
             "activeRecords": 0,
             "runningEntrypoints": 0,
@@ -212,9 +212,10 @@ async def test_application_lifecycle_owns_plugin_host_and_health_summary(
 @pytest.mark.anyio
 async def test_startup_failure_reclaims_started_plugin_host(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     host = _Host()
-    routing = _patch_startup_dependencies(monkeypatch, host)
+    routing = _patch_startup_dependencies(monkeypatch, host, tmp_path / "plugins")
 
     async def _fail_data_manager() -> None:
         raise RuntimeError("fatal data-engine configuration")
@@ -234,9 +235,10 @@ async def test_startup_failure_reclaims_started_plugin_host(
 @pytest.mark.anyio
 async def test_plugin_host_startup_failure_stops_lag_monitor(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     host = _Host()
-    routing = _patch_startup_dependencies(monkeypatch, host)
+    routing = _patch_startup_dependencies(monkeypatch, host, tmp_path / "plugins")
 
     async def _fail_start() -> None:
         host.start_calls += 1
@@ -254,11 +256,17 @@ async def test_plugin_host_startup_failure_stops_lag_monitor(
 @pytest.mark.anyio
 async def test_indicator_routing_startup_failure_reclaims_plugin_host(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     host = _Host()
     routing = _RoutingService()
     routing.fail_start = True
-    _patch_startup_dependencies(monkeypatch, host, routing)
+    _patch_startup_dependencies(
+        monkeypatch,
+        host,
+        tmp_path / "plugins",
+        routing,
+    )
 
     with pytest.raises(RuntimeError, match="indicator routing failed"):
         await main_module.startup_event()

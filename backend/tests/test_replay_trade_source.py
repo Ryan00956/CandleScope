@@ -108,6 +108,35 @@ def test_trade_source_positions_checkpoint_cursor_without_rescanning_prefix() ->
     assert source.cursor().source_sequence == 2
 
 
+def test_pristine_blind_trade_source_reconstructs_identity_for_sequence_position() -> (
+    None
+):
+    rows = [make_trade_row(index) for index in range(4)]
+    source = TradeReplaySource(
+        PagedReplayTradeReader(
+            FakeRawAggTradeArchive(rows),  # type: ignore[arg-type]
+            make_trade_dataset(4),
+            page_rows=1,
+            validate_generation=False,
+        ),
+        blind_mode=True,
+    )
+
+    positioned = source.fork_at_sequence(
+        2,
+        last_event_time_ms=rows[1]["trade_time_ms"],
+    )
+
+    assert source.cursor().source_sequence == 0
+    assert positioned.cursor().source_sequence == 2
+    assert positioned.cursor().last_agg_trade_id == 2
+    third = positioned.next()
+    assert third is not None
+    assert third.agg_trade_id == 3
+    assert third.first_trade_id == 5
+    assert third.last_trade_id == 6
+
+
 def test_blind_trade_source_maps_all_public_ids_but_keeps_actual_archive_cursor() -> (
     None
 ):

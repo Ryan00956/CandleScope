@@ -9,7 +9,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Awaitable, Callable, Protocol, Sequence
 
@@ -23,6 +23,7 @@ from .constants import (
     CommandType,
     ReplayEventType,
     SessionState,
+    SourceKind,
 )
 from .errors import ReplayDomainError, ReplayErrorCode
 from .internal_commands import InternalCommandType
@@ -37,13 +38,18 @@ from .models import (
     validate_identifier,
     validate_timestamp_ms,
 )
+from .period_summary import ReplayPeriodSummary
 from .projection import ProjectionBatch, ProjectionCoalescer
+from .source_chain import (
+    initial_source_chain_hash,
+    next_source_chain_hash,
+    source_event_payload,
+)
 from .sources.base import ReplayMarketSource, SourceCursor
 
 
 ACTOR_STATE_HASH_SCHEMA_VERSION = "replay-actor-state-hash.v1"
 ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION = "replay-actor-checkpoint-state.v2"
-SOURCE_CHAIN_SCHEMA_VERSION = "replay-source-chain.v1"
 MIN_TASK_EXIT_GRACE_SECONDS = 0.05
 MAX_JOURNAL_ENTRIES = 4_096
 COMMAND_EVENT_LOOP_YIELD_INTERVAL = 64
@@ -289,6 +295,19 @@ class _DurableStateRequest:
 
 
 @dataclass(slots=True)
+class _SummaryAuthorityRequest:
+    future: asyncio.Future[dict[str, object]]
+
+
+@dataclass(slots=True)
+class _PeriodSummaryJumpRequest:
+    summary: ReplayPeriodSummary
+    client_instance_id: str
+    expected_revision: int
+    future: asyncio.Future[dict[str, object]]
+
+
+@dataclass(slots=True)
 class _SourceChunkPlanRequest:
     target_time_ms: int
     max_events: int
@@ -330,12 +349,25 @@ _ActorRequest = (
     | _ReportRequest
     | _CheckpointRequest
     | _DurableStateRequest
+    | _SummaryAuthorityRequest
+    | _PeriodSummaryJumpRequest
     | _SourceChunkPlanRequest
     | _SourceEventsPageRequest
     | _SubscribeRequest
     | _UnsubscribeRequest
     | _ShutdownRequest
 )
+
+
+def _consume_abandoned_future(future: asyncio.Future[object]) -> None:
+    """Retrieve a detached mutation failure after its caller was cancelled."""
+
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except BaseException:
+        pass
 
 
 class _LatencyWindow:
@@ -548,6 +580,8 @@ class ReplaySessionActor:
             "command_source_event_limit": self._max_atomic_command_source_events,
             "command_preflight_events": 0,
             "command_resource_rejections": 0,
+            "period_summary_jumps": 0,
+            "period_summary_skipped_events": 0,
         }
 
     @property
@@ -656,6 +690,57 @@ class ReplaySessionActor:
         request = _DurableStateRequest(loop.create_future())
         self._offer_request(request)
         return await request.future
+
+    async def summary_authority(self) -> dict[str, object]:
+        """Return only hashes/cursors needed to select a trusted summary."""
+
+        if self._closed:
+            return self._summary_authority_value()
+        if self._task is None:
+            raise RuntimeError("replay actor has not started")
+        loop = asyncio.get_running_loop()
+        request = _SummaryAuthorityRequest(loop.create_future())
+        self._offer_request(request)
+        return await request.future
+
+    async def apply_period_summary(
+        self,
+        summary: ReplayPeriodSummary,
+        *,
+        client_instance_id: str,
+        expected_revision: int,
+    ) -> dict[str, object]:
+        """Atomically restore one exact derived summary inside the mailbox."""
+
+        if not isinstance(summary, ReplayPeriodSummary):
+            raise TypeError("summary must be ReplayPeriodSummary")
+        self._ensure_accepting()
+        if self._degraded_reason is not None:
+            raise ReplayDomainError(
+                ReplayErrorCode.PERSISTENCE_DEGRADED,
+                "replay session persistence is degraded",
+                details={"reason": self._degraded_reason},
+            )
+        client = validate_identifier(
+            client_instance_id,
+            field_name="client_instance_id",
+        )
+        revision = validate_counter(expected_revision, field_name="expected_revision")
+        loop = asyncio.get_running_loop()
+        request = _PeriodSummaryJumpRequest(
+            summary=summary,
+            client_instance_id=client,
+            expected_revision=revision,
+            future=loop.create_future(),
+        )
+        self._offer_request(request)
+        # A caller cancellation must not cancel a summary mutation that may
+        # already be committing.  Durable advance intent reconciles its result.
+        try:
+            return await asyncio.shield(request.future)
+        except asyncio.CancelledError:
+            request.future.add_done_callback(_consume_abandoned_future)
+            raise
 
     async def source_chunk_plan(
         self,
@@ -1281,6 +1366,12 @@ class ReplaySessionActor:
                 self._materialize_clock()
                 if not request.future.done():
                     request.future.set_result(self._durable_state())
+            elif isinstance(request, _SummaryAuthorityRequest):
+                self._materialize_clock()
+                if not request.future.done():
+                    request.future.set_result(self._summary_authority_value())
+            elif isinstance(request, _PeriodSummaryJumpRequest):
+                await self._handle_period_summary_jump(request)
             elif isinstance(request, _SourceChunkPlanRequest):
                 if not request.future.done():
                     request.future.set_result(
@@ -1305,6 +1396,268 @@ class ReplaySessionActor:
                 await self._handle_shutdown_request(request)
         finally:
             self._queue.task_done()
+
+    async def _handle_period_summary_jump(
+        self,
+        request: _PeriodSummaryJumpRequest,
+    ) -> None:
+        if request.future.cancelled():
+            return
+        summary = request.summary
+        rollback: _ActorRollback | None = None
+        candidate_started = False
+        try:
+            if (
+                canonical_sha256(summary.hash_material()) != summary.summary_hash
+                or canonical_sha256(summary.end_component_state)
+                != summary.end_component_state_hash
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "period summary checksum changed after validation",
+                )
+            self._require_controller(request.client_instance_id)
+            if request.expected_revision != self._revision:
+                raise ReplayDomainError(
+                    ReplayErrorCode.REVISION_CONFLICT,
+                    "summary jump expected_revision does not match actor revision",
+                    details={
+                        "expected_revision": request.expected_revision,
+                        "latest_revision": self._revision,
+                        "state_hash": self._compute_state_hash(),
+                    },
+                )
+            self._require_state(
+                SessionState.PAUSED,
+                InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT,
+            )
+            if summary.session_id != self.session_id:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "period summary belongs to a different replay session",
+                )
+            expected_source_kind = (
+                "BAR"
+                if self.config.source_kind is SourceKind.BAR
+                else "AGG_TRADE"
+            )
+            if summary.source_kind != expected_source_kind:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "period summary source kind does not match actor",
+                )
+            identities = {
+                "data_epoch": self._data_epoch,
+                "snapshot_ref_hash": self._snapshot_ref_hash,
+                "session_config_hash": self._session_config_hash,
+                "execution_version": self._execution_version,
+            }
+            observed = {
+                "data_epoch": summary.data_epoch,
+                "snapshot_ref_hash": summary.snapshot_ref_hash,
+                "session_config_hash": summary.session_config_hash,
+                "execution_version": summary.execution_version,
+            }
+            if observed != identities:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "period summary immutable identity does not match actor",
+                )
+            if self._domain_command_position != summary.base_domain_command_position:
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "period summary lineage was invalidated by a domain mutation",
+                    details={
+                        "summary_domain_command_position": (
+                            summary.base_domain_command_position
+                        ),
+                        "current_domain_command_position": (
+                            self._domain_command_position
+                        ),
+                    },
+                )
+            current_cursor = self._source.cursor()
+            if not (
+                summary.base_source_sequence
+                <= current_cursor.source_sequence
+                < summary.end_source_sequence
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "period summary does not advance the current source cursor",
+                    details={
+                        "base_source_sequence": summary.base_source_sequence,
+                        "current_source_sequence": current_cursor.source_sequence,
+                        "end_source_sequence": summary.end_source_sequence,
+                    },
+                )
+            if self._clock.virtual_time_ms >= summary.end_virtual_time_ms:
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "period summary end time is not ahead of the current clock",
+                )
+            if current_cursor.source_sequence == summary.base_source_sequence:
+                if self._event_chain_hash != summary.base_event_chain_hash:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "period summary base event chain does not match actor",
+                    )
+                if (
+                    canonical_sha256(self._component_state())
+                    != summary.base_component_state_hash
+                ):
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "period summary base component state does not match actor",
+                    )
+            if self._has_active_trading_path():
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "period summary cannot skip an active trading path",
+                )
+
+            fast_position = getattr(self._source, "fork_at_sequence", None)
+            if not callable(fast_position):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source cannot position a period summary cursor",
+                )
+            try:
+                positioned = fast_position(
+                    summary.end_source_sequence,
+                    last_event_time_ms=summary.end_source_cursor[
+                        "last_event_time_ms"
+                    ],
+                )
+            except ReplayDomainError:
+                raise
+            except Exception as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source rejected the period summary cursor",
+                ) from exc
+            self._validate_positioned_source(
+                positioned,
+                summary.end_source_cursor,
+            )
+            next_event = positioned.peek()
+            if (
+                next_event is not None
+                and self._event_time_ms(next_event) < summary.end_virtual_time_ms
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "period summary skipped beyond an unconsumed source event",
+                )
+
+            rollback = self._capture_rollback()
+            self._begin_candidate(capture_source_events=False)
+            candidate_started = True
+            speed = self._clock.speed
+            self._invalidate_component_state()
+            self._reducer.restore(summary.end_component_state)
+            self._source = positioned
+            self._event_chain_hash = summary.end_event_chain_hash
+            self._clock = VirtualClock(
+                initial_time_ms=summary.end_virtual_time_ms,
+                speed=speed,
+                monotonic=self._monotonic,
+            )
+            self._state = SessionState.PAUSED
+            self._revision += 1
+            self._emit_reset_snapshot(
+                "fast_forward_summary_jump",
+                mandatory=True,
+            )
+            component_state = self._component_state()
+            if canonical_sha256(component_state) != summary.end_component_state_hash:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "period summary restored component state changed",
+                )
+            state_hash = self._compute_state_hash(component_state=component_state)
+            checkpoint = self._checkpoint_codec.encode(
+                self._checkpoint_payload(
+                    component_state=component_state,
+                    state_hash=state_hash,
+                )
+            )
+            try:
+                await self._commit_mutation(
+                    kind="summary_jump",
+                    command=None,
+                    result=None,
+                    error=None,
+                    checkpoint=checkpoint,
+                    component_state=component_state,
+                    state_hash=state_hash,
+                )
+            except asyncio.CancelledError:
+                assert rollback is not None
+                self._restore_rollback(rollback, force_paused=True)
+                raise
+            except Exception as exc:
+                assert rollback is not None
+                self._restore_rollback(rollback, force_paused=True)
+                raise self._enter_persistence_degraded(exc) from exc
+            self._record_checkpoint(checkpoint, initial=False)
+            skipped = (
+                summary.end_source_sequence - current_cursor.source_sequence
+            )
+            self._metrics["period_summary_jumps"] = (
+                int(self._metrics["period_summary_jumps"] or 0) + 1
+            )
+            self._metrics["period_summary_skipped_events"] = (
+                int(self._metrics["period_summary_skipped_events"] or 0)
+                + skipped
+            )
+            if not request.future.done():
+                request.future.set_result(
+                    {
+                        "summary_id": summary.summary_id,
+                        "summary_hash": summary.summary_hash,
+                        "skipped_source_events": skipped,
+                        "snapshot": self._public_snapshot_value(),
+                        "authority": self._summary_authority_value(),
+                    }
+                )
+        except BaseException as exc:
+            if (
+                candidate_started
+                and rollback is not None
+                and self._pending_events is not None
+            ):
+                self._restore_rollback(rollback, force_paused=False)
+            if not request.future.done():
+                request.future.set_exception(exc)
+
+    def _summary_authority_value(self) -> dict[str, object]:
+        cursor = self._source.cursor()
+        component_state = self._component_state()
+        return {
+            "schema_version": "replay.summary-authority.v1",
+            "session_id": self.session_id,
+            "data_epoch": self._data_epoch,
+            "snapshot_ref_hash": self._snapshot_ref_hash,
+            "session_config_hash": self._session_config_hash,
+            "execution_version": self._execution_version,
+            "virtual_time_ms": self._clock.virtual_time_ms,
+            "source_cursor": {
+                "source_sequence": cursor.source_sequence,
+                "last_event_time_ms": cursor.last_event_time_ms,
+                "last_base_bar_open_ms": cursor.last_base_bar_open_ms,
+                "at_end": cursor.at_end,
+            },
+            "event_chain_hash": self._event_chain_hash,
+            "component_state_hash": canonical_sha256(component_state),
+            "domain_command_position": self._domain_command_position,
+            "has_active_trading_path": self._has_active_trading_path(),
+            "has_trading_state": self._reducer.has_trading_state(),
+            "state_hash": self._compute_state_hash(
+                component_state=component_state,
+            ),
+            "revision": self._revision,
+        }
 
     async def _handle_command_request(self, request: _CommandRequest) -> None:
         command = request.command
@@ -1536,6 +1889,15 @@ class ReplaySessionActor:
                     checkpoint=False,
                 )
                 consumed += 1
+                if coalesced > 0 and tail_events > 0 and consumed == coalesced:
+                    # Hidden prefix events do not reserve transport sequences.
+                    # Publish one commit-gated atomic cursor reset before the
+                    # visible tail so its first DELTA advances both source and
+                    # transport authority by exactly one.
+                    self._emit_reset_snapshot(
+                        "fast_forward_coalesced_prefix",
+                        mandatory=True,
+                    )
                 if consumed % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
                     await asyncio.sleep(0)
             if self._has_active_trading_path():
@@ -3721,41 +4083,15 @@ class ReplaySessionActor:
         return source
 
     def _initial_chain_hash(self) -> str:
-        return canonical_sha256(
-            {
-                "schema_version": SOURCE_CHAIN_SCHEMA_VERSION,
-                "data_epoch": self._data_epoch,
-                "source_sequence": 0,
-            }
-        )
+        return initial_source_chain_hash(self._data_epoch)
 
     @staticmethod
     def _next_chain_hash(previous: str, event: object, sequence: int) -> str:
-        return canonical_sha256(
-            {
-                "schema_version": SOURCE_CHAIN_SCHEMA_VERSION,
-                "previous": previous,
-                "source_sequence": sequence,
-                "event": ReplaySessionActor._event_payload(event),
-            }
-        )
+        return next_source_chain_hash(previous, event, sequence)
 
     @staticmethod
     def _event_payload(event: object) -> dict[str, object]:
-        to_dict = getattr(event, "to_dict", None)
-        if callable(to_dict):
-            payload = to_dict()
-        elif is_dataclass(event) and not isinstance(event, type):
-            payload = {
-                field.name: getattr(event, field.name) for field in fields(event)
-            }
-        elif isinstance(event, Mapping):
-            payload = dict(event)
-        else:
-            raise TypeError("replay source event must be a dataclass or object mapping")
-        if not isinstance(payload, Mapping):
-            raise TypeError("replay source event payload must be an object")
-        return dict(payload)
+        return source_event_payload(event)
 
     @staticmethod
     def _event_time_ms(event: object) -> int:

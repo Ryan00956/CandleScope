@@ -323,6 +323,45 @@ export class ReplayStreamController {
         && snapshot.state === "PAUSED"
         && snapshot.sequence === lastSequence + 1
         && snapshot.revision === lastRevision + 1;
+      const forwardResetRequiresSourceAdvance = (
+        snapshot.status_reason === "fast_forward_summary_jump"
+        || snapshot.status_reason === "fast_forward_coalesced_prefix"
+      );
+      const isFastForwardComplete = (
+        snapshot.status_reason === "fast_forward_complete"
+      );
+      const isIntentionalForwardReset = hasAuthorityFloor
+        && (forwardResetRequiresSourceAdvance || isFastForwardComplete)
+        && (snapshot.state === "PAUSED" || snapshot.state === "ENDED")
+        && snapshot.sequence === lastSequence + 1
+        && snapshot.cursor.virtual_time_ms >= lastVirtualTimeMs
+        && (
+          forwardResetRequiresSourceAdvance
+            ? (
+              snapshot.revision === lastRevision + 1
+              && snapshot.cursor.source_sequence > lastSourceSequence
+            )
+            : (
+              (
+                snapshot.revision === lastRevision + 1
+                && snapshot.cursor.source_sequence > lastSourceSequence
+              )
+              || (
+                snapshot.revision === lastRevision
+                && snapshot.cursor.source_sequence === lastSourceSequence
+              )
+            )
+        );
+      if (hasAuthorityFloor
+        && (forwardResetRequiresSourceAdvance || isFastForwardComplete)
+        && !isIntentionalForwardReset) {
+        this.protocolFault(
+          "fast-forward snapshot violated its atomic reset contract",
+          generation,
+          socket,
+        );
+        return;
+      }
       if (hasAuthorityFloor
         && ((snapshot.sequence < lastSequence)
           || (snapshot.revision < lastRevision)
@@ -333,6 +372,7 @@ export class ReplayStreamController {
         return;
       }
       if (!isIntentionalSeekReset
+        && !isIntentionalForwardReset
         && hasAuthorityFloor
         && this.lastSequence !== null
         && this.lastSourceSequence !== null) {

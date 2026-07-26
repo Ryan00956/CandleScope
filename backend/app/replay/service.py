@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import secrets
 import time
@@ -43,6 +44,7 @@ from .broker.models import (
     PAPER_LINEAR_EXECUTION_MODE,
 )
 from .canonical import canonical_json_bytes, canonical_sha256
+from .checkpoints import CheckpointCodec, CheckpointError
 from .catalog import ReplayCatalog, ReplayCatalogEntry, ReplaySeriesIdentity
 from .commands import CommandResult
 from .constants import (
@@ -64,6 +66,18 @@ from .dataset import (
 from .errors import ReplayDomainError, ReplayErrorCode
 from .internal_commands import InternalCommandType
 from .models import ReplayCommand, ReplayCursor, ReplaySessionConfig
+from .period_summary import (
+    EncodedPeriodSummaryCandidate,
+    MAX_PERIOD_SUMMARY_CANDIDATES,
+    MAX_PERIOD_SUMMARY_TOTAL_COMPRESSED_BYTES,
+    PERIOD_SUMMARY_ALGORITHM_VERSION,
+    PERIOD_SUMMARY_MIN_SKIP_EVENTS,
+    PERIOD_SUMMARY_MIN_TAIL_EVENTS,
+    PERIOD_SUMMARY_YIELD_EVENTS,
+    ReplayPeriodSummary,
+    encode_component_state,
+)
+from .source_chain import next_source_chain_hash
 from .sources.bar_source import BarReplaySource
 from .sources.trade_reader import PagedReplayTradeReader
 from .sources.trade_source import TradeReplaySource
@@ -591,6 +605,343 @@ class ReplayService:
             return await handle.actor.source_events_page(
                 after_sequence=after_sequence,
                 limit=limit,
+            )
+
+    async def summary_authority(self, session_id: str) -> dict[str, object]:
+        """Expose trusted hashes to the replay.v2 planner, never component data."""
+
+        async with self._lease_handle(session_id) as handle:
+            return await handle.actor.summary_authority()
+
+    async def ensure_advance_recovery_controller(
+        self,
+        session_id: str,
+        *,
+        client_instance_id: str,
+    ) -> None:
+        """Restore only the original durable advance client's expired lease."""
+
+        async with self._lease_handle(session_id) as handle:
+            snapshot = await handle.actor.public_snapshot()
+            owner = snapshot.get("controller_client_id")
+            if owner == client_instance_id:
+                await handle.actor.heartbeat(client_instance_id)
+                return
+            if owner is not None:
+                raise ReplayDomainError(
+                    ReplayErrorCode.CONTROLLER_CONFLICT,
+                    "another client owns the replay controller lease",
+                    details={"controller_client_id": owner},
+                )
+            await handle.actor.submit(
+                ReplayCommand(
+                    protocol=REPLAY_PROTOCOL,
+                    command_id=f"advance-recovery-{uuid.uuid4().hex}",
+                    client_instance_id=client_instance_id,
+                    expected_revision=int(snapshot["revision"]),
+                    type=CommandType.ACQUIRE_CONTROLLER,
+                    payload={},
+                )
+            )
+
+    async def prepare_period_summaries(
+        self,
+        session_id: str,
+        *,
+        run_id: str,
+        set_id: str,
+        rule_revision: int,
+        rule_hash: str,
+    ) -> dict[str, object]:
+        """Build bounded exact-reducer summaries from one trusted paused seed."""
+
+        started_wall = time.perf_counter()
+        started_cpu = time.process_time()
+        async with self._lease_handle(session_id) as handle:
+            public = await handle.actor.public_snapshot()
+            if public.get("state") != SessionState.PAUSED.value:
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "period summaries can be prepared only while replay is paused",
+                )
+            if not isinstance(rule_revision, int) or isinstance(rule_revision, bool):
+                raise TypeError("rule_revision must be an integer")
+            if rule_revision < 1:
+                raise ValueError("rule_revision must be positive")
+
+            codec = CheckpointCodec()
+            payload: dict[str, object] | None = None
+            authority: dict[str, object] | None = None
+            for _attempt in range(3):
+                try:
+                    checkpoint = codec.decode(await handle.actor.checkpoint())
+                except CheckpointError as exc:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "period-summary seed checkpoint is invalid",
+                    ) from exc
+                observed = await handle.actor.summary_authority()
+                source_cursor = checkpoint.get("source_cursor")
+                if not isinstance(source_cursor, Mapping):
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "period-summary seed cursor is invalid",
+                    )
+                if (
+                    checkpoint.get("session_state") == SessionState.PAUSED.value
+                    and checkpoint.get("source_sequence")
+                    == observed.get("source_cursor", {}).get("source_sequence")  # type: ignore[union-attr]
+                    and checkpoint.get("event_chain_hash")
+                    == observed.get("event_chain_hash")
+                    and checkpoint.get("domain_command_position")
+                    == observed.get("domain_command_position")
+                    and canonical_sha256(
+                        checkpoint.get("component_state", {})  # type: ignore[arg-type]
+                    )
+                    == observed.get("component_state_hash")
+                ):
+                    payload = checkpoint
+                    authority = observed
+                    break
+                await asyncio.sleep(0)
+            if payload is None or authority is None:
+                raise ReplayDomainError(
+                    ReplayErrorCode.REVISION_CONFLICT,
+                    "replay changed while capturing the period-summary seed",
+                )
+            if authority.get("has_active_trading_path") is True:
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "period summaries cannot skip an active trading path",
+                )
+            component_state = payload.get("component_state")
+            source_cursor = payload.get("source_cursor")
+            if not isinstance(component_state, Mapping) or not isinstance(
+                source_cursor, Mapping
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "period-summary seed components are invalid",
+                )
+
+            if handle.trade_dataset_ref is None:
+                source = BarReplaySource(handle.actor_dataset)
+                total_events = len(handle.actor_dataset.replay_rows)
+                source_kind = "BAR"
+            else:
+                source = TradeReplaySource(
+                    PagedReplayTradeReader(
+                        self._raw_trade_archive,
+                        handle.trade_dataset_ref,
+                        page_rows=self.settings.trade_page_rows,
+                    ),
+                    time_offset_ms=(
+                        handle.actor_dataset.replay_start_ms
+                        - handle.trade_dataset_ref.start_time_ms
+                    ),
+                    blind_mode=handle.config.blind_mode,
+                )
+                total_events = handle.trade_dataset_ref.row_count
+                source_kind = "AGG_TRADE"
+            base_sequence = int(source_cursor["source_sequence"])
+            try:
+                source = source.fork_at_sequence(
+                    base_sequence,
+                    last_event_time_ms=source_cursor["last_event_time_ms"],  # type: ignore[arg-type]
+                )
+            except (TypeError, ValueError, ReplayDomainError) as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "period-summary source cannot restore the seed cursor",
+                ) from exc
+
+            eligible_events = (
+                total_events - base_sequence - PERIOD_SUMMARY_MIN_TAIL_EVENTS
+            )
+            if eligible_events < PERIOD_SUMMARY_MIN_SKIP_EVENTS:
+                raise ReplayDomainError(
+                    ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
+                    "not enough future source events remain for a period summary",
+                    details={
+                        "required_skip_events": PERIOD_SUMMARY_MIN_SKIP_EVENTS,
+                        "required_tail_events": PERIOD_SUMMARY_MIN_TAIL_EVENTS,
+                        "remaining_events": max(0, total_events - base_sequence),
+                    },
+                )
+            candidate_count = min(
+                MAX_PERIOD_SUMMARY_CANDIDATES,
+                max(1, eligible_events // PERIOD_SUMMARY_MIN_SKIP_EVENTS),
+            )
+            candidate_sequences = tuple(
+                sorted(
+                    {
+                        base_sequence
+                        + max(
+                            PERIOD_SUMMARY_MIN_SKIP_EVENTS,
+                            (eligible_events * index) // candidate_count,
+                        )
+                        for index in range(1, candidate_count + 1)
+                    }
+                )
+            )
+
+            reducer = self._broker(
+                handle.config,
+                handle.actor_dataset,
+                handle.broker_config,
+                trade_dataset_ref=handle.trade_dataset_ref,
+            )
+            try:
+                reducer.restore(component_state)
+            except Exception as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "period-summary reducer rejected the seed components",
+                ) from exc
+
+            chain = str(payload["event_chain_hash"])
+            base_component_hash = canonical_sha256(component_state)
+            candidates: list[EncodedPeriodSummaryCandidate] = []
+            total_compressed = 0
+            endpoint_index = 0
+            while endpoint_index < len(candidate_sequences):
+                event = source.next()
+                if event is None:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "period-summary source ended before its candidate boundary",
+                    )
+                projection = reducer.apply_source_event(event)
+                if inspect.isawaitable(projection):
+                    await projection
+                cursor = source.cursor()
+                chain = next_source_chain_hash(
+                    chain,
+                    event,
+                    cursor.source_sequence,
+                )
+                if cursor.source_sequence == candidate_sequences[endpoint_index]:
+                    state = dict(reducer.snapshot())
+                    blob, raw_bytes, blob_hash, state_hash = (
+                        encode_component_state(state)
+                    )
+                    total_compressed += len(blob)
+                    if (
+                        total_compressed
+                        > MAX_PERIOD_SUMMARY_TOTAL_COMPRESSED_BYTES
+                    ):
+                        raise ReplayDomainError(
+                            ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
+                            "period-summary compressed cache budget was exceeded",
+                            details={
+                                "limit_bytes": (
+                                    MAX_PERIOD_SUMMARY_TOTAL_COMPRESSED_BYTES
+                                )
+                            },
+                        )
+                    summary = ReplayPeriodSummary(
+                        summary_id=f"{set_id}-{endpoint_index + 1:02d}",
+                        run_id=run_id,
+                        session_id=session_id,
+                        source_kind=source_kind,
+                        data_epoch=str(authority["data_epoch"]),
+                        snapshot_ref_hash=str(authority["snapshot_ref_hash"]),
+                        session_config_hash=str(authority["session_config_hash"]),
+                        execution_version=str(authority["execution_version"]),
+                        rule_revision=rule_revision,
+                        rule_hash=rule_hash,
+                        base_source_sequence=base_sequence,
+                        base_domain_command_position=int(
+                            payload["domain_command_position"]
+                        ),
+                        base_event_chain_hash=str(payload["event_chain_hash"]),
+                        base_component_state_hash=base_component_hash,
+                        end_source_sequence=cursor.source_sequence,
+                        end_virtual_time_ms=int(cursor.last_event_time_ms),
+                        end_source_cursor={
+                            "source_sequence": cursor.source_sequence,
+                            "last_event_time_ms": cursor.last_event_time_ms,
+                            "last_base_bar_open_ms": (
+                                cursor.last_base_bar_open_ms
+                            ),
+                            "at_end": cursor.at_end,
+                        },
+                        end_event_chain_hash=chain,
+                        end_component_state=state,
+                        end_component_state_hash=state_hash,
+                    )
+                    candidates.append(
+                        EncodedPeriodSummaryCandidate.from_summary(
+                            summary,
+                            component_blob=blob,
+                            component_raw_bytes=raw_bytes,
+                            component_blob_hash=blob_hash,
+                        )
+                    )
+                    endpoint_index += 1
+                if (
+                    cursor.source_sequence - base_sequence
+                ) % PERIOD_SUMMARY_YIELD_EVENTS == 0:
+                    await asyncio.sleep(0)
+
+            elapsed_wall_ms = max(
+                0,
+                int(round((time.perf_counter() - started_wall) * 1_000)),
+            )
+            elapsed_cpu_ms = max(
+                0,
+                int(round((time.process_time() - started_cpu) * 1_000)),
+            )
+            build_metadata = {
+                "schema_version": "replay.period-summary-build-proof.v1",
+                "algorithm_version": PERIOD_SUMMARY_ALGORITHM_VERSION,
+                "set_id": set_id,
+                "run_id": run_id,
+                "session_id": session_id,
+                "source_kind": source_kind,
+                "data_epoch": str(authority["data_epoch"]),
+                "snapshot_ref_hash": str(authority["snapshot_ref_hash"]),
+                "session_config_hash": str(authority["session_config_hash"]),
+                "execution_version": str(authority["execution_version"]),
+                "rule_revision": rule_revision,
+                "rule_hash": rule_hash,
+                "base_source_sequence": base_sequence,
+                "base_domain_command_position": int(
+                    payload["domain_command_position"]
+                ),
+                "base_event_chain_hash": str(payload["event_chain_hash"]),
+                "base_component_state_hash": base_component_hash,
+                "candidate_summary_hashes": [
+                    candidate.summary_hash for candidate in candidates
+                ],
+                "source_event_count": (
+                    candidates[-1].end_source_sequence - base_sequence
+                ),
+                "candidate_count": len(candidates),
+                "compressed_bytes": total_compressed,
+            }
+            return {
+                "metadata": build_metadata,
+                "build_proof_hash": canonical_sha256(build_metadata),
+                "candidates": tuple(candidates),
+                "source_event_count": build_metadata["source_event_count"],
+                "build_wall_ms": elapsed_wall_ms,
+                "build_cpu_ms": elapsed_cpu_ms,
+            }
+
+    async def apply_period_summary(
+        self,
+        session_id: str,
+        summary: ReplayPeriodSummary,
+        *,
+        client_instance_id: str,
+        expected_revision: int,
+    ) -> dict[str, object]:
+        async with self._lease_handle(session_id) as handle:
+            return await handle.actor.apply_period_summary(
+                summary,
+                client_instance_id=client_instance_id,
+                expected_revision=expected_revision,
             )
 
     async def command(

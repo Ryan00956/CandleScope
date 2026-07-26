@@ -10,6 +10,12 @@ import {
   type ReplaySegmentPreparePlan,
 } from "./replaySegmentTypes.js";
 import {
+  parseReplayPeriodSummaryPrepare,
+  parseReplayPeriodSummaryStatus,
+  type ReplayPeriodSummaryPrepareResponse,
+  type ReplayPeriodSummaryStatusResponse,
+} from "./replayPeriodSummary.js";
+import {
   parseTrainingRunListResponse,
   parseTrainingRunMutationResponse,
   parseTrainingRunReturnResponse,
@@ -334,6 +340,28 @@ export class ReplayV2ApiClient {
       `/runs/${safeSegment(runId, "run id")}/advances/${safeSegment(commandId, "command id")}`,
       parseReplayAdvanceProgressResponse,
       signal ? { signal } : {},
+    );
+  }
+
+  periodSummaryStatusRun(
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<ReplayPeriodSummaryStatusResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/fast-forward-summaries`,
+      parseReplayPeriodSummaryStatus,
+      signal ? { signal } : {},
+    );
+  }
+
+  preparePeriodSummariesRun(
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<ReplayPeriodSummaryPrepareResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/fast-forward-summaries/prepare`,
+      parseReplayPeriodSummaryPrepare,
+      { method: "POST", ...(signal ? { signal } : {}) },
     );
   }
 

@@ -11,6 +11,7 @@ import type {
   ReplayViewerState,
 } from "./replayV2Types.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
+import type { ReplayPeriodSummaryStatusResponse } from "./replayPeriodSummary.js";
 import { rebuildReplayViewerSeries } from "./replayViewerProjection.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 
@@ -47,6 +48,9 @@ export interface ReplayViewerRuntime {
   readonly controlPending: ReplayV2Command | null;
   readonly viewerPending: boolean;
   readonly progress: Readonly<Record<string, ReplayV2Json>> | null;
+  readonly periodSummary: ReplayPeriodSummaryStatusResponse | null;
+  readonly summaryPreparing: boolean;
+  readonly summaryError: string | null;
   readonly actions: {
     setDisplayInterval(interval: string): Promise<ReplayV2CommandResult>;
     submitControl(
@@ -70,6 +74,7 @@ export interface ReplayViewerRuntime {
       payload: Readonly<Record<string, ReplayV2Json>>,
     ): Promise<ReplayV2CommandResult>;
     resyncHistoricalBook(): Promise<void>;
+    preparePeriodSummaries(): Promise<void>;
     reload(): void;
   };
 }
@@ -96,6 +101,9 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   const [controlPending, setControlPending] = useState<ReplayV2Command | null>(null);
   const [viewerPending, setViewerPending] = useState(false);
   const [progress, setProgress] = useState<Readonly<Record<string, ReplayV2Json>> | null>(null);
+  const [periodSummary, setPeriodSummary] = useState<ReplayPeriodSummaryStatusResponse | null>(null);
+  const [summaryPreparing, setSummaryPreparing] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [reloadRevision, setReloadRevision] = useState(0);
   const viewerRef = useRef(viewerState);
   viewerRef.current = viewerState;
@@ -110,6 +118,8 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     if (sessionId === null) {
       setViewerState(null);
       setMarketTracks(null);
+      setPeriodSummary(null);
+      setSummaryError(null);
       return;
     }
     const abort = new AbortController();
@@ -133,6 +143,26 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     });
     return () => abort.abort();
   }, [reloadRevision, sessionId]);
+
+  useEffect(() => {
+    const runId = viewerState?.run_id;
+    if (runId === undefined) {
+      setPeriodSummary(null);
+      return;
+    }
+    const abort = new AbortController();
+    void defaultReplayV2Api.periodSummaryStatusRun(runId, abort.signal)
+      .then((response) => {
+        setPeriodSummary(response);
+        setSummaryError(null);
+      })
+      .catch((cause: unknown) => {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        setPeriodSummary(null);
+        setSummaryError(cause instanceof Error ? cause.message : "摘要状态加载失败");
+      });
+    return () => abort.abort();
+  }, [reloadRevision, viewerState?.run_id]);
 
   const refreshMarketTracks = useCallback(async (
     runId: string,
@@ -476,6 +506,30 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     }
   }, [failClosedAndRefreshMarketTracks, refreshMarketTracks]);
 
+  const preparePeriodSummaries = useCallback(async (): Promise<void> => {
+    const runId = viewerRef.current?.run_id;
+    if (runId === undefined) throw new Error("ViewerState is unavailable");
+    if (controlRef.current !== null || summaryPreparing) {
+      throw new Error("another replay operation is pending");
+    }
+    setSummaryPreparing(true);
+    setSummaryError(null);
+    try {
+      const prepared = await defaultReplayV2Api.preparePeriodSummariesRun(runId);
+      setPeriodSummary({
+        protocol: prepared.protocol,
+        run_id: prepared.run_id,
+        enabled: prepared.enabled,
+        status: prepared.status,
+      });
+    } catch (cause) {
+      setSummaryError(cause instanceof Error ? cause.message : "摘要准备失败");
+      throw cause;
+    } finally {
+      setSummaryPreparing(false);
+    }
+  }, [summaryPreparing]);
+
   return {
     viewerState,
     marketTracks,
@@ -485,6 +539,9 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     controlPending,
     viewerPending,
     progress,
+    periodSummary,
+    summaryPreparing,
+    summaryError,
     actions: {
       setDisplayInterval,
       submitControl,
@@ -494,6 +551,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       addAndSelectTrack,
       submitTrade,
       resyncHistoricalBook,
+      preparePeriodSummaries,
       reload: () => setReloadRevision((value) => value + 1),
     },
   };

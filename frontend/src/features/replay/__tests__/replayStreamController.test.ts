@@ -117,6 +117,43 @@ function replaySeekResetEvent({
   return event;
 }
 
+function replaySummaryJumpResetEvent({
+  sequence = 11,
+  revision = 5,
+  sourceSequence = 84,
+  virtualTimeMs = BASE_TIME_MS + 5_039_999,
+  statusReason = "fast_forward_summary_jump",
+  state = "PAUSED",
+}: {
+  sequence?: number;
+  revision?: number;
+  sourceSequence?: number;
+  virtualTimeMs?: number;
+  statusReason?: string;
+  state?: string;
+} = {}) {
+  const event = replaySnapshotEvent({
+    sequence,
+    revision,
+    sourceSequence,
+    virtualTimeMs,
+    state,
+  });
+  event.data.snapshot.status_reason = statusReason;
+  return event;
+}
+
+function replayCoalescedPrefixResetEvent(
+  options: Parameters<typeof replaySummaryJumpResetEvent>[0] = {},
+) {
+  return replaySummaryJumpResetEvent({
+    sourceSequence: 96,
+    virtualTimeMs: BASE_TIME_MS + 5_759_999,
+    statusReason: "fast_forward_coalesced_prefix",
+    ...options,
+  });
+}
+
 test("stream URL is replay-only and includes bounded resume identity", () => {
   assert.equal(
     buildReplayStreamUrl({
@@ -414,6 +451,292 @@ test("backward seek snapshots require the exact reason, sequence, revision, and 
     assert.deepEqual(snapshots, [10], variant.name);
     assert.equal(controller.diagnostics().lastSequence, 10, variant.name);
     assert.equal(controller.diagnostics().lastRevision, 4, variant.name);
+    assert.equal(controller.diagnostics().lastSourceSequence, 4, variant.name);
+    assert.equal(controller.diagnostics().state, "resyncing", variant.name);
+    assert.ok(errors.includes("REPLAY_PROTOCOL_ERROR"), variant.name);
+    controller.stop();
+  }
+});
+
+test("a contiguous paused period-summary reset may atomically advance the source cursor", () => {
+  const timers = new FakeTimers();
+  const socket = new FakeSocket();
+  const snapshots: Array<{
+    sequence: number;
+    revision: number;
+    sourceSequence: number;
+    virtualTimeMs: number;
+    reason: string;
+  }> = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => socket,
+    onSnapshot: (snapshot) => snapshots.push({
+      sequence: snapshot.sequence,
+      revision: snapshot.revision,
+      sourceSequence: snapshot.cursor.source_sequence,
+      virtualTimeMs: snapshot.cursor.virtual_time_ms,
+      reason: snapshot.status_reason,
+    }),
+  });
+  controller.start();
+  socket.open();
+  socket.message(replaySnapshotEvent({
+    sequence: 10,
+    revision: 4,
+    sourceSequence: 4,
+    virtualTimeMs: BASE_TIME_MS + 239_999,
+  }));
+  socket.message(replaySummaryJumpResetEvent());
+
+  assert.deepEqual(snapshots, [
+    {
+      sequence: 10,
+      revision: 4,
+      sourceSequence: 4,
+      virtualTimeMs: BASE_TIME_MS + 239_999,
+      reason: "created",
+    },
+    {
+      sequence: 11,
+      revision: 5,
+      sourceSequence: 84,
+      virtualTimeMs: BASE_TIME_MS + 5_039_999,
+      reason: "fast_forward_summary_jump",
+    },
+  ]);
+  assert.equal(controller.diagnostics().lastSequence, 11);
+  assert.equal(controller.diagnostics().lastRevision, 5);
+  assert.equal(controller.diagnostics().lastSourceSequence, 84);
+  assert.equal(controller.diagnostics().lastVirtualTimeMs, BASE_TIME_MS + 5_039_999);
+  assert.equal(controller.diagnostics().state, "connected");
+  controller.stop();
+});
+
+test("period-summary resets require exact reason, contiguous counters, paused state, and forward cursor", () => {
+  const variants = [
+    {
+      name: "reason",
+      event: replaySummaryJumpResetEvent({ statusReason: "fast_forward_unknown" }),
+    },
+    { name: "sequence", event: replaySummaryJumpResetEvent({ sequence: 12 }) },
+    { name: "revision", event: replaySummaryJumpResetEvent({ revision: 6 }) },
+    { name: "state", event: replaySummaryJumpResetEvent({ state: "PLAYING" }) },
+    {
+      name: "virtual-time",
+      event: replaySummaryJumpResetEvent({ virtualTimeMs: BASE_TIME_MS + 119_999 }),
+    },
+    { name: "source-sequence", event: replaySummaryJumpResetEvent({ sourceSequence: 4 }) },
+  ];
+
+  for (const variant of variants) {
+    const timers = new FakeTimers();
+    const socket = new FakeSocket();
+    const snapshots: number[] = [];
+    const errors: string[] = [];
+    const controller = new ReplayStreamController({
+      sessionId: "session-0001",
+      initialDataEpoch: replayDigest("c"),
+      baseUrl: "ws://example.test",
+      timers,
+      socketFactory: () => socket,
+      onSnapshot: (snapshot) => snapshots.push(snapshot.sequence),
+      onError: (error) => errors.push(error.code),
+    });
+    controller.start();
+    socket.open();
+    socket.message(replaySnapshotEvent({
+      sequence: 10,
+      revision: 4,
+      sourceSequence: 4,
+      virtualTimeMs: BASE_TIME_MS + 239_999,
+    }));
+    socket.message(variant.event);
+
+    assert.deepEqual(snapshots, [10], variant.name);
+    assert.equal(controller.diagnostics().lastSequence, 10, variant.name);
+    assert.equal(controller.diagnostics().lastRevision, 4, variant.name);
+    assert.equal(controller.diagnostics().lastSourceSequence, 4, variant.name);
+    assert.equal(controller.diagnostics().state, "resyncing", variant.name);
+    assert.ok(errors.includes("REPLAY_PROTOCOL_ERROR"), variant.name);
+    controller.stop();
+  }
+});
+
+test("a coalesced fast-forward prefix reset establishes a causal floor for its visible tail", () => {
+  const timers = new FakeTimers();
+  const socket = new FakeSocket();
+  const snapshots: number[] = [];
+  const events: number[] = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => socket,
+    onSnapshot: (snapshot) => snapshots.push(snapshot.cursor.source_sequence),
+    onEvent: (event) => events.push(
+      (event.data as { source_sequence: number }).source_sequence,
+    ),
+  });
+  controller.start();
+  socket.open();
+  socket.message(replaySnapshotEvent({
+    sequence: 10,
+    revision: 4,
+    sourceSequence: 84,
+    virtualTimeMs: BASE_TIME_MS + 5_039_999,
+  }));
+  socket.message(replayCoalescedPrefixResetEvent());
+  const tail = replayDeltaEvent({
+    sequence: 12,
+    sourceSequence: 97,
+    openTimeMs: BASE_TIME_MS + 5_760_000,
+  });
+  tail.revision = 5;
+  socket.message(tail);
+
+  assert.deepEqual(snapshots, [84, 96]);
+  assert.deepEqual(events, [97]);
+  assert.equal(controller.diagnostics().lastSequence, 12);
+  assert.equal(controller.diagnostics().lastSourceSequence, 97);
+  assert.equal(controller.diagnostics().state, "connected");
+  controller.stop();
+});
+
+test("a final fast-forward reset converges within the visible tail command revision", () => {
+  const timers = new FakeTimers();
+  const socket = new FakeSocket();
+  const snapshots: Array<{ sequence: number; revision: number; sourceSequence: number }> = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => socket,
+    onSnapshot: (snapshot) => snapshots.push({
+      sequence: snapshot.sequence,
+      revision: snapshot.revision,
+      sourceSequence: snapshot.cursor.source_sequence,
+    }),
+  });
+  controller.start();
+  socket.open();
+  socket.message(replaySnapshotEvent({
+    sequence: 10,
+    revision: 4,
+    sourceSequence: 84,
+    virtualTimeMs: BASE_TIME_MS + 5_039_999,
+  }));
+  socket.message(replayCoalescedPrefixResetEvent());
+  const tail = replayDeltaEvent({
+    sequence: 12,
+    sourceSequence: 97,
+    openTimeMs: BASE_TIME_MS + 5_760_000,
+  });
+  tail.revision = 5;
+  socket.message(tail);
+  socket.message(replaySummaryJumpResetEvent({
+    sequence: 13,
+    revision: 5,
+    sourceSequence: 97,
+    virtualTimeMs: BASE_TIME_MS + 5_819_999,
+    statusReason: "fast_forward_complete",
+  }));
+
+  assert.deepEqual(snapshots, [
+    { sequence: 10, revision: 4, sourceSequence: 84 },
+    { sequence: 11, revision: 5, sourceSequence: 96 },
+    { sequence: 13, revision: 5, sourceSequence: 97 },
+  ]);
+  assert.equal(controller.diagnostics().lastSequence, 13);
+  assert.equal(controller.diagnostics().lastRevision, 5);
+  assert.equal(controller.diagnostics().lastSourceSequence, 97);
+  assert.equal(controller.diagnostics().state, "connected");
+  controller.stop();
+});
+
+test("an exact terminal fast-forward reset may atomically publish the exhausted cursor", () => {
+  const timers = new FakeTimers();
+  const socket = new FakeSocket();
+  const snapshots: Array<{ state: string; sourceSequence: number }> = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => socket,
+    onSnapshot: (snapshot) => snapshots.push({
+      state: snapshot.state,
+      sourceSequence: snapshot.cursor.source_sequence,
+    }),
+  });
+  controller.start();
+  socket.open();
+  socket.message(replaySnapshotEvent({
+    sequence: 10,
+    revision: 4,
+    sourceSequence: 84,
+    virtualTimeMs: BASE_TIME_MS + 5_039_999,
+  }));
+  const terminal = replaySummaryJumpResetEvent({
+    sourceSequence: 128,
+    virtualTimeMs: BASE_TIME_MS + 7_679_999,
+    statusReason: "fast_forward_complete",
+    state: "ENDED",
+  });
+  terminal.data.snapshot.cursor.at_end = true;
+  terminal.data.snapshot.components.ended = true;
+  socket.message(terminal);
+
+  assert.deepEqual(snapshots, [
+    { state: "PAUSED", sourceSequence: 84 },
+    { state: "ENDED", sourceSequence: 128 },
+  ]);
+  assert.equal(controller.diagnostics().lastSequence, 11);
+  assert.equal(controller.diagnostics().lastSourceSequence, 128);
+  assert.equal(controller.diagnostics().state, "connected");
+  controller.stop();
+});
+
+test("coalesced-prefix resets reject non-contiguous or non-forward authority", () => {
+  const variants = [
+    { name: "sequence", event: replayCoalescedPrefixResetEvent({ sequence: 12 }) },
+    { name: "revision", event: replayCoalescedPrefixResetEvent({ revision: 6 }) },
+    { name: "state", event: replayCoalescedPrefixResetEvent({ state: "PLAYING" }) },
+    {
+      name: "virtual-time",
+      event: replayCoalescedPrefixResetEvent({ virtualTimeMs: BASE_TIME_MS + 119_999 }),
+    },
+    { name: "source-sequence", event: replayCoalescedPrefixResetEvent({ sourceSequence: 4 }) },
+  ];
+
+  for (const variant of variants) {
+    const timers = new FakeTimers();
+    const socket = new FakeSocket();
+    const errors: string[] = [];
+    const controller = new ReplayStreamController({
+      sessionId: "session-0001",
+      initialDataEpoch: replayDigest("c"),
+      baseUrl: "ws://example.test",
+      timers,
+      socketFactory: () => socket,
+      onError: (error) => errors.push(error.code),
+    });
+    controller.start();
+    socket.open();
+    socket.message(replaySnapshotEvent({
+      sequence: 10,
+      revision: 4,
+      sourceSequence: 4,
+      virtualTimeMs: BASE_TIME_MS + 239_999,
+    }));
+    socket.message(variant.event);
+
+    assert.equal(controller.diagnostics().lastSequence, 10, variant.name);
     assert.equal(controller.diagnostics().lastSourceSequence, 4, variant.name);
     assert.equal(controller.diagnostics().state, "resyncing", variant.name);
     assert.ok(errors.includes("REPLAY_PROTOCOL_ERROR"), variant.name);

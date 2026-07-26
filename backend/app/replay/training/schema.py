@@ -13,6 +13,8 @@ TRAINING_SCHEMA_VERSION = 9
 TRAINING_SCHEMA_ID = "replay.training.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
 DATA_POLICY_SCHEMA_VERSION = "replay.data-policy.v1"
+PERIOD_SUMMARY_SET_SCHEMA_VERSION = "replay.period-summary-set.v1"
+ADVANCE_INTENT_SCHEMA_VERSION = "replay.advance-intent.v1"
 
 
 TRAINING_SCHEMA_V1 = """
@@ -815,6 +817,133 @@ CREATE TABLE IF NOT EXISTS replay_training_data_policy (
 """
 
 
+TRAINING_SCHEMA_PHASE15_ADDITIVE = """
+CREATE TABLE IF NOT EXISTS replay_training_fast_forward_summary_set (
+    set_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.period-summary-set.v1'),
+    algorithm_version TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('PREPARING', 'READY', 'FAILED', 'CANCELLED')),
+    active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
+    metadata_json TEXT NOT NULL,
+    build_proof_hash TEXT
+        CHECK (
+            build_proof_hash IS NULL
+            OR (
+                length(build_proof_hash) = 71
+                AND substr(build_proof_hash, 1, 7) = 'sha256:'
+            )
+        ),
+    candidate_count INTEGER NOT NULL DEFAULT 0 CHECK (candidate_count >= 0),
+    source_event_count INTEGER NOT NULL DEFAULT 0 CHECK (source_event_count >= 0),
+    raw_state_bytes INTEGER NOT NULL DEFAULT 0 CHECK (raw_state_bytes >= 0),
+    compressed_bytes INTEGER NOT NULL DEFAULT 0 CHECK (compressed_bytes >= 0),
+    build_wall_ms INTEGER NOT NULL DEFAULT 0 CHECK (build_wall_ms >= 0),
+    build_cpu_ms INTEGER NOT NULL DEFAULT 0 CHECK (build_cpu_ms >= 0),
+    error_code TEXT,
+    error_message TEXT,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    CHECK (
+        (status = 'READY' AND active IN (0, 1)
+         AND build_proof_hash IS NOT NULL AND candidate_count > 0)
+        OR
+        (status != 'READY' AND active = 0)
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_replay_training_summary_active
+ON replay_training_fast_forward_summary_set(run_id)
+WHERE active = 1;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_replay_training_summary_preparing
+ON replay_training_fast_forward_summary_set(run_id)
+WHERE status = 'PREPARING';
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_summary_status
+ON replay_training_fast_forward_summary_set(run_id, updated_at_ms DESC, set_id DESC);
+
+CREATE TABLE IF NOT EXISTS replay_training_fast_forward_summary (
+    set_id TEXT NOT NULL
+        REFERENCES replay_training_fast_forward_summary_set(set_id)
+        ON DELETE CASCADE,
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    summary_id TEXT NOT NULL,
+    end_source_sequence INTEGER NOT NULL CHECK (end_source_sequence >= 1),
+    end_virtual_time_ms INTEGER NOT NULL CHECK (end_virtual_time_ms >= 0),
+    event_count INTEGER NOT NULL CHECK (event_count >= 1),
+    summary_hash TEXT NOT NULL
+        CHECK (
+            length(summary_hash) = 71
+            AND substr(summary_hash, 1, 7) = 'sha256:'
+        ),
+    metadata_json TEXT NOT NULL,
+    component_blob BLOB NOT NULL CHECK (length(component_blob) >= 1),
+    component_raw_bytes INTEGER NOT NULL CHECK (component_raw_bytes >= 1),
+    component_blob_hash TEXT NOT NULL
+        CHECK (
+            length(component_blob_hash) = 71
+            AND substr(component_blob_hash, 1, 7) = 'sha256:'
+        ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY(set_id, summary_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_summary_candidate
+ON replay_training_fast_forward_summary(
+    run_id, end_virtual_time_ms DESC, end_source_sequence DESC
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_advance_intent (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    command_id TEXT NOT NULL,
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.advance-intent.v1'),
+    command_json TEXT NOT NULL,
+    command_hash TEXT NOT NULL
+        CHECK (
+            length(command_hash) = 71
+            AND substr(command_hash, 1, 7) = 'sha256:'
+        ),
+    session_id TEXT NOT NULL,
+    initial_cursor_json TEXT NOT NULL,
+    target_virtual_time_ms INTEGER NOT NULL
+        CHECK (target_virtual_time_ms >= 0),
+    plan_json TEXT NOT NULL,
+    summary_id TEXT,
+    summary_hash TEXT
+        CHECK (
+            summary_hash IS NULL
+            OR (
+                length(summary_hash) = 71
+                AND substr(summary_hash, 1, 7) = 'sha256:'
+            )
+        ),
+    status TEXT NOT NULL
+        CHECK (status IN ('RUNNING', 'COMPLETED', 'CANCELLED', 'FAILED')),
+    latest_cursor_json TEXT NOT NULL,
+    result_json TEXT,
+    failure_json TEXT,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    PRIMARY KEY(run_id, command_id),
+    CHECK (
+        (status IN ('COMPLETED', 'CANCELLED') AND result_json IS NOT NULL)
+        OR
+        (status NOT IN ('COMPLETED', 'CANCELLED'))
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_advance_intent_status
+ON replay_training_advance_intent(run_id, status, updated_at_ms DESC);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -1205,6 +1334,9 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     # open while new binaries fail closed when a policy row is missing.
     _execute_script(connection, TRAINING_SCHEMA_PHASE14_ADDITIVE)
     _backfill_data_policies(connection, now_ms=now_ms)
+    # Phase 15 remains additive at schema v9 so a Phase 14 binary can ignore
+    # derived summaries and durable advance intents without rewriting them.
+    _execute_script(connection, TRAINING_SCHEMA_PHASE15_ADDITIVE)
     connection.execute(
         """
         INSERT INTO replay_training_schema_version(singleton, version, applied_at_ms)
@@ -1225,7 +1357,9 @@ def _execute_script(connection: sqlite3.Connection, script: str) -> None:
 
 
 __all__ = [
+    "ADVANCE_INTENT_SCHEMA_VERSION",
     "DATA_POLICY_SCHEMA_VERSION",
+    "PERIOD_SUMMARY_SET_SCHEMA_VERSION",
     "START_SELECTION_SCHEMA_VERSION",
     "TRAINING_SCHEMA_ID",
     "TRAINING_SCHEMA_VERSION",

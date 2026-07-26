@@ -154,6 +154,20 @@ test("Phase 8 workspace exposes explainable plans and fail-closed aggregate trad
   assert.doesNotMatch(`${rail}\n${hook}`, /useMarketDataRuntime|SeriesDataFeed|WebSocket/);
 });
 
+test("Phase 15 workspace exposes explicit bounded summary preparation and proof status", () => {
+  const controls = source("src/features/replay/components/ReplayControlBar.tsx");
+  const runtime = source("src/features/replay/useReplayViewerRuntime.ts");
+  const api = source("src/features/replay/replayV2Api.ts");
+  assert.match(controls, /data-replay-period-summary/);
+  assert.match(controls, /data-replay-action="prepare-period-summaries"/);
+  assert.match(controls, /build_wall_ms/);
+  assert.match(controls, /summaryStatus/);
+  assert.match(runtime, /preparePeriodSummariesRun/);
+  assert.match(runtime, /periodSummaryStatusRun/);
+  assert.match(api, /fast-forward-summaries\/prepare/);
+  assert.doesNotMatch(`${controls}\n${runtime}\n${api}`, /useMarketDataRuntime|\/market\//);
+});
+
 test("workspace preferences inherit live layout once and then persist only inside the run scope", () => {
   const storage = new MemoryStorage();
   storage.setItem("candlescope-sidebar-width", "410");

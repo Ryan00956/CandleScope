@@ -791,6 +791,25 @@ async def replay_v2_fast_forward_plan(
     )
 
 
+@router.get("/runs/{run_id}/fast-forward-summaries")
+async def replay_v2_fast_forward_summary_status(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).get_period_summary_status(run_id)
+
+
+@router.post(
+    "/runs/{run_id}/fast-forward-summaries/prepare",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def prepare_replay_v2_fast_forward_summaries(
+    request: Request,
+    run_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).prepare_period_summaries(run_id)
+
+
 @router.get("/runs/{run_id}/trade-flow")
 async def replay_v2_trade_flow_page(
     request: Request,

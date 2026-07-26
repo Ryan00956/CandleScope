@@ -379,6 +379,7 @@ class PagedReplayTradeReader:
                 end_time_ms=self.dataset_ref.end_time_ms,
                 start_agg_trade_id=first_id,
                 end_agg_trade_id=last_id,
+                after=None,
                 limit=expected_rows,
                 dataset_ref=self.dataset_ref,
             )

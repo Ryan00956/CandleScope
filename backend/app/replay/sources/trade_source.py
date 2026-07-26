@@ -127,11 +127,19 @@ class TradeReplaySource:
                 ReplayErrorCode.DATASET_MISMATCH,
                 "aggregate-trade checkpoint event time is invalid",
             )
-        if self._blind_mode and self._first_actual_trade_id is None:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_MISMATCH,
-                "blind aggregate-trade source cannot reconstruct its origin",
+        first_actual_trade_id = self._first_actual_trade_id
+        if self._blind_mode and first_actual_trade_id is None:
+            origin = self._reader.read_sequence_page(
+                after_sequence=0,
+                revealed_sequence=1,
+                limit=1,
             )
+            if len(origin.trades) != 1:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "blind aggregate-trade source cannot reconstruct its origin",
+                )
+            first_actual_trade_id = origin.trades[0].first_trade_id
         actual_agg_trade_id = (
             self._reader.dataset_ref.expected_first_agg_trade_id
             + source_sequence
@@ -152,6 +160,7 @@ class TradeReplaySource:
         forked._last_public_agg_trade_id = (
             source_sequence if self._blind_mode else actual_agg_trade_id
         )
+        forked._first_actual_trade_id = first_actual_trade_id
         return forked
 
     def peek(self) -> ReplayTrade | None:

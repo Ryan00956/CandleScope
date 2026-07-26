@@ -221,6 +221,7 @@ frontend/.playwright-cli/
 frontend/output/
 .playwright-cli/
 output/playwright/*/
+output/phase15-*/
 frontend/*.tsbuildinfo
 docs/perf-baselines/*
 !docs/perf-baselines/drawing-engine-v2/

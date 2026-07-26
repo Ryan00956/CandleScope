@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_14_VERIFIED / PHASE_13_COMMITTED / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–13 已独立提交，Phase 14 已完成实现与提交前验收，Phase 15–18 仍须按本文恢复的原始路线逐阶段实施。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
+状态：`PHASE_15_PASS / PHASE_14_COMMITTED / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–14 已独立提交，Phase 15 已完成实现与门禁并等待本阶段独立提交，Phase 16–18 仍须逐阶段完成。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -1463,16 +1463,58 @@ data-policy 表与 history v2 都是 additive replay.v2 所有物；training sch
 
 ## 26. Phase 15：真正的 checkpoint 快进
 
-### 背景与范围
+### 背景审计
 
-Phase 8 的 `AGGREGATE_SCAN` 仍逐事件执行，只减少中间投影，不是产品目标中的真正跳转。Phase 15 建立可用 checkpoint candidate 和精确 period summary：在完全没有订单、持仓、funding、risk、book 或其他路径依赖时，使用 `checkpoint + summaries + tail` 物化最终状态；任何路径依赖存在时必须全量扫描或阻止。
+Phase 8 冻结了四态 planner、进度/取消和 exact reducer reference，但其 `AGGREGATE_SCAN` 对每一条 BAR/aggTrade 仍调用 source、broker/bar-builder、event-chain 与 actor commit；它只合并普通投影，不能称为真正跳转。现有 `checkpoint_identity_match` 从未连接可用 candidate，`estimated_events/max_events` 也没有真实来源。
 
-### 退出门槛
+仓库已有可复用的正确性基础：
 
-- 每一个优化计划的完整状态、event/ledger chain、cursor 和 hash 与 full-event reference 相同。
-- summary 身份绑定 source checksum、规则版本、区间和算法版本；任一漂移拒绝复用。
-- 有仓位、挂单、条件单、资金费、爆仓风险、规则生效点或 BOOK 依赖时从不选择 summary skip。
-- 使用真实 BAR/AGG 数据冻结 1 天/7 天目标、CPU/RSS/IO 预算与取消边界，不用合成空账户成绩代替。
+1. BAR 与 AGG source 都能按已验证 sequence 定位；BAR 为内存 O(1)，AGG 为 manifest/cursor 定位且只保留有界 page，不必重放前缀。
+2. actor state hash 已绑定 dataset/session/execution identity、cursor、完整 source-event chain、domain command position、披露状态和 reducer component state；revision/投影事件数量不会伪装成领域等价。
+3. 非命令内部 mutation 可以把完整 checkpoint 与 checksum 原子写入 SQLite，恢复会优先使用有效 checkpoint，并能从旧 checkpoint 的 mutation tail 再应用内部 checkpoint。
+4. BAR snapshot 和 aggTrade generation 都有 immutable data epoch/source checksum；TrainingRun 有 active rule revision/hash、segment pin 与 dataset identity。
+5. 现有 planner 已对多 FULL 轨、funding、非 ACTIVE risk、BOOK、open order/position 和 degraded state 退回 `FULL_EVENT_SCAN/BLOCKED`，但还没有防止规则漂移、summary 腐坏、domain mutation 或“已成交后恢复初始账户摘要”。
+6. v2 command 只有完成结果，没有 durable RUNNING advance intent；若 checkpoint jump 已提交而 HTTP/进程在外层结果落库前中断，必须能从当前可信 checkpoint 幂等续跑，而不是要求客户端猜测结果。
+
+### 冻结合同与实现计划
+
+1. 新增 `replay.period-summary.v1` 与 `replay.period-summary.algorithm.v1`。每个 summary 绑定：run/session、source kind、data epoch、snapshot-ref hash、session-config hash、execution version、active rule revision/hash、base cursor/domain position/event-chain/component hash、结束 cursor/time/event-chain、压缩前 component checksum、算法版本和 canonical summary hash。
+2. summary 是 replay-owned、可删除重建的派生缓存，不是新的市场事实。显式 prepare 从当前可信 actor checkpoint 建立最多 64 个累计 candidate，逐事件 exact reducer 只发生在准备阶段；每 64 个事件让出事件循环，取消或失败时不发布半成品。单个解压状态和总压缩缓存分别受 64 MiB / 128 MiB 硬预算约束，超限不截断、不降精度。
+3. prepare 成本、summary bytes/count/source events 与 build proof 单独展示；不得把它计作 checkpoint jump 的执行成绩。未 prepare、候选不足或优化开关关闭时仍可使用 Phase 8 `AGGREGATE_SCAN/FULL_EVENT_SCAN`，正确性不依赖缓存。
+4. 单 FULL 轨、PAUSED、身份/规则一致、funding/book 关闭、账户风险正常且没有活动订单/持仓/条件单/强平路径时，planner 才查询 candidate。当前 domain position 必须与 summary base 相同；当前 cursor 必须位于 base 与 candidate end 之间。规则、source、config、algorithm、hash、blob 或预算任一漂移都拒绝复用并明确回到 reference path。
+5. actor 在自己的 single-writer mailbox 内再次校验 controller/revision、summary hash、身份、base lineage、无活动交易路径、结束 source cursor 和 component checksum；然后 O(1) 定位 source、恢复 exact component、设置累计 event-chain/clock，发布一个 reset snapshot，并把内部 `summary_jump` checkpoint commit-before-publish。最后不足一个 summary period 的 head/tail 仍逐事件 exact reducer，可取消且只停在完整 actor commit boundary。
+6. 新增 durable advance intent：外层 v2 command、初始 cursor/state、目标、plan/summary identity 和状态先落库；summary jump 或 tail 已提交后即使响应丢失/进程重启，同一 command id 也从当前 checkpoint 继续并原子写入唯一完成结果。不同 payload 复用 command id 仍 409。
+7. `CHECKPOINT_JUMP` 的结果分别报告 `summary_skipped_events`、`tail_reducer_events`、summary/build proof、观察到的 cursor/state/component/report hash 和 `VERIFIED_BY_CHECKPOINT_SUMMARY_TAIL`；不能继续使用 Phase 8 的 `VERIFIED_BY_EXACT_REDUCER_PATH` 文案冒充真实跳转。
+8. Hub/工作台提供 replay-only summary 状态、显式准备/重建动作、身份/预算/失败说明和当前 fast-forward plan；不访问 live endpoint，不公开盲化 Run 的实际时间或 component payload。优化与自动准备均不改变仓库默认关闭状态。
+9. replay.training schema version 保持 v9；summary set/candidate/advance intent 均为 additive 表，Phase 14 build 安全忽略。关闭优化时不读取或执行 summary，旧存档和 v1 actor 不改写。
+
+### 测试与退出门槛
+
+- BAR 与 AGG 分别证明：prepare exact scan -> candidate -> O(1) summary jump -> exact tail 的 cursor、source-event chain、component、account/ledger、report 和领域 state hash与独立 `FULL_EVENT_SCAN` reference 完全一致；执行路径实际 reducer 调用显著少于 source event 数。
+- candidate 的 source/config/execution/rule/base lineage、range、algorithm、summary hash、压缩 blob 与 component checksum 任一篡改都拒绝；当前已越界、规则 revision 变化、domain mutation、活动/历史未被 summary 基线包含的交易状态均不能覆盖账户历史。
+- open/conditional order、position、funding、risk/liquidation、BOOK、多 FULL track、degraded segment 和 summary 预算失败都走明确 reference/BLOCKED 路径；不允许静默近似。
+- summary jump 前、原子提交后、tail 中途三处取消/故障，以及优雅重启/强制恢复/同 command id 重试均停在可信 checkpoint，最终可续跑到相同 hash；corrupt newest checkpoint 仍按既有规则回退或 fail closed。
+- prepare single-flight、并发调用、请求取消、进程重启、派生缓存替换和 SQLite quick/foreign-key 均通过；64 candidate、128 MiB 总预算和解压上限可观测且严格执行。
+- 使用本机只读真实 BAR 存储和 checksum-bound aggTrade archive 分别冻结 1 天/7 天证据；分开记录 prepare 与 execute 的 wall/CPU/RSS/read bytes、reducer calls、tail events 和 DB bytes。合成数据只做边界测试，不能替代最终性能结论。
+- 前端 strict parser、准备/失败/引用路径、盲化时间、进度取消和默认关闭全覆盖；真实浏览器验证 prepare -> `CHECKPOINT_JUMP` -> reload/retry，同时 network 仍为 replay-only、console/page errors 为 0。
+- scoped Ruff、后端全量、frontend `npm run check`、提交级 reverse-apply、Phase 14 detached baseline 和独立 commit 全部 PASS，才进入 Phase 16。
+
+### 回滚
+
+关闭 `REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED` 后 planner 不读取 summary，所有 advance 使用既有 exact reference；additive summary/intent 表和已提交 checkpoint 保留，不删除缓存、不逆写 actor 或 v1 schema。回滚到 Phase 14 必须能从 summary-jump 后的普通 actor checkpoint 恢复同一存档；旧 build 不需要理解 summary 表。
+
+### 执行记录（2026-07-26）
+
+1. 新增 `replay.period-summary.v1`、累计 build proof、严格 zlib/canonical component codec、BAR/AGG 可定位 source、actor mailbox 内 `summary_jump` 和 durable `replay.advance-intent.v1`。prepare 只发布完整 READY set；candidate 最多 64 个，单状态解压上限 64 MiB，总压缩预算 128 MiB。source/config/execution/rule/generation/base lineage、event-chain、component/blob/summary hash 任一不一致均拒绝，优化关闭时 summary storage 读取计数为 0。
+2. 真正命中的路径先 O(1) 恢复 exact component/source cursor/event-chain，再只处理精确 tail；结果明确给出 `summary_skipped_events`、`tail_reducer_events`、build/summary proof 和 `VERIFIED_BY_CHECKPOINT_SUMMARY_TAIL`。活动交易路径、规则/身份漂移、BOOK/funding/risk/multi-FULL 等仍走 explainable reference/BLOCKED，不把近似称为 exact。
+3. response loss、最新 durable cursor 丢失、summary 已提交后取消、tail 取消、caller cancel、commit failure、corrupt candidate/checkpoint、相同 command 重试与重启恢复均有真实 SQLite/actor 回归。恢复会为原 durable client 重建 controller，按可信 checkpoint/cursor 继续；不同 payload 复用 command id 仍 fail closed。
+4. 真实浏览器首次暴露了旧 stream causal gate 与新 summary skip 的协议缺口：一个 reset snapshot 合法跨越多个 source event，且隐藏投影前缀后首个可见 tail delta 缺少新的 causal floor。最终实现只接受 reason/state/sequence/revision/cursor 全部精确匹配的 `fast_forward_summary_jump`、`fast_forward_coalesced_prefix` 和 `fast_forward_complete` 原子 reset；隐藏前缀与可见 tail 之间 commit 后才发布 reset，普通伪造、倒退和不连续 snapshot 仍 resync/fail closed。对应前后端 stream 回归覆盖 PAUSED、ENDED、同 revision 最终收敛和非法变体。
+5. 自动门禁最终为：Phase 15 主文件 `13 passed`；actor/stream/trade source 与 Phase 5/8/10–15 扩大矩阵 `146 passed`；前端 Phase 15 + stream 定向 `28 passed`；后端全量 `2058 passed`，仅 4 个既有 FastAPI `on_event` 弃用警告；frontend `npm run check` 的 architecture、两个 TypeScript project、ESLint、`2429 passed` 与 production build 全部通过。变更 Python scope Ruff、compileall、Git whitespace 均 PASS。
+6. 本机只读真实 BAR SQLite 的 1 天/7 天证据分别处理 1,440/10,080 个 source event，summary skip 1,408/10,048，tail 均为 32，12/12 checks 全部通过。prepare/jump/reference wall 分别为 1,819/1,774/424 ms 与 30,223/11,776/3,759 ms；result SHA-256 分别为 `ca6a9ce345c11f669f57f950c8f1565c8c3b8a23a917870f9927ece984a5e6b2`、`78d0b7faf4c2d9c292ce4b06649df18fb82fa0b300bf2358bd24fbd3499110f4`。
+7. Binance 官方 checksum-bound BTCUSDT aggTrades 2024-03-01 至 2024-03-07 共 2,287,203 行，ID 160040775–162327977，无 gap/duplicate，archive audit SHA-256=`51c17e4abbbe7b5ba8dd12e9f1d528f114502da2ee62377cfd0b19d0a74e7adf`。1 天/7 天 summary skip 为 292,488/2,287,171，tail 均 32；prepare 62,869/494,598 ms，jump 4,984/26,613 ms，完整 reference 77,970/849,056 ms，12/12 checks 全部通过。result SHA-256 分别为 `f3654496f8f32ef46b9e6435d206e4c9c4e2cb86681309927386731cfd760cb2`、`5aa40be187d5cc4f83dc2ab7be08e20735d39259cc3d470c7169b348465307b6`；prepare 成本未伪装成 execute 成绩。
+8. headed Chromium 最终在全新库完成 UI create -> EMPTY -> 显式 prepare -> READY -> plan -> 实际 `CHECKPOINT_JUMP` -> reload -> 同 command retry。READY 为 2 candidates/168 source events/12,190 compressed bytes/77 ms；实际 cursor=#150，页面显示最终 `VERIFIED_BY_CHECKPOINT_SUMMARY_TAIL`，retry 200 且 revision/state hash 不变。419 个请求没有非 replay API，console/page errors 均为 0；机器输出包含显式 `PHASE15_PASS`，runner 也会把 Playwright `### Error` 或缺少 PASS token 当作失败。截图 SHA-256=`ffb3305a59154a181c2255cd46e41051328c54248e36dc277461285de740c952`，证据位于 ignored `output/playwright/phase15-20260726/`。
+9. 最终浏览器 `replay.db` 为 1,179,648 B、SHA-256=`b4e50064db9581d66c68926a0f12b22970a6342c4b998f591f53bc2ed863db89`，training schema=9，包含 1 run/session、1 READY set、2 candidates、1 COMPLETED intent/command；与 `candlescope.db` 均 `quick_check=ok`、foreign-key 零行、无 WAL/SHM，`:18087/:15180` 已释放。Phase 14 v9 旧库从 0 个 Phase 15 表原位新增 3 个表且版本仍为 9；PREPARING build 重启后确定转为 `FAILED/PROCESS_RESTARTED`，两项迁移证据数据库亦 quick/FK/WAL 门禁通过。
+10. detached Phase 14 父提交 `5c38d27` 的 Phase 14 回归 8/8 通过并清理 worktree；完整 staged patch 通过 `git apply --reverse --check --whitespace=error-all`。默认 replay/v2、frontend entry/v2、segment worker/GC、raw archive、historical book 和 fast-forward optimization 开关继续关闭。Decision：实现、真实数据、全量回归、浏览器、SQLite、父基线和反向补丁均 PASS；Phase 15 独立提交成功后才进入 Phase 16，release 继续 HOLD。
 
 ---
 

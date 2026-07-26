@@ -29,6 +29,7 @@ function fastForwardPlan(value: ReplayV2Json | undefined): {
   readonly explanation: string;
   readonly reasons: readonly string[];
   readonly equivalence: string;
+  readonly summaryStatus: string | null;
 } | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const plan = value as Readonly<Record<string, ReplayV2Json>>;
@@ -49,7 +50,16 @@ function fastForwardPlan(value: ReplayV2Json | undefined): {
   const equivalence = typeof equivalenceObject?.status === "string"
     ? equivalenceObject.status
     : "UNKNOWN";
-  return { mode, explanation, reasons, equivalence };
+  const summaryValue = plan.period_summary;
+  const summaryObject = summaryValue !== null
+    && typeof summaryValue === "object"
+    && !Array.isArray(summaryValue)
+    ? summaryValue as Readonly<Record<string, ReplayV2Json>>
+    : null;
+  const summaryStatus = typeof summaryObject?.status === "string"
+    ? summaryObject.status
+    : null;
+  return { mode, explanation, reasons, equivalence, summaryStatus };
 }
 
 export interface ReplayControlBarProps {
@@ -111,6 +121,9 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
     originMs: store.replayStartMs,
   });
   const publicTime = publicTimeLabel ?? fallbackPublicTime;
+  const summaryBuild = viewer?.periodSummary?.status.active_set
+    ?? viewer?.periodSummary?.status.latest_build
+    ?? null;
   const command = (type: Parameters<ReplayRuntime["actions"]["submitCommand"]>[0], payload: Parameters<ReplayRuntime["actions"]["submitCommand"]>[1] = {}) => {
     void runtime.actions.submitCommand(type, payload).catch(() => undefined);
   };
@@ -413,6 +426,53 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
           <span>{visiblePlan.explanation}</span>
           {visiblePlan.reasons.length > 0 && <code>{visiblePlan.reasons.join(" · ")}</code>}
           <em>equivalence: {visiblePlan.equivalence}</em>
+          {visiblePlan.summaryStatus !== null && (
+            <em>summary: {visiblePlan.summaryStatus}</em>
+          )}
+        </div>
+      )}
+
+      {viewer !== undefined && (
+        <div
+          className="replay-period-summary-status"
+          data-replay-period-summary={
+            viewer.periodSummary?.enabled === false
+              ? "DISABLED"
+              : summaryBuild?.status ?? (viewer.summaryError === null ? "EMPTY" : "ERROR")
+          }
+        >
+          <strong>Checkpoint 摘要</strong>
+          {viewer.periodSummary?.enabled === false ? (
+            <span>优化开关关闭；推进继续使用精确逐事件参考路径。</span>
+          ) : summaryBuild === null ? (
+            <span>尚未准备可验证摘要。</span>
+          ) : (
+            <span>
+              {summaryBuild.status} · {summaryBuild.candidate_count} 个候选 ·
+              {" "}{summaryBuild.compressed_bytes} bytes ·
+              {" "}{summaryBuild.build_wall_ms} ms 准备成本
+            </span>
+          )}
+          {viewer.summaryError !== null && (
+            <span role="alert">{viewer.summaryError}</span>
+          )}
+          <button
+            type="button"
+            data-replay-action="prepare-period-summaries"
+            disabled={
+              viewer.periodSummary?.enabled === false
+              || viewer.summaryPreparing
+              || viewer.controlPending !== null
+              || viewer.viewerPending
+              || effectiveState !== "PAUSED"
+              || store.connectionState !== "connected"
+            }
+            onClick={() => void viewer.actions.preparePeriodSummaries().catch(() => undefined)}
+          >
+            {viewer.summaryPreparing
+              ? "正在精确扫描准备…"
+              : summaryBuild?.status === "READY" ? "重建摘要" : "准备摘要"}
+          </button>
         </div>
       )}
 

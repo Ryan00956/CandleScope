@@ -13,6 +13,7 @@ import {
 } from "../replayParser.js";
 import type { ReplayStreamControllerOptions } from "../replayStreamController.js";
 import {
+  buildReplayMarketDataRuntime,
   createReplayRuntimeStorePublishScheduler,
   ReplayLifecycleEffectGuard,
   ReplayRuntimeLifecycle,
@@ -100,6 +101,24 @@ test("React-facing replay store publishes coalesce to one asynchronous task", ()
   assert.deepEqual(canceled, [2]);
   assert.equal(callbacks.size, 0);
   assert.equal(publishes, 1);
+});
+
+test("replay market-data actions keep stable identities across authoritative publications", () => {
+  const lifecycle = new ReplayRuntimeLifecycle({
+    entry: { kind: "error", code: "REPLAY_ENTRY_INVALID", message: "not started" },
+  });
+  const before = buildReplayMarketDataRuntime(lifecycle.getSnapshot(), lifecycle);
+
+  lifecycle.store.beginGeneration(1, {
+    resetAuthoritativeState: true,
+    connectionState: "connecting",
+  });
+  const after = buildReplayMarketDataRuntime(lifecycle.getSnapshot(), lifecycle);
+
+  assert.strictEqual(after.actions, before.actions);
+  assert.strictEqual(after.actions.onCrosshairMove, before.actions.onCrosshairMove);
+  assert.strictEqual(after.actions.onVisibleRangeChange, before.actions.onVisibleRangeChange);
+  lifecycle.dispose();
 });
 
 test("HTTP session snapshot validates only; first published chart truth is the WS atomic snapshot", async (context) => {

@@ -245,6 +245,7 @@ function assertInitialStreamAuthorityFloor(
 
 export class ReplayRuntimeLifecycle {
   readonly store: ReplayStore;
+  readonly marketDataActions: MarketDataRuntimeContract["actions"];
   private readonly entry: ReplayEntry;
   private readonly api: ReplayApiBoundary;
   private readonly streamFactory: (options: ReplayStreamControllerOptions) => ReplayStreamBoundary;
@@ -296,6 +297,13 @@ export class ReplayRuntimeLifecycle {
     this.entry = entry;
     this.api = api;
     this.store = store;
+    this.marketDataActions = {
+      retry: () => this.restart(),
+      loadMoreLeft: async () => undefined,
+      onCrosshairMove: (value) => this.store.setCrosshairData(value),
+      onVisibleRangeChange: () => this.store.markVisibleRangePending(),
+      consumeIndicatorRangeRequest: (requestId) => this.store.consumeIndicatorRequest(requestId),
+    };
     this.streamFactory = streamFactory;
     this.clientInstanceId = clientInstanceId;
     this.commandIdFactory = commandIdFactory;
@@ -1199,7 +1207,7 @@ export class ReplayRuntimeLifecycle {
   }
 }
 
-function buildReplayMarketDataRuntime(
+export function buildReplayMarketDataRuntime(
   snapshot: ReplayRuntimeSnapshot,
   lifecycle: ReplayRuntimeLifecycle,
 ): MarketDataRuntimeContract {
@@ -1268,13 +1276,7 @@ function buildReplayMarketDataRuntime(
         marketLabel: snapshot.store.sessionConfig?.market_type ?? "Historical",
       },
     },
-    actions: {
-      retry: () => lifecycle.restart(),
-      loadMoreLeft: async () => undefined,
-      onCrosshairMove: (value) => store.setCrosshairData(value),
-      onVisibleRangeChange: () => store.markVisibleRangePending(),
-      consumeIndicatorRangeRequest: (requestId) => store.consumeIndicatorRequest(requestId),
-    },
+    actions: lifecycle.marketDataActions,
     status: {
       hasMoreLeft: false,
       loadingMoreLeft: false,

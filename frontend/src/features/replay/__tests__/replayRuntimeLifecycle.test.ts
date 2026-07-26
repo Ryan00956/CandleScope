@@ -67,7 +67,7 @@ function streamHarness() {
   };
 }
 
-test("React-facing replay store publishes coalesce to one notification per browser frame", () => {
+test("React-facing replay store publishes coalesce to one asynchronous task", () => {
   const callbacks = new Map<number, () => void>();
   const canceled: number[] = [];
   let nextHandle = 1;

@@ -114,26 +114,30 @@ export interface ReplayRuntimeStorePublishScheduler {
   readonly cancel: () => void;
 }
 
-export function createReplayRuntimeStorePublishScheduler(
+export function createReplayRuntimeStorePublishScheduler<Handle = ReturnType<typeof setTimeout>>(
   publish: () => void,
-  requestFrame: (callback: () => void) => number = (callback) => (
-    globalThis.requestAnimationFrame(() => callback())
-  ),
-  cancelFrame: (handle: number) => void = (handle) => globalThis.cancelAnimationFrame(handle),
+  scheduleTask?: (callback: () => void) => Handle,
+  cancelTask?: (handle: Handle) => void,
 ): ReplayRuntimeStorePublishScheduler {
-  let pendingFrame: number | null = null;
+  const schedule = scheduleTask ?? (
+    (callback: () => void) => setTimeout(callback, 0) as Handle
+  );
+  const cancel = cancelTask ?? (
+    (handle: Handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+  );
+  let pendingTask: Handle | null = null;
   return {
     schedule: () => {
-      if (pendingFrame !== null) return;
-      pendingFrame = requestFrame(() => {
-        pendingFrame = null;
+      if (pendingTask !== null) return;
+      pendingTask = schedule(() => {
+        pendingTask = null;
         publish();
       });
     },
     cancel: () => {
-      if (pendingFrame === null) return;
-      cancelFrame(pendingFrame);
-      pendingFrame = null;
+      if (pendingTask === null) return;
+      cancel(pendingTask);
+      pendingTask = null;
     },
   };
 }
@@ -297,8 +301,7 @@ export class ReplayRuntimeLifecycle {
     this.commandIdFactory = commandIdFactory;
     this.replaceSessionUrl = replaceSessionUrl;
     this.snapshot = this.buildSnapshot();
-    this.storePublishScheduler = typeof globalThis.requestAnimationFrame === "function"
-      && typeof globalThis.cancelAnimationFrame === "function"
+    this.storePublishScheduler = typeof document === "object"
       ? createReplayRuntimeStorePublishScheduler(() => this.publish())
       : {
           schedule: () => this.publish(),

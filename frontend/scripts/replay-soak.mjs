@@ -561,6 +561,16 @@ function isAuthoritativeReplayStatus(value) {
     && value.sourceSequence >= 0;
 }
 
+function replaySpeedRequestState(value, targetSpeed, productV2 = false, revisionFloor = 0) {
+  if (!isAuthoritativeReplayStatus(value)) return "waiting";
+  if (productV2 && value.clockRate === targetSpeed && value.controlPending === "") {
+    return "acknowledged";
+  }
+  if (value.controlPending === "set_speed") return "started";
+  if (!productV2 && value.revision > revisionFloor) return "acknowledged";
+  return "waiting";
+}
+
 async function waitForAuthoritativeReplayStatus(cdp, predicateSource, timeoutMs, label) {
   const authoritative = isAuthoritativeReplayStatus.toString();
   return waitForReplayStatus(
@@ -593,6 +603,131 @@ export function replayTrainingTargetSpeed(optionValues, index) {
     throw new Error("replay training speed control has no numeric option at or above 60x");
   }
   return candidates[index % candidates.length];
+}
+
+async function requestReplayTrainingSpeed({
+  cdp,
+  label,
+  productV2,
+  revisionFloor,
+  targetSpeed,
+  timeoutMs,
+}) {
+  const action = replaySpeedAction(productV2);
+  const targetValue = String(targetSpeed);
+  const startedAt = Date.now();
+  const attempts = [];
+  const ready = await waitForValue(cdp, `(() => {
+    const select = document.querySelector('[data-replay-action="${action}"]');
+    if (!(select instanceof HTMLSelectElement) || select.disabled) return null;
+    const options = [...select.options].map((option) => option.value);
+    return options.includes(${JSON.stringify(targetValue)})
+      ? { selected: select.value, options }
+      : null;
+  })()`, timeoutMs, `${label} control readiness`);
+
+  const initialStatus = await replayStatus(cdp);
+  if (replaySpeedRequestState(initialStatus, targetSpeed, productV2, revisionFloor) === "acknowledged") {
+    return {
+      acknowledged: initialStatus,
+      attempts,
+      idempotent: true,
+      ready,
+      targetSpeed,
+    };
+  }
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const remainingBeforeDispatch = timeoutMs - (Date.now() - startedAt);
+    if (remainingBeforeDispatch <= 0) break;
+    const dispatched = await evaluate(cdp, `(() => {
+      const select = document.querySelector('[data-replay-action="${action}"]');
+      if (!(select instanceof HTMLSelectElement) || select.disabled) {
+        return { dispatched: false, reason: "unavailable" };
+      }
+      const options = [...select.options].map((option) => option.value);
+      if (!options.includes(${JSON.stringify(targetValue)})) {
+        return { dispatched: false, reason: "option-missing", options, selected: select.value };
+      }
+      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+      if (typeof nativeSetter !== "function") {
+        return { dispatched: false, reason: "native-setter-missing", options, selected: select.value };
+      }
+      const selectedBefore = select.value;
+      nativeSetter.call(select, ${JSON.stringify(targetValue)});
+      select.focus();
+      const eventAccepted = select.dispatchEvent(new Event("change", { bubbles: true }));
+      return {
+        dispatched: true,
+        eventAccepted,
+        focused: document.activeElement === select,
+        options,
+        selected: select.value,
+        selectedBefore,
+      };
+    })()`, { userGesture: true });
+    const attemptDetail = { attempt, dispatched, statuses: [] };
+    attempts.push(attemptDetail);
+
+    if (!dispatched?.dispatched || dispatched.selected !== targetValue) {
+      await wait(100);
+      continue;
+    }
+
+    const signalTimeoutMs = Math.min(
+      5_000,
+      Math.max(1_500, timeoutMs - (Date.now() - startedAt)),
+    );
+    const signalDeadline = Date.now() + signalTimeoutMs;
+    while (Date.now() < signalDeadline) {
+      let status = null;
+      try {
+        status = await replayStatus(cdp);
+      } catch (error) {
+        attemptDetail.lastStatusError = error?.message || String(error);
+      }
+      const state = replaySpeedRequestState(status, targetSpeed, productV2, revisionFloor);
+      attemptDetail.statuses.push({ state, status });
+      if (attemptDetail.statuses.length > 5) attemptDetail.statuses.shift();
+      if (state === "acknowledged") {
+        return {
+          acknowledged: status,
+          attempts,
+          idempotent: false,
+          ready,
+          targetSpeed,
+        };
+      }
+      if (state === "started") {
+        const remainingForAck = timeoutMs - (Date.now() - startedAt);
+        if (remainingForAck <= 0) break;
+        const acknowledged = await waitForAuthoritativeReplayStatus(
+          cdp,
+          productV2
+            ? `(value) => value.clockRate === ${targetSpeed} && value.controlPending === ""`
+            : `(value) => value.revision > ${revisionFloor}`,
+          remainingForAck,
+          label,
+        );
+        return {
+          acknowledged,
+          attempts,
+          idempotent: false,
+          ready,
+          targetSpeed,
+        };
+      }
+      await wait(100);
+    }
+  }
+
+  throw new Error(`${label} did not start after safe retries: ${JSON.stringify({
+    attempts,
+    elapsedMs: Date.now() - startedAt,
+    initialStatus,
+    ready,
+    targetSpeed,
+  })}`);
 }
 
 async function waitForCommandReady(cdp, timeoutMs, productV2 = false) {
@@ -678,33 +813,15 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   })()`);
   assert(Array.isArray(speedOptions), "training speed control was unavailable", { index });
   const targetSpeed = replayTrainingTargetSpeed(speedOptions, index);
-  const speedChanged = await evaluate(cdp, `(() => {
-    const select = document.querySelector('[data-replay-action="${speedAction}"]');
-    if (!(select instanceof HTMLSelectElement)) return null;
-    const options = [...select.options].map((option) => option.value);
-    if (!options.includes("${targetSpeed}")) {
-      return { changed: false, selected: select.value, options };
-    }
-    select.value = "${targetSpeed}";
-    if (select.value !== "${targetSpeed}") {
-      return { changed: false, selected: select.value, options };
-    }
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    return { changed: true, selected: select.value, options };
-  })()`);
-  assert(
-    speedChanged?.changed === true && speedChanged.selected === String(targetSpeed),
-    "training speed control rejected a rendered option",
-    { index, targetSpeed, speedChanged },
-  );
-  const accelerated = await waitForAuthoritativeReplayStatus(
+  const acceleratedRequest = await requestReplayTrainingSpeed({
     cdp,
-    productV2
-      ? `(value) => value.clockRate === ${targetSpeed} && value.controlPending === ""`
-      : `(value) => value.revision > ${paused.revision}`,
+    label: "training speed ack",
+    productV2,
+    revisionFloor: paused.revision,
+    targetSpeed,
     timeoutMs,
-    "training speed ack",
-  );
+  });
+  const accelerated = acceleratedRequest.acknowledged;
   await waitForCommandReady(cdp, timeoutMs, productV2);
 
   const side = index % 2 === 0 ? "BUY" : "SELL";
@@ -811,22 +928,15 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
     );
   }
 
-  const normalSpeedChanged = await evaluate(cdp, `(() => {
-    const select = document.querySelector('[data-replay-action="${speedAction}"]');
-    if (!(select instanceof HTMLSelectElement)) return false;
-    select.value = "1";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    return true;
-  })()`);
-  assert(normalSpeedChanged, "training speed reset control was unavailable", { index });
-  const normalSpeed = await waitForAuthoritativeReplayStatus(
+  const normalSpeedRequest = await requestReplayTrainingSpeed({
     cdp,
-    productV2
-      ? `(value) => value.clockRate === 1 && value.controlPending === ""`
-      : `(value) => value.revision > ${gapStatus.revision}`,
+    label: "training speed reset ack",
+    productV2,
+    revisionFloor: gapStatus.revision,
+    targetSpeed: 1,
     timeoutMs,
-    "training speed reset ack",
-  );
+  });
+  const normalSpeed = normalSpeedRequest.acknowledged;
   await waitForCommandReady(cdp, timeoutMs, productV2);
 
   const disconnectRequest = readJson(
@@ -857,6 +967,7 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
     paused,
     pauseStable,
     accelerated,
+    acceleratedRequest,
     ordered,
     immediatelyFilled,
     filled,
@@ -866,6 +977,7 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
     diagnosticGapSteps,
     gapStatus,
     normalSpeed,
+    normalSpeedRequest,
     reconnected,
     reconnectRecovery,
     resumed,
@@ -2312,6 +2424,7 @@ export {
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
   isAuthoritativeReplayStatus,
+  replaySpeedRequestState,
   restoreCommandReadinessAfterReconnect,
 };
 

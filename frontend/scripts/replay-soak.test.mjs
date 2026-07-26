@@ -8,6 +8,7 @@ import {
   isAuthoritativeReplayStatus,
   replayCatalogQueryFromCreatePayload,
   replaySpeedAction,
+  replaySpeedRequestState,
   replayStepAction,
   replayTrainingTargetSpeed,
   restoreCommandReadinessAfterReconnect,
@@ -259,4 +260,32 @@ test("replay soak rejects resync placeholders as command acknowledgements", () =
   }), false);
   assert.equal(isAuthoritativeReplayStatus({ ...authoritative, stateHash: "" }), false);
   assert.equal(isAuthoritativeReplayStatus({ ...authoritative, generation: 0 }), false);
+});
+
+test("replay soak distinguishes speed dispatch, pending work, and authoritative acknowledgement", () => {
+  const authoritative = {
+    clockRate: 1,
+    connection: "connected",
+    controlPending: "",
+    generation: 3,
+    revision: 652,
+    sourceSequence: 225,
+    state: "PAUSED",
+    stateHash: `sha256:${"a".repeat(64)}`,
+  };
+  assert.equal(replaySpeedRequestState(null, 600, true, 652), "waiting");
+  assert.equal(replaySpeedRequestState(authoritative, 600, true, 652), "waiting");
+  assert.equal(
+    replaySpeedRequestState({ ...authoritative, controlPending: "set_speed" }, 600, true, 652),
+    "started",
+  );
+  assert.equal(
+    replaySpeedRequestState({ ...authoritative, clockRate: 600 }, 600, true, 652),
+    "acknowledged",
+  );
+  assert.equal(replaySpeedRequestState(authoritative, 600, false, 652), "waiting");
+  assert.equal(
+    replaySpeedRequestState({ ...authoritative, revision: 653 }, 600, false, 652),
+    "acknowledged",
+  );
 });

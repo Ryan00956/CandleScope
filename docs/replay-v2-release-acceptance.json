@@ -1,14 +1,16 @@
 {
-  "schema_version": "replay.v2.release-acceptance.v1",
+  "schema_version": "replay.v2.release-acceptance.v2",
   "contract": "docs/KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md#17-验收场景",
-  "expected_scenarios": 28,
-  "production_enablement": "NOT_AUTHORIZED_DEFAULTS_REMAIN_OFF",
+  "expected_scenarios": 40,
+  "production_enablement": "HOLD_DEFAULTS_REMAIN_OFF",
   "release_gates": [
     "full_suite",
     "browser",
     "benchmark",
     "soak",
-    "rollback"
+    "rollback",
+    "storage",
+    "real_source"
   ],
   "scenarios": [
     {
@@ -177,6 +179,78 @@
       "id": 28,
       "title": "legacy v1 迁移或只读恢复不改 hash",
       "automated": { "path": "backend/tests/test_replay_v2_training_phase1.py", "needle": "test_legacy_migration_creates_wrapper_without_changing_v1_hashes" },
+      "release_gate": "rollback"
+    },
+    {
+      "id": 29,
+      "title": "live 启动上下文原子持久化且主商品不漂移",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase11.py", "needle": "test_live_launch_context_is_atomic_hashed_and_projected" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 30,
+      "title": "随机起点由服务端持有且披露时间不越界",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase12.py", "needle": "test_random_start_seed_is_server_owned_private_and_durably_committed" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 31,
+      "title": "离散 BAR 与连续逐笔推进共用规范控制契约",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase13.py", "needle": "test_phase13_bar_canonical_advance_matches_reference_paths" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 32,
+      "title": "按需历史角色、缺口和预算由冻结策略决定",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase14.py", "needle": "test_phase14_history_policy_resolves_roles_gaps_and_budget" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 33,
+      "title": "检查点摘要快进与完整 reducer 参考路径等价",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase15.py", "needle": "test_actor_summary_jump_matches_full_reference_and_skips_reducer_calls" },
+      "release_gate": "benchmark"
+    },
+    {
+      "id": 34,
+      "title": "精确账户历史驱动资金费、规则和可重算审计",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase16.py", "needle": "test_exact_plan_create_binding_ordering_funding_and_restart" },
+      "release_gate": "benchmark"
+    },
+    {
+      "id": 35,
+      "title": "复盘时间线、绘图和同游标分叉保持原训练只读",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase17.py", "needle": "test_review_timeline_cursor_drawing_and_multi_track_fork" },
+      "release_gate": "full_suite"
+    },
+    {
+      "id": 36,
+      "title": "存储面板按需加载且严格拒绝路径和私有字段",
+      "automated": { "path": "frontend/src/features/replay/__tests__/replayV2Phase18.test.tsx", "needle": "Training Hub loads storage lazily, clears stale plan confirmation and aborts on close" },
+      "release_gate": "storage"
+    },
+    {
+      "id": 37,
+      "title": "账户归档 GC 计划重验、回收、同校验恢复和审计",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase18.py", "needle": "test_account_gc_plan_hash_eviction_rehydrate_and_audit" },
+      "release_gate": "storage"
+    },
+    {
+      "id": 38,
+      "title": "真实 BAR SQLite 双商品连续窗口只读验证",
+      "automated": { "path": "backend/scripts/validate_replay_v2_real_sources.py", "needle": "real_bar_two_identities" },
+      "release_gate": "real_source"
+    },
+    {
+      "id": 39,
+      "title": "Binance 官方 USD-M aggTrade CHECKSUM 精确归档验证",
+      "automated": { "path": "backend/scripts/validate_replay_v2_real_sources.py", "needle": "official_checksum_required" },
+      "release_gate": "real_source"
+    },
+    {
+      "id": 40,
+      "title": "关闭开关和旧构建不改 Phase 18 存储语义",
+      "automated": { "path": "frontend/scripts/replay-v2-rollback-drill.mjs", "needle": "old_build_preserved_storage_semantics" },
       "release_gate": "rollback"
     }
   ]

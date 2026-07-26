@@ -1362,6 +1362,26 @@ CREATE TABLE IF NOT EXISTS replay_review_fork_lineage (
 """
 
 
+TRAINING_SCHEMA_PHASE18_ADDITIVE = """
+CREATE TABLE IF NOT EXISTS replay_account_history_gc_audit (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL
+        CHECK (action IN ('DRY_RUN', 'RUN', 'REHYDRATE')),
+    plan_hash TEXT NOT NULL
+        CHECK (
+            length(plan_hash) = 71
+            AND substr(plan_hash, 1, 7) = 'sha256:'
+        ),
+    request_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_account_history_gc_audit_created
+ON replay_account_history_gc_audit(created_at_ms DESC, audit_id DESC);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -1863,6 +1883,10 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     # content-addressed evidence cannot be captured.
     _execute_script(connection, TRAINING_SCHEMA_PHASE17_ADDITIVE)
     _backfill_phase17_policies(connection, now_ms=now_ms)
+    # Phase 18 remains additive at schema v9.  Phase 17 binaries safely ignore
+    # account-history GC audit evidence and never interpret EVICTED objects as
+    # READY archives.
+    _execute_script(connection, TRAINING_SCHEMA_PHASE18_ADDITIVE)
     connection.execute(
         """
         INSERT INTO replay_training_schema_version(singleton, version, applied_at_ms)

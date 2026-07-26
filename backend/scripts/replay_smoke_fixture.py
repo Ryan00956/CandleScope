@@ -222,26 +222,40 @@ def _seed_klines(
     *,
     include_live_tail: bool = False,
     include_soak_live_window: bool = False,
+    real_rows_by_symbol: dict[str, list[dict[str, object]]] | None = None,
 ) -> dict[str, int]:
     from app.data_engine.storage.klines_repo import init_klines_storage, upsert_klines
 
     init_klines_storage()
     for symbol, price_origin in FIXTURE_SYMBOLS:
-        rows = [
-            _fixture_row(
-                index=index,
-                open_time=FIXTURE_START_MS + index * INTERVAL_MS,
-                price_origin=price_origin,
-            )
-            for index in range(FIXTURE_ROWS)
-        ]
+        real_rows = (
+            None
+            if real_rows_by_symbol is None
+            else real_rows_by_symbol.get(symbol)
+        )
+        rows = (
+            list(real_rows)
+            if real_rows is not None
+            else [
+                _fixture_row(
+                    index=index,
+                    open_time=FIXTURE_START_MS + index * INTERVAL_MS,
+                    price_origin=price_origin,
+                )
+                for index in range(FIXTURE_ROWS)
+            ]
+        )
         if symbol == "BTCUSDT" and include_live_tail:
             rows.extend(_legacy_live_tail_rows())
         inserted = upsert_klines(
             symbol,
             "1m",
             rows,
-            source="replay-smoke-fixture",
+            source=(
+                "replay-real-source-release"
+                if real_rows is not None
+                else "replay-smoke-fixture"
+            ),
             exchange="binance",
             market_type="spot",
         )
@@ -272,6 +286,87 @@ def _seed_klines(
                 )
             live_window_rows[interval] = len(rows)
     return live_window_rows
+
+
+def _load_real_kline_profile(
+    source_path: Path,
+) -> tuple[dict[str, list[dict[str, object]]], dict[str, object]]:
+    """Validate and copy only the bounded real identities used by release QA."""
+
+    from scripts.validate_replay_v2_real_sources import (
+        DEFAULT_WINDOW_ROWS,
+        _read_only_connection,
+        validate_kline_source,
+    )
+
+    raw_source = source_path.expanduser()
+    if raw_source.is_symlink():
+        raise RuntimeError("real K-line release source must not be a symlink")
+    source = raw_source.resolve()
+    target = Path(os.environ["KLINES_DB_PATH"]).expanduser().resolve()
+    if source == target:
+        raise RuntimeError("real K-line source cannot be the isolated fixture target")
+    validation = validate_kline_source(
+        source,
+        required_rows=DEFAULT_WINDOW_ROWS,
+    )
+    rows_by_symbol: dict[str, list[dict[str, object]]] = {}
+    identities = validation.get("identities")
+    if not isinstance(identities, list):
+        raise RuntimeError("real K-line validation did not return identities")
+    with _read_only_connection(source) as connection:
+        for identity in identities:
+            if not isinstance(identity, dict):
+                raise RuntimeError("real K-line identity evidence is malformed")
+            symbol = str(identity["symbol"])
+            rows = connection.execute(
+                """
+                SELECT
+                    open_time, close_time, open, high, low, close, volume,
+                    quote_volume, trades, taker_buy_base, taker_buy_quote
+                FROM klines
+                WHERE exchange = 'binance'
+                  AND market_type = 'spot'
+                  AND symbol = ?
+                  AND interval = '1m'
+                  AND open_time >= ?
+                  AND close_time <= ?
+                ORDER BY open_time
+                """,
+                (
+                    symbol,
+                    int(identity["range_start_ms"]),
+                    int(identity["range_end_ms"]),
+                ),
+            ).fetchall()
+            if len(rows) != DEFAULT_WINDOW_ROWS:
+                raise RuntimeError(
+                    f"real K-line release window drifted for {symbol}: {len(rows)}"
+                )
+            rows_by_symbol[symbol] = [
+                {
+                    "open_time": int(row[0]),
+                    "close_time": int(row[1]),
+                    "open": row[2],
+                    "high": row[3],
+                    "low": row[4],
+                    "close": row[5],
+                    "volume": row[6],
+                    "quote_volume": row[7],
+                    "trades": int(row[8]),
+                    "taker_buy_base": row[9],
+                    "taker_buy_quote": row[10],
+                }
+                for row in rows
+            ]
+    return rows_by_symbol, {
+        "kind": validation["kind"],
+        "file_name": validation["file_name"],
+        "file_bytes": validation["file_bytes"],
+        "file_sha256": validation["file_sha256"],
+        "read_only": validation["read_only"],
+        "identities": identities,
+    }
 
 
 def _seed_agg_trades() -> int:
@@ -550,14 +645,22 @@ def main() -> None:
     parser.add_argument("--historical-book", action="store_true")
     parser.add_argument("--live-tail", action="store_true")
     parser.add_argument("--live-window", action="store_true")
+    parser.add_argument("--real-klines-source", type=Path)
     parser.add_argument("--disable-gap-maintenance", action="store_true")
     args = parser.parse_args()
     _require_isolated_environment()
     _force_offline_upstreams()
     live_tail_enabled = _smoke_live_tail_required(explicit=args.live_tail)
+    real_rows_by_symbol: dict[str, list[dict[str, object]]] | None = None
+    real_source_evidence: dict[str, object] | None = None
+    if args.real_klines_source is not None:
+        real_rows_by_symbol, real_source_evidence = _load_real_kline_profile(
+            args.real_klines_source,
+        )
     live_window_rows = _seed_klines(
         include_live_tail=live_tail_enabled,
         include_soak_live_window=args.live_window,
+        real_rows_by_symbol=real_rows_by_symbol,
     )
     agg_trade_rows = _seed_agg_trades() if args.agg_trades else 0
     historical_book_bar_rows = (
@@ -604,6 +707,13 @@ def main() -> None:
     async def replay_smoke_fixture_status() -> dict[str, object]:
         return {
             "offline": True,
+            "source_profile": (
+                "REAL_BAR_SQLITE"
+                if real_source_evidence is not None
+                else "SYNTHETIC_DETERMINISTIC"
+            ),
+            "real_source": real_source_evidence is not None,
+            "real_source_evidence": real_source_evidence,
             "fixture_start_ms": FIXTURE_START_MS,
             "fixture_rows": FIXTURE_ROWS,
             "fixture_symbols": [symbol for symbol, _price in FIXTURE_SYMBOLS],

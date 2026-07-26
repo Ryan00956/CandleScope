@@ -16,6 +16,7 @@ import type {
 } from "../replayV2Types.js";
 import { replayCatalogIdentity } from "../replayUiModel.js";
 import type { TrainingHubRuntime } from "../useTrainingHub.js";
+import ReplayStorageGovernancePanel from "./ReplayStorageGovernancePanel.js";
 
 export interface TrainingHubDialogProps {
   readonly runtime: TrainingHubRuntime;
@@ -570,6 +571,9 @@ export default function TrainingHubDialog({
             <button type="button" onClick={() => void runtime.actions.openCreate()} disabled={busy}>
               新建训练
             </button>
+            <button type="button" onClick={() => void runtime.actions.openStorage()} disabled={busy}>
+              存储管理
+            </button>
             {modal ? (
               <button type="button" onClick={onRequestClose}>关闭</button>
             ) : (
@@ -703,6 +707,7 @@ export default function TrainingHubDialog({
           </button>
         )}
         <TrainingRunCreatePanel runtime={runtime} />
+        <ReplayStorageGovernancePanel runtime={runtime} />
       </section>
     </main>
   );

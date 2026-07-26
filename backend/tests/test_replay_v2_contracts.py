@@ -75,11 +75,12 @@ def test_replay_v2_phase8_package_keeps_optimization_inside_training() -> None:
         "multitrack.py",
         "review.py",
         "schema.py",
-        "segments.py",
-        "service.py",
-        "storage.py",
-        "trade_flow.py",
-    }
+            "segments.py",
+            "service.py",
+            "storage.py",
+            "storage_governance.py",
+            "trade_flow.py",
+        }
 
 
 def test_replay_v2_run_track_command_and_event_golden_round_trip() -> None:

@@ -34,7 +34,7 @@ except ModuleNotFoundError:
     )
 
 
-SCHEMA_VERSION = "replay.v2.release-benchmark.v1"
+SCHEMA_VERSION = "replay.v2.release-benchmark.v2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,6 +106,15 @@ def main() -> int:
                 "100000",
             ],
         ),
+        (
+            "account-history-v2",
+            [
+                sys.executable,
+                "scripts/benchmark_replay_account_history.py",
+                "--iterations",
+                "8",
+            ],
+        ),
     )
     commands: list[dict[str, object]] = []
     payloads: dict[str, Mapping[str, object]] = {}
@@ -132,6 +141,7 @@ def main() -> int:
     segments = payloads["segments-v2"]
     fast_forward = payloads["fast-forward-v2"]
     historical_book = payloads["historical-book-v2"]
+    account_history = payloads["account-history-v2"]
     cases = multitrack.get("cases")
     if not isinstance(cases, list):
         raise RuntimeError("multi-track benchmark did not emit cases")
@@ -143,12 +153,29 @@ def main() -> int:
             for case in cases
         ),
         "segment_10000_budget": segments.get("segment_count") == 10_000 and segments.get("budget_pass") is True,
+        "storage_inventory_10000_bounded": (
+            isinstance(segments.get("inventory_evidence"), Mapping)
+            and segments["inventory_evidence"].get("item_count") == 200
+            and segments["inventory_evidence"].get("truncated") is True
+            and segments.get("inventory_budget_pass") is True
+        ),
         "fast_forward_runtime": _accepted(fast_forward),
         "fast_forward_reference_equivalence": isinstance(fast_forward.get("equivalence"), Mapping)
         and fast_forward["equivalence"].get("passed") is True,
         "historical_book_100000": isinstance(historical_book.get("parameters"), Mapping)
         and historical_book["parameters"].get("frames") == 100_000,
         "historical_book_acceptance": _accepted(historical_book),
+        "account_history_1_2_4_8": isinstance(
+            account_history.get("cases"),
+            list,
+        )
+        and [
+            case.get("track_count")
+            for case in account_history["cases"]
+            if isinstance(case, Mapping)
+        ]
+        == [1, 2, 4, 8],
+        "account_history_acceptance": _accepted(account_history),
     }
     if not all(checks.values()):
         raise RuntimeError(f"formal replay benchmark acceptance failed: {checks}")

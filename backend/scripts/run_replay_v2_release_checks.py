@@ -1,4 +1,4 @@
-"""Run backend and frontend Phase 10 release checks on one clean Git HEAD."""
+"""Run backend and frontend Phase 18 release checks on one clean Git HEAD."""
 
 from __future__ import annotations
 

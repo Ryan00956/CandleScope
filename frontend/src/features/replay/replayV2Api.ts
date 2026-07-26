@@ -10,6 +10,16 @@ import {
   type ReplaySegmentPreparePlan,
 } from "./replaySegmentTypes.js";
 import {
+  parseReplayStorageGcPlan,
+  parseReplayStorageGcRunResult,
+  parseReplayStorageInventory,
+  parseReplayStorageRehydrateAck,
+  type ReplayStorageGcPlan,
+  type ReplayStorageGcProtocol,
+  type ReplayStorageGcRunResult,
+  type ReplayStorageInventory,
+} from "./replayStorageModel.js";
+import {
   parseReplayPeriodSummaryPrepare,
   parseReplayPeriodSummaryStatus,
   type ReplayPeriodSummaryPrepareResponse,
@@ -114,6 +124,48 @@ function safeIdentifier(value: string, fieldName: string): string {
   return value;
 }
 
+function boundedPositiveInteger(
+  value: number,
+  fieldName: string,
+  maximum: number,
+): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new ReplayV2ApiError(
+      "REPLAY_V2_PROTOCOL_ERROR",
+      `${fieldName} is invalid`,
+    );
+  }
+  return value;
+}
+
+function storageBoundary(protocol: ReplayStorageGcProtocol): {
+  readonly path: string;
+  readonly maxField: "max_segments" | "max_archives";
+} {
+  if (protocol === "replay.data.gc.v1") {
+    return {
+      path: "/runs/data-segments",
+      maxField: "max_segments",
+    };
+  }
+  if (protocol === "replay.historical-book.gc.v1") {
+    return {
+      path: "/runs/historical-books",
+      maxField: "max_archives",
+    };
+  }
+  if (protocol === "replay.account-history.gc.v1") {
+    return {
+      path: "/runs/account-history",
+      maxField: "max_archives",
+    };
+  }
+  throw new ReplayV2ApiError(
+    "REPLAY_V2_PROTOCOL_ERROR",
+    "storage GC protocol is invalid",
+  );
+}
+
 function parseErrorEnvelope(value: unknown): {
   readonly code: string;
   readonly message: string;
@@ -207,6 +259,88 @@ export class ReplayV2ApiClient {
       body: JSON.stringify(payload),
       ...(signal ? { signal } : {}),
     });
+  }
+
+  storageInventory(signal?: AbortSignal): Promise<ReplayStorageInventory> {
+    return this.request(
+      "/runs/storage",
+      parseReplayStorageInventory,
+      signal ? { signal } : {},
+    );
+  }
+
+  storageGcPlan(
+    protocol: ReplayStorageGcProtocol,
+    {
+      targetReclaimBytes,
+      maxObjects,
+    }: {
+      readonly targetReclaimBytes: number;
+      readonly maxObjects: number;
+    },
+    signal?: AbortSignal,
+  ): Promise<ReplayStorageGcPlan> {
+    const boundary = storageBoundary(protocol);
+    return this.request(
+      `${boundary.path}/gc/dry-run`,
+      parseReplayStorageGcPlan,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          protocol,
+          target_reclaim_bytes: boundedPositiveInteger(
+            targetReclaimBytes,
+            "target reclaim bytes",
+            1_000_000_000_000,
+          ),
+          [boundary.maxField]: boundedPositiveInteger(
+            maxObjects,
+            "maximum GC objects",
+            10_000,
+          ),
+        }),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  storageGcRun(
+    plan: ReplayStorageGcPlan,
+    signal?: AbortSignal,
+  ): Promise<ReplayStorageGcRunResult> {
+    const boundary = storageBoundary(plan.protocol);
+    return this.request(
+      `${boundary.path}/gc/run`,
+      parseReplayStorageGcRunResult,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          protocol: plan.protocol,
+          target_reclaim_bytes: plan.request.target_reclaim_bytes,
+          [boundary.maxField]: plan.request.max_objects,
+          plan_hash: plan.plan_hash,
+          confirm: true,
+        }),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  storageRehydrate(
+    protocol: ReplayStorageGcProtocol,
+    objectId: string,
+    signal?: AbortSignal,
+  ): Promise<{ readonly object_id: string; readonly health: "READY" }> {
+    const boundary = storageBoundary(protocol);
+    return this.request(
+      `${boundary.path}/${safeSegment(objectId, "storage object id")}/rehydrate`,
+      parseReplayStorageRehydrateAck,
+      {
+        method: "POST",
+        body: "{}",
+        ...(signal ? { signal } : {}),
+      },
+    );
   }
 
   getRun(runId: string, signal?: AbortSignal): Promise<TrainingRunCardResponse> {

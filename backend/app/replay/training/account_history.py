@@ -47,6 +47,7 @@ ARCHIVE_FORMULA_VERSION = "CANDLESCOPE_LINEAR_ACCOUNT_V1"
 ARCHIVE_ROUNDING_MODE = "DECIMAL_EXACT_QUOTE_STEP_CEILING"
 ARCHIVE_CAPTURE_MODE = "OPERATOR_CAPTURED"
 ACCOUNT_AUDIT_SCHEMA_VERSION = "replay.account-audit.v1"
+ACCOUNT_GC_PROTOCOL = "replay.account-history.gc.v1"
 EXACT_ACCOUNT_FIDELITY = "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
 RULE_EVENT_PHASE = 10
 MARK_INDEX_EVENT_PHASE = 30
@@ -1376,6 +1377,7 @@ class AccountHistoryArchiveManager:
 
     async def start(self) -> None:
         await asyncio.to_thread(self._ensure_dirs)
+        await self._recover_gc_claims()
         if not self.enabled:
             await self._disable_exact_runs()
 
@@ -1538,12 +1540,278 @@ class AccountHistoryArchiveManager:
                 ).fetchall()
             )
         )
+        items = [self._public_archive(row) for row in rows]
         return {
             "protocol": ARCHIVE_PROTOCOL,
             "feature_enabled": self.enabled,
             "max_archive_bytes": self.max_archive_bytes,
-            "items": [self._public_archive(row) for row in rows],
+            "items": items,
+            "summary": {
+                "archive_count": len(items),
+                "ready_count": sum(item["health"] == "READY" for item in items),
+                "evicted_count": sum(item["health"] == "EVICTED" for item in items),
+                "quarantined_count": sum(
+                    item["health"] == "QUARANTINED" for item in items
+                ),
+                "pinned_count": sum(
+                    int(item["active_pins"]) > 0 for item in items
+                ),
+                "local_bytes": sum(
+                    int(row["byte_size"])
+                    for row in rows
+                    if isinstance(row["local_path"], str) and row["local_path"]
+                ),
+                "max_archive_bytes": self.max_archive_bytes,
+            },
         }
+
+    async def gc_plan(
+        self,
+        *,
+        target_reclaim_bytes: int,
+        max_archives: int,
+    ) -> dict[str, object]:
+        return await self._gc_plan(
+            target_reclaim_bytes=target_reclaim_bytes,
+            max_archives=max_archives,
+            audit=True,
+        )
+
+    async def _gc_plan(
+        self,
+        *,
+        target_reclaim_bytes: int,
+        max_archives: int,
+        audit: bool,
+    ) -> dict[str, object]:
+        if (
+            isinstance(target_reclaim_bytes, bool)
+            or not isinstance(target_reclaim_bytes, int)
+            or not 1 <= target_reclaim_bytes <= 1_000_000_000_000
+        ):
+            raise ValueError(
+                "target_reclaim_bytes must be between 1 and 1000000000000"
+            )
+        if (
+            isinstance(max_archives, bool)
+            or not isinstance(max_archives, int)
+            or not 1 <= max_archives <= 10_000
+        ):
+            raise ValueError("max_archives must be between 1 and 10000")
+
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[tuple[_AccountRow, ...], int]:
+            rows = tuple(
+                connection.execute(
+                    """
+                    SELECT archive.*,
+                           (SELECT COUNT(*)
+                            FROM replay_account_history_ref AS ref
+                            WHERE ref.archive_id = archive.archive_id
+                              AND ref.active = 1) AS active_pins
+                    FROM replay_account_history_archive AS archive
+                    WHERE archive.health = 'READY'
+                    ORDER BY archive.last_used_at_ms, archive.archive_id
+                    """
+                ).fetchall()
+            )
+            total = connection.execute(
+                """
+                SELECT COALESCE(SUM(byte_size), 0)
+                FROM replay_account_history_archive
+                WHERE local_path IS NOT NULL
+                """
+            ).fetchone()
+            assert total is not None
+            return rows, int(total[0])
+
+        rows, local_bytes = await self.store.run_extension_read(read)
+        candidates: list[dict[str, object]] = []
+        protected: list[dict[str, object]] = []
+        estimated = 0
+        for row in rows:
+            reasons: list[str] = []
+            active_pins = int(row["active_pins"])
+            if active_pins > 0:
+                reasons.append("ACTIVE_ARCHIVE_PIN")
+            try:
+                self._owned_file(row, True)
+            except Exception as exc:
+                reasons.append(f"OWNED_OBJECT_{type(exc).__name__.upper()}")
+            trusted_issue = self._trusted_source_issue(row)
+            if trusted_issue is not None:
+                reasons.append(trusted_issue)
+            item = {
+                "archive_id": str(row["archive_id"]),
+                "generation": int(row["generation"]),
+                "byte_size": int(row["byte_size"]),
+                "active_pin_count": active_pins,
+                "recoverability": "TRUSTED_LOCAL_SOURCE_CHECKSUM_BOUND",
+            }
+            if reasons:
+                protected.append(
+                    {**item, "protection_reasons": sorted(set(reasons))}
+                )
+                continue
+            if len(candidates) >= max_archives or estimated >= target_reclaim_bytes:
+                continue
+            candidates.append(item)
+            estimated += int(row["byte_size"])
+        request = {
+            "target_reclaim_bytes": target_reclaim_bytes,
+            "max_archives": max_archives,
+        }
+        plan_hash = canonical_sha256(
+            {
+                "protocol": ACCOUNT_GC_PROTOCOL,
+                "request": request,
+                "candidates": candidates,
+            }
+        )
+        plan = {
+            "protocol": ACCOUNT_GC_PROTOCOL,
+            "mode": "DRY_RUN",
+            "plan_hash": plan_hash,
+            "request": request,
+            "current_local_bytes": local_bytes,
+            "estimated_reclaim_bytes": estimated,
+            "candidates": candidates,
+            "protected": protected,
+            "pinned_auto_reclaimed": False,
+        }
+        if audit:
+            await self._audit_gc("DRY_RUN", plan_hash, request, plan)
+        return plan
+
+    async def gc_run(
+        self,
+        *,
+        plan_hash: str,
+        target_reclaim_bytes: int,
+        max_archives: int,
+    ) -> dict[str, object]:
+        async with self._lock:
+            plan = await self._gc_plan(
+                target_reclaim_bytes=target_reclaim_bytes,
+                max_archives=max_archives,
+                audit=False,
+            )
+            if plan["plan_hash"] != plan_hash:
+                raise TrainingRunError(
+                    "ACCOUNT_HISTORY_GC_PLAN_CHANGED",
+                    "account history GC plan changed; run dry-run again",
+                    status_code=409,
+                    details={"current_plan_hash": plan["plan_hash"]},
+                )
+            raw_candidates = plan["candidates"]
+            if not isinstance(raw_candidates, list):
+                raise RuntimeError("account history GC plan candidates are malformed")
+            reclaimed: list[dict[str, object]] = []
+            skipped: list[dict[str, object]] = []
+            for candidate in raw_candidates:
+                if not isinstance(candidate, Mapping):
+                    raise RuntimeError(
+                        "account history GC candidate is malformed"
+                    )
+                result = await self._reclaim_archive(candidate)
+                (reclaimed if result["reclaimed"] else skipped).append(result)
+            result = {
+                "protocol": ACCOUNT_GC_PROTOCOL,
+                "mode": "RUN",
+                "plan_hash": plan_hash,
+                "request": plan["request"],
+                "reclaimed": reclaimed,
+                "skipped": skipped,
+                "reclaimed_bytes": sum(
+                    int(item["byte_size"]) for item in reclaimed
+                ),
+                "exact_dry_run_set": not skipped,
+                "pinned_auto_reclaimed": False,
+            }
+            await self._audit_gc("RUN", plan_hash, plan["request"], result)
+            return result
+
+    async def rehydrate_archive(self, archive_id: str) -> dict[str, object]:
+        normalized = validate_identifier(archive_id, field_name="archive_id")
+        async with self._lock:
+            row = await self.store.run_extension_read(
+                lambda connection: connection.execute(
+                    """
+                    SELECT archive.*,
+                           (SELECT COUNT(*)
+                            FROM replay_account_history_ref AS ref
+                            WHERE ref.archive_id = archive.archive_id
+                              AND ref.active = 1) AS active_pins
+                    FROM replay_account_history_archive AS archive
+                    WHERE archive.archive_id = ?
+                    """,
+                    (normalized,),
+                ).fetchone()
+            )
+            if row is None:
+                raise TrainingRunError(
+                    "ACCOUNT_HISTORY_ARCHIVE_NOT_FOUND",
+                    "account history archive does not exist",
+                    status_code=404,
+                )
+            if row["health"] == "READY":
+                try:
+                    await asyncio.to_thread(self._owned_file, row, True)
+                except Exception as exc:
+                    await self._quarantine(
+                        normalized,
+                        f"OWNED_OBJECT_{type(exc).__name__.upper()}",
+                    )
+                    row = await self.store.run_extension_read(
+                        lambda connection: connection.execute(
+                            """
+                            SELECT archive.*,
+                                   (SELECT COUNT(*)
+                                    FROM replay_account_history_ref AS ref
+                                    WHERE ref.archive_id = archive.archive_id
+                                      AND ref.active = 1) AS active_pins
+                            FROM replay_account_history_archive AS archive
+                            WHERE archive.archive_id = ?
+                            """,
+                            (normalized,),
+                        ).fetchone()
+                    )
+                    assert row is not None
+                else:
+                    return self._public_archive(row)
+            await self._rehydrate_row(row)
+            restored = await self.store.run_extension_read(
+                lambda connection: connection.execute(
+                    """
+                    SELECT archive.*,
+                           (SELECT COUNT(*)
+                            FROM replay_account_history_ref AS ref
+                            WHERE ref.archive_id = archive.archive_id
+                              AND ref.active = 1) AS active_pins
+                    FROM replay_account_history_archive AS archive
+                    WHERE archive.archive_id = ?
+                    """,
+                    (normalized,),
+                ).fetchone()
+            )
+            assert restored is not None
+            result = self._public_archive(restored)
+            audit_hash = canonical_sha256(
+                {
+                    "protocol": ACCOUNT_GC_PROTOCOL,
+                    "action": "REHYDRATE",
+                    "archive_id": normalized,
+                    "proof_hash": result["proof_hash"],
+                }
+            )
+            await self._audit_gc(
+                "REHYDRATE",
+                audit_hash,
+                {"archive_id": normalized},
+                result,
+            )
+            return result
 
     async def plan_for_request(
         self,
@@ -2142,6 +2410,385 @@ class AccountHistoryArchiveManager:
             ).fetchone()
         )
 
+    async def _reclaim_archive(
+        self,
+        candidate: Mapping[str, object],
+    ) -> dict[str, object]:
+        archive_id = validate_identifier(
+            str(candidate["archive_id"]),
+            field_name="archive_id",
+        )
+        generation = int(candidate["generation"])
+        token = uuid.uuid4().hex
+        claim_reason = f"GC_RECLAIMING:{token}"
+        now_ms = self.store._validated_now_ms()
+
+        def claim(connection: sqlite3.Connection) -> _AccountRow | None:
+            connection.execute(
+                """
+                UPDATE replay_account_history_archive
+                SET health = 'QUARANTINED', quarantine_reason = ?,
+                    generation = generation + 1, updated_at_ms = ?
+                WHERE archive_id = ? AND generation = ? AND health = 'READY'
+                  AND NOT EXISTS(
+                      SELECT 1 FROM replay_account_history_ref AS ref
+                      WHERE ref.archive_id =
+                            replay_account_history_archive.archive_id
+                        AND ref.active = 1
+                  )
+                """,
+                (claim_reason, now_ms, archive_id, generation),
+            )
+            return connection.execute(
+                """
+                SELECT * FROM replay_account_history_archive
+                WHERE archive_id = ? AND health = 'QUARANTINED'
+                  AND quarantine_reason = ?
+                """,
+                (archive_id, claim_reason),
+            ).fetchone()
+
+        row = await self.store.run_extension_write(claim)
+        if row is None:
+            return {
+                "archive_id": archive_id,
+                "reclaimed": False,
+                "byte_size": 0,
+                "reason": "PIN_OR_GENERATION_CHANGED",
+            }
+        trusted_issue = self._trusted_source_issue(row)
+        if trusted_issue is not None:
+            await self._restore_gc_claim(
+                archive_id,
+                claim_reason,
+                trusted_issue,
+                ready=True,
+            )
+            return {
+                "archive_id": archive_id,
+                "reclaimed": False,
+                "byte_size": 0,
+                "reason": trusted_issue,
+            }
+        expected = f"objects/{archive_id}.sqlite3"
+        if row["local_path"] != expected:
+            await self._restore_gc_claim(
+                archive_id,
+                claim_reason,
+                "OWNED_PATH_INVALID",
+                ready=False,
+            )
+            return {
+                "archive_id": archive_id,
+                "reclaimed": False,
+                "byte_size": 0,
+                "reason": "OWNED_PATH_INVALID",
+            }
+        source = self._owned_path(expected)
+        trash = self._owned_path(f".trash/{archive_id}-{token}.trash")
+        try:
+            await asyncio.to_thread(self._assert_regular_owned_file, expected)
+            await asyncio.to_thread(os.replace, source, trash)
+        except OSError as exc:
+            await self._restore_gc_claim(
+                archive_id,
+                claim_reason,
+                type(exc).__name__,
+                ready=True,
+            )
+            return {
+                "archive_id": archive_id,
+                "reclaimed": False,
+                "byte_size": 0,
+                "reason": type(exc).__name__,
+            }
+        except (TypeError, ValueError) as exc:
+            await self._restore_gc_claim(
+                archive_id,
+                claim_reason,
+                type(exc).__name__,
+                ready=False,
+            )
+            return {
+                "archive_id": archive_id,
+                "reclaimed": False,
+                "byte_size": 0,
+                "reason": type(exc).__name__,
+            }
+        finished = self.store._validated_now_ms()
+
+        def finalize(connection: sqlite3.Connection) -> bool:
+            cursor = connection.execute(
+                """
+                UPDATE replay_account_history_archive
+                SET health = 'EVICTED', local_path = NULL,
+                    quarantine_reason = NULL, updated_at_ms = ?
+                WHERE archive_id = ? AND health = 'QUARANTINED'
+                  AND quarantine_reason = ?
+                  AND NOT EXISTS(
+                      SELECT 1 FROM replay_account_history_ref AS ref
+                      WHERE ref.archive_id =
+                            replay_account_history_archive.archive_id
+                        AND ref.active = 1
+                  )
+                """,
+                (finished, archive_id, claim_reason),
+            )
+            return cursor.rowcount == 1
+
+        try:
+            finalized = await self.store.run_extension_write(finalize)
+        except BaseException:
+            await asyncio.to_thread(os.replace, trash, source)
+            await self._restore_gc_claim(
+                archive_id,
+                claim_reason,
+                "FINALIZE_FAILED",
+                ready=True,
+            )
+            raise
+        if not finalized:
+            await asyncio.to_thread(os.replace, trash, source)
+            await self._restore_gc_claim(
+                archive_id,
+                claim_reason,
+                "PIN_CHANGED_DURING_RECLAIM",
+                ready=True,
+            )
+            return {
+                "archive_id": archive_id,
+                "reclaimed": False,
+                "byte_size": 0,
+                "reason": "PIN_CHANGED_DURING_RECLAIM",
+            }
+        try:
+            await asyncio.to_thread(trash.unlink)
+        except OSError:
+            # EVICTED is already authoritative; a replay-owned trash residue is
+            # safe and will be removed on the next manager start.
+            pass
+        with self._checksum_cache_lock:
+            self._checksum_cache.clear()
+        return {
+            "archive_id": archive_id,
+            "reclaimed": True,
+            "byte_size": int(candidate["byte_size"]),
+            "reason": "TRUSTED_SOURCE_MANIFEST_RETAINED",
+        }
+
+    async def _restore_gc_claim(
+        self,
+        archive_id: str,
+        claim_reason: str,
+        reason: str,
+        *,
+        ready: bool,
+    ) -> None:
+        now_ms = self.store._validated_now_ms()
+        await self.store.run_extension_write(
+            lambda connection: connection.execute(
+                """
+                UPDATE replay_account_history_archive
+                SET health = ?, quarantine_reason = ?,
+                    generation = generation + 1, updated_at_ms = ?
+                WHERE archive_id = ? AND health = 'QUARANTINED'
+                  AND quarantine_reason = ?
+                """,
+                (
+                    "READY" if ready else "QUARANTINED",
+                    None if ready else reason[:256],
+                    now_ms,
+                    archive_id,
+                    claim_reason,
+                ),
+            )
+        )
+
+    async def _recover_gc_claims(self) -> None:
+        rows = await self.store.run_extension_read(
+            lambda connection: tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_account_history_archive
+                    WHERE health = 'QUARANTINED'
+                      AND quarantine_reason LIKE 'GC_RECLAIMING:%'
+                    ORDER BY archive_id
+                    """
+                ).fetchall()
+            )
+        )
+        for row in rows:
+            archive_id = str(row["archive_id"])
+            claim_reason = str(row["quarantine_reason"])
+            token = claim_reason.partition(":")[2]
+            relative = f"objects/{archive_id}.sqlite3"
+            source = self._owned_path(relative)
+            trash = self._owned_path(f".trash/{archive_id}-{token}.trash")
+            restored = False
+            try:
+                if not source.exists() and trash.is_file() and not trash.is_symlink():
+                    await asyncio.to_thread(os.replace, trash, source)
+                restored = (
+                    source.is_file()
+                    and not source.is_symlink()
+                    and source.stat().st_size == int(row["byte_size"])
+                    and await asyncio.to_thread(_digest_file, source)
+                    == str(row["checksum_sha256"])
+                )
+            except OSError:
+                restored = False
+            await self._restore_gc_claim(
+                archive_id,
+                claim_reason,
+                "GC_RECOVERY_OBJECT_UNAVAILABLE",
+                ready=restored,
+            )
+        for trash in (self.root / ".trash").glob("*.trash"):
+            try:
+                if trash.is_file() and not trash.is_symlink():
+                    trash.unlink()
+            except OSError:
+                continue
+
+    async def _rehydrate_row(self, row: _AccountRow) -> None:
+        raw_source = Path(str(row["trusted_source_path"])).expanduser()
+        if raw_source.is_symlink():
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_REHYDRATION_SOURCE_INVALID",
+                "trusted account-history source must not be a symlink",
+                status_code=409,
+            )
+        source = raw_source.resolve()
+        if (
+            not source.is_file()
+            or source.is_symlink()
+            or source == self.root
+            or source.is_relative_to(self.root)
+        ):
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_REHYDRATION_SOURCE_INVALID",
+                "trusted account-history source is unavailable",
+                status_code=409,
+            )
+        descriptor = await asyncio.to_thread(
+            verify_account_history_archive,
+            source,
+            trusted_origin=str(row["trusted_origin"]),
+        )
+        if (
+            descriptor.archive_id != str(row["archive_id"])
+            or descriptor.identity_key != str(row["identity_key"])
+            or descriptor.checksum_sha256 != str(row["checksum_sha256"])
+            or descriptor.proof_hash != str(row["proof_hash"])
+            or descriptor.event_chain_tail != str(row["event_chain_tail"])
+            or descriptor.byte_size != int(row["byte_size"])
+        ):
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_REHYDRATION_MISMATCH",
+                "trusted account-history source no longer matches its immutable proof",
+                status_code=409,
+            )
+        await self._assert_budget(
+            descriptor.byte_size,
+            excluding=descriptor.archive_id,
+        )
+        relative = f"objects/{descriptor.archive_id}.sqlite3"
+        final = self._owned_path(relative)
+        temp = self._owned_path(f".tmp/rehydrate-{uuid.uuid4().hex}.part")
+        await asyncio.to_thread(shutil.copyfile, source, temp)
+        if (
+            temp.stat().st_size != descriptor.byte_size
+            or await asyncio.to_thread(_digest_file, temp)
+            != descriptor.checksum_sha256
+        ):
+            temp.unlink(missing_ok=True)
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_REHYDRATION_MISMATCH",
+                "rehydrated account-history object failed checksum validation",
+                status_code=409,
+            )
+        os.replace(temp, final)
+        now_ms = self.store._validated_now_ms()
+
+        def publish(connection: sqlite3.Connection) -> None:
+            cursor = connection.execute(
+                """
+                UPDATE replay_account_history_archive
+                SET health = 'READY', local_path = ?, byte_size = ?,
+                    quarantine_reason = NULL, generation = generation + 1,
+                    last_used_at_ms = ?, updated_at_ms = ?
+                WHERE archive_id = ? AND health != 'READY'
+                  AND NOT EXISTS(
+                      SELECT 1 FROM replay_account_history_ref AS ref
+                      WHERE ref.archive_id =
+                            replay_account_history_archive.archive_id
+                        AND ref.active = 1
+                        AND replay_account_history_archive.health = 'EVICTED'
+                  )
+                """,
+                (
+                    relative,
+                    descriptor.byte_size,
+                    now_ms,
+                    now_ms,
+                    descriptor.archive_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "account history rehydration state changed before commit"
+                )
+
+        try:
+            await self.store.run_extension_write(publish)
+        except BaseException:
+            final.unlink(missing_ok=True)
+            raise
+        with self._checksum_cache_lock:
+            self._checksum_cache.clear()
+
+    async def _audit_gc(
+        self,
+        action: str,
+        plan_hash: str,
+        request: object,
+        result: object,
+    ) -> None:
+        now_ms = self.store._validated_now_ms()
+        await self.store.run_extension_write(
+            lambda connection: connection.execute(
+                """
+                INSERT INTO replay_account_history_gc_audit(
+                    action, plan_hash, request_json, result_json, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    action,
+                    plan_hash,
+                    canonical_json(request),
+                    canonical_json(result),
+                    now_ms,
+                ),
+            )
+        )
+
+    @staticmethod
+    def _trusted_source_issue(row: _AccountRow) -> str | None:
+        try:
+            raw = Path(str(row["trusted_source_path"])).expanduser()
+            if raw.is_symlink():
+                return "TRUSTED_SOURCE_SYMLINK"
+            source = raw.resolve()
+            if not source.is_file() or source.is_symlink():
+                return "TRUSTED_SOURCE_UNAVAILABLE"
+            if source.stat().st_size != int(row["byte_size"]):
+                return "TRUSTED_SOURCE_SIZE_MISMATCH"
+            if _digest_file(source) != str(row["checksum_sha256"]):
+                return "TRUSTED_SOURCE_CHECKSUM_MISMATCH"
+        except (OSError, TypeError, ValueError):
+            return "TRUSTED_SOURCE_UNAVAILABLE"
+        return None
+
     async def _assert_budget(
         self,
         incoming: int,
@@ -2266,9 +2913,8 @@ class AccountHistoryArchiveManager:
         relative = row["local_path"]
         if not isinstance(relative, str):
             raise ValueError("account history owned path is missing")
+        self._assert_regular_owned_file(relative)
         path = self._owned_path(relative)
-        if not path.is_file():
-            raise FileNotFoundError(path)
         if path.stat().st_size != int(row["byte_size"]):
             raise ValueError("account history owned object size changed")
         if verify_checksum:
@@ -2294,7 +2940,20 @@ class AccountHistoryArchiveManager:
                 raise ValueError("account history owned object checksum changed")
         return path
 
+    def _assert_regular_owned_file(self, relative: str) -> None:
+        relative_path = Path(relative)
+        if relative_path.is_absolute():
+            raise ValueError("account history path must be relative")
+        raw = self.root / relative_path
+        if raw.is_symlink():
+            raise ValueError("account history owned object must not be a symlink")
+        path = self._owned_path(relative)
+        if not path.is_file() or path.is_symlink():
+            raise FileNotFoundError(path)
+
     def _owned_path(self, relative: str) -> Path:
+        if Path(relative).is_absolute():
+            raise ValueError("account history path must be relative")
         path = (self.root / relative).resolve()
         if path == self.root or not path.is_relative_to(self.root):
             raise ValueError("account history path escapes its object store")
@@ -2303,6 +2962,7 @@ class AccountHistoryArchiveManager:
     def _ensure_dirs(self) -> None:
         (self.root / "objects").mkdir(parents=True, exist_ok=True)
         (self.root / ".tmp").mkdir(parents=True, exist_ok=True)
+        (self.root / ".trash").mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _public_archive(row: _AccountRow) -> dict[str, object]:
@@ -2334,6 +2994,7 @@ class AccountHistoryArchiveManager:
 
 __all__ = [
     "ACCOUNT_AUDIT_SCHEMA_VERSION",
+    "ACCOUNT_GC_PROTOCOL",
     "ARCHIVE_CONTRACT_MODEL",
     "ARCHIVE_FORMULA_VERSION",
     "ARCHIVE_MARGIN_ASSET_MODE",

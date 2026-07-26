@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_17_COMMITTED / PHASE_18_NOT_STARTED / RELEASE_PENDING`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–17 已独立提交，Phase 18 尚未开始。任何旧发布清单都不得继承到新 HEAD；仓库发布开关继续默认关闭，直到 Phase 18 的真实数据、容量、支持清单、回滚和发布门禁全部通过并形成显式决策。
+状态：`PHASE_17_COMMITTED / PHASE_18_CODE_COMPLETE / RELEASE_RESULT_EXTERNAL_MANIFEST / PRODUCTION_HOLD`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–17 已独立提交，Phase 18 代码、迁移、存储治理、真实来源和发布合同已完成提交前门禁。Phase 18 的最终完成状态只读取仓库外 `<完整 Phase 18 HEAD>\replay-v2\release-manifest.json`，本文不嵌入提交后的结果，避免为了记录证据改变 HEAD 并使 4 小时证据失效。任何旧发布清单都不得继承到新 HEAD；即使 implementation manifest PASS，生产决策仍因缺少 BOOK/account 生产 capture 与运维观察窗保持 HOLD，所有发布开关默认关闭。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -1658,9 +1658,84 @@ Phase 4 已有完整性模式、资金调整审计、多分辨率权益曲线、
 
 ## 29. Phase 18：存储管理、真实数据与发布收口
 
-### 背景与范围
+### 背景审计与范围冻结（2026-07-26）
 
-交付用户可见存储页，展示 segment/archive 使用量、Run/position/review/recovery 保护理由、预算和 GC dry-run；执行 GC 必须复核 plan hash。按 BAR、AGG、BOOK 分阶段 rollout，使用真实来源数据完成容量、告警、恢复、回滚和支持清单。
+Phase 18 开始时的仓库事实如下；后续实现不得用 UI 文案掩盖这些差异：
+
+| 领域 | Phase 17 HEAD 已有能力 | Phase 18 必须闭合的缺口 |
+|---|---|---|
+| BAR / AGG segment | replay-owned object、checksum/epoch、ref pin、quarantine、dry-run plan hash、执行时重算、可信 manifest 重水化、恢复审计 | 缺少总存储硬预算、统一用户可见保护理由和预算压力告警 |
+| 历史 BOOK | 1 TiB 上限、连续性校验、active pin、dry-run/run/rehydrate、执行时重算；`queue_exact=false` | 只有 Binance USD-M operator capture 合同；没有生产 capture/download，不能冒充 queue exact，也不能阻塞 BAR/AGG core |
+| exact account history | 128 GiB 上限、外部可信源、checksum/proof、active pin、模型与覆盖校验；schema 已允许 `EVICTED` | 没有 GC dry-run/run/rehydrate/audit，导致 `EVICTED` 只是未闭合的 schema 状态 |
+| Review/Fork 证据 | 每 Run 512 MiB anchor、128 MiB artifact、8,192 critical events、2,048 viewport buckets；原 Run/Fork 证明不可变 | 没有大厅级占用摘要；本 Phase 不允许自动删除 Review 证据 |
+| 发布工具 | Phase 10 clean-HEAD checks、正式 benchmark、4h/100-cycle browser soak、rollback drill、artifact hash manifest | 只证明 Phase 10 HEAD；验收矩阵未覆盖 Phase 11–18，soak 仍是合成市场数据，rollback 尚未证明新存储治理不减 archive/pin/ledger/aggregate hash |
+
+Phase 18 只实现以下范围：
+
+1. 新增 `REPLAY_SEGMENT_MAX_ARCHIVE_BYTES`，默认安全上限 1 TiB，可由环境变量收紧但不可越过代码冻结上限；segment publish 前必须在锁内复核预算，超限不 publish、不留下 READY 半成品。
+2. exact-account 增加与 BOOK 同构但协议独立的 `replay.account-history.gc.v1`：dry-run、plan hash、执行时全量重算、active pin/path/symlink/trusted-source/checksum 保护、原子 EVICTED、checksum-bound rehydrate 与 additive audit。
+3. 新增只读 `replay.storage.inventory.v1` 聚合接口和训练大厅内按需打开的存储治理面板。响应不得包含本地路径、trusted source locator、actual time、真实起止范围或私有字段。
+4. 面板按 segment、BOOK、account-history 分别执行 GC，不提供跨类别“全部清理”；用户必须先看到 dry-run、勾选确认并提交同一个 71 字符 plan hash。409 `*_GC_PLAN_CHANGED` 必须清除旧计划并要求重新预演。
+5. Review/Fork 只展示每 Run 聚合用量、上限和 `RUN_ARCHIVE_EVIDENCE` / `REVIEW_OPEN` / `FORK_LINEAGE` 等保护理由；Phase 18 不新增 Review GC。
+6. 扩展真实来源验证、容量、告警、4h 浏览器 soak、rollback observation、支持矩阵、acceptance 与 release manifest。所有正式 artifact 位于仓库外且绑定 Phase 18 完整 clean HEAD。
+
+不在本 Phase 的范围：真实资金、自动开启任一生产开关、从公开 K 线推导 exact account、生产 BOOK capture/download、maker queue model、跨类别非原子 GC、删除不可重建数据或删除 Review/Fork 证据。
+
+### 冻结的存储治理协议
+
+`GET /api/v1/replay/runs/storage` 返回唯一顶层协议 `replay.storage.inventory.v1`：
+
+- `decision` 只允许 `HOLD` 或 `ENABLE`，并带 `default_flags_enabled=false`、可机器检查的 `reason_codes` 和 evidence requirements；运行时库存本身永远不能把决策从 HOLD 自动升级成 ENABLE。
+- `categories` 固定为 `segments`、`historical_books`、`account_history`、`review_evidence`。每类必须给出 `local_bytes`、`max_bytes`、`pressure_bps`、READY/EVICTED/QUARANTINED/pinned 计数、bounded items 和 protection reasons。
+- segment/BOOK/account item 只暴露 opaque id、公开 identity、health、byte size、generation、active ref count、recoverability 和 protection reasons；不得暴露 range、path、trusted origin locator、actual timestamp、checksum 或 dataset epoch。
+- Review item 只暴露 opaque run id、Run 状态、anchor/artifact bytes、timeline/viewport counts、各自上限与保护理由；不返回事件内容、时间或 checkpoint。
+- `support_matrix` 由服务端权威生成，不由前端猜测。BAR、AGG_TRADE、BOOK_ASSISTED、HISTORICAL_EXACT_ACCOUNT 分别声明 source contract、exchange/market、fidelity、observed identities、required flags、production readiness、限制和证据状态。
+- `alerts` 只允许 `INFO/WARNING/CRITICAL`，至少覆盖 feature 默认关闭、预算达到 80%/95%、quarantine/degraded、不可重建保护和缺失真实来源证据；告警不包含 actual time。
+
+GC 保持三套独立协议：
+
+- segment：既有 `replay.data.gc.v1`；
+- BOOK：既有 `replay.historical-book.gc.v1`；
+- account：新增 `replay.account-history.gc.v1`。
+
+三者的 RUN 都必须在同一 manager lock 内重新生成计划并精确匹配 plan hash。候选在 claim 前再次核对 generation、health、active refs、owned regular-file 边界和可信重建源；任一漂移只 skip 或 409，不得删错对象。文件删除失败必须恢复可用状态或明确 quarantine，不能留下“数据库声称 EVICTED、文件却处于未知状态”的半写。可信外部源永不删除。
+
+### 真实来源与支持矩阵
+
+1. BAR 核心只声明数据库中实际通过 catalog 连续性与 closed-bar 校验的 exchange/market/symbol/interval；正式 real-source lane 从只读 CandleScope K 线库复制有界连续片段到隔离数据库，记录源文件 SHA-256、表 schema、选中 identity、行数、连续性和输出 aggregate hash，不修改源库。
+2. AGG_TRADE 生产支持只声明 Binance USD-M futures 官方 `data.binance.vision` 日归档；ZIP 与官方 CHECKSUM 都必须验证，importer 继续拒绝 spot、非 Binance、非 HTTPS、缺 checksum、缺 ID 连续性或 K 线不一致。正式证据至少包含一个真实官方日归档及其导入/回放/重启/GC/rehydrate hash。
+3. BOOK 只声明 Binance USD-M operator-captured snapshot + ordered diff-depth，fidelity 固定为 `BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE`。如果没有生产 capture 证据，production readiness 必须为 HOLD；这不阻塞 BAR/AGG 技术完成。
+4. HISTORICAL_EXACT_ACCOUNT 只声明 operator-captured `LINEAR_QUOTE_SETTLED_V1 / ONE_WAY / SINGLE_QUOTE`；缺少真实规则、mark/index、funding 全覆盖时必须 HOLD，绝不降级成公开 K 线代理。
+5. 真实多商品浏览器 lane 至少在 BAR 数据上完成两商品、统一账户、订单/fill、持仓、资金曲线、快进、重启、Review/Fork、segment GC 保护与重水化。AGG 真实来源单独验证逐笔路径；BOOK/account 的合成 fixture 只能证明实现合同，不能升级生产支持。
+
+### 用户界面与操作边界
+
+1. 训练大厅初始仍只加载轻量 Run 列表；用户点击“存储管理”后才请求 inventory，关闭面板即取消未完成请求。
+2. 每一类别展示用量、预算、压力、状态计数、支持 fidelity 和每个对象的保护理由。路径、真实区间和 checksum 即使后端误发，严格 parser 也必须拒绝整个响应。
+3. GC 预演输入有界；面板必须逐项展示候选、预计回收字节和 protected 条目。RUN 按钮在 plan hash、显式确认或计划输入任一不一致时禁用。
+4. RUN/rehydrate 后重新拉取 inventory；plan-changed、pin appeared、checksum/path failure、预算不足都以服务端错误码显示，不乐观删除 UI 行。
+5. `review_evidence` 没有 GC 控件；用户只能看到“存档证据受保护”和预算状态。
+
+### 实现顺序
+
+1. 先完成 additive schema、segment 总预算、account GC/rehydrate/audit、保护竞态与迁移测试。
+2. 建立严格脱敏 inventory assembler、支持矩阵和预算/健康告警；完成 API contract、no-path/no-actual-time、bounded response 测试。
+3. 实现前端 strict parser、API boundary、Hub lifecycle 和 StorageGovernancePanel；完成 lazy-load、取消、dry-run→confirm→run、409 stale-plan 和无 Review 删除入口测试。
+4. 扩展 benchmark、真实 BAR/官方 AGG source profile、正式 soak、rollback drill、acceptance matrix 和 release verifier；先短程验证 harness，再提交 Phase 18。
+5. Phase 18 commit 后只在 clean HEAD 上运行全量 release suite、真实来源容量、4h/100-cycle soak 与 commit rollback observation。任何 artifact 失败都保持 HOLD，修复后必须新 commit 并从 clean-HEAD 证据起点重跑。
+
+### 实现与提交前门禁结果（2026-07-26）
+
+1. segment manager 新增冻结的 1 TiB 总预算；external prepare 和 rehydrate 都在 GC lock 内重算已占用字节，预算或数据库 publish 失败会清理临时/最终文件并把 job/segment 明确置错，不产生 READY 半写。可信重建源拒绝 symlink、replay-owned 内部路径和身份/checksum 漂移。
+2. exact account 新增独立 `replay.account-history.gc.v1` dry-run/run/rehydrate。RUN 在 manager lock 内重算 plan hash，以 health/generation/active ref 原子 claim，文件先移入 `.trash` 后才提交 EVICTED；pin 或事务漂移会还原文件和 READY。启动恢复会校验 byte size 与 SHA-256 后恢复中断 claim；外部可信原件从不删除。replay.training 仍为 additive v9，新增旧 binary 可忽略的 GC audit 表。
+3. 新增 `replay.storage.inventory.v1` 与 Hub StorageGovernancePanel。inventory 每类最多 200 项、observed identity 最多 100 项，返回 category budget/pressure/health/pin/protection、支持矩阵和 HOLD 原因；不得返回 path、trusted locator、checksum、dataset epoch、actual time 或真实 range。前端递归拒绝这些字段，初始 Hub 不请求 storage，关闭面板取消请求；stale plan 清除确认，Review evidence 没有删除入口。
+4. 真实 BAR release profile 对只读 CandleScope SQLite 执行两次整文件 SHA-256、`quick_check`、schema/OHLC/closed-boundary/连续性校验，选中 Binance spot BTCUSDT 与 ETHUSDT 各 4,000 根连续 1m；提交前源文件为 456,822,784 B，SHA-256=`6ca25d6b62ecfebc831bd9ec2449d68da2abe57b1fd1928c0056f40401f8c0b3`。正式 v2 4 小时 soak 未提供该 profile 时直接拒绝运行；短 harness 可继续使用隔离合成源。
+5. 官方 AGG release profile 实际下载 Binance Vision `BTCUSDT-aggTrades-2026-07-24.zip`，官方 SHA-256=`f4c402e575ddaf0104369b8ff737fba58f6e68e542039c56afcec03e274caf1c`；955,309 条 aggregate trade、ID 3,391,998,908..3,392,954,216 连续，导入 10 个 checksum-bound Parquet 对象，freeze/validate 得到 exact dataset epoch=`sha256:6bcc14eb22a9e9b3c1b62f95f565a8b55ac0382d9249e440d467c305f7cd0928`。该真实证据只升级 BAR/AGG 实现门禁，不升级 BOOK queue 或 exact account 生产支持。
+6. 10,000 segment 本机门禁为 GC p50/p95/max=`546.817/550.883/550.883 ms`，inventory p50/p95/max=`50.274/51.452/51.452 ms`，均低于 1,500 ms 冻结上限；inventory object/item=`10000/200` 且 `truncated=true`。exact account 1/2/4/8 持仓轨、每轨 8 次推进的 p95=`72.296/104.202/177.573/359.183 ms`，均低于 500 ms；每例 auditor、ledger、funding、SQLite quick/FK 和 64 MiB RSS 门禁通过。
+7. 自动回归：Phase 18 后端 8 passed；Phase 10/18、segment benchmark、smoke fixture 合集 25 passed；后端最终全量 2,098 passed，只有 4 条既有 FastAPI `on_event` 弃用警告。首轮全量准确捕获训练包显式白名单缺少 `storage_governance.py`，补入后对应 27/27 和隔离全量均通过；一次并行工具中断遗留的 pytest 进程经 PID/命令行核对清理，随后启用 180 秒 faulthandler 的独立全量在 150.95 s 正常完成。变更 Python scope Ruff、compileall 和 Node 脚本语法均通过。
+8. 前端 Phase 18/Hub/Phase 12/16 定向 30 passed；最终 `npm run check` 的 architecture、两个 TypeScript project、ESLint、2,445 tests 和 Vite production build 全部通过。acceptance matrix 从 Phase 10 的 28 项扩展为连续 1..40，新增 storage 与 real_source gate；formal benchmark 加入 10k bounded inventory 和 1/2/4/8 exact-account capacity。
+9. rollback drill 现同时快照 replay schema、16 张存储/引用/Review/ledger/GC 表计数、active refs 和 run/session/ledger 语义 hash；关闭开关、disabled restart、旧 baseline 运行中与关停后必须与首次 graceful shutdown 快照逐字段相等，并继续要求 replay DB 文件集合/大小/SHA-256 完全相同。
+10. Phase 18 独立提交后，最终 clean-HEAD suite 固定生成 checks、formal benchmark、real-source validation、v1 smoke、v2 short smoke、真实 BAR 的 4h/100-cycle/1M projection soak、v2 storage-preserving rollback 与 release manifest。每份 artifact 都必须在仓库外包含同一完整 HEAD；任一失败都不得复用旧 artifact。仓库文件只记录这一门禁合同，最终 PASS/HOLD 事实以外部 manifest 为唯一权威。
 
 ### 最终退出门槛
 
@@ -1670,6 +1745,11 @@ Phase 4 已有完整性模式、资金调整审计、多分辨率权益曲线、
 4. 真实多商品持仓、订单、funding、快进、重启、Review/Fork、下载/rehydration/GC 和 4h 浏览器 soak 全部通过。
 5. rollback 后存档数、pin、archive、账本和数据库 aggregate hash 不减少；旧 build 安全忽略 additive schema。
 6. 形成显式 `ENABLE / HOLD` 决策；本地测试通过本身不等于生产启用。
+
+退出判定分两层：
+
+- `PHASE18_IMPLEMENTATION_PASS`：上述实现、迁移、定向/全量测试、真实来源验证、4h soak、回滚保全和 clean-HEAD artifact 均成功，Phase 18 可以独立完成。
+- `PRODUCTION_ENABLE`：只有真实生产数据供给、容量告警接入、operator 支持责任与观察窗也完成时才允许 ENABLE。若代码和 release gates 全部 PASS，但生产 BOOK/account 数据或运维观察尚缺，Phase 18 仍可完成，最终决策必须明确为 `HOLD`，所有默认开关保持关闭。
 
 Phase 18 完成并独立提交后，才允许结束 Phase 11–18 Goal。
 

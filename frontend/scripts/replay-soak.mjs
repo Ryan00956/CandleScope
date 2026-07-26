@@ -34,6 +34,9 @@ function parseArgs(argv) {
     out: defaultV1Output,
     productV2: false,
     projectionEvents: RELEASE_PROJECTION_EVENTS,
+    realKlinesSource: process.env.REPLAY_REAL_KLINES_SOURCE
+      ? path.resolve(process.env.REPLAY_REAL_KLINES_SOURCE)
+      : "",
     sampleMs: 60_000,
     timeoutMs: DEFAULT_TIMEOUT_MS,
   };
@@ -48,6 +51,7 @@ function parseArgs(argv) {
     else if (value === "--duration-ms") result.durationMs = Number(argv[++index]);
     else if (value === "--out") result.out = path.resolve(String(argv[++index] || ""));
     else if (value === "--projection-events") result.projectionEvents = Number(argv[++index]);
+    else if (value === "--real-klines-source") result.realKlinesSource = path.resolve(String(argv[++index] || ""));
     else if (value === "--sample-ms") result.sampleMs = Number(argv[++index]);
     else if (value === "--timeout-ms") result.timeoutMs = Number(argv[++index]);
     else throw new Error(`Unknown replay soak option: ${value}`);
@@ -76,6 +80,18 @@ function parseArgs(argv) {
   }
   if (!result.allowShort && result.diagnosticGapSteps > 0) {
     throw new Error("--diagnostic-gap-steps is available only with --allow-short");
+  }
+  if (
+    result.realKlinesSource
+    && (
+      !fs.existsSync(result.realKlinesSource)
+      || !fs.statSync(result.realKlinesSource).isFile()
+    )
+  ) {
+    throw new Error("--real-klines-source must point to an existing SQLite file");
+  }
+  if (!result.allowShort && result.productV2 && !result.realKlinesSource) {
+    throw new Error("Phase 18 replay.v2 release soak requires --real-klines-source");
   }
   return result;
 }
@@ -1462,14 +1478,18 @@ async function main() {
     ? path.join(backendRoot, ".venv", "Scripts", "python.exe")
     : "python";
   const offlineOrigin = "http://127.0.0.1:9";
-  const backend = spawn(python, [
+  const backendArgs = [
     "-m",
     "scripts.replay_smoke_fixture",
     "--port",
     String(backendPort),
     "--live-window",
     "--disable-gap-maintenance",
-  ], {
+    ...(args.realKlinesSource
+      ? ["--real-klines-source", args.realKlinesSource]
+      : []),
+  ];
+  const backend = spawn(python, backendArgs, {
     cwd: backendRoot,
     env: {
       ...process.env,
@@ -1547,6 +1567,16 @@ async function main() {
       fixture,
     );
     assert(fixture.gap_maintenance_enabled === false, "offline browser soak fixture left gap maintenance enabled", fixture);
+    if (!args.allowShort && args.productV2) {
+      assert(
+        fixture.source_profile === "REAL_BAR_SQLITE"
+          && fixture.real_source === true
+          && fixture.real_source_evidence?.read_only === true
+          && fixture.real_source_evidence?.identities?.length >= 2,
+        "formal replay.v2 soak did not load the validated real BAR profile",
+        fixture,
+      );
+    }
 
     const projectionPage = await createTarget(debugBase);
     connections.add(projectionPage.cdp);
@@ -1967,6 +1997,12 @@ async function main() {
     const finalActor = actorDiagnostics(finalMetrics.backend, sessionId);
     const minimumSourceProgress = Math.max(0, Math.floor(args.durationMs / 60_000) - 3);
     const checks = {
+      real_bar_source_profile: !args.productV2 || args.allowShort || (
+        fixture.source_profile === "REAL_BAR_SQLITE"
+        && fixture.real_source === true
+        && fixture.real_source_evidence?.read_only === true
+        && fixture.real_source_evidence?.identities?.length >= 2
+      ),
       duration_complete: finalMetrics.elapsedMs >= args.durationMs,
       lifecycle_cycles_complete: cycles.length === args.cycles,
       training_action_cycles_complete: trainingCycles.length === args.cycles,
@@ -2048,6 +2084,10 @@ async function main() {
         projectionEvents: args.projectionEvents,
         product: args.productV2 ? "replay.v2" : "replay.v1",
         chrome: path.basename(chromePath),
+        sourceProfile: fixture.source_profile,
+        realSource: fixture.real_source,
+        realSourceSha256: fixture.real_source_evidence?.file_sha256 ?? null,
+        realSourceIdentityCount: fixture.real_source_evidence?.identities?.length ?? 0,
         fixtureRows: fixture.fixture_rows,
         liveWindow: fixture.live_window,
         fixtureIdentityHash: sha256(JSON.stringify(fixture)),

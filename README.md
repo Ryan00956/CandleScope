@@ -113,6 +113,10 @@ VITE_REPLAY_ENTRY_ENABLED=0
 VITE_REPLAY_PRODUCT_V2_ENABLED=0
 RAW_AGG_TRADE_ARCHIVE_ENABLED=0
 REPLAY_HISTORICAL_BOOK_ENABLED=0
+REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0
+REPLAY_SEGMENT_AUTO_GC_ENABLED=0
+REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0
+REPLAY_ACCOUNT_HISTORY_ENABLED=0
 ```
 
 The frontend flag only hides or shows the live-page entry. The backend
@@ -182,6 +186,20 @@ Set-Location backend
 Storage GC remains explicit dry-run/run, never automatically reclaims an
 active pin, and rehydrates only when the retained trusted source still matches
 the frozen checksum.
+
+Phases 11–18 complete the training-workbench contract: live-page launch
+context, server-owned time disclosure, BAR/AGG control semantics, on-demand
+multi-symbol data policy, checkpoint-equivalent fast-forward, exact
+account-history inputs, read-only review/fork workflows, and bounded storage
+governance. The Hub storage panel is lazy-loaded and path-redacted. Segment,
+book, and account-history GC are category-specific, require a fresh dry-run
+plan hash, protect active pins, and rehydrate only from checksum-identical
+trusted sources. Review evidence has no deletion action.
+
+Implementation acceptance does not enable production. Phase 18 remains
+`HOLD_DEFAULTS_REMAIN_OFF`: real BAR and official checksum-bound Binance USD-M
+aggTrade sources are release-tested, while BOOK and exact account modes still
+lack bound production captures and an operations observation window.
 
 ### Prepare Isolated Data
 
@@ -279,6 +297,11 @@ Set-Location backend
   --out "$ReplayEvidenceRoot\checks.json"
 .\.venv\Scripts\python.exe scripts\benchmark_replay_v2_release.py `
   --out "$ReplayEvidenceRoot\benchmark.json"
+.\.venv\Scripts\python.exe scripts\validate_replay_v2_real_sources.py `
+  --klines-db .\data\replay-dev\source-candlescope.db `
+  --agg-archive-dir "$ReplayEvidenceRoot\official-aggtrade-archive" `
+  --agg-day 2026-07-24 `
+  --out "$ReplayEvidenceRoot\real-source-validation.json"
 
 Set-Location ..\frontend
 npm run smoke:replay -- --timeout-ms 120000 `
@@ -287,6 +310,7 @@ npm run smoke:replay:v2 -- --timeout-ms 120000 `
   --out "$ReplayEvidenceRoot\replay-v2-smoke.json"
 node scripts\replay-soak.mjs `
   --product-v2 `
+  --real-klines-source ..\backend\data\replay-dev\source-candlescope.db `
   --duration-ms 14400000 --cycles 100 --projection-events 1000000 `
   --sample-ms 60000 --timeout-ms 120000 `
   --out "$ReplayEvidenceRoot\replay-v2-soak.json"
@@ -304,13 +328,15 @@ Set-Location ..\backend
 
 Release evidence commands reject a dirty worktree or a changing Git HEAD.
 Keep their outputs outside the repository so one completed gate cannot make
-the next gate fail the clean-tree check. The final verifier also checks all 28
-product-contract scenarios, exact default-off flags, artifact hashes, 100
+the next gate fail the clean-tree check. The final verifier also checks all 40
+product-contract scenarios, exact default-off flags, artifact hashes, real
+BAR and official aggTrade source provenance, bounded storage inventory, 100
 archive lifecycles, keyboard/focus/reduced-motion evidence, and a detached
 `git revert --no-commit` drill. The 4-hour soak is a real release gate, not a
-short harness mode. Passing these local gates does not authorize default
-enablement or replace the required production capacity/alerting observation
-window and explicit enablement decision.
+short harness mode, and formally requires `--real-klines-source` (or
+`REPLAY_REAL_KLINES_SOURCE`). Passing these local gates leaves production on
+HOLD and does not replace the required BOOK/account capture, capacity/alerting
+observation window, or explicit enablement decision.
 
 ## Architecture
 

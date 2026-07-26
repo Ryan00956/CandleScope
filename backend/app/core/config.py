@@ -31,6 +31,7 @@ _REPLAY_BUDGETS: dict[str, int] = {
     "REPLAY_EVENT_SUBSCRIBER_QUEUE": 256,
     "REPLAY_CONTROLLER_TTL_SECONDS": 10,
     "REPLAY_IDLE_TTL_SECONDS": 3_600,
+    "REPLAY_SEGMENT_MAX_ARCHIVE_BYTES": 1_099_511_627_776,
     "REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES": 1_099_511_627_776,
     "REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES": 137_438_953_472,
 }
@@ -56,6 +57,7 @@ class ReplaySettings:
     product_v2_enabled: bool = False
     replay_segment_download_worker_enabled: bool = False
     replay_segment_auto_gc_enabled: bool = False
+    replay_segment_max_archive_bytes: int = 1_099_511_627_776
     replay_fast_forward_optimization_enabled: bool = False
     replay_historical_book_enabled: bool = False
     replay_historical_book_max_archive_bytes: int = 1_099_511_627_776
@@ -146,6 +148,9 @@ def load_replay_settings(
         replay_segment_auto_gc_enabled=_strict_replay_bool(
             environment, "REPLAY_SEGMENT_AUTO_GC_ENABLED", "0"
         ),
+        replay_segment_max_archive_bytes=values[
+            "REPLAY_SEGMENT_MAX_ARCHIVE_BYTES"
+        ],
         replay_fast_forward_optimization_enabled=_strict_replay_bool(
             environment, "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED", "0"
         ),
@@ -187,6 +192,9 @@ REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED = (
     REPLAY_SETTINGS.replay_segment_download_worker_enabled
 )
 REPLAY_SEGMENT_AUTO_GC_ENABLED = REPLAY_SETTINGS.replay_segment_auto_gc_enabled
+REPLAY_SEGMENT_MAX_ARCHIVE_BYTES = (
+    REPLAY_SETTINGS.replay_segment_max_archive_bytes
+)
 REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED = (
     REPLAY_SETTINGS.replay_fast_forward_optimization_enabled
 )

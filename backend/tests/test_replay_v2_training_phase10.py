@@ -17,9 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_phase10_maps_every_product_contract_scenario_to_live_evidence() -> None:
     matrix, validated = release_verifier._validate_matrix()
-    assert matrix["production_enablement"] == "NOT_AUTHORIZED_DEFAULTS_REMAIN_OFF"
-    assert matrix["expected_scenarios"] == 28
-    assert [scenario["id"] for scenario in validated] == list(range(1, 29))
+    assert matrix["production_enablement"] == "HOLD_DEFAULTS_REMAIN_OFF"
+    assert matrix["expected_scenarios"] == 40
+    assert [scenario["id"] for scenario in validated] == list(range(1, 41))
     assert all(scenario["validated"] is True for scenario in validated)
     assert {scenario["release_gate"] for scenario in validated} == {
         "full_suite",
@@ -27,6 +27,8 @@ def test_phase10_maps_every_product_contract_scenario_to_live_evidence() -> None
         "benchmark",
         "soak",
         "rollback",
+        "storage",
+        "real_source",
     }
 
 
@@ -46,6 +48,10 @@ def test_phase10_keeps_all_six_repository_release_flags_default_off(
         "VITE_REPLAY_PRODUCT_V2_ENABLED": "0",
         "RAW_AGG_TRADE_ARCHIVE_ENABLED": "0",
         "REPLAY_HISTORICAL_BOOK_ENABLED": "0",
+        "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED": "0",
+        "REPLAY_SEGMENT_AUTO_GC_ENABLED": "0",
+        "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED": "0",
+        "REPLAY_ACCOUNT_HISTORY_ENABLED": "0",
     }
 
 
@@ -128,6 +134,8 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
         "v2_keyboard_accessible",
         "v2_reduced_motion_effective",
         "release-4h",
+        "--real-klines-source",
+        "real_bar_source_profile",
     ):
         assert needle in soak
     for needle in (
@@ -139,6 +147,8 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
         '#replay-status-bar, #status-bar[data-runtime-source="replay"]',
         "queryReplayV2Archive",
         "old_build_preserved_replay_db",
+        "queryReplayStorageSnapshot",
+        "old_build_preserved_storage_semantics",
     ):
         assert needle in rollback
     assert "--live-window" in smoke

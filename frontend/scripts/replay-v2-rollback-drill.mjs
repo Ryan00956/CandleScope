@@ -522,6 +522,44 @@ function queryReplayV2Archive(python, dbPath, sessionId) {
   return JSON.parse(output);
 }
 
+function queryReplayStorageSnapshot(python, dbPath) {
+  const source = [
+    "import hashlib, json, sqlite3, sys",
+    "path = sys.argv[1]",
+    "connection = sqlite3.connect(f'file:{path}?mode=ro', uri=True)",
+    "connection.row_factory = sqlite3.Row",
+    "tables = [",
+    "  'replay_session', 'replay_training_run', 'replay_data_segment',",
+    "  'replay_data_segment_ref', 'replay_historical_book_archive',",
+    "  'replay_historical_book_ref', 'replay_account_history_archive',",
+    "  'replay_account_history_ref', 'replay_review_timeline_event',",
+    "  'replay_review_actor_anchor', 'replay_review_session',",
+    "  'replay_review_fork_lineage', 'replay_training_contract_ledger',",
+    "  'replay_data_gc_audit', 'replay_historical_book_gc_audit',",
+    "  'replay_account_history_gc_audit'",
+    "]",
+    "existing = {row[0] for row in connection.execute(\"SELECT name FROM sqlite_master WHERE type='table'\")}",
+    "missing = [name for name in tables if name not in existing]",
+    "counts = {name: connection.execute(f'SELECT COUNT(*) FROM {name}').fetchone()[0] for name in tables if name in existing}",
+    "schema = connection.execute('SELECT version FROM replay_training_schema_version WHERE singleton=1').fetchone() if 'replay_training_schema_version' in existing else None",
+    "active_refs = {}",
+    "for name in ('replay_data_segment_ref', 'replay_historical_book_ref', 'replay_account_history_ref'):",
+    "  if name in existing: active_refs[name] = connection.execute(f'SELECT COUNT(*) FROM {name} WHERE active=1').fetchone()[0]",
+    "semantic = []",
+    "if 'replay_training_run' in existing:",
+    "  semantic.extend(tuple(row) for row in connection.execute('SELECT run_id, protocol, state, adapter_session_id FROM replay_training_run ORDER BY run_id'))",
+    "if 'replay_session' in existing:",
+    "  semantic.extend(tuple(row) for row in connection.execute('SELECT session_id, state, state_hash, revision, event_sequence, source_sequence FROM replay_session ORDER BY session_id'))",
+    "if 'replay_training_contract_ledger' in existing:",
+    "  semantic.extend(tuple(row) for row in connection.execute('SELECT run_id, ledger_sequence, entry_hash FROM replay_training_contract_ledger ORDER BY run_id, ledger_sequence'))",
+    "encoded = json.dumps(semantic, separators=(',', ':'), ensure_ascii=True).encode()",
+    "connection.close()",
+    "print(json.dumps({'schema_version': None if schema is None else schema[0], 'missing_tables': missing, 'counts': counts, 'active_refs': active_refs, 'semantic_sha256': hashlib.sha256(encoded).hexdigest()}, sort_keys=True))",
+  ].join("\n");
+  const output = runSync(python, ["-c", source, dbPath], { cwd: backendRoot });
+  return JSON.parse(output);
+}
+
 function sameDigest(left, right) {
   return left.sha256 === right.sha256 && JSON.stringify(left.files) === JSON.stringify(right.files);
 }
@@ -669,6 +707,18 @@ async function main() {
     assert(v2Archive?.protocol === "replay.v2" && v2Archive?.adapter_session_id === sessionId, "v2 archive identity was not persisted", v2Archive);
     assert(v2Archive?.session_state === "PAUSED" && v2Archive?.state_hash === persisted.state_hash, "v2 archive/session state drifted", { v2Archive, persisted });
     const digestAfterGracefulShutdown = replayDatabaseDigest(paths.replay);
+    const storageAfterGracefulShutdown = queryReplayStorageSnapshot(
+      python,
+      paths.replay,
+    );
+    assert(
+      storageAfterGracefulShutdown.schema_version >= 9
+        && storageAfterGracefulShutdown.missing_tables.length === 0
+        && storageAfterGracefulShutdown.counts.replay_training_run >= 1
+        && storageAfterGracefulShutdown.counts.replay_session >= 1,
+      "Phase 18 storage snapshot is incomplete before rollback",
+      storageAfterGracefulShutdown,
+    );
 
     const disabledBackend = trackProcess(
       "current-disabled-backend",
@@ -706,7 +756,13 @@ async function main() {
     const replayStreamsAfterDisabledDocument = replayCapture.webSockets.filter((url) => /\/api\/v1\/stream\/replay\//.test(url)).length;
     assert(replayStreamsAfterDisabledDocument === replayStreamsBeforeDisabledDocument, "disabled replay document opened a replay WebSocket", replayCapture.webSockets);
     const digestWhileDisabled = replayDatabaseDigest(paths.replay);
+    const storageWhileDisabled = queryReplayStorageSnapshot(python, paths.replay);
     assert(sameDigest(digestAfterGracefulShutdown, digestWhileDisabled), "disabled backend changed replay database bytes", { digestAfterGracefulShutdown, digestWhileDisabled });
+    assert(
+      JSON.stringify(storageWhileDisabled) === JSON.stringify(storageAfterGracefulShutdown),
+      "disabled backend changed Phase 18 storage semantics",
+      { storageAfterGracefulShutdown, storageWhileDisabled },
+    );
 
     const currentKlines = await readJson(`${currentBackendOrigin}/api/v1/klines/?symbol=BTCUSDT&interval=1m&limit=10&exchange=binance&market_type=spot`);
     const currentSettings = await readJson(`${currentBackendOrigin}/api/v1/settings/proxy`);
@@ -715,7 +771,16 @@ async function main() {
     await gracefulStopBackend(currentBackendOrigin, disabledBackend.child, args.timeoutMs);
     await stopProcessTree(disabledVite.child);
     const digestAfterDisabledShutdown = replayDatabaseDigest(paths.replay);
+    const storageAfterDisabledShutdown = queryReplayStorageSnapshot(
+      python,
+      paths.replay,
+    );
     assert(sameDigest(digestAfterGracefulShutdown, digestAfterDisabledShutdown), "disabled restart changed replay database", { digestAfterGracefulShutdown, digestAfterDisabledShutdown });
+    assert(
+      JSON.stringify(storageAfterDisabledShutdown) === JSON.stringify(storageAfterGracefulShutdown),
+      "disabled restart changed Phase 18 storage semantics",
+      { storageAfterGracefulShutdown, storageAfterDisabledShutdown },
+    );
 
     runSync("git", ["worktree", "add", "--detach", oldWorktree, baselineCommit]);
     oldWorktreeAdded = true;
@@ -768,11 +833,26 @@ async function main() {
     assert(!oldLiveCapture.webSockets.some((url) => /\/stream\/replay\//.test(url)), "old live target opened replay WebSocket", oldLiveCapture.webSockets);
 
     const digestWhileOldBuildRuns = replayDatabaseDigest(paths.replay);
+    const storageWhileOldBuildRuns = queryReplayStorageSnapshot(
+      python,
+      paths.replay,
+    );
     assert(sameDigest(digestAfterGracefulShutdown, digestWhileOldBuildRuns), "old build changed replay database while running", { digestAfterGracefulShutdown, digestWhileOldBuildRuns });
+    assert(
+      JSON.stringify(storageWhileOldBuildRuns) === JSON.stringify(storageAfterGracefulShutdown),
+      "old build changed Phase 18 storage semantics while running",
+      { storageAfterGracefulShutdown, storageWhileOldBuildRuns },
+    );
     await gracefulStopBackend(oldBackendOrigin, oldBackend.child, args.timeoutMs);
     await stopProcessTree(oldVite.child);
     const digestAfterOldBuild = replayDatabaseDigest(paths.replay);
+    const storageAfterOldBuild = queryReplayStorageSnapshot(python, paths.replay);
     assert(sameDigest(digestAfterGracefulShutdown, digestAfterOldBuild), "old build changed replay database after shutdown", { digestAfterGracefulShutdown, digestAfterOldBuild });
+    assert(
+      JSON.stringify(storageAfterOldBuild) === JSON.stringify(storageAfterGracefulShutdown),
+      "old build changed Phase 18 storage semantics after shutdown",
+      { storageAfterGracefulShutdown, storageAfterOldBuild },
+    );
     const dependencySentinelAfter = fileHash(path.join(currentNodeModules, "vite", "package.json"));
     assert(dependencySentinelAfter === dependencySentinelBefore, "old build changed the shared Vite dependency sentinel");
 
@@ -790,12 +870,18 @@ async function main() {
       old_frontend_ignored_replay_entry: oldLiveSnapshot.anyReplayEntry === false,
       old_live_data_and_settings_healthy: oldKlines.count > 0 && oldSettings.mode === "none" && oldLiveSnapshot.bars > 0,
       old_build_preserved_replay_db: sameDigest(digestAfterGracefulShutdown, digestAfterOldBuild),
+      phase18_storage_schema_present: storageAfterGracefulShutdown.schema_version >= 9
+        && storageAfterGracefulShutdown.missing_tables.length === 0,
+      disabled_restart_preserved_storage_semantics:
+        JSON.stringify(storageAfterDisabledShutdown) === JSON.stringify(storageAfterGracefulShutdown),
+      old_build_preserved_storage_semantics:
+        JSON.stringify(storageAfterOldBuild) === JSON.stringify(storageAfterGracefulShutdown),
       browser_runtime_clean: liveCapture.exceptions.length === 0 && oldLiveCapture.exceptions.length === 0,
     };
     assert(Object.values(checks).every(Boolean), "rollback acceptance failed", checks);
 
     result = {
-      schema_version: "replay-v2-rollback-drill.v1",
+      schema_version: "replay-v2-rollback-drill.v2",
       recorded_at: releaseEvidence.recorded_at,
       release_evidence: releaseEvidence.evidence,
       passed: true,
@@ -822,6 +908,11 @@ async function main() {
           whileDisabled: digestWhileDisabled,
           afterDisabledShutdown: digestAfterDisabledShutdown,
         },
+        storageGovernance: {
+          afterGracefulShutdown: storageAfterGracefulShutdown,
+          whileDisabled: storageWhileDisabled,
+          afterDisabledShutdown: storageAfterDisabledShutdown,
+        },
       },
       oldBuildRollback: {
         commit: baselineCommit,
@@ -832,6 +923,10 @@ async function main() {
         replayDatabase: {
           whileRunning: digestWhileOldBuildRuns,
           afterShutdown: digestAfterOldBuild,
+        },
+        storageGovernance: {
+          whileRunning: storageWhileOldBuildRuns,
+          afterShutdown: storageAfterOldBuild,
         },
       },
       acceptance: { passed: true, checks },

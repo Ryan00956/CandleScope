@@ -1,4 +1,4 @@
-"""Verify and bind all Phase 10 replay.v2 release gates to one clean HEAD."""
+"""Verify and bind all Phase 18 replay.v2 release gates to one clean HEAD."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ except ModuleNotFoundError:
     )
 
 
-SCHEMA_VERSION = "replay.v2.release-manifest.v1"
+SCHEMA_VERSION = "replay.v2.release-manifest.v2"
 MATRIX_PATH = REPOSITORY_ROOT / "docs" / "replay-v2-release-acceptance.json"
 
 
@@ -55,20 +55,22 @@ def _validate_matrix() -> tuple[Mapping[str, object], list[dict[str, object]]]:
         raise ValueError("release acceptance matrix must be an object")
     scenarios = matrix.get("scenarios")
     gates = matrix.get("release_gates")
-    if matrix.get("schema_version") != "replay.v2.release-acceptance.v1":
+    if matrix.get("schema_version") != "replay.v2.release-acceptance.v2":
         raise ValueError("release acceptance matrix schema drifted")
-    if matrix.get("expected_scenarios") != 28 or not isinstance(scenarios, list):
-        raise ValueError("release acceptance matrix must contain 28 scenarios")
+    if matrix.get("expected_scenarios") != 40 or not isinstance(scenarios, list):
+        raise ValueError("release acceptance matrix must contain 40 scenarios")
     if [item.get("id") for item in scenarios if isinstance(item, Mapping)] != list(
-        range(1, 29)
+        range(1, 41)
     ):
-        raise ValueError("release acceptance scenario ids must be exactly 1..28")
+        raise ValueError("release acceptance scenario ids must be exactly 1..40")
     if not isinstance(gates, list) or set(gates) != {
         "full_suite",
         "browser",
         "benchmark",
         "soak",
         "rollback",
+        "storage",
+        "real_source",
     }:
         raise ValueError("release acceptance gate registry drifted")
     validated: list[dict[str, object]] = []
@@ -134,11 +136,25 @@ def _validate_default_flags() -> dict[str, str]:
         "VITE_REPLAY_PRODUCT_V2_ENABLED": "0",
         "RAW_AGG_TRADE_ARCHIVE_ENABLED": "0",
         "REPLAY_HISTORICAL_BOOK_ENABLED": "0",
+        "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED": "0",
+        "REPLAY_SEGMENT_AUTO_GC_ENABLED": "0",
+        "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED": "0",
+        "REPLAY_ACCOUNT_HISTORY_ENABLED": "0",
     }
     checks = {
         "backend_core_off": settings.enabled is False,
         "backend_product_off": settings.product_v2_enabled is False,
         "backend_book_off": settings.replay_historical_book_enabled is False,
+        "backend_segment_worker_off": (
+            settings.replay_segment_download_worker_enabled is False
+        ),
+        "backend_segment_gc_off": settings.replay_segment_auto_gc_enabled is False,
+        "backend_fast_forward_off": (
+            settings.replay_fast_forward_optimization_enabled is False
+        ),
+        "backend_account_history_off": (
+            settings.replay_account_history_enabled is False
+        ),
         "backend_raw_agg_default_source": '"RAW_AGG_TRADE_ARCHIVE_ENABLED", "0"' in backend_source,
         "frontend_entry_strict_default_off": "return value === true || value === \"1\" || value === \"true\";" in entry_source,
         "frontend_product_strict_default_off": "return value === true || value === \"1\" || value === \"true\";" in product_source,
@@ -229,11 +245,15 @@ def main() -> int:
     )
     expected = {
         "checks": ("checks.json", "replay.v2.release-checks.v1"),
-        "benchmark": ("benchmark.json", "replay.v2.release-benchmark.v1"),
+        "benchmark": ("benchmark.json", "replay.v2.release-benchmark.v2"),
+        "real_source": (
+            "real-source-validation.json",
+            "replay.v2.real-source-validation.v1",
+        ),
         "v1_smoke": ("replay-v1-smoke.json", "replay-v1-browser-smoke.v1"),
         "v2_smoke": ("replay-v2-smoke.json", "replay-v2-browser-soak.v1"),
         "v2_soak": ("replay-v2-soak.json", "replay-v2-browser-soak.v1"),
-        "rollback": ("replay-v2-rollback.json", "replay-v2-rollback-drill.v1"),
+        "rollback": ("replay-v2-rollback.json", "replay-v2-rollback-drill.v2"),
     }
     payloads: dict[str, Mapping[str, object]] = {}
     artifacts: dict[str, dict[str, object]] = {}
@@ -248,6 +268,7 @@ def main() -> int:
 
     checks = payloads["checks"]
     benchmark = payloads["benchmark"]
+    real_source = payloads["real_source"]
     v2_smoke = payloads["v2_smoke"]
     v2_soak = payloads["v2_soak"]
     rollback = payloads["rollback"]
@@ -255,11 +276,32 @@ def main() -> int:
     soak_config = v2_soak.get("config")
     soak_lifecycle = v2_soak.get("archiveLifecycle")
     rollback_config = rollback.get("configuration")
+    benchmark_checks = benchmark.get("checks")
+    real_source_checks = real_source.get("checks")
+    real_source_support = real_source.get("production_support_effect")
+    rollback_acceptance = rollback.get("acceptance")
+    rollback_checks = (
+        rollback_acceptance.get("checks")
+        if isinstance(rollback_acceptance, Mapping)
+        else None
+    )
     gate_checks = {
         "backend_and_frontend_full": isinstance(checks.get("counts"), Mapping)
         and checks["counts"].get("backend_pytest_passed", 0) > 0
         and checks["counts"].get("frontend_node_tests_passed", 0) > 0,
         "formal_benchmark": benchmark.get("profile") == "formal-release",
+        "storage_capacity_and_redaction": isinstance(benchmark_checks, Mapping)
+        and benchmark_checks.get("storage_inventory_10000_bounded") is True
+        and benchmark_checks.get("account_history_acceptance") is True,
+        "real_bar_and_official_agg_sources": isinstance(
+            real_source_checks,
+            Mapping,
+        )
+        and all(value is True for value in real_source_checks.values())
+        and isinstance(real_source_support, Mapping)
+        and real_source_support.get("BAR") == "REAL_SOURCE_VALIDATED"
+        and real_source_support.get("AGG_TRADE")
+        == "OFFICIAL_CHECKSUM_SOURCE_VALIDATED",
         "v2_smoke_harness": v2_smoke.get("mode") == "harness-validation"
         and isinstance(smoke_config, Mapping)
         and smoke_config.get("product") == "replay.v2",
@@ -269,10 +311,21 @@ def main() -> int:
         and soak_config.get("durationMs", 0) >= 14_400_000
         and soak_config.get("cycles", 0) >= 100
         and soak_config.get("projectionEvents", 0) >= 1_000_000,
+        "v2_soak_real_bar_source": isinstance(soak_config, Mapping)
+        and soak_config.get("sourceProfile") == "REAL_BAR_SQLITE"
+        and soak_config.get("realSource") is True
+        and soak_config.get("realSourceIdentityCount", 0) >= 2,
         "v2_100_archive_lifecycles": isinstance(soak_lifecycle, Mapping)
         and soak_lifecycle.get("completed", 0) >= 100,
         "v2_rollback": isinstance(rollback_config, Mapping)
         and rollback_config.get("product") == "replay.v2",
+        "v2_rollback_storage_preserved": isinstance(rollback_checks, Mapping)
+        and rollback_checks.get("phase18_storage_schema_present") is True
+        and rollback_checks.get(
+            "disabled_restart_preserved_storage_semantics"
+        )
+        is True
+        and rollback_checks.get("old_build_preserved_storage_semantics") is True,
     }
     _acceptance_checks(v2_smoke)
     soak_acceptance = _acceptance_checks(v2_soak)
@@ -281,7 +334,7 @@ def main() -> int:
         and soak_acceptance.get("v2_reduced_motion_effective") is True
     )
     if not all(gate_checks.values()):
-        raise RuntimeError(f"Phase 10 release gate failed: {gate_checks}")
+        raise RuntimeError(f"Phase 18 release gate failed: {gate_checks}")
 
     matrix, scenarios = _validate_matrix()
     default_flags = _validate_default_flags()
@@ -302,8 +355,12 @@ def main() -> int:
         "artifacts": artifacts,
         "commit_revert_drill": revert,
         "repository_defaults": default_flags,
-        "production_enablement": "NOT_AUTHORIZED_DEFAULTS_REMAIN_OFF",
-        "production_observation": "REQUIRED_BEFORE_ANY_ENABLEMENT_DECISION",
+        "implementation_decision": "PASS",
+        "production_enablement": "HOLD_DEFAULTS_REMAIN_OFF",
+        "production_observation": (
+            "REQUIRED_FOR_BOOK_AND_EXACT_ACCOUNT_BEFORE_ANY_ENABLEMENT_DECISION"
+        ),
+        "support_decision": real_source_support,
     }
     write_json(output, report)
     assert_clean_head(head)

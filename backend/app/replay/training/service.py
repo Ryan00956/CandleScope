@@ -91,6 +91,7 @@ from .multitrack import (
     stable_market_event_order,
 )
 from .storage import TrainingRunStore
+from .storage_governance import ReplayStorageGovernance
 from .segments import (
     ReplaySegmentManager,
     resolve_history_policy,
@@ -145,6 +146,9 @@ class TrainingRunService:
                 replay_service.settings.replay_segment_download_worker_enabled
             ),
             auto_gc_enabled=replay_service.settings.replay_segment_auto_gc_enabled,
+            max_archive_bytes=(
+                replay_service.settings.replay_segment_max_archive_bytes
+            ),
         )
         self.historical_books = HistoricalBookArchiveManager(
             replay_service.store,
@@ -159,6 +163,13 @@ class TrainingRunService:
             max_archive_bytes=(
                 replay_service.settings.replay_account_history_max_archive_bytes
             ),
+        )
+        self.storage_governance = ReplayStorageGovernance(
+            replay_service.store,
+            settings=replay_service.settings,
+            segments=self.segments,
+            historical_books=self.historical_books,
+            account_history=self.account_history,
         )
         self._run_id_factory = run_id_factory
         self._random_seed_factory = random_seed_factory
@@ -246,6 +257,37 @@ class TrainingRunService:
 
     async def list_account_history_archives(self) -> dict[str, object]:
         return await self.account_history.list_archives()
+
+    async def storage_inventory(self) -> dict[str, object]:
+        return await self.storage_governance.inventory()
+
+    async def account_history_gc_plan(
+        self, *, target_reclaim_bytes: int, max_archives: int
+    ) -> dict[str, object]:
+        return await self.account_history.gc_plan(
+            target_reclaim_bytes=target_reclaim_bytes,
+            max_archives=max_archives,
+        )
+
+    async def account_history_gc_run(
+        self,
+        *,
+        plan_hash: str,
+        target_reclaim_bytes: int,
+        max_archives: int,
+    ) -> dict[str, object]:
+        return await self.account_history.gc_run(
+            plan_hash=plan_hash,
+            target_reclaim_bytes=target_reclaim_bytes,
+            max_archives=max_archives,
+        )
+
+    async def rehydrate_account_history_archive(
+        self, archive_id: str
+    ) -> dict[str, object]:
+        return await self.account_history.rehydrate_archive(
+            self._identifier(archive_id, field_name="archive_id")
+        )
 
     async def audit_account(self, run_id: str) -> dict[str, object]:
         normalized = self._identifier(run_id, field_name="run_id")

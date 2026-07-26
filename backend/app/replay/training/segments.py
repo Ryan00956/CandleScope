@@ -754,6 +754,7 @@ class ReplaySegmentManager:
         root: Path | None = None,
         download_worker_enabled: bool = False,
         auto_gc_enabled: bool = False,
+        max_archive_bytes: int = 1_099_511_627_776,
         file_is_regular: Callable[[Path], bool] | None = None,
     ) -> None:
         self.store = store
@@ -764,6 +765,13 @@ class ReplaySegmentManager:
         ).resolve()
         self.download_worker_enabled = bool(download_worker_enabled)
         self.auto_gc_enabled = bool(auto_gc_enabled)
+        if (
+            isinstance(max_archive_bytes, bool)
+            or not isinstance(max_archive_bytes, int)
+            or max_archive_bytes < 1
+        ):
+            raise ValueError("max_archive_bytes must be a positive integer")
+        self.max_archive_bytes = max_archive_bytes
         self._file_is_regular = file_is_regular or (
             lambda path: path.is_file() and not path.is_symlink()
         )
@@ -1221,8 +1229,20 @@ class ReplaySegmentManager:
                 "no enabled rehydrator can satisfy this trusted manifest",
                 status_code=503,
             )
-        source = Path(trusted_file).resolve()
-        if not source.is_file():
+        trusted_path = Path(trusted_file).expanduser()
+        if trusted_path.is_symlink():
+            raise TrainingRunError(
+                "SEGMENT_SOURCE_UNAVAILABLE",
+                "trusted replay segment source must not be a symlink",
+                status_code=409,
+            )
+        source = trusted_path.resolve()
+        if (
+            not source.is_file()
+            or source.is_symlink()
+            or source == self.root
+            or source.is_relative_to(self.root)
+        ):
             raise TrainingRunError(
                 "SEGMENT_SOURCE_UNAVAILABLE",
                 "trusted replay segment source is unavailable",
@@ -1253,30 +1273,56 @@ class ReplaySegmentManager:
                 "rehydrated replay segment failed checksum validation",
                 status_code=409,
             )
-        try:
-            os.replace(temp, final)
-        except OSError as exc:
-            if temp.exists():
-                temp.unlink()
-            raise TrainingRunError(
-                "SEGMENT_REHYDRATION_FAILED",
-                "validated replay segment could not be published",
-                status_code=409,
-                details={"reason": type(exc).__name__},
-            ) from exc
-        now = self.store._validated_now_ms()
-        await self.store.run_extension_write(
-            lambda connection: connection.execute(
-                """
-                UPDATE replay_data_segment
-                SET health = 'READY', local_path = ?, byte_size = ?,
-                    quarantine_reason = NULL, generation = generation + 1,
-                    last_used_at_ms = ?, updated_at_ms = ?
-                WHERE segment_id = ? AND rebuildable = 1
-                """,
-                (final_relative, final.stat().st_size, now, now, segment_id),
-            )
-        )
+        async with self._gc_lock:
+            try:
+                await self._assert_storage_budget(
+                    incoming_bytes=temp.stat().st_size,
+                    excluding_segment_id=segment_id,
+                )
+            except BaseException:
+                temp.unlink(missing_ok=True)
+                raise
+            try:
+                os.replace(temp, final)
+            except OSError as exc:
+                if temp.exists():
+                    temp.unlink()
+                raise TrainingRunError(
+                    "SEGMENT_REHYDRATION_FAILED",
+                    "validated replay segment could not be published",
+                    status_code=409,
+                    details={"reason": type(exc).__name__},
+                ) from exc
+            now = self.store._validated_now_ms()
+
+            def publish(connection: sqlite3.Connection) -> None:
+                cursor = connection.execute(
+                    """
+                    UPDATE replay_data_segment
+                    SET health = 'READY', local_path = ?, byte_size = ?,
+                        quarantine_reason = NULL, generation = generation + 1,
+                        last_used_at_ms = ?, updated_at_ms = ?
+                    WHERE segment_id = ? AND rebuildable = 1
+                      AND health NOT IN ('LOADING', 'RECLAIMING')
+                    """,
+                    (
+                        final_relative,
+                        final.stat().st_size,
+                        now,
+                        now,
+                        segment_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "segment rehydration claim changed before commit"
+                    )
+
+            try:
+                await self.store.run_extension_write(publish)
+            except BaseException:
+                final.unlink(missing_ok=True)
+                raise
         refreshed = await self.store.run_extension_read(
             lambda connection: connection.execute(
                 "SELECT * FROM replay_data_segment WHERE segment_id = ?", (segment_id,)
@@ -1419,37 +1465,72 @@ class ReplaySegmentManager:
             await self._set_job_state(job_id, "PUBLISHING", actual_size, max(actual_size, 1))
             if cancel_event.is_set() or await self._cancel_requested(job_id):
                 raise asyncio.CancelledError
-            os.replace(temp, final)
-            published = self.store._validated_now_ms()
+            async with self._gc_lock:
+                try:
+                    await self._assert_storage_budget(
+                        incoming_bytes=actual_size,
+                        excluding_segment_id=segment_id,
+                    )
+                except TrainingRunError as exc:
+                    temp.unlink(missing_ok=True)
+                    await self._set_job_state(
+                        job_id,
+                        "ERROR",
+                        0,
+                        max(actual_size, 1),
+                        failure_reason=exc.code,
+                    )
+                    await self._set_segment_health(
+                        segment_id,
+                        "ERROR",
+                        exc.code,
+                    )
+                    raise
+                os.replace(temp, final)
+                published = self.store._validated_now_ms()
 
-            def finish(connection: sqlite3.Connection) -> sqlite3.Row:
-                connection.execute(
-                    """
-                    UPDATE replay_data_segment
-                    SET health = 'READY', local_path = ?, byte_size = ?,
-                        generation = generation + 1, last_used_at_ms = ?,
-                        updated_at_ms = ?, quarantine_reason = NULL
-                    WHERE identity_key = ? AND health = 'LOADING'
-                    """,
-                    (final_relative, actual_size, published, published, identity_key),
-                )
-                connection.execute(
-                    """
-                    UPDATE replay_data_prepare_job
-                    SET state = 'READY', progress_numerator = progress_denominator,
-                        temp_path = NULL, updated_at_ms = ?
-                    WHERE job_id = ?
-                    """,
-                    (published, job_id),
-                )
-                row = connection.execute(
-                    "SELECT * FROM replay_data_segment WHERE identity_key = ?",
-                    (identity_key,),
-                ).fetchone()
-                assert row is not None
-                return row
+                def finish(connection: sqlite3.Connection) -> sqlite3.Row:
+                    cursor = connection.execute(
+                        """
+                        UPDATE replay_data_segment
+                        SET health = 'READY', local_path = ?, byte_size = ?,
+                            generation = generation + 1, last_used_at_ms = ?,
+                            updated_at_ms = ?, quarantine_reason = NULL
+                        WHERE identity_key = ? AND health = 'LOADING'
+                        """,
+                        (
+                            final_relative,
+                            actual_size,
+                            published,
+                            published,
+                            identity_key,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "segment publication claim changed before commit"
+                        )
+                    connection.execute(
+                        """
+                        UPDATE replay_data_prepare_job
+                        SET state = 'READY', progress_numerator = progress_denominator,
+                            temp_path = NULL, updated_at_ms = ?
+                        WHERE job_id = ?
+                        """,
+                        (published, job_id),
+                    )
+                    row = connection.execute(
+                        "SELECT * FROM replay_data_segment WHERE identity_key = ?",
+                        (identity_key,),
+                    ).fetchone()
+                    assert row is not None
+                    return row
 
-            row = await self.store.run_extension_write(finish)
+                try:
+                    row = await self.store.run_extension_write(finish)
+                except BaseException:
+                    final.unlink(missing_ok=True)
+                    raise
             return self._public_segment(row, redact_ranges=False)
         except asyncio.CancelledError:
             if temp.exists():
@@ -1473,6 +1554,38 @@ class ReplaySegmentManager:
             raise
         finally:
             self._cancel_events.pop(job_id, None)
+
+    async def _assert_storage_budget(
+        self,
+        *,
+        incoming_bytes: int,
+        excluding_segment_id: str | None,
+    ) -> None:
+        local_bytes = await self.store.run_extension_read(
+            lambda connection: int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(SUM(byte_size), 0)
+                    FROM replay_data_segment
+                    WHERE storage_kind = 'EXTERNAL_REPLAY_OWNED'
+                      AND local_path IS NOT NULL
+                      AND (? IS NULL OR segment_id != ?)
+                    """,
+                    (excluding_segment_id, excluding_segment_id),
+                ).fetchone()[0]
+            )
+        )
+        if local_bytes + incoming_bytes > self.max_archive_bytes:
+            raise TrainingRunError(
+                "SEGMENT_STORAGE_BUDGET_EXCEEDED",
+                "replay segment storage budget would be exceeded",
+                status_code=409,
+                details={
+                    "current_local_bytes": local_bytes,
+                    "incoming_bytes": incoming_bytes,
+                    "max_archive_bytes": self.max_archive_bytes,
+                },
+            )
 
     async def _protection_reasons(self, segment_id: str) -> tuple[list[str], list[str]]:
         def read(connection: sqlite3.Connection) -> tuple[tuple[sqlite3.Row, ...], bool]:

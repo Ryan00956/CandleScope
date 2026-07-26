@@ -432,6 +432,17 @@ class ReplayHistoricalBookGcRunPayload(ReplayHistoricalBookGcPlanPayload):
     confirm: Literal[True]
 
 
+class ReplayAccountHistoryGcPlanPayload(_StrictModel):
+    protocol: Literal["replay.account-history.gc.v1"]
+    target_reclaim_bytes: int = Field(ge=1, le=1_000_000_000_000)
+    max_archives: int = Field(default=100, ge=1, le=10_000)
+
+
+class ReplayAccountHistoryGcRunPayload(ReplayAccountHistoryGcPlanPayload):
+    plan_hash: str = Field(min_length=71, max_length=71)
+    confirm: Literal[True]
+
+
 async def enforce_replay_request_limit(request: Request) -> None:
     limit_bytes = _replay_request_limit(request)
     _validate_declared_replay_length(request, limit_bytes=limit_bytes)
@@ -625,6 +636,11 @@ async def list_replay_v2_account_history(request: Request) -> dict[str, object]:
     return await _training_service(request).list_account_history_archives()
 
 
+@router.get("/runs/storage")
+async def replay_v2_storage_inventory(request: Request) -> dict[str, object]:
+    return await _training_service(request).storage_inventory()
+
+
 @router.post("/runs/{run_id}/account-audit")
 async def audit_replay_v2_account(
     run_id: str,
@@ -671,6 +687,48 @@ async def rehydrate_replay_v2_historical_book(
     archive_id: str,
 ) -> dict[str, object]:
     return await _training_service(request).rehydrate_historical_book_archive(
+        archive_id
+    )
+
+
+@router.post(
+    "/runs/account-history/gc/dry-run",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def dry_run_replay_v2_account_history_gc(
+    request: Request,
+    payload: ReplayAccountHistoryGcPlanPayload,
+) -> dict[str, object]:
+    return await _training_service(request).account_history_gc_plan(
+        target_reclaim_bytes=payload.target_reclaim_bytes,
+        max_archives=payload.max_archives,
+    )
+
+
+@router.post(
+    "/runs/account-history/gc/run",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def run_replay_v2_account_history_gc(
+    request: Request,
+    payload: ReplayAccountHistoryGcRunPayload,
+) -> dict[str, object]:
+    return await _training_service(request).account_history_gc_run(
+        plan_hash=payload.plan_hash,
+        target_reclaim_bytes=payload.target_reclaim_bytes,
+        max_archives=payload.max_archives,
+    )
+
+
+@router.post(
+    "/runs/account-history/{archive_id}/rehydrate",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def rehydrate_replay_v2_account_history(
+    request: Request,
+    archive_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).rehydrate_account_history_archive(
         archive_id
     )
 

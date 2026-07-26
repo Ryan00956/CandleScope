@@ -2059,6 +2059,15 @@ class ReplaySessionActor:
 
     def _handle_heartbeat_request(self, request: _HeartbeatRequest) -> None:
         try:
+            # END_SESSION atomically releases the controller before publishing
+            # replay.ended. A heartbeat already queued by the former owner must
+            # not race that terminal event and tear down its WebSocket sender.
+            # Terminal sessions are immutable, so acknowledging the heartbeat
+            # is an idempotent no-op with no lease or revision side effect.
+            if self._state is SessionState.ENDED:
+                if not request.future.done():
+                    request.future.set_result(None)
+                return
             self._require_controller(request.client_instance_id)
             self._controller_deadline_wall = (
                 self._read_wall() + self._controller_ttl_seconds

@@ -1061,6 +1061,56 @@ test("wrong data epoch is fatal and never falls through to best-effort events", 
   assert.equal(sockets.length, 1);
 });
 
+test("controller conflict resyncs so a terminal snapshot can cross a heartbeat race", () => {
+  const timers = new FakeTimers();
+  const sockets: FakeSocket[] = [];
+  const states: string[] = [];
+  const errors: Array<{ code: string; fatal: boolean }> = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    onSnapshot: (snapshot) => states.push(snapshot.state),
+    onError: (error) => errors.push({ code: error.code, fatal: error.fatal }),
+  });
+  controller.start();
+  sockets[0]?.open();
+  sockets[0]?.message(replaySnapshotEvent());
+  sockets[0]?.message({
+    protocol: "replay.v1",
+    error: {
+      code: "CONTROLLER_CONFLICT",
+      message: "client does not own the replay controller lease",
+      details: { controller_client_id: null },
+    },
+  });
+
+  assert.equal(controller.diagnostics().state, "resyncing");
+  assert.deepEqual(errors, [{ code: "CONTROLLER_CONFLICT", fatal: false }]);
+  timers.runAll();
+  assert.equal(sockets.length, 2);
+
+  const terminal = replaySnapshotEvent({
+    sequence: 1,
+    revision: 1,
+    state: "ENDED",
+  });
+  terminal.data.snapshot.cursor.at_end = true;
+  terminal.data.snapshot.components.ended = true;
+  sockets[1]?.open();
+  sockets[1]?.message(terminal);
+
+  assert.deepEqual(states, ["PAUSED", "ENDED"]);
+  assert.equal(controller.diagnostics().state, "connected");
+  controller.stop();
+});
+
 test("controller heartbeat is exact, ownership-gated, and canceled on stop", () => {
   const timers = new FakeTimers();
   const socket = new FakeSocket();

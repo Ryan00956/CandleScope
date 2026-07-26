@@ -862,6 +862,35 @@ async def test_controller_takeover_heartbeat_release_and_ttl_auto_pause() -> Non
 
 
 @_async_test
+async def test_heartbeat_queued_across_terminal_controller_release_is_idempotent() -> (
+    None
+):
+    actor = _actor(events=event_fixture(count=5))
+    await actor.start()
+    await actor.submit(
+        _command("terminal-heartbeat-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0)
+    )
+    ended = await actor.submit(
+        _command("terminal-heartbeat-end", CommandType.END_SESSION, revision=1)
+    )
+    sequence = ended.sequence
+    revision = ended.revision
+
+    # The former owner's browser timer can already have queued a heartbeat
+    # while END_SESSION is committing. No client can mutate an ended actor, so
+    # both the former owner and a stale viewer are harmless terminal no-ops.
+    await actor.heartbeat("tab-a")
+    await actor.heartbeat("tab-b")
+
+    after = await actor.snapshot()
+    assert after.state is SessionState.ENDED
+    assert after.controller_client_id is None
+    assert after.sequence == sequence
+    assert after.revision == revision
+    await actor.shutdown()
+
+
+@_async_test
 async def test_pause_ack_waits_for_atomic_event_and_queue_overflow_is_diagnostic() -> (
     None
 ):

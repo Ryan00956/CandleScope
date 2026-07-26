@@ -2225,16 +2225,25 @@ async function main() {
     try {
       ended = await waitForReplayStatus(replay.cdp, `(value) => value.state === "ENDED"`, args.timeoutMs, "soak session end");
     } catch (error) {
-      const diagnostics = await evaluate(replay.cdp, `({
+      const diagnostics = await evaluate(replay.cdp, `(() => ({
         status: (() => { const node = document.querySelector("#replay-status-bar"); return node instanceof HTMLElement ? { text: node.innerText, data: { ...node.dataset } } : null; })(),
         commandError: document.querySelector(".replay-command-error")?.textContent || "",
         controllerBanner: document.querySelector(".replay-controller-banner")?.textContent || "",
         endDialog: document.querySelector(".replay-end-dialog")?.textContent || "",
         bodyTail: (document.body?.innerText || "").slice(-2000),
-      })()`).catch(() => null);
+      }))()`).catch(() => null);
       throw new Error(`${error.message}\nEnd diagnostics: ${JSON.stringify({
         diagnostics,
+        backend: await readJson(diagnosticsUrl).catch((backendError) => ({
+          error: backendError?.message || String(backendError),
+        })),
+        apiRequests: replayCapture.requests.filter((item) => (
+          item.url.includes("/api/v1/replay")
+        )).slice(-20),
         apiResponses: replayCapture.responses.filter((item) => item.url.includes("/api/v1/replay")).slice(-20),
+        responseBodies: replayCapture.responseBodies.filter((item) => (
+          item.url.includes("/api/v1/replay")
+        )).slice(-20),
         frames: replayCapture.webSocketFramesReceived.slice(-10),
         consoleErrors: replayCapture.consoleErrors,
         exceptions: replayCapture.exceptions,

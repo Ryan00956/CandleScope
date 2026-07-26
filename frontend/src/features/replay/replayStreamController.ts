@@ -280,7 +280,25 @@ export class ReplayStreamController {
 
     try {
       const envelope = parseReplayErrorEnvelope(payload);
-      this.failFatal(new ReplayStreamError(envelope.error.code, envelope.error.message, { fatal: true }), generation);
+      if (envelope.error.code === "CONTROLLER_CONFLICT") {
+        // A controller lease can expire or be released by END_SESSION while a
+        // previously scheduled heartbeat is in flight. The current socket is
+        // no longer an authority source, but the session itself remains
+        // recoverable. Rebind through an atomic snapshot so an ENDED event
+        // cannot be lost behind the heartbeat error.
+        this.options.onError?.(new ReplayStreamError(
+          envelope.error.code,
+          envelope.error.message,
+          { fatal: false },
+        ), generation);
+        this.beginResync();
+        return;
+      }
+      this.failFatal(new ReplayStreamError(
+        envelope.error.code,
+        envelope.error.message,
+        { fatal: true },
+      ), generation);
       return;
     } catch {
       // A normal replay event is intentionally not an error envelope.

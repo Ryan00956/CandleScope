@@ -105,6 +105,9 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   assert.match(workspace, /"data-replay-session-state": review === null \? effectiveState/);
   assert.match(workspace, /"data-replay-adapter-state": review === null \? runtime\.store\.state/);
   assert.match(workspace, /"data-replay-generation": runtime\.store\.generation/);
+  assert.match(workspace, /"data-replay-clock-basis": review === null \? globalClock\?\.basis/);
+  assert.match(workspace, /"data-replay-clock-rate": review === null \? globalClock\?\.rate/);
+  assert.match(workspace, /"data-replay-control-pending": review === null/);
 });
 
 test("capability surface never renders unsupported history as numeric zero or stale precision", () => {

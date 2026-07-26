@@ -509,6 +509,9 @@ async function replayStatus(cdp) {
       sourceSequence: Number(status.dataset.replaySourceSequence || 0),
       revision: Number(status.dataset.replayRevision || 0),
       stateHash: status.dataset.replayStateHash || "",
+      clockBasis: status.dataset.replayClockBasis || "",
+      clockRate: Number(status.dataset.replayClockRate || 0),
+      controlPending: status.dataset.replayControlPending || "",
       cursorMs: Number(status.dataset.replayCursorMs || 0),
       maxBarMs: Number(status.dataset.replayMaxBarMs || 0),
       orderCount: Number(status.dataset.replayOrderCount || 0),
@@ -530,6 +533,9 @@ async function waitForReplayStatus(cdp, predicateSource, timeoutMs, label) {
       sourceSequence: Number(status.dataset.replaySourceSequence || 0),
       revision: Number(status.dataset.replayRevision || 0),
       stateHash: status.dataset.replayStateHash || "",
+      clockBasis: status.dataset.replayClockBasis || "",
+      clockRate: Number(status.dataset.replayClockRate || 0),
+      controlPending: status.dataset.replayControlPending || "",
       cursorMs: Number(status.dataset.replayCursorMs || 0),
       maxBarMs: Number(status.dataset.replayMaxBarMs || 0),
       orderCount: Number(status.dataset.replayOrderCount || 0),
@@ -659,7 +665,9 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   assert(speedChanged, "training speed control was unavailable", { index, targetSpeed });
   const accelerated = await waitForAuthoritativeReplayStatus(
     cdp,
-    `(value) => value.revision > ${paused.revision}`,
+    productV2
+      ? `(value) => value.clockRate === ${targetSpeed} && value.controlPending === ""`
+      : `(value) => value.revision > ${paused.revision}`,
     timeoutMs,
     "training speed ack",
   );
@@ -779,7 +787,9 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   assert(normalSpeedChanged, "training speed reset control was unavailable", { index });
   const normalSpeed = await waitForAuthoritativeReplayStatus(
     cdp,
-    `(value) => value.revision > ${gapStatus.revision}`,
+    productV2
+      ? `(value) => value.clockRate === 1 && value.controlPending === ""`
+      : `(value) => value.revision > ${gapStatus.revision}`,
     timeoutMs,
     "training speed reset ack",
   );
@@ -1742,7 +1752,9 @@ async function main() {
     if (primarySpeed.changed) {
       await waitForReplayStatus(
         replay.cdp,
-        `(value) => value.revision > ${beforeSpeed.revision}`,
+        args.productV2
+          ? `(value) => value.clockRate === 1 && value.controlPending === ""`
+          : `(value) => value.revision > ${beforeSpeed.revision}`,
         args.timeoutMs,
         "1x speed ack",
       );

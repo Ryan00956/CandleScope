@@ -810,6 +810,11 @@ export default function ReplayTrainingPageShell({
             "data-replay-view-revision": review === null
               ? viewer.viewerState?.semantic_view_revision ?? ""
               : String(review.projection.viewer_state.semantic_view_revision ?? ""),
+            "data-replay-clock-basis": review === null ? globalClock?.basis ?? "" : "",
+            "data-replay-clock-rate": review === null ? globalClock?.rate ?? "" : "",
+            "data-replay-control-pending": review === null
+              ? viewer.controlPending?.type ?? ""
+              : "",
             "data-replay-time-disclosure-policy": integrityRuntime.integrity?.effective_time_disclosure_policy ?? "",
             "data-replay-result-label": integrityRuntime.integrity?.result_label ?? "",
             "data-replay-public-time-projections": publicTimeRuntime.projectedCount,

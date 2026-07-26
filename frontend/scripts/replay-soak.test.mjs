@@ -6,6 +6,8 @@ import {
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
   isAuthoritativeReplayStatus,
+  replaySpeedAction,
+  replayStepAction,
   restoreCommandReadinessAfterReconnect,
 } from "./replay-soak.mjs";
 
@@ -110,14 +112,21 @@ test("replay soak reconnect accepts an already-ready controller", async () => {
   const cdp = reconnectCdp({ recovery: "ready" });
   assert.equal(await restoreCommandReadinessAfterReconnect(cdp, 1_000, true), "ready");
   assert.equal(cdp.calls.some((expression) => expression.includes("const element = document.querySelector")), false);
-  assert.equal(cdp.calls.at(-1).includes('data-replay-action="step-display"'), true);
+  assert.equal(cdp.calls.at(-1).includes('data-replay-action="advance-display"'), true);
 });
 
 test("replay soak reconnect takes over before waiting for command readiness", async () => {
   const cdp = reconnectCdp({ recovery: "takeover" });
   assert.equal(await restoreCommandReadinessAfterReconnect(cdp, 1_000, true), "takeover");
   assert.equal(cdp.calls.some((expression) => expression.includes('data-replay-action="takeover-controller"')), true);
-  assert.equal(cdp.calls.at(-1).includes('data-replay-action="step-display"'), true);
+  assert.equal(cdp.calls.at(-1).includes('data-replay-action="advance-display"'), true);
+});
+
+test("replay soak maps v1 and v2 controls to their rendered action contracts", () => {
+  assert.equal(replayStepAction(false), "step");
+  assert.equal(replayStepAction(true), "advance-display");
+  assert.equal(replaySpeedAction(false), "speed");
+  assert.equal(replaySpeedAction(true), "playback-rate");
 });
 
 test("v2 lifecycle refreshes exactly once for catalog epoch drift", async () => {

@@ -565,8 +565,16 @@ async function waitForAuthoritativeReplayStatus(cdp, predicateSource, timeoutMs,
   );
 }
 
+export function replayStepAction(productV2 = false) {
+  return productV2 ? "advance-display" : "step";
+}
+
+export function replaySpeedAction(productV2 = false) {
+  return productV2 ? "playback-rate" : "speed";
+}
+
 async function waitForCommandReady(cdp, timeoutMs, productV2 = false) {
-  const action = productV2 ? "step-display" : "step";
+  const action = replayStepAction(productV2);
   return waitForValue(cdp, `(() => {
     const button = document.querySelector('[data-replay-action="${action}"]');
     return button instanceof HTMLButtonElement && !button.disabled;
@@ -574,7 +582,7 @@ async function waitForCommandReady(cdp, timeoutMs, productV2 = false) {
 }
 
 async function restoreCommandReadinessAfterReconnect(cdp, timeoutMs, productV2 = false) {
-  const action = productV2 ? "step-display" : "step";
+  const action = replayStepAction(productV2);
   const recovery = await waitForValue(cdp, `(() => {
     const command = document.querySelector('[data-replay-action="${action}"]');
     if (command instanceof HTMLButtonElement && !command.disabled) return "ready";
@@ -640,8 +648,9 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   assert(pauseStable.sourceSequence === paused.sourceSequence, "training cursor advanced after pause ack", { paused, pauseStable });
 
   const targetSpeed = [60, 120, 300, 600][index % 4];
+  const speedAction = replaySpeedAction(productV2);
   const speedChanged = await evaluate(cdp, `(() => {
-    const select = document.querySelector('[data-replay-action="speed"]');
+    const select = document.querySelector('[data-replay-action="${speedAction}"]');
     if (!(select instanceof HTMLSelectElement)) return false;
     select.value = "${targetSpeed}";
     select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -751,7 +760,7 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
       timeoutMs,
       "authoritative pre-gap-step snapshot",
     );
-    await click(cdp, `[data-replay-action="${productV2 ? "step-display" : "step"}"]`);
+    await click(cdp, `[data-replay-action="${replayStepAction(productV2)}"]`);
     gapStatus = await waitForAuthoritativeReplayStatus(
       cdp,
       `(value) => value.sourceSequence > ${beforeGapStep.sourceSequence}`,
@@ -761,7 +770,7 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   }
 
   const normalSpeedChanged = await evaluate(cdp, `(() => {
-    const select = document.querySelector('[data-replay-action="speed"]');
+    const select = document.querySelector('[data-replay-action="${speedAction}"]');
     if (!(select instanceof HTMLSelectElement)) return false;
     select.value = "1";
     select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1710,7 +1719,12 @@ async function main() {
     await replay.cdp.send("Page.bringToFront");
 
     const beforeSpeed = await replayStatus(replay.cdp);
-    await evaluate(replay.cdp, `(() => { const select = document.querySelector('[data-replay-action="speed"]'); if (!(select instanceof HTMLSelectElement)) return false; select.value = "1"; select.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`);
+    const speedAction = replaySpeedAction(args.productV2);
+    const primarySpeedChanged = await evaluate(replay.cdp, `(() => { const select = document.querySelector('[data-replay-action="${speedAction}"]'); if (!(select instanceof HTMLSelectElement)) return false; select.value = "1"; select.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`);
+    assert(primarySpeedChanged, "primary replay speed control was unavailable", {
+      action: speedAction,
+      productV2: args.productV2,
+    });
     await waitForReplayStatus(replay.cdp, `(value) => value.revision > ${beforeSpeed.revision}`, args.timeoutMs, "1x speed ack");
     await waitForValue(
       replay.cdp,

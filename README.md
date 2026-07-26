@@ -289,11 +289,12 @@ Release-quality local checks:
 Set-Location H:\program\CandleScope-kline-replay
 $ReplayHead = (git rev-parse HEAD).Trim()
 $ReplayEvidenceRoot = "H:\program\CandleScope-release-evidence\$ReplayHead\replay-v2"
+$ReplayNpm = "F:\工具箱\node.js\node-v22.14.0-win-x64\npm.cmd"
 New-Item -ItemType Directory -Force $ReplayEvidenceRoot | Out-Null
 
 Set-Location backend
 .\.venv\Scripts\python.exe scripts\run_replay_v2_release_checks.py `
-  --npm F:\工具箱\node.js\node-v22.14.0-win-x64\npm.cmd `
+  --npm $ReplayNpm `
   --out "$ReplayEvidenceRoot\checks.json"
 .\.venv\Scripts\python.exe scripts\benchmark_replay_v2_release.py `
   --out "$ReplayEvidenceRoot\benchmark.json"
@@ -304,9 +305,9 @@ Set-Location backend
   --out "$ReplayEvidenceRoot\real-source-validation.json"
 
 Set-Location ..\frontend
-npm run smoke:replay -- --timeout-ms 120000 `
+& $ReplayNpm run smoke:replay -- --timeout-ms 120000 `
   --out "$ReplayEvidenceRoot\replay-v1-smoke.json"
-npm run smoke:replay:v2 -- --timeout-ms 120000 `
+& $ReplayNpm run smoke:replay:v2 -- --timeout-ms 120000 `
   --out "$ReplayEvidenceRoot\replay-v2-smoke.json"
 node scripts\replay-soak.mjs `
   --product-v2 `

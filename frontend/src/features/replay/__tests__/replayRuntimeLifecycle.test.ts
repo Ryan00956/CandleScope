@@ -12,7 +12,11 @@ import {
   parseReplaySessionResponse,
 } from "../replayParser.js";
 import type { ReplayStreamControllerOptions } from "../replayStreamController.js";
-import { ReplayLifecycleEffectGuard, ReplayRuntimeLifecycle } from "../useReplayRuntime.js";
+import {
+  createReplayRuntimeStorePublishScheduler,
+  ReplayLifecycleEffectGuard,
+  ReplayRuntimeLifecycle,
+} from "../useReplayRuntime.js";
 import {
   BASE_TIME_MS,
   disabledCapabilities,
@@ -62,6 +66,41 @@ function streamHarness() {
     },
   };
 }
+
+test("React-facing replay store publishes coalesce to one notification per browser frame", () => {
+  const callbacks = new Map<number, () => void>();
+  const canceled: number[] = [];
+  let nextHandle = 1;
+  let publishes = 0;
+  const scheduler = createReplayRuntimeStorePublishScheduler(
+    () => { publishes += 1; },
+    (callback) => {
+      const handle = nextHandle;
+      nextHandle += 1;
+      callbacks.set(handle, callback);
+      return handle;
+    },
+    (handle) => {
+      canceled.push(handle);
+      callbacks.delete(handle);
+    },
+  );
+
+  for (let index = 0; index < 100; index += 1) scheduler.schedule();
+  assert.equal(callbacks.size, 1);
+  assert.equal(publishes, 0);
+  const firstFrame = callbacks.get(1);
+  callbacks.delete(1);
+  firstFrame?.();
+  assert.equal(publishes, 1);
+
+  scheduler.schedule();
+  assert.equal(callbacks.size, 1);
+  scheduler.cancel();
+  assert.deepEqual(canceled, [2]);
+  assert.equal(callbacks.size, 0);
+  assert.equal(publishes, 1);
+});
 
 test("HTTP session snapshot validates only; first published chart truth is the WS atomic snapshot", async (context) => {
   const harness = streamHarness();

@@ -109,6 +109,35 @@ export interface ReplayRuntimeLifecycleOptions {
 
 type Listener = () => void;
 
+export interface ReplayRuntimeStorePublishScheduler {
+  readonly schedule: () => void;
+  readonly cancel: () => void;
+}
+
+export function createReplayRuntimeStorePublishScheduler(
+  publish: () => void,
+  requestFrame: (callback: () => void) => number = (callback) => (
+    globalThis.requestAnimationFrame(() => callback())
+  ),
+  cancelFrame: (handle: number) => void = (handle) => globalThis.cancelAnimationFrame(handle),
+): ReplayRuntimeStorePublishScheduler {
+  let pendingFrame: number | null = null;
+  return {
+    schedule: () => {
+      if (pendingFrame !== null) return;
+      pendingFrame = requestFrame(() => {
+        pendingFrame = null;
+        publish();
+      });
+    },
+    cancel: () => {
+      if (pendingFrame === null) return;
+      cancelFrame(pendingFrame);
+      pendingFrame = null;
+    },
+  };
+}
+
 function runtimeError(error: unknown): ReplayRuntimeError {
   if (error instanceof ReplayApiError || error instanceof ReplayStreamError) {
     return {
@@ -219,6 +248,7 @@ export class ReplayRuntimeLifecycle {
   private readonly commandIdFactory: () => string;
   private readonly replaceSessionUrl: (sessionId: string) => void;
   private readonly listeners = new Set<Listener>();
+  private readonly storePublishScheduler: ReplayRuntimeStorePublishScheduler;
   private readonly unsubscribeStore: () => void;
   private phase: ReplayRuntimePhase = "IDLE";
   private capabilities: ReplayCapabilities | null = null;
@@ -267,7 +297,14 @@ export class ReplayRuntimeLifecycle {
     this.commandIdFactory = commandIdFactory;
     this.replaceSessionUrl = replaceSessionUrl;
     this.snapshot = this.buildSnapshot();
-    this.unsubscribeStore = this.store.subscribe(() => this.publish());
+    this.storePublishScheduler = typeof globalThis.requestAnimationFrame === "function"
+      && typeof globalThis.cancelAnimationFrame === "function"
+      ? createReplayRuntimeStorePublishScheduler(() => this.publish())
+      : {
+          schedule: () => this.publish(),
+          cancel: () => undefined,
+        };
+    this.unsubscribeStore = this.store.subscribe(this.storePublishScheduler.schedule);
   }
 
   subscribe = (listener: Listener): (() => void) => {
@@ -1128,6 +1165,7 @@ export class ReplayRuntimeLifecycle {
   }
 
   private publish(): void {
+    this.storePublishScheduler.cancel();
     this.snapshot = this.buildSnapshot();
     for (const listener of this.listeners) listener();
   }

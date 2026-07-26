@@ -9,6 +9,7 @@ import {
   replayCatalogQueryFromCreatePayload,
   replaySpeedAction,
   replayStepAction,
+  replayTrainingTargetSpeed,
   restoreCommandReadinessAfterReconnect,
 } from "./replay-soak.mjs";
 
@@ -128,6 +129,22 @@ test("replay soak maps v1 and v2 controls to their rendered action contracts", (
   assert.equal(replayStepAction(true), "advance-display");
   assert.equal(replaySpeedAction(false), "speed");
   assert.equal(replaySpeedAction(true), "playback-rate");
+});
+
+test("replay soak rotates only through fast speeds rendered by each product", () => {
+  const v1Options = ["1", "5", "15", "30", "60", "120", "300", "600", "MAX"];
+  const v2Options = ["1", "2", "5", "10", "30", "60", "120", "600", "1000", "10000"];
+
+  assert.deepEqual(
+    Array.from({ length: 5 }, (_, index) => replayTrainingTargetSpeed(v1Options, index)),
+    [60, 120, 300, 600, 60],
+  );
+  assert.deepEqual(
+    Array.from({ length: 6 }, (_, index) => replayTrainingTargetSpeed(v2Options, index)),
+    [60, 120, 600, 1000, 10000, 60],
+  );
+  assert.throws(() => replayTrainingTargetSpeed(["1", "30", "MAX"], 0), /no numeric option/);
+  assert.throws(() => replayTrainingTargetSpeed(v2Options, -1), /non-negative safe integer/);
 });
 
 test("v2 lifecycle refreshes exactly once for catalog epoch drift", async () => {

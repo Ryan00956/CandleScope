@@ -579,6 +579,22 @@ export function replaySpeedAction(productV2 = false) {
   return productV2 ? "playback-rate" : "speed";
 }
 
+export function replayTrainingTargetSpeed(optionValues, index) {
+  if (!Array.isArray(optionValues)) {
+    throw new TypeError("replay training speed options must be an array");
+  }
+  if (!Number.isSafeInteger(index) || index < 0) {
+    throw new RangeError("replay training speed cycle index must be a non-negative safe integer");
+  }
+  const candidates = [...new Set(optionValues
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value >= 60))];
+  if (candidates.length === 0) {
+    throw new Error("replay training speed control has no numeric option at or above 60x");
+  }
+  return candidates[index % candidates.length];
+}
+
 async function waitForCommandReady(cdp, timeoutMs, productV2 = false) {
   const action = replayStepAction(productV2);
   return waitForValue(cdp, `(() => {
@@ -653,16 +669,34 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   );
   assert(pauseStable.sourceSequence === paused.sourceSequence, "training cursor advanced after pause ack", { paused, pauseStable });
 
-  const targetSpeed = [60, 120, 300, 600][index % 4];
   const speedAction = replaySpeedAction(productV2);
+  const speedOptions = await evaluate(cdp, `(() => {
+    const select = document.querySelector('[data-replay-action="${speedAction}"]');
+    return select instanceof HTMLSelectElement
+      ? [...select.options].map((option) => option.value)
+      : null;
+  })()`);
+  assert(Array.isArray(speedOptions), "training speed control was unavailable", { index });
+  const targetSpeed = replayTrainingTargetSpeed(speedOptions, index);
   const speedChanged = await evaluate(cdp, `(() => {
     const select = document.querySelector('[data-replay-action="${speedAction}"]');
-    if (!(select instanceof HTMLSelectElement)) return false;
+    if (!(select instanceof HTMLSelectElement)) return null;
+    const options = [...select.options].map((option) => option.value);
+    if (!options.includes("${targetSpeed}")) {
+      return { changed: false, selected: select.value, options };
+    }
     select.value = "${targetSpeed}";
+    if (select.value !== "${targetSpeed}") {
+      return { changed: false, selected: select.value, options };
+    }
     select.dispatchEvent(new Event("change", { bubbles: true }));
-    return true;
+    return { changed: true, selected: select.value, options };
   })()`);
-  assert(speedChanged, "training speed control was unavailable", { index, targetSpeed });
+  assert(
+    speedChanged?.changed === true && speedChanged.selected === String(targetSpeed),
+    "training speed control rejected a rendered option",
+    { index, targetSpeed, speedChanged },
+  );
   const accelerated = await waitForAuthoritativeReplayStatus(
     cdp,
     productV2

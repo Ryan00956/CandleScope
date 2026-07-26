@@ -2249,7 +2249,41 @@ async function main() {
         exceptions: replayCapture.exceptions,
       })}`);
     }
-    await waitForValue(replay.cdp, "document.querySelector('[data-replay-panel=\"report\"]') !== null", args.timeoutMs, "soak report panel");
+    try {
+      await waitForValue(
+        replay.cdp,
+        "document.querySelector('[data-replay-panel=\"report\"]') !== null",
+        args.timeoutMs,
+        "soak report panel",
+      );
+    } catch (error) {
+      const diagnostics = await evaluate(replay.cdp, `(() => ({
+        url: location.href,
+        replayStatus: window.__candlescopeReplayStatus || null,
+        reportPanel: document.querySelector('[data-replay-panel="report"]')?.textContent || null,
+        integrityPanel: document.querySelector('[data-replay-panel="integrity"]')?.textContent?.slice(-3000) || null,
+        commandError: document.querySelector(".replay-command-error")?.textContent || "",
+        bodyTail: (document.body?.innerText || "").slice(-3000),
+      }))()`).catch(() => null);
+      throw new Error(`${error.message}\nReport diagnostics: ${JSON.stringify({
+        diagnostics,
+        backend: await readJson(diagnosticsUrl).catch((backendError) => ({
+          error: backendError?.message || String(backendError),
+        })),
+        apiRequests: replayCapture.requests.filter((item) => (
+          item.url.includes("/api/v1/replay")
+        )).slice(-30),
+        apiResponses: replayCapture.responses.filter((item) => (
+          item.url.includes("/api/v1/replay")
+        )).slice(-30),
+        responseBodies: replayCapture.responseBodies.filter((item) => (
+          item.url.includes("/api/v1/replay")
+        )).slice(-30),
+        frames: replayCapture.webSocketFramesReceived.slice(-10),
+        consoleErrors: replayCapture.consoleErrors,
+        exceptions: replayCapture.exceptions,
+      })}`);
+    }
     assert(ended.revealed === "false", "session end implicitly revealed actual history", ended);
     await waitForValue(
       replay.cdp,

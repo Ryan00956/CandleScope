@@ -12,6 +12,7 @@ import {
   type ReplayRunRulesResponse,
   type ReplayTrainingReportResponse,
 } from "./replayIntegrityModel.js";
+import { replayEffectiveTrainingState } from "./replayUiModel.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
 import type {
   ReplayV2Command,
@@ -118,6 +119,14 @@ export function useReplayIntegrityRuntime(
   runtimeRef.current = runtime;
   viewerRef.current = viewer;
   const runId = viewer.viewerState?.run_id ?? null;
+  const globalClock = viewer.marketTracks?.global_clock ?? null;
+  const effectiveState = replayEffectiveTrainingState(
+    globalClock?.state,
+    runtime.store.state,
+    runtime.store.controllerClientId,
+  );
+  const clockIsAdvancing = effectiveState === "PLAYING"
+    || effectiveState === "ADVANCING";
 
   const refresh = useCallback(async (): Promise<void> => {
     const currentRunId = viewerRef.current.viewerState?.run_id ?? null;
@@ -125,7 +134,13 @@ export function useReplayIntegrityRuntime(
     const requestGeneration = ++generation.current;
     setOperation((current) => current ?? "refresh");
     try {
-      const currentState = runtimeRef.current.store.state;
+      const currentRuntime = runtimeRef.current;
+      const currentViewer = viewerRef.current;
+      const currentState = replayEffectiveTrainingState(
+        currentViewer.marketTracks?.global_clock.state,
+        currentRuntime.store.state,
+        currentRuntime.store.controllerClientId,
+      );
       const [
         nextIntegrity,
         nextRules,
@@ -183,16 +198,33 @@ export function useReplayIntegrityRuntime(
   }, [refresh, runId]);
 
   useEffect(() => {
-    if (runId === null || runtime.store.state !== "PLAYING") return;
+    if (runId === null || !clockIsAdvancing) return;
     const timer = setInterval(() => { void refresh(); }, 750);
     return () => clearInterval(timer);
-  }, [refresh, runId, runtime.store.state]);
+  }, [clockIsAdvancing, refresh, runId]);
 
   useEffect(() => {
-    if (runId === null || runtime.store.state === "PLAYING") return;
+    if (runId === null || clockIsAdvancing) return;
     const timer = setTimeout(() => { void refresh(); }, 50);
     return () => clearTimeout(timer);
-  }, [refresh, runId, runtime.store.revision, runtime.store.state]);
+  }, [
+    clockIsAdvancing,
+    effectiveState,
+    globalClock?.generation,
+    globalClock?.tick,
+    refresh,
+    runId,
+    runtime.store.revision,
+  ]);
+
+  useEffect(() => {
+    if (runId === null || effectiveState !== "ENDED" || report !== null) return;
+    // The terminal adapter snapshot and immutable v2 report commit are
+    // separate projections of one command. Retry while the report is absent;
+    // a transient read cannot strand an already-ended training page forever.
+    const timer = setInterval(() => { void refresh(); }, 1_000);
+    return () => clearInterval(timer);
+  }, [effectiveState, refresh, report, runId]);
 
   const buildCommand = useCallback((
     type: ReplayV2CommandType,

@@ -112,6 +112,8 @@ test("training state fails closed when the global clock outlives its controller 
   assert.equal(replayEffectiveTrainingState("ADVANCING", "PAUSED", null), "PAUSED");
   assert.equal(replayEffectiveTrainingState("PLAYING", "PAUSED", "other-browser"), "PLAYING");
   assert.equal(replayEffectiveTrainingState("ERROR", "PAUSED", null), "ERROR");
+  assert.equal(replayEffectiveTrainingState("ENDED", "PAUSED", null), "ENDED");
+  assert.equal(replayEffectiveTrainingState("PAUSED", "ENDED", null), "ENDED");
   assert.equal(replayEffectiveTrainingState(null, "PAUSED", null), "PAUSED");
 });
 

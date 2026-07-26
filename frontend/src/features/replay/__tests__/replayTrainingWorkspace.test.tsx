@@ -175,6 +175,17 @@ test("Phase 15 workspace exposes explicit bounded summary preparation and proof 
   assert.doesNotMatch(`${controls}\n${runtime}\n${api}`, /useMarketDataRuntime|\/market\//);
 });
 
+test("viewer projection subscription is stable across equivalent runtime snapshots", () => {
+  const runtime = source("src/features/replay/useReplayViewerRuntime.ts");
+  assert.match(runtime, /const baseInterval = config\?\.base_interval \?\? null/);
+  assert.match(runtime, /const displayInterval = viewerState\?\.display_interval \?\? null/);
+  assert.match(
+    runtime,
+    /\[baseInterval, displayInterval, seriesStore, sourceStore\]/,
+  );
+  assert.doesNotMatch(runtime, /\[config, seriesStore, sourceStore, viewerState\]/);
+});
+
 test("workspace preferences inherit live layout once and then persist only inside the run scope", () => {
   const storage = new MemoryStorage();
   storage.setItem("candlescope-sidebar-width", "410");

@@ -126,6 +126,8 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   const seriesStore = useMemo(() => new SeriesWindowStore(), []);
   const sessionId = runtime.store.sessionId;
   const config = runtime.store.sessionConfig;
+  const baseInterval = config?.base_interval ?? null;
+  const displayInterval = viewerState?.display_interval ?? null;
 
   useEffect(() => {
     if (sessionId === null) {
@@ -217,7 +219,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
 
   useEffect(() => {
     const rebuild = () => {
-      if (config === null || viewerState === null) {
+      if (baseInterval === null || displayInterval === null) {
         seriesStore.clear({ source: "replay-viewer-unavailable" });
         return;
       }
@@ -225,8 +227,8 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
         rebuildReplayViewerSeries(
           seriesStore,
           sourceStore,
-          config.base_interval,
-          viewerState.display_interval,
+          baseInterval,
+          displayInterval,
         );
         setError(null);
       } catch (cause) {
@@ -237,7 +239,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     rebuild();
     const unsubscribe = sourceStore.subscribe(rebuild);
     return () => { unsubscribe(); };
-  }, [config, seriesStore, sourceStore, viewerState]);
+  }, [baseInterval, displayInterval, seriesStore, sourceStore]);
 
   useEffect(() => {
     const active = controlPending;

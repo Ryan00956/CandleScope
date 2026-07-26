@@ -720,10 +720,13 @@ async def handle_pyne_indicator_subscribe(
         if meta.get("_disposed"):
             return
         is_preview = bool(
-            msg.get("type") == "indicator.preview"
-            or (
-                msg.get("type") == "indicator.patch"
-                and msg.get("reason") == "bar_update"
+            event.event_type != DataEventType.BAR_CLOSED
+            and (
+                msg.get("type") == "indicator.preview"
+                or (
+                    msg.get("type") == "indicator.patch"
+                    and msg.get("reason") == "bar_update"
+                )
             )
         )
         if not is_preview and callable(queue_critical_message):

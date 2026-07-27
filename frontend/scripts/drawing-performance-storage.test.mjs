@@ -198,6 +198,7 @@ test("drawing perf reload reports marker cleanup failure instead of hiding it", 
     reloadFreshDrawingPerformanceDocument(cdp, {
       timeoutMs: 1,
       markerToken: "Runtime.evaluate",
+      now: () => 0,
       wait: async () => {},
     }),
     /marker cleanup failed/,

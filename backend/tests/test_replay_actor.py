@@ -862,6 +862,43 @@ async def test_controller_takeover_heartbeat_release_and_ttl_auto_pause() -> Non
 
 
 @_async_test
+async def test_atomic_owner_command_longer_than_ttl_renews_controller_lease() -> None:
+    reducer = GateReducer()
+    actor = _actor(
+        reducer=reducer,
+        controller_ttl_seconds=0.03,
+        events=event_fixture(count=3),
+    )
+    await actor.start()
+    await actor.submit(
+        _command("long-command-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0)
+    )
+
+    step = asyncio.create_task(
+        actor.submit(
+            _command(
+                "long-command-step",
+                CommandType.STEP,
+                revision=1,
+                payload={"count": 1},
+            )
+        )
+    )
+    await asyncio.wait_for(reducer.started.wait(), timeout=1.0)
+    await asyncio.sleep(0.05)
+    reducer.release.set()
+
+    completed = await asyncio.wait_for(step, timeout=1.0)
+    assert completed.revision == 2
+    await actor.heartbeat("tab-a")
+    snapshot = await actor.snapshot()
+    assert snapshot.controller_client_id == "tab-a"
+    assert snapshot.revision == 2
+    assert actor.diagnostics()["controller_expirations"] == 0
+    await actor.shutdown()
+
+
+@_async_test
 async def test_heartbeat_queued_across_terminal_controller_release_is_idempotent() -> (
     None
 ):

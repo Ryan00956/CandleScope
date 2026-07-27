@@ -1395,6 +1395,18 @@ class ReplaySessionActor:
             else:
                 await self._handle_shutdown_request(request)
         finally:
+            # Controller requests are serialized through the actor.  A valid
+            # atomic command can itself take longer than the lease TTL, which
+            # means a heartbeat queued by the live client cannot be handled
+            # until that command finishes.  Treat completion of that in-flight
+            # owner request as fresh liveness so the next loop iteration does
+            # not expire the controller before it can drain the heartbeat.
+            if isinstance(request, (_CommandRequest, _PeriodSummaryJumpRequest)):
+                self._renew_controller_lease_if_owned(
+                    request.command.client_instance_id
+                    if isinstance(request, _CommandRequest)
+                    else request.client_instance_id
+                )
             self._queue.task_done()
 
     async def _handle_period_summary_jump(
@@ -2661,6 +2673,12 @@ class ReplaySessionActor:
         self._controller_deadline_wall = (
             self._read_wall() + self._controller_ttl_seconds
         )
+
+    def _renew_controller_lease_if_owned(self, client_id: str) -> None:
+        if self._controller_client_id == client_id:
+            self._controller_deadline_wall = (
+                self._read_wall() + self._controller_ttl_seconds
+            )
 
     def _require_controller(self, client_id: str) -> None:
         if self._controller_client_id != client_id:

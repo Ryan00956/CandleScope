@@ -1390,6 +1390,55 @@ async def test_exact_multi_full_positions_share_clock_funding_and_audit(
         assert len(projection["portfolio"]["account_history"]["bindings"]) == 2
         assert projection["portfolio"]["account_history"]["auditor"]["status"] == "PASS"
         with sqlite3.connect(database) as connection:
+            connection.row_factory = sqlite3.Row
+            stored_equity = connection.execute(
+                """
+                SELECT current_equity FROM replay_training_run
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()["current_equity"]
+            assert stored_equity == projection["portfolio"]["equity"]
+            descriptor_domain = (
+                service.training.store._review._descriptor_domain(  # noqa: SLF001
+                    connection,
+                    run_id=run_id,
+                )
+            )
+            review_projection = service.training.store._review.projection(  # noqa: SLF001
+                connection,
+                run_id=run_id,
+                virtual_time_ms=int(tracks[0]["cursor"]["virtual_time_ms"]),
+                source_sequence=int(tracks[0]["cursor"]["source_sequence"]),
+            )
+            assert descriptor_domain == {
+                key: review_projection["domain"][key]
+                for key in descriptor_domain
+            }
+            event_types = {
+                str(row["event_type"])
+                for row in connection.execute(
+                    """
+                    SELECT event_type FROM replay_review_timeline_event
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchall()
+            }
+            assert "STEP" not in event_types
+            assert "ADVANCE_BY" not in event_types
+            stored_command = json.loads(
+                str(
+                    connection.execute(
+                        """
+                        SELECT command_json FROM replay_training_command
+                        WHERE run_id = ? AND command_id = 'multi-exact-step'
+                        """,
+                        (run_id,),
+                    ).fetchone()["command_json"]
+                )
+            )
+            assert stored_command["type"] == "step_base"
             assert (
                 connection.execute(
                     """

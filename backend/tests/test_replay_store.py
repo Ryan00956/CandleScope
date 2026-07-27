@@ -111,6 +111,24 @@ async def test_schema_migration_is_versioned_and_does_not_touch_klines_db(
         await store.close()
 
 
+async def test_wal_checkpoint_window_preserves_full_commit_durability(
+    tmp_path: Path,
+) -> None:
+    store = ReplaySQLiteStore(tmp_path / "wal-policy.db", now_ms=lambda: 123)
+    try:
+        assert store._connection.execute(  # noqa: SLF001
+            "PRAGMA journal_mode"
+        ).fetchone()[0] == "wal"
+        assert store._connection.execute(  # noqa: SLF001
+            "PRAGMA synchronous"
+        ).fetchone()[0] == 2
+        assert store._connection.execute(  # noqa: SLF001
+            "PRAGMA wal_autocheckpoint"
+        ).fetchone()[0] == 16_384
+    finally:
+        await store.close()
+
+
 async def test_newer_schema_fails_closed_without_mutating_version(
     tmp_path: Path,
 ) -> None:

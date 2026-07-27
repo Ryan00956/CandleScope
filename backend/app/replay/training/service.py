@@ -2782,7 +2782,7 @@ class TrainingRunService:
                 details={"reason": exc.code.value},
             ) from exc
         session_id = str(created["session_id"])
-        await self._ensure_track_controller(
+        snapshot = await self._ensure_track_controller(
             session_id=session_id,
             client_instance_id=command.client_instance_id,
             command_id=command.command_id,
@@ -2793,6 +2793,7 @@ class TrainingRunService:
             client_instance_id=command.client_instance_id,
             command_id=command.command_id,
             track_id=str(track["track_id"]),
+            initial_snapshot=snapshot,
         )
         if requested_tier is SubscriptionTier.WARM:
             await self.replay_service.release_session_to_hub(session_id)
@@ -3302,7 +3303,7 @@ class TrainingRunService:
                 "market track has no frozen adapter session",
                 status_code=409,
             )
-        await self._ensure_track_controller(
+        snapshot = await self._ensure_track_controller(
             session_id=session_id,
             client_instance_id=command.client_instance_id,
             command_id=command.command_id,
@@ -3313,6 +3314,7 @@ class TrainingRunService:
             client_instance_id=command.client_instance_id,
             command_id=command.command_id,
             track_id=str(track["track_id"]),
+            initial_snapshot=snapshot,
         )
 
     async def _execute_multi_track_control(
@@ -4525,6 +4527,7 @@ class TrainingRunService:
                         client_instance_id=command.client_instance_id,
                         command_id=command.command_id,
                         track_id=str(track["track_id"]),
+                        initial_snapshot=before,
                     )
                     after_cursor = after.get("cursor")
                     if not isinstance(after_cursor, Mapping):
@@ -4740,15 +4743,17 @@ class TrainingRunService:
         client_instance_id: str,
         command_id: str,
         track_id: str,
+        initial_snapshot: Mapping[str, object] | None = None,
     ) -> Mapping[str, object]:
+        known_snapshot = initial_snapshot
         for _chunk_index in range(100_000):
-            await self._ensure_track_controller(
+            snapshot = await self._ensure_track_controller(
                 session_id=session_id,
                 client_instance_id=client_instance_id,
                 command_id=command_id,
+                known_snapshot=known_snapshot,
             )
-            session = await self.replay_service.get_session(session_id)
-            snapshot = self._snapshot(session)
+            known_snapshot = None
             cursor = snapshot.get("cursor")
             if not isinstance(cursor, Mapping):
                 raise TrainingRunError(
@@ -4799,7 +4804,7 @@ class TrainingRunService:
                 payload=payload,
             )
             try:
-                await self.replay_service.command(session_id, part)
+                acknowledged = await self.replay_service.command(session_id, part)
             except ReplayDomainError as exc:
                 raise TrainingRunError(
                     exc.code.value,
@@ -4807,6 +4812,14 @@ class TrainingRunService:
                     status_code=exc.http_status,
                     details=exc.details,
                 ) from exc
+            acknowledged_cursor = acknowledged.get("cursor")
+            if (
+                isinstance(acknowledged_cursor, Mapping)
+                and int(acknowledged_cursor["virtual_time_ms"])
+                == target_virtual_time_ms
+            ):
+                return acknowledged
+            known_snapshot = acknowledged
             await asyncio.sleep(0)
         raise TrainingRunError(
             "REPLAY_SCAN_LIMIT_EXCEEDED",
@@ -4820,9 +4833,13 @@ class TrainingRunService:
         session_id: str,
         client_instance_id: str,
         command_id: str,
-    ) -> None:
-        session = await self.replay_service.get_session(session_id)
-        snapshot = self._snapshot(session)
+        known_snapshot: Mapping[str, object] | None = None,
+    ) -> Mapping[str, object]:
+        if known_snapshot is None:
+            session = await self.replay_service.get_session(session_id)
+            snapshot = self._snapshot(session)
+        else:
+            snapshot = known_snapshot
         owner = snapshot.get("controller_client_id")
         if owner == client_instance_id:
             try:
@@ -4830,7 +4847,7 @@ class TrainingRunService:
                     session_id,
                     client_instance_id,
                 )
-                return
+                return snapshot
             except ReplayDomainError as exc:
                 if exc.code is not ReplayErrorCode.CONTROLLER_CONFLICT:
                     raise TrainingRunError(
@@ -4864,7 +4881,7 @@ class TrainingRunService:
             payload={"takeover": False},
         )
         try:
-            await self.replay_service.command(session_id, acquire)
+            return await self.replay_service.command(session_id, acquire)
         except ReplayDomainError as exc:
             raise TrainingRunError(
                 exc.code.value,

@@ -64,6 +64,35 @@ async def test_review_checkpoint_classifier_ignores_market_only_changes() -> Non
         before,
         market_only,
     )
+    assert (
+        review_module.ReviewRecorder._position_descriptor(  # noqa: SLF001
+            before["position"]
+        )
+        == review_module.ReviewRecorder._position_descriptor(  # noqa: SLF001
+            market_only["position"]
+        )
+    )
+    assert (
+        review_module.ReviewRecorder.descriptors(
+            {
+                "kind": "COMMAND",
+                "accepted": True,
+                "command": {"type": "acquire_controller"},
+            },
+            None,
+            {},
+        )
+        == []
+    )
+    assert review_module.ReviewRecorder._internal_adapter_command(  # noqa: SLF001
+        {
+            "kind": "COMMAND",
+            "command": {
+                "command_id": f"v2multi-{'a' * 40}",
+                "type": "step",
+            },
+        }
+    )
     assert ReplaySessionActor._review_checkpoint_required(  # noqa: SLF001
         before,
         {

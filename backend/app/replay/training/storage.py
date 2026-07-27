@@ -1392,6 +1392,11 @@ class TrainingRunStore:
                 run_id=run_id,
                 now_ms=now_ms,
             )
+            self._refresh_contract_current_equity(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+            )
             if not write_audit:
                 return None
             return self._write_account_audit(
@@ -8846,6 +8851,118 @@ class TrainingRunStore:
         }
 
     @classmethod
+    def _contract_current_equity(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        initial_equity: str,
+        tracks: list[dict[str, object]],
+    ) -> str:
+        """Return the contract-equity scalar without materializing full history."""
+
+        base = cls._portfolio_projection(
+            initial_equity=initial_equity,
+            tracks=tracks,
+        )
+        account = connection.execute(
+            """
+            SELECT account_model, overlay_cash
+            FROM replay_training_contract_account
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if account is None or str(account["account_model"]) != CONTRACT_ACCOUNT_MODEL:
+            return str(base["equity"])
+        try:
+            equity = (
+                Decimal(str(base["cash_balance"]))
+                + Decimal(str(account["overlay_cash"]))
+                + Decimal(str(base["unrealized_pnl"]))
+            )
+        except (InvalidOperation, KeyError, TypeError) as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "contract account equity is invalid",
+                status_code=503,
+            ) from exc
+        return decimal_to_string(equity, field_name="equity")
+
+    @classmethod
+    def _refresh_contract_current_equity(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        now_ms: int,
+        summary_revision: int | None = None,
+    ) -> str:
+        rows = tuple(
+            connection.execute(
+                """
+                SELECT account_json FROM replay_training_market_track
+                WHERE run_id = ? ORDER BY stable_ordinal, track_id
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        tracks: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                account = json.loads(str(row["account_json"]))
+            except json.JSONDecodeError as exc:
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market track account projection is invalid",
+                    status_code=503,
+                ) from exc
+            if not isinstance(account, dict):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market track account projection is invalid",
+                    status_code=503,
+                )
+            tracks.append({"account": account})
+        run = connection.execute(
+            """
+            SELECT initial_equity FROM replay_training_run WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training run account owner is missing",
+                status_code=503,
+            )
+        current_equity = cls._contract_current_equity(
+            connection,
+            run_id=run_id,
+            initial_equity=str(run["initial_equity"]),
+            tracks=tracks,
+        )
+        if summary_revision is None:
+            connection.execute(
+                """
+                UPDATE replay_training_run
+                SET current_equity = ?, updated_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (current_equity, now_ms, run_id),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE replay_training_run
+                SET current_equity = ?, summary_revision = ?, updated_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (current_equity, summary_revision, now_ms, run_id),
+            )
+        return current_equity
+
+    @classmethod
     def _contract_portfolio_projection(
         cls,
         connection: sqlite3.Connection,
@@ -12331,35 +12448,11 @@ class TrainingRunStore:
             account_model is not None
             and str(account_model["account_model"]) == CONTRACT_ACCOUNT_MODEL
         ):
-            all_rows = tuple(
-                connection.execute(
-                    """
-                    SELECT * FROM replay_training_market_track
-                    WHERE run_id = ? ORDER BY stable_ordinal, track_id
-                    """,
-                    (run_id,),
-                ).fetchall()
-            )
-            all_tracks = [self._market_track_from_row(row) for row in all_rows]
-            run_row = connection.execute(
-                """
-                SELECT initial_equity FROM replay_training_run WHERE run_id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-            portfolio = self._contract_portfolio_projection(
+            self._refresh_contract_current_equity(
                 connection,
                 run_id=run_id,
-                initial_equity=str(run_row["initial_equity"]),
-                tracks=all_tracks,
-            )
-            connection.execute(
-                """
-                UPDATE replay_training_run
-                SET current_equity = ?, summary_revision = ?, updated_at_ms = ?
-                WHERE run_id = ?
-                """,
-                (portfolio["equity"], state["revision"], now_ms, run_id),
+                now_ms=now_ms,
+                summary_revision=int(state["revision"]),
             )
 
         if selected:

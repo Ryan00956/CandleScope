@@ -758,6 +758,120 @@ class ReviewRecorder:
             "history": history,
         }
 
+    @staticmethod
+    def _internal_adapter_command(context: Mapping[str, object]) -> bool:
+        if context.get("kind") != "COMMAND":
+            return False
+        command = context.get("command")
+        if not isinstance(command, Mapping):
+            return False
+        command_id = command.get("command_id")
+        command_type = command.get("type")
+        return (
+            isinstance(command_id, str)
+            and command_id.startswith("v2multi-")
+            and command_type
+            in {
+                "acquire_controller",
+                "step",
+                "advance_by",
+            }
+        )
+
+    @staticmethod
+    def _position_descriptor(position: object) -> dict[str, object]:
+        """Exclude mark-only fields from the critical position identity."""
+
+        if not isinstance(position, Mapping):
+            return {}
+        return {
+            field: position[field]
+            for field in (
+                "side",
+                "quantity",
+                "entry_price",
+                "realized_pnl",
+            )
+            if field in position
+        }
+
+    @staticmethod
+    def _descriptor_domain(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+    ) -> dict[str, object]:
+        """Build only the domain fields consumed while actors are unaligned."""
+
+        run = connection.execute(
+            "SELECT current_equity FROM replay_training_run WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            raise TypeError("review projection owner is incomplete")
+        orders = [
+            _decoded_object(row["order_json"], field="review order")
+            for row in connection.execute(
+                """
+                SELECT order_json FROM replay_training_contract_order
+                WHERE run_id = ? ORDER BY track_id, order_id
+                """,
+                (run_id,),
+            ).fetchall()
+        ]
+        positions = [
+            {
+                "track_id": str(row["track_id"]),
+                "position": ReviewRecorder._position_descriptor(
+                    _decoded_object(
+                        row["position_json"],
+                        field="track position",
+                    )
+                ),
+            }
+            for row in connection.execute(
+                """
+                SELECT track_id, position_json
+                FROM replay_training_market_track
+                WHERE run_id = ?
+                ORDER BY stable_ordinal, track_id
+                """,
+                (run_id,),
+            ).fetchall()
+        ]
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM replay_training_contract_fill
+                 WHERE run_id = ?) AS fill_count,
+                (SELECT COUNT(*) FROM replay_training_contract_ledger
+                 WHERE run_id = ?) AS ledger_count,
+                (SELECT COUNT(*) FROM replay_training_funding_settlement
+                 WHERE run_id = ?) AS funding_count,
+                (SELECT COUNT(*) FROM replay_training_liquidation_event
+                 WHERE run_id = ?) AS liquidation_count,
+                (SELECT COUNT(*) FROM replay_training_liquidation_event
+                 WHERE run_id = ? AND state = 'COMPLETED')
+                    AS completed_liquidation_count
+            """,
+            (run_id, run_id, run_id, run_id, run_id),
+        ).fetchone()
+        if counts is None:
+            raise TypeError("review descriptor counts are incomplete")
+        return {
+            "order_count": len(orders),
+            "order_hash": canonical_sha256(orders),
+            "fill_count": int(counts["fill_count"]),
+            "ledger_count": int(counts["ledger_count"]),
+            "funding_count": int(counts["funding_count"]),
+            "liquidation_count": int(counts["liquidation_count"]),
+            "completed_liquidation_count": int(
+                counts["completed_liquidation_count"]
+            ),
+            "position_hash": canonical_sha256(positions),
+            "equity": str(run["current_equity"]),
+        }
+
     def projection(
         self,
         connection: sqlite3.Connection,
@@ -978,7 +1092,10 @@ class ReviewRecorder:
             "liquidation_hash": canonical_sha256(liquidations),
             "position_hash": canonical_sha256(
                 [
-                    {"track_id": track["track_id"], "position": track["position"]}
+                    {
+                        "track_id": track["track_id"],
+                        "position": self._position_descriptor(track["position"]),
+                    }
                     for track in tracks
                 ]
             ),
@@ -1289,6 +1406,10 @@ class ReviewRecorder:
                 if isinstance(command, Mapping)
                 else "COMMAND"
             )
+            if command_type == "acquire_controller":
+                # Controller leases are transport ownership, not a training
+                # decision or a forkable market/account transition.
+                return []
             if command_type == "_training_adjust_capital" and isinstance(
                 command, Mapping
             ):
@@ -1359,6 +1480,8 @@ class ReviewRecorder:
         checkpoint: bytes | None,
         now_ms: int,
     ) -> tuple[str, ...]:
+        if self._internal_adapter_command(context):
+            return ()
         run = connection.execute(
             """
             SELECT r.time_disclosure_policy, r.virtual_time_ms,
@@ -1388,12 +1511,6 @@ class ReviewRecorder:
         state_hash = str(
             state["state_hash"] if isinstance(state, Mapping) else run["state_hash"]
         )
-        projection = self.projection(
-            connection,
-            run_id=run_id,
-            virtual_time_ms=virtual_time_ms,
-            source_sequence=source_sequence,
-        )
         full_times = {
             int(row["virtual_time_ms"])
             for row in connection.execute(
@@ -1418,16 +1535,28 @@ class ReviewRecorder:
             decoded = json.loads(str(previous_row["projection_json"]))
             if isinstance(decoded, Mapping):
                 previous = decoded
-        descriptors = self.descriptors(context, previous, projection)
+        context_kind = str(context.get("kind", ""))
+        preliminary_descriptors: list[tuple[str, str]] | None = None
+        if len(full_times) > 1 or context_kind == "SOURCE_EVENT":
+            preliminary_descriptors = self.descriptors(
+                context,
+                previous,
+                {
+                    "domain": self._descriptor_domain(
+                        connection,
+                        run_id=run_id,
+                    )
+                },
+            )
         if (
             len(full_times) > 1
-            and str(context.get("kind", "")) not in {"INITIAL", "DIRECT"}
+            and context_kind not in {"INITIAL", "DIRECT"}
         ):
             # A critical mutation may be observed before the coordinator has
             # aligned the remaining actors. Preserve only this actor's exact
             # checkpoint now; the aligned transaction will build the global
             # frame and pull the latest durable checkpoint for every track.
-            if descriptors:
+            if preliminary_descriptors:
                 self.anchor(
                     connection,
                     run_id=run_id,
@@ -1437,6 +1566,15 @@ class ReviewRecorder:
                     now_ms=now_ms,
                 )
             return ()
+        if context_kind == "SOURCE_EVENT" and not preliminary_descriptors:
+            return ()
+        projection = self.projection(
+            connection,
+            run_id=run_id,
+            virtual_time_ms=virtual_time_ms,
+            source_sequence=source_sequence,
+        )
+        descriptors = self.descriptors(context, previous, projection)
         if any(category == "EQUITY" for category, _ in descriptors):
             prior_equities: list[Decimal] = []
             for row in connection.execute(
@@ -1772,6 +1910,8 @@ class ReviewRecorder:
         now_ms: int,
     ) -> None:
         del component_state
+        if self._internal_adapter_command(context):
+            return
         run = connection.execute(
             """
             SELECT track.run_id

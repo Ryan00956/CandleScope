@@ -4022,7 +4022,17 @@ class TrainingRunStore:
                 - warmup * interval_ms
                 - (display_interval_ms - interval_ms)
             )
-            upper = public_origin + int(row["actual_replay_end_ms"]) - actual_origin
+            # Dataset refs pin BAR replay bounds by base-bar open time.  Public
+            # chart timestamps also include the final bar's close time, so the
+            # valid closed interval ends one base interval after the last open
+            # (exclusive) rather than at the last open itself.
+            upper = (
+                public_origin
+                + int(row["actual_replay_end_ms"])
+                - actual_origin
+                + interval_ms
+                - 1
+            )
             if lower < 0 or any(value < lower or value > upper for value in normalized):
                 raise TrainingRunError(
                     "TRAINING_RUN_INVALID",

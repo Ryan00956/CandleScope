@@ -117,6 +117,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         <label>
           商品
           <select
+            data-training-field="market-identity"
             value={`${draft.exchange}:${draft.marketType}:${draft.symbol}`}
             onChange={(event) => chooseCatalogEntry(runtime, event.target.value)}
           >
@@ -289,6 +290,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         <label>
           前向缓存（ms）
           <input
+            data-training-field="forward-cache-ms"
             type="number"
             min={1}
             value={draft.forwardCacheMs}

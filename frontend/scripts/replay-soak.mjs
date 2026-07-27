@@ -21,6 +21,14 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_ITEMS = 10_000;
 const MAX_CAPTURE_RESPONSE_BODIES = 100;
 const MIB = 1024 * 1024;
+const DAY_MS = 86_400_000;
+const FORMAL_V2_BASE_INTERVAL_MS = 60_000;
+const FORMAL_V2_FORWARD_CACHE_MS = 30 * DAY_MS;
+const FORMAL_V2_WARMUP_BARS = 200;
+const FORMAL_V2_REAL_WINDOW_ROWS = (
+  Math.ceil(FORMAL_V2_FORWARD_CACHE_MS / FORMAL_V2_BASE_INTERVAL_MS)
+  + FORMAL_V2_WARMUP_BARS
+);
 
 function parseArgs(argv) {
   const defaultV1Output = path.join(repositoryRoot, "docs", "perf-baselines", "replay-v1-browser-soak-20260718.json");
@@ -108,6 +116,51 @@ function findChrome(explicit = "") {
     "/usr/bin/chromium",
   ].filter(Boolean);
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+export function selectFormalV2RealTrainingPlan(realSourceEvidence) {
+  assert(
+    realSourceEvidence !== null
+      && typeof realSourceEvidence === "object"
+      && realSourceEvidence.read_only === true
+      && Array.isArray(realSourceEvidence.identities),
+    "formal replay.v2 soak requires read-only real source identity evidence",
+    realSourceEvidence,
+  );
+  const candidates = realSourceEvidence.identities.filter((identity) => (
+    identity !== null
+    && typeof identity === "object"
+    && identity.exchange === "binance"
+    && identity.market_type === "spot"
+    && identity.interval === "1m"
+    && identity.contiguous === true
+    && Number.isSafeInteger(identity.validated_rows)
+    && identity.validated_rows >= FORMAL_V2_REAL_WINDOW_ROWS
+    && typeof identity.symbol === "string"
+    && identity.symbol.length > 0
+  ));
+  candidates.sort((left, right) => (
+    Number(right.symbol === "BTCUSDT") - Number(left.symbol === "BTCUSDT")
+    || right.validated_rows - left.validated_rows
+    || left.symbol.localeCompare(right.symbol)
+  ));
+  const selected = candidates[0];
+  assert(
+    selected,
+    `formal replay.v2 soak requires a contiguous ${FORMAL_V2_REAL_WINDOW_ROWS}-row real 1m identity`,
+    realSourceEvidence.identities,
+  );
+  return {
+    exchange: selected.exchange,
+    marketType: selected.market_type,
+    symbol: selected.symbol,
+    interval: selected.interval,
+    forwardCacheMs: FORMAL_V2_FORWARD_CACHE_MS,
+    warmupBars: FORMAL_V2_WARMUP_BARS,
+    requiredRows: FORMAL_V2_REAL_WINDOW_ROWS,
+    validatedRows: selected.validated_rows,
+    sourceSha256: realSourceEvidence.file_sha256,
+  };
 }
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -383,6 +436,65 @@ async function keyboardActivateButton(cdp, { action = null, text: buttonText = n
     tabs += 1;
   }
   throw new Error(`Keyboard traversal could not activate button: ${JSON.stringify({ action, text: buttonText, tabs })}`);
+}
+
+async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
+  const identityValue = `${plan.exchange}:${plan.marketType}:${plan.symbol}`;
+  const selected = await evaluate(cdp, `(() => {
+    const select = document.querySelector('[data-training-field="market-identity"]');
+    if (!(select instanceof HTMLSelectElement)) return { configured: false, reason: "identity-control-missing" };
+    const options = [...select.options].map((option) => option.value);
+    if (!options.includes(${JSON.stringify(identityValue)})) {
+      return { configured: false, reason: "identity-option-missing", options };
+    }
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+    if (typeof setter !== "function") return { configured: false, reason: "identity-setter-missing" };
+    setter.call(select, ${JSON.stringify(identityValue)});
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    return { configured: true, selected: select.value, options };
+  })()`, { userGesture: true });
+  assert(selected?.configured === true, "formal replay.v2 real identity selection failed", selected);
+  await waitForValue(
+    cdp,
+    `document.querySelector('[data-training-field="market-identity"]')?.value === ${JSON.stringify(identityValue)}`,
+    timeoutMs,
+    "formal replay.v2 real identity selection",
+  );
+
+  const horizonValue = String(plan.forwardCacheMs);
+  const horizon = await evaluate(cdp, `(() => {
+    const input = document.querySelector('[data-training-field="forward-cache-ms"]');
+    if (!(input instanceof HTMLInputElement)) return { configured: false, reason: "forward-cache-control-missing" };
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    if (typeof setter !== "function") return { configured: false, reason: "forward-cache-setter-missing" };
+    setter.call(input, ${JSON.stringify(horizonValue)});
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return { configured: true, value: input.value };
+  })()`, { userGesture: true });
+  assert(horizon?.configured === true, "formal replay.v2 forward cache selection failed", horizon);
+  await waitForValue(
+    cdp,
+    `document.querySelector('[data-training-field="forward-cache-ms"]')?.value === ${JSON.stringify(horizonValue)}`,
+    timeoutMs,
+    "formal replay.v2 forward cache selection",
+  );
+  await waitForValue(
+    cdp,
+    `(() => {
+      const button = [...document.querySelectorAll("button")]
+        .find((item) => item.textContent?.trim() === "创建并进入训练");
+      return button instanceof HTMLButtonElement && !button.disabled;
+    })()`,
+    timeoutMs,
+    "formal replay.v2 configured create readiness",
+  );
+  return {
+    identityValue,
+    forwardCacheMs: plan.forwardCacheMs,
+    selected,
+    horizon,
+  };
 }
 
 function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
@@ -1720,6 +1832,7 @@ function writeJson(outputPath, payload) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const useBoundRealProfile = args.productV2 && Boolean(args.realKlinesSource);
   const releaseEvidence = captureReplayReleaseEvidence(repositoryRoot);
   const chromePath = findChrome(args.chromePath);
   if (!chromePath) throw new Error("Chrome or Edge not found; set CHROME_PATH or --chrome-path");
@@ -1748,6 +1861,9 @@ async function main() {
     "--disable-gap-maintenance",
     ...(args.realKlinesSource
       ? ["--real-klines-source", args.realKlinesSource]
+      : []),
+    ...(useBoundRealProfile
+      ? ["--real-kline-window-rows", String(FORMAL_V2_REAL_WINDOW_ROWS)]
       : []),
   ];
   const backend = spawn(python, backendArgs, {
@@ -1828,7 +1944,7 @@ async function main() {
       fixture,
     );
     assert(fixture.gap_maintenance_enabled === false, "offline browser soak fixture left gap maintenance enabled", fixture);
-    if (!args.allowShort && args.productV2) {
+    if (useBoundRealProfile) {
       assert(
         fixture.source_profile === "REAL_BAR_SQLITE"
           && fixture.real_source === true
@@ -1838,6 +1954,9 @@ async function main() {
         fixture,
       );
     }
+    const formalTrainingPlan = useBoundRealProfile
+      ? selectFormalV2RealTrainingPlan(fixture.real_source_evidence)
+      : null;
 
     const projectionPage = await createTarget(debugBase);
     connections.add(projectionPage.cdp);
@@ -1868,6 +1987,13 @@ async function main() {
       const opened = await keyboardActivateButton(replay.cdp, { text: "新建训练" }, args.timeoutMs);
       try {
         await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "创建并进入训练"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "v2 create plan readiness");
+        if (formalTrainingPlan !== null) {
+          await configureFormalV2TrainingPlan(
+            replay.cdp,
+            formalTrainingPlan,
+            args.timeoutMs,
+          );
+        }
       } catch (error) {
         await replayCapture.settle();
         phaseDiagnostics = {
@@ -1928,6 +2054,26 @@ async function main() {
       : null;
     const v2CreatePayload = v2CreateRequest?.postData ? JSON.parse(v2CreateRequest.postData) : null;
     if (args.productV2) assert(v2CreatePayload?.protocol === "replay.v2", "v2 create payload was not captured", v2CreateRequest);
+    const formalTrainingBinding = formalTrainingPlan === null
+      ? null
+      : {
+        ...formalTrainingPlan,
+        payloadBound: (
+          v2CreatePayload?.exchange === formalTrainingPlan.exchange
+          && v2CreatePayload?.market_type === formalTrainingPlan.marketType
+          && v2CreatePayload?.symbol === formalTrainingPlan.symbol
+          && v2CreatePayload?.base_interval === formalTrainingPlan.interval
+          && v2CreatePayload?.indicator_warmup_bars === formalTrainingPlan.warmupBars
+          && v2CreatePayload?.forward_cache_ms === formalTrainingPlan.forwardCacheMs
+        ),
+      };
+    if (formalTrainingBinding !== null) {
+      assert(
+        formalTrainingBinding.payloadBound === true,
+        "formal replay.v2 training POST was not bound to the selected real source window",
+        { formalTrainingBinding, v2CreatePayload },
+      );
+    }
     assert(await evaluate(replay.cdp, "window.opener === null"), "primary replay target retained opener");
     const blindInitialDom = await evaluate(replay.cdp, "document.body.innerText");
     assert(!/\b20\d{2}(?:[-/.年](?:0?[1-9]|1[0-2])(?:[-/.月]))/.test(String(blindInitialDom)), "blind replay DOM rendered a calendar date before reveal");
@@ -2350,11 +2496,18 @@ async function main() {
     const finalActor = actorDiagnostics(finalMetrics.backend, sessionId);
     const minimumSourceProgress = Math.max(0, Math.floor(args.durationMs / 60_000) - 3);
     const checks = {
-      real_bar_source_profile: !args.productV2 || args.allowShort || (
+      real_bar_source_profile: !useBoundRealProfile || (
         fixture.source_profile === "REAL_BAR_SQLITE"
         && fixture.real_source === true
         && fixture.real_source_evidence?.read_only === true
         && fixture.real_source_evidence?.identities?.length >= 2
+      ),
+      real_bar_training_bound: !useBoundRealProfile || (
+        formalTrainingBinding?.payloadBound === true
+        && formalTrainingBinding.requiredRows === FORMAL_V2_REAL_WINDOW_ROWS
+        && formalTrainingBinding.validatedRows >= formalTrainingBinding.requiredRows
+        && formalTrainingBinding.forwardCacheMs === FORMAL_V2_FORWARD_CACHE_MS
+        && fixture.real_source_evidence?.window_rows === formalTrainingBinding.requiredRows
       ),
       duration_complete: finalMetrics.elapsedMs >= args.durationMs,
       lifecycle_cycles_complete: cycles.length === args.cycles,
@@ -2443,6 +2596,7 @@ async function main() {
         realSource: fixture.real_source,
         realSourceSha256: fixture.real_source_evidence?.file_sha256 ?? null,
         realSourceIdentityCount: fixture.real_source_evidence?.identities?.length ?? 0,
+        trainingSource: formalTrainingBinding,
         fixtureRows: fixture.fixture_rows,
         liveWindow: fixture.live_window,
         fixtureIdentityHash: sha256(JSON.stringify(fixture)),

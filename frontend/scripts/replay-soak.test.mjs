@@ -14,6 +14,7 @@ import {
   replaySubscriberReleaseState,
   replayTrainingTargetSpeed,
   restoreCommandReadinessAfterReconnect,
+  selectFormalV2RealTrainingPlan,
 } from "./replay-soak.mjs";
 
 const catalogEntry = {
@@ -148,6 +149,57 @@ test("replay soak rotates only through fast speeds rendered by each product", ()
   );
   assert.throws(() => replayTrainingTargetSpeed(["1", "30", "MAX"], 0), /no numeric option/);
   assert.throws(() => replayTrainingTargetSpeed(v2Options, -1), /non-negative safe integer/);
+});
+
+test("formal v2 soak binds a 30-day plan to a contiguous real identity", () => {
+  const evidence = {
+    read_only: true,
+    file_sha256: "a".repeat(64),
+    identities: [
+      {
+        exchange: "binance",
+        market_type: "spot",
+        symbol: "ETHUSDT",
+        interval: "1m",
+        contiguous: true,
+        validated_rows: 43_400,
+      },
+      {
+        exchange: "binance",
+        market_type: "spot",
+        symbol: "BTCUSDT",
+        interval: "1m",
+        contiguous: true,
+        validated_rows: 43_401,
+      },
+    ],
+  };
+
+  assert.deepEqual(selectFormalV2RealTrainingPlan(evidence), {
+    exchange: "binance",
+    marketType: "spot",
+    symbol: "BTCUSDT",
+    interval: "1m",
+    forwardCacheMs: 2_592_000_000,
+    warmupBars: 200,
+    requiredRows: 43_400,
+    validatedRows: 43_401,
+    sourceSha256: "a".repeat(64),
+  });
+  assert.throws(
+    () => selectFormalV2RealTrainingPlan({
+      ...evidence,
+      identities: evidence.identities.map((identity) => ({
+        ...identity,
+        validated_rows: 43_399,
+      })),
+    }),
+    /contiguous 43400-row real 1m identity/,
+  );
+  assert.throws(
+    () => selectFormalV2RealTrainingPlan({ ...evidence, read_only: false }),
+    /read-only real source identity evidence/,
+  );
 });
 
 test("v2 lifecycle refreshes exactly once for catalog epoch drift", async () => {

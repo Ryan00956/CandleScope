@@ -274,6 +274,11 @@ def main() -> int:
     rollback = payloads["rollback"]
     smoke_config = v2_smoke.get("config")
     soak_config = v2_soak.get("config")
+    soak_training_source = (
+        soak_config.get("trainingSource")
+        if isinstance(soak_config, Mapping)
+        else None
+    )
     soak_lifecycle = v2_soak.get("archiveLifecycle")
     rollback_config = rollback.get("configuration")
     benchmark_checks = benchmark.get("checks")
@@ -314,7 +319,18 @@ def main() -> int:
         "v2_soak_real_bar_source": isinstance(soak_config, Mapping)
         and soak_config.get("sourceProfile") == "REAL_BAR_SQLITE"
         and soak_config.get("realSource") is True
-        and soak_config.get("realSourceIdentityCount", 0) >= 2,
+        and soak_config.get("realSourceIdentityCount", 0) >= 2
+        and isinstance(soak_training_source, Mapping)
+        and soak_training_source.get("payloadBound") is True
+        and soak_training_source.get("exchange") == "binance"
+        and soak_training_source.get("marketType") == "spot"
+        and soak_training_source.get("interval") == "1m"
+        and soak_training_source.get("forwardCacheMs") == 2_592_000_000
+        and soak_training_source.get("requiredRows") == 43_400
+        and soak_training_source.get("validatedRows", 0)
+        >= soak_training_source.get("requiredRows", 43_401)
+        and soak_training_source.get("sourceSha256")
+        == soak_config.get("realSourceSha256"),
         "v2_100_archive_lifecycles": isinstance(soak_lifecycle, Mapping)
         and soak_lifecycle.get("completed", 0) >= 100,
         "v2_rollback": isinstance(rollback_config, Mapping)

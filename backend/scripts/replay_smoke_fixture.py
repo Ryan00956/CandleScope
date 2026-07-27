@@ -290,6 +290,8 @@ def _seed_klines(
 
 def _load_real_kline_profile(
     source_path: Path,
+    *,
+    required_rows: int | None = None,
 ) -> tuple[dict[str, list[dict[str, object]]], dict[str, object]]:
     """Validate and copy only the bounded real identities used by release QA."""
 
@@ -299,6 +301,13 @@ def _load_real_kline_profile(
         validate_kline_source,
     )
 
+    window_rows = DEFAULT_WINDOW_ROWS if required_rows is None else required_rows
+    if (
+        isinstance(window_rows, bool)
+        or not isinstance(window_rows, int)
+        or window_rows < 2
+    ):
+        raise ValueError("real K-line profile requires at least two rows")
     raw_source = source_path.expanduser()
     if raw_source.is_symlink():
         raise RuntimeError("real K-line release source must not be a symlink")
@@ -308,7 +317,7 @@ def _load_real_kline_profile(
         raise RuntimeError("real K-line source cannot be the isolated fixture target")
     validation = validate_kline_source(
         source,
-        required_rows=DEFAULT_WINDOW_ROWS,
+        required_rows=window_rows,
     )
     rows_by_symbol: dict[str, list[dict[str, object]]] = {}
     identities = validation.get("identities")
@@ -339,7 +348,7 @@ def _load_real_kline_profile(
                     int(identity["range_end_ms"]),
                 ),
             ).fetchall()
-            if len(rows) != DEFAULT_WINDOW_ROWS:
+            if len(rows) != window_rows:
                 raise RuntimeError(
                     f"real K-line release window drifted for {symbol}: {len(rows)}"
                 )
@@ -365,6 +374,7 @@ def _load_real_kline_profile(
         "file_bytes": validation["file_bytes"],
         "file_sha256": validation["file_sha256"],
         "read_only": validation["read_only"],
+        "window_rows": window_rows,
         "identities": identities,
     }
 
@@ -646,8 +656,16 @@ def main() -> None:
     parser.add_argument("--live-tail", action="store_true")
     parser.add_argument("--live-window", action="store_true")
     parser.add_argument("--real-klines-source", type=Path)
+    parser.add_argument("--real-kline-window-rows", type=int)
     parser.add_argument("--disable-gap-maintenance", action="store_true")
     args = parser.parse_args()
+    if args.real_kline_window_rows is not None and args.real_klines_source is None:
+        parser.error("--real-kline-window-rows requires --real-klines-source")
+    if (
+        args.real_kline_window_rows is not None
+        and args.real_kline_window_rows < 2
+    ):
+        parser.error("--real-kline-window-rows must be >= 2")
     _require_isolated_environment()
     _force_offline_upstreams()
     live_tail_enabled = _smoke_live_tail_required(explicit=args.live_tail)
@@ -656,6 +674,7 @@ def main() -> None:
     if args.real_klines_source is not None:
         real_rows_by_symbol, real_source_evidence = _load_real_kline_profile(
             args.real_klines_source,
+            required_rows=args.real_kline_window_rows,
         )
     live_window_rows = _seed_klines(
         include_live_tail=live_tail_enabled,

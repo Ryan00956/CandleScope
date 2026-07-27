@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 from pathlib import Path
 
 from app.core import config
@@ -17,11 +18,72 @@ from scripts.replay_smoke_fixture import (
     _force_offline_upstreams,
     _legacy_live_tail_rows,
     _legacy_live_tail_required,
+    _load_real_kline_profile,
     _release_replay_adapter_when_idle,
     _seed_historical_book_source,
     _smoke_live_tail_required,
     _soak_live_window_rows,
 )
+
+def test_real_kline_profile_honors_the_explicit_bounded_window(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "real-source.db"
+    target = tmp_path / "isolated-target.db"
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            """
+            CREATE TABLE klines (
+                exchange TEXT NOT NULL,
+                market_type TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                interval TEXT NOT NULL,
+                open_time INTEGER NOT NULL,
+                close_time INTEGER NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL NOT NULL,
+                quote_volume REAL NOT NULL,
+                trades INTEGER NOT NULL,
+                taker_buy_base REAL NOT NULL,
+                taker_buy_quote REAL NOT NULL,
+                source TEXT NOT NULL,
+                PRIMARY KEY (exchange, market_type, symbol, interval, open_time)
+            )
+            """
+        )
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            for index in range(5):
+                open_time = 1_800_000_000_000 + index * INTERVAL_MS
+                connection.execute(
+                    """
+                    INSERT INTO klines VALUES (
+                        'binance', 'spot', ?, '1m', ?, ?,
+                        100, 102, 99, 101, 10, 1000, 5, 4, 400, 'unit-test'
+                    )
+                    """,
+                    (symbol, open_time, open_time + INTERVAL_MS - 1),
+                )
+        connection.commit()
+    monkeypatch.setenv("KLINES_DB_PATH", str(target))
+
+    rows_by_symbol, evidence = _load_real_kline_profile(
+        source,
+        required_rows=4,
+    )
+
+    assert evidence["read_only"] is True
+    assert evidence["window_rows"] == 4
+    assert all(identity["validated_rows"] == 4 for identity in evidence["identities"])
+    assert set(rows_by_symbol) == {"BTCUSDT", "ETHUSDT"}
+    assert all(len(rows) == 4 for rows in rows_by_symbol.values())
+    assert all(
+        rows[0]["open_time"] == 1_800_000_000_000 + INTERVAL_MS
+        for rows in rows_by_symbol.values()
+    )
 
 
 def test_phase5_smoke_fixture_has_multiple_same_settlement_symbols() -> None:

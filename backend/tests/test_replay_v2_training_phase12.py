@@ -308,7 +308,8 @@ async def test_v8_start_selection_backfill_is_additive_and_does_not_rewrite_v1(
 async def test_public_time_batch_allows_display_bucket_alignment_but_not_dataset_escape(
     tmp_path: Path,
 ) -> None:
-    service = await _service(tmp_path / "display-alignment.db")
+    database_path = tmp_path / "display-alignment.db"
+    service = await _service(database_path)
     try:
         created = await service.training.create_run(  # type: ignore[union-attr]
             await _request(
@@ -330,6 +331,38 @@ async def test_public_time_batch_allows_display_bucket_alignment_but_not_dataset
             await service.training.public_times(  # type: ignore[union-attr]
                 run_id,
                 timeline_ms=(origin - 62 * INTERVAL_MS,),
+            )
+        with sqlite3.connect(database_path) as connection:
+            bounds = connection.execute(
+                """
+                SELECT d.actual_replay_start_ms, d.actual_replay_end_ms,
+                       d.synthetic_origin_ms
+                FROM replay_training_run AS r
+                JOIN replay_dataset_ref AS d
+                  ON d.session_id = r.adapter_session_id
+                WHERE r.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        assert bounds is not None
+        actual_start_ms = int(bounds[0])
+        actual_end_open_ms = int(bounds[1])
+        public_origin_ms = int(bounds[2])
+        public_last_open_ms = (
+            public_origin_ms + actual_end_open_ms - actual_start_ms
+        )
+        public_last_close_ms = public_last_open_ms + INTERVAL_MS - 1
+        projected_end = await service.training.public_times(  # type: ignore[union-attr]
+            run_id,
+            timeline_ms=(public_last_open_ms, public_last_close_ms),
+        )
+        assert [
+            item["input_timeline_ms"] for item in projected_end["items"]
+        ] == [public_last_open_ms, public_last_close_ms]
+        with pytest.raises(TrainingRunError, match="outside the pinned"):
+            await service.training.public_times(  # type: ignore[union-attr]
+                run_id,
+                timeline_ms=(public_last_close_ms + 1,),
             )
     finally:
         await service.shutdown(step_timeout=1.0)

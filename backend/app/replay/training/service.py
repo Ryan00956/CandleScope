@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import sqlite3
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
@@ -2868,12 +2868,18 @@ class TrainingRunService:
                 binding=binding,
             )
         session_id = str(binding["adapter_session_id"])
+        controller_snapshot = await self._ensure_track_controller(
+            session_id=session_id,
+            client_instance_id=command.client_instance_id,
+            command_id=command.command_id,
+            known_snapshot=snapshot,
+        )
         adapter = ReplayCommand(
             protocol=REPLAY_PROTOCOL,
             command_id=command.command_id,
             client_instance_id=command.client_instance_id,
             expected_revision=_stored_counter(
-                snapshot["revision"], field_name="revision"
+                controller_snapshot["revision"], field_name="revision"
             ),
             type=v1_types[command.type],
             payload=payload,
@@ -3052,10 +3058,15 @@ class TrainingRunService:
         run_id: str,
         client_instance_id: str,
         command_id: str,
+        pending: Sequence[Mapping[str, object]] | None = None,
     ) -> int:
-        pending = await self.store.pending_liquidations(run_id)
+        pending_events = (
+            await self.store.pending_liquidations(run_id)
+            if pending is None
+            else tuple(pending)
+        )
         completed = 0
-        for event in pending:
+        for event in pending_events:
             session_id = event.get("adapter_session_id")
             if not isinstance(session_id, str):
                 raise TrainingRunError(
@@ -4376,10 +4387,15 @@ class TrainingRunService:
                 virtual_time_ms=target_virtual_time_ms,
             )
         all_events: list[StableMarketEvent] = []
+        pending_global_events: list[StableMarketEvent] = []
         for _wave_index in range(10_000):
             if job is not None:
                 cancel = job.get("cancel")
-                if isinstance(cancel, asyncio.Event) and cancel.is_set():
+                if (
+                    isinstance(cancel, asyncio.Event)
+                    and cancel.is_set()
+                    and not pending_global_events
+                ):
                     job["status"] = "CANCELLED"
                     return tuple(all_events)
             snapshots: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
@@ -4468,6 +4484,12 @@ class TrainingRunService:
                     or next_account_virtual > current
                 )
             ):
+                if pending_global_events:
+                    raise TrainingRunError(
+                        "GLOBAL_CHECKPOINT_INCOMPLETE",
+                        "account events reached the target without a market barrier",
+                        status_code=409,
+                    )
                 if prepared_book:
                     await self.historical_books.commit_run_projection(
                         run_id=command.run_id,
@@ -4482,6 +4504,10 @@ class TrainingRunService:
             if next_account_virtual is not None:
                 candidate_times.append(next_account_virtual)
             wave_time = min(candidate_times)
+            market_barrier = (
+                wave_time == target_virtual_time_ms
+                or wave_time in next_times
+            )
             wave_events: list[StableMarketEvent] = []
             actual_wave_time = self._actual_event_time_ms(binding, wave_time)
             account_events = await self.account_history.events_at(
@@ -4501,15 +4527,12 @@ class TrainingRunService:
                 if item[1].event_phase
                 in {MARK_INDEX_EVENT_PHASE, FUNDING_EVENT_PHASE}
             )
-            try:
-                wave_events.extend(
-                    await self.store.apply_account_history_events(
-                        command.run_id,
-                        events=pre_account_events,
-                        virtual_time_ms=wave_time,
-                    )
-                )
-                for track, before in snapshots:
+            failed_track: Mapping[str, object] = tracks[0]
+
+            async def advance_market_barrier() -> None:
+                nonlocal failed_track
+                for barrier_track, before in snapshots:
+                    failed_track = barrier_track
                     before_cursor = before.get("cursor")
                     if not isinstance(before_cursor, Mapping):
                         raise TrainingRunError(
@@ -4522,11 +4545,11 @@ class TrainingRunService:
                         field_name="source_sequence",
                     )
                     after = await self._advance_adapter_to(
-                        session_id=self._track_session_id(track),
+                        session_id=self._track_session_id(barrier_track),
                         target_virtual_time_ms=wave_time,
                         client_instance_id=command.client_instance_id,
                         command_id=command.command_id,
-                        track_id=str(track["track_id"]),
+                        track_id=str(barrier_track["track_id"]),
                         initial_snapshot=before,
                     )
                     after_cursor = after.get("cursor")
@@ -4551,10 +4574,23 @@ class TrainingRunService:
                                     wave_time,
                                 ),
                                 event_phase=MARKET_EVENT_PHASE,
-                                market_track_stable_id=str(track["track_id"]),
+                                market_track_stable_id=str(
+                                    barrier_track["track_id"]
+                                ),
                                 source_sequence=sequence,
                             )
                         )
+
+            try:
+                wave_events.extend(
+                    await self.store.apply_account_history_events(
+                        command.run_id,
+                        events=pre_account_events,
+                        virtual_time_ms=wave_time,
+                    )
+                )
+                if market_barrier:
+                    await advance_market_barrier()
                 wave_events.extend(
                     await self.store.apply_account_history_events(
                         command.run_id,
@@ -4565,12 +4601,22 @@ class TrainingRunService:
                 await self.store.finalize_account_history(
                     command.run_id,
                     write_audit=False,
+                    risk_virtual_time_ms=wave_time,
                 )
+                pending_liquidations = await self.store.pending_liquidations(
+                    command.run_id
+                )
+                if pending_liquidations and not market_barrier:
+                    # Exact account marks can trigger liquidation between two
+                    # source events. Align every adapter to that precise
+                    # account time before cancel/close mutations are issued.
+                    await advance_market_barrier()
+                    market_barrier = True
             except (ReplayDomainError, TrainingRunError) as exc:
                 await self._fail_closed_multi_track(
                     run_id=command.run_id,
                     tracks=tracks,
-                    failed_track=track,
+                    failed_track=failed_track,
                     client_instance_id=command.client_instance_id,
                     reason=(
                         exc.code.value
@@ -4582,32 +4628,46 @@ class TrainingRunService:
                     "MULTI_TRACK_PAUSED",
                     "a required FULL market track failed during global advance",
                     status_code=409,
-                    details={"track_id": track["track_id"]},
+                    details={"track_id": failed_track["track_id"]},
                 ) from exc
             await self._reconcile_liquidations(
                 run_id=command.run_id,
                 client_instance_id=command.client_instance_id,
                 command_id=command.command_id,
+                pending=pending_liquidations,
             )
             if wave_events:
                 ordered_wave = stable_market_event_order(wave_events)
-                await self.store.record_global_events(command.run_id, ordered_wave)
+                pending_global_events.extend(ordered_wave)
                 all_events.extend(ordered_wave)
                 if job is not None and len(all_events) > 512:
                     del all_events[:-512]
                     job["stable_order_truncated"] = True
-            else:
-                await self.store.checkpoint_market_tracks(command.run_id)
+            if market_barrier:
+                if pending_global_events:
+                    await self.store.record_global_events(
+                        command.run_id,
+                        stable_market_event_order(pending_global_events),
+                    )
+                    pending_global_events.clear()
+                else:
+                    await self.store.checkpoint_market_tracks(command.run_id)
             if job is not None:
                 job["consumed"] = int(job["consumed"]) + len(wave_events)
                 job["chunks"] = int(job["chunks"]) + 1
-                job["current_virtual_time_ms"] = wave_time
+                job["current_virtual_time_ms"] = (
+                    wave_time if market_barrier else current
+                )
                 job["queue_high_water"] = max(
                     int(job["queue_high_water"]),
                     len(tracks),
                 )
                 cancel = job.get("cancel")
-                if isinstance(cancel, asyncio.Event) and cancel.is_set():
+                if (
+                    isinstance(cancel, asyncio.Event)
+                    and cancel.is_set()
+                    and not pending_global_events
+                ):
                     job["status"] = "CANCELLED"
                     await self.store.audit_account(command.run_id)
                     return tuple(all_events)

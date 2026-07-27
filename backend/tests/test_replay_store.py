@@ -124,7 +124,7 @@ async def test_wal_checkpoint_window_preserves_full_commit_durability(
         ).fetchone()[0] == 2
         assert store._connection.execute(  # noqa: SLF001
             "PRAGMA wal_autocheckpoint"
-        ).fetchone()[0] == 16_384
+        ).fetchone()[0] == 256
     finally:
         await store.close()
 

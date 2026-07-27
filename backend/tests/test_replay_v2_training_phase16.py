@@ -605,6 +605,89 @@ async def test_exact_plan_create_binding_ordering_funding_and_restart(
         await restored.shutdown(step_timeout=1.0)
 
 
+async def test_exact_account_only_waves_batch_until_market_barrier(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "account-wave-batching.db"
+    archive = tmp_path / "account-wave-batching.sqlite3"
+    build_account_history_archive(
+        archive,
+        archive_id="account-wave-batching",
+        range_start_ms=REPLAY_START,
+        range_end_ms=ARCHIVE_END,
+        funding_interval_ms=0,
+        price_at=lambda timestamp: str(
+            100 + (timestamp - REPLAY_START) // INTERVAL_MS
+        ),
+    )
+    service = await _service(database)
+    try:
+        base = await _base_request(service)
+        exact, _ = await _import_and_plan(
+            service,
+            archive,
+            _exact_request(base, funding=False),
+        )
+        created = await service.training.create_run(exact)  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="account-wave-batching-acquire",
+        )
+        before = await service.get_session(session_id)
+        stepped = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="account-wave-batching-step",
+            command_type=ReplayV2CommandType.STEP_BASE,
+            payload={"count": 1},
+        )
+
+        # A 30-second exact mark exists between two 1-minute BAR events. It is
+        # durably applied and globally ordered, but does not create a separate
+        # adapter ADVANCE_BY transaction. The target BAR is the sole barrier.
+        assert stepped["revision"] == before["snapshot"]["revision"] + 1
+        stable = stepped["data"]["stable_order"]
+        assert stable == sorted(
+            stable,
+            key=lambda event: (
+                event["actual_event_time_ms"],
+                event["event_phase"],
+                event["market_track_stable_id"],
+                event["source_sequence"],
+            ),
+        )
+        assert any(
+            event["event_phase"] == 30
+            and before["snapshot"]["cursor"]["virtual_time_ms"]
+            < event["actual_event_time_ms"]
+            < stepped["cursor"]["virtual_time_ms"]
+            for event in stable
+        )
+        assert sum(event["event_phase"] == 20 for event in stable) == 1
+        projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
+        assert projection["portfolio"]["account_history"]["auditor"]["status"] == "PASS"
+        with sqlite3.connect(database) as connection:
+            command_types = [
+                json.loads(row[0])["type"]
+                for row in connection.execute(
+                    """
+                    SELECT command_json FROM replay_command_log
+                    WHERE session_id = ? ORDER BY result_sequence
+                    """,
+                    (session_id,),
+                ).fetchall()
+            ]
+        assert "advance_by" not in command_types
+        assert command_types.count("step") == 1
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_exact_create_fail_closed_for_flag_random_ref_and_budget(
     tmp_path: Path,
 ) -> None:
@@ -1019,6 +1102,10 @@ async def test_exact_mark_drives_modelled_liquidation_not_market_feed(
         assert portfolio["liquidations"]
         assert portfolio["liquidations"][0]["state"] == "COMPLETED"
         liquidation = portfolio["liquidations"][0]
+        assert (
+            liquidation["trigger_virtual_time_ms"]
+            == REPLAY_START + 30_000
+        )
         assert Decimal(liquidation["bankruptcy_price"]) == (
             Decimal(portfolio["fills"][0]["price"])
             - Decimal(liquidation["account_equity_before"])

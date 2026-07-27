@@ -20,7 +20,7 @@ from .schema import REPLAY_SCHEMA_VERSION, migrate_replay_schema
 
 
 _BUSY_MARKERS = ("database is locked", "database table is locked", "database is busy")
-_WAL_AUTOCHECKPOINT_PAGES = 16_384
+_WAL_AUTOCHECKPOINT_PAGES = 256
 ExtensionWriter = Callable[[sqlite3.Connection, int], None]
 SessionSummaryWriter = Callable[
     [sqlite3.Connection, str, Mapping[str, object], Mapping[str, object], int],
@@ -149,10 +149,11 @@ class ReplaySQLiteStore:
             self._connection.execute("PRAGMA journal_mode=DELETE")
             journal_mode = "delete"
         if journal_mode == "wal":
-            # FULL still fsyncs every committed WAL transaction. A larger,
-            # bounded checkpoint window keeps an unrelated 1000-page merge
-            # from landing inside a multi-track replay step; close/recovery
-            # semantics are unchanged and the WAL remains capped near 64 MiB.
+            # FULL still fsyncs every committed WAL transaction. Keep each
+            # automatic merge small so positioned multi-track replay spreads
+            # checkpoint work across commands instead of paying one large,
+            # latency-spiking merge. Recovery semantics stay unchanged and the
+            # normal WAL window remains near 1 MiB.
             self._connection.execute(
                 f"PRAGMA wal_autocheckpoint={_WAL_AUTOCHECKPOINT_PAGES}"
             )

@@ -434,12 +434,22 @@ async def _run_case(root: Path, *, track_count: int, iterations: int) -> dict[st
         await service.shutdown(step_timeout=5.0)
 
 
-async def run_benchmark(*, iterations: int) -> dict[str, object]:
+async def run_benchmark(
+    *,
+    iterations: int,
+    temporary_storage_root: Path | None = None,
+) -> dict[str, object]:
     if iterations < 3:
         raise ValueError("iterations must be at least 3")
-    temporary_storage_root = Path(tempfile.gettempdir()).resolve()
+    storage_root = (
+        Path(tempfile.gettempdir()).resolve()
+        if temporary_storage_root is None
+        else temporary_storage_root.expanduser().resolve()
+    )
+    storage_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        prefix="replay-phase16-account-capacity-"
+        prefix="replay-phase16-account-capacity-",
+        dir=storage_root,
     ) as raw_root:
         root = Path(raw_root)
         cases = [
@@ -478,7 +488,8 @@ async def run_benchmark(*, iterations: int) -> dict[str, object]:
             "platform": platform.platform(),
             "python": platform.python_version(),
             "sqlite": sqlite3.sqlite_version,
-            "temporary_storage_drive": temporary_storage_root.drive,
+            "temporary_storage_drive": storage_root.drive,
+            "temporary_storage_root": str(storage_root),
         },
         "workload": {
             "source_kind": "BAR",
@@ -509,8 +520,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--iterations", type=int, default=8)
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--temp-root", type=Path)
     args = parser.parse_args()
-    result = asyncio.run(run_benchmark(iterations=args.iterations))
+    result = asyncio.run(
+        run_benchmark(
+            iterations=args.iterations,
+            temporary_storage_root=args.temp_root,
+        )
+    )
     payload = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
     if args.out is not None:
         args.out.parent.mkdir(parents=True, exist_ok=True)

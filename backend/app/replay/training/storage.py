@@ -1351,6 +1351,7 @@ class TrainingRunStore:
         run_id: str,
         *,
         write_audit: bool = True,
+        risk_virtual_time_ms: int | None = None,
     ) -> dict[str, object] | None:
         """Reapply authoritative marks, run risk, and emit an independent audit."""
 
@@ -1391,6 +1392,7 @@ class TrainingRunStore:
                 connection,
                 run_id=run_id,
                 now_ms=now_ms,
+                trigger_virtual_time_ms=risk_virtual_time_ms,
             )
             self._refresh_contract_current_equity(
                 connection,
@@ -8414,14 +8416,25 @@ class TrainingRunStore:
                     run_id=run_id,
                     operation="actor activation",
                 )
-            connection.execute(
-                """
-                UPDATE replay_data_segment_ref
-                SET active = ?, released_at_ms = ?
-                WHERE run_id = ? AND owner_kind = 'ACTOR'
-                """,
-                (int(active), None if active else now_ms, run_id),
-            )
+                connection.execute(
+                    """
+                    UPDATE replay_data_segment_ref
+                    SET active = 1, released_at_ms = NULL
+                    WHERE run_id = ? AND owner_kind = 'ACTOR'
+                      AND (active != 1 OR released_at_ms IS NOT NULL)
+                    """,
+                    (run_id,),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE replay_data_segment_ref
+                    SET active = 0, released_at_ms = ?
+                    WHERE run_id = ? AND owner_kind = 'ACTOR'
+                      AND (active != 0 OR released_at_ms IS NULL)
+                    """,
+                    (now_ms, run_id),
+                )
 
         await self.base_store.run_extension_write(write)
 
@@ -12066,6 +12079,7 @@ class TrainingRunStore:
         *,
         run_id: str,
         now_ms: int,
+        trigger_virtual_time_ms: int | None = None,
     ) -> None:
         account = connection.execute(
             """
@@ -12181,7 +12195,11 @@ class TrainingRunStore:
                     run_id,
                     liquidation_id,
                     track["track_id"],
-                    int(track["virtual_time_ms"] or 0),
+                    (
+                        int(track["virtual_time_ms"] or 0)
+                        if trigger_virtual_time_ms is None
+                        else trigger_virtual_time_ms
+                    ),
                     sequence,
                     position["mark_price"],
                     position["quantity"],

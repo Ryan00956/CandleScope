@@ -726,6 +726,55 @@ async def test_global_clock_fail_closes_when_adapter_controller_lease_is_lost(
         await service.shutdown(step_timeout=1.0)
 
 
+async def test_direct_trade_reacquires_an_expired_unowned_controller(
+    tmp_path: Path,
+) -> None:
+    service = await _service(
+        tmp_path / "direct-trade-reacquire.db",
+        controller_ttl_seconds=0.03,
+    )
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        selected_id = str(created["run"]["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=selected_id,
+            command_id="direct-trade-expiring-acquire",
+        )
+
+        await asyncio.sleep(0.08)
+        expired = await service.get_session(selected_id)
+        assert expired["snapshot"]["controller_client_id"] is None
+        opened = await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "direct-trade-after-expiry",
+                ReplayV2CommandType.PLACE_ORDER,
+                expired,
+                {
+                    "client_order_id": "direct-trade-after-expiry",
+                    "side": "BUY",
+                    "order_type": "MARKET",
+                    "quantity": "1",
+                    "reduce_only": False,
+                    "limit_price": None,
+                    "stop_price": None,
+                },
+            ),
+        )
+        assert opened["data"]["orders"]
+        refreshed = await service.get_session(selected_id)
+        assert (
+            refreshed["snapshot"]["controller_client_id"]
+            == "phase5-browser"
+        )
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_shutdown_persists_active_global_playback_as_shutdown_pause(
     tmp_path: Path,
 ) -> None:

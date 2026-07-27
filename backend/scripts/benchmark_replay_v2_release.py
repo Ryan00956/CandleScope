@@ -59,6 +59,7 @@ def main() -> int:
     output = require_external_head_path(args.out, head)
     component_directory = output.parent / "benchmarks"
     log_directory = output.parent / "logs" / "benchmarks"
+    benchmark_work_directory = output.parent / "work" / "benchmarks"
     environment = dict(os.environ)
     environment.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
     specifications = (
@@ -112,7 +113,9 @@ def main() -> int:
                 sys.executable,
                 "scripts/benchmark_replay_account_history.py",
                 "--iterations",
-                "8",
+                "20",
+                "--temp-root",
+                str(benchmark_work_directory / "account-history-v2"),
             ],
         ),
     )

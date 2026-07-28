@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:18080'
 const devServerPort = Number(process.env.VITE_DEV_PORT || 15173)
+const replaySoakProjectionEnabled = process.env.VITE_REPLAY_SOAK_PROJECTION_ENABLED === '1'
 const buildApiProxy = () => ({
   '/api': {
     target: apiProxyTarget,
@@ -21,6 +22,14 @@ export default defineConfig({
       input: {
         live: resolve(import.meta.dirname, 'index.html'),
         replay: resolve(import.meta.dirname, 'replay.html'),
+        ...(replaySoakProjectionEnabled
+          ? {
+              replaySoakProjection: resolve(
+                import.meta.dirname,
+                'scripts/replay-soak-projection.ts',
+              ),
+            }
+          : {}),
       },
       output: {
         manualChunks(id) {

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -7,6 +10,7 @@ import {
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
   isAuthoritativeReplayStatus,
+  inspectReplaySoakFrontendBuild,
   readJson,
   replayBackendHealth,
   replayCatalogQueryFromCreatePayload,
@@ -14,10 +18,139 @@ import {
   replaySpeedRequestState,
   replayStepAction,
   replaySubscriberReleaseState,
+  replaySoakFrontendPlan,
+  replaySoakFrontendProcessEnvironment,
   replayTrainingTargetSpeed,
   restoreCommandReadinessAfterReconnect,
   selectFormalV2RealTrainingPlan,
 } from "./replay-soak.mjs";
+
+test("replay soak builds and serves the same flag-enabled production output", () => {
+  const outDir = path.join(os.tmpdir(), "candlescope-soak-plan");
+  const plan = replaySoakFrontendPlan({
+    backendPort: 18_080,
+    frontendPort: 15_173,
+    outDir,
+    productV2: true,
+  });
+  assert.equal(plan.runtime, "vite-production-preview");
+  assert.equal(plan.environment.VITE_API_PROXY_TARGET, "http://127.0.0.1:18080");
+  assert.equal(plan.environment.VITE_REPLAY_ENTRY_ENABLED, "1");
+  assert.equal(plan.environment.VITE_REPLAY_PRODUCT_V2_ENABLED, "1");
+  assert.equal(plan.environment.VITE_REPLAY_SOAK_PROJECTION_ENABLED, "1");
+  assert.deepEqual(plan.buildArgs.slice(1), [
+    "build",
+    "--outDir",
+    outDir,
+    "--emptyOutDir",
+    "--manifest",
+  ]);
+  assert.deepEqual(plan.previewArgs.slice(1), [
+    "preview",
+    "--outDir",
+    outDir,
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "15173",
+    "--strictPort",
+  ]);
+  assert.equal(
+    replaySoakFrontendPlan({
+      backendPort: 18_080,
+      frontendPort: 15_173,
+      outDir,
+      productV2: false,
+    }).environment.VITE_REPLAY_PRODUCT_V2_ENABLED,
+    "0",
+  );
+  assert.throws(
+    () => replaySoakFrontendPlan({
+      backendPort: 0,
+      frontendPort: 15_173,
+      outDir,
+      productV2: true,
+    }),
+    /backendPort/,
+  );
+  assert.throws(
+    () => replaySoakFrontendPlan({
+      backendPort: 18_080,
+      frontendPort: 15_173,
+      outDir: "relative-dist",
+      productV2: true,
+    }),
+    /absolute child of the OS temp directory/,
+  );
+  const processEnvironment = replaySoakFrontendProcessEnvironment(
+    plan.environment,
+    {
+      NODE_ENV: "development",
+      PATH: "trusted-path",
+      VITE_API_PROXY_TARGET: "https://untrusted.invalid",
+      VITE_REPLAY_PRODUCT_V2_ENABLED: "0",
+      VITE_UNRELATED_FLAG: "ambient-leak",
+    },
+  );
+  assert.equal(processEnvironment.PATH, "trusted-path");
+  assert.equal(processEnvironment.NODE_ENV, "production");
+  assert.equal(processEnvironment.VITE_API_PROXY_TARGET, "http://127.0.0.1:18080");
+  assert.equal(processEnvironment.VITE_REPLAY_PRODUCT_V2_ENABLED, "1");
+  assert.equal(processEnvironment.VITE_UNRELATED_FLAG, undefined);
+});
+
+test("replay soak binds its projection URL and evidence to the production manifest", (context) => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "candlescope-soak-build-test-"));
+  context.after(() => fs.rmSync(outDir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(outDir, ".vite"), { recursive: true });
+  fs.mkdirSync(path.join(outDir, "assets"), { recursive: true });
+  fs.writeFileSync(path.join(outDir, "assets", "projection-abc.js"), "export const ready=true;\n");
+  fs.writeFileSync(path.join(outDir, "replay.html"), "<!doctype html>\n");
+  fs.writeFileSync(
+    path.join(outDir, ".vite", "manifest.json"),
+    JSON.stringify({
+      "scripts/replay-soak-projection.ts": {
+        file: "assets/projection-abc.js",
+        isEntry: true,
+        name: "replaySoakProjection",
+        src: "scripts/replay-soak-projection.ts",
+      },
+    }),
+  );
+
+  const inspected = inspectReplaySoakFrontendBuild(outDir);
+  assert.equal(inspected.projectionModuleUrl, "/assets/projection-abc.js");
+  assert.equal(inspected.evidence.schema_version, "replay-soak-frontend-build.v1");
+  assert.equal(inspected.evidence.runtime, "vite-production-preview");
+  assert.equal(inspected.evidence.fileCount, 3);
+  assert.equal(inspected.evidence.projectionAsset.file, "assets/projection-abc.js");
+  assert.match(inspected.evidence.projectionAsset.sha256, /^sha256:[a-f0-9]{64}$/);
+  assert.match(inspected.evidence.manifestSha256, /^sha256:[a-f0-9]{64}$/);
+
+  fs.writeFileSync(
+    path.join(outDir, ".vite", "manifest.json"),
+    JSON.stringify({
+      "scripts/replay-soak-projection.ts": {
+        file: "../projection.js",
+        isEntry: true,
+        name: "replaySoakProjection",
+      },
+    }),
+  );
+  assert.throws(() => inspectReplaySoakFrontendBuild(outDir), /manifest file is invalid/);
+
+  fs.writeFileSync(
+    path.join(outDir, ".vite", "manifest.json"),
+    JSON.stringify({
+      "scripts/replay-soak-projection.ts": {
+        file: "assets/missing.js",
+        isEntry: true,
+        name: "replaySoakProjection",
+      },
+    }),
+  );
+  assert.throws(() => inspectReplaySoakFrontendBuild(outDir), /projection asset is missing/);
+});
 
 class FakeSocket {
   constructor() {

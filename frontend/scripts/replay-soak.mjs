@@ -1609,15 +1609,17 @@ async function browserMetrics(cdp, collectGarbage = true) {
   };
 }
 
-async function runProjectionSoak(cdp, eventCount) {
+async function runProjectionSoak(cdp, eventCount, projectionModuleUrl) {
+  assert(
+    typeof projectionModuleUrl === "string"
+      && /^\/assets\/[A-Za-z0-9._-]+\.js$/.test(projectionModuleUrl),
+    "browser projection module URL is not a production asset",
+    projectionModuleUrl,
+  );
   await cdp.send("HeapProfiler.collectGarbage").catch(() => undefined);
   const before = await cdp.send("Runtime.getHeapUsage");
   const result = await evaluate(cdp, `(async () => {
-    const [{ ReplayStore }, parser, fixtures] = await Promise.all([
-      import("/src/features/replay/replayStore.ts"),
-      import("/src/features/replay/replayParser.ts"),
-      import("/src/features/replay/__tests__/fixtures.ts"),
-    ]);
+    const { ReplayStore, parser, fixtures } = await import(${JSON.stringify(projectionModuleUrl)});
     let store = new ReplayStore();
     store.beginGeneration(1, { resetAuthoritativeState: true, connectionState: "connecting" });
     store.applyAtomicSnapshot(1, parser.parseReplaySessionResponse(fixtures.replayTradeSessionResponse()).snapshot);
@@ -1694,6 +1696,149 @@ async function dumpIndexedDb(cdp) {
 
 function sha256(value) {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function validateHarnessPort(value, label) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
+    throw new TypeError(`${label} must be an integer TCP port`);
+  }
+}
+
+export function replaySoakFrontendPlan({
+  backendPort,
+  frontendPort,
+  outDir,
+  productV2,
+}) {
+  validateHarnessPort(backendPort, "backendPort");
+  validateHarnessPort(frontendPort, "frontendPort");
+  const resolvedOutDir = typeof outDir === "string" ? path.resolve(outDir) : "";
+  const expectedTempPrefix = path.resolve(os.tmpdir()) + path.sep;
+  if (
+    typeof outDir !== "string"
+    || !path.isAbsolute(outDir)
+    || !resolvedOutDir.startsWith(expectedTempPrefix)
+  ) {
+    throw new TypeError(
+      "replay soak frontend outDir must be an absolute child of the OS temp directory",
+    );
+  }
+  const viteCli = path.join(frontendRoot, "node_modules", "vite", "bin", "vite.js");
+  const environment = {
+    VITE_DEV_PORT: String(frontendPort),
+    VITE_API_PROXY_TARGET: `http://127.0.0.1:${backendPort}`,
+    VITE_REPLAY_ENTRY_ENABLED: "1",
+    VITE_REPLAY_PRODUCT_V2_ENABLED: productV2 ? "1" : "0",
+    VITE_REPLAY_SOAK_PROJECTION_ENABLED: "1",
+  };
+  return {
+    runtime: "vite-production-preview",
+    viteCli,
+    environment,
+    buildArgs: [
+      viteCli,
+      "build",
+      "--outDir",
+      resolvedOutDir,
+      "--emptyOutDir",
+      "--manifest",
+    ],
+    previewArgs: [
+      viteCli,
+      "preview",
+      "--outDir",
+      resolvedOutDir,
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(frontendPort),
+      "--strictPort",
+    ],
+  };
+}
+
+export function replaySoakFrontendProcessEnvironment(
+  explicitEnvironment,
+  hostEnvironment = process.env,
+) {
+  const inherited = Object.fromEntries(Object.entries(hostEnvironment || {}).filter(([name]) => (
+    name.toUpperCase() !== "NODE_ENV"
+      && !name.toUpperCase().startsWith("VITE_")
+  )));
+  return {
+    ...inherited,
+    NODE_ENV: "production",
+    ...explicitEnvironment,
+  };
+}
+
+function collectBuildFiles(root, directory = root, files = []) {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const absolutePath = path.join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`replay soak frontend build contains a symbolic link: ${entry.name}`);
+    }
+    if (entry.isDirectory()) {
+      collectBuildFiles(root, absolutePath, files);
+    } else if (entry.isFile()) {
+      const bytes = fs.readFileSync(absolutePath);
+      files.push({
+        file: path.relative(root, absolutePath).split(path.sep).join("/"),
+        bytes: bytes.byteLength,
+        sha256: sha256(bytes),
+      });
+    }
+  }
+  return files;
+}
+
+export function inspectReplaySoakFrontendBuild(outDir) {
+  if (typeof outDir !== "string" || !path.isAbsolute(outDir)) {
+    throw new TypeError("replay soak frontend build directory must be absolute");
+  }
+  const manifestPath = path.join(outDir, ".vite", "manifest.json");
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error("replay soak production build did not emit a Vite manifest");
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const projectionEntries = Object.entries(manifest).filter(([, item]) => (
+    item !== null
+    && typeof item === "object"
+    && item.isEntry === true
+    && item.name === "replaySoakProjection"
+    && typeof item.file === "string"
+  ));
+  if (projectionEntries.length !== 1) {
+    throw new Error(
+      `replay soak production build requires one projection entry, received ${projectionEntries.length}`,
+    );
+  }
+  const projectionFile = projectionEntries[0][1].file;
+  if (!/^assets\/[A-Za-z0-9._-]+\.js$/.test(projectionFile)) {
+    throw new Error(`replay soak projection manifest file is invalid: ${projectionFile}`);
+  }
+  const files = collectBuildFiles(outDir).sort((left, right) => left.file.localeCompare(right.file));
+  const totalBytes = files.reduce((total, item) => total + item.bytes, 0);
+  const manifestHash = sha256(JSON.stringify(files));
+  const projectionAsset = files.find((item) => item.file === projectionFile);
+  if (!projectionAsset) {
+    throw new Error(`replay soak projection asset is missing: ${projectionFile}`);
+  }
+  return {
+    projectionModuleUrl: `/${projectionFile}`,
+    evidence: {
+      schema_version: "replay-soak-frontend-build.v1",
+      runtime: "vite-production-preview",
+      fileCount: files.length,
+      totalBytes,
+      manifestSha256: manifestHash,
+      projectionAsset: {
+        file: projectionFile,
+        sha256: projectionAsset.sha256,
+      },
+      files,
+    },
+  };
 }
 
 const forbiddenBoundaries = [
@@ -2015,8 +2160,68 @@ async function main() {
   assert(path.resolve(tempRoot).startsWith(expectedTempPrefix), "temporary soak root escaped the OS temp directory", tempRoot);
   const userDataDir = path.join(tempRoot, "chrome-profile");
   const downloadDir = path.join(tempRoot, "downloads");
+  const frontendDist = path.join(tempRoot, "frontend-dist");
   fs.mkdirSync(userDataDir);
   fs.mkdirSync(downloadDir);
+  const frontendPlan = replaySoakFrontendPlan({
+    backendPort,
+    frontendPort,
+    outDir: frontendDist,
+    productV2: args.productV2,
+  });
+  const frontendProcessEnvironment = replaySoakFrontendProcessEnvironment(
+    frontendPlan.environment,
+  );
+  const frontendBuildStartedAt = Date.now();
+  const frontendBuildResult = spawnSync(process.execPath, frontendPlan.buildArgs, {
+    cwd: frontendRoot,
+    env: frontendProcessEnvironment,
+    encoding: "utf8",
+    maxBuffer: 8 * MIB,
+    timeout: args.timeoutMs,
+    windowsHide: true,
+  });
+  const frontendBuildExecution = {
+    durationMs: Date.now() - frontendBuildStartedAt,
+    exitCode: frontendBuildResult.status,
+    signal: frontendBuildResult.signal,
+    stdoutBytes: Buffer.byteLength(frontendBuildResult.stdout || "", "utf8"),
+    stdoutSha256: sha256(frontendBuildResult.stdout || ""),
+    stderrBytes: Buffer.byteLength(frontendBuildResult.stderr || "", "utf8"),
+    stderrSha256: sha256(frontendBuildResult.stderr || ""),
+  };
+  let frontendBuild;
+  try {
+    if (frontendBuildResult.error) throw frontendBuildResult.error;
+    assert(
+      frontendBuildResult.status === 0,
+      "replay soak production frontend build failed",
+      {
+        ...frontendBuildExecution,
+        stdoutTail: String(frontendBuildResult.stdout || "").split(/\r?\n/).slice(-40),
+        stderrTail: String(frontendBuildResult.stderr || "").split(/\r?\n/).slice(-40),
+      },
+    );
+    frontendBuild = inspectReplaySoakFrontendBuild(frontendDist);
+  } catch (error) {
+    writeJson(`${args.out}.failed.json`, {
+      schema_version: args.productV2
+        ? "replay-v2-browser-soak-failure.v1"
+        : "replay-v1-browser-soak-failure.v1",
+      recorded_at: releaseEvidence.recorded_at,
+      release_evidence: releaseEvidence.evidence,
+      passed: false,
+      error: error.stack || error.message || String(error),
+      phaseDiagnostics: {
+        phase: "frontend-production-build",
+        execution: frontendBuildExecution,
+        stdoutTail: String(frontendBuildResult.stdout || "").split(/\r?\n/).slice(-80),
+        stderrTail: String(frontendBuildResult.stderr || "").split(/\r?\n/).slice(-80),
+      },
+    });
+    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    throw error;
+  }
   const python = fs.existsSync(path.join(backendRoot, ".venv", "Scripts", "python.exe"))
     ? path.join(backendRoot, ".venv", "Scripts", "python.exe")
     : "python";
@@ -2063,15 +2268,9 @@ async function main() {
     backfillFailures: /Backfill FAILED:/g,
     backfillFetchIssues: /Backfill fetch task issue:/g,
   });
-  const vite = spawn(process.execPath, [path.join(frontendRoot, "node_modules", "vite", "bin", "vite.js")], {
+  const vite = spawn(process.execPath, frontendPlan.previewArgs, {
     cwd: frontendRoot,
-    env: {
-      ...process.env,
-      VITE_DEV_PORT: String(frontendPort),
-      VITE_API_PROXY_TARGET: `http://127.0.0.1:${backendPort}`,
-      VITE_REPLAY_ENTRY_ENABLED: "1",
-      VITE_REPLAY_PRODUCT_V2_ENABLED: args.productV2 ? "1" : "0",
-    },
+    env: frontendProcessEnvironment,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -2139,7 +2338,11 @@ async function main() {
       "projection soak module host",
     );
     console.error(`browser projection soak starting: ${args.projectionEvents} events`);
-    const projectionSoak = await runProjectionSoak(projectionPage.cdp, args.projectionEvents);
+    const projectionSoak = await runProjectionSoak(
+      projectionPage.cdp,
+      args.projectionEvents,
+      frontendBuild.projectionModuleUrl,
+    );
     console.error(`browser projection soak complete: ${projectionSoak.eventsPerSecond.toFixed(2)} events/s`);
     await projectionPage.cdp.send("Page.close").catch(() => undefined);
     projectionPage.cdp.close();
@@ -2769,6 +2972,12 @@ async function main() {
         fixtureRows: fixture.fixture_rows,
         liveWindow: fixture.live_window,
         fixtureIdentityHash: sha256(JSON.stringify(fixture)),
+        frontendRuntime: {
+          mode: frontendPlan.runtime,
+          explicitEnvironment: frontendPlan.environment,
+          buildExecution: frontendBuildExecution,
+          build: frontendBuild.evidence,
+        },
       },
       projectionSoak,
       replay: {
@@ -2862,6 +3071,12 @@ async function main() {
       passed: false,
       error: error.stack || error.message || String(error),
       phaseDiagnostics,
+      frontendRuntime: {
+        mode: frontendPlan.runtime,
+        explicitEnvironment: frontendPlan.environment,
+        buildExecution: frontendBuildExecution,
+        build: frontendBuild.evidence,
+      },
       backendTail: backendTail(),
       viteTail: viteTail(),
       chromeTail: chromeTail(),

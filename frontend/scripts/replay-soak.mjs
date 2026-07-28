@@ -1792,6 +1792,18 @@ function collectBuildFiles(root, directory = root, files = []) {
   return files;
 }
 
+function generatedEsmExportNames(source) {
+  const names = new Set();
+  for (const match of source.matchAll(/\bexport\s*\{([^}]*)\}/g)) {
+    for (const specifier of match[1].split(",")) {
+      const parts = specifier.trim().split(/\s+as\s+/);
+      const exportedName = parts.at(-1)?.trim() || "";
+      if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(exportedName)) names.add(exportedName);
+    }
+  }
+  return names;
+}
+
 export function inspectReplaySoakFrontendBuild(outDir) {
   if (typeof outDir !== "string" || !path.isAbsolute(outDir)) {
     throw new TypeError("replay soak frontend build directory must be absolute");
@@ -1824,6 +1836,17 @@ export function inspectReplaySoakFrontendBuild(outDir) {
   if (!projectionAsset) {
     throw new Error(`replay soak projection asset is missing: ${projectionFile}`);
   }
+  const projectionSource = fs.readFileSync(path.join(outDir, projectionFile), "utf8");
+  const projectionExports = generatedEsmExportNames(projectionSource);
+  const requiredProjectionExports = ["ReplayStore", "fixtures", "parser"];
+  const missingProjectionExports = requiredProjectionExports.filter(
+    (name) => !projectionExports.has(name),
+  );
+  if (missingProjectionExports.length > 0) {
+    throw new Error(
+      `replay soak projection entry is missing exports: ${missingProjectionExports.join(", ")}`,
+    );
+  }
   return {
     projectionModuleUrl: `/${projectionFile}`,
     evidence: {
@@ -1835,6 +1858,7 @@ export function inspectReplaySoakFrontendBuild(outDir) {
       projectionAsset: {
         file: projectionFile,
         sha256: projectionAsset.sha256,
+        exports: requiredProjectionExports,
       },
       files,
     },

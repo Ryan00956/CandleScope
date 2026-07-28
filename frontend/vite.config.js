@@ -19,6 +19,9 @@ export default defineConfig({
   plugins: [react()],
   build: {
     rollupOptions: {
+      ...(replaySoakProjectionEnabled
+        ? { preserveEntrySignatures: 'strict' }
+        : {}),
       input: {
         live: resolve(import.meta.dirname, 'index.html'),
         replay: resolve(import.meta.dirname, 'replay.html'),

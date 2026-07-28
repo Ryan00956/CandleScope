@@ -104,7 +104,10 @@ test("replay soak binds its projection URL and evidence to the production manife
   context.after(() => fs.rmSync(outDir, { recursive: true, force: true }));
   fs.mkdirSync(path.join(outDir, ".vite"), { recursive: true });
   fs.mkdirSync(path.join(outDir, "assets"), { recursive: true });
-  fs.writeFileSync(path.join(outDir, "assets", "projection-abc.js"), "export const ready=true;\n");
+  fs.writeFileSync(
+    path.join(outDir, "assets", "projection-abc.js"),
+    "const R=class{},f={},p={};export{R as ReplayStore,f as fixtures,p as parser};\n",
+  );
   fs.writeFileSync(path.join(outDir, "replay.html"), "<!doctype html>\n");
   fs.writeFileSync(
     path.join(outDir, ".vite", "manifest.json"),
@@ -124,8 +127,21 @@ test("replay soak binds its projection URL and evidence to the production manife
   assert.equal(inspected.evidence.runtime, "vite-production-preview");
   assert.equal(inspected.evidence.fileCount, 3);
   assert.equal(inspected.evidence.projectionAsset.file, "assets/projection-abc.js");
+  assert.deepEqual(
+    inspected.evidence.projectionAsset.exports,
+    ["ReplayStore", "fixtures", "parser"],
+  );
   assert.match(inspected.evidence.projectionAsset.sha256, /^sha256:[a-f0-9]{64}$/);
   assert.match(inspected.evidence.manifestSha256, /^sha256:[a-f0-9]{64}$/);
+
+  fs.writeFileSync(
+    path.join(outDir, "assets", "projection-abc.js"),
+    "const R=class{};export{R as ReplayStore};\n",
+  );
+  assert.throws(
+    () => inspectReplaySoakFrontendBuild(outDir),
+    /missing exports: fixtures, parser/,
+  );
 
   fs.writeFileSync(
     path.join(outDir, ".vite", "manifest.json"),

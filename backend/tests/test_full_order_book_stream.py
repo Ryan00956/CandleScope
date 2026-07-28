@@ -216,12 +216,13 @@ def test_full_order_book_ws_applies_requested_grouping_from_cached_tick(monkeypa
         assert data["price_step"] == 1.0
         assert data["aggregation_applied"] is True
 
+        # The fixture deliberately queues a stale status after the cached
+        # snapshot. Consume it before unsubscribing: once the unsubscribe reader
+        # wins FIRST_COMPLETED, the forwarder is cancelled and queued market
+        # updates are not part of the unsubscribe acknowledgement contract.
+        assert ws.receive_json()["type"] == "full_order_book.status"
         ws.send_json({"action": "unsubscribe"})
-        terminal_types = {
-            ws.receive_json()["type"],
-            ws.receive_json()["type"],
-        }
-        assert terminal_types == {"full_order_book.status", "unsubscribed"}
+        assert ws.receive_json()["type"] == "unsubscribed"
 
 
 def test_full_order_book_ws_rejects_ambiguous_or_unsupported_streams() -> None:

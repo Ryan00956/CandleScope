@@ -4159,6 +4159,7 @@ class TrainingRunService:
                             binding=binding,
                             tracks=tracks,
                             target_virtual_time_ms=target,
+                            stop_event=stop,
                         )
                         if consumed_wall_seconds > 0:
                             last_advance_wall += consumed_wall_seconds
@@ -4362,6 +4363,7 @@ class TrainingRunService:
         tracks: tuple[Mapping[str, object], ...],
         target_virtual_time_ms: int,
         job: dict[str, object] | None = None,
+        stop_event: asyncio.Event | None = None,
     ) -> tuple[StableMarketEvent, ...]:
         await self.account_history.guard_run(
             run_id=command.run_id,
@@ -4388,16 +4390,25 @@ class TrainingRunService:
             )
         all_events: list[StableMarketEvent] = []
         pending_global_events: list[StableMarketEvent] = []
-        for _wave_index in range(10_000):
+        cancel_event = stop_event
+        if job is not None:
+            job_cancel = job.get("cancel")
+            if isinstance(job_cancel, asyncio.Event):
+                cancel_event = job_cancel
+
+        async def cancel_at_committed_barrier() -> tuple[StableMarketEvent, ...]:
             if job is not None:
-                cancel = job.get("cancel")
-                if (
-                    isinstance(cancel, asyncio.Event)
-                    and cancel.is_set()
-                    and not pending_global_events
-                ):
-                    job["status"] = "CANCELLED"
-                    return tuple(all_events)
+                job["status"] = "CANCELLED"
+            await self.store.audit_account(command.run_id)
+            return tuple(all_events)
+
+        for _wave_index in range(10_000):
+            if (
+                cancel_event is not None
+                and cancel_event.is_set()
+                and not pending_global_events
+            ):
+                return await cancel_at_committed_barrier()
             snapshots: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
             times: set[int] = set()
             next_times: list[int] = []
@@ -4662,15 +4673,12 @@ class TrainingRunService:
                     int(job["queue_high_water"]),
                     len(tracks),
                 )
-                cancel = job.get("cancel")
-                if (
-                    isinstance(cancel, asyncio.Event)
-                    and cancel.is_set()
-                    and not pending_global_events
-                ):
-                    job["status"] = "CANCELLED"
-                    await self.store.audit_account(command.run_id)
-                    return tuple(all_events)
+            if (
+                cancel_event is not None
+                and cancel_event.is_set()
+                and not pending_global_events
+            ):
+                return await cancel_at_committed_barrier()
             await asyncio.sleep(0)
         raise TrainingRunError(
             "REPLAY_SCAN_LIMIT_EXCEEDED",

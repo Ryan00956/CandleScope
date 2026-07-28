@@ -421,3 +421,106 @@ async def test_phase13_canonical_play_rate_pause_barrier_and_restart_defaults(
         assert clock["profile_revision"] == 0
     finally:
         await restored.shutdown(step_timeout=1.0)
+
+
+async def test_phase13_pause_interrupts_high_rate_batch_at_committed_wave(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _service(tmp_path / "playback-pause-barrier.db")
+    pause_task: asyncio.Task[dict[str, object]] | None = None
+    release_first_wave = asyncio.Event()
+    never_release_second_wave = asyncio.Event()
+    try:
+        run = await _create_and_acquire(service, command_suffix="pause-barrier")
+        before = await service.get_session(run["adapter_session_id"])
+        await service.training.command(
+            run["run_id"],
+            _command(
+                run["run_id"],
+                "profile-pause-barrier",
+                ReplayV2CommandType.SET_SPEED,
+                before,
+                {"basis": "BASE_BAR", "rate": 10_000},
+            ),
+        )
+        after_profile = await service.get_session(run["adapter_session_id"])
+
+        original_advance = service.training._advance_adapter_to
+        first_wave_advanced = asyncio.Event()
+        second_wave_started = asyncio.Event()
+        advance_calls = 0
+
+        async def controlled_advance(**kwargs):
+            nonlocal advance_calls
+            advance_calls += 1
+            if advance_calls > 1:
+                second_wave_started.set()
+                await never_release_second_wave.wait()
+            result = await original_advance(**kwargs)
+            first_wave_advanced.set()
+            await release_first_wave.wait()
+            return result
+
+        monkeypatch.setattr(
+            service.training,
+            "_advance_adapter_to",
+            controlled_advance,
+        )
+        monkeypatch.setattr(
+            "app.replay.training.service.discrete_playback_units",
+            lambda _elapsed_seconds, *, rate: 100,
+        )
+
+        playing = await service.training.command(
+            run["run_id"],
+            _command(
+                run["run_id"],
+                "play-pause-barrier",
+                ReplayV2CommandType.PLAY,
+                after_profile,
+                {"basis": "BASE_BAR", "rate": 10_000},
+            ),
+        )
+        assert playing["state"] == "PLAYING"
+        await asyncio.wait_for(first_wave_advanced.wait(), timeout=1.0)
+
+        pause_task = asyncio.create_task(
+            service.training.command(
+                run["run_id"],
+                _command(
+                    run["run_id"],
+                    "pause-in-flight-batch",
+                    ReplayV2CommandType.PAUSE,
+                    after_profile,
+                    {},
+                ),
+            )
+        )
+        actor = service.training._run_actors[str(run["run_id"])]
+        for _attempt in range(100):
+            if actor._playback_stop.is_set():
+                break
+            await asyncio.sleep(0)
+        assert actor._playback_stop.is_set()
+        release_first_wave.set()
+
+        paused = await asyncio.wait_for(pause_task, timeout=1.0)
+        pause_task = None
+        assert paused["state"] == "PAUSED"
+        assert advance_calls == 1
+        assert second_wave_started.is_set() is False
+
+        at_barrier = await service.get_session(run["adapter_session_id"])
+        barrier_cursor = dict(at_barrier["snapshot"]["cursor"])
+        assert barrier_cursor["source_sequence"] == 1
+        await asyncio.sleep(0.02)
+        stable = await service.get_session(run["adapter_session_id"])
+        assert stable["snapshot"]["cursor"] == barrier_cursor
+    finally:
+        release_first_wave.set()
+        never_release_second_wave.set()
+        if pause_task is not None:
+            pause_task.cancel()
+            await asyncio.gather(pause_task, return_exceptions=True)
+        await service.shutdown(step_timeout=1.0)

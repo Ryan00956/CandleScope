@@ -29,6 +29,7 @@ const FORMAL_V2_REAL_WINDOW_ROWS = (
   Math.ceil(FORMAL_V2_FORWARD_CACHE_MS / FORMAL_V2_BASE_INTERVAL_MS)
   + FORMAL_V2_WARMUP_BARS
 );
+const SHUTDOWN_REQUEST_TIMEOUT_MS = 5_000;
 
 function parseArgs(argv) {
   const defaultV1Output = path.join(repositoryRoot, "docs", "perf-baselines", "replay-v1-browser-soak-20260718.json");
@@ -165,31 +166,99 @@ export function selectFormalV2RealTrainingPlan(realSourceEvidence) {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function readJson(url, options = {}) {
-  const response = await fetch(url, options);
-  const text = await response.text();
-  let body = null;
-  if (text) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = text;
+function timeoutError(label, timeoutMs) {
+  const error = new Error(`${label} timed out after ${timeoutMs}ms`);
+  error.name = "TimeoutError";
+  return error;
+}
+
+async function withAbortTimeout({
+  label,
+  timeoutMs,
+  upstreamSignal = undefined,
+  operation,
+}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new TypeError("bounded operation timeout must be a positive safe integer");
+  }
+  const controller = new AbortController();
+  let timeoutId;
+  let abortListener;
+  let operationPromise;
+  try {
+    operationPromise = Promise.resolve(operation(controller.signal));
+  } catch (error) {
+    operationPromise = Promise.reject(error);
+  }
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = timeoutError(label, timeoutMs);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+  const racers = [operationPromise, timeoutPromise];
+  if (upstreamSignal) {
+    racers.push(new Promise((_, reject) => {
+      abortListener = () => {
+        const error = upstreamSignal.reason instanceof Error
+          ? upstreamSignal.reason
+          : new Error(`${label} aborted`);
+        controller.abort(error);
+        reject(error);
+      };
+      if (upstreamSignal.aborted) abortListener();
+      else upstreamSignal.addEventListener("abort", abortListener, { once: true });
+    }));
+  }
+  try {
+    return await Promise.race(racers);
+  } finally {
+    clearTimeout(timeoutId);
+    if (upstreamSignal && abortListener) {
+      upstreamSignal.removeEventListener("abort", abortListener);
     }
   }
-  if (!response.ok) {
-    const code =
-      body && typeof body === "object" && typeof body.error?.code === "string"
-        ? ` (${body.error.code})`
-        : "";
-    const error = new Error(
-      `${response.status} ${response.statusText}${code}: ${url}`,
-    );
-    error.status = response.status;
-    error.responseBody = body;
-    error.url = url;
-    throw error;
-  }
-  return body;
+}
+
+export async function readJson(url, options = {}, fetchImpl = fetch) {
+  const {
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal: upstreamSignal,
+    ...requestOptions
+  } = options;
+  const method = String(requestOptions.method || "GET").toUpperCase();
+  return withAbortTimeout({
+    label: `HTTP ${method} ${url}`,
+    timeoutMs,
+    upstreamSignal,
+    operation: async (signal) => {
+      const response = await fetchImpl(url, { ...requestOptions, signal });
+      const text = await response.text();
+      let body = null;
+      if (text) {
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = text;
+        }
+      }
+      if (!response.ok) {
+        const code =
+          body && typeof body === "object" && typeof body.error?.code === "string"
+            ? ` (${body.error.code})`
+            : "";
+        const error = new Error(
+          `${response.status} ${response.statusText}${code}: ${url}`,
+        );
+        error.status = response.status;
+        error.responseBody = body;
+        error.url = url;
+        throw error;
+      }
+      return body;
+    },
+  });
 }
 
 async function waitForHttp(url, child, timeoutMs) {
@@ -198,7 +267,12 @@ async function waitForHttp(url, child, timeoutMs) {
   while (Date.now() - started < timeoutMs) {
     if (child.exitCode !== null) throw new Error(`Process exited before ${url}: ${child.exitCode}`);
     try {
-      const response = await fetch(url);
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - started));
+      const response = await withAbortTimeout({
+        label: `HTTP readiness ${url}`,
+        timeoutMs: Math.min(SHUTDOWN_REQUEST_TIMEOUT_MS, remainingMs),
+        operation: (signal) => fetch(url, { signal }),
+      });
       if (response.ok) return response;
       lastError = new Error(`${response.status} ${response.statusText}`);
     } catch (error) {
@@ -247,7 +321,12 @@ async function stopProcessTree(child) {
 async function stopBackendGracefully(child, backendOrigin) {
   if (!child || child.exitCode !== null || !Number.isSafeInteger(child.pid)) return;
   try {
-    const response = await fetch(`${backendOrigin}/__replay_smoke__/shutdown`, { method: "POST" });
+    const shutdownUrl = `${backendOrigin}/__replay_smoke__/shutdown`;
+    const response = await withAbortTimeout({
+      label: `HTTP POST ${shutdownUrl}`,
+      timeoutMs: SHUTDOWN_REQUEST_TIMEOUT_MS,
+      operation: (signal) => fetch(shutdownUrl, { method: "POST", signal }),
+    });
     if (!response.ok) return;
     if (child.exitCode !== null) return;
     await Promise.race([
@@ -264,30 +343,102 @@ function boundedPush(items, value, maximum = MAX_CAPTURE_ITEMS) {
   if (items.length > maximum) items.splice(0, items.length - maximum);
 }
 
-class CdpConnection {
-  constructor(webSocketUrl) {
-    this.socket = new WebSocket(webSocketUrl);
+export class CdpConnection {
+  constructor(
+    webSocketUrl,
+    {
+      socketFactory = (url) => new WebSocket(url),
+      timeoutMs = DEFAULT_TIMEOUT_MS,
+    } = {},
+  ) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+      throw new TypeError("CDP command timeout must be a positive safe integer");
+    }
+    this.socket = socketFactory(webSocketUrl);
+    this.timeoutMs = timeoutMs;
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
-  }
-
-  async connect() {
-    await new Promise((resolve, reject) => {
-      this.socket.addEventListener("open", resolve, { once: true });
-      this.socket.addEventListener("error", () => reject(new Error("CDP WebSocket failed")), { once: true });
-    });
+    this.connected = false;
+    this.terminalError = null;
     this.socket.addEventListener("message", (event) => {
-      const message = JSON.parse(String(event.data));
+      let message;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        this.#terminate(new Error("CDP WebSocket returned malformed JSON"));
+        return;
+      }
       if (message.id && this.pending.has(message.id)) {
         const pending = this.pending.get(message.id);
         this.pending.delete(message.id);
-        if (message.error) pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
-        else pending.resolve(message.result);
+        clearTimeout(pending.timeoutId);
+        if (message.error) {
+          pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        } else {
+          pending.resolve(message.result);
+        }
       } else if (message.method) {
         for (const handler of this.handlers.get(message.method) || []) handler(message.params || {});
       }
     });
+    this.socket.addEventListener("close", (event) => {
+      const suffix = Number.isSafeInteger(event?.code)
+        ? ` (code=${event.code}${event.reason ? ` reason=${event.reason}` : ""})`
+        : "";
+      this.#terminate(new Error(`CDP WebSocket closed${suffix}`));
+    });
+    this.socket.addEventListener("error", () => {
+      this.#terminate(new Error("CDP WebSocket failed"));
+    });
+  }
+
+  #terminate(error) {
+    if (this.terminalError) return;
+    this.terminalError = error;
+    this.connected = false;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  async connect(timeoutMs = this.timeoutMs) {
+    if (this.terminalError) throw this.terminalError;
+    try {
+      await withAbortTimeout({
+        label: "CDP WebSocket connect",
+        timeoutMs,
+        operation: () => new Promise((resolve, reject) => {
+          const opened = () => {
+            cleanup();
+            resolve();
+          };
+          const failed = () => {
+            cleanup();
+            reject(this.terminalError || new Error("CDP WebSocket failed before open"));
+          };
+          const cleanup = () => {
+            this.socket.removeEventListener("open", opened);
+            this.socket.removeEventListener("error", failed);
+            this.socket.removeEventListener("close", failed);
+          };
+          this.socket.addEventListener("open", opened, { once: true });
+          this.socket.addEventListener("error", failed, { once: true });
+          this.socket.addEventListener("close", failed, { once: true });
+        }),
+      });
+    } catch (error) {
+      const connectionError = error instanceof Error
+        ? error
+        : new Error(`CDP WebSocket connect failed: ${String(error)}`);
+      this.#terminate(connectionError);
+      try { this.socket.close(); } catch { /* timeout still remains terminal */ }
+      throw connectionError;
+    }
+    if (this.terminalError) throw this.terminalError;
+    this.connected = true;
   }
 
   on(method, handler) {
@@ -295,13 +446,31 @@ class CdpConnection {
     this.handlers.get(method).add(handler);
   }
 
-  send(method, params = {}) {
+  send(method, params = {}, timeoutMs = this.timeoutMs) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+      return Promise.reject(new TypeError("CDP command timeout must be a positive safe integer"));
+    }
+    if (this.terminalError) return Promise.reject(this.terminalError);
+    if (!this.connected) return Promise.reject(new Error("CDP WebSocket is not connected"));
     const id = this.nextId++;
-    this.socket.send(JSON.stringify({ id, method, params }));
-    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        reject(timeoutError(`CDP ${method}`, timeoutMs));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timeoutId });
+      try {
+        this.socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timeoutId);
+        reject(error);
+      }
+    });
   }
 
   close() {
+    this.#terminate(new Error("CDP WebSocket closed by replay soak harness"));
     try { this.socket.close(); } catch { /* target may already be closed */ }
   }
 }

@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   auditBoundary,
+  CdpConnection,
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
   isAuthoritativeReplayStatus,
+  readJson,
   replayBackendHealth,
   replayCatalogQueryFromCreatePayload,
   replaySpeedAction,
@@ -16,6 +18,60 @@ import {
   restoreCommandReadinessAfterReconnect,
   selectFormalV2RealTrainingPlan,
 } from "./replay-soak.mjs";
+
+class FakeSocket {
+  constructor() {
+    this.closed = false;
+    this.listeners = new Map();
+    this.sent = [];
+  }
+
+  addEventListener(type, listener, options = {}) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push({
+      listener,
+      once: Boolean(options?.once),
+    });
+  }
+
+  removeEventListener(type, listener) {
+    const listeners = this.listeners.get(type);
+    if (!listeners) return;
+    this.listeners.set(
+      type,
+      listeners.filter((record) => record.listener !== listener),
+    );
+  }
+
+  emit(type, event = {}) {
+    for (const record of [...(this.listeners.get(type) || [])]) {
+      if (record.once) this.removeEventListener(type, record.listener);
+      record.listener(event);
+    }
+  }
+
+  send(payload) {
+    if (this.closed) throw new Error("fake socket is closed");
+    this.sent.push(JSON.parse(payload));
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.emit("close", { code: 1_000, reason: "test-close" });
+  }
+}
+
+async function connectedCdp(timeoutMs = 1_000) {
+  const socket = new FakeSocket();
+  const cdp = new CdpConnection("ws://replay-soak.test", {
+    socketFactory: () => socket,
+    timeoutMs,
+  });
+  queueMicrotask(() => socket.emit("open"));
+  await cdp.connect();
+  return { cdp, socket };
+}
 
 const catalogEntry = {
   identity: {
@@ -57,6 +113,107 @@ function reconnectCdp({ recovery }) {
     },
   };
 }
+
+test("replay soak bounds an HTTP fetch even when the implementation ignores abort", async () => {
+  let observedSignal = null;
+  await assert.rejects(
+    readJson(
+      "http://replay-soak.test/hanging-fetch",
+      { timeoutMs: 25 },
+      async (_url, options) => {
+        observedSignal = options.signal;
+        return new Promise(() => {});
+      },
+    ),
+    (error) => {
+      assert.equal(error.name, "TimeoutError");
+      assert.match(error.message, /HTTP GET .* timed out after 25ms/);
+      return true;
+    },
+  );
+  assert.equal(observedSignal?.aborted, true);
+});
+
+test("replay soak bounds an HTTP response body that never completes", async () => {
+  await assert.rejects(
+    readJson(
+      "http://replay-soak.test/hanging-body",
+      { timeoutMs: 25 },
+      async () => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        text: async () => new Promise(() => {}),
+      }),
+    ),
+    (error) => {
+      assert.equal(error.name, "TimeoutError");
+      assert.match(error.message, /HTTP GET .* timed out after 25ms/);
+      return true;
+    },
+  );
+});
+
+test("replay soak makes a CDP connect timeout terminal and closes the socket", async () => {
+  const socket = new FakeSocket();
+  const cdp = new CdpConnection("ws://replay-soak.test", {
+    socketFactory: () => socket,
+    timeoutMs: 25,
+  });
+  await assert.rejects(
+    cdp.connect(),
+    (error) => {
+      assert.equal(error.name, "TimeoutError");
+      assert.match(error.message, /CDP WebSocket connect timed out after 25ms/);
+      return true;
+    },
+  );
+  assert.equal(socket.closed, true);
+  await assert.rejects(cdp.send("Runtime.evaluate"), /connect timed out/);
+});
+
+test("replay soak rejects a timed-out CDP command without retaining pending work", async () => {
+  const { cdp, socket } = await connectedCdp(25);
+  await assert.rejects(
+    cdp.send("Runtime.evaluate"),
+    (error) => {
+      assert.equal(error.name, "TimeoutError");
+      assert.match(error.message, /CDP Runtime\.evaluate timed out after 25ms/);
+      return true;
+    },
+  );
+  assert.equal(socket.sent.length, 1);
+  assert.equal(cdp.pending.size, 0);
+  cdp.close();
+});
+
+test("replay soak rejects every pending CDP command when the target disappears", async () => {
+  const { cdp, socket } = await connectedCdp();
+  const first = cdp.send("Runtime.evaluate");
+  const second = cdp.send("Page.captureScreenshot");
+  socket.emit("close", { code: 1_006, reason: "target-gone" });
+  await assert.rejects(first, /CDP WebSocket closed \(code=1006 reason=target-gone\)/);
+  await assert.rejects(second, /CDP WebSocket closed \(code=1006 reason=target-gone\)/);
+  assert.equal(cdp.pending.size, 0);
+  await assert.rejects(cdp.send("Runtime.evaluate"), /target-gone/);
+});
+
+test("replay soak resolves a CDP command response and clears its deadline", async () => {
+  const { cdp, socket } = await connectedCdp();
+  const pending = cdp.send("Runtime.evaluate", { expression: "1 + 1" });
+  const request = socket.sent.at(-1);
+  socket.emit("message", {
+    data: JSON.stringify({
+      id: request.id,
+      result: { result: { type: "number", value: 2 } },
+    }),
+  });
+  assert.deepEqual(await pending, {
+    result: { type: "number", value: 2 },
+  });
+  assert.equal(cdp.pending.size, 0);
+  cdp.close();
+});
 
 test("replay soak blind audit catches standalone fixture epochs across HTTP shapes", () => {
   for (const value of [

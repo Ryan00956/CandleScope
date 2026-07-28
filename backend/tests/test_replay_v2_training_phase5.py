@@ -729,8 +729,9 @@ async def test_global_clock_fail_closes_when_adapter_controller_lease_is_lost(
 async def test_direct_trade_reacquires_an_expired_unowned_controller(
     tmp_path: Path,
 ) -> None:
+    path = tmp_path / "direct-trade-reacquire.db"
     service = await _service(
-        tmp_path / "direct-trade-reacquire.db",
+        path,
         controller_ttl_seconds=0.03,
     )
     try:
@@ -766,11 +767,33 @@ async def test_direct_trade_reacquires_an_expired_unowned_controller(
             ),
         )
         assert opened["data"]["orders"]
-        refreshed = await service.get_session(selected_id)
+        with sqlite3.connect(path) as connection:
+            accepted_commands = [
+                json.loads(str(row[0]))
+                for row in connection.execute(
+                    """
+                    SELECT command_json
+                    FROM replay_command_log
+                    WHERE session_id = ? AND accepted = 1
+                    ORDER BY log_offset
+                    """,
+                    (selected_id,),
+                )
+            ]
+        assert [
+            command["type"] for command in accepted_commands[-2:]
+        ] == [
+            "acquire_controller",
+            "place_order",
+        ]
         assert (
-            refreshed["snapshot"]["controller_client_id"]
-            == "phase5-browser"
+            sum(
+                command["type"] == "acquire_controller"
+                for command in accepted_commands
+            )
+            == 2
         )
+        assert accepted_commands[-2]["client_instance_id"] == "phase5-browser"
     finally:
         await service.shutdown(step_timeout=1.0)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from dataclasses import replace
@@ -159,6 +160,86 @@ async def test_v2_flag_off_does_not_create_training_schema(tmp_path: Path) -> No
                 "WHERE type = 'table' AND name LIKE 'replay_training_%'"
             ).fetchone() == (0,)
     finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_return_to_hub_transfers_recovery_lease_before_idle_reaper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "return-hub-recovery-race.db"
+    now = [NOW_MS]
+    settings = replace(
+        replay_settings(path),
+        product_v2_enabled=True,
+        idle_ttl_seconds=60,
+    )
+    service = ReplayService(
+        settings=settings,
+        store=ReplaySQLiteStore(path, now_ms=lambda: now[0]),
+        repository=replay_repository(),
+        now_ms=lambda: now[0],
+        session_id_factory=SessionIdFactory("adapter-race"),
+        training_run_id_factory=SessionIdFactory("run-race"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    assert service.training is not None
+    prune_task: asyncio.Task[None] | None = None
+    try:
+        created = await service.training.create_run(await _request(service))
+        session_id = str(created["run"]["adapter_session_id"])
+        first_return = await service.training.return_to_hub_by_session(session_id)
+        assert first_return["released"] is True
+        assert session_id not in service._sessions
+
+        lease_released = asyncio.Event()
+        prune_complete = asyncio.Event()
+        original_release_lease = service._release_handle_lease
+        original_get_session = service.get_session
+
+        def release_lease_and_open_reaper_window(handle) -> None:
+            original_release_lease(handle)
+            if handle.session_id == session_id and handle.in_flight == 0:
+                now[0] += 60_001
+                lease_released.set()
+
+        async def wait_for_adversarial_prune(
+            requested_session_id: str,
+        ) -> dict[str, object]:
+            payload = await original_get_session(requested_session_id)
+            if requested_session_id == session_id:
+                await asyncio.wait_for(prune_complete.wait(), timeout=1.0)
+            return payload
+
+        monkeypatch.setattr(
+            service,
+            "_release_handle_lease",
+            release_lease_and_open_reaper_window,
+        )
+        monkeypatch.setattr(service, "get_session", wait_for_adversarial_prune)
+
+        async def prune_as_soon_as_the_recovery_lease_is_released() -> None:
+            await asyncio.wait_for(lease_released.wait(), timeout=1.0)
+            await service._prune_reclaimable_sessions()
+            prune_complete.set()
+
+        prune_task = asyncio.create_task(
+            prune_as_soon_as_the_recovery_lease_is_released()
+        )
+        returned = await asyncio.wait_for(
+            service.training.return_to_hub_by_session(session_id),
+            timeout=2.0,
+        )
+        await asyncio.wait_for(prune_task, timeout=2.0)
+
+        assert returned["released"] is True
+        assert prune_complete.is_set()
+        assert session_id not in service._sessions
+    finally:
+        if prune_task is not None and not prune_task.done():
+            prune_task.cancel()
+            await asyncio.gather(prune_task, return_exceptions=True)
         await service.shutdown(step_timeout=1.0)
 
 

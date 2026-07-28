@@ -1205,25 +1205,39 @@ class ReplayService:
         """Pause, checkpoint and evict one adapter before the Hub becomes visible."""
 
         self._ensure_accepting()
-        if session_id not in self._sessions:
-            await self.get_session(session_id)
-        async with self._prune_lock:
-            async with self._lifecycle_lock:
-                handle = self._sessions.get(session_id)
-                if handle is None:
-                    raise ReplayDomainError(
-                        ReplayErrorCode.SESSION_NOT_FOUND,
-                        "replay session does not exist",
-                        details={"session_id": session_id},
-                    )
-                if handle.evicting or handle.in_flight != 0:
-                    raise ReplayDomainError(
-                        ReplayErrorCode.REVISION_CONFLICT,
-                        "replay session is busy",
-                    )
-                handle.evicting = True
-                handle.eviction_complete.clear()
-            await self._evict_claimed_handle(session_id, handle, reason="hub")
+        # Lazy recovery must remain leased until ownership is transferred to the
+        # eviction lane. Otherwise an idle reaper can evict the freshly
+        # recovered handle after get_session() releases its transient lease but
+        # before this method acquires _prune_lock.
+        handle = await self._acquire_handle_lease(session_id)
+        lease_active = True
+        try:
+            async with self._prune_lock:
+                async with self._lifecycle_lock:
+                    if self._sessions.get(session_id) is not handle:
+                        raise ReplayDomainError(
+                            ReplayErrorCode.REVISION_CONFLICT,
+                            "replay session ownership changed before Hub release",
+                        )
+                    # This method owns exactly one lease. Any additional lease
+                    # represents a concurrent request and preserves the existing
+                    # fail-closed busy contract.
+                    if handle.evicting or handle.in_flight != 1:
+                        raise ReplayDomainError(
+                            ReplayErrorCode.REVISION_CONFLICT,
+                            "replay session is busy",
+                        )
+                    # No await is permitted between releasing our lease and
+                    # claiming eviction. _prune_lock excludes the reaper while
+                    # the lifecycle lock protects the handle state transition.
+                    self._release_handle_lease(handle)
+                    lease_active = False
+                    handle.evicting = True
+                    handle.eviction_complete.clear()
+                await self._evict_claimed_handle(session_id, handle, reason="hub")
+        finally:
+            if lease_active:
+                self._release_handle_lease(handle)
 
     async def discard_session(self, session_id: str) -> None:
         """Evict and delete one non-primary training adapter after detachment."""

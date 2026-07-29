@@ -822,6 +822,7 @@ def main() -> None:
             "release_attempts": release_attempts,
             "sessions_evicted_before": int(before["sessions_evicted"]),
             "sessions_evicted_after": int(after["sessions_evicted"]),
+            "hub_sessions_evicted_before": int(before["hub_sessions_evicted"]),
             "hub_sessions_evicted_after": int(after["hub_sessions_evicted"]),
         }
 

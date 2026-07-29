@@ -779,6 +779,19 @@ function assert(condition, message, detail = undefined) {
   if (!condition) throw new Error(`${message}${detail === undefined ? "" : `: ${JSON.stringify(detail)}`}`);
 }
 
+export function isRecordedAdapterEviction(evicted, expectedSessionId) {
+  return evicted?.evicted === true
+    && evicted.session_id === expectedSessionId
+    && Number.isSafeInteger(evicted.release_attempts)
+    && evicted.release_attempts >= 1
+    && Number.isSafeInteger(evicted.sessions_evicted_before)
+    && Number.isSafeInteger(evicted.sessions_evicted_after)
+    && evicted.sessions_evicted_after >= evicted.sessions_evicted_before + 1
+    && Number.isSafeInteger(evicted.hub_sessions_evicted_before)
+    && Number.isSafeInteger(evicted.hub_sessions_evicted_after)
+    && evicted.hub_sessions_evicted_after === evicted.hub_sessions_evicted_before + 1;
+}
+
 async function replayStatus(cdp) {
   return evaluate(cdp, `(() => {
     const status = document.querySelector('#replay-status-bar, #status-bar[data-runtime-source="replay"]');
@@ -1173,11 +1186,7 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
       { method: "POST" },
     );
     assert(
-      evicted.evicted === true
-        && evicted.session_id === sessionId
-        && Number.isSafeInteger(evicted.release_attempts)
-        && evicted.release_attempts >= 1
-        && evicted.sessions_evicted_after === evicted.sessions_evicted_before + 1,
+      isRecordedAdapterEviction(evicted, sessionId),
       "primary replay adapter eviction was not recorded",
       evicted,
     );
@@ -2946,11 +2955,7 @@ async function main() {
         (cycle) => cycle.cycleStart.recovery === "takeover",
       ).length <= 1,
       v2_primary_actor_recoveries_complete: !args.productV2 || trainingCycles.every((cycle) => (
-        cycle.adapterRecovery?.evicted?.evicted === true
-        && Number.isSafeInteger(cycle.adapterRecovery.evicted.release_attempts)
-        && cycle.adapterRecovery.evicted.release_attempts >= 1
-        && cycle.adapterRecovery.evicted.sessions_evicted_after
-          === cycle.adapterRecovery.evicted.sessions_evicted_before + 1
+        isRecordedAdapterEviction(cycle.adapterRecovery?.evicted, sessionId)
         && cycle.adapterRecovery.recovered.generation > cycle.filledPauseStable.generation
         && cycle.adapterRecovery.recovered.sourceSequence >= cycle.filledPauseStable.sourceSequence
         && ["ready", "takeover"].includes(cycle.adapterRecovery.readiness)

@@ -9,6 +9,7 @@ import {
   CdpConnection,
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
+  isRecordedAdapterEviction,
   isAuthoritativeReplayStatus,
   inspectReplaySoakFrontendBuild,
   readJson,
@@ -24,6 +25,34 @@ import {
   restoreCommandReadinessAfterReconnect,
   selectFormalV2RealTrainingPlan,
 } from "./replay-soak.mjs";
+
+test("adapter eviction evidence keys the target Hub eviction amid background reaping", () => {
+  const evidence = {
+    evicted: true,
+    session_id: "session-primary",
+    release_attempts: 1,
+    sessions_evicted_before: 226,
+    sessions_evicted_after: 228,
+    hub_sessions_evicted_before: 150,
+    hub_sessions_evicted_after: 151,
+  };
+  assert.equal(isRecordedAdapterEviction(evidence, "session-primary"), true);
+  assert.equal(
+    isRecordedAdapterEviction(
+      { ...evidence, hub_sessions_evicted_after: 152 },
+      "session-primary",
+    ),
+    false,
+  );
+  assert.equal(
+    isRecordedAdapterEviction(
+      { ...evidence, sessions_evicted_after: 226 },
+      "session-primary",
+    ),
+    false,
+  );
+  assert.equal(isRecordedAdapterEviction(evidence, "session-other"), false);
+});
 
 test("replay soak builds and serves the same flag-enabled production output", () => {
   const outDir = path.join(os.tmpdir(), "candlescope-soak-plan");

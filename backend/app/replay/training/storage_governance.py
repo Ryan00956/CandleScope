@@ -302,7 +302,10 @@ class ReplayStorageGovernance:
                        (SELECT COUNT(*) FROM replay_review_viewport_sample AS sample
                         WHERE sample.run_id = run.run_id) AS viewport_samples,
                        COALESCE((
-                           SELECT SUM(payload_bytes)
+                           SELECT SUM(
+                               CASE WHEN stored_bytes > 0 THEN stored_bytes
+                                    ELSE length(payload) END
+                           )
                            FROM replay_review_actor_anchor AS anchor
                            WHERE anchor.run_id = run.run_id
                        ), 0) AS anchor_bytes,
@@ -366,7 +369,10 @@ class ReplayStorageGovernance:
             FROM (
                 SELECT run.run_id,
                        COALESCE((
-                           SELECT SUM(payload_bytes)
+                            SELECT SUM(
+                                CASE WHEN stored_bytes > 0 THEN stored_bytes
+                                     ELSE length(payload) END
+                            )
                            FROM replay_review_actor_anchor AS anchor
                            WHERE anchor.run_id = run.run_id
                        ), 0) AS anchor_bytes,

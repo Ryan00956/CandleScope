@@ -1119,7 +1119,11 @@ async def test_review_budgets_rollback_and_100k_viewport_offers_are_bounded(
             anchor_bytes = int(
                 connection.execute(
                     """
-                    SELECT SUM(payload_bytes) FROM replay_review_actor_anchor
+                    SELECT SUM(
+                        CASE WHEN stored_bytes > 0 THEN stored_bytes
+                             ELSE length(payload) END
+                    )
+                    FROM replay_review_actor_anchor
                     WHERE run_id = ?
                     """,
                     (run_id,),

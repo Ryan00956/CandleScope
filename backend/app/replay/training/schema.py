@@ -1207,9 +1207,12 @@ CREATE TABLE IF NOT EXISTS replay_review_actor_anchor (
     state_hash TEXT NOT NULL,
     dataset_epoch TEXT NOT NULL,
     payload BLOB NOT NULL,
+    payload_encoding TEXT NOT NULL DEFAULT 'RAW'
+        CHECK (payload_encoding IN ('RAW', 'ZLIB_V1')),
     payload_sha256 TEXT NOT NULL
         CHECK (length(payload_sha256) = 71 AND substr(payload_sha256, 1, 7) = 'sha256:'),
     payload_bytes INTEGER NOT NULL CHECK (payload_bytes >= 1),
+    stored_bytes INTEGER NOT NULL DEFAULT 0 CHECK (stored_bytes >= 0),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     PRIMARY KEY (run_id, anchor_id),
     UNIQUE (run_id, track_id, checkpoint_id)
@@ -1882,6 +1885,7 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     # independent rule/review tables; new binaries fail closed if their
     # content-addressed evidence cannot be captured.
     _execute_script(connection, TRAINING_SCHEMA_PHASE17_ADDITIVE)
+    _ensure_review_anchor_storage_columns(connection)
     _backfill_phase17_policies(connection, now_ms=now_ms)
     # Phase 18 remains additive at schema v9.  Phase 17 binaries safely ignore
     # account-history GC audit evidence and never interpret EVICTED objects as
@@ -1896,6 +1900,43 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
             applied_at_ms = excluded.applied_at_ms
         """,
         (TRAINING_SCHEMA_VERSION, now_ms),
+    )
+
+
+def _ensure_review_anchor_storage_columns(connection: sqlite3.Connection) -> None:
+    """Add the Phase 18 physical codec fields without changing schema v9."""
+
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(replay_review_actor_anchor)"
+        ).fetchall()
+    }
+    if "payload_encoding" not in columns:
+        connection.execute(
+            """
+            ALTER TABLE replay_review_actor_anchor
+            ADD COLUMN payload_encoding TEXT NOT NULL DEFAULT 'RAW'
+                CHECK (payload_encoding IN ('RAW', 'ZLIB_V1'))
+            """
+        )
+    if "stored_bytes" not in columns:
+        connection.execute(
+            """
+            ALTER TABLE replay_review_actor_anchor
+            ADD COLUMN stored_bytes INTEGER NOT NULL DEFAULT 0
+                CHECK (stored_bytes >= 0)
+            """
+        )
+    # A Phase 17 binary can still be used for a disabled/default-off rollback.
+    # If it writes a legacy RAW row before a later re-upgrade, the default zero
+    # is repaired deterministically from the immutable BLOB on startup.
+    connection.execute(
+        """
+        UPDATE replay_review_actor_anchor
+        SET stored_bytes = length(payload)
+        WHERE stored_bytes = 0
+        """
     )
 
 

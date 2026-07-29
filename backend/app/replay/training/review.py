@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from app.replay.broker.models import decimal_to_string
 from app.replay.canonical import canonical_json, canonical_sha256
 
+from .anchor_codec import encode_anchor_payload
 from .errors import TrainingRunError
 from .models import REPLAY_V2_PROTOCOL
 from .schema import REVIEW_TIMELINE_SCHEMA_VERSION, RUN_RULES_SCHEMA_VERSION
@@ -1328,21 +1329,26 @@ class ReviewRecorder:
             (run_id, anchor_id),
         ).fetchone() is not None:
             return anchor_id
+        encoded = encode_anchor_payload(payload)
         used = int(
             connection.execute(
-                "SELECT COALESCE(SUM(payload_bytes), 0) "
+                "SELECT COALESCE(SUM("
+                "CASE WHEN stored_bytes > 0 THEN stored_bytes "
+                "ELSE length(payload) END"
+                "), 0) "
                 "FROM replay_review_actor_anchor WHERE run_id = ?",
                 (run_id,),
             ).fetchone()[0]
         )
-        if used + len(payload) > REVIEW_ANCHOR_BYTES_LIMIT:
+        if used + encoded.stored_bytes > REVIEW_ANCHOR_BYTES_LIMIT:
             raise TrainingRunError(
                 "REVIEW_ANCHOR_BUDGET_EXCEEDED",
                 "review actor-anchor budget is exhausted",
                 status_code=409,
                 details={
                     "used_bytes": used,
-                    "offered_bytes": len(payload),
+                    "offered_bytes": encoded.stored_bytes,
+                    "offered_raw_bytes": encoded.raw_bytes,
                     "limit_bytes": REVIEW_ANCHOR_BYTES_LIMIT,
                     "event_dropped": False,
                 },
@@ -1359,8 +1365,9 @@ class ReviewRecorder:
                 run_id, anchor_id, track_id, adapter_session_id,
                 checkpoint_id, source_sequence, event_sequence,
                 virtual_time_ms, state_hash, dataset_epoch, payload,
-                payload_sha256, payload_bytes, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                payload_encoding, payload_sha256, payload_bytes,
+                stored_bytes, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -1373,9 +1380,11 @@ class ReviewRecorder:
                 virtual_time_ms,
                 checkpoint_row["state_hash"],
                 track["dataset_epoch"],
-                payload,
+                encoded.payload,
+                encoded.encoding,
                 digest,
                 len(payload),
+                encoded.stored_bytes,
                 now_ms,
             ),
         )

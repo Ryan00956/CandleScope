@@ -63,6 +63,7 @@ def test_replay_v2_phase8_package_keeps_optimization_inside_training() -> None:
             "__init__.py",
             "account.py",
             "account_history.py",
+            "anchor_codec.py",
         "commands.py",
         "control.py",
         "disclosure.py",

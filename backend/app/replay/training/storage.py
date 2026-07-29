@@ -50,6 +50,10 @@ from .account import (
     ledger_chain_hash,
     round_to_step,
 )
+from .anchor_codec import (
+    ANCHOR_PAYLOAD_ENCODING_RAW,
+    decode_anchor_payload,
+)
 from .models import (
     CapabilityKind,
     CapabilityState,
@@ -4653,7 +4657,10 @@ class TrainingRunStore:
                  WHERE run_id = ?) AS critical_events,
                 (SELECT COUNT(*) FROM replay_review_viewport_sample
                  WHERE run_id = ?) AS viewport_samples,
-                COALESCE((SELECT SUM(payload_bytes)
+                COALESCE((SELECT SUM(
+                              CASE WHEN stored_bytes > 0 THEN stored_bytes
+                                   ELSE length(payload) END
+                          )
                           FROM replay_review_actor_anchor
                           WHERE run_id = ?), 0) AS anchor_bytes,
                 COALESCE((SELECT SUM(length(CAST(projection_json AS BLOB)))
@@ -5086,6 +5093,31 @@ class TrainingRunStore:
                 "review event has no actor anchors",
                 status_code=503,
             )
+        decoded_payloads: dict[str, bytes] = {}
+        for anchor in anchors:
+            stored_payload = bytes(anchor["payload"])
+            encoding = str(anchor["payload_encoding"])
+            stored_bytes = int(anchor["stored_bytes"])
+            if stored_bytes == 0 and encoding == ANCHOR_PAYLOAD_ENCODING_RAW:
+                stored_bytes = len(stored_payload)
+            try:
+                decoded_payloads[str(anchor["anchor_id"])] = decode_anchor_payload(
+                    stored_payload,
+                    encoding=encoding,
+                    raw_bytes=int(anchor["payload_bytes"]),
+                    stored_bytes=stored_bytes,
+                    raw_sha256=str(anchor["payload_sha256"]),
+                )
+            except (TypeError, ValueError) as exc:
+                raise TrainingRunError(
+                    "REVIEW_ANCHOR_CORRUPT",
+                    "review event actor anchor failed integrity validation",
+                    status_code=503,
+                    details={
+                        "anchor_id": str(anchor["anchor_id"]),
+                        "track_id": str(anchor["track_id"]),
+                    },
+                ) from exc
         primary = next(
             (
                 anchor
@@ -5118,7 +5150,7 @@ class TrainingRunStore:
                     "event_sequence": int(anchor["event_sequence"]),
                     "virtual_time_ms": int(anchor["virtual_time_ms"]),
                     "dataset_epoch": str(anchor["dataset_epoch"]),
-                    "payload": bytes(anchor["payload"]),
+                    "payload": decoded_payloads[str(anchor["anchor_id"])],
                     "payload_sha256": str(anchor["payload_sha256"]),
                 }
                 for anchor in anchors

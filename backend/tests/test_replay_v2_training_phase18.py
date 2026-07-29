@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 
 from app.core.config import load_replay_settings
+from app.replay.training.anchor_codec import (
+    ANCHOR_PAYLOAD_ENCODING_RAW,
+    ANCHOR_PAYLOAD_ENCODING_ZLIB_V1,
+    decode_anchor_payload,
+    encode_anchor_payload,
+)
 from app.replay.training.errors import TrainingRunError
+from app.replay.training.models import ReplayV2CommandType
 from app.replay.training.segments import ReplaySegmentManager
 from scripts.validate_replay_v2_real_sources import validate_kline_source
 from tests.fixtures.replay.account_history import build_account_history_archive
@@ -15,6 +22,12 @@ from tests.fixtures.replay.service_fakes import replay_settings
 from tests.test_replay_v2_training_phase7 import (
     _prepare_payload,
     _spec,
+)
+from tests.test_replay_v2_training_phase5 import (
+    _acquire as _review_acquire,
+    _command as _review_command,
+    _request as _review_request,
+    _service as _review_service,
 )
 from tests.test_replay_v2_training_phase16 import (
     ARCHIVE_END,
@@ -30,6 +43,174 @@ from tests.test_replay_v2_training_api import (
 
 
 pytestmark = pytest.mark.anyio
+
+
+def test_review_anchor_codec_is_bounded_and_integrity_checked() -> None:
+    raw = b'{"schema_version":"test","payload":"' + (b"a" * 500_000) + b'"}'
+    encoded = encode_anchor_payload(raw)
+    assert encoded.encoding == ANCHOR_PAYLOAD_ENCODING_ZLIB_V1
+    assert encoded.stored_bytes < encoded.raw_bytes // 100
+    assert (
+        decode_anchor_payload(
+            encoded.payload,
+            encoding=encoded.encoding,
+            raw_bytes=encoded.raw_bytes,
+            stored_bytes=encoded.stored_bytes,
+            raw_sha256=encoded.raw_sha256,
+        )
+        == raw
+    )
+
+    corrupted = bytearray(encoded.payload)
+    corrupted[len(corrupted) // 2] ^= 0x01
+    with pytest.raises(ValueError):
+        decode_anchor_payload(
+            bytes(corrupted),
+            encoding=encoded.encoding,
+            raw_bytes=encoded.raw_bytes,
+            stored_bytes=encoded.stored_bytes,
+            raw_sha256=encoded.raw_sha256,
+        )
+    with pytest.raises(ValueError):
+        decode_anchor_payload(
+            encoded.payload,
+            encoding=encoded.encoding,
+            raw_bytes=encoded.raw_bytes - 1,
+            stored_bytes=encoded.stored_bytes,
+            raw_sha256=encoded.raw_sha256,
+        )
+    with pytest.raises(ValueError):
+        decode_anchor_payload(
+            encoded.payload + b"trailing",
+            encoding=encoded.encoding,
+            raw_bytes=encoded.raw_bytes,
+            stored_bytes=encoded.stored_bytes + len(b"trailing"),
+            raw_sha256=encoded.raw_sha256,
+        )
+
+    tiny = encode_anchor_payload(b"x")
+    assert tiny.encoding == ANCHOR_PAYLOAD_ENCODING_RAW
+    assert tiny.payload == b"x"
+
+
+async def test_review_anchor_compression_preserves_exact_fork_and_legacy_raw_upgrade(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "review-anchor-codec.db"
+    service = await _review_service(database)
+    try:
+        assert service.training is not None
+        created = await service.training.create_run(await _review_request(service))
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        await _review_acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="phase18-codec-acquire",
+        )
+        for index in range(40):
+            session = await service.get_session(session_id)
+            await service.training.command(
+                run_id,
+                _review_command(
+                    run_id,
+                    f"phase18-codec-speed-{index}",
+                    ReplayV2CommandType.SET_SPEED,
+                    session,
+                    {"speed": 5 if index % 2 == 0 else 1},
+                ),
+            )
+        review = await service.training.start_review(run_id, event_id=None)
+        event_id = str(review["selected_event_id"])
+        state_hash = str(review["selected_state_hash"])
+        checkpoint = await service.training.store.checkpoint_for_event(
+            run_id,
+            event_id,
+        )
+        primary = next(
+            anchor
+            for anchor in checkpoint["anchors"]
+            if anchor["track_id"] == "track-1"
+        )
+        raw_payload = bytes(primary["payload"])
+        anchor_id = str(primary["anchor_id"])
+
+        with sqlite3.connect(database) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*), SUM(payload_bytes), SUM(stored_bytes),
+                       SUM(payload_encoding = 'ZLIB_V1')
+                FROM replay_review_actor_anchor WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            assert row is not None
+            anchor_count, raw_bytes, stored_bytes, compressed_count = map(int, row)
+            assert anchor_count >= 40
+            assert compressed_count == anchor_count
+            assert stored_bytes * 2 < raw_bytes
+
+        forked = await service.training.fork_run(run_id, event_id=event_id)
+        assert forked["run"]["state_hash"] == state_hash
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+    # Simulate a disabled/default-off Phase 17 rollback writing a legacy RAW
+    # row with the additive columns' defaults before the new binary starts.
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            UPDATE replay_review_actor_anchor
+            SET payload = ?, payload_encoding = 'RAW', stored_bytes = 0
+            WHERE run_id = ? AND anchor_id = ?
+            """,
+            (raw_payload, run_id, anchor_id),
+        )
+
+    restarted = await _review_service(database)
+    try:
+        assert restarted.training is not None
+        restarted._session_id_factory = type(  # noqa: SLF001
+            restarted._session_id_factory  # noqa: SLF001
+        )("phase18-codec-restart-adapter")
+        restarted.training._run_id_factory = type(  # noqa: SLF001
+            restarted.training._run_id_factory  # noqa: SLF001
+        )("phase18-codec-restart-run")
+        with sqlite3.connect(database) as connection:
+            upgraded = connection.execute(
+                """
+                SELECT payload_encoding, payload_bytes, stored_bytes,
+                       length(payload)
+                FROM replay_review_actor_anchor
+                WHERE run_id = ? AND anchor_id = ?
+                """,
+                (run_id, anchor_id),
+            ).fetchone()
+            assert upgraded == (
+                ANCHOR_PAYLOAD_ENCODING_RAW,
+                len(raw_payload),
+                len(raw_payload),
+                len(raw_payload),
+            )
+        forked = await restarted.training.fork_run(run_id, event_id=event_id)
+        assert forked["run"]["state_hash"] == state_hash
+
+        corrupted = bytearray(raw_payload)
+        corrupted[len(corrupted) // 2] ^= 0x01
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                """
+                UPDATE replay_review_actor_anchor SET payload = ?
+                WHERE run_id = ? AND anchor_id = ?
+                """,
+                (bytes(corrupted), run_id, anchor_id),
+            )
+        with pytest.raises(TrainingRunError) as failure:
+            await restarted.training.store.checkpoint_for_event(run_id, event_id)
+        assert failure.value.code == "REVIEW_ANCHOR_CORRUPT"
+    finally:
+        await restarted.shutdown(step_timeout=1.0)
 
 
 def _assert_inventory_is_redacted(value: object, field: str = "inventory") -> None:

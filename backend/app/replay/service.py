@@ -2236,7 +2236,11 @@ class ReplayService:
                     handle.activity_generation,
                 )
                 for session_id, handle in self._sessions.items()
-                if not handle.evicting and handle.in_flight == 0
+                if (
+                    session_id not in self._pending_recoveries
+                    and not handle.evicting
+                    and handle.in_flight == 0
+                )
             )
         for session_id, handle, observed_generation in candidates:
             # A stream subscription materializes the actor's cached snapshot, but

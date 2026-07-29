@@ -626,6 +626,68 @@ async def test_lazy_recovery_is_singleflight_and_does_not_block_resident_command
         await service.shutdown(step_timeout=1.0)
 
 
+async def test_lazy_recovery_claim_protects_published_handle_until_owner_leases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "lazy-recovery-publication-race.db"
+    now = [NOW_MS]
+    service = ReplayService(
+        settings=replace(
+            replay_settings(path),
+            max_active_sessions=1,
+            idle_ttl_seconds=60,
+        ),
+        store=ReplaySQLiteStore(path, now_ms=lambda: now[0]),
+        repository=replay_repository(),
+        now_ms=lambda: now[0],
+        session_id_factory=SessionIdFactory("lazy-publication"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    created = await service.create_session(replay_config())
+    session_id = str(created["session_id"])
+    now[0] += 60_001
+    await service._prune_reclaimable_sessions()
+    assert session_id not in service._sessions
+
+    original_recover = service._recover_record
+    recovery_published = asyncio.Event()
+    release_recovery_owner = asyncio.Event()
+
+    async def observed_recover(record):
+        handle = await original_recover(record)
+        recovery_published.set()
+        await release_recovery_owner.wait()
+        return handle
+
+    monkeypatch.setattr(service, "_recover_record", observed_recover)
+    owner = asyncio.create_task(service.get_session(session_id))
+    try:
+        await asyncio.wait_for(recovery_published.wait(), timeout=2)
+        assert session_id in service._sessions
+        assert service.diagnostics()["pending_recoveries"] == (session_id,)
+
+        await asyncio.wait_for(service._prune_reclaimable_sessions(), timeout=2)
+        published = service._sessions[session_id]
+        assert published.evicting is False
+        assert published.in_flight == 0
+
+        release_recovery_owner.set()
+        restored = await asyncio.wait_for(owner, timeout=2)
+        assert restored["session_id"] == session_id
+        assert service._sessions[session_id] is published
+        assert published.in_flight == 0
+        assert service.diagnostics()["pending_handle_acquisitions"] == 0
+        assert service.diagnostics()["pending_recoveries"] == ()
+    finally:
+        release_recovery_owner.set()
+        if not owner.done():
+            owner.cancel()
+        await asyncio.gather(owner, return_exceptions=True)
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_blind_catalog_and_bar_materialization_errors_are_redacted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

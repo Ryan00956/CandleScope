@@ -89,6 +89,7 @@ from .training.service import TrainingRunService
 SYNTHETIC_TIME_ANCHOR_MS = 946_684_800_000
 _DATASET_POOL_MAX_BYTES = 512 * 1024 * 1024
 _EVICTION_SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
+_ENDED_SESSION_HANDOFF_GRACE_MS = 5_000
 TRADE_SESSION_DATASET_SCHEMA_VERSION = "replay-trade-session-dataset.v1"
 TRADE_SESSION_REF_SCHEMA_VERSION = "replay-trade-session-ref.v1"
 _TaskResult = TypeVar("_TaskResult")
@@ -2211,7 +2212,7 @@ class ReplayService:
             except TimeoutError:
                 pass
             try:
-                await self._prune_reclaimable_sessions()
+                await self._prune_reclaimable_sessions(capacity_pressure=False)
             except Exception as exc:
                 self._metrics["reaper_failures"] = (
                     int(self._metrics["reaper_failures"] or 0) + 1
@@ -2220,13 +2221,23 @@ class ReplayService:
                     :500
                 ]
 
-    async def _prune_reclaimable_sessions(self) -> None:
+    async def _prune_reclaimable_sessions(
+        self,
+        *,
+        capacity_pressure: bool = True,
+    ) -> None:
         async with self._prune_lock:
             if not self._accepting or self._closed:
                 return
-            await self._prune_reclaimable_sessions_exclusive()
+            await self._prune_reclaimable_sessions_exclusive(
+                capacity_pressure=capacity_pressure
+            )
 
-    async def _prune_reclaimable_sessions_exclusive(self) -> None:
+    async def _prune_reclaimable_sessions_exclusive(
+        self,
+        *,
+        capacity_pressure: bool,
+    ) -> None:
         idle_ttl_ms = self.settings.idle_ttl_seconds * 1_000
         async with self._lifecycle_lock:
             candidates = tuple(
@@ -2251,11 +2262,19 @@ class ReplayService:
             if snapshot is None:
                 return
             ended = snapshot.state is SessionState.ENDED
+            activity_age_ms = (
+                self._validated_now_ms() - handle.last_activity_ms
+            )
+            ended_handoff_complete = (
+                activity_age_ms >= _ENDED_SESSION_HANDOFF_GRACE_MS
+            )
             idle = (
                 snapshot.controller_client_id is None
-                and self._validated_now_ms() - handle.last_activity_ms >= idle_ttl_ms
+                and activity_age_ms >= idle_ttl_ms
             )
-            if not ended and not idle:
+            if not idle and not (
+                ended and (capacity_pressure or ended_handoff_complete)
+            ):
                 continue
             reason = "ended" if ended else "idle_ttl"
             async with self._lifecycle_lock:
@@ -2268,9 +2287,16 @@ class ReplayService:
                     or handle.activity_generation != observed_generation
                 ):
                     continue
-                if reason == "idle_ttl" and (
-                    self._validated_now_ms() - handle.last_activity_ms < idle_ttl_ms
+                activity_age_ms = (
+                    self._validated_now_ms() - handle.last_activity_ms
+                )
+                if (
+                    reason == "ended"
+                    and not capacity_pressure
+                    and activity_age_ms < _ENDED_SESSION_HANDOFF_GRACE_MS
                 ):
+                    continue
+                if reason == "idle_ttl" and activity_age_ms < idle_ttl_ms:
                     continue
                 handle.evicting = True
                 handle.eviction_complete.clear()

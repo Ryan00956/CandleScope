@@ -302,6 +302,67 @@ async def test_ended_session_is_reclaimed_after_stream_snapshot_and_remains_reco
     await service.shutdown(step_timeout=1.0)
 
 
+async def test_background_reaper_preserves_ended_report_handoff_grace(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "ended-report-handoff.db"
+    now = [NOW_MS]
+    service = ReplayService(
+        settings=replace(
+            replay_settings(path),
+            max_active_sessions=1,
+            idle_ttl_seconds=1,
+        ),
+        store=ReplaySQLiteStore(path, now_ms=lambda: now[0]),
+        repository=replay_repository(),
+        now_ms=lambda: now[0],
+        session_id_factory=SessionIdFactory("ended-handoff"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    created = await service.create_session(replay_config(blind_mode=True))
+    session_id = str(created["session_id"])
+    acquired = await service.command(
+        session_id,
+        _command("acquire-ended-handoff", CommandType.ACQUIRE_CONTROLLER, revision=0),
+    )
+    await service.command(
+        session_id,
+        _command(
+            "end-for-report-handoff",
+            CommandType.END_SESSION,
+            revision=acquired["revision"],
+            payload={
+                "open_order_disposition": "expire",
+                "position_disposition": "keep",
+            },
+        ),
+    )
+
+    # Capacity pressure can still reclaim an ended actor immediately.
+    await service._prune_reclaimable_sessions()
+    assert session_id not in service._sessions
+
+    first_report = await service.report(session_id)
+    recovered = service._sessions[session_id]
+    assert str(first_report["report"]["report_hash"]).startswith("sha256:")
+    assert service.diagnostics()["sessions_recovered"] == 1
+
+    # The periodic reaper must leave a recently used ended actor resident long
+    # enough for the report page's HTTP-to-WebSocket handoff to lease it.
+    await service._prune_reclaimable_sessions(capacity_pressure=False)
+    assert service._sessions[session_id] is recovered
+    second_report = await service.report(session_id)
+    assert second_report["report"] == first_report["report"]
+    assert service.diagnostics()["sessions_recovered"] == 1
+
+    now[0] += 5_001
+    await service._prune_reclaimable_sessions(capacity_pressure=False)
+    assert session_id not in service._sessions
+    assert service.diagnostics()["ended_sessions_evicted"] == 2
+    await service.shutdown(step_timeout=1.0)
+
+
 async def test_controller_free_idle_session_ttl_reclaims_and_lazy_recovers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -74,6 +74,14 @@ function AppShell({
     },
   }), [model.chartWorkspace, chartSurfaceRef]);
 
+  const featureSurfaces = useMemo(() => ({
+    ...model.lazySurfaces,
+    settingsModal: {
+      ...model.lazySurfaces.settingsModal,
+      plugins,
+    },
+  }), [model.lazySurfaces, plugins]);
+
   return (
     <MarketPageFrame
       rootRef={pageExportRef}
@@ -82,7 +90,7 @@ function AppShell({
       workspace={<ChartWorkspace {...chartWorkspace} pluginMarkerSource={plugins.view.markerSource} />}
       featureSurfaces={(
         <>
-          <LazyFeatureSurfaces surfaces={model.lazySurfaces} />
+          <LazyFeatureSurfaces surfaces={featureSurfaces} />
           <PluginUiErrorBoundary>
             <PluginLiveControl runtime={plugins} />
           </PluginUiErrorBoundary>

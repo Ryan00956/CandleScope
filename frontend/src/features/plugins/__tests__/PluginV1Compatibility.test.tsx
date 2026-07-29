@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import PluginPlatformSurfaces from "../PluginPlatformSurfaces.js";
+import { PluginSettingsPanel } from "../PluginPlatformSurfaces.js";
 import PluginPlatformToolbar from "../PluginPlatformToolbar.js";
+import { SETTINGS_CATEGORIES } from "../../settings/settingsTabRegistry.js";
 import type {
   PluginCatalog,
   PluginPlatformRuntime,
@@ -126,26 +127,29 @@ function runtime(platformEnabled: boolean): PluginPlatformRuntime {
 test("v1-only mode keeps one product directory without exposing v2 mutations", () => {
   const value = runtime(false);
   const toolbar = renderToStaticMarkup(<PluginPlatformToolbar runtime={value} />);
-  assert.match(toolbar, /data-plugin-manager/);
-  assert.doesNotMatch(toolbar, /data-plugin-command-palette/);
+  assert.equal(toolbar, "");
+  assert.equal(
+    SETTINGS_CATEGORIES.some((category) => category.key === "plugins"),
+    true,
+  );
 
-  const manager = renderToStaticMarkup(<PluginPlatformSurfaces runtime={value} />);
-  assert.match(manager, /Script runtimes \(v1 compatibility\)/);
+  const manager = renderToStaticMarkup(<PluginSettingsPanel runtime={value} />);
+  assert.match(manager, /脚本运行时/);
   assert.match(manager, /data-v1-runtime="candlescope.pyne"/);
   assert.match(manager, /candlescope\.script-runtime\/1/);
-  assert.match(manager, /Enable Plugin Platform v2 to persist/);
+  assert.match(manager, /启用插件平台后/);
   assert.doesNotMatch(manager, /data-plugin-install-input/);
   assert.doesNotMatch(manager, /<iframe/);
 });
 
 test("enabled platform exposes separate import and rollback previews", () => {
   const manager = renderToStaticMarkup(
-    <PluginPlatformSurfaces runtime={runtime(true)} />,
+    <PluginSettingsPanel runtime={runtime(true)} />,
   );
   assert.match(manager, /data-v1-compatibility-preview="import"/);
   assert.match(manager, /data-v1-compatibility-preview="rollback"/);
-  assert.match(manager, /Preview registry import/);
-  assert.match(manager, /Preview compatibility rollback/);
+  assert.match(manager, /预览注册表导入/);
+  assert.match(manager, /预览兼容层回滚/);
   assert.match(manager, /data-plugin-install-input/);
   assert.doesNotMatch(manager, /Apply exact import preview/);
 });

@@ -4,6 +4,15 @@ export default function PluginPlatformToolbar({ runtime }: { runtime: PluginPlat
   const { catalog, registries, managementAvailable } = runtime.view;
   if (!catalog) return null;
   if (!catalog.platform.enabled && catalog.compatibility.contributions.length === 0) return null;
+  const hasToolbarControls = catalog.platform.enabled && (
+    registries.topToolbar.length > 0
+    || registries.commandPalette.length > 0
+    || registries.sidePanel.length > 0
+    || registries.bottomPanel.length > 0
+    || registries.settings.length > 0
+    || runtime.view.liveControl.mode !== "disabled"
+  );
+  if (!hasToolbarControls) return null;
   return (
     <div className="plugin-toolbar" data-plugin-slot="topToolbar">
       {catalog.platform.enabled && registries.topToolbar.map((command) => {
@@ -50,9 +59,6 @@ export default function PluginPlatformToolbar({ runtime }: { runtime: PluginPlat
           LIVE {runtime.view.liveControl.mode.toUpperCase()}
         </button>
       )}
-      <button type="button" data-plugin-manager onClick={runtime.actions.openManager}>
-        Plugins
-      </button>
     </div>
   );
 }

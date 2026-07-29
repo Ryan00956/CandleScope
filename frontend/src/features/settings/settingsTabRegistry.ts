@@ -8,6 +8,7 @@ export const SETTINGS_CATEGORIES = [
   { key: "network", label: "网络连接", icon: "🌐" },
   { key: "exchanges", label: "交易所", icon: "🏦" },
   { key: "data", label: "数据管理", icon: "💾" },
+  { key: "plugins", label: "插件与扩展", icon: "" },
   { key: "about", label: "关于", icon: "ℹ️" },
 ] as const satisfies readonly SettingsCategoryDescriptor[];
 

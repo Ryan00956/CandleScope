@@ -6,17 +6,21 @@ import DataWorkbenchLaunchPanel from "./panels/DataWorkbenchLaunchPanel.js";
 import ExchangeSettingsPanel from "./panels/ExchangeSettingsPanel.js";
 import ProxySettingsPanel from "./panels/ProxySettingsPanel.js";
 import StorageMaintenancePanel from "./panels/StorageMaintenancePanel.js";
+import { PluginSettingsPanel } from "../plugins/PluginPlatformSurfaces.js";
+import type { PluginPlatformRuntime } from "../plugins/pluginPlatformTypes.js";
 import type { SettingsCategory, SettingsPanelViewModel } from "./settingsTypes.js";
 
 export interface SettingsPanelHostProps {
   activeCategory: SettingsCategory;
   panelModel: SettingsPanelViewModel;
+  plugins?: PluginPlatformRuntime | undefined;
   onOpenDataWorkbench(): void;
 }
 
 export default function SettingsPanelHost({
   activeCategory,
   panelModel,
+  plugins,
   onOpenDataWorkbench,
 }: SettingsPanelHostProps) {
   switch (activeCategory) {
@@ -35,6 +39,10 @@ export default function SettingsPanelHost({
           <StorageMaintenancePanel {...panelModel.data.maintenance} />
         </>
       );
+    case "plugins":
+      return plugins
+        ? <PluginSettingsPanel runtime={plugins} />
+        : <div className="st-info-box">插件平台当前不可用。</div>;
     case "about":
       return <AboutSettingsPanel />;
     default:

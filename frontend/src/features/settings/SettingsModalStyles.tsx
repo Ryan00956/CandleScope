@@ -99,6 +99,11 @@ export default function SettingsModalStyles(props: SettingsModalStylesProps) {
   color: var(--accent-blue, #3b82f6);
 }
 
+.st-nav-item:focus-visible {
+  outline: 2px solid var(--accent-blue, #3b82f6);
+  outline-offset: -2px;
+}
+
 .st-nav-icon {
   font-size: 16px;
   width: 22px;

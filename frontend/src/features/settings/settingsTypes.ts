@@ -13,6 +13,7 @@ export type SettingsCategory =
   | "network"
   | "exchanges"
   | "data"
+  | "plugins"
   | "about";
 
 export interface SettingsActionDescriptor {

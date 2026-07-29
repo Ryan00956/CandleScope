@@ -4878,6 +4878,387 @@ body {
 
 .plugin-platform-error { border-color: var(--candle-down); }
 
+/* ── Plugin center inside Settings ───────────────────────── */
+.plugin-settings-page {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding-bottom: 4px;
+  color: var(--text-primary);
+}
+
+.plugin-settings-page h3,
+.plugin-settings-page p {
+  margin: 0;
+}
+
+.plugin-settings-page p {
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.plugin-settings-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(59, 130, 246, 0.14), rgba(139, 92, 246, 0.06)),
+    var(--bg-primary);
+  box-shadow: 0 12px 30px rgba(2, 6, 23, 0.16);
+}
+
+.plugin-settings-hero h3 {
+  margin: 3px 0 5px;
+  font-size: 21px;
+  letter-spacing: -0.02em;
+}
+
+.plugin-settings-eyebrow {
+  color: var(--accent-blue);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.plugin-settings-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-primary);
+}
+
+.plugin-settings-summary > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 14px 16px;
+}
+
+.plugin-settings-summary > div + div {
+  border-left: 1px solid var(--border-color);
+}
+
+.plugin-settings-summary strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-settings-summary span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.plugin-settings-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.24);
+}
+
+.plugin-settings-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.plugin-settings-card-header > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.plugin-settings-card-header h3 {
+  font-size: 14px;
+}
+
+.plugin-state-pill {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.plugin-state-pill.is-ready {
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(34, 197, 94, 0.1);
+  color: #4ade80;
+}
+
+.plugin-state-pill.is-compatibility {
+  border-color: rgba(167, 139, 250, 0.35);
+  background: rgba(139, 92, 246, 0.1);
+  color: #c4b5fd;
+}
+
+.plugin-state-pill.is-muted {
+  color: var(--text-secondary);
+}
+
+.plugin-settings-page .plugin-v1-compatibility {
+  padding: 16px;
+  border-color: var(--border-color);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.24);
+}
+
+.plugin-runtime-list {
+  display: grid;
+  gap: 8px;
+}
+
+.plugin-runtime-list > article {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-primary);
+}
+
+.plugin-runtime-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.plugin-runtime-main > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.plugin-runtime-main strong {
+  color: var(--text-primary);
+}
+
+.plugin-runtime-main span:not(.plugin-state-pill) {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.plugin-technical-details {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.plugin-technical-details summary {
+  width: max-content;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.plugin-technical-details[open] summary {
+  margin-bottom: 9px;
+}
+
+.plugin-technical-details dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.3);
+}
+
+.plugin-technical-details dl > div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.plugin-technical-details dt {
+  color: var(--text-muted);
+}
+
+.plugin-technical-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.plugin-settings-page .plugin-action-row {
+  margin: 0;
+}
+
+.plugin-settings-page button,
+.plugin-install-button {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  padding: 7px 10px;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.plugin-settings-page button:hover:not(:disabled),
+.plugin-install-button:hover {
+  border-color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--text-primary);
+}
+
+.plugin-settings-page button:focus-visible,
+.plugin-install-button:focus-within,
+.plugin-technical-details summary:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+.plugin-settings-page button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.plugin-settings-page .plugin-install-row {
+  justify-content: flex-start;
+  padding: 0;
+  border: 0;
+}
+
+.plugin-install-button {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  min-width: 142px;
+  background: var(--accent-blue);
+  color: #fff;
+  font-weight: 700;
+}
+
+.plugin-install-button:hover {
+  background: #2563eb;
+  color: #fff;
+}
+
+.plugin-install-button:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.plugin-install-button input {
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.plugin-install-row > div {
+  display: grid;
+  gap: 3px;
+}
+
+.plugin-install-row > div strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.plugin-install-row > div small {
+  color: var(--text-muted);
+}
+
+.plugin-settings-page .plugin-marketplace-panel {
+  margin-top: 0;
+  padding: 16px;
+  border-color: var(--border-color);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.24);
+}
+
+.plugin-marketplace-empty {
+  border-style: dashed;
+}
+
+.plugin-empty-state {
+  display: grid;
+  place-items: center;
+  gap: 5px;
+  min-height: 88px;
+  padding: 16px;
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-primary);
+  text-align: center;
+}
+
+.plugin-empty-state strong {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.plugin-empty-state p {
+  max-width: 520px;
+  font-size: 11px;
+}
+
+.plugin-settings-page .plugin-manager-layout {
+  min-height: 320px;
+  margin-top: 0;
+}
+
+.plugin-settings-page .plugin-manager-layout nav button {
+  padding: 10px;
+}
+
+.plugin-settings-page .plugin-manager-detail {
+  padding-right: 4px;
+}
+
+@media (max-width: 760px) {
+  .plugin-settings-hero,
+  .plugin-settings-card-header,
+  .plugin-runtime-main,
+  .plugin-settings-page .plugin-install-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .plugin-settings-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .plugin-settings-summary > div + div {
+    border-top: 1px solid var(--border-color);
+    border-left: 0;
+  }
+
+  .plugin-state-pill {
+    align-self: flex-start;
+  }
+
+  .plugin-install-button {
+    width: 100%;
+  }
+}
+
 .live-control-banner {
   position: fixed;
   z-index: 2100;

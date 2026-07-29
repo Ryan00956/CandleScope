@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { PluginNativeField } from "./PluginNativeFields.js";
 import SandboxPluginFrame from "./SandboxPluginFrame.js";
 import { defaultForPluginSchema } from "./pluginSchemaDefaults.js";
-import { LOCAL_BUNDLE_INSTALL_LABEL } from "./pluginTrustLabels.js";
 import { formatPluginValue } from "./pluginViewFormatting.js";
 import type {
   JsonValue,
@@ -638,17 +637,37 @@ function MarketplacePanel({
   run(key: string, operation: () => Promise<void>): Promise<void>;
 }) {
   const catalog = runtime.view.marketplaceCatalog;
-  if (catalog === null) return <section className="plugin-marketplace-panel"><p>Loading signed marketplace metadata…</p></section>;
+  if (catalog === null) {
+    return (
+      <section className="plugin-marketplace-panel plugin-settings-card">
+        <p>正在读取可信插件市场配置…</p>
+      </section>
+    );
+  }
   return (
-    <section className="plugin-marketplace-panel" data-plugin-marketplace>
-      <header>
+    <section className="plugin-marketplace-panel plugin-settings-card" data-plugin-marketplace>
+      <header className="plugin-settings-card-header">
         <div>
-          <h3>Signed Marketplace</h3>
-          <p>Publisher signatures, immutable SHA-256 artifacts, SBOM/license evidence, transparency and revocation are verified by Host.</p>
+          <h3>可信插件市场</h3>
+          <p>仅接收 Host 验证过签名、构建摘要与透明度记录的插件版本。</p>
         </div>
-        <strong data-plugin-marketplace-state>{catalog.enabled ? "enabled" : "disabled"}</strong>
+        <span
+          className={`plugin-state-pill ${catalog.enabled ? "is-ready" : "is-muted"}`}
+          data-plugin-marketplace-state
+        >
+          {catalog.enabled ? "已开启" : "未配置"}
+        </span>
       </header>
-      <p>Marketplace metadata never grants permissions. Downloads only create a verified candidate; apply remains staged and activation is always explicit. Automatic updates are disabled.</p>
+      {!catalog.enabled && !catalog.marketplaces.length && (
+        <div className="plugin-empty-state plugin-marketplace-empty">
+          <strong>尚未配置可信插件市场</strong>
+          <p>当前仍可通过上方的本地安装加入经 SHA-256 校验的 .cspkg 插件包。</p>
+        </div>
+      )}
+      <details className="plugin-technical-details">
+        <summary>安全与更新策略</summary>
+        <p>市场元数据不会自动授予权限。下载只会生成已验证的候选版本，应用与激活均需显式操作，自动更新保持关闭。</p>
+      </details>
       <div className="plugin-marketplace-roots">
         {catalog.marketplaces.map((marketplace) => (
           <article key={marketplace.marketplaceId}>
@@ -673,7 +692,6 @@ function MarketplacePanel({
             </button>
           </article>
         ))}
-        {!catalog.marketplaces.length && <p>No build-pinned marketplace root is configured. Local developer bundles remain a separate trust class.</p>}
       </div>
       <div className="plugin-marketplace-list">
         {catalog.plugins.map((entry) => {
@@ -771,13 +789,13 @@ function MarketplacePanel({
             </article>
           );
         })}
-        {catalog.enabled && !catalog.plugins.length && <p>The verified index contains no installable releases.</p>}
+        {catalog.enabled && !catalog.plugins.length && <p>已验证的插件索引中暂无可安装版本。</p>}
       </div>
     </section>
   );
 }
 
-function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
+export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
   const plugins = useMemo(
     () => runtime.view.catalog?.plugins ?? [],
     [runtime.view.catalog?.plugins],
@@ -793,9 +811,8 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
   const compatibility = runtime.view.catalog?.compatibility ?? null;
   const platformEnabled = runtime.view.catalog?.platform.enabled === true;
   useEffect(() => {
-    if (!runtime.view.managerOpen) return;
     if (!selectedId || !plugins.some((item) => item.id === selectedId)) setSelectedId(plugins[0]?.id ?? null);
-  }, [plugins, runtime.view.managerOpen, selectedId]);
+  }, [plugins, selectedId]);
   const reload = async () => {
     if (!selectedId || !runtime.view.managementAvailable) return;
     setLoading(true);
@@ -805,9 +822,9 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
   useEffect(() => {
     setDetail(null);
     void reload();
-    // reload is intentionally keyed by the selected plugin and manager visibility.
+    // reload is intentionally keyed by the selected plugin and management availability.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtime.view.managerOpen, runtime.view.managementAvailable, selectedId]);
+  }, [runtime.view.managementAvailable, selectedId]);
   const reloadMarketplace = async () => {
     if (!runtime.view.managementAvailable || !platformEnabled) {
       setMarketplaceStatus(null);
@@ -820,15 +837,13 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
     }
   };
   useEffect(() => {
-    if (!runtime.view.managerOpen) return;
     void reloadMarketplace();
     // Marketplace mutations explicitly reload protected state after the public refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtime.view.managerOpen, runtime.view.managementAvailable, platformEnabled]);
+  }, [runtime.view.managementAvailable, platformEnabled]);
   useEffect(() => {
     setCompatibilityPreview(null);
-  }, [compatibility?.import.sourceSha256, runtime.view.managerOpen]);
-  if (!runtime.view.managerOpen) return null;
+  }, [compatibility?.import.sourceSha256]);
   const selected = plugins.find((item) => item.id === selectedId) ?? null;
   const mutate = async (action: "enable" | "disable" | "rollback" | "uninstall") => {
     if (!selected) return;
@@ -886,30 +901,72 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
       setCompatibilityBusy(null);
     }
   };
+  const runtimeCount = compatibility?.contributions.length ?? 0;
+  const marketplaceEnabled = runtime.view.marketplaceCatalog?.enabled === true;
   return (
-    <Modal title="Plugin Manager" onClose={runtime.actions.closeManager} testId="plugin-manager">
+    <div className="plugin-settings-page" data-testid="plugin-manager">
+      <section className="plugin-settings-hero">
+        <div>
+          <span className="plugin-settings-eyebrow">扩展能力</span>
+          <h3>插件中心</h3>
+          <p>集中管理脚本运行时、插件安装与可信扩展来源。</p>
+        </div>
+        <span className={`plugin-state-pill ${platformEnabled ? "is-ready" : "is-compatibility"}`}>
+          {platformEnabled ? "平台已启用" : "兼容模式"}
+        </span>
+      </section>
+      <div className="plugin-settings-summary" aria-label="插件平台概览">
+        <div><strong>{plugins.length}</strong><span>已安装插件</span></div>
+        <div><strong>{runtimeCount}</strong><span>脚本运行时</span></div>
+        <div>
+          <strong>{marketplaceEnabled ? "已开启" : "未配置"}</strong>
+          <span>可信插件市场</span>
+        </div>
+      </div>
       {compatibility && (
-        <section className="plugin-v1-compatibility" data-v1-compatibility-status={compatibility.import.status}>
-          <h3>Script runtimes (v1 compatibility)</h3>
-          <p>
-            {compatibility.kind} · {compatibility.protocol} · {compatibility.import.status}
-            {compatibility.import.sourceSha256 ? ` · ${compatibility.import.sourceSha256}` : ""}
-          </p>
-          <p>
-            Discovery is live and read-only. Import and rollback change only the unified catalog snapshot;
-            existing v1 activation, installer, HTTP, range and WebSocket routes stay unchanged.
-          </p>
-          <ul>
+        <section className="plugin-settings-card plugin-v1-compatibility" data-v1-compatibility-status={compatibility.import.status}>
+          <header className="plugin-settings-card-header">
+            <div>
+              <h3>脚本运行时</h3>
+              <p>已接入的指标语言运行时，可直接为图表提供计算与渲染能力。</p>
+            </div>
+            <span className="plugin-state-pill is-ready">{runtimeCount} 个可用</span>
+          </header>
+          <div className="plugin-runtime-list">
             {compatibility.contributions.map((contribution) => (
-              <li key={contribution.id} data-v1-runtime={contribution.runtimeId}>
-                <strong>{contribution.title}</strong>
-                {` ${contribution.version} · ${contribution.languages.map((item) => `${item.id}:${item.routeMode}`).join(", ")}`}
-                {contribution.release.bundleSha256 ? ` · ${contribution.release.bundleSha256}` : ""}
-                {contribution.imported ? " · imported" : " · live preview"}
-              </li>
+              <article key={contribution.id} data-v1-runtime={contribution.runtimeId}>
+                <div className="plugin-runtime-main">
+                  <div>
+                    <strong>{contribution.title}</strong>
+                    <span>
+                      {contribution.version}
+                      {` · ${contribution.languages.map((item) => item.name).join("、")}`}
+                      {contribution.imported ? " · 已导入" : " · 实时发现"}
+                    </span>
+                  </div>
+                  <span className={`plugin-state-pill ${contribution.available ? "is-ready" : "is-muted"}`}>
+                    {contribution.available ? "可用" : "不可用"}
+                  </span>
+                </div>
+                <details className="plugin-technical-details">
+                  <summary>技术详情</summary>
+                  <dl>
+                    <div><dt>运行时</dt><dd>{contribution.runtimeId}</dd></div>
+                    <div><dt>协议</dt><dd>{compatibility.protocol}</dd></div>
+                    {contribution.release.bundleSha256 && (
+                      <div><dt>构建摘要</dt><dd>{contribution.release.bundleSha256}</dd></div>
+                    )}
+                  </dl>
+                </details>
+              </article>
             ))}
-          </ul>
-          {!compatibility.contributions.length && <p>No v1 script runtimes are routed.</p>}
+          </div>
+          {!compatibility.contributions.length && (
+            <div className="plugin-empty-state">
+              <strong>暂未发现脚本运行时</strong>
+              <p>已安装并可路由的运行时会显示在这里。</p>
+            </div>
+          )}
           <div className="plugin-action-row">
             <button
               type="button"
@@ -917,7 +974,7 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
               disabled={!platformEnabled || !runtime.view.managementAvailable || compatibilityBusy !== null}
               onClick={() => void previewCompatibility("import")}
             >
-              {compatibilityBusy === "import" ? "Previewing…" : "Preview registry import"}
+              {compatibilityBusy === "import" ? "正在生成预览…" : "预览注册表导入"}
             </button>
             <button
               type="button"
@@ -930,10 +987,10 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
               }
               onClick={() => void previewCompatibility("rollback")}
             >
-              {compatibilityBusy === "rollback" ? "Previewing…" : "Preview compatibility rollback"}
+              {compatibilityBusy === "rollback" ? "正在生成预览…" : "预览兼容层回滚"}
             </button>
           </div>
-          {!platformEnabled && <small>Enable Plugin Platform v2 to persist an explicit compatibility import.</small>}
+          {!platformEnabled && <small>启用插件平台后，才可保存兼容层导入快照。</small>}
           {compatibilityPreview && (
             <div className="plugin-v1-compatibility-preview" data-v1-compatibility-action={compatibilityPreview.action}>
               <p>
@@ -967,12 +1024,18 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
         </section>
       )}
       {platformEnabled && (
-        <div className="plugin-install-row">
-          <label>
-            <span>{installing ? "Installing and verifying…" : LOCAL_BUNDLE_INSTALL_LABEL}</span>
-            <input
-              type="file"
-              accept=".cspkg,application/vnd.candlescope.plugin+zip"
+        <section className="plugin-settings-card plugin-install-card">
+          <header className="plugin-settings-card-header">
+            <div>
+              <h3>从本地安装</h3>
+              <p>安装经过摘要校验的 CandleScope 插件包，安装后仍需显式授权与启用。</p>
+            </div>
+          </header>
+          <div className="plugin-install-row">
+            <label className="plugin-install-button">
+              <input
+                type="file"
+                accept=".cspkg,application/vnd.candlescope.plugin+zip"
               data-plugin-install-input
               disabled={!runtime.view.managementAvailable || installing}
               onChange={async (event) => {
@@ -983,10 +1046,15 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
                 try { await runtime.actions.installBundle(file); } catch { /* notice published */ }
                 finally { setInstalling(false); }
               }}
-            />
-          </label>
-          <small>SHA-256 is recomputed by both browser and Host. Maximum 16 MiB.</small>
-        </div>
+              />
+              <span>{installing ? "正在校验并安装…" : "选择 .cspkg 文件"}</span>
+            </label>
+            <div>
+              <strong>经过摘要校验的本地插件包</strong>
+              <small>浏览器与 Host 会分别复算 SHA-256，文件最大 16 MiB。</small>
+            </div>
+          </div>
+        </section>
       )}
       {platformEnabled && (
         <MarketplacePanel
@@ -996,68 +1064,86 @@ function PluginManager({ runtime }: { runtime: PluginPlatformRuntime }) {
           run={runMarketplace}
         />
       )}
-      {platformEnabled && <div className="plugin-manager-layout">
-        <nav>
-          {plugins.map((plugin) => (
-            <button type="button" key={plugin.id} className={selectedId === plugin.id ? "active" : ""} onClick={() => setSelectedId(plugin.id)}>
-              <strong>{plugin.name}</strong><small>{plugin.version} · {plugin.state}</small>
-            </button>
-          ))}
-          {!plugins.length && <p>No v2 plugins installed.</p>}
-        </nav>
-        <section className="plugin-manager-detail">
-          {selected && (
-            <>
-              <h3>{selected.name}</h3>
-              <p>{selected.id} · {selected.publisher} · {selected.trustLevel}</p>
-              <div className="plugin-action-row">
-                {selected.state === "active"
-                  ? <button type="button" disabled={!runtime.view.managementAvailable} onClick={() => void mutate("disable")}>Disable</button>
-                  : <button type="button" disabled={!runtime.view.managementAvailable || !selected.permissions.activationReady} onClick={() => void mutate("enable")}>Enable</button>}
-                <button type="button" disabled={!runtime.view.managementAvailable || !detail?.rollback.available} onClick={() => void mutate("rollback")}>Rollback</button>
-                <button type="button" disabled={!runtime.view.managementAvailable} onClick={() => void mutate("uninstall")}>Uninstall</button>
-              </div>
-              {!runtime.view.managementAvailable && <p>Read-only: trusted desktop management session was not provided.</p>}
-              {loading && <p>Loading protected details…</p>}
-              <ProviderRows providers={selected.contributions.filter(
-                (item): item is PluginProviderContribution => (
-                  item.kind === "symbol-provider/1" || item.kind === "market-data-provider/1"
-                ),
-              )} />
-              <PaperRows
-                contributions={selected.contributions.filter(
-                  (item): item is PluginPaperContribution => (
-                    item.kind === "account-provider/1" || item.kind === "order-executor/1"
-                  ),
+      {platformEnabled && (
+        <section className="plugin-settings-card plugin-installed-card">
+          <header className="plugin-settings-card-header">
+            <div>
+              <h3>已安装插件</h3>
+              <p>查看运行状态、权限、更新与回滚信息。</p>
+            </div>
+            <span className="plugin-state-pill is-muted">{plugins.length} 个</span>
+          </header>
+          {!plugins.length && (
+            <div className="plugin-empty-state">
+              <strong>还没有安装插件</strong>
+              <p>可以从上方选择本地插件包，或在配置可信插件市场后安装扩展。</p>
+            </div>
+          )}
+          {plugins.length > 0 && (
+            <div className="plugin-manager-layout">
+              <nav aria-label="已安装插件">
+                {plugins.map((plugin) => (
+                  <button type="button" key={plugin.id} className={selectedId === plugin.id ? "active" : ""} onClick={() => setSelectedId(plugin.id)}>
+                    <strong>{plugin.name}</strong><small>{plugin.version} · {plugin.state}</small>
+                  </button>
+                ))}
+              </nav>
+              <section className="plugin-manager-detail">
+                {selected && (
+                  <>
+                    <h3>{selected.name}</h3>
+                    <p>{selected.id} · {selected.publisher} · {selected.trustLevel}</p>
+                    <div className="plugin-action-row">
+                      {selected.state === "active"
+                        ? <button type="button" disabled={!runtime.view.managementAvailable} onClick={() => void mutate("disable")}>停用</button>
+                        : <button type="button" disabled={!runtime.view.managementAvailable || !selected.permissions.activationReady} onClick={() => void mutate("enable")}>启用</button>}
+                      <button type="button" disabled={!runtime.view.managementAvailable || !detail?.rollback.available} onClick={() => void mutate("rollback")}>回滚</button>
+                      <button type="button" disabled={!runtime.view.managementAvailable} onClick={() => void mutate("uninstall")}>卸载</button>
+                    </div>
+                    {!runtime.view.managementAvailable && <p>当前为只读模式：缺少受信任的桌面管理会话。</p>}
+                    {loading && <p>正在读取受保护的插件详情…</p>}
+                    <ProviderRows providers={selected.contributions.filter(
+                      (item): item is PluginProviderContribution => (
+                        item.kind === "symbol-provider/1" || item.kind === "market-data-provider/1"
+                      ),
+                    )} />
+                    <PaperRows
+                      contributions={selected.contributions.filter(
+                        (item): item is PluginPaperContribution => (
+                          item.kind === "account-provider/1" || item.kind === "order-executor/1"
+                        ),
+                      )}
+                      detail={detail}
+                      runtime={runtime}
+                      reload={reload}
+                    />
+                    {detail && (
+                      <>
+                        <h4>健康状态</h4>
+                        <p>{detail.health.available ? "可用" : `不可用：${detail.health.unavailableReason ?? "原因未知"}`}</p>
+                        <h4>更新与回滚</h4>
+                        <p>
+                          更新来源：签名插件市场或本地构建 · 自动更新已关闭
+                          {detail.update.latest ? ` · 已验证 ${detail.update.latest.version} 可用` : ""}
+                          {detail.update.reason ? ` · ${detail.update.reason}` : ""}
+                        </p>
+                        {detail.update.candidate && <p>候选版本：{detail.update.candidate.version} · {detail.update.candidate.phase}</p>}
+                        <p>回滚：{detail.rollback.available ? `可用 → ${detail.rollback.target?.version ?? detail.rollback.target?.state ?? "上一个激活版本"}` : detail.rollback.reason ?? "不可用"}</p>
+                        <h4>数据保留</h4>
+                        <p>停用或卸载后保留插件私有数据，不会自动删除。</p>
+                        <pre>{JSON.stringify(detail.dataRetention.storage, null, 2)}</pre>
+                        <h4>权限</h4>
+                        <PermissionRows runtime={runtime} detail={detail} reload={reload} />
+                      </>
+                    )}
+                  </>
                 )}
-                detail={detail}
-                runtime={runtime}
-                reload={reload}
-              />
-              {detail && (
-                <>
-                  <h4>Health</h4>
-                  <p>{detail.health.available ? "Available" : `Unavailable: ${detail.health.unavailableReason ?? "unknown"}`}</p>
-                  <h4>Updates and rollback</h4>
-                  <p>
-                    Updates: signed Marketplace or local artifact · automatic updates disabled
-                    {detail.update.latest ? ` · verified ${detail.update.latest.version} available` : ""}
-                    {detail.update.reason ? ` · ${detail.update.reason}` : ""}
-                  </p>
-                  {detail.update.candidate && <p>Candidate: {detail.update.candidate.version} · {detail.update.candidate.phase}</p>}
-                  <p>Rollback: {detail.rollback.available ? `available → ${detail.rollback.target?.version ?? detail.rollback.target?.state ?? "previous activation"}` : detail.rollback.reason ?? "unavailable"}</p>
-                  <h4>Data retention</h4>
-                  <p>Private data is retained on disable and uninstall. Automatic deletion is disabled.</p>
-                  <pre>{JSON.stringify(detail.dataRetention.storage, null, 2)}</pre>
-                  <h4>Permissions</h4>
-                  <PermissionRows runtime={runtime} detail={detail} reload={reload} />
-                </>
-              )}
-            </>
+              </section>
+            </div>
           )}
         </section>
-      </div>}
-    </Modal>
+      )}
+    </div>
   );
 }
 
@@ -1080,7 +1166,6 @@ export default function PluginPlatformSurfaces({ runtime }: { runtime: PluginPla
   return (
     <PluginUiErrorBoundary>
       <CommandPalette runtime={runtime} />
-      <PluginManager runtime={runtime} />
       {openSettings && <SettingsSurface runtime={runtime} contribution={openSettings} />}
       {openView && <ViewSurface key={openView.id} runtime={runtime} contribution={openView} />}
       {runtime.view.error && <div className="plugin-platform-notice plugin-platform-error" role="alert">Plugin Platform unavailable: {runtime.view.error}</div>}

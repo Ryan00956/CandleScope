@@ -245,7 +245,22 @@ async def test_phase14_history_policy_resolves_roles_gaps_and_budget(
             max_dataset_rows=10,
         )
         assert all_available.visible_history_rows == 4
+        assert all_available.effective_warmup_bars == 2
         assert all_available.actual_visible_history_start_ms == START_MS
+        lazy_all_available = resolve_history_policy(
+            await _request(
+                service,
+                visible_mode="ALL_AVAILABLE",
+                visible_duration_ms=None,
+            ),
+            {
+                **selection,
+                "selected_start_ms": START_MS + 100_000 * INTERVAL_MS,
+            },
+            max_dataset_rows=8,
+        )
+        assert lazy_all_available.visible_history_rows == 100_000
+        assert lazy_all_available.effective_warmup_bars == 2
 
         with pytest.raises(
             TrainingRunError,

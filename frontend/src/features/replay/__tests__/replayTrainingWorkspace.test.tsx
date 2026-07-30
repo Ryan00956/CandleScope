@@ -57,6 +57,9 @@ test("v2 workspace owns the same source-neutral market slots without legacy repl
   assert.doesNotMatch(workspace, /ReplayRightRail/);
   assert.match(workspace, /ReviewMode 只读图表工具/);
   assert.match(workspace, /review === null \? viewer\.seriesStore : reviewSeriesStore/);
+  assert.match(workspace, /aria-controls="replay-integrity-drawer"/);
+  assert.match(workspace, /integrityOpen &&/);
+  assert.match(workspace, /event\.key !== "Escape"/);
   assert.doesNotMatch(workspace, /<header\s+className="top-bar replay-top-bar"/);
 });
 
@@ -117,7 +120,9 @@ test("capability surface never renders unsupported history as numeric zero or st
   assert.equal(model.SIMULATED_LIQUIDATION.state, "AVAILABLE_APPROX");
   assert.equal(model.ORDER_BOOK.state, "UNSUPPORTED_NO_HISTORY");
   assert.equal(model.AGG_TRADE_TAPE.state, "UNSUPPORTED_SOURCE_MODE");
-  assert.equal(model.ORDER_FLOW.state, "UNSUPPORTED_SOURCE_MODE");
+  assert.equal(model.ORDER_FLOW.state, "AVAILABLE_APPROX");
+  assert.equal(model.ORDER_FLOW.value, "KLINE_TAKER_PROXY");
+  assert.match(model.ORDER_FLOW.detail, /taker buy volume/);
   assert.equal(model.ORDER_BOOK.value, "--");
   assert.match(model.FUNDING.detail, /交易所历史 funding\/mark/);
   assert.match(model.FUNDING.detail, /近似账户模拟/);
@@ -185,6 +190,18 @@ test("viewer projection subscription is stable across equivalent runtime snapsho
     /\[baseInterval, displayInterval, seriesStore, sourceStore\]/,
   );
   assert.doesNotMatch(runtime, /\[config, seriesStore, sourceStore, viewerState\]/);
+});
+
+test("history paging stays non-blocking and uses viewer delta projection", () => {
+  const workspace = source("src/features/replay/ReplayTrainingPageShell.tsx");
+  const runtime = source("src/features/replay/useReplayViewerRuntime.ts");
+  assert.doesNotMatch(
+    workspace,
+    /loading=\{review === null\s*&&\s*\([^)]*history\.loading/s,
+  );
+  assert.match(workspace, /history\.loading && <span>Loading older replay data/);
+  assert.match(runtime, /applyReplayViewerSeriesDelta/);
+  assert.match(runtime, /pendingSourceDeltas\.push\(delta\)/);
 });
 
 test("viewer projection coalesces source bursts to one rebuild per browser frame", () => {

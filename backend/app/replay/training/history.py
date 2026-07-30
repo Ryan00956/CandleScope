@@ -1,13 +1,21 @@
-"""Immutable, revealed-only history pages for the replay training workspace."""
+"""Revealed-only history pages for the replay training workspace."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 
-from app.replay.bars.builder import ReplayBarBuilder
+from app.data_engine.interval_policy import compute_bucket_start_ms, parse_interval_ms
+from app.replay.bars.builder import ReplayBarBuilder, ReplayDisplayBar
 from app.replay.canonical import canonical_sha256
-from app.replay.dataset import BarDatasetSnapshot, remap_bar_snapshot_time
+from app.replay.catalog import KlinesReadRepository
+from app.replay.dataset import (
+    BarDatasetSnapshot,
+    remap_bar_snapshot_time,
+    validate_replay_repository_bar,
+)
+from app.replay.errors import ReplayDomainError
 from app.replay.models import ReplaySessionConfig
 
 from .errors import TrainingRunError
@@ -16,6 +24,7 @@ from .errors import TrainingRunError
 HISTORY_SCHEMA_VERSION = "replay.history.v2"
 HISTORY_EPOCH_SCHEMA_VERSION = "replay.history-epoch.v2"
 MAX_HISTORY_PAGE_BARS = 1_000
+MAX_HISTORY_QUERY_BASE_ROWS = 100_000
 
 
 def _fail(code: str, message: str, *, status_code: int = 409) -> TrainingRunError:
@@ -133,6 +142,188 @@ def _history_epoch(
     )
 
 
+def _history_mode(raw_policy: Mapping[str, object]) -> str:
+    lookback = raw_policy.get("visible_history_lookback")
+    if (
+        not isinstance(lookback, Mapping)
+        or set(lookback) != {"mode", "duration_ms"}
+    ):
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training history policy is invalid",
+            status_code=503,
+        )
+    mode = lookback.get("mode")
+    duration_ms = lookback.get("duration_ms")
+    if (
+        mode not in {"DURATION", "ALL_AVAILABLE"}
+        or (mode == "DURATION" and (
+            isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, int)
+            or duration_ms < 1
+        ))
+        or (mode == "ALL_AVAILABLE" and duration_ms is not None)
+    ):
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training history policy is invalid",
+            status_code=503,
+        )
+    return str(mode)
+
+
+def _build_all_available_page(
+    *,
+    repository: KlinesReadRepository,
+    config: ReplaySessionConfig,
+    snapshot: BarDatasetSnapshot,
+    before_ms: int,
+    revealed_boundary_ms: int,
+    limit: int,
+    history_boundary_ms: int,
+    actual_visible_history_start_ms: int,
+    actual_replay_start_ms: int,
+    interval_ms: int,
+) -> tuple[list[ReplayDisplayBar], int, bool]:
+    """Read one bounded chart page without expanding the execution snapshot."""
+
+    timeline_delta_ms = snapshot.replay_start_ms - actual_replay_start_ms
+    public_end_ms = min(before_ms, snapshot.replay_start_ms)
+    actual_end_ms = public_end_ms - timeline_delta_ms
+    actual_end_ms = compute_bucket_start_ms(
+        actual_end_ms,
+        interval_ms,
+        interval=config.base_interval,
+    )
+    public_end_ms = actual_end_ms + timeline_delta_ms
+    if actual_end_ms <= actual_visible_history_start_ms:
+        return [], before_ms, False
+    distance_ms = actual_end_ms - actual_visible_history_start_ms
+    if distance_ms % interval_ms:
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training history boundary is not base-interval aligned",
+            status_code=503,
+        )
+
+    display_interval_ms = parse_interval_ms(config.display_interval)
+    if display_interval_ms is None or display_interval_ms < interval_ms:
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training display interval is invalid",
+            status_code=503,
+        )
+    components_per_display = max(
+        1,
+        (display_interval_ms + interval_ms - 1) // interval_ms,
+    )
+    available_rows = distance_ms // interval_ms
+    target_rows = max(
+        components_per_display * 2,
+        (limit + 1) * components_per_display,
+    )
+    query_rows = min(
+        available_rows,
+        MAX_HISTORY_QUERY_BASE_ROWS,
+        target_rows,
+    )
+    query_start_ms = actual_end_ms - query_rows * interval_ms
+    try:
+        raw_rows = repository.query_bars(
+            config.symbol,
+            config.base_interval,
+            start_ms=query_start_ms,
+            end_ms=actual_end_ms - interval_ms,
+            limit=query_rows,
+            order="ASC",
+            exchange=config.exchange,
+            market_type=config.market_type,
+        )
+    except Exception as exc:
+        raise _fail(
+            "HISTORY_SOURCE_UNAVAILABLE",
+            "replay history source could not be read",
+            status_code=503,
+        ) from exc
+    if len(raw_rows) != query_rows:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "replay history source no longer covers the bound continuous range",
+            status_code=503,
+        )
+
+    actual_rows = []
+    try:
+        for index, raw in enumerate(raw_rows):
+            actual_rows.append(
+                validate_replay_repository_bar(
+                    raw,
+                    identity=snapshot.identity,
+                    interval=config.base_interval,
+                    interval_ms=interval_ms,
+                    expected_open_ms=query_start_ms + index * interval_ms,
+                    # Every requested history row must already have been closed
+                    # at the immutable replay start.
+                    now_ms=actual_replay_start_ms,
+                )
+            )
+    except ReplayDomainError as exc:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "replay history source changed inside the bound continuous range",
+            status_code=503,
+        ) from exc
+
+    public_rows = (
+        actual_rows
+        if timeline_delta_ms == 0
+        else [
+            replace(
+                row,
+                open_time_ms=row.open_time_ms + timeline_delta_ms,
+                close_time_ms=row.close_time_ms + timeline_delta_ms,
+            )
+            for row in actual_rows
+        ]
+    )
+    try:
+        builder = ReplayBarBuilder(
+            base_interval=config.base_interval,
+            display_interval=config.display_interval,
+            replay_start_ms=public_end_ms,
+            warmup_bars=public_rows,
+            max_closed_bars=max(1, limit + 1),
+        )
+    except ReplayDomainError as exc:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "replay history source cannot reconstruct the display interval",
+            status_code=503,
+        ) from exc
+
+    eligible = [
+        bar
+        for bar in builder.closed_bars
+        if bar.open_time_ms >= history_boundary_ms
+        and bar.open_time_ms < before_ms
+        and bar.close_time_ms <= revealed_boundary_ms
+        and bar.last_base_open_ms <= revealed_boundary_ms
+    ]
+    page = eligible[-limit:]
+    has_more = (
+        query_start_ms > actual_visible_history_start_ms
+        or len(eligible) > len(page)
+    )
+    if not page and has_more:
+        raise _fail(
+            "HISTORY_PAGE_INTERVAL_TOO_LARGE",
+            "display interval requires more base rows than one history page can validate",
+            status_code=409,
+        )
+    next_before_ms = page[0].open_time_ms if page else before_ms
+    return list(page), next_before_ms, has_more
+
+
 def build_history_page(
     *,
     binding: Mapping[str, object],
@@ -142,6 +333,7 @@ def build_history_page(
     limit: int,
     data_epoch: str,
     expected_history_epoch: str | None,
+    repository: KlinesReadRepository | None = None,
 ) -> dict[str, object]:
     for field_name, value in (
         ("before_ms", before_ms),
@@ -222,11 +414,13 @@ def build_history_page(
             "training history policy is invalid",
             status_code=503,
         )
+    history_mode = _history_mode(raw_policy)
     try:
         actual_replay_start_ms = int(raw_policy["actual_replay_start_ms"])
         actual_visible_history_start_ms = int(
             raw_policy["actual_visible_history_start_ms"]
         )
+        interval_ms = int(raw_policy["interval_ms"])
     except (TypeError, ValueError) as exc:
         raise _fail(
             "HISTORY_POLICY_INVALID",
@@ -245,6 +439,12 @@ def build_history_page(
         raise _fail(
             "HISTORY_POLICY_INVALID",
             "training history boundary is invalid",
+            status_code=503,
+        )
+    if interval_ms < 1:
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training history policy is invalid",
             status_code=503,
         )
     policy_hash = str(raw_policy["policy_hash"])
@@ -268,29 +468,49 @@ def build_history_page(
             "training history epoch does not match",
         )
 
-    builder = ReplayBarBuilder(
-        base_interval=config.base_interval,
-        display_interval=config.display_interval,
-        replay_start_ms=snapshot.replay_start_ms,
-        warmup_bars=snapshot.warmup_rows,
-        max_closed_bars=max(1, snapshot.row_count),
-    )
-    for replay_bar in snapshot.replay_rows:
-        if replay_bar.close_time_ms > revealed_boundary_ms:
-            break
-        builder.apply_bar(replay_bar)
+    if history_mode == "ALL_AVAILABLE":
+        if repository is None:
+            raise _fail(
+                "HISTORY_SOURCE_UNAVAILABLE",
+                "replay history source is unavailable",
+                status_code=503,
+            )
+        page, next_before_ms, has_more = _build_all_available_page(
+            repository=repository,
+            config=config,
+            snapshot=snapshot,
+            before_ms=before_ms,
+            revealed_boundary_ms=revealed_boundary_ms,
+            limit=limit,
+            history_boundary_ms=history_boundary_ms,
+            actual_visible_history_start_ms=actual_visible_history_start_ms,
+            actual_replay_start_ms=actual_replay_start_ms,
+            interval_ms=interval_ms,
+        )
+    else:
+        builder = ReplayBarBuilder(
+            base_interval=config.base_interval,
+            display_interval=config.display_interval,
+            replay_start_ms=snapshot.replay_start_ms,
+            warmup_bars=snapshot.warmup_rows,
+            max_closed_bars=max(1, snapshot.row_count),
+        )
+        for replay_bar in snapshot.replay_rows:
+            if replay_bar.close_time_ms > revealed_boundary_ms:
+                break
+            builder.apply_bar(replay_bar)
 
-    eligible = [
-        bar
-        for bar in builder.closed_bars
-        if bar.open_time_ms >= history_boundary_ms
-        and bar.open_time_ms < before_ms
-        and bar.close_time_ms <= revealed_boundary_ms
-        and bar.last_base_open_ms <= revealed_boundary_ms
-    ]
-    page = eligible[-limit:]
-    has_more = len(eligible) > len(page)
-    next_before_ms = page[0].open_time_ms if page else before_ms
+        eligible = [
+            bar
+            for bar in builder.closed_bars
+            if bar.open_time_ms >= history_boundary_ms
+            and bar.open_time_ms < before_ms
+            and bar.close_time_ms <= revealed_boundary_ms
+            and bar.last_base_open_ms <= revealed_boundary_ms
+        ]
+        page = eligible[-limit:]
+        has_more = len(eligible) > len(page)
+        next_before_ms = page[0].open_time_ms if page else before_ms
     return {
         "protocol": "replay.v2",
         "schema_version": HISTORY_SCHEMA_VERSION,
@@ -319,5 +539,6 @@ def build_history_page(
 __all__ = [
     "HISTORY_SCHEMA_VERSION",
     "MAX_HISTORY_PAGE_BARS",
+    "MAX_HISTORY_QUERY_BASE_ROWS",
     "build_history_page",
 ]

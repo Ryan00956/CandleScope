@@ -619,107 +619,132 @@ class BarDatasetBuilder:
         expected_open_ms: int,
         now_ms: int,
     ) -> ReplayBar:
-        try:
-            open_time_ms = int(raw["open_time"])
-            close_time_ms = int(raw["close_time"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_INCOMPLETE,
-                "BAR open_time/close_time is invalid",
-            ) from exc
-        if open_time_ms != expected_open_ms:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATA_GAP,
-                f"BAR open_time sequence gap: expected {expected_open_ms}, got {open_time_ms}",
-            )
-        expected_close = open_time_ms + interval_ms - 1
-        if close_time_ms != expected_close or close_time_ms >= now_ms:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_INCOMPLETE,
-                "BAR close_time does not identify a fully closed interval",
-            )
-        if not row_is_closed(dict(raw), default=True):
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_INCOMPLETE,
-                "BAR row is marked forming rather than closed",
-            )
-        for field_name, expected in (
-            ("exchange", entry.identity.exchange),
-            ("market_type", entry.identity.market_type),
-            ("symbol", entry.identity.symbol),
-            ("interval", entry.selected_base_interval),
-        ):
-            actual = raw.get(field_name)
-            if actual is not None and str(actual) != expected:
-                raise ReplayDomainError(
-                    ReplayErrorCode.DATASET_MISMATCH,
-                    f"BAR {field_name} does not match catalog identity",
-                )
-        try:
-            open_value = _decimal_value(raw.get("open"), field_name="open", positive=True)
-            high_value = _decimal_value(raw.get("high"), field_name="high", positive=True)
-            low_value = _decimal_value(raw.get("low"), field_name="low", positive=True)
-            close_value = _decimal_value(raw.get("close"), field_name="close", positive=True)
-            volume = _decimal_value(raw.get("volume"), field_name="volume")
-            quote_volume = _optional_decimal(
-                raw.get("quote_volume"), field_name="quote_volume"
-            )
-            taker_buy_base = _optional_decimal(
-                raw.get("taker_buy_base"), field_name="taker_buy_base"
-            )
-            taker_buy_quote = _optional_decimal(
-                raw.get("taker_buy_quote"), field_name="taker_buy_quote"
-            )
-        except (TypeError, ValueError) as exc:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_INCOMPLETE,
-                f"BAR {exc}",
-            ) from exc
-        open_decimal = Decimal(open_value)
-        high_decimal = Decimal(high_value)
-        low_decimal = Decimal(low_value)
-        close_decimal = Decimal(close_value)
-        if (
-            high_decimal < max(open_decimal, close_decimal)
-            or low_decimal > min(open_decimal, close_decimal)
-            or low_decimal > high_decimal
-        ):
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_INCOMPLETE,
-                "BAR OHLC relationship is invalid",
-            )
-        trades_raw = raw.get("trades")
-        if trades_raw is None:
-            trades = None
-        elif isinstance(trades_raw, bool) or not isinstance(trades_raw, int) or trades_raw < 0:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_INCOMPLETE,
-                "BAR trades must be a non-negative integer or null",
-            )
-        else:
-            trades = trades_raw
-        source = raw.get("source", "unknown")
-        try:
-            source_value = validate_identifier(source, field_name="source")
-        except (TypeError, ValueError) as exc:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_INCOMPLETE,
-                "BAR source identifier is invalid",
-            ) from exc
-        return ReplayBar(
-            open_time_ms=open_time_ms,
-            close_time_ms=close_time_ms,
-            open=open_value,
-            high=high_value,
-            low=low_value,
-            close=close_value,
-            volume=volume,
-            quote_volume=quote_volume,
-            trades=trades,
-            taker_buy_base=taker_buy_base,
-            taker_buy_quote=taker_buy_quote,
-            source=source_value,
+        return validate_replay_repository_bar(
+            raw,
+            identity=entry.identity,
+            interval=entry.selected_base_interval,
+            interval_ms=interval_ms,
+            expected_open_ms=expected_open_ms,
+            now_ms=now_ms,
         )
+
+
+def validate_replay_repository_bar(
+    raw: Mapping[str, object],
+    *,
+    identity: ReplaySeriesIdentity,
+    interval: str,
+    interval_ms: int,
+    expected_open_ms: int,
+    now_ms: int,
+) -> ReplayBar:
+    """Validate one repository row before it enters any replay projection."""
+
+    try:
+        open_time_ms = int(raw["open_time"])
+        close_time_ms = int(raw["close_time"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReplayDomainError(
+            ReplayErrorCode.DATASET_INCOMPLETE,
+            "BAR open_time/close_time is invalid",
+        ) from exc
+    if open_time_ms != expected_open_ms:
+        raise ReplayDomainError(
+            ReplayErrorCode.DATA_GAP,
+            f"BAR open_time sequence gap: expected {expected_open_ms}, got {open_time_ms}",
+        )
+    expected_close = open_time_ms + interval_ms - 1
+    if close_time_ms != expected_close or close_time_ms >= now_ms:
+        raise ReplayDomainError(
+            ReplayErrorCode.DATASET_INCOMPLETE,
+            "BAR close_time does not identify a fully closed interval",
+        )
+    if not row_is_closed(dict(raw), default=True):
+        raise ReplayDomainError(
+            ReplayErrorCode.DATASET_INCOMPLETE,
+            "BAR row is marked forming rather than closed",
+        )
+    for field_name, expected in (
+        ("exchange", identity.exchange),
+        ("market_type", identity.market_type),
+        ("symbol", identity.symbol),
+        ("interval", interval),
+    ):
+        actual = raw.get(field_name)
+        if actual is not None and str(actual) != expected:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                f"BAR {field_name} does not match catalog identity",
+            )
+    try:
+        open_value = _decimal_value(raw.get("open"), field_name="open", positive=True)
+        high_value = _decimal_value(raw.get("high"), field_name="high", positive=True)
+        low_value = _decimal_value(raw.get("low"), field_name="low", positive=True)
+        close_value = _decimal_value(raw.get("close"), field_name="close", positive=True)
+        volume = _decimal_value(raw.get("volume"), field_name="volume")
+        quote_volume = _optional_decimal(
+            raw.get("quote_volume"), field_name="quote_volume"
+        )
+        taker_buy_base = _optional_decimal(
+            raw.get("taker_buy_base"), field_name="taker_buy_base"
+        )
+        taker_buy_quote = _optional_decimal(
+            raw.get("taker_buy_quote"), field_name="taker_buy_quote"
+        )
+    except (TypeError, ValueError) as exc:
+        raise ReplayDomainError(
+            ReplayErrorCode.DATASET_INCOMPLETE,
+            f"BAR {exc}",
+        ) from exc
+    open_decimal = Decimal(open_value)
+    high_decimal = Decimal(high_value)
+    low_decimal = Decimal(low_value)
+    close_decimal = Decimal(close_value)
+    if (
+        high_decimal < max(open_decimal, close_decimal)
+        or low_decimal > min(open_decimal, close_decimal)
+        or low_decimal > high_decimal
+    ):
+        raise ReplayDomainError(
+            ReplayErrorCode.DATASET_INCOMPLETE,
+            "BAR OHLC relationship is invalid",
+        )
+    trades_raw = raw.get("trades")
+    if trades_raw is None:
+        trades = None
+    elif (
+        isinstance(trades_raw, bool)
+        or not isinstance(trades_raw, int)
+        or trades_raw < 0
+    ):
+        raise ReplayDomainError(
+            ReplayErrorCode.DATASET_INCOMPLETE,
+            "BAR trades must be a non-negative integer or null",
+        )
+    else:
+        trades = trades_raw
+    source = raw.get("source", "unknown")
+    try:
+        source_value = validate_identifier(source, field_name="source")
+    except (TypeError, ValueError) as exc:
+        raise ReplayDomainError(
+            ReplayErrorCode.DATASET_INCOMPLETE,
+            "BAR source identifier is invalid",
+        ) from exc
+    return ReplayBar(
+        open_time_ms=open_time_ms,
+        close_time_ms=close_time_ms,
+        open=open_value,
+        high=high_value,
+        low=low_value,
+        close=close_value,
+        volume=volume,
+        quote_volume=quote_volume,
+        trades=trades,
+        taker_buy_base=taker_buy_base,
+        taker_buy_quote=taker_buy_quote,
+        source=source_value,
+    )
 
 
 class BarDatasetPool:

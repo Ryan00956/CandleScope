@@ -8540,8 +8540,9 @@ class TrainingRunStore:
     ) -> dict[str, object]:
         """Read the immutable source binding and latest durable public cursor.
 
-        This deliberately reads only replay-owned SQLite tables. Historical
-        pages must never fall through to the active market-data repository.
+        This query deliberately reads only replay-owned SQLite tables. The
+        service may subsequently page pre-start chart history through its
+        read-only replay repository when the bound policy is ALL_AVAILABLE.
         """
 
         def read(connection: sqlite3.Connection) -> sqlite3.Row | None:

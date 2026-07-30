@@ -111,17 +111,38 @@ test("Phase 14 create payload separates indicator warmup from visible history", 
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const draft = createTrainingRunDraft(sourceCatalog);
   assert.equal(draft.indicatorWarmupBars, 200);
-  assert.equal(draft.visibleHistoryMode, "DURATION");
-  assert.equal(draft.visibleHistoryLookbackMs, 12_000_000);
+  assert.equal(draft.visibleHistoryMode, "ALL_AVAILABLE");
+  assert.equal(draft.visibleHistoryLookbackMs, null);
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, sourceCatalog);
   assert.equal(evaluation.canSubmit, true);
   const payload = buildTrainingRunCreateRequest(draft, evaluation, sourceCatalog);
   assert.equal(payload.indicator_warmup_bars, 200);
   assert.deepEqual(payload.visible_history_lookback, {
-    mode: "DURATION",
-    duration_ms: 12_000_000,
+    mode: "ALL_AVAILABLE",
+    duration_ms: null,
   });
   assert.equal("warmup_bars" in payload, false);
+});
+
+test("launch-context display periods keep the all-available history default", () => {
+  const sourceCatalog = catalog();
+  const launchContext = {
+    schema_version: "replay.launch-context.v1" as const,
+    source: "LIVE_PAGE" as const,
+    exchange: "binance",
+    market_type: "spot",
+    symbol: "BTCUSDT",
+    display_interval: "1h",
+    watchlist_snapshot: {
+      schema_version: "replay.watchlist-snapshot.v1" as const,
+      groups: [],
+    },
+  };
+  const draft = createTrainingRunDraft(sourceCatalog, launchContext);
+  assert.equal(draft.baseInterval, "1m");
+  assert.equal(draft.displayInterval, "1h");
+  assert.equal(draft.visibleHistoryMode, "ALL_AVAILABLE");
+  assert.equal(draft.visibleHistoryLookbackMs, null);
 });
 
 test("Phase 14 model rejects misalignment and accepts explicit all-available policy", () => {
@@ -129,18 +150,18 @@ test("Phase 14 model rejects misalignment and accepts explicit all-available pol
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const base = createTrainingRunDraft(sourceCatalog);
   const misaligned = evaluateTrainingRunDraft(
-    { ...base, visibleHistoryLookbackMs: 60_001 },
+    {
+      ...base,
+      visibleHistoryMode: "DURATION",
+      visibleHistoryLookbackMs: 60_001,
+    },
     capabilities,
     sourceCatalog,
   );
   assert.equal(misaligned.canSubmit, false);
   assert.match(misaligned.errors.join("\n"), /精确对齐基础周期/);
 
-  const allAvailable = {
-    ...base,
-    visibleHistoryMode: "ALL_AVAILABLE" as const,
-    visibleHistoryLookbackMs: null,
-  };
+  const allAvailable = base;
   const accepted = evaluateTrainingRunDraft(
     allAvailable,
     capabilities,

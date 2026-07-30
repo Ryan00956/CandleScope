@@ -169,9 +169,12 @@ function parseHistoryPolicy(value: unknown, path: string): ReplayHistoryPolicy {
   const forwardCacheMs = integer(source.forward_cache_ms, `${path}.forward_cache_ms`);
   const intervalMs = integer(source.interval_ms, `${path}.interval_ms`);
   if (indicatorWarmup < 1 || intervalMs < 1 || forwardCacheMs < 1
-    || effectiveWarmup < indicatorWarmup || effectiveWarmup < visibleRows
+    || effectiveWarmup < indicatorWarmup
     || (mode === "DURATION"
-      && (durationMs === null || durationMs < 1 || durationMs !== visibleRows * intervalMs))
+      && (durationMs === null
+        || durationMs < 1
+        || durationMs !== visibleRows * intervalMs
+        || effectiveWarmup < visibleRows))
     || (mode === "ALL_AVAILABLE" && durationMs !== null)) {
     fail(path, "contains inconsistent history bounds");
   }

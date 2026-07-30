@@ -1,8 +1,10 @@
 # Replay feature boundary
 
 Replay is a server-authoritative historical market runtime. It is not a source
-toggle inside the live application. Both replay product flags remain disabled
-by default while the phase-gated v2 workbench is built and verified.
+toggle inside the live application. The backend replay capability and live-page
+entry remain disabled by default. The v2 product selector defaults on, so an
+enabled replay entry opens the verified v2 workbench unless an operator
+explicitly selects the v1 rollback path.
 
 The phase-gated v2 workbench now includes the Training Hub, source-neutral market
 workspace, ViewerState and aligned replay controls, Phase 4 server-owned time
@@ -29,6 +31,16 @@ remain disabled by default. Explicit GC is LRU, rehydration-aware, and requires
 a fresh dry-run plan hash before any replay-owned file can be reclaimed;
 embedded/non-rebuildable archives are never candidates.
 
+New training drafts default to `ALL_AVAILABLE`. Indicator warmup remains an
+execution/indicator concern only; dragging the chart left requests bounded
+`replay.history.v2` pages through the replay service until the run-bound
+continuous source boundary. Existing `DURATION` runs retain their fixed left
+edge. Neither mode may read a live browser feed or expose bars to the right of
+the durable replay cursor. The chart keeps a bounded in-memory window: if deep
+left paging evicts newer rows, a right-edge gesture atomically restores the
+latest replay-authoritative window and resets paging so the same history can
+be traversed again without touching live market data.
+
 Phase 8 adds a server-authoritative four-plan fast-forward response. The
 optimization flag remains off by default; disabling it routes every advance to
 the proven `FULL_EVENT_SCAN` reference path. With it enabled, only an account
@@ -45,9 +57,10 @@ aggressor/CVD is explicitly approximate because side is inferred from
 buyer-maker. Any gap or epoch change clears the projection and requires resync.
 BAR shows `UNSUPPORTED_SOURCE_MODE`; it never renders missing history as zero.
 
-With the repository-default `VITE_REPLAY_PRODUCT_V2_ENABLED=0`, composition is
-still exactly v1. The backend additionally requires both replay flags before
-serving v2 routes. The frozen v1 public execution enum and legacy
+With the repository-default `VITE_REPLAY_PRODUCT_V2_ENABLED=1`, the configure
+entry opens the v2 Hub. Explicit `0` keeps composition exactly v1. The backend
+still requires its authoritative replay gate before serving v2 routes. The
+frozen v1 public execution enum and legacy
 `PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER` restore path remain unchanged; the v2
 TrainingRun selects its internal execution version explicitly. Historical-exact
 funding remains fail-closed because this repository has no aligned historical
@@ -82,6 +95,13 @@ status  source-specific health and lifecycle state
 The shared chart/workspace consumes that contract and one `SeriesWindowStore`.
 It does not select a source. Replay source identity includes the opaque session
 and data epoch so live and replay caches cannot collide.
+
+Once the chart is mounted, replay history paging is non-blocking: request
+progress stays in the status bar, source history remains a `prepend`, and the
+ViewerState projection forwards `prepend` plus any boundary `mid-merge` instead
+of publishing a replacement dataset. Playback similarly forwards `tick` and
+`append`. Only initial load, interval/identity changes, and authoritative stream
+resync may replace the projected window.
 
 ## Allowed dependencies
 

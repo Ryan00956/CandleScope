@@ -177,14 +177,14 @@ def test_replay_v2_source_mix_and_silent_disclosure_downgrade_fail_closed() -> N
         )
 
 
-def test_replay_v2_flags_are_strict_default_off_and_nested_under_replay(
+def test_replay_v2_flags_are_strict_default_on_and_nested_under_replay(
     tmp_path: Path,
 ) -> None:
     default = load_replay_settings(
         {}, data_dir=tmp_path, klines_db_path=tmp_path / "candlescope.db"
     )
     assert default.enabled is False
-    assert default.product_v2_enabled is False
+    assert default.product_v2_enabled is True
     assert default.product_v2_available is False
     assert default.replay_segment_download_worker_enabled is False
     assert default.replay_segment_auto_gc_enabled is False
@@ -193,15 +193,15 @@ def test_replay_v2_flags_are_strict_default_off_and_nested_under_replay(
     assert default.replay_account_history_max_archive_bytes == 128 * 1024**3
 
     nested_off = load_replay_settings(
-        {"REPLAY_PRODUCT_V2_ENABLED": "1"},
+        {"REPLAY_PRODUCT_V2_ENABLED": "0"},
         data_dir=tmp_path,
         klines_db_path=tmp_path / "candlescope.db",
     )
-    assert nested_off.product_v2_enabled is True
+    assert nested_off.product_v2_enabled is False
     assert nested_off.product_v2_available is False
 
     enabled = load_replay_settings(
-        {"REPLAY_ENABLED": "1", "REPLAY_PRODUCT_V2_ENABLED": "1"},
+        {"REPLAY_ENABLED": "1"},
         data_dir=tmp_path,
         klines_db_path=tmp_path / "candlescope.db",
     )
@@ -228,7 +228,18 @@ def test_replay_v2_flags_are_strict_default_off_and_nested_under_replay(
 
 
 @pytest.mark.anyio
-async def test_replay_v2_phase0_http_paths_fail_closed_by_default() -> None:
+async def test_replay_v2_http_paths_fail_closed_while_core_default_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        replay_api,
+        "REPLAY_SETTINGS",
+        replace(
+            replay_api.REPLAY_SETTINGS,
+            enabled=False,
+            product_v2_enabled=True,
+        ),
+    )
     app = _app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -271,7 +282,18 @@ async def test_replay_v2_enabled_flag_without_started_runtime_fails_closed(
     }
 
 
-def test_replay_v2_phase0_websocket_path_fails_before_v1_subscription() -> None:
+def test_replay_v2_websocket_path_fails_while_core_default_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        replay_api,
+        "REPLAY_SETTINGS",
+        replace(
+            replay_api.REPLAY_SETTINGS,
+            enabled=False,
+            product_v2_enabled=True,
+        ),
+    )
     with TestClient(_app()) as client:
         with client.websocket_connect(
             "/api/v1/stream/replay/run-1?protocol=replay.v2"

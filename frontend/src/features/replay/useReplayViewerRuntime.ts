@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import type { WindowDelta, WindowDeltaType } from "../market-data/klineContracts.js";
+import { WINDOW_DELTA_TYPES } from "../market-data/window/windowDeltas.js";
 import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import type {
   ReplayAccountAuditResponse,
@@ -13,7 +15,10 @@ import type {
 } from "./replayV2Types.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
 import type { ReplayPeriodSummaryStatusResponse } from "./replayPeriodSummary.js";
-import { rebuildReplayViewerSeries } from "./replayViewerProjection.js";
+import {
+  applyReplayViewerSeriesDelta,
+  rebuildReplayViewerSeries,
+} from "./replayViewerProjection.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 
 
@@ -75,6 +80,49 @@ export function createReplayViewerProjectionScheduler(
       cancelFrame(pendingFrame);
       pendingFrame = null;
     },
+  };
+}
+
+export function coalesceReplayViewerSourceDeltas(
+  deltas: readonly WindowDelta[],
+): WindowDelta | null {
+  const changed = deltas.filter((delta) => delta.changed);
+  if (changed.length === 0) return null;
+  if (changed.length === 1) return changed[0] ?? null;
+  const types = changed.map((delta) => delta.type);
+  let type: WindowDeltaType;
+  if (types.includes(WINDOW_DELTA_TYPES.REPLACE)) {
+    type = WINDOW_DELTA_TYPES.REPLACE;
+  } else if (types.includes(WINDOW_DELTA_TYPES.CLEAR)) {
+    // A clear mixed with another write describes a new authoritative shape.
+    type = WINDOW_DELTA_TYPES.REPLACE;
+  } else if (types.every((item) => item === WINDOW_DELTA_TYPES.TICK)) {
+    type = WINDOW_DELTA_TYPES.TICK;
+  } else if (types.every((item) => (
+    item === WINDOW_DELTA_TYPES.TICK || item === WINDOW_DELTA_TYPES.APPEND
+  ))) {
+    type = WINDOW_DELTA_TYPES.APPEND;
+  } else if (types.every((item) => item === WINDOW_DELTA_TYPES.PREPEND)) {
+    type = WINDOW_DELTA_TYPES.PREPEND;
+  } else {
+    type = WINDOW_DELTA_TYPES.MID_MERGE;
+  }
+  return {
+    type,
+    changed: true,
+    addedLeft: changed.reduce((total, delta) => (
+      total + (Number(delta.addedLeft) || 0)
+    ), 0),
+    addedRight: changed.reduce((total, delta) => (
+      total + (Number(delta.addedRight) || 0)
+    ), 0),
+    trimmedLeft: changed.reduce((total, delta) => (
+      total + (Number(delta.trimmedLeft) || 0)
+    ), 0),
+    trimmedRight: changed.reduce((total, delta) => (
+      total + (Number(delta.trimmedRight) || 0)
+    ), 0),
+    source: "replay-viewer-source-burst",
   };
 }
 
@@ -245,18 +293,35 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   }, [marketTracks?.global_clock.state, marketTracks?.run_id, refreshMarketTracks]);
 
   useEffect(() => {
+    let initialized = false;
+    let pendingSourceDeltas: WindowDelta[] = [];
     const rebuild = () => {
       if (baseInterval === null || displayInterval === null) {
         seriesStore.clear({ source: "replay-viewer-unavailable" });
+        initialized = false;
+        pendingSourceDeltas = [];
         return;
       }
       try {
-        rebuildReplayViewerSeries(
-          seriesStore,
-          sourceStore,
-          baseInterval,
-          displayInterval,
-        );
+        const sourceDelta = coalesceReplayViewerSourceDeltas(pendingSourceDeltas);
+        pendingSourceDeltas = [];
+        if (!initialized || sourceDelta === null) {
+          rebuildReplayViewerSeries(
+            seriesStore,
+            sourceStore,
+            baseInterval,
+            displayInterval,
+          );
+          initialized = true;
+        } else {
+          applyReplayViewerSeriesDelta(
+            seriesStore,
+            sourceStore,
+            baseInterval,
+            displayInterval,
+            sourceDelta,
+          );
+        }
         setError(null);
       } catch (cause) {
         seriesStore.clear({ source: "replay-viewer-error" });
@@ -265,10 +330,14 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     };
     rebuild();
     const projectionScheduler = createReplayViewerProjectionScheduler(rebuild);
-    const unsubscribe = sourceStore.subscribe(projectionScheduler.schedule);
+    const unsubscribe = sourceStore.subscribe((delta) => {
+      pendingSourceDeltas.push(delta);
+      projectionScheduler.schedule();
+    });
     return () => {
       unsubscribe();
       projectionScheduler.cancel();
+      pendingSourceDeltas = [];
     };
   }, [baseInterval, displayInterval, seriesStore, sourceStore]);
 

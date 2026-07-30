@@ -10,6 +10,7 @@ export interface ReplayIntegrityReviewPanelProps {
   readonly runtime: ReplayRuntime;
   readonly integrityRuntime: ReplayIntegrityRuntime;
   readonly trainingState?: string | null;
+  readonly onClose?: (() => void) | undefined;
 }
 
 function AuditValue({ value }: { readonly value: Readonly<Record<string, unknown>> }) {
@@ -20,6 +21,7 @@ export default function ReplayIntegrityReviewPanel({
   runtime,
   integrityRuntime,
   trainingState = null,
+  onClose,
 }: ReplayIntegrityReviewPanelProps) {
   const [amount, setAmount] = useState("100");
   const [reason, setReason] = useState("training adjustment");
@@ -47,6 +49,17 @@ export default function ReplayIntegrityReviewPanel({
   if (integrity === null && integrityRuntime.error === null) {
     return (
       <section className="replay-integrity-panel" data-replay-panel="integrity" aria-label="训练完整性">
+        <header className="replay-integrity-heading">
+          <div>
+            <span className="training-hub-kicker">服务端校验 · 只读证据</span>
+            <h2>完整性与复盘</h2>
+          </div>
+          {onClose !== undefined && (
+            <button type="button" data-replay-action="close-integrity" onClick={onClose}>
+              关闭
+            </button>
+          )}
+        </header>
         <p role="status">正在加载服务端完整性与权益证据…</p>
       </section>
     );
@@ -101,12 +114,19 @@ export default function ReplayIntegrityReviewPanel({
     >
       <header className="replay-integrity-heading">
         <div>
-          <span className="training-hub-kicker">SERVER-AUTHORITATIVE · PHASE 17</span>
+          <span className="training-hub-kicker">服务端校验 · 只读证据</span>
           <h2 id="replay-integrity-title">完整性与复盘</h2>
         </div>
-        <button type="button" disabled={busy} onClick={() => void integrityRuntime.actions.refresh()}>
-          刷新证据
-        </button>
+        <div className="replay-integrity-heading-actions">
+          <button type="button" disabled={busy} onClick={() => void integrityRuntime.actions.refresh()}>
+            刷新
+          </button>
+          {onClose !== undefined && (
+            <button type="button" data-replay-action="close-integrity" onClick={onClose}>
+              关闭
+            </button>
+          )}
+        </div>
       </header>
 
       {integrityRuntime.error !== null && (
@@ -179,7 +199,7 @@ export default function ReplayIntegrityReviewPanel({
           <section className="replay-run-rules" aria-labelledby="replay-run-rules-title">
             <div className="replay-integrity-section-heading">
               <div>
-                <h3 id="replay-run-rules-title">Run Rules</h3>
+                <h3 id="replay-run-rules-title">训练规则</h3>
                 <p>交易所规则不可变；用户杠杆上限是独立 overlay，实际值取二者较小值。</p>
               </div>
               <span>{rules === null ? "LOADING" : `${rules.history.length} revisions`}</span>
@@ -341,7 +361,7 @@ export default function ReplayIntegrityReviewPanel({
 
           <section className="replay-review" aria-labelledby="replay-review-title" data-review-read-only={String(review?.read_only ?? false)}>
             <div className="replay-integrity-section-heading">
-              <div><h3 id="replay-review-title">ReviewMode</h3><p>独立持久游标、只读组合和 run-scoped 绘图；原 Run 不 seek。</p></div>
+              <div><h3 id="replay-review-title">只读复盘</h3><p>独立持久游标、只读组合和回放专属绘图；原训练不会被移动。</p></div>
               <button
                 type="button"
                 disabled={busy || (review === null && !reviewStartReady)}

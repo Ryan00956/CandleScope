@@ -50,6 +50,8 @@ async def _create_run(
     service: ReplayService,
     *,
     disclosure: str = "NONE",
+    history_mode: str = "DURATION",
+    requested_start_index: int = 4,
 ) -> tuple[dict[str, object], dict[str, object]]:
     catalog = await service.catalog(
         warmup_bars=2,
@@ -57,6 +59,17 @@ async def _create_run(
         quality_mode="exact",
         blind_mode=disclosure != "NONE",
     )
+    history_fields: dict[str, object]
+    if history_mode == "ALL_AVAILABLE":
+        history_fields = {
+            "indicator_warmup_bars": 2,
+            "visible_history_lookback": {
+                "mode": "ALL_AVAILABLE",
+                "duration_ms": None,
+            },
+        }
+    else:
+        history_fields = {"warmup_bars": 2}
     request = TrainingRunCreateRequest.from_dict(
         {
             "protocol": "replay.v2",
@@ -70,8 +83,8 @@ async def _create_run(
             "settlement_asset": "USDT",
             "base_interval": "1m",
             "display_interval": "1m",
-            "requested_start_ms": START_MS + 4 * INTERVAL_MS,
-            "warmup_bars": 2,
+            "requested_start_ms": START_MS + requested_start_index * INTERVAL_MS,
+            **history_fields,
             "forward_cache_ms": 5 * INTERVAL_MS,
             "random_seed": 42,
             "initial_equity": "10000",
@@ -144,6 +157,70 @@ async def test_history_pages_are_snapshot_bound_revealed_only_and_repository_fre
             {bar["open_time_ms"] for bar in second["bars"]}
         )
         assert second["has_more"] is False
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_all_available_history_pages_repository_to_the_bound_source_start(
+    tmp_path: Path,
+) -> None:
+    service, repository = await _service(tmp_path / "all-history.db")
+    try:
+        _created, snapshot = await _create_run(
+            service,
+            history_mode="ALL_AVAILABLE",
+            requested_start_index=12,
+        )
+        training = service.training
+        assert training is not None
+        cursor_before = dict(snapshot["cursor"])  # type: ignore[arg-type]
+        data_epoch = str(snapshot["data_epoch"])
+        before_ms = int(cursor_before["virtual_time_ms"]) + 1
+        history_epoch = None
+        opens: list[int] = []
+        pages: list[dict[str, object]] = []
+
+        while True:
+            page = await training.history_page(
+                "adapter-1",
+                track_id="track-1",
+                before_ms=before_ms,
+                revealed_boundary_ms=int(cursor_before["virtual_time_ms"]),
+                limit=3,
+                data_epoch=data_epoch,
+                history_epoch=history_epoch,
+            )
+            pages.append(page)
+            history_epoch = str(page["history_epoch"])
+            page_opens = [
+                int(bar["open_time_ms"])
+                for bar in page["bars"]  # type: ignore[union-attr]
+            ]
+            assert all(open_ms < before_ms for open_ms in page_opens)
+            opens.extend(page_opens)
+            if not page["has_more"]:
+                break
+            before_ms = int(page["next_before_ms"])
+
+        assert sorted(opens) == [
+            START_MS + index * INTERVAL_MS
+            for index in range(12)
+        ]
+        assert len(opens) == len(set(opens))
+        assert pages[0]["history_boundary_ms"] == START_MS
+        policy = pages[0]["history_policy"]
+        assert policy["visible_history_lookback"]["mode"] == "ALL_AVAILABLE"
+        assert policy["visible_history_rows"] == 12
+        assert policy["effective_warmup_bars"] == 2
+        assert any(
+            name == "query_bars"
+            and call["end_ms"] < START_MS + 12 * INTERVAL_MS
+            for name, call in repository.calls  # type: ignore[attr-defined]
+        )
+
+        snapshot_after = (await service.get_session("adapter-1"))["snapshot"]
+        assert snapshot_after["cursor"] == cursor_before
+        assert snapshot_after["data_epoch"] == data_epoch
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -234,7 +311,7 @@ async def test_blind_history_uses_only_the_public_synthetic_timeline(
         await service.shutdown(step_timeout=1.0)
 
 
-async def test_agg_trade_training_history_decodes_the_frozen_bundle(
+async def test_agg_trade_training_all_available_history_uses_chart_only_bars(
     tmp_path: Path,
 ) -> None:
     archive = verified_trade_archive(tmp_path / "trade-archive")
@@ -271,7 +348,11 @@ async def test_agg_trade_training_history_decodes_the_frozen_bundle(
                 "base_interval": "1m",
                 "display_interval": "1m",
                 "requested_start_ms": TRADE_REPLAY_START_MS,
-                "warmup_bars": 2,
+                "indicator_warmup_bars": 2,
+                "visible_history_lookback": {
+                    "mode": "ALL_AVAILABLE",
+                    "duration_ms": None,
+                },
                 "forward_cache_ms": TRADE_REPLAY_MINUTES * INTERVAL_MS,
                 "random_seed": 7,
                 "initial_equity": "10000",
@@ -303,6 +384,9 @@ async def test_agg_trade_training_history_decodes_the_frozen_bundle(
             history_epoch=None,
         )
         assert page["identity"]["source_kind"] == "AGG_TRADE"
+        assert page["history_policy"]["visible_history_lookback"]["mode"] == (
+            "ALL_AVAILABLE"
+        )
         assert page["bars"]
         assert all(bar["close_time_ms"] <= boundary for bar in page["bars"])
     finally:

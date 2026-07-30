@@ -203,7 +203,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
       )}
       {!ownsController && (
         <div className="replay-controller-banner" role="status">
-          {store.controllerClientId ? "另一个页面持有控制权；当前为只读 viewer。" : "当前没有 controller lease。"}
+          {store.controllerClientId ? "另一个页面正在控制，本页只读。" : "当前为只读；获取控制权后可操作。"}
           <button
             type="button"
             data-replay-action="takeover-controller"
@@ -256,20 +256,20 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
           disabled={pending !== null || phase3Pending !== null || viewer?.viewerPending === true || forkPending || multiTrackForkBlocked}
           title={multiTrackForkBlocked ? "多商品存档保持 v2-only；当前不会压缩成单商品 v1 Fork" : undefined}
           onClick={() => void runtime.actions.forkSession().catch(() => undefined)}
-        >Fork</button>
+        >分支</button>
         {viewer === undefined ? (
           <button type="button" data-replay-action="step" disabled={disabled || store.state !== "PAUSED"} onClick={() => command("step", { count: 1 })}>
             {pending === "step" ? "单步中…" : "单步 →"}
           </button>
         ) : (<>
           {supportedBases.includes("DISPLAY_BAR") && (
-            <button type="button" data-replay-action="advance-display" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => submitCanonicalAdvance("DISPLAY_BAR", 1)}>
-              {canonicalAdvancePending ? "推进中…" : `下一展示 K (${viewer.viewerState?.display_interval ?? "--"}) →`}
+            <button type="button" title="推进一根当前展示周期 K 线" data-replay-action="advance-display" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => submitCanonicalAdvance("DISPLAY_BAR", 1)}>
+              {canonicalAdvancePending ? "推进中…" : `下一根 ${viewer.viewerState?.display_interval ?? "--"}`}
             </button>
           )}
           {supportedBases.includes("BASE_BAR") && (
-            <button type="button" data-replay-action="advance-base" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => submitCanonicalAdvance("BASE_BAR", 1)}>
-              {canonicalAdvancePending ? "推进中…" : `下一最小周期 K (${config?.base_interval ?? "--"})`}
+            <button type="button" title="推进一根最小周期 K 线" data-replay-action="advance-base" disabled={disabled || effectiveState !== "PAUSED"} onClick={() => submitCanonicalAdvance("BASE_BAR", 1)}>
+              {canonicalAdvancePending ? "推进中…" : `下一根 ${config?.base_interval ?? "--"}`}
             </button>
           )}
           {supportedBases.includes("SOURCE_EVENT") && (
@@ -280,7 +280,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
         </>)}
         {viewer !== undefined && (
           <label className="replay-speed-control">
-            推进基准
+            基准
             <select
               data-replay-action="advance-basis"
               value={advanceBasis}
@@ -322,9 +322,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
         ) : (
           <>
             <label className="replay-speed-control">
-              {advanceBasis === "VIRTUAL_TIME"
-                ? (virtualTimeQuantumMs === 1 ? "历史毫秒数" : `${config?.base_interval ?? "基础周期"} 时间单位数`)
-                : `${BASIS_LABELS[advanceBasis]}数量`}
+              数量
               <input
                 data-replay-action="advance-amount"
                 type="number"
@@ -342,10 +340,11 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             <button
               type="button"
               data-replay-action="advance"
+              title={`推进 ${advanceAmount} ${BASIS_LABELS[advanceBasis]}`}
               disabled={disabled || effectiveState !== "PAUSED"}
               onClick={() => submitCanonicalAdvance(advanceBasis, advanceAmount)}
             >
-              {canonicalAdvancePending ? "推进中…" : `推进 ${advanceAmount} ${BASIS_LABELS[advanceBasis]} ⇥`}
+              {canonicalAdvancePending ? "推进中…" : `推进 ${advanceAmount}`}
             </button>
           </>
         )}
@@ -376,7 +375,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
           </label>
         ) : (
           <label className="replay-speed-control">
-            播放速率
+            速度
             <select
               data-replay-action="playback-rate"
               value={String(playbackRate)}
@@ -406,74 +405,80 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
           <progress max={1} value={progress ?? 0} aria-label="回放进度" />
           <span>{progress === null ? "进度未知" : `${(progress * 100).toFixed(1)}%`}</span>
         </div>
-        <div className="replay-fidelity-chips">
-          <span>{tradeTape ? "AGG_TRADE" : `BAR_${config?.base_interval.toUpperCase() ?? "--"}`}</span>
-          <span>{contractPortfolio?.execution_model ?? "PAPER_LINEAR_V1"}</span>
-          <span>{tradeTape ? "EXACT_AGG_TRADE" : "EXACT_BAR"}</span>
-          <span>{contractPortfolio === null
-            ? (tradeTape ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE")
-            : "NO_BOOK_QUEUE"}</span>
-        </div>
       </div>
 
-      {visiblePlan !== null && (
-        <div
-          className="replay-fast-forward-plan"
-          data-replay-fast-forward-plan={visiblePlan.mode}
-          data-replay-equivalence={visiblePlan.equivalence}
-        >
-          <strong>{visiblePlan.mode}</strong>
-          <span>{visiblePlan.explanation}</span>
-          {visiblePlan.reasons.length > 0 && <code>{visiblePlan.reasons.join(" · ")}</code>}
-          <em>equivalence: {visiblePlan.equivalence}</em>
-          {visiblePlan.summaryStatus !== null && (
-            <em>summary: {visiblePlan.summaryStatus}</em>
-          )}
-        </div>
-      )}
-
-      {viewer !== undefined && (
-        <div
-          className="replay-period-summary-status"
-          data-replay-period-summary={
-            viewer.periodSummary?.enabled === false
-              ? "DISABLED"
-              : summaryBuild?.status ?? (viewer.summaryError === null ? "EMPTY" : "ERROR")
-          }
-        >
-          <strong>Checkpoint 摘要</strong>
-          {viewer.periodSummary?.enabled === false ? (
-            <span>优化开关关闭；推进继续使用精确逐事件参考路径。</span>
-          ) : summaryBuild === null ? (
-            <span>尚未准备可验证摘要。</span>
-          ) : (
-            <span>
-              {summaryBuild.status} · {summaryBuild.candidate_count} 个候选 ·
-              {" "}{summaryBuild.compressed_bytes} bytes ·
-              {" "}{summaryBuild.build_wall_ms} ms 准备成本
-            </span>
-          )}
-          {viewer.summaryError !== null && (
-            <span role="alert">{viewer.summaryError}</span>
-          )}
-          <button
-            type="button"
-            data-replay-action="prepare-period-summaries"
-            disabled={
-              viewer.periodSummary?.enabled === false
-              || viewer.summaryPreparing
-              || viewer.controlPending !== null
-              || viewer.viewerPending
-              || effectiveState !== "PAUSED"
-              || store.connectionState !== "connected"
-            }
-            onClick={() => void viewer.actions.preparePeriodSummaries().catch(() => undefined)}
-          >
-            {viewer.summaryPreparing
-              ? "正在精确扫描准备…"
-              : summaryBuild?.status === "READY" ? "重建摘要" : "准备摘要"}
-          </button>
-        </div>
+      {(visiblePlan !== null || viewer !== undefined) && (
+        <details className="replay-control-diagnostics">
+          <summary>高级诊断</summary>
+          <div className="replay-control-diagnostics-body">
+            <div className="replay-fidelity-chips">
+              <span>{tradeTape ? "AGG_TRADE" : `BAR_${config?.base_interval.toUpperCase() ?? "--"}`}</span>
+              <span>{contractPortfolio?.execution_model ?? "PAPER_LINEAR_V1"}</span>
+              <span>{tradeTape ? "EXACT_AGG_TRADE" : "EXACT_BAR"}</span>
+              <span>{contractPortfolio === null
+                ? (tradeTape ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE")
+                : "NO_BOOK_QUEUE"}</span>
+            </div>
+            {visiblePlan !== null && (
+              <div
+                className="replay-fast-forward-plan"
+                data-replay-fast-forward-plan={visiblePlan.mode}
+                data-replay-equivalence={visiblePlan.equivalence}
+              >
+                <strong>{visiblePlan.mode}</strong>
+                <span>{visiblePlan.explanation}</span>
+                {visiblePlan.reasons.length > 0 && <code>{visiblePlan.reasons.join(" · ")}</code>}
+                <em>equivalence: {visiblePlan.equivalence}</em>
+                {visiblePlan.summaryStatus !== null && (
+                  <em>summary: {visiblePlan.summaryStatus}</em>
+                )}
+              </div>
+            )}
+            {viewer !== undefined && (
+              <div
+                className="replay-period-summary-status"
+                data-replay-period-summary={
+                  viewer.periodSummary?.enabled === false
+                    ? "DISABLED"
+                    : summaryBuild?.status ?? (viewer.summaryError === null ? "EMPTY" : "ERROR")
+                }
+              >
+                <strong>推进摘要</strong>
+                {viewer.periodSummary?.enabled === false ? (
+                  <span>优化开关关闭；推进继续使用精确逐事件参考路径。</span>
+                ) : summaryBuild === null ? (
+                  <span>尚未准备可验证摘要。</span>
+                ) : (
+                  <span>
+                    {summaryBuild.status} · {summaryBuild.candidate_count} 个候选 ·
+                    {" "}{summaryBuild.compressed_bytes} bytes ·
+                    {" "}{summaryBuild.build_wall_ms} ms 准备成本
+                  </span>
+                )}
+                {viewer.summaryError !== null && (
+                  <span role="alert">{viewer.summaryError}</span>
+                )}
+                <button
+                  type="button"
+                  data-replay-action="prepare-period-summaries"
+                  disabled={
+                    viewer.periodSummary?.enabled === false
+                    || viewer.summaryPreparing
+                    || viewer.controlPending !== null
+                    || viewer.viewerPending
+                    || effectiveState !== "PAUSED"
+                    || store.connectionState !== "connected"
+                  }
+                  onClick={() => void viewer.actions.preparePeriodSummaries().catch(() => undefined)}
+                >
+                  {viewer.summaryPreparing
+                    ? "正在精确扫描准备…"
+                    : summaryBuild?.status === "READY" ? "重建摘要" : "准备摘要"}
+                </button>
+              </div>
+            )}
+          </div>
+        </details>
       )}
 
       {showEnd && (

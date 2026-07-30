@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 产品合同
 
-状态：`FROZEN_PHASE_11`。用户已于 2026-07-21 确认基础合同；Phase 11 将入口旅程修订为“实时页内存档大厅 → 创建或加载 → 独立 replay document”。该修订不改变 live/replay 运行时隔离、服务端权威语义或默认关闭的发布开关。
+状态：`FROZEN_PHASE_11`。用户已于 2026-07-21 确认基础合同；Phase 11 将入口旅程修订为“实时页内存档大厅 → 创建或加载 → 独立 replay document”。该修订不改变 live/replay 运行时隔离或服务端权威语义。2026-07-30 的后续发布决策仅把 v2 产品选择器改为默认开启；回放后端与实时页入口总闸仍默认关闭。
 
 合同版本：`replay.product.v2`
 
@@ -311,9 +311,12 @@ flowchart LR
 
 ### 7.3 开始点之前的历史回看
 
-- 主图初次打开应包含开始点之前的 warmup 历史。
+- 新建训练默认使用 `ALL_AVAILABLE`；主图初次打开包含指标 warmup 历史，用户继续向左滚动时应像实时页一样分段加载，直到创建时绑定的连续历史起点。
 - 用户向左滚动时复用实时 backfill 的范围规划、去重、取消、缓存和 `SeriesWindowStore` 增量语义，但数据请求必须走 replay-aware history provider。
-- 更早历史必须绑定该 MarketTrack 的不可变 history epoch、已 pin 数据段或可确定重建 manifest；不得查询一个正在变化的 live 生产库后把结果混进存档。
+- 已挂载图表的分页状态不得映射为整图 loading/空白遮罩；ViewerState 投影必须把历史页继续发布为 `prepend`（聚合边界修正可追加 `mid-merge`），把推进发布为 `tick/append`。只有初次装载、身份/周期切换或权威重同步才允许 `replace`。图表实例、pane、缩放和可见时间锚点在左侧分页期间必须保持，体感与实时行情一致。
+- `indicator_warmup_bars` 只决定执行/指标初始化快照，不得作为图表可浏览历史上限。`DURATION` 仅作为旧 Run 与显式固定窗口的兼容策略。
+- 更早历史必须绑定该 MarketTrack 的 history epoch、创建时确定的 source identity 与连续历史边界。`ALL_AVAILABLE` 可由 replay service 从本地只读 K 线仓库按固定范围分页，但不得触发 live backfill、交易所网络请求、live HTTP/WS 或读取浏览器实时缓存；行数、时间序列、身份或连续性不符时必须 fail closed。
+- 前端可以使用有界滑动窗口控制内存；若向左分页淘汰了窗口右端，用户重新向右触边时必须通过 replay 权威快照恢复当前已揭示窗口，并重置 history provider，使其随后仍可再次向左分页。不得把内存上限伪装成历史终点，也不得用 live 数据修补右端。
 - backfill 只能返回该 `MarketTrack` 的历史数据，且任何向右数据不得超过当前全局 `VirtualTime`。
 - 加载更早历史不推进虚拟时钟、不触发订单、不改变账户，也不把 warmup 数据记作训练期间行情。
 - 时间隐藏策略同样覆盖更早历史。

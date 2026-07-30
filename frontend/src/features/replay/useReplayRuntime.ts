@@ -283,6 +283,10 @@ export class ReplayRuntimeLifecycle {
   private disposed = false;
   private acquireAfterSnapshot = false;
   private commandRevisionFloor = 0;
+  private latestWindowRestore: {
+    readonly promise: Promise<boolean>;
+    finish(restored: boolean): void;
+  } | null = null;
   private snapshot: ReplayRuntimeSnapshot;
 
   constructor({
@@ -300,6 +304,7 @@ export class ReplayRuntimeLifecycle {
     this.marketDataActions = {
       retry: () => this.restart(),
       loadMoreLeft: async () => undefined,
+      restoreLatestWindow: () => this.restoreLatestWindow(),
       onCrosshairMove: (value) => this.store.setCrosshairData(value),
       onVisibleRangeChange: () => this.store.markVisibleRangePending(),
       consumeIndicatorRangeRequest: (requestId) => this.store.consumeIndicatorRequest(requestId),
@@ -341,6 +346,66 @@ export class ReplayRuntimeLifecycle {
 
   requestResync(reason?: string): void {
     this.stream?.requestResync(reason);
+  }
+
+  private restoreLatestWindow(): Promise<boolean> {
+    const authority = this.store.getSnapshot();
+    if (
+      this.disposed
+      || this.stream === null
+      || !authority.hasAuthoritativeSnapshot
+      || authority.connectionState !== "connected"
+      || authority.sessionId === null
+      || !this.store.seriesStore.rightTruncated
+    ) {
+      return Promise.resolve(false);
+    }
+    if (this.latestWindowRestore !== null) return this.latestWindowRestore.promise;
+
+    const expectedSessionId = authority.sessionId;
+    const generationFloor = authority.generation;
+    let finishRequest: (restored: boolean) => void = () => undefined;
+    const promise = new Promise<boolean>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let unsubscribe: () => void = () => undefined;
+      const finish = (restored: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) clearTimeout(timer);
+        unsubscribe();
+        if (this.latestWindowRestore?.promise === promise) {
+          this.latestWindowRestore = null;
+        }
+        resolve(restored);
+      };
+      finishRequest = finish;
+      unsubscribe = this.store.subscribe(() => {
+        const latest = this.store.getSnapshot();
+        if (latest.generation <= generationFloor) return;
+        if (
+          latest.hasAuthoritativeSnapshot
+          && latest.connectionState === "connected"
+        ) {
+          finish(
+            latest.sessionId === expectedSessionId
+            && !this.store.seriesStore.rightTruncated,
+          );
+        } else if (
+          latest.connectionState === "error"
+          || latest.connectionState === "closed"
+        ) {
+          finish(false);
+        }
+      });
+      timer = setTimeout(() => finish(false), 10_000);
+      this.stream?.requestResync("restore latest replay K-line window");
+    });
+    this.latestWindowRestore = {
+      promise,
+      finish: (restored) => finishRequest(restored),
+    };
+    return promise;
   }
 
   async loadCatalog(query: ReplayCatalogQuery = {
@@ -1088,6 +1153,8 @@ export class ReplayRuntimeLifecycle {
   }
 
   private stopCurrentRun(preservePendingCommand = false): void {
+    this.latestWindowRestore?.finish(false);
+    this.latestWindowRestore = null;
     const pendingSessionId = this.sessionId;
     const pendingCommand = this.pendingCommand;
     if (preservePendingCommand
@@ -1283,7 +1350,9 @@ export function buildReplayMarketDataRuntime(
       initialHistoryPending: false,
       activeChartReady: snapshot.store.hasAuthoritativeSnapshot && store.seriesStore.barCount > 0,
       canLoadMoreLeft: false,
-      canRestoreLatestWindow: false,
+      canRestoreLatestWindow: snapshot.store.hasAuthoritativeSnapshot
+        && snapshot.store.connectionState === "connected"
+        && store.seriesStore.rightTruncated,
       barCount: store.seriesStore.barCount,
       cacheDiagnostics: () => ({
         owner: "replay",

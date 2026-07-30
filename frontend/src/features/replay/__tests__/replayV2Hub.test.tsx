@@ -641,8 +641,9 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /Phase 6 合约账户基础/);
   assert.match(html, /Phase 14 按需数据策略/);
   assert.match(html, /指标预热 BAR/);
-  assert.match(html, /可见历史时长/);
-  assert.match(html, /数据预算.*预校验通过/);
+  assert.match(html, /全部可用（默认，按需加载）/);
+  assert.match(html, /像实时行情一样向左按需分页/);
+  assert.match(html, /执行快照预算.*预校验通过/);
   assert.match(html, /SNAPSHOT_LOCAL_BAR_RANGE/);
   assert.match(html, /校验失败 quarantine/);
   assert.match(html, /后台下载.*默认关闭/);

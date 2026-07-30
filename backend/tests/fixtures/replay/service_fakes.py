@@ -41,6 +41,7 @@ def replay_settings(path: Path, *, enabled: bool = True) -> ReplaySettings:
         event_subscriber_queue=8,
         controller_ttl_seconds=1,
         idle_ttl_seconds=60,
+        product_v2_enabled=False,
     )
 
 

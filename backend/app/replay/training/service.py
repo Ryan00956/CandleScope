@@ -1667,7 +1667,7 @@ class TrainingRunService:
         data_epoch: str,
         history_epoch: str | None,
     ) -> dict[str, object]:
-        """Return one immutable page without touching the production repository."""
+        """Return one revealed-only page through the replay-owned data boundary."""
 
         normalized_session = self._identifier(session_id, field_name="session_id")
         normalized_track = self._identifier(track_id, field_name="track_id")
@@ -1689,7 +1689,8 @@ class TrainingRunService:
                 "training history snapshot is unavailable",
                 status_code=503,
             )
-        return build_history_page(
+        return await asyncio.to_thread(
+            build_history_page,
             binding=binding,
             persisted=persisted,
             before_ms=before_ms,
@@ -1697,6 +1698,7 @@ class TrainingRunService:
             limit=limit,
             data_epoch=data_epoch,
             expected_history_epoch=history_epoch,
+            repository=self.replay_service.history_repository,
         )
 
     async def command(

@@ -1,6 +1,6 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_17_COMMITTED / PHASE_18_CODE_COMPLETE / RELEASE_RESULT_EXTERNAL_MANIFEST / PRODUCTION_HOLD`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–17 已独立提交，Phase 18 代码、迁移、存储治理、真实来源和发布合同已完成提交前门禁。Phase 18 的最终完成状态只读取仓库外 `<完整 Phase 18 HEAD>\replay-v2\release-manifest.json`，本文不嵌入提交后的结果，避免为了记录证据改变 HEAD 并使 4 小时证据失效。任何旧发布清单都不得继承到新 HEAD；即使 implementation manifest PASS，生产决策仍因缺少 BOOK/account 生产 capture 与运维观察窗保持 HOLD，所有发布开关默认关闭。
+状态：`PHASE_17_COMMITTED / PHASE_18_CODE_COMPLETE / RELEASE_RESULT_EXTERNAL_MANIFEST / PRODUCTION_HOLD`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–17 已独立提交，Phase 18 代码、迁移、存储治理、真实来源和发布合同已完成提交前门禁。Phase 18 的最终完成状态只读取仓库外 `<完整 Phase 18 HEAD>\replay-v2\release-manifest.json`，本文不嵌入提交后的结果，避免为了记录证据改变 HEAD 并使 4 小时证据失效。任何旧发布清单都不得继承到新 HEAD；即使 implementation manifest PASS，生产决策仍因缺少 BOOK/account 生产 capture 与运维观察窗保持 HOLD。2026-07-30 的显式产品决策把前后端 v2 选择器改为默认开启，但 `REPLAY_ENABLED` 与 `VITE_REPLAY_ENTRY_ENABLED` 总闸仍默认关闭；下文各 Phase 中记录的旧 `=0` 值是当时的历史验收快照。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -158,9 +158,9 @@ backend/data/replay-dev/replay_segments/
 | 开关 | 默认 | 所有权 |
 |---|---:|---|
 | `REPLAY_ENABLED` | `0` | 后端总开关，保持权威 |
-| `REPLAY_PRODUCT_V2_ENABLED` | `0` | 后端 run/protocol/schema v2 开关 |
+| `REPLAY_PRODUCT_V2_ENABLED` | `1` | 后端 run/protocol/schema v2 选择器；显式 `0` 回退 v1 |
 | `VITE_REPLAY_ENTRY_ENABLED` | `0` | live 页入口显示 |
-| `VITE_REPLAY_PRODUCT_V2_ENABLED` | `0` | replay document 选择 v2 hub/workspace |
+| `VITE_REPLAY_PRODUCT_V2_ENABLED` | `1` | replay document 默认选择 v2 hub/workspace；显式 `0` 回退 v1 |
 | `RAW_AGG_TRADE_ARCHIVE_ENABLED` | `0` | 成交 archive 能力 |
 | `REPLAY_HISTORICAL_BOOK_ENABLED` | `0` | Phase 9 可选 verified Binance USD-M 历史 L2；关闭时既有 BOOK Run 明确暂停/降级，不回退成交模型 |
 | `REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES` | `1099511627776` | 受管历史盘口对象总预算，默认 1 TiB；可收紧不可超过冻结上限，回收只允许显式 dry-run/run 且活动 pin 受保护 |
@@ -228,7 +228,7 @@ $env:VITE_REPLAY_PRODUCT_V2_ENABLED = '1'
 npm run dev
 ```
 
-这些 `=1` 只用于当前 Phase 的显式本地验证。完成验证和正式提交前恢复默认关闭，并通过 capability/入口审计证明没有残留默认启用。
+`REPLAY_ENABLED=1` 与 `VITE_REPLAY_ENTRY_ENABLED=1` 仍只用于显式本地验证；v2 两个选择器的 `=1` 已成为仓库默认。其余 archive、BOOK、worker、GC 与优化能力继续保持默认关闭，并通过 capability/入口审计确认总闸没有被绕过。
 
 ---
 
@@ -566,10 +566,13 @@ onNeedMoreLeft
   -> plan uncovered older range
   -> GET run-scoped replay history
   -> validate public time + track identity + <= revealed boundary
-  -> SeriesWindowStore prepend/replace delta
+  -> source SeriesWindowStore prepend delta
+  -> ViewerState projection prepend (+ optional boundary mid-merge)
+  -> shared chart adapter atomic commit + viewport anchor compensation
 ```
 
 architecture test 必须禁止 replay provider 调用 live Kline API。
+分页 pending 只进入状态栏，不得传给 `SingleChartPanes.loading` 触发整图遮罩。ViewerState 仅在初次装载、周期/身份切换或权威 stream resync 时发布 `replace`；普通历史页和播放推进必须沿用实时行情的 `prepend`、`mid-merge`、`tick`、`append` 语义。
 
 ### 7.5 capability surface
 
@@ -1415,7 +1418,7 @@ Phase 3 已提供 `STEP_DISPLAY/STEP_BASE/STEP_EVENT/ADVANCE_BY/ADVANCE_TO` 的�
 
 ### 背景审计
 
-Phase 7 已实现 `replay.data.segment.v1`：不可变 identity/checksum、prepare job、进度、取消、进程中断恢复、single-flight、quarantine、可信 rehydration、引用 pin、plan-hash GC 与 Windows 文件锁恢复均有测试。Phase 3 也已有 replay-only history endpoint 与前端 before-page provider；它只读取冻结 `replay_dataset_ref`，不会回退到 live/生产查询。
+Phase 7 已实现 `replay.data.segment.v1`：不可变 identity/checksum、prepare job、进度、取消、进程中断恢复、single-flight、quarantine、可信 rehydration、引用 pin、plan-hash GC 与 Windows 文件锁恢复均有测试。Phase 3 也已有 replay-only history endpoint 与前端 before-page provider；`DURATION` 只读取冻结 `replay_dataset_ref`，`ALL_AVAILABLE` 则由 replay service 按创建时绑定的连续边界读取本地只读 K 线仓库，不接入 live HTTP/WS、交易所下载或浏览器实时缓存。
 
 当前不能直接宣称产品合同完成：
 
@@ -1433,21 +1436,22 @@ Phase 7 已实现 `replay.data.segment.v1`：不可变 identity/checksum、prepa
    - `visible_history_lookback`：`{mode: DURATION, duration_ms}` 或 `{mode: ALL_AVAILABLE, duration_ms: null}`；
    - `forward_cache_ms`：保持起点之后的冻结窗口。
    旧客户端 `warmup_bars` 继续作为严格兼容 alias；响应、规则与新 UI 只写 canonical 字段。
-2. `DURATION` 必须为 base interval 的正整数倍；`ALL_AVAILABLE` 定义为“所选起点所在、无 gap 的连续历史段起点”，不跨缺口伪造连续覆盖。实际有效 warmup 为 indicator 与 visible rows 的较大值；总 rows 超过 `max_bar_dataset_rows` 时 plan 与 create 都明确阻止，不静默截断。
+2. `DURATION` 必须为 base interval 的正整数倍；`ALL_AVAILABLE` 定义为“所选起点所在、无 gap 的连续历史段起点”，不跨缺口伪造连续覆盖。`DURATION` 的有效 warmup 为 indicator 与 visible rows 的较大值；`ALL_AVAILABLE` 的执行 warmup 只取 indicator，左侧历史通过有界 before-page 按需读取，不占 `max_bar_dataset_rows` 执行快照预算。
 3. 新增 replay.training additive data-policy schema，原子保存 indicator、visible mode/duration、实际可见边界、实际 replay 起点、effective warmup、forward cache 与 policy hash。v9 既有 Run 确定回填为 `DURATION = legacy warmup * base interval`；Fork 精确复制，旧 build 安全忽略。
-4. selection 分两步但保持一个权威结果：先用请求 `catalog_epoch + server seed/manual start` 选定窗口，再用扩大后的 effective warmup 重建；第二次必须保持 source fingerprint 和已选起点，不能重新随机或接受漂移。adapter 继续只拥有一个冻结 snapshot。
-5. segment manifest range 改为完整 snapshot coverage（warmup start 到 forward end），并携带 data-policy role/count；Run、dataset epoch、start-selection commitment 与领域 state hash 不因 history before-page 读取而变化。
-6. history 升级为严格 `replay.history.v2`：返回 public history boundary 与 canonical policy，只显示边界之后的 closed bars；盲化 Run 的边界映射到 synthetic timeline。`NONE` 在加载 dataset 前拒绝，WARM 可准备/读取但不推进，FULL 才进入全局时钟。
+4. selection 保持一个权威结果：先用请求 `catalog_epoch + server seed/manual start` 选定窗口，再按 effective warmup 构建执行快照；必须保持 source fingerprint 和已选起点，不能重新随机或接受漂移。adapter 继续只拥有一个有界冻结 snapshot。
+5. segment manifest range 覆盖执行 snapshot（effective warmup start 到 forward end），并携带 data-policy role/count；`ALL_AVAILABLE` 的 `actual_visible_history_start_ms` 可早于 segment 起点。Run、dataset epoch、start-selection commitment 与领域 state hash 不因 history before-page 读取而变化。
+6. history 升级为严格 `replay.history.v2`：返回 public history boundary 与 canonical policy，只显示边界之后的 closed bars；`DURATION` 从冻结 snapshot 读取，`ALL_AVAILABLE` 从 replay service 的本地只读仓库按固定边界、最多 100,000 基础行分段读取并逐行校验。盲化 Run 的查询和响应都映射到 synthetic timeline。`NONE` 在加载 dataset 前拒绝，WARM 可准备/读取但不推进，FULL 才进入全局时钟。
+   前端沿用有界 `SeriesWindowStore`：深度左翻淘汰右端后，右侧触边必须走 replay stream 的原子 resync 恢复最新已揭示窗口；恢复成功后清空旧 history epoch 并允许重新左翻，虚拟时钟、账户和 data epoch 均不前进。
 7. Hub 显示三项输入、分项 rows/bytes、连续历史定义、budget block reason、worker/GC 开关和 fail-closed 策略；catalog 仍只按 indicator warmup 选择，选择商品本身零历史读取。
-8. BAR 与 AGG 共用冻结 K 线左侧历史；AGG 的成交源仍只覆盖 forward replay 窗口，不把历史 K 伪装成旧成交/order-flow。provider 的下载、校验、取消、retry、single-flight、quarantine 与 rehydrate 继续由 Phase 7 内核负责。
+8. BAR 与 AGG 共用 chart-only K 线左侧历史；AGG 的成交源仍只覆盖 forward replay 窗口，不把历史 K 伪装成旧成交/order-flow。左侧分页不得触发下载；缺行、错序、身份漂移或 gap 均 fail closed。
 
 ### 测试与退出门槛
 
-- manual/random × BAR/AGG × DURATION/ALL_AVAILABLE 的 selection、effective rows、gap、预算、catalog/source drift 均有 reference matrix；同 seed 与同输入重启后边界和 policy hash 不漂移。
+- manual/random × BAR/AGG × DURATION/ALL_AVAILABLE 的 selection、effective rows、gap、预算、catalog/source drift 均有 reference matrix；特别证明 ALL_AVAILABLE 的可见 rows 可大于执行 warmup 和执行快照预算，同 seed 与同输入重启后边界和 policy hash 不漂移。
 - indicator 大于 visible、visible 大于 indicator、1m/15m 展示、最早连续边界与超预算均证明：可见页严格到边界，指标所需隐藏 prefix 不被 UI 泄露。
 - before-page 读取前后 Run identity、start-selection hash、dataset epoch、cursor、account/ledger 与领域 state hash 完全一致；切周期只重建 projection。
 - `NONE` 数据集读取计数为 0；`WARM` 完成 immutable prepare 后 cursor 不前进且 actor 释放；forced/selected/position `FULL` 连续维护。
-- provider 中断、checksum/schema/identity/range 错误、retry、并发 single-flight、取消与重启恢复复用 Phase 7 真实文件/SQLite 测试，并增加 canonical data-policy/manifest 集成证据。
+- provider 中断、schema/identity/range/gap 错误、retry、并发 single-flight、取消与重启恢复复用 Phase 7 真实文件/SQLite 测试，并增加 canonical data-policy/manifest 集成证据。
 - Hub 严格 parser、三输入交互、分项估算、错误说明、catalog rebind 与提交 payload 全覆盖；真实浏览器完成左侧 backfill、NONE/WARM/FULL 与 BAR/AGG 可见边界验收。
 - 后端全量、frontend `npm run check`、SQLite v9 additive migration/quick/foreign-key、默认开关、clean browser console/network、reverse-apply 全部 PASS，独立 commit 后才进入 Phase 15。
 
@@ -1466,6 +1470,10 @@ data-policy 表与 history v2 都是 additive replay.v2 所有物；training sch
 7. 浏览器运行库优雅关闭后 `replay.db` 与 `candlescope.db` 均 `quick_check=ok`、`foreign_key_check` 零行；training schema=9 且 data-policy 表存在。验收库含 4 runs、6 sessions、4 policies、6 segments、16 refs，覆盖 DURATION 与 ALL_AVAILABLE；`replay.db` 为 1,155,072 B、SHA-256=`13EB43393C4773A035EEE652A60EC0CB5550AD25ABE0CDAE1404ADE60996DF03`，无 WAL/SHM，后端和 Vite 端口均已释放。
 8. 回滚门禁在独立 detached worktree 的 Phase 13 父提交 `bc4883f` 上运行 `test_replay_v2_training_phase13.py`，5/5 通过且 worktree 正常清理；完整 Phase 14 staged diff 通过 `git apply --reverse --check --whitespace=error-all`。默认 `REPLAY_ENABLED=0`、`REPLAY_PRODUCT_V2_ENABLED=0`、前端 v2、segment worker/auto-GC、fast-forward optimization、raw agg archive 与 historical book 开关均保持关闭。
 9. 本阶段没有交付真正 checkpoint skip、历史 mark/index/funding/spec/tier、规则时点变更、完整语义复盘或生产 GC/发布授权；这些严格属于 Phase 15–18。Decision：实现、自动回归、真实浏览器、数据库、父基线和完整反向补丁均 PASS；独立 commit 成功后才进入 Phase 15，release 继续 HOLD。
+
+### 产品纠偏（2026-07-30）
+
+用户确认训练图表应与实时图表具有相同的左侧浏览体验：限制未来的是 `VirtualTime`，不是 indicator warmup。此前“`ALL_AVAILABLE` 把全部左侧历史扩大进 immutable execution snapshot”的 Phase 14 解释被废止。新建 Run 默认 `ALL_AVAILABLE`，创建时只把连续历史起点写入 data policy；执行 snapshot/segment 仍只包含 indicator warmup 与 forward cache。图表向左时由 `replay.history.v2` 经 replay service 从本地只读 K 线仓库分段读取，逐行校验 identity、闭合状态、基础周期对齐和连续性，盲化 Run 保持 synthetic timeline；任何页面读取都不推进 cursor、账户或领域 state，也不允许越过 `VirtualTime`。旧 `DURATION` Run 保持原固定边界，避免静默改写既有训练证据。
 
 ---
 

@@ -623,20 +623,29 @@ class ResolvedHistoryPolicy:
             raise ValueError("resolved replay history policy is empty")
         if self.actual_visible_history_start_ms > self.actual_replay_start_ms:
             raise ValueError("visible replay history begins after replay start")
-        if self.effective_warmup_bars < max(
-            self.indicator_warmup_bars,
-            self.visible_history_rows,
-        ):
-            raise ValueError("effective replay warmup does not cover its roles")
+        if self.effective_warmup_bars < self.indicator_warmup_bars:
+            raise ValueError("effective replay warmup does not cover indicators")
         if self.visible_history_mode is VisibleHistoryMode.DURATION:
             if (
                 self.visible_history_lookback_ms is None
                 or self.visible_history_lookback_ms
                 != self.visible_history_rows * self.interval_ms
+                or self.effective_warmup_bars < self.visible_history_rows
+                or self.actual_visible_history_start_ms
+                != self.actual_replay_start_ms - self.visible_history_lookback_ms
             ):
                 raise ValueError("duration replay history policy is misaligned")
-        elif self.visible_history_lookback_ms is not None:
-            raise ValueError("all-available replay history cannot include duration")
+        else:
+            distance = (
+                self.actual_replay_start_ms
+                - self.actual_visible_history_start_ms
+            )
+            if (
+                self.visible_history_lookback_ms is not None
+                or distance % self.interval_ms
+                or self.visible_history_rows != distance // self.interval_ms
+            ):
+                raise ValueError("all-available replay history is misaligned")
 
     @property
     def policy_hash(self) -> str:
@@ -708,6 +717,7 @@ def resolve_history_policy(
                     ),
                 },
             )
+        effective = max(request.indicator_warmup_bars, visible_rows)
     else:
         visible_start_ms = continuous_start_ms
         distance = selected_start_ms - visible_start_ms
@@ -718,13 +728,16 @@ def resolve_history_policy(
                 status_code=409,
             )
         visible_rows = distance // interval_ms
-    effective = max(request.indicator_warmup_bars, visible_rows)
+        # ALL_AVAILABLE is a chart navigation boundary, not an instruction to
+        # materialize the entire preceding market history into the execution
+        # snapshot. Older pages are read lazily through the replay service.
+        effective = request.indicator_warmup_bars
     forward_rows = (request.forward_cache_ms + interval_ms - 1) // interval_ms
     estimated_total = effective + forward_rows + 1
     if estimated_total > max_dataset_rows:
         raise TrainingRunError(
             "VISIBLE_HISTORY_BUDGET_EXCEEDED",
-            "visible history and forward cache exceed the immutable dataset budget",
+            "execution warmup and forward cache exceed the immutable dataset budget",
             status_code=409,
             details={
                 "estimated_rows": estimated_total,

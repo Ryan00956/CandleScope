@@ -92,7 +92,18 @@ async def _payload(service: ReplayService) -> dict[str, object]:
     }
 
 
-async def test_v2_routes_are_disabled_without_both_runtime_flags() -> None:
+async def test_v2_routes_are_disabled_by_explicit_v1_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        replay_api,
+        "REPLAY_SETTINGS",
+        replace(
+            replay_api.REPLAY_SETTINGS,
+            enabled=True,
+            product_v2_enabled=False,
+        ),
+    )
     response = await _request(_app(), "GET", "/api/v1/replay/runs")
     assert response.status_code == 503
     assert response.json() == {

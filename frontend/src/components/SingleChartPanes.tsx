@@ -252,6 +252,7 @@ export interface SingleChartPanesProps {
   onNeedMoreRight?: (() => Promise<boolean>) | null;
   canLoadMoreLeft?: boolean;
   canRestoreLatestWindow?: boolean;
+  rightWindowTruncated?: boolean;
   datasetKey: string;
   upColor: string;
   downColor: string;
@@ -1204,6 +1205,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   onNeedMoreRight = null,
   canLoadMoreLeft = true,
   canRestoreLatestWindow = true,
+  rightWindowTruncated,
   datasetKey,
   upColor,
   downColor,
@@ -1367,6 +1369,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const onNeedMoreRightRef = useRef(onNeedMoreRight);
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
   const canRestoreLatestWindowRef = useRef(canRestoreLatestWindow);
+  const rightWindowTruncatedRef = useRef(rightWindowTruncated);
   const loadingRef = useRef(loading);
   const leftHistoryDemandDatasetRef = useRef<string | null>(null);
   const leftHistoryInteractionGenerationRef = useRef(0);
@@ -2220,7 +2223,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       hasHandler: Boolean(restore),
       interactionGeneration,
       ...(range?.to === undefined ? {} : { rangeTo: range.to }),
-      rightTruncated: Boolean(store?.rightTruncated),
+      rightTruncated: rightWindowTruncatedRef.current ?? Boolean(store?.rightTruncated),
       triggerBars: LEFT_EDGE_TRIGGER_BARS,
       userInteracted: userInteractedRef.current,
     }) || !restore) return false;
@@ -2286,6 +2289,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => {
     canRestoreLatestWindowRef.current = canRestoreLatestWindow;
   }, [canRestoreLatestWindow]);
+  useEffect(() => {
+    rightWindowTruncatedRef.current = rightWindowTruncated;
+  }, [rightWindowTruncated]);
 
   const captureVisibleRange = useCallback(() => {
     const visibleRange = chartAdapter.getVisibleRange();

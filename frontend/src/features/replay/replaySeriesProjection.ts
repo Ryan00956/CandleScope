@@ -31,17 +31,24 @@ function finiteDecimal(value: string, field: string): number {
 export function replayDisplayBarToKline(bar: ReplayDisplayBar): KlineBar {
   const time = toEpochSeconds(Math.floor(bar.open_time_ms / 1_000));
   if (time == null) throw new ReplaySeriesProjectionError("bar open time is invalid");
+  const volume = finiteDecimal(bar.volume, "volume");
+  const quoteVolume = bar.quote_volume === null ? null : finiteDecimal(bar.quote_volume, "quote_volume");
+  const takerBuyBase = bar.taker_buy_base === null ? null : finiteDecimal(bar.taker_buy_base, "taker_buy_base");
+  const takerBuyQuote = bar.taker_buy_quote === null ? null : finiteDecimal(bar.taker_buy_quote, "taker_buy_quote");
   return {
     time,
     open: finiteDecimal(bar.open, "open"),
     high: finiteDecimal(bar.high, "high"),
     low: finiteDecimal(bar.low, "low"),
     close: finiteDecimal(bar.close, "close"),
-    volume: finiteDecimal(bar.volume, "volume"),
-    quoteVolume: bar.quote_volume === null ? null : finiteDecimal(bar.quote_volume, "quote_volume"),
+    volume,
+    quote_volume: quoteVolume,
+    quoteVolume,
     trades: bar.trades,
-    takerBuyBase: bar.taker_buy_base === null ? null : finiteDecimal(bar.taker_buy_base, "taker_buy_base"),
-    takerBuyQuote: bar.taker_buy_quote === null ? null : finiteDecimal(bar.taker_buy_quote, "taker_buy_quote"),
+    taker_buy_base: takerBuyBase,
+    taker_buy_quote: takerBuyQuote,
+    takerBuyBase,
+    takerBuyQuote,
     replayCloseTimeMs: bar.close_time_ms,
     replayLastBaseOpenMs: bar.last_base_open_ms,
     replayComponentCount: bar.component_count,

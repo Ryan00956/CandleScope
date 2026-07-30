@@ -46,7 +46,12 @@ from .broker.models import (
 )
 from .canonical import canonical_json_bytes, canonical_sha256
 from .checkpoints import CheckpointCodec, CheckpointError
-from .catalog import ReplayCatalog, ReplayCatalogEntry, ReplaySeriesIdentity
+from .catalog import (
+    KlinesReadRepository,
+    ReplayCatalog,
+    ReplayCatalogEntry,
+    ReplaySeriesIdentity,
+)
 from .commands import CommandResult
 from .constants import (
     REPLAY_PROTOCOL,
@@ -226,6 +231,12 @@ class ReplayService:
             "shutdown_failures": 0,
             "last_shutdown_error": None,
         }
+
+    @property
+    def history_repository(self) -> KlinesReadRepository:
+        """Expose the replay-owned read repository for chart-only history pages."""
+
+        return self._repository  # type: ignore[return-value]
 
     async def start(self) -> None:
         """Recover non-ended sessions without ever resuming PLAYING."""

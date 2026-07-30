@@ -168,9 +168,9 @@ function inventoryRaw() {
     })),
     alerts: [{
       severity: "INFO",
-      code: "PRODUCTION_DEFAULTS_OFF",
+      code: "REPLAY_CORE_DEFAULT_OFF",
       category: "release",
-      message: "Replay v2 production flags remain default-off.",
+      message: "Replay remains gated by the default-off core switch; v2 is selected when replay is enabled.",
     }],
     bounds: {
       max_items_per_category: 200,

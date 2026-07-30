@@ -97,7 +97,7 @@ export function createTrainingRunDraft(
       ));
   const symbol = launchContext?.symbol ?? entry?.identity.symbol ?? "BTCUSDT";
   const baseInterval = entry?.selected_base_interval ?? entry?.base_intervals[0] ?? "1m";
-  const baseIntervalMs = (parseIntervalSeconds(baseInterval) ?? 60) * 1_000;
+  const displayInterval = launchContext?.display_interval ?? baseInterval;
   return {
     name: `${symbol} 训练`,
     sourceKind: "BAR",
@@ -107,11 +107,11 @@ export function createTrainingRunDraft(
     symbol,
     settlementAsset: symbol.endsWith("USDT") ? "USDT" : "USDT",
     baseInterval,
-    displayInterval: launchContext?.display_interval ?? baseInterval,
+    displayInterval,
     requestedStartMs: null,
     indicatorWarmupBars: catalog.warmup_bars,
-    visibleHistoryMode: "DURATION",
-    visibleHistoryLookbackMs: catalog.warmup_bars * baseIntervalMs,
+    visibleHistoryMode: "ALL_AVAILABLE",
+    visibleHistoryLookbackMs: null,
     forwardCacheMs: catalog.horizon_ms,
     initialEquity: "10000",
     maxLeverage: "3",

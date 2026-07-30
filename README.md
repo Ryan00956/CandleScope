@@ -106,15 +106,17 @@ CandleScope is a local-first market charting application with:
 
 Replay v1 is a local-first, deterministic market-training runtime. It opens in
 an independent `replay.html` document with its own composition root; the live
-page never swaps its market source or owns replay state. Replay is disabled by
-default on both sides. The v2 product, aggregate-trade archive, and historical-
-book capability are independently closed as well:
+page never swaps its market source or owns replay state. The authoritative
+replay capability and live-page entry remain disabled by default. Once those
+gates are enabled, v2 is the default replay product; aggregate-trade archive,
+historical-book, background workers, and optimized paths remain independently
+closed:
 
 ```text
 REPLAY_ENABLED=0
-REPLAY_PRODUCT_V2_ENABLED=0
+REPLAY_PRODUCT_V2_ENABLED=1
 VITE_REPLAY_ENTRY_ENABLED=0
-VITE_REPLAY_PRODUCT_V2_ENABLED=0
+VITE_REPLAY_PRODUCT_V2_ENABLED=1
 RAW_AGG_TRADE_ARCHIVE_ENABLED=0
 REPLAY_HISTORICAL_BOOK_ENABLED=0
 REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0
@@ -144,7 +146,9 @@ Replay v1 explicitly does **not** support:
 - `L2_BOOK`: no historical order-book queue position or book-assisted fill fidelity.
 - `EXCHANGE_FUTURES_EXACT`: no historical funding, maintenance-margin tiers, liquidation/ADL, or exact exchange account semantics.
 
-Replay v2 remains separately opt-in. Phase 8 adds explainable
+Replay v2 is selected by default after the replay gates are opened. Setting
+either v2 selector explicitly to `0` keeps the corresponding v1 rollback path.
+Phase 8 adds explainable
 `CHECKPOINT_JUMP` / `AGGREGATE_SCAN` / `FULL_EVENT_SCAN` / `BLOCKED` planning,
 bounded source-page scans, cancellable committed chunks, and a replay-isolated
 aggregate-trade Tape/CVD panel. `AGGREGATE_SCAN` still applies every source event
@@ -163,11 +167,12 @@ explicit revalidation/resync. The execution model remains `TOUCH_OR_TAPE_V2`
 and reports `BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE`: L2 is an exact
 continuity capability, not proof of queue position or maker-fill priority.
 
-The optimization and historical-book flags both default to off:
+The v2 selectors default to on; optimization and historical-book capabilities
+remain default-off:
 
 ```text
-REPLAY_PRODUCT_V2_ENABLED=0
-VITE_REPLAY_PRODUCT_V2_ENABLED=0
+REPLAY_PRODUCT_V2_ENABLED=1
+VITE_REPLAY_PRODUCT_V2_ENABLED=1
 REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0
 REPLAY_HISTORICAL_BOOK_ENABLED=0
 REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES=1099511627776
@@ -200,10 +205,11 @@ book, and account-history GC are category-specific, require a fresh dry-run
 plan hash, protect active pins, and rehydrate only from checksum-identical
 trusted sources. Review evidence has no deletion action.
 
-Implementation acceptance does not enable production. Phase 18 remains
-`HOLD_DEFAULTS_REMAIN_OFF`: real BAR and official checksum-bound Binance USD-M
-aggTrade sources are release-tested, while BOOK and exact account modes still
-lack bound production captures and an operations observation window.
+Implementation acceptance does not open the authoritative replay or live-entry
+gates. The current decision is `HOLD_CORE_DEFAULT_OFF_V2_DEFAULT_ON`: real BAR
+and official checksum-bound Binance USD-M aggTrade sources are release-tested,
+while BOOK and exact account modes still lack bound production captures and an
+operations observation window.
 
 ### Prepare Isolated Data
 
@@ -334,7 +340,7 @@ Set-Location ..\backend
 Release evidence commands reject a dirty worktree or a changing Git HEAD.
 Keep their outputs outside the repository so one completed gate cannot make
 the next gate fail the clean-tree check. The final verifier also checks all 40
-product-contract scenarios, exact default-off flags, artifact hashes, real
+product-contract scenarios, exact repository defaults, artifact hashes, real
 BAR and official aggTrade source provenance, bounded storage inventory, 100
 archive lifecycles, keyboard/focus/reduced-motion evidence, and a detached
 `git revert --no-commit` drill. The 4-hour soak is a real release gate, not a

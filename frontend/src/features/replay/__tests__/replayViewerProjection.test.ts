@@ -4,6 +4,7 @@ import test from "node:test";
 import { SeriesWindowStore } from "../../market-data/window/seriesWindowStore.js";
 import type { KlineBar } from "../../market-data/marketDataTypes.js";
 import {
+  applyReplayViewerSeriesDelta,
   ReplayViewerProjectionError,
   aggregateReplayBaseBars,
   rebuildReplayViewerSeries,
@@ -48,6 +49,10 @@ test("base 1m projects the complete 1m/5m/15m/1h close matrix", () => {
     assert.ok(rows.every((row) => row.replayComponentCount === expectedComponents));
     assert.ok(rows.every((row) => row.replayExpectedComponents === expectedComponents));
   }
+  const hourly = aggregateReplayBaseBars(prefix, "1m", "1h")[0];
+  assert.equal(hourly?.taker_buy_base, 240);
+  assert.equal(hourly?.takerBuyBase, 240);
+  assert.equal(hourly?.volume, 600);
 });
 
 test("a single revealed base bar remains a forming 15m bar until bucket close", () => {
@@ -112,5 +117,80 @@ test("misaligned base rows fail closed instead of completing a display bucket", 
   assert.throws(
     () => aggregateReplayBaseBars([misaligned], "1m", "15m"),
     /not aligned/,
+  );
+});
+
+test("history pages stay prepend deltas instead of replacing the viewer dataset", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    maxBars: 100,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 10 }, (_, index) => baseBar(index + 10)));
+  const viewer = new SeriesWindowStore();
+  rebuildReplayViewerSeries(viewer, source, "1m", "1m");
+  const emitted: string[] = [];
+  const unsubscribe = viewer.subscribe((delta) => { emitted.push(delta.type); });
+
+  const sourceDelta = source.applyRange(
+    Array.from({ length: 10 }, (_, index) => baseBar(index)),
+  );
+  applyReplayViewerSeriesDelta(viewer, source, "1m", "1m", sourceDelta);
+  unsubscribe();
+
+  assert.deepEqual(viewer.snapshot(), source.snapshot());
+  assert.deepEqual(emitted, ["prepend"]);
+  assert.doesNotMatch(emitted.join(","), /replace|clear/);
+});
+
+test("derived history prepend corrects its boundary bucket without a viewer replace", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    maxBars: 6,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 6 }, (_, index) => baseBar(index + 6)));
+  const viewer = new SeriesWindowStore();
+  rebuildReplayViewerSeries(viewer, source, "1m", "5m");
+  const emitted: string[] = [];
+  const unsubscribe = viewer.subscribe((delta) => { emitted.push(delta.type); });
+
+  const sourceDelta = source.applyRange(
+    Array.from({ length: 6 }, (_, index) => baseBar(index)),
+  );
+  applyReplayViewerSeriesDelta(viewer, source, "1m", "5m", sourceDelta);
+  unsubscribe();
+
+  assert.equal(source.rightTruncated, true);
+  assert.deepEqual(
+    viewer.snapshot(),
+    aggregateReplayBaseBars(source.snapshot(), "1m", "5m"),
+  );
+  assert.equal(emitted[0], "prepend");
+  assert.ok(emitted.includes("mid-merge"));
+  assert.doesNotMatch(emitted.join(","), /replace|clear/);
+});
+
+test("tail projection publishes tick then append semantics like the live chart path", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 14 }, (_, index) => baseBar(index)));
+  const viewer = new SeriesWindowStore();
+  rebuildReplayViewerSeries(viewer, source, "1m", "15m");
+  const emitted: string[] = [];
+  const unsubscribe = viewer.subscribe((delta) => { emitted.push(delta.type); });
+
+  const closeBucket = source.applyRange([baseBar(14)]);
+  applyReplayViewerSeriesDelta(viewer, source, "1m", "15m", closeBucket);
+  const openNextBucket = source.applyRange([baseBar(15)]);
+  applyReplayViewerSeriesDelta(viewer, source, "1m", "15m", openNextBucket);
+  unsubscribe();
+
+  assert.deepEqual(emitted, ["tick", "append"]);
+  assert.deepEqual(
+    viewer.snapshot(),
+    aggregateReplayBaseBars(source.snapshot(), "1m", "15m"),
   );
 });

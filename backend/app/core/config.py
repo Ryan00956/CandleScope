@@ -54,7 +54,7 @@ class ReplaySettings:
     event_subscriber_queue: int
     controller_ttl_seconds: int
     idle_ttl_seconds: int
-    product_v2_enabled: bool = False
+    product_v2_enabled: bool = True
     replay_segment_download_worker_enabled: bool = False
     replay_segment_auto_gc_enabled: bool = False
     replay_segment_max_archive_bytes: int = 1_099_511_627_776
@@ -140,7 +140,7 @@ def load_replay_settings(
         controller_ttl_seconds=values["REPLAY_CONTROLLER_TTL_SECONDS"],
         idle_ttl_seconds=values["REPLAY_IDLE_TTL_SECONDS"],
         product_v2_enabled=_strict_replay_bool(
-            environment, "REPLAY_PRODUCT_V2_ENABLED", "0"
+            environment, "REPLAY_PRODUCT_V2_ENABLED", "1"
         ),
         replay_segment_download_worker_enabled=_strict_replay_bool(
             environment, "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED", "0"

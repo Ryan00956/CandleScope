@@ -116,14 +116,14 @@ test("replay.v2 rejects source mixing and silent time-disclosure downgrade", () 
   assert.throws(() => parseReplayV2Event(event, "HIDE_DAY"), /downgrade/);
 });
 
-test("replay.v2 frontend flag is strict, default-off and direct URL remains closed", () => {
-  assert.equal(replayV2ProductFlagEnabled(undefined), false);
+test("replay.v2 frontend flag is strict, default-on and direct URL remains closed", () => {
+  assert.equal(replayV2ProductFlagEnabled(undefined), true);
   assert.equal(replayV2ProductFlagEnabled("0"), false);
   assert.equal(replayV2ProductFlagEnabled("false"), false);
   assert.equal(replayV2ProductFlagEnabled("1"), true);
   assert.equal(replayV2ProductFlagEnabled("true"), true);
   assert.equal(replayV2ProductFlagEnabled(true), true);
-  assert.equal(REPLAY_PRODUCT_V2_ENABLED, false);
+  assert.equal(REPLAY_PRODUCT_V2_ENABLED, true);
 
   assert.deepEqual(
     resolveReplayEntry({ pathname: "/replay.html", search: "?product=v2" }),
@@ -135,7 +135,7 @@ test("replay.v2 frontend flag is strict, default-off and direct URL remains clos
   );
 });
 
-test("Phase 1 production composition keeps v2 default-off at the replay-only root", () => {
+test("replay-only root selects v2 by default while preserving the isolated composition", () => {
   const replayMain = readFileSync(new URL("../../../replay-main.tsx", import.meta.url), "utf8");
   const replayApp = readFileSync(new URL("../ReplayApp.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(replayMain, /replayV2|REPLAY_PRODUCT_V2|VITE_REPLAY_PRODUCT_V2/);

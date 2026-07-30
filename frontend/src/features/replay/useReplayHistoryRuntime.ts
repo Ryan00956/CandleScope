@@ -5,16 +5,25 @@ import {
   ReplayHistoryProvider,
   applyReplayHistoryPage,
 } from "./replayHistoryProvider.js";
-import type { ReplayHistoryIdentity } from "./replayHistoryProvider.js";
+import type {
+  ReplayHistoryIdentity,
+  ReplayHistoryPolicy,
+} from "./replayHistoryProvider.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 
 
 export interface ReplayHistoryRuntime {
   readonly loading: boolean;
   readonly hasMore: boolean;
+  readonly canRestoreLatestWindow: boolean;
   readonly error: string | null;
   readonly historyEpoch: ReplayDigest | null;
+  readonly boundaryMs: number | null;
+  readonly policy: ReplayHistoryPolicy | null;
+  readonly notice: string | null;
   readonly loadMoreLeft: LoadMoreLeft;
+  readonly restoreLatestWindow: () => Promise<boolean>;
+  readonly dismissNotice: () => void;
 }
 
 export function useReplayHistoryRuntime(runtime: ReplayRuntime): ReplayHistoryRuntime {
@@ -22,12 +31,16 @@ export function useReplayHistoryRuntime(runtime: ReplayRuntime): ReplayHistoryRu
   const [hasMore, setHasMore] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [historyEpoch, setHistoryEpoch] = useState<ReplayDigest | null>(null);
+  const [boundaryMs, setBoundaryMs] = useState<number | null>(null);
+  const [policy, setPolicy] = useState<ReplayHistoryPolicy | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const loadingRef = useRef(false);
   const storeRef = useRef(runtime.store);
   storeRef.current = runtime.store;
   const config = runtime.store.sessionConfig;
   const sessionId = runtime.store.sessionId;
   const dataEpoch = runtime.store.dataEpoch;
+  const runtimeGeneration = runtime.store.generation;
   const identity = useMemo<ReplayHistoryIdentity | null>(() => config === null ? null : ({
     exchange: config.exchange,
     market_type: config.market_type,
@@ -46,10 +59,13 @@ export function useReplayHistoryRuntime(runtime: ReplayRuntime): ReplayHistoryRu
     setHasMore(true);
     setError(null);
     setHistoryEpoch(null);
+    setBoundaryMs(null);
+    setPolicy(null);
+    setNotice(null);
     loadingRef.current = false;
     setLoading(false);
     return () => provider?.cancel();
-  }, [provider]);
+  }, [provider, runtimeGeneration]);
 
   const loadMoreLeft = useCallback<LoadMoreLeft>(async (oldestLoadedTime) => {
     const store = storeRef.current;
@@ -75,7 +91,16 @@ export function useReplayHistoryRuntime(runtime: ReplayRuntime): ReplayHistoryRu
         || page.revealed_boundary_ms > latest.virtualTimeMs) return;
       applyReplayHistoryPage(runtime.replayStore.seriesStore, page);
       setHistoryEpoch(page.history_epoch);
+      setBoundaryMs(page.history_boundary_ms);
+      setPolicy(page.history_policy);
       setHasMore(page.has_more && page.bars.length > 0);
+      if (!page.has_more) {
+        setNotice(page.history_policy.visible_history_lookback.mode === "DURATION"
+          ? `已到旧 Run 的固定历史边界：开始前 ${page.history_policy.visible_history_rows} 根 ${config?.base_interval ?? "基础周期"} K 线。新建 Run 默认可按需翻到数据起点。`
+          : "已到该数据源连续历史的最早一根 K 线。");
+      } else {
+        setNotice(null);
+      }
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       setError(cause instanceof Error ? cause.message : "回放历史回补失败");
@@ -84,7 +109,29 @@ export function useReplayHistoryRuntime(runtime: ReplayRuntime): ReplayHistoryRu
       loadingRef.current = false;
       setLoading(false);
     }
-  }, [hasMore, provider, runtime.replayStore.seriesStore, sessionId]);
+  }, [config?.base_interval, hasMore, provider, runtime.replayStore.seriesStore, sessionId]);
 
-  return { loading, hasMore, error, historyEpoch, loadMoreLeft };
+  const restoreLatestWindow = useCallback(async (): Promise<boolean> => {
+    const restore = runtime.marketData.actions.restoreLatestWindow;
+    if (restore === undefined || loadingRef.current) return false;
+    return restore();
+  }, [runtime.marketData.actions.restoreLatestWindow]);
+
+  return {
+    loading,
+    hasMore,
+    canRestoreLatestWindow: !loading
+      && runtime.store.hasAuthoritativeSnapshot
+      && runtime.store.connectionState === "connected"
+      && runtime.replayStore.seriesStore.rightTruncated
+      && runtime.marketData.actions.restoreLatestWindow !== undefined,
+    error,
+    historyEpoch,
+    boundaryMs,
+    policy,
+    notice,
+    loadMoreLeft,
+    restoreLatestWindow,
+    dismissNotice: () => setNotice(null),
+  };
 }

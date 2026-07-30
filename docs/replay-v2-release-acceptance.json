@@ -2,7 +2,7 @@
   "schema_version": "replay.v2.release-acceptance.v2",
   "contract": "docs/KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md#17-验收场景",
   "expected_scenarios": 40,
-  "production_enablement": "HOLD_DEFAULTS_REMAIN_OFF",
+  "production_enablement": "HOLD_CORE_DEFAULT_OFF_V2_DEFAULT_ON",
   "release_gates": [
     "full_suite",
     "browser",

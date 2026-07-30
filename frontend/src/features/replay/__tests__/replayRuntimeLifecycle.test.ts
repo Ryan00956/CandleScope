@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { SeriesWindowStore } from "../../market-data/window/seriesWindowStore.js";
 import { ReplayApiError } from "../replayApi.js";
 import {
   parseReplayCapabilities,
@@ -18,6 +19,7 @@ import {
   ReplayLifecycleEffectGuard,
   ReplayRuntimeLifecycle,
 } from "../useReplayRuntime.js";
+import { ReplayStore } from "../replayStore.js";
 import {
   BASE_TIME_MS,
   disabledCapabilities,
@@ -154,6 +156,53 @@ test("HTTP session snapshot validates only; first published chart truth is the W
   callback?.onSnapshot?.(parseReplaySessionResponse(replaySessionResponse()).snapshot, 1);
   assert.equal(lifecycle.getSnapshot().phase, "ACTIVE");
   assert.equal(lifecycle.store.seriesStore.barCount, 1);
+});
+
+test("a right-edge gesture restores the latest replay window after deep left history", async (context) => {
+  const harness = streamHarness();
+  const store = new ReplayStore({
+    seriesStore: new SeriesWindowStore({ maxBars: 1 }),
+  });
+  const lifecycle = new ReplayRuntimeLifecycle({
+    entry: { kind: "session", sessionId: "session-0001" },
+    store,
+    api: {
+      async capabilities() {
+        return parseReplayCapabilities(enabledCapabilities());
+      },
+      async getSession() {
+        return parseReplaySessionResponse(replaySessionResponse());
+      },
+    },
+    streamFactory: (options) => harness.factory(options),
+  });
+  context.after(() => lifecycle.dispose());
+  lifecycle.start();
+  await settle();
+
+  const callbacks = harness.options[0]!;
+  const authoritative = parseReplaySessionResponse(replaySessionResponse()).snapshot;
+  callbacks.onGeneration?.({ generation: 1, reason: "initial", resetAuthoritativeState: true });
+  callbacks.onSnapshot?.(authoritative, 1);
+  const latest = store.seriesStore.first();
+  assert.ok(latest);
+  store.seriesStore.applyRange([{
+    ...latest,
+    time: latest.time - 60,
+  }], { source: "replay-history-before-page" });
+  assert.equal(store.seriesStore.rightTruncated, true);
+
+  const runtime = buildReplayMarketDataRuntime(lifecycle.getSnapshot(), lifecycle);
+  assert.equal(runtime.status.canRestoreLatestWindow, true);
+  const restore = runtime.actions.restoreLatestWindow?.();
+  assert.ok(restore);
+  assert.equal(harness.resyncs, 1);
+
+  callbacks.onGeneration?.({ generation: 2, reason: "resync", resetAuthoritativeState: true });
+  callbacks.onSnapshot?.(authoritative, 2);
+  assert.equal(await restore, true);
+  assert.equal(store.seriesStore.rightTruncated, false);
+  assert.equal(store.seriesStore.first()?.time, latest.time);
 });
 
 for (const recovery of [

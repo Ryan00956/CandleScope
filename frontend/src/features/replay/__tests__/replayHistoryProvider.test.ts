@@ -132,6 +132,33 @@ test("history parser rejects source, epoch, unknown-field, and lookahead drift",
   }
 });
 
+test("all-available policy may expose more rows than the execution warmup", async () => {
+  const payload = response({
+    history_policy: {
+      schema_version: "replay.data-policy.v1",
+      indicator_warmup_bars: 200,
+      visible_history_lookback: {
+        mode: "ALL_AVAILABLE",
+        duration_ms: null,
+      },
+      visible_history_rows: 250_000,
+      effective_warmup_bars: 200,
+      forward_cache_ms: 86_400_000,
+      interval_ms: 60_000,
+      policy_hash: `sha256:${"d".repeat(64)}`,
+    },
+  });
+  const runtime = provider(async () => new Response(JSON.stringify(payload), { status: 200 }));
+  const page = await runtime.loadBefore({
+    beforeMs: BOUNDARY_MS,
+    revealedBoundaryMs: BOUNDARY_MS,
+    dataEpoch: DATA_EPOCH,
+    limit: 250,
+  });
+  assert.equal(page.history_policy.visible_history_rows, 250_000);
+  assert.equal(page.history_policy.effective_warmup_bars, 200);
+});
+
 test("history application prepends once and preserves the authoritative replay tail", async () => {
   const runtime = provider(async () => new Response(JSON.stringify(response()), { status: 200 }));
   const page = await runtime.loadBefore({

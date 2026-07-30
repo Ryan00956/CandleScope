@@ -106,11 +106,11 @@ creation. The disabled capability response remains stable so the independent
 frontend page can show `REPLAY_DISABLED` instead of falling back to live data.
 
 Replay training v2 has an additional subordinate switch,
-`REPLAY_PRODUCT_V2_ENABLED`. Phase 0 freezes only its `replay.v2` enums,
-strict envelopes, schema policy, and fail-closed transport boundary. Even when
-both switches are enabled in a Phase 0 build, v2 Run HTTP/WebSocket paths return
-`REPLAY_PRODUCT_V2_PHASE_0_ONLY`; they do not construct a v2 runtime or touch a
-replay database.
+`REPLAY_PRODUCT_V2_ENABLED`. It defaults to enabled so v2 is selected whenever
+the authoritative `REPLAY_ENABLED` gate is opened. Explicitly setting the
+subordinate switch to `0` restores the v1 route; it does not weaken the
+authoritative gate or enable optional archive, book, worker, or optimization
+capabilities.
 
 When enabled, replay owns a separate SQLite database and a bounded runtime:
 
@@ -128,12 +128,19 @@ reports are stored only in `REPLAY_DB_PATH`. Active dataset snapshots/partitions
 mailboxes, event rings, subscriber queues, checkpoint history, and frontend
 projection windows all have explicit capacity limits.
 
+Training drafts use `ALL_AVAILABLE` chart history by default. The immutable
+execution snapshot remains bounded by indicator warmup plus forward cache;
+older pre-start chart bars are paged through the replay service from the
+read-only local K-line repository up to the run-bound continuous-history
+boundary. This path never triggers exchange backfill and cannot reveal data
+after the durable virtual-time cursor.
+
 ### Replay Configuration
 
 | Variable | Default | Meaning |
 |---|---:|---|
 | `REPLAY_ENABLED` | `0` | Authoritative backend feature/capability switch |
-| `REPLAY_PRODUCT_V2_ENABLED` | `0` | Subordinate v2 product switch; Phase 0 remains runtime-closed even when explicitly set |
+| `REPLAY_PRODUCT_V2_ENABLED` | `1` | Subordinate v2 product selector; explicit `0` restores v1 while the authoritative replay gate remains unchanged |
 | `REPLAY_DB_PATH` | `<CANDLE_DATA_DIR>/replay.db` | Replay-only SQLite state; must differ from `KLINES_DB_PATH` |
 | `REPLAY_MAX_ACTIVE_SESSIONS` | `8` | Active pinned session limit |
 | `REPLAY_COMMAND_QUEUE_SIZE` | `256` | Per-actor bounded command mailbox |

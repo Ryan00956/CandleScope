@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MarketChartWorkspace from "../../app/MarketChartWorkspace.js";
 import MarketPageFrame from "../../app/MarketPageFrame.js";
 import MarketStatusBar from "../../app/MarketStatusBar.js";
@@ -17,6 +17,7 @@ import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import { groupIntervalsByDuration, parseIntervalSeconds } from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import ReplayBottomControlDock from "./components/ReplayBottomControlDock.js";
+import ReplayIndicatorPanel from "./components/ReplayIndicatorPanel.js";
 import ReplayIntegrityReviewPanel from "./components/ReplayIntegrityReviewPanel.js";
 import ReplayRightMarketRail from "./components/ReplayRightMarketRail.js";
 import ReplaySessionDialog from "./components/ReplaySessionDialog.js";
@@ -135,6 +136,10 @@ export default function ReplayTrainingPageShell({
 }: ReplayTrainingPageShellProps) {
   const [returningToHub, setReturningToHub] = useState(false);
   const [returnToHubError, setReturnToHubError] = useState<string | null>(null);
+  const [integrityOpen, setIntegrityOpen] = useState(false);
+  const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
+  const integrityToggleRef = useRef<HTMLButtonElement | null>(null);
+  const integrityDrawerRef = useRef<HTMLElement | null>(null);
   const [priceScale] = useState(() => {
     const preferences = loadUserPrefs();
     return {
@@ -147,6 +152,28 @@ export default function ReplayTrainingPageShell({
   const history = useReplayHistoryRuntime(runtime);
   const integrityRuntime = useReplayIntegrityRuntime(runtime, viewer);
   const review = integrityRuntime.review;
+  useEffect(() => {
+    if (review !== null) setIntegrityOpen(true);
+  }, [review]);
+  useEffect(() => {
+    if (review !== null) setIndicatorPanelOpen(false);
+  }, [review]);
+  useEffect(() => {
+    if (!integrityOpen) return undefined;
+    const drawer = integrityDrawerRef.current;
+    const toggle = integrityToggleRef.current;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setIntegrityOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    requestAnimationFrame(() => drawer?.focus());
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      requestAnimationFrame(() => toggle?.focus());
+    };
+  }, [integrityOpen]);
   const liveDrawingScopeBase = integrityRuntime.runId === null
     ? `replay-run:pending`
     : `replay-run:${integrityRuntime.runId}`;
@@ -602,10 +629,15 @@ export default function ReplayTrainingPageShell({
       drawingKeyBase={drawingScopeBase}
       interval={displayedInterval}
       loading={review === null
-        && (runtime.marketData.view.loading || viewer.loading || history.loading)}
+        && (runtime.marketData.view.loading || viewer.loading)}
       onCrosshairMove={runtime.marketData.actions.onCrosshairMove}
       onNeedMoreLeft={review === null ? history.loadMoreLeft : null}
+      onNeedMoreRight={review === null ? history.restoreLatestWindow : null}
       canLoadMoreLeft={review === null && history.hasMore}
+      canRestoreLatestWindow={review === null && history.canRestoreLatestWindow}
+      rightWindowTruncated={review === null
+        ? runtime.replayStore.seriesStore.rightTruncated
+        : false}
       datasetKey={review === null
         ? String(displayedSeriesStore.seriesKey ?? "replay-viewer-uninitialized")
         : `review:${review.review_id}:${review.selected_timeline_sequence}`}
@@ -643,6 +675,14 @@ export default function ReplayTrainingPageShell({
       drawingSnapEnabled={drawings.view.drawingSnapEnabled}
       onSelectedDrawingChange={drawings.actions.handleSelectedDrawingChange}
       mainOverlayLines={review === null ? [...indicators.mainOverlayLines] : []}
+      subPanes={review === null ? [...indicators.subPanes] : []}
+      onRemoveSubPane={review === null
+        ? (pane) => {
+            const id = pane.owner?.id;
+            const item = indicators.catalog.find((candidate) => candidate.id === id);
+            if (item) indicators.actions.remove(item.id);
+          }
+        : null}
       invertScale={priceScale.invert}
       priceScaleMode={priceScale.mode}
     />
@@ -710,7 +750,20 @@ export default function ReplayTrainingPageShell({
             </button>
           )}
           controls={<>
-            <button className="indicator-toggle-btn active" type="button" disabled={review !== null} title={review === null ? "本地指标仅使用已揭示前缀" : "ReviewMode 禁用活动 Run 指标，防止未来值进入只读投影"}>📊<span className="indicator-badge">{review === null ? indicators.status.sourceBarCount : "R/O"}</span></button>
+            <button
+              className={`indicator-toggle-btn ${indicatorPanelOpen ? "active" : ""}`}
+              type="button"
+              disabled={review !== null}
+              aria-expanded={indicatorPanelOpen}
+              aria-controls="replay-indicator-panel"
+              onClick={() => setIndicatorPanelOpen((open) => !open)}
+              title={review === null ? "管理仅使用已揭示 K 线的回放指标" : "ReviewMode 禁用活动 Run 指标，防止未来值进入只读投影"}
+            >
+              📊
+              <span className="indicator-badge">
+                {review === null ? indicators.status.activeIndicatorCount : "R/O"}
+              </span>
+            </button>
             <button className="indicator-toggle-btn alert-toggle-btn" type="button" disabled title={capabilities.ALERTS.state}>🔔</button>
           </>}
           quote={last && (
@@ -727,16 +780,21 @@ export default function ReplayTrainingPageShell({
               ))}
             </div>
           )}
-          ohlcv={last && (
-            <div className="ohlcv-bar">
-              <div className="ohlcv-item"><span className="ohlcv-label">O</span><span className="ohlcv-value">{last.open}</span></div>
-              <div className="ohlcv-item"><span className="ohlcv-label">H</span><span className="ohlcv-value">{last.high}</span></div>
-              <div className="ohlcv-item"><span className="ohlcv-label">L</span><span className="ohlcv-value">{last.low}</span></div>
-              <div className="ohlcv-item"><span className="ohlcv-label">C</span><span className="ohlcv-value">{last.close}</span></div>
-              <div className="ohlcv-item"><span className="ohlcv-label">Vol</span><span className="ohlcv-value">{last.volume}</span></div>
-            </div>
-          )}
           trailing={<>
+            {active && (
+              <button
+                ref={integrityToggleRef}
+                className="replay-integrity-toggle"
+                type="button"
+                data-replay-action="toggle-integrity"
+                data-review-active={review === null ? "false" : "true"}
+                aria-controls="replay-integrity-drawer"
+                aria-expanded={integrityOpen}
+                onClick={() => setIntegrityOpen((open) => !open)}
+              >
+                {review === null ? "复盘与完整性" : "复盘中"}
+              </button>
+            )}
             {active && runtime.store.sessionId !== null && <button className="replay-return-hub" type="button" disabled={returningToHub || review !== null} title={review !== null ? "先退出只读 ReviewMode" : returnToHubError ?? "服务端暂停并写入 checkpoint 后返回存档大厅"} onClick={() => void returnToHub()}>{returningToHub ? "正在保存…" : "存档大厅"}</button>}
             <a className="replay-live-link" href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
           </>}
@@ -786,7 +844,39 @@ export default function ReplayTrainingPageShell({
           ) : null}
         />
       )}
-      featureSurfaces={active ? <><ReplayIntegrityReviewPanel runtime={runtime} integrityRuntime={integrityRuntime} trainingState={effectiveState} />{review === null && <ReplayBottomControlDock runtime={runtime} viewer={viewer} publicTimeLabel={publicTime} />}</> : null}
+      featureSurfaces={active ? <>
+        {review === null && history.notice !== null && (
+          <div className="replay-history-boundary-notice" role="status">
+            <span>{history.notice}</span>
+            <button type="button" onClick={history.dismissNotice} aria-label="关闭历史边界提示">×</button>
+          </div>
+        )}
+        {review === null && <ReplayBottomControlDock runtime={runtime} viewer={viewer} publicTimeLabel={publicTime} />}
+        {review === null && indicatorPanelOpen && (
+          <div id="replay-indicator-panel" className="replay-indicator-panel-layer">
+            <ReplayIndicatorPanel
+              runtime={indicators}
+              onClose={() => setIndicatorPanelOpen(false)}
+            />
+          </div>
+        )}
+        {integrityOpen && (
+          <aside
+            ref={integrityDrawerRef}
+            id="replay-integrity-drawer"
+            className="replay-integrity-drawer"
+            aria-label="复盘与完整性"
+            tabIndex={-1}
+          >
+            <ReplayIntegrityReviewPanel
+              runtime={runtime}
+              integrityRuntime={integrityRuntime}
+              trainingState={effectiveState}
+              onClose={() => setIntegrityOpen(false)}
+            />
+          </aside>
+        )}
+      </> : null}
       statusBar={(
         <MarketStatusBar
           source="replay"
@@ -806,6 +896,12 @@ export default function ReplayTrainingPageShell({
             "data-replay-fill-count": review?.projection.fills.length ?? runtime.store.fills.length,
             "data-replay-revealed": String(runtime.store.revealed),
             "data-replay-history-epoch": history.historyEpoch ?? "",
+            "data-replay-history-right-truncated": String(
+              review === null
+                ? runtime.replayStore.seriesStore.rightTruncated
+                : displayedSeriesStore.rightTruncated,
+            ),
+            "data-replay-history-can-restore-latest": String(history.canRestoreLatestWindow),
             "data-replay-view-interval": displayedInterval,
             "data-replay-view-revision": review === null
               ? viewer.viewerState?.semantic_view_revision ?? ""
@@ -831,7 +927,7 @@ export default function ReplayTrainingPageShell({
             <span>{review === null ? effectiveState ?? runtime.phase : `REVIEW ${review.playback_state}`}</span>
             <span>{viewerBarCount} display bars</span>
             {review === null && history.loading && <span>Loading older replay data…</span>}
-            {review === null && !history.hasMore && !history.loading && <span>No more frozen history</span>}
+            {review === null && !history.hasMore && !history.loading && <span>已到可用历史起点</span>}
             {review === null && history.error && <span className="replay-history-error">{history.error}</span>}
             {review !== null && <span>immutable event #{review.selected_timeline_sequence}</span>}
             {review !== null && reviewChartBounded && <span>20,000-bar review prefix bound</span>}
@@ -839,7 +935,7 @@ export default function ReplayTrainingPageShell({
           right={<>
             <span>{review === null ? `Controller: ${ownsController ? "本页" : runtime.store.controllerClientId ? "其他页面" : "无"}` : "Original controller isolated"}</span>
             <span>{config?.source_kind.toUpperCase() ?? "BAR"} · {config?.quality_mode.toUpperCase() ?? "EXACT"}</span>
-            <span>无 live feeds · replay.v2 shell / replay.v1 adapter</span>
+            <span>服务端回放 · 与实时行情隔离</span>
           </>}
         />
       )}

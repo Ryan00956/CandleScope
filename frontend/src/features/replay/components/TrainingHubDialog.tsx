@@ -268,10 +268,15 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               });
             }}
           >
-            <option value="DURATION">固定时长</option>
-            <option value="ALL_AVAILABLE">当前连续数据段内全部可用</option>
+            <option value="ALL_AVAILABLE">全部可用（默认，按需加载）</option>
+            <option value="DURATION">固定时长（兼容旧 Run）</option>
           </select>
         </label>
+        {draft.visibleHistoryMode === "ALL_AVAILABLE" && (
+          <p className="training-hub-field-note">
+            像实时行情一样向左按需分页，直到所选连续数据段的最早一根；不会把全部历史塞进执行快照。
+          </p>
+        )}
         {draft.visibleHistoryMode === "DURATION" && (
           <label>
             可见历史时长（ms）
@@ -284,7 +289,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                 visibleHistoryLookbackMs: Number(event.target.value),
               })}
             />
-            <small>必须是基础周期的整数倍；与指标预热分别计算，冻结后不可变。</small>
+            <small>必须是基础周期的整数倍；该模式会把左侧边界固定在 Run 中。</small>
           </label>
         )}
         <label>
@@ -461,16 +466,16 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             <li>
               <strong>可见历史</strong> — {runtime.segmentPlan.history_policy.visible_history_lookback.mode}
               {runtime.segmentPlan.history_policy.visible_history_lookback.duration_ms === null
-                ? " · 创建时按选中连续数据段解析"
+                ? " · 按需分页至选中连续数据段起点"
                 : ` · ${runtime.segmentPlan.history_policy.visible_history_lookback.duration_ms} ms · ${runtime.segmentPlan.history_policy.visible_history_rows_estimate ?? "未对齐"} rows`}
             </li>
             <li>
-              <strong>实际冻结预热估算</strong> — {runtime.segmentPlan.history_policy.effective_warmup_bars_estimate} rows；
+              <strong>执行快照预热估算</strong> — {runtime.segmentPlan.history_policy.effective_warmup_bars_estimate} rows；
               前向 {runtime.segmentPlan.history_policy.forward_rows_estimate} rows
             </li>
             <li>
-              <strong>数据预算</strong> — {runtime.segmentPlan.history_policy.accepted
-                ? `预校验通过（上限 ${runtime.segmentPlan.history_policy.max_dataset_rows} rows）`
+              <strong>执行快照预算</strong> — {runtime.segmentPlan.history_policy.accepted
+                ? `预校验通过（上限 ${runtime.segmentPlan.history_policy.max_dataset_rows} rows；左侧分页不计入）`
                 : `拒绝：${runtime.segmentPlan.history_policy.blocked_reason ?? "UNKNOWN"}`}
             </li>
             <li><strong>本地同源 READY 库存</strong> — {runtime.segmentPlan.existing_ready_segments} segments · {formatBytes(runtime.segmentPlan.existing_ready_bytes)}（创建时再核对范围）</li>

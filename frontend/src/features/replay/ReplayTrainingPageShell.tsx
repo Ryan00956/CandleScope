@@ -8,13 +8,19 @@ import type { RefObject } from "react";
 import DrawingToolbar from "../../components/DrawingToolbar.js";
 import IntervalSelector from "../../components/IntervalSelector.js";
 import SingleChartPanes from "../../components/SingleChartPanes.js";
+import { useCustomIntervals } from "../chart-session/customIntervalStore.js";
+import { useIntervalNoticeRuntime } from "../chart-session/intervalNoticeRuntime.js";
 import { loadUserPrefs } from "../chart-session/chartSessionModel.js";
+import type { CustomIntervalRecord } from "../chart-session/chartSessionTypes.js";
 import { useDrawingRuntime } from "../drawings/useDrawingRuntime.js";
 import { createEmptyDrawingDocument } from "../drawings/core/drawingDocument.js";
 import { drawingDocumentSessionRegistry } from "../drawings/core/drawingDocumentStore.js";
 import { useChartSettingsRuntime } from "../settings/chartAppearanceSettings.js";
 import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
-import { groupIntervalsByDuration, parseIntervalSeconds } from "../../utils/intervals.js";
+import {
+  intervalsSemanticallyEquivalent,
+  parseIntervalSeconds,
+} from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import ReplayBottomControlDock from "./components/ReplayBottomControlDock.js";
 import ReplayIndicatorPanel from "./components/ReplayIndicatorPanel.js";
@@ -22,6 +28,11 @@ import ReplayIntegrityReviewPanel from "./components/ReplayIntegrityReviewPanel.
 import ReplayRightMarketRail from "./components/ReplayRightMarketRail.js";
 import ReplaySessionDialog from "./components/ReplaySessionDialog.js";
 import { buildReplayCapabilityModel } from "./replayCapabilityModel.js";
+import {
+  buildReplayIntervalCatalog,
+  canProjectReplayDisplayInterval,
+  replayIntervalUnavailableMessage,
+} from "./replayIntervalPolicy.js";
 import { defaultReplayApi } from "./replayApi.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
 import {
@@ -138,6 +149,18 @@ export default function ReplayTrainingPageShell({
   const [returnToHubError, setReturnToHubError] = useState<string | null>(null);
   const [integrityOpen, setIntegrityOpen] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
+  const {
+    customIntervalRecords,
+    savedCustomIntervals,
+    addCustomInterval,
+    markIntervalUsed,
+    removeCustomInterval,
+    restoreCustomInterval,
+    togglePinCustomInterval,
+    clearCustomIntervals,
+  } = useCustomIntervals();
+  const { intervalNotice, showIntervalNotice } = useIntervalNoticeRuntime();
+  const lastRemovedIntervalRef = useRef<CustomIntervalRecord | null>(null);
   const integrityToggleRef = useRef<HTMLButtonElement | null>(null);
   const integrityDrawerRef = useRef<HTMLElement | null>(null);
   const [priceScale] = useState(() => {
@@ -546,31 +569,100 @@ export default function ReplayTrainingPageShell({
   const displayedSymbol = review !== null && typeof reviewSelectedTrack?.symbol === "string"
     ? reviewSelectedTrack.symbol
     : config?.symbol ?? "--";
-  const displayIntervals = useMemo(() => {
-    const base = (config?.base_interval ?? "1m") as IntervalString;
-    const baseSeconds = parseIntervalSeconds(base);
-    const candidates = new Set<IntervalString>([base, "1m", "5m", "15m", "1h"] as IntervalString[]);
-    return [...candidates]
-      .map((value) => ({ value, seconds: parseIntervalSeconds(value) }))
-      .filter((item): item is { value: IntervalString; seconds: number } => (
-        baseSeconds !== null
-        && item.seconds !== null
-        && item.seconds >= baseSeconds
-        && item.seconds % baseSeconds === 0
-      ))
-      .sort((left, right) => left.seconds - right.seconds);
-  }, [config?.base_interval]);
-  const nativeIntervals = useMemo(() => displayIntervals.map(({ value, seconds }) => ({
-    value,
-    seconds,
-    label: value,
-  })), [displayIntervals]);
-  const intervalGroups = useMemo(() => groupIntervalsByDuration(displayIntervals.map(({ value, seconds }) => ({
-    value,
-    seconds,
-    label: value,
-    isCustom: false,
-  }))), [displayIntervals]);
+  const baseInterval = (config?.base_interval ?? "1m") as IntervalString;
+  const replayIntervalCatalog = useMemo(() => buildReplayIntervalCatalog({
+    exchange: config?.exchange ?? "binance",
+    marketType: config?.market_type ?? "spot",
+    savedCustomIntervals,
+  }), [
+    config?.exchange,
+    config?.market_type,
+    savedCustomIntervals,
+  ]);
+  const intervalAvailability = useCallback((next: IntervalString): boolean => (
+    canProjectReplayDisplayInterval(baseInterval, next)
+  ), [baseInterval]);
+  const unavailableIntervalMessage = useCallback((next: IntervalString): string => (
+    replayIntervalUnavailableMessage(baseInterval, next)
+  ), [baseInterval]);
+  const selectReplayInterval = useCallback((next: IntervalString): void => {
+    if (review !== null || !intervalAvailability(next)) return;
+    markIntervalUsed(next);
+    void viewer.actions.setDisplayInterval(next).catch(() => undefined);
+  }, [intervalAvailability, markIntervalUsed, review, viewer.actions]);
+  const createReplayCustomInterval = useCallback((next: IntervalString) => {
+    if (review !== null) return { ok: false as const, message: "ReviewMode 中周期只读" };
+    if (!intervalAvailability(next)) {
+      return { ok: false as const, message: unavailableIntervalMessage(next) };
+    }
+    const result = addCustomInterval(next, { markUsed: true });
+    if (!result.ok) return { ok: false as const, message: "周期格式无效" };
+    void viewer.actions.setDisplayInterval(result.value).catch(() => undefined);
+    showIntervalNotice({
+      type: "success",
+      text: `${result.value} 已保存并切换；实时主图与回放共用这份自定义周期`,
+    });
+    return { ok: true as const, added: result.added };
+  }, [
+    addCustomInterval,
+    intervalAvailability,
+    review,
+    showIntervalNotice,
+    unavailableIntervalMessage,
+    viewer.actions,
+  ]);
+  const removeReplayCustomInterval = useCallback((removedInterval: IntervalString): void => {
+    if (review !== null) return;
+    const removed = removeCustomInterval(removedInterval);
+    if (removed === null) return;
+    lastRemovedIntervalRef.current = removed;
+    if (intervalsSemanticallyEquivalent(interval, removed.value)) {
+      void viewer.actions.setDisplayInterval(baseInterval).catch(() => undefined);
+    }
+    showIntervalNotice({
+      type: "warning",
+      text: `${removed.value} 已从实时主图与回放的自定义周期中删除`,
+      actionLabel: "撤销",
+      duration: 6500,
+    });
+  }, [
+    baseInterval,
+    interval,
+    removeCustomInterval,
+    review,
+    showIntervalNotice,
+    viewer.actions,
+  ]);
+  const restoreReplayCustomInterval = useCallback((): void => {
+    const restored = restoreCustomInterval(lastRemovedIntervalRef.current);
+    if (restored === null) return;
+    lastRemovedIntervalRef.current = null;
+    showIntervalNotice({ type: "success", text: `${restored.value} 已恢复` });
+  }, [restoreCustomInterval, showIntervalNotice]);
+  const clearReplayCustomIntervals = useCallback((): void => {
+    if (review !== null) return;
+    const removed = clearCustomIntervals();
+    if (removed.length === 0) return;
+    lastRemovedIntervalRef.current = removed.at(-1) ?? null;
+    if (removed.some((record) => (
+      intervalsSemanticallyEquivalent(interval, record.value)
+    ))) {
+      void viewer.actions.setDisplayInterval(baseInterval).catch(() => undefined);
+    }
+    showIntervalNotice({
+      type: "warning",
+      text: `已清空 ${removed.length} 个共享自定义周期，最近一项可撤销`,
+      actionLabel: "撤销最近一项",
+      duration: 6500,
+    });
+  }, [
+    baseInterval,
+    clearCustomIntervals,
+    interval,
+    review,
+    showIntervalNotice,
+    viewer.actions,
+  ]);
   const viewerLast = displayedSeriesStore.last();
   const viewerFirst = displayedSeriesStore.first();
   const viewerBarCount = displayedSeriesStore.barCount;
@@ -803,21 +895,28 @@ export default function ReplayTrainingPageShell({
       intervalSelector={(
         <IntervalSelector
           interval={displayedInterval}
-          capabilityReady={review === null && config !== null && viewer.viewerState !== null && !viewer.viewerPending}
-          capabilityLoading={config === null || viewer.loading || viewer.viewerPending}
-          nativeIntervals={nativeIntervals}
-          intervalGroups={intervalGroups}
-          customIntervalRecords={[]}
-          savedCustomIntervals={[]}
-          onSelectInterval={(next) => {
-            if (review === null) void viewer.actions.setDisplayInterval(next).catch(() => undefined);
-          }}
-          onCreateCustomInterval={() => ({ ok: false, message: "Phase 3 仅开放可证明的固定周期倍数" })}
-          onRemoveCustomInterval={() => undefined}
-          onRestoreCustomInterval={() => undefined}
-          onTogglePinCustomInterval={() => null}
-          onClearCustomIntervals={() => undefined}
-          intervalNotice={{
+          capabilityReady={review === null
+            && config !== null
+            && viewer.viewerState !== null
+            && !viewer.viewerPending
+            && replayIntervalCatalog.nativeIntervals.length > 0}
+          capabilityLoading={config === null
+            || viewer.loading
+            || viewer.viewerPending}
+          nativeIntervals={replayIntervalCatalog.nativeIntervals}
+          intervalGroups={replayIntervalCatalog.intervalGroups}
+          customIntervalRecords={customIntervalRecords}
+          savedCustomIntervals={savedCustomIntervals}
+          onSelectInterval={selectReplayInterval}
+          onCreateCustomInterval={createReplayCustomInterval}
+          onRemoveCustomInterval={removeReplayCustomInterval}
+          onRestoreCustomInterval={restoreReplayCustomInterval}
+          onTogglePinCustomInterval={togglePinCustomInterval}
+          onClearCustomIntervals={clearReplayCustomIntervals}
+          intervalAvailability={intervalAvailability}
+          unavailableIntervalMessage={unavailableIntervalMessage}
+          readOnlyReason={review === null ? null : "ReviewMode 中周期只读"}
+          intervalNotice={intervalNotice ?? {
             type: viewer.error ? "error" : "info",
             text: review === null
               ? viewer.error ?? `ViewerState r${viewer.viewerState?.semantic_view_revision ?? "--"} · ${publicTime}`

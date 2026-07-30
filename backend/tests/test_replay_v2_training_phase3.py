@@ -160,15 +160,21 @@ def test_aligned_step_finishes_forming_bucket_then_advances_full_buckets() -> No
     ) == bucket_start + 2_699_999
 
 
-def test_aligned_step_rejects_calendar_or_inexact_intervals() -> None:
-    with pytest.raises(TrainingRunError, match="fixed-duration"):
-        aligned_step_target_ms(
-            current_virtual_time_ms=START_MS,
-            base_interval="1m",
-            step_interval="1M",
-            count=1,
-        )
-    with pytest.raises(TrainingRunError, match="integer multiple"):
+def test_aligned_step_supports_calendar_intervals_and_rejects_inexact_intervals() -> None:
+    january_midpoint_ms = 1_705_276_800_000  # 2024-01-15T12:00:00Z
+    assert aligned_step_target_ms(
+        current_virtual_time_ms=january_midpoint_ms,
+        base_interval="1m",
+        step_interval="1M",
+        count=1,
+    ) == 1_706_745_599_999  # 2024-01-31T23:59:59.999Z
+    assert aligned_step_target_ms(
+        current_virtual_time_ms=1_706_745_599_999,
+        base_interval="1m",
+        step_interval="1M",
+        count=1,
+    ) == 1_709_251_199_999  # 2024-02-29T23:59:59.999Z
+    with pytest.raises(TrainingRunError, match="exactly tileable"):
         aligned_step_target_ms(
             current_virtual_time_ms=START_MS,
             base_interval="5m",
@@ -218,34 +224,55 @@ async def test_create_run_uses_base_adapter_and_persists_initial_viewer(
         await service.shutdown(step_timeout=1.0)
 
 
-async def test_create_and_viewer_switch_reject_unsupported_display_intervals(
+async def test_create_and_viewer_switch_support_calendar_but_reject_inexact_intervals(
     tmp_path: Path,
 ) -> None:
     service = await _service(tmp_path / "intervals.db")
     try:
-        for interval in ("1M", "90s"):
-            with pytest.raises(TrainingRunError):
-                await service.training.create_run(  # type: ignore[union-attr]
-                    await _request(service, display_interval=interval)
-                )
+        monthly = await service.training.create_run(  # type: ignore[union-attr]
+            await _request(service, display_interval="1M")
+        )
+        monthly_viewer = await service.training.get_viewer_state(  # type: ignore[union-attr]
+            monthly["run"]["run_id"]
+        )
+        assert monthly_viewer["display_interval"] == "1M"
+
+        with pytest.raises(TrainingRunError):
+            await service.training.create_run(  # type: ignore[union-attr]
+                await _request(service, display_interval="90s")
+            )
 
         created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
         snapshot = await service.get_session(created["run"]["adapter_session_id"])
-        for index, interval in enumerate(("1M", "90s")):
-            with pytest.raises(TrainingRunError):
-                await service.training.command(  # type: ignore[union-attr]
-                    created["run"]["run_id"],
-                    _v2_command(
-                        run_id=created["run"]["run_id"],
-                        command_id=f"invalid-view-{index}",
-                        command_type=ReplayV2CommandType.SET_DISPLAY_INTERVAL,
-                        snapshot=snapshot,
-                        payload={
-                            "display_interval": interval,
-                            "expected_viewer_revision": 0,
-                        },
-                    ),
-                )
+        switched = await service.training.command(  # type: ignore[union-attr]
+            created["run"]["run_id"],
+            _v2_command(
+                run_id=created["run"]["run_id"],
+                command_id="calendar-view",
+                command_type=ReplayV2CommandType.SET_DISPLAY_INTERVAL,
+                snapshot=snapshot,
+                payload={
+                    "display_interval": "1M",
+                    "expected_viewer_revision": 0,
+                },
+            ),
+        )
+        assert switched["viewer_state"]["display_interval"] == "1M"
+
+        with pytest.raises(TrainingRunError):
+            await service.training.command(  # type: ignore[union-attr]
+                created["run"]["run_id"],
+                _v2_command(
+                    run_id=created["run"]["run_id"],
+                    command_id="invalid-view",
+                    command_type=ReplayV2CommandType.SET_DISPLAY_INTERVAL,
+                    snapshot=snapshot,
+                    payload={
+                        "display_interval": "90s",
+                        "expected_viewer_revision": 1,
+                    },
+                ),
+            )
     finally:
         await service.shutdown(step_timeout=1.0)
 

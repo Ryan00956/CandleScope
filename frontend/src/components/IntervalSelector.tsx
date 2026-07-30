@@ -115,6 +115,8 @@ function createStatusForValue(
   nativeValues: readonly IntervalString[],
   capabilityReady: boolean,
   capabilityLoading: boolean,
+  intervalAvailability?: (value: IntervalString) => boolean,
+  unavailableIntervalMessage?: (value: IntervalString) => string,
 ): IntervalStatus {
   const normalized = canonicalizeIntervalValue(value);
   const seconds = parseIntervalSeconds(normalized);
@@ -128,15 +130,19 @@ function createStatusForValue(
   if (!capabilityReady) {
     return { ok: false, kind: "invalid", text: "当前交易所没有可用的历史 K 线能力。" };
   }
-  if (nativeValueSet.has(signature)) {
-    return { ok: false, kind: "native", text: "这是交易所原生周期，可直接选择。" };
-  }
-  if (!canResolveIntervalFromNativeValues(normalized, nativeValues)) {
+  const available = intervalAvailability
+    ? intervalAvailability(normalized)
+    : canResolveIntervalFromNativeValues(normalized, nativeValues);
+  if (!available) {
     return {
       ok: false,
       kind: "invalid",
-      text: "当前市场没有可精确拼接该周期的历史 K 线基准周期。",
+      text: unavailableIntervalMessage?.(normalized)
+        ?? "当前市场没有可精确拼接该周期的历史 K 线基准周期。",
     };
+  }
+  if (nativeValueSet.has(signature)) {
+    return { ok: false, kind: "native", text: "这是交易所原生周期，可直接选择。" };
   }
   if (customValueSet.has(signature)) {
     return { ok: false, kind: "exists", text: "该自定义周期已添加，可直接选择。" };
@@ -160,6 +166,8 @@ export interface IntervalSelectorProps {
   onClearCustomIntervals(): void;
   intervalNotice: IntervalNotice | null;
   readOnlyReason?: string | null;
+  intervalAvailability?: (interval: IntervalString) => boolean;
+  unavailableIntervalMessage?: (interval: IntervalString) => string;
 }
 
 function IntervalSelector({
@@ -178,6 +186,8 @@ function IntervalSelector({
   onClearCustomIntervals,
   intervalNotice,
   readOnlyReason = null,
+  intervalAvailability,
+  unavailableIntervalMessage: unavailableIntervalMessageOverride,
 }: IntervalSelectorProps) {
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<IntervalTab>("common");
@@ -229,8 +239,26 @@ function IntervalSelector({
 
   const normalizedSearch = canonicalizeIntervalValue(search);
   const searchCreateStatus = useMemo(
-    () => createStatusForValue(search, nativeValueSet, customValueSet, nativeValues, capabilityReady, capabilityLoading),
-    [capabilityLoading, capabilityReady, customValueSet, nativeValueSet, nativeValues, search],
+    () => createStatusForValue(
+      search,
+      nativeValueSet,
+      customValueSet,
+      nativeValues,
+      capabilityReady,
+      capabilityLoading,
+      intervalAvailability,
+      unavailableIntervalMessageOverride,
+    ),
+    [
+      capabilityLoading,
+      capabilityReady,
+      customValueSet,
+      intervalAvailability,
+      nativeValueSet,
+      nativeValues,
+      search,
+      unavailableIntervalMessageOverride,
+    ],
   );
 
   const formValue = useMemo(() => {
@@ -239,21 +267,44 @@ function IntervalSelector({
     return `${numeric}${unit}`;
   }, [amount, unit]);
   const formStatus = useMemo(
-    () => createStatusForValue(formValue, nativeValueSet, customValueSet, nativeValues, capabilityReady, capabilityLoading),
-    [capabilityLoading, capabilityReady, customValueSet, formValue, nativeValueSet, nativeValues],
+    () => createStatusForValue(
+      formValue,
+      nativeValueSet,
+      customValueSet,
+      nativeValues,
+      capabilityReady,
+      capabilityLoading,
+      intervalAvailability,
+      unavailableIntervalMessageOverride,
+    ),
+    [
+      capabilityLoading,
+      capabilityReady,
+      customValueSet,
+      formValue,
+      intervalAvailability,
+      nativeValueSet,
+      nativeValues,
+      unavailableIntervalMessageOverride,
+    ],
   );
 
   const isIntervalAvailable = useCallback((value: IntervalString): boolean => (
-    capabilityReady && canResolveIntervalFromNativeValues(value, nativeValues)
-  ), [capabilityReady, nativeValues]);
+    capabilityReady && (
+      intervalAvailability
+        ? intervalAvailability(value)
+        : canResolveIntervalFromNativeValues(value, nativeValues)
+    )
+  ), [capabilityReady, intervalAvailability, nativeValues]);
 
   const unavailableMessage = useCallback((value: IntervalString): string => (
     capabilityLoading
       ? "交易所周期能力正在加载，请稍候。"
       : capabilityReady
-        ? `当前市场没有可精确拼接 ${value} 的历史 K 线基准周期。`
+        ? unavailableIntervalMessageOverride?.(value)
+          ?? `当前市场没有可精确拼接 ${value} 的历史 K 线基准周期。`
         : "当前交易所没有可用的历史 K 线能力。"
-  ), [capabilityLoading, capabilityReady]);
+  ), [capabilityLoading, capabilityReady, unavailableIntervalMessageOverride]);
 
   const visibleItems = useMemo(() => {
     if (activeTab === "custom") {
@@ -334,6 +385,8 @@ function IntervalSelector({
       nativeValues,
       capabilityReady,
       capabilityLoading,
+      intervalAvailability,
+      unavailableIntervalMessageOverride,
     );
     if (status.kind === "native" || status.kind === "exists") {
       selectInterval(normalized);
@@ -352,7 +405,17 @@ function IntervalSelector({
     setInlineMessage({ type: "success", text: `${normalized} 已添加并切换` });
     setOpen(false);
     setSearch("");
-  }, [capabilityLoading, capabilityReady, customValueSet, nativeValueSet, nativeValues, onCreateCustomInterval, selectInterval]);
+  }, [
+    capabilityLoading,
+    capabilityReady,
+    customValueSet,
+    intervalAvailability,
+    nativeValueSet,
+    nativeValues,
+    onCreateCustomInterval,
+    selectInterval,
+    unavailableIntervalMessageOverride,
+  ]);
 
   const handleSearchKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
@@ -611,6 +674,8 @@ function IntervalSelector({
                     nativeValues,
                     capabilityReady,
                     capabilityLoading,
+                    intervalAvailability,
+                    unavailableIntervalMessageOverride,
                   );
                   const disabled = status.kind === "invalid";
                   return (

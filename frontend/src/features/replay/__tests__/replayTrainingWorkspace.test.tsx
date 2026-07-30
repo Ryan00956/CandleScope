@@ -81,6 +81,11 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   assert.match(workspace, /seriesStore=\{displayedSeriesStore\}/);
   assert.match(workspace, /review === null \? viewer\.seriesStore : reviewSeriesStore/);
   assert.match(workspace, /setDisplayInterval/);
+  assert.match(workspace, /buildReplayIntervalCatalog/);
+  assert.match(workspace, /useCustomIntervals/);
+  assert.match(workspace, /customIntervalRecords=\{customIntervalRecords\}/);
+  assert.match(workspace, /savedCustomIntervals=\{savedCustomIntervals\}/);
+  assert.doesNotMatch(workspace, /\[base, "1m", "5m", "15m", "1h"\]/);
   assert.doesNotMatch(workspace, /Phase 2 interval is read-only|Phase 3 才开放重采样/);
   assert.match(controls, /globalClock\?\.supported_bases/);
   assert.match(controls, /globalClock\?\.playback_bases/);

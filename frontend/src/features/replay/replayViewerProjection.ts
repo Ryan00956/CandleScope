@@ -3,7 +3,12 @@ import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type { WindowDelta } from "../market-data/klineContracts.js";
 import { WINDOW_DELTA_TYPES } from "../market-data/window/windowDeltas.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
-import { parseIntervalSeconds } from "../../utils/intervals.js";
+import {
+  intervalTiles,
+  parseIntervalSeconds,
+} from "../../utils/intervals.js";
+import { createIntervalTimeline } from "../../utils/intervalTimeline.js";
+import type { IntervalTimeline } from "../../utils/intervalTimeline.js";
 
 
 export class ReplayViewerProjectionError extends Error {
@@ -13,15 +18,50 @@ export class ReplayViewerProjectionError extends Error {
   }
 }
 
-function fixedSeconds(interval: string, fieldName: string): number {
-  if (interval.endsWith("M")) {
-    throw new ReplayViewerProjectionError(`${fieldName} calendar intervals are unsupported`);
+function replayIntervalTimeline(
+  interval: string,
+  fieldName: string,
+): IntervalTimeline {
+  const timeline = createIntervalTimeline(interval);
+  if (timeline === null) {
+    throw new ReplayViewerProjectionError(`${fieldName} is invalid`);
   }
+  return timeline;
+}
+
+function nominalSeconds(interval: string, fieldName: string): number {
   const seconds = parseIntervalSeconds(interval);
   if (seconds === null || !Number.isSafeInteger(seconds) || seconds <= 0) {
-    throw new ReplayViewerProjectionError(`${fieldName} must be a fixed-duration interval`);
+    throw new ReplayViewerProjectionError(`${fieldName} is invalid`);
   }
   return seconds;
+}
+
+function timelineTime(
+  value: number | null,
+  fieldName: string,
+): number {
+  if (value === null || !Number.isSafeInteger(value)) {
+    throw new ReplayViewerProjectionError(`${fieldName} is invalid`);
+  }
+  return value;
+}
+
+function expectedComponentCount(
+  baseTimeline: IntervalTimeline,
+  displayTimeline: IntervalTimeline,
+  bucketStart: number,
+  bucketEnd: number,
+): number {
+  const baseSpec = baseTimeline.spec;
+  const displaySpec = displayTimeline.spec;
+  if (baseSpec.alignment === "fixed-epoch") {
+    return (bucketEnd - bucketStart) / (baseSpec.widthSeconds ?? 1);
+  }
+  if (baseSpec.alignment === "weekly-monday") {
+    return (displaySpec.weekCount ?? 0) / (baseSpec.weekCount ?? 1);
+  }
+  return (displaySpec.monthCount ?? 0) / (baseSpec.monthCount ?? 1);
 }
 
 function nullableSum(rows: readonly KlineBar[], key: "quoteVolume" | "trades" | "takerBuyBase" | "takerBuyQuote"): number | null {
@@ -46,24 +86,37 @@ function aggregateBucket(
   rows: readonly KlineBar[],
   options: {
     readonly bucketStart: number;
-    readonly baseSeconds: number;
-    readonly displaySeconds: number;
+    readonly baseTimeline: IntervalTimeline;
+    readonly displayTimeline: IntervalTimeline;
   },
 ): KlineBar {
-  const { bucketStart, baseSeconds, displaySeconds } = options;
+  const { bucketStart, baseTimeline, displayTimeline } = options;
   const first = rows[0];
   const last = rows.at(-1);
   if (!first || !last) throw new ReplayViewerProjectionError("viewer bucket cannot be empty");
-  const expected = displaySeconds / baseSeconds;
+  const bucketEndSeconds = timelineTime(
+    displayTimeline.next(bucketStart),
+    "display bucket end",
+  );
+  const expected = expectedComponentCount(
+    baseTimeline,
+    displayTimeline,
+    bucketStart,
+    bucketEndSeconds,
+  );
   const lastBaseOpenMs = Number(last.time) * 1_000;
-  const bucketEndSeconds = bucketStart + displaySeconds;
   // The adapter always publishes one row per BaseInterval. In AGG_TRADE mode
   // a row's replayComponentCount counts trades, not base bars, so display
   // completeness must be based on the number of revealed base rows.
   const componentCount = rows.length;
   const closed = componentCount === expected
     && Number(first.time) === bucketStart
-    && Number(last.time) + baseSeconds === bucketEndSeconds
+    && baseTimeline.next(Number(last.time)) === bucketEndSeconds
+    && rows.every((row, index) => (
+      index === 0
+      || baseTimeline.next(Number(rows[index - 1]?.time))
+        === Number(row.time)
+    ))
     && rows.every((row) => row.replayClosed === true);
   const time = toEpochSeconds(bucketStart);
   if (time === null) throw new ReplayViewerProjectionError("viewer bucket time is invalid");
@@ -99,34 +152,46 @@ export function aggregateReplayBaseBars(
   baseInterval: string,
   displayInterval: string,
 ): readonly KlineBar[] {
-  const baseSeconds = fixedSeconds(baseInterval, "base interval");
-  const displaySeconds = fixedSeconds(displayInterval, "display interval");
-  if (displaySeconds < baseSeconds || displaySeconds % baseSeconds !== 0) {
+  const baseTimeline = replayIntervalTimeline(baseInterval, "base interval");
+  const displayTimeline = replayIntervalTimeline(displayInterval, "display interval");
+  if (!intervalTiles(baseInterval, displayInterval)) {
     throw new ReplayViewerProjectionError(
-      "display interval must be an integer multiple of the base interval",
+      "display interval cannot be tiled exactly by the base interval",
     );
   }
-  if (displaySeconds === baseSeconds) return rows.map((row) => ({ ...row }));
+  const baseSpec = baseTimeline.spec;
+  const displaySpec = displayTimeline.spec;
+  if (baseSpec.alignment === displaySpec.alignment
+    && baseSpec.canonicalValue === displaySpec.canonicalValue) {
+    return rows.map((row) => ({ ...row }));
+  }
   const output: KlineBar[] = [];
   let bucketStart: number | null = null;
   let bucket: KlineBar[] = [];
   let previousTime: number | null = null;
   const flush = () => {
     if (bucketStart === null || bucket.length === 0) return;
-    output.push(aggregateBucket(bucket, { bucketStart, baseSeconds, displaySeconds }));
+    output.push(aggregateBucket(bucket, {
+      bucketStart,
+      baseTimeline,
+      displayTimeline,
+    }));
   };
   for (const row of rows) {
     const time = Number(row.time);
     if (!Number.isSafeInteger(time) || time < 0) {
       throw new ReplayViewerProjectionError("base prefix contains an invalid time");
     }
-    if (time % baseSeconds !== 0) {
+    if (baseTimeline.floor(time) !== time) {
       throw new ReplayViewerProjectionError("base prefix is not aligned to the base interval");
     }
     if (previousTime !== null && time <= previousTime) {
       throw new ReplayViewerProjectionError("base prefix must be strictly increasing");
     }
-    const nextBucketStart = Math.floor(time / displaySeconds) * displaySeconds;
+    const nextBucketStart = timelineTime(
+      displayTimeline.floor(time),
+      "display bucket start",
+    );
     if (bucketStart !== null && nextBucketStart !== bucketStart) {
       flush();
       bucket = [];
@@ -150,7 +215,7 @@ export function rebuildReplayViewerSeries(
     baseInterval,
     displayInterval,
   );
-  const displaySeconds = fixedSeconds(displayInterval, "display interval");
+  const displaySeconds = nominalSeconds(displayInterval, "display interval");
   target.intervalSeconds = displaySeconds;
   target.seriesKey = asSeriesKey(`${String(source.seriesKey ?? "replay-base")}|viewer:${displayInterval}`);
   target.replace(rows, {
@@ -219,7 +284,7 @@ export function applyReplayViewerSeriesDelta(
     baseInterval,
     displayInterval,
   );
-  const displaySeconds = fixedSeconds(displayInterval, "display interval");
+  const displaySeconds = nominalSeconds(displayInterval, "display interval");
   const sourceDeltaType = sourceDelta.type;
   const meta = {
     source: `replay-viewer-${sourceDeltaType}`,

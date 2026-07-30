@@ -35,6 +35,15 @@ function baseBar(index: number, closed = true): KlineBar {
   };
 }
 
+function barAt(time: number, index: number, intervalSeconds: number): KlineBar {
+  return {
+    ...baseBar(index),
+    time: time as KlineBar["time"],
+    replayCloseTimeMs: (time + intervalSeconds) * 1_000 - 1,
+    replayLastBaseOpenMs: time * 1_000,
+  };
+}
+
 test("base 1m projects the complete 1m/5m/15m/1h close matrix", () => {
   const prefix = Array.from({ length: 60 }, (_, index) => baseBar(index));
   for (const [interval, expectedCount, expectedComponents] of [
@@ -98,11 +107,38 @@ test("viewer interval round-trip rebuilds from the base prefix without mutating 
   assert.deepEqual(source.snapshot(), original);
 });
 
-test("calendar and inexact viewer intervals fail closed", () => {
-  assert.throws(
-    () => aggregateReplayBaseBars([baseBar(0)], "1m", "1M"),
-    ReplayViewerProjectionError,
-  );
+test("weekly and calendar-month viewer intervals preserve real UTC boundaries", () => {
+  const daySeconds = 86_400;
+  const januaryStart = Date.UTC(2024, 0, 1) / 1_000;
+  const daily = Array.from({ length: 60 }, (_, index) => (
+    barAt(januaryStart + index * daySeconds, index, daySeconds)
+  ));
+
+  const weekly = aggregateReplayBaseBars(daily.slice(0, 14), "1d", "1w");
+  assert.deepEqual(weekly.map((row) => Number(row.time)), [
+    Date.UTC(2024, 0, 1) / 1_000,
+    Date.UTC(2024, 0, 8) / 1_000,
+  ]);
+  assert.ok(weekly.every((row) => row.replayExpectedComponents === 7));
+  assert.ok(weekly.every((row) => row.replayClosed === true));
+
+  const monthly = aggregateReplayBaseBars(daily, "1d", "1M");
+  assert.deepEqual(monthly.map((row) => Number(row.time)), [
+    Date.UTC(2024, 0, 1) / 1_000,
+    Date.UTC(2024, 1, 1) / 1_000,
+  ]);
+  assert.deepEqual(monthly.map((row) => row.replayExpectedComponents), [31, 29]);
+  assert.ok(monthly.every((row) => row.replayClosed === true));
+  assert.equal(monthly[1]?.replayCloseTimeMs, Date.UTC(2024, 2, 1) - 1);
+});
+
+test("custom fixed intervals project while inexact intervals fail closed", () => {
+  const intervalSeconds = 89 * 60;
+  const alignedStart = Math.floor(HOUR_START / intervalSeconds) * intervalSeconds;
+  const rows = Array.from({ length: 178 }, (_, index) => (
+    barAt(alignedStart + index * 60, index, 60)
+  ));
+  assert.equal(aggregateReplayBaseBars(rows, "1m", "89m").length, 2);
   assert.throws(
     () => aggregateReplayBaseBars([baseBar(0)], "5m", "7m"),
     ReplayViewerProjectionError,

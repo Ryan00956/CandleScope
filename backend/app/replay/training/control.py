@@ -7,8 +7,10 @@ import math
 from app.data_engine.interval_policy import (
     compute_bucket_end_ms,
     compute_bucket_start_ms,
+    interval_tiles,
     is_monthly_interval,
     parse_interval_ms,
+    parse_interval_spec,
 )
 from app.replay.models import MAX_TIMESTAMP_MS, validate_timestamp_ms
 
@@ -201,14 +203,27 @@ def compatible_step_interval_ms(
     base_interval: str,
     step_interval: str,
 ) -> int:
-    """Validate a fixed display/control interval without moving the clock."""
+    """Validate an exactly tileable display/control interval without moving the clock."""
 
-    base_ms = fixed_interval_ms(base_interval, field_name="base_interval")
-    step_ms = fixed_interval_ms(step_interval, field_name="step_interval")
-    if step_ms < base_ms or step_ms % base_ms != 0:
+    fixed_interval_ms(base_interval, field_name="base_interval")
+    base_spec = parse_interval_spec(base_interval)
+    step_spec = (
+        parse_interval_spec(step_interval)
+        if isinstance(step_interval, str)
+        else None
+    )
+    if step_spec is None:
         raise TrainingRunError(
             "REPLAY_CONTROL_UNSUPPORTED_INTERVAL",
-            "step interval must be an integer multiple of base interval",
+            "step_interval is invalid",
+            status_code=422,
+            details={"step_interval": step_interval},
+        )
+    step_ms = step_spec.nominal_ms
+    if base_spec is None or not interval_tiles(base_spec, step_spec):
+        raise TrainingRunError(
+            "REPLAY_CONTROL_UNSUPPORTED_INTERVAL",
+            "step interval must be exactly tileable by base interval",
             status_code=422,
             details={
                 "base_interval": base_interval,
@@ -245,7 +260,30 @@ def aligned_step_target_ms(
     bucket_close = (
         compute_bucket_end_ms(bucket_start, step_ms, interval=step_interval) - 1
     )
-    target = bucket_close + (steps if current >= bucket_close else steps - 1) * step_ms
+    remaining = steps if current >= bucket_close else steps - 1
+    target = bucket_close
+    if is_monthly_interval(step_interval):
+        bucket_open = bucket_start
+        try:
+            for _ in range(remaining):
+                bucket_open = compute_bucket_end_ms(
+                    bucket_open,
+                    step_ms,
+                    interval=step_interval,
+                )
+            target = compute_bucket_end_ms(
+                bucket_open,
+                step_ms,
+                interval=step_interval,
+            ) - 1
+        except (OverflowError, ValueError) as exc:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "step target exceeds the timestamp range",
+                status_code=422,
+            ) from exc
+    else:
+        target += remaining * step_ms
     if target > MAX_TIMESTAMP_MS:
         raise TrainingRunError(
             "REPLAY_CONTROL_INVALID",

@@ -1,0 +1,5 @@
+# Replay release gates hash these assets byte-for-byte. Keep checkout bytes
+# stable across Windows and Unix even when core.autocrlf is enabled.
+backend/tests/fixtures/replay/*.json text eol=lf
+docs/perf-baselines/replay-*.json text eol=lf
+frontend/scripts/replay-rollback-drill.* text eol=lf

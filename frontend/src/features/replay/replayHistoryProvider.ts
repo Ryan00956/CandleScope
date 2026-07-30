@@ -1,5 +1,6 @@
 import type { WindowDelta } from "../market-data/klineContracts.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
+import { createIntervalTimeline } from "../../utils/intervalTimeline.js";
 import { replayDisplayBarToKline } from "./replaySeriesProjection.js";
 import type { ReplayDigest, ReplayDisplayBar } from "./replayTypes.js";
 
@@ -67,6 +68,33 @@ export class ReplayHistoryProtocolError extends Error {
     super(message);
     this.name = "ReplayHistoryProtocolError";
   }
+}
+
+export function replayHistoryStoreBeforeMs(
+  store: SeriesWindowStore,
+): number | null {
+  const firstTime = Number(store.first()?.time);
+  const beforeMs = firstTime * 1_000;
+  return Number.isSafeInteger(beforeMs) && beforeMs >= 0 ? beforeMs : null;
+}
+
+export function replayHistoryInitialBeforeMs(
+  replayStartMs: number | null,
+  displayInterval: string | null,
+): number | null {
+  if (
+    replayStartMs === null
+    || !Number.isSafeInteger(replayStartMs)
+    || replayStartMs < 0
+    || displayInterval === null
+  ) return null;
+  const timeline = createIntervalTimeline(displayInterval);
+  const replayStartSeconds = Math.floor(replayStartMs / 1_000);
+  const seamSeconds = timeline?.floor(replayStartSeconds);
+  const seamMs = seamSeconds === null || seamSeconds === undefined
+    ? Number.NaN
+    : seamSeconds * 1_000;
+  return Number.isSafeInteger(seamMs) && seamMs >= 0 ? seamMs : null;
 }
 
 function fail(path: string, message: string): never {
@@ -283,8 +311,12 @@ function parsePage(
   if (!Array.isArray(source.bars)) fail("history.bars", "must be an array");
   const bars = source.bars.map((item, index) => parseBar(item, `history.bars[${index}]`));
   let previousOpen = -1;
+  let previousClose = -1;
   for (const [index, item] of bars.entries()) {
     if (item.open_time_ms <= previousOpen) fail(`history.bars[${index}]`, "must be strictly increasing");
+    if (previousClose >= 0 && item.open_time_ms !== previousClose + 1) {
+      fail(`history.bars[${index}]`, "must be contiguous with the previous history bar");
+    }
     if (item.open_time_ms >= request.beforeMs) fail(`history.bars[${index}]`, "is outside the before-page");
     if (item.open_time_ms < historyBoundary) {
       fail(`history.bars[${index}]`, "precedes the visible history boundary");
@@ -293,6 +325,7 @@ function parsePage(
       fail(`history.bars[${index}]`, "exceeds the revealed boundary");
     }
     previousOpen = item.open_time_ms;
+    previousClose = item.close_time_ms;
   }
   const nextBefore = integer(source.next_before_ms, "history.next_before_ms");
   if (bars.length > 0 && nextBefore !== bars[0]?.open_time_ms) {
@@ -356,6 +389,7 @@ export class ReplayHistoryProvider {
     const controller = new AbortController();
     const params = new URLSearchParams({
       track_id: this.trackId,
+      display_interval: this.identity.display_interval,
       before_ms: String(request.beforeMs),
       revealed_boundary_ms: String(request.revealedBoundaryMs),
       limit: String(request.limit),
@@ -406,8 +440,30 @@ export class ReplayHistoryProvider {
 export function applyReplayHistoryPage(
   store: SeriesWindowStore,
   page: ReplayHistoryPage,
+  {
+    expectedBeforeMs,
+    contextHistory = false,
+  }: {
+    readonly expectedBeforeMs?: number;
+    readonly contextHistory?: boolean;
+  } = {},
 ): WindowDelta {
-  return store.applyRange(page.bars.map(replayDisplayBarToKline), {
+  if (expectedBeforeMs !== undefined) {
+    if (!Number.isSafeInteger(expectedBeforeMs) || expectedBeforeMs < 0) {
+      throw new ReplayHistoryProtocolError("history cursor must be a non-negative safe integer");
+    }
+    const newestHistoryBar = page.bars.at(-1);
+    if (newestHistoryBar !== undefined
+      && newestHistoryBar.close_time_ms + 1 !== expectedBeforeMs) {
+      throw new ReplayHistoryProtocolError(
+        "history page does not connect to the authoritative replay source window",
+      );
+    }
+  }
+  return store.applyRange(page.bars.map((bar) => ({
+    ...replayDisplayBarToKline(bar),
+    ...(contextHistory ? { replayContextHistory: true } : {}),
+  })), {
     source: "replay-history-before-page",
     sessionId: page.session_id,
     trackId: page.track_id,

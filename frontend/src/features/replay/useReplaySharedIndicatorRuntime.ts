@@ -48,7 +48,6 @@ const DISABLED_CAPABILITIES = Object.freeze([
   "hosted-range",
   "indicator-websocket",
   "unsafe-script",
-  "forming-bars",
 ] as const);
 
 interface ReplayOrderFlowPreferences {
@@ -158,7 +157,7 @@ export function saveReplayOrderFlowPreferences(
   }
 }
 
-function replayBarIsClosed(bar: KlineBar): boolean {
+function replayBarFinality(bar: KlineBar): boolean | null {
   const replayClosed = typeof bar.replayClosed === "boolean"
     ? bar.replayClosed
     : null;
@@ -166,42 +165,54 @@ function replayBarIsClosed(bar: KlineBar): boolean {
     ? bar.is_closed
     : null;
   if (replayClosed !== null && transportClosed !== null) {
-    return replayClosed && transportClosed;
+    return replayClosed === transportClosed ? replayClosed : null;
   }
   if (replayClosed !== null) return replayClosed;
   if (transportClosed !== null) return transportClosed;
-  return false;
+  return null;
 }
 
 /**
- * Pine and the replay-safe shared runtime consume only authoritative closed
- * bars. Unknown finality fails closed instead of being treated as historical.
+ * Pine and the replay-safe shared runtime consume an authoritative closed
+ * prefix plus, at most, the single forming bar at the revealed right edge.
+ * The forming bar is built only from base rows already revealed by the replay
+ * cursor. Unknown or contradictory finality still fails closed.
  */
-export function selectRevealedClosedIndicatorBars(
+export function selectRevealedIndicatorBars(
   rows: readonly KlineBar[],
   cursorMs: number | null,
 ): KlineBar[] {
   if (cursorMs === null || !Number.isFinite(cursorMs)) return [];
   const prefix: KlineBar[] = [];
   let previousTime = -Infinity;
-  for (const bar of rows) {
+  for (const [index, bar] of rows.entries()) {
     const time = Number(bar.time);
+    const openTimeMs = time * 1_000;
     const closeTimeMs = typeof bar.replayCloseTimeMs === "number"
       ? bar.replayCloseTimeMs
       : Number.NaN;
     const lastBaseOpenMs = typeof bar.replayLastBaseOpenMs === "number"
       ? bar.replayLastBaseOpenMs
       : Number.NaN;
+    const finality = replayBarFinality(bar);
     if (
       !Number.isFinite(time)
       || time <= previousTime
-      || time * 1_000 > cursorMs
+      || !Number.isFinite(openTimeMs)
+      || openTimeMs > cursorMs
       || !Number.isFinite(closeTimeMs)
-      || closeTimeMs > cursorMs
+      || closeTimeMs < openTimeMs
       || !Number.isFinite(lastBaseOpenMs)
+      || lastBaseOpenMs < openTimeMs
+      || lastBaseOpenMs > closeTimeMs
       || lastBaseOpenMs > cursorMs
-      || !replayBarIsClosed(bar)
+      || finality === null
     ) {
+      break;
+    }
+    if (finality) {
+      if (closeTimeMs > cursorMs) break;
+    } else if (index !== rows.length - 1 || closeTimeMs <= cursorMs) {
       break;
     }
     prefix.push(bar);
@@ -241,9 +252,9 @@ export function useReplaySharedIndicatorRuntime(
     getSeriesRevision,
   );
   const cursorMs = runtime.store.virtualTimeMs;
-  const closedBars = useMemo(() => {
+  const indicatorBars = useMemo(() => {
     void seriesRevision;
-    return selectRevealedClosedIndicatorBars(seriesStore.snapshot(), cursorMs);
+    return selectRevealedIndicatorBars(seriesStore.snapshot(), cursorMs);
   }, [cursorMs, seriesRevision, seriesStore]);
   const selectedTrackId = viewer.viewerState?.selected_track_id ?? null;
   const selectedTrack = viewer.marketTracks?.tracks.find(
@@ -272,20 +283,20 @@ export function useReplaySharedIndicatorRuntime(
     ),
     [resolvedRunScope],
   );
-  const first = closedBars.at(0);
-  const last = closedBars.at(-1);
+  const first = indicatorBars.at(0);
+  const last = indicatorBars.at(-1);
   const chartDataMeta = useMemo(() => ({
     ...runtime.marketData.view.meta,
     version: Number(seriesStore.version),
     status: "ready" as const,
-    source: "replay-indicator-revealed-closed-prefix",
+    source: "replay-indicator-revealed-prefix",
     seriesKey: seriesStore.seriesKey,
     interval,
-    bars: closedBars.length,
+    bars: indicatorBars.length,
     firstTime: first?.time ?? null,
     lastTime: last?.time ?? null,
   }), [
-    closedBars.length,
+    indicatorBars.length,
     first?.time,
     interval,
     last?.time,
@@ -294,7 +305,7 @@ export function useReplaySharedIndicatorRuntime(
     seriesStore.version,
   ]);
   const providedBars = useProvidedBarsIndicatorRuntime({
-    bars: closedBars,
+    bars: indicatorBars,
     chartDataMeta,
     datasetKey: sourceScopeKey,
     exchange,
@@ -321,14 +332,14 @@ export function useReplaySharedIndicatorRuntime(
   const orderFlowEnabled = orderFlowPreferences.cvd.added
     || orderFlowPreferences.delta.added;
   const projectedOrderFlowPanes = useMemo(() => orderFlowProjection.project({
-    bars: closedBars,
+    bars: indicatorBars,
     enabled: orderFlowEnabled,
     forceFull: true,
     interval,
     intervalSeconds: seriesStore.intervalSeconds,
     structureRevision: seriesRevision,
   }), [
-    closedBars,
+    indicatorBars,
     interval,
     orderFlowEnabled,
     orderFlowProjection,
@@ -345,7 +356,7 @@ export function useReplaySharedIndicatorRuntime(
         && orderFlowPreferences.delta.visible)
     ))
   ), [orderFlowPreferences, projectedOrderFlowPanes]);
-  const orderFlowBarCount = closedBars.filter(hasOrderFlow).length;
+  const orderFlowBarCount = indicatorBars.filter(hasOrderFlow).length;
   const orderFlowSupported = orderFlowBarCount > 0;
 
   const updateOrderFlow = useCallback((
@@ -386,7 +397,7 @@ export function useReplaySharedIndicatorRuntime(
         supported: orderFlowSupported,
         unsupportedReason: orderFlowSupported
           ? null
-          : "当前已揭示的闭合 K 线不含可信 taker buy/order-flow 字段",
+          : "当前已揭示 K 线不含可信 taker buy/order-flow 字段",
         status: !orderFlowSupported
           ? "dormant"
           : preference.added && preference.visible
@@ -395,7 +406,7 @@ export function useReplaySharedIndicatorRuntime(
               ? "dormant"
               : "idle",
         statusText: orderFlowSupported
-          ? "使用同一共享 K 线订单流投影；仅消费已揭示闭合前缀"
+          ? "使用同一共享 K 线订单流投影；仅消费游标前已揭示数据"
           : null,
         error: null,
       };
@@ -422,7 +433,7 @@ export function useReplaySharedIndicatorRuntime(
     status: {
       ...providedBars.status,
       mode: "provided_bars_replay_safe",
-      sourceBarCount: closedBars.length,
+      sourceBarCount: indicatorBars.length,
       latestSourceTimeMs: last === undefined ? null : Number(last.time) * 1_000,
       activeIndicatorCount:
         providedBars.view.activeIndicators.length + addedOrderFlowCount,

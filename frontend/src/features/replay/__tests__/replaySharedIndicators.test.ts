@@ -37,7 +37,7 @@ import {
   replayIndicatorStorageKey,
   replayOrderFlowStorageKey,
   saveReplayOrderFlowPreferences,
-  selectRevealedClosedIndicatorBars,
+  selectRevealedIndicatorBars,
 } from "../useReplaySharedIndicatorRuntime.js";
 import { epochSeconds } from "../../../test/testHelpers.js";
 
@@ -87,14 +87,14 @@ function bar(
   };
 }
 
-test("replay indicator input is a closed, cursor-bounded prefix with explicit finality", () => {
+test("replay indicator input rejects a forming bar before the revealed tail", () => {
   const rows = [
     bar(1_000, true),
     bar(1_060, false),
     bar(1_120, true),
     bar(940, undefined),
   ];
-  const selected = selectRevealedClosedIndicatorBars(rows, 1_120_000);
+  const selected = selectRevealedIndicatorBars(rows, 1_120_000);
   assert.deepEqual(selected.map((item) => item.time), [1_000]);
 
   const ohlcv = buildIndicatorOhlcv(selected);
@@ -102,14 +102,41 @@ test("replay indicator input is a closed, cursor-bounded prefix with explicit fi
   assert.equal(ohlcv[0]?.is_closed, true);
   assert.ok(ohlcv.every((item) => item.time * 1_000 <= 1_120_000));
 
-  assert.deepEqual(selectRevealedClosedIndicatorBars([{
+  assert.deepEqual(selectRevealedIndicatorBars([{
     ...bar(1_000, true),
     is_closed: false,
   }], 1_120_000), []);
   assert.deepEqual(
-    selectRevealedClosedIndicatorBars([bar(1_000, undefined)], 1_120_000),
+    selectRevealedIndicatorBars([bar(1_000, undefined)], 1_120_000),
     [],
   );
+});
+
+test("replay indicator input includes one authoritative forming bar at the revealed tail", () => {
+  const forming = {
+    ...bar(1_060, false),
+    replayCloseTimeMs: 1_179_999,
+    replayLastBaseOpenMs: 1_120_000,
+    is_closed: false,
+  };
+  const selected = selectRevealedIndicatorBars([
+    { ...bar(1_000, true), is_closed: true },
+    forming,
+  ], 1_120_000);
+
+  assert.deepEqual(selected.map((item) => item.time), [1_000, 1_060]);
+  const ohlcv = buildIndicatorOhlcv(selected);
+  assert.equal(ohlcv.at(-1)?.is_closed, false);
+
+  assert.deepEqual(selectRevealedIndicatorBars([
+    { ...forming, replayCloseTimeMs: 1_119_999 },
+  ], 1_120_000), []);
+  assert.deepEqual(selectRevealedIndicatorBars([
+    { ...forming, replayLastBaseOpenMs: 1_120_001 },
+  ], 1_120_000), []);
+  assert.deepEqual(selectRevealedIndicatorBars([
+    { ...forming, is_closed: true },
+  ], 1_120_000), []);
 });
 
 test("provided-bars policy forces local safe execution and rejects unknown runtimes", () => {

@@ -816,6 +816,7 @@ async def replay_v2_training_history(
     limit: int = Query(default=500, ge=1, le=1_000),
     data_epoch: str = Query(min_length=71, max_length=71),
     history_epoch: str | None = Query(default=None, min_length=71, max_length=71),
+    display_interval: str | None = Query(default=None, min_length=1, max_length=32),
 ) -> dict[str, object]:
     return await _training_service(request).history_page(
         session_id,
@@ -825,6 +826,7 @@ async def replay_v2_training_history(
         limit=limit,
         data_epoch=data_epoch,
         history_epoch=history_epoch,
+        display_interval=display_interval,
     )
 
 

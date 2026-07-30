@@ -6,8 +6,13 @@ import {
   ReplayHistoryProvider,
   ReplayHistoryProtocolError,
   applyReplayHistoryPage,
+  replayHistoryInitialBeforeMs,
+  replayHistoryStoreBeforeMs,
 } from "../replayHistoryProvider.js";
-import type { ReplayHistoryIdentity } from "../replayHistoryProvider.js";
+import type {
+  ReplayHistoryIdentity,
+  ReplayHistoryPage,
+} from "../replayHistoryProvider.js";
 
 
 const DATA_EPOCH = `sha256:${"a".repeat(64)}` as const;
@@ -22,10 +27,10 @@ const IDENTITY: ReplayHistoryIdentity = {
   display_interval: "1m",
 };
 
-function bar(openTimeMs: number) {
+function bar(openTimeMs: number, intervalMs = 60_000) {
   return {
     open_time_ms: openTimeMs,
-    close_time_ms: openTimeMs + 59_999,
+    close_time_ms: openTimeMs + intervalMs - 1,
     open: "100",
     high: "102",
     low: "99",
@@ -108,6 +113,7 @@ test("history provider deduplicates an in-flight before-page and stays on replay
   assert.deepEqual(await first, await duplicate);
   assert.equal(urls.length, 1);
   assert.match(urls[0] ?? "", /^\/api\/v1\/replay\/runs\/session\/adapter-1\/history\?/);
+  assert.match(urls[0] ?? "", /display_interval=1m/);
   assert.doesNotMatch(urls[0] ?? "", /klines|market|order.?book|liquidation|indicator/i);
 });
 
@@ -116,6 +122,9 @@ test("history parser rejects source, epoch, unknown-field, and lookahead drift",
     response({ identity: { ...IDENTITY, symbol: "ETHUSDT" } }),
     response({ data_epoch: `sha256:${"c".repeat(64)}` }),
     response({ bars: [bar(BOUNDARY_MS + 1)] }),
+    response({
+      bars: [bar(1_800_000_120_000), bar(1_800_000_240_000)],
+    }),
     { ...response(), future_field: true },
   ];
   for (const payload of cases) {
@@ -172,8 +181,15 @@ test("history application prepends once and preserves the authoritative replay t
     { time: 1_800_000_240, open: 103, high: 104, low: 102, close: 103.5, volume: 8 },
   ]);
 
-  const first = applyReplayHistoryPage(store, page);
-  const duplicate = applyReplayHistoryPage(store, page);
+  const expectedBeforeMs = replayHistoryStoreBeforeMs(store);
+  assert.equal(expectedBeforeMs, 1_800_000_240_000);
+  const first = applyReplayHistoryPage(store, page, {
+    expectedBeforeMs: expectedBeforeMs!,
+    contextHistory: true,
+  });
+  const duplicate = applyReplayHistoryPage(store, page, {
+    contextHistory: true,
+  });
   assert.equal(first.type, "prepend");
   assert.equal(duplicate.type, "noop");
   assert.deepEqual(store.snapshot().map((row) => Number(row.time)), [
@@ -182,6 +198,151 @@ test("history application prepends once and preserves the authoritative replay t
     1_800_000_240,
   ]);
   assert.equal(store.last()?.close, 103.5);
+  assert.equal(store.first()?.replayContextHistory, true);
+  assert.equal(store.last()?.replayContextHistory, undefined);
+});
+
+test("initial display history starts at the replay seam instead of an incomplete warmup bucket", () => {
+  assert.equal(
+    replayHistoryInitialBeforeMs(946_684_800_000, "1h"),
+    946_684_800_000,
+  );
+  assert.equal(
+    replayHistoryInitialBeforeMs(946_684_860_000, "1h"),
+    946_684_800_000,
+  );
+  assert.equal(replayHistoryInitialBeforeMs(null, "1h"), null);
+  assert.equal(replayHistoryInitialBeforeMs(946_684_800_000, "invalid"), null);
+});
+
+test("initial display page replaces an overlapping partial warmup bucket", async () => {
+  const runtime = provider(async () => new Response(JSON.stringify(response()), { status: 200 }));
+  const page = await runtime.loadBefore({
+    beforeMs: 1_800_000_240_000,
+    revealedBoundaryMs: BOUNDARY_MS,
+    dataEpoch: DATA_EPOCH,
+    limit: 250,
+  });
+  const store = new SeriesWindowStore({ maxBars: 100 });
+  store.replace([
+    {
+      time: 1_800_000_180,
+      open: 90,
+      high: 91,
+      low: 89,
+      close: 90.5,
+      volume: 1,
+      replayClosed: false,
+    },
+    {
+      time: 1_800_000_240,
+      open: 103,
+      high: 104,
+      low: 102,
+      close: 103.5,
+      volume: 8,
+      replayClosed: true,
+    },
+  ]);
+
+  const delta = applyReplayHistoryPage(store, page, {
+    expectedBeforeMs: 1_800_000_240_000,
+    contextHistory: true,
+  });
+  assert.equal(delta.type, "mid-merge");
+  assert.deepEqual(store.snapshot().map((row) => Number(row.time)), [
+    1_800_000_120,
+    1_800_000_180,
+    1_800_000_240,
+  ]);
+  assert.equal(store.snapshot()[1]?.replayClosed, true);
+  assert.equal(store.snapshot()[1]?.replayContextHistory, true);
+  assert.equal(store.last()?.replayContextHistory, undefined);
+});
+
+test("history application rejects a page that skips the authoritative source cursor", async () => {
+  const runtime = provider(async () => new Response(JSON.stringify(response()), { status: 200 }));
+  const page = await runtime.loadBefore({
+    beforeMs: BOUNDARY_MS,
+    revealedBoundaryMs: BOUNDARY_MS,
+    dataEpoch: DATA_EPOCH,
+    limit: 250,
+  });
+  const store = new SeriesWindowStore({ maxBars: 100 });
+  store.replace([
+    { time: 1_800_000_300, open: 103, high: 104, low: 102, close: 103.5, volume: 8 },
+  ]);
+  const expectedBeforeMs = replayHistoryStoreBeforeMs(store);
+  assert.equal(expectedBeforeMs, 1_800_000_300_000);
+
+  assert.throws(
+    () => applyReplayHistoryPage(store, page, {
+      expectedBeforeMs: expectedBeforeMs!,
+    }),
+    /does not connect to the authoritative replay source window/,
+  );
+  assert.deepEqual(store.snapshot().map((row) => Number(row.time)), [
+    1_800_000_300,
+  ]);
+});
+
+test("display-owned cursor extends coarse history without mutating execution bars", () => {
+  const hourMs = 3_600_000;
+  const initialFirstMs = 946_670_400_000;
+  const execution = new SeriesWindowStore({ maxBars: 10_000 });
+  execution.replace(Array.from({ length: 658 }, (_, index) => ({
+    time: (initialFirstMs + index * 60_000) / 1_000,
+    open: 100,
+    high: 101,
+    low: 99,
+    close: 100,
+    volume: 1,
+  })));
+  const executionSnapshot = structuredClone(execution.snapshot());
+  const viewer = new SeriesWindowStore({ maxBars: 10_000, intervalSeconds: 3_600 });
+  viewer.replace(Array.from({ length: 3 }, (_, index) => ({
+    time: (initialFirstMs + index * hourMs) / 1_000,
+    open: 100,
+    high: 101,
+    low: 99,
+    close: 100,
+    volume: 1,
+  })));
+
+  for (let pageIndex = 0; pageIndex < 3; pageIndex += 1) {
+    const beforeMs = replayHistoryStoreBeforeMs(viewer);
+    assert.notEqual(beforeMs, null);
+    const pageStartMs = beforeMs! - 500 * hourMs;
+    const bars = Array.from(
+      { length: 500 },
+      (_, index) => bar(pageStartMs + index * hourMs, hourMs),
+    );
+    const page = response({
+      identity: { ...IDENTITY, display_interval: "1h" },
+      history_boundary_ms: initialFirstMs - 20_000 * hourMs,
+      revealed_boundary_ms: initialFirstMs + 658 * 60_000,
+      bars,
+      next_before_ms: pageStartMs,
+      has_more: true,
+    }) as unknown as ReplayHistoryPage;
+    applyReplayHistoryPage(viewer, page, {
+      expectedBeforeMs: beforeMs!,
+      contextHistory: true,
+    });
+  }
+
+  assert.deepEqual(execution.snapshot(), executionSnapshot);
+  const rows = viewer.snapshot();
+  assert.equal(rows.length, 1_503);
+  for (let index = 1; index < rows.length; index += 1) {
+    assert.equal(
+      Number(rows[index]?.time) - Number(rows[index - 1]?.time),
+      3_600,
+    );
+  }
+  assert.equal(rows[0]?.replayContextHistory, true);
+  assert.equal(rows.at(-4)?.replayContextHistory, true);
+  assert.equal(rows.at(-3)?.replayContextHistory, undefined);
 });
 
 test("cancel aborts the active history request and a later epoch starts cleanly", async () => {

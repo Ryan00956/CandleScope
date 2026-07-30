@@ -390,6 +390,192 @@ async def test_phase14_history_boundary_hides_indicator_only_rows_and_blinds_tim
         await service.shutdown()
 
 
+async def test_phase14_public_time_projection_covers_all_visible_history(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "public-visible-history.db")
+    try:
+        created = await service.training.create_run(  # type: ignore[union-attr]
+            await _request(
+                service,
+                disclosure="HIDE_ALL",
+                visible_mode="ALL_AVAILABLE",
+                visible_duration_ms=None,
+            )
+        )
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        snapshot = (await service.get_session(session_id))["snapshot"]
+        cursor = snapshot["cursor"]
+        page = await service.training.history_page(  # type: ignore[union-attr]
+            session_id,
+            track_id="track-1",
+            before_ms=int(cursor["virtual_time_ms"]) + 1,
+            revealed_boundary_ms=int(cursor["virtual_time_ms"]),
+            limit=10,
+            data_epoch=str(snapshot["data_epoch"]),
+            history_epoch=None,
+        )
+        history_boundary_ms = int(page["history_boundary_ms"])
+        projected = await service.training.public_times(  # type: ignore[union-attr]
+            run_id,
+            timeline_ms=(history_boundary_ms, int(cursor["virtual_time_ms"])),
+        )
+        assert [item["input_timeline_ms"] for item in projected["items"]] == [
+            history_boundary_ms,
+            int(cursor["virtual_time_ms"]),
+        ]
+        with pytest.raises(TrainingRunError, match="outside the pinned"):
+            await service.training.public_times(  # type: ignore[union-attr]
+                run_id,
+                timeline_ms=(history_boundary_ms - 1,),
+            )
+    finally:
+        await service.shutdown()
+
+
+async def test_phase14_display_context_uses_native_interval_without_expanding_execution(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "native-display-history.db")
+    try:
+        created = await service.training.create_run(  # type: ignore[union-attr]
+            await _request(
+                service,
+                disclosure="HIDE_ALL",
+                visible_mode="ALL_AVAILABLE",
+                visible_duration_ms=None,
+            )
+        )
+        session_id = str(created["run"]["adapter_session_id"])
+        repository = service.history_repository
+        repository.add_rows(  # type: ignore[attr-defined]
+            FixtureIdentity("binance", "spot", "BTCUSDT"),
+            "1h",
+            [
+                make_bar(
+                    START_MS - (48 - index) * 3_600_000,
+                    interval_ms=3_600_000,
+                    price=str(50 + index),
+                )
+                for index in range(48)
+            ],
+        )
+        session_before = await service.get_session(session_id)
+        snapshot_before = session_before["snapshot"]
+        cursor_before = snapshot_before["cursor"]
+        public_start_ms = int(cursor_before["virtual_time_ms"])
+        call_count = len(repository.calls)  # type: ignore[attr-defined]
+
+        page = await service.training.history_page(  # type: ignore[union-attr]
+            session_id,
+            track_id="track-1",
+            before_ms=public_start_ms,
+            revealed_boundary_ms=public_start_ms,
+            limit=10,
+            data_epoch=str(snapshot_before["data_epoch"]),
+            history_epoch=None,
+            display_interval="1h",
+        )
+
+        assert page["identity"]["base_interval"] == "1m"
+        assert page["identity"]["display_interval"] == "1h"
+        assert page["history_boundary_ms"] == public_start_ms - 48 * 3_600_000
+        assert [bar["open_time_ms"] for bar in page["bars"]] == [
+            public_start_ms - offset * 3_600_000
+            for offset in range(10, 0, -1)
+        ]
+        assert page["bars"][-1]["close_time_ms"] + 1 == public_start_ms
+        assert page["has_more"] is True
+        history_calls = repository.calls[call_count:]  # type: ignore[attr-defined]
+        assert any(
+            name == "query_bars"
+            and details["key"][-1] == "1h"
+            for name, details in history_calls
+        )
+        assert not any(
+            name == "query_bars"
+            and details["key"][-1] == "1m"
+            for name, details in history_calls
+        )
+        session_after = await service.get_session(session_id)
+        assert session_after["snapshot"]["cursor"] == cursor_before
+        assert session_after["snapshot"]["data_epoch"] == snapshot_before["data_epoch"]
+        assert str(START_MS) not in json.dumps(page, sort_keys=True)
+
+        base_page = await service.training.history_page(  # type: ignore[union-attr]
+            session_id,
+            track_id="track-1",
+            before_ms=public_start_ms + 1,
+            revealed_boundary_ms=public_start_ms,
+            limit=10,
+            data_epoch=str(snapshot_before["data_epoch"]),
+            history_epoch=None,
+            display_interval="1m",
+        )
+        assert base_page["identity"]["display_interval"] == "1m"
+        assert base_page["history_epoch"] != page["history_epoch"]
+    finally:
+        await service.shutdown()
+
+
+async def test_phase14_native_display_context_stops_at_first_real_gap(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "native-display-gap.db")
+    try:
+        created = await service.training.create_run(  # type: ignore[union-attr]
+            await _request(
+                service,
+                visible_mode="ALL_AVAILABLE",
+                visible_duration_ms=None,
+            )
+        )
+        session_id = str(created["run"]["adapter_session_id"])
+        repository = service.history_repository
+        repository.add_rows(  # type: ignore[attr-defined]
+            FixtureIdentity("binance", "spot", "BTCUSDT"),
+            "1h",
+            [
+                make_bar(
+                    START_MS - offset * 3_600_000,
+                    interval_ms=3_600_000,
+                    price=str(100 + offset),
+                )
+                for offset in range(1, 25)
+                if offset != 6
+            ],
+        )
+        snapshot = (await service.get_session(session_id))["snapshot"]
+        revealed_boundary_ms = int(snapshot["cursor"]["virtual_time_ms"])
+        public_start_ms = (
+            revealed_boundary_ms
+            - revealed_boundary_ms % 3_600_000
+        )
+        page = await service.training.history_page(  # type: ignore[union-attr]
+            session_id,
+            track_id="track-1",
+            before_ms=public_start_ms,
+            revealed_boundary_ms=revealed_boundary_ms,
+            limit=10,
+            data_epoch=str(snapshot["data_epoch"]),
+            history_epoch=None,
+            display_interval="1h",
+        )
+
+        assert [bar["open_time_ms"] for bar in page["bars"]] == [
+            public_start_ms - offset * 3_600_000
+            for offset in range(5, 0, -1)
+        ]
+        assert page["has_more"] is False
+        assert all(
+            right["open_time_ms"] == left["close_time_ms"] + 1
+            for left, right in zip(page["bars"], page["bars"][1:])
+        )
+    finally:
+        await service.shutdown()
+
+
 async def test_phase14_none_tier_rejects_before_snapshot_load(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

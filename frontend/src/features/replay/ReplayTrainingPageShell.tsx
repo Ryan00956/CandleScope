@@ -42,7 +42,10 @@ import {
   applyReplayHistoryPage,
   ReplayHistoryProvider,
 } from "./replayHistoryProvider.js";
-import { rebuildReplayViewerSeries } from "./replayViewerProjection.js";
+import {
+  isReplayContextHistoryBar,
+  rebuildReplayViewerSeries,
+} from "./replayViewerProjection.js";
 import { handleReplayShortcut } from "./replayShortcuts.js";
 import { returnToTrainingHub } from "./trainingHubNavigation.js";
 import { replayEffectiveTrainingState, replayOwnsController } from "./replayUiModel.js";
@@ -177,7 +180,7 @@ export default function ReplayTrainingPageShell({
   });
   const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
   const drawings = useDrawingRuntime({ chartSurfaceActions, session: null });
-  const history = useReplayHistoryRuntime(runtime);
+  const history = useReplayHistoryRuntime(runtime, viewer);
   const integrityRuntime = useReplayIntegrityRuntime(runtime, viewer);
   const review = integrityRuntime.review;
   useEffect(() => {
@@ -243,7 +246,9 @@ export default function ReplayTrainingPageShell({
   );
   const capabilities = useMemo(() => buildReplayCapabilityModel(config?.source_kind ?? "BAR"), [config?.source_kind]);
   const publicTimeline = (() => {
-    const values = viewer.seriesStore.snapshot().map((bar) => Number(bar.time) * 1_000);
+    const values = viewer.seriesStore.snapshot()
+      .filter((bar) => !isReplayContextHistoryBar(bar))
+      .map((bar) => Number(bar.time) * 1_000);
     if (runtime.store.virtualTimeMs !== null) values.push(runtime.store.virtualTimeMs);
     for (const order of runtime.store.orders) values.push(order.created_time_ms);
     for (const fill of runtime.store.fills) values.push(fill.event_time_ms);
@@ -733,7 +738,7 @@ export default function ReplayTrainingPageShell({
       canLoadMoreLeft={review === null && history.hasMore}
       canRestoreLatestWindow={review === null && history.canRestoreLatestWindow}
       rightWindowTruncated={review === null
-        ? runtime.replayStore.seriesStore.rightTruncated
+        ? viewer.seriesStore.rightTruncated
         : false}
       datasetKey={review === null
         ? String(displayedSeriesStore.seriesKey ?? "replay-viewer-uninitialized")
@@ -1033,7 +1038,7 @@ export default function ReplayTrainingPageShell({
             "data-replay-history-epoch": history.historyEpoch ?? "",
             "data-replay-history-right-truncated": String(
               review === null
-                ? runtime.replayStore.seriesStore.rightTruncated
+                ? viewer.seriesStore.rightTruncated
                 : displayedSeriesStore.rightTruncated,
             ),
             "data-replay-history-can-restore-latest": String(history.canRestoreLatestWindow),

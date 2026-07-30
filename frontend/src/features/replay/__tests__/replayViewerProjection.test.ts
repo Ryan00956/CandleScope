@@ -9,6 +9,9 @@ import {
   aggregateReplayBaseBars,
   rebuildReplayViewerSeries,
 } from "../replayViewerProjection.js";
+import {
+  selectRevealedIndicatorBars,
+} from "../useReplaySharedIndicatorRuntime.js";
 
 
 const HOUR_START = 1_800_000_000 - (1_800_000_000 % 3_600);
@@ -229,4 +232,103 @@ test("tail projection publishes tick then append semantics like the live chart p
     viewer.snapshot(),
     aggregateReplayBaseBars(source.snapshot(), "1m", "15m"),
   );
+});
+
+test("display-only context survives execution ticks and explicit restore drops it", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 3 }, (_, index) => baseBar(index + 10)));
+  const viewer = new SeriesWindowStore({ maxBars: 20 });
+  rebuildReplayViewerSeries(viewer, source, "1m", "1m");
+  viewer.applyRange(Array.from({ length: 3 }, (_, index) => ({
+    ...baseBar(index + 7),
+    replayContextHistory: true,
+  })));
+
+  const sourceDelta = source.applyRange([baseBar(13)]);
+  applyReplayViewerSeriesDelta(viewer, source, "1m", "1m", sourceDelta);
+  assert.deepEqual(
+    viewer.snapshot().slice(0, 3).map((row) => row.replayContextHistory),
+    [true, true, true],
+  );
+  assert.deepEqual(
+    viewer.snapshot().slice(3).map((row) => Number(row.time)),
+    source.snapshot().map((row) => Number(row.time)),
+  );
+
+  rebuildReplayViewerSeries(viewer, source, "1m", "1m");
+  assert.ok(viewer.snapshot().every((row) => row.replayContextHistory !== true));
+  assert.deepEqual(viewer.snapshot(), source.snapshot());
+});
+
+test("native pre-replay context replaces a partial warmup bucket and keeps latest indicators continuous", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 140 }, (_, index) => baseBar(index + 40)));
+  const viewer = new SeriesWindowStore({ maxBars: 200 });
+  rebuildReplayViewerSeries(viewer, source, "1m", "1h");
+  assert.equal(viewer.first()?.replayClosed, false);
+
+  const nativeContext = {
+    ...barAt(HOUR_START, -1, 3_600),
+    close: 777,
+    replayContextHistory: true,
+  };
+  viewer.applyRange([nativeContext]);
+  assert.equal(viewer.first()?.close, 777);
+
+  const sourceDelta = source.applyRange([baseBar(180)]);
+  applyReplayViewerSeriesDelta(viewer, source, "1m", "1h", sourceDelta);
+  const rows = viewer.snapshot();
+  assert.equal(rows[0]?.close, 777);
+  assert.equal(rows[0]?.replayContextHistory, true);
+  assert.equal(rows.at(-1)?.replayClosed, false);
+
+  const cursorMs = (HOUR_START + 181 * 60) * 1_000 - 1;
+  const indicatorBars = selectRevealedIndicatorBars(rows, cursorMs);
+  assert.deepEqual(
+    indicatorBars.map((row) => Number(row.time)),
+    [
+      HOUR_START,
+      HOUR_START + 3_600,
+      HOUR_START + 7_200,
+      HOUR_START + 10_800,
+    ],
+  );
+  assert.equal(indicatorBars.at(-1)?.replayClosed, false);
+});
+
+test("a right-truncated context window stops following execution until restore", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 3 }, (_, index) => baseBar(index + 10)));
+  const viewer = new SeriesWindowStore({ maxBars: 5 });
+  rebuildReplayViewerSeries(viewer, source, "1m", "1m");
+  viewer.applyRange(Array.from({ length: 5 }, (_, index) => ({
+    ...baseBar(index + 5),
+    replayContextHistory: true,
+  })));
+  assert.equal(viewer.rightTruncated, true);
+  const historicalWindow = structuredClone(viewer.snapshot());
+
+  const sourceDelta = source.applyRange([baseBar(13)]);
+  const ignored = applyReplayViewerSeriesDelta(
+    viewer,
+    source,
+    "1m",
+    "1m",
+    sourceDelta,
+  );
+  assert.equal(ignored.type, "noop");
+  assert.deepEqual(viewer.snapshot(), historicalWindow);
+
+  rebuildReplayViewerSeries(viewer, source, "1m", "1m");
+  assert.equal(viewer.rightTruncated, false);
+  assert.deepEqual(viewer.snapshot(), source.snapshot());
 });

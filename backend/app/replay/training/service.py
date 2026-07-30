@@ -1666,6 +1666,7 @@ class TrainingRunService:
         limit: int,
         data_epoch: str,
         history_epoch: str | None,
+        display_interval: str | None = None,
     ) -> dict[str, object]:
         """Return one revealed-only page through the replay-owned data boundary."""
 
@@ -1698,6 +1699,7 @@ class TrainingRunService:
             limit=limit,
             data_epoch=data_epoch,
             expected_history_epoch=history_epoch,
+            display_interval=display_interval,
             repository=self.replay_service.history_repository,
         )
 

@@ -225,6 +225,7 @@ test("viewer projection subscription is stable across equivalent runtime snapsho
 test("history paging stays non-blocking and uses viewer delta projection", () => {
   const workspace = source("src/features/replay/ReplayTrainingPageShell.tsx");
   const runtime = source("src/features/replay/useReplayViewerRuntime.ts");
+  const historyRuntime = source("src/features/replay/useReplayHistoryRuntime.ts");
   assert.doesNotMatch(
     workspace,
     /loading=\{review === null\s*&&\s*\([^)]*history\.loading/s,
@@ -232,6 +233,20 @@ test("history paging stays non-blocking and uses viewer delta projection", () =>
   assert.match(workspace, /history\.loading && <span>Loading older replay data/);
   assert.match(runtime, /applyReplayViewerSeriesDelta/);
   assert.match(runtime, /pendingSourceDeltas\.push\(delta\)/);
+  assert.match(historyRuntime, /replayHistoryInitialBeforeMs/);
+  assert.match(historyRuntime, /provider\.historyEpoch === null/);
+  assert.match(
+    historyRuntime,
+    /replayHistoryStoreBeforeMs\(\s*viewer\.seriesStore,\s*\)/s,
+  );
+  assert.match(historyRuntime, /applyReplayHistoryPage\(viewer\.seriesStore/);
+  assert.match(historyRuntime, /contextHistory:\s*true/);
+  assert.doesNotMatch(
+    historyRuntime,
+    /applyReplayHistoryPage\(runtime\.replayStore\.seriesStore/,
+  );
+  assert.match(historyRuntime, /expectedBeforeMs:\s*beforeMs/);
+  assert.doesNotMatch(historyRuntime, /oldestLoadedTime/);
 });
 
 test("viewer projection coalesces source bursts to one rebuild per browser frame", () => {

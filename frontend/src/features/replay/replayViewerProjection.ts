@@ -29,6 +29,12 @@ function replayIntervalTimeline(
   return timeline;
 }
 
+export function isReplayContextHistoryBar(
+  row: KlineBar | null | undefined,
+): boolean {
+  return row?.replayContextHistory === true;
+}
+
 function nominalSeconds(interval: string, fieldName: string): number {
   const seconds = parseIntervalSeconds(interval);
   if (seconds === null || !Number.isSafeInteger(seconds) || seconds <= 0) {
@@ -247,7 +253,48 @@ function sameProjectedRows(
     && left.every((row, index) => sameProjectedRow(
       row as Readonly<Record<string, unknown>>,
       right[index] as Readonly<Record<string, unknown>> | undefined,
-    ));
+  ));
+}
+
+function mergeDisplayContextWithProjection(
+  contextRows: readonly KlineBar[],
+  projectedRows: readonly KlineBar[],
+): KlineBar[] {
+  if (contextRows.length === 0) return [...projectedRows];
+  const rows: KlineBar[] = [];
+  let contextIndex = 0;
+  let projectedIndex = 0;
+  while (
+    contextIndex < contextRows.length
+    || projectedIndex < projectedRows.length
+  ) {
+    const context = contextRows[contextIndex];
+    const projected = projectedRows[projectedIndex];
+    if (context === undefined) {
+      if (projected !== undefined) rows.push(projected);
+      projectedIndex += 1;
+      continue;
+    }
+    if (projected === undefined) {
+      rows.push(context);
+      contextIndex += 1;
+      continue;
+    }
+    const contextTime = Number(context.time);
+    const projectedTime = Number(projected.time);
+    if (contextTime <= projectedTime) {
+      // History pages are server-clamped strictly before the replay seam.
+      // Let their complete native display candle replace an incomplete
+      // aggregate built from the bounded execution warmup at the same time.
+      rows.push(context);
+      contextIndex += 1;
+      if (contextTime === projectedTime) projectedIndex += 1;
+    } else {
+      rows.push(projected);
+      projectedIndex += 1;
+    }
+  }
+  return rows;
 }
 
 function firstDifferentRow(
@@ -280,7 +327,7 @@ export function applyReplayViewerSeriesDelta(
   displayInterval: string,
   sourceDelta: WindowDelta,
 ): WindowDelta {
-  const rows = aggregateReplayBaseBars(
+  const projectedRows = aggregateReplayBaseBars(
     source.snapshot({ force: true }),
     baseInterval,
     displayInterval,
@@ -298,9 +345,15 @@ export function applyReplayViewerSeriesDelta(
     `${String(source.seriesKey ?? "replay-base")}|viewer:${displayInterval}`,
   );
 
-  if (rows.length === 0 || sourceDeltaType === WINDOW_DELTA_TYPES.CLEAR) {
+  if (projectedRows.length === 0 || sourceDeltaType === WINDOW_DELTA_TYPES.CLEAR) {
     return target.clear(meta);
   }
+  // A bounded before-window intentionally stops following the execution tail.
+  // Keep it stable until the user explicitly restores the latest window.
+  if (target.rightTruncated) return target.applyRange([], meta);
+
+  const contextRows = target.snapshot().filter(isReplayContextHistoryBar);
+  const rows = mergeDisplayContextWithProjection(contextRows, projectedRows);
   if (target.isEmpty() || sourceDeltaType === WINDOW_DELTA_TYPES.REPLACE) {
     return target.replace(rows, meta);
   }

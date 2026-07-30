@@ -165,7 +165,7 @@ async def _init_data_manager() -> None:
                 result_service=indicator_range_service,
             )
             app.state.indicator_engine = indicator_engine
-            print("[startup] IndicatorEngine bridged to DataManager ✓")
+            print("[startup] IndicatorEngine bridged to DataManager [ok]")
         except Exception as exc:
             logger.warning("IndicatorEngine bridge failed: %s", exc)
             print(f"[startup] IndicatorEngine bridge failed: {exc}")
@@ -178,7 +178,7 @@ async def _init_data_manager() -> None:
             app.state.alert_facade = alert_facade
             app.state.alert_runtime = alert_runtime
             await alert_runtime.start()
-            print("[startup] AlertRuntime bridged to DataManager ✓")
+            print("[startup] AlertRuntime bridged to DataManager [ok]")
         except Exception as exc:
             logger.warning("AlertRuntime bridge failed: %s", exc, exc_info=True)
             print(f"[startup] AlertRuntime bridge failed: {exc}")
@@ -366,7 +366,7 @@ def _schedule_symbol_catalog_refresh() -> asyncio.Task[None]:
 
             await _wait_for_catalog_foreground_quiet()
             counts = await refresh_exchange_metadata()
-            print(f"[startup] Exchange info loaded ✓ {counts}")
+            print(f"[startup] Exchange info loaded [ok] {counts}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -447,7 +447,7 @@ async def shutdown_event() -> None:
     if indicator_engine is not None:
         try:
             indicator_engine.stop()
-            print("[shutdown] IndicatorEngine shut down ✓")
+            print("[shutdown] IndicatorEngine shut down [ok]")
         except Exception as exc:
             print(f"[shutdown] IndicatorEngine shutdown error: {exc}")
 
@@ -460,7 +460,7 @@ async def shutdown_event() -> None:
     if alert_runtime is not None:
         try:
             await alert_runtime.stop()
-            print("[shutdown] AlertRuntime shut down ✓")
+            print("[shutdown] AlertRuntime shut down [ok]")
         except Exception as exc:
             print(f"[shutdown] AlertRuntime shutdown error: {exc}")
 
@@ -483,7 +483,7 @@ async def shutdown_event() -> None:
     if plugin_runtime_host is not None:
         try:
             await plugin_runtime_host.stop()
-            print("[shutdown] Runtime plugin host shut down ✓")
+            print("[shutdown] Runtime plugin host shut down [ok]")
         except Exception as exc:
             logger.warning("Runtime plugin host shutdown error: %s", exc, exc_info=True)
             print(f"[shutdown] Runtime plugin host shutdown error: {exc}")

@@ -1,0 +1,3 @@
+packages/candlescope-plugin-sdk/tests/fixtures/hello_transcript_v1.json text eol=lf
+backend/tests/fixtures/plugin_runtime/pyne_transport_v1.json text eol=lf
+backend/app/official-plugin-releases.json text eol=lf

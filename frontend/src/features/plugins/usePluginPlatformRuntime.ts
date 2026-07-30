@@ -39,6 +39,15 @@ import {
 } from "./pluginPlatformApi.js";
 import { PluginMarkerSource } from "./pluginMarkerSource.js";
 import { PluginChartLayerSource } from "./pluginChartLayerSource.js";
+import {
+  createDeferredAbortableTask,
+  PLUGIN_CATALOG_REVALIDATE_MS,
+  PLUGIN_CHART_CONTEXT_HEARTBEAT_MS,
+  PLUGIN_UI_ACTIVE_POLL_MS,
+  pluginCatalogNeedsChartContextSync,
+  pluginCatalogNeedsUiPolling,
+  pluginLivePollIntervalMs,
+} from "./pluginRefreshRuntime.js";
 import { buildPluginRegistries } from "./pluginRegistries.js";
 import type {
   JsonValue,
@@ -52,6 +61,49 @@ import type {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Plugin Platform operation failed";
+}
+
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true || (error instanceof Error && error.name === "AbortError");
+}
+
+async function awaitRefreshTasks(tasks: Promise<void>[]): Promise<void> {
+  const results = await Promise.allSettled(tasks);
+  const failed = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failed) throw failed.reason;
+}
+
+function useAbortableInterval(
+  task: (signal: AbortSignal) => Promise<void>,
+  intervalMs: number,
+  enabled: boolean,
+): void {
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let running = false;
+    let controller: AbortController | null = null;
+    const poll = async () => {
+      if (running) return;
+      running = true;
+      controller = new AbortController();
+      try {
+        await task(controller.signal);
+      } catch {
+        // Each refresh publishes its own fail-closed state.
+      } finally {
+        controller = null;
+        running = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), intervalMs);
+    return () => {
+      window.clearInterval(timer);
+      controller?.abort();
+      controller = null;
+    };
+  }, [enabled, intervalMs, task]);
 }
 
 const DISABLED_LIVE_CONTROL: PluginLiveControlStatus = {
@@ -89,15 +141,25 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
   const [notice, setNotice] = useState<string | null>(null);
   const [liveControl, setLiveControl] = useState<PluginLiveControlStatus>(DISABLED_LIVE_CONTROL);
   const [liveControlOpen, setLiveControlOpen] = useState(false);
+  const [pageVisible, setPageVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState !== "hidden",
+  );
   const managementAvailable = useMemo(() => pluginManagementAvailable(), []);
   const markerSourceRef = useRef<PluginMarkerSource | null>(null);
   const chartLayerSourceRef = useRef<PluginChartLayerSource | null>(null);
   const chartContextSyncRef = useRef<Promise<unknown>>(Promise.resolve());
-  const refreshSequenceRef = useRef(0);
+  const catalogRef = useRef<PluginCatalog | null>(null);
+  const snapshotRef = useRef<PluginUiSnapshot | null>(null);
+  const catalogRefreshSequenceRef = useRef(0);
+  const snapshotRefreshSequenceRef = useRef(0);
+  const marketplaceRefreshSequenceRef = useRef(0);
+  const liveRefreshSequenceRef = useRef(0);
   if (markerSourceRef.current === null) markerSourceRef.current = new PluginMarkerSource();
   if (chartLayerSourceRef.current === null) {
     chartLayerSourceRef.current = new PluginChartLayerSource();
   }
+  const openManager = useCallback(() => setManagerOpen(true), []);
+  const closeManager = useCallback(() => setManagerOpen(false), []);
 
   const enqueueChartContextSync = useCallback((
     value: PluginMarketIdentity | null,
@@ -109,63 +171,233 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     return next;
   }, []);
 
-  const refresh = useCallback(async (): Promise<void> => {
-    const sequence = ++refreshSequenceRef.current;
+  const refreshCatalogState = useCallback(async (
+    options: { signal?: AbortSignal; includeSnapshot?: boolean } = {},
+  ): Promise<void> => {
+    const { signal, includeSnapshot = false } = options;
+    const sequence = ++catalogRefreshSequenceRef.current;
+    const snapshotSequence = includeSnapshot
+      ? ++snapshotRefreshSequenceRef.current
+      : null;
     try {
-      const [nextCatalog, nextMarketplaceCatalog, initialSnapshot, nextLiveControl] = await Promise.all([
-        fetchPluginCatalog(),
-        fetchPluginMarketplaceCatalog(),
-        fetchPluginUiSnapshot(),
-        fetchPluginLiveControlStatus(),
+      const [nextCatalog, initialSnapshot] = await Promise.all([
+        fetchPluginCatalog(signal),
+        includeSnapshot ? fetchPluginUiSnapshot(signal) : Promise.resolve(null),
       ]);
-      const nextSnapshot = initialSnapshot.registryRevision === nextCatalog.platform.registryRevision
-        ? initialSnapshot
-        : await fetchPluginUiSnapshot();
-      if (nextSnapshot.registryRevision !== nextCatalog.platform.registryRevision) {
+      let nextSnapshot = initialSnapshot;
+      if (
+        nextSnapshot !== null
+        && nextSnapshot.registryRevision !== nextCatalog.platform.registryRevision
+      ) {
+        nextSnapshot = await fetchPluginUiSnapshot(signal);
+      }
+      if (
+        nextSnapshot !== null
+        && nextSnapshot.registryRevision !== nextCatalog.platform.registryRevision
+      ) {
         throw new Error("Plugin catalog changed during refresh; retrying safely");
       }
-      if (sequence !== refreshSequenceRef.current) return;
+      if (signal?.aborted || sequence !== catalogRefreshSequenceRef.current) return;
+
+      catalogRef.current = nextCatalog;
       setCatalog(nextCatalog);
-      setMarketplaceCatalog(nextMarketplaceCatalog);
-      setSnapshot(nextSnapshot);
-      setLiveControl(nextLiveControl);
+      if (
+        nextSnapshot !== null
+        && snapshotSequence === snapshotRefreshSequenceRef.current
+      ) {
+        snapshotRef.current = nextSnapshot;
+        setSnapshot(nextSnapshot);
+      } else if (
+        snapshotRef.current !== null
+        && snapshotRef.current.registryRevision !== nextCatalog.platform.registryRevision
+      ) {
+        snapshotRef.current = null;
+        setSnapshot(null);
+      }
       setError(null);
     } catch (caught) {
-      if (sequence !== refreshSequenceRef.current) return;
+      if (
+        isAbortError(caught, signal)
+        || sequence !== catalogRefreshSequenceRef.current
+      ) return;
+      catalogRef.current = null;
+      snapshotRef.current = null;
+      snapshotRefreshSequenceRef.current += 1;
       setCatalog(null);
-      setMarketplaceCatalog(null);
       setSnapshot(null);
-      setLiveControl((current) => (
-        current.mode === "disabled" ? UNAVAILABLE_LIVE_CONTROL : { ...current, available: false, mode: "unavailable" }
-      ));
       setError(errorMessage(caught));
       throw caught;
     } finally {
-      if (sequence === refreshSequenceRef.current) setLoading(false);
+      if (
+        includeSnapshot
+        && !signal?.aborted
+        && sequence === catalogRefreshSequenceRef.current
+      ) setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    let disposed = false;
-    let polling = false;
-    const poll = async () => {
-      if (disposed || polling) return;
-      polling = true;
-      try {
-        await refresh();
-      } catch {
-        // The fail-closed state is already published by refresh().
-      } finally {
-        polling = false;
+  const refreshUiSnapshotState = useCallback(async (
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const expectedRevision = catalogRef.current?.platform.registryRevision;
+    if (expectedRevision === undefined) return;
+    const sequence = ++snapshotRefreshSequenceRef.current;
+    try {
+      const nextSnapshot = await fetchPluginUiSnapshot(signal);
+      if (signal?.aborted || sequence !== snapshotRefreshSequenceRef.current) return;
+      const currentRevision = catalogRef.current?.platform.registryRevision;
+      if (
+        currentRevision !== expectedRevision
+        || nextSnapshot.registryRevision !== expectedRevision
+      ) {
+        if (currentRevision === expectedRevision) {
+          await refreshCatalogState({
+            includeSnapshot: true,
+            ...(signal ? { signal } : {}),
+          });
+        }
+        return;
       }
+      snapshotRef.current = nextSnapshot;
+      setSnapshot(nextSnapshot);
+      setError(null);
+    } catch (caught) {
+      if (
+        isAbortError(caught, signal)
+        || sequence !== snapshotRefreshSequenceRef.current
+      ) return;
+      snapshotRef.current = null;
+      setSnapshot(null);
+      setError(errorMessage(caught));
+      throw caught;
+    }
+  }, [refreshCatalogState]);
+
+  const refreshMarketplaceCatalogState = useCallback(async (
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const sequence = ++marketplaceRefreshSequenceRef.current;
+    try {
+      const nextMarketplaceCatalog = await fetchPluginMarketplaceCatalog(signal);
+      if (signal?.aborted || sequence !== marketplaceRefreshSequenceRef.current) return;
+      setMarketplaceCatalog(nextMarketplaceCatalog);
+      setError(null);
+    } catch (caught) {
+      if (
+        isAbortError(caught, signal)
+        || sequence !== marketplaceRefreshSequenceRef.current
+      ) return;
+      setMarketplaceCatalog(null);
+      setError(errorMessage(caught));
+      throw caught;
+    }
+  }, []);
+
+  const refreshLiveControlState = useCallback(async (
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const sequence = ++liveRefreshSequenceRef.current;
+    try {
+      const nextLiveControl = await fetchPluginLiveControlStatus(signal);
+      if (signal?.aborted || sequence !== liveRefreshSequenceRef.current) return;
+      setLiveControl(nextLiveControl);
+    } catch (caught) {
+      if (
+        isAbortError(caught, signal)
+        || sequence !== liveRefreshSequenceRef.current
+      ) return;
+      setLiveControl((current) => (
+        current.mode === "disabled"
+          ? UNAVAILABLE_LIVE_CONTROL
+          : { ...current, available: false, mode: "unavailable" }
+      ));
+      throw caught;
+    }
+  }, []);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    const tasks = [
+      refreshCatalogState({ includeSnapshot: true }),
+      refreshLiveControlState(),
+    ];
+    if (managerOpen) tasks.push(refreshMarketplaceCatalogState());
+    await awaitRefreshTasks(tasks);
+  }, [
+    managerOpen,
+    refreshCatalogState,
+    refreshLiveControlState,
+    refreshMarketplaceCatalogState,
+  ]);
+
+  useEffect(() => {
+    const bootstrap = createDeferredAbortableTask(async (signal) => {
+      await awaitRefreshTasks([
+        refreshCatalogState({ signal, includeSnapshot: true }),
+        refreshLiveControlState(signal),
+      ]);
+    });
+    bootstrap.start();
+    return () => bootstrap.stop();
+  }, [refreshCatalogState, refreshLiveControlState]);
+
+  const revalidateCatalog = useCallback(
+    (signal: AbortSignal) => refreshCatalogState({ signal }),
+    [refreshCatalogState],
+  );
+  useAbortableInterval(
+    revalidateCatalog,
+    PLUGIN_CATALOG_REVALIDATE_MS,
+    pageVisible,
+  );
+
+  const uiPollingEnabled = pluginCatalogNeedsUiPolling(catalog, snapshot);
+  useAbortableInterval(
+    refreshUiSnapshotState,
+    PLUGIN_UI_ACTIVE_POLL_MS,
+    pageVisible && uiPollingEnabled,
+  );
+
+  const livePollIntervalMs = pluginLivePollIntervalMs(liveControl);
+  useAbortableInterval(
+    refreshLiveControlState,
+    livePollIntervalMs,
+    pageVisible,
+  );
+
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    let resumeController: AbortController | null = null;
+    const onVisibilityChange = () => {
+      const visible = document.visibilityState !== "hidden";
+      setPageVisible(visible);
+      if (!visible) {
+        resumeController?.abort();
+        resumeController = null;
+        return;
+      }
+      resumeController?.abort();
+      resumeController = new AbortController();
+      void awaitRefreshTasks([
+        refreshCatalogState({
+          signal: resumeController.signal,
+          includeSnapshot: true,
+        }),
+        refreshLiveControlState(resumeController.signal),
+      ]).catch(() => undefined);
     };
-    void poll();
-    const interval = window.setInterval(() => void poll(), 2_000);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
-      disposed = true;
-      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      resumeController?.abort();
     };
-  }, [refresh]);
+  }, [refreshCatalogState, refreshLiveControlState]);
+
+  useEffect(() => {
+    if (!managerOpen || !pageVisible) return undefined;
+    const controller = new AbortController();
+    void refreshMarketplaceCatalogState(controller.signal).catch(() => undefined);
+    return () => controller.abort();
+  }, [managerOpen, pageVisible, refreshMarketplaceCatalogState]);
 
   useEffect(() => {
     markerSourceRef.current?.update(snapshot?.chartLayers ?? [], { exchange, interval, marketType, symbol });
@@ -177,8 +409,13 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     });
   }, [exchange, interval, marketType, snapshot?.chartLayers, symbol]);
 
+  const chartContextSyncEnabled = (
+    pageVisible
+    && managementAvailable
+    && pluginCatalogNeedsChartContextSync(catalog)
+  );
   useEffect(() => {
-    if (!managementAvailable) return undefined;
+    if (!chartContextSyncEnabled) return undefined;
     let disposed = false;
     const sync = () => {
       if (disposed) return;
@@ -186,26 +423,20 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
         .catch(() => undefined);
     };
     sync();
-    const heartbeat = window.setInterval(sync, 5_000);
+    const heartbeat = window.setInterval(sync, PLUGIN_CHART_CONTEXT_HEARTBEAT_MS);
     return () => {
       disposed = true;
       window.clearInterval(heartbeat);
+      void enqueueChartContextSync(null).catch(() => undefined);
     };
   }, [
+    chartContextSyncEnabled,
     enqueueChartContextSync,
     exchange,
     interval,
-    managementAvailable,
     marketType,
     symbol,
   ]);
-
-  useEffect(() => {
-    if (!managementAvailable) return undefined;
-    return () => {
-      void enqueueChartContextSync(null).catch(() => undefined);
-    };
-  }, [enqueueChartContextSync, managementAvailable]);
 
   const registries = useMemo(() => buildPluginRegistries(catalog), [catalog]);
   useEffect(() => {
@@ -398,8 +629,8 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     },
     actions: {
       refresh,
-      openManager: () => setManagerOpen(true),
-      closeManager: () => setManagerOpen(false),
+      openManager,
+      closeManager,
       openPalette: () => setPaletteOpen(true),
       closePalette: () => setPaletteOpen(false),
       openView: setOpenViewId,
@@ -513,6 +744,8 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     managerOpen,
     marketType,
     notice,
+    openManager,
+    closeManager,
     openSettingsId,
     openViewId,
     paletteOpen,

@@ -796,6 +796,11 @@ function MarketplacePanel({
 }
 
 export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
+  const { closeManager, openManager } = runtime.actions;
+  useEffect(() => {
+    openManager();
+    return closeManager;
+  }, [closeManager, openManager]);
   const plugins = useMemo(
     () => runtime.view.catalog?.plugins ?? [],
     [runtime.view.catalog?.plugins],

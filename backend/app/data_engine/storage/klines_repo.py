@@ -155,7 +155,7 @@ def _migrate_add_exchange_market_type(conn: sqlite3.Connection) -> None:
         ON klines(exchange, market_type, symbol, interval, open_time);
         """
     )
-    print("[migration] Migration complete ✓")
+    print("[migration] Migration complete [ok]")
 
 
 def init_klines_storage() -> None:

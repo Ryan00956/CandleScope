@@ -284,7 +284,7 @@ class DataEngineRuntime:
         task.cancel()
         with suppress(asyncio.CancelledError, Exception):
             await asyncio.wait_for(task, timeout=2)
-        print(f"[shutdown] {name} task cancelled ✓")
+        print(f"[shutdown] {name} task cancelled [ok]")
 
     @staticmethod
     async def _shutdown_step(
@@ -301,7 +301,7 @@ class DataEngineRuntime:
                 await awaitable
             else:
                 await asyncio.wait_for(awaitable, timeout=timeout)
-            print(f"[shutdown] {name} shut down ✓")
+            print(f"[shutdown] {name} shut down [ok]")
         except asyncio.TimeoutError:
             print(f"[shutdown] {name} shutdown timed out")
         except Exception as exc:
@@ -851,7 +851,7 @@ async def start_data_engine() -> DataEngineRuntime:
         if callable(set_ingestion_calendar):
             set_ingestion_calendar(_calendar_resolver)
         dm.set_ingestion_factory(ingestion_factory)
-        print("[startup] IngestionFactory injected ✓")
+        print("[startup] IngestionFactory injected [ok]")
 
         market_metrics_repository = MarketMetricsRepository()
         market_metrics_writer = MarketMetricStorageWriter(market_metrics_repository)
@@ -863,25 +863,25 @@ async def start_data_engine() -> DataEngineRuntime:
             history_policy=history_policy,
         )
         dm.set_market_data_service(market_data_service)
-        print("[startup] MarketDataService injected ✓")
+        print("[startup] MarketDataService injected [ok]")
 
         trade_flow_service = _build_trade_flow_service(ingestion_factory)
         dm.set_trade_flow_service(trade_flow_service)
         await _start_raw_archive_streams(trade_flow_service)
-        print("[startup] TradeFlowService injected ✓")
+        print("[startup] TradeFlowService injected [ok]")
 
         liquidation_service = _build_liquidation_service(ingestion_factory)
         dm.set_liquidation_service(liquidation_service)
         await _start_liquidation_capture_streams(liquidation_service)
-        print("[startup] LiquidationService injected ✓")
+        print("[startup] LiquidationService injected [ok]")
 
         order_book_service = _build_order_book_service(ingestion_factory)
         dm.set_order_book_service(order_book_service)
-        print("[startup] OrderBookService injected ✓")
+        print("[startup] OrderBookService injected [ok]")
 
         full_order_book_service = _build_full_order_book_service(ingestion_factory)
         dm.set_full_order_book_service(full_order_book_service)
-        print("[startup] FullOrderBookService injected ✓")
+        print("[startup] FullOrderBookService injected [ok]")
 
         ingestion_cfg = IngestionConfig()
         transport = TransportLayer(ingestion_cfg)
@@ -927,11 +927,11 @@ async def start_data_engine() -> DataEngineRuntime:
         if callable(set_suppression_lookup):
             set_suppression_lookup(backfill_coordinator.get_repair_suppression)
         dm.set_backfill_trigger(backfill_coordinator.trigger)
-        print("[startup] BackfillCoordinator injected ✓")
+        print("[startup] BackfillCoordinator injected [ok]")
 
         await dm.start()
         logger.info("DataManager initialized and started successfully")
-        print("[startup] DataManager initialized ✓")
+        print("[startup] DataManager initialized [ok]")
 
         price_source, subscription_service = await _start_subscription_workflows(
             dm,
@@ -998,7 +998,7 @@ async def _start_subscription_workflows(
 
         await subscription_service.start()
 
-        print("[startup] SubscriptionService + ingestion price source initialized ✓")
+        print("[startup] SubscriptionService + ingestion price source initialized [ok]")
         return price_source, subscription_service
     except Exception as exc:
         logger.warning("SubscriptionService init failed: %s", exc)

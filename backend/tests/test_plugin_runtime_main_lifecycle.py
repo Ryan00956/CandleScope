@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,37 @@ from app import main as main_module
 from app.first_party_plugin_bootstrap import FirstPartyPluginBootstrapResult
 from app.plugin_runtime import RuntimeHostService
 from app.plugin_runtime.registry import RuntimeRegistry
+
+
+def test_lifecycle_print_literals_are_windows_console_safe() -> None:
+    backend_root = Path(__file__).resolve().parents[1]
+    lifecycle_modules = (
+        backend_root / "app" / "main.py",
+        backend_root / "app" / "data_engine" / "runtime.py",
+        backend_root / "app" / "data_engine" / "storage" / "klines_repo.py",
+    )
+
+    for module_path in lifecycle_modules:
+        syntax_tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        for node in ast.walk(syntax_tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "print"
+            ):
+                continue
+            literal_parts = (
+                part.value
+                for argument in node.args
+                for part in (
+                    argument.values
+                    if isinstance(argument, ast.JoinedStr)
+                    else (argument,)
+                )
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            )
+            for literal_part in literal_parts:
+                literal_part.encode("cp936")
 
 
 class _LagMonitor:

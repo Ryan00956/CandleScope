@@ -174,6 +174,21 @@ test("a forged tick cannot rewrite an already revealed historical bar", () => {
   assert.deepEqual(store.snapshot(), original);
 });
 
+test("a bar marked closed cannot be published before its close time", () => {
+  const snapshot = parseReplaySessionResponse(replaySessionResponse()).snapshot;
+  const store = new SeriesWindowStore();
+  replaceReplaySeriesFromSnapshot(store, snapshot);
+  assert.throws(() => applyReplayBarUpdate(store, {
+    action: "append",
+    bar: parseReplayDisplayBar(replayBar(BASE_TIME_MS + 60_000, "101")),
+    source_sequence: 1,
+    base_open_time_ms: BASE_TIME_MS + 60_000,
+    gap_policy: "reject",
+    synthetic_policy: "reject",
+  }, BASE_TIME_MS + 60_000), /closed replay bar exceeds the public cursor/);
+  assert.equal(store.barCount, 1);
+});
+
 test("semantic batch validation is atomic and rejects backward source order", () => {
   const snapshot = parseReplaySessionResponse(replaySessionResponse()).snapshot;
   const store = new SeriesWindowStore();

@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { computeIndicatorBatch } from "../../services/indicatorApi.js";
 import { markPerf, recordPerfEvent } from "../../runtime/performance/perfMarks.js";
@@ -55,10 +56,12 @@ export interface UseIndicatorComputeControllerOptions {
   datasetKey: string;
   exchange: string;
   forceHostedSubscriptions(): void;
+  historyLimit?: number;
   interval: string;
   marketType: string;
   outputDispatch: Dispatch<IndicatorOutputAction>;
   pendingForceComputeRef: MutableRefObject<boolean>;
+  resultCacheMode?: "shared" | "disabled";
   seriesReady: number;
   setActiveIndicators: Dispatch<SetStateAction<IndicatorDefinition[]>>;
   symbol: string;
@@ -132,10 +135,12 @@ export function useIndicatorComputeController({
   datasetKey,
   exchange,
   forceHostedSubscriptions,
+  historyLimit,
   interval,
   marketType,
   outputDispatch,
   pendingForceComputeRef,
+  resultCacheMode = "shared",
   seriesReady,
   setActiveIndicators,
   symbol,
@@ -148,9 +153,12 @@ export function useIndicatorComputeController({
   );
   const desiredDataSignature = useMemo(
     () => hasExplicitLocalIndicator
-      ? buildIndicatorOhlcvSignature(chartData || [])
+      ? buildIndicatorOhlcvSignature(
+          chartData || [],
+          historyLimit === undefined ? {} : { limit: historyLimit },
+        )
       : "hosted-only",
-    [chartData, hasExplicitLocalIndicator],
+    [chartData, hasExplicitLocalIndicator, historyLimit],
   );
   const desiredPlanSignature = useMemo(() => buildLocalIndicatorPlanSignature(
     activeIndicators,
@@ -213,7 +221,10 @@ export function useIndicatorComputeController({
     }
 
     if (showUI) setComputing(true);
-    const ohlcv = buildIndicatorOhlcv(currentChartData);
+    const ohlcv = buildIndicatorOhlcv(
+      currentChartData,
+      historyLimit === undefined ? {} : { limit: historyLimit },
+    );
     const targetByJobKey = new Map<string, {
       indicator: IndicatorDefinition;
       job: IndicatorComputeBatchJob;
@@ -245,14 +256,16 @@ export function useIndicatorComputeController({
       });
     }
     const jobs = Array.from(targetByJobKey.values()).map((target) => target.job);
-    const cacheContext = buildIndicatorCacheContext({
-      candleDownColor: candleDownColorRef.current,
-      candleUpColor: candleUpColorRef.current,
-      exchange: context.exchange,
-      interval: context.interval,
-      marketType: context.marketType,
-      symbol: context.symbol,
-    });
+    const cacheContext = resultCacheMode === "shared"
+      ? buildIndicatorCacheContext({
+          candleDownColor: candleDownColorRef.current,
+          candleUpColor: candleUpColorRef.current,
+          exchange: context.exchange,
+          interval: context.interval,
+          marketType: context.marketType,
+          symbol: context.symbol,
+        })
+      : null;
     const submittedJobKeys = new Set<string>();
     try {
       const scheduled = await jobCoordinator.schedule<
@@ -268,15 +281,17 @@ export function useIndicatorComputeController({
           const chunks = chunkIndicatorComputeJobs(physicalJobs);
           for (const job of physicalJobs) {
             submittedJobKeys.add(job.jobKey);
-            removeCachedIndicatorResult(
-              targetByJobKey.get(job.jobKey)?.indicator,
-              cacheContext,
-            );
+            if (cacheContext !== null) {
+              removeCachedIndicatorResult(
+                targetByJobKey.get(job.jobKey)?.indicator,
+                cacheContext,
+              );
+            }
           }
           markPerf("indicator.compute.start", {
             force,
             indicatorCount: physicalJobs.length,
-            bars: currentChartData.length,
+            bars: ohlcv.length,
             symbol: context.symbol,
             interval: context.interval,
             marketType: context.marketType,
@@ -293,7 +308,7 @@ export function useIndicatorComputeController({
             markPerf("indicator.compute.end", {
               force,
               indicatorCount: physicalJobs.length,
-              bars: currentChartData.length,
+              bars: ohlcv.length,
               symbol: context.symbol,
               interval: context.interval,
               marketType: context.marketType,
@@ -363,7 +378,7 @@ export function useIndicatorComputeController({
       const cachedJobKeys: string[] = [];
       for (const { id, normalized, error } of processedResults) {
         if (error || !normalized) continue;
-        const cached = cacheIndicatorSnapshot(
+        const cached = cacheContext === null || cacheIndicatorSnapshot(
           indicatorById.get(id),
           cacheContext,
           normalized,
@@ -374,7 +389,8 @@ export function useIndicatorComputeController({
       }
       jobCoordinator.complete(cachedJobKeys);
 
-      startTransition(() => {
+      const publishAcceptedResults = () => {
+        if (committedRuntimeRef.current.lifecycleKey !== lifecycleKey) return;
         outputDispatch({
           type: "compute-results",
           processedIds: processedResults.map((item) => item.id),
@@ -388,6 +404,9 @@ export function useIndicatorComputeController({
         });
 
         setActiveIndicators((prev) => {
+          if (committedRuntimeRef.current.lifecycleKey !== lifecycleKey) {
+            return prev;
+          }
           const updated = [...prev];
           for (const { id, mappedLines, error } of processedResults) {
             const index = updated.findIndex((indicator) => indicator.id === id);
@@ -404,7 +423,15 @@ export function useIndicatorComputeController({
           }
           return updated;
         });
-      });
+      };
+      if (resultCacheMode === "disabled") {
+        // Replay must publish in the urgent lane. A deferred transition from a
+        // longer revealed prefix could otherwise commit after a cursor rewind
+        // and repaint historical points with future-bar knowledge.
+        flushSync(publishAcceptedResults);
+      } else {
+        startTransition(publishAcceptedResults);
+      }
     } catch (error) {
       if (committedRuntimeRef.current.lifecycleKey === lifecycleKey) {
         const message = error instanceof Error ? error.message : String(error);
@@ -468,8 +495,10 @@ export function useIndicatorComputeController({
     candleDownColorRef,
     candleUpColorRef,
     chartDataRef,
+    historyLimit,
     jobCoordinator,
     outputDispatch,
+    resultCacheMode,
     setActiveIndicators,
   ]);
 
@@ -512,7 +541,7 @@ export function useIndicatorComputeController({
     }
     const timer = setTimeout(() => {
       fired = true;
-      void computeAll(false);
+      void computeAll(urgent);
     }, delayMs);
     return () => {
       clearTimeout(timer);

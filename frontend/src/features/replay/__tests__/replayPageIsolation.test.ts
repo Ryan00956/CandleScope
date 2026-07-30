@@ -49,6 +49,7 @@ test("replay composition source has no live runtime value import", () => {
     "src/features/replay/ReplayPageShell.tsx",
     "src/features/replay/ReplayTrainingPageShell.tsx",
     "src/features/replay/components/ReplayRightMarketRail.tsx",
+    "src/features/replay/useReplaySharedIndicatorRuntime.ts",
     "src/features/replay/useReplayHistoryRuntime.ts",
     "src/features/replay/useReplayRuntime.ts",
   ];
@@ -59,6 +60,8 @@ test("replay composition source has no live runtime value import", () => {
     "useWatchlistRuntime",
     "useWatchlistFullCacheRuntime",
     "useIndicatorRuntime",
+    "indicatorStreamController",
+    "computeIndicatorRangeBatch",
     "useAlert",
     "/services/",
   ];

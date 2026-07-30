@@ -143,6 +143,7 @@ function aggregateBucket(
     replayComponentCount: componentCount,
     replayExpectedComponents: expected,
     replayClosed: closed,
+    is_closed: closed,
     replaySynthetic: rows.some((row) => row.replaySynthetic === true),
   };
 }

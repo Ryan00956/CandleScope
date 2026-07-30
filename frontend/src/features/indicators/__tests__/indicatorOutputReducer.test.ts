@@ -37,6 +37,20 @@ test("remove-indicator clears global outputs and param schema for one indicator"
   assert.deepEqual(next.paramSchemas, { rsi: [{ name: "period" }] });
 });
 
+test("replay context reset can clear compute-derived schemas fail closed", () => {
+  const state = structuralMock<IndicatorOutputState>({
+    ...createIndicatorOutputState(),
+    markers: [{ id: "future", indicatorId: "script" }],
+    paramSchemas: { script: [{ name: "future-sensitive" }] },
+  });
+  const next = indicatorOutputReducer(state, {
+    type: "reset-context",
+    preserveParamSchemas: false,
+  });
+  assert.deepEqual(next.markers, []);
+  assert.deepEqual(next.paramSchemas, {});
+});
+
 test("snapshot preserves untouched output lane references", () => {
   const state = createIndicatorOutputState();
   const next = indicatorOutputReducer(state, structuralMock({

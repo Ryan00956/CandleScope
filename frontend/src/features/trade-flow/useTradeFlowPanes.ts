@@ -2,7 +2,7 @@ import { useMemo, useState, useSyncExternalStore } from "react";
 import type { WindowDelta } from "../market-data/klineContracts.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import type { IndicatorSubPane } from "../indicators/indicatorPaneProjection.js";
-import { createKlineOrderFlowProjectionMemo } from "./klineOrderFlowProjection.js";
+import { createKlineOrderFlowProjectionMemo } from "../indicators/klineOrderFlowProjection.js";
 import type { TradeFlowRuntime } from "./tradeFlowTypes.js";
 
 const EMPTY_PANES: readonly IndicatorSubPane[] = Object.freeze([]);

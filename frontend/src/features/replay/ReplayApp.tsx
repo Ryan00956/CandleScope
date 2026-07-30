@@ -6,6 +6,7 @@ import ReplayTrainingPageShell from "./ReplayTrainingPageShell.js";
 import { resolveReplayProduct } from "./replayProduct.js";
 import { REPLAY_PRODUCT_V2_ENABLED } from "./replayV2Types.js";
 import { useReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
+import { useReplaySharedIndicatorRuntime } from "./useReplaySharedIndicatorRuntime.js";
 import { useReplayRuntime } from "./useReplayRuntime.js";
 import { useReplayViewerRuntime } from "./useReplayViewerRuntime.js";
 import { useTrainingHub } from "./useTrainingHub.js";
@@ -26,10 +27,20 @@ function ReplayTrainingHubApp() {
   return <TrainingHubDialog runtime={runtime} />;
 }
 
-function ReplayTrainingWorkspaceApp({ entry }: ReplayAppProps) {
-  const replay = useReplayRuntime(entry);
-  const viewer = useReplayViewerRuntime(replay);
-  const indicators = useReplayIndicatorRuntime(replay, viewer.seriesStore);
+function ReplayTrainingWorkspaceSurface({
+  indicatorScope,
+  replay,
+  viewer,
+}: {
+  indicatorScope: string;
+  replay: ReturnType<typeof useReplayRuntime>;
+  viewer: ReturnType<typeof useReplayViewerRuntime>;
+}) {
+  const indicators = useReplaySharedIndicatorRuntime(
+    replay,
+    viewer,
+    indicatorScope,
+  );
   const chartSurface = useChartSurfaceRuntime();
   return (
     <ReplayTrainingPageShell
@@ -37,6 +48,21 @@ function ReplayTrainingWorkspaceApp({ entry }: ReplayAppProps) {
       indicators={indicators}
       chartSurfaceRef={chartSurface.ref}
       chartSurfaceActions={chartSurface.actions}
+      viewer={viewer}
+    />
+  );
+}
+
+function ReplayTrainingWorkspaceApp({ entry }: ReplayAppProps) {
+  const replay = useReplayRuntime(entry);
+  const viewer = useReplayViewerRuntime(replay);
+  const indicatorScope = viewer.viewerState?.run_id
+    ?? `session:${entry.kind === "session" ? entry.sessionId : "unavailable"}`;
+  return (
+    <ReplayTrainingWorkspaceSurface
+      key={indicatorScope}
+      indicatorScope={indicatorScope}
+      replay={replay}
       viewer={viewer}
     />
   );

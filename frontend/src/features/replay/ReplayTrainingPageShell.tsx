@@ -8,6 +8,10 @@ import type { RefObject } from "react";
 import DrawingToolbar from "../../components/DrawingToolbar.js";
 import IntervalSelector from "../../components/IntervalSelector.js";
 import SingleChartPanes from "../../components/SingleChartPanes.js";
+import IndicatorPanel from "../indicators/IndicatorPanel.js";
+import {
+  providedBarsIndicatorSupport,
+} from "../indicators/useProvidedBarsIndicatorRuntime.js";
 import { useCustomIntervals } from "../chart-session/customIntervalStore.js";
 import { useIntervalNoticeRuntime } from "../chart-session/intervalNoticeRuntime.js";
 import { loadUserPrefs } from "../chart-session/chartSessionModel.js";
@@ -23,7 +27,6 @@ import {
 } from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
 import ReplayBottomControlDock from "./components/ReplayBottomControlDock.js";
-import ReplayIndicatorPanel from "./components/ReplayIndicatorPanel.js";
 import ReplayIntegrityReviewPanel from "./components/ReplayIntegrityReviewPanel.js";
 import ReplayRightMarketRail from "./components/ReplayRightMarketRail.js";
 import ReplaySessionDialog from "./components/ReplaySessionDialog.js";
@@ -46,7 +49,9 @@ import { replayEffectiveTrainingState, replayOwnsController } from "./replayUiMo
 import { useReplayHistoryRuntime } from "./useReplayHistoryRuntime.js";
 import { useReplayIntegrityRuntime } from "./useReplayIntegrityRuntime.js";
 import { useReplayPublicTimeRuntime } from "./useReplayPublicTimeRuntime.js";
-import type { ReplayIndicatorRuntime } from "./useReplayIndicatorRuntime.js";
+import type {
+  ReplaySharedIndicatorRuntime,
+} from "./useReplaySharedIndicatorRuntime.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 import type { ReplayViewerRuntime } from "./useReplayViewerRuntime.js";
 import { useReplayWorkspacePreferences } from "./replayWorkspacePreferences.js";
@@ -60,7 +65,7 @@ import type { ReplayReviewResponse } from "./replayIntegrityModel.js";
 
 export interface ReplayTrainingPageShellProps {
   readonly runtime: ReplayRuntime;
-  readonly indicators: ReplayIndicatorRuntime;
+  readonly indicators: ReplaySharedIndicatorRuntime;
   readonly chartSurfaceRef: RefObject<ChartSurfaceHandle | null>;
   readonly chartSurfaceActions: ChartSurfaceActions;
   readonly viewer: ReplayViewerRuntime;
@@ -766,13 +771,21 @@ export default function ReplayTrainingPageShell({
       positionSize={drawings.view.positionSize}
       drawingSnapEnabled={drawings.view.drawingSnapEnabled}
       onSelectedDrawingChange={drawings.actions.handleSelectedDrawingChange}
-      mainOverlayLines={review === null ? [...indicators.mainOverlayLines] : []}
-      subPanes={review === null ? [...indicators.subPanes] : []}
+      mainOverlayLines={review === null ? [...indicators.view.mainOverlayLines] : []}
+      subPanes={review === null ? [...indicators.view.subPanes] : []}
+      indicatorMarkers={review === null ? [...indicators.view.markers] : []}
+      indicatorFills={review === null ? [...indicators.view.fills] : []}
+      indicatorHlines={review === null ? [...indicators.view.hlines] : []}
+      indicatorBgcolors={review === null ? [...indicators.view.bgcolors] : []}
+      indicatorBarcolors={review === null ? [...indicators.view.barcolors] : []}
       onRemoveSubPane={review === null
         ? (pane) => {
-            const id = pane.owner?.id;
-            const item = indicators.catalog.find((candidate) => candidate.id === id);
-            if (item) indicators.actions.remove(item.id);
+            const owner = pane.owner;
+            if (owner?.kind === "indicator") {
+              indicators.actions.removeIndicator(owner.id);
+            } else if (owner?.kind === "trade-flow") {
+              indicators.marketStudyActions.remove(owner.id);
+            }
           }
         : null}
       invertScale={priceScale.invert}
@@ -952,10 +965,33 @@ export default function ReplayTrainingPageShell({
         )}
         {review === null && <ReplayBottomControlDock runtime={runtime} viewer={viewer} publicTimeLabel={publicTime} />}
         {review === null && indicatorPanelOpen && (
-          <div id="replay-indicator-panel" className="replay-indicator-panel-layer">
-            <ReplayIndicatorPanel
-              runtime={indicators}
+          <div id="replay-indicator-panel" className="replay-shared-indicator-panel">
+            <IndicatorPanel
+              allowedScriptLanguages={["pyne", "pine"]}
+              allowedSecurityModes={["safe"]}
+              isOpen
               onClose={() => setIndicatorPanelOpen(false)}
+              activeIndicators={indicators.view.activeIndicators}
+              paramSchemas={indicators.view.paramSchemas}
+              onAddIndicator={indicators.actions.addIndicator}
+              onRemoveIndicator={indicators.actions.removeIndicator}
+              onToggleVisibility={indicators.actions.toggleVisibility}
+              onUpdateParams={indicators.actions.updateIndicatorParams}
+              onUpdateScript={indicators.actions.updateIndicatorScript}
+              computing={indicators.status.computing}
+              realtimeMode={indicators.status.realtimeMode}
+              onRecompute={indicators.actions.recompute}
+              marketStudies={indicators.marketStudies}
+              onAddMarketStudy={indicators.marketStudyActions.add}
+              onRemoveMarketStudy={indicators.marketStudyActions.remove}
+              onToggleMarketStudyVisibility={
+                indicators.marketStudyActions.toggleVisibility
+              }
+              modeNotice={{
+                label: "回放闭合前缀",
+                description: "只计算服务端已揭示且已闭合的 K 线；禁用 hosted range、指标 WebSocket 与 unsafe 脚本。",
+              }}
+              resolveIndicatorSupport={providedBarsIndicatorSupport}
             />
           </div>
         )}

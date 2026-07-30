@@ -77,7 +77,18 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   const controls = source("src/features/replay/components/ReplayControlBar.tsx");
   const viewerRuntime = source("src/features/replay/useReplayViewerRuntime.ts");
   assert.match(composition, /useReplayViewerRuntime\(replay\)/);
-  assert.match(composition, /useReplayIndicatorRuntime\(replay, viewer\.seriesStore\)/);
+  assert.match(composition, /useReplaySharedIndicatorRuntime\(/);
+  assert.match(workspace, /<IndicatorPanel/);
+  assert.doesNotMatch(workspace, /ReplayIndicatorPanel/);
+  for (const prop of [
+    "indicatorMarkers",
+    "indicatorFills",
+    "indicatorHlines",
+    "indicatorBgcolors",
+    "indicatorBarcolors",
+  ]) {
+    assert.match(workspace, new RegExp(`${prop}=\\{`));
+  }
   assert.match(workspace, /seriesStore=\{displayedSeriesStore\}/);
   assert.match(workspace, /review === null \? viewer\.seriesStore : reviewSeriesStore/);
   assert.match(workspace, /setDisplayInterval/);

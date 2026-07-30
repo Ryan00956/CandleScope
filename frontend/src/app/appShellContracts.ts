@@ -4,7 +4,7 @@ import type { IntervalSelectorProps } from "../components/IntervalSelector.js";
 import type { ChartSessionRuntime } from "../features/chart-session/chartSessionTypes.js";
 import type { DrawingRuntime } from "../features/drawings/useDrawingRuntime.js";
 import type { ExportRuntime } from "../features/export/useExportRuntime.js";
-import type { IndicatorRuntime } from "../features/indicators/useIndicatorRuntime.js";
+import type { IndicatorRuntime } from "../features/indicators/indicatorRuntimeContract.js";
 import type { MarketDataRuntimeContract } from "../features/market-data/marketDataRuntimeContract.js";
 import type { AdvancedMarketRuntime } from "../features/advanced-market-data/advancedMarketDataTypes.js";
 import type { ChartSettings } from "../features/settings/chartAppearanceSettings.js";

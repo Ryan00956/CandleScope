@@ -63,6 +63,8 @@ export interface IndicatorEditorPreviewState {
 }
 
 export interface IndicatorEditorProps {
+  allowedScriptLanguages?: readonly string[];
+  allowedSecurityModes?: readonly string[];
   indicator: IndicatorEditorSource;
   onSave(value: IndicatorEditorValue): void | Promise<void>;
   onBack(): void;
@@ -74,6 +76,8 @@ export interface IndicatorEditorProps {
 }
 
 export default function IndicatorEditor({
+  allowedScriptLanguages,
+  allowedSecurityModes = ["safe", "research", "unsafe"],
   indicator,
   onSave,
   onBack,
@@ -86,38 +90,60 @@ export default function IndicatorEditor({
   const [name, setName] = useState(indicator?.name || "My Indicator");
   const [script, setScript] = useState(indicator?.script || "");
   const [language, setLanguage] = useState(indicator?.language || "");
-  const [securityMode, setSecurityMode] = useState(indicator?.securityMode || "safe");
+  const [securityMode, setSecurityMode] = useState(() => {
+    const requested = indicator?.securityMode || "safe";
+    return allowedSecurityModes.includes(requested)
+      ? requested
+      : allowedSecurityModes[0] || "safe";
+  });
   const [runtimeCatalog, setRuntimeCatalog] = useState<ScriptRuntimeCatalog | null>(null);
   const [runtimeCatalogError, setRuntimeCatalogError] = useState<string | null>(null);
   const securityPolicy = usePyneSecurityPolicy();
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const allowedRuntimeCatalog = useMemo(() => {
+    if (!runtimeCatalog || allowedScriptLanguages === undefined) {
+      return runtimeCatalog;
+    }
+    const allowed = new Set(
+      allowedScriptLanguages.map((item) => item.trim().toLowerCase()),
+    );
+    return {
+      ...runtimeCatalog,
+      languages: runtimeCatalog.languages.filter(
+        (descriptor) => allowed.has(descriptor.id.trim().toLowerCase()),
+      ),
+    };
+  }, [allowedScriptLanguages, runtimeCatalog]);
 
   const selectedLanguage = useMemo(
-    () => runtimeCatalog
-      ? resolveAvailableScriptLanguage(runtimeCatalog, language || indicator?.language)
+    () => allowedRuntimeCatalog
+      ? resolveAvailableScriptLanguage(
+          allowedRuntimeCatalog,
+          language || indicator?.language,
+        )
       : null,
-    [indicator?.language, language, runtimeCatalog],
+    [allowedRuntimeCatalog, indicator?.language, language],
   );
   const selectedRuntime = useMemo(
-    () => runtimeCatalog && selectedLanguage
-      ? runtimeForScriptLanguage(runtimeCatalog, selectedLanguage)
+    () => allowedRuntimeCatalog && selectedLanguage
+      ? runtimeForScriptLanguage(allowedRuntimeCatalog, selectedLanguage)
       : null,
-    [runtimeCatalog, selectedLanguage],
+    [allowedRuntimeCatalog, selectedLanguage],
   );
   const editorProfile = useMemo(
-    () => runtimeCatalog && selectedLanguage
-      ? resolveScriptEditorProfile(runtimeCatalog, selectedLanguage)
+    () => allowedRuntimeCatalog && selectedLanguage
+      ? resolveScriptEditorProfile(allowedRuntimeCatalog, selectedLanguage)
       : null,
-    [runtimeCatalog, selectedLanguage],
+    [allowedRuntimeCatalog, selectedLanguage],
   );
   const languageReady = Boolean(selectedLanguage?.available && editorProfile);
   const requestedLanguageId = (language || indicator?.language || "").trim();
-  const requestedLanguage = runtimeCatalog?.languages.find(
+  const requestedLanguage = allowedRuntimeCatalog?.languages.find(
     (candidate) => candidate.id === requestedLanguageId,
   ) ?? null;
   const displayedLanguage = selectedLanguage ?? requestedLanguage;
   const missingRequestedLanguage = Boolean(
-    runtimeCatalog
+    allowedRuntimeCatalog
       && requestedLanguageId
       && !requestedLanguage,
   );
@@ -196,20 +222,24 @@ export default function IndicatorEditor({
 
   const handleLanguageChange = useCallback((event: ChangeEvent<HTMLSelectElement>) => {
     const nextLanguageId = event.target.value;
-    if (!runtimeCatalog) return;
-    const nextLanguage = runtimeCatalog.languages.find(
+    if (!allowedRuntimeCatalog) return;
+    const nextLanguage = allowedRuntimeCatalog.languages.find(
       (candidate) => candidate.id === nextLanguageId && candidate.available,
     );
     if (!nextLanguage) return;
-    const nextProfile = resolveScriptEditorProfile(runtimeCatalog, nextLanguage);
+    const nextProfile = resolveScriptEditorProfile(
+      allowedRuntimeCatalog,
+      nextLanguage,
+    );
     if (!script.trim() && nextProfile.starterSource) {
       setScript(nextProfile.starterSource);
     }
     setLanguage(nextLanguage.id);
-  }, [runtimeCatalog, script]);
+  }, [allowedRuntimeCatalog, script]);
 
   const handleSecurityModeChange = useCallback((event: ChangeEvent<HTMLSelectElement>) => {
     const nextMode = event.target.value;
+    if (!allowedSecurityModes.includes(nextMode)) return;
     if (
       nextMode === "unsafe" &&
       !window.confirm("不安全模式允许脚本执行任意 Python 代码，包括访问文件、网络和交易 API。仅在本机运行完全信任的脚本时启用。")
@@ -217,7 +247,7 @@ export default function IndicatorEditor({
       return;
     }
     setSecurityMode(nextMode);
-  }, []);
+  }, [allowedSecurityModes]);
 
   /**
    * Called before Monaco mounts — register theme so it's available
@@ -371,7 +401,7 @@ export default function IndicatorEditor({
                 <select
                   value={selectedLanguage?.id || requestedLanguageId}
                   onChange={handleLanguageChange}
-                  disabled={!runtimeCatalog || runtimeCatalog.languages.length === 0}
+                  disabled={!allowedRuntimeCatalog || allowedRuntimeCatalog.languages.length === 0}
                   style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '4px 8px', fontSize: '12px' }}
                 >
                   {missingRequestedLanguage && (
@@ -379,7 +409,7 @@ export default function IndicatorEditor({
                       {requestedLanguageId}（当前不可用）
                     </option>
                   )}
-                  {runtimeCatalog?.languages.map((descriptor) => (
+                  {allowedRuntimeCatalog?.languages.map((descriptor) => (
                     <option
                       key={`${descriptor.runtimeId || "legacy"}:${descriptor.id}`}
                       value={descriptor.id}
@@ -398,9 +428,9 @@ export default function IndicatorEditor({
                 onChange={handleSecurityModeChange}
                 style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '4px 8px', fontSize: '12px' }}
               >
-                <option value="safe">safe</option>
-                <option value="research">research</option>
-                <option value="unsafe">unsafe</option>
+                {allowedSecurityModes.map((mode) => (
+                  <option key={mode} value={mode}>{mode}</option>
+                ))}
               </select>
             </label>}
             {editorProfile?.pyneEnhancements && securityPolicy && (
@@ -471,9 +501,9 @@ export default function IndicatorEditor({
           <span style={{ color: 'var(--candle-down)' }}>
             {runtimeCatalogError
               ? "❌ 无法发现可用脚本运行时"
-              : runtimeCatalog && requestedLanguageId
+              : allowedRuntimeCatalog && requestedLanguageId
                 ? `❌ 保存的脚本语言 ${requestedLanguageId} 当前不可用；请选择可用语言后才能运行或保存`
-                : runtimeCatalog
+                : allowedRuntimeCatalog
                   ? "❌ 当前没有可用脚本运行时"
                   : "⏳ 正在发现脚本运行时..."}
           </span>

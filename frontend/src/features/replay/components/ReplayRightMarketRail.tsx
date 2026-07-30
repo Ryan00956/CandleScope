@@ -5,7 +5,9 @@ import { buildReplayCapabilityModel } from "../replayCapabilityModel.js";
 import ReplayPaperTradingDock from "./ReplayPaperTradingDock.js";
 import ReplayWatchlistPanel from "./ReplayWatchlistPanel.js";
 import type { ReplayWorkspacePreferenceActions, ReplayWorkspacePreferences } from "../replayWorkspacePreferences.js";
-import type { ReplayIndicatorRuntime } from "../useReplayIndicatorRuntime.js";
+import type {
+  ReplaySharedIndicatorRuntime,
+} from "../useReplaySharedIndicatorRuntime.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 import type { ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 
@@ -13,7 +15,7 @@ import type { ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 export interface ReplayRightMarketRailProps {
   readonly runtime: ReplayRuntime;
   readonly viewer: ReplayViewerRuntime;
-  readonly indicators: ReplayIndicatorRuntime;
+  readonly indicators: ReplaySharedIndicatorRuntime;
   readonly preferences: ReplayWorkspacePreferences;
   readonly actions: ReplayWorkspacePreferenceActions;
   readonly upColor: string;

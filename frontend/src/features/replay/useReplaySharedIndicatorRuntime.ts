@@ -1,0 +1,438 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
+
+import {
+  createActiveIndicatorPersistence,
+} from "../indicators/activeIndicatorStore.js";
+import type {
+  IndicatorStorageLike,
+} from "../indicators/activeIndicatorStore.js";
+import type {
+  IndicatorPanelMarketStudy,
+} from "../indicators/IndicatorPanel.js";
+import {
+  createKlineOrderFlowProjectionMemo,
+  resolveKlineOrderFlow,
+} from "../indicators/klineOrderFlowProjection.js";
+import {
+  KLINE_ORDER_FLOW_INDICATOR_DEFINITIONS,
+} from "../indicators/klineOrderFlowStudy.js";
+import type {
+  KlineOrderFlowIndicatorId,
+  KlineOrderFlowIndicatorKey,
+} from "../indicators/klineOrderFlowStudy.js";
+import type {
+  IndicatorRuntime,
+} from "../indicators/indicatorRuntimeContract.js";
+import {
+  useProvidedBarsIndicatorRuntime,
+} from "../indicators/useProvidedBarsIndicatorRuntime.js";
+import type {
+  KlineBar,
+} from "../market-data/marketDataTypes.js";
+import type {
+  ReplayRuntime,
+} from "./useReplayRuntime.js";
+import type {
+  ReplayViewerRuntime,
+} from "./useReplayViewerRuntime.js";
+
+const REPLAY_INDICATOR_STORAGE_PREFIX = "candlescope-replay-indicators-v2:";
+const REPLAY_ORDER_FLOW_STORAGE_PREFIX = "candlescope-replay-order-flow-v2:";
+const DISABLED_CAPABILITIES = Object.freeze([
+  "hosted-range",
+  "indicator-websocket",
+  "unsafe-script",
+  "forming-bars",
+] as const);
+
+interface ReplayOrderFlowPreferences {
+  cvd: {
+    added: boolean;
+    visible: boolean;
+  };
+  delta: {
+    added: boolean;
+    visible: boolean;
+  };
+}
+
+export interface ReplaySharedIndicatorRuntime {
+  readonly view: IndicatorRuntime["view"];
+  readonly actions: IndicatorRuntime["actions"];
+  readonly status: IndicatorRuntime["status"] & {
+    readonly mode: "provided_bars_replay_safe";
+    readonly sourceBarCount: number;
+    readonly latestSourceTimeMs: number | null;
+    readonly activeIndicatorCount: number;
+    readonly visibleIndicatorCount: number;
+    readonly orderFlowBarCount: number;
+    readonly disabledCapabilities: typeof DISABLED_CAPABILITIES;
+  };
+  readonly marketStudies: readonly IndicatorPanelMarketStudy[];
+  readonly marketStudyActions: {
+    add(studyId: string): void;
+    remove(studyId: string): void;
+    toggleVisibility(studyId: string): void;
+  };
+}
+
+function browserStorage(): IndicatorStorageLike | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function emptyOrderFlowPreferences(): ReplayOrderFlowPreferences {
+  return {
+    cvd: { added: false, visible: true },
+    delta: { added: false, visible: true },
+  };
+}
+
+function isPreference(value: unknown): value is {
+  added: boolean;
+  visible: boolean;
+} {
+  return Boolean(value)
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as Record<string, unknown>).added === "boolean"
+    && typeof (value as Record<string, unknown>).visible === "boolean";
+}
+
+export function replayIndicatorStorageKey(runScope: string): string {
+  return `${REPLAY_INDICATOR_STORAGE_PREFIX}${runScope}`;
+}
+
+export function replayOrderFlowStorageKey(runScope: string): string {
+  return `${REPLAY_ORDER_FLOW_STORAGE_PREFIX}${runScope}`;
+}
+
+export function loadReplayOrderFlowPreferences(
+  runScope: string,
+  storage: IndicatorStorageLike | null = browserStorage(),
+): ReplayOrderFlowPreferences {
+  if (!storage) return emptyOrderFlowPreferences();
+  try {
+    const parsed: unknown = JSON.parse(
+      storage.getItem(replayOrderFlowStorageKey(runScope)) || "null",
+    );
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return emptyOrderFlowPreferences();
+    }
+    const record = parsed as Record<string, unknown>;
+    return {
+      cvd: isPreference(record.cvd)
+        ? { added: record.cvd.added, visible: record.cvd.visible }
+        : { added: false, visible: true },
+      delta: isPreference(record.delta)
+        ? { added: record.delta.added, visible: record.delta.visible }
+        : { added: false, visible: true },
+    };
+  } catch {
+    return emptyOrderFlowPreferences();
+  }
+}
+
+export function saveReplayOrderFlowPreferences(
+  runScope: string,
+  preferences: ReplayOrderFlowPreferences,
+  storage: IndicatorStorageLike | null = browserStorage(),
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(
+      replayOrderFlowStorageKey(runScope),
+      JSON.stringify(preferences),
+    );
+  } catch {
+    // View preferences are best effort and never alter replay evidence.
+  }
+}
+
+function replayBarIsClosed(bar: KlineBar): boolean {
+  const replayClosed = typeof bar.replayClosed === "boolean"
+    ? bar.replayClosed
+    : null;
+  const transportClosed = typeof bar.is_closed === "boolean"
+    ? bar.is_closed
+    : null;
+  if (replayClosed !== null && transportClosed !== null) {
+    return replayClosed && transportClosed;
+  }
+  if (replayClosed !== null) return replayClosed;
+  if (transportClosed !== null) return transportClosed;
+  return false;
+}
+
+/**
+ * Pine and the replay-safe shared runtime consume only authoritative closed
+ * bars. Unknown finality fails closed instead of being treated as historical.
+ */
+export function selectRevealedClosedIndicatorBars(
+  rows: readonly KlineBar[],
+  cursorMs: number | null,
+): KlineBar[] {
+  if (cursorMs === null || !Number.isFinite(cursorMs)) return [];
+  const prefix: KlineBar[] = [];
+  let previousTime = -Infinity;
+  for (const bar of rows) {
+    const time = Number(bar.time);
+    const closeTimeMs = typeof bar.replayCloseTimeMs === "number"
+      ? bar.replayCloseTimeMs
+      : Number.NaN;
+    const lastBaseOpenMs = typeof bar.replayLastBaseOpenMs === "number"
+      ? bar.replayLastBaseOpenMs
+      : Number.NaN;
+    if (
+      !Number.isFinite(time)
+      || time <= previousTime
+      || time * 1_000 > cursorMs
+      || !Number.isFinite(closeTimeMs)
+      || closeTimeMs > cursorMs
+      || !Number.isFinite(lastBaseOpenMs)
+      || lastBaseOpenMs > cursorMs
+      || !replayBarIsClosed(bar)
+    ) {
+      break;
+    }
+    prefix.push(bar);
+    previousTime = time;
+  }
+  return prefix;
+}
+
+function hasOrderFlow(bar: KlineBar): boolean {
+  return resolveKlineOrderFlow(bar) !== null;
+}
+
+function orderFlowKey(
+  studyId: string,
+): KlineOrderFlowIndicatorKey | null {
+  if (studyId === "trade-flow:cvd") return "cvd";
+  if (studyId === "trade-flow:delta") return "delta";
+  return null;
+}
+
+export function useReplaySharedIndicatorRuntime(
+  runtime: ReplayRuntime,
+  viewer: ReplayViewerRuntime,
+  runScope: string,
+): ReplaySharedIndicatorRuntime {
+  const seriesStore = viewer.seriesStore;
+  const subscribeSeries = useCallback((listener: () => void) => (
+    seriesStore.subscribe(() => listener())
+  ), [seriesStore]);
+  const getSeriesRevision = useCallback(
+    () => Number(seriesStore.version),
+    [seriesStore],
+  );
+  const seriesRevision = useSyncExternalStore(
+    subscribeSeries,
+    getSeriesRevision,
+    getSeriesRevision,
+  );
+  const cursorMs = runtime.store.virtualTimeMs;
+  const closedBars = useMemo(() => {
+    void seriesRevision;
+    return selectRevealedClosedIndicatorBars(seriesStore.snapshot(), cursorMs);
+  }, [cursorMs, seriesRevision, seriesStore]);
+  const selectedTrackId = viewer.viewerState?.selected_track_id ?? null;
+  const selectedTrack = viewer.marketTracks?.tracks.find(
+    (track) => track.track_id === selectedTrackId,
+  ) ?? null;
+  const config = runtime.store.sessionConfig;
+  const exchange = selectedTrack?.exchange ?? config?.exchange ?? "binance";
+  const marketType = selectedTrack?.market_type ?? config?.market_type ?? "spot";
+  const symbol = selectedTrack?.symbol ?? config?.symbol ?? "UNKNOWN";
+  const interval = viewer.viewerState?.display_interval
+    ?? config?.base_interval
+    ?? "1m";
+  // ReplayApp keys the shared indicator surface by this scope. A session-to-run
+  // identity transition therefore remounts the stores instead of saving the
+  // previous scope's state into the newly discovered Run.
+  const resolvedRunScope = runScope;
+  const sourceScopeKey = [
+    resolvedRunScope,
+    selectedTrackId ?? "unselected",
+    String(seriesStore.seriesKey ?? "uninitialized"),
+    interval,
+  ].join("|");
+  const persistence = useMemo(
+    () => createActiveIndicatorPersistence(
+      replayIndicatorStorageKey(resolvedRunScope),
+    ),
+    [resolvedRunScope],
+  );
+  const first = closedBars.at(0);
+  const last = closedBars.at(-1);
+  const chartDataMeta = useMemo(() => ({
+    ...runtime.marketData.view.meta,
+    version: Number(seriesStore.version),
+    status: "ready" as const,
+    source: "replay-indicator-revealed-closed-prefix",
+    seriesKey: seriesStore.seriesKey,
+    interval,
+    bars: closedBars.length,
+    firstTime: first?.time ?? null,
+    lastTime: last?.time ?? null,
+  }), [
+    closedBars.length,
+    first?.time,
+    interval,
+    last?.time,
+    runtime.marketData.view.meta,
+    seriesStore.seriesKey,
+    seriesStore.version,
+  ]);
+  const providedBars = useProvidedBarsIndicatorRuntime({
+    bars: closedBars,
+    chartDataMeta,
+    datasetKey: sourceScopeKey,
+    exchange,
+    interval,
+    marketType,
+    persistence,
+    seriesReady: seriesRevision,
+    sourceOrdinal: cursorMs ?? -1,
+    sourceScopeKey,
+    symbol,
+    visibleThroughSeconds: cursorMs === null
+      ? null
+      : Math.floor(cursorMs / 1_000),
+  });
+
+  const [orderFlowPreferences, setOrderFlowPreferences] =
+    useState<ReplayOrderFlowPreferences>(
+      () => loadReplayOrderFlowPreferences(resolvedRunScope),
+    );
+  useEffect(() => {
+    saveReplayOrderFlowPreferences(resolvedRunScope, orderFlowPreferences);
+  }, [orderFlowPreferences, resolvedRunScope]);
+  const [orderFlowProjection] = useState(createKlineOrderFlowProjectionMemo);
+  const orderFlowEnabled = orderFlowPreferences.cvd.added
+    || orderFlowPreferences.delta.added;
+  const projectedOrderFlowPanes = useMemo(() => orderFlowProjection.project({
+    bars: closedBars,
+    enabled: orderFlowEnabled,
+    forceFull: true,
+    interval,
+    intervalSeconds: seriesStore.intervalSeconds,
+    structureRevision: seriesRevision,
+  }), [
+    closedBars,
+    interval,
+    orderFlowEnabled,
+    orderFlowProjection,
+    seriesRevision,
+    seriesStore.intervalSeconds,
+  ]);
+  const visibleOrderFlowPanes = useMemo(() => (
+    projectedOrderFlowPanes.filter((pane) => (
+      (pane.id === "trade-flow-cvd"
+        && orderFlowPreferences.cvd.added
+        && orderFlowPreferences.cvd.visible)
+      || (pane.id === "trade-flow-delta"
+        && orderFlowPreferences.delta.added
+        && orderFlowPreferences.delta.visible)
+    ))
+  ), [orderFlowPreferences, projectedOrderFlowPanes]);
+  const orderFlowBarCount = closedBars.filter(hasOrderFlow).length;
+  const orderFlowSupported = orderFlowBarCount > 0;
+
+  const updateOrderFlow = useCallback((
+    studyId: string,
+    update: (
+      current: ReplayOrderFlowPreferences[KlineOrderFlowIndicatorKey],
+    ) => ReplayOrderFlowPreferences[KlineOrderFlowIndicatorKey],
+  ) => {
+    const key = orderFlowKey(studyId);
+    if (key === null) return;
+    setOrderFlowPreferences((current) => ({
+      ...current,
+      [key]: update(current[key]),
+    }));
+  }, []);
+  const marketStudyActions = useMemo(() => ({
+    add: (studyId: string) => updateOrderFlow(studyId, (current) => ({
+      ...current,
+      added: true,
+      visible: true,
+    })),
+    remove: (studyId: string) => updateOrderFlow(studyId, (current) => ({
+      ...current,
+      added: false,
+    })),
+    toggleVisibility: (studyId: string) => updateOrderFlow(
+      studyId,
+      (current) => ({ ...current, visible: !current.visible }),
+    ),
+  }), [updateOrderFlow]);
+  const marketStudies = useMemo<IndicatorPanelMarketStudy[]>(() => (
+    KLINE_ORDER_FLOW_INDICATOR_DEFINITIONS.map((definition) => {
+      const preference = orderFlowPreferences[definition.key];
+      return {
+        ...definition,
+        added: preference.added,
+        visible: preference.visible,
+        supported: orderFlowSupported,
+        unsupportedReason: orderFlowSupported
+          ? null
+          : "当前已揭示的闭合 K 线不含可信 taker buy/order-flow 字段",
+        status: !orderFlowSupported
+          ? "dormant"
+          : preference.added && preference.visible
+            ? "ready"
+            : preference.added
+              ? "dormant"
+              : "idle",
+        statusText: orderFlowSupported
+          ? "使用同一共享 K 线订单流投影；仅消费已揭示闭合前缀"
+          : null,
+        error: null,
+      };
+    })
+  ), [orderFlowPreferences, orderFlowSupported]);
+  const view = useMemo(() => ({
+    ...providedBars.view,
+    subPanes: [
+      ...providedBars.view.subPanes,
+      ...visibleOrderFlowPanes,
+    ],
+  }), [providedBars.view, visibleOrderFlowPanes]);
+  const addedOrderFlowCount = Number(orderFlowPreferences.cvd.added)
+    + Number(orderFlowPreferences.delta.added);
+  const visibleOrderFlowCount = Number(
+    orderFlowPreferences.cvd.added && orderFlowPreferences.cvd.visible,
+  ) + Number(
+    orderFlowPreferences.delta.added && orderFlowPreferences.delta.visible,
+  );
+
+  return {
+    view,
+    actions: providedBars.actions,
+    status: {
+      ...providedBars.status,
+      mode: "provided_bars_replay_safe",
+      sourceBarCount: closedBars.length,
+      latestSourceTimeMs: last === undefined ? null : Number(last.time) * 1_000,
+      activeIndicatorCount:
+        providedBars.view.activeIndicators.length + addedOrderFlowCount,
+      visibleIndicatorCount: providedBars.view.activeIndicators.filter(
+        (indicator) => indicator.visible !== false,
+      ).length + visibleOrderFlowCount,
+      orderFlowBarCount,
+      disabledCapabilities: DISABLED_CAPABILITIES,
+    },
+    marketStudies,
+    marketStudyActions,
+  };
+}

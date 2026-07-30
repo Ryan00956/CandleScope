@@ -81,6 +81,7 @@ export interface IndicatorOhlcvBar {
   low: number;
   close: number;
   volume: number;
+  is_closed?: boolean;
 }
 
 export interface IndicatorValuePoint {
@@ -756,7 +757,7 @@ export interface IndicatorOutputState {
 }
 
 export type IndicatorOutputAction =
-  | { type: "reset-context" }
+  | { type: "reset-context"; preserveParamSchemas?: boolean }
   | { type: "hydrate-cache"; entries: IndicatorCacheResult[] }
   | {
       type: "snapshot";

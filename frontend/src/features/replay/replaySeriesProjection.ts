@@ -54,6 +54,7 @@ export function replayDisplayBarToKline(bar: ReplayDisplayBar): KlineBar {
     replayComponentCount: bar.component_count,
     replayExpectedComponents: bar.expected_components,
     replayClosed: bar.is_closed,
+    is_closed: bar.is_closed,
     replaySynthetic: bar.synthetic,
   };
 }
@@ -74,6 +75,11 @@ export function buildReplayDatasetKey(snapshot: ReplaySessionSnapshot): string {
 function assertRevealed(bar: ReplayDisplayBar, publicTimeMs: number): void {
   if (bar.open_time_ms > publicTimeMs || bar.last_base_open_ms > publicTimeMs) {
     throw new ReplaySeriesProjectionError("replay bar exceeds the public cursor");
+  }
+  if (bar.is_closed && bar.close_time_ms > publicTimeMs) {
+    throw new ReplaySeriesProjectionError(
+      "closed replay bar exceeds the public cursor",
+    );
   }
 }
 

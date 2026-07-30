@@ -5,6 +5,7 @@ import {
 import type {
   IndicatorAuxiliaryItem,
   IndicatorCacheResult,
+  IndicatorDefinition,
   IndicatorOutputAction,
   IndicatorOutputState,
   IndicatorParameterSchema,
@@ -50,6 +51,31 @@ function replaceIndicatorOutputs(
     bgcolors: [...withoutIndicator(state.bgcolors, indicatorId), ...normalized.bgcolors],
     barcolors: [...withoutIndicator(state.barcolors, indicatorId), ...normalized.barcolors],
     signals: [...withoutIndicator(state.signals, indicatorId), ...normalized.signals],
+  };
+}
+
+export function filterIndicatorOutputStateByVisibility(
+  state: IndicatorOutputState,
+  indicators: readonly IndicatorDefinition[],
+): IndicatorOutputState {
+  const visibleIds = new Set(
+    indicators
+      .filter((indicator) => indicator.visible === true)
+      .map((indicator) => indicator.id),
+  );
+  const visible = <T extends IndicatorAuxiliaryItem>(items: T[]): T[] => (
+    items.filter(
+      (item) => item.indicatorId === undefined || visibleIds.has(item.indicatorId),
+    )
+  );
+  return {
+    markers: visible(state.markers),
+    fills: visible(state.fills),
+    hlines: visible(state.hlines),
+    bgcolors: visible(state.bgcolors),
+    barcolors: visible(state.barcolors),
+    signals: visible(state.signals),
+    paramSchemas: state.paramSchemas,
   };
 }
 
@@ -255,7 +281,9 @@ export function indicatorOutputReducer(
     case "reset-context":
       return reuseUnchangedOutputLanes(state, {
         ...createIndicatorOutputState(),
-        paramSchemas: state.paramSchemas,
+        paramSchemas: action.preserveParamSchemas === false
+          ? {}
+          : state.paramSchemas,
       });
     case "hydrate-cache":
       return reuseUnchangedOutputLanes(state, hydrateCachedOutputs(state, action.entries));

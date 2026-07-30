@@ -55,14 +55,22 @@ export function buildIndicatorOhlcv(
   chartData: KlineBar[] = [],
   { limit = INDICATOR_HISTORY_LIMIT }: { limit?: number } = {},
 ) {
-  return limitIndicatorHistory(chartData, limit).map((bar) => ({
-    time: bar.time,
-    open: Number(bar.open ?? 0),
-    high: Number(bar.high ?? 0),
-    low: Number(bar.low ?? 0),
-    close: Number(bar.close ?? 0),
-    volume: bar.volume || 0,
-  }));
+  return limitIndicatorHistory(chartData, limit).map((bar) => {
+    const finality = typeof bar.is_closed === "boolean"
+      ? bar.is_closed
+      : typeof bar.replayClosed === "boolean"
+        ? bar.replayClosed
+        : null;
+    return {
+      time: bar.time,
+      open: Number(bar.open ?? 0),
+      high: Number(bar.high ?? 0),
+      low: Number(bar.low ?? 0),
+      close: Number(bar.close ?? 0),
+      volume: bar.volume || 0,
+      ...(finality === null ? {} : { is_closed: finality }),
+    };
+  });
 }
 
 /** Hashes exactly the bounded OHLCV window sent to local compute. */
@@ -92,6 +100,11 @@ export function buildIndicatorOhlcvSignature(
     mix(bar.low ?? 0);
     mix(bar.close ?? 0);
     mix(bar.volume || 0);
+    mix(
+      bar.is_closed === false || bar.replayClosed === false
+        ? 0
+        : 1,
+    );
   }
   return [
     bars.length,
@@ -201,14 +214,12 @@ export function collectIndicatorComputeResults(
       error: null,
     });
 
-    if (visible) {
-      allMarkers.push(...normalized.markers);
-      allFills.push(...normalized.fills);
-      allHlines.push(...normalized.hlines);
-      allBgcolors.push(...normalized.bgcolors);
-      allBarcolors.push(...normalized.barcolors);
-      allSignals.push(...normalized.signals);
-    }
+    allMarkers.push(...normalized.markers);
+    allFills.push(...normalized.fills);
+    allHlines.push(...normalized.hlines);
+    allBgcolors.push(...normalized.bgcolors);
+    allBarcolors.push(...normalized.barcolors);
+    allSignals.push(...normalized.signals);
 
     if (result.param_schema && result.param_schema.length > 0) {
       newParamSchemas[id] = normalizeParamSchema(result.param_schema);

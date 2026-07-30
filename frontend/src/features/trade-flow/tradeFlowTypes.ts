@@ -1,4 +1,13 @@
 import type { ExternalMarkerSource } from "../../chart-adapter/externalMarkerSource.js";
+import {
+  isKlineOrderFlowIndicatorId,
+  KLINE_ORDER_FLOW_INDICATOR_DEFINITIONS,
+  klineOrderFlowIndicatorKey,
+} from "../indicators/klineOrderFlowStudy.js";
+import type {
+  KlineOrderFlowIndicatorId,
+  KlineOrderFlowIndicatorKey,
+} from "../indicators/klineOrderFlowStudy.js";
 
 export type TradeFlowConnectionStatus =
   | "idle"
@@ -12,32 +21,18 @@ export type TradeFlowConnectionStatus =
 export type TradeFlowSide = "buy" | "sell";
 export type TradeFlowSideFilter = "all" | TradeFlowSide;
 export type TradeFlowDockView = "order-book" | "tape" | "profile";
-export type TradeFlowIndicatorId = "trade-flow:cvd" | "trade-flow:delta";
-export type TradeFlowIndicatorKey = "cvd" | "delta";
+export type TradeFlowIndicatorId = KlineOrderFlowIndicatorId;
+export type TradeFlowIndicatorKey = KlineOrderFlowIndicatorKey;
 
-export const TRADE_FLOW_INDICATOR_DEFINITIONS = Object.freeze([
-  Object.freeze({
-    id: "trade-flow:cvd" as const,
-    key: "cvd" as const,
-    category: "volume" as const,
-    name: "CVD（累计成交量差）",
-    description: "基于 K 线主动买卖量构建的连续前缀和；与右侧实时订单流独立。",
-  }),
-  Object.freeze({
-    id: "trade-flow:delta" as const,
-    key: "delta" as const,
-    category: "volume" as const,
-    name: "Volume Delta（成交量差）",
-    description: "逐根 K 线展示主动买量、主动卖量及其差值；与右侧实时订单流独立。",
-  }),
-]);
+export const TRADE_FLOW_INDICATOR_DEFINITIONS =
+  KLINE_ORDER_FLOW_INDICATOR_DEFINITIONS;
 
 export function isTradeFlowIndicatorId(value: unknown): value is TradeFlowIndicatorId {
-  return TRADE_FLOW_INDICATOR_DEFINITIONS.some((definition) => definition.id === value);
+  return isKlineOrderFlowIndicatorId(value);
 }
 
 export function tradeFlowIndicatorKey(id: TradeFlowIndicatorId): TradeFlowIndicatorKey {
-  return id === "trade-flow:cvd" ? "cvd" : "delta";
+  return klineOrderFlowIndicatorKey(id);
 }
 
 export interface TradeFlowIdentity {

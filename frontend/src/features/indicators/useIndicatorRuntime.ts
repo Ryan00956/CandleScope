@@ -25,9 +25,16 @@ import { useIndicatorComputeController } from "./indicatorComputeController.js";
 import { parseIntervalParts, parseIntervalSeconds } from "../../utils/intervals.js";
 import {
   createIndicatorOutputState,
+  filterIndicatorOutputStateByVisibility,
   indicatorOutputReducer,
 } from "./indicatorOutputReducer.js";
 import { buildIndicatorPaneData } from "./indicatorPaneProjection.js";
+import type {
+  IndicatorRealtimeMode,
+  IndicatorRuntime,
+  IndicatorRangeRequestOptions,
+  RequestIndicatorRange,
+} from "./indicatorRuntimeContract.js";
 import { useIndicatorStreamController } from "./indicatorStreamController.js";
 import {
   getVisibleHostedIndicators,
@@ -121,8 +128,6 @@ import type {
   DeferredRightCatchupPlan,
   IndicatorDefinition,
   IndicatorLine,
-  IndicatorOutputState,
-  IndicatorParams,
   IndicatorPayloadEnvelope,
   IndicatorRange,
   IndicatorRangeRequest,
@@ -211,15 +216,6 @@ interface HostedCatchupSignatureOptions {
   end: unknown;
 }
 
-interface IndicatorRangeRequestOptions {
-  indicatorIds?: Array<string | number>;
-  waitForSubscription?: boolean;
-  revision?: unknown;
-  onSettled?: (ok: boolean, detail: Record<string, unknown>) => void;
-  invalidate?: boolean;
-  cascadeRight?: boolean;
-}
-
 interface IndicatorRangeTargetRuntime {
   key: string;
   indicator: IndicatorDefinition;
@@ -238,13 +234,6 @@ interface DirectIndicatorRangeIntentPayload {
 type DirectIndicatorRangeIntent = DeferredIndicatorRangeIntent<
   DirectIndicatorRangeIntentPayload
 >;
-
-type RequestIndicatorRange = (
-  start: unknown,
-  end: unknown,
-  reason?: string,
-  options?: IndicatorRangeRequestOptions,
-) => boolean;
 
 interface IndicatorRuntimeError extends Error {
   afterEventId?: number;
@@ -274,30 +263,10 @@ function isIndicatorRuntimeError(value: unknown): value is IndicatorRuntimeError
   return value instanceof Error && "deferred" in value && "payload" in value;
 }
 
-export interface IndicatorRuntime {
-  view: {
-    activeIndicators: IndicatorDefinition[];
-    mainOverlayLines: ReturnType<typeof buildIndicatorPaneData>["mainOverlayLines"];
-    subPanes: ReturnType<typeof buildIndicatorPaneData>["subPanes"];
-  } & IndicatorOutputState;
-  actions: {
-    addIndicator(indicator: IndicatorDefinition): void;
-    computeAll(force?: boolean): Promise<void>;
-    ensureVisibleIndicatorRange(visibleRange: unknown): boolean;
-    recompute(force?: boolean): void;
-    removeIndicator(indicatorId: string): void;
-    requestIndicatorRange: RequestIndicatorRange;
-    toggleVisibility(indicatorId: string): void;
-    updateIndicatorParams(indicatorId: string, params: IndicatorParams): void;
-    updateIndicatorScript(indicatorId: string, script: string, language?: string): void;
-  };
-  status: {
-    computing: boolean;
-    realtimeMode: IndicatorRealtimeMode;
-  };
-}
-
-export type IndicatorRealtimeMode = "enabled" | "degraded" | "historical-only";
+export type {
+  IndicatorRealtimeMode,
+  IndicatorRuntime,
+} from "./indicatorRuntimeContract.js";
 
 export function resolveIndicatorRealtimeMode(
   webSocketReady: boolean,
@@ -3113,19 +3082,27 @@ export function useIndicatorRuntime(
     setActiveIndicators,
   ]);
 
+  const visibleOutputState = useMemo(
+    () => filterIndicatorOutputStateByVisibility(
+      outputState,
+      activeIndicators,
+    ),
+    [activeIndicators, outputState],
+  );
+
   const paneData = useMemo(
     () => buildIndicatorPaneData(activeIndicators, {
-      markers: outputState.markers,
-      fills: outputState.fills,
-      hlines: outputState.hlines,
-      bgcolors: outputState.bgcolors,
+      markers: visibleOutputState.markers,
+      fills: visibleOutputState.fills,
+      hlines: visibleOutputState.hlines,
+      bgcolors: visibleOutputState.bgcolors,
     }),
     [
       activeIndicators,
-      outputState.bgcolors,
-      outputState.fills,
-      outputState.hlines,
-      outputState.markers,
+      visibleOutputState.bgcolors,
+      visibleOutputState.fills,
+      visibleOutputState.hlines,
+      visibleOutputState.markers,
     ],
   );
 
@@ -3133,14 +3110,14 @@ export function useIndicatorRuntime(
     activeIndicators,
     mainOverlayLines: paneData.mainOverlayLines,
     subPanes: paneData.subPanes,
-    markers: outputState.markers,
-    fills: outputState.fills,
-    hlines: outputState.hlines,
-    bgcolors: outputState.bgcolors,
-    barcolors: outputState.barcolors,
-    signals: outputState.signals,
-    paramSchemas: outputState.paramSchemas,
-  }), [activeIndicators, outputState, paneData]);
+    markers: visibleOutputState.markers,
+    fills: visibleOutputState.fills,
+    hlines: visibleOutputState.hlines,
+    bgcolors: visibleOutputState.bgcolors,
+    barcolors: visibleOutputState.barcolors,
+    signals: visibleOutputState.signals,
+    paramSchemas: visibleOutputState.paramSchemas,
+  }), [activeIndicators, paneData, visibleOutputState]);
 
   const actions = useMemo(() => ({
     addIndicator,

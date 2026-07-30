@@ -127,6 +127,8 @@ interface CustomIndicatorDraft extends IndicatorDefinition {
 }
 
 export interface IndicatorPanelProps {
+  allowedScriptLanguages?: readonly string[];
+  allowedSecurityModes?: readonly string[];
   isOpen: boolean;
   onClose(): void;
   activeIndicators: IndicatorDefinition[];
@@ -135,7 +137,12 @@ export interface IndicatorPanelProps {
   onRemoveIndicator(indicatorId: string): void;
   onToggleVisibility(indicatorId: string): void;
   onUpdateParams(indicatorId: string, params: IndicatorParams): void;
-  onUpdateScript(indicatorId: string, script: string, language?: string): void;
+  onUpdateScript(
+    indicatorId: string,
+    script: string,
+    language?: string,
+    securityMode?: string,
+  ): void;
   computing: boolean;
   realtimeMode?: "enabled" | "degraded" | "historical-only";
   onRecompute?: (force?: boolean) => void;
@@ -143,6 +150,16 @@ export interface IndicatorPanelProps {
   onAddMarketStudy?: (studyId: string) => void;
   onRemoveMarketStudy?: (studyId: string) => void;
   onToggleMarketStudyVisibility?: (studyId: string) => void;
+  modeNotice?: {
+    label: string;
+    description: string;
+  } | null;
+  resolveIndicatorSupport?: (
+    indicator: IndicatorDefinition,
+  ) => {
+    supported: boolean;
+    reason: string | null;
+  };
 }
 
 type IndicatorBuiltinLike = Partial<Pick<
@@ -265,6 +282,8 @@ function marketStudyMatchesSearch(
 }
 
 export default function IndicatorPanel({
+  allowedScriptLanguages,
+  allowedSecurityModes,
   isOpen,
   onClose,
   activeIndicators,
@@ -281,6 +300,8 @@ export default function IndicatorPanel({
   onAddMarketStudy,
   onRemoveMarketStudy,
   onToggleMarketStudyVisibility,
+  modeNotice = null,
+  resolveIndicatorSupport,
 }: IndicatorPanelProps) {
   const [tab, setTab] = useState<IndicatorPanelTab>("presets");
   const {
@@ -405,11 +426,13 @@ export default function IndicatorPanel({
 
   const handleAddPreset = useCallback(async (preset: CatalogIndicator) => {
     try {
-      onAddIndicator(await resolvePresetForChart(preset));
+      const resolved = await resolvePresetForChart(preset);
+      if (resolveIndicatorSupport?.(resolved).supported === false) return;
+      onAddIndicator(resolved);
     } catch (err) {
       console.error("Failed to add preset:", err);
     }
-  }, [onAddIndicator, resolvePresetForChart]);
+  }, [onAddIndicator, resolveIndicatorSupport, resolvePresetForChart]);
 
   const handleDeleteCustomPreset = useCallback(async (preset: CatalogIndicator) => {
     if (isBuiltinIndicator(preset)) return;
@@ -484,7 +507,12 @@ plot(ma, "MA", color=line_color)
   const handleEditorPreview = useCallback((updated: IndicatorEditorValue) => {
     const active = updated.id ? activeIndicators.find((i) => i.id === updated.id) : null;
     if (updated.id && active && !active.isPreset && !active.engineName) {
-      onUpdateScript(updated.id, updated.script, updated.language);
+      onUpdateScript(
+        updated.id,
+        updated.script,
+        updated.language,
+        updated.securityMode,
+      );
       if (updated.params) onUpdateParams(updated.id, updated.params);
       setEditingIndicator((prev) => prev ? { ...prev, ...updated } : updated);
     } else {
@@ -532,7 +560,12 @@ plot(ma, "MA", color=line_color)
 
     if (!shouldFork && activeIndicators.some((i) => i.id === saved.id)) {
       // Update existing — these already trigger pendingForceCompute in the indicators runtime
-      onUpdateScript(saved.id, saved.script, saved.language);
+      onUpdateScript(
+        saved.id,
+        saved.script,
+        saved.language,
+        saved.securityMode || indicatorToSave.securityMode,
+      );
       if (saved.params) onUpdateParams(saved.id, saved.params);
     } else {
       // Add new — addIndicator already triggers pendingForceCompute
@@ -639,6 +672,12 @@ plot(ma, "MA", color=line_color)
 
         {tab === "editor" && editingIndicator ? (
           <IndicatorEditor
+            {...(allowedScriptLanguages === undefined
+              ? {}
+              : { allowedScriptLanguages })}
+            {...(allowedSecurityModes === undefined
+              ? {}
+              : { allowedSecurityModes })}
             key={`${editingIndicator.id || "new"}:${isBuiltinIndicator(editingIndicator) ? "builtin" : editingIndicator.language || "descriptor-default"}`}
             indicator={editingIndicator}
             onSave={handleEditorSave}
@@ -670,6 +709,14 @@ plot(ma, "MA", color=line_color)
                     title="至少一个指标的实时订阅不可用；受影响指标通过 HTTP 补齐已收盘值。"
                   >
                     部分仅已收盘值
+                  </span>
+                )}
+                {modeNotice && (
+                  <span
+                    className="indicator-computing-badge"
+                    title={modeNotice.description}
+                  >
+                    {modeNotice.label}
                   </span>
                 )}
               </h3>
@@ -727,7 +774,13 @@ plot(ma, "MA", color=line_color)
                           <span>{CATEGORY_ICONS[cat] || "📌"}</span>
                           <span>{CATEGORY_LABELS[cat] || cat}</span>
                         </div>
-                        {items.map((preset) => (
+                        {items.map((preset) => {
+                          const support = resolveIndicatorSupport?.(preset) ?? {
+                            supported: true,
+                            reason: null,
+                          };
+                          const addDisabled = !isActive(preset.id) && !support.supported;
+                          return (
                           <div
                             key={preset.id}
                             className={`indicator-preset-item ${isActive(preset.id) ? "is-active" : ""}`}
@@ -744,14 +797,27 @@ plot(ma, "MA", color=line_color)
                                 <IndicatorBadge tone={preset.paneTarget === "main" ? "main" : "sub"}>
                                   {preset.paneTarget === "main" ? "主图" : "副图"}
                                 </IndicatorBadge>
+                                {!support.supported && (
+                                  <IndicatorBadge tone="neutral">回放不可用</IndicatorBadge>
+                                )}
                               </span>
-                              <span className="indicator-preset-desc">{preset.description}</span>
+                              <span className="indicator-preset-desc">
+                                {preset.description}
+                                {!support.supported && support.reason && (
+                                  <span style={{ display: "block", color: "#f59e0b", marginTop: 3 }}>
+                                    {support.reason}
+                                  </span>
+                                )}
+                              </span>
                             </div>
                             <div className="indicator-preset-actions">
                               <button
                                 className={`indicator-add-btn ${isActive(preset.id) ? "added" : ""}`}
                                 onClick={() => isActive(preset.id) ? onRemoveIndicator(preset.id) : handleAddPreset(preset)}
-                                title={isActive(preset.id) ? "从图表移除" : "添加到图表"}
+                                disabled={addDisabled}
+                                title={isActive(preset.id)
+                                  ? "从图表移除"
+                                  : support.reason || "添加到图表"}
                               >
                                 {isActive(preset.id) ? "✓" : "+"}
                               </button>
@@ -766,7 +832,8 @@ plot(ma, "MA", color=line_color)
                               )}
                             </div>
                           </div>
-                        ))}
+                          );
+                        })}
                         {studies.map((study) => {
                           const callback = study.added ? onRemoveMarketStudy : onAddMarketStudy;
                           const disabled = !study.supported || !callback;

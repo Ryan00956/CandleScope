@@ -5,7 +5,7 @@
 Lightweight trading chart software built with FastAPI, React, Vite, and Lightweight Charts. CandleScope supports Binance and OKX market data, spot and perpetual market types, a modular Data Engine, exchange-aware symbol metadata, realtime WebSocket streams, built-in indicators, and Pine-style Python scripting through Pyne.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python" />
+  <img src="https://img.shields.io/badge/Python-3.12-blue?logo=python" />
   <img src="https://img.shields.io/badge/Node.js-20+-green?logo=node.js" />
   <img src="https://img.shields.io/badge/React-19+-61DAFB?logo=react" />
   <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi" />
@@ -32,7 +32,7 @@ Lightweight trading chart software built with FastAPI, React, Vite, and Lightwei
 
 Requirements:
 
-- Python 3.11+
+- Windows CPython 3.12 (the pinned platform for first-party Pyne/Pine bundles)
 - Node.js 20+
 - npm 10+
 
@@ -41,7 +41,7 @@ Start the backend:
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 On Windows, you can use the helper script instead:
@@ -50,6 +50,9 @@ On Windows, you can use the helper script instead:
 cd backend
 .\dev-server.ps1
 ```
+
+The Windows entrypoint leaves Uvicorn reload disabled because its Selector
+event loop cannot launch the Pyne/Pine sidecar subprocesses CandleScope needs.
 
 Start the frontend:
 

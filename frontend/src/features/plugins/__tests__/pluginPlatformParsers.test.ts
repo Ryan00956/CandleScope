@@ -814,6 +814,79 @@ test("UI snapshot accepts scalar projections and rejects executable-shaped extra
   assert.throws(() => parsePluginUiSnapshot(invalid), /invalid/);
 });
 
+test("UI snapshot accepts bounded Render IR v2 analysis layers and rejects unknown items", () => {
+  const wire = {
+    schemaVersion: "candlescope.plugin-ui/1",
+    registryRevision: 1,
+    views: [],
+    chartLayers: [{
+      id: "acme.wave.waves",
+      pluginId: "acme.wave",
+      generation: 1,
+      revision: 2,
+      chartId: "main-chart",
+      chartRevision: 3,
+      zOrder: "above-series",
+      context: { mode: "live", exchange: "binance", marketType: "spot" },
+      series: { symbol: "BTCUSDT", interval: "1m" },
+      itemCount: 4,
+      schemaVersion: "candlescope.render/2",
+      render: {
+        schemaVersion: "candlescope.render/2",
+        items: [
+          {
+            id: "path",
+            type: "polyline",
+            points: [{ time: 100, price: 10 }, { time: 200, price: 12 }],
+            color: "#3B82F6",
+            width: 2,
+            style: "solid",
+          },
+          {
+            id: "label",
+            type: "label",
+            time: 200,
+            price: 12,
+            text: "(3)",
+            color: "#FFFFFF",
+            backgroundColor: "#1D4ED8CC",
+            position: "above",
+          },
+          {
+            id: "invalid",
+            type: "price-line",
+            price: 9,
+            color: "#EF4444",
+            width: 1,
+            style: "dashed",
+            text: "invalid",
+          },
+          {
+            id: "target",
+            type: "band",
+            startTime: 200,
+            endTime: 400,
+            lowerPrice: 13,
+            upperPrice: 14,
+            fillColor: "#22C55E22",
+          },
+        ],
+      },
+    }],
+  };
+  const parsed = parsePluginUiSnapshot(wire);
+  const layer = parsed.chartLayers[0];
+  assert.equal(layer?.render.schemaVersion, "candlescope.render/2");
+  assert.equal(layer && "chartRevision" in layer ? layer.chartRevision : null, 3);
+
+  const invalid = structuredClone(wire);
+  invalid.chartLayers[0]!.render.items[0] = {
+    ...invalid.chartLayers[0]!.render.items[0]!,
+    type: "host-component",
+  };
+  assert.throws(() => parsePluginUiSnapshot(invalid), /type/);
+});
+
 test("marketplace catalog and status preserve only verified distribution metadata", () => {
   const release = marketplaceRelease();
   const candidate = marketplaceCandidate();

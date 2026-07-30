@@ -14,6 +14,7 @@ immutable installation/activation registry 和 Phase 4 的 Grant Store/capabilit
 | `event-subscriber/1` | 只订阅版本化 public app event；每 subscriber 独立有界队列和 drop-oldest 计数 |
 | `job/1` | 静态 interval、single-flight、timeout、指数退避、手动触发和 disable/revoke 取消 |
 | `chart-layer/1` | Host 校验 marker-only `candlescope.render/1`、item/byte/text budget、revision 与 generation |
+| `chart-layer/2` | 绑定 Host chart revision 的 `candlescope.render/2`；支持 polyline、price-line、band、label 与聚合 point budget |
 | `storage.private` | publisher + plugin 命名空间的 KV/document/blob、逻辑配额、snapshot 和事务迁移 |
 | `market.*.read` | 只经 DataManager facade 返回 symbol、K 线、TradeFlow 与 partial order-book 公共 DTO |
 | `market.bars.subscribe` | 精确 series lease、有界队列、forming latest-coalesce、closed/amended 可靠投递与 resync |
@@ -22,8 +23,9 @@ immutable installation/activation registry 和 Phase 4 的 Grant Store/capabilit
 | `symbol-provider/1` + `market-data-provider/1` | 成对 sidecar provider；输出回到 Host ingestion/Data Engine 真相路径 |
 | `account-provider/1` + `order-executor/1` | first-party pinned、显式开启的 Paper-only intent/ack；账本、成交和风控归 Host |
 
-公共事件当前只有 `candlescope.app.ready/1`、`candlescope.app.stopping/1`、
-`candlescope.plugin.enabled/1` 和 `candlescope.plugin.disabled/1`。插件不能订阅
+公共事件当前包括 `candlescope.app.ready/1`、`candlescope.app.stopping/1`、
+`candlescope.plugin.enabled/1`、`candlescope.plugin.disabled/1` 和
+`candlescope.chart.context-changed/1`。插件不能订阅
 `DataEventBus`，也不能获得 `DataManager`、SQLite connection 或 `app.state`。
 
 ## 生命周期
@@ -100,6 +102,8 @@ AppContainer runtime roots 不能从字符串推断；调用方必须注入显�
   自动权限或自动激活；
 - 所有 management 请求要求 loopback client/Host、精确 Origin 和 ephemeral local session；
   mutation 还要求 CSRF 与显式 user-action ID；
+- `PUT /manage/chart-context` 是唯一后台生命周期同步例外：仍要求 loopback、Origin、
+  session 与 CSRF，但不会伪造或签发 user-action authority；
 - session/CSRF 只保存在 Host 内存，并通过一次性桌面 bootstrap 交给 Plugin Manager；公共
   catalog/status 不返回这些令牌。
 

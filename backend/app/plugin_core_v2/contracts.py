@@ -27,6 +27,7 @@ CORE_CONTRIBUTION_KINDS = frozenset(
         "event-subscriber/1",
         "job/1",
         "chart-layer/1",
+        "chart-layer/2",
         "view/1",
         "http-endpoint/1",
         "symbol-provider/1",
@@ -41,6 +42,11 @@ PUBLIC_EVENT_SCHEMAS: dict[str, dict[str, type]] = {
     "candlescope.app.stopping/1": {"reason": str},
     "candlescope.plugin.enabled/1": {"pluginId": str},
     "candlescope.plugin.disabled/1": {"pluginId": str},
+    "candlescope.chart.context-changed/1": {
+        "chartId": str,
+        "revision": int,
+        "active": bool,
+    },
 }
 
 _COMMON_SCHEMA_KEYS = frozenset({"type", "enum", "title", "description", "default"})
@@ -1791,16 +1797,20 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
                 contribution_id=item.id,
             ),
         }
-    elif item.kind == "chart-layer/1":
+    elif item.kind in {"chart-layer/1", "chart-layer/2"}:
+        allowed = {"target", "zOrder", "maxItems", "maxBytes", "maxTextChars"}
+        if item.kind == "chart-layer/2":
+            allowed.add("maxPoints")
         _exact_keys(
             config,
-            allowed={"target", "zOrder", "maxItems", "maxBytes", "maxTextChars"},
+            allowed=allowed,
             label="chart layer configuration",
             plugin_id=plugin_id,
             contribution_id=item.id,
         )
         target = config.get("target", "main-chart")
         z_order = config.get("zOrder", "above-series")
+        max_points = config.get("maxPoints", 20_000)
         if target != "main-chart" or z_order not in {
             "above-series",
             "below-series",
@@ -1838,6 +1848,15 @@ def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str
                 contribution_id=item.id,
             ),
         }
+        if item.kind == "chart-layer/2":
+            config["maxPoints"] = _bounded_int(
+                max_points,
+                minimum=2,
+                maximum=100_000,
+                label="maxPoints",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
     elif item.kind == "view/1" and config.get("renderer") == "sandbox":
         _exact_keys(
             config,

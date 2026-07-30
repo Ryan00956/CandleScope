@@ -87,7 +87,13 @@ function AppShell({
       rootRef={pageExportRef}
       topBar={<TopBar {...model.topBar} extensionControls={<PluginUiErrorBoundary><PluginPlatformToolbar runtime={plugins} /></PluginUiErrorBoundary>} />}
       intervalSelector={<IntervalSelector {...model.intervalSelector} />}
-      workspace={<ChartWorkspace {...chartWorkspace} pluginMarkerSource={plugins.view.markerSource} />}
+      workspace={(
+        <ChartWorkspace
+          {...chartWorkspace}
+          pluginMarkerSource={plugins.view.markerSource}
+          pluginChartLayerSource={plugins.view.chartLayerSource}
+        />
+      )}
       featureSurfaces={(
         <>
           <LazyFeatureSurfaces surfaces={featureSurfaces} />

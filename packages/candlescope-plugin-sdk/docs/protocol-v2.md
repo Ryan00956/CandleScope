@@ -8,7 +8,7 @@ CandleScope internals.
 This document describes the Phase 1 control contract plus additive contracts
 shipped through Phase 11A. The CandleScope product now supplies the Host,
 installer, permission broker, core services, scoped read-only live market
-consumer, marker-only chart-layer registry, declarative/sandbox UI surfaces,
+consumer, Host-owned chart analysis layers, declarative/sandbox UI surfaces,
 controlled integration gateways, public market-data providers, and an explicitly
 pinned Paper-only broker. Live account and trading brokers remain independently gated. A Python process using this SDK is
 not thereby a security sandbox.
@@ -214,6 +214,13 @@ an unbounded order-book, trade, file, or large-history transport. Dedicated
 named-pipe/UDS and optional binary codecs remain a later measured data-plane
 optimization, not a capability plugins may assume.
 
+Current Hosts add a Host-minted, non-user-action `requestContext` to public
+event and market-stream delivery metadata. The reference dispatcher therefore
+allows `event_batch()` to return the same `HostCallInvocation` or
+`DeferredInvocation` outcomes as `invoke()`. The Host binds that context only
+for the lifetime of the batch request. A plugin cannot invent a context, turn
+it into user-action authority, or use it after completion/cancellation.
+
 ### `healthCheck`
 
 Returns a structured JSON object suitable for Host-side redaction. It must not
@@ -309,7 +316,9 @@ The public SDK exports strict request models and schema identifiers for:
 - `market.bars.read`, `market.bars.subscribe`, `market.bars.cancel`, and
   `market.bars.resume`;
 - `market.trades.read` and `market.order-book.read`;
-- `chart.layer.publish` with marker-only `candlescope.render/1`.
+- `chart.context.read`;
+- `chart.layer.publish` with marker-only `candlescope.render/1` or bounded
+  analysis geometry in `candlescope.render/2`.
 
 Every market request carries an explicit context:
 
@@ -339,10 +348,42 @@ require an explicit resync. Revocation, disable, crash, generation change, or
 Host stop releases both the DataManager event subscription and stream consumer
 lease.
 
-Render IR v1 accepts declarative markers only. The Host validates IDs, time,
+Render IR v1 remains frozen and accepts declarative markers only. The Host validates IDs, time,
 position, shape, hex color, optional price, text length, total items, encoded
 bytes, revision, layer contribution ownership, context, and generation. Phase
 7 owns native frontend consumption; Phase 6 does not load plugin JavaScript.
+
+The additive `chart-layer/2` contribution uses `candlescope.render/2`. Its
+declarative items are `marker`, `polyline`, `price-line`, `band`, and `label`.
+The Host validates exact item shapes, finite prices, strictly increasing
+polyline times, line styles/widths, text and color bounds, aggregate item,
+point, and encoded-byte budgets. One polyline is limited to 10,000 points by
+the control-protocol container bound; `maxPoints` is the aggregate layer
+budget and may be higher across multiple polylines. The plugin still receives no Lightweight
+Charts instance and cannot supply JavaScript, callbacks, HTML, Canvas commands,
+or arbitrary component names.
+
+`chart.context.read` accepts only `{ "chartId": "main-chart" }` and returns a
+`candlescope.chart-context/1` snapshot. An active snapshot contains the exact
+live market context, series, and a Host-owned chart revision. A v2 layer
+publish must echo `chartId`, `chartRevision`, context, and series; a switch,
+expiry, stale revision, generation replacement, or permission-scope mismatch
+fails closed. The permission scope must include `chartIds`, contexts,
+exchanges, market types, symbols, and intervals. The layer publish scope also
+includes local layer IDs plus `maxItems` and `maxPoints`.
+
+The Host publishes `candlescope.chart.context-changed/1` with only chart ID,
+revision, and active state. A declared `event-subscriber/1` may react by using
+the batch request context to call `chart.context.read`, cancel/resubscribe the
+old market stream, and publish a fresh layer. Market bar batches use the same
+correlated path, so incremental analyzers do not need a timer or private Host
+object.
+
+The current product adapter is intentionally limited to the trusted desktop
+`main-chart`, live time-axis representations, and bounded JSON updates. Replay
+contexts, derived/ordinal chart representations, hit testing, arbitrary plugin
+frontend code, and a high-frequency binary render channel are not part of this
+contract.
 
 ## Phase 9 controlled integration gateways
 

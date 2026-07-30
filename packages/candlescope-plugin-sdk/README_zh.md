@@ -24,7 +24,9 @@ v1 SDK 和 `.cspkg` 模板，Host 只把已校验 route 暴露成只读
 [`docs/v1-compatibility-adapter_zh.md`](docs/v1-compatibility-adapter_zh.md)。
 
 通用平台协议为 `candlescope.plugin/2` 与 `candlescope.host-api/1`。完整契约见
-[`docs/protocol-v2.md`](docs/protocol-v2.md)，可运行参考见
+[`docs/protocol-v2.md`](docs/protocol-v2.md)；自动数浪、趋势通道、目标区等 live
+分析图层另见
+[`图表分析插件 SDK 指南`](docs/chart-analysis-v2_zh.md)。可运行参考见
 [`Hello Command`](examples/platform-v2/hello-command.manifest.json) 和
 [`Scheduled Notification`](examples/platform-v2/scheduled-notification.manifest.json)，以及 wheel
 内的 `platform_v2.examples.market_scanner` 参考插件。CandleScope Phase 2–6 已提供生产

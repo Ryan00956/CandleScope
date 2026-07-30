@@ -431,6 +431,60 @@ async def test_bidirectional_host_call_supports_reentrant_host_requests() -> Non
 
 
 @pytest.mark.anyio
+async def test_event_batch_host_call_uses_host_minted_non_user_action_context() -> None:
+    observed: list[HostCallRequest] = []
+
+    async def broker(
+        call: HostCallRequest,
+        grant: CapabilityGrant,
+    ) -> dict[str, Any]:
+        observed.append(call)
+        assert grant.permission_id == "notifications.show"
+        assert call.request_context.user_action is False
+        return {"published": True}
+
+    supervisor = _supervisor(
+        "event-host-call",
+        manifest=_host_call_manifest(),
+        host_apis=(HOST_API_V1,),
+        host_call_handler=broker,
+        request_timeout_seconds=1.0,
+    )
+    manager = PluginManager((supervisor,))
+    try:
+        await manager.activate(
+            "candlescope.host-call",
+            "main",
+            capabilities=(
+                CapabilityGrant(
+                    handle="cap-notify",
+                    permission_id="notifications.show",
+                ),
+            ),
+        )
+        result = await supervisor.event_batch(
+            ({"type": "bar.closed"},),
+            {
+                "schemaVersion": 1,
+                "requestContext": {
+                    "contributionId": "hello",
+                    "userAction": False,
+                    "generation": supervisor.generation,
+                    "traceId": "market-batch-host-test",
+                },
+            },
+        )
+        assert result == {
+            "notified": True,
+            "receipt": {"published": True},
+            "token": "event:market-batch-host-test",
+        }
+        assert len(observed) == 1
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.anyio
 async def test_host_call_context_rejects_concurrent_replay() -> None:
     entered = asyncio.Event()
     release = asyncio.Event()

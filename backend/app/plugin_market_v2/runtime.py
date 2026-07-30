@@ -9,6 +9,7 @@ from app.plugin_security_v2 import CapabilityBroker, CapabilityHandleAuthority
 from app.plugin_security_v2.capabilities import CapabilityLease
 
 from .adapters import MarketCapabilityAdapters
+from .chart_contexts import ChartContextRegistry
 from .chart_layers import ChartLayerRegistry
 from .ports import MarketDataConsumerPort
 from .subscriptions import BarSubscriptionManager, MarketBatchDelivery
@@ -23,11 +24,16 @@ class PluginMarketRuntime:
         resolve_contribution: Callable[[str, str, str], Any],
         deliver: MarketBatchDelivery,
     ) -> None:
-        self.chart_layers = ChartLayerRegistry(resolve_contribution)
+        self.chart_contexts = ChartContextRegistry()
+        self.chart_layers = ChartLayerRegistry(
+            resolve_contribution,
+            chart_contexts=self.chart_contexts,
+        )
         self.subscriptions = BarSubscriptionManager(deliver=deliver)
         self.adapters = MarketCapabilityAdapters(
             subscriptions=self.subscriptions,
             chart_layers=self.chart_layers,
+            chart_contexts=self.chart_contexts,
         )
         self.adapters.register(broker)
         self._authority = authority
@@ -65,6 +71,24 @@ class PluginMarketRuntime:
         await self.subscriptions.cancel_plugin(plugin_id, reason=reason)
         self.chart_layers.clear_plugin(plugin_id)
 
+    def update_chart_context(
+        self,
+        *,
+        chart_id: Any,
+        active: Any,
+        context: Any,
+        series: Any,
+    ) -> tuple[dict[str, Any], bool]:
+        snapshot, changed = self.chart_contexts.update(
+            chart_id=chart_id,
+            active=active,
+            context=context,
+            series=series,
+        )
+        if changed:
+            self.chart_layers.clear_chart(snapshot["chartId"])
+        return snapshot, changed
+
     async def stop(self) -> None:
         self.adapters.stop()
         self.chart_layers.stop()
@@ -80,6 +104,7 @@ class PluginMarketRuntime:
             "adapters": self.adapters.snapshot(),
             "subscriptions": self.subscriptions.snapshot(),
             "chartLayers": self.chart_layers.snapshot(),
+            "chartContexts": self.chart_contexts.snapshot(),
         }
 
 

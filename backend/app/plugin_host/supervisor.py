@@ -727,12 +727,38 @@ class EntrypointSupervisor:
                 "PLUGIN_PLATFORM_REQUEST_INVALID",
                 "eventBatch.delivery must be an object",
             )
-        result = await self._request(
-            METHOD_EVENT_BATCH,
-            {"events": normalized_events, "delivery": normalized_delivery},
-            generation=generation,
-            timeout=self.spec.request_timeout_seconds,
-        )
+        request_context: RequestContext | None = None
+        raw_context = normalized_delivery.get("requestContext")
+        if raw_context is not None:
+            try:
+                request_context = RequestContext.from_wire(raw_context)
+            except PlatformContractError as exc:
+                raise self._request_error(
+                    "PLUGIN_PLATFORM_REQUEST_INVALID",
+                    exc.message,
+                    details={"contractCode": exc.code, "path": exc.path},
+                ) from exc
+            if (
+                request_context.generation != generation
+                or request_context.user_action
+                or request_context.contribution_id
+                not in {item.id for item in self._active_snapshot()[1].contributions}
+            ):
+                raise self._request_error(
+                    "PLUGIN_PLATFORM_REQUEST_INVALID",
+                    "eventBatch requestContext is not bound to the active generation",
+                )
+            self._begin_invocation(request_context)
+        try:
+            result = await self._request(
+                METHOD_EVENT_BATCH,
+                {"events": normalized_events, "delivery": normalized_delivery},
+                generation=generation,
+                timeout=self.spec.request_timeout_seconds,
+            )
+        finally:
+            if request_context is not None:
+                self._end_invocation(request_context)
         self._ensure_generation_current(generation)
         return result
 

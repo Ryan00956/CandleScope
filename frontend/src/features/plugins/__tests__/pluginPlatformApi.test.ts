@@ -13,6 +13,7 @@ import {
   setLiveControlMode,
   setPaperKillSwitch,
   stagePluginUserFile,
+  syncPluginChartContext,
 } from "../pluginPlatformApi.js";
 
 test("settings API unwraps the validated value from its revision envelope", () => {
@@ -158,6 +159,15 @@ test("user-selected file APIs send bytes only through the guarded Host gateway",
         "Content-Type": "application/json",
       },
     }),
+    new Response(JSON.stringify({
+      schemaVersion: "candlescope.chart-context/1",
+      chartId: "main-chart",
+      revision: 1,
+      active: true,
+      context: { mode: "live", exchange: "binance", marketType: "spot" },
+      series: { symbol: "BTCUSDT", interval: "1m" },
+      updatedAtMs: 1_700_000_000_000,
+    }), { status: 200, headers: { "Content-Type": "application/json" } }),
   ];
   const originalFetch = globalThis.fetch;
   const originalWindow = globalThis.window;
@@ -209,13 +219,19 @@ test("user-selected file APIs send bytes only through the guarded Host gateway",
       "issued",
     );
     assert.ok((await fetchLiveAuditExport()).size > 0);
+    assert.equal((await syncPluginChartContext({
+      exchange: "binance",
+      marketType: "spot",
+      symbol: "BTCUSDT",
+      interval: "1m",
+    })).revision, 1);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalWindow === undefined) delete (globalThis as { window?: Window }).window;
     else Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
   }
 
-  assert.equal(calls.length, 10);
+  assert.equal(calls.length, 11);
   const upload = calls[0]!;
   assert.match(upload.url, /\/manage\/files\/open\?contributionId=candlescope\.integration-gateway\.import-file&field=fileHandle$/);
   assert.ok(upload.options.body instanceof File);
@@ -274,4 +290,11 @@ test("user-selected file APIs send bytes only through the guarded Host gateway",
     (audit.options.headers as Record<string, string>)["X-CandleScope-CSRF"],
     undefined,
   );
+  const chartContext = calls[10]!;
+  assert.match(chartContext.url, /\/manage\/chart-context$/);
+  assert.equal(chartContext.options.method, "PUT");
+  const chartHeaders = chartContext.options.headers as Record<string, string>;
+  assert.equal(chartHeaders["X-CandleScope-Plugin-Session"], sessionToken);
+  assert.equal(chartHeaders["X-CandleScope-CSRF"], csrfToken);
+  assert.equal(chartHeaders["X-CandleScope-User-Action"], undefined);
 });

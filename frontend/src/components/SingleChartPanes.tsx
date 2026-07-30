@@ -50,6 +50,8 @@ import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRe
 import { renderMarkers } from "../chart-adapter/markerRenderer";
 import { attachExternalMarkerSource } from "../chart-adapter/externalMarkerSource";
 import type { ExternalMarkerSource } from "../chart-adapter/externalMarkerSource.js";
+import { attachPluginChartLayerSource } from "../chart-adapter/pluginChartLayerRenderer.js";
+import type { PluginChartLayerSource } from "../features/plugins/pluginChartLayerSource.js";
 import { renderBgcolors } from "../chart-adapter/bgcolorPrimitiveRenderer";
 import {
   buildMainSeriesProjectionPatch,
@@ -291,6 +293,7 @@ export interface SingleChartPanesProps {
   subPanes?: IndicatorSubPane[];
   indicatorMarkers?: IndicatorMarker[];
   externalMarkerSource?: ExternalMarkerSource | null;
+  pluginChartLayerSource?: PluginChartLayerSource | null;
   indicatorFills?: IndicatorFill[];
   indicatorHlines?: IndicatorHLine[];
   indicatorBgcolors?: IndicatorBgColor[];
@@ -1242,6 +1245,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   subPanes = [],
   indicatorMarkers = [],
   externalMarkerSource = null,
+  pluginChartLayerSource = null,
   indicatorFills = [],
   indicatorHlines = [],
   indicatorBgcolors = [],
@@ -1606,6 +1610,20 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       return undefined;
     }
   }, [datasetKey, drawingSeriesGeneration, externalMarkerSource, usesDerivedAxis]);
+  useEffect(() => {
+    const series = mainSeriesRef.current;
+    if (!pluginChartLayerSource || !series || usesDerivedAxis) return undefined;
+    try {
+      return attachPluginChartLayerSource({
+        source: pluginChartLayerSource,
+        targetSeries: series,
+        recordPerfEvent,
+      });
+    } catch (error) {
+      console.warn("SingleChartPanes: failed to attach plugin chart layer source:", error);
+      return undefined;
+    }
+  }, [datasetKey, drawingSeriesGeneration, pluginChartLayerSource, usesDerivedAxis]);
   const drawingAnchorMode = resolvedDescriptor.drawingAnchorMode;
   const supportsDrawingFeatures = supportsDrawingAnchorMode(drawingAnchorMode);
   const effectiveDrawingTool = drawingToolForAnchorMode(drawingAnchorMode, drawingTool);

@@ -1,4 +1,5 @@
 import type { ExternalMarkerSource } from "../../chart-adapter/externalMarkerSource.js";
+import type { PluginChartLayerSource } from "./pluginChartLayerSource.js";
 
 export type JsonScalar = string | number | boolean | null;
 export type JsonValue = JsonScalar | JsonValue[] | { [key: string]: JsonValue };
@@ -492,26 +493,101 @@ export interface PluginViewProjection {
   data: { rows: Record<string, JsonScalar>[] } | { values: Record<string, JsonScalar> };
 }
 
-export interface PluginChartLayer {
+interface PluginChartLayerBase {
   id: string;
   pluginId: string;
   generation: number;
   revision: number;
   context: { mode: "live"; exchange: string; marketType: string };
   series: { symbol: string; interval: string };
+}
+
+export interface PluginChartLayerV1 extends PluginChartLayerBase {
   render: {
     schemaVersion: "candlescope.render/1";
-    items: Array<{
-      id: string;
-      type: "marker";
-      time: number;
-      position: "aboveBar" | "belowBar" | "inBar";
-      shape: "circle" | "square" | "arrowUp" | "arrowDown";
-      color: string;
-      text: string;
-      price?: number;
-    }>;
+    items: PluginChartMarker[];
   };
+}
+
+export interface PluginChartMarker {
+  id: string;
+  type: "marker";
+  time: number;
+  position: "aboveBar" | "belowBar" | "inBar";
+  shape: "circle" | "square" | "arrowUp" | "arrowDown";
+  color: string;
+  text: string;
+  price?: number;
+}
+
+export interface PluginChartPolyline {
+  id: string;
+  type: "polyline";
+  points: Array<{ time: number; price: number }>;
+  color: string;
+  width: number;
+  style: "solid" | "dashed" | "dotted";
+}
+
+export interface PluginChartPriceLine {
+  id: string;
+  type: "price-line";
+  price: number;
+  color: string;
+  width: number;
+  style: "solid" | "dashed" | "dotted";
+  text?: string;
+}
+
+export interface PluginChartBand {
+  id: string;
+  type: "band";
+  startTime: number;
+  endTime: number;
+  lowerPrice: number;
+  upperPrice: number;
+  fillColor: string;
+  borderColor?: string;
+}
+
+export interface PluginChartLabel {
+  id: string;
+  type: "label";
+  time: number;
+  price: number;
+  text: string;
+  color: string;
+  position: "above" | "below" | "center";
+  backgroundColor?: string;
+}
+
+export type PluginChartRenderItem =
+  | PluginChartMarker
+  | PluginChartPolyline
+  | PluginChartPriceLine
+  | PluginChartBand
+  | PluginChartLabel;
+
+export interface PluginChartLayerV2 extends PluginChartLayerBase {
+  chartId: "main-chart";
+  chartRevision: number;
+  zOrder: "above-series" | "below-series";
+  render: {
+    schemaVersion: "candlescope.render/2";
+    items: PluginChartRenderItem[];
+  };
+}
+
+export type PluginChartLayer = PluginChartLayerV1 | PluginChartLayerV2;
+
+export interface PluginChartContextSnapshot {
+  schemaVersion: "candlescope.chart-context/1";
+  chartId: "main-chart";
+  revision: number;
+  active: boolean;
+  context: { mode: "live"; exchange: string; marketType: string } | null;
+  series: { symbol: string; interval: string } | null;
+  updatedAtMs: number | null;
 }
 
 export interface PluginUiSnapshot {
@@ -745,6 +821,7 @@ export interface PluginPlatformRuntime {
     liveControl: PluginLiveControlStatus;
     liveControlOpen: boolean;
     markerSource: ExternalMarkerSource;
+    chartLayerSource: PluginChartLayerSource;
     marketIdentity: PluginMarketIdentity;
   };
   actions: {

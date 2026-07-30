@@ -21,6 +21,7 @@ import {
   revokeLiveConfirmation,
   setPaperKillSwitch,
   setLiveControlMode,
+  syncPluginChartContext,
   fetchLiveAuditExport,
   previewLiveConfirmation,
   submitLiveExecution,
@@ -37,6 +38,7 @@ import {
   writePluginSettings,
 } from "./pluginPlatformApi.js";
 import { PluginMarkerSource } from "./pluginMarkerSource.js";
+import { PluginChartLayerSource } from "./pluginChartLayerSource.js";
 import { buildPluginRegistries } from "./pluginRegistries.js";
 import type {
   JsonValue,
@@ -89,8 +91,23 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
   const [liveControlOpen, setLiveControlOpen] = useState(false);
   const managementAvailable = useMemo(() => pluginManagementAvailable(), []);
   const markerSourceRef = useRef<PluginMarkerSource | null>(null);
+  const chartLayerSourceRef = useRef<PluginChartLayerSource | null>(null);
+  const chartContextSyncRef = useRef<Promise<unknown>>(Promise.resolve());
   const refreshSequenceRef = useRef(0);
   if (markerSourceRef.current === null) markerSourceRef.current = new PluginMarkerSource();
+  if (chartLayerSourceRef.current === null) {
+    chartLayerSourceRef.current = new PluginChartLayerSource();
+  }
+
+  const enqueueChartContextSync = useCallback((
+    value: PluginMarketIdentity | null,
+  ): Promise<unknown> => {
+    const next = chartContextSyncRef.current
+      .catch(() => undefined)
+      .then(() => syncPluginChartContext(value));
+    chartContextSyncRef.current = next;
+    return next;
+  }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
     const sequence = ++refreshSequenceRef.current;
@@ -152,7 +169,43 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
 
   useEffect(() => {
     markerSourceRef.current?.update(snapshot?.chartLayers ?? [], { exchange, interval, marketType, symbol });
+    chartLayerSourceRef.current?.update(snapshot?.chartLayers ?? [], {
+      exchange,
+      interval,
+      marketType,
+      symbol,
+    });
   }, [exchange, interval, marketType, snapshot?.chartLayers, symbol]);
+
+  useEffect(() => {
+    if (!managementAvailable) return undefined;
+    let disposed = false;
+    const sync = () => {
+      if (disposed) return;
+      void enqueueChartContextSync({ exchange, interval, marketType, symbol })
+        .catch(() => undefined);
+    };
+    sync();
+    const heartbeat = window.setInterval(sync, 5_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(heartbeat);
+    };
+  }, [
+    enqueueChartContextSync,
+    exchange,
+    interval,
+    managementAvailable,
+    marketType,
+    symbol,
+  ]);
+
+  useEffect(() => {
+    if (!managementAvailable) return undefined;
+    return () => {
+      void enqueueChartContextSync(null).catch(() => undefined);
+    };
+  }, [enqueueChartContextSync, managementAvailable]);
 
   const registries = useMemo(() => buildPluginRegistries(catalog), [catalog]);
   useEffect(() => {
@@ -340,6 +393,7 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       liveControl,
       liveControlOpen,
       markerSource: markerSourceRef.current!,
+      chartLayerSource: chartLayerSourceRef.current!,
       marketIdentity: { exchange, interval, marketType, symbol },
     },
     actions: {

@@ -14,6 +14,7 @@ import {
 import type {
   JsonValue,
   PluginCatalog,
+  PluginChartContextSnapshot,
   PluginFileSelection,
   PluginLiveConfirmationPreview,
   PluginLiveConfirmationReceipt,
@@ -177,6 +178,88 @@ export async function fetchPluginLiveControlStatus(
   return parsePluginLiveControlStatus(await responseJson(response));
 }
 
+export async function syncPluginChartContext(
+  identity: {
+    exchange: string;
+    marketType: string;
+    symbol: string;
+    interval: string;
+  } | null,
+): Promise<PluginChartContextSnapshot> {
+  const value = await backgroundManagementRequest(
+    "/manage/chart-context",
+    identity === null
+      ? {
+        chartId: "main-chart",
+        active: false,
+        context: null,
+        series: null,
+      }
+      : {
+        chartId: "main-chart",
+        active: true,
+        context: {
+          mode: "live",
+          exchange: identity.exchange,
+          marketType: identity.marketType,
+        },
+        series: {
+          symbol: identity.symbol,
+          interval: identity.interval,
+        },
+      },
+  );
+  const payload = object(value, "chart context");
+  if (
+    Object.keys(payload).sort().join(",")
+      !== "active,chartId,context,revision,schemaVersion,series,updatedAtMs"
+    || payload.schemaVersion !== "candlescope.chart-context/1"
+    || payload.chartId !== "main-chart"
+    || typeof payload.active !== "boolean"
+    || !Number.isSafeInteger(payload.revision)
+    || Number(payload.revision) < 0
+    || (
+      payload.updatedAtMs !== null
+      && (!Number.isSafeInteger(payload.updatedAtMs) || Number(payload.updatedAtMs) < 0)
+    )
+  ) throw new Error("Plugin chart context response is invalid");
+  let context: PluginChartContextSnapshot["context"] = null;
+  let series: PluginChartContextSnapshot["series"] = null;
+  if (payload.active) {
+    const rawContext = object(payload.context, "chart context.context");
+    const rawSeries = object(payload.series, "chart context.series");
+    if (
+      Object.keys(rawContext).sort().join(",") !== "exchange,marketType,mode"
+      || Object.keys(rawSeries).sort().join(",") !== "interval,symbol"
+      || rawContext.mode !== "live"
+      || typeof rawContext.exchange !== "string"
+      || typeof rawContext.marketType !== "string"
+      || typeof rawSeries.symbol !== "string"
+      || typeof rawSeries.interval !== "string"
+    ) throw new Error("Plugin chart context response is invalid");
+    context = {
+      mode: "live",
+      exchange: rawContext.exchange,
+      marketType: rawContext.marketType,
+    };
+    series = {
+      symbol: rawSeries.symbol,
+      interval: rawSeries.interval,
+    };
+  } else if (payload.context !== null || payload.series !== null) {
+    throw new Error("Plugin chart context response is invalid");
+  }
+  return {
+    schemaVersion: "candlescope.chart-context/1",
+    chartId: "main-chart",
+    revision: Number(payload.revision),
+    active: payload.active,
+    context,
+    series,
+    updatedAtMs: payload.updatedAtMs === null ? null : Number(payload.updatedAtMs),
+  };
+}
+
 function actionId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 96);
 }
@@ -201,6 +284,30 @@ async function managementRequest(
     headers,
     credentials: "omit",
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+  });
+  return responseJson(response);
+}
+
+async function backgroundManagementRequest(
+  path: string,
+  body: unknown,
+): Promise<unknown> {
+  const session = consumeManagementSession();
+  if (!session) {
+    throw new PluginPlatformApiError(
+      "Plugin management requires a trusted desktop session",
+      403,
+    );
+  }
+  const response = await fetch(`${session.apiBase}${path}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CandleScope-Plugin-Session": session.sessionToken,
+      "X-CandleScope-CSRF": session.csrfToken,
+    },
+    credentials: "omit",
+    body: JSON.stringify(body),
   });
   return responseJson(response);
 }

@@ -54,6 +54,10 @@ def _read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _portable_file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def test_manifest_schema_and_python_model_accept_the_same_positive_example() -> None:
     schema = manifest_schema()
     example = _read(EXAMPLES / "hello-command.manifest.json")
@@ -67,10 +71,8 @@ def test_manifest_schema_and_python_model_accept_the_same_positive_example() -> 
     assert example == _read(PACKAGED_MANIFEST)
     assert parsed.plugin.id == "candlescope.hello-command"
     assert parsed.contributions[0].kind == "command/1"
-    assert hashlib.sha256(PACKAGED_SCHEMA.read_bytes()).hexdigest() == (FROZEN_SCHEMA_FILE_SHA256)
-    assert hashlib.sha256(PACKAGED_MANIFEST.read_bytes()).hexdigest() == (
-        FROZEN_MANIFEST_FILE_SHA256
-    )
+    assert _portable_file_sha256(PACKAGED_SCHEMA) == FROZEN_SCHEMA_FILE_SHA256
+    assert _portable_file_sha256(PACKAGED_MANIFEST) == FROZEN_MANIFEST_FILE_SHA256
     assert canonical_sha256(schema) == FROZEN_SCHEMA_CANONICAL_SHA256
     assert parsed.canonical_sha256 == FROZEN_MANIFEST_CANONICAL_SHA256
 

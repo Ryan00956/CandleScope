@@ -82,6 +82,25 @@ class HostCallingPlugin(BasePlatformPlugin):
             ),
         )
 
+    def event_batch(
+        self,
+        events: tuple[dict[str, Any], ...],
+        delivery: dict[str, Any],
+    ) -> dict[str, Any] | HostCallInvocation:
+        if MODE != "event-host-call":
+            return {"accepted": len(events)}
+        context = RequestContext.from_wire(delivery["requestContext"])
+        self._request_context = context
+        return HostCallInvocation(
+            token=f"event:{context.trace_id}",
+            call=HostCallRequest(
+                capability_handle=self._capability_handle,
+                method="notifications.show",
+                params={"message": "Event batch from the sidecar"},
+                request_context=context,
+            ),
+        )
+
     def complete_host_call(
         self,
         token: str,
@@ -129,6 +148,7 @@ def main() -> int:
             "host-call",
             "host-call-chain",
             "host-call-forged-user-action",
+            "event-host-call",
             "accept-missing-host-api",
         }
         else HelloCommandPlugin()

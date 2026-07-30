@@ -16,13 +16,13 @@
 
 ## Quick Start
 
-CandleScope requires Python 3.11 or newer. Unsupported interpreters fail fast
-before the FastAPI application starts.
+CandleScope's default first-party Pyne/Pine bundles require Windows CPython
+3.12. Unsupported interpreters fail fast before the FastAPI application starts.
 
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 On Windows, `dev-server.ps1` runs the same development server with UTF-8 output
@@ -31,6 +31,9 @@ enabled:
 ```powershell
 .\dev-server.ps1
 ```
+
+The Windows entrypoint leaves Uvicorn reload disabled because its Selector
+event loop cannot launch the Pyne/Pine sidecar subprocesses CandleScope needs.
 
 Default API base:
 
@@ -323,7 +326,7 @@ environment probe without downloading again:
 ```powershell
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 Diagnostics expose the selected sidecar route under

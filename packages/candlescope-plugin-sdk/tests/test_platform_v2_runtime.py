@@ -14,6 +14,7 @@ from candlescope_plugin_sdk.platform_v2 import (
     PermissionSet,
     PlatformJsonLineServer,
     PluginManifest,
+    RequestContext,
     RpcFailure,
     RpcSuccess,
     RuntimeDescriptor,
@@ -523,3 +524,103 @@ def test_invalid_host_call_completion_fails_the_original_invocation() -> None:
     assert failed[0]["id"] == "invoke-host-invalid"
     assert failed[0]["error"]["code"] == -32107
     assert failed[0]["error"]["data"]["code"] == "INVALID_CONTRACT"
+
+
+def test_event_batch_can_issue_a_correlated_host_call_without_user_action() -> None:
+    class EventCallingPlugin(_HostCallingPlugin):
+        def invoke(self, request: InvokeRequest):
+            return {"unused": True}
+
+        def event_batch(
+            self,
+            events: tuple[dict, ...],
+            delivery: dict,
+        ):
+            context = RequestContext.from_wire(delivery["requestContext"])
+            assert context.user_action is False
+            return HostCallInvocation(
+                token="event-layer-1",
+                call=HostCallRequest(
+                    capability_handle="cap-notify-1",
+                    method="notifications.show",
+                    params={"message": events[0]["message"]},
+                    request_context=context,
+                ),
+            )
+
+        def complete_host_call(
+            self,
+            token: str,
+            response: RpcSuccess | RpcFailure,
+        ):
+            assert token == "event-layer-1"
+            assert isinstance(response, RpcSuccess)
+            return {"accepted": 1, "receipt": response.result}
+
+    server = PlatformJsonLineServer(EventCallingPlugin())
+    server.handle_message(_handshake(HOST_API_V1))
+    server.handle_message(_activate(CapabilityGrant("cap-notify-1", "notifications.show")))
+    outgoing = server.handle_message(
+        _request(
+            "event-1",
+            "eventBatch",
+            generation=1,
+            params={
+                "events": [{"message": "bar closed"}],
+                "delivery": {
+                    "schemaVersion": 1,
+                    "requestContext": {
+                        "contributionId": "hello",
+                        "userAction": False,
+                        "generation": 1,
+                        "traceId": "market-batch-1",
+                    },
+                },
+            },
+        )
+    )
+    host_call = outgoing[0]
+    completed = server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": host_call["id"],
+            "result": {"published": True},
+            "generation": 1,
+        }
+    )
+
+    assert host_call["method"] == "host.call"
+    assert host_call["params"]["requestContext"]["userAction"] is False
+    assert completed[0]["id"] == "event-1"
+    assert completed[0]["result"] == {
+        "accepted": 1,
+        "receipt": {"published": True},
+    }
+
+
+def test_event_batch_host_call_requires_a_host_issued_request_context() -> None:
+    class MissingContextPlugin(_HostCallingPlugin):
+        def event_batch(self, events: tuple[dict, ...], delivery: dict):
+            context = RequestContext("hello", False, 1, "invented-event-context")
+            return HostCallInvocation(
+                token="invalid-event",
+                call=HostCallRequest(
+                    capability_handle="cap-notify-1",
+                    method="notifications.show",
+                    params={},
+                    request_context=context,
+                ),
+            )
+
+    server = PlatformJsonLineServer(MissingContextPlugin())
+    server.handle_message(_handshake(HOST_API_V1))
+    server.handle_message(_activate(CapabilityGrant("cap-notify-1", "notifications.show")))
+    failed = server.handle_message(
+        _request(
+            "event-without-context",
+            "eventBatch",
+            generation=1,
+            params={"events": [], "delivery": {"schemaVersion": 1}},
+        )
+    )
+    assert failed[0]["error"]["data"]["code"] == "EVENT_BATCH_CONTEXT_REQUIRED"

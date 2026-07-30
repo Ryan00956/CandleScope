@@ -1055,39 +1055,159 @@ function viewProjection(value: unknown, path: string): PluginViewProjection {
 
 function chartLayer(value: unknown, path: string): PluginChartLayer {
   const data = record(value, path);
-  exact(data, ["id", "pluginId", "generation", "revision", "context", "series", "itemCount", "schemaVersion", "render"], [], path);
   const context = record(data.context, `${path}.context`);
   const series = record(data.series, `${path}.series`);
   const render = record(data.render, `${path}.render`);
   exact(context, ["mode", "exchange", "marketType"], [], `${path}.context`);
   exact(series, ["symbol", "interval"], [], `${path}.series`);
   exact(render, ["schemaVersion", "items"], [], `${path}.render`);
-  if (context.mode !== "live" || render.schemaVersion !== "candlescope.render/1" || data.schemaVersion !== "candlescope.render/1") fail(path);
-  const items = array(render.items, `${path}.render.items`, 5_000).map((raw, index) => {
-    const item = record(raw, `${path}.render.items[${index}]`);
-    exact(item, ["id", "type", "time", "position", "shape", "color", "text"], ["price"], `${path}.render.items[${index}]`);
-    const color = string(item.color, `${path}.render.items[${index}].color`, 9);
-    if (!COLOR.test(color) || item.type !== "marker") fail(`${path}.render.items[${index}]`);
-    return {
-      id: string(item.id, `${path}.render.items[${index}].id`, 128),
-      type: "marker" as const,
-      time: integer(item.time, `${path}.render.items[${index}].time`),
-      position: oneOf(item.position, new Set(["aboveBar", "belowBar", "inBar"] as const), `${path}.render.items[${index}].position`),
-      shape: oneOf(item.shape, new Set(["circle", "square", "arrowUp", "arrowDown"] as const), `${path}.render.items[${index}].shape`),
-      color,
-      text: typeof item.text === "string" && item.text.length <= 1_024 ? item.text : fail(`${path}.render.items[${index}].text`),
-      ...(item.price === undefined ? {} : { price: finite(item.price, `${path}.render.items[${index}].price`) }),
-    };
-  });
-  if (integer(data.itemCount, `${path}.itemCount`) !== items.length) fail(`${path}.itemCount`);
-  return {
+  if (context.mode !== "live" || render.schemaVersion !== data.schemaVersion) fail(path);
+  const base = {
     id: string(data.id, `${path}.id`, 256),
     pluginId: string(data.pluginId, `${path}.pluginId`, 128),
     generation: integer(data.generation, `${path}.generation`, 1),
     revision: integer(data.revision, `${path}.revision`, 1),
-    context: { mode: "live", exchange: string(context.exchange, `${path}.context.exchange`, 64), marketType: string(context.marketType, `${path}.context.marketType`, 64) },
-    series: { symbol: string(series.symbol, `${path}.series.symbol`, 64), interval: string(series.interval, `${path}.series.interval`, 64) },
-    render: { schemaVersion: "candlescope.render/1", items },
+    context: {
+      mode: "live" as const,
+      exchange: string(context.exchange, `${path}.context.exchange`, 64),
+      marketType: string(context.marketType, `${path}.context.marketType`, 64),
+    },
+    series: {
+      symbol: string(series.symbol, `${path}.series.symbol`, 64),
+      interval: string(series.interval, `${path}.series.interval`, 64),
+    },
+  };
+  if (render.schemaVersion === "candlescope.render/1") {
+    exact(data, ["id", "pluginId", "generation", "revision", "context", "series", "itemCount", "schemaVersion", "render"], [], path);
+    const items = array(render.items, `${path}.render.items`, 5_000).map((raw, index) => {
+      const item = record(raw, `${path}.render.items[${index}]`);
+      exact(item, ["id", "type", "time", "position", "shape", "color", "text"], ["price"], `${path}.render.items[${index}]`);
+      const color = string(item.color, `${path}.render.items[${index}].color`, 9);
+      if (!COLOR.test(color) || item.type !== "marker") fail(`${path}.render.items[${index}]`);
+      return {
+        id: string(item.id, `${path}.render.items[${index}].id`, 128),
+        type: "marker" as const,
+        time: integer(item.time, `${path}.render.items[${index}].time`),
+        position: oneOf(item.position, new Set(["aboveBar", "belowBar", "inBar"] as const), `${path}.render.items[${index}].position`),
+        shape: oneOf(item.shape, new Set(["circle", "square", "arrowUp", "arrowDown"] as const), `${path}.render.items[${index}].shape`),
+        color,
+        text: typeof item.text === "string" && item.text.length <= 1_024 ? item.text : fail(`${path}.render.items[${index}].text`),
+        ...(item.price === undefined ? {} : { price: finite(item.price, `${path}.render.items[${index}].price`) }),
+      };
+    });
+    if (integer(data.itemCount, `${path}.itemCount`) !== items.length) fail(`${path}.itemCount`);
+    return {
+      ...base,
+      render: { schemaVersion: "candlescope.render/1", items },
+    };
+  }
+  if (render.schemaVersion !== "candlescope.render/2") fail(`${path}.render.schemaVersion`);
+  exact(data, [
+    "id", "pluginId", "generation", "revision", "chartId", "chartRevision",
+    "zOrder", "context", "series", "itemCount", "schemaVersion", "render",
+  ], [], path);
+  if (data.chartId !== "main-chart") fail(`${path}.chartId`);
+  const lineStyles = new Set(["solid", "dashed", "dotted"] as const);
+  const items = array(render.items, `${path}.render.items`, 5_000).map((raw, index) => {
+    const itemPath = `${path}.render.items[${index}]`;
+    const item = record(raw, itemPath);
+    const id = string(item.id, `${itemPath}.id`, 128);
+    if (item.type === "marker") {
+      exact(item, ["id", "type", "time", "position", "shape", "color", "text"], ["price"], itemPath);
+      const color = string(item.color, `${itemPath}.color`, 9);
+      if (!COLOR.test(color)) fail(`${itemPath}.color`);
+      return {
+        id,
+        type: "marker" as const,
+        time: integer(item.time, `${itemPath}.time`),
+        position: oneOf(item.position, new Set(["aboveBar", "belowBar", "inBar"] as const), `${itemPath}.position`),
+        shape: oneOf(item.shape, new Set(["circle", "square", "arrowUp", "arrowDown"] as const), `${itemPath}.shape`),
+        color,
+        text: typeof item.text === "string" && item.text.length <= 1_024 ? item.text : fail(`${itemPath}.text`),
+        ...(item.price === undefined ? {} : { price: finite(item.price, `${itemPath}.price`) }),
+      };
+    }
+    if (item.type === "polyline") {
+      exact(item, ["id", "type", "points", "color", "width", "style"], [], itemPath);
+      const points = array(item.points, `${itemPath}.points`, 10_000).map((rawPoint, pointIndex) => {
+        const point = record(rawPoint, `${itemPath}.points[${pointIndex}]`);
+        exact(point, ["time", "price"], [], `${itemPath}.points[${pointIndex}]`);
+        return {
+          time: integer(point.time, `${itemPath}.points[${pointIndex}].time`),
+          price: finite(point.price, `${itemPath}.points[${pointIndex}].price`),
+        };
+      });
+      if (points.length < 2 || points.some((point, pointIndex) => pointIndex > 0 && point.time <= points[pointIndex - 1]!.time)) fail(`${itemPath}.points`);
+      const color = string(item.color, `${itemPath}.color`, 9);
+      if (!COLOR.test(color)) fail(`${itemPath}.color`);
+      return {
+        id,
+        type: "polyline" as const,
+        points,
+        color,
+        width: integer(item.width, `${itemPath}.width`, 1, 8),
+        style: oneOf(item.style, lineStyles, `${itemPath}.style`),
+      };
+    }
+    if (item.type === "price-line") {
+      exact(item, ["id", "type", "price", "color", "width", "style"], ["text"], itemPath);
+      const color = string(item.color, `${itemPath}.color`, 9);
+      if (!COLOR.test(color)) fail(`${itemPath}.color`);
+      return {
+        id,
+        type: "price-line" as const,
+        price: finite(item.price, `${itemPath}.price`),
+        color,
+        width: integer(item.width, `${itemPath}.width`, 1, 8),
+        style: oneOf(item.style, lineStyles, `${itemPath}.style`),
+        ...(item.text === undefined ? {} : { text: typeof item.text === "string" && item.text.length <= 1_024 ? item.text : fail(`${itemPath}.text`) }),
+      };
+    }
+    if (item.type === "band") {
+      exact(item, ["id", "type", "startTime", "endTime", "lowerPrice", "upperPrice", "fillColor"], ["borderColor"], itemPath);
+      const startTime = integer(item.startTime, `${itemPath}.startTime`);
+      const endTime = integer(item.endTime, `${itemPath}.endTime`);
+      const lowerPrice = finite(item.lowerPrice, `${itemPath}.lowerPrice`);
+      const upperPrice = finite(item.upperPrice, `${itemPath}.upperPrice`);
+      const fillColor = string(item.fillColor, `${itemPath}.fillColor`, 9);
+      const borderColor = item.borderColor === undefined ? undefined : string(item.borderColor, `${itemPath}.borderColor`, 9);
+      if (endTime <= startTime || upperPrice < lowerPrice || !COLOR.test(fillColor) || (borderColor !== undefined && !COLOR.test(borderColor))) fail(itemPath);
+      return {
+        id,
+        type: "band" as const,
+        startTime,
+        endTime,
+        lowerPrice,
+        upperPrice,
+        fillColor,
+        ...(borderColor === undefined ? {} : { borderColor }),
+      };
+    }
+    if (item.type === "label") {
+      exact(item, ["id", "type", "time", "price", "text", "color", "position"], ["backgroundColor"], itemPath);
+      const color = string(item.color, `${itemPath}.color`, 9);
+      const backgroundColor = item.backgroundColor === undefined ? undefined : string(item.backgroundColor, `${itemPath}.backgroundColor`, 9);
+      if (!COLOR.test(color) || (backgroundColor !== undefined && !COLOR.test(backgroundColor))) fail(itemPath);
+      return {
+        id,
+        type: "label" as const,
+        time: integer(item.time, `${itemPath}.time`),
+        price: finite(item.price, `${itemPath}.price`),
+        text: typeof item.text === "string" && item.text.length <= 1_024 ? item.text : fail(`${itemPath}.text`),
+        color,
+        position: oneOf(item.position, new Set(["above", "below", "center"] as const), `${itemPath}.position`),
+        ...(backgroundColor === undefined ? {} : { backgroundColor }),
+      };
+    }
+    return fail(`${itemPath}.type`);
+  });
+  if (integer(data.itemCount, `${path}.itemCount`) !== items.length) fail(`${path}.itemCount`);
+  return {
+    ...base,
+    chartId: "main-chart",
+    chartRevision: integer(data.chartRevision, `${path}.chartRevision`, 1),
+    zOrder: oneOf(data.zOrder, new Set(["above-series", "below-series"] as const), `${path}.zOrder`),
+    render: { schemaVersion: "candlescope.render/2", items },
   };
 }
 

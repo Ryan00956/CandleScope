@@ -107,7 +107,7 @@ class BasePlatformPlugin(ABC):
         self,
         events: tuple[dict[str, Any], ...],
         delivery: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> InvocationOutcome:
         return {"accepted": len(events)}
 
     def health_check(self) -> dict[str, Any]:
@@ -143,6 +143,7 @@ class _PendingInvocation:
     generation: int
     token: str
     request_context: RequestContext
+    result_path: str
     host_call_id: RpcId | None = None
 
 
@@ -234,7 +235,7 @@ class PlatformDispatcher:
         if request.method == METHOD_INVOKE:
             return self._invoke(request)
         if request.method == METHOD_EVENT_BATCH:
-            return (self._event_batch(request),)
+            return self._event_batch(request)
         if request.method == METHOD_HEALTH_CHECK:
             self._require_current_generation(request)
             result = normalize_json(self._plugin.health_check(), path="healthCheck.result")
@@ -409,10 +410,16 @@ class PlatformDispatcher:
                 generation=request.generation,
                 token=outcome.token,
                 request_context=invocation.request_context,
+                result_path="invoke.result",
             )
             return ()
         if isinstance(outcome, HostCallInvocation):
-            return self._begin_host_call(request, invocation, outcome)
+            return self._begin_host_call(
+                request,
+                invocation.request_context,
+                outcome,
+                result_path="invoke.result",
+            )
         result = normalize_json(outcome, path="invoke.result")
         if not isinstance(result, dict):
             raise PlatformContractError(
@@ -424,8 +431,10 @@ class PlatformDispatcher:
     def _begin_host_call(
         self,
         request: RpcRequest,
-        invocation: InvokeRequest,
+        request_context: RequestContext,
         outcome: HostCallInvocation,
+        *,
+        result_path: str,
     ) -> tuple[RpcFrame, ...]:
         call = outcome.call
         if HOST_API_V1 not in self._negotiated_host_apis:
@@ -434,7 +443,7 @@ class PlatformDispatcher:
                 "HOST_API_NOT_NEGOTIATED",
                 f"{HOST_API_V1} was not negotiated",
             )
-        if call.request_context != invocation.request_context:
+        if call.request_context != request_context:
             raise PlatformProtocolError(
                 RPC_CONTRACT_VIOLATION,
                 "HOST_CALL_CONTEXT_MISMATCH",
@@ -453,7 +462,8 @@ class PlatformDispatcher:
             request_id=request.id,
             generation=request.generation,
             token=outcome.token,
-            request_context=invocation.request_context,
+            request_context=request_context,
+            result_path=result_path,
             host_call_id=host_call_id,
         )
         self._pending[request.id] = pending
@@ -527,7 +537,7 @@ class PlatformDispatcher:
                 pending.token = outcome.token
                 pending.host_call_id = None
                 return ()
-            result = normalize_json(outcome, path="invoke.result")
+            result = normalize_json(outcome, path=pending.result_path)
             if not isinstance(result, dict):
                 raise PlatformContractError(
                     "INVALID_CONTRACT",
@@ -562,8 +572,15 @@ class PlatformDispatcher:
         self._pending.pop(original_id, None)
         return (completed,)
 
-    def _event_batch(self, request: RpcRequest) -> RpcSuccess:
+    def _event_batch(self, request: RpcRequest) -> tuple[RpcFrame, ...]:
         self._require_active(request)
+        if len(self._pending) >= self._max_in_flight:
+            raise PlatformProtocolError(
+                RPC_INVALID_STATE,
+                "IN_FLIGHT_LIMIT",
+                "The plugin has reached its bounded in-flight request limit.",
+                {"maxInFlight": self._max_in_flight},
+            )
         data = self._exact_params(request.params, {"events", "delivery"}, "eventBatch")
         raw_events = data["events"]
         if isinstance(raw_events, (str, bytes)) or not isinstance(raw_events, Sequence):
@@ -580,16 +597,65 @@ class PlatformDispatcher:
         delivery = normalize_json(data["delivery"], path="eventBatch.delivery")
         if not isinstance(delivery, dict):
             raise PlatformContractError("INVALID_CONTRACT", "eventBatch.delivery must be an object")
-        result = normalize_json(
-            self._plugin.event_batch(tuple(events), delivery),
-            path="eventBatch.result",
-        )
+        raw_context = delivery.get("requestContext")
+        request_context = RequestContext.from_wire(raw_context) if raw_context is not None else None
+        if request_context is not None:
+            if request_context.generation != request.generation:
+                raise PlatformProtocolError(
+                    RPC_GENERATION_MISMATCH,
+                    "GENERATION_MISMATCH",
+                    "eventBatch requestContext generation does not match the envelope",
+                )
+            contributions = {item.id for item in self._runtime_descriptor().contributions}
+            if request_context.contribution_id not in contributions:
+                raise PlatformProtocolError(
+                    RPC_CONTRACT_VIOLATION,
+                    "CONTRIBUTION_NOT_DECLARED",
+                    "eventBatch requestContext references an undeclared contribution",
+                    {"contributionId": request_context.contribution_id},
+                )
+            if request_context.user_action:
+                raise PlatformProtocolError(
+                    RPC_CONTRACT_VIOLATION,
+                    "EVENT_BATCH_USER_ACTION_INVALID",
+                    "eventBatch requestContext cannot carry user-action authority",
+                )
+        outcome = self._plugin.event_batch(tuple(events), delivery)
+        if isinstance(outcome, DeferredInvocation):
+            if request_context is None:
+                raise PlatformProtocolError(
+                    RPC_CONTRACT_VIOLATION,
+                    "EVENT_BATCH_CONTEXT_REQUIRED",
+                    "deferred eventBatch work requires a Host-issued requestContext",
+                )
+            self._pending[request.id] = _PendingInvocation(
+                request_id=request.id,
+                generation=request.generation,
+                token=outcome.token,
+                request_context=request_context,
+                result_path="eventBatch.result",
+            )
+            return ()
+        if isinstance(outcome, HostCallInvocation):
+            if request_context is None:
+                raise PlatformProtocolError(
+                    RPC_CONTRACT_VIOLATION,
+                    "EVENT_BATCH_CONTEXT_REQUIRED",
+                    "eventBatch host.call requires a Host-issued requestContext",
+                )
+            return self._begin_host_call(
+                request,
+                request_context,
+                outcome,
+                result_path="eventBatch.result",
+            )
+        result = normalize_json(outcome, path="eventBatch.result")
         if not isinstance(result, dict):
             raise PlatformContractError(
                 "INVALID_CONTRACT",
-                "event_batch() must return an object",
+                "event_batch() must return an object or an invocation outcome",
             )
-        return RpcSuccess(request.id, result, request.generation)
+        return (RpcSuccess(request.id, result, request.generation),)
 
     def _cancel(self, request: RpcRequest) -> tuple[RpcFrame, ...]:
         self._require_current_generation(request)

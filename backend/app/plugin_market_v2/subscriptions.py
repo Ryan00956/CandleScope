@@ -9,7 +9,11 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from candlescope_plugin_sdk.platform_v2 import MARKET_STREAM_V1, BarsSubscribeRequest
+from candlescope_plugin_sdk.platform_v2 import (
+    MARKET_STREAM_V1,
+    BarsSubscribeRequest,
+    RequestContext,
+)
 
 from app.plugin_security_v2.capabilities import CapabilityLease
 
@@ -39,6 +43,7 @@ class _BarSubscription:
         stream_id: str,
         request: BarsSubscribeRequest,
         lease: CapabilityLease,
+        request_context: RequestContext,
         deliver: MarketBatchDelivery,
         on_terminal: Callable[[str, str], None],
     ) -> None:
@@ -46,6 +51,7 @@ class _BarSubscription:
         self.stream_id = stream_id
         self.request = request
         self.lease = lease
+        self.request_context = request_context
         self._deliver = deliver
         self._on_terminal = on_terminal
         self._condition = asyncio.Condition()
@@ -176,6 +182,12 @@ class _BarSubscription:
                             "coalesced": coalesced,
                             "resyncRequired": True,
                             "reason": overflow,
+                            "requestContext": RequestContext(
+                                contribution_id=self.request_context.contribution_id,
+                                user_action=False,
+                                generation=self.lease.generation,
+                                trace_id=f"market-resync-{self.id}-{self._sequence}",
+                            ).to_wire(),
                         },
                     )
                     return
@@ -191,6 +203,14 @@ class _BarSubscription:
                         "creditWindow": self.request.queue_capacity,
                         "coalesced": coalesced,
                         "resyncRequired": False,
+                        "requestContext": RequestContext(
+                            contribution_id=self.request_context.contribution_id,
+                            user_action=False,
+                            generation=self.lease.generation,
+                            trace_id=(
+                                f"market-batch-{self.id}-{events[-1]['sequence']}"
+                            ),
+                        ).to_wire(),
                     }
                     await self._deliver(
                         self.lease.plugin_id,
@@ -307,7 +327,10 @@ class BarSubscriptionManager:
         task.add_done_callback(self._terminal_tasks.discard)
 
     async def create(
-        self, request: BarsSubscribeRequest, lease: CapabilityLease
+        self,
+        request: BarsSubscribeRequest,
+        lease: CapabilityLease,
+        request_context: RequestContext | None = None,
     ) -> dict[str, Any]:
         port = self._port
         if port is None:
@@ -321,6 +344,22 @@ class BarSubscriptionManager:
             raise market_error(
                 "MARKET_SUBSCRIPTION_SCOPE_INVALID",
                 "granted maxConcurrent is invalid",
+                plugin_id=lease.plugin_id,
+            )
+        if request_context is None:
+            request_context = RequestContext(
+                contribution_id=lease.contribution_ids[0],
+                user_action=False,
+                generation=lease.generation,
+                trace_id="market-subscription",
+            )
+        if (
+            request_context.generation != lease.generation
+            or request_context.contribution_id not in lease.contribution_ids
+        ):
+            raise market_error(
+                "MARKET_SUBSCRIPTION_CONTEXT_INVALID",
+                "bar subscription request context is not bound to the capability lease",
                 plugin_id=lease.plugin_id,
             )
         async with self._lock:
@@ -356,6 +395,7 @@ class BarSubscriptionManager:
                 stream_id=stream_id,
                 request=request,
                 lease=lease,
+                request_context=request_context,
                 deliver=self._deliver,
                 on_terminal=self._terminal,
             )

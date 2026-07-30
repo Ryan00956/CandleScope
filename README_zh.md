@@ -5,7 +5,7 @@
 CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻量级交易看盘软件。当前支持 Binance 与 OKX 行情、现货与永续市场、多模块 Data Engine、交易所感知的交易对元数据、实时 WebSocket、内置指标，以及通过 Pyne 提供的 Pine 风格 Python 指标脚本。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python" />
+  <img src="https://img.shields.io/badge/Python-3.12-blue?logo=python" />
   <img src="https://img.shields.io/badge/Node.js-20+-green?logo=node.js" />
   <img src="https://img.shields.io/badge/React-19+-61DAFB?logo=react" />
   <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi" />
@@ -32,7 +32,7 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻
 
 环境要求：
 
-- Python 3.11+
+- Windows CPython 3.12（首方 Pyne/Pine 插件包的固定运行平台）
 - Node.js 20+
 - npm 10+
 
@@ -41,7 +41,7 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 Windows 下也可以直接用脚本：
@@ -50,6 +50,9 @@ Windows 下也可以直接用脚本：
 cd backend
 .\dev-server.ps1
 ```
+
+Windows 启动入口默认不启用 Uvicorn 热重载，因为 Selector event loop
+无法启动 CandleScope 所需的 Pyne/Pine sidecar 子进程。
 
 启动前端：
 

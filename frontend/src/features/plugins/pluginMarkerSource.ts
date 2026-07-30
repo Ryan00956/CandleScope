@@ -41,15 +41,18 @@ export class PluginMarkerSource implements ExternalMarkerSource {
         && layer.series.symbol === identity.symbol
         && layer.series.interval === identity.interval
       ))
-      .flatMap((layer) => layer.render.items.map((item) => ({
-        id: `plugin:${layer.id}:${item.id}`,
-        time: chartTime(item.time),
-        position: item.position,
-        shape: item.shape,
-        color: item.color,
-        text: item.text,
-        ...(item.price === undefined ? {} : { price: item.price }),
-      } satisfies ExternalSeriesMarker)));
+      .flatMap((layer) => layer.render.items.flatMap((item) => {
+        if (item.type !== "marker") return [];
+        return [{
+          id: `plugin:${layer.id}:${item.id}`,
+          time: chartTime(item.time),
+          position: item.position,
+          shape: item.shape,
+          color: item.color,
+          text: item.text,
+          ...(item.price === undefined ? {} : { price: item.price }),
+        } satisfies ExternalSeriesMarker];
+      }));
     const nextKey = markerKey(markers);
     if (nextKey === this.key) return;
     this.key = nextKey;

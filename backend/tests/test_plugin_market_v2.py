@@ -13,6 +13,7 @@ from candlescope_plugin_sdk.platform_v2 import (
     MARKET_BARS_PAGE_V1,
     MARKET_STREAM_V1,
     RENDER_IR_V1,
+    RENDER_IR_V2,
     BarsReadRequest,
     BarsSubscribeRequest,
     CapabilityGrant,
@@ -31,6 +32,7 @@ from app.data_engine.data_manager.models import (
     SeriesKey,
 )
 from app.plugin_market_v2.adapters import MarketCapabilityAdapters
+from app.plugin_market_v2.chart_contexts import ChartContextRegistry
 from app.plugin_market_v2.chart_layers import ChartLayerRegistry
 from app.plugin_market_v2.data_manager_port import DataManagerConsumerPort
 from app.plugin_market_v2.ports import PortBarSubscription
@@ -632,6 +634,110 @@ def test_chart_layer_budget_revision_context_and_generation_are_host_owned() -> 
             newer,
         )
     assert budget.value.code == "CHART_LAYER_RENDER_INVALID"
+    with pytest.raises(PlatformSecurityError) as malformed_render:
+        registry.publish(
+            {
+                **params,
+                "revision": 2,
+                "render": [],
+            },
+            newer,
+        )
+    assert malformed_render.value.code == "CHART_LAYER_RENDER_INVALID"
+
+
+def test_chart_context_registry_and_v2_layers_are_bound_to_exact_chart_revision() -> (
+    None
+):
+    now = [100.0]
+    contexts = ChartContextRegistry(
+        ttl_seconds=15,
+        clock=lambda: now[0],
+        wall_clock_ms=lambda: 1_700_000_000_000,
+    )
+    snapshot, changed = contexts.update(
+        chart_id="main-chart",
+        active=True,
+        context={"mode": "live", "exchange": "binance", "marketType": "spot"},
+        series={"symbol": "BTCUSDT", "interval": "1m"},
+    )
+    assert changed is True
+    assert snapshot["revision"] == 1
+    assert contexts.read("main-chart").active is True
+
+    contribution = SimpleNamespace(
+        id="waves",
+        full_id="candlescope.auto-wave.waves",
+        configuration={
+            "zOrder": "above-series",
+            "maxItems": 10,
+            "maxPoints": 100,
+            "maxBytes": 16_384,
+            "maxTextChars": 64,
+        },
+    )
+
+    def resolve(_plugin_id: str, kind: str, contribution_id: str):
+        assert kind == "chart-layer/2"
+        assert contribution_id == "waves"
+        return contribution
+
+    registry = ChartLayerRegistry(resolve, chart_contexts=contexts)
+    lease = _lease(
+        "chart.layer.publish",
+        {
+            "contexts": ["live"],
+            "exchanges": ["binance"],
+            "marketTypes": ["spot"],
+            "chartIds": ["main-chart"],
+            "symbols": ["BTCUSDT"],
+            "intervals": ["1m"],
+            "layers": ["waves"],
+            "maxItems": 10,
+            "maxPoints": 100,
+        },
+    )
+    params = {
+        "layerId": "waves",
+        "chartId": "main-chart",
+        "chartRevision": 1,
+        "context": {"mode": "live", "exchange": "binance", "marketType": "spot"},
+        "series": {"symbol": "BTCUSDT", "interval": "1m"},
+        "revision": 1,
+        "render": {
+            "schemaVersion": RENDER_IR_V2,
+            "items": [
+                {
+                    "id": "wave-path",
+                    "type": "polyline",
+                    "points": [
+                        {"time": 60, "price": 100},
+                        {"time": 120, "price": 103},
+                    ],
+                    "color": "#3B82F6",
+                    "width": 2,
+                    "style": "solid",
+                }
+            ],
+        },
+    }
+    published = registry.publish(params, lease)
+    assert published["chartRevision"] == 1
+    assert registry.projections()[0]["zOrder"] == "above-series"
+
+    contexts.update(
+        chart_id="main-chart",
+        active=True,
+        context={"mode": "live", "exchange": "binance", "marketType": "spot"},
+        series={"symbol": "ETHUSDT", "interval": "1m"},
+    )
+    assert registry.projections() == ()
+    with pytest.raises(PlatformSecurityError) as stale:
+        registry.publish({**params, "revision": 2}, lease)
+    assert stale.value.code == "CHART_LAYER_CONTEXT_STALE"
+
+    now[0] += 16
+    assert contexts.read("main-chart").active is False
 
 
 def test_capability_revocation_listener_receives_exact_activation_lease(

@@ -103,6 +103,17 @@ async def _guarded_platform(request: Request) -> CorePluginPlatform:
     return platform
 
 
+async def _background_platform(request: Request) -> CorePluginPlatform:
+    platform = _platform(request)
+    guard = getattr(request.app.state, "plugin_platform_v2_management_guard", None)
+    if not isinstance(platform, CorePluginPlatform) or not isinstance(
+        guard, LocalManagementGuard
+    ):
+        raise HTTPException(status_code=503, detail="plugin platform v2 is disabled")
+    await guard.authorize_background(request)
+    return platform
+
+
 def _v1_compatibility(platform: CorePluginPlatform) -> Any:
     compatibility = getattr(platform, "v1_compatibility", None)
     if compatibility is None:
@@ -407,6 +418,23 @@ def create_core_plugin_router() -> APIRouter:
     async def diagnostics(request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
         return platform.diagnostics()
+
+    @router.put("/manage/chart-context")
+    async def update_chart_context(request: Request) -> dict[str, Any]:
+        platform = await _background_platform(request)
+        payload = await _body(
+            request,
+            required={"chartId", "active", "context", "series"},
+        )
+        try:
+            return platform.update_chart_context(
+                chart_id=payload["chartId"],
+                active=payload["active"],
+                context=payload["context"],
+                series=payload["series"],
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
 
     @router.get("/manage/compatibility/v1/status")
     async def v1_compatibility_status(request: Request) -> dict[str, Any]:

@@ -129,7 +129,12 @@ class LocalManagementGuard:
             headers["X-CandleScope-User-Action"] = user_action
         return headers
 
-    async def __call__(self, request: Request) -> None:
+    async def _authorize(
+        self,
+        request: Request,
+        *,
+        require_user_action: bool,
+    ) -> None:
         if any(name in request.headers for name in _FORWARDED_HEADERS):
             raise HTTPException(status_code=403, detail="forwarded requests are denied")
         if request.client is None or not _is_loopback_host(request.client.host):
@@ -146,12 +151,22 @@ class LocalManagementGuard:
             csrf = request.headers.get("x-candlescope-csrf", "")
             if not secrets.compare_digest(csrf, self._csrf_token):
                 raise HTTPException(status_code=403, detail="management CSRF denied")
-            user_action = request.headers.get("x-candlescope-user-action", "")
-            if _USER_ACTION.fullmatch(user_action) is None:
-                raise HTTPException(
-                    status_code=403, detail="explicit user action identifier required"
-                )
-            request.state.plugin_user_action = user_action
+            if require_user_action:
+                user_action = request.headers.get("x-candlescope-user-action", "")
+                if _USER_ACTION.fullmatch(user_action) is None:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="explicit user action identifier required",
+                    )
+                request.state.plugin_user_action = user_action
+
+    async def __call__(self, request: Request) -> None:
+        await self._authorize(request, require_user_action=True)
+
+    async def authorize_background(self, request: Request) -> None:
+        """Authorize trusted desktop lifecycle sync without user-action authority."""
+
+        await self._authorize(request, require_user_action=False)
 
 
 def _management_error(exc: Exception) -> HTTPException:

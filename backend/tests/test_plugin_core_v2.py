@@ -193,9 +193,10 @@ def test_environment_bootstrap_is_enabled_by_default_and_can_be_disabled(
         environ={"LOCALAPPDATA": str(tmp_path / "local")},
     )
     assert isinstance(enabled_by_default, CorePluginPlatform)
-    assert enabled_by_default.root == (
-        tmp_path / "local" / "CandleScope" / "plugin-platform-v2"
-    ).resolve()
+    assert (
+        enabled_by_default.root
+        == (tmp_path / "local" / "CandleScope" / "plugin-platform-v2").resolve()
+    )
 
     disabled = build_core_plugin_platform_from_environment(
         host_name="CandleScope",
@@ -590,6 +591,67 @@ async def test_catalog_is_public_but_mutations_require_local_management_guard(
                 "views": [],
                 "chartLayers": [],
             }
+            background_without_csrf = {
+                key: value
+                for key, value in guard.trusted_headers().items()
+                if key != "X-CandleScope-CSRF"
+            }
+            assert (
+                await client.put(
+                    "/api/v2/plugins/manage/chart-context",
+                    headers=background_without_csrf,
+                    json={
+                        "chartId": "main-chart",
+                        "active": False,
+                        "context": None,
+                        "series": None,
+                    },
+                )
+            ).status_code == 403
+            chart_context = await client.put(
+                "/api/v2/plugins/manage/chart-context",
+                headers=guard.trusted_headers(),
+                json={
+                    "chartId": "main-chart",
+                    "active": True,
+                    "context": {
+                        "mode": "live",
+                        "exchange": "binance",
+                        "marketType": "spot",
+                    },
+                    "series": {"symbol": "BTCUSDT", "interval": "1m"},
+                },
+            )
+            assert chart_context.status_code == 200
+            assert chart_context.json() == {
+                "schemaVersion": "candlescope.chart-context/1",
+                "chartId": "main-chart",
+                "revision": 1,
+                "active": True,
+                "context": {
+                    "mode": "live",
+                    "exchange": "binance",
+                    "marketType": "spot",
+                },
+                "series": {"symbol": "BTCUSDT", "interval": "1m"},
+                "updatedAtMs": chart_context.json()["updatedAtMs"],
+            }
+            heartbeat = await client.put(
+                "/api/v2/plugins/manage/chart-context",
+                headers=guard.trusted_headers(),
+                json={
+                    "chartId": "main-chart",
+                    "active": True,
+                    "context": {
+                        "mode": "live",
+                        "exchange": "binance",
+                        "marketType": "spot",
+                    },
+                    "series": {"symbol": "BTCUSDT", "interval": "1m"},
+                },
+            )
+            assert heartbeat.status_code == 200
+            assert heartbeat.json()["revision"] == 1
             assert (
                 await client.get(
                     "/api/v2/plugins/manage/candlescope.hello-command/detail"

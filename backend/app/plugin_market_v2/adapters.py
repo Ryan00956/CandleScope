@@ -12,9 +12,12 @@ from typing import Any
 from candlescope_plugin_sdk.platform_v2 import (
     BarsReadRequest,
     BarsSubscribeRequest,
+    ChartContextReadRequest,
+    ChartLayerPublishRequest,
     HostCallRequest,
     OrderBookReadRequest,
     PlatformContractError,
+    RENDER_IR_V2,
     SymbolsReadRequest,
     TradesReadRequest,
 )
@@ -25,7 +28,9 @@ from app.plugin_security_v2.capabilities import (
     CapabilityLease,
     CapabilityMethodPolicy,
 )
+from app.plugin_security_v2.scope import scope_contains
 
+from .chart_contexts import ChartContextRegistry
 from .chart_layers import ChartLayerRegistry
 from .errors import market_error
 from .ports import MarketDataConsumerPort
@@ -89,9 +94,11 @@ class MarketCapabilityAdapters:
         *,
         subscriptions: BarSubscriptionManager,
         chart_layers: ChartLayerRegistry,
+        chart_contexts: ChartContextRegistry | None = None,
     ) -> None:
         self.subscriptions = subscriptions
         self.chart_layers = chart_layers
+        self.chart_contexts = chart_contexts or ChartContextRegistry()
         self._port: MarketDataConsumerPort | None = None
         self._active_reads: Counter[tuple[str, str, int]] = Counter()
         self._reads = _ReadCoordinator()
@@ -178,6 +185,23 @@ class MarketCapabilityAdapters:
 
     @classmethod
     def _chart_scope(cls, params: dict[str, Any]) -> dict[str, Any]:
+        render = params.get("render")
+        if isinstance(render, dict) and render.get("schemaVersion") == RENDER_IR_V2:
+            request = cls._parse(ChartLayerPublishRequest, params)
+            point_count = sum(
+                len(item.get("points", ()))
+                for item in request.render["items"]
+                if item.get("type") == "polyline"
+            )
+            return {
+                **cls._context_scope(request.context),
+                "chartIds": [request.chart_id],
+                "symbols": [request.series.symbol],
+                "intervals": [request.series.interval],
+                "layers": [request.layer_id],
+                "maxItems": len(request.render["items"]),
+                "maxPoints": point_count,
+            }
         context = params.get("context")
         try:
             from candlescope_plugin_sdk.platform_v2 import MarketContext
@@ -206,6 +230,11 @@ class MarketCapabilityAdapters:
             "layers": [layer_id],
             "maxItems": len(items),
         }
+
+    @classmethod
+    def _chart_context_scope(cls, params: dict[str, Any]) -> dict[str, Any]:
+        request = cls._parse(ChartContextReadRequest, params)
+        return {"chartIds": [request.chart_id]}
 
     def register(self, broker: CapabilityBroker) -> None:
         policies = (
@@ -262,6 +291,14 @@ class MarketCapabilityAdapters:
                 scope_extractor=self._order_book_scope,
                 max_calls_per_minute=120,
                 max_calls_per_activation=5_000,
+            ),
+            CapabilityMethodPolicy(
+                "chart.context.read",
+                "chart.context.read",
+                handler_with_lease=self._chart_context_read,
+                scope_extractor=self._chart_context_scope,
+                max_calls_per_minute=600,
+                max_calls_per_activation=50_000,
             ),
             CapabilityMethodPolicy(
                 "chart.layer.publish",
@@ -405,7 +442,11 @@ class MarketCapabilityAdapters:
         request = self._parse(BarsSubscribeRequest, dict(call.params))
         self._require_live(request.context, lease)
         self._require_port(lease)
-        return await self.subscriptions.create(request, lease)
+        return await self.subscriptions.create(
+            request,
+            lease,
+            request_context=call.request_context,
+        )
 
     @staticmethod
     def _subscription_control(
@@ -463,6 +504,28 @@ class MarketCapabilityAdapters:
         self, call: HostCallRequest, lease: CapabilityLease
     ) -> dict[str, Any]:
         return self.chart_layers.publish(dict(call.params), lease)
+
+    async def _chart_context_read(
+        self, call: HostCallRequest, lease: CapabilityLease
+    ) -> dict[str, Any]:
+        request = self._parse(ChartContextReadRequest, dict(call.params))
+        snapshot = self.chart_contexts.read(request.chart_id)
+        if snapshot.active:
+            assert snapshot.context is not None
+            assert snapshot.series is not None
+            requested_scope = {
+                "chartIds": [snapshot.chart_id],
+                **self._context_scope(snapshot.context),
+                "symbols": [snapshot.series.symbol],
+                "intervals": [snapshot.series.interval],
+            }
+            if not scope_contains(lease.scope, requested_scope):
+                raise market_error(
+                    "CHART_CONTEXT_SCOPE_DENIED",
+                    "active chart context is outside the granted permission scope",
+                    plugin_id=lease.plugin_id,
+                )
+        return snapshot.to_wire()
 
     def snapshot(self) -> dict[str, Any]:
         return {

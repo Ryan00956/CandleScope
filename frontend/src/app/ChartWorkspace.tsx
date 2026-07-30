@@ -15,6 +15,7 @@ import { useTradeFlowPanes } from "../features/trade-flow/useTradeFlowPanes.js";
 import type { TradeFlowRuntime } from "../features/trade-flow/tradeFlowTypes.js";
 import { combineExternalMarkerSources } from "../chart-adapter/externalMarkerSource.js";
 import type { ExternalMarkerSource } from "../chart-adapter/externalMarkerSource.js";
+import type { PluginChartLayerSource } from "../features/plugins/pluginChartLayerSource.js";
 import { preloadDrawingEngineHost } from "../features/drawings/drawingEngineLoader.js";
 import { drawingToolWhenInteractionReady } from "./drawingInteractionReadiness.js";
 
@@ -40,6 +41,7 @@ export interface ChartWorkspaceProps {
   orderBook: OrderBookRuntime;
   tradeFlow: TradeFlowRuntime;
   pluginMarkerSource?: ExternalMarkerSource | null;
+  pluginChartLayerSource?: PluginChartLayerSource | null;
   errorBoundary?: ComponentType<PropsWithChildren>;
 }
 
@@ -51,6 +53,7 @@ function ChartWorkspace({
   orderBook,
   tradeFlow,
   pluginMarkerSource = null,
+  pluginChartLayerSource = null,
   errorBoundary = ChartErrorBoundary,
 }: ChartWorkspaceProps) {
   const Boundary = errorBoundary;
@@ -83,6 +86,7 @@ function ChartWorkspace({
     ),
     onDrawingInteractionReadyChange: handleDrawingInteractionReadyChange,
     externalMarkerSource: markerSource,
+    pluginChartLayerSource,
     subPanes: [
       ...tradeFlowPanes,
       ...advancedPanes,
@@ -94,6 +98,7 @@ function ChartWorkspace({
     drawingInteractionReady,
     handleDrawingInteractionReadyChange,
     markerSource,
+    pluginChartLayerSource,
     tradeFlowPanes,
   ]);
 

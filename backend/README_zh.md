@@ -16,13 +16,13 @@
 
 ## 快速启动
 
-CandleScope 要求 Python 3.11 或更高版本。不受支持的解释器会在 FastAPI
-应用启动前直接报错，不会带着不兼容的运行时继续启动。
+CandleScope 默认首方 Pyne/Pine 插件包要求 Windows CPython 3.12。不受支持的
+解释器会在 FastAPI 应用启动前直接报错，不会带着不兼容的运行时继续启动。
 
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 Windows 下 `dev-server.ps1` 会用同样的开发端口启动，并启用 UTF-8 输出：
@@ -30,6 +30,9 @@ Windows 下 `dev-server.ps1` 会用同样的开发端口启动，并启用 UTF-8
 ```powershell
 .\dev-server.ps1
 ```
+
+Windows 启动入口默认不启用 Uvicorn 热重载，因为 Selector event loop
+无法启动 CandleScope 所需的 Pyne/Pine sidecar 子进程。
 
 默认 API base：
 
@@ -219,7 +222,7 @@ managed environment，不会再次下载：
 ```powershell
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 诊断接口会在 `/api/v1/indicators/diagnostics -> pyne.runtimeBackend` 返回当前

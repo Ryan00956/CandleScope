@@ -23,6 +23,7 @@ _UPPER_BOUND_KEYS = frozenset(
         "maxNotional",
         "maxOpenOrders",
         "maxOrdersPerMinute",
+        "maxPoints",
         "maxRedirects",
         "maxRequestBytes",
         "maxRequests",

@@ -29,7 +29,10 @@ release checklist, compatibility matrix, and troubleshooting guide.
 
 The general platform identifiers are `candlescope.plugin/2` and
 `candlescope.host-api/1`. See
-[`docs/protocol-v2.md`](docs/protocol-v2.md) and the packaged
+[`docs/protocol-v2.md`](docs/protocol-v2.md). Plugins that draw live analytical
+geometry such as Elliott-wave counts should also use the
+[`chart analysis SDK guide`](docs/chart-analysis-v2_zh.md). Packaged references
+include the
 [`Hello Command`](examples/platform-v2/hello-command.manifest.json) and
 [`Scheduled Notification`](examples/platform-v2/scheduled-notification.manifest.json), plus the
 packaged `platform_v2.examples.market_scanner` reference plugin. CandleScope

@@ -35,6 +35,10 @@ def _fixture() -> dict:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
+def _portable_file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def _replay_in_process(fixture: dict) -> list[dict]:
     server = PlatformJsonLineServer(HelloCommandPlugin())
     responses: list[dict] = []
@@ -48,7 +52,7 @@ def test_v2_hello_command_transcript_and_host_call_examples_are_frozen() -> None
     responses = _replay_in_process(fixture)
     expected = fixture["expected"]
 
-    assert hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest() == (FROZEN_V2_FIXTURE_FILE_SHA256)
+    assert _portable_file_sha256(FIXTURE_PATH) == FROZEN_V2_FIXTURE_FILE_SHA256
     assert fixture["protocol"] == "candlescope.plugin/2"
     assert fixture["transport"] == "jsonl/1"
     assert [canonical_sha256(item) for item in responses] == expected["responseSha256"]
@@ -99,5 +103,5 @@ def test_additive_v2_namespace_does_not_mutate_the_frozen_v1_fixture() -> None:
     fixture_bytes = V1_FIXTURE_PATH.read_bytes()
     fixture = json.loads(fixture_bytes)
 
-    assert hashlib.sha256(fixture_bytes).hexdigest() == FROZEN_V1_FILE_SHA256
+    assert _portable_file_sha256(V1_FIXTURE_PATH) == FROZEN_V1_FILE_SHA256
     assert fixture["expected"]["transcriptSha256"] == FROZEN_V1_TRANSCRIPT_SHA256

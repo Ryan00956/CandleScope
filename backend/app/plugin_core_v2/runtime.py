@@ -13,7 +13,13 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from candlescope_plugin_sdk.platform_v2 import HOST_API_V1, UI_BRIDGE_V1, normalize_json
+from candlescope_plugin_sdk.platform_v2 import (
+    CHART_CONTEXT_CHANGED_EVENT_V1,
+    HOST_API_V1,
+    UI_BRIDGE_V1,
+    RequestContext,
+    normalize_json,
+)
 
 from app.plugin_host import EntrypointProcessSpec, EntrypointSupervisor
 from app.plugin_installer_v2 import PlatformPluginInstaller
@@ -1074,7 +1080,17 @@ class CorePluginPlatform:
         supervisor = await self._ensure_active(
             contribution.plugin_id, contribution.entrypoint_id
         )
-        await supervisor.event_batch(events, delivery)
+        batch_sequence = delivery.get("batchSequence", 0)
+        event_delivery = {
+            **delivery,
+            "requestContext": RequestContext(
+                contribution_id=contribution.id,
+                user_action=False,
+                generation=supervisor.generation,
+                trace_id=f"event-batch-{batch_sequence}",
+            ).to_wire(),
+        }
+        await supervisor.event_batch(events, event_delivery)
 
     async def _deliver_market_batch(
         self,
@@ -1097,6 +1113,33 @@ class CorePluginPlatform:
         """Bind the Host-owned DataManager adapter without exposing it to plugins."""
 
         self.market.bind(port)
+
+    def update_chart_context(
+        self,
+        *,
+        chart_id: Any,
+        active: Any,
+        context: Any,
+        series: Any,
+    ) -> dict[str, Any]:
+        """Accept one trusted frontend chart identity and notify static subscribers."""
+
+        snapshot, changed = self.market.update_chart_context(
+            chart_id=chart_id,
+            active=active,
+            context=context,
+            series=series,
+        )
+        if changed and self._started:
+            self.events.publish(
+                CHART_CONTEXT_CHANGED_EVENT_V1,
+                {
+                    "chartId": snapshot["chartId"],
+                    "revision": snapshot["revision"],
+                    "active": snapshot["active"],
+                },
+            )
+        return snapshot
 
     def bind_symbol_refresher(
         self,

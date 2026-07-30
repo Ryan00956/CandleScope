@@ -8841,6 +8841,398 @@ body {
 .replay-isolated-allocation button { padding: 6px; border: 1px solid #3b82f6; border-radius: 5px; color: #dbeafe; background: rgba(29, 78, 216, .45); }
 .replay-fidelity-panel p { margin: 5px 0; color: #94a3b8; font-size: 10px; overflow-wrap: anywhere; }
 
+/* Paper trading owns a complete, readable surface in both app themes. */
+.replay-right-rail,
+.replay-market-dock[data-active-dock="paper"],
+.replay-paper-trading {
+  --replay-rail-bg: #0b1220;
+  --replay-rail-surface: #101b2d;
+  --replay-rail-surface-strong: #152238;
+  --replay-rail-border: #2a3a52;
+  --replay-rail-text: #edf2f7;
+  --replay-rail-text-secondary: #aab7c8;
+  --replay-rail-text-muted: #8595aa;
+  --replay-rail-input: #08111f;
+  --replay-rail-active: #1d4ed8;
+  --replay-rail-active-soft: rgba(37, 99, 235, .22);
+  --replay-rail-warning: #fbbf24;
+  --replay-rail-shadow: rgba(2, 6, 23, .28);
+}
+
+[data-theme='light'] .replay-right-rail,
+[data-theme='light'] .replay-market-dock[data-active-dock="paper"],
+[data-theme='light'] .replay-paper-trading {
+  --replay-rail-bg: #f4f7fb;
+  --replay-rail-surface: #ffffff;
+  --replay-rail-surface-strong: #eaf0f7;
+  --replay-rail-border: #c7d2e0;
+  --replay-rail-text: #172033;
+  --replay-rail-text-secondary: #405168;
+  --replay-rail-text-muted: #5f7086;
+  --replay-rail-input: #ffffff;
+  --replay-rail-active: #1d4ed8;
+  --replay-rail-active-soft: #dbeafe;
+  --replay-rail-warning: #9a5b00;
+  --replay-rail-shadow: rgba(15, 23, 42, .1);
+}
+
+.replay-right-rail,
+.replay-market-dock[data-active-dock="paper"],
+.replay-market-dock[data-active-dock="paper"] .replay-market-dock-body,
+.replay-paper-trading {
+  color: var(--replay-rail-text-secondary);
+  background: var(--replay-rail-bg);
+}
+
+.replay-paper-trading {
+  min-height: 100%;
+  overflow: clip;
+}
+
+.replay-market-dock[data-active-dock="paper"] {
+  border-color: var(--replay-rail-border);
+}
+
+.replay-market-dock[data-active-dock="paper"] .replay-market-dock-tabs {
+  border-color: var(--replay-rail-border);
+  background: var(--replay-rail-surface);
+}
+
+.replay-market-dock[data-active-dock="paper"] .replay-market-dock-tabs button {
+  color: var(--replay-rail-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.replay-market-dock[data-active-dock="paper"] .replay-market-dock-tabs button:hover {
+  color: var(--replay-rail-text);
+  background: var(--replay-rail-surface-strong);
+}
+
+.replay-market-dock[data-active-dock="paper"] .replay-market-dock-tabs button.active {
+  border-color: color-mix(in srgb, var(--replay-rail-active) 55%, transparent);
+  color: #ffffff;
+  background: var(--replay-rail-active);
+}
+
+.replay-paper-trading .replay-rail-account-strip {
+  gap: 6px 10px;
+  padding: 12px 14px;
+  border-color: var(--replay-rail-border);
+  background: color-mix(in srgb, var(--replay-rail-surface) 96%, transparent);
+  box-shadow: 0 8px 22px var(--replay-rail-shadow);
+}
+
+.replay-paper-trading .replay-rail-account-strip small {
+  color: var(--replay-rail-text-muted);
+  font-size: 10px;
+  letter-spacing: .02em;
+}
+
+.replay-paper-trading .replay-rail-account-strip strong {
+  color: var(--replay-rail-text);
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.replay-paper-trading .replay-rail-account-strip > span {
+  padding: 4px 8px;
+  color: #86efac;
+  background: #123b2d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.replay-paper-trading .replay-rail-account-strip > span[data-account-status="LIQUIDATING"] {
+  color: #fde68a;
+  background: #78350f;
+}
+
+.replay-paper-trading .replay-rail-account-strip > span[data-account-status="BANKRUPT"] {
+  color: #fecaca;
+  background: #7f1d1d;
+}
+
+[data-theme='light'] .replay-paper-trading .replay-rail-account-strip > span {
+  color: #166534;
+  background: #dcfce7;
+}
+
+[data-theme='light'] .replay-paper-trading .replay-rail-account-strip > span[data-account-status="LIQUIDATING"] {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+[data-theme='light'] .replay-paper-trading .replay-rail-account-strip > span[data-account-status="BANKRUPT"] {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+.replay-paper-trading .replay-rail-account-strip em {
+  color: var(--replay-rail-warning);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.replay-paper-trading .replay-rail-tabs {
+  top: 71px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 7px 8px;
+  border-color: var(--replay-rail-border);
+  background: color-mix(in srgb, var(--replay-rail-surface) 96%, transparent);
+}
+
+.replay-paper-trading .replay-rail-tabs button {
+  min-height: 32px;
+  padding: 6px 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--replay-rail-text-secondary);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.replay-paper-trading .replay-rail-tabs button:hover {
+  color: var(--replay-rail-text);
+  background: var(--replay-rail-surface-strong);
+}
+
+.replay-paper-trading .replay-rail-tabs button.active {
+  border-color: color-mix(in srgb, var(--replay-rail-active) 55%, transparent);
+  color: #ffffff;
+  background: var(--replay-rail-active);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--replay-rail-active) 24%, transparent);
+}
+
+.replay-paper-trading .replay-rail-section {
+  padding: 15px 14px;
+  border-color: var(--replay-rail-border);
+  background: var(--replay-rail-bg);
+}
+
+.replay-paper-trading .replay-rail-section h2 {
+  margin-bottom: 11px;
+  color: var(--replay-rail-text);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .01em;
+}
+
+.replay-paper-trading .replay-metrics-grid {
+  gap: 8px;
+}
+
+.replay-paper-trading .replay-metrics-grid div {
+  padding: 10px;
+  border: 1px solid var(--replay-rail-border);
+  border-radius: 7px;
+  background: var(--replay-rail-surface);
+}
+
+.replay-paper-trading .replay-metrics-grid dt {
+  color: var(--replay-rail-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.replay-paper-trading .replay-metrics-grid dd {
+  margin-top: 5px;
+  color: var(--replay-rail-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.replay-paper-trading .replay-account-fidelity {
+  display: block;
+  margin-top: 10px;
+  color: var(--replay-rail-text-muted);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.replay-paper-trading .replay-rail-tabpanel {
+  min-height: 0;
+}
+
+.replay-paper-trading .replay-order-ticket {
+  gap: 11px;
+}
+
+.replay-paper-trading .replay-order-ticket label,
+.replay-paper-trading .replay-isolated-allocation label {
+  color: var(--replay-rail-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.replay-paper-trading .replay-order-ticket :is(input, select),
+.replay-paper-trading .replay-isolated-allocation input,
+.replay-paper-trading textarea {
+  min-height: 40px;
+  border-color: var(--replay-rail-border);
+  color: var(--replay-rail-text);
+  background: var(--replay-rail-input);
+  font-size: 13px;
+}
+
+.replay-paper-trading :is(button, input, select, textarea):focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+.replay-paper-trading .replay-checkbox-field {
+  width: fit-content;
+  min-height: 28px;
+  flex-direction: row;
+  gap: 8px;
+  color: var(--replay-rail-text-secondary);
+}
+
+.replay-paper-trading .replay-checkbox-field input {
+  width: 17px;
+  min-height: 17px;
+  height: 17px;
+  accent-color: var(--replay-rail-active);
+}
+
+.replay-paper-trading .replay-segmented {
+  gap: 6px;
+  margin-bottom: 1px;
+}
+
+.replay-paper-trading .replay-segmented button {
+  min-height: 38px;
+  border-color: var(--replay-rail-border);
+  border-radius: 6px;
+  color: var(--replay-rail-text-secondary);
+  background: var(--replay-rail-surface);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.replay-paper-trading .replay-segmented button.active:first-child {
+  border-color: #22c55e;
+  color: #ecfdf5;
+  background: #0f5f46;
+}
+
+.replay-paper-trading .replay-segmented button.active:last-child {
+  border-color: #fb7185;
+  color: #fff1f2;
+  background: #8f2832;
+}
+
+.replay-paper-trading .replay-rail-section > button,
+.replay-paper-trading .replay-order-ticket > button {
+  min-height: 40px;
+  margin-top: 2px;
+  border-color: color-mix(in srgb, var(--replay-rail-active) 70%, var(--replay-rail-border));
+  border-radius: 7px;
+  color: #ffffff;
+  background: var(--replay-rail-active);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.replay-paper-trading .replay-rail-section button:disabled {
+  border-color: var(--replay-rail-border);
+  color: var(--replay-rail-text-secondary);
+  background: var(--replay-rail-surface-strong);
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.replay-paper-trading .replay-order-hint {
+  color: var(--replay-rail-text-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.replay-paper-trading .replay-list-card,
+.replay-paper-trading .replay-isolated-allocation {
+  border-color: var(--replay-rail-border);
+  color: var(--replay-rail-text);
+  background: var(--replay-rail-surface);
+}
+
+.replay-paper-trading .replay-list-card button {
+  border-color: var(--replay-rail-border);
+  color: var(--replay-rail-text);
+  background: var(--replay-rail-surface-strong);
+}
+
+.replay-paper-trading .replay-isolated-allocation button {
+  border-color: var(--replay-rail-active);
+  color: #ffffff;
+  background: var(--replay-rail-active);
+}
+
+.replay-paper-trading .replay-list-card span,
+.replay-paper-trading .replay-indicator-boundary p,
+.replay-paper-trading .replay-fidelity-panel p,
+.replay-paper-trading .replay-empty {
+  color: var(--replay-rail-text-secondary);
+}
+
+.replay-paper-trading .replay-capability-boundary {
+  border-color: #b7791f;
+  color: var(--replay-rail-warning);
+  background: color-mix(in srgb, #b7791f 12%, var(--replay-rail-surface));
+}
+
+.replay-paper-trading .replay-ambiguity-warning {
+  border-color: #b45309;
+  color: #fde68a;
+  background: #4a2a0b;
+}
+
+[data-theme='light'] .replay-paper-trading .replay-ambiguity-warning {
+  color: #78350f;
+  background: #fff7ed;
+}
+
+.replay-paper-trading .replay-trade-flow-list article,
+.replay-paper-trading .replay-book-columns span {
+  border-color: var(--replay-rail-border);
+  color: var(--replay-rail-text);
+  background: var(--replay-rail-surface);
+}
+
+.replay-paper-trading .replay-trade-flow-list span,
+.replay-paper-trading .replay-trade-flow-list small,
+.replay-paper-trading .replay-book-columns h3,
+.replay-paper-trading .replay-book-columns span small {
+  color: var(--replay-rail-text-secondary);
+}
+
+[data-theme='light'] .replay-paper-trading .replay-trade-flow-list article[data-aggressor-side="BUY"] strong,
+[data-theme='light'] .replay-paper-trading .replay-book-columns span[data-book-side="bid"] strong {
+  color: #166534;
+}
+
+[data-theme='light'] .replay-paper-trading .replay-trade-flow-list article[data-aggressor-side="SELL"] strong,
+[data-theme='light'] .replay-paper-trading .replay-book-columns span[data-book-side="ask"] strong {
+  color: #b91c1c;
+}
+
+.replay-paper-trading::-webkit-scrollbar,
+.replay-market-dock[data-active-dock="paper"] .replay-market-dock-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.replay-paper-trading::-webkit-scrollbar-thumb,
+.replay-market-dock[data-active-dock="paper"] .replay-market-dock-body::-webkit-scrollbar-thumb {
+  border: 2px solid var(--replay-rail-bg);
+  border-radius: 999px;
+  background: var(--replay-rail-border);
+}
+
 .replay-watchlist-pane .wl-header small { color: #64748b; font: 9px "JetBrains Mono", monospace; }
 .replay-watchlist-rows { min-height: 0; overflow: auto; }
 .replay-watchlist-group > header { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 7px 9px; border-bottom: 1px solid rgba(148, 163, 184, .1); color: #cbd5e1; background: rgba(15, 23, 42, .72); font-size: 10px; font-weight: 700; }

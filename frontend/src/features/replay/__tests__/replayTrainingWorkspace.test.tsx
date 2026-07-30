@@ -183,6 +183,20 @@ test("Phase 8 workspace exposes explainable plans and fail-closed aggregate trad
   assert.doesNotMatch(`${rail}\n${hook}`, /useMarketDataRuntime|SeriesDataFeed|WebSocket/);
 });
 
+test("paper trading dock owns a complete readable surface in both app themes", () => {
+  const rail = source("src/features/replay/components/ReplayRightRail.tsx");
+  const marketRail = source("src/features/replay/components/ReplayRightMarketRail.tsx");
+  const styles = source("src/index.css");
+  assert.match(rail, /className="replay-paper-trading"/);
+  assert.match(rail, /role="tablist"/);
+  assert.match(rail, /role="tabpanel"/);
+  assert.match(rail, /handleRailTabKeyDown/);
+  assert.match(marketRail, /data-active-dock=\{preferences\.activeDock\}/);
+  assert.match(styles, /\[data-theme='light'\] \.replay-paper-trading/);
+  assert.match(styles, /grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/);
+  assert.match(styles, /--replay-rail-text-muted: #5f7086/);
+});
+
 test("Phase 15 workspace exposes explicit bounded summary preparation and proof status", () => {
   const controls = source("src/features/replay/components/ReplayControlBar.tsx");
   const runtime = source("src/features/replay/useReplayViewerRuntime.ts");

@@ -46,6 +46,7 @@ function ReplayRightMarketRail({
       className={`replay-market-dock ${preferences.dockCollapsed ? "collapsed" : ""}`}
       style={{ height }}
       aria-label="回放市场与纸面交易面板"
+      data-active-dock={preferences.activeDock}
     >
       <header className="replay-market-dock-tabs">
         {(["capabilities", "paper", "activity"] as const).map((tab) => (

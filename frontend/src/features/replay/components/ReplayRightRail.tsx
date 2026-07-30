@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import {
   formatReplayPublicTime,
@@ -127,16 +128,42 @@ export function ReplayPaperTradingDock({
       blindMode: config?.blind_mode ?? true,
       originMs: store.replayStartMs,
     });
+  const handleRailTabKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    value: RailTab,
+  ) => {
+    const currentIndex = RAIL_TABS.findIndex(([tab]) => tab === value);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (currentIndex + 1) % RAIL_TABS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (currentIndex - 1 + RAIL_TABS.length) % RAIL_TABS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = RAIL_TABS.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const next = RAIL_TABS[nextIndex];
+    if (next === undefined) return;
+    const nextTab = next[0];
+    setActiveTab(nextTab);
+    event.currentTarget
+      .closest('[role="tablist"]')
+      ?.querySelector<HTMLButtonElement>(`[data-replay-rail-tab="${nextTab}"]`)
+      ?.focus();
+  };
 
   return (
-    <>
+    <div className="replay-paper-trading" data-replay-paper-surface="account">
       <header
         className="replay-rail-account-strip"
         data-replay-account-model={contract?.account_model ?? "PAPER_LINEAR_V1"}
         data-replay-account-history-mode={accountHistory?.mode ?? "LEGACY"}
       >
         <div>
-          <small>{contract === null ? "Legacy paper account" : "TOUCH_OR_TAPE_V2"}</small>
+          <small>账户模型 · {contract === null ? "Legacy paper account" : "TOUCH_OR_TAPE_V2"}</small>
           <strong>{portfolio?.equity ?? store.account?.equity ?? "--"} {settlementAsset}</strong>
         </div>
         <span data-account-status={contract?.status ?? "ACTIVE"}>{contract?.status ?? "ACTIVE"}</span>
@@ -149,15 +176,20 @@ export function ReplayPaperTradingDock({
         )}
       </header>
 
-      <nav className="replay-rail-tabs" aria-label="训练账户视图">
+      <nav className="replay-rail-tabs" aria-label="训练账户视图" role="tablist">
         {RAIL_TABS.map(([value, label]) => (
           <button
             key={value}
             type="button"
+            role="tab"
+            id={`replay-rail-tab-${value}`}
             className={activeTab === value ? "active" : ""}
             aria-selected={activeTab === value}
+            aria-controls="replay-rail-active-panel"
+            tabIndex={activeTab === value ? 0 : -1}
             data-replay-rail-tab={value}
             onClick={() => setActiveTab(value)}
+            onKeyDown={(event) => handleRailTabKeyDown(event, value)}
           >
             {label}
           </button>
@@ -172,6 +204,12 @@ export function ReplayPaperTradingDock({
         </section>
       )}
 
+      <div
+        id="replay-rail-active-panel"
+        className="replay-rail-tabpanel"
+        role="tabpanel"
+        aria-labelledby={`replay-rail-tab-${activeTab}`}
+      >
       {activeTab === "trade" && (
         <>
           <section className="replay-rail-section" data-replay-panel="account-summary">
@@ -182,11 +220,11 @@ export function ReplayPaperTradingDock({
               <div><dt>Realized PnL</dt><dd>{portfolio?.realized_pnl ?? store.account?.realized_pnl ?? "--"}</dd></div>
               <div><dt>Unrealized PnL</dt><dd>{portfolio?.unrealized_pnl ?? store.account?.unrealized_pnl ?? "--"}</dd></div>
             </dl>
-            {contract !== null && <small>{contract.margin_mode} · {contract.funding_mode} · {contract.execution_fidelity}</small>}
+            {contract !== null && <small className="replay-account-fidelity">{contract.margin_mode} · {contract.funding_mode} · {contract.execution_fidelity}</small>}
           </section>
 
           <section className="replay-rail-section replay-order-ticket" data-replay-panel="order-ticket">
-            <h2>Paper order ticket</h2>
+            <h2>纸面下单</h2>
             <div className="replay-segmented">
               <button type="button" className={side === "BUY" ? "active" : ""} onClick={() => setSide("BUY")}>BUY</button>
               <button type="button" className={side === "SELL" ? "active" : ""} onClick={() => setSide("SELL")}>SELL</button>
@@ -213,7 +251,7 @@ export function ReplayPaperTradingDock({
                 stop_price: orderType === "STOP_MARKET" || orderType === "TAKE_PROFIT_MARKET" ? price : null,
               })}
             >{contract === null ? "提交纸面委托" : "按当前已揭示参考价提交"}</button>
-            <small>市价/穿价单立即 taker；挂单只从接受命令后的首次触价开始，不追溯成交。</small>
+            <small className="replay-order-hint">市价/穿价单立即 taker；挂单只从接受命令后的首次触价开始，不追溯成交。</small>
           </section>
         </>
       )}
@@ -523,7 +561,8 @@ export function ReplayPaperTradingDock({
           </section>
         </>
       )}
-    </>
+      </div>
+    </div>
   );
 }
 
